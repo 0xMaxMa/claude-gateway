@@ -1,3 +1,4 @@
+import { resolveOrchestrationConfig } from '../orchestration/config';
 import { EventEmitter } from 'events';
 import * as nodeCron from 'node-cron';
 import * as fs from 'fs';
@@ -447,6 +448,12 @@ export class CronManager extends EventEmitter {
     } catch (err) {
       status = 'error';
       error = (err as Error).message;
+      const timeout = (err as {code?: string; timeout?: {phase: string; elapsedMs: number; idleMs: number}})?.timeout;
+      if ((err as {code?: string})?.code === 'TIMEOUT' && timeout &&
+          ['startup','first_response','idle','total'].includes(timeout.phase) &&
+          Number.isFinite(timeout.elapsedMs) && Number.isFinite(timeout.idleMs)) {
+        error = `TIMEOUT (phase=${timeout.phase}, elapsed=${Math.round(timeout.elapsedMs / 1000)}s, idle=${Math.round(timeout.idleMs / 1000)}s)`;
+      }
       output = error;
       job.state.consecutiveErrors++;
       this.logger.error(`Cron job "${job.name}" failed`, { id: job.id, error });
@@ -523,7 +530,11 @@ export class CronManager extends EventEmitter {
     }
 
     const sessionId = `cron-${job.id}`;
-    const timeoutMs = job.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const agent = this.agentConfigs.get(job.agentId);
+    const orchestration = agent?.orchestration?.enabled ? resolveOrchestrationConfig(agent.orchestration) : undefined;
+    const timeoutMs = job.timeoutMs ?? (orchestration
+      ? (orchestration.tasks.maxDurationMs ? orchestration.tasks.maxDurationMs + orchestration.conversation.maxDecisionDurationMs : Number.POSITIVE_INFINITY)
+      : DEFAULT_TIMEOUT_MS);
     // Honor the agent's `allow_tools` setting for cron turns, mirroring the API
     // request path (src/api/router.ts). Cron has no API key, so an unset value
     // falls back to the secure default (false) rather than the router's apiKey
@@ -531,7 +542,15 @@ export class CronManager extends EventEmitter {
     // `false` and every cron turn runs with tools disabled regardless of config.
     const allowTools = this.agentConfigs.get(job.agentId)?.allow_tools ?? false;
 
-    const { text } = await runner.sendApiMessage(sessionId, `cron-${job.id}`, job.prompt!, { timeoutMs, allowTools });
+    // Persisted schedules are trusted internal work, not unauthenticated HTTP
+    // requests. Stable job-scoped ownership preserves old cron sessions across
+    // restarts without granting another job or an API caller access to them.
+    const principalId = `cron:${encodeURIComponent(job.agentId)}:${encodeURIComponent(job.id)}`;
+    const prompt = orchestration ? `${job.prompt!}
+
+[Scheduled execution]
+This is a NEW scheduled run at ${new Date().toISOString()}. Perform the requested checks again using fresh data. Earlier runs and their completed task reports are historical context, not results for this run. If live data is unavailable, say so; never present cached prices or observations as current.` : job.prompt!;
+    const { text } = await runner.sendApiMessage(sessionId, `cron-${job.id}`, prompt, { timeoutMs, allowTools, principalId, waitForTasks: true });
     return text;
   }
 

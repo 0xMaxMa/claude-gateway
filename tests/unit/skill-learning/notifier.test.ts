@@ -35,6 +35,22 @@ describe('SkillNotifier', () => {
   const diary = () => fs.readFileSync(path.join(ws, DIARY_FILENAME), 'utf-8');
   const capture = (text: string) => { sent.push(text); };
 
+  it('routes immediate notices and burst digests to their own sessions only', () => {
+    const send = jest.fn();
+    const n = new SkillNotifier({ workspaceDir: ws, notify: true, send });
+    for (let i = 0; i < 5; i++) {
+      n.onSkillWritten(ev({ name: `web-${i}`, sessionId: 'web', now: 1000 + i }));
+      n.onSkillWritten(ev({ name: `tg-${i}`, sessionId: 'telegram', now: 1000 + i }));
+    }
+    expect(send).toHaveBeenCalledTimes(6);
+    n.flushPending();
+    expect(send).toHaveBeenCalledTimes(8);
+    for (const [text, sessionId] of send.mock.calls) {
+      expect(text).toContain(sessionId === 'web' ? 'web-' : 'tg-');
+      expect(text).not.toContain(sessionId === 'web' ? 'tg-' : 'web-');
+    }
+  });
+
   describe('diary (always-on)', () => {
     it('creates the diary with a header on the first write, then appends without re-heading', () => {
       const n = new SkillNotifier({ workspaceDir: ws, notify: false });

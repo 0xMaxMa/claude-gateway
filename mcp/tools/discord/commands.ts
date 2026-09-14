@@ -24,15 +24,31 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
   },
 ];
 
+export function commandDefinitions(orchestration:boolean,interactive:boolean):SlashCommandDef[]{
+  return [...SLASH_COMMANDS,
+    ...(orchestration ? [
+      {name:'voice',description:'Turn automatic voice replies on or off',options:[{name:'mode',description:'on or off (omit to show buttons)',required:false,type:'STRING' as const}]},
+      {name:'voices',description:'Choose the agent voice'},
+      {name:'tasks',description:'View pending tasks in this conversation'},
+      {name:'help',description:'Show available orchestration controls'},
+    ] : []),
+    {name:'stop',description:orchestration?'Stop a response or choose a task to stop':'Stop the agent response'},
+    ...(interactive && !orchestration ? [{name:'cli',description:'Open the live terminal viewer'}] : []),
+  ];
+}
+
 export async function registerCommands(
   client: any,
   token: string,
+  orchestration = false,
+  interactive = false,
 ): Promise<void> {
   // @ts-ignore — discord.js in mcp/node_modules
   const { REST, Routes, SlashCommandBuilder } = await import('discord.js');
   const rest = new REST().setToken(token);
 
-  const bodies = SLASH_COMMANDS.map(cmd => {
+  const commands=commandDefinitions(orchestration,interactive);
+  const bodies = commands.map(cmd => {
     const builder = new SlashCommandBuilder()
       .setName(cmd.name)
       .setDescription(cmd.description);

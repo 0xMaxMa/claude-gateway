@@ -397,6 +397,16 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
 });
 
 describe('GET /api/v1/agents', () => {
+  it('exposes the effective orchestration mode for background-reply clients', async () => {
+    const previous = agentConfig.orchestration;
+    try {
+      agentConfig.orchestration = { enabled: true };
+      const app = buildApp(async () => ({ text: 'ok', attachments: [] }));
+      const res = await supertest.default(app).get('/api/v1/agents').set(AUTH);
+      expect(res.body.agents[0].orchestration_enabled).toBe(true);
+    } finally { agentConfig.orchestration = previous; }
+  });
+
   it('returns only agents accessible by the key', async () => {
     const app = buildApp(async () => ({ text: 'ok', attachments: [] }));
     const res = await supertest.default(app)
@@ -405,6 +415,7 @@ describe('GET /api/v1/agents', () => {
     expect(res.status).toBe(200);
     expect(res.body.agents).toHaveLength(1);
     expect(res.body.agents[0].id).toBe(AGENT_ID);
+    expect(res.body.agents[0].orchestration_enabled).toBe(false);
   });
 
   it('admin key returns all agents', async () => {

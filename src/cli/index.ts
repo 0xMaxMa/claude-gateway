@@ -13,6 +13,7 @@ import { runDoctor } from './commands/doctor';
 import { runDebugBundle } from './commands/debug-bundle';
 import { runAgents } from './commands/agents';
 import { runChannels } from './commands/channels';
+import { runTasks } from './commands/tasks';
 
 /** Flags that are always boolean regardless of command — never consume the next
  *  token as a value (see parseCliArgs). `follow` is here rather than in the
@@ -25,7 +26,7 @@ import { runChannels } from './commands/channels';
  *  <source> --wait` (flag after every positional, but before nothing) never
  *  risks swallowing a token that happens to come after it in some other
  *  invocation order. */
-const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print', 'follow', 'force', 'wait']);
+const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print', 'follow', 'force', 'wait', 'all']);
 /** Flags every command accepts, on top of whatever the generated manifest
  *  declares for that command. Anything outside this set and the command's own
  *  flags is a typo, and is reported rather than dropped: a resource command
@@ -100,6 +101,8 @@ export async function runCli(argv: string[]): Promise<number> {
         return await runDebugBundle(flags);
       case 'agents':
         return await runAgents(positionals, flags, config);
+      case 'tasks':
+        return await runTasks(positionals, flags, config);
       case 'channels':
         return await runChannels(positionals, flags, config);
     }
@@ -320,6 +323,7 @@ export const CORE_HELP: ReadonlyArray<readonly [string, string]> = [
   ['doctor', 'Check config/env/connectivity'],
   ['debug-bundle', 'Write a small redacted diagnostics bundle'],
   ['agents list|create|update', 'Create/manage agents (interactive wizard)'],
+  ['tasks list|show|watch|cancel', 'Inspect and cancel orchestration tasks'],
   ['channels pending|approve|deny', 'Approve/deny incoming Telegram/Discord pairing requests'],
   ['api <METHOD> <path>', 'Call any endpoint directly (escape hatch)'],
   ['version', 'Print the gateway version'],

@@ -71,6 +71,7 @@ export class ShareClientError extends Error {
  * is absent the private mint endpoint is not mounted and calls fail closed.
  */
 export function shareBridgeEnabled(): boolean {
+  if (process.env.GATEWAY_ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_ORCHESTRATION_MEDIA === 'true' && process.env.GATEWAY_ORCHESTRATION_TICKET_FILE) return true;
   return (
     !!process.env.GATEWAY_API_URL &&
     !!process.env.GATEWAY_API_KEY &&
@@ -88,6 +89,24 @@ async function callGateway(
   pathname: string,
   body?: Record<string, unknown>,
 ): Promise<{ status: number; json: Record<string, unknown> }> {
+  if (process.env.GATEWAY_ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_ORCHESTRATION_TICKET_FILE) {
+    const { readFile } = await import('node:fs/promises');
+    const ticket = JSON.parse(await readFile(process.env.GATEWAY_ORCHESTRATION_TICKET_FILE, 'utf8'));
+    const response = await fetch(ticket.url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ticket.token}` },
+      body: JSON.stringify({ tool: 'task_share_call', action_id: crypto.randomUUID(), args: { method, pathname, body } }), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({})) as Record<string, unknown> | null;
+      // The bridge uses {error: CODE}; retain that cause instead of treating
+      // path validation, stale attempts and unavailable configuration alike.
+      const code = typeof failure?.error === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(failure.error)
+        ? failure.error : 'share_scope_denied';
+      const error = code === 'ARTIFACT_PATH_DENIED'
+        ? 'File is outside this task scope. Use the original file’s absolute path in the active task workspace, a supplied input attachment, or this session’s media directory. Do not copy it to the agent-wide media root. The gateway stages authorized files automatically.'
+        : code === 'share_scope_denied' ? 'Scoped share request denied' : code;
+      return { status: response.status, json: { error, code } };
+    }
+    return await response.json() as { status: number; json: Record<string, unknown> };
+  }
   const res = await fetch(`${apiBase()}${pathname}`, {
     method,
     headers: {

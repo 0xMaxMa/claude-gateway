@@ -155,6 +155,23 @@ describe('LINE inbound file download (real handlePost)', () => {
     for (const f of stagedLeftovers()) fs.rmSync(path.join(os.tmpdir(), f), { force: true });
   });
 
+  test('orchestrated LINE audio downloads and forwards bytes; legacy audio stays ignored', async () => {
+    const event = { ...fileEvent('voice.m4a'), message: { type: 'audio', id: msgId, duration: 1200 } };
+    mockGetMessageContent.mockResolvedValue(streamOf([Buffer.from('audio fixture')]));
+    await post([event]);
+    expect(forwarded).toHaveLength(0); expect(mockGetMessageContent).not.toHaveBeenCalled();
+    const runner = fakeRunner((server.address() as { port: number }).port);
+    const config = runner.getAgentConfig();
+    runner.getAgentConfig = () => ({ ...config, orchestration: { enabled: true, channels: ['line'] } });
+    handler = createLineWebhookHandler(new Map([[AGENT, runner]]), logDir);
+    await post([{ ...event, message: { ...event.message, id: msgId + '-orchestration' } }]);
+    expect(forwarded).toHaveLength(1);
+    const meta = forwarded[0].meta!;
+    expect(meta).toMatchObject({ media_type: 'audio', attachment_kind: 'voice', chat_id: USER });
+    expect(fs.readFileSync(meta.image_path, 'utf8')).toBe('audio fixture');
+    fs.rmSync(meta.image_path, { force: true });
+  });
+
   test('a successful download hands the agent a readable path and marks it ephemeral', async () => {
     mockGetMessageContent.mockResolvedValue(streamOf([Buffer.from('%PDF-1.4 hello')]));
     await post([fileEvent('report.pdf')]);

@@ -785,3 +785,9 @@ describe('HistoryDB — reply context (repliedTo* round-trip)', () => {
     }
   });
 });
+
+it('returns the input identity needed to replace optimistic voice messages', () => {
+  const db = makeDb();
+  db.insertMessageOnce('input:voice-123', makeMsg());
+  expect(db.getMessages('telegram-12345', {}).messages[0].inputId).toBe('voice-123');
+});

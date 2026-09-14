@@ -273,6 +273,22 @@ Both use the same detection and install strategy as the dashboard's Update butto
 Updating the gateway replaces the files on disk; the running process keeps serving the previous
 build until \`claude-gateway gateway restart\`.
 
+## Orchestration tasks (require a running server)
+
+Use \`claude-gateway tasks <verb> --agent <id> --session <id>\` with the usual connection flags.
+
+| Command | Action |
+|---------|--------|
+| \`tasks list\` | Active tasks; \`--all\` includes finished tasks; \`--page <n> --page-size <n>\` selects a zero-based page |
+| \`tasks show <task-id>\` | Details and the full retained result |
+| \`tasks watch [task-id]\` | Poll every 3 seconds; emit changes; Ctrl+C stops watching only |
+| \`tasks cancel <task-id>\` | Request user cancellation; stopping is distinct from stopped |
+
+Page size is 1–100 (default 10). Watching one task ends at a terminal state; list watching
+continues and includes new tasks on that page. The authenticated principal must belong to
+the session. These commands use the running gateway's task controls; they never modify its
+SQLite database directly. Legacy mode returns \`ORCHESTRATION_DISABLED\`.
+
 ## Agents & channels (require a running server)
 
 | Command | Description |

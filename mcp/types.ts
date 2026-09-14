@@ -14,8 +14,13 @@ export type InboundMessage = {
   text: string;
   messageId: string;
   replyToMessageId?: string;
+  repliedText?: string;
+  repliedSender?: string;
+  attachments?: Array<{url:string;name?:string;kind?:string;quoted?:boolean}>;
   threadId?: string;
   attachmentFileId?: string;
+  attachmentKind?: 'voice' | 'file';
+  controlMessageId?: string;
   ts: number;
 };
 

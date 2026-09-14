@@ -47,7 +47,7 @@ export class SlackClient {
    * Slack Web API method accepts, so use it uniformly rather than branching
    * per method.
    */
-  private async call(method: string, body: Record<string, unknown>): Promise<SlackApiResponse> {
+  private async call(method: string, body: Record<string, unknown>, timeoutMs = 30000): Promise<SlackApiResponse> {
     const params = new URLSearchParams();
     for (const [k, v] of Object.entries(body)) {
       if (v !== undefined) params.set(k, String(v));
@@ -58,7 +58,7 @@ export class SlackClient {
         Authorization: `Bearer ${this.botToken}`,
         'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
       },
-      body: params,
+      body: params, signal: AbortSignal.timeout(timeoutMs), redirect: 'error',
     });
     const json = (await res.json()) as SlackApiResponse;
     if (!json.ok) {
@@ -75,6 +75,11 @@ export class SlackClient {
   async authTest(): Promise<{ ok: boolean; team?: string; error?: string }> {
     const json = await this.call('auth.test', {});
     return { ok: json.ok, team: json.team as string | undefined, error: json.error };
+  }
+
+  /** Read the explicitly referenced thread root; no history scan or permission expansion. */
+  async threadRoot(channel:string, ts:string): Promise<SlackApiResponse> {
+    return this.call('conversations.replies',{channel,ts,limit:1,inclusive:true},5000);
   }
 
   /**

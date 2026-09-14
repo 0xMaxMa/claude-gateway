@@ -51,6 +51,10 @@ stop.sh
 .skills
 .claude-gateway
 tasks/
+!src/orchestration/tasks/
+!src/orchestration/tasks/**
+!mcp/tools/tasks/
+!mcp/tools/tasks/**
 .ralph-tui/
 CLAUDE.md
 tests/e2e/pr58-api-e2e.sh
@@ -60,3 +64,6 @@ docker-stats.sh
 
 # Diagnostics bundles written into the working directory by `debug-bundle`.
 debug-bundle-*.txt
+
+# Local design notes and implementation evidence (not part of PRs)
+/docs/

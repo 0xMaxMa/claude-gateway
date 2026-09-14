@@ -1,16 +1,18 @@
 ---
 name: open-browser
-description: "ALWAYS invoke this skill when user says 'browser [site]', 'open [site]', or asks to navigate to a website. Never call MCP browser tools directly."
+description: "Open a website in GetPod Cloud Browser after that environment is selected. Does not control the user Chrome or Remote Browser connector."
 user-invocable: true
 ---
 
 # open-browser
 
-When user says "open X in browser", "navigate to X", "open chrome", "browser to X", "switch to tab X", etc.
+Use this skill only for GetPod Cloud Browser. Remote Browser is a separate connector controlling the user's approved device tabs.
+
+If a Remote Browser connector is enabled and the user has not selected an environment, ask whether to use Remote Browser (recommended) or GetPod Cloud Browser before taking browser actions. An explicit remote/device request must use that connector instead of this skill. Reuse the selection for related follow-ups. With no Remote Browser connector, ordinary browser requests may use Cloud Browser. Never fall back from Remote Browser to Cloud Browser without user approval.
 
 ## Rules
 
-- Use ONLY `mcp__gateway__browser_*` tools — never Python, never CDP direct, never filesystem
+- For the selected Cloud Browser workflow, use ONLY `mcp__gateway__browser_*` tools — never Python, never CDP direct, never filesystem
 - NEVER use `wait: "networkidle"` — it hangs on SPAs. Omit `wait` entirely (fire-and-forget)
 - Always check tab state before navigating — tab IDs change between sessions
 - Do NOT pass `session_id` — it is injected automatically from agent context

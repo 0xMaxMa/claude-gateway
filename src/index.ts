@@ -284,11 +284,7 @@ async function startAgent(
       agentCfg: agentConfig.skillLearning,
       gatewayTimezone: gatewayConfig.gateway.timezone,
       logger,
-      channels: {
-        telegramBotToken: agentConfig.telegram?.botToken,
-        discordBotToken: agentConfig.discord?.botToken,
-        lineAccessToken: agentConfig.line?.channelAccessToken,
-      },
+      sendNotification: (text, sessionId) => runner.notifySkillLearning(sessionId, text),
     });
     runner.setSkillLearning(skillLearning);
     skillLearning.startCurator(); // unref'd self-rescheduling timer
@@ -753,9 +749,25 @@ async function main(): Promise<void> {
     globalLogger.warn('Failed to sweep orphaned receivers', { error: (err as Error).message });
   }
 
+  // Registered app Agents wait for their own Compose restore before admission.
+  const appsConfigPath = path.join(path.dirname(CONFIG_PATH), 'apps.json');
+  const appsRegistry = new AppsRegistry(appsConfigPath);
+  const agentManager = new AgentManager(CONFIG_PATH, agentsDirForConfig(CONFIG_PATH));
+  const { migrateAppAgentContainer } = await import('./apps/agent-container-migration');
+  const restoringAgentIds = new Set((await appsRegistry.list().catch(error => {
+    globalLogger.warn('App registry unavailable before Agent admission', {error: String(error)});
+    return [];
+  })).filter(entry => entry.status === 'running').map(entry => entry.agentDeclaration?.name));
+  const deferredAppAgents = new Set<string>();
+
   for (const agentConfig of config.agents) {
     // Expand ~ in workspace path so all downstream code uses absolute paths
     agentConfig.workspace = expandTilde(agentConfig.workspace);
+    if (agentConfig.type === 'app-agent' && agentConfig.orchestration?.enabled && restoringAgentIds.has(agentConfig.id)) {
+      deferredAppAgents.add(agentConfig.id);
+      ctx.agentConfigs.set(agentConfig.id, agentConfig);
+      continue;
+    }
     await startAgent(agentConfig, config, ctx);
   }
 
@@ -763,10 +775,7 @@ async function main(): Promise<void> {
   printStartupTable(startupResults);
 
   // ── App store components ─────────────────────────────────────────────────
-  const appsConfigPath = path.join(path.dirname(CONFIG_PATH), 'apps.json');
-  const appsRegistry = new AppsRegistry(appsConfigPath);
   const registryClient = new RegistryClient();
-  const agentManager = new AgentManager(CONFIG_PATH, agentsDirForConfig(CONFIG_PATH));
   const socketServer = new SocketServer();
 
   // Callbacks that bridge installer events to the router (filled in after router is created)
@@ -913,7 +922,17 @@ async function main(): Promise<void> {
   // The batch was read and marked in flight before the server started listening,
   // so every app in it has been reporting `restoring` since the first request.
   void appInstaller
-    .restoreRunningApps(restorePending)
+    .restoreRunningApps(restorePending, async entry => {
+      const agent = ctx.agentConfigs.get(entry.agentDeclaration?.name ?? '');
+      if (isShuttingDown || !agent || !deferredAppAgents.has(agent.id) || ctx.agentRunners.has(agent.id)) return;
+      try {
+        await migrateAppAgentContainer(entry, agent, agentManager);
+        if (isShuttingDown) return;
+        await startAgent(agent, config, ctx);
+      } catch (error) {
+        globalLogger.warn(`App agent admission failed after restore for "${entry.name}"`, {error: String(error)});
+      }
+    })
     .then(({ attempted, failures }) => {
       for (const f of failures) {
         globalLogger.warn(`App store: failed to start "${f.app}" containers on restore (non-fatal): ${f.error}`);
@@ -950,9 +969,14 @@ async function main(): Promise<void> {
 
       // Gateway-level changes (agentId === '')
       if (change.agentId === '') {
+        if(change.field==='gateway.orchestration'){
+          config.gateway.orchestration=newConfig.gateway.orchestration;
+          for(const [id,runner] of ctx.agentRunners){const agent=agentConfigs.get(id);if(agent)runner.updateAgentConfig(agent);}
+        }
         if (change.field === 'gateway.headless') {
           // Applies to sessions spawned after the change; running sessions keep their backend.
           config.gateway.headless = change.newValue as boolean | undefined;
+          for (const runner of ctx.agentRunners.values()) runner.refreshTelegramCommands();
         } else if (change.field === 'gateway.customConnectors') {
           // Same "new spawns only" scope as the agent-level 'connectors' case
           // below — an already-running session's subprocess isn't hot-patched
@@ -983,6 +1007,14 @@ async function main(): Promise<void> {
       if (!agentConfig) continue;
 
       switch (change.field) {
+        case 'voice':
+          agentConfig.voice = change.newValue as AgentConfig['voice'];
+          ctx.agentRunners.get(change.agentId)?.updateAgentConfig(agentConfig);
+          break;
+        case 'orchestration':
+          agentConfig.orchestration = change.newValue as AgentConfig['orchestration'];
+          ctx.agentRunners.get(change.agentId)?.updateAgentConfig(agentConfig);
+          break;
         case 'claude.model':
           agentConfig.claude.model = change.newValue as string;
           break;

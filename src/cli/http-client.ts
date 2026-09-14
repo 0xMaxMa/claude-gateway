@@ -202,6 +202,8 @@ export interface RequestOptions {
   body?: unknown;
   /** Abort the request after this many ms (default 30000). */
   timeoutMs?: number;
+  /** Cancel a read/watch without changing server-side task state. */
+  signal?: AbortSignal;
   /** A second address for the same gateway, tried once when `baseUrl` cannot be
    *  reached at all (see resolveUrlPlan). An HTTP error is never retried — the
    *  gateway answered, and repeating the call elsewhere would hide that. */
@@ -252,7 +254,7 @@ export async function request(opts: RequestOptions): Promise<RequestResult> {
   try {
     return await attempt(opts.baseUrl, opts);
   } catch (err) {
-    if (!opts.fallbackBaseUrl || !(err instanceof TransportError)) throw err;
+    if (opts.signal?.aborted || !opts.fallbackBaseUrl || !(err instanceof TransportError)) throw err;
     const notify =
       opts.onFallback ??
       ((from, to, reason) =>
@@ -272,6 +274,9 @@ async function attempt(baseUrl: string, opts: RequestOptions): Promise<RequestRe
   if (hasBody) headers['Content-Type'] = 'application/json';
 
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  opts.signal?.addEventListener('abort', abort, { once: true });
+  if (opts.signal?.aborted) abort();
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res: Response;
@@ -285,7 +290,7 @@ async function attempt(baseUrl: string, opts: RequestOptions): Promise<RequestRe
         signal: controller.signal,
       });
     } catch (err) {
-      const reason = (err as Error)?.name === 'AbortError' ? `timed out after ${timeoutMs}ms` : (err as Error).message;
+      const reason = opts.signal?.aborted ? 'cancelled' : (err as Error)?.name === 'AbortError' ? `timed out after ${timeoutMs}ms` : (err as Error).message;
       throw new TransportError(`Cannot reach gateway at ${baseUrl}: ${reason}`);
     }
     try {
@@ -295,13 +300,14 @@ async function attempt(baseUrl: string, opts: RequestOptions): Promise<RequestRe
     } catch (err) {
       // Not a TransportError — the gateway answered, so falling back to another
       // address would only re-ask the same wedged process through a proxy.
-      const reason = (err as Error)?.name === 'AbortError' ? `timed out after ${timeoutMs}ms` : (err as Error).message;
+      const reason = opts.signal?.aborted ? 'cancelled' : (err as Error)?.name === 'AbortError' ? `timed out after ${timeoutMs}ms` : (err as Error).message;
       throw new Error(`Gateway at ${baseUrl} answered but the response body failed: ${reason}`);
     }
   } finally {
     // In `finally`: a rejected fetch or body read would otherwise leave a live
     // timer holding the event loop open.
     clearTimeout(timer);
+    opts.signal?.removeEventListener('abort', abort);
   }
 
   let data: unknown = text;

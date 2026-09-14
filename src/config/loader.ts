@@ -1,9 +1,12 @@
+import { configWritePending, withConfigWriteLock, writeConfigAtomicSync } from './config-write-lock';
+import {migrateAgentVoiceConfig,gatewayOrchestrationEnabled,effectiveOrchestration,validateGatewayOrchestration,GatewayOrchestration} from '../orchestration/gateway-config';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { GatewayConfig, Logger } from '../types';
 import { resolveGatewayPublicUrl } from './public-url';
 import { upgradeAgentWhatsAppAccounts } from './whatsapp-accounts';
+import { resolveOrchestrationConfig, OrchestrationConfig } from '../orchestration/config';
 
 export class ConfigValidationError extends Error {
   constructor(message: string) {
@@ -70,7 +73,11 @@ function interpolateObject(obj: unknown): unknown {
 /**
  * Validate an agent config. Returns an error message if invalid, or null if valid.
  */
-function validateAgent(agent: Record<string, unknown>, index: number): string | null {
+function validateAgent(agent: Record<string, unknown>, index: number, orchestration?: GatewayOrchestration): string | null {
+  if (agent.voice !== undefined || agent.orchestration !== undefined || orchestration !== undefined) {
+    try { resolveOrchestrationConfig(effectiveOrchestration(agent.orchestration as OrchestrationConfig,orchestration), agent.voice as import('../orchestration/config').AgentVoiceConfig); }
+    catch (error) { return `agent '${agent.id}': ${(error as Error).message}`; }
+  }
   if (!agent.id || typeof agent.id !== 'string') {
     return `Agent at index ${index} is missing required field "id"`;
   }
@@ -231,6 +238,17 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
   if (!config.gateway || typeof config.gateway !== 'object') {
     throw new ConfigValidationError('Config is missing required "gateway" object');
   }
+  try {validateGatewayOrchestration((config.gateway as any).orchestration);}catch(error){throw new ConfigValidationError((error as Error).message);}
+  let migratedVoice = false;
+  try { migratedVoice = migrateAgentVoiceConfig(config as any); }
+  catch (error) { throw new ConfigValidationError((error as Error).message); }
+  const limits = (config.gateway as { processLimits?: { maxTotal?: number; reservedAgent?: number } }).processLimits;
+  if (limits !== undefined) {
+    const total = limits?.maxTotal ?? 32, reserved = limits?.reservedAgent ?? 2;
+    if (!limits || typeof limits !== 'object' || Object.keys(limits).some(key => !['maxTotal', 'reservedAgent'].includes(key)) || !Number.isSafeInteger(total) || !Number.isSafeInteger(reserved) || reserved < 1 || total <= reserved) {
+      throw new ConfigValidationError('Invalid gateway.processLimits');
+    }
+  }
 
   // Validate each agent before interpolation — skip invalid agents with a warning
   const validAgents: Record<string, unknown>[] = [];
@@ -240,7 +258,7 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
       skipAgent(`index ${i}`, 'Config entry must be an object');
       continue;
     }
-    const error = validateAgent(agent as Record<string, unknown>, i);
+    const error = validateAgent(agent as Record<string, unknown>, i,(config.gateway as any).orchestration);
     if (error) {
       skipAgent(String((agent as Record<string, unknown>).id || `index ${i}`), error);
       continue;
@@ -272,11 +290,18 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
       throw new ConfigValidationError('gateway.api.keys must be an array');
     }
     const seenKeys = new Set<string>();
+    const seenIds = new Set<string>();
     for (const k of api.keys as unknown[]) {
       if (typeof k !== 'object' || k === null) {
         throw new ConfigValidationError('Each entry in gateway.api.keys must be an object');
       }
       const entry = k as Record<string, unknown>;
+      if (entry.id !== undefined) {
+        if (typeof entry.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(entry.id) || seenIds.has(entry.id)) {
+          throw new ConfigValidationError('API key id must be unique and contain 1–128 letters, digits, underscores or hyphens');
+        }
+        seenIds.add(entry.id);
+      }
       if (!entry.key || typeof entry.key !== 'string') {
         throw new ConfigValidationError('Each API key must have a non-empty "key" string');
       }
@@ -354,6 +379,43 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
 
   if (skippedAgents.length > 0) {
     console.warn(`[gateway] ${skippedAgents.length} agent(s) skipped: ${skippedAgents.join(', ')}`);
+  }
+
+  if (gatewayOrchestrationEnabled(interpolatedGateway.orchestration as GatewayOrchestration) && interpolatedGateway.headless !== true) {
+    // Persist the raw document, never interpolated secrets or filtered agents.
+    // Do this only after successful validation and without yielding to another writer.
+    if (fs.readFileSync(configPath, 'utf-8') !== raw) throw new ConfigValidationError('Config changed while loading; retry');
+    if (migratedVoice && !fs.existsSync(configPath + '.before-agent-voice.bak')) fs.writeFileSync(configPath + '.before-agent-voice.bak', raw, { mode: 0o600, flag: 'wx' });
+    (config.gateway as Record<string, unknown>).headless = true;
+    if (configWritePending(configPath)) {
+      // A settings API writer may be awaiting I/O. Queue behind it and read its
+      // latest document, rather than overwriting its changes with this snapshot.
+      void withConfigWriteLock(configPath, () => {
+        const latest = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        if (gatewayOrchestrationEnabled(latest.gateway?.orchestration) && latest.gateway.headless !== true) {
+          latest.gateway.headless = true;
+          writeConfigAtomicSync(configPath, latest);
+        }
+      }).catch(() => console.warn('[gateway] Could not persist headless mode; orchestration is running headless'));
+    } else writeConfigAtomicSync(configPath, config);
+    interpolatedGateway.headless = true;
+    console.info('[gateway] Orchestration requires headless mode; using gateway.headless=true (config normalization requested)');
+  }
+
+  if (migratedVoice) {
+    const persist = () => {
+      const latestText = fs.readFileSync(configPath, 'utf8');
+      const latest = JSON.parse(latestText);
+      if (!migrateAgentVoiceConfig(latest)) return;
+      const backup = configPath + '.before-agent-voice.bak';
+      if (!fs.existsSync(backup)) fs.writeFileSync(backup, latestText, { mode: 0o600, flag: 'wx' });
+      writeConfigAtomicSync(configPath, latest);
+    };
+    if (configWritePending(configPath)) {
+      void withConfigWriteLock(configPath, persist).catch(() => console.warn('[gateway] Could not persist agent voice migration; using migrated settings in memory'));
+    } else {
+      try { persist(); } catch { console.warn('[gateway] Could not persist agent voice migration; using migrated settings in memory'); }
+    }
   }
 
   return {

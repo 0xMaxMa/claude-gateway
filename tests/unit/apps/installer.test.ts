@@ -963,7 +963,9 @@ services:
       });
       const installer2 = makeInstaller(successSpawn, trackAsyncSpawn);
 
-      const { attempted, failures } = await installer2.restoreRunningApps();
+      const onRestored = jest.fn(async () => { expect(calls.some(c => c.includes('up'))).toBe(true); });
+      const { attempted, failures } = await installer2.restoreRunningApps(undefined, onRestored);
+      expect(onRestored).toHaveBeenCalledWith(expect.objectContaining({name:'my-app'}));
       expect(failures).toEqual([]);
       expect(attempted).toBe(1);
       expect(calls.some((c) => c.includes('up'))).toBe(true);
@@ -995,7 +997,9 @@ services:
 
       const installer2 = makeInstaller(successSpawn, failingAsyncSpawn('up'));
 
-      const { attempted, failures } = await installer2.restoreRunningApps();
+      const onRestored = jest.fn();
+      const { attempted, failures } = await installer2.restoreRunningApps(undefined, onRestored);
+      expect(onRestored).not.toHaveBeenCalled();
       expect(attempted).toBe(1);
       expect(failures).toHaveLength(1);
       expect(failures[0].app).toBe('my-app');
@@ -1027,7 +1031,10 @@ services:
       });
       const installer2 = makeInstaller(successSpawn, trackAsyncSpawn);
 
-      const { attempted, failures } = await installer2.restoreRunningApps();
+      const startedWhenReady: number[] = [];
+      const { attempted, failures } = await installer2.restoreRunningApps(undefined, async () => { startedWhenReady.push(started); });
+      expect(startedWhenReady).toHaveLength(6);
+      expect(startedWhenReady.some(count => count < 6)).toBe(true);
       expect(attempted).toBe(6);
       expect(failures).toEqual([]);
       expect(started).toBe(6); // every app was started

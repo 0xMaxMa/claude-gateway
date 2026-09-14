@@ -4,14 +4,13 @@
  * Two independent surfaces (per user request, 2026-08-17):
  *   1. **Diary** (`SKILLS_LEARNED.md` in the workspace) — ALWAYS appended, an
  *      immutable audit log of every auto-write. Cheap, offline, never throttled.
- *   2. **Channel push** (Telegram) — a short "learned a skill" ping, gated by
+ *   2. **Origin session notice** — a short "learned a skill" ping, gated by
  *      `cfg.notify`. Throttled: up to NOTIFY_THROTTLE_MAX immediate pings per
  *      rolling window, then further writes coalesce into one digest so a burst
  *      cannot spam the chat.
  *
  * Everything here is best-effort and MUST NOT throw into the review path.
- * The channel transport (`send`) is injected — the manager builds the real
- * Telegram sender; tests pass a capturing stub. Diary + throttle logic are
+ * The session transport (`send`) is injected by the runner; tests pass a capturing stub. Diary + throttle logic are
  * transport-agnostic and fully unit-testable with an injected clock.
  */
 
@@ -43,7 +42,7 @@ export interface SkillNotifierOpts {
   /** Channel push on/off. The diary is written regardless. */
   notify: boolean;
   /** Channel transport. `undefined` ⇒ no channel wired (diary-only). */
-  send?: SendFn;
+  send?: (text: string, sessionId: string) => void | Promise<void>;
   logger?: { info: (msg: string) => void; warn?: (msg: string) => void };
 }
 
@@ -319,13 +318,13 @@ export function buildChannelSend(
 export class SkillNotifier {
   private readonly workspaceDir: string;
   private readonly notify: boolean;
-  private readonly send?: SendFn;
+  private readonly send?: SkillNotifierOpts['send'];
   private readonly logger?: SkillNotifierOpts['logger'];
 
   /** Timestamps of immediate pings still inside the current window. */
-  private recent: number[] = [];
+  private recent: Array<{ now: number; sessionId: string }> = [];
   /** Coalesced writes awaiting a digest flush. */
-  private buffer: string[] = [];
+  private buffer: Array<{ text: string; sessionId: string }> = [];
   private flushTimer?: ReturnType<typeof setTimeout>;
 
   constructor(opts: SkillNotifierOpts) {
@@ -357,9 +356,10 @@ export class SkillNotifier {
     }
     const n = this.buffer.length;
     if (n > 0 && this.send) {
-      const list = this.buffer.join(', ');
+      const groups = new Map<string, string[]>();
+      for (const item of this.buffer) groups.set(item.sessionId, [...(groups.get(item.sessionId) ?? []), item.text]);
       this.buffer = [];
-      void this.safeSend(`🧠 ${n} more skill${n === 1 ? '' : 's'} learned (auto): ${list}`);
+      for (const [sessionId, items] of groups) void this.safeSend(`🧠 ${items.length} more skill${items.length === 1 ? '' : 's'} learned (auto): ${items.join(', ')} · session ${shortId(sessionId)} · /skill-metrics`, sessionId);
     }
     // Do NOT reset `recent` here: pushThrottled already rolls the window forward
     // by timestamp on every write, so wiping it would let a mid-life flush (or a
@@ -371,21 +371,21 @@ export class SkillNotifier {
   private pushThrottled(ev: SkillWriteEvent): void {
     const now = ev.now;
     // Roll the window forward.
-    this.recent = this.recent.filter((t) => now - t < NOTIFY_THROTTLE_WINDOW_MS);
+    this.recent = this.recent.filter((t) => now - t.now < NOTIFY_THROTTLE_WINDOW_MS);
     const verb = ev.action === 'create' ? 'created' : 'updated';
-    if (this.recent.length < NOTIFY_THROTTLE_MAX) {
-      this.recent.push(now);
-      void this.safeSend(`🧠 Skill ${verb} (auto): ${ev.name} · session ${shortId(ev.sessionId)} · /skill-metrics`);
+    if (this.recent.filter(t => t.sessionId === ev.sessionId).length < NOTIFY_THROTTLE_MAX) {
+      this.recent.push({ now, sessionId: ev.sessionId });
+      void this.safeSend(`🧠 Skill ${verb} (auto): ${ev.name} · session ${shortId(ev.sessionId)} · /skill-metrics`, ev.sessionId);
     } else {
       // Over the burst limit — coalesce into a digest.
-      this.buffer.push(`${verb} ${ev.name}`);
+      this.buffer.push({ text: `${verb} ${ev.name}`, sessionId: ev.sessionId });
       this.armFlush(now);
     }
   }
 
   private armFlush(now: number): void {
     if (this.flushTimer) return;
-    const oldest = this.recent[0] ?? now;
+    const oldest = this.recent[0]?.now ?? now;
     const delay = Math.max(0, NOTIFY_THROTTLE_WINDOW_MS - (now - oldest));
     this.flushTimer = setTimeout(() => this.flushPending(), delay);
     if (typeof (this.flushTimer as NodeJS.Timeout).unref === 'function') {
@@ -393,10 +393,10 @@ export class SkillNotifier {
     }
   }
 
-  private async safeSend(text: string): Promise<void> {
+  private async safeSend(text: string, sessionId: string): Promise<void> {
     if (!this.send) return;
     try {
-      await this.send(text);
+      await this.send(text, sessionId);
     } catch (err) {
       this.logger?.warn?.(`[skill-learning] notify send failed: ${(err as Error).message}`);
     }

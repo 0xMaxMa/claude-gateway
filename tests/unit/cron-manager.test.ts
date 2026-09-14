@@ -1,3 +1,4 @@
+import { AgentRunner } from '../../src/agent/runner';
 /**
  * Unit tests for CronManager
  *
@@ -1640,4 +1641,54 @@ describe('TZ-GAP: catchUpMissedJobs should honor job.timezone', () => {
     parseSpy.mockRestore();
     manager.stop();
   });
+});
+
+describe('legacy cron orchestration ownership',()=>{
+ it('a saved cron loads unchanged and passes the real orchestration principal guard',async()=>{
+  const runner=Object.create(AgentRunner.prototype) as any;
+  runner.pendingApiSessions=new Set();runner.apiChatIds=new Map();runner.agentConfig={id:'test-agent'};
+  runner.orchestrationForApi=()=>true;
+  runner.sessionStore={ensureApiSession:jest.fn(async()=>{}),loadIndex:jest.fn(async()=>undefined)};
+  const send=jest.fn(async(_input:any,_capabilities:any,_options:any)=> 'Scheduled check complete');
+  runner.getOrchestration=async()=>({send,responseFiles:()=>[],waitForTaskReport:async(_s:string,_p:string,_r:string,text:string)=>text});
+  runner.addApiAttachments=jest.fn();runner.popApiAttachments=()=>[];
+  const first=makeManager({runner});await first.manager.start();
+  const job=await first.manager.create({agentId:first.agentId,name:'Old scheduled check',scheduleKind:'cron',schedule:'0 * * * *',type:'agent',prompt:'Check status'});
+  first.manager.stop();
+  const restored=makeManager({runner,tmpDir:first.tmpDir});await restored.manager.start();
+  try {
+   const result=await restored.manager.run(job.id);expect(result.status).toBe('ok');
+   const scope=send.mock.calls[0][0].scope;
+   expect(scope.principalId).toBe(`cron:${first.agentId}:${job.id}`);
+   expect(scope.agentSessionId).toBe(`cron-${job.id}`);
+   expect(send.mock.calls[0][1]).toMatchObject({execute:false,writeMemory:false});
+   await restored.manager.run(job.id);expect(send.mock.calls[1][0].scope.principalId).toBe(scope.principalId);
+   await expect(runner.sendApiMessage('external','chat','test',{timeoutMs:1000})).rejects.toThrow('Authenticated principal required');
+  }finally{restored.manager.stop();}
+ });
+});
+
+it('persists orchestration timeout phase and timing instead of a bare TIMEOUT',async()=>{
+ const runner=makeRunner();
+ runner.sendApiMessage.mockRejectedValue(Object.assign(new Error('TIMEOUT'),{code:'TIMEOUT',timeout:{phase:'idle',elapsedMs:27832,idleMs:15001}}));
+ const {manager,agentId}=makeManager({runner});await manager.start();
+ try{
+  const job=await manager.create({agentId,name:'Scheduled check',scheduleKind:'cron',schedule:'0 * * * *',type:'agent',prompt:'Check status'});
+  const result=await manager.run(job.id);
+  expect(result).toMatchObject({status:'error',error:'TIMEOUT (phase=idle, elapsed=28s, idle=15s)'});
+  expect(runner.sendApiMessage).toHaveBeenCalledTimes(1);
+ }finally{manager.stop();}
+});
+
+it('managed recurring runs request fresh data and wait without a total cap unless explicitly configured',async()=>{
+ const runner=makeRunner('Fresh report');const f=makeManager({runner});
+ f.agentConfigs.get(f.agentId)!.orchestration={enabled:true,tasks:{maxDurationMs:0}};
+ await f.manager.start();
+ try{
+  const job=await f.manager.create({agentId:f.agentId,name:'Current status',scheduleKind:'cron',schedule:'0 * * * *',type:'agent',prompt:'Fetch current status'});
+  await f.manager.run(job.id);
+  expect(runner.sendApiMessage).toHaveBeenLastCalledWith(expect.any(String),expect.any(String),expect.stringContaining('NEW scheduled run'),expect.objectContaining({timeoutMs:Infinity,waitForTasks:true}));
+  await f.manager.update(job.id,{timeoutMs:45000});await f.manager.run(job.id);
+  expect(runner.sendApiMessage).toHaveBeenLastCalledWith(expect.any(String),expect.any(String),expect.stringContaining('fresh data'),expect.objectContaining({timeoutMs:45000}));
+ }finally{f.manager.stop();}
 });

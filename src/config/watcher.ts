@@ -7,6 +7,8 @@ import { expandHome } from '../utils/paths';
 
 // Fields that can be hot-reloaded without restarting the gateway
 const HOT_RELOADABLE_AGENT_FIELDS: string[] = [
+  'orchestration',
+  'voice',
   'claude.model',
   'claude.extraFlags',
   'session.idleTimeoutMinutes',
@@ -22,6 +24,7 @@ const HOT_RELOADABLE_AGENT_FIELDS: string[] = [
 
 // Gateway-level (non-agent) fields that can be hot-reloaded; agentId will be '' in ConfigChange
 const HOT_RELOADABLE_GATEWAY_FIELDS: string[] = [
+  'gateway.orchestration',
   'gateway.headless',
   // Logging policy is process-wide module state, so re-installing it is just a
   // call — and turning the level up to chase a live problem is precisely when a
@@ -237,6 +240,8 @@ export class ConfigWatcher extends EventEmitter {
 
       // Check each field path
       const fieldPairs: Array<{ field: string; oldVal: unknown; newVal: unknown }> = [
+        { field: 'orchestration', oldVal: oldAgent.orchestration, newVal: newAgent.orchestration },
+        { field: 'voice', oldVal: oldAgent.voice, newVal: newAgent.voice },
         { field: 'claude.model', oldVal: oldAgent.claude.model, newVal: newAgent.claude.model },
         { field: 'claude.extraFlags', oldVal: oldAgent.claude.extraFlags, newVal: newAgent.claude.extraFlags },
         { field: 'session.idleTimeoutMinutes', oldVal: oldAgent.session?.idleTimeoutMinutes, newVal: newAgent.session?.idleTimeoutMinutes },
@@ -264,6 +269,7 @@ export class ConfigWatcher extends EventEmitter {
 
     // Gateway-level fields (emitted with agentId: '')
     const gatewayFieldPairs: Array<{ field: string; oldVal: unknown; newVal: unknown }> = [
+      {field:'gateway.orchestration',oldVal:oldCfg.gateway.orchestration,newVal:newCfg.gateway.orchestration},
       { field: 'gateway.headless', oldVal: oldCfg.gateway.headless, newVal: newCfg.gateway.headless },
       { field: 'gateway.publicUrl', oldVal: oldCfg.gateway.publicUrl, newVal: newCfg.gateway.publicUrl },
       { field: 'gateway.logs', oldVal: oldCfg.gateway.logs, newVal: newCfg.gateway.logs },

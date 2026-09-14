@@ -223,3 +223,20 @@ describe('remapVideoParamsRefs — the i2v source frame follows promoted files (
     expect(remap(p, STAGED, [...STAGED])).toBe(p);
   });
 });
+
+test('orchestrated API persists composer video options and forwards their authoritative directive', async () => {
+  const send = jest.fn(async () => 'ok');
+  const update = jest.fn(async () => {});
+  const runner = Object.assign(Object.create(AgentRunner.prototype), {
+    pendingApiSessions: new Set(), apiChatIds: new Map(), agentConfig: { id: 'a' },
+    sessionStore: { ensureApiSession: async () => {}, loadIndex: async () => null, updateSessionMeta: update },
+    getOrchestration: async () => ({ send, responseFiles: () => [] }),
+    addApiAttachments: () => {}, popApiAttachments: () => [],
+  });
+  const videoParams = { model: 'video-fixture', duration: 8, aspect_ratio: '9:16', resolution: '720p' };
+  await runner.sendOrchestratedApi('s', 'c', 'make a clip', { timeoutMs: 2000, principalId: 'owner', allowTools: true, videoParams });
+  const input = (send.mock.calls as unknown as any[][])[0][0];
+  expect(input.metadata.promptContext).toContain('<video-params');
+  for (const value of ['video-fixture', '8', '9:16', '720p']) expect(input.metadata.promptContext).toContain(value);
+  expect(update).toHaveBeenCalledWith('a', 'c', 's', { videoConfig: videoParams }, 'api');
+});
