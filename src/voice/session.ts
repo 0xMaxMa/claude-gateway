@@ -61,7 +61,13 @@ export class VoiceSession {
   async start(): Promise<void> {
     if (this.closed || this.turn) throw new VoiceError('VOICE_ALREADY_STARTED');
     if (!this.sttSession) {
-      const stt = await this.stt.open({ format: PCM16, language: this.options.language || undefined, signal: this.controller.signal });
+      let stt: SttSession;
+      try {
+        stt = await this.stt.open({ format: PCM16, language: this.options.language || undefined, signal: this.controller.signal });
+      } catch (error) {
+        this.failStt(error instanceof VoiceError ? error.code : 'STT_PROVIDER_ERROR');
+        return;
+      }
       if (this.closed) { await stt.close(); return; }
       this.sttSession = stt;
       void (async () => {
@@ -291,7 +297,7 @@ export class VoiceSession {
         }
       } else if (!this.turn) await this.start();
     } finally {
-      this.client.control({ type: 'voice.state', state: muted ? 'muted' : 'listening' });
+      if (!this.closed) this.client.control({ type: 'voice.state', state: muted ? 'muted' : 'listening' });
     }
   }
   private speechUnavailable(): void { if (!this.closed) this.client.control({ type: 'voice.notice', code: 'SPEECH_SUMMARY_UNAVAILABLE' }); }

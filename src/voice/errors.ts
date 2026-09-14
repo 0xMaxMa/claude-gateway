@@ -76,7 +76,7 @@ export function describeVoiceError(error: unknown) {
     // A bare 429 cannot reliably distinguish an exhausted quota from a rate limit.
     else if (httpStatus === 429) return { category: 'quota_or_rate_limit', message: 'The voice provider rate limit or quota was reached (HTTP 429). Check provider usage before retrying.', retryable: false, httpStatus };
     else if (httpStatus === 408 || httpStatus === 504 || /TIMEOUT|TimeoutError/.test(code)) category = 'timeout';
-    else if (httpStatus && httpStatus >= 500) category = 'unavailable';
+    else if ((httpStatus && httpStatus >= 500) || code === 'MANAGED_VOICE_USAGE_UNAVAILABLE') category = 'unavailable';
     else if (/LANGUAGE_UNSUPPORTED|UNSUPPORTED_LANGUAGE/.test(code)) category = 'language';
     else if (/INVALID_VOICE_MODEL|UNKNOWN_TTS_PROVIDER|UNKNOWN_STT_PROVIDER|TTS_FILE_UNSUPPORTED/.test(code)) category = 'model';
     else if (httpStatus && httpStatus >= 400) category = 'invalid_request';

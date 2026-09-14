@@ -36,3 +36,16 @@ test('provider messages stay actionable while internal failures and bearer value
   expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'API Error: 401 Unauthorized Bearer secret-value' })).toBe('401 Unauthorized Bearer [redacted]');
   expect(inferenceFailureMessage(new Error('internal stack detail'))).toBeUndefined();
 });
+
+test.each(['final-only','replacement','structured'])('oversized %s result fails before a successful report is published',async kind=>{
+ const p=new EventEmitter() as SessionProcess,publish=jest.fn();
+ const text='🎯'.repeat(65537);
+ Object.assign(p,{runtimeProfile:kind==='structured'?{role:'agent',responseSchema:{type:'object'}}:undefined,
+  start:async()=>{},stop:jest.fn(async()=>{}),sendMessage:()=>{
+   if(kind==='replacement')p.emit('output',JSON.stringify({type:'stream_event',event:{delta:{type:'text_delta',text:'Starting'}}}));
+   p.emit('output',JSON.stringify({type:'result',...(kind==='structured'?{structured_output:{display_text:text}}:{result:text})}));
+  }});
+ await expect(startProcessTurn(p,'task',1000,publish).result).rejects.toMatchObject({code:'RESPONSE_TOO_LARGE'});
+ expect(p.stop).toHaveBeenCalled();
+ expect(publish.mock.calls.flat()).toEqual(kind==='replacement'?['Starting']:[]);
+});

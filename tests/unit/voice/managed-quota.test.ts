@@ -23,9 +23,33 @@ test('only explicit managed exhaustion suppresses audio failure notifications',(
  expect(speechSynthesisFailure(new VoiceError('TTS_PROVIDER_ERROR_HTTP_503'))).toMatchObject({speechSynthesisFailed:true});
 });
 test('unavailable or malformed wallet does not masquerade as exhausted credit',async()=>{
- for(const response of [new Response('{}'),new Response('{}',{status:503})]) {
+ for(const response of [new Response('{}'),new Response('null'),new Response('not JSON'),new Response('{}',{status:503})]) {
  await expect(requireManagedVoiceCredit('managed:elevenlabs',async()=>response)).rejects.toMatchObject({code:'MANAGED_VOICE_USAGE_UNAVAILABLE'});
  }
+});
+
+test('wallet network failure is retryable unavailability, never exhausted credit', async () => {
+ const {describeVoiceError}=await import('../../../src/voice/errors');
+ let failure: unknown;
+ try { await requireManagedVoiceCredit('managed:elevenlabs',async()=>{throw Error('private upstream diagnostic')}); }
+ catch(error){failure=error;}
+ expect(failure).toMatchObject({code:'MANAGED_VOICE_USAGE_UNAVAILABLE'});
+ expect(describeVoiceError(failure)).toMatchObject({category:'unavailable',retryable:true});
+});
+
+test('stopping playback cancels the pending wallet check before synthesis', async () => {
+ const controller=new AbortController();
+ let started!:()=>void;
+ const ready=new Promise<void>(resolve=>{started=resolve;});
+ const request=jest.fn((_url: unknown,init?:RequestInit)=>new Promise<Response>((_resolve,reject)=>{
+  init!.signal!.addEventListener('abort',()=>reject(init!.signal!.reason),{once:true});started();
+ }));
+ const pending=requireManagedVoiceCredit('managed:paxalabs',request,controller.signal);
+ const rejected=expect(pending).rejects.toMatchObject({code:'PROVIDER_ABORTED'});
+ await ready;controller.abort();await rejected;
+ const untouched=jest.fn();
+ await expect(requireManagedVoiceCredit('managed:paxalabs',untouched,controller.signal)).rejects.toMatchObject({code:'PROVIDER_ABORTED'});
+ expect(untouched).not.toHaveBeenCalled();
 });
 
 test('quota exhausted between preflight and websocket handshake keeps its explicit code', async()=>{

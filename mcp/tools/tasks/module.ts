@@ -1,4 +1,6 @@
-import { WORKFLOW_SCHEMA } from '../../../src/orchestration/workflow';
+// MCP sources are published, src/ is not. Share the compiled schema so an
+// installed package has the same inventory as a development checkout.
+import { WORKFLOW_SCHEMA } from '../../../dist/orchestration/workflow.js';
 import type { McpToolDefinition, McpToolResult } from '../../types';
 
 const schema = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required, additionalProperties: false });

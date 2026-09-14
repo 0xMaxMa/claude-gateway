@@ -39,7 +39,7 @@ export function sttProvider(config: { provider: string; model: string }): SttPro
   const provider = makeSttProvider(config);
   if (!config.provider.startsWith('managed:')) return provider;
   return { id: provider.id, capabilities: provider.capabilities, async open(options) {
-    await requireManagedVoiceCredit(config.provider);
+    await requireManagedVoiceCredit(config.provider, undefined, options.signal);
     return provider.open(options);
   }};
 }
@@ -48,11 +48,11 @@ export function ttsProvider(config: { provider: string; model: string }): TtsPro
   if (!config.provider.startsWith('managed:')) return provider;
   return { id: provider.id, capabilities: provider.capabilities,
     synthesizeFile: provider.synthesizeFile ? async options => {
-      await requireManagedVoiceCredit(config.provider);
+      await requireManagedVoiceCredit(config.provider, undefined, options.signal);
       return provider.synthesizeFile!(options);
     } : undefined,
     async *synthesize(options) {
-      await requireManagedVoiceCredit(config.provider);
+      await requireManagedVoiceCredit(config.provider, undefined, options.signal);
       yield* provider.synthesize(options);
     },
   };

@@ -136,6 +136,10 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
       if (process.runtimeProfile?.responseSchema && event.structured_output && typeof event.structured_output === 'object') {
         text = JSON.stringify(event.structured_output);
       } else if (typeof event.result === 'string' && event.result) text = event.result;
+      // The CLI can emit a final-only result, or replace a short stream with
+      // a larger canonical/structured result. Apply the same byte limit before
+      // publishing or recording success, without silently shortening evidence.
+      if (Buffer.byteLength(text) > 262144) { fail(new OrchestrationError('RESPONSE_TOO_LARGE')); void process.stop(); return; }
       if (!streamed && text && !publish(text)) return;
       resolveAccepted(); settled = true; cleanup(); resolveResult({ text, interrupted: stopped });
     }

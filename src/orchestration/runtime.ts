@@ -510,7 +510,14 @@ export class AgentOrchestrationRuntime {
         }
         if (transcript.state !== 'completed') {
           if (transcript.error_code === 'MANAGED_VOICE_QUOTA_EXHAUSTED') {
-            this.decisions.finish(decision, '', 'completed', undefined, false); await this.flushHistory(); return '';
+            // Skipping a recording has not reported any assigned worker results.
+            // Preserve their notifications and staged files for the next report.
+            this.store.transaction(() => {
+              this.store.run("UPDATE notifications SET status='pending',decision_id=NULL WHERE decision_id=? AND status='assigned'", decision.decisionId);
+              this.store.run("UPDATE conversation_decisions SET notification_ids_json='[]' WHERE id=?", decision.decisionId);
+            });
+            this.decisions.finish(decision, '', 'completed', undefined, false);
+            await this.flushHistory(); return '';
           }
           const text = `${voiceNoteFailureMessage(String(transcript.error_code ?? 'VOICE_NOTE_INTERRUPTED'))} Reference: ${receipt.inputId}`;
           this.decisions.finish(decision, text, 'failed'); await this.flushHistory(); options.onText?.(text); return text;

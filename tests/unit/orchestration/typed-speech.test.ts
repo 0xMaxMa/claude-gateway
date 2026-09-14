@@ -112,9 +112,9 @@ test('failed voice note retains provider code and returns a readable diagnostic 
  }finally{await runtime.close();log.mockRestore();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
 });
 
-test('managed quota exhaustion does not reply, invoke an agent or leave input pending', async () => {
+test.each([false,true])('managed quota skip preserves pending worker results (%s) without replying or invoking an agent', async pendingResult => {
  const root=mkdtempSync(join(tmpdir(),'voice-note-failure-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Identity');
- const a={id:'a',description:'fixture',env:'',workspace,voice:{...ORCHESTRATION_DEFAULTS.voice,enabled:true},claude:{model:'fixture',extraFlags:[]}} as AgentConfig;
+ const a={id:'a',description:'fixture',env:'',workspace,voice:{...ORCHESTRATION_DEFAULTS.voice,enabled:true},claude:{model:'fixture',extraFlags:[]},orchestration:{conversation:{notificationPolicy:'next_user_turn'}}} as AgentConfig;
  const c={gateway:{orchestration:true,headless:true},agents:[a]} as GatewayConfig,sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a');
  const sid=randomUUID();await sessions.ensureApiSession('a','chat',sid);
  const failure=new VoiceError('MANAGED_VOICE_QUOTA_EXHAUSTED');
@@ -123,11 +123,27 @@ test('managed quota exhaustion does not reply, invoke an agent or leave input pe
  const log=jest.spyOn(console,'warn').mockImplementation(()=>{});
  const runtime=await AgentOrchestrationRuntime.open(a,c,dir,sessions,history,{transcribeNote:transcribe,createAgentSession,releaseAgentSession:async()=>{}});
  try {
+  const scope={agentId:'a',agentSessionId:sid,source:'api' as const,accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'};
+  let notificationId: string|undefined;
+  if(pendingResult){
+   const {DecisionService}=await import('../../../src/orchestration/decisions');
+   const decisions=new DecisionService(runtime.store),input=runtime.store.acceptInput({scope,text:'Prior task'});
+   const decision=decisions.begin(input.conversationId,'owner',[input.inputId]);
+   const task=runtime.tasks.spawn({...input,...decision,principalId:'owner',actionId:'spawn',execute:true,writeMemory:false},{title:'Prior task',instructions:'Fixture',targetProfile:'default-worker'});
+   decisions.finish(decision,'Queued');
+   const attempt=runtime.tasks.claim(task.taskId)!;
+   runtime.tasks.finish(attempt.attemptId,attempt.generation,{type:'completed',result:{summary:'Unreported result',artifactIds:[]}});
+   notificationId=String(runtime.store.get('SELECT id FROM notifications WHERE task_id=?',task.taskId)!.id);
+  }
   const result=await runtime.send({scope:{agentId:'a',agentSessionId:sid,source:'api',accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'},text:'(voice message)',modality:'voice_note',attachmentIds:['media/chat/fixture.ogg'],requestId:randomUUID()},{execute:false,writeMemory:false},{timeoutMs:1000});
   const row=runtime.store.get('SELECT * FROM voice_note_transcripts')!;
   expect(row).toMatchObject({state:'failed',error_code:'MANAGED_VOICE_QUOTA_EXHAUSTED'});
   expect(result).toBe('');
-  expect(runtime.store.get('SELECT status FROM conversation_inputs')?.status).toBe('handled');
+  expect(runtime.store.get('SELECT status FROM conversation_inputs WHERE id=?',row.input_id)?.status).toBe('handled');
+  if(notificationId){
+   expect(runtime.store.get('SELECT status,decision_id FROM notifications WHERE id=?',notificationId)).toMatchObject({status:'pending',decision_id:null});
+   expect(runtime.store.get("SELECT state FROM outbox WHERE kind='notification' AND json_extract(payload_json,'$.notificationId')=?",notificationId)?.state).toBe('pending');
+  }
   expect(runtime.store.all('SELECT * FROM deliveries')).toHaveLength(0);
   expect(transcribe).toHaveBeenCalledTimes(1);expect(createAgentSession).not.toHaveBeenCalled();
  }finally{await runtime.close();log.mockRestore();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}

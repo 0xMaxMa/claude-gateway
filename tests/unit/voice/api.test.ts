@@ -108,3 +108,32 @@ test('STT disconnect closes with a retryable transport code and a new ticket ope
   expect(runner.stopVoiceResponse).not.toHaveBeenCalled();
  }finally{ws?.terminate();await api.close();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
+
+test('a failed STT handshake releases the lease and requests a fresh connection',async()=>{
+ const {sttProvider}=await import('../../../src/voice/providers/registry');
+ const {VoiceError}=await import('../../../src/voice/types');
+ const stt=new FakeSttProvider();
+ jest.spyOn(stt,'open').mockRejectedValue(new VoiceError('STT_PROVIDER_ERROR_HTTP_503'));
+ (sttProvider as jest.Mock).mockReturnValueOnce(stt);
+ const agent={id:'a',orchestration:{enabled:true},voice:{...ORCHESTRATION_DEFAULTS.voice,enabled:true}} as AgentConfig;
+ const runner={subscribeVoiceResults:async()=>()=>{},apiSessionExists:async()=>true,authorizeVoiceSession:async()=>{},stopVoiceResponse:jest.fn(),recordVoicePlayback:jest.fn()} as unknown as AgentRunner;
+ const api=new VoiceApi(new Map([['a',runner]]),new Map([['a',agent]]),[{id:'owner',key:'fixture',agents:['a']}]);
+ const app=express();app.use(express.json());app.use('/api',api.router);
+ const server=createServer(app);server.on('upgrade',(req,socket,head)=>{api.upgrade(req,socket,head);});
+ server.listen(0,'127.0.0.1');await once(server,'listening');
+ const endpoint='/api/v1/agents/a/sessions/s/voice-sessions';
+ let ws:WebSocket|undefined;
+ try{
+  const ticket=await request(app).post(endpoint).set('Authorization','Bearer fixture').send({chat_id:'c'});
+  expect(ticket.status).toBe(200);
+  ws=new WebSocket(`ws://127.0.0.1:${(server.address() as {port:number}).port}${ticket.body.stream_path}?ticket=${ticket.body.ticket}`);
+  await once(ws,'message');
+  const messages:any[]=[];ws.on('message',data=>messages.push(JSON.parse(String(data))));
+  const closed=once(ws,'close');ws.send(JSON.stringify({type:'voice.start'}));
+  expect((await closed)[0]).toBe(1012);
+  expect(messages).toContainEqual(expect.objectContaining({type:'voice.notice',code:'STT_PROVIDER_ERROR_HTTP_503',reconnect:true,retryable:true}));
+  expect(messages.some(m=>m.state==='listening')).toBe(false);
+  expect((await request(app).post(endpoint).set('Authorization','Bearer fixture').send({chat_id:'c'})).status).toBe(200);
+  expect(runner.stopVoiceResponse).not.toHaveBeenCalled();
+ }finally{ws?.terminate();await api.close();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});

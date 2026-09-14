@@ -324,3 +324,23 @@ test('provider authentication failures remain non-retryable',async()=>{
  expect(controls).toContainEqual({type:'voice.error',code:'STT_PROVIDER_ERROR_HTTP_401',retryable:false,reconnect:false});
  await session.close();
 });
+
+test.each([
+ ['STT_PROVIDER_ERROR_HTTP_503',true],
+ ['MANAGED_VOICE_USAGE_UNAVAILABLE',true],
+ ['STT_PROVIDER_ERROR_HTTP_401',false],
+ ['MANAGED_VOICE_QUOTA_EXHAUSTED',false],
+])('startup failure %s retires the recognizer with the correct retry policy',async(code,retryable)=>{
+ const stt=new FakeSttProvider(),controls:Record<string,any>[]=[];
+ const {FakeTtsProvider}=await import('../../../src/voice/providers/fake');
+ const {VoiceError}=await import('../../../src/voice/types');
+ jest.spyOn(stt,'open').mockRejectedValue(new VoiceError(String(code)));
+ const stop=jest.fn();
+ const session=new VoiceSession(stt,new FakeTtsProvider(),'fixture',{control:m=>controls.push(m),audio:()=>{},bufferedBytes:()=>0},jest.fn(),stop);
+ try {
+  await session.start();
+  expect(controls).toEqual([{type:'voice.error',code,retryable,reconnect:retryable}]);
+  await expect(session.start()).rejects.toThrow('VOICE_ALREADY_STARTED');
+  expect(stop).not.toHaveBeenCalled();
+ }finally{await session.close();}
+});
