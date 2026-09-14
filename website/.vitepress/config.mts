@@ -2,7 +2,7 @@ import { defineConfig } from 'vitepress'
 
 export default defineConfig({
   title: 'Claude Gateway',
-  description: 'An orchestrator, voice, and multi-channel platform for Claude Code. Claude Code inside.',
+  description: 'Task orchestration, voice, and multi-channel conversations for Claude Code.',
   lang: 'en-US',
   base: process.env.DOCS_BASE || '/',
   srcExclude: ['README.md'],
@@ -19,7 +19,7 @@ export default defineConfig({
       { text: 'Start here', items: [
         { text: 'Overview', link: '/' },
         { text: 'Quickstart', link: '/guide/quickstart' },
-        { text: 'Claude Code inside', link: '/reference/architecture' },
+        { text: 'Architecture', link: '/reference/architecture' },
         { text: 'Agents & sessions', link: '/guide/agents' },
         { text: 'Orchestration & tasks', link: '/guide/orchestration' }
       ] },
@@ -47,7 +47,8 @@ export default defineConfig({
         { text: 'Gateway settings', link: '/reference/gateway-settings' },
         { text: 'Orchestration settings', link: '/reference/orchestration-settings' },
         { text: 'Memory & learning settings', link: '/reference/memory-settings' },
-        { text: 'CLI', link: '/reference/cli-api' },
+        { text: 'CLI & API overview', link: '/reference/cli-api' },
+        { text: 'CLI command reference', link: '/reference/cli' },
         { text: 'Operations & upgrades', link: '/guide/operations' },
         { text: 'Troubleshooting', link: '/guide/troubleshooting' },
         { text: 'Development & docs deployment', link: '/reference/development' }
@@ -86,6 +87,6 @@ export default defineConfig({
     outline: [2, 3],
     socialLinks: [{ icon: 'github', link: 'https://github.com/0xMaxMa/claude-gateway' }],
     editLink: { pattern: 'https://github.com/0xMaxMa/claude-gateway/edit/main/website/:path', text: 'Improve this page' },
-    footer: { message: 'Claude Code inside. Self-hosted orchestration, voice, and multi-channel conversations.' }
+    footer: { message: 'Claude Code inside.' }
   }
 })

@@ -12,7 +12,7 @@ claude-gateway doctor
 
 `--url` and `--key` explicitly select the server and API key. Environment alternatives are `CLAUDE_GATEWAY_URL` and `CLAUDE_GATEWAY_API_KEY`; a local CLI can read the admin key from configuration automatically. When a local gateway is detected, ordinary commands prefer its local address over `gateway.publicUrl`.
 
-`--json` reserves stdout for the JSON result. `--data` merges a JSON object into a write request. See [CLI.md](https://github.com/0xMaxMa/claude-gateway/blob/main/CLI.md) for the generated command inventory, exact precedence, and exit codes.
+`--json` reserves stdout for the JSON result. `--data` merges a JSON object into a write request. See [CLI command reference](./cli.md) for the generated command inventory, exact precedence, and exit codes.
 
 ## Make a read-only API request
 

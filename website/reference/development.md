@@ -34,7 +34,7 @@ It uses the same default config directory as an installed gateway. To test indep
 | `mcp/` | Bun MCP server and tool modules |
 | `tests/` | Unit, integration and end-to-end tests |
 | `website/` | Documentation source and its independent build |
-| `CLI.md` | Generated CLI reference |
+| `website/reference/cli.md` | Generated CLI reference |
 
 This map describes the orchestration codebase documented by this site. Runtime data belongs under the configured gateway home and agent workspaces, not inside the repository.
 
@@ -64,7 +64,7 @@ For async tests, wait for an observable state or event with a bounded deadline r
 
 ## Update documentation with code
 
-HTTP API changes belong in [API reference](../api/). Update the relevant channel or feature guide when behavior changes. Regenerate `CLI.md` with the repository's CLI generator when changing CLI command definitions. Keep examples consistent with configuration validation, authorization and route mounts.
+HTTP API changes belong in [API reference](../api/). Update the relevant channel or feature guide when behavior changes. Regenerate `website/reference/cli.md` with the repository's CLI generator when changing CLI command definitions. Keep examples consistent with configuration validation, authorization and route mounts.
 
 The website is built independently:
 

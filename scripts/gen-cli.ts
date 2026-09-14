@@ -1,7 +1,7 @@
 /**
  * Code generator: turns the route manifest (single source of truth) into
  *   - src/cli/commands.generated.ts  (the CLI's friendly command table), and
- *   - CLI.md                         (the CLI reference doc).
+ *   - website/reference/cli.md       (the CLI reference doc).
  *
  * Run:   ./node_modules/.bin/ts-node scripts/gen-cli.ts
  * Check: ./node_modules/.bin/ts-node scripts/gen-cli.ts --check   (CI drift guard)
@@ -19,7 +19,7 @@ import { GeneratedCommand, GeneratedFlag } from '../src/cli/types';
 
 const ROOT = path.join(__dirname, '..');
 export const COMMANDS_FILE = path.join(ROOT, 'src', 'cli', 'commands.generated.ts');
-export const CLI_DOC_FILE = path.join(ROOT, 'CLI.md');
+export const CLI_DOC_FILE = path.join(ROOT, 'website/reference/cli.md');
 
 function toCommand(r: RouteDef): GeneratedCommand {
   const cli = r.cli!;

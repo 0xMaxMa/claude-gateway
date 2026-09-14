@@ -89,7 +89,7 @@ curl http://localhost:10850/api/v1/commands | jq
 Returns the route manifest: every endpoint registered via `defineRoute` in the API
 routers, each with its method, path, auth level, and (where exposed) its CLI
 `noun`/`verb` mapping. `scripts/gen-cli.ts` reads this manifest offline to generate
-the CLI's command table (`src/cli/commands.generated.ts`) and `CLI.md`; the endpoint
+the CLI's command table (`src/cli/commands.generated.ts`) and the [CLI command reference](../reference/cli.md); the endpoint
 itself is for runtime verification (e.g. `claude-gateway doctor`), not for building
 commands at request time. Requires a valid API key.
 

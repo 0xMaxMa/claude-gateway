@@ -4,7 +4,7 @@
  *
  * Both defects here shared a shape: the command did something other than what
  * the user asked for, and still exited 0. Help was written to stderr while the
- * documented contract (CLI.md) puts a requested listing on stdout, so
+ * documented contract (website/reference/cli.md) puts a requested listing on stdout, so
  * `crons list --help | grep …` matched nothing; and a flag outside the
  * generated manifest was parsed, dropped, and never mentioned, so a typo
  * created a job missing that field and a command whose manifest declared no

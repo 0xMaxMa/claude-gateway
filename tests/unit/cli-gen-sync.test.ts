@@ -14,7 +14,7 @@ describe('cli generated files are in sync with the route manifest', () => {
     expect(fs.readFileSync(COMMANDS_FILE, 'utf8')).toBe(commands);
   });
 
-  it('CLI.md is up to date (run `npm run gen-cli` if this fails)', () => {
+  it('website/reference/cli.md is up to date (run `npm run gen-cli` if this fails)', () => {
     expect(fs.readFileSync(CLI_DOC_FILE, 'utf8')).toBe(doc);
   });
 });

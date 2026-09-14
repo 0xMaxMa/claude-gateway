@@ -2,8 +2,6 @@
 
 **An orchestrator, voice, and multi-channel platform for Claude Code.**
 
-**Claude Code inside.**
-
 Claude Gateway keeps conversations responsive while Claude Code workers execute tasks. Talk or type through your connected channels, follow progress, and carry your agents' memory and skills across sessions.
 
 <p align="center">
@@ -49,4 +47,4 @@ Follow the [quickstart](https://0xmaxma.github.io/claude-gateway/guide/quickstar
 | Running, upgrading, and troubleshooting | [Operations](https://0xmaxma.github.io/claude-gateway/guide/operations.html) |
 | Source builds and contributions | [Development](https://0xmaxma.github.io/claude-gateway/reference/development.html) |
 
-API documentation lives on the documentation website. [CLI.md](CLI.md) is the generated command reference. To edit or preview this site, see [website development](website/README.md).
+API documentation lives on the documentation website. [CLI command reference](https://0xmaxma.github.io/claude-gateway/reference/cli.html) is the generated command reference. To edit or preview this site, see [website development](website/README.md).

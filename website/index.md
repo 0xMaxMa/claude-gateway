@@ -2,8 +2,8 @@
 layout: home
 hero:
   name: Claude Gateway
-  text: Orchestrator. Voice. Multi‑channel.
-  tagline: A self-hosted orchestration, voice, and multi-channel platform for Claude Code. Claude Code inside — conversations, workers, tools, and persistent knowledge in one gateway.
+  text: Talk naturally. Run tasks. Stay connected.
+  tagline: A self-hosted platform for Claude Code agents, bringing task orchestration, voice, and multi-channel conversations together.
   actions:
     - theme: brand
       text: Start your gateway
@@ -32,7 +32,7 @@ features:
     link: /reference/architecture
 ---
 
-## Claude Code inside
+## How the gateway works
 
 Claude Code runs the conversation agent and its workers. Claude Gateway coordinates their work, routes messages and tool activity across channels, manages speech, and preserves task results and knowledge. Host workers can handle research, browser actions, files, services, or code; installed app-agents retain their container boundary.
 

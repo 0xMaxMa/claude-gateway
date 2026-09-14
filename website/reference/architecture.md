@@ -1,4 +1,4 @@
-# Architecture: Claude Code inside
+# Architecture
 
 Claude Gateway coordinates Claude Code rather than replacing it with a separate model runtime. The gateway owns channel ingress, access checks, conversation state, tasks, provider configuration, speech transport and delivery. Claude Code supplies the agent and worker execution environment.
 
