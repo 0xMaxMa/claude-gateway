@@ -1,6 +1,6 @@
 # Orchestration settings
 
-The gateway-level switch is `gateway.orchestration: true`. It applies to every agent and connected channel. The fields below live under **`agents[].orchestration`**, except voice, which lives directly under **`agents[].voice`**. Do not configure a second `enabled` or channel allowlist inside an agent's orchestration block.
+The gateway-level switch is `gateway.orchestration`, enabled by default. New installations use `true`; when an older configuration omits the switch, loading it saves `true`. An explicit `false` remains an opt-out. Migration preview and results include `gateway.orchestration` when the field is added. It applies to every agent and connected channel. The fields below live under **`agents[].orchestration`**, except voice, which lives directly under **`agents[].voice`**. Do not configure a second `enabled` or channel allowlist inside an agent's orchestration block.
 
 Enabling orchestration saves `gateway.headless: true`. Both the conversation agent and workers run through Claude Code's headless execution path. Host process supervision requires Linux. App-agents run inside their own validated containers; a missing or unsafe container never falls back to host execution.
 

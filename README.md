@@ -12,6 +12,8 @@ Claude Gateway keeps conversations responsive while Claude Code workers execute 
 
 ## Features
 
+- 🪄 **Agent Orchestration Engine (enabled by default)** — responsive conversations while workers execute durable tasks. Existing configurations without the switch are upgraded automatically; explicit `false` remains an opt-out. See [orchestration settings](https://0xmaxma.github.io/claude-gateway/reference/orchestration-settings.html).
+
 - 🔥 **Agent orchestration** — keep conversations responsive while reusable workers execute durable tasks, report progress, accept follow-up instructions, and support cancellation. See [orchestration and tasks](https://0xmaxma.github.io/claude-gateway/guide/orchestration.html).
 - 🎙️ **Voice conversations** — speech recognition and spoken replies with per-agent models and voices, direct or upstream providers, live or recorded speech input, and audio replay. See [voice setup](https://0xmaxma.github.io/claude-gateway/guide/voice.html).
 - 🧠 **Skill self-improvement** — agents learn reusable skills from their own work: after a substantive turn a background reviewer creates or updates a skill, hot-reloaded for the next turn. Provenance-guarded (never overwrites human-written skills), capped per day, and audited to `SKILLS_LEARNED.md`. See [`gateway.skillLearning`](https://0xmaxma.github.io/claude-gateway/reference/memory-settings.html#gateway-skilllearning)

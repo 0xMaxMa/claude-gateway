@@ -52,6 +52,6 @@ claude-gateway channels approve --agent assistant --channel telegram --code YOUR
 
 Send “Hello, introduce yourself.” A reply confirms inbound delivery, access approval, model execution, and outbound delivery. If it stays silent, work through [channel checks](./channels.md) and [troubleshooting](./troubleshooting.md).
 
-Next, [enable orchestration](./orchestration.md), optionally [configure voice](./voice.md), then [run it as a service](./operations.md) or [customize the agent](./agents.md).
+Next, [learn about orchestration and tasks](./orchestration.md), optionally [configure voice](./voice.md), then [run it as a service](./operations.md) or [customize the agent](./agents.md).
 
 Source: [first-run implementation](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/config/bootstrap.ts).
