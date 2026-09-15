@@ -33,6 +33,26 @@ describe('config-migrator', () => {
     return p;
   }
 
+  it.each([undefined, true, false])('reports the orchestration default only when added (existing: %s)', (existing) => {
+    const config = {
+      configVersion: '1.0.0',
+      gateway: { headless: true, bind: '127.0.0.1', ...(existing === undefined ? {} : { orchestration: existing }) },
+      agents: [],
+    };
+    const template = { ...config, configVersion: '1.0.1', gateway: { ...config.gateway, orchestration: true } };
+    const configPath = writeJson('config.json', config);
+    const original = fs.readFileSync(configPath, 'utf8');
+    const templatePath = writeJson('template.json', template);
+    const preview = detectMigration(configPath, templatePath, '1.0.1');
+    expect(fs.readFileSync(configPath, 'utf8')).toBe(original);
+    const applied = applyMigration(configPath, config, template, '1.0.1');
+    const expected = existing === undefined ? ['gateway.orchestration', 'configVersion'] : ['configVersion'];
+    expect(preview.addedFields).toEqual(expected);
+    expect(applied.addedFields).toEqual(expected);
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf8')).gateway.orchestration).toBe(existing ?? true);
+    expect(detectMigration(configPath, templatePath, '1.0.1').needed).toBe(false);
+  });
+
   // ---------------------------------------------------------------------------
   // compareSemver
   // ---------------------------------------------------------------------------
