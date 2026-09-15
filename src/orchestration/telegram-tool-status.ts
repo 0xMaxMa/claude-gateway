@@ -90,7 +90,7 @@ export class TelegramToolStatus {
           if (detail!==details.at(-1)) details.push(detail);
         }
         // Same history/current/elapsed layout as main's Telegram typing manager.
-        const last=details.slice(-5), current=last.pop()??'🧠 Processing, please wait...';
+        const last=details.slice(-5), current=last.pop()??'🧠 Thinking...';
         if (!status.messageId && !details.length && Date.now()-status.since<5000) continue;
         const signature=[...last,current].join('\n');
         if (!move && status.details===signature && Date.now()-status.seenAt<10000) continue;

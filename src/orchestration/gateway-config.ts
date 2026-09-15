@@ -5,7 +5,7 @@ import {CHAT_CHANNELS} from '../history/types';
 export type GatewayOrchestration = boolean | Omit<OrchestrationConfig,'channels'>;
 const overrides=Symbol('agent-orchestration-overrides');
 export const ORCHESTRATION_CHANNELS=['api',...CHAT_CHANNELS];
-export function gatewayOrchestrationEnabled(value:GatewayOrchestration|undefined):boolean {return typeof value==='boolean'?value:value?.enabled===true;}
+export function gatewayOrchestrationEnabled(value:GatewayOrchestration|undefined):boolean {return typeof value==='boolean'?value:value?.enabled !== false;}
 export function validateGatewayOrchestration(value:unknown):void {
   if(value===undefined||typeof value==='boolean')return;
   validateTree(value,ORCHESTRATION_DEFAULTS,'gateway.orchestration');
@@ -89,7 +89,13 @@ export function migrateAgentVoiceConfig(document: { gateway?: any; agents?: any[
     changed = true;
   }
   if (legacyGlobal) {
-    document.gateway.orchestration = global.enabled === true;
+    document.gateway.orchestration = gatewayOrchestrationEnabled(global);
+    changed = true;
+  }
+  // Materialize the default for older configs as well as fresh installs.
+  // Explicit false remains an opt-out; voice is still independently disabled.
+  if (document.gateway && document.gateway.orchestration === undefined) {
+    document.gateway.orchestration = true;
     changed = true;
   }
   return changed;

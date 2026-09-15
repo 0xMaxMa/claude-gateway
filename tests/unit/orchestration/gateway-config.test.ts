@@ -15,7 +15,7 @@ test('gateway boolean alone controls every Agent/channel and cannot be overridde
   expect(a.orchestration!.enabled).toBe(enabled);expect(a.orchestration!.channels).toEqual(ORCHESTRATION_CHANNELS);
   expect(JSON.stringify(a.orchestration)).toBe('{}');
  }
- expect(effectiveOrchestration({enabled:true},undefined).enabled).toBe(false);
+ expect(effectiveOrchestration({enabled:true},undefined).enabled).toBe(true);
 });
 test('global voice defaults merge deeply; Agent overrides survive gateway updates and disabling retains valid settings',()=>{
  const original={voice:{tts:{voiceId:'agent-voice'}}};
@@ -91,4 +91,32 @@ test('ordinary Agents default to general host work without rewriting explicit wo
   expect(resolveOrchestrationConfig(effective).tasks.workspaceMode).toBe(mode);
   expect(JSON.parse(JSON.stringify(effective))).toEqual(explicit);
  }
+});
+
+
+test.each([true, false])('upgrade persists orchestration default with headless=%s and keeps raw settings', (headless) => {
+ const root=mkdtempSync(join(tmpdir(),'default-orchestration-')),file=join(root,'config.json');
+ try {
+  const raw={gateway:{headless,logDir:root},agents:[],custom:'retained'};
+  writeFileSync(file,JSON.stringify(raw));
+  const loaded=loadConfig(file);
+  expect(loaded.gateway.orchestration).toBe(true);
+  expect(loaded.gateway.headless).toBe(true);
+  expect(JSON.parse(readFileSync(file,'utf8'))).toEqual({...raw,gateway:{...raw.gateway,headless:true,orchestration:true}});
+  const saved=readFileSync(file,'utf8');loadConfig(file);
+  expect(readFileSync(file,'utf8')).toBe(saved);
+ } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('default migration preserves concurrent explicit opt-out', async()=>{
+ const root=mkdtempSync(join(tmpdir(),'default-orchestration-lock-')),file=join(root,'config.json');
+ try {
+  const raw={gateway:{headless:false,logDir:root},agents:[]};
+  writeFileSync(file,JSON.stringify(raw));
+  let release!:()=>void; const hold=new Promise<void>(r=>{release=r;});
+  const pending=withConfigWriteLock(file,async()=>{await hold;writeFileSync(file,JSON.stringify({...raw,gateway:{...raw.gateway,orchestration:false}}));});
+  expect(loadConfig(file).gateway.orchestration).toBe(true);
+  release();await pending;await withConfigWriteLock(file,()=>{});
+  expect(JSON.parse(readFileSync(file,'utf8')).gateway).toEqual({...raw.gateway,orchestration:false});
+ }finally{rmSync(root,{recursive:true,force:true});}
 });

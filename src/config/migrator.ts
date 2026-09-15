@@ -2,6 +2,16 @@ import { migrateAgentVoiceConfig } from '../orchestration/gateway-config';
 import * as fs from 'fs';
 import * as path from 'path';
 
+/** Preserve structural additions in both the preview and applied change report. */
+function migrateOrchestrationSettings(config: Record<string, unknown>): string[] {
+  const gateway = config.gateway as { orchestration?: unknown } | undefined;
+  const hadOrchestration = gateway?.orchestration !== undefined;
+  migrateAgentVoiceConfig(config);
+  return !hadOrchestration && gateway?.orchestration !== undefined
+    ? ['gateway.orchestration']
+    : [];
+}
+
 export interface MigrationResult {
   migrated: boolean;
   addedFields: string[];
@@ -443,8 +453,7 @@ export function detectMigration(
 
   // Dry-run merge on a clone to detect what would be added/removed
   const configClone = structuredClone(config);
-  migrateAgentVoiceConfig(configClone);
-  const added: string[] = [];
+  const added = migrateOrchestrationSettings(configClone);
   const warnings: string[] = [];
 
   // Preserve external bind for an upgrading config (Issue #204) BEFORE the
@@ -536,7 +545,7 @@ export function applyMigration(
   const added: string[] = [];
   const warnings: string[] = [];
 
-  migrateAgentVoiceConfig(config);
+  added.push(...migrateOrchestrationSettings(config));
 
   // Preserve external bind for an upgrading config (Issue #204) BEFORE the
   // template merge: config.template.json ships gateway.bind = "127.0.0.1", and
