@@ -1,7 +1,7 @@
 /**
  * Code generator: turns the route manifest (single source of truth) into
  *   - src/cli/commands.generated.ts  (the CLI's friendly command table), and
- *   - CLI.md                         (the CLI reference doc).
+ *   - website/reference/cli.md       (the CLI reference doc).
  *
  * Run:   ./node_modules/.bin/ts-node scripts/gen-cli.ts
  * Check: ./node_modules/.bin/ts-node scripts/gen-cli.ts --check   (CI drift guard)
@@ -19,7 +19,7 @@ import { GeneratedCommand, GeneratedFlag } from '../src/cli/types';
 
 const ROOT = path.join(__dirname, '..');
 export const COMMANDS_FILE = path.join(ROOT, 'src', 'cli', 'commands.generated.ts');
-export const CLI_DOC_FILE = path.join(ROOT, 'CLI.md');
+export const CLI_DOC_FILE = path.join(ROOT, 'website/reference/cli.md');
 
 function toCommand(r: RouteDef): GeneratedCommand {
   const cli = r.cli!;
@@ -72,7 +72,7 @@ function renderDoc(cmds: GeneratedCommand[]): string {
   let out = `# Claude Gateway — CLI Reference
 
 > **Auto-generated from the route manifest** (\`scripts/gen-cli.ts\`). Do not edit by hand.
-> Every command is a thin client over the HTTP API; see \`API.md\` for the raw HTTP reference.
+> See the [HTTP API reference](https://0xmaxma.github.io/claude-gateway/api/) for integration protocols.
 
 The \`claude-gateway\` binary accepts friendly \`<noun> <verb>\` subcommands.
 
@@ -231,7 +231,7 @@ never mistaken for one.
 | \`claude-gateway app uninstall <name> [--yes]\` | Remove an app's containers and installed files (keeps backups) |
 | \`claude-gateway app install <source> [--version <v>] [--commit <sha>] [--env KEY=VALUE,...] [--env-file <path>] [--ports NAME=PORT,...] [--wait]\` | Install an app |
 
-A thin client over \`/v1/apps\` (see API.md's App Store section for the full HTTP reference) — every
+A thin client over \`/v1/apps\` (see the [Apps API](https://0xmaxma.github.io/claude-gateway/api/apps.html) for the full HTTP reference) — every
 action is the same admin-gated call the dashboard's App Store UI makes, so there is only one
 authorization/behavior path to keep correct.
 
