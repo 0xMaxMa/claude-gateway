@@ -67,7 +67,7 @@ function makeAgentConfig(workspace: string): AgentConfig {
 }
 
 function makeGatewayConfig(): GatewayConfig {
-  return { gateway: { logDir: '/tmp/test-cmd-persist-logs', timezone: 'UTC' }, agents: [] };
+  return { gateway: { orchestration: false, logDir: '/tmp/test-cmd-persist-logs', timezone: 'UTC' }, agents: [] };
 }
 
 function getSessionStore(runner: AgentRunner): SessionStore {

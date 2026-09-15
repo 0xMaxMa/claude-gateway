@@ -70,7 +70,7 @@ function makeAgentConfig(accounts?: WhatsAppAccountConfig[]): AgentConfig {
 }
 
 const gatewayConfig: GatewayConfig = {
-  gateway: { logDir: '/tmp/test-ar-wa-logs', timezone: 'UTC' },
+  gateway: { orchestration: false, logDir: '/tmp/test-ar-wa-logs', timezone: 'UTC' },
   agents: [],
 };
 

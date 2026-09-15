@@ -49,6 +49,8 @@ npm run typecheck
 
 The heap size shown is a conservative starting point for a small shared host, not a guaranteed memory bound: Node child processes, native buffers, the compiler, and other services also consume memory. Run builds and tests sequentially on such hosts and monitor available RAM. If the suite needs more memory, move full validation to an appropriately sized CI runner rather than repeatedly exhausting production RAM.
 
+Install `ffmpeg` before running the full unit suite: audio cancellation tests exercise the real decoder. The release workflow installs it explicitly. Test fixtures for legacy AgentRunner behavior must set `gateway.orchestration: false`; omitted settings now enable orchestration and can otherwise invoke CLI discovery through legacy subprocess mocks. Keep orchestration tests enabled explicitly and use temporary config copies when testing loader migrations.
+
 The standard project commands are:
 
 ```bash

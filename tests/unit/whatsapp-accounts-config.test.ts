@@ -179,7 +179,7 @@ describe('upgradeWhatsAppAccountsFile — self-healing write-back', () => {
     // Simulates a read-only config volume: loadConfig alone must still hand
     // the rest of the gateway the new shape.
     write({
-      gateway: { logDir: '~/logs', timezone: 'UTC' },
+      gateway: { orchestration: false, logDir: '~/logs', timezone: 'UTC' },
       agents: [JSON.parse(JSON.stringify(LEGACY_AGENT))],
     });
     const loaded = loadConfig(configPath);

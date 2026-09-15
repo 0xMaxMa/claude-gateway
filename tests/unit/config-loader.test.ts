@@ -46,7 +46,10 @@ describe('config-loader', () => {
   // U-CL-01: Valid config with 2 agents
   // -------------------------------------------------------------------------
   it('U-CL-01: loads a valid config with 2 agents', () => {
-    const config = loadConfig(path.join(FIXTURES, 'valid-2-agents.json'));
+    // Loading now persists missing defaults; never rewrite the shared fixture.
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.copyFileSync(path.join(FIXTURES, 'valid-2-agents.json'), configPath);
+    const config = loadConfig(configPath);
     expect(config.agents).toHaveLength(2);
     expect(config.agents[0].id).toBe('alfred');
     expect(config.agents[1].id).toBe('baerbel');

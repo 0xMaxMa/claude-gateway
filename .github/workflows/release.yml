@@ -41,6 +41,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install audio test dependency
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Run unit tests
         run: npm run test:unit
 

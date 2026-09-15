@@ -76,7 +76,7 @@ function makeAgentConfig(workspace: string, overrides: Partial<AgentConfig> = {}
 
 function makeGatewayConfig(): GatewayConfig {
   return {
-    gateway: { logDir: '/tmp/test-ar-logs', timezone: 'UTC' },
+    gateway: { orchestration: false, logDir: '/tmp/test-ar-logs', timezone: 'UTC' },
     agents: [],
   };
 }

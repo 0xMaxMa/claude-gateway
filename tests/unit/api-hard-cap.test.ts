@@ -102,7 +102,7 @@ function makeAgentConfig(workspace: string): AgentConfig {
 }
 
 function makeGatewayConfig(): GatewayConfig {
-  return { gateway: { logDir: '/tmp/test-api-hardcap-logs', timezone: 'UTC' }, agents: [] };
+  return { gateway: { orchestration: false, logDir: '/tmp/test-api-hardcap-logs', timezone: 'UTC' }, agents: [] };
 }
 
 /**

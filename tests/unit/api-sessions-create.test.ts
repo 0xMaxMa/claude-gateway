@@ -51,7 +51,7 @@ function makeAgentConfig(workspace: string): AgentConfig {
 }
 
 function makeGatewayConfig(): GatewayConfig {
-  return { gateway: { logDir: os.tmpdir(), timezone: 'UTC' }, agents: [] };
+  return { gateway: { orchestration: false, logDir: os.tmpdir(), timezone: 'UTC' }, agents: [] };
 }
 
 // ── Section 1: HTTP layer — thin mock runner ──────────────────────────────────

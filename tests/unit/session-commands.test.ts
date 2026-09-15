@@ -83,7 +83,7 @@ function makeAgentConfig(workspace: string, overrides: Partial<AgentConfig> = {}
 
 function makeGatewayConfig(contextWindow = 200000): GatewayConfig {
   return {
-    gateway: {
+    gateway: { orchestration: false,
       logDir: '/tmp/test-sc-logs',
       timezone: 'UTC',
       models: [

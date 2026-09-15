@@ -89,7 +89,7 @@ function makeAgentConfig(workspace: string): AgentConfig {
 }
 
 function makeGatewayConfig(): GatewayConfig {
-  return { gateway: { logDir: '/tmp/test-api-reattach-logs', timezone: 'UTC' }, agents: [] };
+  return { gateway: { orchestration: false, logDir: '/tmp/test-api-reattach-logs', timezone: 'UTC' }, agents: [] };
 }
 
 /** A second SSE connection, standing in for the client that reconnected. */

@@ -70,7 +70,7 @@ function makeAgentConfig(workspace: string): AgentConfig {
 
 function makeGatewayConfig(logDir: string): GatewayConfig {
   return {
-    gateway: { logDir, timezone: 'UTC', models: [...STATIC_MODELS] },
+    gateway: { orchestration: false, logDir, timezone: 'UTC', models: [...STATIC_MODELS] },
     agents: [],
   } as unknown as GatewayConfig;
 }
@@ -140,7 +140,7 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     // persistModelToConfig resolves workspace/../../../config.json
     configPath = path.join(tmpDir, 'config.json');
     fs.writeFileSync(configPath, JSON.stringify({
-      gateway: { models: STATIC_MODELS },
+      gateway: { orchestration: false, models: STATIC_MODELS },
       agents: [{ id: 'test-agent', claude: { model: 'claude-sonnet-4-6' } }],
     }, null, 2));
   });
@@ -400,7 +400,7 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     });
 
     runner = new AgentRunner(agentConfig, {
-      gateway: { logDir: path.join(tmpDir, 'logs'), timezone: 'UTC', models: [...STATIC_MODELS, bigModel] },
+      gateway: { orchestration: false, logDir: path.join(tmpDir, 'logs'), timezone: 'UTC', models: [...STATIC_MODELS, bigModel] },
       agents: [],
     } as unknown as GatewayConfig);
     await runner.start();

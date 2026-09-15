@@ -95,7 +95,7 @@ function makeAgentConfig(workspace: string): AgentConfig {
 }
 
 function makeGatewayConfig(): GatewayConfig {
-  return { gateway: { logDir: '/tmp/test-api-crash-logs', timezone: 'UTC' }, agents: [] };
+  return { gateway: { orchestration: false, logDir: '/tmp/test-api-crash-logs', timezone: 'UTC' }, agents: [] };
 }
 
 describe('AgentRunner.sendApiMessageStream — subprocess exit mid-turn', () => {
