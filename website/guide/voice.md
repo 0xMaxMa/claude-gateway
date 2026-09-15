@@ -85,7 +85,7 @@ Voice replies and controls cover Telegram, Discord, LINE, and Slack in orchestra
 
 ## Recorded input and replay
 
-Gemini and PaxaLabs transcription use completed recorded segments, not realtime partial transcripts. A pause or microphone mute ends a segment before transcription begins. PaxaLabs live TTS requires `ffmpeg` for MP3 decoding.
+PaxaLabs, OpenRouter, and Gemini batch transcription use completed recorded segments, not realtime partial transcripts. Gemini browser STT instead uses the realtime adapter when the selected model is `gemini-3.5-transcribe-live`; availability depends on provider access. A pause or microphone mute ends a segment before transcription begins. PaxaLabs live TTS requires `ffmpeg` for MP3 decoding.
 
 Completed browser TTS recordings can be replayed without another provider request. The speaker button appears only when a recording was retained. Retention is up to 30 days with a 64 MiB budget per agent and a 16 MiB per-recording limit; interrupted synthesis is not offered as a completed recording.
 
@@ -101,24 +101,26 @@ These are two input routes, not two sequential transcription passes:
 | `voice.notes` — Voice message STT model | A completed voice message received through Telegram, Discord, LINE or Slack | ElevenLabs `scribe_v2` for the uploaded recording |
 | `voice.tts` — TTS model | Agent speech output after approved spoken text is ready | ElevenLabs, Gemini, PaxaLabs or another supported TTS adapter |
 
-Selecting a batch provider for browser STT is supported, but changes the interaction: recording stops on a committed segment, then transcription runs and the final text appears. It does not make Gemini or PaxaLabs emit live word suggestions. Muting the microphone can commit the captured utterance; it does not disable spoken answers while the browser voice session remains connected.
+Selecting a batch provider for browser STT is supported, but changes the interaction: recording stops on a committed segment, then transcription runs and the final text appears. Batch adapters do not emit live word suggestions; choose a realtime adapter/model for partial transcripts. Muting the microphone can commit the captured utterance; it does not disable spoken answers while the browser voice session remains connected.
 
 ## Provider credentials and model choices
 
 | Provider ID | Credential for direct access | Browser STT | Voice-message STT | TTS |
 | --- | --- | --- | --- | --- |
 | `elevenlabs` | `ELEVENLABS_API_KEY` | Realtime | Recorded file | Streaming audio |
-| `gemini` | `GEMINI_API_KEY` | Recorded segment | Recorded file | Buffered provider response in the current adapter |
+| `gemini` | `GEMINI_API_KEY` | Realtime with `gemini-3.5-transcribe-live`; otherwise recorded segment | Recorded file | Buffered provider response in the current adapter |
 | `paxalabs` | `PAXALABS_API_KEY` | Recorded segment | Recorded file | Supported; browser decoding needs ffmpeg |
+| `openrouter` | `OPENROUTER_API_KEY` | Recorded segment | Recorded file | Supported speech models; encoded audio decoding needs ffmpeg |
 | `deepgram` | `DEEPGRAM_API_KEY` | Realtime adapter | Not supported by the voice-note upload path | No |
 | `cartesia` | `CARTESIA_API_KEY` | No | No | Supported TTS adapter |
 
-Direct and upstream routes are distinct. `upstream:elevenlabs`, `upstream:gemini` and `upstream:paxalabs` use the upstream service's credentials and connected BYOK provider. A missing BYOK credential is an error, not permission to silently fall back to another payer. Catalog IDs such as `gemini/gemini-3.1-flash-tts-preview` are accepted only with the matching selected provider; the prefix alone does not select upstream routing.
+Direct and upstream routes are distinct. `upstream:elevenlabs`, `upstream:gemini`, `upstream:paxalabs` and `upstream:openrouter` use the upstream service's credentials and connected BYOK provider. A missing BYOK credential is an error, not permission to silently fall back to another payer. Catalog IDs such as `gemini/gemini-3.1-flash-tts-preview` are accepted only with the matching selected provider; the prefix alone does not select upstream routing.
 
 ### Obtain direct provider keys
 
 - **ElevenLabs:** create an API key in your workspace and enable access for the features you use. Voice/model catalog reads and synthesis/transcription permissions are separate: a synthesis-only key can leave the model or voice picker incomplete. Follow [ElevenLabs API key setup](https://elevenlabs.io/docs/overview/administration/workspaces/api-keys) and its [quickstart](https://elevenlabs.io/docs/eleven-api/quickstart).
 - **Gemini:** create or select a Google Cloud project in Google AI Studio and create its API key. Put the key in `GEMINI_API_KEY`; account quota/model access still applies. Follow [Google's API key guide](https://ai.google.dev/gemini-api/docs/api-key). The gateway uses the Gemini API, not a Vertex service-account credential in this field.
+- **OpenRouter:** set `OPENROUTER_API_KEY` for direct access, or select `upstream:openrouter` to use the connected upstream account. Select a model returned by the voice catalog for the required speech or transcription capability; a chat model is not automatically an audio model.
 - **PaxaLabs:** obtain your account API key and verify sufficient credits and model access using the [Paxa API documentation](https://paxalabs.com/docs/text-to-speech). The gateway's environment variable is `PAXALABS_API_KEY`, even where provider examples use a differently named shell variable.
 
 For example, a **partial agent voice configuration** for Gemini:
@@ -133,6 +135,10 @@ For example, a **partial agent voice configuration** for Gemini:
   }
 }
 ```
+
+For realtime Gemini browser input, change only `voice.stt.model` to `gemini-3.5-transcribe-live` when your provider offers it. Keep a recorded-file model in `voice.notes` for uploaded voice messages.
+
+For OpenRouter, select `openrouter` (direct) or `upstream:openrouter` (connected upstream account) independently in `voice.tts`, `voice.stt`, and `voice.notes`. Use a speech model for TTS and a transcription model for STT from the catalog; preserve the native model ID, including its publisher prefix. Browser transcription uses recorded segments.
 
 For PaxaLabs, the corresponding integration examples are `paxa-tts-flash-v1` and `paxa-stt-lite-v1-preview`. Its gateway integration supports Thai and English only. Choose another available provider/model for other languages. Do not infer language support solely from the selected voice's gender.
 

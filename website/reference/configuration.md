@@ -23,7 +23,7 @@ The following is a **partial configuration**. Merge the shown fields into the ex
 }
 ```
 
-These fields are checked against the repository template by the website checks. This is a structural check, not a substitute for the gateway loader's runtime validation.
+Website checks validate JSON syntax only; they do not compare fields or types against the repository template or config schema. The gateway loader performs runtime configuration validation when loading your configuration.
 
 ## Settings by purpose
 

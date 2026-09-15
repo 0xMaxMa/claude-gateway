@@ -5,7 +5,7 @@
 Claude Gateway keeps conversations responsive while Claude Code workers execute tasks. Talk or type through your connected channels, follow progress, and carry your agents' memory and skills across sessions.
 
 <p align="center">
-  <img src="resource/claude_gateway.svg" alt="Claude Gateway" width="680" />
+  <img src="resource/claude_gateway.jpeg" alt="Claude Gateway" width="680" />
 </p>
 
 [Documentation](https://0xmaxma.github.io/claude-gateway/) · [Quickstart](https://0xmaxma.github.io/claude-gateway/guide/quickstart.html) · [API reference](https://0xmaxma.github.io/claude-gateway/api/)
