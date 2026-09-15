@@ -12,7 +12,7 @@
   },
   "configVersion": "1.0.32",
   "gateway": {
-    "orchestration": false,
+    "orchestration": true,
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
     "bind": "127.0.0.1",

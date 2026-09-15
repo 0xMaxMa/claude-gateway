@@ -542,7 +542,7 @@ Access policy is configured per-channel in the agent's workspace state file, not
 
 ### `gateway.orchestration` and Agent overrides
 
-One gateway switch enables orchestration for **every Agent and every connected channel**, including API, Telegram, Discord, LINE, Slack, WhatsApp and WeChat. Use `gateway.orchestration: true` or `false`; configure conversation and task settings per Agent. Omitted configuration defaults to legacy mode. Orchestration automatically sets and saves `gateway.headless: true`; Agent and Worker both use `claude --print` with stream JSON. Interactive PTY mode is not supported.
+One gateway switch enables orchestration for **every Agent and every connected channel**, including API, Telegram, Discord, LINE, Slack, WhatsApp and WeChat. Use `gateway.orchestration: true` or `false`; configure conversation and task settings per Agent. Orchestration defaults to enabled. On upgrade, missing `gateway.orchestration` is saved as `true`; an explicit `false` remains an opt-out for legacy mode. Orchestration automatically sets and saves `gateway.headless: true`; Agent and Worker both use `claude --print` with stream JSON. Interactive PTY mode is not supported.
 
 ```json
 {

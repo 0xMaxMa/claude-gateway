@@ -32,7 +32,7 @@ export const STATUS_MESSAGES = [
   '🔍 Analyzing your request...',
   '⚙️ Working on it...',
   '📝 Preparing a response...',
-  '🧠 Processing, please wait...',
+  '🧠 Thinking...',
 ]
 
 export const STALLED_TIMEOUT_MS = 300_000  // 5 minutes without heartbeat → warn + stop
