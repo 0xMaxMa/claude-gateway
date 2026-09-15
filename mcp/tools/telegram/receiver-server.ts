@@ -1643,7 +1643,8 @@ bot.on('callback_query:data', async ctx => {
       const message=ctx.callbackQuery.message
       const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),body:JSON.stringify({command:'telegram_question',chat_id:String(message.chat.id),payload:{user_id:String(ctx.from.id),question_id:questionControl[1],action:questionControl[2],thread:'message_thread_id' in message?String(message.message_thread_id??''):''}})})
       const result=await response.json() as {success?:boolean;text?:string;error?:string}
-      await ctx.answerCallbackQuery({text:(response.ok&&result.success?result.text:result.error)??'Question unavailable or already answered.'}).catch(()=>{})
+      const confirmation=(response.ok&&result.success?result.text:result.error)??'Question unavailable or already answered.'
+      await ctx.answerCallbackQuery({text:confirmation.slice(0,180)}).catch(()=>{})
     }catch{await ctx.answerCallbackQuery({text:'Question unavailable. Use /tasks to refresh.'}).catch(()=>{})}
     return
   }

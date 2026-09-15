@@ -8,6 +8,7 @@ import { SessionStore } from '../../../src/session/store';
 import { HistoryDB } from '../../../src/history/db';
 import { AgentConfig, GatewayConfig } from '../../../src/types';
 import { SessionProcess } from '../../../src/session/process';
+import { AgentRunner } from '../../../src/agent/runner';
 
 async function fixture() {
  const root=mkdtempSync(join(tmpdir(),'question-runtime-')),dir=join(root,'a'),workspace=join(dir,'workspace');
@@ -45,6 +46,20 @@ test('explicit answer is saved and streamed once while another model turn is act
   expect(f.runtime.store.get("SELECT COUNT(*) n FROM conversation_inputs WHERE status='accepted'")!.n).toBe(0);
   active.delete(f.scope.agentSessionId);
  }finally{(f.runtime as any).active.clear();await f.close();}
+});
+
+test('API task answer flushes its user history before returning without a model turn',async()=>{
+ const f=await fixture();
+ try{
+  await f.runtime.flushHistory();
+  const runner=Object.create(AgentRunner.prototype) as any;
+  runner.agentConfig={orchestration:{enabled:true}};
+  runner.getOrchestration=async()=>f.runtime;
+  await runner.answerApiTask(f.scope.agentSessionId,'owner',f.task.taskId,f.question.questionId,'staging');
+  expect(f.runtime.tasks.revision(f.task.taskId,2).answers?.[0].text).toBe('staging');
+  expect(f.runtime.store.get("SELECT COUNT(*) n FROM history_operations WHERE state='pending'")!.n).toBe(0);
+  expect(f.createAgentSession).not.toHaveBeenCalled();
+ }finally{await f.close();}
 });
 
 test.each(['text','live_voice'] as const)('natural %s answer still goes through model task matching, without new-task acknowledgement gate',async modality=>{

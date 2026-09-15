@@ -584,7 +584,10 @@ export class AgentRunner extends EventEmitter {
   }
   async answerApiTask(sessionId: string, principalId: string, taskId: string, questionId: string, answer: string) {
     if (!this.agentConfig.orchestration?.enabled) throw new Error('ORCHESTRATION_DISABLED');
-    return (await this.getOrchestration()).taskControls.answer(sessionId, principalId, taskId, questionId, answer);
+    const runtime = await this.getOrchestration();
+    const task = runtime.taskControls.answer(sessionId, principalId, taskId, questionId, answer);
+    await runtime.flushHistory();
+    return task;
   }
   stopVoiceResponse(sessionId: string): void { this.orchestration?.stopResponse(sessionId); }
 
@@ -770,6 +773,7 @@ export class AgentRunner extends EventEmitter {
               const scope = {channel:channelSource,chatId,thread:channelSource === 'whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : meta.thread_ts ?? meta.message_thread_id ?? '',sessionId,principalId:`${channelSource}:${meta.user_id ?? meta.user ?? chatId}`};
               try { menu = runtime.questionControls.handle(scope,content.trim()) ?? {text:'Invalid task question command.',buttons:[]}; }
               catch { menu = {text:'Question unavailable or already answered. Use /tasks to refresh.',buttons:[]}; }
+              await runtime.flushHistory();
             }
             const responseMeta = {...meta};
             delete responseMeta.control_message_id;

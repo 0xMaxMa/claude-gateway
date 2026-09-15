@@ -157,3 +157,23 @@ test('a Slack reply thread maps only to its exact top-level question in the same
    expect(f.controls.matches(followup)).toBe(false);
  }finally{store.close();}
 });
+
+test.each(['mute','snooze','answer staging'])('in-flight delivery page does not resurrect a question after %s',async action=>{
+ const store=new OrchestrationStore(':memory:','a');
+ try{
+  const f=fixture(store),now=Date.now();f.controls.tick(now);await f.delivery.tick();
+  const binding=store.get('SELECT binding_id FROM task_questions WHERE question_id=?',f.question.questionId)!;
+  let release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const sent:string[]=[];
+  const outbox=new DeliveryOutbox(store,async(_binding,text)=>{sent.push(text);if(text==='Earlier message')await gate;return {state:'delivered',providerId:'sent-'+sent.length};});
+  const earlier=f.decisions.notice(f.task.conversationId,'Earlier message',false);
+  store.transaction(()=>outbox.enqueue(earlier,String(binding.binding_id),'Earlier message'));
+  f.controls.tick(now+600000);
+  const sending=outbox.tick();
+  expect(sent).toEqual(['Earlier message']);
+  f.controls.handle(f.controlScope,`/task_question ${f.question.questionId} ${action}`);
+  release();await sending;
+  expect(sent).toEqual(['Earlier message']);
+ }finally{store.close();}
+});

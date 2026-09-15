@@ -169,11 +169,17 @@ export class DeliveryOutbox {
         const earlier = payload.speechFailureFor ? undefined : this.store.get(`SELECT id FROM deliveries WHERE response_id=? AND rowid < (SELECT rowid FROM deliveries WHERE id=?)
           AND state!='delivered' AND NOT (modality='speech' AND (state IN ('failed','unknown') OR ?!='speech')) LIMIT 1`, delivery.response_id, id, delivery.modality);
         if (earlier) continue;
-        sent++;
-        this.store.transaction(() => {
+        const claimed = this.store.transaction(() => {
+          // The page can become stale while an earlier provider send is pending.
+          // Never revive a question cancelled by an answer, snooze, or mute.
+          if (!this.store.get("SELECT id FROM outbox WHERE id=? AND state='pending'", row.id)
+            || !this.store.get("SELECT id FROM deliveries WHERE id=? AND state='pending'", id)) return false;
           this.store.run("UPDATE outbox SET state='processing',attempt_count=attempt_count+1 WHERE id=?", row.id);
           this.store.run("UPDATE deliveries SET state='sending' WHERE id=?", id);
+          return true;
         });
+        if (!claimed) continue;
+        sent++;
         const result = await (delivery.modality === 'speech'
           ? this.send(binding, '', id, undefined, JSON.parse(String(delivery.delivered_text)))
           : this.send(binding, delivery.modality === 'text' ? String(delivery.delivered_text) : '', id,
