@@ -168,8 +168,19 @@ describe('Discord /cli end-to-end (mocked client)', () => {
     expect(forwarded.at(-1)).toMatchObject({text:'/tasks',senderId:USER,chatId:'dm-chan'});
     client.emit('interactionCreate',{...base,id:'click-1',isButton:()=>true,customId:'orch:11111111-1111-4111-8111-111111111111'});await tick();
     expect(forwarded.at(-1)).toMatchObject({text:'/orch 11111111-1111-4111-8111-111111111111',controlMessageId:'menu'});expect(base.deferUpdate).toHaveBeenCalled();
+    for (const action of ['snooze','mute']) {
+      client.emit('interactionCreate',{...base,id:`question-${action}`,isButton:()=>true,customId:`orch:q:11111111-1111-4111-8111-111111111111:${action}`});await tick();
+      expect(forwarded.at(-1)).toMatchObject({text:`/orch q:11111111-1111-4111-8111-111111111111:${action}`,senderId:USER,chatId:'dm-chan',controlMessageId:'menu'});
+    }
+    const validCount=forwarded.length;
+    for (const data of ['orch:q:11111111-1111-4111-8111-111111111111:answer','orch:q:------------------------------------:mute','orch:q:11111111-1111-4111-8111-111111111111:mute:extra']) {
+      client.emit('interactionCreate',{...base,isButton:()=>true,customId:data});await tick();
+    }
+    expect(forwarded).toHaveLength(validCount);
     fs.writeFileSync(path.join(tmp,'access.json'),JSON.stringify({dmPolicy:'disabled'}));
     const count=forwarded.length;client.emit('interactionCreate',{...base,isButton:()=>true,customId:'orch:11111111-1111-4111-8111-111111111111'});await tick();expect(forwarded).toHaveLength(count);
+    client.emit('interactionCreate',{...base,isButton:()=>true,customId:'orch:q:11111111-1111-4111-8111-111111111111:mute'});await tick();expect(forwarded).toHaveLength(count);
+    expect(base.reply).toHaveBeenLastCalledWith({content:'Not authorized.',ephemeral:true});
   });
 
 });

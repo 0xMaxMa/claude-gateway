@@ -47,6 +47,8 @@ export function boundedText(text: unknown, max = 65536): string {
 export class OrchestrationStore {
   private readonly db: DatabaseSync;
   private inTransaction = false;
+  private composing = false;
+  private savepointSequence = 0;
   constructor(readonly filename: string, readonly agentId: string) {
     if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(filename);
@@ -61,6 +63,15 @@ export class OrchestrationStore {
           this.db.exec(ORCHESTRATION_SCHEMA_V1);
           this.run('INSERT INTO orchestration_schema_migrations VALUES(1,?)', Date.now());
         }
+        this.db.exec(`CREATE TABLE IF NOT EXISTS task_questions(
+          question_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL, state_version INTEGER NOT NULL,
+          binding_id TEXT NOT NULL REFERENCES conversation_bindings(id), next_reminder_at INTEGER NOT NULL,
+          reminder_count INTEGER NOT NULL DEFAULT 0, muted INTEGER NOT NULL DEFAULT 0, closed INTEGER NOT NULL DEFAULT 0);
+          CREATE INDEX IF NOT EXISTS task_questions_task ON task_questions(task_id,closed);
+          CREATE TABLE IF NOT EXISTS task_question_messages(
+          response_id TEXT PRIMARY KEY REFERENCES assistant_responses(id), question_id TEXT NOT NULL REFERENCES task_questions(question_id));
+          CREATE INDEX IF NOT EXISTS task_question_messages_question ON task_question_messages(question_id);
+          CREATE INDEX IF NOT EXISTS deliveries_provider_message ON deliveries(provider_message_id,binding_id);`);
         this.db.exec('CREATE TABLE IF NOT EXISTS response_audio(response_id TEXT PRIMARY KEY REFERENCES assistant_responses(id),audio BLOB NOT NULL,created_at INTEGER NOT NULL)');
         this.db.exec('CREATE TABLE IF NOT EXISTS telegram_tts_voices(chat_id TEXT PRIMARY KEY, provider TEXT NOT NULL, voice_id TEXT NOT NULL)');
         this.db.exec('CREATE TABLE IF NOT EXISTS telegram_voice_preferences(chat_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)))');
@@ -111,7 +122,16 @@ export class OrchestrationStore {
   run(sql: string, ...values: SQLInputValue[]) { return this.db.prepare(sql).run(...values); }
   /** Synchronous only: network, process startup and canonical history writes stay outside. */
   transaction<T>(operation: () => T): T {
-    if (this.inTransaction) throw new OrchestrationError('NESTED_TRANSACTION');
+    if (this.inTransaction) {
+      if (!this.composing) throw new OrchestrationError('NESTED_TRANSACTION');
+      const name = `composed_${++this.savepointSequence}`;
+      this.db.exec(`SAVEPOINT ${name}`);
+      try {
+        const result = operation();
+        if (result && typeof (result as { then?: unknown }).then === 'function') throw new OrchestrationError('ASYNC_TRANSACTION');
+        this.db.exec(`RELEASE SAVEPOINT ${name}`); return result;
+      } catch (error) { this.db.exec(`ROLLBACK TO SAVEPOINT ${name}; RELEASE SAVEPOINT ${name}`); throw error; }
+    }
     this.db.exec('BEGIN IMMEDIATE'); this.inTransaction = true;
     try {
       const result = operation();
@@ -119,6 +139,13 @@ export class OrchestrationStore {
       this.db.exec('COMMIT'); return result;
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     finally { this.inTransaction = false; }
+  }
+  /** Explicit atomic composition of existing synchronous commands. Each nested
+   * command rolls back to its own savepoint even if the caller handles its error. */
+  compose<T>(operation: () => T): T {
+    const previous = this.composing;
+    this.composing = true;
+    try { return this.transaction(operation); } finally { this.composing = previous; }
   }
   assertMember(conversationId: string, principalId: string): Row {
     const row = this.get(`SELECT c.* FROM conversations c JOIN conversation_members m ON c.id=m.conversation_id
@@ -227,6 +254,13 @@ export class OrchestrationStore {
     const row = this.get('SELECT payload_json FROM task_attempts WHERE id=?', id);
     return row ? JSON.parse(String(row.payload_json)) : undefined;
   }
+  cancelQuestionDeliveries(questionId: string): void {
+    if (!this.inTransaction) throw new OrchestrationError('TRANSACTION_REQUIRED');
+    this.run(`UPDATE outbox SET state='completed' WHERE kind='delivery' AND state='pending'
+      AND json_extract(payload_json,'$.deliveryId') IN (SELECT d.id FROM deliveries d JOIN task_question_messages m ON m.response_id=d.response_id WHERE m.question_id=?)`, questionId);
+    this.run(`UPDATE deliveries SET state='failed' WHERE state='pending' AND response_id IN
+      (SELECT response_id FROM task_question_messages WHERE question_id=?)`, questionId);
+  }
   saveTask(task: TaskSnapshot, expectedVersion: number): void {
     if (!this.inTransaction) throw new OrchestrationError('TRANSACTION_REQUIRED');
     advanceTiming(task);
@@ -234,6 +268,11 @@ export class OrchestrationStore {
     const changed = this.run(`UPDATE tasks SET state=?,state_version=?,revision=?,active_attempt_id=?,snapshot_json=?,updated_at=? WHERE id=? AND state_version=?`,
       task.state, task.stateVersion, task.revision, task.activeAttemptId ?? null, JSON.stringify(task), task.updatedAt, task.taskId, expectedVersion);
     if (Number(changed.changes) !== 1) throw new OrchestrationError('STATE_CONFLICT');
+    for (const question of this.all(`UPDATE task_questions SET closed=1 WHERE task_id=? AND closed=0
+      AND question_id!=? RETURNING question_id,state_version`, task.taskId, task.state === 'waiting_input' ? task.pendingQuestion?.questionId ?? '' : '')) {
+      this.cancelQuestionDeliveries(String(question.question_id));
+      this.run("UPDATE notifications SET status='handled' WHERE task_id=? AND task_state_version<=? AND status='pending'", task.taskId, question.state_version);
+    }
     // State events are notifications, not the result store. Large results remain
     // complete in the snapshot/attempt and are retrieved through task_status.
     const eventTask = task.result && Buffer.byteLength(JSON.stringify(task)) > 65536

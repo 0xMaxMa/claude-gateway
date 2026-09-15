@@ -337,7 +337,7 @@ export function createSlackWebhookHandler(
       const actions=payload.actions as Array<{value?:string;action_id?:string}>|undefined;
       const data=actions?.[0]?.value??actions?.[0]?.action_id??'';
       const command=String(payload.command??'');
-      if(slash?!['/session','/sessions','/voice','/voices','/tasks','/stop','/help'].includes(command):!/^orch:[a-f0-9-]{36}$/.test(data)){res.status(200).json({text:'Unknown command.'});return;}
+      if(slash?!['/session','/sessions','/voice','/voices','/tasks','/task_question','/stop','/help'].includes(command):!/^orch:(?:[a-f0-9-]{36}|q:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}:(?:snooze|mute))$/.test(data)){res.status(200).json({text:'Unknown command.'});return;}
       const resolved={conversationId:chatId,senderId:userId,kind:chatId.startsWith('D')?'user' as const:'group' as const};
       if(!userId||!chatId||!isResolvedSourceAllowed(cfg,resolved)){res.status(200).json({response_type:'ephemeral',text:'Not authorized.'});return;}
       const message=payload.message as {ts?:string;thread_ts?:string}|undefined;

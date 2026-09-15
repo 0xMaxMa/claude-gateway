@@ -417,7 +417,7 @@ export class DiscordModule implements ChannelModule {
     }
     this.client.on('interactionCreate', async (interaction: ButtonInteraction) => {
       try {
-        const orchButton=interaction.isButton?.()&&/^orch:[a-f0-9-]{36}$/.test(interaction.customId??'');
+        const orchButton=interaction.isButton?.()&&/^orch:(?:[a-f0-9-]{36}|q:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}:(?:snooze|mute))$/.test(interaction.customId??'');
         const slash=interaction.isChatInputCommand?.();
         if(orchButton||slash){
           const isDM=!interaction.guildId,isThread=interaction.channel?.isThread?.()??false;

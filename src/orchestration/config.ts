@@ -37,6 +37,8 @@ export interface OrchestrationConfig {
     /** Optional total worker deadline; zero disables it. */
     maxDurationMs?: number;
     /** Advisory thresholds; these never terminate a worker. */
+    /** First unanswered-question reminder; later reminders back off to six times this interval. */
+    questionReminderMs?: number;
     progressStaleMs?: number;
     progressNotifyCooldownMs?: number;
     repeatedToolThreshold?: number;
@@ -70,7 +72,7 @@ export const ORCHESTRATION_DEFAULTS = {
   conversation: { backend: 'inherit' as const, semanticIntake: false, intakeWaitMs: 2000, maxActiveSessions: 2, notificationPolicy: 'existing_receive_path' as const,
     decisionTimeoutMs: 120000, idleTimeoutMs: 120000, startupTimeoutMs: 120000, firstResponseTimeoutMs: 120000, maxDecisionDurationMs: 600000, preemptionGraceMs: 250, maxPendingInputs: 100 },
   tasks: { maxConcurrentPerAgent: 10, maxConcurrentPerConversation: 10, workerIdleTtlMs: 600000, maxQueuedPerConversation: 20,
-    maxQueuedPerAgent: 100, defaultTimeoutMs: 1800000, idleTimeoutMs: 300000, maxDurationMs: 0, progressStaleMs: 180000, progressNotifyCooldownMs: 300000, repeatedToolThreshold: 6, interruptAckTimeoutMs: 5000, workspaceMode: 'host' as const, projectRoot: '', resourceRetentionDays: 7 },
+    maxQueuedPerAgent: 100, defaultTimeoutMs: 1800000, idleTimeoutMs: 300000, maxDurationMs: 0, questionReminderMs: 600000, progressStaleMs: 180000, progressNotifyCooldownMs: 300000, repeatedToolThreshold: 6, interruptAckTimeoutMs: 5000, workspaceMode: 'host' as const, projectRoot: '', resourceRetentionDays: 7 },
   events: { retentionDays: 7, maxSubscriberBufferBytes: 1048576 },
   voice: { enabled: false, notes: { enabled: true, provider: 'elevenlabs', model: 'scribe_v2', replyWithVoice: true }, transport: 'websocket' as const, maxActiveSessionsPerConversation: 1, allowedOrigins: [] as string[], language: '',
     stt: { provider: 'elevenlabs', model: 'scribe_v2_realtime' },

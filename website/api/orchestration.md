@@ -14,6 +14,8 @@ Managed activity is based on durable input, decision and Worker states, includin
 
 Uploaded still images (PNG/JPEG/GIF/WebP) are supplied as native image content in the Agent's input turn before any task dispatch. Existing attachment upload and authorization rules are unchanged. The Agent can answer image questions directly; workers still inherit original attachment references for subsequent execution. Native image input is bounded to 5 MiB per image, 20 MiB and 20 images per turn. Unsupported, missing or over-limit images are identified to the Agent instead of silently treating a filename as visible image content.
 
+Worker questions are delivered as dedicated messages with the full retained question, separate from unrelated replies. Users can text-reply to the exact question message, use `/task_question <question-uuid> answer <text>`, or answer naturally for the Agent to resolve through `task_answer`; ambiguous answers across several tasks require clarification. Native reminder controls on Telegram, Discord, Slack and LINE support one-hour snooze and mute for the current question, with text fallbacks on other channels. Unanswered reminders default to 10-, 30-, then 60-minute intervals and do not approve work or expand task permissions. See [question identity, reminders and the authenticated answer endpoint](./tasks.md#answer-a-task-question).
+
 ## Session activity {#session-activity}
 
 `GET /api/v1/agents/:agentId/sessions/:sessionId/activity?after=0`
