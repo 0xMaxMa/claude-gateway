@@ -6,13 +6,15 @@ export interface DecisionReceipt { decisionId: string; epoch: number; inputIds: 
 export class DecisionService {
   constructor(readonly store: OrchestrationStore, private readonly deliver?: (responseId: string, bindingId: string, text: string) => void) {}
   /** Deterministic system notice: no inference, input consumption, or epoch change. */
-  notice(conversationId: string, text: string, deliver: boolean): string {
+  notice(conversationId: string, text: string, deliver: boolean, inputId?: string): string {
     return this.store.transaction(() => {
       const conversation = this.store.get("SELECT * FROM conversations WHERE id=? AND status='active'", conversationId);
       if (!conversation) throw new OrchestrationError('CONVERSATION_NOT_FOUND');
+      const input = inputId ? this.store.get('SELECT * FROM conversation_inputs WHERE id=? AND conversation_id=?', inputId, conversationId) : undefined;
+      if (inputId && !input) throw new OrchestrationError('INPUT_NOT_FOUND');
       const id = randomUUID(), responseId = randomUUID(), now = Date.now();
-      this.store.run('INSERT INTO conversation_decisions VALUES(?,?,?,?,?,?,?,?,?,?,?)', id, conversationId, conversation.epoch, 'notice', null, 'completed', conversation.agent_session_id, '[]', '[]', now, now);
-      this.store.run('INSERT INTO assistant_responses VALUES(?,?,?,?,?,?,?,?)', responseId, conversationId, id, null, 'completed', text, now, now);
+      this.store.run('INSERT INTO conversation_decisions VALUES(?,?,?,?,?,?,?,?,?,?,?)', id, conversationId, conversation.epoch, 'notice', input?.request_id ?? null, 'completed', conversation.agent_session_id, JSON.stringify(inputId ? [inputId] : []), '[]', now, now);
+      this.store.run('INSERT INTO assistant_responses VALUES(?,?,?,?,?,?,?,?)', responseId, conversationId, id, input?.request_id ?? null, 'completed', text, now, now);
       this.historyOperation(`response:${responseId}`, conversationId, null, responseId);
       const binding = this.store.get('SELECT * FROM conversation_bindings WHERE conversation_id=? AND channel=? AND chat_id=? AND thread_key=?', conversationId, conversation.source, conversation.chat_id, conversation.thread_key);
       if (deliver && binding && binding.channel !== 'api') this.deliver?.(responseId, String(binding.id), text);

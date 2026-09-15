@@ -4705,6 +4705,22 @@ export function createApiRouter(
     });
   }
 
+  router.post('/v1/agents/:agentId/sessions/:sessionId/tasks/:taskId/answer', auth, async (req: Request, res: Response) => {
+    const { agentId, sessionId, taskId } = req.params as { agentId: string; sessionId: string; taskId: string };
+    const key = (req as AuthedRequest).apiKey, runner = agentRunners.get(agentId);
+    if (!canAccessAgent(key, agentId) || !runner) { res.status(403).json({ error: 'Task unavailable' }); return; }
+    if (!(runner.getAgentConfig().allow_tools ?? Boolean(key.allow_tools))) { res.status(403).json({ error: 'Task answers require tool access' }); return; }
+    const { questionId, answer } = req.body ?? {};
+    if (!isValidSessionId(sessionId) || !isValidSessionId(taskId) || typeof questionId !== 'string' || !isValidSessionId(questionId) || typeof answer !== 'string' || !answer.trim()) {
+      res.status(400).json({ error: 'Valid session, task, questionId and non-empty answer are required' }); return;
+    }
+    try { res.json({ task: await runner.answerApiTask(sessionId, apiPrincipal(key), taskId, questionId, answer) }); }
+    catch (error) {
+      if ((error as Error).message === 'ORCHESTRATION_DISABLED') { res.status(409).json({ error: 'ORCHESTRATION_DISABLED' }); return; }
+      res.status(403).json({ error: 'Question unavailable for this principal or already answered' });
+    }
+  });
+
   router.post('/v1/agents/:agentId/sessions/:sessionId/tasks/:taskId/cancel', auth, async (req: Request, res: Response) => {
     const { agentId, sessionId, taskId } = req.params as { agentId: string; sessionId: string; taskId: string };
     const key = (req as AuthedRequest).apiKey, runner = agentRunners.get(agentId);

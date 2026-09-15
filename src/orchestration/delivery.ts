@@ -11,16 +11,18 @@ import { OrchestrationStore, Row } from './store';
 import { sendChannelFile, ChannelFile } from './file-delivery';
 
 export type DeliveryOutcome = { state: 'delivered'; providerId?: string } | { state: 'failed' | 'unknown'; code: string; speechSynthesisFailed?: boolean };
-export type ChannelSender = (binding: Row, text: string, deliveryId: string, file?: ChannelFile, speech?: SpeechDelivery, textFormat?: 'HTML' | 'text') => Promise<DeliveryOutcome>;
+export type DeliveryControl = { label: string; data: string };
+export type ChannelSender = (binding: Row, text: string, deliveryId: string, file?: ChannelFile, speech?: SpeechDelivery, textFormat?: 'HTML' | 'text', controls?: DeliveryControl[]) => Promise<DeliveryOutcome>;
 
 /** A transport receipt means provider acceptance, never that a human read it.
  * Ambiguous network failures are retained for reconciliation, not blind retry. */
 export function channelSender(config: AgentConfig | (() => AgentConfig), request: typeof fetch = fetch, speechEnabled: (binding: Row, speech: SpeechDelivery) => boolean = () => true, linkedSender?: ChannelSender): ChannelSender {
-  return async (binding, text, id, file, speech, textFormat) => {
+  return async (binding, text, id, file, speech, textFormat, controls) => {
     const agent = typeof config === 'function' ? config() : config;
     if (speech) return sendChannelSpeech(agent, binding, speech, id, request, undefined, () => speechEnabled(binding, speech));
     if (['whatsapp', 'wechat'].includes(String(binding.channel))) {
       if (!linkedSender) return {state: 'failed', code: 'DELIVERY_NOT_CONFIGURED'};
+      // Question callers include plain commands for transports without native controls.
       return linkedSender(binding, text, id, file, speech, textFormat);
     }
     if (file) return sendChannelFile(agent, binding, file, id, request);
@@ -30,18 +32,24 @@ export function channelSender(config: AgentConfig | (() => AgentConfig), request
     if (source === 'telegram' && agent.telegram?.botToken) {
       url = `https://api.telegram.org/bot${agent.telegram.botToken}/sendMessage`;
       const formatted = textFormat ? { sendText: text, parseMode: textFormat === 'HTML' ? 'HTML' : undefined } : resolveTelegramReplyFormat(text);
-      body = { chat_id: chat, text: formatted.sendText, ...(formatted.parseMode ? { parse_mode: formatted.parseMode } : {}), ...(thread ? { message_thread_id: Number(thread) } : {}) };
+      body = { chat_id: chat, text: formatted.sendText, ...(formatted.parseMode ? { parse_mode: formatted.parseMode } : {}), ...(thread ? { message_thread_id: Number(thread) } : {}),
+        ...(controls?.length ? {reply_markup: {inline_keyboard: controls.map(control => [{text: control.label, callback_data: control.data}])}} : {}) };
     } else if (source === 'discord' && agent.discord?.botToken) {
       url = `https://discord.com/api/v10/channels/${encodeURIComponent(chat)}/messages`;
       headers.Authorization = `Bot ${agent.discord.botToken}`;
-      body = { content: text, nonce: id.replace(/-/g, '').slice(0, 25), enforce_nonce: true, allowed_mentions: { parse: [] } };
+      body = { content: text, nonce: id.replace(/-/g, '').slice(0, 25), enforce_nonce: true, allowed_mentions: { parse: [] },
+        ...(controls?.length ? {components: Array.from({length: Math.ceil(controls.length / 5)}, (_, index) => ({type: 1,
+          components: controls.slice(index * 5, index * 5 + 5).map(control => ({type: 2, style: 2, label: control.label.slice(0, 80), custom_id: control.data}))}))} : {}) };
     } else if (source === 'line' && agent.line?.channelAccessToken) {
       url = 'https://api.line.me/v2/bot/message/push';
       headers.Authorization = `Bearer ${agent.line.channelAccessToken}`; headers['X-Line-Retry-Key'] = id;
-      body = { to: chat, messages: [{ type: 'text', text: textFormat === 'text' ? text : stripMarkdownPreservingUrls(text) }] };
+      body = { to: chat, messages: [{ type: 'text', text: textFormat === 'text' ? text : stripMarkdownPreservingUrls(text),
+        ...(controls?.length ? {quickReply: {items: controls.map(control => ({type: 'action', action: {type: 'postback', label: control.label.slice(0, 20), data: control.data}}))}} : {}) }] };
     } else if (source === 'slack' && agent.slack?.botToken) {
       url = 'https://slack.com/api/chat.postMessage'; headers.Authorization = `Bearer ${agent.slack.botToken}`;
-      body = { channel: chat, text, ...(thread ? { thread_ts: thread } : {}), unfurl_links: false, unfurl_media: false };
+      body = { channel: chat, text, ...(thread ? { thread_ts: thread } : {}), unfurl_links: false, unfurl_media: false,
+        ...(controls?.length ? {mrkdwn: false, blocks: [{type: 'section', text: {type: 'plain_text', text}}, {type: 'actions',
+          elements: controls.map(control => ({type: 'button', text: {type: 'plain_text', text: control.label.slice(0, 75)}, action_id: control.data, value: control.data}))}]} : {}) };
     } else if (source === 'whatsapp_cloud' && agent.whatsapp_cloud?.accessToken && agent.whatsapp_cloud.phoneNumberId) {
       url = `https://graph.facebook.com/v20.0/${encodeURIComponent(agent.whatsapp_cloud.phoneNumberId)}/messages`;
       headers.Authorization = `Bearer ${agent.whatsapp_cloud.accessToken}`;
@@ -98,7 +106,7 @@ export class DeliveryOutbox {
   private active?: Promise<void>;
   constructor(private readonly store: OrchestrationStore, private readonly send: ChannelSender) {}
   /** Called inside the decision commit transaction. Each chunk has its own receipt. */
-  enqueue(responseId: string, bindingId: string, text: string): void {
+  enqueue(responseId: string, bindingId: string, text: string, controls?: DeliveryControl[]): void {
     const binding = this.store.get('SELECT channel FROM conversation_bindings WHERE id=?', bindingId);
     // Normalize the complete reply so Markdown delimiters never straddle chunks.
     if (binding?.channel === 'line') text = stripMarkdownPreservingUrls(text);
@@ -114,10 +122,11 @@ export class DeliveryOutbox {
       formatted = {sendText: htmlToPlain(formatted.sendText), parseMode: undefined};
       chunks = chunkText(formatted.sendText, 1900);
     }
-    for (const [index, content] of chunks.filter(part => part.length > 0).entries()) {
+    chunks = chunks.filter(part => part.length > 0);
+    for (const [index, content] of chunks.entries()) {
       const id = randomUUID();
       this.store.run('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?,?,?)', id, responseId, null, bindingId, 'text', 'pending', null, content, null, Date.now());
-      this.store.enqueue('delivery', `delivery:${responseId}:${index}`, { deliveryId: id, textFormat: binding?.channel === 'telegram' ? formatted.parseMode ?? 'text' : binding?.channel === 'line' ? 'text' : undefined });
+      this.store.enqueue('delivery', `delivery:${responseId}:${index}`, { deliveryId: id, textFormat: binding?.channel === 'telegram' ? formatted.parseMode ?? 'text' : binding?.channel === 'line' ? 'text' : undefined, ...(controls?.length && index === chunks.length - 1 ? {controls} : {}) });
     }
     for (const file of this.store.all('SELECT * FROM task_files WHERE response_id=? ORDER BY created_at,id', responseId)) {
       const id = randomUUID();
@@ -160,15 +169,21 @@ export class DeliveryOutbox {
         const earlier = payload.speechFailureFor ? undefined : this.store.get(`SELECT id FROM deliveries WHERE response_id=? AND rowid < (SELECT rowid FROM deliveries WHERE id=?)
           AND state!='delivered' AND NOT (modality='speech' AND (state IN ('failed','unknown') OR ?!='speech')) LIMIT 1`, delivery.response_id, id, delivery.modality);
         if (earlier) continue;
-        sent++;
-        this.store.transaction(() => {
+        const claimed = this.store.transaction(() => {
+          // The page can become stale while an earlier provider send is pending.
+          // Never revive a question cancelled by an answer, snooze, or mute.
+          if (!this.store.get("SELECT id FROM outbox WHERE id=? AND state='pending'", row.id)
+            || !this.store.get("SELECT id FROM deliveries WHERE id=? AND state='pending'", id)) return false;
           this.store.run("UPDATE outbox SET state='processing',attempt_count=attempt_count+1 WHERE id=?", row.id);
           this.store.run("UPDATE deliveries SET state='sending' WHERE id=?", id);
+          return true;
         });
+        if (!claimed) continue;
+        sent++;
         const result = await (delivery.modality === 'speech'
           ? this.send(binding, '', id, undefined, JSON.parse(String(delivery.delivered_text)))
           : this.send(binding, delivery.modality === 'text' ? String(delivery.delivered_text) : '', id,
-            delivery.modality === 'text' ? undefined : JSON.parse(String(delivery.delivered_text)), undefined, payload.textFormat)).catch(() => ({ state: 'unknown' as const, code: 'PROVIDER_RECEIPT_UNKNOWN' }));
+            delivery.modality === 'text' ? undefined : JSON.parse(String(delivery.delivered_text)), undefined, payload.textFormat, payload.controls)).catch(() => ({ state: 'unknown' as const, code: 'PROVIDER_RECEIPT_UNKNOWN' }));
         this.store.transaction(() => {
           this.store.run('UPDATE deliveries SET state=?,provider_message_id=?,updated_at=? WHERE id=?', result.state, result.state === 'delivered' ? result.providerId ?? null : null, Date.now(), id);
           this.store.run('UPDATE outbox SET state=?,last_error=? WHERE id=?', result.state === 'delivered' ? 'completed' : result.state, result.state === 'delivered' ? null : result.code, row.id);

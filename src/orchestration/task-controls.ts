@@ -20,7 +20,7 @@ export class TaskControls {
     const progressText = [task.failure ? `${task.failure.code}: ${task.failure.message}` : latestProgress?.text.slice(0,1500), task.replacedByTaskId ? `Replaced by task ${task.replacedByTaskId}` : undefined].filter(Boolean).join('\n');
     const activityDetails = task.execution && ['running','starting'].includes(task.state) ? executionDetails(task.execution) : undefined;
     return { timing: timingTotals(task), timingMeasuredFrom: task.timing?.measuredFrom, supervision: task.supervision, progressText, activityDetails, startedAt, finishedAt, taskId: task.taskId, title: task.title.slice(0,200), state: task.state, replacedByTaskId: task.replacedByTaskId,
-      cancellation: task.cancellation, failure: task.failure, execution: task.execution, progress: [task.failure ? `${task.failure.code}: ${task.failure.message}` : latestProgress?.text.slice(0,1500), task.execution && ['running','starting'].includes(task.state) ? executionDescription(task.execution) : undefined, task.replacedByTaskId ? `Replaced by task ${task.replacedByTaskId}` : undefined].filter(Boolean).join('\n') || undefined, question: task.pendingQuestion?.text.slice(0,1000),
+      cancellation: task.cancellation, failure: task.failure, execution: task.execution, progress: [task.failure ? `${task.failure.code}: ${task.failure.message}` : latestProgress?.text.slice(0,1500), task.execution && ['running','starting'].includes(task.state) ? executionDescription(task.execution) : undefined, task.replacedByTaskId ? `Replaced by task ${task.replacedByTaskId}` : undefined].filter(Boolean).join('\n') || undefined, question: task.pendingQuestion?.text.slice(0,1000), questionId: task.pendingQuestion?.questionId,
       updatedAt: Math.max(task.updatedAt, Number(activity?.occurred_at ?? 0), task.execution?.lastActivityAt ?? 0), canStop: ['queued','starting','running','waiting_input','interrupting','recovering','needs_reconciliation'].includes(task.state) };
   }
   list(sessionId: string, principalId: string, page = 0, pageSize = 10, includeFinished = false) {
@@ -40,6 +40,10 @@ export class TaskControls {
     return task;
   }
   detail(sessionId: string, principalId: string, taskId: string) { return this.view(this.owned(sessionId,principalId,taskId)); }
+  answer(sessionId: string, principalId: string, taskId: string, questionId: string, answer: string, acceptedInputId?: string) {
+    const task=this.owned(sessionId,principalId,taskId);
+    return this.view(this.tasks.answerByUser(task.conversationId,principalId,taskId,questionId,answer,acceptedInputId));
+  }
   cancel(sessionId: string, principalId: string, taskId: string) {
     const task=this.owned(sessionId,principalId,taskId);
     return this.view(this.tasks.cancelByUser(task.conversationId,principalId,taskId));

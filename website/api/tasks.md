@@ -50,6 +50,29 @@ The dedicated `claude-gateway tasks list|show|watch|cancel` CLI wraps these cont
 
 
 
+## Answer a task question {#answer-a-task-question}
+
+A task in `waiting_input` retains `pendingQuestion: {questionId, text, revision}`. The task detail endpoint includes the full retained `pendingQuestion.text`; list/control previews may be shorter and expose `questionId` for answering. The gateway sends each question as a separate message, with the task title and full question, and retains it in conversation history. Questions are not repeated in unrelated Agent replies.
+
+`POST /api/v1/agents/:agentId/sessions/:sessionId/tasks/:taskId/answer`
+
+```json
+{
+  "questionId": "<question-uuid>",
+  "answer": "Use the existing database."
+}
+```
+
+Requires an authenticated API key with access to the agent, membership of the task conversation, and effective tool access under the existing Agent/API-key `allow_tools` policy. The task must belong to the supplied session and the question must be the current unanswered question. A non-empty answer is required. Returns `{task}` with the updated task control snapshot; saving the answer does not imply that a worker has already resumed. The answer preserves the task's existing execution and memory-writing capabilities.
+
+Invalid IDs or an empty/missing answer return `400`; inaccessible or stale questions and denied tool access return `403`. Disabled orchestration returns `409 {"error":"ORCHESTRATION_DISABLED"}`. Repeating the same saved answer is idempotent; a conflicting answer to an already answered question is rejected. The question ID prevents an old response from answering a newer question on the same task.
+
+In channels, a text reply to the exact delivered question message or `/task_question <question-uuid> answer <text>` submits an explicit answer. Natural answers without a platform reply go through the Agent, which calls `task_answer` for an unambiguous pending question and asks for clarification when several tasks could match.
+
+`/task_question <question-uuid> snooze` defers the next reminder for one hour; `mute` silences the current question until it is replaced by a new question. Telegram, Discord, Slack and LINE supply native reminder controls, with text-command fallbacks on other channels. Confirmations preserve the original question message. Controls bind to the current authenticated session, channel, chat/thread and principal.
+
+The initial question is sent promptly. Subsequent reminder intervals default to 10, 30, then 60 minutes and remain capped at 60 minutes. `agents[].orchestration.tasks.questionReminderMs` sets the base interval in milliseconds (default `600000`), multiplied by 1, 3 and then 6. Answered, superseded and terminal-task questions stop reminders. Snoozing, muting and reminders neither approve a decision nor grant additional work permissions.
+
 ## Telegram live task menus and selection confirmations {#telegram-live-task-menus-and-selection-confirmations}
 
 In orchestration mode, `/tasks` keeps one live task menu per private chat.

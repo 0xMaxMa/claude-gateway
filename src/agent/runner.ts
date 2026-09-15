@@ -473,11 +473,11 @@ export class AgentRunner extends EventEmitter {
   }
 
   private async sendOrchestrationControl(channel: string, chatId: string, menu: ControlMenu, meta: Record<string, string>): Promise<void> {
-    if (!['whatsapp', 'whatsapp_cloud', 'wechat'].includes(channel)) return sendControlMenu(this.agentConfig, channel, chatId, menu, meta);
+    if (!['telegram', 'whatsapp', 'whatsapp_cloud', 'wechat'].includes(channel)) return sendControlMenu(this.agentConfig, channel, chatId, menu, meta);
     const text = [menu.text, ...menu.buttons.map(button => `${button.label}: /orch ${button.data.replace(/^orch:/, '')}`)].join('\n');
     const send = channelSender(() => this.agentConfig, fetch, () => false, (...args) => this.sendLinkedOrchestrationChannel(...args));
     for (const part of chunkText(text, 1900)) {
-      const result = await send({channel, chat_id: chatId, thread_key: channel === 'whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : ''}, part, randomUUID());
+      const result = await send({channel, chat_id: chatId, thread_key: channel === 'whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : meta.message_thread_id ?? ''}, part, randomUUID());
       if (result.state !== 'delivered') throw new Error(result.code);
     }
   }
@@ -580,6 +580,13 @@ export class AgentRunner extends EventEmitter {
     if (!this.agentConfig.orchestration?.enabled) throw new Error('ORCHESTRATION_DISABLED');
     const runtime = await this.getOrchestration();
     const task = runtime.taskControls.cancel(sessionId, principalId, taskId);
+    return task;
+  }
+  async answerApiTask(sessionId: string, principalId: string, taskId: string, questionId: string, answer: string) {
+    if (!this.agentConfig.orchestration?.enabled) throw new Error('ORCHESTRATION_DISABLED');
+    const runtime = await this.getOrchestration();
+    const task = runtime.taskControls.answer(sessionId, principalId, taskId, questionId, answer);
+    await runtime.flushHistory();
     return task;
   }
   stopVoiceResponse(sessionId: string): void { this.orchestration?.stopResponse(sessionId); }
@@ -756,6 +763,21 @@ export class AgentRunner extends EventEmitter {
               ? `Sessions\n${index.sessions.slice(0,15).map(session=>`${session.id===index.activeSessionId?'✅ ':''}${session.name}\n${session.id}`).join('\n\n')}`
               : `Current session: ${current?.name??'(unnamed)'}\n${index.activeSessionId}\nMode: Orchestration\nModel: ${this.agentConfig.claude.model}\nMessages: ${current?.messageCount??0}\n\nCommands: /session /sessions /voice /voices /tasks /stop`;
             await this.sendOrchestrationControl(channelSource,chatId,{text,buttons:[]},meta);
+            res.writeHead(200);res.end('ok');return;
+          }
+          if (/^\/task_question(?:\s|$)/.test(content.trim()) || (channelSource !== 'telegram' && /^\/orch\s+q:/.test(content.trim()))) {
+            let menu: ControlMenu = {text:'Task controls require orchestration mode.',buttons:[]};
+            if (channelOrchestration) {
+              const sessionId = await this.sessionStore.getActiveSessionId(this.agentConfig.id,chatId,channelSource);
+              const runtime = await this.getOrchestration();
+              const scope = {channel:channelSource,chatId,thread:channelSource === 'whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : meta.thread_ts ?? meta.message_thread_id ?? '',sessionId,principalId:`${channelSource}:${meta.user_id ?? meta.user ?? chatId}`};
+              try { menu = runtime.questionControls.handle(scope,content.trim()) ?? {text:'Invalid task question command.',buttons:[]}; }
+              catch { menu = {text:'Question unavailable or already answered. Use /tasks to refresh.',buttons:[]}; }
+              await runtime.flushHistory();
+            }
+            const responseMeta = {...meta};
+            delete responseMeta.control_message_id;
+            await this.sendOrchestrationControl(channelSource,chatId,menu,responseMeta);
             res.writeHead(200);res.end('ok');return;
           }
           if (channelSource!=='telegram' && (/^\/(voice|voices|tasks|stop|orch)(?:\s|$)/.test(content.trim()) || (this.agentConfig.orchestration?.enabled&&(this.agentConfig.orchestration.channels??['api']).includes(channelSource)&&content.trim()==='/help'))) {
@@ -1139,6 +1161,21 @@ export class AgentRunner extends EventEmitter {
         else if(payload.action==='choose'&&typeof payload.menu_id==='string'&&typeof payload.index==='number')respond({success:true,...await voices.choose(chatId,payload.menu_id,payload.index)});
         else respond({success:true,...await voices.menu(chatId,typeof payload.page==='number'?payload.page:0,typeof payload.menu_id==='string'?payload.menu_id:undefined,typeof payload.gender==='string'?payload.gender:undefined)});
       } catch {respond({success:false,error:'Voice list unavailable or provider changed. Use /voices to refresh.'});}
+      return;
+    }
+
+    if (command === 'telegram_question') {
+      const chatId=body.chat_id??'', payload=body.payload??{};
+      if (!/^\d+$/.test(chatId) || payload.user_id!==chatId) { respond({success:false},400); return; }
+      if (!this.agentConfig.orchestration?.enabled || !this.agentConfig.orchestration.channels?.includes('telegram')) { respond({success:false,error:'Task controls require orchestration mode.'}); return; }
+      if (typeof payload.question_id!=='string' || !['snooze','mute'].includes(String(payload.action))) { respond({success:false,error:'Invalid question command.'},400); return; }
+      try {
+        const runtime=await this.getOrchestration();
+        const sessionId=await this.sessionStore.getActiveSessionId(this.agentConfig.id,chatId,'telegram');
+        const menu=runtime.questionControls.handle({channel:'telegram',chatId,thread:typeof payload.thread==='string'?payload.thread:'',sessionId,principalId:`telegram:${payload.user_id}`},`/task_question ${payload.question_id} ${payload.action}`);
+        if (!menu) throw Error('INVALID_QUESTION');
+        respond({success:true,text:menu.text});
+      } catch { respond({success:false,error:'Question unavailable or already answered. Use /tasks to refresh.'}); }
       return;
     }
 

@@ -589,7 +589,7 @@ export function createLineWebhookHandler(
       // is safe — only users who received the button can tap it.
       const pb = normalizeLinePostback(event);
       if (pb) {
-        if(/^orch:[a-f0-9-]{36}$/.test(pb.data)){
+        if(/^orch:(?:[a-f0-9-]{36}|q:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}:(?:snooze|mute))$/.test(pb.data)){
           if(!isResolvedSourceAllowed(cfg,resolveLineSource(event.source)))continue;
           const forwarded=await fetch(`http://127.0.0.1:${runner.getCallbackPort()}/channel`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:`/orch ${pb.data.slice(5)}`,meta:{source:'line',chat_id:pb.chatId,user_id:event.source?.userId??pb.chatId,reply_token:pb.replyToken}})});
           if(!forwarded.ok)throw Error('Control unavailable');

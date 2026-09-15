@@ -265,21 +265,77 @@ export class TaskService {
   }
   answer(context: CommandContext, taskId: string, questionId: string, answer: string): TaskSnapshot {
     boundedText(answer);
-    return this.command(context, 'answer', { taskId, questionId, answer }, true, () => {
-      const task = this.owned(taskId, context.conversationId), version = task.stateVersion;
-      if (task.state !== 'waiting_input' || task.pendingQuestion?.questionId !== questionId || task.pendingQuestion.revision !== task.revision) throw new OrchestrationError('STALE_QUESTION');
-      // An early user answer can be persisted, but the scheduler must still wait
-      // for the old attempt's true end before claiming the next revision.
-      const previous = this.revision(taskId, task.revision);
-      task.revision++;
-      this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify({ ...previous, revision: task.revision,
-        answers: [...(previous.answers ?? []), { questionId, text: answer, inputId: context.inputId }], originatingInputId: context.inputId }));
-      task.pendingQuestion = undefined;
-      task.state = task.activeAttemptId ? 'interrupting' : 'queued';
-      this.store.saveTask(task, version);
-      this.store.enqueue(task.activeAttemptId ? 'interrupt' : 'schedule', `answer:${questionId}`, { taskId });
-      return task;
-    }, taskId);
+    return this.command(context, 'answer', { taskId, questionId, answer }, true,
+      () => this.answerOwned(context.conversationId, taskId, questionId, answer, context.inputId), taskId);
+  }
+  /** A scoped authenticated reply is user authorization, without a fabricated model decision. */
+  answerByUser(conversationId: string, principalId: string, taskId: string, questionId: string, answer: string, acceptedInputId?: string): TaskSnapshot {
+    boundedText(questionId, 128); boundedText(answer);
+    return this.store.transaction(() => {
+      const conversation = this.store.assertMember(conversationId, principalId);
+      const task = this.owned(taskId, conversationId);
+      if (!task.capabilities.execute) throw new OrchestrationError('EXECUTION_DENIED');
+      const input = acceptedInputId ? this.store.get('SELECT * FROM conversation_inputs WHERE id=? AND conversation_id=? AND principal_id=?', acceptedInputId, conversationId, principalId) : undefined;
+      if (acceptedInputId && (!input || JSON.parse(String(input.ingress_json)).capabilities?.execute !== true)) throw new OrchestrationError('EXECUTION_DENIED');
+      // Revisions and their real input provenance outlive the prunable event stream.
+      const prior = this.store.get(`SELECT json_extract(a.value,'$.text') AS answer,i.principal_id
+        FROM task_revisions r,json_each(r.payload_json,'$.answers') a
+        JOIN conversation_inputs i ON i.id=json_extract(a.value,'$.inputId') AND i.conversation_id=?
+        WHERE r.task_id=? AND json_extract(a.value,'$.questionId')=? ORDER BY r.revision LIMIT 1`, conversationId, taskId, questionId);
+      if (prior) {
+        if (prior.principal_id !== principalId) throw new OrchestrationError('STALE_QUESTION');
+        if (prior.answer !== answer) throw new OrchestrationError('IDEMPOTENCY_CONFLICT');
+        if (input) this.handleAnswerInput(conversationId, String(input.id));
+        return task;
+      }
+      if (input && input.status !== 'accepted') throw new OrchestrationError('INPUT_CONFLICT');
+      this.assertQuestion(task, questionId);
+      if (conversation.status !== 'active') throw new OrchestrationError('DRAINING');
+      const inputId = acceptedInputId ?? randomUUID(), now = Date.now(), seq = Number(conversation.last_input_seq) + 1;
+      if (!input) {
+        const binding = this.store.get('SELECT binding_id FROM conversation_inputs WHERE id=? AND conversation_id=?', task.initiatingInputId, conversationId)!;
+        this.store.run('UPDATE conversations SET last_input_seq=?,updated_at=? WHERE id=?', seq, now, conversationId);
+        this.store.run(`INSERT INTO conversation_inputs(id,conversation_id,input_seq,principal_id,binding_id,modality,text,attachment_refs_json,request_id,store_user_message,status,created_at,ingress_json)
+          VALUES(?,?,?,?,?,'text',?,'[]',NULL,1,'handled',?,?)`, inputId, conversationId, seq, principalId, binding.binding_id, answer, now,
+          JSON.stringify({ metadata: { taskId, questionId }, capabilities: task.capabilities }));
+        this.store.appendEvent(conversationId, 'input.accepted', { inputId });
+      }
+      this.handleAnswerInput(conversationId, inputId);
+      const answered = this.answerOwned(conversationId, taskId, questionId, answer, inputId);
+      this.store.appendEvent(conversationId, 'task.user_answer', { taskId, questionId, principalId, inputId, answerHash: payloadHash(answer) }, taskId);
+      return answered;
+    });
+  }
+  private handleAnswerInput(conversationId: string, inputId: string): void {
+    const input = this.store.get('SELECT status FROM conversation_inputs WHERE id=?', inputId)!;
+    if (!['accepted', 'handled'].includes(String(input.status))) throw new OrchestrationError('INPUT_CONFLICT');
+    this.store.run("UPDATE conversation_inputs SET status='handled' WHERE id=?", inputId);
+    this.store.run("UPDATE outbox SET state='completed' WHERE kind='input' AND dedup_key=?", `input:${inputId}`);
+    const operationId = `input:${inputId}`;
+    this.store.run('INSERT INTO history_operations VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(operation_id) DO NOTHING', operationId, conversationId, inputId, null, 'append', null, 'pending', Date.now());
+    this.store.enqueue('history', operationId, { operationId });
+  }
+  private assertQuestion(task: TaskSnapshot, questionId: string): void {
+    if (task.state !== 'waiting_input' || task.pendingQuestion?.questionId !== questionId || task.pendingQuestion.revision !== task.revision) throw new OrchestrationError('STALE_QUESTION');
+  }
+  private answerOwned(conversationId: string, taskId: string, questionId: string, answer: string, inputId: string): TaskSnapshot {
+    const task = this.owned(taskId, conversationId), version = task.stateVersion;
+    this.assertQuestion(task, questionId);
+    // Persist early answers, while fencing scheduling until the old attempt really ends.
+    const previous = this.revision(taskId, task.revision);
+    task.revision++;
+    this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify({ ...previous, revision: task.revision,
+      answers: [...(previous.answers ?? []), { questionId, text: answer, inputId }], originatingInputId: inputId }));
+    task.pendingQuestion = undefined;
+    task.state = task.activeAttemptId ? 'interrupting' : 'queued';
+    this.store.saveTask(task, version);
+    this.store.enqueue(task.activeAttemptId ? 'interrupt' : 'schedule', `answer:${questionId}`, { taskId });
+    if (this.store.get("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_intake'")) {
+      const input = this.store.get('SELECT principal_id,binding_id,input_seq FROM conversation_inputs WHERE id=? AND conversation_id=?', inputId, conversationId)!;
+      this.store.run(`DELETE FROM conversation_intake WHERE conversation_id=? AND principal_id=? AND binding_id=?
+        AND json_extract(data_json,'$.task_id')=? AND latest_input_seq<=?`, conversationId, input.principal_id, input.binding_id, taskId, input.input_seq);
+    }
+    return task;
   }
   revision(taskId: string, revision: number): TaskRevision {
     const row = this.store.get('SELECT payload_json FROM task_revisions WHERE task_id=? AND revision=?', taskId, revision);

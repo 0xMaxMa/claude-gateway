@@ -1635,6 +1635,20 @@ function validModelRows(value: unknown): Array<{ id: string; label: string }> {
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
 
+  const questionControl=/^orch:q:([a-f0-9-]{36}):(snooze|mute)$/.exec(data)
+  if(questionControl){
+    if(!ORCHESTRATION_ENABLED||ctx.callbackQuery.message?.chat.type!=='private'||!isCallbackAuthorized(ctx)){await ctx.answerCallbackQuery({text:'Not available or not authorized.'}).catch(()=>{});return}
+    try{
+      if(!CALLBACK_URL_BASE)throw Error('not_configured')
+      const message=ctx.callbackQuery.message
+      const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),body:JSON.stringify({command:'telegram_question',chat_id:String(message.chat.id),payload:{user_id:String(ctx.from.id),question_id:questionControl[1],action:questionControl[2],thread:'message_thread_id' in message?String(message.message_thread_id??''):''}})})
+      const result=await response.json() as {success?:boolean;text?:string;error?:string}
+      const confirmation=(response.ok&&result.success?result.text:result.error)??'Question unavailable or already answered.'
+      await ctx.answerCallbackQuery({text:confirmation.slice(0,180)}).catch(()=>{})
+    }catch{await ctx.answerCallbackQuery({text:'Question unavailable. Use /tasks to refresh.'}).catch(()=>{})}
+    return
+  }
+
   const voicePicker=/^(voicepick|voicepage|voicegroup|voicedismiss):([a-f0-9-]{36})(?::(male|female|neutral|unspecified|back))?(?::(\d+))?$/.exec(data)
   if(voicePicker){
     if(!ORCHESTRATION_ENABLED||ctx.callbackQuery.message?.chat.type!=='private'||!isCallbackAuthorized(ctx)){await ctx.answerCallbackQuery({text:'Not available or not authorized.'}).catch(()=>{});return}

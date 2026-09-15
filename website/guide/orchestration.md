@@ -28,6 +28,26 @@ Replace the IDs with real identifiers from your session. The principal must belo
 
 Confirm success from the retained result and relevant files or checks. CPU/I/O movement is evidence of process activity, not proof of useful progress or passing tests. A tool marked `returned` only means a result arrived.
 
+## Answer a task question
+
+When a worker needs your decision, the gateway sends a separate **Waiting for your answer** message with the task title and complete question. It retains the question in task history and does not append it to unrelated replies.
+
+Use your channel's Reply action on that question message and send a text answer, or copy its question ID into an explicit command:
+
+```text
+/task_question QUESTION_UUID answer Use the existing database.
+/task_question QUESTION_UUID snooze
+/task_question QUESTION_UUID mute
+```
+
+You can also answer naturally without replying to the message. The Agent uses `task_answer` when your answer clearly identifies a pending question. If several tasks are waiting and your answer could apply to more than one, it asks which task you mean.
+
+Telegram, Discord, Slack and LINE offer native **Remind in 1 hour** and **Mute reminders** controls; other channels provide text commands. Snooze postpones the next reminder by one hour. Mute lasts for the current question; a new question has its own reminders. Both leave the task waiting for your answer.
+
+After the initial question, unanswered reminders arrive at intervals of 10 minutes, then 30 minutes, then 60 minutes. Later intervals remain one hour. Tune the base interval with `agents[].orchestration.tasks.questionReminderMs` (default `600000`); the sequence is 1×, 3×, then 6× that value. Reminder state survives gateway restarts.
+
+An accepted answer is saved before the task continues when a worker slot is available. Reminders stop when the question is answered, superseded, or its task ends. A reminder never approves a decision, and answering does not grant additional execution or memory-writing permissions. Controls validate the question, session, chat/thread and user; stale or foreign questions cannot resume another task. See the [task answer API](../api/tasks.md#answer-a-task-question) for clients.
+
 ## Cancel and reconcile
 
 ```bash
