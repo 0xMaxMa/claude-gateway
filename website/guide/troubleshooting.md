@@ -78,3 +78,76 @@ Read the persisted task state before retrying. `queued` means execution has not 
 After interruption, inspect current files, remote side effects, and recorded test evidence before retrying the action. A timeout does not establish that edits disappeared or that a deploy failed. Likewise `cancel_requested` means stopping has been requested; report cancellation only after the terminal cancelled state is confirmed. Stopping a spoken response or chat decision does not cancel ongoing execution tasks.
 
 Source: [runtime profile rules](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/session/runtime-profile.ts), [worker driver](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/orchestration/tasks/driver.ts), and [task controls](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/orchestration/task-controls.ts).
+
+## Gateway will not start: doctor and repair
+
+Run these commands as the same OS user that runs the gateway. They do not need a
+running gateway API to inspect or repair local files and dependencies.
+
+```bash
+claude-gateway doctor
+claude-gateway doctor fix
+# Non-interactive provisioning (explicitly accepts the repair):
+claude-gateway doctor fix --yes
+```
+
+| Finding | What `doctor fix` does | What still needs your decision |
+| --- | --- | --- |
+| ffmpeg or ffprobe missing/unusable | Installs the ffmpeg package through apt-get (Linux) or Homebrew (macOS), then checks both executables | Package-manager/network/PATH failures or unsupported OS; use the printed manual command |
+| Config owner permissions wrong | Saves a private backup and sets a regular file owned by the current user to 0600 | Foreign ownership, symlinks, inaccessible parent directories |
+| Config begins with a UTF-8 BOM | Backs up and removes the BOM only if the remaining JSON parses | Other invalid JSON or invalid agent settings must be corrected manually |
+| Log directory missing | Creates the configured directory with private permissions | Existing directories with wrong ownership/access |
+| Linux user service is failed | Resets the service failure latch without starting it | Correct the original failure, then start; outdated service paths need `service install` |
+| Port already in use | Reports a known startup-log signature | Identify the process; doctor will not kill it or select a different port |
+| Orchestration instance already running | Reports a known startup-log signature | Inspect the running instance; do not delete SQLite lock files |
+| Missing API credentials or agents | Reports configuration/connectivity gaps | Restore valid settings; doctor will not generate replacement identities |
+
+Runtime and log checks do not perform full config validation. Recent-log hints
+are historical matches from the bounded end of `gateway.log`, not proof that a
+previous failure is still present; raw log lines and credentials are not printed.
+
+After fixing the reported problems, start using your existing launch method:
+
+```bash
+claude-gateway gateway start
+# Or, for an installed service:
+claude-gateway service start
+```
+
+In a second terminal, run `claude-gateway doctor` again and verify a real request.
+A repair report with `health: no response` means the process still is not answering;
+it does not mean all repairs failed. No repair automatically restarts active tasks.
+
+### Voice works with one provider but fails with another
+
+ElevenLabs streaming requests PCM directly. PaxaLabs and OpenRouter streaming
+paths need local ffmpeg conversion. Gemini voice-file creation also uses ffmpeg;
+LINE delivery uses ffmpeg and ffprobe to create and validate AAC/M4A. Preview is
+therefore not the only affected feature. Tools installed in an upstream provider
+container do not provide these binaries inside a separate gateway host/container.
+
+Missing executables produce a local-dependency message with `doctor fix` guidance,
+not a claim that the provider sent corrupt audio. Install on the gateway host:
+
+```bash
+# Debian/Ubuntu, if explicit doctor repair cannot install:
+sudo apt-get update
+sudo apt-get install -y ffmpeg
+# macOS, with Homebrew already installed:
+brew install ffmpeg
+
+ffmpeg -version
+ffprobe -version
+```
+
+Use the command appropriate for your OS. Installation requires root or working
+non-interactive sudo on apt-based systems; repair never waits for a sudo password.
+If a service still cannot find the binaries, check its PATH and installation
+namespace rather than repeatedly calling the provider. Repeat Preview after fixing
+the dependency; it makes a real provider request and may incur normal usage.
+
+For a config owned by the current user without read permission, repair restores access
+before it can copy the contents into a private backup. It does not change file
+contents during this step. Linux supports mode `000` through a pinned file
+descriptor and `/proc`; other systems can recover write-only files. If neither
+method is available, restore owner read access manually and rerun doctor.

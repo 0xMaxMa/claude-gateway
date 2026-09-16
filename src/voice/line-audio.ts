@@ -1,11 +1,21 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { VoiceError } from './types';
 import { stat } from 'fs/promises';
 
 /** LINE's native player receives an AAC-LC M4A with metadata before media data.
  * No shell, metadata, artwork, video tracks or provider container assumptions. */
 export async function convertLineAudio(input: string, output: string): Promise<number> {
-  const run = promisify(execFile);
+  const execute = promisify(execFile);
+  const run = async (file: string, args: string[], options: { timeout: number; maxBuffer: number }) => {
+    try { return await execute(file, args, options); } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'EACCES') {
+        throw new VoiceError(`VOICE_DEPENDENCY_${file === 'ffprobe' ? 'FFPROBE' : 'FFMPEG'}_UNAVAILABLE`);
+      }
+      throw error;
+    }
+  };
   await run('ffmpeg', ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
     '-i', input, '-map', '0:a:0', '-vn', '-map_metadata', '-1',
     '-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '96k', '-ar', '44100', '-ac', '1',

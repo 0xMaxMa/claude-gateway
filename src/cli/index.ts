@@ -96,7 +96,7 @@ export async function runCli(argv: string[]): Promise<number> {
       case 'claude':
         return await runClaude(positionals, flags);
       case 'doctor':
-        return await runDoctor(flags, config);
+        return await runDoctor(flags, config, positionals);
       case 'debug-bundle':
         return await runDebugBundle(flags);
       case 'agents':
@@ -320,7 +320,7 @@ export const CORE_HELP: ReadonlyArray<readonly [string, string]> = [
   ['app install', 'Install an app from the registry, GitHub, or a local path'],
   ['update [check]', 'Check for / install a newer claude-gateway'],
   ['claude version|update [check]', 'Inspect / update the Claude Code binary'],
-  ['doctor', 'Check config/env/connectivity'],
+  ['doctor', 'Check startup/dependencies; fix local setup'],
   ['debug-bundle', 'Write a small redacted diagnostics bundle'],
   ['agents list|create|update', 'Create/manage agents (interactive wizard)'],
   ['tasks list|show|watch|cancel', 'Inspect and cancel orchestration tasks'],

@@ -69,3 +69,10 @@ Follow the [quickstart](https://0xmaxma.github.io/claude-gateway/guide/quickstar
 | Source builds and contributions | [Development](https://0xmaxma.github.io/claude-gateway/reference/development.html) |
 
 API documentation lives on the documentation website. [CLI command reference](https://0xmaxma.github.io/claude-gateway/reference/cli.html) is the generated command reference. To edit or preview this site, see [website development](website/README.md).
+
+### Installation health
+
+Run `claude-gateway doctor` to check startup and voice dependencies, even when the
+server is down. Use `claude-gateway doctor fix` for supported local repairs and
+installation of missing `ffmpeg`/`ffprobe`. Repair asks for confirmation and never
+starts or restarts the gateway. See [diagnosis and repair](https://0xmaxma.github.io/claude-gateway/guide/troubleshooting.html#gateway-will-not-start-doctor-and-repair).

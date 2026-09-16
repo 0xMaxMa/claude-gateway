@@ -1,4 +1,8 @@
-import { CliConfigView, resolveUrl, resolveLocalUrl, resolveKey } from '../http-client';
+import { inspectStartup, repairStartup, inspectUserService, repairUserService, doctorConfigPath } from '../startup-diagnostics';
+import { checkDependencies, repairVoiceDependencies } from '../dependencies';
+import { confirmAction } from '../prompt';
+import { unknownFlagNames } from '../args';
+import { CliConfigView, resolveUrl, resolveLocalUrl, resolveKey, loadCliConfig } from '../http-client';
 import { probeHealth, HealthProbe } from '../health';
 import { detectManager } from '../manager';
 import { printJson, helpStream, writeCommandHelp } from '../output';
@@ -30,21 +34,54 @@ function printHelp(): void {
   writeCommandHelp(
     true,
     'doctor',
-    'check config, key resolution, manager and connectivity',
-    'claude-gateway doctor [--url <url>] [--key <key>] [--config <path>] [--json]',
+    'check startup, dependencies and connectivity; explicitly repair local setup',
+    'claude-gateway doctor [fix] [--yes] [--url <url>] [--key <key>] [--config <path>] [--json]',
     [
       `  Exits 0 when every check passes. Rows marked ${c.dim('[--]')} are informational and ${c.yellow('[warn]')}`,
       '  rows are advisory — neither fails the command. The key itself is never printed.',
+      '  fix: back up and repair owner config permissions/BOM, create missing logs, reset a failed user service,',
+      '       and install missing ffmpeg/ffprobe. No automatic start/restart or credential changes.',
+      '  --yes confirms repair in scripts. Remote-target diagnosis never repairs this host.',
     ],
   );
 }
 
-export async function runDoctor(flags: Record<string, string | boolean>, config: CliConfigView): Promise<number> {
+export async function runDoctor(flags: Record<string, string | boolean>, config: CliConfigView, positionals: string[] = []): Promise<number> {
   if (flags.help === true) {
     printHelp();
     return 0;
   }
+  if (positionals.length > 1 || (positionals.length === 1 && positionals[0] !== 'fix') || unknownFlagNames(flags, new Set(['help','json','yes','url','key','config'])).length) {
+    process.stderr.write('Usage: claude-gateway doctor [fix] [--yes] [--config <path>] [--json]\n');
+    return 1;
+  }
+  for (const name of ['config', 'url', 'key']) {
+    if (flags[name] !== undefined && (typeof flags[name] !== 'string' || !(flags[name] as string).trim())) {
+      process.stderr.write(`--${name} requires a nonempty value. No repairs performed.\n`);
+      return 1;
+    }
+  }
+  const fixing = positionals[0] === 'fix';
   const checks: Check[] = [];
+
+  if (fixing && (typeof flags.url === 'string' || !!process.env.CLAUDE_GATEWAY_URL)) {
+    process.stderr.write('doctor fix operates locally. Remove --url / CLAUDE_GATEWAY_URL and run it on the gateway host.\n');
+    return 1;
+  }
+  // Explicit remote targets never cause local disk, package or service changes.
+  const localDiagnostics = !flags.url && !process.env.CLAUDE_GATEWAY_URL;
+  if (localDiagnostics) {
+    const file = doctorConfigPath(flags);
+    if (fixing) {
+      if (!await confirmAction(flags, 'repair local gateway setup', 'Repair local config permissions/encoding, missing logs, failed user-service state and install missing ffmpeg/ffprobe?')) return 1;
+      checks.push(...repairStartup(file), ...repairUserService());
+      const repaired = await repairVoiceDependencies();
+      checks.push({ name: 'voiceDependencyRepair', ok: repaired.ok, detail: repaired.detail });
+      config = loadCliConfig(file);
+    }
+    checks.push(...inspectStartup(file), ...inspectUserService());
+    for (const dependency of await checkDependencies()) checks.push({ name: dependency.name, ok: dependency.ok, detail: dependency.detail, warn: !dependency.ok && !dependency.required });
+  }
 
   const hasKeys = !!(config.keys && config.keys.length);
   checks.push({ name: 'config', ok: hasKeys, detail: hasKeys ? `${config.keys!.length} api key(s)` : 'no config / no api keys found' });

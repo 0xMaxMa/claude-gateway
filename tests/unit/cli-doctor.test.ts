@@ -1,5 +1,9 @@
+jest.mock('../../src/cli/startup-diagnostics', () => ({ inspectStartup: jest.fn(() => []), inspectUserService: jest.fn(() => []), doctorConfigPath: jest.fn(() => '/tmp/doctor-config'), repairStartup: jest.fn(() => []), repairUserService: jest.fn(() => []) }));
+jest.mock('../../src/cli/dependencies', () => ({ checkDependencies: jest.fn(() => Promise.resolve([])), repairVoiceDependencies: jest.fn(() => Promise.resolve({ ok: true, detail: 'ready' })) }));
 jest.mock('../../src/cli/manager', () => ({ detectManager: jest.fn(), readLocalGateway: jest.fn(() => ({ pid: 1 })) }));
 
+import { inspectStartup, repairStartup } from '../../src/cli/startup-diagnostics';
+import { checkDependencies, repairVoiceDependencies } from '../../src/cli/dependencies';
 import { detectManager, readLocalGateway } from '../../src/cli/manager';
 import { runDoctor } from '../../src/cli/commands/doctor';
 import type { CliConfigView } from '../../src/cli/http-client';
@@ -17,6 +21,7 @@ describe('cli doctor', () => {
   const realFetch = global.fetch;
 
   beforeEach(() => {
+    jest.clearAllMocks();
     stdout = [];
     stderr = [];
     writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
@@ -40,6 +45,46 @@ describe('cli doctor', () => {
   function report(): DoctorReport {
     return JSON.parse(stdout.join(''));
   }
+
+  it('never probes or repairs local dependencies for a remote target', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
+    await runDoctor({ url: 'https://remote.example', json: true }, {});
+    expect(inspectStartup).not.toHaveBeenCalled();
+    expect(checkDependencies).not.toHaveBeenCalled();
+    expect(await runDoctor({ url: 'https://remote.example', yes: true }, {}, ['fix'])).toBe(1);
+    expect(repairStartup).not.toHaveBeenCalled();
+    expect(repairVoiceDependencies).not.toHaveBeenCalled();
+  });
+
+  it.each(['config', 'url', 'key'])('rejects a missing --%s value before repair', async name => {
+    expect(await runDoctor({ [name]: true, yes: true }, {}, ['fix'])).toBe(1);
+    expect(repairStartup).not.toHaveBeenCalled();
+    expect(repairVoiceDependencies).not.toHaveBeenCalled();
+  });
+
+  it('rejects unknown actions instead of silently diagnosing', async () => {
+    expect(await runDoctor({}, {}, ['fixx'])).toBe(1);
+    expect(repairStartup).not.toHaveBeenCalled();
+  });
+
+  it('plain doctor does not mutate, even when dependencies are missing', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('offline'));
+    (checkDependencies as jest.Mock).mockResolvedValueOnce([{ name: 'ffmpeg', ok: false, required: false, detail: 'missing' }]);
+    await runDoctor({}, {});
+    expect(report().checks).toContainEqual(expect.objectContaining({ name: 'ffmpeg', warn: true }));
+    expect(repairStartup).not.toHaveBeenCalled();
+    expect(repairVoiceDependencies).not.toHaveBeenCalled();
+  });
+
+  it('explicit fix repairs without a live API and still reports health failure', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('offline'));
+    const result = await runDoctor({ yes: true }, {}, ['fix']);
+    expect(repairStartup).toHaveBeenCalled();
+    expect(repairVoiceDependencies).toHaveBeenCalled();
+    expect(result).toBe(1);
+    expect(report().checks).toContainEqual(expect.objectContaining({ name: 'voiceDependencyRepair', ok: true }));
+    expect(report().checks).toContainEqual(expect.objectContaining({ name: 'health', ok: false }));
+  });
 
   const configWithKey: CliConfigView = { keys: [{ key: 'sk-admin-doctor-test', agents: '*', admin: true }] };
 

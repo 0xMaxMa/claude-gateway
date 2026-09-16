@@ -179,3 +179,11 @@ The diagnostic payload contains metadata, not transcript text, audio, URLs or pr
 Select `managed:elevenlabs` or `managed:paxalabs` with a model from the authenticated provider service’s managed catalog. These routes use its daily voice wallet; direct providers and `upstream:<provider>` BYOK routes keep their own billing. There is no automatic switch between payers.
 
 When managed credits run out, channels quietly skip voice transcription and synthesis while text chat remains available. Saved voice preferences stay unchanged; a subsequent request checks the wallet again after reset. Browser clients should pause voice on `MANAGED_VOICE_QUOTA_EXHAUSTED` until credits become available. An unavailable wallet is a separate retryable error, not evidence that credits are exhausted. See the [Voice API](../api/voice.md#managed-voice-wallet-and-startup-recovery).
+
+## Local audio dependencies
+
+Install `ffmpeg` and `ffprobe` in the environment running the gateway for encoded
+streaming audio and channel conversions. A working ElevenLabs preview does not
+prove these tools are installed. Run `claude-gateway doctor`; use
+`claude-gateway doctor fix` for explicit supported installation/repair. See
+[voice dependency troubleshooting](./troubleshooting.md#voice-works-with-one-provider-but-fails-with-another).

@@ -77,7 +77,8 @@ does not touch the palette, so `--json` piped into `jq` is unaffected by any of 
 | `claude-gateway gateway restart` | Restart via the owning manager (systemd-user/systemd-system/pm2/foreground) |
 | `claude-gateway gateway stop` | Stop the gateway |
 | `claude-gateway gateway logs [--follow] [--lines <n>] [--agent <id>] [--json]` | Read the gateway log files directly (no running server needed) |
-| `claude-gateway doctor` | Check config, key resolution, owning manager, and connectivity |
+| `claude-gateway doctor` | Check local startup files, runtime/voice dependencies, key resolution, manager, and connectivity |
+| `claude-gateway doctor fix` | Confirm and repair supported local setup problems; never starts/restarts the gateway |
 | `claude-gateway debug-bundle` | Write a small redacted diagnostics bundle for a stuck session |
 | `claude-gateway api <METHOD> <path>` | Escape hatch: call any endpoint directly |
 
@@ -244,3 +245,46 @@ SQLite database directly. Legacy mode returns `ORCHESTRATION_DISABLED`.
 | `claude-gateway crons status` | GET | `/v1/crons/status` | key | Cron scheduler status |
 | `claude-gateway crons update <id> [--name <v>] [--type <v>] [--schedule <v>] [--scheduleKind <v>] [--scheduleAt <v>] [--timezone <v>] [--command <v>] [--prompt <v>] [--telegram <v>] [--discord <v>] [--timeoutMs <v>] [--deleteAfterRun] [--enabled]` | PUT | `/v1/crons/:id` | key | Update a cron job |
 
+
+## Doctor and local repairs
+
+```bash
+claude-gateway doctor
+claude-gateway doctor --config /path/to/config.json --json
+claude-gateway doctor fix
+claude-gateway doctor fix --yes --config /path/to/config.json --json
+```
+
+`doctor` is read-only. It checks Node.js 22+, Claude Code, Bun, ffmpeg and ffprobe;
+configuration readability, basic structure and owner permissions; runtime/log paths;
+failed Linux user-service state; known startup log signatures; and the existing
+API connectivity checks. It does not validate provider credentials, inspect every
+agent setting, or prove that an audio codec works merely because a binary starts.
+Missing optional voice binaries appear as warnings. Missing required tools or
+failed startup/connectivity checks produce exit code 1. Informational historical
+log matches do not fail the command.
+
+`fix` asks for confirmation; `--yes` is required without an interactive terminal.
+Supported actions are configuration backups and owner permission/BOM repair,
+missing log-directory creation, resetting a failed Linux user-service state, and
+installing the ffmpeg package on apt-based Linux or macOS with Homebrew. Other
+platforms/package managers receive manual instructions. Node.js, Bun, and Claude
+Code are diagnosed but not installed by this repair command.
+
+Repair rechecks the local setup and health. The command may exit 1 after successful
+repairs because the gateway is still stopped or another problem remains. Inspect
+the individual JSON `checks` and start the gateway/service explicitly afterward.
+Backups are private files named `config.json.doctor-*.bak` beside the original.
+The command never restores a backup automatically or replaces secrets/agents.
+
+Explicit `--url` or `CLAUDE_GATEWAY_URL` selects remote diagnosis: local file and
+binary checks are omitted and `fix` is refused, including when the URL happens to
+point to localhost. Run on the target host without those overrides to repair it.
+The invoking user/PATH may differ from a service/container; run checks in the
+actual gateway environment. See [startup troubleshooting](../guide/troubleshooting.md#gateway-will-not-start-doctor-and-repair).
+
+For a config owned by the current user without read permission, repair restores access
+before it can copy the contents into a private backup. It does not change file
+contents during this step. Linux supports mode `000` through a pinned file
+descriptor and `/proc`; other systems can recover write-only files. If neither
+method is available, restore owner read access manually and rerun doctor.
