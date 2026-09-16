@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -46,6 +47,16 @@ test('tick registers questions but does not send boilerplate, buttons or timed r
   expect(f.publish).not.toHaveBeenCalled();expect(store.all('SELECT * FROM task_question_messages')).toEqual([]);
   expect(f.controls.initialReviews([])).toHaveLength(1);
   f.controls.reviewed(f.task.conversationId);expect(f.controls.initialReviews([])).toHaveLength(0);
+ }finally{store.close();}
+});
+
+test('pending result notifications do not suppress the first question review',()=>{
+ const store=new OrchestrationStore(':memory:','a');
+ try{const f=fixture(store);
+  store.run('INSERT INTO notifications(id,conversation_id,task_id,task_state_version,originating_binding_id) VALUES(?,?,?,?,?)',
+   randomUUID(),f.task.conversationId,f.task.taskId,999,store.get('SELECT binding_id FROM task_questions WHERE question_id=?',f.question.questionId)!.binding_id);
+  expect(f.controls.initialReviews([])).toHaveLength(1);
+  expect(store.get("SELECT COUNT(*) n FROM notifications WHERE status='pending'")!.n).toBe(1);
  }finally{store.close();}
 });
 

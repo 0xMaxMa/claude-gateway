@@ -68,7 +68,6 @@ export class TaskQuestions {
       WHERE q.closed=0 AND q.muted=0 AND q.reminder_count=0 AND q.next_reminder_at<=? AND t.state='waiting_input' AND c.status='active'
       AND (a.last_review_at=0 OR a.last_review_at+?<=?)
       AND c.agent_session_id NOT IN (SELECT value FROM json_each(?))
-      AND NOT EXISTS(SELECT 1 FROM notifications n WHERE n.conversation_id=c.id AND n.status='pending')
       AND NOT EXISTS(SELECT 1 FROM conversation_inputs i WHERE i.conversation_id=c.id AND i.status IN ('accepted','assigned'))
       LIMIT 20`, now, this.reminderMs(), now, JSON.stringify(activeSessions));
   }
