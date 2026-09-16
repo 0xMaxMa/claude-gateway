@@ -12,7 +12,7 @@ Retain all existing required configuration fields. Set `gateway.orchestration` t
 
 The optional per-agent `orchestration.conversation.semanticIntake: true` prepares incomplete material while waiting for a complete instruction. `intakeWaitMs` defaults to 2000 ms after the latest received material. More material restarts the interval; a complete instruction proceeds without waiting another interval. Model processing can take longer, and recording/upload-in-progress signals are not part of this timer.
 
-Executable work receives a contextual acknowledgement before task creation. Amendments update the relevant task. Greetings and directly answerable conversation use one normal answer without a separate task acknowledgement.
+Executable work receives a contextual acknowledgement before task creation. Channel text must be delivered first; voice acknowledgement is best-effort and does not block dispatch when synthesis is slow, suppressed or unavailable. Live voice playback also does not gate task creation. If an attempted task creation/update has no committed receipt, the gateway reports that work did not start instead of promising background progress. Amendments update the relevant task. Greetings and directly answerable conversation use one normal answer without a separate task acknowledgement.
 
 ## Inspect actual work
 

@@ -10,7 +10,7 @@ import { AgentConfig, GatewayConfig } from '../../../src/types';
 import { SessionProcess } from '../../../src/session/process';
 import { AgentRunner } from '../../../src/agent/runner';
 
-async function fixture() {
+async function fixture(source: 'api'|'telegram'|'discord'|'line'|'slack' = 'api') {
  const root=mkdtempSync(join(tmpdir(),'question-runtime-')),dir=join(root,'a'),workspace=join(dir,'workspace');
  mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Identity');
  const agent={id:'a',description:'fixture',env:'',workspace,claude:{model:'fixture',extraFlags:[]},orchestration:{conversation:{semanticIntake:true}}} as AgentConfig;
@@ -19,7 +19,7 @@ async function fixture() {
  await sessions.ensureApiSession('a','chat',sid);
  const createAgentSession=jest.fn();
  const runtime=await AgentOrchestrationRuntime.open(agent,gateway,dir,sessions,history,{createAgentSession,releaseAgentSession:async()=>{}});
- const scope={agentId:'a',agentSessionId:sid,source:'api' as const,accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'};
+ const scope={agentId:'a',agentSessionId:sid,source,accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'};
  const input=runtime.store.acceptInput({scope,text:'Prepare deployment',capabilities:{execute:true,writeMemory:false}}),decision=runtime.decisions.begin(input.conversationId,'owner',[input.inputId]);
  const task=runtime.tasks.spawn({...input,...decision,principalId:'owner',execute:true,writeMemory:false,actionId:'spawn'}, {title:'Deploy',instructions:'Ask which target',targetProfile:'default-worker'});
  const attempt=runtime.tasks.claim(task.taskId)!;runtime.tasks.started(attempt.attemptId,attempt.generation);
@@ -133,5 +133,78 @@ test('initial internal question review emits only the separately staged natural 
   expect(seen.mock.calls.map(call=>call[0].text)).toEqual(['Which environment should I use for the deployment?']);
   expect(f.runtime.store.get('SELECT status,decision_id FROM notifications WHERE id=?',lateNotification)).toMatchObject({status:'pending',decision_id:null});
   expect(f.runtime.store.task(f.task.taskId)!.state).toBe('waiting_input');
+ }finally{await f.close();}
+});
+
+
+test.each((['api','telegram','discord','line','slack'] as const).flatMap(source => (['absent','pending','failed'] as const).filter(audioState=>source!=='api'||audioState==='absent').map(audioState=>({source,audioState}))))('acknowledgement permits dispatch on $source with $audioState audio',async ({source,audioState})=>{
+ const f=await fixture(source);
+ try{
+  (f.runtime as any).config.voice.enabled=true;
+  (f.runtime as any).config.voice.notes.replyWithVoice=true;
+  // Reproduce suppressed audio (e.g. quota/policy or a detached live player).
+  jest.spyOn((f.runtime as any).delivery,'enqueueSpeech').mockImplementation((...args: unknown[])=>{
+   if(audioState!=='absent') f.runtime.store.run('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?,?,?)',randomUUID(),String(args[0]),null,String(args[1]),'speech',audioState,null,'{}',null,Date.now());
+  });
+  (f.runtime as any).delivery.send=jest.fn(async()=>({state:'delivered'}));
+  let scope:any;
+  const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((value,...args)=>{scope=value;return issue(value,...args);});
+  const dispatched=jest.fn();
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+   const emitter=this;
+   void(async()=>{
+    await scope.onIntake({mode:'ready',acknowledgement:'I will inspect the PR.'});
+    await scope.beforeMutation('task_spawn',{});
+    const task=f.runtime.tasks.spawn({...scope.context,actionId:'new-review'},{title:'Inspect PR',instructions:'Inspect read-only',targetProfile:'default-worker'});
+    dispatched(task);
+    emitter.emit('output',JSON.stringify({type:'result',result:'Work started.'}));
+   })().catch(error=>emitter.emit('error',error));
+  }}) as unknown as SessionProcess);
+  await f.runtime.send({scope:f.scope,text:'Inspect the PR',modality:source==='api'?'live_voice':'text'},{execute:true,writeMemory:false},{timeoutMs:5000});
+  expect(dispatched).toHaveBeenCalledTimes(1);
+  expect(f.runtime.store.get("SELECT COUNT(*) n FROM task_commands WHERE action_id='new-review'")!.n).toBe(1);
+ }finally{await f.close();}
+});
+
+test('failed task dispatch cannot finish with a false promise of background work',async()=>{
+ const f=await fixture();
+ try{
+  let scope:any;
+  const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((value,...args)=>{scope=value;return issue(value,...args);});
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+   const emitter=this;
+   void(async()=>{
+    await scope.onIntake({mode:'ready',acknowledgement:'I will inspect it.'});
+    await scope.beforeMutation('task_spawn',{});
+    try { f.runtime.tasks.spawn({...scope.context,actionId:'bad-spawn'},{title:'',instructions:'',targetProfile:'default-worker'}); } catch {}
+    emitter.emit('output',JSON.stringify({type:'result',result:'I am working on it and will report back.'}));
+   })().catch(error=>emitter.emit('error',error));
+  }}) as unknown as SessionProcess);
+  expect(await f.runtime.send({scope:f.scope,text:'Inspect it'},{execute:true,writeMemory:false},{timeoutMs:5000})).toBe('The requested task was not started or updated. Please try again.');
+  expect(f.runtime.store.get("SELECT action_id FROM task_commands WHERE action_id='bad-spawn'")).toBeUndefined();
+ }finally{await f.close();}
+});
+
+
+test('undelivered text acknowledgement still blocks new work',async()=>{
+ const f=await fixture('telegram');
+ try{
+  (f.runtime as any).delivery.send=jest.fn(async()=>({state:'failed',code:'TEST_FAILURE'}));
+  let scope:any;const failures:unknown[]=[];
+  const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((value,...args)=>{scope=value;return issue(value,...args);});
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+   const emitter=this;
+   void(async()=>{
+    try{await scope.onIntake({mode:'ready',acknowledgement:'I will inspect it.'});}catch(error){failures.push(error);}
+    try{await scope.beforeMutation('task_spawn',{});}catch(error){failures.push(error);}
+    emitter.emit('output',JSON.stringify({type:'result',result:'I am working on it.'}));
+   })().catch(error=>emitter.emit('error',error));
+  }}) as unknown as SessionProcess);
+  const result=await f.runtime.send({scope:f.scope,text:'Inspect it'},{execute:true,writeMemory:false},{timeoutMs:5000});
+  expect(failures).toEqual([expect.objectContaining({code:'ACKNOWLEDGEMENT_DELIVERY_PENDING'}),expect.objectContaining({code:'ACKNOWLEDGEMENT_REQUIRED'})]);
+  expect(result).toContain('not started or updated');
  }finally{await f.close();}
 });
