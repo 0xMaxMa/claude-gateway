@@ -344,3 +344,28 @@ test.each([
   expect(stop).not.toHaveBeenCalled();
  }finally{await session.close();}
 });
+
+test.each([false, true])('response rejection only notifies the current voice turn (interrupted=%s)', async interrupted => {
+  const stt = new FakeSttProvider(), controls: Record<string, any>[] = [];
+  let reject!: (error: Error) => void;
+  const response = new Promise<string>((_, fail) => { reject = fail; });
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] }, synthesize: async function* () {} };
+  const session = new VoiceSession(stt, tts, 'voice',
+    { control: event => controls.push(event), audio: () => {}, bufferedBytes: () => 0 },
+    async () => ({ inputId: 'input', response }), jest.fn(),
+    { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 100 });
+  try {
+    await session.start();
+    const listening = controls.at(-1)!;
+    await session.audio({ generation: listening.generation, epoch: 0, sequence: 1, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    const commit = session.commit(1);
+    while (!stt.sessions[0].commitId) await new Promise(resolve => setImmediate(resolve));
+    stt.sessions[0].emit({ type: 'segment_final', segmentId: 'segment', text: 'First question' });
+    stt.sessions[0].emit({ type: 'commit_done', commitId: stt.sessions[0].commitId! });
+    await commit;
+    if (interrupted) session.speechStarted(1);
+    reject(Object.assign(new Error('Process failed'), { code: 'INFERENCE_FAILED' }));
+    await new Promise(resolve => setImmediate(resolve));
+    expect(controls.filter(event => event.type === 'voice.error')).toEqual(interrupted ? [] : [{ type: 'voice.error', code: 'INFERENCE_FAILED' }]);
+  } finally { await session.close(); }
+});

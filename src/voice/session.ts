@@ -156,7 +156,12 @@ export class VoiceSession {
       if (this.closed || epoch !== this.interruption) return;
       if (streaming) { this.client.control({ type: 'response.text', input_id: accepted.inputId, response_id: accepted.responseId?.(), text: answer, final: true }); await streaming; }
       else this.client.control({ type: 'response.text', input_id: accepted.inputId, response_id: accepted.responseId?.(), text: answer, final: true });
-    }).catch(error => this.error(error.code ?? 'CONVERSATION_FAILED'));
+    }).catch(error => {
+      // A previous response may reject as its process exits after barge-in.
+      // Match the success path: only the current voice turn may notify the client.
+      if (this.closed || epoch !== this.interruption) return;
+      this.error(error.code ?? 'CONVERSATION_FAILED');
+    });
     void streaming?.catch(() => {}); // response chain reports the original failure once
     this.responses.add(response); void response.finally(() => this.responses.delete(response));
   }

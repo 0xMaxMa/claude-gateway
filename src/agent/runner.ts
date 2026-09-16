@@ -589,7 +589,7 @@ export class AgentRunner extends EventEmitter {
     await runtime.flushHistory();
     return task;
   }
-  stopVoiceResponse(sessionId: string): void { this.orchestration?.stopResponse(sessionId); }
+  stopVoiceResponse(sessionId: string): void { this.orchestration?.stopResponse(sessionId, 'barge-in'); }
 
   private async sendOrchestratedApi(sessionId: string, chatId: string, message: string,
     opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string },

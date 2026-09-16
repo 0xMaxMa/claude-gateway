@@ -187,3 +187,10 @@ streaming audio and channel conversions. A working ElevenLabs preview does not
 prove these tools are installed. Run `claude-gateway doctor`; use
 `claude-gateway doctor fix` for explicit supported installation/repair. See
 [voice dependency troubleshooting](./troubleshooting.md#voice-works-with-one-provider-but-fails-with-another).
+
+### Speaking over a response
+
+Speaking again during a live voice response interrupts its playback and inference.
+The gateway keeps any reply text already shown, without inserting a “Response stopped.”
+message into chat history. Your next utterance starts the next turn. Explicit Stop
+commands keep their confirmation behavior; interrupting a reply does not cancel background tasks.
