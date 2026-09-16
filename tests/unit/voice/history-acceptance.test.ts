@@ -22,3 +22,10 @@ test('voice acceptance waits for visible history, without waiting for the Agent 
   finishHistory();
   await expect(result).resolves.toMatchObject({ inputId: 'input', response });
 });
+
+test('voice barge-in supplies an explicit interruption reason', () => {
+  const runner = Object.create(AgentRunner.prototype) as any;
+  runner.orchestration = { stopResponse: jest.fn() };
+  runner.stopVoiceResponse('session');
+  expect(runner.orchestration.stopResponse).toHaveBeenCalledWith('session', 'barge-in');
+});
