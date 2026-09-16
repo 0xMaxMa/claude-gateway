@@ -55,6 +55,12 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
     process.stderr.write('Usage: claude-gateway doctor [fix] [--yes] [--config <path>] [--json]\n');
     return 1;
   }
+  for (const name of ['config', 'url', 'key']) {
+    if (flags[name] !== undefined && (typeof flags[name] !== 'string' || !(flags[name] as string).trim())) {
+      process.stderr.write(`--${name} requires a nonempty value. No repairs performed.\n`);
+      return 1;
+    }
+  }
   const fixing = positionals[0] === 'fix';
   const checks: Check[] = [];
 

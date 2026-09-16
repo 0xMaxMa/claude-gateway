@@ -56,6 +56,12 @@ describe('cli doctor', () => {
     expect(repairVoiceDependencies).not.toHaveBeenCalled();
   });
 
+  it.each(['config', 'url', 'key'])('rejects a missing --%s value before repair', async name => {
+    expect(await runDoctor({ [name]: true, yes: true }, {}, ['fix'])).toBe(1);
+    expect(repairStartup).not.toHaveBeenCalled();
+    expect(repairVoiceDependencies).not.toHaveBeenCalled();
+  });
+
   it('rejects unknown actions instead of silently diagnosing', async () => {
     expect(await runDoctor({}, {}, ['fixx'])).toBe(1);
     expect(repairStartup).not.toHaveBeenCalled();
