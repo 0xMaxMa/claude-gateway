@@ -73,7 +73,7 @@ export class GeminiTts implements TtsProvider {
       const stop = () => encoder.kill('SIGKILL');
       options.signal.addEventListener('abort', stop, { once: true });
       const output: Buffer[] = [];
-      encoder.on('error', reject);
+      encoder.on('error', () => reject(new VoiceError('VOICE_DEPENDENCY_FFMPEG_UNAVAILABLE')));
       encoder.stdin.on('error', reject);
       encoder.stdout.on('data', chunk => output.push(chunk));
       encoder.once('close', code => { options.signal.removeEventListener('abort', stop); if (code || options.signal.aborted) reject(new VoiceError('TTS_INCOMPLETE')); else resolve(Buffer.concat(output)); });

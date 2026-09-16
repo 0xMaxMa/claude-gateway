@@ -1,8 +1,9 @@
 import { voiceTiming } from './diagnostics';
 import { VoiceError } from './types';
 
-type Category = 'payment' | 'authentication' | 'permission' | 'quota' | 'daily_quota' | 'rate_limit' | 'unavailable' | 'language' | 'model' | 'timeout' | 'network' | 'cancelled' | 'invalid_response' | 'invalid_request' | 'unknown';
+type Category = 'local_dependency' | 'payment' | 'authentication' | 'permission' | 'quota' | 'daily_quota' | 'rate_limit' | 'unavailable' | 'language' | 'model' | 'timeout' | 'network' | 'cancelled' | 'invalid_response' | 'invalid_request' | 'unknown';
 const descriptions: Record<Category, [string, boolean]> = {
+  local_dependency: ['A local audio dependency (ffmpeg or ffprobe) is missing or cannot run. Run claude-gateway doctor, then claude-gateway doctor fix on the gateway machine.', false],
   payment: ['The voice provider requires payment. Check provider credits or billing before trying again.', false],
   authentication: ['No API key is configured or the voice provider rejected it. Check the connected API key.', false],
   permission: ['The voice provider denied access. Check API key permissions and model access.', false],
@@ -70,7 +71,8 @@ export function describeVoiceError(error: unknown) {
   const explicit = code.match(/_REASON_([A-Z_]+)$/)?.[1]?.toLowerCase() as Category | undefined;
   let category: Category = explicit && Object.prototype.hasOwnProperty.call(descriptions, explicit) ? explicit : 'unknown';
   if (category === 'unknown') {
-    if (httpStatus === 402) category = 'payment';
+    if (/^(?:TTS_DECODER_UNAVAILABLE|VOICE_DEPENDENCY_(?:FFMPEG|FFPROBE)_UNAVAILABLE)$/.test(code)) category = 'local_dependency';
+    else if (httpStatus === 402) category = 'payment';
     else if (httpStatus === 401 || /CREDENTIALS_MISSING/.test(code)) category = 'authentication';
     else if (httpStatus === 403) category = 'permission';
     // A bare 429 cannot reliably distinguish an exhausted quota from a rate limit.
