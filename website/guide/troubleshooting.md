@@ -145,3 +145,9 @@ non-interactive sudo on apt-based systems; repair never waits for a sudo passwor
 If a service still cannot find the binaries, check its PATH and installation
 namespace rather than repeatedly calling the provider. Repeat Preview after fixing
 the dependency; it makes a real provider request and may incur normal usage.
+
+For a config owned by the current user without read permission, repair restores access
+before it can copy the contents into a private backup. It does not change file
+contents during this step. Linux supports mode `000` through a pinned file
+descriptor and `/proc`; other systems can recover write-only files. If neither
+method is available, restore owner read access manually and rerun doctor.

@@ -60,13 +60,50 @@ export function inspectStartup(file: string): StartupCheck[] {
   return checks;
 }
 
+/** Recover read access through a pinned descriptor, never a path-based chmod.
+ * Linux O_PATH works even for mode 000; other platforms can recover write-only
+ * files with O_WRONLY. Neither open truncates or writes configuration contents.
+ */
+function recoverConfigReadAccess(file: string): fs.Stats {
+  const noFollow = fs.constants.O_NOFOLLOW || 0;
+  const linux = process.platform === 'linux';
+  // Linux UAPI O_PATH is not exposed by Node's fs.constants.
+  const descriptor = fs.openSync(file, (linux ? 0x200000 : fs.constants.O_WRONLY) | noFollow | fs.constants.O_NONBLOCK);
+  try {
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || !process.getuid || stat.uid !== process.getuid()) {
+      throw Object.assign(new Error(), { code: 'UNSAFE_CONFIG_OWNER_OR_TYPE' });
+    }
+    // O_PATH cannot be fchmod'ed. This proc link targets the pinned inode even
+    // if the original name is replaced; do not substitute chmod(file).
+    if (linux) fs.chmodSync(`/proc/self/fd/${descriptor}`, 0o600);
+    else fs.fchmodSync(descriptor, 0o600);
+    const current = fs.lstatSync(file);
+    if (!current.isFile() || current.ino !== stat.ino || current.dev !== stat.dev) {
+      throw Object.assign(new Error(), { code: 'CONFIG_CHANGED_RETRY' });
+    }
+    return stat;
+  } finally { fs.closeSync(descriptor); }
+}
+
 /** Only repair files owned by this OS user; never follow a config symlink. */
 export function repairStartup(file: string): StartupCheck[] {
   const actions: StartupCheck[] = [];
   let fd: number | undefined;
   try {
     // Descriptor operations cannot follow a symlink swapped after this open.
-    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | fs.constants.O_NONBLOCK;
+    let restoredReadAccess = false;
+    try { fd = fs.openSync(file, flags); }
+    catch (error) {
+      if (errorCode(error) !== 'EACCES') throw error;
+      const recovered = recoverConfigReadAccess(file);
+      restoredReadAccess = true;
+      actions.push({ name: 'configReadAccess', ok: true, detail: 'Restored owner read/write permissions (0600); contents unchanged. Creating a private content backup next.' });
+      fd = fs.openSync(file, flags);
+      const reopened = fs.fstatSync(fd);
+      if (reopened.ino !== recovered.ino || reopened.dev !== recovered.dev) throw Object.assign(new Error(), { code: 'CONFIG_CHANGED_RETRY' });
+    }
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || fs.lstatSync(file).isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())) throw Object.assign(new Error(), { code: 'UNSAFE_CONFIG_OWNER_OR_TYPE' });
     let raw = fs.readFileSync(fd, 'utf8');
@@ -74,7 +111,7 @@ export function repairStartup(file: string): StartupCheck[] {
       const current = fs.lstatSync(file);
       if (!current.isFile() || current.ino !== stat.ino || current.dev !== stat.dev || fs.readFileSync(file, 'utf8') !== raw) throw Object.assign(new Error(), { code: 'CONFIG_CHANGED_RETRY' });
     };
-    if ((stat.mode & 0o777) !== 0o600) {
+    if (restoredReadAccess || (stat.mode & 0o777) !== 0o600) {
       fs.writeFileSync(`${file}.doctor-${randomUUID()}.bak`, raw, { mode: 0o600, flag: 'wx' });
       assertUnchanged();
       fs.fchmodSync(fd, 0o600);

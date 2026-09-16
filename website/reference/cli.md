@@ -282,3 +282,9 @@ binary checks are omitted and `fix` is refused, including when the URL happens t
 point to localhost. Run on the target host without those overrides to repair it.
 The invoking user/PATH may differ from a service/container; run checks in the
 actual gateway environment. See [startup troubleshooting](../guide/troubleshooting.md#gateway-will-not-start-doctor-and-repair).
+
+For a config owned by the current user without read permission, repair restores access
+before it can copy the contents into a private backup. It does not change file
+contents during this step. Linux supports mode `000` through a pinned file
+descriptor and `/proc`; other systems can recover write-only files. If neither
+method is available, restore owner read access manually and rerun doctor.

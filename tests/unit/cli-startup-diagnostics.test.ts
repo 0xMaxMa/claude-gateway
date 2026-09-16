@@ -34,6 +34,21 @@ describe('offline startup diagnosis and repair', () => {
     expect(repairStartup(file)).toEqual([]);
     expect(fs.readdirSync(dir)).toEqual(names);
   });
+  it.each([0o200, 0o000])('repairs unreadable owner config mode %s without changing content', mode => {
+    if (process.platform !== 'linux' && mode === 0) return;
+    const original = JSON.stringify(config(dir));
+    fs.writeFileSync(file, original);
+    fs.chmodSync(file, mode);
+    try {
+      expect(repairStartup(file).every(check => check.ok)).toBe(true);
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+      expect(fs.readFileSync(file, 'utf8')).toBe(original);
+      const backups = fs.readdirSync(dir).filter(name => name.endsWith('.bak'));
+      expect(backups).toHaveLength(1);
+      expect(fs.readFileSync(path.join(dir, backups[0]), 'utf8')).toBe(original);
+      expect(fs.statSync(path.join(dir, backups[0])).mode & 0o777).toBe(0o600);
+    } finally { fs.chmodSync(file, 0o600); }
+  });
   it('does not rewrite invalid JSON or invent credentials', () => {
     fs.writeFileSync(file, '{broken', { mode: 0o600 });
     expect(repairStartup(file).some(check => !check.ok)).toBe(true);
@@ -43,6 +58,49 @@ describe('offline startup diagnosis and repair', () => {
     const target = path.join(dir, 'other'); fs.writeFileSync(target, JSON.stringify(config(dir)), { mode: 0o644 }); fs.symlinkSync(target, file);
     expect(repairStartup(file)[0].ok).toBe(false);
     expect(fs.statSync(target).mode & 0o777).toBe(0o644);
+  });
+  it('does not repair an unreadable symlink target', () => {
+    const target = path.join(dir, 'other');
+    fs.writeFileSync(target, JSON.stringify(config(dir)));
+    fs.chmodSync(target, 0o200);
+    fs.symlinkSync(target, file);
+    try {
+      expect(repairStartup(file).some(check => !check.ok)).toBe(true);
+      expect(fs.statSync(target).mode & 0o777).toBe(0o200);
+    } finally { fs.chmodSync(target, 0o600); }
+  });
+  it('does not chmod a replacement symlink during unreadable-config recovery', () => {
+    if (process.platform !== 'linux' || process.getuid?.() === 0) return;
+    const target = path.join(dir, 'replacement');
+    fs.writeFileSync(target, 'unrelated', { mode: 0o644 });
+    fs.writeFileSync(file, JSON.stringify(config(dir)));
+    fs.chmodSync(file, 0o000);
+    const chmod = fs.chmodSync;
+    const spy = jest.spyOn(require('fs') as typeof fs, 'chmodSync').mockImplementation((name, mode) => {
+      if (String(name).startsWith('/proc/self/fd/')) {
+        fs.renameSync(file, path.join(dir, 'original'));
+        fs.symlinkSync(target, file);
+      }
+      chmod(name, mode);
+    });
+    try {
+      expect(repairStartup(file)).toContainEqual(expect.objectContaining({ ok: false, detail: expect.stringContaining('CONFIG_CHANGED_RETRY') }));
+      expect(fs.statSync(target).mode & 0o777).toBe(0o644);
+      expect(fs.readFileSync(target, 'utf8')).toBe('unrelated');
+    } finally { spy.mockRestore(); }
+  });
+  it('refuses a foreign-owned descriptor before restoring read access', () => {
+    fs.writeFileSync(file, JSON.stringify(config(dir)));
+    fs.chmodSync(file, 0o200);
+    const original = fs.fstatSync;
+    const spy = jest.spyOn(require('fs') as typeof fs, 'fstatSync').mockImplementation(((fd: number) => {
+      const stat = original(fd);
+      return Object.assign(stat, { uid: (process.getuid?.() ?? 0) + 1 });
+    }) as typeof fs.fstatSync);
+    try {
+      expect(repairStartup(file).some(check => !check.ok)).toBe(true);
+      expect(fs.statSync(file).mode & 0o777).toBe(0o200);
+    } finally { spy.mockRestore(); fs.chmodSync(file, 0o600); }
   });
   it('reports only known startup signatures, never raw logs', () => {
     fs.writeFileSync(file, JSON.stringify(config(dir)), { mode: 0o600 }); fs.mkdirSync(path.join(dir, 'logs'));
