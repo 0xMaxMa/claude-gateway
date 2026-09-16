@@ -16,7 +16,7 @@ import type { IntakeChoice } from './conversation-intake';
 import { resolveNamedSkill } from './skills';
 import type { SkillRegistry } from '../skills';
 
-type Scope = { role: 'agent'; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; beforeMutation?: (tool: string, args: Record<string, unknown>) => Promise<void> } |
+type Scope = { role: 'agent'; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; beforeMutation?: (tool: string, args: Record<string, unknown>) => Promise<void> } |
   { role: 'worker'; attemptId: string; generation: number };
 
 /** Private MCP bridge: host loopback or an app-local Unix socket. No public task API. */
@@ -84,6 +84,10 @@ export class TaskBridge {
               : this.tasks.context(context.conversationId, context.principalId, context.decisionId); break;
             case 'task_cancel': result = this.tasks.cancel(context, a.task_id, a.replaced_by_task_id); break;
             case 'task_update': result = this.tasks.update(context, a.task_id, a.expected_revision, a.instruction, a.mode as ChangeMode); break;
+            case 'task_question': {
+              if (!scope.onQuestion) throw new OrchestrationError('QUESTION_CONTROLS_UNAVAILABLE');
+              result = scope.onQuestion(context, a); break;
+            }
             case 'task_answer': result = this.tasks.answer(context, a.task_id, a.question_id, a.answer); break;
             default: throw new OrchestrationError('TOOL_DENIED');
           }
@@ -178,6 +182,7 @@ export function containerTaskTools(role: 'agent' | 'worker', semanticIntake = fa
     ['task_status',{task_id:text},[],'Read task status without waiting. Pass task_id to retrieve its complete stored result and evidence; task indexes in conversation context are not result reports.'],
     ['task_cancel',{task_id:text},['task_id'],'Request cancellation.'],
     ['task_update',{task_id:text,expected_revision:{type:'integer'},instruction:text,mode:{type:'string',enum:['when_ready','interrupt_and_resume']}},['task_id','expected_revision','instruction','mode'],'Replace the current task instructions when the user changes the goal or constraints. Write the complete updated brief, preserving unchanged requirements and citing relevant user input IDs.'],
+    ['task_question',{action:{type:'string',enum:['ask','discuss','defer','mute','resume']},question_ids:{type:'array',items:text,minItems:1,maxItems:20},text,delay_ms:{type:'integer',minimum:60000,maximum:2592000000}},['action','question_ids'],'Manage pending questions without answering or resuming work. Ask stages one natural separate message after your reply; discuss marks ongoing consultation; defer/mute/resume persist the user reminder preference.'],
     ['task_answer',{task_id:text,question_id:text,answer:text},['task_id','question_id','answer'],'Answer a pending worker question. Cite the user input IDs supporting any authorization; distinguish direct user statements from your interpretation. For a changed goal, prefer task_update with a complete replacement brief instead of repeatedly answering the same question.'],
   ] : [
     ['task_report_progress',{text,checkpoint:WORKFLOW_SCHEMA},['text'],'Report current phase, versioned evidence, checks and findings internally; no user notification is implied.'],

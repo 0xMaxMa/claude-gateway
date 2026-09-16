@@ -16,7 +16,7 @@ test('a busy session spanning topics cannot hide another session behind the mail
     const send = jest.fn(async () => 'ok');
     const runtime = Object.assign(Object.create(AgentOrchestrationRuntime.prototype), {
       store, closing: false, config: {conversation: {notificationPolicy: 'next_user_turn', maxActiveSessions: 2, maxDecisionDurationMs: 600000}},
-      scheduledReports: new Set(), active: new Map([['busy', {}]]), send, deferred: new Map(),
+      questionControls: { initialReviews: () => [] }, scheduledReports: new Set(), active: new Map([['busy', {}]]), send, deferred: new Map(),
     });
     runtime.pumpMailbox();
     await Promise.resolve();

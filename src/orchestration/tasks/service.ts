@@ -74,6 +74,10 @@ export class TaskService {
       return receipt;
     });
   }
+  /** Question presentation has the same ownership, epoch and replay fences as task commands. */
+  questionAction<T>(context: CommandContext, payload: unknown, operation: () => T): T {
+    return this.command(context, 'question', payload, false, operation);
+  }
   private owned(taskId: string, conversationId: string): TaskSnapshot {
     const task = this.store.task(taskId);
     if (!task || task.conversationId !== conversationId) throw new OrchestrationError('ACCESS_DENIED');
