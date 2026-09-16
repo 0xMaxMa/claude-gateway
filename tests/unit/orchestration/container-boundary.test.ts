@@ -17,7 +17,7 @@ test('container profiles do not inherit executable settings or host MCP inventor
   expect(args[args.indexOf('--setting-sources')+1]).toBe('');
   expect(args[args.indexOf('--tools')+1]).not.toBe('default');
   expect(containerTaskTools('worker').map(t=>t.name)).toEqual(['task_report_progress','task_request_input','task_stage_file']);
-  expect(containerTaskTools('agent').map(t=>t.name)).toEqual(['capabilities_list','task_spawn','task_status','task_cancel','task_update','task_answer']);
+  expect(containerTaskTools('agent').map(t=>t.name)).toEqual(['capabilities_list','task_spawn','task_status','task_cancel','task_update','task_question','task_answer']);
 });
 
 test('container bridge rejects host tools and revoked tickets; artifacts require imported spool bytes', async () => {

@@ -86,3 +86,52 @@ test.each(['text','live_voice'] as const)('natural %s answer still goes through 
   expect(f.runtime.tasks.revision(f.task.taskId,2).answers?.[0].text).toBe('staging');
  }finally{await f.close();}
 });
+
+test('reply consultation reaches the agent and can defer a question without answering the worker',async()=>{
+ const f=await fixture();
+ try{
+  const message=f.runtime.decisions.notice(f.task.conversationId,'Which environment?',false);
+  f.runtime.store.run('INSERT INTO task_question_messages VALUES(?,?)',message,f.question.questionId);
+  let ticketScope:any;
+  const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((scope,...args)=>{ticketScope=scope;return issue(scope,...args);});
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter,prompt:string){
+    expect(prompt).toContain('Reply-to question context (not consent)');expect(prompt).toContain(f.question.questionId);
+    ticketScope.onQuestion({...ticketScope.context,actionId:'defer-discussion'},{action:'defer',question_ids:[f.question.questionId]});
+    this.emit('output',JSON.stringify({type:'result',result:'We can discuss the options first.'}));
+  }}) as unknown as SessionProcess);
+  const answer=await f.runtime.send({scope:f.scope,text:'Can we discuss alternatives later?',metadata:{repliedMessageId:message}},{execute:true,writeMemory:false},{timeoutMs:5000});
+  expect(answer).toBe('We can discuss the options first.');
+  expect(f.runtime.store.task(f.task.taskId)!.state).toBe('waiting_input');
+  expect(f.runtime.store.task(f.task.taskId)!.revision).toBe(1);
+  expect(f.runtime.questionControls.context(f.task.conversationId,'owner')[0].eligibleToAsk).toBe(false);
+ }finally{await f.close();}
+});
+
+test('initial internal question review emits only the separately staged natural question',async()=>{
+ const f=await fixture();
+ try{
+  (f.runtime as any).config.conversation.notificationPolicy='next_user_turn';
+  const lateNotification=randomUUID();
+  const begin=f.runtime.decisions.begin.bind(f.runtime.decisions);
+  jest.spyOn(f.runtime.decisions,'begin').mockImplementationOnce((...args)=>{
+    // Arrives after initialReviews chose this conversation but before begin.
+    f.runtime.store.run('INSERT INTO notifications(id,conversation_id,task_id,task_state_version,originating_binding_id) VALUES(?,?,?,?,?)',lateNotification,f.task.conversationId,f.task.taskId,999,f.runtime.store.get('SELECT binding_id FROM task_questions WHERE question_id=?',f.question.questionId)!.binding_id);
+    return begin(...args);
+  });
+  let ticketScope:any;
+  const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((scope,...args)=>{ticketScope=scope;return issue(scope,...args);});
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+    ticketScope.onQuestion({...ticketScope.context,actionId:'ask-natural'},{action:'ask',question_ids:[f.question.questionId],text:'Which environment should I use for the deployment?'});
+    this.emit('output',JSON.stringify({type:'stream_event',event:{delta:{type:'text_delta',text:'Duplicate question that must not appear'}}}));
+    this.emit('output',JSON.stringify({type:'result',result:'Duplicate question that must not appear'}));
+  }}) as unknown as SessionProcess);
+  const seen=jest.fn();f.runtime.subscribeText(f.scope.agentSessionId,'owner',seen);
+  (f.runtime as any).pumpMailbox();
+  const until=Date.now()+5000;while(!seen.mock.calls.length&&Date.now()<until)await new Promise(r=>setTimeout(r,10));
+  expect(seen.mock.calls.map(call=>call[0].text)).toEqual(['Which environment should I use for the deployment?']);
+  expect(f.runtime.store.get('SELECT status,decision_id FROM notifications WHERE id=?',lateNotification)).toMatchObject({status:'pending',decision_id:null});
+  expect(f.runtime.store.task(f.task.taskId)!.state).toBe('waiting_input');
+ }finally{await f.close();}
+});

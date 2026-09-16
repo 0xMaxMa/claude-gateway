@@ -69,9 +69,26 @@ export class OrchestrationStore {
           reminder_count INTEGER NOT NULL DEFAULT 0, muted INTEGER NOT NULL DEFAULT 0, closed INTEGER NOT NULL DEFAULT 0);
           CREATE INDEX IF NOT EXISTS task_questions_task ON task_questions(task_id,closed);
           CREATE TABLE IF NOT EXISTS task_question_messages(
-          response_id TEXT PRIMARY KEY REFERENCES assistant_responses(id), question_id TEXT NOT NULL REFERENCES task_questions(question_id));
+          response_id TEXT NOT NULL REFERENCES assistant_responses(id), question_id TEXT NOT NULL REFERENCES task_questions(question_id), PRIMARY KEY(response_id,question_id));
           CREATE INDEX IF NOT EXISTS task_question_messages_question ON task_question_messages(question_id);
           CREATE INDEX IF NOT EXISTS deliveries_provider_message ON deliveries(provider_message_id,binding_id);`);
+        // Existing installations mapped one question per message. Natural reminders
+        // can combine several questions without losing their reply associations.
+        if (!Number(this.all('PRAGMA table_info(task_question_messages)').find(row => row.name === 'question_id')?.pk)) {
+          this.db.exec(`ALTER TABLE task_question_messages RENAME TO task_question_messages_old;
+            CREATE TABLE task_question_messages(response_id TEXT NOT NULL REFERENCES assistant_responses(id),
+              question_id TEXT NOT NULL REFERENCES task_questions(question_id), PRIMARY KEY(response_id,question_id));
+            INSERT INTO task_question_messages SELECT * FROM task_question_messages_old;
+            DROP TABLE task_question_messages_old;
+            CREATE INDEX task_question_messages_question ON task_question_messages(question_id);`);
+        }
+        this.db.exec(`CREATE TABLE IF NOT EXISTS task_question_attention(
+          question_id TEXT PRIMARY KEY REFERENCES task_questions(question_id),
+          last_discussed_at INTEGER NOT NULL DEFAULT 0, last_review_at INTEGER NOT NULL DEFAULT 0);
+          CREATE TABLE IF NOT EXISTS task_question_prompts(
+          id TEXT PRIMARY KEY, decision_id TEXT NOT NULL REFERENCES conversation_decisions(id),
+          conversation_id TEXT NOT NULL REFERENCES conversations(id), binding_id TEXT NOT NULL REFERENCES conversation_bindings(id),
+          question_ids_json TEXT NOT NULL, text TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending');`);
         this.db.exec('CREATE TABLE IF NOT EXISTS response_audio(response_id TEXT PRIMARY KEY REFERENCES assistant_responses(id),audio BLOB NOT NULL,created_at INTEGER NOT NULL)');
         this.db.exec('CREATE TABLE IF NOT EXISTS telegram_tts_voices(chat_id TEXT PRIMARY KEY, provider TEXT NOT NULL, voice_id TEXT NOT NULL)');
         this.db.exec('CREATE TABLE IF NOT EXISTS telegram_voice_preferences(chat_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)))');
@@ -256,6 +273,19 @@ export class OrchestrationStore {
   }
   cancelQuestionDeliveries(questionId: string): void {
     if (!this.inTransaction) throw new OrchestrationError('TRANSACTION_REQUIRED');
+    // Cancelling an undelivered combined first question must not strand its
+    // other questions as "already asked". Wake the agent to rephrase those.
+    const peers = this.all(`SELECT DISTINCT q.question_id FROM task_question_messages other
+      JOIN task_questions q ON q.question_id=other.question_id
+      JOIN deliveries d ON d.response_id=other.response_id
+      WHERE q.question_id!=? AND q.closed=0 AND q.reminder_count=1 AND d.state='pending'
+      AND other.response_id IN (SELECT response_id FROM task_question_messages WHERE question_id=?)
+      AND NOT EXISTS(SELECT 1 FROM deliveries sent JOIN task_question_messages m ON m.response_id=sent.response_id
+        WHERE m.question_id=q.question_id AND sent.state='delivered')`, questionId, questionId);
+    for (const peer of peers) {
+      this.run('UPDATE task_questions SET reminder_count=0,next_reminder_at=0 WHERE question_id=?', peer.question_id);
+      this.run('UPDATE task_question_attention SET last_review_at=0 WHERE question_id=?', peer.question_id);
+    }
     this.run(`UPDATE outbox SET state='completed' WHERE kind='delivery' AND state='pending'
       AND json_extract(payload_json,'$.deliveryId') IN (SELECT d.id FROM deliveries d JOIN task_question_messages m ON m.response_id=d.response_id WHERE m.question_id=?)`, questionId);
     this.run(`UPDATE deliveries SET state='failed' WHERE state='pending' AND response_id IN

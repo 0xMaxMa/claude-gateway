@@ -58,7 +58,7 @@ This is an agent-entry fragment. Keep the agent's existing workspace, Claude mod
 | `maxQueuedPerAgent` | `100` | Pending queue bound across the agent |
 | `idleTimeoutMs` | `300000` | Quiet-worker observation budget; not an unconditional five-minute kill |
 | `maxDurationMs` | `0` | Optional hard task deadline; zero disables total-duration expiry |
-| `questionReminderMs` | `600000` | Base interval for unanswered task-question reminders: 1×, then 3×, then 6× (capped at 6×); independent of task deadlines |
+| `questionReminderMs` | `600000` | Minimum cooldown for agent-chosen question reminders: 1×, then 3×, then 6×; also requires three new user messages, not a fixed send schedule |
 | `interruptAckTimeoutMs` | `5000` | Accepted configuration field; currently not consumed by the interruption path |
 | `workspaceMode` | `host` | Host agents' workspace policy; installed app-agents use `container` |
 | `projectRoot` | empty | Optional starting directory; empty uses the agent workspace |
@@ -66,7 +66,7 @@ This is an agent-entry fragment. Keep the agent's existing workspace, Claude mod
 
 `defaultTimeoutMs` is the compatibility alias for the worker inactivity budget. If explicitly set and `idleTimeoutMs` is absent, it supplies that budget; it is not a fixed wall-clock task limit. Task queue limits and worker concurrency are different controls: a queued task does not mean another worker is already running it.
 
-Question delivery is immediate; the default reminder intervals after that are 10 minutes, 30 minutes and then one hour between later reminders. Each question can be snoozed for one hour or muted until a new question is raised. Answering or closing the question stops its reminders. These controls do not approve decisions or change worker permissions. See [answering task questions](../guide/orchestration.md#answer-a-task-question).
+A new question wakes the Agent to prepare a natural separate message. Later reminders are considered on user turns only, after enough new messages and the configured cooldown. Discussion postpones reminders; natural-language requests can defer them for an hour or mute the current question. State survives restart. These controls do not approve decisions or change worker permissions. See [answering task questions](../guide/orchestration.md#answer-a-task-question).
 
 ### Workspace modes
 

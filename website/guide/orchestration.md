@@ -30,9 +30,15 @@ Confirm success from the retained result and relevant files or checks. CPU/I/O m
 
 ## Answer a task question
 
-When a worker needs your decision, the gateway sends a separate **Waiting for your answer** message with the task title and complete question. It retains the question in task history and does not append it to unrelated replies.
+When work needs your decision, the Agent asks naturally in a separate message. It can combine several pending questions in one message. There are no reminder/mute buttons or system-card instructions.
 
-Use your channel's Reply action on that question message and send a text answer, or copy its question ID into an explicit command:
+Reply normally, with or without your channel's Reply action. Text, voice transcripts and attachment context go through the Agent first. Reply identifies the question being discussed; it is **not automatic consent**. A question such as “Can you try another approach?” stays a discussion until the Agent understands whether you want an answer, a changed goal, or more explanation. Only `task_answer` commits an interpreted answer; `task_update` handles an authorized change of goal.
+
+Pending questions remain visible to the Agent even when you change topics. After replying to the new topic, it can ask a short separate reminder. The gateway enforces a minimum cooldown and at least three new user messages since the last question or discussion. With the default `questionReminderMs=600000`, cooldowns are 10, 30, then 60 minutes, capped at 60 minutes. These are eligibility limits, **not a recurring message schedule**. The Agent chooses whether a reminder is useful; idle conversations do not receive recurring timer reminders. A new question wakes the Agent to prepare its first message.
+
+Say “leave it for later” to defer reminders (one hour by default), or “do not ask again” to mute that question. Discussing the question renews its cooldown. These preferences and question/message associations survive restart. Asking, discussing, deferring and muting never resume a worker or grant execution permission. Questions stop when answered, replaced or their task ends.
+
+Explicit controls remain available for clients that intentionally bypass interpretation:
 
 ```text
 /task_question QUESTION_UUID answer Use the existing database.
@@ -40,13 +46,9 @@ Use your channel's Reply action on that question message and send a text answer,
 /task_question QUESTION_UUID mute
 ```
 
-You can also answer naturally without replying to the message. The Agent uses `task_answer` when your answer clearly identifies a pending question. If several tasks are waiting and your answer could apply to more than one, it asks which task you mean.
+These commands and the [task answer API](../api/tasks.md#answer-a-task-question) require a current question and the correct authenticated conversation. An accepted answer is saved before work resumes when a worker slot is available.
 
-Telegram, Discord, Slack and LINE offer native **Remind in 1 hour** and **Mute reminders** controls; other channels provide text commands. Snooze postpones the next reminder by one hour. Mute lasts for the current question; a new question has its own reminders. Both leave the task waiting for your answer.
-
-After the initial question, unanswered reminders arrive at intervals of 10 minutes, then 30 minutes, then 60 minutes. Later intervals remain one hour. Tune the base interval with `agents[].orchestration.tasks.questionReminderMs` (default `600000`); the sequence is 1×, 3×, then 6× that value. Reminder state survives gateway restarts.
-
-An accepted answer is saved before the task continues when a worker slot is available. Reminders stop when the question is answered, superseded, or its task ends. A reminder never approves a decision, and answering does not grant additional execution or memory-writing permissions. Controls validate the question, session, chat/thread and user; stale or foreign questions cannot resume another task. See the [task answer API](../api/tasks.md#answer-a-task-question) for clients.
+A finished investigation and a proposed implementation are different stages. Completion reports should identify what finished and whether a follow-up task is actually queued/running. A suggested next step is not a promise that execution has started, and read-only investigation does not authorize deployment.
 
 ## Cancel and reconcile
 
