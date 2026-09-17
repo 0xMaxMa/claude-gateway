@@ -21,7 +21,7 @@ export function sanitizeProviderMessage(text: string): string | undefined {
 /** Only typed error envelopes supply provider display text, never ordinary replies. */
 export function structuredProviderMessage(value: unknown, depth = 0, budget = { nodes: 256 }, errorEnvelope = false): string | undefined {
   if (depth >= 8 || --budget.nodes < 0 || !value) return undefined;
-  if (typeof value === 'string') return /^API Error:\s*\S/.test(value) ? value : undefined;
+  if (typeof value === 'string') return (errorEnvelope || /^API Error:\s*\S/.test(value)) ? value : undefined;
   if (typeof value !== 'object') return undefined;
   if (Array.isArray(value)) {
     for (const item of value.slice(0, 32)) {

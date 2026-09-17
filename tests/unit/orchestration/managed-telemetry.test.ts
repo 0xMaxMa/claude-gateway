@@ -262,3 +262,25 @@ test.each(['HTTP request failed; Authorization: Token private-value','Authorizat
   expect(text).toContain('Provider rejected request');
   expect(text).not.toMatch(/private|value-tail/);
 });
+
+
+test.each([
+  {error: 'Account access paused. Contact your administrator.'},
+  {error: {error: 'Account access paused. Contact your administrator.'}},
+])('plain text inside a typed error envelope survives: %j', async result => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, {start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({type: 'result', is_error: true, result}));
+  }});
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(inferenceFailureMessage(error)).toBe('Account access paused. Contact your administrator.');
+});
+
+test('untyped terminal prose remains private', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, {start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({type: 'result', is_error: true, result: 'Private internal failure'}));
+  }});
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(inferenceFailureMessage(error)).toBeUndefined();
+});
