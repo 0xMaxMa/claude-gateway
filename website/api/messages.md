@@ -120,8 +120,8 @@ Chat delivery, synchronous API responses, SSE and resumed terminal frames share 
 
 | Failure | Diagnostic |
 | --- | --- |
-| Claude executable missing / cannot start | `CLAUDE_BINARY_NOT_FOUND`, `PROCESS_PERMISSION_DENIED`, `PROCESS_START_FAILED` |
-| Workspace context missing | `WORKSPACE_CONTEXT_MISSING` |
+| Claude executable missing / cannot start | `CLAUDE_BINARY_NOT_FOUND`, `CONTAINER_RUNTIME_NOT_FOUND`, `PROCESS_PERMISSION_DENIED`, `PROCESS_START_FAILED` |
+| Workspace context missing | `WORKSPACE_CONTEXT_MISSING`, `WORKSPACE_DIRECTORY_MISSING` |
 | Process dies during a turn | `PROCESS_EXITED` |
 | Response cannot be saved / is too large | `RESPONSE_PERSISTENCE_FAILED`, `RESPONSE_TOO_LARGE` |
 | Startup, first-response, idle or total deadline | `TIMEOUT`, with phase-specific guidance |
@@ -133,3 +133,5 @@ Chat delivery, synchronous API responses, SSE and resumed terminal frames share 
 New orchestration errors retain their diagnostic code even before a dedicated explanation is added. Unclassified exceptions do not expose arbitrary internal text. Legacy uncoded stream/command errors retain their redacted message. HTTP response status and diagnostic codes are separate from provider wording; a provider's HTTP 400 message does not imply the gateway itself returns HTTP 400.
 
 Worker failures remain task failures with bounded, scrubbed evidence, visible to the agent and task inspection. Tool errors remain tool results so the agent can recover. Delivery failures remain outbox/delivery state: if the channel transport is down, an error notice through that same transport cannot be guaranteed. These mechanisms are distinct from a failed conversational response; not every background error should become a new chat message.
+
+Managed streaming errors are normalized before entering legacy stream callbacks, so uncoded internal exceptions stay private on both live and replayed connections. A typed provider error is superseded when the model resumes producing normal output; a later process crash is reported as a process failure, not as an already-recovered provider error.

@@ -1,10 +1,12 @@
 /** Display provider text without interpreting its language, reset syntax or wording. */
 export function sanitizeProviderMessage(text: string): string | undefined {
   const safe = text
+    // Header schemes include Token/Digest, not only Bearer/Basic.
+    .replace(/\b((?:proxy-)?authorization\s*:\s*)[^\r\n]*/gi, '$1[redacted]')
     .replace(/\b(?:Bearer|Basic)\s+[^\s"'<>]+/gi, '[redacted]')
     .replace(/\bsk-[A-Za-z0-9_-]+/g, '[redacted]')
     .replace(/\b(?:set-cookie|cookie)\s*:\s*[^\r\n]+/gi, '[redacted cookie]')
-    .replace(/(["']?[a-z0-9_-]*(?:api[_-]?key|token|password|secret|authorization|cookie)["']?\s*[=:]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;}]+)/gi, '$1[redacted]')
+    .replace(/(["']?[a-z0-9_-]*(?:api[_-]?key|token|password|secret|authorization|cookie)["']?\s*[=:]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)/gi, '$1[redacted]')
     .replace(/https?:\/\/[^\s<>"']+/gi, value => {
       try { const url = new URL(value); url.username = ''; url.password = ''; url.search = ''; url.hash = ''; return url.toString(); }
       catch { return '[redacted URL]'; }
@@ -19,7 +21,7 @@ export function sanitizeProviderMessage(text: string): string | undefined {
 /** Only typed error envelopes supply provider display text, never ordinary replies. */
 export function structuredProviderMessage(value: unknown, depth = 0, budget = { nodes: 256 }, errorEnvelope = false): string | undefined {
   if (depth >= 8 || --budget.nodes < 0 || !value) return undefined;
-  if (typeof value === 'string') return /^API Error:\s*\d{3}\b/.test(value) ? value : undefined;
+  if (typeof value === 'string') return /^API Error:\s*\S/.test(value) ? value : undefined;
   if (typeof value !== 'object') return undefined;
   if (Array.isArray(value)) {
     for (const item of value.slice(0, 32)) {
@@ -29,7 +31,7 @@ export function structuredProviderMessage(value: unknown, depth = 0, budget = { 
     return undefined;
   }
   const entry = value as Record<string, unknown>;
-  if (entry.error && typeof entry.error === 'object') {
+  if (entry.error && (typeof entry.error === 'object' || typeof entry.error === 'string')) {
     const nested = structuredProviderMessage(entry.error, depth + 1, budget, true);
     if (nested) return nested;
   }

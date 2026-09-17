@@ -1,3 +1,4 @@
+import { presentedResponseError } from '../orchestration/response-errors';
 import { ChannelMediaError } from '../orchestration/channel-media-error';
 import { payloadHash, type AcceptInput } from '../orchestration/store';
 import { channelInputMedia } from '../orchestration/channel-input-media';
@@ -4723,7 +4724,10 @@ export class AgentRunner extends EventEmitter {
         text => turn.emit({ type: 'text_delta', text } as StreamEvent),
         event => { if (event.type === 'tool_use') turn.emit({ ...event, type: 'tool_use' }); })
         .then(result => this.turnStreams.complete(turn, resultEvent(result.text, result.attachments)))
-        .catch(error => this.turnStreams.complete(turn, errorEvent(error), error));
+        .catch(error => {
+          const publicError = presentedResponseError(error);
+          this.turnStreams.complete(turn, errorEvent(publicError), publicError);
+        });
       return () => turn.detach(sink);
     }
     if (this.pendingApiSessions.has(sessionId)) {
@@ -5653,7 +5657,8 @@ export class AgentRunner extends EventEmitter {
     const fail = (error: Error) => {
       if (closed) return;
       try { drain(); } catch { /* Preserve the original stream/provider failure. */ }
-      this.turnStreams.completeAndRelease(turn, errorEvent(error), error);
+      const publicError = presentedResponseError(error);
+      this.turnStreams.completeAndRelease(turn, errorEvent(publicError), publicError);
       close();
     };
     void (async () => {

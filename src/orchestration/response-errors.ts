@@ -13,6 +13,8 @@ const explanations: Readonly<Record<string, string>> = {
   INFERENCE_FAILED: 'The model request failed without a usable provider diagnostic. Check the gateway logs.',
   PROCESS_EXITED: 'The agent process exited before completing the response. Check the gateway logs before retrying.',
   PROCESS_START_FAILED: 'The agent process could not start. Check the Claude installation and gateway logs.',
+  WORKSPACE_DIRECTORY_MISSING: 'The agent workspace directory is missing. Restore the workspace before restarting the agent.',
+  CONTAINER_RUNTIME_NOT_FOUND: 'The container runtime executable was not found. Check the Docker installation and gateway PATH.',
   CLAUDE_BINARY_NOT_FOUND: 'The Claude executable was not found. Check the Claude installation or CLAUDE_BIN setting.',
   PROCESS_PERMISSION_DENIED: 'The gateway does not have permission to start the Claude executable.',
   RESPONSE_PERSISTENCE_FAILED: 'The gateway could not save the response. Check storage and gateway logs before retrying.',
@@ -66,4 +68,13 @@ export function responseFailureMessage(error: unknown, legacyMessage = false): s
   // New orchestration codes remain diagnosable without exposing arbitrary exception text.
   const publicCode = error instanceof OrchestrationError && /^[A-Z][A-Z0-9_]{0,79}$/.test(code) ? code : 'GATEWAY_INTERNAL_ERROR';
   return `The gateway could not complete the response (${publicCode}). Check the gateway logs for details.`;
+}
+
+
+/** Normalize managed failures before they reach legacy stream callbacks. */
+export function presentedResponseError(error: unknown): PresentedResponseError {
+  const presented = new PresentedResponseError(responseFailureMessage(error));
+  const code = (error as {code?: unknown} | null)?.code;
+  if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(code)) Object.assign(presented, {code});
+  return presented;
 }

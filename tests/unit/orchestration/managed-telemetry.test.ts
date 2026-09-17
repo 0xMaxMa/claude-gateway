@@ -239,3 +239,26 @@ test('process exit after a typed provider error retains that error', async () =>
   const error = await startProcessTurn(p,'check',1000).result.catch(error=>error);
   expect(inferenceFailureMessage(error)).toBe(thirdPartyError);
 });
+
+test.each(['API Error: The socket connection was closed unexpectedly', {error:'API Error: The socket connection was closed unexpectedly'}])('terminal provider envelope without HTTP status survives: %j', async result => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p,{start:async()=>{},stop:jest.fn(async()=>{}),sendMessage:()=>p.emit('output',JSON.stringify({type:'result',is_error:true,result}))});
+  const error = await startProcessTurn(p,'check',1000).result.catch(error=>error);
+  expect(inferenceFailureMessage(error)).toBe('API Error: The socket connection was closed unexpectedly');
+});
+
+test('a recovered provider error is not blamed for a later process crash', async()=>{
+  const p=new EventEmitter() as SessionProcess;
+  Object.assign(p,{start:async()=>{},stop:jest.fn(async()=>{}),sendMessage:()=>{
+    p.emit('output',JSON.stringify({type:'assistant',isApiErrorMessage:true,message:{content:[{type:'text',text:'API Error: 429 Retry shortly'}]}}));
+    p.emit('output',JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'Recovered; continuing the task'}]}}));
+    p.emit('exit',1);
+  }});
+  await expect(startProcessTurn(p,'check',1000).result).rejects.toMatchObject({code:'PROCESS_EXITED'});
+});
+
+test.each(['HTTP request failed; Authorization: Token private-value','Authorization: Token private-value','Authorization: Digest username="private-value", response="private-response"','{"api_key":"private-\\\"value-tail"}'])('sanitizer removes complete credential values: %s', providerMessage=>{
+  const text=inferenceFailureMessage({code:'INFERENCE_FAILED',providerMessage:'Provider rejected request\n'+providerMessage});
+  expect(text).toContain('Provider rejected request');
+  expect(text).not.toMatch(/private|value-tail/);
+});

@@ -1555,9 +1555,14 @@ export class SessionProcess extends EventEmitter {
       // hint. This is the exact failure the binary-resolution work targets.
       this.lastStderrLine = err.message;
       this.logger.error('session subprocess error', { error: err.message });
-      if (this.runtimeProfile) {
+      if (this.runtimeProfile && !proc.pid) {
+        // Failed spawn emits 'error' and 'close', but never 'exit'. Clear the
+        // nonexistent child before listeners call stop(), or cleanup waits forever.
+        if (this.process === proc) { this.process = null; this._exited = true; }
         const cause = (err as NodeJS.ErrnoException).code;
-        const code = cause === 'ENOENT' ? 'CLAUDE_BINARY_NOT_FOUND' : cause === 'EACCES' || cause === 'EPERM' ? 'PROCESS_PERMISSION_DENIED' : 'PROCESS_START_FAILED';
+        const missingWorkspace = cause === 'ENOENT' && !fs.existsSync(this.agentConfig.workspace);
+        const code = missingWorkspace ? 'WORKSPACE_DIRECTORY_MISSING'
+          : cause === 'ENOENT' ? (isAppAgent ? 'CONTAINER_RUNTIME_NOT_FOUND' : 'CLAUDE_BINARY_NOT_FOUND') : cause === 'EACCES' || cause === 'EPERM' ? 'PROCESS_PERMISSION_DENIED' : 'PROCESS_START_FAILED';
         this.emit('startup-error', Object.assign(new Error(code), { code }));
       }
     });

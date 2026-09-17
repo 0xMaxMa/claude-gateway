@@ -177,7 +177,12 @@ describe('SessionProcess', () => {
     const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore, undefined, {role:'agent',context:'fixture',overlay:'',allowedTools:[],mcpConfigPath:''} as any);
     const receive=jest.fn(); sp.on('startup-error',receive);
     await sp.start();
-    lastProcess!.emit('error',Object.assign(new Error('private executable path'),{code:cause}));
+    const child = lastProcess!;
+    (child as {pid?: number}).pid = undefined;
+    child.kill.mockImplementation(() => false); // no child exists, so no exit event
+    child.emit('error',Object.assign(new Error('private executable path'),{code:cause}));
+    await sp.stop();
+    expect(child.kill).not.toHaveBeenCalled();
     expect(receive).toHaveBeenCalledWith(expect.objectContaining({code}));
     expect(receive.mock.calls[0][0].message).not.toContain('private');
   });

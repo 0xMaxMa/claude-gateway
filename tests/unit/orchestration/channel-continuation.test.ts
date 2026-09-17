@@ -15,9 +15,10 @@ test.each([[1, 0], [125, 0], [3, 150]])('web continuation forwards %i tool calls
   const agent = { id: 'a', workspace: join(root, 'a', 'workspace'), description: '', env: '', claude: { model: 'fixture', extraFlags: [] }, orchestration: { enabled: true, channels: ['telegram'] } } as AgentConfig;
   const gateway = { gateway: { orchestration: true, headless: true, logDir: join(root, 'logs'), timezone: 'UTC' }, agents: [agent] } as GatewayConfig;
   const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a');
-  let failNext = false;
+  let failNext = false, privateFailure = false;
   const runtime = await AgentOrchestrationRuntime.open(agent, gateway, root, sessions, history, {
     createAgentSession: async () => {
+      if (privateFailure) throw new Error('Private prompt contents from an internal failure');
       const process = new EventEmitter() as SessionProcess;
       process.start = async () => {}; process.stop = async () => {};
       process.sendMessage = () => {
@@ -60,6 +61,14 @@ test.each([[1, 0], [125, 0], [3, 150]])('web continuation forwards %i tool calls
     });
     await expect(failed).rejects.toBeDefined();
     expect(failedChunks.filter(event => event.type === 'tool_use')).toHaveLength(count);
+    privateFailure = true;
+    const internal = await new Promise<Error>((resolve,reject)=>{
+      void runner.sendMessageToSession('chat','telegram','s','Fail internally','Web user',{
+        onChunk:()=>{},onDone:()=>reject(new Error('unexpected success')),onError:resolve,
+      },{timeoutMs:2000,principalId:'api:key',allowTools:false}).catch(reject);
+    });
+    expect(internal.message).toContain('GATEWAY_INTERNAL_ERROR');
+    expect(internal.message).not.toContain('Private prompt');
 
   } finally {
     await runtime.close(); (history as any).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true });

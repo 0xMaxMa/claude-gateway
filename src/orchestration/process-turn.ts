@@ -88,10 +88,19 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
     if (settled) return;
     try { event = JSON.parse(line); } catch { return; }
     const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
-    if (event.type === 'assistant' && (event.isApiErrorMessage || event.error)) {
+    const isProviderError = event.type === 'assistant' && (event.isApiErrorMessage || event.error);
+    if (isProviderError) {
       apiErrorCodes = [];
       providerMessage = blocks.filter((block: any) => block.type === 'text' && typeof block.text === 'string').map((block: any) => block.text).join('\n') || structuredProviderMessage(event.error);
       apiErrorText = providerErrorText({ error: event.error, message: blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text) }, apiErrorCodes);
+    }
+    // A successful retry supersedes the earlier provider failure. Do not blame
+    // a later process crash/terminal error on an already-recovered request.
+    const resumedDelta = event.type === 'stream_event' ? event.event?.delta : undefined;
+    if (!isProviderError && ((event.type === 'assistant' && blocks.length > 0)
+        || (resumedDelta && ['text_delta', 'thinking_delta', 'input_json_delta'].includes(resumedDelta.type)
+          && (resumedDelta.text || resumedDelta.thinking || resumedDelta.partial_json)))) {
+      apiErrorText = ''; apiErrorCodes = []; providerMessage = undefined;
     }
     for (const block of blocks) {
       if (block.type === 'tool_use' && typeof block.id === 'string' && !activeTools.has(block.id) && activeTools.size < 2000) activeTools.set(block.id, -1);
