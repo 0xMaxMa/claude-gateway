@@ -439,7 +439,7 @@ ${dashboardFontLink}</head>
     <div id="pty-terminal" tabindex="0"></div>
   </div>
 
-</div><div id="view-sessions" class="view" style="display:none"><h2>Conversations</h2><p class="live-note">Inspect a session for its Agent turns and Worker attempts. Loaded tools and used tools are recorded separately.</p><div id="session-results"></div></div>
+</div><div id="view-sessions" class="view" style="display:none"><h2>Conversations</h2><p class="live-note">Inspect a session for its Agent turns and Worker attempts. Inspect the tools used in each session and worker attempt.</p><div id="session-results"></div></div>
   <!-- Knowledge base — a 3D force-directed graph over the shared vault / an agent's memory.
        Zero external deps: the spherical layout + canvas render + rotation are hand-rolled. -->
   <div id="view-kb" class="view" style="display:none;">
@@ -494,7 +494,7 @@ ${dashboardFontLink}</head>
     <div id="dreams-empty" class="dreams-empty" style="display:none;"></div>
   </div><!-- /view-dreams -->
 
-  <div id="error-msg" class="error" style="display:none;" role="status"></div><footer class="footer">Claude Gateway · Admin dashboard</footer></main></div></div>
+  <div id="error-msg" class="error" style="display:none;" role="status"></div><footer class="footer">Claude Gateway · Admin dashboard</footer></main></div></div><div id="dash-drawer-back" class="dash-drawer-back"><section id="dash-drawer" class="dash-drawer" role="dialog" aria-modal="true" aria-label="Recorded session and task details" tabindex="-1"></section></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js"
     integrity="sha384-pELe6ZHtFxFcuYBq3gMkqvmnNIqUWnAYjBG5gThqQQCjWp8PJ/65MLK4lMIfEK1e" crossorigin="anonymous"></script>

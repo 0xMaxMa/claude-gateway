@@ -4,6 +4,7 @@ import { dashboardPresentationClient } from './dashboard-presentation';
 export const dashboardClient = dashboardPresentationClient + dashboardRange.toString()+';'+dashboardSince.toString()+';'+ String.raw`
 let dashboardData = null, dashboardOffset = 0, dashboardBusy = false, dashboardSearch = '', dashboardAgent = '', dashboardScope = '24h';
 const dashboardExpanded=new Map();
+let dashboardFocus=null;
 function dashboardRows() {
   const rows=[];
   (dashboardData?.agents||[]).forEach(a=>(a.sessions||[]).forEach(s=>rows.push({a,s})));
@@ -59,14 +60,17 @@ async function dashDetail(agentId,sessionId,taskId,offset=0){
   const key=[agentId,sessionId,taskId||''].join(':');
   const previous=dashboardExpanded.get(key);if(previous?.pending)return;
   const record={agentId,sessionId,taskId,offset,pending:true,html:previous?.html||'<p>Loading recorded details…</p>'};
-  dashboardExpanded.set(key,record);restoreDashboardDetails();
+  const opening=!dashboardExpanded.size;
+  if(opening)dashboardFocus=document.activeElement;
+  dashboardExpanded.clear();dashboardExpanded.set(key,record);restoreDashboardDetails();
+  if(opening)document.getElementById('dash-drawer').focus();
   try{
     const path=taskId?'/dashboard/task':'/dashboard/session';
     const response=await fetch(apiUrl(path)+'?agentId='+encodeURIComponent(agentId)+'&sessionId='+encodeURIComponent(sessionId)+'&offset='+offset+'&scope='+dashboardScope+(taskId?'&taskId='+encodeURIComponent(taskId):''));
     if(response.status===401){onUnauthorized();return;}
     if(!response.ok)throw Error('Details unavailable (HTTP '+response.status+').');
     const detail=await response.json();if(dashboardExpanded.get(key)!==record)return;
-    let body='<h2>'+dashText(taskId?detail.snapshot.title:'Session details')+'</h2><p class="muted">'+agentBadge(agentId)+' · <span class="session-id">'+dashText(sessionId)+'</span></p><p class="live-note">Recorded snapshot · '+new Date().toLocaleTimeString()+'</p><a class="btn-stream" href="'+escHtml(dashReportUrl(agentId,sessionId))+'" target="_blank" rel="noopener">Open full token report ↗</a>';
+    let body='<h1>'+dashText(taskId?detail.snapshot.title:'Session details')+'</h1><p class="muted">'+agentBadge(agentId)+' · <span class="session-id">'+dashText(sessionId)+'</span></p><p class="live-note">Recorded snapshot · '+new Date().toLocaleTimeString()+'</p><a class="btn-stream" href="'+escHtml(dashReportUrl(agentId,sessionId))+'" target="_blank" rel="noopener">Open full token report ↗</a>';
     if(taskId){
       body+='<h2>Task</h2>'+dashStatus(detail.snapshot.state)+'<pre>'+dashText(detail.snapshot.instructions||'No assignment recorded')+'</pre>';
       if(detail.snapshot.result)body+='<h2>Latest result</h2><pre>'+dashText(detail.snapshot.result.summary||JSON.stringify(detail.snapshot.result,null,2))+'</pre>';
@@ -86,31 +90,36 @@ async function dashDetail(agentId,sessionId,taskId,offset=0){
   }catch(e){if(dashboardExpanded.get(key)===record){record.html='<p>'+dashText(e.message)+'</p>';restoreDashboardDetails();}}finally{record.pending=false;}
 }
 function restoreDashboardDetails(){
- document.querySelectorAll('tr.inline-detail').forEach(row=>row.remove());
- document.querySelectorAll('tr[data-dash-agent]').forEach(row=>{
-  const key=[row.dataset.dashAgent,row.dataset.dashSession,row.dataset.dashTask||''].join(':');
-  const record=dashboardExpanded.get(key);row.setAttribute('aria-expanded',String(Boolean(record)));
-  if(!record)return;
-  const detail=document.createElement('tr');detail.className='inline-detail';
-  detail.dataset.agent=record.agentId;detail.dataset.session=record.sessionId;detail.dataset.task=record.taskId||'';
-  const cell=document.createElement('td');cell.colSpan=row.children.length;cell.innerHTML=record.html;detail.append(cell);row.after(detail);
- });
+ const record=[...dashboardExpanded.values()][0];
+ const back=document.getElementById('dash-drawer-back'),panel=document.getElementById('dash-drawer');
+ back.classList.toggle('open',Boolean(record));document.body.style.overflow=record?'hidden':'';
+ document.querySelectorAll('tr[data-dash-agent]').forEach(row=>row.setAttribute('aria-expanded',String(Boolean(record&&row.dataset.dashAgent===record.agentId&&row.dataset.dashSession===record.sessionId&&(row.dataset.dashTask||'')===(record.taskId||'')))));
+ if(!record){panel.innerHTML='';delete panel.dataset.html;return;}
+ const html='<button data-dash-close aria-label="Close details">Close ×</button>'+record.html;
+ if(panel.dataset.html!==html){
+  const scroll=panel.scrollTop,focused=panel.contains(document.activeElement),closeFocused=document.activeElement?.hasAttribute('data-dash-close');
+  panel.innerHTML=html;panel.dataset.html=html;panel.scrollTop=scroll;
+  if(focused)(closeFocused?panel.querySelector('[data-dash-close]'):panel).focus({preventScroll:true});
+ }
+ panel.dataset.agent=record.agentId;panel.dataset.session=record.sessionId;panel.dataset.task=record.taskId||'';
 }
-function dashClose(){dashboardExpanded.clear();restoreDashboardDetails();}
+function dashClose(){const wasOpen=dashboardExpanded.size;dashboardExpanded.clear();restoreDashboardDetails();if(wasOpen&&dashboardFocus?.isConnected)dashboardFocus.focus({preventScroll:true});}
 document.addEventListener('click',function(e){
-  const open=e.target.closest('[data-dash-agent]');if(open&&!e.target.closest('a,summary,input,select')&&(!e.target.closest('button')||open.tagName==='BUTTON')){const key=[open.dataset.dashAgent,open.dataset.dashSession,open.dataset.dashTask||''].join(':');if(dashboardExpanded.has(key)){dashboardExpanded.delete(key);restoreDashboardDetails();}else dashDetail(open.dataset.dashAgent,open.dataset.dashSession,open.dataset.dashTask);return;}
-  const next=e.target.closest('[data-dash-next]'),prev=e.target.closest('[data-dash-prev]');if(next||prev){dashboardExpanded.clear();dashboardOffset=Math.max(0,dashboardOffset+(next?25:-25));refresh();connectDashboardStream();}
-  const sessionPage=e.target.closest('[data-session-page]');if(sessionPage){const p=e.target.closest('.inline-detail');dashDetail(p.dataset.agent,p.dataset.session,null,Number(sessionPage.dataset.sessionPage));}
-  const older=e.target.closest('[data-attempt-page]');if(older){const p=e.target.closest('.inline-detail');dashDetail(p.dataset.agent,p.dataset.session,p.dataset.task,Number(older.dataset.attemptPage));}
+  const open=e.target.closest('[data-dash-agent]');if(open&&!e.target.closest('a,summary,input,select')&&(!e.target.closest('button')||open.tagName==='BUTTON')){const key=[open.dataset.dashAgent,open.dataset.dashSession,open.dataset.dashTask||''].join(':');if(dashboardExpanded.has(key)){dashClose();}else dashDetail(open.dataset.dashAgent,open.dataset.dashSession,open.dataset.dashTask);return;}
+  if(e.target.closest('[data-dash-close]')||e.target.id==='dash-drawer-back')dashClose();
+  const next=e.target.closest('[data-dash-next]'),prev=e.target.closest('[data-dash-prev]');if(next||prev){dashClose();dashboardOffset=Math.max(0,dashboardOffset+(next?25:-25));refresh();connectDashboardStream();}
+  const sessionPage=e.target.closest('[data-session-page]');if(sessionPage){const p=document.getElementById('dash-drawer');dashDetail(p.dataset.agent,p.dataset.session,null,Number(sessionPage.dataset.sessionPage));}
+  const older=e.target.closest('[data-attempt-page]');if(older){const p=document.getElementById('dash-drawer');dashDetail(p.dataset.agent,p.dataset.session,p.dataset.task,Number(older.dataset.attemptPage));}
   if(e.target.closest('#dash-menu'))document.body.classList.toggle('menuopen');
   if(e.target.closest('.tab')){const view=e.target.closest('.tab').dataset.view;document.querySelector('.dash-filter').hidden=['view-kb','view-system'].includes(view);document.getElementById('dash-search').hidden=view==='view-dreams';document.getElementById('dash-agent-filter').hidden=view==='view-dreams';document.querySelector('.dash-pager').hidden=['view-kb','view-dreams','view-system'].includes(view);document.body.classList.remove('menuopen');document.getElementById('dash-current-view').textContent=e.target.closest('.tab').textContent.trim();if(e.target.closest('.tab').dataset.view==='view-system')refreshProcesses();}
   if(e.target.closest('#dash-theme')){const root=document.documentElement;root.dataset.theme=root.dataset.theme==='dark'?'light':'dark';}
 });
 document.addEventListener('keydown',function(e){
  if(e.key==='Escape'){dashClose();document.body.classList.remove('menuopen');}
+ if(e.key==='Tab'&&document.getElementById('dash-drawer-back').classList.contains('open')){const panel=document.getElementById('dash-drawer'),nodes=[...panel.querySelectorAll('button,a,summary')].filter(n=>n.getClientRects().length);const first=nodes[0],last=nodes[nodes.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===panel)){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}
  if((e.key==='Enter'||e.key===' ')&&e.target.matches('tr[data-dash-agent]')){e.preventDefault();e.target.click();}
 });
-document.getElementById('dash-scope').addEventListener('click',e=>{const button=e.target.closest('[data-range]');if(!button)return;dashboardScope=button.dataset.range;document.querySelectorAll('#dash-scope [data-range]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));dashboardOffset=0;dashboardExpanded.clear();refresh();connectDashboardStream();window.__loadDreams?.(true);});
+document.getElementById('dash-scope').addEventListener('click',e=>{const button=e.target.closest('[data-range]');if(!button)return;dashboardScope=button.dataset.range;document.querySelectorAll('#dash-scope [data-range]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));dashboardOffset=0;dashClose();refresh();connectDashboardStream();window.__loadDreams?.(true);});
 document.getElementById('dash-search').addEventListener('input',e=>{dashboardSearch=e.target.value;if(dashboardData)renderDashboard(dashboardData);});
 document.getElementById('dash-agent-filter').addEventListener('change',e=>{dashboardAgent=e.target.value;if(dashboardData)renderDashboard(dashboardData);});
 
