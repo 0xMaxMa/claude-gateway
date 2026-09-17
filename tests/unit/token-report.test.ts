@@ -122,3 +122,12 @@ test('footprint bar hides empty sections and excludes duplicate parent and raw-f
  const footprint=html.split('<section id="report-footprint">')[1].split('<section id="report-distribution">')[0];
  expect(footprint).toContain('1.50K estimated tokens');expect(footprint).toContain('AGENTS.md');expect(footprint).not.toContain('USER.md');expect(footprint).not.toContain('<table');expect(footprint).not.toContain('source file</');
 });
+
+test('request rows omit repeated tool inventories while the turn retains its measured count', () => {
+ const turn={...report.turns[0],contextTools:['Bash','Read'],requests:Array.from({length:101},(_,i)=>({id:'request-'+i,usage:report.turns[0].usage!,toolSchemas:{messageId:'msg-'+i,requestId:'req-'+i,loaded:['Bash','Read'],deferred:[],source:'cli-request-body' as const}}))};
+ const html=generateTokenReportHtml('agent',{...report,turns:[turn]});
+ expect(html).toContain('Observed model requests: 101');
+ expect(html).toContain('Loaded: 2');
+ const requests=html.split('<div class="request-details">')[1].split('</tbody></table></div>')[0];
+ expect(requests).not.toContain('Loaded');expect(requests).not.toContain('Bash');
+});
