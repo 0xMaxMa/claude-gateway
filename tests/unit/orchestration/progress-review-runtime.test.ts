@@ -22,7 +22,7 @@ test.each([false,true])('internal reviews gate all text and voice (%s), consume 
  createAgentSession:async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter,prompt:string){
    overlays.push(profile.overlay);prompts.push(prompt);
    this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));
-   const review=profile.overlay.includes('This is an internal progress review');
+   const review=prompt.includes('This is an internal progress review');
    const text=review?JSON.stringify(output):'Final result';
    this.emit('output',JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'Draft commentary must not escape an internal review.'}]}}));
    this.emit('output',JSON.stringify({type:'result',result:text}));
@@ -45,6 +45,11 @@ test.each([false,true])('internal reviews gate all text and voice (%s), consume 
    return runtime.send({scope,text:'Internal review',storeUserMessage:false,ingressKey:'notification:'+n.id},{execute:false,writeMemory:false},{timeoutMs:2000,onText:seen});
  };
  expect(await inspect()).toBe('');
+ // The review directive lives in the per-turn prompt, never in the cached system-prompt
+ // overlay: an interleaved report turn must not diverge the shared cache prefix from a
+ // normal turn's (see PR #502 cache-lineage fix).
+ expect(overlays[0]).not.toContain('This is an internal progress review');
+ expect(prompts[0]).toContain('This is an internal progress review');
  expect(seen).not.toHaveBeenCalled();expect(heard).not.toHaveBeenCalled();
  expect(runtime.store.all("SELECT id FROM notifications WHERE status!='handled'")).toHaveLength(0);
  expect(runtime.store.all("SELECT generated_text FROM assistant_responses WHERE generated_text LIKE '%leak%'")).toHaveLength(0);
