@@ -1,7 +1,7 @@
 /** Shared display-only formatting; stored values and identifiers remain unchanged. */
 export function compactNumber(value: unknown): string {
- if(value==null)return 'Unavailable';
- const n=Number(value);if(!Number.isFinite(n))return 'Unavailable';
+ if(value==null)return '—';
+ const n=Number(value);if(!Number.isFinite(n))return '—';
  if(Math.abs(n)>=999995)return (n/1000000).toFixed(2)+'M';
  if(Math.abs(n)>=1000)return (n/1000).toFixed(2)+'K';
  return String(n);
@@ -23,4 +23,10 @@ export function channelBadge(value: string): string {
  const fallback='<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.7" d="M3 4h18v14H3zM8 22h8M12 18v4M3 8h18"/></svg>';
  return '<span class="channel-badge">'+(channelIcons[key]||fallback)+'<span>'+dashboardEscape(label[key]||value||'Unknown')+'</span></span>';
 }
-export const dashboardPresentationClient = compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';';
+export function taskStatusBadge(value: string): string {
+ const state=String(value||'unknown');
+ const colors:Record<string,string>={running:'#1879bf',working:'#267d97',thinking:'#7762bc',completed:'#24834a',succeeded:'#24834a',success:'#24834a',failed:'#c73946',queued:'#a16c11',starting:'#4d63c9',recovering:'#188b80',ended:'#607244',waiting_input:'#ba681c',needs_reconciliation:'#b345a4',cancel_requested:'#8c603c',interrupting:'#9e4d76',interrupted:'#7c6352',cancelled:'#657080',stopped:'#65605a',idle:'#647574',unknown:'#737373'};
+ const color=colors[state]||'#737373';
+ return '<span class="badge status-badge" style="--status-color:'+color+'">'+dashboardEscape(state.replace(/_/g,' ').replace(/^./,c=>c.toUpperCase()))+'</span>';
+}
+export const dashboardPresentationClient = compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';'+taskStatusBadge.toString()+';';

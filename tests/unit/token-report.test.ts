@@ -13,9 +13,9 @@ const report: TokenReportView = {
 test('report separates categories, cache categories and missing inventory without estimating', () => {
   const html = generateTokenReportHtml('agent', report);
   expect(html).toContain('30.0%'); expect(html).toContain('70.0%');
-  expect(html).toContain('Loaded: Unavailable'); expect(html).toContain('Loaded: 2');
-  expect(html).toContain('Used: 1'); expect(html).toContain('Cache reads');
-  expect(html).toContain('5m: Unavailable'); expect(html).toContain('not monetary costs');
+  expect(html).toContain('Loaded: —'); expect(html).toContain('Available (2)');
+  expect(html).toContain('Used: 1'); expect(html).toContain('Cache read');
+  expect(html).toContain('5m: —'); expect(html).toContain('not monetary costs');
 });
 test('stored metadata cannot inject markup or executable scripts', () => {
   const malicious = '<img src=x onerror=alert(1)>';
@@ -28,13 +28,13 @@ test('dashboard inline script stays valid with token/tool details and separate r
     if (match[1].trim()) expect(() => new Function(match[1])).not.toThrow();
   }
   expect(html).toContain('View token report'); expect(html).toContain('target="_blank"');
-  expect(html).toContain('Agent / combined · recorded only');
+  expect(html).toContain('Agent / total · recorded only');
 });
 test('missing usage is unavailable and per-request records remain separate from the turn aggregate', () => {
   const missing = generateTokenReportHtml('agent', { ...report, turns: [{ ...report.turns[0], usage: null }] });
   expect(missing).toContain('No recorded token usage.');
-  expect(missing).toContain('Agent tokens<strong>Unavailable');
-  expect(missing).toContain('Per-request usage: Unavailable');
+  expect(missing).toContain('Agent tokens<strong>—');
+  expect(missing).toContain('Per-request usage: —');
   const measured = generateTokenReportHtml('agent', { ...report, turns: [{ ...report.turns[0], requests: [{ id: 'request-id', usage: report.turns[0].usage! }] }] });
   expect(measured).toContain('Observed model requests: 1'); expect(measured).toContain('request-id');
   expect(measured).toContain('Role: agent');
@@ -48,7 +48,7 @@ test('conversation and assignments preserve full text while escaping all supplie
 });
 test('background reviews are omitted and incomplete request observations remain explicit', () => {
   const html = generateTokenReportHtml('agent', { ...report, backgroundReviews: [{ ts: '2026-09-17', outcome: '<updated>', tokensSpent: 9999, triggerReason: '<reason>' }], turns: [{ ...report.turns[0], requests: [{ id: 'observed-request', usage: { ...report.turns[0].usage!, totalTokens: 2 } }] }] });
-  expect(html).toContain('Combined tokens<strong>100');
+  expect(html).toContain('Total tokens<strong>100');
   expect(html).not.toContain('Background skill learning');
   expect(html).not.toContain('&lt;updated&gt;'); expect(html).not.toContain('&lt;reason&gt;');
   expect(html).toContain('Observed requests do not cover the full turn aggregate');
@@ -59,11 +59,11 @@ test('one measured role never turns another role with unknown usage into zero', 
     totals: {agentTokens: null,workerTokens: 70,totalTokens: 70},
     turns: [{...report.turns[0],usage: null},report.turns[1]],
   });
-  expect(html).toContain('Agent tokens<strong>Unavailable');
+  expect(html).toContain('Agent tokens<strong>—');
   expect(html).toContain('Worker tokens<strong>70');
-  expect(html).toContain('Combined tokens<strong>70');
+  expect(html).toContain('Total tokens<strong>70');
   const onlyAgent = generateTokenReportHtml('agent', {...report,turns:[report.turns[0]]});
-  expect(onlyAgent).toContain('Worker tokens<strong>Unavailable');
+  expect(onlyAgent).toContain('Worker tokens<strong>—');
 });
 
 test('worker rows describe latest-attempt token and inventory scope', () => {
@@ -71,7 +71,7 @@ test('worker rows describe latest-attempt token and inventory scope', () => {
   expect(html).toContain('Latest attempt');
   expect(html).toContain('Latest attempt tools');
   expect(html).toContain("dashCount(s.tokenSummary?.agentTokens)");
-  expect(html).toContain("n == null ? 'Unavailable' : n === 0 ? '0'");
+  expect(html).toContain("n == null ? '—' : n === 0 ? '0'");
 });
 
 test('paginated reports keep whole-session totals and distribution when a role is absent from the page',()=>{
@@ -96,7 +96,7 @@ test('a slow prior-page response cannot replace a newer session page', async()=>
 
 test('report shows readable input previews, voice badges and a scope-preserving pager',()=>{
  const html=generateTokenReportHtml('voice-agent',{...report,since:1,source:'telegram',pagination:{offset:0,limit:1,total:2},turns:[{...report.turns[0],inputTexts:['Please check my task'],inputModalities:['voice_note'],inputSequences:[7]}]});
- expect(html).toContain('Please check my task');expect(html).toContain('Voice message');expect(html).toContain('Input #7');expect(html).toContain('Telegram');expect(html).toContain('scope=current');expect(html).toContain('stacked-distribution');expect(html).toContain('Current gateway run');
+ expect(html).toContain('Please check my task');expect(html).toContain('Voice message');expect(html).toContain('Input #7');expect(html).toContain('Telegram');expect(html).toContain('scope=24h');expect(html).toContain('stacked-distribution');expect(html).toContain('data-range="24h"');
  for(const match of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g))if(match[1].trim())expect(()=>new Function(match[1])).not.toThrow();
 });
 

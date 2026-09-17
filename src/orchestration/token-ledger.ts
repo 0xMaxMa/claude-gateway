@@ -15,6 +15,7 @@ export interface TokenTurn extends ManagedTurnMetrics {
   responseText?: string;
   taskTitle?: string;
   state?: string;
+  failureCode?: string;
 }
 const initialized = new WeakSet<OrchestrationStore>();
 // Dashboard polling never reloads full request arrays or conversation text.
@@ -85,6 +86,11 @@ export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 
           turn.inputSequences = inputs.map(input => Number(input.input_seq));
           turn.responseText = store.all('SELECT generated_text FROM assistant_responses WHERE decision_id=? ORDER BY created_at,id', turn.id).map(response => String(response.generated_text)).join('\n\n');
           turn.state = String(decision.state);
+          if (turn.state === 'failed') {
+            const failure = store.get("SELECT json_extract(payload_json,'$.payload.code') code FROM conversation_events WHERE conversation_id=? AND type='response.error' AND json_extract(payload_json,'$.payload.responseId') IN (SELECT id FROM assistant_responses WHERE decision_id=?) ORDER BY seq DESC LIMIT 1", decision.conversation_id, turn.id);
+            if (typeof failure?.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(failure.code)) turn.failureCode = failure.code;
+          }
+
         }
       } else if (turn.taskId) {
         const task = store.get('SELECT t.snapshot_json FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.id=? AND c.agent_session_id=?', turn.taskId, sessionId);

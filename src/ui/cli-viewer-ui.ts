@@ -316,7 +316,7 @@ export function generateCliViewerPage(opts: CliViewerPageOpts): string {
             list.forEach(function(s){
               var o = document.createElement('option');
               o.value = s.sessionId;
-              o.textContent = (s.source||'session') + ' · ' + s.sessionId.slice(0,8);
+              o.textContent = (s.source||'session') + ' · ' + s.sessionId;
               sel.appendChild(o);
             });
             sel.addEventListener('change', function(){ connect(sel.value); });

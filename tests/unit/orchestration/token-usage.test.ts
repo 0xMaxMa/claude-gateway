@@ -127,3 +127,16 @@ test('report JSON distinguishes missing role usage from measured zero', () => {
     expect(tokenReport(store, 'session').totals).toEqual({agentTokens:0,workerTokens:0,totalTokens:0});
   } finally { store.close(); }
 });
+
+test('failed turn details expose the recorded diagnostic without leaking unrelated session errors',()=>{
+ const store=new OrchestrationStore(':memory:','agent');
+ try{
+  const input=store.acceptInput({scope:{agentId:'agent',agentSessionId:'session',source:'api',accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'},text:'work'});
+  const decisions=new DecisionService(store),decision=decisions.begin(input.conversationId,'owner',[input.inputId]);
+  store.transaction(()=>store.appendEvent(input.conversationId,'response.error',{responseId:decision.responseId,code:'INFERENCE_FAILED'}));
+  decisions.finish(decision,'','failed');
+  recordTokenTurn(store,{id:decision.decisionId,sessionId:'session',role:'agent',category:'report',startedAt:1,toolIds:[],inputTokens:0,totalTokens:0});
+  expect(tokenReport(store,'session').turns[0]).toMatchObject({state:'failed',failureCode:'INFERENCE_FAILED'});
+  expect(tokenReport(store,'other').turns).toEqual([]);
+ }finally{store.close();}
+});

@@ -1,3 +1,4 @@
+import { rangeButtons } from './dashboard-range';
 import { dashboardTheme, dashboardFontLink } from './dashboard-theme';
 import { dashboardClient } from './dashboard-client';
 /**
@@ -406,8 +407,8 @@ export function generateDashboardHtml(): string {
 ${dashboardFontLink}</head>
 <body><div class="layout"><aside class="sidebar"><div class="brand row"><div class="brandmark">✳</div><div>Claude Gateway<small>OPERATIONS CONSOLE</small></div></div><div class="navlabel">WORKSPACE</div><nav class="tabs" aria-label="Main navigation"><button class="tab active" id="tab-overview" data-view="view-overview"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h7v7H3zM14 3h7v4h-7zM14 11h7v10h-7zM3 14h7v7H3z"/></svg>Overview</button><button class="tab " id="tab-sessions" data-view="view-sessions"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11a8 8 0 0 1-8 8H6l-4 3 1-7a8 8 0 1 1 18-4Z"/></svg>Conversations</button><button class="tab " id="tab-tasks" data-view="view-tasks"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5h12M9 12h12M9 19h12M3 5l1 1 2-3M3 12l1 1 2-3M3 19l1 1 2-3"/></svg>Tasks</button><button class="tab " id="tab-usage" data-view="view-usage"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10m8 10V4m8 16v-7"/></svg>Usage & tokens</button><button class="tab " id="tab-kb" data-view="view-kb"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h7v18H4zM14 3h7v18h-7zM7 7h1m9 0h1"/></svg>Knowledge base</button><button class="tab " id="tab-dreams" data-view="view-dreams"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15A9 9 0 0 1 9 4 9 9 0 1 0 20 15Z"/></svg>Nightly dreaming</button><button class="tab " id="tab-system" data-view="view-system"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v6H3zM3 14h18v6H3zM6 7h1M6 17h1"/></svg>System</button></nav><div class="sidebarfoot"><div class="instance">Admin workspace<br><span id="gateway-version"></span></div></div></aside><div class="main"><header class="topbar"><div class="row"><button id="dash-menu" class="mobilemenu" aria-label="Toggle navigation">☰</button><h1 id="dash-current-view">Overview</h1></div><div id="top-right"><span id="refresh-indicator">Connecting…</span><button class="theme-toggle" id="dash-theme" aria-label="Toggle light and dark theme">◐</button><button id="logout-btn">Logout</button></div></header><main class="shell-content"><div class="meta">Uptime: <span id="uptime">—</span> · Started: <span id="started-at">—</span> · Updated: <span id="last-updated">—</span></div>
 <div id="view-overview" class="view"><div class="heading" style="margin-top:24px"><div class="eyebrow">ONE WORKSPACE. EVERY CONVERSATION.</div><h1>Good work, <span class="gradient-title">in motion.</span></h1><p>Your agents, ongoing work, and what needs your attention.</p></div><div class="dash-grid" id="overview-stats"></div><div class="columns"><section class="dash-panel"><h2>Token activity</h2><p class="live-note">Today · UTC · Workers (violet) / Agent (blue)</p><div id="overview-chart"></div><p class="live-note">Recorded token volume, including cache. Not billing cost.</p></section><section class="dash-panel"><h2>Needs your attention</h2><div class="dash-mini-list" id="overview-attention"></div></section></div><section class="dash-panel"><h2>Active & recent work</h2><div id="overview-tasks"></div></section></div>
-<div class="dash-filter"><input id="dash-search" type="search" aria-label="Filter displayed sessions" placeholder="Filter this page by session, chat or model…"><select id="dash-scope" aria-label="Gateway run"><option value="current">Current gateway run</option><option value="all">All history</option></select><select id="dash-agent-filter" aria-label="Filter agent"><option value="">All agents</option></select></div><div class="dash-pager"><span data-dash-page></span><div class="row"><button data-dash-prev disabled>← Previous</button><button data-dash-next disabled>Next →</button></div></div>
-<div id="view-tasks" class="view" style="display:none"><h2>Tasks & workers</h2><p id="tasks-scope" class="live-note"></p><div id="task-results"></div></div><div id="view-usage" class="view" style="display:none"><h2>Usage & tokens</h2><p class="live-note">Session totals include every recorded attempt, including retries. Missing measurements stay unavailable. Open a report for fresh input, cache creation, cache reads, output and per-turn details.</p><div id="usage-results"></div></div>
+<div class="dash-filter"><input id="dash-search" type="search" aria-label="Filter displayed sessions" placeholder="Filter this page by session, chat or model…">${rangeButtons("dash-scope","24h")}<select id="dash-agent-filter" aria-label="Filter agent"><option value="">All agents</option></select></div><div class="dash-pager"><span data-dash-page></span><div class="row"><button data-dash-prev disabled>← Previous</button><button data-dash-next disabled>Next →</button></div></div>
+<div id="view-tasks" class="view" style="display:none"><h2>Tasks & workers</h2><p id="tasks-scope" class="live-note"></p><div id="task-results"></div></div><div id="view-usage" class="view" style="display:none"><h2>Usage & tokens</h2><p class="live-note">Session totals include every recorded attempt, including retries. Missing measurements are shown as —. Open a report for fresh input, cache write, cache read, output and per-turn details.</p><div id="usage-results"></div></div>
   <div id="view-system" class="view" style="display:none">
   <!-- Row: Processes 70% | Agent badges 30% (collapses on narrow screens) -->
   <div class="top-grid">
@@ -493,7 +494,7 @@ ${dashboardFontLink}</head>
     <div id="dreams-empty" class="dreams-empty" style="display:none;"></div>
   </div><!-- /view-dreams -->
 
-  <div id="error-msg" class="error" style="display:none;" role="status"></div><footer class="footer">Claude Gateway · Admin dashboard</footer></main></div></div><div id="dash-drawer-back" class="dash-drawer-back"><section id="dash-drawer" class="dash-drawer" role="dialog" aria-modal="true" aria-label="Recorded session and task details" tabindex="-1"></section></div>
+  <div id="error-msg" class="error" style="display:none;" role="status"></div><footer class="footer">Claude Gateway · Admin dashboard</footer></main></div></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js"
     integrity="sha384-pELe6ZHtFxFcuYBq3gMkqvmnNIqUWnAYjBG5gThqQQCjWp8PJ/65MLK4lMIfEK1e" crossorigin="anonymous"></script>
@@ -881,13 +882,13 @@ ${dashboardFontLink}</head>
     // Full value is kept in the tooltip. 0/unknown renders as a dash.
     function toolInventory(loaded, used) {
       function list(label, names) {
-        return '<details><summary>'+label+': '+(Array.isArray(names) ? compactNumber(names.length) : 'Unavailable')+'</summary><span class="ts">'+(Array.isArray(names) ? escHtml(names.join(', ') || 'None') : 'Not recorded')+'</span></details>';
+        return '<div title="'+(Array.isArray(names)?escHtml(names.join(', ')||'None'):'Not recorded')+'">'+label+': '+(Array.isArray(names)?compactNumber(names.length):'—')+'</div>';
       }
-      return list('Loaded', loaded)+list('Used', used);
+      return '<div title="Actual model-context schema loading is not reported. Available inventory: '+(Array.isArray(loaded)?compactNumber(loaded.length):'—')+'">Loaded: —</div>'+list('Used', used);
     }
 
     function fmtRecordedTokens(n) {
-      return n == null ? 'Unavailable' : n === 0 ? '0' : fmtTokens(n);
+      return n == null ? '—' : n === 0 ? '0' : fmtTokens(n);
     }
 
     function fmtTokens(n) {
@@ -1931,7 +1932,7 @@ ${dashboardFontLink}</head>
       function render(){
         var filter = agentSel ? agentSel.value : '';
         var runs = filter ? allRuns.filter(function(r){ return r.agent === filter; }) : allRuns;
-        runs=runs.filter(function(r){return dashboardScope==='all'||Date.parse(r.iso)>=Date.parse(dashboardData?.startedAt||'');}).sort(function(a,b){return Date.parse(b.iso)-Date.parse(a.iso);});
+        runs=runs.filter(function(r){return Date.parse(r.iso)>=dashboardSince(dashboardScope);}).sort(function(a,b){return Date.parse(b.iso)-Date.parse(a.iso);});
         listEl.textContent = '';
         if (!runs.length){
           emptyEl.textContent = allRuns.length ? 'No dream runs for this agent.' : 'No dream runs yet. The nightly dreaming pass writes here after it first runs (auto or propose mode).';

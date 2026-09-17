@@ -11,6 +11,7 @@ async function refreshReport(){
   if(!response.ok)throw Error('Unavailable');
   var next=new DOMParser().parseFromString(await response.text(),'text/html');
   if(!next.getElementById('report-totals'))throw Error('Unavailable');
+  var expanded=new Set(Array.from(document.querySelectorAll('.turn-row[aria-expanded=true]')).map(function(row){return row.dataset.turnId;}));
   var open=new Set();
   document.querySelectorAll('[data-turn-id]').forEach(function(row){row.querySelectorAll('details').forEach(function(d,i){if(d.open)open.add(row.dataset.turnId+':'+row.className+':'+i);});});
   var scrolls=Array.from(document.querySelectorAll('.table-scroll')).map(function(el){return el.scrollLeft;});
@@ -20,6 +21,7 @@ async function refreshReport(){
   if(body.innerHTML!==freshBody.innerHTML)body.innerHTML=freshBody.innerHTML;
   var pagers=next.querySelectorAll('.report-pager');document.querySelectorAll('.report-pager').forEach(function(el,i){if(pagers[i])el.innerHTML=pagers[i].innerHTML;});
   document.querySelectorAll('[data-turn-id]').forEach(function(row){row.querySelectorAll('details').forEach(function(d,i){d.open=open.has(row.dataset.turnId+':'+row.className+':'+i);});});
+  document.querySelectorAll('.turn-row').forEach(function(row){row.setAttribute('aria-expanded',String(expanded.has(row.dataset.turnId)));});
   filter();document.querySelectorAll('.table-scroll').forEach(function(el,i){el.scrollLeft=scrolls[i]||0;});scrollTo(x,y);
   status.textContent='Live · updated '+new Date().toLocaleTimeString();
  }catch(e){status.textContent='Reconnecting… · data may be outdated';}

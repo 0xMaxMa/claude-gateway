@@ -1,3 +1,4 @@
+import { dashboardRange, dashboardSince } from '../ui/dashboard-range';
 import { DashboardReader } from '../orchestration/dashboard-reader';
 import express, { Request, Response } from 'express';
 import * as http from 'node:http';
@@ -946,10 +947,10 @@ export class GatewayRouter {
         if (!runner) { res.status(404).json({ error: 'Unknown agent' }); return; }
         try {
           const source = runner.getDashboardSource?.();
-          const report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, semanticIntake:source.semanticIntake, sessionId, offset, since:req.query.scope==='all'||(reportPath==='/token-report'&&req.query.scope!=='current')?0:this.startedAt.getTime(), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
+          const report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, semanticIntake:source.semanticIntake, sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h')), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
           if (!report) { res.status(404).json({ error: 'No recorded session token report' }); return; }
           if (reportPath === '/token-report') res.json(report);
-          else res.type('html').send(generateTokenReportHtml(agentId, report));
+          else res.type('html').send(generateTokenReportHtml(agentId, {...report, scope:dashboardRange(req.query.scope)}));
         } catch {
           res.status(500).json({ error: 'Unable to load session token report' });
         }
@@ -963,7 +964,7 @@ export class GatewayRouter {
       if([agentId,sessionId].some(v=>typeof v!=='string'||!v||v.length>256)||!Number.isSafeInteger(offset)||offset<0||offset>1000000){res.status(400).json({error:'Invalid session query'});return;}
       const source=this.agents.get(String(agentId))?.getDashboardSource?.();
       if(!source){res.status(404).json({error:'Unknown agent'});return;}
-      try{const detail=await this.dashboardReader.read('session',source.filename,{sessionId,offset,since:req.query.scope==='all'?0:this.startedAt.getTime(),historyFilename:source.historyFilename});if(!detail){res.status(404).json({error:'Session not found'});return;}res.json(detail);}
+      try{const detail=await this.dashboardReader.read('session',source.filename,{sessionId,offset,since:dashboardSince(req.query.scope),historyFilename:source.historyFilename});if(!detail){res.status(404).json({error:'Session not found'});return;}res.json(detail);}
       catch{res.status(503).json({error:'Dashboard data temporarily unavailable'});}
     });
 
@@ -978,7 +979,7 @@ export class GatewayRouter {
       const source = this.agents.get(String(agentId))?.getDashboardSource?.();
       if (!source) {res.status(404).json({error:'Unknown agent'});return;}
       try {
-        const task = await this.dashboardReader.read('task',source.filename,{sessionId,taskId,offset,since:req.query.scope==='current'?this.startedAt.getTime():0});
+        const task = await this.dashboardReader.read('task',source.filename,{sessionId,taskId,offset,since:dashboardSince(req.query.scope)});
         if (!task) {res.status(404).json({error:'Task not found in this session'});return;}
         res.json(task);
       } catch {res.status(503).json({error:'Dashboard data temporarily unavailable'});}
@@ -1364,7 +1365,7 @@ export class GatewayRouter {
       });
     });
 
-    const dashboardSnapshot = async (offset: number, current = false) => {
+    const dashboardSnapshot = async (offset: number, scope: unknown = 'all') => {
       const uptimeMs = Date.now() - this.startedAt.getTime();
       const agentsStatus = await Promise.all([...this.agents.entries()].map(async ([id, runner]) => {
         const scheduler = this.schedulers.get(id);
@@ -1394,10 +1395,10 @@ export class GatewayRouter {
         // PTY streams are keyed per session, so liveness is per session too.
         const source = runner.getDashboardSource?.();
         const legacySessions = runner.getSessionsSummary();
-        const orchestration = source ? (source.enabled ? await this.dashboardReader.read('summary',source.filename,{...source,offset,since:current?this.startedAt.getTime():0,legacyIds:legacySessions.map(s=>s.sessionId)}) : undefined) : runner.getOrchestrationSummary?.();
+        const orchestration = source ? (source.enabled ? await this.dashboardReader.read('summary',source.filename,{...source,offset,since:dashboardSince(scope),legacyIds:legacySessions.map(s=>s.sessionId)}) : undefined) : runner.getOrchestrationSummary?.();
         const managedSessions = orchestration?.sessions ?? [];
         const managedIds = new Set([...managedSessions.map((s: {sessionId:string}) => s.sessionId),...(orchestration?.managedLegacyIds??[])]);
-        const sessions = [...legacySessions.filter(s => !managedIds.has(s.sessionId)), ...managedSessions].map((s) => ({
+        const sessions = [...legacySessions.filter(s => !managedIds.has(s.sessionId) && (!dashboardSince(scope) || Number((s as any).updatedAt || s.spawnedAt || 0) >= dashboardSince(scope))), ...managedSessions].map((s) => ({
           ...s,
           hasPtyStream: ptyStreamRegistry.hasSockets(s.sessionId),
         }));
@@ -1441,7 +1442,7 @@ export class GatewayRouter {
       res.setHeader('Cache-Control','no-store');
       const offset=Number(req.query.offset??0);
       if(!Number.isSafeInteger(offset)||offset<0||offset>1000000){res.status(400).json({error:'Invalid offset'});return;}
-      try {res.json(await dashboardSnapshot(offset,req.query.scope==='current'));}
+      try {res.json(await dashboardSnapshot(offset,req.query.scope ?? 'all'));}
       catch {res.status(503).json({error:'Dashboard data temporarily unavailable'});}
     });
     this.app.get('/dashboard/events', async (req: Request,res: Response) => {
@@ -1461,7 +1462,7 @@ export class GatewayRouter {
         if(res.writableLength>256*1024){stop();return;}
         busy=true;
         try {
-          const data=await dashboardSnapshot(offset,req.query.scope==='current');
+          const data=await dashboardSnapshot(offset,req.query.scope ?? 'all');
           if(closed)return;
           const payload=JSON.stringify(data),id=crypto.createHash('sha256').update(JSON.stringify({agents:data.agents,watchers:data.watchers,version:data.version})).digest('hex').slice(0,24);
           if(id!==last){res.write('id: '+id+'\nevent: snapshot\ndata: '+payload+'\n\n');last=id;}
