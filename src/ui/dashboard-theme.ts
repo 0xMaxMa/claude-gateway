@@ -387,7 +387,7 @@ tr.session-row:hover td{background:var(--raised)}
 .dash-filter input{flex:1;min-width:160px;max-width:380px}
 .error{background:var(--yellowbg);color:var(--yellow);border-radius:12px;padding:16px}
 .live-note{font-size:11px;color:var(--muted);margin:18px 0}
-.dash-mini-list{display:grid;gap:12px}
+.dash-mini-list{display:grid;gap:12px}.session-task-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px 20px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid var(--line)}.session-task-row:last-child{border-bottom:0}.session-task-title{flex:1 1 260px;min-width:0;overflow-wrap:anywhere;font-size:13px;line-height:1.6;font-weight:500}.session-task-row>.status-badge{flex:0 0 auto;margin-top:1px}.session-tasks .dash-mini-list{gap:0}
 .dash-mini-list button{border-radius:12px;text-align:left;justify-content:space-between;width:100%}
 .top-grid{display:block}
 .top-grid>div{margin-bottom:24px}
