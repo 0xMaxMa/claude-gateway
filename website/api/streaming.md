@@ -84,6 +84,8 @@ closes the stream is a terminator, not an event, and has no fields at all.
 | `result` | `text`, `request_id`, `session_id`, `duration_ms`, `attachments?` | yes | Final aggregated result; `attachments` present only when images were captured |
 | `error` | `message`, `code?` | yes | The turn failed |
 
+Recognized provider quota, billing, rate limit, authentication, and availability failures use a safe, actionable `message`. Unknown failures use `Internal error`.
+
 The stream ends with `data: [DONE]` after `result`.
 
 **Idle streams send a keepalive.** While a turn is working without producing

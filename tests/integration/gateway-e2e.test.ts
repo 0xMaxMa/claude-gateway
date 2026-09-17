@@ -21,7 +21,8 @@ const MOCK_CLAUDE_BIN = path.resolve(__dirname, '../helpers/mock-claude.js');
 
 /** Create a workspace directory with all required .md files. */
 function createTempWorkspace(prefix = 'gw-test-ws-'): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), prefix)), 'agent', 'workspace');
+  fs.mkdirSync(dir, { recursive: true });
   const files: Record<string, string> = {
     'AGENTS.md': '# Agent\nYou are a test assistant.',
     'SOUL.md': '# Soul\nBe helpful.',
@@ -56,7 +57,7 @@ function makeAgentConfig(
 
 function makeGatewayConfig(logDir: string, apiKeys: import('../../src/types').ApiKey[] = []): GatewayConfig {
   return {
-    gateway: { logDir, timezone: 'UTC', ...(apiKeys.length ? { api: { keys: apiKeys } } : {}) },
+    gateway: { logDir, timezone: 'UTC', orchestration: false, ...(apiKeys.length ? { api: { keys: apiKeys } } : {}) },
     agents: [],
   };
 }

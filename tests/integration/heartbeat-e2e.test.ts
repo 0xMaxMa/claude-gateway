@@ -30,7 +30,8 @@ process.env.NODE_ENV = 'test';
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 function createTempWorkspace(prefix = 'hb-ws-'): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), prefix)), 'agent', 'workspace');
+  fs.mkdirSync(dir, { recursive: true });
   const files: Record<string, string> = {
     'AGENTS.md': '# Agent\nYou are a test assistant.',
     'SOUL.md': '# Soul\nBe helpful.',
@@ -67,7 +68,7 @@ function makeAgentConfig(
 
 function makeGatewayConfig(logDir: string): GatewayConfig {
   return {
-    gateway: { logDir, timezone: 'UTC' },
+    gateway: { logDir, timezone: 'UTC', orchestration: false },
     agents: [],
   };
 }

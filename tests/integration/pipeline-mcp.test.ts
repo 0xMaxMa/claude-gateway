@@ -172,7 +172,7 @@ function makeAgentConfig(workspace: string, botToken: string, telegramApiRoot: s
 
 function makeGatewayConfig(logDir: string): GatewayConfig {
   return {
-    gateway: { logDir, timezone: 'UTC' },
+    gateway: { logDir, timezone: 'UTC', orchestration: false },
     agents: [],
   }
 }

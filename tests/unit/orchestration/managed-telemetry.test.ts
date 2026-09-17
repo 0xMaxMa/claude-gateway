@@ -21,6 +21,8 @@ test.each([
   [{ result: 'API Error: 503 Provider capacity is fully in use right now.' }, 'PROVIDER_CAPACITY'],
   [{ errors: ['API Error: 503 Provider capacity is fully in use right now.'] }, 'PROVIDER_CAPACITY'],
   [{ result: 'API Error: 503 Service unavailable' }, 'PROVIDER_UNAVAILABLE'],
+  [{ result: { error: { type: 'rate_limit', message: 'Daily credit limit reached. Resets in 2 hours.' } } }, 'INFERENCE_FAILED'],
+  [{ result: { error: { status: 429 } } }, 'INFERENCE_FAILED'],
   [{ result: 'Other inference failure' }, 'INFERENCE_FAILED'],
 ])('managed turns retain actionable provider error codes: %j', async (body, code) => {
   const p = new EventEmitter() as SessionProcess;
@@ -33,8 +35,59 @@ test.each([
 test('provider messages stay actionable while internal failures and bearer values remain private', () => {
   const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
   expect(inferenceFailureMessage({ code: 'PROVIDER_CAPACITY' })).toContain('503: Provider capacity is fully in use right now');
-  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'API Error: 401 Unauthorized Bearer secret-value' })).toBe('401 Unauthorized Bearer [redacted]');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'API Error: 401 Unauthorized Bearer secret-value' })).toBe('Provider authentication failed. Check your provider credentials.');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'Daily credit limit reached. Resets in 2 hours. Bearer secret-value /internal/path' })).toBe('Provider quota or billing limit reached. Try again after the limit resets in 2 hours.');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'rate_limit: Too many requests. Retry after 45 seconds. sk-secret-value' })).toBe('Provider rate limit reached. Try again in 45 seconds.');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'billing_error: payment required' })).toContain('provider usage or billing');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: '503 Service unavailable at /internal/path' })).toBe('The model provider is temporarily unavailable. Please try again later.');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'request failed with sk-secret-value at /internal/path' })).toBeUndefined();
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'claude-opus: Daily credit limit reached. Resets in 2 hours.' })).toContain('2 hours');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'gpt-5: Daily credit limit reached. Resets in 2 hours.' })).toContain('2 hours');
   expect(inferenceFailureMessage(new Error('internal stack detail'))).toBeUndefined();
+});
+
+test('assistant error type remains actionable when provider omits text', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'assistant', error: 'rate_limit', message: { content: [] } }));
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: 'Inference failed' }));
+  }});
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(inferenceFailureMessage(error)).toBe('Provider rate limit reached. Please try again later.');
+});
+
+test('assistant error without API Error prefix survives a generic terminal result', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text: 'Daily credit limit reached. Resets in 3 hours.' }] } }));
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: 'Inference failed' }));
+  }});
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(error).toMatchObject({ code: 'INFERENCE_FAILED', message: expect.stringContaining('Daily credit limit reached') });
+  expect(inferenceFailureMessage(error)).toBe('Provider quota or billing limit reached. Try again after the limit resets in 3 hours.');
+});
+
+test('structured provider errors retain their message for web and channel presentation', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: { error: { type: 'rate_limit', message: 'Daily credit limit reached. Resets in 20 minutes.' } } }));
+  }});
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(error.message).toContain('Daily credit limit reached');
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  expect(inferenceFailureMessage(error)).toContain('20 minutes');
+});
+
+test.each([[429, 'Provider rate limit reached.'], [401, 'Provider authentication failed.'], [402, 'Provider quota or billing limit reached.']])('structured HTTP %s provider status stays actionable', async (status, message) => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: { error: { status } } }));
+  }});
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(inferenceFailureMessage(error)).toContain(message);
 });
 
 test.each(['final-only','replacement','structured'])('oversized %s result fails before a successful report is published',async kind=>{

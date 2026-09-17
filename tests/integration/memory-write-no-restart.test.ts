@@ -92,7 +92,7 @@ function makeAgentConfig(workspace: string): AgentConfig {
 }
 
 function makeGatewayConfig(): GatewayConfig {
-  return { gateway: { logDir: '/tmp/test-mw-logs', timezone: 'UTC' }, agents: [] };
+  return { gateway: { logDir: '/tmp/test-mw-logs', timezone: 'UTC', orchestration: false }, agents: [] };
 }
 
 async function sendChannelPost(port: number, chatId: string, content: string): Promise<void> {

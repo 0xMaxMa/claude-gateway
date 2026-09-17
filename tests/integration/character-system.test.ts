@@ -61,7 +61,7 @@ function makeAgentConfig(
 function makeGatewayConfig(): GatewayConfig {
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-log-'));
   return {
-    gateway: { logDir, timezone: 'UTC' },
+    gateway: { logDir, timezone: 'UTC', orchestration: false },
     agents: [],
   };
 }

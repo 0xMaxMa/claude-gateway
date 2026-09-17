@@ -170,6 +170,18 @@ const POST_URL = `/api/v1/agents/${AGENT_ID}/messages`;
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('POST /api/v1/agents/:agentId/messages', () => {
+  it('returns safe quota guidance for provider failures and hides unknown details', async () => {
+    const quota = Object.assign(new Error('Daily credit limit reached. Resets in 2 hours. Bearer secret-value /internal/path'), { code: 'INFERENCE_FAILED' });
+    const app = buildApp(async () => { throw quota; });
+    const response = await supertest.default(app).post(POST_URL).set(AUTH).send({ message: 'Hi', chat_id: 'test-chat' });
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({ error: 'Provider quota or billing limit reached. Try again after the limit resets in 2 hours.', code: 'INFERENCE_FAILED' });
+
+    const unknown = buildApp(async () => { throw Object.assign(new Error('private /internal/path sk-secret-value'), { code: 'INFERENCE_FAILED' }); });
+    const hidden = await supertest.default(unknown).post(POST_URL).set(AUTH).send({ message: 'Hi', chat_id: 'test-chat' });
+    expect(hidden.body).toEqual({ error: 'Internal error' });
+  });
+
   it('returns 200 with response on success', async () => {
     const app = buildApp(async () => ({ text: 'Hello!', attachments: [] }));
     const res = await supertest.default(app)
@@ -565,6 +577,14 @@ function collectSSE(
 }
 
 describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
+  it('sends safe quota guidance on an SSE provider failure', async () => {
+    const { app } = buildStreamApp(async () => { throw Object.assign(new Error('Daily credit limit reached. Retry after 45 seconds. sk-secret-value'), { code: 'INFERENCE_FAILED' }); });
+    const { status, data } = await collectSSE(app, { message: 'hi', chat_id: 'test-chat', stream: true });
+    expect(status).toBe(200);
+    expect(data).toContain('Provider quota or billing limit reached. Try again in 45 seconds.');
+    expect(data).not.toContain('sk-secret-value');
+  });
+
   // T1: SSE headers
   it('T1: returns SSE headers when stream=true', async () => {
     const { app } = buildStreamApp(async (_sid, _chatId, _msg, cb) => {
