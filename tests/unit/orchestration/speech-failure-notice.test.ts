@@ -17,7 +17,10 @@ test.each(['telegram', 'discord', 'line', 'slack'] as const)('%s sends one durab
   let store = new OrchestrationStore(database, 'a');
   const agent = { id: 'a', telegram: { botToken: 'fixture' }, discord: { botToken: 'fixture' }, line: { channelAccessToken: 'fixture' }, slack: { botToken: 'fixture' } } as AgentConfig;
   const request = jest.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({ ok: true, id: 'receipt', result: { message_id: 42 } })));
-  const synthesizeFile = jest.fn(async () => { throw dailyQuota(); });
+  const synthesizeFile = jest.fn(async () => {
+    expect(request).toHaveBeenCalledTimes(1); // Text accepted before synthesis starts.
+    throw dailyQuota();
+  });
   const provider = () => ({ synthesizeFile } as unknown as TtsProvider);
   const sender: ChannelSender = (binding, text, id, file, audio, format) => audio
     ? sendChannelSpeech(agent, binding, audio, id, request, provider)
@@ -32,8 +35,7 @@ test.each(['telegram', 'discord', 'line', 'slack'] as const)('%s sends one durab
     store.transaction(() => outbox.enqueueSpeech(receipt.responseId!, input.bindingId, speech));
     decisions.finish(receipt, 'Original answer');
     await outbox.tick();
-    expect(synthesizeFile).not.toHaveBeenCalled();
-    await outbox.tick();
+    expect(synthesizeFile).toHaveBeenCalledTimes(1);
     const failed = store.get("SELECT id FROM deliveries WHERE modality='speech'")!;
     expect(store.get("SELECT last_error FROM outbox WHERE dedup_key=?", `speech:${receipt.responseId}`)?.last_error).toBe('VOICE_PROVIDER_ERROR_HTTP_429_REASON_DAILY_QUOTA');
     expect(request).toHaveBeenCalledTimes(1);

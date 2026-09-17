@@ -624,8 +624,11 @@ export class AgentOrchestrationRuntime {
         return text;
       }
       let intakeChoice: IntakeChoice | undefined, acknowledgement = '', acknowledgementId = '', acknowledgementReady = false;
-      let intakeDeferred = false;
+      let intakeDeferred = false, taskMutationAttempted = false;
+      const attemptedTaskActions = new Set<string>();
+      const taskActionResults = new Map<string, boolean>();
       let acknowledgementInFlight: Promise<unknown> | undefined;
+      let acknowledgementTextIds: string[] = [];
       const newerInputPending = () => !!this.store.get("SELECT id FROM conversation_inputs WHERE conversation_id=? AND principal_id=? AND binding_id=(SELECT binding_id FROM conversation_inputs WHERE id=?) AND status='accepted' AND input_seq>(SELECT input_seq FROM conversation_inputs WHERE id=?)", receipt.conversationId, input.scope.principalId, receipt.inputId, receipt.inputId);
       const intakeContext = { ...capabilities, ...receipt, ...decision, model: options.model ?? this.agent.claude.model, principalId: input.scope.principalId, actionId: `intake:${receipt.inputId}` };
       const deliverAcknowledgement = async (choice: IntakeChoice) => {
@@ -640,39 +643,41 @@ export class AgentOrchestrationRuntime {
         const alreadyPublished = !!acknowledgementId;
         acknowledgement = intakeChoice!.acknowledgement!;
         acknowledgementId = this.decisions.acknowledge(decision, acknowledgement, channelSpeech ? acknowledgement : undefined);
+        // Capture only the original acknowledgement chunks, before asynchronous delivery
+        // can enqueue optional speech-failure notices under the same response.
+        if (!alreadyPublished) acknowledgementTextIds = this.store.all("SELECT id FROM deliveries WHERE response_id=? AND modality='text'", acknowledgementId).map(row => String(row.id));
         await this.flushHistory();
         if (!alreadyPublished) options.onText?.(acknowledgement);
         if (!alreadyPublished) this.publishText(sessionId, acknowledgementId, acknowledgement, true);
         if (!alreadyPublished && speechEnabled && !channelSpeech) {
-          const listener = this.voiceListeners.get(sessionId);
-          if (listener?.principalId === input.scope.principalId) listener.receive({responseId:acknowledgementId,text:acknowledgement,spoken:acknowledgement,requestId:input.requestId,speechOnly:true});
-          else {
-            const stream=this.inputStreams.get(receipt.inputId);
-            stream?.push({responseId:acknowledgementId,text:acknowledgement});stream?.close();
+          try {
+            const listener = this.voiceListeners.get(sessionId);
+            if (listener?.principalId === input.scope.principalId) listener.receive({responseId:acknowledgementId,text:acknowledgement,spoken:acknowledgement,requestId:input.requestId,speechOnly:true});
+            else {
+              const stream=this.inputStreams.get(receipt.inputId);
+              stream?.push({responseId:acknowledgementId,text:acknowledgement});stream?.close();
+            }
+          } catch {
+            this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.speech_failed', { responseId: acknowledgementId, code: 'VOICE_PLAYBACK_UNAVAILABLE' }));
           }
         }
-        await this.delivery.tick();
-        if(this.store.get("SELECT id FROM deliveries WHERE response_id=? AND state='pending'",acknowledgementId)) await this.delivery.tick();
-        let speechState = speechEnabled ? 'pending' : 'not_requested';
-        if (speechEnabled && !channelSpeech) {
-          const until=Date.now()+10000;
-          while(!active.stopping && !this.closing && Date.now()<until) {
-            const playback=this.store.get("SELECT state,audio_progress_json FROM deliveries WHERE response_id=? AND modality='audio' ORDER BY updated_at DESC LIMIT 1",acknowledgementId);
-            const progress=playback?.audio_progress_json ? JSON.parse(String(playback.audio_progress_json)) : {};
-            if (progress.generatedSamples>0 || progress.playedSamples>0) { speechState = 'started'; break; }
-            if (['failed','detached','interrupted'].includes(String(playback?.state))) { speechState = String(playback!.state); break; }
-            await new Promise(resolve=>setTimeout(resolve,25));
+        // Audio is best-effort and stays on the normal delivery/playback path.
+        // Do not await a whole outbox tick: it may be busy synthesizing speech.
+        let deliveryTickFailed = false;
+        void this.delivery.tick().catch(() => {});
+        void this.delivery.tickText().catch(() => { deliveryTickFailed = true; });
+        const until = Date.now() + 10000;
+        while (!active.stopping && !this.closing) {
+          const text = this.store.all("SELECT state FROM deliveries WHERE response_id=? AND modality='text' AND id IN (SELECT value FROM json_each(?))", acknowledgementId, JSON.stringify(acknowledgementTextIds));
+          if ((text.length > 0 || input.scope.source === 'api') && text.every(row => row.state === 'delivered')) break;
+          if (deliveryTickFailed || text.some(row => ['failed','unknown'].includes(String(row.state))) || Date.now() >= until) {
+            throw new OrchestrationError('ACKNOWLEDGEMENT_DELIVERY_PENDING');
           }
-          if(active.stopping || this.closing) throw new OrchestrationError('INTERRUPTED');
-          if(speechState === 'pending') throw new OrchestrationError('VOICE_ACKNOWLEDGEMENT_PENDING');
+          await new Promise(resolve => setTimeout(resolve,25));
         }
-        const deliveries = this.store.all('SELECT modality,state FROM deliveries WHERE response_id=?',acknowledgementId);
-        if (channelSpeech) {
-          const speech = deliveries.find(row => row.modality === 'speech');
-          if (!speech || ['pending','sending'].includes(String(speech.state))) throw new OrchestrationError('VOICE_ACKNOWLEDGEMENT_PENDING');
-          speechState = String(speech.state);
-        }
-        if (deliveries.some(row => row.modality==='text' && row.state!=='delivered')) throw new OrchestrationError('ACKNOWLEDGEMENT_DELIVERY_PENDING');
+        if (active.stopping || this.closing) throw new OrchestrationError('INTERRUPTED');
+        const speech = this.store.get("SELECT state,audio_progress_json FROM deliveries WHERE response_id=? AND modality IN ('speech','audio') ORDER BY updated_at DESC LIMIT 1",acknowledgementId);
+        const speechState = !speechEnabled ? 'not_requested' : speech ? String(speech.state) : 'not_queued';
         acknowledgementReady = true;
         this.store.transaction(() => this.store.appendEvent(receipt.conversationId,'input.acknowledged',{inputId:receipt.inputId,responseId:acknowledgementId,receivedAt:this.store.get('SELECT created_at FROM conversation_inputs WHERE id=?',receipt.inputId)!.created_at,acknowledgedAt:Date.now(),speechState}));
         return {acknowledged:true,responseId:acknowledgementId};
@@ -693,7 +698,10 @@ export class AgentOrchestrationRuntime {
         return readCapabilityPage(await this.capabilityCatalog.snapshot(), this.host.skills?.(), args);
       },
         onIntake: semantic ? acknowledge : undefined,
-        beforeMutation: semantic ? async (tool, args) => {
+        onMutationResult: semantic ? (actionId, committed) => { taskActionResults.set(actionId, committed); } : undefined,
+        beforeMutation: semantic ? async (tool, args, actionId) => {
+          if (actionId) attemptedTaskActions.add(actionId);
+          if (tool === 'task_spawn' || tool === 'task_update') taskMutationAttempted = true;
           // Resolving a pending question is not admission of a new task. A slow or failed
           // acknowledgement must not block saving it; authorization stays in TaskService.
           if (tool !== 'task_answer' && acknowledgementInFlight) await acknowledgementInFlight;
@@ -795,7 +803,23 @@ export class AgentOrchestrationRuntime {
       const response = await turn.result;
       const review = internalReview ? progressReviewResult(response.text, previousReports) : undefined;
       const surfaces = review ?? (speechEnabled ? splitSpeechResponse(response.text) : { display: response.text, spoken: '' });
-      const intakeSilent = semantic && (intakeChoice?.mode==='wait' || intakeDeferred || (acknowledgementId && this.store.get("SELECT action_id FROM task_commands WHERE decision_id=? AND command_type IN ('spawn','update','answer') LIMIT 1",decision.decisionId)));
+      const committedTaskCommand = semantic && taskMutationAttempted && this.store.get(`SELECT tc.action_id FROM task_commands tc JOIN conversation_decisions d ON d.id=tc.decision_id
+        WHERE tc.conversation_id=? AND tc.command_type IN ('spawn','update','answer')
+        AND EXISTS(SELECT 1 FROM json_each(d.input_ids_json) WHERE value=?) LIMIT 1`,receipt.conversationId,receipt.inputId);
+      const failedTaskActions = [...attemptedTaskActions].some(actionId => {
+        const result = taskActionResults.get(actionId);
+        if (result !== undefined) return !result;
+        return !this.store.get('SELECT action_id FROM task_commands WHERE conversation_id=? AND action_id=?', receipt.conversationId, actionId);
+      });
+      const uncommittedDispatch = semantic && taskMutationAttempted && (!committedTaskCommand || failedTaskActions) && !intakeDeferred && !newerInputPending() && !response.interrupted;
+      if (uncommittedDispatch) {
+        // Never turn a rejected tool call into a false promise of background work.
+        surfaces.display = committedTaskCommand
+          ? 'Some task commands were rejected. Other commands succeeded; please check /tasks for the current task status.'
+          : 'The requested task was not started or updated. Please try again.';
+        surfaces.spoken = '';
+      }
+      const intakeSilent = semantic && !uncommittedDispatch && (intakeChoice?.mode==='wait' || intakeDeferred || (acknowledgementId && this.store.get("SELECT action_id FROM task_commands WHERE decision_id=? AND command_type IN ('spawn','update','answer') LIMIT 1",decision.decisionId)));
       if (intakeSilent) {
         // A receipt/preparation turn has not reported older task results. Keep
         // their notifications (and attachments) available to the next report.

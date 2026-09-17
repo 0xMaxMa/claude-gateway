@@ -16,7 +16,7 @@ import type { IntakeChoice } from './conversation-intake';
 import { resolveNamedSkill } from './skills';
 import type { SkillRegistry } from '../skills';
 
-type Scope = { role: 'agent'; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; beforeMutation?: (tool: string, args: Record<string, unknown>) => Promise<void> } |
+type Scope = { role: 'agent'; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; onMutationResult?: (actionId: string, committed: boolean) => void; beforeMutation?: (tool: string, args: Record<string, unknown>, actionId: string) => Promise<void> } |
   { role: 'worker'; attemptId: string; generation: number };
 
 /** Private MCP bridge: host loopback or an app-local Unix socket. No public task API. */
@@ -52,44 +52,51 @@ export class TaskBridge {
         let result: unknown;
         if (scope.role === 'agent') {
           const context: CommandContext = { ...scope.context, actionId: `${scope.context.inputId}:${command.action_id}` };
-          if (['task_spawn','task_update','task_answer'].includes(command.tool)) await scope.beforeMutation?.(command.tool, a);
-          switch (command.tool) {
-            case 'capabilities_list': {
-              this.tasks.store.assertMember(context.conversationId, context.principalId);
-              if (!scope.capabilities) throw new OrchestrationError('CAPABILITY_DISCOVERY_UNAVAILABLE');
-              result = { ...(await scope.capabilities(a) as Record<string, unknown>), executionAllowedForThisTurn: context.execute, memoryWriteAllowedForThisTurn: context.writeMemory }; break;
+          const mutation = ['task_spawn','task_update','task_answer'].includes(command.tool);
+          try {
+            if (mutation) await scope.beforeMutation?.(command.tool, a, context.actionId);
+            switch (command.tool) {
+              case 'capabilities_list': {
+                this.tasks.store.assertMember(context.conversationId, context.principalId);
+                if (!scope.capabilities) throw new OrchestrationError('CAPABILITY_DISCOVERY_UNAVAILABLE');
+                result = { ...(await scope.capabilities(a) as Record<string, unknown>), executionAllowedForThisTurn: context.execute, memoryWriteAllowedForThisTurn: context.writeMemory }; break;
+              }
+              case 'conversation_intake': {
+                if (!scope.onIntake) throw new OrchestrationError('SEMANTIC_INTAKE_DISABLED');
+                result = await scope.onIntake(a); break;
+              }
+              case 'task_spawn': {
+                const skill = resolveNamedSkill(a.skill_name, a.skill_args, this.skills?.());
+                if (a.target_profile === 'skill-worker' && !skill) throw new OrchestrationError('UNKNOWN_SKILL');
+                if (a.target_profile !== 'skill-worker' && (a.skill_name !== undefined || a.skill_args !== undefined)) throw new OrchestrationError('INVALID_INPUT');
+                const spoken = typeof a.spoken_acknowledgement === 'string' ? a.spoken_acknowledgement.trim() : '';
+                if (scope.onTaskQueued && (!spoken || spoken.length > 600 || spoken.includes('```'))) throw new OrchestrationError('VOICE_ACKNOWLEDGEMENT_REQUIRED');
+                await this.tasks.validateSpawnProfile(context, a.target_profile);
+                // Profile resolution may yield while another input arrives. Recheck
+                // readiness immediately before the synchronous task transaction.
+                await scope.beforeMutation?.(command.tool, a, context.actionId);
+                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, targetProfile: a.target_profile, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
+                scope.onTaskQueued?.(spoken);
+                const { skill: _workerOnly, ...receipt } = task;
+                result = receipt;
+                break;
+              }
+              case 'task_status': result = a.task_id
+                ? this.tasks.status(context.conversationId, context.principalId, a.task_id)
+                : this.tasks.context(context.conversationId, context.principalId, context.decisionId); break;
+              case 'task_cancel': result = this.tasks.cancel(context, a.task_id, a.replaced_by_task_id); break;
+              case 'task_update': result = this.tasks.update(context, a.task_id, a.expected_revision, a.instruction, a.mode as ChangeMode); break;
+              case 'task_question': {
+                if (!scope.onQuestion) throw new OrchestrationError('QUESTION_CONTROLS_UNAVAILABLE');
+                result = scope.onQuestion(context, a); break;
+              }
+              case 'task_answer': result = this.tasks.answer(context, a.task_id, a.question_id, a.answer); break;
+              default: throw new OrchestrationError('TOOL_DENIED');
             }
-            case 'conversation_intake': {
-              if (!scope.onIntake) throw new OrchestrationError('SEMANTIC_INTAKE_DISABLED');
-              result = await scope.onIntake(a); break;
-            }
-            case 'task_spawn': {
-              const skill = resolveNamedSkill(a.skill_name, a.skill_args, this.skills?.());
-              if (a.target_profile === 'skill-worker' && !skill) throw new OrchestrationError('UNKNOWN_SKILL');
-              if (a.target_profile !== 'skill-worker' && (a.skill_name !== undefined || a.skill_args !== undefined)) throw new OrchestrationError('INVALID_INPUT');
-              const spoken = typeof a.spoken_acknowledgement === 'string' ? a.spoken_acknowledgement.trim() : '';
-              if (scope.onTaskQueued && (!spoken || spoken.length > 600 || spoken.includes('```'))) throw new OrchestrationError('VOICE_ACKNOWLEDGEMENT_REQUIRED');
-              await this.tasks.validateSpawnProfile(context, a.target_profile);
-              // Profile resolution may yield while another input arrives. Recheck
-              // readiness immediately before the synchronous task transaction.
-              await scope.beforeMutation?.(command.tool, a);
-              const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, targetProfile: a.target_profile, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
-              scope.onTaskQueued?.(spoken);
-              const { skill: _workerOnly, ...receipt } = task;
-              result = receipt;
-              break;
-            }
-            case 'task_status': result = a.task_id
-              ? this.tasks.status(context.conversationId, context.principalId, a.task_id)
-              : this.tasks.context(context.conversationId, context.principalId, context.decisionId); break;
-            case 'task_cancel': result = this.tasks.cancel(context, a.task_id, a.replaced_by_task_id); break;
-            case 'task_update': result = this.tasks.update(context, a.task_id, a.expected_revision, a.instruction, a.mode as ChangeMode); break;
-            case 'task_question': {
-              if (!scope.onQuestion) throw new OrchestrationError('QUESTION_CONTROLS_UNAVAILABLE');
-              result = scope.onQuestion(context, a); break;
-            }
-            case 'task_answer': result = this.tasks.answer(context, a.task_id, a.question_id, a.answer); break;
-            default: throw new OrchestrationError('TOOL_DENIED');
+            if (mutation) scope.onMutationResult?.(context.actionId, true);
+          } catch (error) {
+            if (mutation) scope.onMutationResult?.(context.actionId, false);
+            throw error;
           }
         } else {
           if (command.tool === 'task_checkpoint') result = this.tasks.checkpoint(scope.attemptId, scope.generation, a);

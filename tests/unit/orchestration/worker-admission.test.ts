@@ -20,7 +20,9 @@ import { TaskBridge } from '../../../src/orchestration/bridge';
     const attempt = tasks.claim(prior.taskId)!;
     tasks.finish(attempt.attemptId,attempt.generation,{type:'failed',failure:{code:'GATEWAY_SHUTDOWN',message:'Interrupted',observedAt:Date.now()}});
     await bridge.start();
-    bridge.issue({role:'agent',context}, join(root,'ticket'), root);
+    const beforeMutation = jest.fn(async () => {});
+    const onMutationResult = jest.fn();
+    bridge.issue({role:'agent',context,beforeMutation,onMutationResult}, join(root,'ticket'), root);
     const ticket = JSON.parse(readFileSync(join(root,'ticket/ticket.json'),'utf8'));
     const call = async (profile: string) => {
       const response = await fetch(ticket.url, {method:'POST',headers:{Authorization:`Bearer ${ticket.token}`,'Content-Type':'application/json'},body:JSON.stringify({tool:'task_spawn',action_id:profile,args:{title:'Check PR',instructions:'Check current state before any merge',target_profile:profile,continue_task_id:prior.taskId}})});
@@ -28,11 +30,14 @@ import { TaskBridge } from '../../../src/orchestration/bridge';
     };
     const rejected = await call('default-worker');
     expect(rejected.status).toBe(400);
+    expect(onMutationResult).toHaveBeenCalledWith(`${input.inputId}:default-worker`, false);
     expect(rejected.body).toMatchObject({error:'WORKER_GIT_PROJECT_REQUIRED',retryable:true});
     expect(rejected.body.message).toContain('media-worker');
     expect(store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(1);
     const accepted = await call('media-worker');
     expect(accepted.status).toBe(200);
+    expect(onMutationResult).toHaveBeenCalledWith(`${input.inputId}:media-worker`, true);
+    expect(beforeMutation).toHaveBeenCalledWith('task_spawn', expect.objectContaining({target_profile:'media-worker'}), `${input.inputId}:media-worker`);
     expect(accepted.body).toMatchObject({state:'queued',continueTaskId:prior.taskId,workstreamId:prior.workstreamId,resourceProfile:{mode:'isolated-worktree',projectRoot:root}});
     const again = await call('media-worker');
     expect(again.body.taskId).toBe(accepted.body.taskId);
@@ -70,5 +75,30 @@ test('default worker accepts non-Git work through MCP without project config, pr
     expect(second).toMatchObject({state:'queued',continueTaskId:first.taskId,workstreamId:first.workstreamId});
     expect((await call('followup',first.taskId)).taskId).toBe(second.taskId);
     expect(tasks.claim(second.taskId)!.workerId).toBe(attempt.workerId);
+  } finally { await bridge.close(); store.close(); rmSync(root,{recursive:true,force:true}); }
+});
+
+test('bridge confirms recovered receipts without requiring a new command row', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'recovered-admission-'));
+  const store = new OrchestrationStore(':memory:', 'a');
+  const tasks = new TaskService(store, undefined, root), bridge = new TaskBridge(tasks);
+  try {
+    const input = store.acceptInput({scope:{agentId:'a',agentSessionId:'s',source:'api',accountId:'u',principalId:'u',chatId:'c',threadKey:''},text:'Prepare a list'});
+    const decisions = new DecisionService(store);
+    const original = decisions.begin(input.conversationId,'u',[input.inputId]);
+    const task = tasks.spawn({...input,...original,principalId:'u',execute:true,writeMemory:false,actionId:'original'}, {title:'List',instructions:'Write a list',targetProfile:'default-worker'});
+    decisions.interrupt(original);
+    decisions.releaseInterrupted(original,false);
+    const recovered = decisions.begin(input.conversationId,'u',[input.inputId]);
+    const onMutationResult = jest.fn();
+    await bridge.start();
+    bridge.issue({role:'agent',context:{...input,...recovered,principalId:'u',execute:true,writeMemory:false},onMutationResult},join(root,'ticket'),root);
+    const ticket = JSON.parse(readFileSync(join(root,'ticket/ticket.json'),'utf8'));
+    const response = await fetch(ticket.url,{method:'POST',headers:{Authorization:`Bearer ${ticket.token}`,'Content-Type':'application/json'},body:JSON.stringify({tool:'task_spawn',action_id:'retry',args:{title:'List',instructions:'Write a list',target_profile:'default-worker'}})});
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({taskId:task.taskId});
+    expect(onMutationResult).toHaveBeenCalledWith(`${input.inputId}:retry`,true);
+    expect(store.get('SELECT action_id FROM task_commands WHERE action_id=?',`${input.inputId}:retry`)).toBeUndefined();
+    expect(store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(1);
   } finally { await bridge.close(); store.close(); rmSync(root,{recursive:true,force:true}); }
 });
