@@ -413,5 +413,45 @@ tr.session-row:hover td{background:var(--raised)}
 }
 
 
+/* Shared operational components: bounded columns and theme-aware legacy panels. */
+[hidden]{display:none!important}
+.identity-badge{display:inline-flex;align-items:center;max-width:100%;padding:4px 9px;border-radius:7px;font-size:11px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:hsl(var(--agent-hue) 60% 94%);color:hsl(var(--agent-hue) 55% 30%);border:1px solid hsl(var(--agent-hue) 45% 85%)}
+[data-theme=dark] .identity-badge{background:hsl(var(--agent-hue) 30% 21%);color:hsl(var(--agent-hue) 65% 80%);border-color:hsl(var(--agent-hue) 30% 35%)}
+.channel-badge{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);white-space:nowrap;margin-top:6px}
+.channel-badge svg{width:14px;height:14px;flex:none;fill:currentColor}
+.table-wrap,.table-scroll{width:100%;max-width:100%;overflow:auto;overscroll-behavior-x:contain;scrollbar-gutter:stable}
+.data-table{table-layout:fixed;width:100%;white-space:normal}
+.data-table td,.data-table th{padding:14px 16px;vertical-align:top;word-break:normal;overflow-wrap:break-word;font-size:12px}
+.data-table th{font-size:10px;white-space:normal}
+.data-table .btn-stream{font-size:11px;white-space:nowrap;padding:7px 10px}
+.data-table .dash-task-title{white-space:normal;text-align:left;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;border:0;background:none;padding:0;font-size:12px;line-height:1.6;border-radius:0;margin-bottom:8px}
+.cell-clip{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.short-id{font:11px ui-monospace,monospace;white-space:nowrap;color:var(--muted)}
+.data-table .session-id{word-break:normal;overflow-wrap:normal;font-family:inherit}
+.data-table .ts{font-size:10px;line-height:1.6;color:var(--muted)}
+.data-table td{font-variant-numeric:tabular-nums}
+.dash-tools details{font-size:11px}.dash-tools details[open]{max-width:100%}
+.dash-tools .ts{white-space:normal;overflow-wrap:anywhere}
+.kb-toolbar,.dream-run,.dream-prop,.proc-tree{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:16px}
+.kb-toolbar{gap:14px;align-items:center;flex-wrap:wrap}
+.kb-toolbar button,.kb-zoom button,.dream-accept-btn,.dream-accept-all,#kb-source,#kb-demo-size,#kb-search,#dreams-agent{font:inherit;font-size:12px;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 12px;min-height:38px}
+.kb-toolbar button:hover,.kb-zoom button:hover,.dream-accept-btn:hover{background:var(--raised);border-color:var(--accent)}
+.kb-stage{background:var(--raised);border-color:var(--line);border-radius:16px}
+.dream-run-head .agent,.dream-prop .file,.proc-tree .proc-orchestrator,.proc-tree .proc-mcp{color:var(--accent)}
+.dream-run-head .when,.dream-meta,.dreams-empty,.dream-prop .score,.dream-prop .reason,.proc-tree .proc-label,#kb-search-count{color:var(--muted)}
+.dream-summary,.dream-prop .content,.dream-prop .anchor{color:var(--text);background:var(--raised)}
+.dream-badge.auto,.dream-badge.propose,.dream-badge.outcome{background:var(--raised);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:3px 8px}
+.proc-tree .proc-summary,.proc-tree .proc-claude{color:var(--text)}
+.proc-tree .proc-pty,.proc-tree .proc-receiver{color:var(--green)}
+.proc-tree .proc-orphan{color:var(--red)}
+#view-system h2{color:var(--text)}
+.proc-tree{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.8}
+.dream-run-head{gap:10px}.dream-run-head .when{font:11px inherit;margin-left:auto}
+
+.dream-prop .op.add,.prop-status.applied,.prop-status.applied-auto{color:var(--green)}
+.dream-prop .op.replace,.dream-prop .anchor,.prop-status.pending{color:var(--accent)}
+.dream-prop .op.remove,.prop-status.failed{color:var(--red)}
+.dream-accept-all:hover{background:var(--raised)}
+.kb-note,.kb-note-head,.kb-note-body{background:var(--panel);color:var(--text);border-color:var(--line)}
 `;
 export const dashboardFontLink = "<script>(function(){var i=location.pathname.lastIndexOf('/dashboard');if(i<0)return;var l=document.createElement('link');l.rel='stylesheet';l.href=location.pathname.slice(0,i)+'/dashboard/fonts.css';document.head.appendChild(l);})();</script>";

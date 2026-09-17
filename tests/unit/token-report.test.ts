@@ -46,12 +46,11 @@ test('conversation and assignments preserve full text while escaping all supplie
   expect(html).toContain('&lt;b&gt;Assignment&lt;/b&gt;'); expect(html).toContain('END-OF-RESULT');
   expect(html).not.toContain('<script>bad()'); expect(html).toContain('&lt;img onerror=x&gt;');
 });
-test('background reviews stay separately labelled and incomplete request observations are explicit', () => {
+test('background reviews are omitted and incomplete request observations remain explicit', () => {
   const html = generateTokenReportHtml('agent', { ...report, backgroundReviews: [{ ts: '2026-09-17', outcome: '<updated>', tokensSpent: 9999, triggerReason: '<reason>' }], turns: [{ ...report.turns[0], requests: [{ id: 'observed-request', usage: { ...report.turns[0].usage!, totalTokens: 2 } }] }] });
   expect(html).toContain('Combined tokens<strong>100');
-  expect(html).toContain('Excluded from agent + worker totals');
-  expect(html).toContain('Historical cache accounting may be incomplete');
-  expect(html).toContain('&lt;updated&gt;'); expect(html).toContain('&lt;reason&gt;');
+  expect(html).not.toContain('Background skill learning');
+  expect(html).not.toContain('&lt;updated&gt;'); expect(html).not.toContain('&lt;reason&gt;');
   expect(html).toContain('Observed requests do not cover the full turn aggregate');
 });
 
@@ -86,11 +85,17 @@ test('a slow prior-page response cannot replace a newer session page', async()=>
  const end=html.indexOf('// ── Process Tree',start);
  let complete!: (value:unknown)=>void;
  const apply=jest.fn();
- const context:any={dashboardBusy:false,dashboardOffset:0,document:{hidden:false,getElementById:()=>({textContent:'',style:{}})},apiUrl:(p:string)=>p,
+ const context:any={dashboardBusy:false,dashboardOffset:0,dashboardScope:"current",document:{hidden:false,getElementById:()=>({textContent:'',style:{}})},apiUrl:(p:string)=>p,
   fetch:()=>new Promise(resolve=>{complete=resolve;}),applyDashboardSnapshot:apply,onUnauthorized:jest.fn()};
  const pending=runInNewContext(html.slice(start,end)+';refresh()',context);
  context.dashboardOffset=25;
  complete({ok:true,status:200,json:async()=>({agents:[]})});
  await pending;
  expect(apply).not.toHaveBeenCalled();expect(context.dashboardBusy).toBe(false);
+});
+
+test('report shows readable input previews, voice badges and a scope-preserving pager',()=>{
+ const html=generateTokenReportHtml('voice-agent',{...report,since:1,source:'telegram',pagination:{offset:0,limit:1,total:2},turns:[{...report.turns[0],inputTexts:['Please check my task'],inputModalities:['voice_note'],inputSequences:[7]}]});
+ expect(html).toContain('Please check my task');expect(html).toContain('Voice message');expect(html).toContain('Input #7');expect(html).toContain('Telegram');expect(html).toContain('scope=current');expect(html).toContain('stacked-distribution');expect(html).toContain('Current gateway run');
+ for(const match of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g))if(match[1].trim())expect(()=>new Function(match[1])).not.toThrow();
 });

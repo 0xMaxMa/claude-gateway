@@ -10,6 +10,8 @@ export interface TokenTurn extends ManagedTurnMetrics {
   taskId?: string;
   taskRevision?: number;
   inputTexts?: string[];
+  inputModalities?: string[];
+  inputSequences?: number[];
   responseText?: string;
   taskTitle?: string;
   state?: string;
@@ -67,15 +69,20 @@ export function tokenReport(store: OrchestrationStore, sessionId: string, includ
   ensure(store);
   return readTokenReport(store, sessionId, includeDetails);
 }
-export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 'attempt'>, sessionId: string, includeDetails = true, page?: {offset: number; limit: number}) {
-  const turns = store.all('SELECT payload_json FROM token_turns WHERE session_id=? ORDER BY started_at,id LIMIT ? OFFSET ?', sessionId, page?.limit ?? -1, page?.offset ?? 0)
+export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 'attempt'>, sessionId: string, includeDetails = true, page?: {offset: number; limit: number; since?: number; newestFirst?: boolean}) {
+  const since = page?.since ?? 0;
+  const order = page?.newestFirst ? 'DESC' : 'ASC';
+  const turns = store.all(`SELECT payload_json FROM token_turns WHERE session_id=? AND started_at>=? ORDER BY started_at ${order},id ${order} LIMIT ? OFFSET ?`, sessionId, since, page?.limit ?? -1, page?.offset ?? 0)
     .map(row => {
       const turn = JSON.parse(String(row.payload_json)) as TokenTurn;
       if (!includeDetails) return turn;
       if (turn.role === 'agent') {
         const decision = store.get('SELECT d.* FROM conversation_decisions d JOIN conversations c ON c.id=d.conversation_id WHERE d.id=? AND c.agent_session_id=?', turn.id, sessionId);
         if (decision) {
-          turn.inputTexts = store.all('SELECT text FROM conversation_inputs WHERE conversation_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY input_seq', decision.conversation_id, decision.input_ids_json).map(input => String(input.text));
+          const inputs = store.all('SELECT text,modality,input_seq FROM conversation_inputs WHERE conversation_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY input_seq', decision.conversation_id, decision.input_ids_json);
+          turn.inputTexts = inputs.map(input => String(input.text));
+          turn.inputModalities = inputs.map(input => String(input.modality));
+          turn.inputSequences = inputs.map(input => Number(input.input_seq));
           turn.responseText = store.all('SELECT generated_text FROM assistant_responses WHERE decision_id=? ORDER BY created_at,id', turn.id).map(response => String(response.generated_text)).join('\n\n');
           turn.state = String(decision.state);
         }
@@ -103,13 +110,13 @@ export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 
       }
       return turn;
     });
-  const totalsByRole = store.all(`SELECT role, SUM(json_extract(payload_json,'$.usage.totalTokens')) total FROM token_turns WHERE session_id=? GROUP BY role`,sessionId);
+  const totalsByRole = store.all(`SELECT role, SUM(json_extract(payload_json,'$.usage.totalTokens')) total FROM token_turns WHERE session_id=? AND started_at>=? GROUP BY role`,sessionId,since);
   const agentTokens = totalsByRole.find(row=>row.role==='agent')?.total ?? null;
   const workerTokens = totalsByRole.find(row=>row.role==='worker')?.total ?? null;
   const totalTokens = agentTokens === null && workerTokens === null ? null : Number(agentTokens??0)+Number(workerTokens??0);
-  const distribution = store.all(`SELECT json_extract(payload_json,'$.category') category, SUM(json_extract(payload_json,'$.usage.totalTokens')) tokens FROM token_turns WHERE session_id=? AND json_type(payload_json,'$.usage')='object' GROUP BY category`,sessionId).map(r=>({category:String(r.category),tokens:Number(r.tokens??0)}));
+  const distribution = store.all(`SELECT json_extract(payload_json,'$.category') category, SUM(json_extract(payload_json,'$.usage.totalTokens')) tokens FROM token_turns WHERE session_id=? AND started_at>=? AND json_type(payload_json,'$.usage')='object' GROUP BY category`,sessionId,since).map(r=>({category:String(r.category),tokens:Number(r.tokens??0)}));
   return { sessionId, turns, totals: {agentTokens:agentTokens===null?null:Number(agentTokens),workerTokens:workerTokens===null?null:Number(workerTokens),totalTokens}, distribution,
-    pagination: page ? {...page,total:Number(store.get('SELECT COUNT(*) n FROM token_turns WHERE session_id=?',sessionId)!.n)} : undefined,
+    pagination: page ? {...page,total:Number(store.get('SELECT COUNT(*) n FROM token_turns WHERE session_id=? AND started_at>=?',sessionId,since)!.n)} : undefined,
     coverage: 'recorded-turns-only' as const };
 }
 export function summarizeTokenTurns(turns: TokenTurn[]) {

@@ -33,7 +33,11 @@ test('isolated reader preserves historical sessions, exact attempt totals, owner
   expect(await reader.read('task',file,{taskId:task.taskId,sessionId:'wrong'})).toBeUndefined();
   const detail=await reader.read('task',file,{taskId:task.taskId,sessionId:'session'});
   expect(detail.attempts[0].attemptId).toBe(attempt.attemptId);expect(detail.snapshot.result.summary).toBe('result');
-  const report=await reader.read('report',file,{sessionId:'session'});expect(report.totals.totalTokens).toBe(40);expect(report.turns[1].responseText).toBe('result');
+  const report=await reader.read('report',file,{sessionId:'session'});expect(report.totals.totalTokens).toBe(40);expect(report.turns.find((t:any)=>t.id===attempt.attemptId).responseText).toBe('result');
+  const current=await reader.read('report',file,{sessionId:'session',since:2});
+  expect(current.turns.map((t:any)=>t.id)).toEqual([attempt.attemptId]);expect(current.totals.totalTokens).toBe(30);expect(current.pagination.total).toBe(1);
+  expect(report.turns[0].id).toBe(attempt.attemptId);
+  const future=await reader.read('summary',file,{since:Date.now()+1000});expect(future.sessions).toHaveLength(0);expect(future.pagination.total).toBe(0);expect(future.counts.tasks).toEqual([]);
   expect(await reader.read('report',file,{sessionId:'missing'})).toBeUndefined();
   expect(store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(1);
   // Existing ledgers remain readable before projection initialization, and a

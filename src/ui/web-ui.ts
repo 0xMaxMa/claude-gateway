@@ -339,74 +339,74 @@ export function generateDashboardHtml(): string {
     .dream-accept-all:disabled { opacity: 0.55; cursor: default; }
     /* Note detail — full-width card below the graph. Shows the whole file. */
     .kb-note {
-      margin-top: 12px; background: #131a2b; border: 1px solid #2d3748; border-radius: 8px;
-      padding: 16px 18px; font-size: 0.85rem; color: #cbd5e0;
+      margin-top: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+      padding: 16px 18px; font-size: 0.85rem; color: var(--text);
     }
     .kb-note-head { display: flex; align-items: flex-start; gap: 10px; }
-    .kb-note-head h3 { margin: 0; font-size: 1.02rem; color: #e2e8f0; flex: 1; word-break: break-word; }
+    .kb-note-head h3 { margin: 0; font-size: 1.02rem; color: var(--text); flex: 1; word-break: break-word; }
     .kb-note-close {
-      cursor: pointer; color: #718096; background: #1a202c; border: 1px solid #2d3748;
+      cursor: pointer; color: var(--muted); background: var(--panel); border: 1px solid var(--line);
       border-radius: 4px; padding: 1px 8px; font-size: 0.9rem; line-height: 1.4;
     }
-    .kb-note-close:hover { color: #e2e8f0; background: #2d3748; }
+    .kb-note-close:hover { color: var(--text); background: var(--line); }
     /* Metadata chips row. */
     .kb-note-meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
     .kb-note-chip {
-      display: inline-flex; align-items: center; gap: 5px; background: #0e1420;
-      border: 1px solid #1e2740; border-radius: 999px; padding: 2px 10px; font-size: 0.72rem; color: #a0aec0;
+      display: inline-flex; align-items: center; gap: 5px; background: var(--raised);
+      border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 0.72rem; color: var(--muted);
     }
-    .kb-note-chip b { color: #cbd5e0; font-weight: 600; }
+    .kb-note-chip b { color: var(--text); font-weight: 600; }
     .kb-note-chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
     /* File path line under the chips — full width, monospace, wraps on long paths. */
     .kb-note-path {
       margin: 6px 0 2px; font-size: 0.72rem; font-family: ui-monospace, monospace;
-      color: #718096; word-break: break-all;
+      color: var(--muted); word-break: break-all;
     }
-    .kb-note-path b { color: #a0aec0; font-weight: 600; }
+    .kb-note-path b { color: var(--muted); font-weight: 600; }
     /* Rendered Markdown body. */
     .kb-md {
-      margin-top: 12px; padding-top: 12px; border-top: 1px solid #222c40;
-      line-height: 1.62; color: #cbd5e0; word-break: break-word;
+      margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line);
+      line-height: 1.62; color: var(--text); word-break: break-word;
     }
     .kb-md > :first-child { margin-top: 0; }
-    .kb-md h1, .kb-md h2, .kb-md h3, .kb-md h4 { color: #e2e8f0; line-height: 1.3; margin: 18px 0 8px; }
-    .kb-md h1 { font-size: 1.25rem; border-bottom: 1px solid #222c40; padding-bottom: 5px; }
-    .kb-md h2 { font-size: 1.1rem; border-bottom: 1px solid #1e2740; padding-bottom: 4px; }
-    .kb-md h3 { font-size: 1rem; } .kb-md h4 { font-size: 0.9rem; color: #a0aec0; }
+    .kb-md h1, .kb-md h2, .kb-md h3, .kb-md h4 { color: var(--text); line-height: 1.3; margin: 18px 0 8px; }
+    .kb-md h1 { font-size: 1.25rem; border-bottom: 1px solid var(--line); padding-bottom: 5px; }
+    .kb-md h2 { font-size: 1.1rem; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+    .kb-md h3 { font-size: 1rem; } .kb-md h4 { font-size: 0.9rem; color: var(--muted); }
     .kb-md p { margin: 8px 0; }
     .kb-md ul, .kb-md ol { margin: 8px 0; padding-left: 22px; }
     .kb-md li { margin: 3px 0; }
-    .kb-md a { color: #63b3ed; text-decoration: none; } .kb-md a:hover { text-decoration: underline; }
+    .kb-md a { color: var(--accent); text-decoration: none; } .kb-md a:hover { text-decoration: underline; }
     .kb-md code {
-      background: #0d1117; border: 1px solid #1e2740; border-radius: 4px;
-      padding: 1px 5px; font-size: 0.82em; font-family: ui-monospace, monospace; color: #e2e8f0;
+      background: var(--raised); border: 1px solid var(--line); border-radius: 4px;
+      padding: 1px 5px; font-size: 0.82em; font-family: ui-monospace, monospace; color: var(--text);
     }
     .kb-md pre {
-      background: #0a0e17; border: 1px solid #1e2740; border-radius: 6px; padding: 10px 12px;
+      background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px;
       overflow-x: auto; margin: 10px 0;
     }
     .kb-md pre code { background: none; border: none; padding: 0; font-size: 0.8rem; line-height: 1.5; }
     .kb-md blockquote {
-      margin: 10px 0; padding: 2px 14px; border-left: 3px solid #2d3748; color: #a0aec0;
+      margin: 10px 0; padding: 2px 14px; border-left: 3px solid var(--line); color: var(--muted);
     }
-    .kb-md hr { border: none; border-top: 1px solid #222c40; margin: 14px 0; }
-    .kb-md strong { color: #e2e8f0; } .kb-md table { border-collapse: collapse; margin: 0; width: 100%; font-size: 0.82rem; }
-    .kb-md th, .kb-md td { border: 1px solid #222c40; padding: 5px 10px; text-align: left; }
-    .kb-md th { background: #0e1420; color: #e2e8f0; font-weight: 600; }
-    .kb-md tbody tr:nth-child(even) { background: #0e1420; }
+    .kb-md hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
+    .kb-md strong { color: var(--text); } .kb-md table { border-collapse: collapse; margin: 0; width: 100%; font-size: 0.82rem; }
+    .kb-md th, .kb-md td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; }
+    .kb-md th { background: var(--raised); color: var(--text); font-weight: 600; }
+    .kb-md tbody tr:nth-child(even) { background: var(--raised); }
     /* Wide tables scroll horizontally instead of breaking the panel. */
     .kb-table-wrap { overflow-x: auto; margin: 10px 0; border-radius: 6px; }
-    .kb-md del { color: #718096; }
+    .kb-md del { color: var(--muted); }
     /* Task-list items: bullet replaced by a real (disabled) checkbox. */
     .kb-md li.kb-task { list-style: none; margin-left: -18px; }
-    .kb-md li.kb-task input { margin-right: 7px; vertical-align: middle; accent-color: #63b3ed; }
-    .kb-note-loading { color: #718096; font-size: 0.82rem; margin-top: 12px; }
+    .kb-md li.kb-task input { margin-right: 7px; vertical-align: middle; accent-color: var(--accent); }
+    .kb-note-loading { color: var(--muted); font-size: 0.82rem; margin-top: 12px; }
   ${dashboardTheme}
   </style>
 ${dashboardFontLink}</head>
 <body><div class="layout"><aside class="sidebar"><div class="brand row"><div class="brandmark">✳</div><div>Claude Gateway<small>OPERATIONS CONSOLE</small></div></div><div class="navlabel">WORKSPACE</div><nav class="tabs" aria-label="Main navigation"><button class="tab active" id="tab-overview" data-view="view-overview"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h7v7H3zM14 3h7v4h-7zM14 11h7v10h-7zM3 14h7v7H3z"/></svg>Overview</button><button class="tab " id="tab-sessions" data-view="view-sessions"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11a8 8 0 0 1-8 8H6l-4 3 1-7a8 8 0 1 1 18-4Z"/></svg>Conversations</button><button class="tab " id="tab-tasks" data-view="view-tasks"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5h12M9 12h12M9 19h12M3 5l1 1 2-3M3 12l1 1 2-3M3 19l1 1 2-3"/></svg>Tasks</button><button class="tab " id="tab-usage" data-view="view-usage"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10m8 10V4m8 16v-7"/></svg>Usage & tokens</button><button class="tab " id="tab-kb" data-view="view-kb"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h7v18H4zM14 3h7v18h-7zM7 7h1m9 0h1"/></svg>Knowledge base</button><button class="tab " id="tab-dreams" data-view="view-dreams"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15A9 9 0 0 1 9 4 9 9 0 1 0 20 15Z"/></svg>Nightly dreaming</button><button class="tab " id="tab-system" data-view="view-system"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v6H3zM3 14h18v6H3zM6 7h1M6 17h1"/></svg>System</button></nav><div class="sidebarfoot"><div class="instance">Admin workspace<br><span id="gateway-version"></span></div></div></aside><div class="main"><header class="topbar"><div class="row"><button id="dash-menu" class="mobilemenu" aria-label="Toggle navigation">☰</button><h1 id="dash-current-view">Overview</h1></div><div id="top-right"><span id="refresh-indicator">Connecting…</span><button class="theme-toggle" id="dash-theme" aria-label="Toggle light and dark theme">◐</button><button id="logout-btn">Logout</button></div></header><main class="shell-content"><div class="meta">Uptime: <span id="uptime">—</span> · Started: <span id="started-at">—</span> · Updated: <span id="last-updated">—</span></div>
 <div id="view-overview" class="view"><div class="heading" style="margin-top:24px"><div class="eyebrow">ONE WORKSPACE. EVERY CONVERSATION.</div><h1>Good work, <span class="gradient-title">in motion.</span></h1><p>Your agents, ongoing work, and what needs your attention.</p></div><div class="dash-grid" id="overview-stats"></div><div class="columns"><section class="dash-panel"><h2>Token activity</h2><p class="live-note">Today · UTC · Workers (violet) / Agent (blue)</p><div id="overview-chart"></div><p class="live-note">Recorded token volume, including cache. Not billing cost.</p></section><section class="dash-panel"><h2>Needs your attention</h2><div class="dash-mini-list" id="overview-attention"></div></section></div><section class="dash-panel"><h2>Active & recent work</h2><div id="overview-tasks"></div></section></div>
-<div class="dash-filter"><input id="dash-search" type="search" aria-label="Filter displayed sessions" placeholder="Filter this page by session, chat or model…"><select id="dash-agent-filter" aria-label="Filter agent"><option value="">All agents</option></select></div><div class="dash-pager"><span data-dash-page></span><div class="row"><button data-dash-prev disabled>← Previous</button><button data-dash-next disabled>Next →</button></div></div>
+<div class="dash-filter"><input id="dash-search" type="search" aria-label="Filter displayed sessions" placeholder="Filter this page by session, chat or model…"><select id="dash-scope" aria-label="Gateway run"><option value="current">Current gateway run</option><option value="all">All history</option></select><select id="dash-agent-filter" aria-label="Filter agent"><option value="">All agents</option></select></div><div class="dash-pager"><span data-dash-page></span><div class="row"><button data-dash-prev disabled>← Previous</button><button data-dash-next disabled>Next →</button></div></div>
 <div id="view-tasks" class="view" style="display:none"><h2>Tasks & workers</h2><p id="tasks-scope" class="live-note"></p><div id="task-results"></div></div><div id="view-usage" class="view" style="display:none"><h2>Usage & tokens</h2><p class="live-note">Session totals include every recorded attempt, including retries. Missing measurements stay unavailable. Open a report for fresh input, cache creation, cache reads, output and per-turn details.</p><div id="usage-results"></div></div>
   <div id="view-system" class="view" style="display:none">
   <!-- Row: Processes 70% | Agent badges 30% (collapses on narrow screens) -->
@@ -915,7 +915,7 @@ ${dashboardFontLink}</head>
         const badges = agents.map(function(a) {
           const ok = a.hasChannel ? a.isRunning : true;
           const dot = ok ? '<span class="dot-green">&#x25CF;</span>' : '<span class="dot-red">&#x25CF;</span>';
-          return '<span class="agent-badge">' + dot + ' <span class="agent-name">' + escHtml(a.id) + '</span></span>';
+          return agentBadge(a.id);
         });
         document.getElementById('agents-bar').innerHTML = badges.join('') || '<span class="ts">No agents</span>';
 
@@ -928,15 +928,15 @@ ${dashboardFontLink}</head>
     async function refresh() {
       if (dashboardBusy || document.hidden) return;
       dashboardBusy = true;
-      const requestedOffset = dashboardOffset;
+      const requestedOffset = dashboardOffset, requestedScope = dashboardScope;
       document.getElementById('refresh-indicator').textContent = 'Updating…';
       try {
-        const res = await fetch(apiUrl('/status')+'?offset='+requestedOffset);
+        const res = await fetch(apiUrl('/status')+'?offset='+requestedOffset+'&scope='+requestedScope);
         if (res.status === 401) { onUnauthorized(); return; }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
 
-        if (requestedOffset === dashboardOffset) applyDashboardSnapshot(data);
+        if (requestedOffset === dashboardOffset && requestedScope === dashboardScope) applyDashboardSnapshot(data);
       } catch(e) {
         document.getElementById('error-msg').textContent = 'Error fetching status: ' + e.message;
         document.getElementById('error-msg').style.display = 'block';
@@ -1330,7 +1330,7 @@ ${dashboardFontLink}</head>
         // Labels: hubs always; hovered / selected / search-hit reveal on demand.
         var showLabel = (o.deg >= LABEL_MIN_DEG) || isHov || isSel || (searching && o.hit);
         if (showLabel && !dim){
-          ctx.fillStyle = (isHov || isSel) ? '#e6edf3' : 'rgba(213,222,236,' + (0.25 + 0.6 * near) + ')';
+          ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text').trim();
           ctx.font = (isHov || isSel ? '12px ' : '11px ') + 'ui-sans-serif, system-ui, sans-serif';
           ctx.fillText(nd.title, p.sx + p.r + 4, p.sy + 3);
         }
@@ -1868,11 +1868,11 @@ ${dashboardFontLink}</head>
       function renderRun(run){
         var box = el('div', 'dream-run');
         var head = el('div', 'dream-run-head');
-        if (run.agent) head.appendChild(el('span', 'agent', run.agent));
+        if (run.agent) { var agentEl=el('span'); agentEl.innerHTML=agentBadge(run.agent); head.appendChild(agentEl); }
         var modeCls = run.mode === 'auto' ? 'auto' : 'propose';
         head.appendChild(el('span', 'dream-badge ' + modeCls, run.mode));
         head.appendChild(el('span', 'dream-badge outcome', run.outcome));
-        head.appendChild(el('span', 'when', run.iso));
+        head.appendChild(el('span', 'when', new Date(run.iso).toLocaleString()));
 
         // Pending = a propose-run proposal not yet manually accepted. Accept-all
         // shows only when there is something to apply.
@@ -1931,6 +1931,7 @@ ${dashboardFontLink}</head>
       function render(){
         var filter = agentSel ? agentSel.value : '';
         var runs = filter ? allRuns.filter(function(r){ return r.agent === filter; }) : allRuns;
+        runs=runs.filter(function(r){return dashboardScope==='all'||Date.parse(r.iso)>=Date.parse(dashboardData?.startedAt||'');}).sort(function(a,b){return Date.parse(b.iso)-Date.parse(a.iso);});
         listEl.textContent = '';
         if (!runs.length){
           emptyEl.textContent = allRuns.length ? 'No dream runs for this agent.' : 'No dream runs yet. The nightly dreaming pass writes here after it first runs (auto or propose mode).';
