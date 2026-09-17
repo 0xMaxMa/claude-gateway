@@ -115,7 +115,14 @@ export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 
   const workerTokens = totalsByRole.find(row=>row.role==='worker')?.total ?? null;
   const totalTokens = agentTokens === null && workerTokens === null ? null : Number(agentTokens??0)+Number(workerTokens??0);
   const distribution = store.all(`SELECT json_extract(payload_json,'$.category') category, SUM(json_extract(payload_json,'$.usage.totalTokens')) tokens FROM token_turns WHERE session_id=? AND started_at>=? AND json_type(payload_json,'$.usage')='object' GROUP BY category`,sessionId,since).map(r=>({category:String(r.category),tokens:Number(r.tokens??0)}));
-  return { sessionId, turns, totals: {agentTokens:agentTokens===null?null:Number(agentTokens),workerTokens:workerTokens===null?null:Number(workerTokens),totalTokens}, distribution,
+  const usageByRole = store.all(`SELECT role,
+    SUM(json_extract(payload_json,'$.usage.inputTokens')) inputTokens,
+    SUM(json_extract(payload_json,'$.usage.cacheCreationTokens')) cacheCreationTokens,
+    SUM(json_extract(payload_json,'$.usage.cacheReadTokens')) cacheReadTokens,
+    SUM(json_extract(payload_json,'$.usage.outputTokens')) outputTokens
+    FROM token_turns WHERE session_id=? AND started_at>=? AND json_type(payload_json,'$.usage')='object' GROUP BY role`, sessionId, since)
+    .map(row => ({role:String(row.role),inputTokens:Number(row.inputTokens??0),cacheCreationTokens:Number(row.cacheCreationTokens??0),cacheReadTokens:Number(row.cacheReadTokens??0),outputTokens:Number(row.outputTokens??0)}));
+  return { sessionId, turns, usageByRole, totals: {agentTokens:agentTokens===null?null:Number(agentTokens),workerTokens:workerTokens===null?null:Number(workerTokens),totalTokens}, distribution,
     pagination: page ? {...page,total:Number(store.get('SELECT COUNT(*) n FROM token_turns WHERE session_id=? AND started_at>=?',sessionId,since)!.n)} : undefined,
     coverage: 'recorded-turns-only' as const };
 }

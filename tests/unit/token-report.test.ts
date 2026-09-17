@@ -99,3 +99,19 @@ test('report shows readable input previews, voice badges and a scope-preserving 
  expect(html).toContain('Please check my task');expect(html).toContain('Voice message');expect(html).toContain('Input #7');expect(html).toContain('Telegram');expect(html).toContain('scope=current');expect(html).toContain('stacked-distribution');expect(html).toContain('Current gateway run');
  for(const match of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g))if(match[1].trim())expect(()=>new Function(match[1])).not.toThrow();
 });
+
+test('report distinguishes measured usage from unavailable per-file attribution',()=>{
+ const html=generateTokenReportHtml('a',{...report,usageByRole:[{role:'agent',inputTokens:10,cacheCreationTokens:20,cacheReadTokens:30,outputTokens:40}]});
+ expect(html).toContain('What makes up these tokens?');expect(html).toContain('<td>10</td><td>20</td><td>30</td><td>40</td>');
+ expect(html).toContain('tool-schema token counts were not recorded');
+ expect(html).toContain('setInterval(refreshReport,5000)');
+ for(const match of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g))expect(()=>new Function(match[1])).not.toThrow();
+});
+
+test('conversation and request details have only one disclosure level',()=>{
+ const html=generateTokenReportHtml('a',{...report,turns:[{...report.turns[0],inputTexts:['Hello'],requests:[{id:'request',usage:report.turns[0].usage!}]}]});
+ expect(html).toContain('<h3>Conversation / assignment / result</h3>');
+ expect(html).toContain('<h3>Observed model requests: 1</h3>');
+ expect(html).not.toContain('<summary>Observed model requests');
+ expect(html).not.toContain('<summary>Conversation / assignment');
+});

@@ -1,3 +1,4 @@
+import { contextFootprint } from './context-footprint';
 import { parentPort } from 'worker_threads';
 import { DatabaseSync } from 'node:sqlite';
 import { existsSync } from 'fs';
@@ -39,7 +40,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
         return {...report,session:{sessionId:session.agent_session_id,source:session.source,chatId:session.chat_id,createdAt:session.created_at,updatedAt:session.updated_at},tasks,totalTasks:Number(get('SELECT COUNT(*) n FROM tasks WHERE conversation_id=? AND updated_at>=?',session.id,since)!.n),offset};
       }
       const session=get('SELECT source,chat_id FROM conversations WHERE agent_session_id=?',options.sessionId)!;
-      return {...report, source:session.source, chatId:session.chat_id, since};
+      return {...report, source:session.source, chatId:session.chat_id, since, contextFootprint:contextFootprint(options.workspace, Boolean(options.semanticIntake))};
     }
     if (operation === 'task') {
       const row = get('SELECT t.*,c.agent_session_id FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.id=? AND c.agent_session_id=?', options.taskId, options.sessionId);
