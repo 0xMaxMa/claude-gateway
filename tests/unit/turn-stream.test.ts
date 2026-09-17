@@ -11,6 +11,7 @@ import {
   TurnStreamRegistry,
   TURN_BUFFER_MAX_EVENTS,
   callbackSink,
+  errorCode,
   errorEvent,
   resultEvent,
   turnStreamKey,
@@ -170,6 +171,21 @@ describe('TurnStream', () => {
 
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0][0]).toBe(err);
+  });
+
+  it('errorCode only surfaces a protocol-shaped code, matching the message-text filter', () => {
+    // The `code` field on a JSON/SSE error frame must obey the same
+    // ^[A-Z][A-Z0-9_]{0,79}$ contract responseFailureMessage enforces on the
+    // message text, so a raw `err.code` cannot leak through unfiltered.
+    expect(errorCode(Object.assign(new Error('x'), { code: 'TIMEOUT' }))).toBe('TIMEOUT');
+    expect(errorCode(Object.assign(new Error('x'), { code: 'rate_limit' }))).toBeUndefined();
+    expect(errorCode(Object.assign(new Error('x'), { code: 'Some arbitrary detail' }))).toBeUndefined();
+    expect(errorCode(Object.assign(new Error('x'), { code: 'A'.repeat(81) }))).toBeUndefined();
+    expect(errorCode(Object.assign(new Error('x'), { code: 7 }))).toBeUndefined();
+    // errorEvent builds the terminal frame's `code`, so it inherits the filter:
+    // a non-protocol code is dropped rather than echoed onto the frame.
+    expect(errorEvent(Object.assign(new Error('boom'), { code: 'lowercase_code' })))
+      .not.toHaveProperty('code');
   });
 
   it('errorEvent puts the Error\'s code on the frame, and omits the field when there is none', () => {

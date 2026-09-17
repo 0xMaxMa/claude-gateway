@@ -871,7 +871,7 @@ export function createApiRouter(
           if (code === 'CONFLICT') {
             res.status(409).json({ error: 'Session already has a pending request' });
           } else {
-            res.status(code === 'PROVIDER_CAPACITY' || code === 'PROVIDER_UNAVAILABLE' ? 503 : 500).json({ error: responseFailureMessage(err), ...(code ? { code } : {}) });
+            res.status(code === 'PROVIDER_CAPACITY' || code === 'PROVIDER_UNAVAILABLE' ? 503 : 500).json({ error: responseFailureMessage(err), ...(errorCode(err) ? { code: errorCode(err) } : {}) });
           }
         } else {
           try {
@@ -924,7 +924,7 @@ export function createApiRouter(
         } else if (code === 'CONFLICT') {
           res.status(409).json({ error: 'Session already has a pending request' });
         } else {
-          res.status(code === 'PROVIDER_CAPACITY' || code === 'PROVIDER_UNAVAILABLE' ? 503 : 500).json({ error: responseFailureMessage(err), ...(code ? { code } : {}) });
+          res.status(code === 'PROVIDER_CAPACITY' || code === 'PROVIDER_UNAVAILABLE' ? 503 : 500).json({ error: responseFailureMessage(err), ...(errorCode(err) ? { code: errorCode(err) } : {}) });
         }
       }
     }
