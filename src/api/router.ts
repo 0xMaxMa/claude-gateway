@@ -1,3 +1,4 @@
+import { sanitizeProviderMessage } from '../orchestration/provider-message';
 import { inferenceFailureMessage } from '../orchestration/inference-errors';
 import { voiceSettingsRouter } from './voice-settings-router';
 import { Router, Request, Response } from 'express';
@@ -159,7 +160,7 @@ function createSseCallbacks(
         // interrupted, do not wait for it) from a crash (PROCESS_EXITED) or a
         // transport failure, instead of string-matching `message`.
         const code = errorCode(err);
-        res.write(`data: ${JSON.stringify({ type: 'error', message: err.message, ...(code ? { code } : {}), seq, ...ids() })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'error', message: inferenceFailureMessage(err) ?? (code === 'INFERENCE_FAILED' ? 'Internal error' : sanitizeProviderMessage(err.message) ?? 'Internal error'), ...(code ? { code } : {}), seq, ...ids() })}\n\n`);
       } catch { /* client gone */ }
       finally { try { res.end(); } catch { /* client gone */ } }
     },

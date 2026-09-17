@@ -1,3 +1,4 @@
+import { structuredProviderMessage } from './provider-message';
 import { toolOutcome, TurnObservation, ToolOutcome } from './execution-observation';
 import type { InputImage } from '../session/input-image';
 import { SessionProcess } from '../session/process';
@@ -39,6 +40,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
   let structuredIndex: number | undefined;
   let settled = false, stopped = false, text = '', streamed = false, apiErrorText = '';
   let apiErrorCodes: string[] = [];
+  let providerMessage: string | undefined;
   const startedAt = Date.now(); const tools = new Set<string>(); let inputTokens = 0, totalTokens = 0, recorded = false;
   const activeTools = new Map<string, number>();
   const toolNames = new Map<string, string>();
@@ -77,6 +79,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
   const exit = () => {
     if (settled) return;
     if (stopped) { settled = true; cleanup(); rejectAccepted(new OrchestrationError('INTERRUPTED')); resolveResult({ text, interrupted: true }); }
+    else if (apiErrorText) fail(Object.assign(new OrchestrationError('INFERENCE_FAILED', apiErrorText), { providerCodes: apiErrorCodes, providerMessage }));
     else fail(new OrchestrationError('PROCESS_EXITED'));
   };
   const output = (line: string) => {
@@ -86,6 +89,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
     const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
     if (event.type === 'assistant' && (event.isApiErrorMessage || event.error)) {
       apiErrorCodes = [];
+      providerMessage = blocks.filter((block: any) => block.type === 'text' && typeof block.text === 'string').map((block: any) => block.text).join('\n') || structuredProviderMessage(event.error);
       apiErrorText = providerErrorText({ error: event.error, message: blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text) }, apiErrorCodes);
     }
     for (const block of blocks) {
@@ -149,7 +153,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
         const detail = [apiErrorText, providerErrorText([event.result, event.errors], providerCodes)].filter(Boolean).join(' ').slice(0, 4096) || 'Inference failed';
         const code = /provider capacity is fully in use|overloaded_error/i.test(detail) ? 'PROVIDER_CAPACITY'
           : /\b(?:API Error:|HTTP)\s*503\b/i.test(detail) ? 'PROVIDER_UNAVAILABLE' : 'INFERENCE_FAILED';
-        fail(Object.assign(new OrchestrationError(code, detail), { providerCodes })); return;
+        fail(Object.assign(new OrchestrationError(code, detail), { providerCodes, providerMessage: providerMessage || structuredProviderMessage(event.result) || structuredProviderMessage(event.errors) })); return;
       }
       if (process.runtimeProfile?.responseSchema && event.structured_output && typeof event.structured_output === 'object') {
         text = JSON.stringify(event.structured_output);

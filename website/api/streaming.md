@@ -84,7 +84,7 @@ closes the stream is a terminator, not an event, and has no fields at all.
 | `result` | `text`, `request_id`, `session_id`, `duration_ms`, `attachments?` | yes | Final aggregated result; `attachments` present only when images were captured |
 | `error` | `message`, `code?` | yes | The turn failed |
 
-Recognized provider quota, billing, rate limit, authentication, and availability failures use a safe, actionable `message`. Unknown failures use `Internal error`.
+Typed provider failures preserve the sanitized provider text in `message`, including reset wording and unfamiliar error types. Error classification and retry behavior are separate from presentation. Failures with only code/status use general guidance; internal failures without provider error evidence use `Internal error`.
 
 The stream ends with `data: [DONE]` after `result`.
 
