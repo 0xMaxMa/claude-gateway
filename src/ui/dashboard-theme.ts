@@ -360,7 +360,7 @@ tr.session-row:hover td{background:var(--raised)}
 .dash-stat:nth-child(3){background:var(--lavender)}
 .dash-stat:nth-child(4){background:var(--peach)}
 .dash-stat strong{display:block;font-size:32px;font-weight:400;margin-top:12px}
-.dash-stat span{font-size:11px}
+.dash-stat span{font-size:11px}.dash-drawer .session-token-totals{grid-template-columns:repeat(3,minmax(0,1fr))}.session-token-totals .dash-stat{padding:18px}.session-token-totals .dash-stat strong{font-size:28px}@media(max-width:520px){.dash-drawer .session-token-totals{grid-template-columns:1fr}.session-token-totals .dash-stat{display:flex;align-items:center;justify-content:space-between;gap:12px}.session-token-totals .dash-stat strong{margin-top:0}}
 .dash-panel{background:var(--panel);border:1px solid var(--line);border-radius:24px;padding:24px;margin:24px 0}
 .dash-panel h2{margin:0 0 16px;color:var(--text)}
 .view>h2{margin:0 0 18px;color:var(--text)}

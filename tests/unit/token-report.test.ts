@@ -15,7 +15,7 @@ test('report separates categories, cache categories and missing inventory withou
   expect(html).toContain('30.0%'); expect(html).toContain('70.0%');
   expect(html).toContain('Loaded: —'); expect(html).not.toContain('Available (2)');
   expect(html).toContain('Used: 1'); expect(html).toContain('Cache read');
-  expect(html).toContain('5m: —'); expect(html).toContain('not monetary costs');
+  expect(html).not.toContain('5m: —'); expect(html).toContain('not monetary costs');
 });
 test('stored metadata cannot inject markup or executable scripts', () => {
   const malicious = '<img src=x onerror=alert(1)>';
