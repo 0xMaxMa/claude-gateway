@@ -112,7 +112,7 @@ async function dashDetail(agentId,sessionId,taskId,offset=0){
       body+='<h2>Session</h2><dl><dt>Channel</dt><dd>'+channelBadge(detail.session?.source)+'</dd><dt>Chat</dt><dd>'+dashText(detail.session?.chatId)+'</dd><dt>Created</dt><dd>'+dashText(detail.session?.createdAt?new Date(detail.session.createdAt).toLocaleString():null)+'</dd></dl>';
       var uBy=detail.usageByRole||[];
       var uAgent=uBy.find(function(u){return u.role==='agent';}),uWorker=uBy.find(function(u){return u.role==='worker';});
-      var cachedLineFor=function(u){if(!u)return '';var read=Number(u.cacheReadTokens||0),base=Number(u.inputTokens||0)+read+Number(u.cacheCreationTokens||0);return '<span class="card-cached">Cached: <b>'+dashCount(read)+' · '+(base?(read/base*100).toFixed(2):'0.00')+'%</b></span>';};
+      var cachedLineFor=function(u){if(!u)return '';var read=Number(u.cacheReadTokens||0),base=Number(u.inputTokens||0)+read+Number(u.cacheCreationTokens||0);return '<span class="card-cached">Cached: <b>'+(base?(read/base*100).toFixed(2):'0.00')+'%</b></span>';};
       var cw=detail.contextWindow;
       var windowCap=function(t){return t>=1e6?(+(t/1e6).toFixed(2))+'M':Math.round(t/1000)+'K';};
       var cwStopped=detail.sessionStatus==='stopped';

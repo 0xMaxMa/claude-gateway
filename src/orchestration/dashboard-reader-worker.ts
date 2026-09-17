@@ -5,6 +5,24 @@ import { existsSync } from 'fs';
 import { readTokenReport, summarizeTokenTurns, TokenTurn } from './token-ledger';
 import type { TaskAttempt } from './types';
 
+/**
+ * Conversation activity status — the single source shared by the dashboard
+ * Conversations "Status" column and the Session token report header, so the two
+ * views can never disagree (thinking → working → waiting_input → queued → idle).
+ * `thinking` is returned alongside so callers keep the existing isRunning signal
+ * without re-querying. Display-only; does not touch token accounting.
+ */
+function conversationActivityStatus(
+  get: (sql: string, ...params: any[]) => Record<string, any> | undefined,
+  all: (sql: string, ...params: any[]) => Record<string, any>[],
+  conversationId: unknown,
+): { status: string; thinking: boolean } {
+  const thinking = Boolean(get("SELECT id FROM conversation_decisions WHERE conversation_id=? AND state='running' LIMIT 1", conversationId));
+  const states = all("SELECT DISTINCT state FROM tasks WHERE conversation_id=? AND state NOT IN ('completed','failed','cancelled')", conversationId).map(t => t.state);
+  const status = thinking ? 'thinking' : states.includes('needs_reconciliation') ? 'needs_reconciliation' : states.some(s => ['starting', 'running', 'interrupting', 'cancel_requested'].includes(s)) ? 'working' : states.includes('waiting_input') ? 'waiting_input' : states.includes('queued') ? 'queued' : 'idle';
+  return { status, thinking };
+}
+
 const connections = new Map<string, DatabaseSync>();
 function database(filename: string): DatabaseSync | undefined {
   if (!existsSync(filename)) return undefined;
@@ -39,8 +57,10 @@ function read(filename: string, operation: string, options: Record<string, any>)
         const tasks=all('SELECT id,state,snapshot_json,updated_at FROM tasks WHERE conversation_id=? AND updated_at>=? ORDER BY updated_at DESC,id LIMIT 50 OFFSET ?',session.id,since,offset).map(t=>({taskId:t.id,state:t.state,title:JSON.parse(t.snapshot_json).title,updatedAt:t.updated_at}));
         return {...report,session:{sessionId:session.agent_session_id,source:session.source,chatId:session.chat_id,createdAt:session.created_at,updatedAt:session.updated_at},tasks,totalTasks:Number(get('SELECT COUNT(*) n FROM tasks WHERE conversation_id=? AND updated_at>=?',session.id,since)!.n),offset};
       }
-      const session=get('SELECT source,chat_id FROM conversations WHERE agent_session_id=?',options.sessionId)!;
-      return {...report, source:session.source, chatId:session.chat_id, since, contextFootprint:contextFootprint(options.workspace, Boolean(options.semanticIntake))};
+      const session=get('SELECT id,source,chat_id FROM conversations WHERE agent_session_id=?',options.sessionId)!;
+      // Same activity status the Conversations column shows, so the report header mirrors it.
+      const activityStatus=conversationActivityStatus(get,all,session.id).status;
+      return {...report, source:session.source, chatId:session.chat_id, activityStatus, since, contextFootprint:contextFootprint(options.workspace, Boolean(options.semanticIntake))};
     }
     if (operation === 'task') {
       const row = get('SELECT t.*,c.agent_session_id FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.id=? AND c.agent_session_id=?', options.taskId, options.sessionId);
@@ -79,9 +99,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
           tokenSummary:{totalTokens:metrics.totalTokens,allAttemptsTokens:total.totalTokens},contextTools:metrics.contextTools,loadedTools:metrics.loadedTools,usedTools:metrics.usedTools,
           lastTool:tool?{name:tool.name,type:tool.type,is_error:tool.is_error,at:lastTool!.occurred_at}:undefined};
       });
-      const thinking = Boolean(get("SELECT id FROM conversation_decisions WHERE conversation_id=? AND state='running' LIMIT 1", c.id));
-      const states = all("SELECT DISTINCT state FROM tasks WHERE conversation_id=? AND state NOT IN ('completed','failed','cancelled')", c.id).map(t=>t.state);
-      const state = thinking?'thinking':states.includes('needs_reconciliation')?'needs_reconciliation':states.some(s=>['starting','running','interrupting','cancel_requested'].includes(s))?'working':states.includes('waiting_input')?'waiting_input':states.includes('queued')?'queued':'idle';
+      const {status:state, thinking} = conversationActivityStatus(get, all, c.id);
       const totalTokens = agent.totalTokens===null&&workers.totalTokens===null ? null : (agent.totalTokens??0)+(workers.totalTokens??0);
       return {sessionId:c.agent_session_id,chatId:c.chat_id,source:c.source,orchestration:true,mode:'headless',status:state,isRunning:thinking,
         model:turns.filter(t=>t.role==='agent'&&t.model).at(-1)?.model??'',updatedAt:c.updated_at,createdAt:c.created_at,
