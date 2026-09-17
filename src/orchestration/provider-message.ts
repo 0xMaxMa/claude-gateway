@@ -1,8 +1,11 @@
 /** Display provider text without interpreting its language, reset syntax or wording. */
 export function sanitizeProviderMessage(text: string): string | undefined {
   const safe = text
-    // Header schemes include Token/Digest, not only Bearer/Basic.
+    // The authorization header carries any scheme (Bearer/Basic/Token/Digest/…)
+    // and may hold quoted multi-value params, so redact its whole value to the
+    // line end rather than matching a scheme list.
     .replace(/\b((?:proxy-)?authorization\s*:\s*)[^\r\n]*/gi, '$1[redacted]')
+    // Bare Bearer/Basic credentials can also appear without the header name.
     .replace(/\b(?:Bearer|Basic)\s+[^\s"'<>]+/gi, '[redacted]')
     .replace(/\bsk-[A-Za-z0-9_-]+/g, '[redacted]')
     .replace(/\b(?:set-cookie|cookie)\s*:\s*[^\r\n]+/gi, '[redacted cookie]')
