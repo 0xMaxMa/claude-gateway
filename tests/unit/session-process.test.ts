@@ -173,6 +173,20 @@ describe('SessionProcess', () => {
     expect(lastProcess).not.toBeNull();
   });
 
+  it.each([['ENOENT','CLAUDE_BINARY_NOT_FOUND'],['EACCES','PROCESS_PERMISSION_DENIED'],['OTHER','PROCESS_START_FAILED']])('managed subprocess error %s emits a typed startup failure', async (cause,code) => {
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore, undefined, {role:'agent',context:'fixture',overlay:'',allowedTools:[],mcpConfigPath:''} as any);
+    const receive=jest.fn(); sp.on('startup-error',receive);
+    await sp.start();
+    const child = lastProcess!;
+    (child as {pid?: number}).pid = undefined;
+    child.kill.mockImplementation(() => false); // no child exists, so no exit event
+    child.emit('error',Object.assign(new Error('private executable path'),{code:cause}));
+    await sp.stop();
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(receive).toHaveBeenCalledWith(expect.objectContaining({code}));
+    expect(receive.mock.calls[0][0].message).not.toContain('private');
+  });
+
   // --------------------------------------------------------------------------
   // U-SP-02: sendMessage() writes stream-json turn to stdin
   // --------------------------------------------------------------------------

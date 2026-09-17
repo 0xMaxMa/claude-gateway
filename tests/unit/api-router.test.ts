@@ -175,11 +175,11 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
     const app = buildApp(async () => { throw quota; });
     const response = await supertest.default(app).post(POST_URL).set(AUTH).send({ message: 'Hi', chat_id: 'test-chat' });
     expect(response.status).toBe(500);
-    expect(response.body).toEqual({ error: 'Provider quota or billing limit reached. Try again after the limit resets in 2 hours.', code: 'INFERENCE_FAILED' });
+    expect(response.body).toEqual({ error: 'Daily credit limit reached. Resets in 2 hours. [redacted] [redacted path]', code: 'INFERENCE_FAILED' });
 
     const unknown = buildApp(async () => { throw Object.assign(new Error('private /internal/path sk-secret-value'), { code: 'INFERENCE_FAILED' }); });
     const hidden = await supertest.default(unknown).post(POST_URL).set(AUTH).send({ message: 'Hi', chat_id: 'test-chat' });
-    expect(hidden.body).toEqual({ error: 'Internal error' });
+    expect(hidden.body).toEqual({ error: 'The model request failed without a usable provider diagnostic. Check the gateway logs. (INFERENCE_FAILED)', code: 'INFERENCE_FAILED' });
   });
 
   it('returns 200 with response on success', async () => {
@@ -581,7 +581,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     const { app } = buildStreamApp(async () => { throw Object.assign(new Error('Daily credit limit reached. Retry after 45 seconds. sk-secret-value'), { code: 'INFERENCE_FAILED' }); });
     const { status, data } = await collectSSE(app, { message: 'hi', chat_id: 'test-chat', stream: true });
     expect(status).toBe(200);
-    expect(data).toContain('Provider quota or billing limit reached. Try again in 45 seconds.');
+    expect(data).toContain('Daily credit limit reached. Retry after 45 seconds. [redacted]');
     expect(data).not.toContain('sk-secret-value');
   });
 
@@ -1260,4 +1260,35 @@ describe('isValidSessionId', () => {
     expect(isValidSessionId(123)).toBe(false);
     expect(isValidSessionId(undefined)).toBe(false);
   });
+});
+
+
+describe('typed provider error presentation', () => {
+  const message = 'API Error: 400 Third-party apps now draw from your extra usage, not your plan limits.';
+  const failure = () => Object.assign(new Error('unknown ' + message + ' ' + message), {code:'INFERENCE_FAILED',providerMessage:message});
+  it('preserves unfamiliar provider text in synchronous responses', async () => {
+    const app = buildApp(async () => { throw failure(); });
+    const res = await supertest.default(app).post(POST_URL).set(AUTH).send({message:'Hi',chat_id:'test-chat'});
+    expect(res.body).toEqual({error:message,code:'INFERENCE_FAILED'});
+  });
+  it('preserves unfamiliar provider text in SSE callback errors without duplicating it', async () => {
+    const {app} = buildStreamApp(async (_sid, _chatId, _msg, cb) => { cb.onError(failure()); return () => {}; });
+    const {data} = await collectSSE(app,{message:'Hi',chat_id:'test-chat',stream:true});
+    expect(data).toContain(message);
+    expect(data.split(message)).toHaveLength(2);
+    expect(data).not.toContain('unknown');
+  });
+});
+
+
+describe('internal errors across API transports',()=>{
+ it.each(['PROCESS_EXITED','CLAUDE_BINARY_NOT_FOUND','RESPONSE_PERSISTENCE_FAILED','ENOSPC','PROFILE_INVENTORY_MISMATCH'])('retains %s in sync and SSE', async code=>{
+  const fail=()=>Object.assign(new Error('private /srv/workspace sk-secret'),{code});
+  const app=buildApp(async()=>{throw fail();});
+  const res=await supertest.default(app).post(POST_URL).set(AUTH).send({message:'Hi',chat_id:'test-chat'});
+  expect(res.body.error).toContain(code);expect(res.body.error).not.toContain('sk-secret');
+  const stream=buildStreamApp(async(_s,_c,_m,cb)=>{cb.onError(fail());return()=>{};});
+  const {data}=await collectSSE(stream.app,{message:'Hi',chat_id:'test-chat',stream:true});
+  expect(data).toContain(code);expect(data).not.toContain('sk-secret');
+ });
 });

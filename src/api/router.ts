@@ -1,4 +1,4 @@
-import { inferenceFailureMessage } from '../orchestration/inference-errors';
+import { responseFailureMessage } from '../orchestration/response-errors';
 import { voiceSettingsRouter } from './voice-settings-router';
 import { Router, Request, Response } from 'express';
 import { apiPrincipal } from '../orchestration/identity';
@@ -159,7 +159,7 @@ function createSseCallbacks(
         // interrupted, do not wait for it) from a crash (PROCESS_EXITED) or a
         // transport failure, instead of string-matching `message`.
         const code = errorCode(err);
-        res.write(`data: ${JSON.stringify({ type: 'error', message: err.message, ...(code ? { code } : {}), seq, ...ids() })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'error', message: responseFailureMessage(err, true), ...(code ? { code } : {}), seq, ...ids() })}\n\n`);
       } catch { /* client gone */ }
       finally { try { res.end(); } catch { /* client gone */ } }
     },
@@ -871,11 +871,11 @@ export function createApiRouter(
           if (code === 'CONFLICT') {
             res.status(409).json({ error: 'Session already has a pending request' });
           } else {
-            res.status(code === 'PROVIDER_CAPACITY' || code === 'PROVIDER_UNAVAILABLE' ? 503 : 500).json({ error: inferenceFailureMessage(err) ?? 'Internal error', ...(inferenceFailureMessage(err) ? { code } : {}) });
+            res.status(code === 'PROVIDER_CAPACITY' || code === 'PROVIDER_UNAVAILABLE' ? 503 : 500).json({ error: responseFailureMessage(err), ...(errorCode(err) ? { code: errorCode(err) } : {}) });
           }
         } else {
           try {
-            res.write(`data: ${JSON.stringify({ type: 'error', message: inferenceFailureMessage(err) ?? 'Internal error' })}\n\n`);
+            res.write(`data: ${JSON.stringify({ type: 'error', message: responseFailureMessage(err), ...(errorCode(err) ? { code: errorCode(err) } : {}) })}\n\n`);
             res.end();
           } catch { /* client gone */ }
         }
@@ -924,7 +924,7 @@ export function createApiRouter(
         } else if (code === 'CONFLICT') {
           res.status(409).json({ error: 'Session already has a pending request' });
         } else {
-          res.status(code === 'PROVIDER_CAPACITY' || code === 'PROVIDER_UNAVAILABLE' ? 503 : 500).json({ error: inferenceFailureMessage(err) ?? 'Internal error', ...(inferenceFailureMessage(err) ? { code } : {}) });
+          res.status(code === 'PROVIDER_CAPACITY' || code === 'PROVIDER_UNAVAILABLE' ? 503 : 500).json({ error: responseFailureMessage(err), ...(errorCode(err) ? { code: errorCode(err) } : {}) });
         }
       }
     }
@@ -4038,10 +4038,10 @@ export function createApiRouter(
       res.on('close', cleanup);
     } catch (err: unknown) {
       if (!res.headersSent) {
-        res.status(500).json({ error: 'Internal error' });
+        res.status(500).json({ error: responseFailureMessage(err), ...(errorCode(err) ? { code: errorCode(err) } : {}) });
       } else {
         try {
-          res.write(`data: ${JSON.stringify({ type: 'error', message: 'Internal error' })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: 'error', message: responseFailureMessage(err), ...(errorCode(err) ? { code: errorCode(err) } : {}) })}\n\n`);
           res.end();
         } catch { /* client gone */ }
       }
@@ -4949,11 +4949,11 @@ export function createApiRouter(
         if (code === 'CONFLICT') {
           res.status(409).json({ error: 'Session already has a pending request' });
         } else {
-          res.status(500).json({ error: (err as Error).message ?? 'Internal error' });
+          res.status(500).json({ error: responseFailureMessage(err), ...(errorCode(err) ? { code: errorCode(err) } : {}) });
         }
       } else {
         try {
-          res.write(`data: ${JSON.stringify({ type: 'error', message: (err as Error).message ?? 'Internal error' })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: 'error', message: responseFailureMessage(err), ...(errorCode(err) ? { code: errorCode(err) } : {}) })}\n\n`);
           res.end();
         } catch { /* client gone */ }
       }

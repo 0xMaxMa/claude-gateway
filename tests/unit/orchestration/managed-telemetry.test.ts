@@ -25,24 +25,24 @@ test('ordinary assistant prose is not provider error evidence on a failed result
 });
 
 test.each([
-  [{ error: { code: 'quota_exceeded', message: 'Provider diagnostic changed completely.' } }, 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Check your provider usage or billing before retrying.'],
+  [{ error: { code: 'quota_exceeded', message: 'Provider diagnostic changed completely.' } }, 'INFERENCE_FAILED', 'Provider diagnostic changed completely.'],
   [{ error: { code: 'insufficient_credits' } }, 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Check your provider usage or billing before retrying.'],
-  ['API Error: 400 Your credit balance is too low to access the API.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Check your provider usage or billing before retrying.'],
-  ['Daily credit limit reached. Resets at 14:30 UTC+07:00.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again after the limit resets at 14:30 UTC+07:00.'],
-  ['Daily credit limit reached. Resets in 1 hour 30 minutes.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again after the limit resets in 1 hour 30 minutes.'],
-  ['Daily credit limit reached. Resets at 2:30 PM UTC.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again after the limit resets at 2:30 PM UTC.'],
-  ['Daily credit limit reached. Resets at 14:30 Mars/Colony.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Check your provider usage or billing before retrying.'],
-  [{ error: { code: 'invalid_api_key', message: 'Daily credit limit reached.' } }, 'INFERENCE_FAILED', 'Provider authentication failed. Check your provider credentials.'],
+  ['API Error: 400 Your credit balance is too low to access the API.', 'INFERENCE_FAILED', 'API Error: 400 Your credit balance is too low to access the API.'],
+  ['Daily credit limit reached. Resets at 14:30 UTC+07:00.', 'INFERENCE_FAILED', 'Daily credit limit reached. Resets at 14:30 UTC+07:00.'],
+  ['Daily credit limit reached. Resets in 1 hour 30 minutes.', 'INFERENCE_FAILED', 'Daily credit limit reached. Resets in 1 hour 30 minutes.'],
+  ['Daily credit limit reached. Resets at 2:30 PM UTC.', 'INFERENCE_FAILED', 'Daily credit limit reached. Resets at 2:30 PM UTC.'],
+  ['Daily credit limit reached. Resets at 14:30 Mars/Colony.', 'INFERENCE_FAILED', 'Daily credit limit reached. Resets at 14:30 Mars/Colony.'],
+  [{ error: { code: 'invalid_api_key', message: 'Daily credit limit reached.' } }, 'INFERENCE_FAILED', 'Daily credit limit reached.'],
   [{ error: { status: 429 } }, 'INFERENCE_FAILED', 'Provider rate limit or quota reached. Check provider usage before retrying.'],
-  [{ error: { code: 'context_length_exceeded', message: 'The token limit was exceeded.' } }, 'INFERENCE_FAILED', undefined],
-  [{ error: { code: 'future_unknown_error', message: 'private /internal/path sk-secret-value' } }, 'INFERENCE_FAILED', undefined],
-  ['Daily credit limit reached. Retry after 503 seconds.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again in 503 seconds.'],
-  ['Daily credit limit reached. Retry after 1503 seconds.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again in 1503 seconds.'],
+  [{ error: { code: 'context_length_exceeded', message: 'The token limit was exceeded.' } }, 'INFERENCE_FAILED', 'The token limit was exceeded.'],
+  [{ error: { code: 'future_unknown_error', message: 'private /internal/path sk-secret-value' } }, 'INFERENCE_FAILED', 'private [redacted path] [redacted]'],
+  ['Daily credit limit reached. Retry after 503 seconds.', 'INFERENCE_FAILED', 'Daily credit limit reached. Retry after 503 seconds.'],
+  ['Daily credit limit reached. Retry after 1503 seconds.', 'INFERENCE_FAILED', 'Daily credit limit reached. Retry after 1503 seconds.'],
   [{ error: { status: 503 } }, 'PROVIDER_UNAVAILABLE', '503: The model provider is temporarily unavailable. Please try again shortly.'],
-  [{ error: { type: 'authentication_error', message: 'Invalid x-api-key' } }, 'INFERENCE_FAILED', 'Provider authentication failed. Check your provider credentials.'],
+  [{ error: { type: 'authentication_error', message: 'Invalid x-api-key' } }, 'INFERENCE_FAILED', 'Invalid x-api-key'],
   [{ error: { code: 'invalid_api_key' } }, 'INFERENCE_FAILED', 'Provider authentication failed. Check your provider credentials.'],
-  ['Daily credit limit reached. Resets at 14:30 UTC. Bearer secret-value /internal/path', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again after the limit resets at 14:30 UTC.'],
-  ['rate_limit: Retry at 09:15:30 GMT. sk-secret-value', 'INFERENCE_FAILED', 'Provider rate limit reached. Try again at 09:15:30 GMT.'],
+  ['Daily credit limit reached. Resets at 14:30 UTC. Bearer secret-value /internal/path', 'INFERENCE_FAILED', 'Daily credit limit reached. Resets at 14:30 UTC. [redacted] [redacted path]'],
+  ['rate_limit: Retry at 09:15:30 GMT. sk-secret-value', 'INFERENCE_FAILED', 'rate_limit: Retry at 09:15:30 GMT. [redacted]'],
 ])('provider review regression: %j', async (detail, code, message) => {
   const p = new EventEmitter() as SessionProcess;
   Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
@@ -86,15 +86,29 @@ test.each([
 test('provider messages stay actionable while internal failures and bearer values remain private', () => {
   const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
   expect(inferenceFailureMessage({ code: 'PROVIDER_CAPACITY' })).toContain('503: Provider capacity is fully in use right now');
-  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'API Error: 401 Unauthorized Bearer secret-value' })).toBe('Provider authentication failed. Check your provider credentials.');
-  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'Daily credit limit reached. Resets in 2 hours. Bearer secret-value /internal/path' })).toBe('Provider quota or billing limit reached. Try again after the limit resets in 2 hours.');
-  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'rate_limit: Too many requests. Retry after 45 seconds. sk-secret-value' })).toBe('Provider rate limit reached. Try again in 45 seconds.');
-  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'billing_error: payment required' })).toContain('provider usage or billing');
-  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: '503 Service unavailable at /internal/path' })).toBe('The model provider is temporarily unavailable. Please try again later.');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'API Error: 401 Unauthorized Bearer secret-value' })).toBe('API Error: 401 Unauthorized [redacted]');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'Daily credit limit reached. Resets in 2 hours. Bearer secret-value /internal/path' })).toBe('Daily credit limit reached. Resets in 2 hours. [redacted] [redacted path]');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'rate_limit: Too many requests. Retry after 45 seconds. sk-secret-value' })).toBe('rate_limit: Too many requests. Retry after 45 seconds. [redacted]');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'billing_error: payment required' })).toBe('billing_error: payment required');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: '503 Service unavailable at /internal/path' })).toBe('503 Service unavailable at [redacted path]');
   expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'request failed with sk-secret-value at /internal/path' })).toBeUndefined();
   expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'claude-opus: Daily credit limit reached. Resets in 2 hours.' })).toContain('2 hours');
   expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'gpt-5: Daily credit limit reached. Resets in 2 hours.' })).toContain('2 hours');
   expect(inferenceFailureMessage(new Error('internal stack detail'))).toBeUndefined();
+});
+
+test('a categorized failure whose detail sanitizes to nothing still yields its base message', () => {
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  // The only categorizing signal ('rate-limited') lives on a stack `at` line
+  // that sanitizing strips entirely, leaving an empty detail. Before the fix the
+  // empty sanitized detail was returned as undefined, dropping the categorized
+  // base message and falling back to generic; now it falls through to the base.
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: '    at handler (rate-limited /srv/x.js:1:2)' }))
+    .toBe('Provider rate limit reached. Please try again later.');
+  // Control (passes both ways): a categorized detail that survives sanitizing is
+  // still preserved verbatim rather than replaced by the base message.
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'rate_limit: slow down' }))
+    .toBe('rate_limit: slow down');
 });
 
 test('assistant error type remains actionable when provider omits text', async () => {
@@ -117,7 +131,7 @@ test('assistant error without API Error prefix survives a generic terminal resul
   const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
   const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
   expect(error).toMatchObject({ code: 'INFERENCE_FAILED', message: expect.stringContaining('Daily credit limit reached') });
-  expect(inferenceFailureMessage(error)).toBe('Provider quota or billing limit reached. Try again after the limit resets in 3 hours.');
+  expect(inferenceFailureMessage(error)).toBe('Daily credit limit reached. Resets in 3 hours.');
 });
 
 test('long terminal errors do not hide an earlier actionable assistant error', async () => {
@@ -128,7 +142,7 @@ test('long terminal errors do not hide an earlier actionable assistant error', a
   }});
   const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
   const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
-  expect(inferenceFailureMessage(error)).toBe('Provider quota or billing limit reached. Try again after the limit resets in 2 hours.');
+  expect(inferenceFailureMessage(error)).toBe('Daily credit limit reached. Resets in 2 hours.');
 });
 
 test('structured provider errors retain their message for web and channel presentation', async () => {
@@ -176,4 +190,111 @@ test.each(['final-only','replacement','structured'])('oversized %s result fails 
  await expect(startProcessTurn(p,'task',1000,publish).result).rejects.toMatchObject({code:'RESPONSE_TOO_LARGE'});
  expect(p.stop).toHaveBeenCalled();
  expect(publish.mock.calls.flat()).toEqual(kind==='replacement'?['Starting']:[]);
+});
+
+
+test.each(['Daily credit limit reached. Resets in 18h 0m — usage details: https://example.test/billing', 'โควตาหมด จะรีเซ็ตในอีก 18 ชั่วโมง', 'New provider wording; reset window = tomorrow'])('typed provider error preserves wording without reset parsing: %s', async message => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, {start:async()=>{}, stop:jest.fn(async()=>{}), sendMessage:()=>{
+    p.emit('output', JSON.stringify({type:'assistant',error:'future_provider_error',message:{content:[{type:'text',text:message}]}}));
+    p.emit('output', JSON.stringify({type:'result',is_error:true,result:'Inference failed'}));
+  }});
+  const error = await startProcessTurn(p,'check',1000).result.catch(error=>error);
+  expect(inferenceFailureMessage(error)).toBe(message);
+});
+
+
+test('provider display text redacts secrets and internal traces without parsing reset wording', () => {
+  const message = 'Resets in 18h 0m — https://user:pass@example.test/billing?token=hidden#private\nBearer abc API_KEY=hidden sk-private\n/internal/path C:\\private\\file\n    at fn (/srv/app/file.js:1:2)';
+  const rendered = inferenceFailureMessage({code:'INFERENCE_FAILED',providerMessage:message});
+  expect(rendered).toContain('Resets in 18h 0m — https://example.test/billing');
+  for (const secret of ['user:pass', 'token=hidden', '#private', 'Bearer abc', 'API_KEY=hidden', 'sk-private', '/internal/path', 'C:\\private', '/srv/app', 'at fn']) expect(rendered).not.toContain(secret);
+});
+
+
+test('structured errors array preserves unfamiliar provider text', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, {start:async()=>{},stop:jest.fn(async()=>{}),sendMessage:()=>{
+    p.emit('output', JSON.stringify({type:'result',is_error:true,errors:[{error:{code:'new_type',message:'Resets in 18h 0m'}}]}));
+  }});
+  const error = await startProcessTurn(p,'check',1000).result.catch(error=>error);
+  expect(inferenceFailureMessage(error)).toBe('Resets in 18h 0m');
+  expect(inferenceFailureMessage({code:'INFERENCE_FAILED',providerMessage:'{"api_key":"secret-value"}'})).not.toContain('secret-value');
+});
+
+
+test.each(['ANTHROPIC_AUTH_TOKEN=example_private_token', 'Cookie: session=example_private_cookie; other=private', 'Set-Cookie: session=example_private_cookie; HttpOnly', '{"token":"example_private_token"}'])('provider sanitizer protects common auth fields: %s', providerMessage => {
+  const rendered = inferenceFailureMessage({code:'INFERENCE_FAILED',providerMessage:'Resets in 18h 0m\n'+providerMessage});
+  expect(rendered).toContain('Resets in 18h 0m');
+  expect(rendered).not.toContain('example_private');
+});
+
+const thirdPartyError = 'API Error: 400 Third-party apps now draw from your extra usage, not your plan limits. Add more at claude.ai/settings/usage and keep going.';
+test.each(['assistant', 'result', 'errors'])('unrecognized HTTP 400 is preserved once from %s', async source => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, {start:async()=>{},stop:jest.fn(async()=>{}),sendMessage:()=>{
+    if (source === 'assistant') p.emit('output', JSON.stringify({type:'assistant',isApiErrorMessage:true,error:'unknown',message:{content:[{type:'text',text:thirdPartyError}]}}));
+    p.emit('output', JSON.stringify({type:'result',is_error:true,...(source === 'errors' ? {errors:[thirdPartyError]} : {result:thirdPartyError})}));
+  }});
+  const error = await startProcessTurn(p,'check',1000).result.catch(error=>error);
+  expect(inferenceFailureMessage(error)).toBe(thirdPartyError);
+});
+test('workspace startup failure is actionable without disclosing filesystem paths', () => {
+  expect(inferenceFailureMessage({code:'WORKSPACE_CONTEXT_MISSING',message:'private /home/user/file'})).toContain('workspace context (CLAUDE.md) is missing');
+  expect(inferenceFailureMessage({code:'ENOENT',message:'private /home/user/file'})).toBeUndefined();
+});
+
+test('process exit after a typed provider error retains that error', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, {start:async()=>{},stop:jest.fn(async()=>{}),sendMessage:()=>{
+    p.emit('output',JSON.stringify({type:'assistant',isApiErrorMessage:true,message:{content:[{type:'text',text:thirdPartyError}]}}));
+    p.emit('exit',1);
+  }});
+  const error = await startProcessTurn(p,'check',1000).result.catch(error=>error);
+  expect(inferenceFailureMessage(error)).toBe(thirdPartyError);
+});
+
+test.each(['API Error: The socket connection was closed unexpectedly', {error:'API Error: The socket connection was closed unexpectedly'}])('terminal provider envelope without HTTP status survives: %j', async result => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p,{start:async()=>{},stop:jest.fn(async()=>{}),sendMessage:()=>p.emit('output',JSON.stringify({type:'result',is_error:true,result}))});
+  const error = await startProcessTurn(p,'check',1000).result.catch(error=>error);
+  expect(inferenceFailureMessage(error)).toBe('API Error: The socket connection was closed unexpectedly');
+});
+
+test('a recovered provider error is not blamed for a later process crash', async()=>{
+  const p=new EventEmitter() as SessionProcess;
+  Object.assign(p,{start:async()=>{},stop:jest.fn(async()=>{}),sendMessage:()=>{
+    p.emit('output',JSON.stringify({type:'assistant',isApiErrorMessage:true,message:{content:[{type:'text',text:'API Error: 429 Retry shortly'}]}}));
+    p.emit('output',JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'Recovered; continuing the task'}]}}));
+    p.emit('exit',1);
+  }});
+  await expect(startProcessTurn(p,'check',1000).result).rejects.toMatchObject({code:'PROCESS_EXITED'});
+});
+
+test.each(['HTTP request failed; Authorization: Token private-value','Authorization: Token private-value','Authorization: Digest username="private-value", response="private-response"','{"api_key":"private-\\\"value-tail"}'])('sanitizer removes complete credential values: %s', providerMessage=>{
+  const text=inferenceFailureMessage({code:'INFERENCE_FAILED',providerMessage:'Provider rejected request\n'+providerMessage});
+  expect(text).toContain('Provider rejected request');
+  expect(text).not.toMatch(/private|value-tail/);
+});
+
+
+test.each([
+  {error: 'Account access paused. Contact your administrator.'},
+  {error: {error: 'Account access paused. Contact your administrator.'}},
+])('plain text inside a typed error envelope survives: %j', async result => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, {start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({type: 'result', is_error: true, result}));
+  }});
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(inferenceFailureMessage(error)).toBe('Account access paused. Contact your administrator.');
+});
+
+test('untyped terminal prose remains private', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, {start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({type: 'result', is_error: true, result: 'Private internal failure'}));
+  }});
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(inferenceFailureMessage(error)).toBeUndefined();
 });

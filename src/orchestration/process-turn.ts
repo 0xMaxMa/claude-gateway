@@ -1,3 +1,4 @@
+import { structuredProviderMessage } from './provider-message';
 import { toolOutcome, TurnObservation, ToolOutcome } from './execution-observation';
 import type { InputImage } from '../session/input-image';
 import { SessionProcess } from '../session/process';
@@ -39,6 +40,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
   let structuredIndex: number | undefined;
   let settled = false, stopped = false, text = '', streamed = false, apiErrorText = '';
   let apiErrorCodes: string[] = [];
+  let providerMessage: string | undefined;
   const startedAt = Date.now(); const tools = new Set<string>(); let inputTokens = 0, totalTokens = 0, recorded = false;
   const activeTools = new Map<string, number>();
   const toolNames = new Map<string, string>();
@@ -68,15 +70,17 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
     };
     phaseTimer = setTimeout(check, budget);
   };
-  const cleanup = () => { if (!recorded) { recorded = true; try { onMetrics?.({ toolIds: [...tools], inputTokens, totalTokens, startedAt }); } catch { /* telemetry must not break delivery */ } } clearTimeout(timer); clearTimeout(phaseTimer); clearInterval(observationTimer); process.off('output', output); process.off('exit', exit); };
+  const cleanup = () => { if (!recorded) { recorded = true; try { onMetrics?.({ toolIds: [...tools], inputTokens, totalTokens, startedAt }); } catch { /* telemetry must not break delivery */ } } clearTimeout(timer); clearTimeout(phaseTimer); clearInterval(observationTimer); process.off('output', output); process.off('exit', exit); process.off('startup-error', startupError); };
   const fail = (error: Error) => { if (settled) return; settled = true; cleanup(); rejectAccepted(error); rejectResult(error); };
   const publish = (chunk: string): boolean => {
     try { onText(chunk); return true; }
     catch { fail(new OrchestrationError('RESPONSE_PERSISTENCE_FAILED')); void process.stop(); return false; }
   };
+  const startupError = (error: Error) => { fail(error); void process.stop(); };
   const exit = () => {
     if (settled) return;
     if (stopped) { settled = true; cleanup(); rejectAccepted(new OrchestrationError('INTERRUPTED')); resolveResult({ text, interrupted: true }); }
+    else if (apiErrorText) fail(Object.assign(new OrchestrationError('INFERENCE_FAILED', apiErrorText), { providerCodes: apiErrorCodes, providerMessage }));
     else fail(new OrchestrationError('PROCESS_EXITED'));
   };
   const output = (line: string) => {
@@ -84,9 +88,19 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
     if (settled) return;
     try { event = JSON.parse(line); } catch { return; }
     const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
-    if (event.type === 'assistant' && (event.isApiErrorMessage || event.error)) {
+    const isProviderError = event.type === 'assistant' && (event.isApiErrorMessage || event.error);
+    if (isProviderError) {
       apiErrorCodes = [];
+      providerMessage = blocks.filter((block: any) => block.type === 'text' && typeof block.text === 'string').map((block: any) => block.text).join('\n') || structuredProviderMessage(event.error);
       apiErrorText = providerErrorText({ error: event.error, message: blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text) }, apiErrorCodes);
+    }
+    // A successful retry supersedes the earlier provider failure. Do not blame
+    // a later process crash/terminal error on an already-recovered request.
+    const resumedDelta = event.type === 'stream_event' ? event.event?.delta : undefined;
+    if (!isProviderError && ((event.type === 'assistant' && blocks.length > 0)
+        || (resumedDelta && ['text_delta', 'thinking_delta', 'input_json_delta'].includes(resumedDelta.type)
+          && (resumedDelta.text || resumedDelta.thinking || resumedDelta.partial_json)))) {
+      apiErrorText = ''; apiErrorCodes = []; providerMessage = undefined;
     }
     for (const block of blocks) {
       if (block.type === 'tool_use' && typeof block.id === 'string' && !activeTools.has(block.id) && activeTools.size < 2000) activeTools.set(block.id, -1);
@@ -147,9 +161,12 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
       if (event.is_error) {
         const providerCodes = [...apiErrorCodes];
         const detail = [apiErrorText, providerErrorText([event.result, event.errors], providerCodes)].filter(Boolean).join(' ').slice(0, 4096) || 'Inference failed';
-        const code = /provider capacity is fully in use|overloaded_error/i.test(detail) ? 'PROVIDER_CAPACITY'
-          : /\b(?:API Error:|HTTP)\s*503\b/i.test(detail) ? 'PROVIDER_UNAVAILABLE' : 'INFERENCE_FAILED';
-        fail(Object.assign(new OrchestrationError(code, detail), { providerCodes })); return;
+        const terminalCode = event.subtype === 'error_max_turns' ? 'MODEL_MAX_TURNS'
+          : event.subtype === 'error_max_budget_usd' ? 'MODEL_BUDGET_EXCEEDED'
+          : event.subtype === 'error_max_structured_output_retries' ? 'MODEL_OUTPUT_INVALID' : undefined;
+        const code = terminalCode ?? (/provider capacity is fully in use|overloaded_error/i.test(detail) ? 'PROVIDER_CAPACITY'
+          : /\b(?:API Error:|HTTP)\s*503\b/i.test(detail) ? 'PROVIDER_UNAVAILABLE' : 'INFERENCE_FAILED');
+        fail(Object.assign(new OrchestrationError(code, detail), { providerCodes, providerMessage: providerMessage || structuredProviderMessage(event.result) || structuredProviderMessage(event.errors) })); return;
       }
       if (process.runtimeProfile?.responseSchema && event.structured_output && typeof event.structured_output === 'object') {
         text = JSON.stringify(event.structured_output);
@@ -174,7 +191,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
   observationTimer?.unref();
   const timer = timeoutMs === undefined ? undefined : setTimeout(() => expire('total'), timeoutMs);
   if (policy) arm('startup', policy.startupTimeoutMs);
-  process.on('output', output); process.on('exit', exit);
+  process.on('output', output); process.on('exit', exit); process.on('startup-error', startupError);
   void process.start().then(() => {
     if (stopped || settled) return process.stop();
     process.sendMessage(prompt, images);

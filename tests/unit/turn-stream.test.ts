@@ -11,6 +11,7 @@ import {
   TurnStreamRegistry,
   TURN_BUFFER_MAX_EVENTS,
   callbackSink,
+  errorCode,
   errorEvent,
   resultEvent,
   turnStreamKey,
@@ -172,9 +173,24 @@ describe('TurnStream', () => {
     expect(onError.mock.calls[0][0]).toBe(err);
   });
 
+  it('errorCode only surfaces a protocol-shaped code, matching the message-text filter', () => {
+    // The `code` field on a JSON/SSE error frame must obey the same
+    // ^[A-Z][A-Z0-9_]{0,79}$ contract responseFailureMessage enforces on the
+    // message text, so a raw `err.code` cannot leak through unfiltered.
+    expect(errorCode(Object.assign(new Error('x'), { code: 'TIMEOUT' }))).toBe('TIMEOUT');
+    expect(errorCode(Object.assign(new Error('x'), { code: 'rate_limit' }))).toBeUndefined();
+    expect(errorCode(Object.assign(new Error('x'), { code: 'Some arbitrary detail' }))).toBeUndefined();
+    expect(errorCode(Object.assign(new Error('x'), { code: 'A'.repeat(81) }))).toBeUndefined();
+    expect(errorCode(Object.assign(new Error('x'), { code: 7 }))).toBeUndefined();
+    // errorEvent builds the terminal frame's `code`, so it inherits the filter:
+    // a non-protocol code is dropped rather than echoed onto the frame.
+    expect(errorEvent(Object.assign(new Error('boom'), { code: 'lowercase_code' })))
+      .not.toHaveProperty('code');
+  });
+
   it('errorEvent puts the Error\'s code on the frame, and omits the field when there is none', () => {
     expect(errorEvent(Object.assign(new Error('timed out'), { code: 'TIMEOUT' })))
-      .toEqual({ type: 'error', message: 'timed out', code: 'TIMEOUT' });
+      .toEqual({ type: 'error', message: expect.stringContaining('(TIMEOUT)'), code: 'TIMEOUT' });
     expect(errorEvent(new Error('plain'))).toEqual({ type: 'error', message: 'plain' });
     // A non-string `code` (libuv errno objects use numbers) is not a protocol code.
     expect(errorEvent(Object.assign(new Error('numeric'), { code: 7 })))
@@ -451,4 +467,16 @@ describe('TurnStreamRegistry', () => {
     expect(watcher.finished).toBeNull();
     registry.clear();
   });
+});
+
+
+test('provider error replay retains its safe message without original exception metadata', () => {
+ const { responseFailureMessage } = require('../../src/orchestration/response-errors');
+ const original=Object.assign(new Error('unknown duplicate secret'),{code:'INFERENCE_FAILED',providerMessage:'API Error: 400 New provider diagnostic. Bearer private-value'});
+ const frame=errorEvent(original);
+ expect(frame).toMatchObject({message:'API Error: 400 New provider diagnostic. [redacted]'});
+ const callback=jest.fn();
+ const sink=callbackSink({onChunk:jest.fn(),onDone:jest.fn(),onError:callback});
+ sink.finish({seq:1,event:frame});
+ expect(responseFailureMessage(callback.mock.calls[0][0])).toBe('API Error: 400 New provider diagnostic. [redacted]');
 });

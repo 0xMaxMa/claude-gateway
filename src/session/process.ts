@@ -939,7 +939,16 @@ export class SessionProcess extends EventEmitter {
     if (this.runtimeProfile) {
       if (this.agentConfig.type === 'app-agent' && this.runtimeProfile.hostExecution) throw new Error('Container roles cannot use host execution');
       if (this.gatewayConfig.gateway.headless === false) throw new Error('Orchestration runtime profile is only verified for the configured headless backend');
-      const context = this.runtimeProfile.context ?? fs.readFileSync(path.join(this.agentConfig.workspace, 'CLAUDE.md'), 'utf8');
+      let context = this.runtimeProfile.context;
+      if (context === undefined) {
+        try { context = fs.readFileSync(path.join(this.agentConfig.workspace, 'CLAUDE.md'), 'utf8'); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw Object.assign(new Error('Required workspace context CLAUDE.md is missing.'), { code: 'WORKSPACE_CONTEXT_MISSING' });
+          }
+          throw error;
+        }
+      }
       args.push(...runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: this.containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${this.containerAttempt.directory}/checkpoint.cjs ${this.containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: this.containerAttempt && this.runtimeProfile.skillPluginDir ? this.containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []));
       if (this.runtimeProfile.workerSession) {
         const session = this.runtimeProfile.workerSession;
@@ -1546,6 +1555,16 @@ export class SessionProcess extends EventEmitter {
       // hint. This is the exact failure the binary-resolution work targets.
       this.lastStderrLine = err.message;
       this.logger.error('session subprocess error', { error: err.message });
+      if (this.runtimeProfile && !proc.pid) {
+        // Failed spawn emits 'error' and 'close', but never 'exit'. Clear the
+        // nonexistent child before listeners call stop(), or cleanup waits forever.
+        if (this.process === proc) { this.process = null; this._exited = true; }
+        const cause = (err as NodeJS.ErrnoException).code;
+        const missingWorkspace = cause === 'ENOENT' && !fs.existsSync(this.agentConfig.workspace);
+        const code = missingWorkspace ? 'WORKSPACE_DIRECTORY_MISSING'
+          : cause === 'ENOENT' ? (isAppAgent ? 'CONTAINER_RUNTIME_NOT_FOUND' : 'CLAUDE_BINARY_NOT_FOUND') : cause === 'EACCES' || cause === 'EPERM' ? 'PROCESS_PERMISSION_DENIED' : 'PROCESS_START_FAILED';
+        this.emit('startup-error', Object.assign(new Error(code), { code }));
+      }
     });
   }
 

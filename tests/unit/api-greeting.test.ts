@@ -318,9 +318,9 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
   // SSE headers are written before sendApiMessageStream is called. If sendApiMessageStream
   // throws synchronously (e.g. subprocess spawn failure), the error must be delivered as
   // an SSE error event — JSON 500 is impossible once headers are flushed.
-  it('T-GREETING-SSE-ERROR-ON-THROW: sync throw from sendApiMessageStream delivers SSE error event', async () => {
+  it.each(['PROCESS_START_FAILED', undefined])('T-GREETING-SSE-ERROR-ON-THROW: startup error %s delivers a safe SSE diagnostic', async code => {
     await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
-    runner.sendStreamThrow = new Error('spawn failed');
+    runner.sendStreamThrow = Object.assign(new Error('spawn failed: private workspace details'), code ? {code} : {});
     const app = buildApp(runner);
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
@@ -331,7 +331,9 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     expect(res.headers['content-type']).toMatch(/text\/event-stream/);
     const events = parseSseEvents(res.text);
     const errEvent = events.find(e => e['type'] === 'error');
-    expect(errEvent?.['message']).toMatch(/spawn failed/);
+    expect(errEvent?.['message']).toContain(code ?? 'GATEWAY_INTERNAL_ERROR');
+    expect(errEvent?.['message']).not.toContain('private workspace details');
+    expect(errEvent?.['code']).toBe(code);
   });
 
   // ── chatId routing ─────────────────────────────────────────────────────────

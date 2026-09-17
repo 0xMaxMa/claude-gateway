@@ -1,3 +1,4 @@
+import { sanitizeProviderMessage } from './provider-message';
 const providerCodes: Readonly<Record<string, string>> = {
   insufficient_quota: 'quota', quota_exceeded: 'quota', billing_error: 'quota', payment_required: 'quota',
   insufficient_credits: 'quota', insufficient_balance: 'quota', credit_balance: 'quota',
@@ -7,24 +8,14 @@ const providerCodes: Readonly<Record<string, string>> = {
 };
 const codeCategory = (code: string): string | undefined => Object.prototype.hasOwnProperty.call(providerCodes, code) ? providerCodes[code] : undefined;
 
-function retryGuidance(message: string): string | undefined {
-  // Validate the entire clause: never truncate an offset, AM/PM, or compound duration.
-  const reset = message.match(/\b(resets?|resetting|retry(?:ing)?|try again)\s+(?:(in|after|at)\s+)?([^\n.!?]{1,160})(?:[\n.!?]|$)/i);
-  if (!reset) return undefined;
-  const value = reset[3].trim(), connector = reset[2]?.toLowerCase();
-  const duration = /^(?:\d{1,4}\s*(?:seconds?|minutes?|hours?|days?))(?:\s*(?:,\s*|and\s+)?\d{1,4}\s*(?:seconds?|minutes?|hours?|days?)){0,3}$/i.test(value);
-  const clock = value.match(/^([01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?(?:\s+(AM|PM))?(?:\s+(UTC|GMT)(?:([+-])((?:0?\d|1[0-4]))(?::([0-5]\d))?)?)?$/i);
-  if (clock?.[2] && (Number(clock[1]) < 1 || Number(clock[1]) > 12)) return undefined;
-  if (clock?.[5] && Number(clock[5]) === 14 && Number(clock[6] ?? 0) !== 0) return undefined;
-  if (duration && connector === 'at') return undefined;
-  if (!duration && (!clock || ((connector === 'in' || connector === 'after') && (clock[2] || clock[3])))) return undefined;
-  const when = duration || connector === 'in' || connector === 'after' ? 'in' : 'at';
-  return ` Try again ${/^reset/i.test(reset[1]) ? 'after the limit resets ' : ''}${when} ${value}.`;
-}
-
 /** User-facing provider failures, without credentials or internal stack traces. */
 export function inferenceFailureMessage(error: unknown): string | undefined {
-  const failure = error as { code?: string; message?: string; providerCodes?: string[] } | null;
+  const failure = error as { code?: string; message?: string; providerCodes?: string[]; providerMessage?: string } | null;
+  if (failure?.code === 'WORKSPACE_CONTEXT_MISSING') return 'The agent could not start because its workspace context (CLAUDE.md) is missing. Restore the required workspace files and restart the agent.';
+  if (failure && ['INFERENCE_FAILED', 'PROVIDER_CAPACITY', 'PROVIDER_UNAVAILABLE'].includes(failure.code ?? '') && typeof failure.providerMessage === 'string') {
+    const message = sanitizeProviderMessage(failure.providerMessage);
+    if (message) return message;
+  }
   if (failure?.code === 'PROVIDER_CAPACITY') return '503: Provider capacity is fully in use right now. Please try again later.';
   if (failure?.code === 'PROVIDER_UNAVAILABLE') return '503: The model provider is temporarily unavailable. Please try again shortly.';
   if (failure?.code !== 'INFERENCE_FAILED' || typeof failure.message !== 'string') return undefined;
@@ -43,6 +34,14 @@ export function inferenceFailureMessage(error: unknown): string | undefined {
     if (!category && /\b(?:service unavailable|provider unavailable|temporarily unavailable|HTTP\s*503|API Error:\s*503)\b/i.test(detail)) category = 'unavailable';
   }
   if (!category) return undefined;
+  // Older callers carry only an Error message. Once identified as a provider
+  // failure, preserve its wording too; do not parse a reset time out of prose.
+  // When sanitizing strips the detail to nothing (a pure stack/path), fall
+  // through to the categorized base message rather than dropping to generic.
+  if (detail && !failure.providerCodes?.length && !/^HTTP \d{3}$/.test(detail)) {
+    const preserved = sanitizeProviderMessage(detail);
+    if (preserved) return preserved;
+  }
   const base = category === 'quota' ? 'Provider quota or billing limit reached.'
     : category === 'rate_limit' ? 'Provider rate limit reached.'
     : category === 'quota_or_rate_limit' ? 'Provider rate limit or quota reached.'
@@ -50,6 +49,6 @@ export function inferenceFailureMessage(error: unknown): string | undefined {
     : category === 'capacity' ? '503: Provider capacity is fully in use right now.'
     : 'The model provider is temporarily unavailable.';
   if (category === 'authentication') return base + ' Check your provider credentials.';
-  return base + (retryGuidance(detail) ?? (category === 'quota' ? ' Check your provider usage or billing before retrying.'
-    : category === 'quota_or_rate_limit' ? ' Check provider usage before retrying.' : ' Please try again later.'));
+  return base + (category === 'quota' ? ' Check your provider usage or billing before retrying.'
+    : category === 'quota_or_rate_limit' ? ' Check provider usage before retrying.' : ' Please try again later.');
 }
