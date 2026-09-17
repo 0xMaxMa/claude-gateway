@@ -2,7 +2,7 @@ import { BrowserVoice } from './browser-voice';
 import { committedCommandContext, communicatedProgressContext } from './decision-context';
 import { recordTokenTurn, tokenReport, summarizeTokenTurns, measuredTurns } from './token-ledger';
 import { TaskQuestions } from './task-questions';
-import { isProgressReview, recentCommunicatedProgress, progressReviewResult, PROGRESS_REVIEW_SCHEMA, PROGRESS_REVIEW_OVERLAY } from './progress-review';
+import { isProgressReview, recentCommunicatedProgress, progressReviewResult, PROGRESS_REVIEW_OVERLAY } from './progress-review';
 import { canonicalVoiceProvider } from '../voice/providers/model-ref';
 import { CapabilityCatalog, readCapabilityPage } from './capabilities';
 import { browserRouting } from './browser-routing';
@@ -32,7 +32,7 @@ import { MediaStore } from '../history/media-store';
 import { resolveSkill, skillCatalog } from './skills';
 import type { SkillRegistry } from '../skills';
 import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
-import { SPEECH_SCHEMA, SPEECH_OVERLAY, splitSpeechResponse, speechVoiceStyle } from './speech';
+import { SPEECH_OVERLAY, splitSpeechResponse, speechVoiceStyle } from './speech';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { mkdirSync } from 'fs';
@@ -783,7 +783,6 @@ export class AgentOrchestrationRuntime {
       ticket.profile.overlay += '\n' + skillCatalog(this.host.skills?.());
       let speechDirective = '';
       if (speechEnabled) {
-        ticket.profile.responseSchema = SPEECH_SCHEMA;
         const listener = this.voiceListeners.get(sessionId);
         const gender = channelSpeech ? await resolveVoiceId(channelTts).then(async id => (await voiceChoices(channelTts)).find(v => v.id === id)?.gender).catch(() => undefined) : listener?.principalId === input.scope.principalId ? listener.gender?.() : undefined;
         speechDirective = `\n\n${SPEECH_OVERLAY}${speechVoiceStyle(gender)}`;
@@ -791,26 +790,29 @@ export class AgentOrchestrationRuntime {
       const previousReports = internalReview ? recentCommunicatedProgress(this.store, receipt.conversationId) : [];
       // Anthropic's prompt cache is a strict prefix match over [tools, system, messages],
       // evaluated ahead of the per-turn user message. Mutating ticket.profile.overlay (which
-      // becomes --append-system-prompt, part of the cached system block) or unconditionally
-      // swapping ticket.profile.responseSchema (which adds/changes the synthetic
-      // StructuredOutput tool, part of the cached tools block) for only SOME turns of a
-      // session (report/internalReview turns, semantic-intake turns, speech-enabled turns)
-      // makes those turns' byte-prefix diverge from every other turn in the same session,
-      // forcing a full cache-write every time such a turn is interleaved with a differently
-      // shaped one. INTAKE_OVERLAY, the review directive and the speech directive below all
-      // move into the per-turn prompt instead — that is new message content every turn
-      // regardless, so it was never part of the cached prefix and appending it there costs
-      // nothing extra. ticket.profile.responseSchema (the actual StructuredOutput tool
-      // definition, part of the cached tools block) genuinely must vary with speechEnabled —
-      // enforcing it unconditionally would change the output contract for every non-speech
-      // turn — so that residual toggle is accepted rather than papered over. Native schema
-      // enforcement is skipped for internalReview unless speech already forces one: the
-      // review's 3-field shape and the speech overlay's 2-field shape genuinely conflict
-      // (additionalProperties:false rejects notify_user), so that narrow combination keeps
-      // the original override rather than silently making reviews mute in speech-enabled
-      // sessions. progressReviewResult() already tolerates free-form/unvalidated JSON text,
-      // so dropping native validation for the dominant non-speech case is safe.
-      if (internalReview && ticket.profile.responseSchema) ticket.profile.responseSchema = PROGRESS_REVIEW_SCHEMA;
+      // becomes --append-system-prompt, part of the cached system block) or attaching
+      // ticket.profile.responseSchema (which adds a synthetic StructuredOutput tool, part of
+      // the cached tools block) for only SOME turns of a session (report/internalReview turns,
+      // semantic-intake turns, speech-enabled turns) would make those turns' byte-prefix
+      // diverge from every other turn in the same session, forcing a full cache-write every
+      // time such a turn interleaves with a differently shaped one. INTAKE_OVERLAY, the review
+      // directive and the speech directive below all move into the per-turn prompt instead —
+      // that is new message content every turn regardless, so it was never part of the cached
+      // prefix and appending it there costs nothing extra.
+      // ticket.profile.responseSchema is deliberately left unset here, on every turn shape,
+      // including speech and internalReview: the CLI's --json-schema flag both declares the
+      // StructuredOutput tool AND forces tool_choice to it (verified against the installed
+      // claude-code binary), so "declare the schema always, only toggle its use via per-turn
+      // text" is not reachable through this flag — declaring it on every turn would force
+      // every plain conversational turn through a JSON tool call instead of free text, which
+      // is exactly the output-contract change per-turn schema swapping was meant to avoid.
+      // Speech/review output shape is instead governed purely by SPEECH_OVERLAY and
+      // PROGRESS_REVIEW_OVERLAY prompt text (both already per-turn, below the cache
+      // breakpoint), parsed by splitSpeechResponse()/progressReviewResult(), which already
+      // tolerate free-form/unvalidated JSON text — this was already the dominant, shipped code
+      // path for internalReview (native schema was previously attached there only in the
+      // narrow speech+review combination). Speech now runs the same proven fallback instead of
+      // a second, cache-breaking enforcement mechanism.
       agentSession = await this.host.createAgentSession(sessionId, ticket.profile, options.model, input.scope);
       const snapshots = this.tasks.context(receipt.conversationId, input.scope.principalId, decision.decisionId);
       const committed = committedCommandContext(this.store, receipt.conversationId);
