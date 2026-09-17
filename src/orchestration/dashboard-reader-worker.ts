@@ -76,7 +76,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
           createdAt:t.created_at, execution:snapshot.execution, workerId:attempt?.workerId, attemptId:attempt?.attemptId,
           workerSessionId:attempt?.sessionId, resumed:attempt?.resumeSession, workstreamId:snapshot.workstreamId,
           continueTaskId:snapshot.continueTaskId,hostProcessId:t.active_attempt_id?attempt?.processIdentity?.pid:undefined,
-          tokenSummary:{totalTokens:metrics.totalTokens,allAttemptsTokens:total.totalTokens},loadedTools:metrics.loadedTools,usedTools:metrics.usedTools,
+          tokenSummary:{totalTokens:metrics.totalTokens,allAttemptsTokens:total.totalTokens},contextTools:metrics.contextTools,loadedTools:metrics.loadedTools,usedTools:metrics.usedTools,
           lastTool:tool?{name:tool.name,type:tool.type,is_error:tool.is_error,at:lastTool!.occurred_at}:undefined};
       });
       const thinking = Boolean(get("SELECT id FROM conversation_decisions WHERE conversation_id=? AND state='running' LIMIT 1", c.id));
@@ -85,7 +85,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
       const totalTokens = agent.totalTokens===null&&workers.totalTokens===null ? null : (agent.totalTokens??0)+(workers.totalTokens??0);
       return {sessionId:c.agent_session_id,chatId:c.chat_id,source:c.source,orchestration:true,mode:'headless',status:state,isRunning:thinking,
         model:turns.filter(t=>t.role==='agent'&&t.model).at(-1)?.model??'',updatedAt:c.updated_at,createdAt:c.created_at,
-        tokenSummary:{agentTokens:agent.totalTokens,workerTokens:workers.totalTokens,totalTokens},loadedTools:agent.loadedTools,usedTools:agent.usedTools,
+        tokenSummary:{agentTokens:agent.totalTokens,workerTokens:workers.totalTokens,totalTokens},contextTools:agent.contextTools,loadedTools:agent.loadedTools,usedTools:agent.usedTools,
         tasks,totalTasks:Number(get('SELECT COUNT(*) n FROM tasks WHERE conversation_id=? AND updated_at>=?',c.id,since)!.n),
         workerIds:all('SELECT id FROM worker_pool WHERE conversation_id=?',c.id).map(w=>w.id),spawnedAt:0,uptimeSec:0,tokens:0};
     });

@@ -311,7 +311,7 @@ export class AgentOrchestrationRuntime {
       const event = this.store.get("SELECT payload_json FROM conversation_events WHERE json_extract(payload_json,'$.task_id')=? AND type='tool.activity' ORDER BY seq DESC LIMIT 1", row.id);
       const tool = event ? JSON.parse(String(event.payload_json)).payload : undefined;
       const measured = summarizeTokenTurns(measuredTurns(this.store, String(row.agent_session_id)).filter(turn => turn.id === attempt?.attemptId));
-      return { tokenSummary: {totalTokens: measured.totalTokens}, loadedTools: measured.loadedTools, usedTools: measured.usedTools, taskId: row.id, sessionId: row.agent_session_id, state: row.state, title: snapshot.title,
+      return { tokenSummary: {totalTokens: measured.totalTokens}, contextTools: measured.contextTools, loadedTools: measured.loadedTools, usedTools: measured.usedTools, taskId: row.id, sessionId: row.agent_session_id, state: row.state, title: snapshot.title,
         execution: snapshot.execution, workerId: attempt?.workerId, workstreamId: snapshot.workstreamId, continueTaskId: snapshot.continueTaskId, resumed: attempt?.resumeSession,
         attemptId: attempt?.attemptId, workerSessionId: attempt?.sessionId, hostProcessId: row.active_attempt_id ? attempt?.processIdentity?.pid : undefined,
         container: this.agent.type === 'app-agent' ? this.agent.container : undefined,
@@ -333,7 +333,7 @@ export class AgentOrchestrationRuntime {
       const measured = summarizeTokenTurns(turns.filter(turn => turn.role === 'agent'));
       const workerTokens = summarizeTokenTurns(turns.filter(turn => turn.role === 'worker')).totalTokens;
       const totalTokens = measured.totalTokens === null && workerTokens === null ? null : (measured.totalTokens ?? 0) + (workerTokens ?? 0);
-      return { tokenSummary: totalTokens === null ? undefined : {agentTokens: measured.totalTokens, workerTokens, totalTokens}, loadedTools: measured.loadedTools, usedTools: measured.usedTools, orchestration: true, sessionId: String(c.agent_session_id), chatId: String(c.chat_id), source: String(c.source),
+      return { tokenSummary: totalTokens === null ? undefined : {agentTokens: measured.totalTokens, workerTokens, totalTokens}, contextTools: measured.contextTools, loadedTools: measured.loadedTools, usedTools: measured.usedTools, orchestration: true, sessionId: String(c.agent_session_id), chatId: String(c.chat_id), source: String(c.source),
         mode: 'headless', model: '', tokens: 0, isRunning: thinking, status: state, spawnedAt: 0, uptimeSec: 0,
         tasks: children, workerIds: workers.filter(w => w.conversation_id === c.id).map(w => String(w.id)) };
     });

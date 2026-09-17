@@ -1,3 +1,4 @@
+import type { RequestToolSchemas } from '../session/request-tool-capture';
 import { executionTool } from './tool-name';
 /** Model token volume, not billing cost. Output already includes thinking. */
 export interface TokenUsage {
@@ -9,7 +10,7 @@ export interface TokenUsage {
   cacheCreation5mTokens?: number;
   cacheCreation1hTokens?: number;
 }
-export interface RequestUsage { id: string; model?: string; usage: TokenUsage; }
+export interface RequestUsage { id: string; model?: string; usage: TokenUsage; toolSchemas?: RequestToolSchemas; }
 const fields = ['inputTokens', 'cacheCreationTokens', 'cacheReadTokens', 'outputTokens', 'cacheCreation5mTokens', 'cacheCreation1hTokens'] as const;
 export function emptyUsage(): TokenUsage {
   return { inputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
@@ -37,6 +38,11 @@ export function sumUsage(values: TokenUsage[]): TokenUsage {
 export class TurnUsageCollector {
   private readonly messages = new Map<string, RequestUsage>();
   private currentId?: string;
+  private readonly schemas = new Map<string, RequestToolSchemas>();
+  observeSchemas(value: RequestToolSchemas): void {
+    this.schemas.set(value.messageId, value);
+    const request=this.messages.get(value.messageId);if(request)request.toolSchemas=value;
+  }
   private aggregate: TokenUsage | null = null;
   loadedTools: string[] | null = null;
   readonly usedTools = new Set<string>();
@@ -62,9 +68,9 @@ export class TurnUsageCollector {
     const next = normalize(raw), previous = this.messages.get(id);
     if (previous) for (const key of fields) if (previous.usage[key] !== undefined || next[key] !== undefined) next[key] = Math.max(previous.usage[key] ?? 0, next[key] ?? 0);
     next.totalTokens = next.inputTokens + next.cacheCreationTokens + next.cacheReadTokens + next.outputTokens;
-    this.messages.set(id, {id, model: typeof model === 'string' ? model : previous?.model, usage: next});
+    this.messages.set(id, {id, model: typeof model === 'string' ? model : previous?.model, usage: next, toolSchemas:this.schemas.get(id)});
   }
-  snapshot(): { usage: TokenUsage | null; requests: RequestUsage[]; loadedTools: string[] | null; usedTools: string[]; model?: string } {
+  snapshot(): { usage: TokenUsage | null; requests: RequestUsage[]; loadedTools: string[] | null; usedTools: string[]; contextTools: string[] | null; schemaCoverage: {measured:number;total:number}; model?: string } {
     const requests = [...this.messages.values()];
     // The CLI aggregate includes otherwise unreported subcalls. It is a fallback
     // and reconciliation source, not an extra request or fabricated request ID.
@@ -74,6 +80,8 @@ export class TurnUsageCollector {
       for (const key of fields) if (usage[key] !== undefined || this.aggregate[key] !== undefined) usage[key] = Math.max(usage[key] ?? 0, this.aggregate[key] ?? 0);
       usage.totalTokens = usage.inputTokens + usage.cacheCreationTokens + usage.cacheReadTokens + usage.outputTokens;
     }
-    return {usage, requests, loadedTools: this.loadedTools, usedTools: [...this.usedTools].sort(), model: this.model};
+    const measured=requests.filter(r=>r.toolSchemas);
+    const contextTools=measured.length?[...new Set(measured.flatMap(r=>r.toolSchemas!.loaded))].sort():null;
+    return {usage, requests, contextTools, schemaCoverage:{measured:measured.length,total:requests.length}, loadedTools: this.loadedTools, usedTools: [...this.usedTools].sort(), model: this.model};
   }
 }

@@ -434,6 +434,9 @@ describe('SessionProcess', () => {
       const sp = makeSp('managed-connector', 'api', agentConfig, gatewayConfig, sessionStore, undefined, profile);
       await sp.start();
       const args = (require('child_process').spawn as jest.Mock).mock.calls.slice(-1)[0]![1] as string[];
+      const captureEnv = (require('child_process').spawn as jest.Mock).mock.calls.slice(-1)[0]![2].env.OTEL_LOG_RAW_API_BODIES;
+      expect(captureEnv).toMatch(/^file:/);
+      expect(fs.statSync(captureEnv.slice(5)).mode & 0o777).toBe(0o700);
       const configPath = args[args.indexOf('--mcp-config')+1];
       const servers=JSON.parse(fs.readFileSync(configPath,'utf8')).mcpServers;
       expect(servers.github.headers.Authorization).toBe('Bearer fixture-old');

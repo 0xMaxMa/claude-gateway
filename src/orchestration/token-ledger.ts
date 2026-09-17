@@ -30,10 +30,12 @@ export function measuredTurns(store: OrchestrationStore, sessionId: string): Tok
   const turns = store.all(`SELECT id, role, task_id, started_at,
     json_extract(payload_json,'$.usage') AS usage,
     json_extract(payload_json,'$.loadedTools') AS loaded_tools,
+    json_extract(payload_json,'$.contextTools') AS context_tools,
     json_extract(payload_json,'$.usedTools') AS used_tools
     FROM token_turns WHERE session_id=? ORDER BY started_at,id`, sessionId).map(row => ({
       id: String(row.id), sessionId, role: String(row.role) as TokenTurn['role'], category: String(row.role) === 'worker' ? 'worker' as const : 'input' as const,
       taskId: row.task_id == null ? undefined : String(row.task_id), startedAt: Number(row.started_at), toolIds: [], inputTokens: 0, totalTokens: 0,
+      contextTools: row.context_tools == null ? null : JSON.parse(String(row.context_tools)),
       usage: row.usage == null ? null : JSON.parse(String(row.usage)), loadedTools: row.loaded_tools == null ? null : JSON.parse(String(row.loaded_tools)),
       usedTools: row.used_tools == null ? [] : JSON.parse(String(row.used_tools)),
     }));
@@ -136,6 +138,7 @@ export function summarizeTokenTurns(turns: TokenTurn[]) {
   const measured = turns.filter(turn => turn.usage);
   const usage = measured.length ? sumUsage(measured.map(turn => turn.usage!)) : null;
   return {totalTokens: usage?.totalTokens ?? null,
+    contextTools: turns.some(turn=>turn.contextTools!=null)?[...new Set(turns.flatMap(turn=>turn.contextTools??[]))].sort():null,
     loadedTools: turns.some(turn => turn.loadedTools != null) ? [...new Set(turns.flatMap(turn => turn.loadedTools ?? []))].sort() : null,
     usedTools: [...new Set(turns.flatMap(turn => turn.usedTools ?? []))].sort()};
 }

@@ -1,3 +1,4 @@
+import { RequestToolCapture, RequestToolSchemas } from './request-tool-capture';
 import type { InputImage } from './input-image';
 import { prepareContainerProfile, stopContainerProfile, CONTAINER_SUPERVISOR, containerNode, assertContainerBinding } from '../orchestration/container';
 import { spawn, ChildProcess } from 'child_process';
@@ -1150,12 +1151,19 @@ export class SessionProcess extends EventEmitter {
     const capacityEnabled = Boolean(this.runtimeProfile || this.gatewayConfig.gateway.processLimits || this.gatewayConfig.agents?.some(agent => agent.orchestration?.enabled));
     const releaseCapacity = this.runtimeProfile?.capacityReserved ? () => {} : gatewayCapacity(this.gatewayConfig).acquire(this.runtimeProfile?.role ?? 'legacy', capacityEnabled);
     if (!releaseCapacity) throw Object.assign(new Error('Gateway process capacity exceeded'), { code: 'CAPACITY_EXCEEDED' });
+    this.toolCapture?.close(); this.toolCapture = undefined;
+    if (this.runtimeProfile && !isAppAgent) {
+      try { this.toolCapture = new RequestToolCapture(value => this.emit('request-tools', value)); }
+      catch { /* Schema telemetry cannot block a session. */ }
+    }
+    const toolCapture = this.toolCapture;
     let proc: ReturnType<typeof spawn>;
     try { proc = spawn(spawnBin, spawnArgs, {
       env: {
         ...process.env,
         ...(!isAppAgent && this.runtimeProfile?.checkpointCommand && !this.runtimeProfile.hostExecution ? Object.fromEntries(CONTAINER_CREDENTIAL_KEYS.map(key=>[key,undefined])) : {}),
         ...containerAuthEnv,
+        ...(toolCapture ? {OTEL_LOG_RAW_API_BODIES:'file:'+toolCapture.directory} : {}),
         ...(hardenedPath ? { PATH: hardenedPath } : {}),
         GATEWAY_ORIGIN_SESSION_ID: this.runtimeProfile?.originSessionId ?? this.sessionId,
         GATEWAY_TASK_ID: this.runtimeProfile?.taskId ?? '',
@@ -1170,10 +1178,12 @@ export class SessionProcess extends EventEmitter {
       cwd: this.agentConfig.workspace,
       ...(this.runtimeProfile?.role === 'worker' && process.platform === 'linux' ? { detached: true } : {}),
       stdio: ['pipe', 'pipe', 'pipe'],
-    }); } catch (error) { releaseCapacity(); throw error; }
+    }); } catch (error) { toolCapture?.close(); releaseCapacity(); throw error; }
 
     this.process = proc;
     proc.once('exit', releaseCapacity);
+    proc.once('exit', () => { setTimeout(() => toolCapture?.close(), 200).unref(); });
+    proc.once('error', () => toolCapture?.close());
     proc.once('error', releaseCapacity);
     if (this.runtimeProfile?.role === 'worker' && process.platform === 'linux') this.managedProcessGroup = proc.pid;
     // Fresh child is alive: clear any exit observed for a prior process (e.g.
@@ -1967,6 +1977,9 @@ export class SessionProcess extends EventEmitter {
     // would falsely report a healthy interrupted session as not-running.
     return this.process !== null && !this._exited;
   }
+
+  private toolCapture?: RequestToolCapture;
+  async flushToolSchemas(expectedIds?: string[]): Promise<RequestToolSchemas[]> { return this.toolCapture?.flush(expectedIds) ?? []; }
 
   async stop(): Promise<void> {
     this.stopping = true;

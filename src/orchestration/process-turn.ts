@@ -1,3 +1,4 @@
+import type { RequestToolSchemas } from '../session/request-tool-capture';
 import { structuredProviderMessage } from './provider-message';
 import { executionTool } from './tool-name';
 import { TurnUsageCollector, TokenUsage, RequestUsage } from './token-usage';
@@ -16,7 +17,7 @@ export interface ProcessTurn {
 }
 /** Reuses the existing process/history lifecycle; a turn ends on a terminal
  * event or confirmed process exit. The owner decides task recovery policy. */
-export interface ManagedTurnMetrics { toolIds: string[]; inputTokens: number; totalTokens: number; startedAt: number; endedAt?: number; usage?: TokenUsage | null; requests?: RequestUsage[]; loadedTools?: string[] | null; usedTools?: string[]; model?: string; }
+export interface ManagedTurnMetrics { toolIds: string[]; inputTokens: number; totalTokens: number; startedAt: number; endedAt?: number; usage?: TokenUsage | null; requests?: RequestUsage[]; loadedTools?: string[] | null; usedTools?: string[]; contextTools?: string[] | null; schemaCoverage?: {measured:number;total:number}; model?: string; }
 function providerErrorText(value: unknown, codes: string[], depth = 0, budget = { nodes: 256 }): string {
   if (depth >= 8 || --budget.nodes < 0) return '';
   if (typeof value === 'string') return value.slice(0, 4096);
@@ -40,6 +41,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
   // Both promises are observed immediately, including startup errors.
   void accepted.catch(() => {}); void result.catch(() => {});
   let structuredIndex: number | undefined;
+  let finalCapturePending=false;
   let settled = false, stopped = false, text = '', streamed = false, apiErrorText = '';
   let apiErrorCodes: string[] = [];
   let providerMessage: string | undefined;
@@ -73,7 +75,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
     };
     phaseTimer = setTimeout(check, budget);
   };
-  const cleanup = () => { if (!recorded) { recorded = true; try { const measured = usageCollector.snapshot(); onMetrics?.({ toolIds: [...tools], inputTokens: measured.usage ? measured.usage.inputTokens + measured.usage.cacheCreationTokens + measured.usage.cacheReadTokens : inputTokens, totalTokens: measured.usage?.totalTokens ?? totalTokens, startedAt, endedAt: Date.now(), ...measured }); } catch { /* telemetry must not break delivery */ } } clearTimeout(timer); clearTimeout(phaseTimer); clearInterval(observationTimer); process.off('output', output); process.off('exit', exit); process.off('startup-error', startupError); };
+  const cleanup = () => { if (!recorded) { recorded = true; try { const measured = usageCollector.snapshot(); onMetrics?.({ toolIds: [...tools], inputTokens: measured.usage ? measured.usage.inputTokens + measured.usage.cacheCreationTokens + measured.usage.cacheReadTokens : inputTokens, totalTokens: measured.usage?.totalTokens ?? totalTokens, startedAt, endedAt: Date.now(), ...measured }); } catch { /* telemetry must not break delivery */ } } clearTimeout(timer); clearTimeout(phaseTimer); clearInterval(observationTimer); process.off('output', output); process.off('request-tools', schemaOutput); process.off('exit', exit); process.off('startup-error', startupError); };
   const fail = (error: Error) => { if (settled) return; settled = true; cleanup(); rejectAccepted(error); rejectResult(error); };
   const publish = (chunk: string): boolean => {
     try { onText(chunk); return true; }
@@ -81,15 +83,26 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
   };
   const startupError = (error: Error) => { fail(error); void process.stop(); };
   const exit = () => {
-    if (settled) return;
+    if (settled || finalCapturePending) return;
     if (stopped) { settled = true; cleanup(); rejectAccepted(new OrchestrationError('INTERRUPTED')); resolveResult({ text, interrupted: true }); }
     else if (apiErrorText) fail(Object.assign(new OrchestrationError('INFERENCE_FAILED', apiErrorText), { providerCodes: apiErrorCodes, providerMessage }));
     else fail(new OrchestrationError('PROCESS_EXITED'));
   };
+  const schemaOutput = (value: RequestToolSchemas) => {
+    if(settled)return;
+    usageCollector.observeSchemas(value);
+    try {const measured=usageCollector.snapshot();policy?.onUsage?.({toolIds:[...tools],inputTokens:measured.usage?.inputTokens??0,totalTokens:measured.usage?.totalTokens??0,startedAt,...measured});}catch{}
+  };
+  process.on('request-tools', schemaOutput);
   const output = (line: string) => {
     let event: Record<string, any>;
     if (settled) return;
     try { event = JSON.parse(line); } catch { return; }
+    if(event.type==='result'&&!event.gatewaySchemasFlushed&&typeof process.flushToolSchemas==='function'){
+      finalCapturePending=true;
+      void process.flushToolSchemas(usageCollector.snapshot().requests.map(r=>r.id)).then(values=>{for(const value of values)usageCollector.observeSchemas(value);}).catch(()=>{}).finally(()=>{finalCapturePending=false;output(JSON.stringify({...event,gatewaySchemasFlushed:true}));});
+      return;
+    }
     usageCollector.observe(event);
     if ((event.type === 'assistant' && event.message?.usage) || (event.type === 'system' && event.subtype === 'init') || (event.type === 'stream_event' && event.event?.type === 'message_stop')) {
       try {
