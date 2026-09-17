@@ -1,7 +1,9 @@
 import { OrchestrationStore } from './store';
 
 /** Retry reports, never task execution. Decisions/inputs retain the retry clock
- * across restarts, including failed reports written before this implementation. */
+ * across restarts, including failed reports written before this implementation.
+ * Prolonged outages back off to one hour instead of retrying every five minutes.
+ * User inputs bypass this automatic-report scheduler. */
 export function pendingReports(store: OrchestrationStore, activeSessions: string[], scheduled: string[], automatic: boolean, now = Date.now()) {
   return store.all(`WITH candidates AS (
     SELECT n.id notification_id,c.*,i.id previous_input_id,i.input_seq previous_seq,
@@ -22,7 +24,7 @@ export function pendingReports(store: OrchestrationStore, activeSessions: string
   ), eligible AS (
     SELECT *,ROW_NUMBER() OVER (PARTITION BY id ORDER BY notification_id) position FROM candidates
     WHERE decision_state IS NULL OR decision_state='completed' OR (decision_state='failed'
-      AND ended_at+MIN(300000,5000*(1 << MIN(6,attempts-1)))<=?)
+      AND ended_at+MIN(3600000,5000*(1 << MIN(10,attempts-1)))<=?)
   ) SELECT * FROM eligible WHERE position=1 ORDER BY notification_id LIMIT 20`,
   JSON.stringify(activeSessions), automatic ? 1 : 0, JSON.stringify(scheduled), now);
 }

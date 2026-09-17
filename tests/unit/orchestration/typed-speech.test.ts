@@ -200,3 +200,26 @@ test.each(['api', 'telegram'] as const)('%s orchestration persists unrecognized 
   if(source==='telegram')expect(runtime.store.all('SELECT delivered_text FROM deliveries')).toEqual([{delivered_text:row?.generated_text}]);
  }finally{await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
 });
+
+test.each(['api', 'telegram'] as const)('%s automatic report failures remain silent while retaining diagnostics', async source => {
+ const root=mkdtempSync(join(tmpdir(),'quota-response-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Identity');
+ const a={id:'a',description:'fixture',env:'',workspace,claude:{model:'fixture',extraFlags:[]},orchestration:{enabled:true,channels:['api','telegram']}} as AgentConfig;
+ const c={gateway:{orchestration:true,headless:true},agents:[a]} as GatewayConfig,sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a');
+ const sid=randomUUID();if(source==='api')await sessions.ensureApiSession('a','chat',sid);
+ const runtime=await AgentOrchestrationRuntime.open(a,c,dir,sessions,history,{
+  createAgentSession:async(id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+   this.emit('output',JSON.stringify({type:'assistant',error:'rate_limit',message:{content:[{type:'text',text:'Daily credit limit reached. Resets in 2 hours. Bearer secret-value /internal/path'}]}}));
+   this.emit('output',JSON.stringify({type:'result',is_error:true,result:'Inference failed'}));
+  }}) as unknown as SessionProcess,
+  releaseAgentSession:async()=>{},
+ });
+ try {
+  await expect(runtime.send({scope:{agentId:'a',agentSessionId:sid,source,accountId:'owner',chatId:'chat',threadKey:source==='telegram'?'123':'',principalId:'owner'},text:'status',storeUserMessage:false,ingressKey:'notification:fixture'},{execute:false,writeMemory:false},{timeoutMs:1000})).rejects.toMatchObject({code:'INFERENCE_FAILED'});
+  const row=runtime.store.get('SELECT state,generated_text FROM assistant_responses');
+  expect(row?.state).toBe('failed');
+  expect(row?.generated_text).toBe('');
+  expect(runtime.store.all("SELECT * FROM conversation_events WHERE type='response.error'")).toHaveLength(1);
+  expect(runtime.store.all('SELECT * FROM deliveries')).toHaveLength(0);
+  expect(runtime.store.all('SELECT * FROM response_speech')).toHaveLength(0);
+ }finally{await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
+});

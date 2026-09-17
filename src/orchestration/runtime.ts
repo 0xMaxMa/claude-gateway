@@ -900,7 +900,10 @@ export class AgentOrchestrationRuntime {
           const timeout = (error as {timeout?: {phase: string; elapsedMs: number; idleMs: number}})?.timeout;
           if (timeout) this.store.transaction(() => this.store.appendEvent(String(row.conversation_id), 'response.timeout', {responseId: active.decision!.responseId, ...timeout}));
           const message = responseFailureMessage(error);
-          this.decisions.finish(active.decision, internalReview || questionReview ? '' : message, 'failed', undefined, !internalReview && !questionReview);
+          // Automatic reports retry durably, but their failures are not new user replies.
+          // Keep notifications pending and diagnostics visible without creating
+          // repeated chat/history/audio errors. Explicit user turns still show the error.
+          this.decisions.finish(active.decision, active.notification ? '' : message, 'failed', undefined, !active.notification);
         }
         else if (row?.state === 'interrupting') this.decisions.finish(active.decision, 'Response stopped.', 'interrupted', undefined, !active.stopping);
         await this.flushHistory();
