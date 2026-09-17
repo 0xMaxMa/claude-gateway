@@ -76,7 +76,7 @@ test('worker rows describe latest-attempt token and inventory scope', () => {
 
 test('paginated reports keep whole-session totals and distribution when a role is absent from the page',()=>{
  const html=generateTokenReportHtml('a', {...report,turns:[report.turns[0]],pagination:{offset:0,limit:1,total:2},distribution:[{category:'input',tokens:30},{category:'worker',tokens:70}]});
- expect(html).toContain('Worker tokens<strong>70');expect(html).toContain('70.0%');expect(html).toContain('Next turns');expect(html).toContain('offset=1');
+ expect(html).toContain('Worker tokens<strong>70');expect(html).toContain('70.0%');expect(html).toContain('Next →');expect(html).toContain('offset=1');
 });
 
 test('a slow prior-page response cannot replace a newer session page', async()=>{
