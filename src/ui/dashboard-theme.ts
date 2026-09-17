@@ -393,16 +393,11 @@ tr.session-row:hover td{background:var(--raised)}
 .top-grid>div{margin-bottom:24px}
 .pty-viewer{margin:24px 0}
 .theme-toggle{padding:8px 12px}
-#dash-menu{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;padding:8px;flex:none}
+#dash-menu{display:none;align-items:center;justify-content:center;width:36px;height:36px;padding:8px;flex:none}
 #dash-menu .icon{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7}
-.sidebar-toggle{display:flex;align-items:center;justify-content:flex-start;gap:10px;width:100%;padding:10px 12px;background:transparent;color:var(--muted);border:1px solid var(--line);border-radius:8px;font-size:12px}
-.sidebar-toggle:hover{background:var(--raised);color:var(--text)}
-.sidebar-toggle .icon{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.7}
-.sidebar-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+#dashboard-sidebar,#sidebar-brand{cursor:pointer}
+#sidebar-brand:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:8px}
 @media(min-width:761px){
-[data-sidebar-collapsed=true] .sidebar-toggle{justify-content:center;padding:10px}
-[data-sidebar-collapsed=true] .sidebar-toggle span{display:none}
-[data-sidebar-collapsed=true] .sidebar-toggle .icon{transform:rotate(180deg)}
 [data-sidebar-collapsed=true] .layout{grid-template-columns:76px minmax(0,1fr)}
 [data-sidebar-collapsed=true] .sidebar{width:76px;padding:30px 10px 18px}
 [data-sidebar-collapsed=true] .sidebar .brand{padding:0 0 24px;justify-content:center}
@@ -415,7 +410,7 @@ tr.session-row:hover td{background:var(--raised)}
 
 @media(max-width:1100px){.dash-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
-@media(max-width:760px){.shell-content{padding:24px 16px}
+@media(max-width:760px){#dash-menu{display:inline-flex}.shell-content{padding:24px 16px}
 .dash-grid{gap:12px}
 .dash-stat{padding:18px}
 .dash-stat strong{font-size:26px}
