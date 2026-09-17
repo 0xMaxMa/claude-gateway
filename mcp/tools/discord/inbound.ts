@@ -49,7 +49,7 @@ export function createMessageHandler(
       ts: message.createdTimestamp,
     };
 
-    const attachments = (msg: DiscordMessage, quoted=false) => (msg.attachments.values ? [...msg.attachments.values()] : [msg.attachments.first()].filter(Boolean)).slice(0,10).map(a=>({url:a!.url,name:a!.name,kind:a!.contentType?.startsWith('image/')?'image':a!.contentType?.startsWith('audio/')?'audio':'file',quoted}));
+    const attachments = (msg: DiscordMessage, quoted=false) => (msg.attachments.values ? [...msg.attachments.values()] : [msg.attachments.first()].filter(Boolean)).slice(0,10).map(a=>({url:a!.url,name:a!.name,size:a!.size,kind:a!.contentType?.startsWith('image/')?'image':a!.contentType?.startsWith('audio/')?'audio':'file',quoted}));
     inbound.attachments = attachments(message);
     if (message.reference?.messageId && (!message.reference.channelId || message.reference.channelId === message.channelId)) {
       inbound.replyToMessageId = message.reference.messageId;

@@ -21,13 +21,13 @@ test('spool persists an album across restart, resets the quiet window, and forwa
  let spool=new ReceiverSpool(root,'http://callback',request,2000);
  try{
   spool.enqueue(item('1','Explain these images'));spool.enqueue(item('2'));spool.enqueue(item('3'));
-  await spool.flush();expect(request).not.toHaveBeenCalled();expect(readdirSync(root)).toHaveLength(1);
+  await spool.flush();expect(request).not.toHaveBeenCalled();expect(readdirSync(root).filter(file=>file.endsWith('.json'))).toHaveLength(1);
   spool.close();spool=new ReceiverSpool(root,'http://callback',request,2000);
   await spool.flush();expect(request).not.toHaveBeenCalled();
   for(const file of readdirSync(root))utimesSync(join(root,file),new Date(0),new Date(0));
   await spool.flush();expect(request).toHaveBeenCalledTimes(1);
   const body=JSON.parse(request.mock.calls[0][1]!.body as string);expect(body.content).toBe('Explain these images');expect(JSON.parse(body.meta.attachments_json)).toHaveLength(3);
-  expect(readdirSync(root)).toEqual([]);
+  expect(readdirSync(root).filter(file=>file.endsWith('.json'))).toEqual([]);
  }finally{spool.close();rmSync(root,{recursive:true,force:true});}
 });
 test('replying to the second picture resolves the complete album within the same authorized chat',()=>{
@@ -40,16 +40,17 @@ test('replying to the second picture resolves the complete album within the same
 
 test('ordinary text bypasses album waiting and a rejected callback retains the complete album for retry',async()=>{
  const root=mkdtempSync(join(tmpdir(),'album-retry-'));let ok=false;
+ let now=Date.now();const clock=jest.spyOn(Date,'now').mockImplementation(()=>now);
  const request=jest.fn(async(_url:any,_init?:RequestInit)=>new Response('',{status:ok?200:503}));
  const spool=new ReceiverSpool(root,'http://callback',request,2000);
  try{
   spool.enqueue({content:'hello',meta:{chat_id:'chat',message_id:'ordinary'}});
   await new Promise(resolve=>setImmediate(resolve));expect(request).toHaveBeenCalledTimes(1);
-  ok=true;await spool.flush();request.mockClear();
+  ok=true;now+=1000;await spool.flush();request.mockClear();
   spool.enqueue(item('1','One request'));spool.enqueue(item('2'));
   for(const file of readdirSync(root))utimesSync(join(root,file),new Date(0),new Date(0));
-  ok=false;await spool.flush();expect(readdirSync(root)).toHaveLength(1);
-  ok=true;await spool.flush();expect(readdirSync(root)).toHaveLength(0);
+  ok=false;await spool.flush();expect(readdirSync(root).filter(file=>file.endsWith('.json'))).toHaveLength(1);
+  ok=true;now+=1000;await spool.flush();expect(readdirSync(root).filter(file=>file.endsWith('.json'))).toHaveLength(0);
   expect(request.mock.calls[0][1]!.body).toBe(request.mock.calls[1][1]!.body);
- }finally{spool.close();rmSync(root,{recursive:true,force:true});}
+ }finally{clock.mockRestore();spool.close();rmSync(root,{recursive:true,force:true});}
 });

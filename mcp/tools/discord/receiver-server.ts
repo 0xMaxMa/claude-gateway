@@ -32,7 +32,7 @@ async function postCallback(inbound: InboundMessage): Promise<void> {
   if (inbound.attachmentFileId) {
     meta['attachment_file_id'] = inbound.attachmentFileId;
   }
-  if(inbound.attachments?.length)meta.attachments_json=JSON.stringify(inbound.attachments.map(a=>({ref:a.url,name:a.name,kind:a.kind,quoted:a.quoted})));
+  if(inbound.attachments?.length)meta.attachments_json=JSON.stringify(inbound.attachments.map(a=>({ref:a.url,name:a.name,kind:a.kind,quoted:a.quoted,size:a.size})));
   if(inbound.replyToMessageId)meta.replied_message_id=inbound.replyToMessageId;
   if(inbound.repliedText)meta.replied_text=inbound.repliedText;
   if(inbound.repliedSender)meta.replied_user=inbound.repliedSender;

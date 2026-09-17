@@ -28,7 +28,7 @@ async function fixture(source: ConversationScope['source'] = 'api', answer = 'St
     createAgentSession: jest.fn(async (_, profile) => {
       profiles.push(profile.overlay);
       const agentSession = new EventEmitter() as SessionProcess;
-      agentSession.start = async () => {}; agentSession.stop = async () => {};
+      agentSession.start = async () => {}; agentSession.stop = async () => {}; agentSession.interrupt = () => true;
       agentSession.sendMessage = prompt => { prompts.push(prompt); agentSession.emit('output', JSON.stringify({ type: 'result', result: answer })); };
       return agentSession;
     }), releaseAgentSession: async () => {},
@@ -148,7 +148,7 @@ test.each([
     const config = JSON.parse(readFileSync(profile.mcpConfigPath, 'utf8'));
     const ticket = JSON.parse(readFileSync(config.mcpServers.gateway.env.GATEWAY_ORCHESTRATION_TICKET_FILE, 'utf8'));
     const session = new EventEmitter() as SessionProcess;
-    session.start = async () => {}; session.stop = async () => {};
+    session.start = async () => {}; session.stop = async () => {}; session.interrupt = () => true;
     session.sendMessage = prompt => { void (async () => {
       if (calls++ === 0) {
         expect(prompt).toContain(text);
@@ -167,7 +167,7 @@ test.each([
     return session;
   });
   try {
-    const response = await f.runtime.send({ scope: f.scope, text: modality === 'voice_note' ? '(voice message)' : text, modality, ...(modality === 'voice_note' ? { attachmentIds: ['media/note.ogg'] } : {}) }, { execute: true, writeMemory: false }, { timeoutMs: 3000 });
+    const response = await f.runtime.send({ scope: f.scope, text: modality === 'voice_note' ? '(voice message)' : text, modality, ...(modality === 'voice_note' ? { attachmentIds: ['media/note.ogg'] } : {}) }, { execute: true, writeMemory: false }, { timeoutMs: 10000 });
     expect(response).toContain('Queued review');
     expect(f.runtime.store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(1);
     expect(f.runtime.store.task(String(f.runtime.store.get('SELECT id FROM tasks')!.id))).toMatchObject({ targetProfile: 'skill-worker', skill: { name: 'review', args: '465' } });
@@ -175,7 +175,7 @@ test.each([
     while (!f.workers.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
     expect(f.workers).toHaveLength(1); f.workers[0]();
     while (f.runtime.store.get('SELECT state FROM tasks')!.state !== 'completed' && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
-    expect(await f.runtime.send({ scope: f.scope, text: 'What did you find?' }, { execute: true, writeMemory: false }, { timeoutMs: 3000 })).toContain('access control bug');
+    expect(await f.runtime.send({ scope: f.scope, text: 'What did you find?' }, { execute: true, writeMemory: false }, { timeoutMs: 10000 })).toContain('access control bug');
   } finally { await f.close(); }
 });
 

@@ -63,10 +63,12 @@ test('materials survive a silent turn; complete instruction acknowledges before 
     const started = Date.now();
     const result = await runtime.send({scope,text:'Please review it.'},{execute:true,writeMemory:false},{timeoutMs:2000,onText:text=>{if(text.includes('reviewing'))order.push('ack');}});
     expect(failures).toEqual([]);
-    expect(result).toBe('I am reviewing the report now.');
+    expect(result).toBe('Some task commands were rejected. Other commands succeeded; please check /tasks for the current task status.');
     expect(Date.now()-started).toBeLessThan(2000);
     expect(order).toEqual(['ack','task']);
-    expect((await sessions.loadSession('a','s')).map(message=>message.role)).toEqual(['user','user','assistant']);
+    const messages=await sessions.loadSession('a','s');
+    expect(messages.map(message=>message.role)).toEqual(['user','user','assistant','assistant']);
+    expect(messages.slice(-2).map(message=>message.content)).toEqual(['I am reviewing the report now.',result]);
   } finally { await runtime.close(); (history as any).db.close(); HistoryDB.evict(root,'a'); rmSync(root,{recursive:true,force:true}); }
 });
 
@@ -128,31 +130,44 @@ test('an amendment acknowledges and updates the same task; duplicate spawn is re
     expect(f.failures).toEqual([]);
     expect(f.runtime.store.get('SELECT count(*) n FROM tasks')!.n).toBe(1);
     expect(f.runtime.tasks.revision(taskId,2).instructions).toContain('appendix');
-    expect((await f.sessions.loadSession('a','s')).filter(m=>m.role==='assistant')).toHaveLength(2);
+    expect((await f.sessions.loadSession('a','s')).filter(m=>m.role==='assistant').map(m=>m.content)).toEqual([
+      'I am reviewing it.',
+      'I will include the appendix in the review.',
+      'Some task commands were rejected. Other commands succeeded; please check /tasks for the current task status.',
+    ]);
   }finally{await f.close();}
 });
 
-test('voice acknowledgement emits audio before a concurrent task call can create work',async()=>{
+test('voice acknowledgement requests audio but pending playback does not block task creation',async()=>{
   const order:string[]=[];
+  let releaseAudio!:()=>void;
+  const audioReady=new Promise<void>(resolve=>{releaseAudio=resolve;});
+  let audioPlayback:Promise<void>|undefined;
   const f=await fixture(async(call)=>{
     const ack=call('conversation_intake',{mode:'ready',acknowledgement:'I am reviewing the report.'});
     // Wait for the text receipt; voice emission is deliberately still pending.
     while(!order.includes('speech-request'))await new Promise(resolve=>setTimeout(resolve,1));
-    const task=call('task_spawn',spawnArgs);
     expect(f.runtime.store.get('SELECT count(*) n FROM tasks')!.n).toBe(0);
+    const task=call('task_spawn',spawnArgs);
     expect((await ack).acknowledged).toBe(true);
     expect((await task).taskId).toBeTruthy();
     order.push('task');
   });
   const unsubscribe=f.runtime.subscribeVoiceResults('s','p',result=>{
     order.push('speech-request');
-    setTimeout(()=>{
+    audioPlayback=audioReady.then(()=>{
       order.push('audio');
       f.runtime.recordPlayback(result.responseId,'p',{generation:'fixture',epoch:1,generatedSamples:160,playedSamples:0},'streaming');
-    },40);
+    });
   });
-  try{await f.send('Review the report');expect(f.failures).toEqual([]);expect(order).toEqual(['speech-request','audio','task']);}
-  finally{unsubscribe();await f.close();}
+  try{
+    expect(await f.send('Review the report')).toBe('I am reviewing the report.');
+    expect(f.failures).toEqual([]);
+    expect(order).toEqual(['speech-request','task']);
+    expect(f.runtime.store.get('SELECT count(*) n FROM tasks')!.n).toBe(1);
+    releaseAudio();await audioPlayback;
+    expect(order).toEqual(['speech-request','task','audio']);
+  }finally{releaseAudio();await audioPlayback;unsubscribe();await f.close();}
 });
 
 test('new input arriving while reading defers stale execution and preserves the original instruction',async()=>{

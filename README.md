@@ -21,6 +21,7 @@ Claude Gateway keeps conversations responsive while Claude Code workers execute 
 - 🌙 **Nightly dreaming** — background consolidation of long-term memory: a print-only reviewer proposes ops that a safe applier writes to `MEMORY.md` / `USER.md` (backup, bounded-loss, net-negative when over budget). Deterministic compaction, budget-scaled pruning, and staleness GC keep memory near budget without forgetting — archived entries stay searchable. See [`gateway.dreaming`](https://0xmaxma.github.io/claude-gateway/reference/memory-settings.html#gateway-dreaming)
 - 🤖 **Multi-agent** — run multiple bots from a single gateway, each with isolated sessions
 - 🔌 **Multi-channel MCP** — modular tool system per channel (Telegram, Discord, LINE, Slack, WhatsApp, Cron, Skills, extensible to more)
+- 📥 **Channel ingress recovery** — unavailable attachments preserve the message and readable files; Telegram/Discord receiver retries isolate conversations and archive stale startup queues without executing old requests. See [ingress recovery](https://0xmaxma.github.io/claude-gateway/api/orchestration.html#channel-ingress-recovery).
 - 🧩 **Agent skills** — extensible skill system via SKILL.md files; agents can create, delete, and install skills from URLs at runtime with hot-reload
 - 🎭 **Agent identity** — define personality, tone, and rules via workspace markdown files
 - 📡 **Live status messages** — real-time status updates showing tool usage, thinking, and progress

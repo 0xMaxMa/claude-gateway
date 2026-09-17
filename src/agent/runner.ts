@@ -1,3 +1,5 @@
+import { ChannelMediaError } from '../orchestration/channel-media-error';
+import { payloadHash, type AcceptInput } from '../orchestration/store';
 import { channelInputMedia } from '../orchestration/channel-input-media';
 import { chunkText } from '../telegram/chunks';
 import { resolveChannelFile } from '../orchestration/file-delivery';
@@ -756,6 +758,39 @@ export class AgentRunner extends EventEmitter {
           this.channelSourceMap.set(chatId, channelSource);
 
           const channelOrchestration = this.orchestration?.ownsChannel(channelSource, chatId) || (this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes(channelSource));
+          // Resolve a receiver receipt before fetching media again: an ACK may have
+          // been lost after the original file was admitted or staging was removed.
+          let ingress: {runtime: AgentOrchestrationRuntime; scope: AcceptInput['scope']; fingerprint:string; platformMessageIds?:string[]} | undefined;
+          if (channelOrchestration || meta.ingress_recovery_batch) {
+            const sessionId = await this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, channelSource);
+            const runtime = await this.getOrchestration();
+            const senderId = meta.user_id ?? meta.user ?? chatId;
+            const scope: AcceptInput['scope'] = {agentId:this.agentConfig.id,agentSessionId:sessionId,source:channelSource,
+              accountId:this.agentConfig.id,chatId,threadKey:channelSource==='whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : meta.thread_ts ?? meta.message_thread_id ?? '',principalId:`${channelSource}:${senderId}`};
+            const {ingress_recovery_batch,...originalMeta} = meta;
+            let recoveryBatch = ingress_recovery_batch, recoveryKey = meta.message_id;
+            const fingerprint = payloadHash({content,meta:originalMeta});
+            const platformMessageIds = meta.message_ids_json ? JSON.parse(meta.message_ids_json) : undefined;
+            ingress = {runtime,scope,fingerprint,platformMessageIds};
+            const prior = runtime.store.channelReceipt(scope,meta.message_id,fingerprint,platformMessageIds);
+            if (prior && !prior.envelopeConflict) {
+              res.writeHead(200);res.end('ok');return;
+            }
+            if (prior?.envelopeConflict) {
+              // Keep changed/legacy album envelopes without repeating accepted work.
+              recoveryKey = `channel-recovery:${fingerprint}`;
+              recoveryBatch = `conflict:${payloadHash(meta.message_id)}`;
+              const recovered = runtime.store.channelReceipt(scope,recoveryKey,fingerprint);
+              if (recovered && !recovered.envelopeConflict) {res.writeHead(200);res.end('recovered');return;}
+            }
+            if (recoveryBatch) {
+              runtime.recoverChannelInput({scope,text:`[Recovered queued message; not executed. A fresh request is required.]\n${content}`,
+                ingressKey:recoveryKey,trustedChannelMember:true,
+                metadata:{channelIngressFingerprint:fingerprint,recoveryBatch,recoveredChannelInput:{content,meta:originalMeta},
+                  platformMessageId:meta.message_id,senderId,senderName:meta.sender_name}});
+              res.writeHead(200);res.end('recovered');return;
+            }
+          }
           if (channelSource!=='telegram' && this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels??['api']).includes(channelSource) && /^\/sessions?(?:\s|$)/.test(content.trim())) {
             const index=await this.sessionStore.listSessions(this.agentConfig.id,chatId,channelSource);
             const current=index.sessions.find(session=>session.id===index.activeSessionId);
@@ -799,17 +834,18 @@ export class AgentRunner extends EventEmitter {
             }
           }
           if (channelOrchestration && !isBuiltinCommand(content.trim(), channelSource)) {
-            const sessionId = await this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, channelSource);
-            const orchestration = await this.getOrchestration();
-            const {media,quoted,details} = await channelInputMedia(this.agentConfig,this.agentsBaseDir,channelSource,chatId,meta,AgentRunner.discardEphemeralStaging);
+            const orchestration = ingress!.runtime;
+            const cleanup: string[] = [];
+            const {media,quoted,details,unavailable,primaryDirectMedia} = await channelInputMedia(this.agentConfig,this.agentsBaseDir,channelSource,chatId,meta,path=>cleanup.push(path));
             const senderId = meta.user_id ?? meta.user ?? chatId;
-            const accepted = orchestration.submitInput({ scope: { agentId: this.agentConfig.id, agentSessionId: sessionId, source: channelSource,
-              accountId: this.agentConfig.id, chatId, threadKey: channelSource === 'whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : meta.thread_ts ?? meta.message_thread_id ?? '', principalId: `${channelSource}:${senderId}` },
-              text: content || '[Attachment inspection requested]', attachmentIds: media, trustedChannelMember: true,
-              modality: ['voice', 'audio'].includes(meta.media_type ?? meta.attachment_kind) ? 'voice_note' : 'text',
-              ingressKey: meta.message_id, metadata: { senderId, senderName: meta.sender_name, platformMessageId: meta.message_id, platformMessageIds: meta.message_ids_json ? JSON.parse(meta.message_ids_json) : undefined, mediaGroupId: meta.media_group_id,
+            const voiceNote = Boolean(primaryDirectMedia && ['voice', 'audio'].includes(meta.media_type ?? meta.attachment_kind));
+            const accepted = orchestration.submitInput({ scope: ingress!.scope,
+              text: content || '[Attachment inspection requested]', attachmentIds: voiceNote ? [primaryDirectMedia!,...media.filter(ref=>ref!==primaryDirectMedia)] : media, trustedChannelMember: true,
+              modality: voiceNote ? 'voice_note' : 'text',
+              ingressKey: meta.message_id, metadata: { channelIngressFingerprint:ingress!.fingerprint, unavailableAttachments:unavailable, senderId, senderName: meta.sender_name, platformMessageId: meta.message_id, platformMessageIds: ingress!.platformMessageIds, mediaGroupId: meta.media_group_id,
                 attachmentName: meta.attachment_name, mediaType: meta.media_type ?? meta.attachment_kind, repliedText: meta.replied_text, repliedMessageId: meta.replied_message_id, repliedSender: meta.replied_user, repliedAttachmentIds: quoted, attachmentDetails: details, attachmentError: meta.attachment_error } },
               { execute: this.agentConfig.allow_tools !== false, writeMemory: this.agentConfig.allow_tools !== false });
+            for (const path of cleanup) AgentRunner.discardEphemeralStaging(path);
             // The durable receipt precedes receiver acknowledgment and inference.
             res.writeHead(200); res.end('ok');
             void accepted.response.catch(error => {
@@ -887,10 +923,14 @@ export class AgentRunner extends EventEmitter {
           this.channelCoalesce.set(chatId, buf);
           return;
         } catch (err) {
-          if (!res.headersSent) { res.writeHead(503); res.end('Channel input was not accepted'); }
-          this.logger.warn('Failed to parse channel callback body', {
-            error: (err as Error).message,
-          });
+          const mediaError = err instanceof ChannelMediaError ? err : undefined;
+          const code = mediaError?.code ?? (err instanceof SyntaxError ? 'INVALID_CALLBACK_JSON' : 'CHANNEL_ADMISSION_FAILED');
+          if (!res.headersSent) {
+            if (mediaError?.retryAfterMs !== undefined) res.setHeader('Retry-After', String(Math.ceil(mediaError.retryAfterMs / 1000)));
+            res.writeHead(err instanceof SyntaxError ? 400 : mediaError?.status === 429 ? 429 : 503);
+            res.end(JSON.stringify({accepted:false,code,retryable:!(err instanceof SyntaxError)}));
+          }
+          this.logger.warn('Channel callback admission failed', {code,retryable:!(err instanceof SyntaxError),inputHash:payloadHash(raw).slice(0,16)});
         }
       });
     });
