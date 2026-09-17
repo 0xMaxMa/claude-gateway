@@ -11,7 +11,7 @@ export function referenceTokens(text: string): number {
 }
 export interface ContextFootprint {
   observedAt: number;
-  rows: Array<{name:string;tokens:number|null;characters:number|null;note:string}>;
+  rows: Array<{name:string;tokens:number|null;characters:number|null;hasContent?:boolean;note:string}>;
 }
 /** Run in the dashboard reader thread. Never launch a CLI/model or return file content. */
 export function contextFootprint(workspace: string | undefined, semanticIntake: boolean): ContextFootprint {
@@ -22,7 +22,7 @@ export function contextFootprint(workspace: string | undefined, semanticIntake: 
   const read=(name:string):string|undefined=>{
     try{const filename=join(workspace,name);if(statSync(filename).size>1024*1024)return undefined;return readFileSync(filename,'utf8');}catch{return undefined;}
   };
-  const add=(name:string,text:string|undefined,note:string)=>rows.push({name,tokens:text===undefined?null:referenceTokens(text),characters:text===undefined?null:[...text].length,note});
+  const add=(name:string,text:string|undefined,note:string)=>rows.push({name,tokens:text===undefined?null:referenceTokens(text),characters:text===undefined?null:[...text].length,hasContent:Boolean(text?.trim()),note});
   const composed=read('CLAUDE.md');
   add('CLAUDE.md · composed workspace context',composed,'Current generated file after workspace budgets. Parent total; do not add its sections again. Not the complete CLI prompt.');
   const labels:Record<string,string>={'AGENT IDENTITY':'AGENTS.md','IDENTITY':'IDENTITY.md','SOUL':'SOUL.md','USER PROFILE':'USER.md','LONG-TERM MEMORY':'MEMORY.md','HEARTBEAT CONFIG':'HEARTBEAT.md','AVAILABLE SKILLS':'Skill catalog','MEMORY RULE':'Memory rules','MEMORY RETRIEVAL':'Memory retrieval instructions'};

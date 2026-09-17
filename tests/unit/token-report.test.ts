@@ -115,3 +115,10 @@ test('conversation and request details have only one disclosure level',()=>{
  expect(html).not.toContain('<summary>Observed model requests');
  expect(html).not.toContain('<summary>Conversation / assignment');
 });
+
+test('footprint bar hides empty sections and excludes duplicate parent and raw-file totals',()=>{
+ const row=(name:string,tokens:number,hasContent=true)=>({name,tokens,hasContent,characters:10,note:''});
+ const html=generateTokenReportHtml('a',{...report,contextFootprint:{observedAt:1,rows:[row('CLAUDE.md · composed workspace context',9000),row('AGENTS.md · source file',8000),row('↳ AGENTS.md',1000),row('↳ USER.md',1,false),row('Agent gateway tool schemas (8)',500)]}});
+ const footprint=html.split('<section id="report-footprint">')[1].split('<section id="report-distribution">')[0];
+ expect(footprint).toContain('1.50K estimated tokens');expect(footprint).toContain('AGENTS.md');expect(footprint).not.toContain('USER.md');expect(footprint).not.toContain('<table');expect(footprint).not.toContain('source file</');
+});
