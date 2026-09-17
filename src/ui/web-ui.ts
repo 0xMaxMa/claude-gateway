@@ -884,7 +884,7 @@ ${dashboardFontLink}</head>
       function list(label, names) {
         return '<div title="'+(Array.isArray(names)?escHtml(names.join(', ')||'None'):'Not recorded')+'">'+label+': '+(Array.isArray(names)?compactNumber(names.length):'—')+'</div>';
       }
-      return '<div title="Actual model-context schema loading is not reported. Available inventory: '+(Array.isArray(loaded)?compactNumber(loaded.length):'—')+'">Loaded: —</div>'+list('Used', used);
+      return '<div title="Actual model-context schema loading is not recorded.">Loaded: —</div>'+list('Used', used);
     }
 
     function fmtRecordedTokens(n) {

@@ -13,7 +13,7 @@ const report: TokenReportView = {
 test('report separates categories, cache categories and missing inventory without estimating', () => {
   const html = generateTokenReportHtml('agent', report);
   expect(html).toContain('30.0%'); expect(html).toContain('70.0%');
-  expect(html).toContain('Loaded: —'); expect(html).toContain('Available (2)');
+  expect(html).toContain('Loaded: —'); expect(html).not.toContain('Available (2)');
   expect(html).toContain('Used: 1'); expect(html).toContain('Cache read');
   expect(html).toContain('5m: —'); expect(html).toContain('not monetary costs');
 });
