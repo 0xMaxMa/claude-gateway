@@ -99,7 +99,7 @@ function makeAgentConfig(workspace: string): AgentConfig {
 
 function makeGatewayConfig(): GatewayConfig {
   return {
-    gateway: { logDir: '/tmp/test-hr-logs', timezone: 'UTC' },
+    gateway: { logDir: '/tmp/test-hr-logs', timezone: 'UTC', orchestration: false },
     agents: [],
   };
 }

@@ -38,6 +38,13 @@ function makeTempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
+function makeTempConfigFixture(name: string): { configPath: string; cleanup: () => void } {
+  const dir = makeTempDir('gateway-config-fixture-');
+  const configPath = path.join(dir, name);
+  fs.copyFileSync(path.resolve(__dirname, '../fixtures/configs', name), configPath);
+  return { configPath, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
+
 /**
  * Create a workspace directory populated with all standard .md files.
  */
@@ -179,10 +186,7 @@ function nextUid(): number {
 describe('Phase 1: Config Loader', () => {
   // P1-01
   it('P1-01: valid config with 2 agents loads correctly', () => {
-    const configPath = path.resolve(
-      __dirname,
-      '../fixtures/configs/valid-2-agents.json',
-    );
+    const { configPath, cleanup } = makeTempConfigFixture('valid-2-agents.json');
     // Provide the env vars referenced by the fixture
     process.env.ALFRED_BOT_TOKEN = 'token-alfred-test';
     process.env.BAERBEL_BOT_TOKEN = 'token-baerbel-test';
@@ -198,21 +202,21 @@ describe('Phase 1: Config Loader', () => {
     } finally {
       delete process.env.ALFRED_BOT_TOKEN;
       delete process.env.BAERBEL_BOT_TOKEN;
+      cleanup();
     }
   });
 
   // P1-02: agents with missing env vars are skipped; if none remain, throws ConfigValidationError
   it('P1-02: missing bot token env var skips agents, throws when none remain', () => {
-    const configPath = path.resolve(
-      __dirname,
-      '../fixtures/configs/valid-2-agents.json',
-    );
+    const { configPath, cleanup } = makeTempConfigFixture('valid-2-agents.json');
     // Ensure the env vars are NOT set
     delete process.env.ALFRED_BOT_TOKEN;
     delete process.env.BAERBEL_BOT_TOKEN;
 
-    expect(() => loadConfig(configPath)).toThrow(ConfigValidationError);
-    expect(() => loadConfig(configPath)).toThrow(/no valid agents/i);
+    try {
+      expect(() => loadConfig(configPath)).toThrow(ConfigValidationError);
+      expect(() => loadConfig(configPath)).toThrow(/no valid agents/i);
+    } finally { cleanup(); }
   });
 
   // P1-03

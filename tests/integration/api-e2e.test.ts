@@ -41,7 +41,9 @@ function writeWorkspaceFiles(dir: string): string {
 }
 
 function createTempWorkspace(prefix = 'api-e2e-ws-'): string {
-  return writeWorkspaceFiles(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+  const ws = path.join(fs.mkdtempSync(path.join(os.tmpdir(), prefix)), 'agent', 'workspace');
+  fs.mkdirSync(ws, { recursive: true });
+  return writeWorkspaceFiles(ws);
 }
 
 /**
@@ -77,6 +79,7 @@ function makeGatewayConfig(logDir: string): GatewayConfig {
     gateway: {
       logDir,
       timezone: 'UTC',
+      orchestration: false,
       api: {
         keys: [
           { key: API_KEY_ALFRED, description: 'Alfred only', agents: ['alfred'] },
@@ -527,7 +530,7 @@ describe('Agent HTTP API integration (planning-05)', () => {
     const logDir = createTempDir('api-12-log-');
     const cfg = makeAgentConfig('alfred', ws);
     const gatewayCfg: GatewayConfig = {
-      gateway: { logDir, timezone: 'UTC', api: { keys: [{ key: API_KEY_ADMIN, description: 'admin', agents: '*' }] } },
+      gateway: { logDir, timezone: 'UTC', orchestration: false, api: { keys: [{ key: API_KEY_ADMIN, description: 'admin', agents: '*' }] } },
       agents: [],
     };
 

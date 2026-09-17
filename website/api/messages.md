@@ -98,7 +98,12 @@ curl -X POST \
 | 404 | Agent ID not found, or `session_id` names no session in this `chat_id` (`code: "SESSION_NOT_FOUND"`) |
 | 409 | Session is busy processing another request |
 | 504 | Agent did not respond within timeout (default 60s) — **sync mode only** |
+| 503 | Provider capacity is exhausted or the provider is temporarily unavailable |
 | 500 | Internal error |
+
+Recognized provider quota, billing, rate limit, and authentication failures return a short, safe `error` message with retry or account guidance when available. Unknown failures return `Internal error`; provider credentials and internal paths are not included. Recognized failures also include a `code` field.
+
+Provider error codes take priority over wording. A bare HTTP 429 is described as a rate limit or quota because it does not identify which limit was reached. Reset/retry times are included only when the complete time expression can be read safely; otherwise the response uses general guidance.
 
 > - `session_id` is optional — omit for a stateless one-shot call
 > - Sessions idle-timeout after `idleTimeoutMinutes` (default 30 min); history is restored automatically on next message

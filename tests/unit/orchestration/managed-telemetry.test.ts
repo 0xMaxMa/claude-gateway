@@ -1,6 +1,57 @@
 import { EventEmitter } from 'events';
 import { startProcessTurn } from '../../../src/orchestration/process-turn';
 import type { SessionProcess } from '../../../src/session/process';
+import { inferenceFailureMessage } from '../../../src/orchestration/inference-errors';
+
+test('quota prose and a retry notification do not turn a successful response into an error', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  const text = 'The provider documentation says: Daily credit limit reached.';
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'rate_limit_event' }));
+    p.emit('output', JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } }));
+    p.emit('output', JSON.stringify({ type: 'result', result: text }));
+  }});
+  await expect(startProcessTurn(p, 'check', 1000).result).resolves.toMatchObject({ text });
+});
+
+test('ordinary assistant prose is not provider error evidence on a failed result', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'stream_event', event: { delta: { type: 'text_delta', text: 'Daily credit limit reached.' } } }));
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true }));
+  }});
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(inferenceFailureMessage(error)).toBeUndefined();
+});
+
+test.each([
+  [{ error: { code: 'quota_exceeded', message: 'Provider diagnostic changed completely.' } }, 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Check your provider usage or billing before retrying.'],
+  [{ error: { code: 'insufficient_credits' } }, 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Check your provider usage or billing before retrying.'],
+  ['API Error: 400 Your credit balance is too low to access the API.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Check your provider usage or billing before retrying.'],
+  ['Daily credit limit reached. Resets at 14:30 UTC+07:00.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again after the limit resets at 14:30 UTC+07:00.'],
+  ['Daily credit limit reached. Resets in 1 hour 30 minutes.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again after the limit resets in 1 hour 30 minutes.'],
+  ['Daily credit limit reached. Resets at 2:30 PM UTC.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again after the limit resets at 2:30 PM UTC.'],
+  ['Daily credit limit reached. Resets at 14:30 Mars/Colony.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Check your provider usage or billing before retrying.'],
+  [{ error: { code: 'invalid_api_key', message: 'Daily credit limit reached.' } }, 'INFERENCE_FAILED', 'Provider authentication failed. Check your provider credentials.'],
+  [{ error: { status: 429 } }, 'INFERENCE_FAILED', 'Provider rate limit or quota reached. Check provider usage before retrying.'],
+  [{ error: { code: 'context_length_exceeded', message: 'The token limit was exceeded.' } }, 'INFERENCE_FAILED', undefined],
+  [{ error: { code: 'future_unknown_error', message: 'private /internal/path sk-secret-value' } }, 'INFERENCE_FAILED', undefined],
+  ['Daily credit limit reached. Retry after 503 seconds.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again in 503 seconds.'],
+  ['Daily credit limit reached. Retry after 1503 seconds.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again in 1503 seconds.'],
+  [{ error: { status: 503 } }, 'PROVIDER_UNAVAILABLE', '503: The model provider is temporarily unavailable. Please try again shortly.'],
+  [{ error: { type: 'authentication_error', message: 'Invalid x-api-key' } }, 'INFERENCE_FAILED', 'Provider authentication failed. Check your provider credentials.'],
+  [{ error: { code: 'invalid_api_key' } }, 'INFERENCE_FAILED', 'Provider authentication failed. Check your provider credentials.'],
+  ['Daily credit limit reached. Resets at 14:30 UTC. Bearer secret-value /internal/path', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again after the limit resets at 14:30 UTC.'],
+  ['rate_limit: Retry at 09:15:30 GMT. sk-secret-value', 'INFERENCE_FAILED', 'Provider rate limit reached. Try again at 09:15:30 GMT.'],
+])('provider review regression: %j', async (detail, code, message) => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: detail }));
+  }});
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(error.code).toBe(code);
+  expect(inferenceFailureMessage(error)).toBe(message);
+});
 
 test('managed turns report deduplicated tool usage and elapsed start time exactly once', async () => {
   const p = new EventEmitter() as SessionProcess;
@@ -21,6 +72,8 @@ test.each([
   [{ result: 'API Error: 503 Provider capacity is fully in use right now.' }, 'PROVIDER_CAPACITY'],
   [{ errors: ['API Error: 503 Provider capacity is fully in use right now.'] }, 'PROVIDER_CAPACITY'],
   [{ result: 'API Error: 503 Service unavailable' }, 'PROVIDER_UNAVAILABLE'],
+  [{ result: { error: { type: 'rate_limit', message: 'Daily credit limit reached. Resets in 2 hours.' } } }, 'INFERENCE_FAILED'],
+  [{ result: { error: { status: 429 } } }, 'INFERENCE_FAILED'],
   [{ result: 'Other inference failure' }, 'INFERENCE_FAILED'],
 ])('managed turns retain actionable provider error codes: %j', async (body, code) => {
   const p = new EventEmitter() as SessionProcess;
@@ -33,8 +86,83 @@ test.each([
 test('provider messages stay actionable while internal failures and bearer values remain private', () => {
   const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
   expect(inferenceFailureMessage({ code: 'PROVIDER_CAPACITY' })).toContain('503: Provider capacity is fully in use right now');
-  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'API Error: 401 Unauthorized Bearer secret-value' })).toBe('401 Unauthorized Bearer [redacted]');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'API Error: 401 Unauthorized Bearer secret-value' })).toBe('Provider authentication failed. Check your provider credentials.');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'Daily credit limit reached. Resets in 2 hours. Bearer secret-value /internal/path' })).toBe('Provider quota or billing limit reached. Try again after the limit resets in 2 hours.');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'rate_limit: Too many requests. Retry after 45 seconds. sk-secret-value' })).toBe('Provider rate limit reached. Try again in 45 seconds.');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'billing_error: payment required' })).toContain('provider usage or billing');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: '503 Service unavailable at /internal/path' })).toBe('The model provider is temporarily unavailable. Please try again later.');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'request failed with sk-secret-value at /internal/path' })).toBeUndefined();
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'claude-opus: Daily credit limit reached. Resets in 2 hours.' })).toContain('2 hours');
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'gpt-5: Daily credit limit reached. Resets in 2 hours.' })).toContain('2 hours');
   expect(inferenceFailureMessage(new Error('internal stack detail'))).toBeUndefined();
+});
+
+test('assistant error type remains actionable when provider omits text', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'assistant', error: 'rate_limit', message: { content: [] } }));
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: 'Inference failed' }));
+  }});
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(inferenceFailureMessage(error)).toBe('Provider rate limit reached. Please try again later.');
+});
+
+test('assistant error without API Error prefix survives a generic terminal result', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text: 'Daily credit limit reached. Resets in 3 hours.' }] } }));
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: 'Inference failed' }));
+  }});
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(error).toMatchObject({ code: 'INFERENCE_FAILED', message: expect.stringContaining('Daily credit limit reached') });
+  expect(inferenceFailureMessage(error)).toBe('Provider quota or billing limit reached. Try again after the limit resets in 3 hours.');
+});
+
+test('long terminal errors do not hide an earlier actionable assistant error', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text: 'Daily credit limit reached. Resets in 2 hours.' }] } }));
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: 'Inference failed ' + 'x'.repeat(4096) }));
+  }});
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(inferenceFailureMessage(error)).toBe('Provider quota or billing limit reached. Try again after the limit resets in 2 hours.');
+});
+
+test('structured provider errors retain their message for web and channel presentation', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: { error: { type: 'rate_limit', message: 'Daily credit limit reached. Resets in 20 minutes.' } } }));
+  }});
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(error.message).toContain('Daily credit limit reached');
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  expect(inferenceFailureMessage(error)).toContain('20 minutes');
+});
+
+test.each([[429, 'Provider rate limit or quota reached.'], [401, 'Provider authentication failed.'], [402, 'Provider quota or billing limit reached.']])('structured HTTP %s provider status stays actionable', async (status, message) => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: { error: { status } } }));
+  }});
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(inferenceFailureMessage(error)).toContain(message);
+});
+
+test('deeply nested provider errors remain bounded and safely generic', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  let nested: unknown = { message: 'Daily credit limit reached.' };
+  for (let i = 0; i < 40; i++) nested = { error: nested };
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: nested }));
+  }});
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(error.code).toBe('INFERENCE_FAILED');
+  expect(inferenceFailureMessage(error)).toBeUndefined();
 });
 
 test.each(['final-only','replacement','structured'])('oversized %s result fails before a successful report is published',async kind=>{

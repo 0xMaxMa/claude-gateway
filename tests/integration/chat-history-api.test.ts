@@ -61,6 +61,7 @@ function makeGatewayConfig(logDir: string): GatewayConfig {
     gateway: {
       logDir,
       timezone: 'UTC',
+      orchestration: false,
       api: {
         keys: [
           { key: API_KEY_ADMIN, description: 'Admin all', agents: '*' },

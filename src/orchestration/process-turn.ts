@@ -14,6 +14,21 @@ export interface ProcessTurn {
 /** Reuses the existing process/history lifecycle; a turn ends on a terminal
  * event or confirmed process exit. The owner decides task recovery policy. */
 export interface ManagedTurnMetrics { toolIds: string[]; inputTokens: number; totalTokens: number; startedAt: number; }
+function providerErrorText(value: unknown, codes: string[], depth = 0, budget = { nodes: 256 }): string {
+  if (depth >= 8 || --budget.nodes < 0) return '';
+  if (typeof value === 'string') return value.slice(0, 4096);
+  if (Array.isArray(value)) return value.slice(0, 32).map(item => providerErrorText(item, codes, depth + 1, budget)).filter(Boolean).join(' ').slice(0, 4096);
+  if (value && typeof value === 'object') {
+    const entry = value as Record<string, unknown>;
+    for (const code of [entry.code, entry.type, entry.error]) {
+      if (typeof code === 'string' && /^[a-z][a-z0-9_]{0,79}$/i.test(code) && codes.length < 32) codes.push(code.toLowerCase());
+    }
+    const status = /^[1-5]\d{2}$/.test(String(entry.status)) ? `HTTP ${entry.status}` : undefined;
+    return [entry.code, entry.type, status, entry.message, entry.error].map(item => providerErrorText(item, codes, depth + 1, budget)).filter(Boolean).join(' ').slice(0, 4096);
+  }
+  if (typeof value === 'number') return String(value);
+  return '';
+}
 export function startProcessTurn(process: SessionProcess, prompt: string, timeoutMs: number | undefined, onText: (text: string) => void = () => {}, onMetrics?: (metrics: ManagedTurnMetrics) => void, images: readonly InputImage[] = [], policy?: TurnTimeoutPolicy, onStructured?: (chunk: string) => void): ProcessTurn {
   let resolveAccepted!: () => void, rejectAccepted!: (error: Error) => void;
   let resolveResult!: (result: ProcessResult) => void, rejectResult!: (error: Error) => void;
@@ -23,6 +38,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
   void accepted.catch(() => {}); void result.catch(() => {});
   let structuredIndex: number | undefined;
   let settled = false, stopped = false, text = '', streamed = false, apiErrorText = '';
+  let apiErrorCodes: string[] = [];
   const startedAt = Date.now(); const tools = new Set<string>(); let inputTokens = 0, totalTokens = 0, recorded = false;
   const activeTools = new Map<string, number>();
   const toolNames = new Map<string, string>();
@@ -69,7 +85,8 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
     try { event = JSON.parse(line); } catch { return; }
     const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
     if (event.type === 'assistant' && (event.isApiErrorMessage || event.error)) {
-      apiErrorText = blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('\n').slice(0, 4096);
+      apiErrorCodes = [];
+      apiErrorText = providerErrorText({ error: event.error, message: blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text) }, apiErrorCodes);
     }
     for (const block of blocks) {
       if (block.type === 'tool_use' && typeof block.id === 'string' && !activeTools.has(block.id) && activeTools.size < 2000) activeTools.set(block.id, -1);
@@ -128,10 +145,11 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
     if (Buffer.byteLength(text) > 262144) { fail(new OrchestrationError('RESPONSE_TOO_LARGE')); void process.stop(); return; }
     if (event.type === 'result') {
       if (event.is_error) {
-        const detail = String(event.result || (Array.isArray(event.errors) ? event.errors.join(' ') : '') || apiErrorText || text || 'Inference failed');
+        const providerCodes = [...apiErrorCodes];
+        const detail = [apiErrorText, providerErrorText([event.result, event.errors], providerCodes)].filter(Boolean).join(' ').slice(0, 4096) || 'Inference failed';
         const code = /provider capacity is fully in use|overloaded_error/i.test(detail) ? 'PROVIDER_CAPACITY'
-          : /API Error:\s*503/i.test(detail) ? 'PROVIDER_UNAVAILABLE' : 'INFERENCE_FAILED';
-        fail(new OrchestrationError(code, detail)); return;
+          : /\b(?:API Error:|HTTP)\s*503\b/i.test(detail) ? 'PROVIDER_UNAVAILABLE' : 'INFERENCE_FAILED';
+        fail(Object.assign(new OrchestrationError(code, detail), { providerCodes })); return;
       }
       if (process.runtimeProfile?.responseSchema && event.structured_output && typeof event.structured_output === 'object') {
         text = JSON.stringify(event.structured_output);
