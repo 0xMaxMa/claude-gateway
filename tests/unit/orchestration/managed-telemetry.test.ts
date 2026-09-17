@@ -69,6 +69,17 @@ test('assistant error without API Error prefix survives a generic terminal resul
   expect(inferenceFailureMessage(error)).toBe('Provider quota or billing limit reached. Try again after the limit resets in 3 hours.');
 });
 
+test('long terminal errors do not hide an earlier actionable assistant error', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text: 'Daily credit limit reached. Resets in 2 hours.' }] } }));
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: 'Inference failed ' + 'x'.repeat(4096) }));
+  }});
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(inferenceFailureMessage(error)).toBe('Provider quota or billing limit reached. Try again after the limit resets in 2 hours.');
+});
+
 test('structured provider errors retain their message for web and channel presentation', async () => {
   const p = new EventEmitter() as SessionProcess;
   Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {

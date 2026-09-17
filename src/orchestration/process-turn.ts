@@ -141,7 +141,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
     if (Buffer.byteLength(text) > 262144) { fail(new OrchestrationError('RESPONSE_TOO_LARGE')); void process.stop(); return; }
     if (event.type === 'result') {
       if (event.is_error) {
-        const detail = [providerErrorText(event.result), providerErrorText(event.errors), apiErrorText].filter(Boolean).join(' ').slice(0, 4096) || text || 'Inference failed';
+        const detail = [apiErrorText, providerErrorText(event.result), providerErrorText(event.errors)].filter(Boolean).join(' ').slice(0, 4096) || text || 'Inference failed';
         const code = /provider capacity is fully in use|overloaded_error/i.test(detail) ? 'PROVIDER_CAPACITY'
           : /(?:API Error:|HTTP)?\s*503\b/i.test(detail) ? 'PROVIDER_UNAVAILABLE' : 'INFERENCE_FAILED';
         fail(new OrchestrationError(code, detail)); return;
