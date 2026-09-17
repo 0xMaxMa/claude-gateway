@@ -62,7 +62,7 @@ export class TurnUsageCollector {
     if (stream?.type === 'message_delta' && this.currentId && stream.usage) this.merge(this.currentId, stream.usage);
     if (event.type === 'result' && event.usage && typeof event.usage === 'object') this.aggregate = normalize(event.usage);
     const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
-    for (const block of [...blocks, stream?.content_block]) if (block?.type === 'tool_use' && typeof block.name === 'string' && !(block.name === 'mcp__gateway__tool_call' && !block.input?.name)) this.usedTools.add(executionTool(block).name);
+    for (const block of [...blocks, stream?.content_block]) if (block?.type === 'tool_use' && typeof block.name === 'string' && !(/^mcp__[a-zA-Z0-9_-]+__tool_call$/.test(block.name) && !block.input?.name)) this.usedTools.add(executionTool(block).name);
   }
   private merge(id: string, raw: any, model?: unknown): void {
     const next = normalize(raw), previous = this.messages.get(id);

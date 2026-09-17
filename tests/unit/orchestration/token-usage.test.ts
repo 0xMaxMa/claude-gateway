@@ -140,3 +140,10 @@ test('failed turn details expose the recorded diagnostic without leaking unrelat
   expect(tokenReport(store,'other').turns).toEqual([]);
  }finally{store.close();}
 });
+
+test('lazy connector calls count the underlying tool without a phantom partial wrapper',()=>{
+ const collector=new TurnUsageCollector();
+ collector.observe({type:'stream_event',event:{content_block:{type:'tool_use',name:'mcp__browser__tool_call',input:{}}}});
+ collector.observe({type:'assistant',message:{content:[{type:'tool_use',name:'mcp__browser__tool_call',input:{name:'page_observe',arguments:{tabId:42}}}]}});
+ expect(collector.snapshot().usedTools).toEqual(['mcp__browser__page_observe']);
+});

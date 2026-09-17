@@ -690,6 +690,7 @@ export class SessionProcess extends EventEmitter {
   }
 
   private managedMcpConfigPath?: string;
+  private managedConnectorPaths = new Set<string>();
 
   private writeMcpConfig(): string | null {
     if (this.runtimeProfile) {
@@ -705,7 +706,13 @@ export class SessionProcess extends EventEmitter {
         if (isReservedConnectorId(id)) continue;
         this.spawnedConnectors.set(id, connectorFingerprint(server));
       }
-      const servers = Object.fromEntries([...this.spawnedConnectors.keys()].map(id => [id, connectors[id]]));
+      const servers = Object.fromEntries([...this.spawnedConnectors.keys()].map((id, index) => {
+        const connectorPath = path.join(path.dirname(this.runtimeProfile!.mcpConfigPath), `connector-${index}.json`);
+        fs.writeFileSync(connectorPath, JSON.stringify(connectors[id]), {mode:0o600});
+        fs.chmodSync(connectorPath, 0o600);
+        this.managedConnectorPaths.add(connectorPath);
+        return [id, {command:'bun', args:[path.resolve(__dirname, '../../mcp/lazy-connector.ts'), connectorPath]}];
+      }));
       const configPath = path.join(path.dirname(this.runtimeProfile.mcpConfigPath), 'managed-connectors.json');
       fs.writeFileSync(configPath, JSON.stringify({ mcpServers: { ...servers, ...ticket.mcpServers } }), { mode: 0o600 });
       fs.chmodSync(configPath, 0o600);
@@ -2008,6 +2015,8 @@ export class SessionProcess extends EventEmitter {
     // bind-mounts this path) can be alive for up to the 10s graceful-shutdown
     // window immediately after this point, and must not find it gone under it.
     const removeSessionDir = (): void => {
+      for (const filename of this.managedConnectorPaths) { try { fs.rmSync(filename, {force:true}); } catch {} }
+      this.managedConnectorPaths.clear();
       if (this.managedMcpConfigPath) {
         try { fs.rmSync(this.managedMcpConfigPath, { force: true }); } catch {}
         this.managedMcpConfigPath = undefined;

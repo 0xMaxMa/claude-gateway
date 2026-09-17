@@ -85,7 +85,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const context = this.agent.type === 'app-agent'
       ? await containerNode(this.agent.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))")
       : await readFile(join(this.agent.workspace, 'CLAUDE.md'), 'utf8');
-    this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway }));
+    this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway, toolExposure: 'lazy-connectors-v1' }));
     const shared = resolveSharedConfig(this.agent.knowledge?.shared, this.gateway.gateway.knowledge?.shared);
     const ticket = this.bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation }, directory, this.agent.workspace, shared.enabled ? sharedVaultDir(shared) : '');
     try {

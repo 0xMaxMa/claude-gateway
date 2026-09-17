@@ -3,7 +3,7 @@ import type { McpToolDefinition, McpToolResult } from './types';
 export const LAZY_TOOL_DEFINITIONS: McpToolDefinition[] = [
   { name: 'tool_search', description: 'Discover available gateway capabilities. Empty query lists tool names and descriptions; search by query or exact name to retrieve original argument schemas before calling tool_call. Results are paginated. This catalog contains only tools authorized for this worker.',
     inputSchema: { type: 'object', properties: { query: { type: 'string' }, name: { type: 'string' }, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 20 }, include_schema: { type: 'boolean' } }, additionalProperties: false } },
-  { name: 'tool_call', description: 'Execute a gateway capability discovered with tool_search. Use its exact name and original arguments. All original permissions, validation and cancellation apply. Task reporting and memory tools remain directly available.',
+  { name: 'tool_call', description: 'Execute a gateway capability discovered with tool_search. Use its exact name and original arguments. All original permissions, validation and cancellation apply. Task reporting and memory retrieval remain directly available.',
     inputSchema: { type: 'object', properties: { name: { type: 'string' }, arguments: { type: 'object' } }, required: ['name', 'arguments'], additionalProperties: false } },
 ];
 
@@ -11,9 +11,9 @@ const fail = (text: string): McpToolResult => ({ content: [{ type: 'text', text 
 const result = (value: unknown): McpToolResult => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
 
 /** Discovery is data-only. Invocation delegates to the SAME dispatcher as direct calls. */
-export function createLazyToolCatalog(tools: readonly McpToolDefinition[]) {
+export function createLazyToolCatalog(tools: readonly McpToolDefinition[], excludeReserved = true) {
   const reserved = new Set(LAZY_TOOL_DEFINITIONS.map(tool => tool.name));
-  const catalog = [...tools].filter(tool => !reserved.has(tool.name))
+  const catalog = [...tools].filter(tool => !excludeReserved || !reserved.has(tool.name))
     .sort((a, b) => a.name.localeCompare(b.name));
   const names = new Set(catalog.map(tool => tool.name));
   return {

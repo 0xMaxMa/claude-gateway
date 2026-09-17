@@ -58,7 +58,7 @@ if (ORCHESTRATION_ROLE && process.env.GATEWAY_ORCHESTRATION_TICKET_FILE) visible
 
 // Preserve the full policy-filtered inventory internally; only schema exposure is lazy.
 const lazyEnabled = ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_LAZY_TOOLS === 'true';
-const deferredTools = visibleTools.filter(tool => toolMap.has(tool.name) && toolMap.get(tool.name)?.id !== 'memory');
+const deferredTools = visibleTools.filter(tool => toolMap.has(tool.name) && !['memory_search','memory_get'].includes(tool.name));
 const deferredNames = new Set(deferredTools.map(tool => tool.name));
 const lazyCatalog = createLazyToolCatalog(deferredTools);
 const advertisedTools = lazyEnabled ? [...visibleTools.filter(tool => !deferredNames.has(tool.name)), ...LAZY_TOOL_DEFINITIONS] : visibleTools;
@@ -87,7 +87,7 @@ const mcp = new Server(
         'claude/channel/permission': {},
       },
     },
-    instructions: ORCHESTRATION_ROLE ? 'Use scoped capability discovery, task tools and memory retrieval. The agent writes user-facing responses; workers return task results and orchestration handles delivery.' + (lazyEnabled ? ' Gateway execution capabilities are available through tool_search and tool_call: search for the capability to read its original arguments, then invoke it by exact name. An unlisted execution tool is not unavailable; inspect the catalog. Task reporting and memory remain direct tools.' : '') : buildChannelInstructions(imageEnabled, videoEnabled),
+    instructions: ORCHESTRATION_ROLE ? 'Use scoped capability discovery, task tools and memory retrieval. The agent writes user-facing responses; workers return task results and orchestration handles delivery.' + (lazyEnabled ? ' Gateway execution capabilities are available through tool_search and tool_call: search for the capability to read its original arguments, then invoke it by exact name. An unlisted execution tool is not unavailable; inspect the catalog. Task reporting and memory retrieval remain direct tools.' : '') : buildChannelInstructions(imageEnabled, videoEnabled),
   },
 );
 
