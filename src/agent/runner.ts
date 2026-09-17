@@ -4415,6 +4415,29 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
+   * Session IDs currently alive in the in-memory session map. Display-only
+   * liveness signal for the dashboard: a session removed by the idle cleaner
+   * (kept-alive window elapsed) or released is no longer present here.
+   */
+  liveSessionIds(): string[] {
+    return [...this.sessions.values()].filter(p => p.isRunning()).map(p => p.sessionId);
+  }
+
+  /**
+   * Live status of one agent session derived from the in-memory session map:
+   * - 'running' → alive and processing a turn right now
+   * - 'idle'    → alive and kept warm, not currently processing
+   * - 'stopped' → gone from the map (idle-timeout kill or otherwise released)
+   * Display-only; does not touch token accounting.
+   */
+  agentSessionLiveStatus(sessionId: string): 'running' | 'idle' | 'stopped' {
+    for (const p of this.sessions.values()) {
+      if (p.sessionId === sessionId && p.isRunning()) return p.isIdle(0) ? 'idle' : 'running';
+    }
+    return 'stopped';
+  }
+
+  /**
    * Send a message to an API session and wait for the response.
    *
    * - Spawns a new SessionProcess (source='api') if none exists for sessionId.

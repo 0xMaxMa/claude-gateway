@@ -952,7 +952,7 @@ export class GatewayRouter {
           const report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, semanticIntake:source.semanticIntake, sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h')), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
           if (!report) { res.status(404).json({ error: 'No recorded session token report' }); return; }
           if (reportPath === '/token-report') res.json(report);
-          else res.type('html').send(generateTokenReportHtml(agentId, {...report, scope:dashboardRange(req.query.scope)}));
+          else res.type('html').send(generateTokenReportHtml(agentId, {...report, scope:dashboardRange(req.query.scope), sessionStatus: runner.agentSessionLiveStatus?.(sessionId) ?? 'stopped'}));
         } catch {
           res.status(500).json({ error: 'Unable to load session token report' });
         }
@@ -964,9 +964,10 @@ export class GatewayRouter {
       res.setHeader('Cache-Control','no-store');
       const {agentId,sessionId}=req.query,offset=Number(req.query.offset??0);
       if([agentId,sessionId].some(v=>typeof v!=='string'||!v||v.length>256)||!Number.isSafeInteger(offset)||offset<0||offset>1000000){res.status(400).json({error:'Invalid session query'});return;}
-      const source=this.agents.get(String(agentId))?.getDashboardSource?.();
+      const detailRunner=this.agents.get(String(agentId));
+      const source=detailRunner?.getDashboardSource?.();
       if(!source){res.status(404).json({error:'Unknown agent'});return;}
-      try{const detail=await this.dashboardReader.read('session',source.filename,{sessionId,offset,since:dashboardSince(req.query.scope),historyFilename:source.historyFilename});if(!detail){res.status(404).json({error:'Session not found'});return;}res.json(detail);}
+      try{const detail=await this.dashboardReader.read('session',source.filename,{sessionId,offset,since:dashboardSince(req.query.scope),historyFilename:source.historyFilename});if(!detail){res.status(404).json({error:'Session not found'});return;}res.json({...detail,sessionStatus:detailRunner?.agentSessionLiveStatus?.(String(sessionId))??'stopped'});}
       catch{res.status(503).json({error:'Dashboard data temporarily unavailable'});}
     });
 
@@ -1397,8 +1398,15 @@ export class GatewayRouter {
         // PTY streams are keyed per session, so liveness is per session too.
         const source = runner.getDashboardSource?.();
         const legacySessions = runner.getSessionsSummary();
+        const liveSessionIds = new Set(runner.liveSessionIds?.() ?? []);
         const orchestration = source ? (source.enabled ? await this.dashboardReader.read('summary',source.filename,{...source,offset,since:dashboardSince(scope),legacyIds:legacySessions.map(s=>s.sessionId)}) : undefined) : runner.getOrchestrationSummary?.();
-        const managedSessions = orchestration?.sessions ?? [];
+        const managedSessions = (orchestration?.sessions ?? []).map((s: { sessionId: string }) => ({
+          ...s,
+          // Live liveness from the runner's in-memory map: the DB-derived status
+          // reports 'idle' for both a kept-alive session and one already killed by
+          // the idle cleaner; sessionAlive disambiguates them for the dashboard.
+          sessionAlive: liveSessionIds.has(s.sessionId),
+        }));
         const managedIds = new Set([...managedSessions.map((s: {sessionId:string}) => s.sessionId),...(orchestration?.managedLegacyIds??[])]);
         const sessions = [...legacySessions.filter(s => !managedIds.has(s.sessionId) && (!dashboardSince(scope) || Number((s as any).updatedAt || s.spawnedAt || 0) >= dashboardSince(scope))), ...managedSessions].map((s) => ({
           ...s,
