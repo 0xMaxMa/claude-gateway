@@ -15,7 +15,7 @@ async function refreshReport(){
   document.querySelectorAll('[data-turn-id]').forEach(function(row){row.querySelectorAll('details').forEach(function(d,i){if(d.open)open.add(row.dataset.turnId+':'+row.className+':'+i);});});
   var scrolls=Array.from(document.querySelectorAll('.table-scroll')).map(function(el){return el.scrollLeft;});
   var x=scrollX,y=scrollY;
-  ['report-totals','report-footprint','report-breakdown','report-distribution'].forEach(function(id){var old=document.getElementById(id),fresh=next.getElementById(id);if(old.innerHTML!==fresh.innerHTML)old.innerHTML=fresh.innerHTML;});
+  ['report-totals','report-footprint','report-distribution'].forEach(function(id){var old=document.getElementById(id),fresh=next.getElementById(id);if(old.innerHTML!==fresh.innerHTML)old.innerHTML=fresh.innerHTML;});
   var body=document.querySelector('.report-table tbody'),freshBody=next.querySelector('.report-table tbody');
   if(body.innerHTML!==freshBody.innerHTML)body.innerHTML=freshBody.innerHTML;
   var pagers=next.querySelectorAll('.report-pager');document.querySelectorAll('.report-pager').forEach(function(el,i){if(pagers[i])el.innerHTML=pagers[i].innerHTML;});

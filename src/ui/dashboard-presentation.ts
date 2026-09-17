@@ -1,3 +1,11 @@
+/** Shared display-only formatting; stored values and identifiers remain unchanged. */
+export function compactNumber(value: unknown): string {
+ if(value==null)return 'Unavailable';
+ const n=Number(value);if(!Number.isFinite(n))return 'Unavailable';
+ if(Math.abs(n)>=999995)return (n/1000000).toFixed(2)+'M';
+ if(Math.abs(n)>=1000)return (n/1000).toFixed(2)+'K';
+ return String(n);
+}
 /** Shared, escaped presentation for dashboard pages and static token reports.
  * Platform SVGs: Simple Icons (CC0), https://github.com/simple-icons/simple-icons.
  */
@@ -15,4 +23,4 @@ export function channelBadge(value: string): string {
  const fallback='<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.7" d="M3 4h18v14H3zM8 22h8M12 18v4M3 8h18"/></svg>';
  return '<span class="channel-badge">'+(channelIcons[key]||fallback)+'<span>'+dashboardEscape(label[key]||value||'Unknown')+'</span></span>';
 }
-export const dashboardPresentationClient = 'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';';
+export const dashboardPresentationClient = compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';';

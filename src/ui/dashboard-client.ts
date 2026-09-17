@@ -9,7 +9,7 @@ function dashboardRows() {
 }
 function dashboardTaskRows(){return dashboardRows().flatMap(({a,s})=>(s.tasks||[]).map(t=>({a,s,t}))).sort((x,y)=>Number(y.t.updatedAt)-Number(x.t.updatedAt)||x.t.taskId.localeCompare(y.t.taskId));}
 function dashText(value){return escHtml(value==null?'Unavailable':String(value));}
-function dashCount(value){return value==null?'Unavailable':Number(value).toLocaleString();}
+function dashCount(value){return compactNumber(value);}
 function dashStatus(value){return '<span class="badge '+(['running','working','thinking','completed'].includes(value)?'badge-green':value==='failed'?'badge-red':'badge-gray')+'">'+dashText(String(value||'unknown').replace(/_/g,' '))+'</span>';}
 function dashReportUrl(a,s){return apiUrl('/dashboard/token-report')+'?agentId='+encodeURIComponent(a)+'&sessionId='+encodeURIComponent(s)+'&scope='+dashboardScope;}
 function dashOpenAttrs(a,s,t){return ' data-dash-agent="'+escHtml(a)+'" data-dash-session="'+escHtml(s)+'"'+(t?' data-dash-task="'+escHtml(t)+'"':'');}

@@ -102,8 +102,8 @@ test('report shows readable input previews, voice badges and a scope-preserving 
 
 test('report distinguishes measured usage from unavailable per-file attribution',()=>{
  const html=generateTokenReportHtml('a',{...report,usageByRole:[{role:'agent',inputTokens:10,cacheCreationTokens:20,cacheReadTokens:30,outputTokens:40}]});
- expect(html).toContain('What makes up these tokens?');expect(html).toContain('<td>10</td><td>20</td><td>30</td><td>40</td>');
- expect(html).toContain('tool-schema token counts were not recorded');
+ expect(html).not.toContain('What makes up these tokens?');
+ expect(html).toContain('not historical turn attribution');
  expect(html).toContain('setInterval(refreshReport,5000)');
  for(const match of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g))expect(()=>new Function(match[1])).not.toThrow();
 });

@@ -881,7 +881,7 @@ ${dashboardFontLink}</head>
     // Full value is kept in the tooltip. 0/unknown renders as a dash.
     function toolInventory(loaded, used) {
       function list(label, names) {
-        return '<details><summary>'+label+': '+(Array.isArray(names) ? names.length : 'Unavailable')+'</summary><span class="ts">'+(Array.isArray(names) ? escHtml(names.join(', ') || 'None') : 'Not recorded')+'</span></details>';
+        return '<details><summary>'+label+': '+(Array.isArray(names) ? compactNumber(names.length) : 'Unavailable')+'</summary><span class="ts">'+(Array.isArray(names) ? escHtml(names.join(', ') || 'None') : 'Not recorded')+'</span></details>';
       }
       return list('Loaded', loaded)+list('Used', used);
     }
@@ -893,7 +893,7 @@ ${dashboardFontLink}</head>
     function fmtTokens(n) {
       const v = Number(n) || 0;
       if (v <= 0) return '<span class="ts">&mdash;</span>';
-      const label = v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1) + 'k' : String(v);
+      const label = compactNumber(v);
       return '<span title="' + v.toLocaleString() + ' tokens">' + label + '</span>';
     }
 
@@ -1460,7 +1460,7 @@ ${dashboardFontLink}</head>
         o.hit = hay.indexOf(q) >= 0;
         if (o.hit) hits.push(o);
       });
-      if (elSearchCount) elSearchCount.textContent = hits.length + ' / ' + G.nodes.length;
+      if (elSearchCount) elSearchCount.textContent = compactNumber(hits.length) + ' / ' + compactNumber(G.nodes.length);
       invalidate();
       return hits;
     }
@@ -1742,7 +1742,7 @@ ${dashboardFontLink}</head>
         sourceSel.textContent = '';
         (data.sources || [{ id: 'shared', label: 'Shared Knowledge Base', count: 0 }]).forEach(function(s){
           var o = document.createElement('option');
-          o.value = s.id; o.textContent = s.label + (typeof s.count === 'number' ? ' (' + s.count + ')' : '');
+          o.value = s.id; o.textContent = s.label + (typeof s.count === 'number' ? ' (' + compactNumber(s.count) + ')' : '');
           sourceSel.appendChild(o);
         });
         // Restore prior selection if it still exists, else fall back to Shared KB.
@@ -1785,7 +1785,7 @@ ${dashboardFontLink}</head>
         }
         buildModel(data);
         renderLegend();
-        elStats.textContent = data.nodes.length + ' notes, ' + data.edges.length + ' links';
+        elStats.textContent = compactNumber(data.nodes.length) + ' notes, ' + compactNumber(data.edges.length) + ' links';
       }).catch(function(err){
         elStats.textContent = ''; elEmpty.textContent = 'Failed to load graph: ' + err.message; elEmpty.style.display = '';
       });
@@ -1924,7 +1924,7 @@ ${dashboardFontLink}</head>
         }
 
         var applied = (run.applied != null) ? (', applied ' + run.applied) : '';
-        box.appendChild(el('div', 'dream-meta', 'tokens ' + (run.tokens||0) + ' · sessions ' + (run.sessions||0) + applied));
+        box.appendChild(el('div', 'dream-meta', 'tokens ' + compactNumber(run.tokens||0) + ' · sessions ' + compactNumber(run.sessions||0) + applied));
         return box;
       }
 
@@ -1945,8 +1945,8 @@ ${dashboardFontLink}</head>
           if (r.mode === 'auto') return;
           (r.proposals || []).forEach(function(p){ if (!p.accepted) pendingTotal++; });
         });
-        statsEl.textContent = runs.length + ' run' + (runs.length === 1 ? '' : 's')
-          + (pendingTotal ? ' · ' + pendingTotal + ' pending' : '');
+        statsEl.textContent = compactNumber(runs.length) + ' run' + (runs.length === 1 ? '' : 's')
+          + (pendingTotal ? ' · ' + compactNumber(pendingTotal) + ' pending' : '');
         if (pendingNotice){
           statsEl.textContent += ' — ' + pendingNotice;
           pendingNotice = '';
