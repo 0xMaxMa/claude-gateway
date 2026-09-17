@@ -372,7 +372,7 @@ tr.session-row:hover td{background:var(--raised)}
 .dash-drawer h2{margin:24px 0 12px;color:var(--text)}
 .dash-drawer pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--raised);padding:16px;border-radius:12px;font:12px/1.7 ui-monospace,monospace;max-height:480px;overflow:auto}
 .dash-drawer details{border-bottom:1px solid var(--line);padding:16px 0}
-.dash-drawer summary{cursor:pointer}
+.dash-drawer summary{cursor:pointer}.dash-drawer .turn-disclosure{padding:14px;border:1px solid var(--line)}.turn-disclosure>summary{font-size:13px;font-weight:600;line-height:1.6;overflow-wrap:anywhere}.turn-disclosure[open]>summary{margin-bottom:14px}.turn-disclosure>summary:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:4px}
 .dash-drawer p{overflow-wrap:anywhere}
 .dash-drawer dl{display:grid;grid-template-columns:130px minmax(0,1fr);gap:10px;font-size:12px}
 .dash-drawer dd{margin:0;overflow-wrap:anywhere}

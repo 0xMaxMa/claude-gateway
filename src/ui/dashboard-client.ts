@@ -3,6 +3,19 @@ import { dashboardPresentationClient } from './dashboard-presentation';
 /** Browser controller: no provider keys or model-generated HTML are trusted. */
 export const dashboardClient = dashboardPresentationClient + dashboardRange.toString()+';'+dashboardSince.toString()+';'+ String.raw`
 let dashboardData = null, dashboardOffset = 0, dashboardBusy = false, dashboardSearch = '', dashboardAgent = '', dashboardScope = '24h';
+const dashboardStateKey='gateway-dashboard-view:'+location.pathname.replace(/\/$/,'');
+let savedDashboardState={};
+try{savedDashboardState=JSON.parse(sessionStorage.getItem(dashboardStateKey)||'{}')||{};}catch{}
+dashboardScope=dashboardRange(savedDashboardState.scope);
+dashboardOffset=Number.isSafeInteger(savedDashboardState.offset)&&savedDashboardState.offset>=0&&savedDashboardState.offset<=1000000?savedDashboardState.offset:0;
+dashboardSearch=typeof savedDashboardState.search==='string'?savedDashboardState.search:'';
+dashboardAgent=typeof savedDashboardState.agent==='string'?savedDashboardState.agent:'';
+window.addEventListener('pagehide',()=>{try{sessionStorage.setItem(dashboardStateKey,JSON.stringify({view:document.querySelector('.tab.active')?.dataset.view,scope:dashboardScope,offset:dashboardOffset,search:dashboardSearch,agent:dashboardAgent}));}catch{}});
+document.addEventListener('DOMContentLoaded',()=>{
+ document.getElementById('dash-search').value=dashboardSearch;
+ document.querySelectorAll('#dash-scope [data-range]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.range===dashboardScope)));
+ const tab=[...document.querySelectorAll('.tab')].find(t=>t.dataset.view===savedDashboardState.view);tab?.click();
+});
 const dashboardExpanded=new Map();
 let dashboardFocus=null;
 function dashboardRows() {
@@ -81,7 +94,7 @@ async function dashDetail(agentId,sessionId,taskId,offset=0){
     }else{
       body+='<h2>Session</h2><dl><dt>Channel</dt><dd>'+channelBadge(detail.session?.source)+'</dd><dt>Chat</dt><dd>'+dashText(detail.session?.chatId)+'</dd><dt>Created</dt><dd>'+dashText(detail.session?.createdAt?new Date(detail.session.createdAt).toLocaleString():null)+'</dd></dl><h2>Tasks ('+dashCount(detail.totalTasks)+')</h2><div class="dash-mini-list">'+(detail.tasks||[]).map(t=>'<div class="detail-block">'+dashText(t.title)+dashStatus(t.state)+'</div>').join('')+'</div>';
       body+='<div class="dash-grid"><div class="dash-stat"><span>Agent tokens</span><strong>'+dashCount(detail.totals.agentTokens)+'</strong></div><div class="dash-stat"><span>Worker tokens</span><strong>'+dashCount(detail.totals.workerTokens)+'</strong></div></div><p class="live-note">Recorded turns only. Missing measurements are shown as —, not zero. Token volume is not billing cost.</p><h2>Turns & worker attempts</h2>';
-      body+=detail.turns.map(t=>'<section class="detail-block"><h3>'+dashText(t.role)+' · '+dashText(t.category)+' · '+dashText(new Date(t.startedAt).toLocaleString())+' · '+dashCount(t.usage?.totalTokens)+' tokens</h3><p class="live-note">'+dashText(t.id)+' · '+dashText(t.model)+' · '+dashText(t.state)+'</p>'+(t.taskId?'<p>Task '+dashText(t.taskId)+'</p>':'')+toolInventory(t.loadedTools,t.usedTools)+'<h3>Used tools</h3>'+toolNameList(t.usedTools)+(t.inputTexts||[]).map(text=>'<pre>'+dashText(text)+'</pre>').join('')+(t.responseText?'<h3>Response / result</h3><pre>'+dashText(t.responseText)+'</pre>':'')+'</section>').join('');
+      body+=detail.turns.map(t=>'<details class="detail-block turn-disclosure" data-detail-turn="'+dashText(t.id)+'"><summary>'+dashText(t.role)+' · '+dashText(t.category)+' · '+dashText(new Date(t.startedAt).toLocaleString())+' · '+dashCount(t.usage?.totalTokens)+' tokens</summary><p class="live-note">'+dashText(t.id)+' · '+dashText(t.model)+' · '+dashText(t.state)+'</p>'+(t.taskId?'<p>Task '+dashText(t.taskId)+'</p>':'')+toolInventory(t.loadedTools,t.usedTools)+'<h3>Used tools</h3>'+toolNameList(t.usedTools)+(t.inputTexts||[]).map(text=>'<pre>'+dashText(text)+'</pre>').join('')+(t.responseText?'<h3>Response / result</h3><pre>'+dashText(t.responseText)+'</pre>':'')+'</details>').join('');
       if(!detail.turns.length)body+='<p class="empty">No instrumented turns recorded on this page.</p>';
       if(offset>0)body+='<button data-session-page="'+Math.max(0,offset-50)+'">Previous records</button>';
       if(offset+50<Math.max(detail.totalTasks||0,detail.pagination?.total||0))body+='<button data-session-page="'+(offset+50)+'">Next records</button>';
@@ -98,8 +111,14 @@ function restoreDashboardDetails(){
  const html='<button data-dash-close aria-label="Close details">Close ×</button>'+record.html;
  if(panel.dataset.html!==html){
   const scroll=panel.scrollTop,focused=panel.contains(document.activeElement),closeFocused=document.activeElement?.hasAttribute('data-dash-close');
-  panel.innerHTML=html;panel.dataset.html=html;panel.scrollTop=scroll;
-  if(focused)(closeFocused?panel.querySelector('[data-dash-close]'):panel).focus({preventScroll:true});
+  const sameDetail=panel.dataset.agent===record.agentId&&panel.dataset.session===record.sessionId&&panel.dataset.task===(record.taskId||'');
+  const openTurns=new Set(sameDetail?[...panel.querySelectorAll('details[data-detail-turn][open]')].map(e=>e.dataset.detailTurn):[]);
+  const focusedTurn=focused?document.activeElement.closest('details[data-detail-turn]')?.dataset.detailTurn:null;
+  panel.innerHTML=html;panel.dataset.html=html;
+  panel.querySelectorAll('details[data-detail-turn]').forEach(e=>{e.open=openTurns.has(e.dataset.detailTurn);});
+  panel.scrollTop=scroll;
+  if(focusedTurn){const summary=[...panel.querySelectorAll('details[data-detail-turn]')].find(e=>e.dataset.detailTurn===focusedTurn)?.querySelector('summary');summary?.focus({preventScroll:true});}
+  if(focused&&!focusedTurn)(closeFocused?panel.querySelector('[data-dash-close]'):panel).focus({preventScroll:true});
  }
  panel.dataset.agent=record.agentId;panel.dataset.session=record.sessionId;panel.dataset.task=record.taskId||'';
 }

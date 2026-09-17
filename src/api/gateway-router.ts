@@ -933,7 +933,9 @@ export class GatewayRouter {
         if (reportPath === '/dashboard/token-report' && this.apiKeys.length > 0 && !this.hasValidDashSession(req)) {
           // Relative redirect preserves deployment prefixes (e.g. /gateway) without
           // trusting forwarded headers. Also handle Express's optional trailing slash.
-          res.redirect(303, req.path.endsWith('/') ? '../' : './');
+          const query = new URLSearchParams();
+          for (const key of ['agentId','sessionId','scope','offset']) if (typeof req.query[key] === 'string') query.set(key, req.query[key] as string);
+          res.redirect(303, (req.path.endsWith('/') ? '../' : './') + '?returnTo=' + encodeURIComponent('token-report?' + query.toString()));
           return;
         }
         if (!this.requireDashOrApiKey(req, res)) return;

@@ -7,9 +7,10 @@ async function refreshReport(){
  var status=document.getElementById('report-live');
  try{
   var response=await fetch(location.href,{cache:'no-store',headers:{Accept:'text/html'}});
-  if(response.status===401){status.textContent='Session expired · sign in again';return;}
+  if(response.status===401){location.reload();return;}
   if(!response.ok)throw Error('Unavailable');
   var next=new DOMParser().parseFromString(await response.text(),'text/html');
+  if(next.getElementById('login-form')){location.reload();return;}
   if(!next.getElementById('report-totals'))throw Error('Unavailable');
   var expanded=new Set(Array.from(document.querySelectorAll('.turn-row[aria-expanded=true]')).map(function(row){return row.dataset.turnId;}));
   var open=new Set();
