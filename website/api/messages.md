@@ -103,6 +103,8 @@ curl -X POST \
 
 Recognized provider quota, billing, rate limit, and authentication failures return a short, safe `error` message with retry or account guidance when available. Unknown failures return `Internal error`; provider credentials and internal paths are not included. Recognized failures also include a `code` field.
 
+Provider error codes take priority over wording. A bare HTTP 429 is described as a rate limit or quota because it does not identify which limit was reached. Reset/retry times are included only when the complete time expression can be read safely; otherwise the response uses general guidance.
+
 > - `session_id` is optional — omit for a stateless one-shot call
 > - Sessions idle-timeout after `idleTimeoutMinutes` (default 30 min); history is restored automatically on next message
 > - Error 409 = session is currently processing a request — wait and retry
