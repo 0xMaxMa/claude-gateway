@@ -111,7 +111,7 @@ export interface DiscordMessage {
   reference?: {messageId?:string;channelId?:string};
   fetchReference?(): Promise<DiscordMessage>;
   flags?: number | {has(bit:number):boolean};
-  attachments: { first(): { url: string; contentType?: string | null; name?: string } | undefined; values?(): IterableIterator<{url:string;contentType?:string|null;name?:string}> };
+  attachments: { first(): { url: string; contentType?: string | null; name?: string; size?: number } | undefined; values?(): IterableIterator<{url:string;contentType?:string|null;name?:string;size?:number}> };
   client: { user: { id: string } | null };
   startThread(options: { name: string; autoArchiveDuration: number }): Promise<{ id: string }>;
 }

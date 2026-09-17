@@ -1086,7 +1086,7 @@ async function handleInbound(
         replied_user: replyMsg.from?.username ?? String(replyMsg.from?.id ?? ''),
         ...((replyMsg.text || replyMsg.caption) ? { replied_text: replyMsg.text || replyMsg.caption } : {}),
         ...(repliedImagePath ? { replied_image_path: repliedImagePath } : {}),
-        ...(orchestrationSpool && replyMsg.photo ? {replied_attachment_file_id:replyMsg.photo[replyMsg.photo.length-1]!.file_id} : {}),
+        ...(orchestrationSpool && replyMsg.photo ? {replied_attachment_file_id:replyMsg.photo[replyMsg.photo.length-1]!.file_id,...(replyMsg.photo[replyMsg.photo.length-1]!.file_size!==undefined?{replied_attachment_size:String(replyMsg.photo[replyMsg.photo.length-1]!.file_size)}:{})} : {}),
         ...(repliedAttachment ? {
           replied_attachment_kind: repliedAttachment.kind,
           replied_attachment_file_id: repliedAttachment.file_id,

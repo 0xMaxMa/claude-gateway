@@ -16,7 +16,7 @@ export type InboundMessage = {
   replyToMessageId?: string;
   repliedText?: string;
   repliedSender?: string;
-  attachments?: Array<{url:string;name?:string;kind?:string;quoted?:boolean}>;
+  attachments?: Array<{url:string;name?:string;kind?:string;quoted?:boolean;size?:number}>;
   threadId?: string;
   attachmentFileId?: string;
   attachmentKind?: 'voice' | 'file';

@@ -1,4 +1,4 @@
-import { test, expect } from 'bun:test';
+import { test, expect, spyOn } from 'bun:test';
 import { mkdtempSync, readdirSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +6,8 @@ import { ReceiverSpool } from './receiver-spool';
 
 test('receiver restart retains unacknowledged input and removes it only after gateway acceptance', async () => {
   const root = mkdtempSync(join(tmpdir(), 'receiver-spool-'));
+  let now = Date.now();
+  const clock = spyOn(Date, 'now').mockImplementation(() => now);
   let fail = true;
   const delivered: unknown[] = [];
   const request = (async (_url: string | URL | Request, options?: RequestInit) => {
@@ -22,7 +24,11 @@ test('receiver restart retains unacknowledged input and removes it only after ga
     spool.close(); fail = false;
     spool = new ReceiverSpool(root, 'http://fixture.invalid/channel', request);
     await new Promise(resolve => setTimeout(resolve, 10));
+    expect(delivered).toHaveLength(1);
+    expect(readdirSync(root).filter(file => file.endsWith('.json'))).toHaveLength(1);
+    now += 1000;
+    await spool.flush();
     expect(readdirSync(root)).toEqual([]);
     expect(delivered.at(-1)).toEqual(input);
-  } finally { spool.close(); rmSync(root, { recursive: true, force: true }); }
+  } finally { clock.mockRestore(); spool.close(); rmSync(root, { recursive: true, force: true }); }
 });

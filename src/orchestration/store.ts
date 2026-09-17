@@ -24,7 +24,8 @@ export interface AcceptInput {
   /** Only ingress supplies these; they survive a crash before agent admission. */
   capabilities?: ExecutionCapabilities;
   model?: string;
-  metadata?: { senderName?: string; senderId?: string; platformMessageId?: string; platformMessageIds?: string[]; mediaGroupId?: string; promptContext?: string; imageRefs?: string[];
+  metadata?: { channelIngressFingerprint?: string; recoveryBatch?: string; recoveredChannelInput?: {content:string;meta:Record<string,string>};
+    unavailableAttachments?: Array<{code:string;name?:string;quoted:boolean}>; senderName?: string; senderId?: string; platformMessageId?: string; platformMessageIds?: string[]; mediaGroupId?: string; promptContext?: string; imageRefs?: string[];
     attachmentName?: string; mediaType?: string; repliedText?: string; repliedMessageId?: string; repliedSender?: string; repliedAttachmentIds?: string[]; attachmentDetails?: Array<{ref:string;name?:string;quoted:boolean}>; attachmentError?: string };
   /** Internal mailbox replay identifier; never accepted from HTTP/model arguments. */
   acceptedInputId?: string;
@@ -169,6 +170,27 @@ export class OrchestrationStore {
       WHERE c.id=? AND c.agent_id=? AND m.principal_id=?`, conversationId, this.agentId, principalId);
     if (!row) throw new OrchestrationError('ACCESS_DENIED');
     return row;
+  }
+  /** A lost receiver ACK must not re-fetch an expired file or re-admit work. */
+  channelReceipt(scope: ConversationScope, ingressKey: string | undefined, fingerprint: string): InputReceipt | undefined {
+    if (!ingressKey) return undefined;
+    if (scope.agentId !== this.agentId) throw new OrchestrationError('ACCESS_DENIED');
+    const key = payloadHash([this.agentId, scope.source, scope.accountId, scope.chatId, scope.threadKey, scope.principalId, boundedText(ingressKey, 2048)]);
+    const prior = this.get(`SELECT r.input_id,r.conversation_id,i.binding_id,i.ingress_json FROM ingress_receipts r
+      JOIN conversation_inputs i ON i.id=r.input_id WHERE r.ingress_key=?`, key);
+    if (!prior) return undefined;
+    this.assertMember(String(prior.conversation_id), scope.principalId);
+    const original = JSON.parse(String(prior.ingress_json)).metadata?.channelIngressFingerprint;
+    // Older receipts predate envelope fingerprints; their scoped provider ID is authoritative.
+    if (original && original !== fingerprint) throw new OrchestrationError('IDEMPOTENCY_CONFLICT');
+    return {inputId:String(prior.input_id),conversationId:String(prior.conversation_id),bindingId:String(prior.binding_id)};
+  }
+  /** Complete a deterministic ingress receipt without scheduling inference. */
+  completeInputReceipt(receipt: InputReceipt): void {
+    this.run("UPDATE conversation_inputs SET status='handled' WHERE id=?", receipt.inputId);
+    this.run("UPDATE outbox SET state='completed' WHERE kind='input' AND dedup_key=?", `input:${receipt.inputId}`);
+    this.run('INSERT OR IGNORE INTO history_operations VALUES(?,?,?,?,?,?,?,?)', `input:${receipt.inputId}`, receipt.conversationId, receipt.inputId, null, 'append', null, 'pending', Date.now());
+    this.enqueue('history', `input:${receipt.inputId}`, {operationId:`input:${receipt.inputId}`});
   }
   acceptInput(input: AcceptInput, maxPending = 100): InputReceipt {
     const { scope } = input;

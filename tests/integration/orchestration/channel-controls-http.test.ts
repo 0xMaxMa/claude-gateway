@@ -21,7 +21,7 @@ test.each(['discord','line','slack'] as const)('%s signed/native controls pass t
  const runner=new AgentRunner(agent,{gateway:{ orchestration: true,headless:true,logDir:join(root,'logs'),timezone:'UTC'},agents:[agent]} as GatewayConfig);
  const store=new OrchestrationStore(':memory:','a'),tasks=new TaskService(store),stop=jest.fn(()=>false);
  const controls=new ChannelControls(store,new TaskControls(store,tasks),new StopControls(store,tasks,stop),new TelegramVoices(store,()=>({provider:'fixture',model:'m',voiceId:'v'}),async()=>[{id:'v',name:'Voice',gender:'female'}]),()=>true);
- (runner as any).orchestration={channelControls:controls,updateAgentConfig:jest.fn(),ownsChannel:()=>true};
+ (runner as any).orchestration={store,channelControls:controls,updateAgentConfig:jest.fn(),ownsChannel:()=>true};
  const sent:Array<{url:string;body:any}>=[];
  global.fetch=(async(url:any,init?:RequestInit)=>{
    if(String(url).startsWith('http://127.0.0.1:'))return originalFetch(url,init);
