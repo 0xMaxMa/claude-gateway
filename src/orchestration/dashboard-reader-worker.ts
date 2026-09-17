@@ -55,7 +55,10 @@ function read(filename: string, operation: string, options: Record<string, any>)
         const session = get('SELECT * FROM conversations WHERE agent_session_id=?',options.sessionId)!;
         const offset=Math.max(0,Number(options.offset)||0);
         const tasks=all('SELECT id,state,snapshot_json,updated_at FROM tasks WHERE conversation_id=? AND updated_at>=? ORDER BY updated_at DESC,id LIMIT 50 OFFSET ?',session.id,since,offset).map(t=>({taskId:t.id,state:t.state,title:JSON.parse(t.snapshot_json).title,updatedAt:t.updated_at}));
-        return {...report,session:{sessionId:session.agent_session_id,source:session.source,chatId:session.chat_id,createdAt:session.created_at,updatedAt:session.updated_at},tasks,totalTasks:Number(get('SELECT COUNT(*) n FROM tasks WHERE conversation_id=? AND updated_at>=?',session.id,since)!.n),offset};
+        // Same activity status the Conversations column shows, so the session drawer's
+        // Context window box can use the same idle-vs-stopped disambiguation as the report page.
+        const activityStatus=conversationActivityStatus(get,all,session.id).status;
+        return {...report,session:{sessionId:session.agent_session_id,source:session.source,chatId:session.chat_id,createdAt:session.created_at,updatedAt:session.updated_at},tasks,totalTasks:Number(get('SELECT COUNT(*) n FROM tasks WHERE conversation_id=? AND updated_at>=?',session.id,since)!.n),offset,activityStatus};
       }
       const session=get('SELECT id,source,chat_id FROM conversations WHERE agent_session_id=?',options.sessionId)!;
       // Same activity status the Conversations column shows, so the report header mirrors it.
