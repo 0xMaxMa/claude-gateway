@@ -14,6 +14,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { gatewayModules } from './modules';
 import { AGENT_TASK_TOOLS, WORKER_REPORT_TOOLS, callTaskBridge } from './tools/tasks/module';
+import { createLazyToolCatalog, LAZY_TOOL_DEFINITIONS } from './lazy-tools';
 import { buildChannelInstructions } from './instructions';
 import type { ChannelModule, ToolModule, McpToolDefinition } from './types';
 
@@ -55,6 +56,13 @@ for (const mod of modules) {
 const taskTools = ORCHESTRATION_ROLE === 'agent' ? AGENT_TASK_TOOLS.filter(tool => (tool.name !== 'conversation_intake' || process.env.GATEWAY_SEMANTIC_INTAKE === 'true') && (tool.name !== 'capabilities_list' || process.env.GATEWAY_CAPABILITY_CATALOG === 'true')) : ORCHESTRATION_ROLE === 'worker' ? WORKER_REPORT_TOOLS.filter(tool => tool.name !== 'task_memory_append' || process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true') : [];
 if (ORCHESTRATION_ROLE && process.env.GATEWAY_ORCHESTRATION_TICKET_FILE) visibleTools.push(...taskTools);
 
+// Preserve the full policy-filtered inventory internally; only schema exposure is lazy.
+const lazyEnabled = ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_LAZY_TOOLS === 'true';
+const deferredTools = visibleTools.filter(tool => toolMap.has(tool.name) && toolMap.get(tool.name)?.id !== 'memory');
+const deferredNames = new Set(deferredTools.map(tool => tool.name));
+const lazyCatalog = createLazyToolCatalog(deferredTools);
+const advertisedTools = lazyEnabled ? [...visibleTools.filter(tool => !deferredNames.has(tool.name)), ...LAZY_TOOL_DEFINITIONS] : visibleTools;
+
 // Initialize channel modules so their bot API clients are ready for tool calls.
 // initBot() returns immediately after creating the client — no blocking.
 for (const mod of modules) {
@@ -79,47 +87,51 @@ const mcp = new Server(
         'claude/channel/permission': {},
       },
     },
-    instructions: ORCHESTRATION_ROLE ? 'Use scoped capability discovery, task tools and memory retrieval. The agent writes user-facing responses; workers return task results and orchestration handles delivery.' : buildChannelInstructions(imageEnabled, videoEnabled),
+    instructions: ORCHESTRATION_ROLE ? 'Use scoped capability discovery, task tools and memory retrieval. The agent writes user-facing responses; workers return task results and orchestration handles delivery.' + (lazyEnabled ? ' Gateway execution capabilities are available through tool_search and tool_call: search for the capability to read its original arguments, then invoke it by exact name. An unlisted execution tool is not unavailable; inspect the catalog. Task reporting and memory remain direct tools.' : '') : buildChannelInstructions(imageEnabled, videoEnabled),
   },
 );
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: visibleTools,
+  tools: advertisedTools,
 }));
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
-  const toolName = req.params.name;
+  const dispatch = async (toolName: string, args: Record<string, unknown>) => {
+    if (ORCHESTRATION_ROLE && process.env.GATEWAY_ORCHESTRATION_TICKET_FILE && taskTools.some(tool => tool.name === toolName)) {
+      return callTaskBridge(toolName, args, String(extra.requestId), AbortSignal.any([extra.signal, shutdownController.signal]));
+    }
+
+    const mod = toolMap.get(toolName);
+    if (!mod) {
+      return {
+        content: [{ type: 'text', text: `unknown tool: ${toolName}` }],
+        isError: true,
+      };
+    }
+    if (ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_ORCHESTRATION_MEDIA === 'true') {
+      const validation = await callTaskBridge('task_validate', {}, String(extra.requestId), AbortSignal.any([extra.signal, shutdownController.signal]));
+      if (validation.isError) return validation;
+    }
+
+    // extra.signal fires on notifications/cancelled for THIS call (the SDK matches
+    // it by requestId) — the CLI sends that when a user Stop/Ctrl-C interrupts an
+    // in-flight tool call. Threaded through so a long-running module (image
+    // generation's poll loop) can react instead of running to its full timeout.
+    // Also combine with shutdownController.signal: the CLI sending that
+    // notification is only a "SHOULD" in the MCP spec, not a "MUST", and in
+    // practice a Stop that lets the CLI process exit cleanly (rather than
+    // staying alive to keep chatting) closes this server's stdin without ever
+    // sending notifications/cancelled — extra.signal would then never fire, and
+    // an in-flight image generation would poll to its full timeout instead of
+    // cancelling. stdin closing is a reliable, protocol-independent signal that
+    // the turn is over either way, so it backstops the notification.
+    const combinedSignal = AbortSignal.any([extra.signal, shutdownController.signal]);
+    return mod.handleTool(toolName, args, combinedSignal);
+  };
   const args = (req.params.arguments ?? {}) as Record<string, unknown>;
-  if (ORCHESTRATION_ROLE && process.env.GATEWAY_ORCHESTRATION_TICKET_FILE && taskTools.some(tool => tool.name === toolName)) {
-    return callTaskBridge(toolName, args, String(extra.requestId), AbortSignal.any([extra.signal, shutdownController.signal]));
-  }
-
-  const mod = toolMap.get(toolName);
-  if (!mod) {
-    return {
-      content: [{ type: 'text', text: `unknown tool: ${toolName}` }],
-      isError: true,
-    };
-  }
-  if (ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_ORCHESTRATION_MEDIA === 'true') {
-    const validation = await callTaskBridge('task_validate', {}, String(extra.requestId), AbortSignal.any([extra.signal, shutdownController.signal]));
-    if (validation.isError) return validation;
-  }
-
-  // extra.signal fires on notifications/cancelled for THIS call (the SDK matches
-  // it by requestId) — the CLI sends that when a user Stop/Ctrl-C interrupts an
-  // in-flight tool call. Threaded through so a long-running module (image
-  // generation's poll loop) can react instead of running to its full timeout.
-  // Also combine with shutdownController.signal: the CLI sending that
-  // notification is only a "SHOULD" in the MCP spec, not a "MUST", and in
-  // practice a Stop that lets the CLI process exit cleanly (rather than
-  // staying alive to keep chatting) closes this server's stdin without ever
-  // sending notifications/cancelled — extra.signal would then never fire, and
-  // an in-flight image generation would poll to its full timeout instead of
-  // cancelling. stdin closing is a reliable, protocol-independent signal that
-  // the turn is over either way, so it backstops the notification.
-  const combinedSignal = AbortSignal.any([extra.signal, shutdownController.signal]);
-  return mod.handleTool(toolName, args, combinedSignal);
+  if (lazyEnabled && req.params.name === 'tool_search') return lazyCatalog.search(args);
+  if (lazyEnabled && req.params.name === 'tool_call') return lazyCatalog.call(args, dispatch);
+  return dispatch(req.params.name, args);
 });
 
 // Connect MCP transport

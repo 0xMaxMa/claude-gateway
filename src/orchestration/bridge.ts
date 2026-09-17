@@ -148,6 +148,7 @@ export class TaskBridge {
       GATEWAY_ORIGIN_CHANNEL: workerMemory ? String(worker!.conversation.source) : 'api', GATEWAY_AGENT_ID: this.tasks.store.agentId,
       GATEWAY_SESSION_ID: worker?.task.agentSessionId ?? '', GATEWAY_SESSION_MEDIA_DIR: worker?.mediaDir ?? '',
       GATEWAY_ORCHESTRATION_MEDIA: worker ? 'true' : '',
+      GATEWAY_LAZY_TOOLS: worker ? 'true' : '',
       GETPOD_BROWSER_URL: worker ? process.env.GETPOD_BROWSER_URL ?? 'http://127.0.0.1:10880' : '',
       GETPOD_BROWSER_API_KEY: worker ? process.env.GETPOD_BROWSER_API_KEY ?? '' : '',
       GETPOD_BROWSER_DISABLED: worker ? process.env.GETPOD_BROWSER_DISABLED ?? '' : 'true',

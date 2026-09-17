@@ -16,6 +16,7 @@ import { getWatcherHealth } from '../watch/factory';
 import { CronScheduler } from '../cron/scheduler';
 import { CronManager } from '../cron/manager';
 import { generateDashboardHtml, generateLoginHtml } from '../ui/web-ui';
+import { generateTokenReportHtml } from '../ui/token-report';
 import { resolveSharedConfig, sharedVaultDir, buildGraphModel, demoGraphModel, demoGraphModelSized, readVaultPages, makeSharedPromoter } from '../agent/knowledge';
 import { createLogger } from '../logger';
 import { parseDreamReport } from '../agent/dreaming/report';
@@ -906,6 +907,28 @@ export class GatewayRouter {
         res.send(generateDashboardHtml());
       }
     });
+
+    // Reports expose cross-agent usage/tool inventories: the same admin gate as status.
+    for (const reportPath of ['/dashboard/token-report', '/token-report']) {
+      this.app.get(reportPath, async (req: Request, res: Response) => {
+        if (!this.requireDashOrApiKey(req, res)) return;
+        res.setHeader('Cache-Control', 'no-store');
+        const { agentId, sessionId } = req.query;
+        if (typeof agentId !== 'string' || typeof sessionId !== 'string' || !sessionId || sessionId.length > 256) {
+          res.status(400).json({ error: 'agentId and sessionId are required' }); return;
+        }
+        const runner = this.agents.get(agentId);
+        if (!runner) { res.status(404).json({ error: 'Unknown agent' }); return; }
+        try {
+          const report = await runner.getTokenReport(sessionId);
+          if (!report) { res.status(404).json({ error: 'No recorded session token report' }); return; }
+          if (reportPath === '/token-report') res.json(report);
+          else res.type('html').send(generateTokenReportHtml(agentId, report));
+        } catch {
+          res.status(500).json({ error: 'Unable to load session token report' });
+        }
+      });
+    }
 
     // Dashboard login — exchange a configured API key for an HttpOnly session
     // cookie (multi-use, 8h). The cookie is never readable by page JS / view-source,

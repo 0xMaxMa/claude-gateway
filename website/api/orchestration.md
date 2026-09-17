@@ -131,3 +131,14 @@ Telegram and Discord receiver journals persist exponential retry delays from one
 At receiver startup, if any persisted entry in a conversation is older than five minutes, its entire startup queue is marked for recovery. The gateway saves the original text and metadata, marks those inputs handled, and sends one recovery notice for the batch. **It does not execute queued commands, start inference, or dispatch tasks for these entries.** History labels recovered text as not executed; original attachment references are retained in the durable input metadata, but expired remote file contents cannot be recovered automatically. Resend the requests and files that are still needed. Fresh arrivals are admitted normally, and previously admitted messages remain deduplicated even if their acknowledgment was lost. If an envelope conflicts with its existing receipt, including an older album expanded after admission, it is archived separately under a stable recovery identity with one notice per original message. It cannot change or re-execute the already admitted request.
 
 Unreadable journal records are retained for operator inspection with a bounded diagnostic. Invalid album member metadata and damaged retry records block only their identifiable conversation until repaired; it does not silently discard messages or block other conversations.
+
+## Session token reports {#session-token-reports}
+
+- `GET /dashboard/token-report?agentId=AGENT_ID&sessionId=SESSION_ID` renders the English HTML report.
+- `GET /token-report?agentId=AGENT_ID&sessionId=SESSION_ID` returns its JSON data.
+
+Both routes use the dashboard administrative access gate: a valid dashboard session or an admin API key under the existing loopback/local-access policy. An ordinary agent-scoped API key does not grant access. Responses use `Cache-Control: no-store`. A reverse-proxy prefix such as `/gateway` must be applied consistently to the dashboard and these routes.
+
+The report separates user-input handling, Agent reporting turns and worker attempts. It contains available per-request and per-turn fresh-input, cache-creation, cache-read and output counts, tool inventories and actual tool calls, plus corresponding task/input/result context. Background learning usage is separate. Request IDs deduplicate repeated stream/content-block usage; CLI aggregate usage is reconciled with the request breakdown rather than counted twice. Thinking is part of output. Percentages are token volume, not provider billing.
+
+The durable `token_turns` ledger starts recording after deployment; it does not reconstruct earlier usage. Unknown or incomplete measurements are explicitly identified. This report can contain conversation and task content and must remain behind the administrative gate.

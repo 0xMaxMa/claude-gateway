@@ -68,3 +68,14 @@ describe('runReviewer', () => {
     });
   });
 });
+
+it('counts cache reads and writes exactly once without TTL/model subtotals', async () => {
+  const r = await runReviewer(input, cfg, async () => ({ stdout: JSON.stringify({
+    result: '{"action":"none"}', usage: { input_tokens: 10, output_tokens: 7,
+      cache_creation_input_tokens: 100, cache_read_input_tokens: 200,
+      cache_creation: { ephemeral_1h_input_tokens: 100 } },
+    modelUsage: { model: { inputTokens: 10, outputTokens: 7, cacheReadInputTokens: 200 } },
+  }) }));
+  expect(r.tokensSpent).toBe(317);
+  expect(r.reviewed).toBe(true);
+});

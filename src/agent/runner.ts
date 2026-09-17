@@ -4361,6 +4361,11 @@ export class AgentRunner extends EventEmitter {
     return this.receiver?.isRunning() ?? false;
   }
 
+  getTokenReport(sessionId: string) {
+    const report = this.orchestration?.tokenReport(sessionId);
+    return report ? {...report, backgroundReviews: this.historyDb.listReviewRuns().filter(run => run.sessionId === sessionId)} : undefined;
+  }
+
   getOrchestrationSummary() {
     if (!this.agentConfig.orchestration?.enabled && !this.orchestration) return undefined;
     const summary = this.orchestration?.dashboardSummary() ?? { enabled: true, backend: 'headless', workspaceMode: this.agentConfig.type === 'app-agent' ? 'container' : this.agentConfig.orchestration?.tasks?.workspaceMode ?? 'host', activeAgentSessions: [], tasks: [], sessions: [] };

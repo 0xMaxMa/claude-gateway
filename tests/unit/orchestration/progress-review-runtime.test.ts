@@ -16,9 +16,11 @@ test.each([false,true])('internal reviews gate all text and voice (%s), consume 
  const gateway={gateway:{orchestration:true,headless:true},agents:[agent]} as GatewayConfig;
  const sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a'),sid=randomUUID();
  await sessions.ensureApiSession('a','chat',sid);
+ const overlays:string[]=[],prompts:string[]=[];
  let output={notify_user:false,display_text:'Do not leak draft',spoken_text:'Do not speak'};
  const runtime=await AgentOrchestrationRuntime.open(agent,gateway,dir,sessions,history,{
- createAgentSession:async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+ createAgentSession:async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter,prompt:string){
+   overlays.push(profile.overlay);prompts.push(prompt);
    this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));
    const review=profile.overlay.includes('This is an internal progress review');
    const text=review?JSON.stringify(output):'Final result';
@@ -52,6 +54,9 @@ test.each([false,true])('internal reviews gate all text and voice (%s), consume 
  expect(heard).toHaveBeenCalledTimes(withVoice?1:0);
  seen.mockClear();heard.mockClear();
  expect(await inspect()).toBe(''); // Same report is suppressed even if model asks to send.
+ expect(overlays[2]).toBe(overlays[0]); // Changing historical reports do not invalidate system prefixes.
+ expect(overlays[2]).not.toContain(output.display_text);
+ expect(prompts[2]).toContain(output.display_text); // Full history remains available as turn data.
  expect(seen).not.toHaveBeenCalled();expect(heard).not.toHaveBeenCalled();
  runtime.tasks.finish(attempt.attemptId,1,{type:'completed',result:{summary:'Final result',artifactIds:[]}});
  const n=runtime.store.get("SELECT id FROM notifications WHERE status='pending' LIMIT 1")!;

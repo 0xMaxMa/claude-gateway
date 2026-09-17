@@ -1,3 +1,4 @@
+import { recordTokenTurn } from '../token-ledger';
 import { storedReplyContext, resolveStoredReply } from '../reply-context';
 import { observeToolRepetition } from './tool-repetition';
 import { taskDirective } from './task-directive';
@@ -139,9 +140,13 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       let observing = false, observationClosed = false, lastActivityAt = Date.now();
       const limits = resolveOrchestrationConfig(this.agent.orchestration);
       const turn = startProcessTurn(process, prompt, limits.tasks.maxDurationMs || undefined, undefined,
-        metrics => this.onManagedTurn?.(task.agentSessionId, revision.instructions, metrics, task.skill ? [task.skill.name] : []), [],
+        metrics => {
+          recordTokenTurn(this.tasks.store, { id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics });
+          this.onManagedTurn?.(task.agentSessionId, revision.instructions, metrics, task.skill ? [task.skill.name] : []);
+        }, [],
         {startupTimeoutMs: limits.conversation.startupTimeoutMs, firstResponseTimeoutMs: limits.conversation.firstResponseTimeoutMs,
           idleTimeoutMs: limits.tasks.idleTimeoutMs, acceptToolProgress: true, idleAction: 'observe',
+          onUsage: metrics => recordTokenTurn(this.tasks.store, {id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics}),
           onObservation: observation => {
             if (observing || observationClosed) return;
             observing = true;

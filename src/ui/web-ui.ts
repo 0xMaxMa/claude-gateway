@@ -458,7 +458,8 @@ export function generateDashboardHtml(): string {
           <th>Source</th>
           <th>Mode</th>
           <th>Model</th>
-          <th>Tokens</th>
+          <th>Agent / Total tokens</th>
+          <th>Tools</th>
           <th>Status</th>
           <th>Uptime</th>
           <th>Spawned</th>
@@ -466,7 +467,7 @@ export function generateDashboardHtml(): string {
         </tr>
       </thead>
       <tbody id="sessions-tbody">
-        <tr><td colspan="11" class="ts">Loading...</td></tr>
+        <tr><td colspan="12" class="ts">Loading...</td></tr>
       </tbody>
     </table>
   </div>
@@ -867,7 +868,7 @@ export function generateDashboardHtml(): string {
         const detail=document.getElementById(toggle.getAttribute('aria-controls'));if(detail)detail.hidden=!open;
         return;
       }
-      const btn = e.target.closest('.btn-stream');
+      const btn = e.target.closest('button.btn-stream');
       if (btn) void openPtyViewer(btn.getAttribute('data-agent-id'), btn.getAttribute('data-session-id'));
     });
 
@@ -912,6 +913,17 @@ export function generateDashboardHtml(): string {
 
     // Format a context-window token count compactly: 1234 -> "1.2k", 45000 -> "45k".
     // Full value is kept in the tooltip. 0/unknown renders as a dash.
+    function toolInventory(loaded, used) {
+      function list(label, names) {
+        return '<details><summary>'+label+': '+(Array.isArray(names) ? names.length : 'Unavailable')+'</summary><span class="ts">'+(Array.isArray(names) ? escHtml(names.join(', ') || 'None') : 'Not recorded')+'</span></details>';
+      }
+      return list('Loaded', loaded)+list('Used', used);
+    }
+
+    function fmtRecordedTokens(n) {
+      return n == null ? 'Unavailable' : n === 0 ? '0' : fmtTokens(n);
+    }
+
     function fmtTokens(n) {
       const v = Number(n) || 0;
       if (v <= 0) return '<span class="ts">&mdash;</span>';
@@ -979,7 +991,8 @@ export function generateDashboardHtml(): string {
               '<td>' + sourceBadge(s.source) + '</td>' +
               '<td><div class="session-modes">' + (s.orchestration ? '<span class="badge badge-purple">orchestration</span>' : '') + modeBadge(s.mode) + '</div></td>' +
               '<td>' + fmtModel(s.model) + '</td>' +
-              '<td>' + fmtTokens(s.tokens) + '</td>' +
+              '<td>' + (s.tokenSummary ? fmtRecordedTokens(s.tokenSummary.agentTokens)+' / '+fmtRecordedTokens(s.tokenSummary.totalTokens) : (s.orchestration ? 'Unavailable' : fmtTokens(s.tokens))) + (s.orchestration ? '<br><a class="btn-stream" target="_blank" rel="noopener" href="'+escHtml(apiUrl('/dashboard/token-report')+'?agentId='+encodeURIComponent(a.id)+'&sessionId='+encodeURIComponent(s.sessionId))+'">View token report</a>' : '') + '</td>' +
+              '<td>' + toolInventory(s.loadedTools, s.usedTools) + '</td>' +
               '<td>' + statusBadge + '</td>' +
               '<td>' + uptime + '</td>' +
               '<td>' + fmtTs(s.spawnedAt ? new Date(s.spawnedAt).toISOString() : null) + '</td>' +
@@ -991,17 +1004,17 @@ export function generateDashboardHtml(): string {
               let content='<div style="padding:12px 20px;border-left:3px solid #805ad5"><div class="ts">'+escHtml(a.orchestration.workspaceMode)+(a.container ? ' · '+escHtml(a.container) : '')+(pool ? ' · Agent pool '+pool.workers.length+'/'+pool.maxWorkers+' · idle TTL '+Math.round(pool.idleTtlMs/60000)+' min' : '')+'</div>';
               slots.forEach(function(w){content+='<div class="worker-slot">'+escHtml(w.state)+' · Worker '+escHtml(w.workerId)+' · session '+escHtml(w.sessionId)+(w.expiresAt ? ' · expires '+escHtml(new Date(w.expiresAt).toLocaleTimeString()) : '')+'</div>';});
               if (count) {
-                content+='<table class="worker-tasks"><thead><tr><th>Worker / Session</th><th>Task</th><th>Status</th><th>Tool</th><th>Process</th></tr></thead><tbody>';
-                childTasks.forEach(function(t){content+='<tr data-task="'+escHtml(t.taskId)+'"><td>'+escHtml(t.workerId||'Unassigned')+'<br><span class="ts">'+escHtml(t.workerSessionId||'')+(t.resumed?' · resumed':'')+'</span></td><td>'+escHtml(t.title)+'<br><span class="ts">'+escHtml(t.taskId)+(t.continueTaskId?' · follows '+escHtml(t.continueTaskId):'')+'</span></td><td>'+escHtml(t.state)+'</td><td>'+escHtml(t.lastTool ? t.lastTool.name+' · '+t.lastTool.type+(t.lastTool.is_error?' (error)':'') : '—')+'</td><td>'+escHtml(t.hostProcessId ? String(t.hostProcessId)+(t.container?' (docker exec)':'') : '—')+'</td></tr>';});
+                content+='<table class="worker-tasks"><thead><tr><th>Worker / Session</th><th>Task</th><th>Status</th><th>Latest attempt tokens</th><th>Latest attempt tools</th><th>Latest tool</th><th>Process</th></tr></thead><tbody>';
+                childTasks.forEach(function(t){content+='<tr data-task="'+escHtml(t.taskId)+'"><td>'+escHtml(t.workerId||'Unassigned')+'<br><span class="ts">'+escHtml(t.workerSessionId||'')+(t.resumed?' · resumed':'')+'</span></td><td>'+escHtml(t.title)+'<br><span class="ts">'+escHtml(t.taskId)+(t.continueTaskId?' · follows '+escHtml(t.continueTaskId):'')+'</span></td><td>'+escHtml(t.state)+'</td><td>'+(t.tokenSummary ? fmtRecordedTokens(t.tokenSummary.totalTokens) : 'Unavailable')+'</td><td>'+toolInventory(t.loadedTools,t.usedTools)+'</td><td>'+escHtml(t.lastTool ? t.lastTool.name+' · '+t.lastTool.type+(t.lastTool.is_error?' (error)':'') : '—')+'</td><td>'+escHtml(t.hostProcessId ? String(t.hostProcessId)+(t.container?' (docker exec)':'') : '—')+'</td></tr>';});
                 content+='</tbody></table>';
               } else content+='<div class="ts">No worker tasks in this session</div>';
-              rows.push('<tr class="session-workers" id="'+escHtml(detailId)+'"'+(open?'':' hidden')+'><td colspan="11">'+content+'</div></td></tr>');
+              rows.push('<tr class="session-workers" id="'+escHtml(detailId)+'"'+(open?'':' hidden')+'><td colspan="12">'+content+'</div></td></tr>');
             }
           });
         });
 
         document.getElementById('sessions-tbody').innerHTML =
-          rows.length ? rows.join('') : '<tr><td colspan="11" class="ts">No active sessions</td></tr>';
+          rows.length ? rows.join('') : '<tr><td colspan="12" class="ts">No active sessions</td></tr>';
 
         document.getElementById('refresh-indicator').textContent = 'auto-refresh 3s';
       } catch(e) {

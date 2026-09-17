@@ -31,8 +31,13 @@ export class WorkerPool {
     const related = this.store.get('SELECT * FROM worker_pool WHERE conversation_id=? AND workstream_id=? ORDER BY idle_since DESC LIMIT 1', task.conversationId, stream);
     if (related?.active_task_id) return undefined;
     let slot = related;
-    if (!slot) slot = this.store.get('SELECT * FROM worker_pool WHERE active_task_id IS NULL ORDER BY idle_since DESC LIMIT 1');
-    if (!slot && Number(this.store.get('SELECT COUNT(*) n FROM worker_pool')!.n) >= max) return undefined;
+    // An unrelated assignment must not evict a warm continuation while there
+    // is room for another logical slot. At capacity evict the coldest idle
+    // slot, not the most recently completed workstream. Busy slots stay fenced.
+    if (!slot && Number(this.store.get('SELECT COUNT(*) n FROM worker_pool')!.n) >= max) {
+      slot = this.store.get('SELECT * FROM worker_pool WHERE active_task_id IS NULL ORDER BY idle_since ASC,id ASC LIMIT 1');
+      if (!slot) return undefined;
+    }
     const reuse = Boolean(slot && slot.conversation_id === task.conversationId && slot.workstream_id === stream && slot.binding_key === binding && slot.resumable);
     const workerId = slot ? String(slot.id) : randomUUID(), sessionId = reuse ? String(slot!.session_id) : randomUUID();
     this.store.run(`INSERT INTO worker_pool(id,conversation_id,workstream_id,binding_key,session_id,active_task_id,idle_since,resumable,fingerprint)
