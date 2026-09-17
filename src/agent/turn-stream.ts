@@ -1,3 +1,4 @@
+import { PresentedResponseError, responseFailureMessage } from '../orchestration/response-errors';
 /**
  * Resumable turn streams (#421).
  *
@@ -321,7 +322,8 @@ export function resultEvent(text: string, attachments: ApiAttachment[]): StreamE
 /** Terminal frame for a turn that failed, carrying the Error's `code` when it has one. */
 export function errorEvent(err: Error): StreamEvent {
   const code = errorCode(err);
-  return code ? { type: 'error', message: err.message, code } : { type: 'error', message: err.message };
+  const message = responseFailureMessage(err, true);
+  return code ? { type: 'error', message, code } : { type: 'error', message };
 }
 
 /** The `code` property producers attach to their Errors, when it is a string. */
@@ -342,7 +344,7 @@ function terminalMessage(event: StreamEvent): string {
  * thing the original connection did.
  */
 function terminalError(event: StreamEvent): Error {
-  const err = new Error(terminalMessage(event));
+  const err = new PresentedResponseError(terminalMessage(event));
   if (event.type === 'error' && event.code) Object.assign(err, { code: event.code });
   return err;
 }

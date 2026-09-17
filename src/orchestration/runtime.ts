@@ -3,7 +3,7 @@ import { isProgressReview, recentCommunicatedProgress, progressReviewResult, PRO
 import { canonicalVoiceProvider } from '../voice/providers/model-ref';
 import { CapabilityCatalog, readCapabilityPage } from './capabilities';
 import { browserRouting } from './browser-routing';
-import { inferenceFailureMessage } from './inference-errors';
+import { responseFailureMessage } from './response-errors';
 import { partialDisplay } from './display-stream';
 import { responseHasVoiceOrigin, voiceReplyAllowed } from './voice-reply-policy';
 import { taskReport } from './task-report';
@@ -884,14 +884,7 @@ export class AgentOrchestrationRuntime {
           this.store.transaction(() => this.store.appendEvent(String(row.conversation_id), 'response.error', { responseId: active.decision!.responseId, code: failureCode }));
           const timeout = (error as {timeout?: {phase: string; elapsedMs: number; idleMs: number}})?.timeout;
           if (timeout) this.store.transaction(() => this.store.appendEvent(String(row.conversation_id), 'response.timeout', {responseId: active.decision!.responseId, ...timeout}));
-          const message = inferenceFailureMessage(error) ?? (error instanceof OrchestrationError && error.code === 'TIMEOUT'
-            ? (timeout?.phase === 'startup' ? 'The agent could not finish starting in time.'
-              : timeout?.phase === 'first_response' ? 'The model did not begin responding in time.'
-              : timeout?.phase === 'idle' ? 'The agent stopped making progress before completing the reply.'
-              : 'The agent reached its response time limit before completing the reply.') + ' Please check /tasks for any pending work.'
-            : error instanceof OrchestrationError && error.code === 'PROFILE_INVENTORY_MISMATCH'
-              ? 'The agent could not start because its tool configuration does not match the running gateway (PROFILE_INVENTORY_MISMATCH). Check that the gateway and MCP server are from the same deployment.'
-              : 'The response could not be completed. Please check /tasks for any pending work.');
+          const message = responseFailureMessage(error);
           this.decisions.finish(active.decision, internalReview || questionReview ? '' : message, 'failed', undefined, !internalReview && !questionReview);
         }
         else if (row?.state === 'interrupting') this.decisions.finish(active.decision, 'Response stopped.', 'interrupted', undefined, !active.stopping);

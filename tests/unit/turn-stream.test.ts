@@ -174,7 +174,7 @@ describe('TurnStream', () => {
 
   it('errorEvent puts the Error\'s code on the frame, and omits the field when there is none', () => {
     expect(errorEvent(Object.assign(new Error('timed out'), { code: 'TIMEOUT' })))
-      .toEqual({ type: 'error', message: 'timed out', code: 'TIMEOUT' });
+      .toEqual({ type: 'error', message: expect.stringContaining('(TIMEOUT)'), code: 'TIMEOUT' });
     expect(errorEvent(new Error('plain'))).toEqual({ type: 'error', message: 'plain' });
     // A non-string `code` (libuv errno objects use numbers) is not a protocol code.
     expect(errorEvent(Object.assign(new Error('numeric'), { code: 7 })))
@@ -451,4 +451,16 @@ describe('TurnStreamRegistry', () => {
     expect(watcher.finished).toBeNull();
     registry.clear();
   });
+});
+
+
+test('provider error replay retains its safe message without original exception metadata', () => {
+ const { responseFailureMessage } = require('../../src/orchestration/response-errors');
+ const original=Object.assign(new Error('unknown duplicate secret'),{code:'INFERENCE_FAILED',providerMessage:'API Error: 400 New provider diagnostic. Bearer private-value'});
+ const frame=errorEvent(original);
+ expect(frame).toMatchObject({message:'API Error: 400 New provider diagnostic. [redacted]'});
+ const callback=jest.fn();
+ const sink=callbackSink({onChunk:jest.fn(),onDone:jest.fn(),onError:callback});
+ sink.finish({seq:1,event:frame});
+ expect(responseFailureMessage(callback.mock.calls[0][0])).toBe('API Error: 400 New provider diagnostic. [redacted]');
 });

@@ -203,7 +203,7 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
     );
     expect(events[events.length - 1]).toMatchObject({
       type: 'error',
-      message: 'Agent response timed out.',
+      message: expect.stringContaining('(TIMEOUT)'),
       code: 'TIMEOUT',
       seq: 5,
     });

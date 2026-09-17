@@ -101,7 +101,7 @@ curl -X POST \
 | 503 | Provider capacity is exhausted or the provider is temporarily unavailable |
 | 500 | Internal error |
 
-Typed provider failures preserve the provider message in `error`, including reset times and account guidance, after redacting credentials, internal paths, stack frames and URL credentials/query parameters. This does not depend on recognizing the provider wording or language. Unknown internal failures without provider error evidence return `Internal error`. Missing workspace context returns the actionable `WORKSPACE_CONTEXT_MISSING` code and a repair hint; provider calls have not started in that case. Recognized failures also include a `code` field.
+Typed provider failures preserve the provider message in `error`, including reset times and account guidance, after redacting credentials, internal paths, stack frames and URL credentials/query parameters. This does not depend on recognizing the provider wording or language. Known internal failures return a safe explanation and diagnostic code. Unknown internal exceptions return `GATEWAY_INTERNAL_ERROR` guidance without exposing their raw message. Missing workspace context returns the actionable `WORKSPACE_CONTEXT_MISSING` code and a repair hint; provider calls have not started in that case. Recognized failures also include a `code` field.
 
 Error classification remains separate from display text. A bare HTTP 429 without a provider message is described as a rate limit or quota because it does not identify which limit was reached. Reset/retry wording in provider messages is preserved, not parsed or reformatted. Older callers without typed provider-message metadata retain the existing classification fallback.
 
@@ -112,3 +112,24 @@ Error classification remains separate from display text. A bare HTTP 429 without
 > - The soft timeout only ends the *request* in sync mode (`504`). In streaming mode it is a non-terminal [`timeout` event](/api/streaming#streaming-api-sse) — the turn is still running and the stream stays open.
 
 ---
+
+
+### Internal response failures
+
+Chat delivery, synchronous API responses, SSE and resumed terminal frames share the same error presentation. Provider wording is preserved from typed error events; internal exceptions use diagnostic codes and safe explanations.
+
+| Failure | Diagnostic |
+| --- | --- |
+| Claude executable missing / cannot start | `CLAUDE_BINARY_NOT_FOUND`, `PROCESS_PERMISSION_DENIED`, `PROCESS_START_FAILED` |
+| Workspace context missing | `WORKSPACE_CONTEXT_MISSING` |
+| Process dies during a turn | `PROCESS_EXITED` |
+| Response cannot be saved / is too large | `RESPONSE_PERSISTENCE_FAILED`, `RESPONSE_TOO_LARGE` |
+| Startup, first-response, idle or total deadline | `TIMEOUT`, with phase-specific guidance |
+| HTTP request wait expires while work may continue | `TIMEOUT_SOFT` |
+| CLI turn, spending or response-format limit | `MODEL_MAX_TURNS`, `MODEL_BUDGET_EXCEEDED`, `MODEL_OUTPUT_INVALID` |
+| Gateway busy, shutting down or mismatched deployment | `CAPACITY_EXCEEDED`, `ORCHESTRATION_CLOSING`, `PROFILE_INVENTORY_MISMATCH` |
+| Storage or permission failure | `ENOSPC`, `EACCES`, `EPERM`, `SQLITE_FULL`, `SQLITE_BUSY` |
+
+New orchestration errors retain their diagnostic code even before a dedicated explanation is added. Unclassified exceptions do not expose arbitrary internal text. Legacy uncoded stream/command errors retain their redacted message. HTTP response status and diagnostic codes are separate from provider wording; a provider's HTTP 400 message does not imply the gateway itself returns HTTP 400.
+
+Worker failures remain task failures with bounded, scrubbed evidence, visible to the agent and task inspection. Tool errors remain tool results so the agent can recover. Delivery failures remain outbox/delivery state: if the channel transport is down, an error notice through that same transport cannot be guaranteed. These mechanisms are distinct from a failed conversational response; not every background error should become a new chat message.

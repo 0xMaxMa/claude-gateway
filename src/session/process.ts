@@ -1555,6 +1555,11 @@ export class SessionProcess extends EventEmitter {
       // hint. This is the exact failure the binary-resolution work targets.
       this.lastStderrLine = err.message;
       this.logger.error('session subprocess error', { error: err.message });
+      if (this.runtimeProfile) {
+        const cause = (err as NodeJS.ErrnoException).code;
+        const code = cause === 'ENOENT' ? 'CLAUDE_BINARY_NOT_FOUND' : cause === 'EACCES' || cause === 'EPERM' ? 'PROCESS_PERMISSION_DENIED' : 'PROCESS_START_FAILED';
+        this.emit('startup-error', Object.assign(new Error(code), { code }));
+      }
     });
   }
 

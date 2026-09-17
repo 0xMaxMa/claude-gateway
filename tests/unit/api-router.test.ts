@@ -179,7 +179,7 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
 
     const unknown = buildApp(async () => { throw Object.assign(new Error('private /internal/path sk-secret-value'), { code: 'INFERENCE_FAILED' }); });
     const hidden = await supertest.default(unknown).post(POST_URL).set(AUTH).send({ message: 'Hi', chat_id: 'test-chat' });
-    expect(hidden.body).toEqual({ error: 'Internal error' });
+    expect(hidden.body).toEqual({ error: 'The model request failed without a usable provider diagnostic. Check the gateway logs. (INFERENCE_FAILED)', code: 'INFERENCE_FAILED' });
   });
 
   it('returns 200 with response on success', async () => {
@@ -1278,4 +1278,17 @@ describe('typed provider error presentation', () => {
     expect(data.split(message)).toHaveLength(2);
     expect(data).not.toContain('unknown');
   });
+});
+
+
+describe('internal errors across API transports',()=>{
+ it.each(['PROCESS_EXITED','CLAUDE_BINARY_NOT_FOUND','RESPONSE_PERSISTENCE_FAILED','ENOSPC','PROFILE_INVENTORY_MISMATCH'])('retains %s in sync and SSE', async code=>{
+  const fail=()=>Object.assign(new Error('private /srv/workspace sk-secret'),{code});
+  const app=buildApp(async()=>{throw fail();});
+  const res=await supertest.default(app).post(POST_URL).set(AUTH).send({message:'Hi',chat_id:'test-chat'});
+  expect(res.body.error).toContain(code);expect(res.body.error).not.toContain('sk-secret');
+  const stream=buildStreamApp(async(_s,_c,_m,cb)=>{cb.onError(fail());return()=>{};});
+  const {data}=await collectSSE(stream.app,{message:'Hi',chat_id:'test-chat',stream:true});
+  expect(data).toContain(code);expect(data).not.toContain('sk-secret');
+ });
 });

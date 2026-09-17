@@ -70,12 +70,13 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
     };
     phaseTimer = setTimeout(check, budget);
   };
-  const cleanup = () => { if (!recorded) { recorded = true; try { onMetrics?.({ toolIds: [...tools], inputTokens, totalTokens, startedAt }); } catch { /* telemetry must not break delivery */ } } clearTimeout(timer); clearTimeout(phaseTimer); clearInterval(observationTimer); process.off('output', output); process.off('exit', exit); };
+  const cleanup = () => { if (!recorded) { recorded = true; try { onMetrics?.({ toolIds: [...tools], inputTokens, totalTokens, startedAt }); } catch { /* telemetry must not break delivery */ } } clearTimeout(timer); clearTimeout(phaseTimer); clearInterval(observationTimer); process.off('output', output); process.off('exit', exit); process.off('startup-error', startupError); };
   const fail = (error: Error) => { if (settled) return; settled = true; cleanup(); rejectAccepted(error); rejectResult(error); };
   const publish = (chunk: string): boolean => {
     try { onText(chunk); return true; }
     catch { fail(new OrchestrationError('RESPONSE_PERSISTENCE_FAILED')); void process.stop(); return false; }
   };
+  const startupError = (error: Error) => { fail(error); void process.stop(); };
   const exit = () => {
     if (settled) return;
     if (stopped) { settled = true; cleanup(); rejectAccepted(new OrchestrationError('INTERRUPTED')); resolveResult({ text, interrupted: true }); }
@@ -151,8 +152,11 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
       if (event.is_error) {
         const providerCodes = [...apiErrorCodes];
         const detail = [apiErrorText, providerErrorText([event.result, event.errors], providerCodes)].filter(Boolean).join(' ').slice(0, 4096) || 'Inference failed';
-        const code = /provider capacity is fully in use|overloaded_error/i.test(detail) ? 'PROVIDER_CAPACITY'
-          : /\b(?:API Error:|HTTP)\s*503\b/i.test(detail) ? 'PROVIDER_UNAVAILABLE' : 'INFERENCE_FAILED';
+        const terminalCode = event.subtype === 'error_max_turns' ? 'MODEL_MAX_TURNS'
+          : event.subtype === 'error_max_budget_usd' ? 'MODEL_BUDGET_EXCEEDED'
+          : event.subtype === 'error_max_structured_output_retries' ? 'MODEL_OUTPUT_INVALID' : undefined;
+        const code = terminalCode ?? (/provider capacity is fully in use|overloaded_error/i.test(detail) ? 'PROVIDER_CAPACITY'
+          : /\b(?:API Error:|HTTP)\s*503\b/i.test(detail) ? 'PROVIDER_UNAVAILABLE' : 'INFERENCE_FAILED');
         fail(Object.assign(new OrchestrationError(code, detail), { providerCodes, providerMessage: providerMessage || structuredProviderMessage(event.result) || structuredProviderMessage(event.errors) })); return;
       }
       if (process.runtimeProfile?.responseSchema && event.structured_output && typeof event.structured_output === 'object') {
@@ -178,7 +182,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
   observationTimer?.unref();
   const timer = timeoutMs === undefined ? undefined : setTimeout(() => expire('total'), timeoutMs);
   if (policy) arm('startup', policy.startupTimeoutMs);
-  process.on('output', output); process.on('exit', exit);
+  process.on('output', output); process.on('exit', exit); process.on('startup-error', startupError);
   void process.start().then(() => {
     if (stopped || settled) return process.stop();
     process.sendMessage(prompt, images);
