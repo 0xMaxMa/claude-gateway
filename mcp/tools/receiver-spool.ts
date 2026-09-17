@@ -4,7 +4,7 @@ import { mkdirSync, readdirSync, openSync, closeSync, writeFileSync, fsyncSync, 
 import { join } from 'node:path';
 
 type RetryState = { queuedAt: number; attempts: number; nextAttemptAt: number; recoveryBatch?: string; sealedMessageIds?: string[] };
-type Entry = { file: string; payload: string; input: ChannelInput; modified: number; state: RetryState };
+type Entry = { file: string; payload: string; input: ChannelInput; modified: number; state: RetryState; albumMessageIds?: string[] };
 const MAX_BACKOFF_MS = 5 * 60_000;
 const STALE_STARTUP_AGE_MS = 5 * 60_000;
 
@@ -83,7 +83,17 @@ export class ReceiverSpool {
           input = undefined;
           throw new Error('Invalid ingress payload');
         }
-        entries.push({ file, modified, payload, input, state: this.state(file, modified) });
+        // Validate nested album metadata inside the per-record boundary, so a
+        // damaged album cannot abort delivery for unrelated conversations.
+        let albumMessageIds: string[] | undefined;
+        if (mediaGroupKey(input)) {
+          const ids: unknown = JSON.parse(input.meta.message_ids_json);
+          if (!Array.isArray(ids) || !ids.length || ids.length > 10 || ids.some(id=>typeof id !== 'string' || !id)) {
+            throw new Error('Invalid ingress album members');
+          }
+          albumMessageIds = ids;
+        }
+        entries.push({ file, modified, payload, input, state: this.state(file, modified), albumMessageIds });
       } catch {
         // An identifiable conversation must not skip its damaged head. Other
         // conversations remain usable; preserve all bytes for operator recovery.
@@ -189,8 +199,8 @@ export class ReceiverSpool {
         if (readFileSync(join(this.directory, entry.file), 'utf8') !== entry.payload) continue;
         if (mediaGroupKey(entry.input) && Date.now() - entry.modified < this.mediaGroupWaitMs) continue;
         const body = entry.state.recoveryBatch ? JSON.stringify({ ...entry.input, meta: { ...entry.input.meta, ingress_recovery_batch: entry.state.recoveryBatch } }) : entry.payload;
-        if (mediaGroupKey(entry.input) && !entry.state.sealedMessageIds) {
-          entry.state = { ...entry.state, sealedMessageIds: JSON.parse(entry.input.meta.message_ids_json) as string[] };
+        if (entry.albumMessageIds && !entry.state.sealedMessageIds) {
+          entry.state = { ...entry.state, sealedMessageIds: entry.albumMessageIds };
           this.saveState(entry.file, entry.state);
         }
         attempts++;

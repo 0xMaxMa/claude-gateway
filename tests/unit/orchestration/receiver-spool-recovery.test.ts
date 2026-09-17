@@ -263,3 +263,36 @@ test('an album expanded while a different callback is pending is refreshed befor
   expect(JSON.parse(albums[0].meta.message_ids_json)).toEqual(['1', '2']);
   expect(readdirSync(root).filter(file => file.endsWith('.json'))).toHaveLength(0);
 });
+
+test.each([undefined, 'not-json', 'null', '{}', '[]', '[1]', '[""]', JSON.stringify(Array.from({length:11},(_,i)=>String(i)))])(
+  'invalid album member metadata %s retains its conversation while other chats progress across restart', async messageIds => {
+    const metadata: Record<string,string> = { media_group_id:'album', message_id:'1' };
+    if (messageIds !== undefined) metadata.message_ids_json = messageIds;
+    const album = input('a','album',metadata);
+    const broken = persist(root,album,10000);
+    const original = readFileSync(join(root,broken),'utf8');
+    persist(root,input('a','tail'),9000);
+    persist(root,input('b','healthy'),8000);
+    const diagnostic = jest.spyOn(process.stderr,'write').mockReturnValue(true);
+    const request = jest.fn(async (_:any,init?:RequestInit)=>new Response(''));
+    spool = new ReceiverSpool(root,'http://callback',request,0);
+    await tick(); await spool.flush(); await spool.flush();
+    expect(request.mock.calls.map(call=>JSON.parse(String(call[1]?.body)).content)).toEqual(['healthy']);
+    expect(readFileSync(join(root,broken),'utf8')).toBe(original);
+    expect(readdirSync(root).filter(file=>file.endsWith('.json'))).toHaveLength(2);
+    expect(diagnostic).toHaveBeenCalledTimes(1);
+    spool.close();
+    persist(root,input('b','after restart'));
+    spool = new ReceiverSpool(root,'http://callback',request,0);
+    await tick(); await spool.flush();
+    expect(request.mock.calls.map(call=>JSON.parse(String(call[1]?.body)).content)).toEqual(['healthy','after restart']);
+    expect(readFileSync(join(root,broken),'utf8')).toBe(original);
+    expect(diagnostic).toHaveBeenCalledTimes(2);
+    // Repairing the retained record restores its original conversation order.
+    writeFileSync(join(root,broken),JSON.stringify({...album,meta:{...metadata,...album.meta,message_ids_json:'["1"]'}}));
+    utimesSync(join(root,broken),new Date(Date.now()-10000),new Date(Date.now()-10000));
+    await spool.flush();
+    expect(request.mock.calls.map(call=>JSON.parse(String(call[1]?.body)).content)).toEqual(['healthy','after restart','album','tail']);
+    expect(readdirSync(root).filter(file=>file.endsWith('.json'))).toHaveLength(0);
+  }
+);
