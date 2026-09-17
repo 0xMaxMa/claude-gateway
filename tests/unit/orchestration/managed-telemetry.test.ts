@@ -1,6 +1,25 @@
 import { EventEmitter } from 'events';
 import { startProcessTurn } from '../../../src/orchestration/process-turn';
 import type { SessionProcess } from '../../../src/session/process';
+import { inferenceFailureMessage } from '../../../src/orchestration/inference-errors';
+
+test.each([
+  ['Daily credit limit reached. Retry after 503 seconds.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again in 503 seconds.'],
+  ['Daily credit limit reached. Retry after 1503 seconds.', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again in 1503 seconds.'],
+  [{ error: { status: 503 } }, 'PROVIDER_UNAVAILABLE', '503: The model provider is temporarily unavailable. Please try again shortly.'],
+  [{ error: { type: 'authentication_error', message: 'Invalid x-api-key' } }, 'INFERENCE_FAILED', 'Provider authentication failed. Check your provider credentials.'],
+  [{ error: { code: 'invalid_api_key' } }, 'INFERENCE_FAILED', 'Provider authentication failed. Check your provider credentials.'],
+  ['Daily credit limit reached. Resets at 14:30 UTC. Bearer secret-value /internal/path', 'INFERENCE_FAILED', 'Provider quota or billing limit reached. Try again after the limit resets at 14:30 UTC.'],
+  ['rate_limit: Retry at 09:15:30 GMT. sk-secret-value', 'INFERENCE_FAILED', 'Provider rate limit reached. Try again at 09:15:30 GMT.'],
+])('provider review regression: %j', async (detail, code, message) => {
+  const p = new EventEmitter() as SessionProcess;
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: detail }));
+  }});
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(error.code).toBe(code);
+  expect(inferenceFailureMessage(error)).toBe(message);
+});
 
 test('managed turns report deduplicated tool usage and elapsed start time exactly once', async () => {
   const p = new EventEmitter() as SessionProcess;

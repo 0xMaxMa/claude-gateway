@@ -143,7 +143,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
       if (event.is_error) {
         const detail = [apiErrorText, providerErrorText(event.result), providerErrorText(event.errors)].filter(Boolean).join(' ').slice(0, 4096) || text || 'Inference failed';
         const code = /provider capacity is fully in use|overloaded_error/i.test(detail) ? 'PROVIDER_CAPACITY'
-          : /(?:API Error:|HTTP)?\s*503\b/i.test(detail) ? 'PROVIDER_UNAVAILABLE' : 'INFERENCE_FAILED';
+          : /\b(?:API Error:|HTTP)\s*503\b/i.test(detail) ? 'PROVIDER_UNAVAILABLE' : 'INFERENCE_FAILED';
         fail(new OrchestrationError(code, detail)); return;
       }
       if (process.runtimeProfile?.responseSchema && event.structured_output && typeof event.structured_output === 'object') {
