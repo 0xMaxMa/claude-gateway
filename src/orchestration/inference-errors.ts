@@ -36,7 +36,12 @@ export function inferenceFailureMessage(error: unknown): string | undefined {
   if (!category) return undefined;
   // Older callers carry only an Error message. Once identified as a provider
   // failure, preserve its wording too; do not parse a reset time out of prose.
-  if (detail && !failure.providerCodes?.length && !/^HTTP \d{3}$/.test(detail)) return sanitizeProviderMessage(detail);
+  // When sanitizing strips the detail to nothing (a pure stack/path), fall
+  // through to the categorized base message rather than dropping to generic.
+  if (detail && !failure.providerCodes?.length && !/^HTTP \d{3}$/.test(detail)) {
+    const preserved = sanitizeProviderMessage(detail);
+    if (preserved) return preserved;
+  }
   const base = category === 'quota' ? 'Provider quota or billing limit reached.'
     : category === 'rate_limit' ? 'Provider rate limit reached.'
     : category === 'quota_or_rate_limit' ? 'Provider rate limit or quota reached.'

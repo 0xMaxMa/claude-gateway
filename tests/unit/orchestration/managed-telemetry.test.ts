@@ -97,6 +97,20 @@ test('provider messages stay actionable while internal failures and bearer value
   expect(inferenceFailureMessage(new Error('internal stack detail'))).toBeUndefined();
 });
 
+test('a categorized failure whose detail sanitizes to nothing still yields its base message', () => {
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  // The only categorizing signal ('rate-limited') lives on a stack `at` line
+  // that sanitizing strips entirely, leaving an empty detail. Before the fix the
+  // empty sanitized detail was returned as undefined, dropping the categorized
+  // base message and falling back to generic; now it falls through to the base.
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: '    at handler (rate-limited /srv/x.js:1:2)' }))
+    .toBe('Provider rate limit reached. Please try again later.');
+  // Control (passes both ways): a categorized detail that survives sanitizing is
+  // still preserved verbatim rather than replaced by the base message.
+  expect(inferenceFailureMessage({ code: 'INFERENCE_FAILED', message: 'rate_limit: slow down' }))
+    .toBe('rate_limit: slow down');
+});
+
 test('assistant error type remains actionable when provider omits text', async () => {
   const p = new EventEmitter() as SessionProcess;
   Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
