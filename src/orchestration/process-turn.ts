@@ -14,13 +14,14 @@ export interface ProcessTurn {
 /** Reuses the existing process/history lifecycle; a turn ends on a terminal
  * event or confirmed process exit. The owner decides task recovery policy. */
 export interface ManagedTurnMetrics { toolIds: string[]; inputTokens: number; totalTokens: number; startedAt: number; }
-function providerErrorText(value: unknown): string {
+function providerErrorText(value: unknown, depth = 0): string {
+  if (depth >= 8) return '';
   if (typeof value === 'string') return value.slice(0, 4096);
-  if (Array.isArray(value)) return value.map(providerErrorText).filter(Boolean).join(' ').slice(0, 4096);
+  if (Array.isArray(value)) return value.slice(0, 32).map(item => providerErrorText(item, depth + 1)).filter(Boolean).join(' ').slice(0, 4096);
   if (value && typeof value === 'object') {
     const entry = value as Record<string, unknown>;
     const status = typeof entry.status === 'number' ? `HTTP ${entry.status}` : entry.status;
-    return [entry.code, entry.type, status, entry.message, entry.error].map(providerErrorText).filter(Boolean).join(' ').slice(0, 4096);
+    return [entry.code, entry.type, status, entry.message, entry.error].map(item => providerErrorText(item, depth + 1)).filter(Boolean).join(' ').slice(0, 4096);
   }
   if (typeof value === 'number') return String(value);
   return '';

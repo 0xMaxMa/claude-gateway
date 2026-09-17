@@ -90,6 +90,19 @@ test.each([[429, 'Provider rate limit reached.'], [401, 'Provider authentication
   expect(inferenceFailureMessage(error)).toContain(message);
 });
 
+test('deeply nested provider errors remain bounded and safely generic', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  let nested: unknown = { message: 'Daily credit limit reached.' };
+  for (let i = 0; i < 40; i++) nested = { error: nested };
+  Object.assign(p, { start: async () => {}, stop: jest.fn(async () => {}), sendMessage: () => {
+    p.emit('output', JSON.stringify({ type: 'result', is_error: true, result: nested }));
+  }});
+  const { inferenceFailureMessage } = require('../../../src/orchestration/inference-errors');
+  const error = await startProcessTurn(p, 'check', 1000).result.catch(error => error);
+  expect(error.code).toBe('INFERENCE_FAILED');
+  expect(inferenceFailureMessage(error)).toBeUndefined();
+});
+
 test.each(['final-only','replacement','structured'])('oversized %s result fails before a successful report is published',async kind=>{
  const p=new EventEmitter() as SessionProcess,publish=jest.fn();
  const text='🎯'.repeat(65537);
