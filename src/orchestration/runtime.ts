@@ -626,6 +626,7 @@ export class AgentOrchestrationRuntime {
       let intakeChoice: IntakeChoice | undefined, acknowledgement = '', acknowledgementId = '', acknowledgementReady = false;
       let intakeDeferred = false, taskMutationAttempted = false;
       const attemptedTaskActions = new Set<string>();
+      const taskActionResults = new Map<string, boolean>();
       let acknowledgementInFlight: Promise<unknown> | undefined;
       const newerInputPending = () => !!this.store.get("SELECT id FROM conversation_inputs WHERE conversation_id=? AND principal_id=? AND binding_id=(SELECT binding_id FROM conversation_inputs WHERE id=?) AND status='accepted' AND input_seq>(SELECT input_seq FROM conversation_inputs WHERE id=?)", receipt.conversationId, input.scope.principalId, receipt.inputId, receipt.inputId);
       const intakeContext = { ...capabilities, ...receipt, ...decision, model: options.model ?? this.agent.claude.model, principalId: input.scope.principalId, actionId: `intake:${receipt.inputId}` };
@@ -693,6 +694,7 @@ export class AgentOrchestrationRuntime {
         return readCapabilityPage(await this.capabilityCatalog.snapshot(), this.host.skills?.(), args);
       },
         onIntake: semantic ? acknowledge : undefined,
+        onMutationResult: semantic ? (actionId, committed) => { taskActionResults.set(actionId, committed); } : undefined,
         beforeMutation: semantic ? async (tool, args, actionId) => {
           if (actionId) attemptedTaskActions.add(actionId);
           if (tool === 'task_spawn' || tool === 'task_update') taskMutationAttempted = true;
@@ -800,12 +802,16 @@ export class AgentOrchestrationRuntime {
       const committedTaskCommand = semantic && taskMutationAttempted && this.store.get(`SELECT tc.action_id FROM task_commands tc JOIN conversation_decisions d ON d.id=tc.decision_id
         WHERE tc.conversation_id=? AND tc.command_type IN ('spawn','update','answer')
         AND EXISTS(SELECT 1 FROM json_each(d.input_ids_json) WHERE value=?) LIMIT 1`,receipt.conversationId,receipt.inputId);
-      const failedTaskActions = [...attemptedTaskActions].some(actionId => !this.store.get('SELECT action_id FROM task_commands WHERE conversation_id=? AND action_id=?', receipt.conversationId, actionId));
+      const failedTaskActions = [...attemptedTaskActions].some(actionId => {
+        const result = taskActionResults.get(actionId);
+        if (result !== undefined) return !result;
+        return !this.store.get('SELECT action_id FROM task_commands WHERE conversation_id=? AND action_id=?', receipt.conversationId, actionId);
+      });
       const uncommittedDispatch = semantic && taskMutationAttempted && (!committedTaskCommand || failedTaskActions) && !intakeDeferred && !newerInputPending() && !response.interrupted;
       if (uncommittedDispatch) {
         // Never turn a rejected tool call into a false promise of background work.
         surfaces.display = committedTaskCommand
-          ? 'Some requested tasks were not started or updated. Please check /tasks for the tasks that started.'
+          ? 'Some task commands were rejected. Other commands succeeded; please check /tasks for the current task status.'
           : 'The requested task was not started or updated. Please try again.';
         surfaces.spoken = '';
       }

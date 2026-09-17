@@ -209,7 +209,7 @@ test('undelivered text acknowledgement still blocks new work',async()=>{
  }finally{await f.close();}
 });
 
-test.each(['live playback failure','earlier pending speech','partial dispatch'] as const)('%s does not silently lose requested work',async scenario=>{
+test.each(['live playback failure','earlier pending speech','partial dispatch','recovered receipt','corrected retry','conflicting replay'] as const)('%s does not silently lose requested work',async scenario=>{
  const f=await fixture(scenario==='earlier pending speech'?'telegram':'api');
  let release=()=>{};let pending:Promise<void>|undefined;
  try{
@@ -234,9 +234,22 @@ test.each(['live playback failure','earlier pending speech','partial dispatch'] 
     await scope.onIntake({mode:'ready',acknowledgement:'I will run the checks.'});
     await scope.beforeMutation('task_spawn',{},'successful-check');
     f.runtime.tasks.spawn({...scope.context,actionId:'successful-check'},{title:'Check',instructions:'Inspect read-only',targetProfile:'default-worker'});
-    if(scenario==='partial dispatch'){
+    if(scenario==='conflicting replay'){
+     await scope.beforeMutation('task_spawn',{},'successful-check');
+     scope.onMutationResult('successful-check',false);
+    }
+    if(scenario==='recovered receipt'){
+     // Recovery can return an existing committed receipt under a new action ID.
+     await scope.beforeMutation('task_spawn',{},'recovered-action');
+     scope.onMutationResult('recovered-action',true);
+    }
+    if(scenario==='partial dispatch'||scenario==='corrected retry'){
      await scope.beforeMutation('task_spawn',{},'failed-check');
      try{f.runtime.tasks.spawn({...scope.context,actionId:'failed-check'},{title:'',instructions:'',targetProfile:'default-worker'});}catch{}
+    }
+    if(scenario==='corrected retry'){
+     await scope.beforeMutation('task_spawn',{},'corrected-check');
+     f.runtime.tasks.spawn({...scope.context,actionId:'corrected-check'},{title:'Corrected check',instructions:'Inspect read-only',targetProfile:'default-worker'});
     }
     emitter.emit('output',JSON.stringify({type:'result',result:'I am working on all checks.'}));
    })().catch(error=>emitter.emit('error',error));
@@ -248,7 +261,8 @@ test.each(['live playback failure','earlier pending speech','partial dispatch'] 
    const ids=delivery.send.mock.calls.map((call:unknown[])=>call[2]);
    expect(new Set(ids).size).toBe(ids.length);
   }
-  if(scenario==='partial dispatch')expect(result).toContain('Some requested tasks were not started or updated');
+  if(scenario==='partial dispatch'||scenario==='corrected retry'||scenario==='conflicting replay')expect(result).toContain('Some task commands were rejected');
+  if(scenario==='recovered receipt'||scenario==='corrected retry')expect(result).not.toMatch(/not started|not.*updated/);
   if(scenario==='live playback failure')expect(f.runtime.store.get("SELECT COUNT(*) n FROM conversation_events WHERE type='response.speech_failed'")!.n).toBeGreaterThan(0);
  }finally{release();await pending;await f.close();}
 });
