@@ -29,4 +29,9 @@ export function taskStatusBadge(value: string): string {
  const color=colors[state]||'#737373';
  return '<span class="badge status-badge" style="--status-color:'+color+'">'+dashboardEscape(state.replace(/_/g,' ').replace(/^./,c=>c.toUpperCase()))+'</span>';
 }
-export const dashboardPresentationClient = compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';'+taskStatusBadge.toString()+';';
+export function toolNameList(names: string[] | null | undefined): string {
+ if (!Array.isArray(names)) return '<p class="muted">—</p>';
+ if (!names.length) return '<p class="muted">None</p>';
+ return '<ul class="tool-name-list">'+[...new Set(names)].sort().map(name=>'<li><code>'+dashboardEscape(name)+'</code></li>').join('')+'</ul>';
+}
+export const dashboardPresentationClient = compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';'+taskStatusBadge.toString()+';'+toolNameList.toString()+';';
