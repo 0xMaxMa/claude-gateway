@@ -18,6 +18,34 @@ export interface TokenTurn extends ManagedTurnMetrics {
   failureCode?: string;
 }
 const initialized = new WeakSet<OrchestrationStore>();
+/** Context-window size for a model id. The `[1m]` variant buys the 1M window
+ *  (1.05M for the GPT rows); every base id resolves to the standard 200K. This
+ *  mirrors DEFAULT_MODELS in agent/runner.ts without importing that heavy module. */
+function modelContextWindow(model: unknown): number {
+  if (typeof model === 'string' && model.includes('[1m]')) return model.startsWith('gpt') ? 1050000 : 1000000;
+  return 200000;
+}
+/** Current agent context window: the latest agent turn's single largest request
+ *  by sent context (input + cacheRead + cacheCreation); its usage.totalTokens is
+ *  the numerator, the model's window is the denominator. Agent only — workers are
+ *  separate processes and do not share the agent's context. Scope-independent so
+ *  it reflects the true current state even after an auto-compact. */
+function latestAgentContextWindow(store: Pick<OrchestrationStore, 'get'>, sessionId: string): { used: number; total: number; model: string | null } | null {
+  const row = store.get(`SELECT payload_json FROM token_turns WHERE session_id=? AND role='agent' ORDER BY started_at DESC,id DESC LIMIT 1`, sessionId);
+  if (!row) return null;
+  let turn: TokenTurn;
+  try { turn = JSON.parse(String(row.payload_json)) as TokenTurn; } catch { return null; }
+  const requests = Array.isArray(turn.requests) ? turn.requests : [];
+  let best: { context: number; total: number } | null = null;
+  for (const request of requests) {
+    const usage = request?.usage;
+    if (!usage) continue;
+    const context = Number(usage.inputTokens ?? 0) + Number(usage.cacheReadTokens ?? 0) + Number(usage.cacheCreationTokens ?? 0);
+    if (!best || context > best.context) best = { context, total: Number(usage.totalTokens ?? 0) };
+  }
+  if (!best) return null;
+  return { used: best.total, total: modelContextWindow(turn.model), model: typeof turn.model === 'string' ? turn.model : null };
+}
 // Dashboard polling never reloads full request arrays or conversation text.
 // Cache only projected measurements, invalidate the affected session on writes.
 const summaries = new WeakMap<OrchestrationStore, Map<string, TokenTurn[]>>();
@@ -130,7 +158,7 @@ export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 
     SUM(json_extract(payload_json,'$.usage.outputTokens')) outputTokens
     FROM token_turns WHERE session_id=? AND started_at>=? AND json_type(payload_json,'$.usage')='object' GROUP BY role`, sessionId, since)
     .map(row => ({role:String(row.role),inputTokens:Number(row.inputTokens??0),cacheCreationTokens:Number(row.cacheCreationTokens??0),cacheReadTokens:Number(row.cacheReadTokens??0),outputTokens:Number(row.outputTokens??0)}));
-  return { sessionId, turns, usageByRole, totals: {agentTokens:agentTokens===null?null:Number(agentTokens),workerTokens:workerTokens===null?null:Number(workerTokens),totalTokens}, distribution,
+  return { sessionId, turns, usageByRole, contextWindow: latestAgentContextWindow(store, sessionId), totals: {agentTokens:agentTokens===null?null:Number(agentTokens),workerTokens:workerTokens===null?null:Number(workerTokens),totalTokens}, distribution,
     pagination: page ? {...page,total:Number(store.get('SELECT COUNT(*) n FROM token_turns WHERE session_id=? AND started_at>=?',sessionId,since)!.n)} : undefined,
     coverage: 'recorded-turns-only' as const };
 }

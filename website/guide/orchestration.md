@@ -86,7 +86,7 @@ Task state notifications are coalesced before inference. Repeated delivery of th
 
 Open the admin dashboard and select **View token report** on a managed Agent session. The report opens in a new tab and separates Agent input handling, Agent progress/result reporting, and Worker execution. Session rows show Agent usage alongside the combined Agent/Worker total; task rows show the latest attempt’s usage and tools, matching the displayed worker/session identity. Earlier retries remain in the full report and combined session totals. Loaded tools and tools actually called are shown separately.
 
-Token volume includes fresh input, cache creation, cache reads and output. Thinking is already included in output and is not added twice. Cache creation duration is shown when the CLI reports it. These percentages describe token volume, **not billing cost**: cached reads and fresh input may have different prices.
+Token volume includes input, cache creation, cache reads and output. Thinking is already included in output and is not added twice. Cache creation duration is shown when the CLI reports it. These percentages describe token volume, **not billing cost**: cached reads and input may have different prices.
 
 Each recorded turn includes the available request-level usage and its input/task/result context. Repeated content blocks and stream usage are deduplicated by provider message ID. A CLI turn aggregate is reconciled with request usage, not added as another request. Some providers expose only aggregate usage, so a turn total can be available without a complete request breakdown. Missing usage or tool inventory is **Unavailable**, not an inferred zero.
 

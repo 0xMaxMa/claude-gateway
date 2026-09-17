@@ -25,7 +25,7 @@ export function channelBadge(value: string): string {
 }
 export function taskStatusBadge(value: string): string {
  const state=String(value||'unknown');
- const colors:Record<string,string>={running:'#1879bf',working:'#267d97',thinking:'#7762bc',completed:'#24834a',succeeded:'#24834a',success:'#24834a',failed:'#c73946',queued:'#a16c11',starting:'#4d63c9',recovering:'#188b80',ended:'#607244',waiting_input:'#ba681c',needs_reconciliation:'#b345a4',cancel_requested:'#8c603c',interrupting:'#9e4d76',interrupted:'#7c6352',cancelled:'#657080',stopped:'#65605a',idle:'#647574',unknown:'#737373'};
+ const colors:Record<string,string>={running:'#e07a1e',working:'#e07a1e',thinking:'#d6459b',completed:'#24834a',succeeded:'#24834a',success:'#24834a',failed:'#c73946',queued:'#a16c11',starting:'#4d63c9',recovering:'#188b80',ended:'#607244',waiting_input:'#ba681c',needs_reconciliation:'#b345a4',cancel_requested:'#8c603c',interrupting:'#9e4d76',interrupted:'#7c6352',cancelled:'#657080',stopped:'#65605a',idle:'#647574',unknown:'#737373'};
  const color=colors[state]||'#737373';
  return '<span class="badge status-badge" style="--status-color:'+color+'">'+dashboardEscape(state.replace(/_/g,' ').replace(/^./,c=>c.toUpperCase()))+'</span>';
 }
