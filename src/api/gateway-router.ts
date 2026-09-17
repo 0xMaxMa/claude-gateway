@@ -925,8 +925,17 @@ export class GatewayRouter {
     // Reports expose cross-agent usage/tool inventories: the same admin gate as status.
     for (const reportPath of ['/dashboard/token-report', '/token-report']) {
       this.app.get(reportPath, async (req: Request, res: Response) => {
-        if (!this.requireDashOrApiKey(req, res)) return;
         res.setHeader('Cache-Control', 'no-store');
+        // The HTML page requires an explicit dashboard login, just like /dashboard.
+        // Reverse proxies may inject an admin API key: that must not log a browser in.
+        // The JSON /token-report endpoint retains API-key access for API clients.
+        if (reportPath === '/dashboard/token-report' && this.apiKeys.length > 0 && !this.hasValidDashSession(req)) {
+          // Relative redirect preserves deployment prefixes (e.g. /gateway) without
+          // trusting forwarded headers. Also handle Express's optional trailing slash.
+          res.redirect(303, req.path.endsWith('/') ? '../' : './');
+          return;
+        }
+        if (!this.requireDashOrApiKey(req, res)) return;
         const { agentId, sessionId } = req.query;
         const offset = Number(req.query.offset ?? 0);
         if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1000000) {res.status(400).json({error:'Invalid offset'});return;}

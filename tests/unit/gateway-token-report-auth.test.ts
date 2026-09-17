@@ -16,23 +16,26 @@ for (const path of ['/token-report', '/dashboard/token-report']) {
       const { app, getTokenReport } = setup();
       for (const key of ['', 'scoped-secret']) {
         const response = await supertest(app).get(path).query({ agentId: 'agent', sessionId: 'session' }).set('X-Api-Key', key);
-        expect(response.status).toBe(401);
+        expect(response.status).toBe(path === '/token-report' ? 401 : 303);
       }
       expect(getTokenReport).not.toHaveBeenCalled();
     });
-    test('admin and dashboard cookie may read report; no caching', async () => {
+    test('HTML needs dashboard login; JSON also accepts admin API keys; no caching', async () => {
       const { app, getTokenReport } = setup();
       const response = await supertest(app).get(path).query({ agentId: 'agent', sessionId: 'session' }).set('X-Api-Key', 'admin-secret');
-      expect(response.status).toBe(200); expect(response.headers['cache-control']).toBe('no-store');
-      expect(getTokenReport).toHaveBeenCalledWith('session');
+      expect(response.status).toBe(path === '/token-report' ? 200 : 303); expect(response.headers['cache-control']).toBe('no-store');
+      if (path === '/token-report') expect(getTokenReport).toHaveBeenCalledWith('session');
+      else expect(getTokenReport).not.toHaveBeenCalled();
       const login = await supertest(app).post('/dashboard/login').send({ key: 'admin-secret' });
       const cookie = (login.headers['set-cookie'] as unknown as string[])[0].split(';')[0];
       expect((await supertest(app).get(path).query({ agentId: 'agent', sessionId: 'session' }).set('Cookie', cookie)).status).toBe(200);
     });
     test('unknown agent and malformed query never invoke a runner', async () => {
       const { app, getTokenReport } = setup();
-      expect((await supertest(app).get(path).query({ agentId: '../agent', sessionId: 'session' }).set('X-Api-Key', 'admin-secret')).status).toBe(404);
-      expect((await supertest(app).get(path).query({ agentId: 'agent', sessionId: ['one', 'two'] }).set('X-Api-Key', 'admin-secret')).status).toBe(400);
+      const login = await supertest(app).post('/dashboard/login').send({key:'admin-secret'});
+      const cookie = (login.headers['set-cookie'] as unknown as string[])[0].split(';')[0];
+      expect((await supertest(app).get(path).set('Cookie',cookie).query({ agentId: '../agent', sessionId: 'session' }).set('X-Api-Key', 'admin-secret')).status).toBe(404);
+      expect((await supertest(app).get(path).set('Cookie',cookie).query({ agentId: 'agent', sessionId: ['one', 'two'] }).set('X-Api-Key', 'admin-secret')).status).toBe(400);
       expect(getTokenReport).not.toHaveBeenCalled();
     });
     test('keyless public bind fails closed', async () => {
@@ -52,4 +55,24 @@ test.each(['/dashboard/session','/dashboard/task','/dashboard/events'])('%s reje
 test.each(['/dashboard/session','/dashboard/task','/dashboard/events','/status'])('%s validates pagination',async path=>{
  const {app}=setup();
  for(const offset of ['NaN','-1','1.5','1000001']) expect((await supertest(app).get(path).query({agentId:'agent',sessionId:'session',taskId:'task',offset}).set('X-Api-Key','admin-secret')).status).toBe(400);
+});
+
+
+test.each(['/dashboard/token-report','/dashboard/token-report/'])('proxy-injected keys cannot bypass dashboard login at %s', async path => {
+  const {app,getTokenReport} = setup();
+  for (const cookie of ['', 'dash_session=forged']) {
+    const res = await supertest(app).get(path).query({agentId:'agent',sessionId:'session'}).set('X-Api-Key','admin-secret').set('Authorization','Bearer admin-secret').set('Cookie',cookie);
+    expect(res.status).toBe(303);
+    expect(new URL(res.headers.location, 'https://example.test/gateway'+path).pathname).toBe('/gateway/dashboard/');
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.text).not.toContain('Token distribution');
+  }
+  expect(getTokenReport).not.toHaveBeenCalled();
+  const login = await supertest(app).post('/dashboard/login').send({key:'admin-secret'});
+  const cookie = (login.headers['set-cookie'] as unknown as string[])[0].split(';')[0];
+  await supertest(app).get(path).query({agentId:'agent',sessionId:'session'}).set('Cookie',cookie).expect(200);
+  await supertest(app).post('/dashboard/logout').set('Cookie',cookie).expect(200);
+  getTokenReport.mockClear();
+  await supertest(app).get(path).query({agentId:'agent',sessionId:'session'}).set('Cookie',cookie).set('X-Api-Key','admin-secret').expect(303);
+  expect(getTokenReport).not.toHaveBeenCalled();
 });
