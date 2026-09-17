@@ -625,6 +625,7 @@ export class AgentOrchestrationRuntime {
       }
       let intakeChoice: IntakeChoice | undefined, acknowledgement = '', acknowledgementId = '', acknowledgementReady = false;
       let intakeDeferred = false, taskMutationAttempted = false;
+      const attemptedTaskActions = new Set<string>();
       let acknowledgementInFlight: Promise<unknown> | undefined;
       const newerInputPending = () => !!this.store.get("SELECT id FROM conversation_inputs WHERE conversation_id=? AND principal_id=? AND binding_id=(SELECT binding_id FROM conversation_inputs WHERE id=?) AND status='accepted' AND input_seq>(SELECT input_seq FROM conversation_inputs WHERE id=?)", receipt.conversationId, input.scope.principalId, receipt.inputId, receipt.inputId);
       const intakeContext = { ...capabilities, ...receipt, ...decision, model: options.model ?? this.agent.claude.model, principalId: input.scope.principalId, actionId: `intake:${receipt.inputId}` };
@@ -644,17 +645,22 @@ export class AgentOrchestrationRuntime {
         if (!alreadyPublished) options.onText?.(acknowledgement);
         if (!alreadyPublished) this.publishText(sessionId, acknowledgementId, acknowledgement, true);
         if (!alreadyPublished && speechEnabled && !channelSpeech) {
-          const listener = this.voiceListeners.get(sessionId);
-          if (listener?.principalId === input.scope.principalId) listener.receive({responseId:acknowledgementId,text:acknowledgement,spoken:acknowledgement,requestId:input.requestId,speechOnly:true});
-          else {
-            const stream=this.inputStreams.get(receipt.inputId);
-            stream?.push({responseId:acknowledgementId,text:acknowledgement});stream?.close();
+          try {
+            const listener = this.voiceListeners.get(sessionId);
+            if (listener?.principalId === input.scope.principalId) listener.receive({responseId:acknowledgementId,text:acknowledgement,spoken:acknowledgement,requestId:input.requestId,speechOnly:true});
+            else {
+              const stream=this.inputStreams.get(receipt.inputId);
+              stream?.push({responseId:acknowledgementId,text:acknowledgement});stream?.close();
+            }
+          } catch {
+            this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.speech_failed', { responseId: acknowledgementId, code: 'VOICE_PLAYBACK_UNAVAILABLE' }));
           }
         }
         // Audio is best-effort and stays on the normal delivery/playback path.
         // Do not await a whole outbox tick: it may be busy synthesizing speech.
         let deliveryTickFailed = false;
-        void this.delivery.tick().catch(() => { deliveryTickFailed = true; });
+        void this.delivery.tick().catch(() => {});
+        void this.delivery.tickText().catch(() => { deliveryTickFailed = true; });
         const until = Date.now() + 10000;
         while (!active.stopping && !this.closing) {
           const text = this.store.all("SELECT state FROM deliveries WHERE response_id=? AND modality='text'", acknowledgementId);
@@ -687,7 +693,8 @@ export class AgentOrchestrationRuntime {
         return readCapabilityPage(await this.capabilityCatalog.snapshot(), this.host.skills?.(), args);
       },
         onIntake: semantic ? acknowledge : undefined,
-        beforeMutation: semantic ? async (tool, args) => {
+        beforeMutation: semantic ? async (tool, args, actionId) => {
+          if (actionId) attemptedTaskActions.add(actionId);
           if (tool === 'task_spawn' || tool === 'task_update') taskMutationAttempted = true;
           // Resolving a pending question is not admission of a new task. A slow or failed
           // acknowledgement must not block saving it; authorization stays in TaskService.
@@ -793,13 +800,16 @@ export class AgentOrchestrationRuntime {
       const committedTaskCommand = semantic && taskMutationAttempted && this.store.get(`SELECT tc.action_id FROM task_commands tc JOIN conversation_decisions d ON d.id=tc.decision_id
         WHERE tc.conversation_id=? AND tc.command_type IN ('spawn','update','answer')
         AND EXISTS(SELECT 1 FROM json_each(d.input_ids_json) WHERE value=?) LIMIT 1`,receipt.conversationId,receipt.inputId);
-      const uncommittedDispatch = semantic && taskMutationAttempted && !committedTaskCommand && !intakeDeferred && !newerInputPending() && !response.interrupted;
+      const failedTaskActions = [...attemptedTaskActions].some(actionId => !this.store.get('SELECT action_id FROM task_commands WHERE conversation_id=? AND action_id=?', receipt.conversationId, actionId));
+      const uncommittedDispatch = semantic && taskMutationAttempted && (!committedTaskCommand || failedTaskActions) && !intakeDeferred && !newerInputPending() && !response.interrupted;
       if (uncommittedDispatch) {
         // Never turn a rejected tool call into a false promise of background work.
-        surfaces.display = 'The requested task was not started or updated. Please try again.';
+        surfaces.display = committedTaskCommand
+          ? 'Some requested tasks were not started or updated. Please check /tasks for the tasks that started.'
+          : 'The requested task was not started or updated. Please try again.';
         surfaces.spoken = '';
       }
-      const intakeSilent = semantic && (intakeChoice?.mode==='wait' || intakeDeferred || (acknowledgementId && this.store.get("SELECT action_id FROM task_commands WHERE decision_id=? AND command_type IN ('spawn','update','answer') LIMIT 1",decision.decisionId)));
+      const intakeSilent = semantic && !uncommittedDispatch && (intakeChoice?.mode==='wait' || intakeDeferred || (acknowledgementId && this.store.get("SELECT action_id FROM task_commands WHERE decision_id=? AND command_type IN ('spawn','update','answer') LIMIT 1",decision.decisionId)));
       if (intakeSilent) {
         // A receipt/preparation turn has not reported older task results. Keep
         // their notifications (and attachments) available to the next report.

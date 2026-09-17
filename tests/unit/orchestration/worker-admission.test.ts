@@ -20,7 +20,8 @@ import { TaskBridge } from '../../../src/orchestration/bridge';
     const attempt = tasks.claim(prior.taskId)!;
     tasks.finish(attempt.attemptId,attempt.generation,{type:'failed',failure:{code:'GATEWAY_SHUTDOWN',message:'Interrupted',observedAt:Date.now()}});
     await bridge.start();
-    bridge.issue({role:'agent',context}, join(root,'ticket'), root);
+    const beforeMutation = jest.fn(async () => {});
+    bridge.issue({role:'agent',context,beforeMutation}, join(root,'ticket'), root);
     const ticket = JSON.parse(readFileSync(join(root,'ticket/ticket.json'),'utf8'));
     const call = async (profile: string) => {
       const response = await fetch(ticket.url, {method:'POST',headers:{Authorization:`Bearer ${ticket.token}`,'Content-Type':'application/json'},body:JSON.stringify({tool:'task_spawn',action_id:profile,args:{title:'Check PR',instructions:'Check current state before any merge',target_profile:profile,continue_task_id:prior.taskId}})});
@@ -33,6 +34,7 @@ import { TaskBridge } from '../../../src/orchestration/bridge';
     expect(store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(1);
     const accepted = await call('media-worker');
     expect(accepted.status).toBe(200);
+    expect(beforeMutation).toHaveBeenCalledWith('task_spawn', expect.objectContaining({target_profile:'media-worker'}), `${input.inputId}:media-worker`);
     expect(accepted.body).toMatchObject({state:'queued',continueTaskId:prior.taskId,workstreamId:prior.workstreamId,resourceProfile:{mode:'isolated-worktree',projectRoot:root}});
     const again = await call('media-worker');
     expect(again.body.taskId).toBe(accepted.body.taskId);

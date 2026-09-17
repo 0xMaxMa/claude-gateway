@@ -104,6 +104,7 @@ export function speechFailureNotice(code: string): string {
 
 export class DeliveryOutbox {
   private active?: Promise<void>;
+  private activeText?: Promise<void>;
   constructor(private readonly store: OrchestrationStore, private readonly send: ChannelSender) {}
   /** Called inside the decision commit transaction. Each chunk has its own receipt. */
   enqueue(responseId: string, bindingId: string, text: string, controls?: DeliveryControl[]): void {
@@ -142,12 +143,18 @@ export class DeliveryOutbox {
     this.store.run('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?,?,?)', id, responseId, null, bindingId, 'speech', 'pending', null, JSON.stringify(speech), null, Date.now());
     this.store.enqueue('delivery', key, { deliveryId: id });
   }
-  tick(): Promise<void> {
-    if (this.active) return this.active;
-    this.active = this.run().finally(() => { this.active = undefined; });
-    return this.active;
+  /** Text has its own serialized lane so slow speech cannot block acknowledgements. */
+  tickText(): Promise<void> {
+    if (this.activeText) return this.activeText;
+    this.activeText = this.run(true).finally(() => { this.activeText = undefined; });
+    return this.activeText;
   }
-  private async run(): Promise<void> {
+  tick(): Promise<void> {
+    const text = this.tickText();
+    if (!this.active) this.active = text.then(() => this.run(false)).finally(() => { this.active = undefined; });
+    return Promise.all([text, this.active]).then(() => {});
+  }
+  private async run(textOnly: boolean): Promise<void> {
     // Page past blocked responses without retrying ambiguous provider receipts.
     // A fixed high-water mark also bounds this tick when new work arrives mid-send.
     const ceiling = Number(this.store.get('SELECT COALESCE(MAX(rowid),0) n FROM outbox')!.n);
@@ -160,6 +167,7 @@ export class DeliveryOutbox {
         const payload = JSON.parse(String(row.payload_json));
         const id = payload.deliveryId as string;
         const delivery = this.store.get('SELECT * FROM deliveries WHERE id=?', id)!;
+        if ((delivery.modality === 'text') !== textOnly) continue;
         const binding = this.store.get('SELECT * FROM conversation_bindings WHERE id=?', delivery.binding_id)!;
         if (delivery.modality === 'speech') {
           const textRows = this.store.all("SELECT state FROM deliveries WHERE response_id=? AND modality='text'", delivery.response_id);

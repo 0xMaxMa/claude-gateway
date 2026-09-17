@@ -16,7 +16,7 @@ import type { IntakeChoice } from './conversation-intake';
 import { resolveNamedSkill } from './skills';
 import type { SkillRegistry } from '../skills';
 
-type Scope = { role: 'agent'; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; beforeMutation?: (tool: string, args: Record<string, unknown>) => Promise<void> } |
+type Scope = { role: 'agent'; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; beforeMutation?: (tool: string, args: Record<string, unknown>, actionId: string) => Promise<void> } |
   { role: 'worker'; attemptId: string; generation: number };
 
 /** Private MCP bridge: host loopback or an app-local Unix socket. No public task API. */
@@ -52,7 +52,7 @@ export class TaskBridge {
         let result: unknown;
         if (scope.role === 'agent') {
           const context: CommandContext = { ...scope.context, actionId: `${scope.context.inputId}:${command.action_id}` };
-          if (['task_spawn','task_update','task_answer'].includes(command.tool)) await scope.beforeMutation?.(command.tool, a);
+          if (['task_spawn','task_update','task_answer'].includes(command.tool)) await scope.beforeMutation?.(command.tool, a, context.actionId);
           switch (command.tool) {
             case 'capabilities_list': {
               this.tasks.store.assertMember(context.conversationId, context.principalId);
@@ -72,7 +72,7 @@ export class TaskBridge {
               await this.tasks.validateSpawnProfile(context, a.target_profile);
               // Profile resolution may yield while another input arrives. Recheck
               // readiness immediately before the synchronous task transaction.
-              await scope.beforeMutation?.(command.tool, a);
+              await scope.beforeMutation?.(command.tool, a, context.actionId);
               const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, targetProfile: a.target_profile, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
               scope.onTaskQueued?.(spoken);
               const { skill: _workerOnly, ...receipt } = task;

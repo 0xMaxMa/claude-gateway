@@ -208,3 +208,47 @@ test('undelivered text acknowledgement still blocks new work',async()=>{
   expect(result).toContain('not started or updated');
  }finally{await f.close();}
 });
+
+test.each(['live playback failure','earlier pending speech','partial dispatch'] as const)('%s does not silently lose requested work',async scenario=>{
+ const f=await fixture(scenario==='earlier pending speech'?'telegram':'api');
+ let release=()=>{};let pending:Promise<void>|undefined;
+ try{
+  (f.runtime as any).config.voice.enabled=true;
+  (f.runtime as any).config.voice.notes.replyWithVoice=true;
+  if(scenario==='live playback failure') f.runtime.subscribeVoiceResults(f.scope.agentSessionId,'owner',()=>{throw new Error('Playback unavailable');});
+  const delivery=(f.runtime as any).delivery;
+  if(scenario==='earlier pending speech'){
+   let entered!:()=>void;const started=new Promise<void>(resolve=>{entered=resolve;});
+   const blocked=new Promise<void>(resolve=>{release=resolve;});
+   delivery.send=jest.fn(async(_binding:unknown,_text:unknown,_id:unknown,_file:unknown,speech:unknown)=>{if(speech){entered();await blocked;}return {state:'delivered'};});
+   const notice=f.runtime.decisions.notice(f.task.conversationId,'Older response',true);
+   const binding=f.runtime.store.get('SELECT id FROM conversation_bindings WHERE conversation_id=?',f.task.conversationId)!.id;
+   f.runtime.store.transaction(()=>delivery.enqueueSpeech(notice,binding,{provider:'elevenlabs',model:'fixture',voiceId:'fixture',text:'Older speech'}));
+   pending=delivery.tick();await started;
+  }else delivery.send=jest.fn(async()=>({state:'delivered'}));
+  let scope:any;const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((value,...args)=>{scope=value;return issue(value,...args);});
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+   const emitter=this;
+   void(async()=>{
+    await scope.onIntake({mode:'ready',acknowledgement:'I will run the checks.'});
+    await scope.beforeMutation('task_spawn',{},'successful-check');
+    f.runtime.tasks.spawn({...scope.context,actionId:'successful-check'},{title:'Check',instructions:'Inspect read-only',targetProfile:'default-worker'});
+    if(scenario==='partial dispatch'){
+     await scope.beforeMutation('task_spawn',{},'failed-check');
+     try{f.runtime.tasks.spawn({...scope.context,actionId:'failed-check'},{title:'',instructions:'',targetProfile:'default-worker'});}catch{}
+    }
+    emitter.emit('output',JSON.stringify({type:'result',result:'I am working on all checks.'}));
+   })().catch(error=>emitter.emit('error',error));
+  }}) as unknown as SessionProcess);
+  const result=await f.runtime.send({scope:f.scope,text:'Run the checks',modality:'live_voice'},{execute:true,writeMemory:false},{timeoutMs:5000});
+  expect(f.runtime.store.get("SELECT action_id FROM task_commands WHERE action_id='successful-check'")).toBeDefined();
+  if(scenario==='earlier pending speech'){
+   await Promise.all([delivery.tickText(),delivery.tickText(),delivery.tickText()]);
+   const ids=delivery.send.mock.calls.map((call:unknown[])=>call[2]);
+   expect(new Set(ids).size).toBe(ids.length);
+  }
+  if(scenario==='partial dispatch')expect(result).toContain('Some requested tasks were not started or updated');
+  if(scenario==='live playback failure')expect(f.runtime.store.get("SELECT COUNT(*) n FROM conversation_events WHERE type='response.speech_failed'")!.n).toBeGreaterThan(0);
+ }finally{release();await pending;await f.close();}
+});
