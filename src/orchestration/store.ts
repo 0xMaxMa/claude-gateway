@@ -172,7 +172,7 @@ export class OrchestrationStore {
     return row;
   }
   /** A lost receiver ACK must not re-fetch an expired file or re-admit work. */
-  channelReceipt(scope: ConversationScope, ingressKey: string | undefined, fingerprint: string): InputReceipt | undefined {
+  channelReceipt(scope: ConversationScope, ingressKey: string | undefined, fingerprint: string, platformMessageIds?: string[]): (InputReceipt & {envelopeConflict:boolean}) | undefined {
     if (!ingressKey) return undefined;
     if (scope.agentId !== this.agentId) throw new OrchestrationError('ACCESS_DENIED');
     const key = payloadHash([this.agentId, scope.source, scope.accountId, scope.chatId, scope.threadKey, scope.principalId, boundedText(ingressKey, 2048)]);
@@ -180,10 +180,14 @@ export class OrchestrationStore {
       JOIN conversation_inputs i ON i.id=r.input_id WHERE r.ingress_key=?`, key);
     if (!prior) return undefined;
     this.assertMember(String(prior.conversation_id), scope.principalId);
-    const original = JSON.parse(String(prior.ingress_json)).metadata?.channelIngressFingerprint;
-    // Older receipts predate envelope fingerprints; their scoped provider ID is authoritative.
-    if (original && original !== fingerprint) throw new OrchestrationError('IDEMPOTENCY_CONFLICT');
-    return {inputId:String(prior.input_id),conversationId:String(prior.conversation_id),bindingId:String(prior.binding_id)};
+    const metadata = JSON.parse(String(prior.ingress_json)).metadata;
+    const original = metadata?.channelIngressFingerprint;
+    const originalIds = Array.isArray(metadata?.platformMessageIds) ? metadata.platformMessageIds : [ingressKey];
+    // Legacy albums could expand after admission while their ACK was in flight.
+    // Preserve an expanded envelope separately; its first ID cannot ACK new members.
+    const envelopeConflict = original ? original !== fingerprint
+      : Array.isArray(platformMessageIds) && platformMessageIds.some(id=>!originalIds.includes(id));
+    return {inputId:String(prior.input_id),conversationId:String(prior.conversation_id),bindingId:String(prior.binding_id),envelopeConflict};
   }
   /** Complete a deterministic ingress receipt without scheduling inference. */
   completeInputReceipt(receipt: InputReceipt): void {

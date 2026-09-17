@@ -760,22 +760,32 @@ export class AgentRunner extends EventEmitter {
           const channelOrchestration = this.orchestration?.ownsChannel(channelSource, chatId) || (this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes(channelSource));
           // Resolve a receiver receipt before fetching media again: an ACK may have
           // been lost after the original file was admitted or staging was removed.
-          let ingress: {runtime: AgentOrchestrationRuntime; scope: AcceptInput['scope']; fingerprint:string} | undefined;
+          let ingress: {runtime: AgentOrchestrationRuntime; scope: AcceptInput['scope']; fingerprint:string; platformMessageIds?:string[]} | undefined;
           if (channelOrchestration || meta.ingress_recovery_batch) {
             const sessionId = await this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, channelSource);
             const runtime = await this.getOrchestration();
             const senderId = meta.user_id ?? meta.user ?? chatId;
             const scope: AcceptInput['scope'] = {agentId:this.agentConfig.id,agentSessionId:sessionId,source:channelSource,
               accountId:this.agentConfig.id,chatId,threadKey:channelSource==='whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : meta.thread_ts ?? meta.message_thread_id ?? '',principalId:`${channelSource}:${senderId}`};
-            const {ingress_recovery_batch: recoveryBatch,...originalMeta} = meta;
+            const {ingress_recovery_batch,...originalMeta} = meta;
+            let recoveryBatch = ingress_recovery_batch, recoveryKey = meta.message_id;
             const fingerprint = payloadHash({content,meta:originalMeta});
-            ingress = {runtime,scope,fingerprint};
-            if (runtime.store.channelReceipt(scope,meta.message_id,fingerprint)) {
+            const platformMessageIds = meta.message_ids_json ? JSON.parse(meta.message_ids_json) : undefined;
+            ingress = {runtime,scope,fingerprint,platformMessageIds};
+            const prior = runtime.store.channelReceipt(scope,meta.message_id,fingerprint,platformMessageIds);
+            if (prior && !prior.envelopeConflict) {
               res.writeHead(200);res.end('ok');return;
+            }
+            if (prior?.envelopeConflict) {
+              // Keep changed/legacy album envelopes without repeating accepted work.
+              recoveryKey = `channel-recovery:${fingerprint}`;
+              recoveryBatch = `conflict:${payloadHash(meta.message_id)}`;
+              const recovered = runtime.store.channelReceipt(scope,recoveryKey,fingerprint);
+              if (recovered && !recovered.envelopeConflict) {res.writeHead(200);res.end('recovered');return;}
             }
             if (recoveryBatch) {
               runtime.recoverChannelInput({scope,text:`[Recovered queued message; not executed. A fresh request is required.]\n${content}`,
-                ingressKey:meta.message_id,trustedChannelMember:true,
+                ingressKey:recoveryKey,trustedChannelMember:true,
                 metadata:{channelIngressFingerprint:fingerprint,recoveryBatch,recoveredChannelInput:{content,meta:originalMeta},
                   platformMessageId:meta.message_id,senderId,senderName:meta.sender_name}});
               res.writeHead(200);res.end('recovered');return;
@@ -826,12 +836,13 @@ export class AgentRunner extends EventEmitter {
           if (channelOrchestration && !isBuiltinCommand(content.trim(), channelSource)) {
             const orchestration = ingress!.runtime;
             const cleanup: string[] = [];
-            const {media,quoted,details,unavailable} = await channelInputMedia(this.agentConfig,this.agentsBaseDir,channelSource,chatId,meta,path=>cleanup.push(path));
+            const {media,quoted,details,unavailable,primaryDirectMedia} = await channelInputMedia(this.agentConfig,this.agentsBaseDir,channelSource,chatId,meta,path=>cleanup.push(path));
             const senderId = meta.user_id ?? meta.user ?? chatId;
+            const voiceNote = Boolean(primaryDirectMedia && ['voice', 'audio'].includes(meta.media_type ?? meta.attachment_kind));
             const accepted = orchestration.submitInput({ scope: ingress!.scope,
-              text: content || '[Attachment inspection requested]', attachmentIds: media, trustedChannelMember: true,
-              modality: media.length && ['voice', 'audio'].includes(meta.media_type ?? meta.attachment_kind) ? 'voice_note' : 'text',
-              ingressKey: meta.message_id, metadata: { channelIngressFingerprint:ingress!.fingerprint, unavailableAttachments:unavailable, senderId, senderName: meta.sender_name, platformMessageId: meta.message_id, platformMessageIds: meta.message_ids_json ? JSON.parse(meta.message_ids_json) : undefined, mediaGroupId: meta.media_group_id,
+              text: content || '[Attachment inspection requested]', attachmentIds: voiceNote ? [primaryDirectMedia!,...media.filter(ref=>ref!==primaryDirectMedia)] : media, trustedChannelMember: true,
+              modality: voiceNote ? 'voice_note' : 'text',
+              ingressKey: meta.message_id, metadata: { channelIngressFingerprint:ingress!.fingerprint, unavailableAttachments:unavailable, senderId, senderName: meta.sender_name, platformMessageId: meta.message_id, platformMessageIds: ingress!.platformMessageIds, mediaGroupId: meta.media_group_id,
                 attachmentName: meta.attachment_name, mediaType: meta.media_type ?? meta.attachment_kind, repliedText: meta.replied_text, repliedMessageId: meta.replied_message_id, repliedSender: meta.replied_user, repliedAttachmentIds: quoted, attachmentDetails: details, attachmentError: meta.attachment_error } },
               { execute: this.agentConfig.allow_tools !== false, writeMemory: this.agentConfig.allow_tools !== false });
             for (const path of cleanup) AgentRunner.discardEphemeralStaging(path);

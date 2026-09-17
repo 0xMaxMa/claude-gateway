@@ -17,6 +17,8 @@ export async function channelInputMedia(agent: AgentConfig, root: string, source
   }
   if(meta.replied_image_path)items.push({path:meta.replied_image_path,quoted:true});
   else if(meta.replied_attachment_file_id)items.push({ref:meta.replied_attachment_file_id,name:meta.replied_attachment_name,size:meta.replied_attachment_size===undefined?undefined:Number(meta.replied_attachment_size),quoted:true});
+  const primaryDirect = items.find(item=>!item.quoted);
+  let primaryDirectMedia: string | undefined;
   const media: string[]=[],quoted: string[]=[],details: Array<{ref:string;name?:string;quoted:boolean}>=[];
   const unavailable: Array<{code:string;name?:string;quoted:boolean}>=[];
   const discardPaths=new Set<string>();
@@ -39,6 +41,7 @@ export async function channelInputMedia(agent: AgentConfig, root: string, source
       seen.set(key,ref); media.push(ref);
       if(item.path&&meta.media_ephemeral==='1')discardPaths.add(item.path);
     }
+    if(item===primaryDirect)primaryDirectMedia=ref;
     if(item.quoted)quoted.push(ref);
     details.push({ref,name:item.name,quoted:Boolean(item.quoted)});
   }
@@ -47,5 +50,5 @@ export async function channelInputMedia(agent: AgentConfig, root: string, source
     meta.attachment_error=[meta.attachment_error,diagnostic].filter(Boolean).join(' ');
   }
   for(const path of discardPaths)discard(path);
-  return {media,quoted:[...new Set(quoted)],details,unavailable};
+  return {media,quoted:[...new Set(quoted)],details,unavailable,primaryDirectMedia};
 }

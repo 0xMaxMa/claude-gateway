@@ -150,3 +150,53 @@ test('late album member and lost ACK survive receiver restart without conflictin
   expect(f.provider.mock.calls.filter(([url])=>String(url).endsWith('/getFile'))).toHaveLength(2);
  }finally{spool?.close();await f.close();}
 });
+
+
+test('unavailable direct voice never promotes a readable quoted recording into the new request',async()=>{
+ const f=await fixture();try{
+  f.setStatus(200);
+  expect((await f.post('Please inspect my new recording','voice-with-quote',{
+   attachment_kind:'voice',attachment_file_id:'unavailable-new-voice',attachment_size:String(30*1024*1024),
+   replied_attachment_file_id:'old-recording'})).status).toBe(200);
+  const input=f.runtime.store.get('SELECT * FROM conversation_inputs')!;
+  expect(input.modality).toBe('text');
+  expect(input.text).toBe('Please inspect my new recording');
+  expect(JSON.parse(String(input.ingress_json)).metadata.repliedAttachmentIds).toHaveLength(1);
+  expect(f.runtime.store.all('SELECT * FROM voice_note_transcripts')).toHaveLength(0);
+ }finally{await f.close();}
+});
+
+test('expanded legacy album is archived without losing late members or executing its accepted members again',async()=>{
+ const f=await fixture();try{
+  const sessionId=await f.sessions.getActiveSessionId('a','chat','telegram');
+  f.runtime.store.compose(()=>{
+   const receipt=f.runtime.store.acceptInput({scope:{agentId:'a',agentSessionId:sessionId,source:'telegram',accountId:'a',chatId:'chat',threadKey:'',principalId:'telegram:human'},
+    text:'Original album',ingressKey:'30',trustedChannelMember:true,metadata:{platformMessageId:'30',platformMessageIds:['30','31'],mediaGroupId:'legacy-album'}});
+   f.runtime.store.run("UPDATE conversation_inputs SET status='handled' WHERE id=?",receipt.inputId);
+   f.runtime.store.run("UPDATE outbox SET state='completed' WHERE kind='input' AND dedup_key=?",`input:${receipt.inputId}`);
+  });
+  const meta={media_group_id:'legacy-album',message_ids_json:JSON.stringify(['30','31','32']),
+   attachments_json:JSON.stringify([{ref:'original-1'},{ref:'original-2'},{ref:'late-file'}]),ingress_recovery_batch:'upgrade-batch'};
+  expect((await f.post('Original album plus late caption','30',meta)).status).toBe(200);
+  await f.restart();
+  expect((await f.post('Original album plus late caption','30',{...meta,ingress_recovery_batch:'another-restart'})).status).toBe(200);
+  const inputs=f.runtime.store.all('SELECT * FROM conversation_inputs ORDER BY input_seq');expect(inputs).toHaveLength(2);
+  expect(JSON.parse(String(inputs[1].ingress_json))).toMatchObject({capabilities:{execute:false,writeMemory:false},metadata:{recoveredChannelInput:{content:'Original album plus late caption',meta:{attachments_json:meta.attachments_json}}}});
+  expect(inputs[1].status).toBe('handled');
+  expect(f.inference).not.toHaveBeenCalled();
+  expect(f.provider.mock.calls.filter(([url])=>String(url).endsWith('/getFile'))).toHaveLength(0);
+  expect(f.runtime.store.all("SELECT * FROM conversation_decisions WHERE kind='notice'")).toHaveLength(1);
+ }finally{await f.close();}
+});
+
+test('conflicting receiver envelope is archived once instead of poisoning retries or changing accepted work',async()=>{
+ const f=await fixture();try{
+  expect((await f.post('Original request','same-id')).status).toBe(200);
+  expect((await f.post('Changed queued envelope','same-id')).status).toBe(200);
+  expect((await f.post('Changed queued envelope','same-id',{ingress_recovery_batch:'restart-batch'})).status).toBe(200);
+  const inputs=f.runtime.store.all('SELECT * FROM conversation_inputs ORDER BY input_seq');expect(inputs).toHaveLength(2);
+  expect(inputs[0].text).toBe('Original request');expect(inputs[1].status).toBe('handled');
+  expect(JSON.parse(String(inputs[1].ingress_json)).metadata.recoveredChannelInput.content).toBe('Changed queued envelope');
+  expect(f.runtime.store.all("SELECT * FROM conversation_decisions WHERE kind='notice'")).toHaveLength(1);
+ }finally{await f.close();}
+});
