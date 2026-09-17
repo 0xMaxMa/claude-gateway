@@ -395,7 +395,14 @@ tr.session-row:hover td{background:var(--raised)}
 .theme-toggle{padding:8px 12px}
 #dash-menu{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;padding:8px;flex:none}
 #dash-menu .icon{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7}
+.sidebar-toggle{display:flex;align-items:center;justify-content:flex-start;gap:10px;width:100%;padding:10px 12px;background:transparent;color:var(--muted);border:1px solid var(--line);border-radius:8px;font-size:12px}
+.sidebar-toggle:hover{background:var(--raised);color:var(--text)}
+.sidebar-toggle .icon{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.7}
+.sidebar-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 @media(min-width:761px){
+[data-sidebar-collapsed=true] .sidebar-toggle{justify-content:center;padding:10px}
+[data-sidebar-collapsed=true] .sidebar-toggle span{display:none}
+[data-sidebar-collapsed=true] .sidebar-toggle .icon{transform:rotate(180deg)}
 [data-sidebar-collapsed=true] .layout{grid-template-columns:76px minmax(0,1fr)}
 [data-sidebar-collapsed=true] .sidebar{width:76px;padding:30px 10px 18px}
 [data-sidebar-collapsed=true] .sidebar .brand{padding:0 0 24px;justify-content:center}

@@ -38,6 +38,8 @@ test('isolated reader preserves historical sessions, exact attempt totals, owner
   expect(current.turns.map((t:any)=>t.id)).toEqual([attempt.attemptId]);expect(current.totals.totalTokens).toBe(30);expect(current.pagination.total).toBe(1);
   expect(report.turns[0].id).toBe(attempt.attemptId);
   const future=await reader.read('summary',file,{since:Date.now()+1000});expect(future.sessions).toHaveLength(0);expect(future.pagination.total).toBe(0);expect(future.counts.tasks).toEqual([]);
+  expect(future.recentWork).toEqual([expect.objectContaining({taskId:task.taskId,sessionId:'session'})]);
+  expect(two.recentWork).toEqual(one.recentWork);
   expect(await reader.read('report',file,{sessionId:'missing'})).toBeUndefined();
   expect(store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(1);
   // Existing ledgers remain readable before projection initialization, and a

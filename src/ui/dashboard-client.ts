@@ -14,15 +14,15 @@ window.addEventListener('pagehide',()=>{try{sessionStorage.setItem(dashboardStat
 document.addEventListener('DOMContentLoaded',()=>{
  document.getElementById('dash-search').value=dashboardSearch;
  document.querySelectorAll('#dash-scope [data-range]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.range===dashboardScope)));
- const tab=[...document.querySelectorAll('.tab')].find(t=>t.dataset.view===savedDashboardState.view);tab?.click();
+ const tab=[...document.querySelectorAll('.tab')].find(t=>t.dataset.view===savedDashboardState.view)||document.getElementById('tab-overview');tab.click();
 });
 const dashboardExpanded=new Map();
 let dashboardFocus=null;
 const dashboardMobile=window.matchMedia('(max-width:760px)');
 function updateSidebarToggle(){
  const expanded=dashboardMobile.matches?document.body.classList.contains('menuopen'):document.documentElement.dataset.sidebarCollapsed!=='true';
- const button=document.getElementById('dash-menu');button.setAttribute('aria-expanded',String(expanded));
- const label=expanded?'Collapse sidebar':'Expand sidebar';button.setAttribute('aria-label',label);button.title=label;
+ const label=expanded?'Collapse sidebar':'Expand sidebar';
+ document.querySelectorAll('#dash-menu,#sidebar-toggle').forEach(button=>{button.setAttribute('aria-expanded',String(expanded));button.setAttribute('aria-label',label);button.title=label;});
 }
 document.querySelectorAll('.sidebar .tab').forEach(tab=>{tab.title=tab.textContent.trim();tab.setAttribute('aria-label',tab.textContent.trim());});
 dashboardMobile.addEventListener('change',updateSidebarToggle);updateSidebarToggle();
@@ -63,7 +63,8 @@ function renderDashboard(data){
   document.getElementById('session-results').innerHTML=dashTable(['Agent / Channel','Session / Chat','Model','Status','Tokens','Tools','Inspect'],sessionRows);
   const taskRows=tasks.map(({a,s,t})=>'<tr'+dashOpenAttrs(a.id,s.sessionId,t.taskId)+' tabindex="0" aria-expanded="false" data-row-key="'+escHtml(a.id+':'+t.taskId)+'"><td><strong class="dash-task-title">'+dashText(t.title)+'</strong><small class="ts">'+agentBadge(a.id)+' · '+dashId(t.taskId)+'<br>'+channelBadge(s.source)+'</small></td><td>'+dashStatus(t.state)+'</td><td class="session-id">'+dashId(t.workerSessionId)+'<br><small class="ts">Attempt '+dashId(t.attemptId)+'</small></td><td>'+dashCount(t.tokenSummary?.totalTokens)+'<br><small class="ts">Latest attempt</small></td><td>'+dashCount(t.tokenSummary?.allAttemptsTokens)+'<br><small class="ts">All recorded attempts</small></td><td class="dash-tools">'+toolInventory(t.loadedTools,t.usedTools,t.contextTools)+'</td><td><span class="cell-clip" title="'+dashText(t.lastTool?.name)+'">'+dashText(t.lastTool?.name||'No recorded tool')+'</span>'+'<br><small class="ts">'+(t.lastTool?.at?dashText(new Date(t.lastTool.at).toLocaleString()):'')+'</small></td></tr>');
   document.getElementById('task-results').innerHTML=dashTable(['Task / Agent','Status','Worker session / Attempt','Latest tokens','Task tokens','Latest attempt tools','Latest activity'],taskRows);
-  document.getElementById('overview-tasks').innerHTML=dashTable(['Task','Agent','Status'],tasks.slice(0,6).map(({a,s,t})=>'<tr'+dashOpenAttrs(a.id,s.sessionId,t.taskId)+' tabindex="0" aria-expanded="false"><td>'+dashText(t.title)+'</td><td>'+agentBadge(a.id)+'</td><td>'+dashStatus(t.state)+'</td></tr>'));
+  const recentWork=agents.flatMap(a=>(a.orchestration?.recentWork||[]).map(t=>({a,s:{sessionId:t.sessionId},t}))).sort((x,y)=>Number(y.t.updatedAt)-Number(x.t.updatedAt)||x.t.taskId.localeCompare(y.t.taskId));
+  document.getElementById('overview-tasks').innerHTML=dashTable(['Task','Agent','Status'],recentWork.slice(0,6).map(({a,s,t})=>'<tr'+dashOpenAttrs(a.id,s.sessionId,t.taskId)+' tabindex="0" aria-expanded="false"><td>'+dashText(t.title)+'</td><td>'+agentBadge(a.id)+'</td><td>'+dashStatus(t.state)+'</td></tr>'));
   document.getElementById('usage-results').innerHTML=dashTable(['Agent / Session','Channel','Agent tokens','Worker tokens','Total tokens','Report'],rows.filter(({s})=>s.orchestration).map(({a,s})=>'<tr'+dashOpenAttrs(a.id,s.sessionId)+' tabindex="0" aria-expanded="false"><td>'+agentBadge(a.id)+'<br>'+dashId(s.sessionId)+'</td><td>'+channelBadge(s.source)+'</td><td>'+dashCount(s.tokenSummary?.agentTokens)+'</td><td>'+dashCount(s.tokenSummary?.workerTokens)+'</td><td>'+dashCount(s.tokenSummary?.totalTokens)+'</td><td><a class="btn-stream" target="_blank" rel="noopener" href="'+escHtml(dashReportUrl(a.id,s.sessionId))+'">View token report ↗</a></td></tr>'));
 
   const max=Math.max(0,...agents.map(a=>Number(a.orchestration?.pagination?.total||0)));
@@ -138,12 +139,12 @@ document.addEventListener('click',function(e){
   const next=e.target.closest('[data-dash-next]'),prev=e.target.closest('[data-dash-prev]');if(next||prev){dashClose();dashboardOffset=Math.max(0,dashboardOffset+(next?25:-25));refresh();connectDashboardStream();}
   const sessionPage=e.target.closest('[data-session-page]');if(sessionPage){const p=document.getElementById('dash-drawer');dashDetail(p.dataset.agent,p.dataset.session,null,Number(sessionPage.dataset.sessionPage));}
   const older=e.target.closest('[data-attempt-page]');if(older){const p=document.getElementById('dash-drawer');dashDetail(p.dataset.agent,p.dataset.session,p.dataset.task,Number(older.dataset.attemptPage));}
-  if(e.target.closest('#dash-menu')){
+  if(e.target.closest('#dash-menu,#sidebar-toggle')){
    if(dashboardMobile.matches)document.body.classList.toggle('menuopen');
    else{const collapsed=document.documentElement.dataset.sidebarCollapsed!=='true';document.documentElement.dataset.sidebarCollapsed=String(collapsed);try{localStorage.setItem('gateway-sidebar-collapsed',String(collapsed));}catch{}}
    updateSidebarToggle();
   }
-  if(e.target.closest('.tab')){const view=e.target.closest('.tab').dataset.view;document.querySelector('.dash-filter').hidden=['view-kb','view-system'].includes(view);document.getElementById('dash-search').hidden=view==='view-dreams';document.getElementById('dash-agent-filter').hidden=view==='view-dreams';document.querySelector('.dash-pager').hidden=['view-kb','view-dreams','view-system'].includes(view);document.body.classList.remove('menuopen');updateSidebarToggle();document.getElementById('dash-current-view').textContent=e.target.closest('.tab').textContent.trim();if(e.target.closest('.tab').dataset.view==='view-system')refreshProcesses();}
+  if(e.target.closest('.tab')){const view=e.target.closest('.tab').dataset.view;document.querySelector('.dash-filter').hidden=['view-overview','view-kb','view-system'].includes(view);document.getElementById('dash-search').hidden=view==='view-dreams';document.getElementById('dash-agent-filter').hidden=view==='view-dreams';document.querySelector('.dash-pager').hidden=['view-overview','view-kb','view-dreams','view-system'].includes(view);document.body.classList.remove('menuopen');updateSidebarToggle();document.getElementById('dash-current-view').textContent=e.target.closest('.tab').textContent.trim();if(e.target.closest('.tab').dataset.view==='view-system')refreshProcesses();}
   if(e.target.closest('#dash-theme')){const root=document.documentElement;root.dataset.theme=root.dataset.theme==='dark'?'light':'dark';}
 });
 document.addEventListener('keydown',function(e){
