@@ -628,6 +628,7 @@ export class AgentOrchestrationRuntime {
       const attemptedTaskActions = new Set<string>();
       const taskActionResults = new Map<string, boolean>();
       let acknowledgementInFlight: Promise<unknown> | undefined;
+      let acknowledgementTextIds: string[] = [];
       const newerInputPending = () => !!this.store.get("SELECT id FROM conversation_inputs WHERE conversation_id=? AND principal_id=? AND binding_id=(SELECT binding_id FROM conversation_inputs WHERE id=?) AND status='accepted' AND input_seq>(SELECT input_seq FROM conversation_inputs WHERE id=?)", receipt.conversationId, input.scope.principalId, receipt.inputId, receipt.inputId);
       const intakeContext = { ...capabilities, ...receipt, ...decision, model: options.model ?? this.agent.claude.model, principalId: input.scope.principalId, actionId: `intake:${receipt.inputId}` };
       const deliverAcknowledgement = async (choice: IntakeChoice) => {
@@ -642,6 +643,9 @@ export class AgentOrchestrationRuntime {
         const alreadyPublished = !!acknowledgementId;
         acknowledgement = intakeChoice!.acknowledgement!;
         acknowledgementId = this.decisions.acknowledge(decision, acknowledgement, channelSpeech ? acknowledgement : undefined);
+        // Capture only the original acknowledgement chunks, before asynchronous delivery
+        // can enqueue optional speech-failure notices under the same response.
+        if (!alreadyPublished) acknowledgementTextIds = this.store.all("SELECT id FROM deliveries WHERE response_id=? AND modality='text'", acknowledgementId).map(row => String(row.id));
         await this.flushHistory();
         if (!alreadyPublished) options.onText?.(acknowledgement);
         if (!alreadyPublished) this.publishText(sessionId, acknowledgementId, acknowledgement, true);
@@ -664,7 +668,7 @@ export class AgentOrchestrationRuntime {
         void this.delivery.tickText().catch(() => { deliveryTickFailed = true; });
         const until = Date.now() + 10000;
         while (!active.stopping && !this.closing) {
-          const text = this.store.all("SELECT state FROM deliveries WHERE response_id=? AND modality='text'", acknowledgementId);
+          const text = this.store.all("SELECT state FROM deliveries WHERE response_id=? AND modality='text' AND id IN (SELECT value FROM json_each(?))", acknowledgementId, JSON.stringify(acknowledgementTextIds));
           if ((text.length > 0 || input.scope.source === 'api') && text.every(row => row.state === 'delivered')) break;
           if (deliveryTickFailed || text.some(row => ['failed','unknown'].includes(String(row.state))) || Date.now() >= until) {
             throw new OrchestrationError('ACKNOWLEDGEMENT_DELIVERY_PENDING');

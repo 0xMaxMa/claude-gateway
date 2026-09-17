@@ -142,6 +142,7 @@ test.each((['api','telegram','discord','line','slack'] as const).flatMap(source 
  try{
   (f.runtime as any).config.voice.enabled=true;
   (f.runtime as any).config.voice.notes.replyWithVoice=true;
+  f.runtime.store.setChannelVoiceMode(source,f.scope.chatId,'','on');
   // Reproduce suppressed audio (e.g. quota/policy or a detached live player).
   jest.spyOn((f.runtime as any).delivery,'enqueueSpeech').mockImplementation((...args: unknown[])=>{
    if(audioState!=='absent') f.runtime.store.run('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?,?,?)',randomUUID(),String(args[0]),null,String(args[1]),'speech',audioState,null,'{}',null,Date.now());
@@ -163,6 +164,10 @@ test.each((['api','telegram','discord','line','slack'] as const).flatMap(source 
   }}) as unknown as SessionProcess);
   await f.runtime.send({scope:f.scope,text:'Inspect the PR',modality:source==='api'?'live_voice':'text'},{execute:true,writeMemory:false},{timeoutMs:5000});
   expect(dispatched).toHaveBeenCalledTimes(1);
+  if(source!=='api'){
+   expect((f.runtime as any).delivery.enqueueSpeech).toHaveBeenCalled();
+   if(audioState!=='absent')expect(f.runtime.store.get("SELECT state FROM deliveries WHERE modality='speech'")!.state).toBe(audioState);
+  }
   expect(f.runtime.store.get("SELECT COUNT(*) n FROM task_commands WHERE action_id='new-review'")!.n).toBe(1);
  }finally{await f.close();}
 });
@@ -265,4 +270,37 @@ test.each(['live playback failure','earlier pending speech','partial dispatch','
   if(scenario==='recovered receipt'||scenario==='corrected retry')expect(result).not.toMatch(/not started|not.*updated/);
   if(scenario==='live playback failure')expect(f.runtime.store.get("SELECT COUNT(*) n FROM conversation_events WHERE type='response.speech_failed'")!.n).toBeGreaterThan(0);
  }finally{release();await pending;await f.close();}
+});
+
+test('failed optional speech notice does not block an already delivered acknowledgement',async()=>{
+ const f=await fixture('telegram');
+ try{
+  (f.runtime as any).config.voice.enabled=true;
+  (f.runtime as any).config.voice.notes.replyWithVoice=true;
+  f.runtime.store.setChannelVoiceMode('telegram',f.scope.chatId,'','on');
+  const delivery=(f.runtime as any).delivery;
+  delivery.send=jest.fn(async(_binding:unknown,text:string,_id:unknown,_file:unknown,speech:unknown)=>speech
+   ? {state:'failed',code:'VOICE_PROVIDER_ERROR_HTTP_429',speechSynthesisFailed:true}
+   : text.startsWith('Voice rate limit') ? {state:'failed',code:'NOTICE_FAILED'} : {state:'delivered'});
+  let scope:any;const failures:unknown[]=[];
+  const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((value,...args)=>{scope=value;return issue(value,...args);});
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+   const emitter=this;
+   void(async()=>{
+    try{await scope.onIntake({mode:'ready',acknowledgement:'I will inspect it.'});}catch(error){failures.push(error);}
+    try{
+     await scope.beforeMutation('task_spawn',{},'requested-check');
+     f.runtime.tasks.spawn({...scope.context,actionId:'requested-check'},{title:'Check',instructions:'Inspect read-only',targetProfile:'default-worker'});
+    }catch(error){failures.push(error);}
+    emitter.emit('output',JSON.stringify({type:'result',result:'I am working on it.'}));
+   })().catch(error=>emitter.emit('error',error));
+  }}) as unknown as SessionProcess);
+  await f.runtime.send({scope:f.scope,text:'Inspect it'},{execute:true,writeMemory:false},{timeoutMs:5000});
+  expect(f.runtime.store.get("SELECT state FROM deliveries WHERE delivered_text='I will inspect it.'")!.state).toBe('delivered');
+  expect(failures).toEqual([]);
+  await delivery.tick();
+  expect(f.runtime.store.get("SELECT action_id FROM task_commands WHERE action_id='requested-check'")).toBeDefined();
+  expect(f.runtime.store.get("SELECT state FROM deliveries WHERE delivered_text LIKE 'Voice rate limit%'")!.state).toBe('failed');
+ }finally{await f.close();}
 });
