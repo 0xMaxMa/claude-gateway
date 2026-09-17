@@ -43,12 +43,19 @@ function ensure(store: OrchestrationStore): void {
   store.run(`CREATE TABLE IF NOT EXISTS token_turns(id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
     role TEXT NOT NULL, task_id TEXT, started_at INTEGER NOT NULL, payload_json TEXT NOT NULL)`);
   store.run('CREATE INDEX IF NOT EXISTS token_turns_session ON token_turns(session_id,started_at)');
+  store.run(`CREATE TABLE IF NOT EXISTS token_turn_metrics(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, started_at INTEGER NOT NULL, payload_json TEXT NOT NULL)`);
+  store.run('CREATE INDEX IF NOT EXISTS token_turn_metrics_session ON token_turn_metrics(session_id,started_at)');
+  store.run('CREATE INDEX IF NOT EXISTS token_turns_started ON token_turns(started_at)');
   initialized.add(store);
 }
 export function recordTokenTurn(store: OrchestrationStore, turn: TokenTurn): void {
   ensure(store);
+  store.compose(() => {
   store.run(`INSERT INTO token_turns VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json`,
     turn.id, turn.sessionId, turn.role, turn.taskId ?? null, turn.startedAt, JSON.stringify(turn));
+  store.run(`INSERT INTO token_turn_metrics VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json`,
+    turn.id,turn.sessionId,turn.startedAt,JSON.stringify({...turn,requests:undefined,inputTexts:undefined,responseText:undefined}));
+  });
   const cached = summaries.get(store)?.get(turn.sessionId);
   if (cached) {
     const projection = {...turn, requests: undefined, inputTexts: undefined, responseText: undefined};
@@ -58,7 +65,10 @@ export function recordTokenTurn(store: OrchestrationStore, turn: TokenTurn): voi
 }
 export function tokenReport(store: OrchestrationStore, sessionId: string, includeDetails = true) {
   ensure(store);
-  const turns = store.all('SELECT payload_json FROM token_turns WHERE session_id=? ORDER BY started_at,id', sessionId)
+  return readTokenReport(store, sessionId, includeDetails);
+}
+export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 'attempt'>, sessionId: string, includeDetails = true, page?: {offset: number; limit: number}) {
+  const turns = store.all('SELECT payload_json FROM token_turns WHERE session_id=? ORDER BY started_at,id LIMIT ? OFFSET ?', sessionId, page?.limit ?? -1, page?.offset ?? 0)
     .map(row => {
       const turn = JSON.parse(String(row.payload_json)) as TokenTurn;
       if (!includeDetails) return turn;
@@ -93,10 +103,14 @@ export function tokenReport(store: OrchestrationStore, sessionId: string, includ
       }
       return turn;
     });
-  const tokens = (role: TokenTurn['role']) => summarizeTokenTurns(turns.filter(turn => turn.role === role)).totalTokens;
-  const agentTokens = tokens('agent'), workerTokens = tokens('worker');
-  const totalTokens = agentTokens === null && workerTokens === null ? null : (agentTokens ?? 0) + (workerTokens ?? 0);
-  return { sessionId, turns, totals: {agentTokens, workerTokens, totalTokens}, coverage: 'recorded-turns-only' as const };
+  const totalsByRole = store.all(`SELECT role, SUM(json_extract(payload_json,'$.usage.totalTokens')) total FROM token_turns WHERE session_id=? GROUP BY role`,sessionId);
+  const agentTokens = totalsByRole.find(row=>row.role==='agent')?.total ?? null;
+  const workerTokens = totalsByRole.find(row=>row.role==='worker')?.total ?? null;
+  const totalTokens = agentTokens === null && workerTokens === null ? null : Number(agentTokens??0)+Number(workerTokens??0);
+  const distribution = store.all(`SELECT json_extract(payload_json,'$.category') category, SUM(json_extract(payload_json,'$.usage.totalTokens')) tokens FROM token_turns WHERE session_id=? AND json_type(payload_json,'$.usage')='object' GROUP BY category`,sessionId).map(r=>({category:String(r.category),tokens:Number(r.tokens??0)}));
+  return { sessionId, turns, totals: {agentTokens:agentTokens===null?null:Number(agentTokens),workerTokens:workerTokens===null?null:Number(workerTokens),totalTokens}, distribution,
+    pagination: page ? {...page,total:Number(store.get('SELECT COUNT(*) n FROM token_turns WHERE session_id=?',sessionId)!.n)} : undefined,
+    coverage: 'recorded-turns-only' as const };
 }
 export function summarizeTokenTurns(turns: TokenTurn[]) {
   const measured = turns.filter(turn => turn.usage);

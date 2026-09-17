@@ -1,6 +1,7 @@
 import { presentedResponseError } from '../orchestration/response-errors';
 import { ChannelMediaError } from '../orchestration/channel-media-error';
 import { payloadHash, type AcceptInput } from '../orchestration/store';
+import { ORCHESTRATION_DEFAULTS } from '../orchestration/config';
 import { channelInputMedia } from '../orchestration/channel-input-media';
 import { chunkText } from '../telegram/chunks';
 import { resolveChannelFile } from '../orchestration/file-delivery';
@@ -4359,6 +4360,14 @@ export class AgentRunner extends EventEmitter {
 
   isRunning(): boolean {
     return this.receiver?.isRunning() ?? false;
+  }
+
+  getDashboardSource() {
+    return { filename: path.join(this.agentDir, 'orchestration.db'), historyFilename: path.join(this.agentDir, 'history.db'),
+      enabled: Boolean(this.orchestration || this.agentConfig.orchestration?.enabled),
+      workspaceMode: this.agentConfig.type === 'app-agent' ? 'container' : this.agentConfig.orchestration?.tasks?.workspaceMode ?? 'host',
+      maxWorkers: this.agentConfig.orchestration?.tasks?.maxConcurrentPerAgent ?? ORCHESTRATION_DEFAULTS.tasks.maxConcurrentPerAgent,
+      idleTtlMs: this.agentConfig.orchestration?.tasks?.workerIdleTtlMs ?? ORCHESTRATION_DEFAULTS.tasks.workerIdleTtlMs };
   }
 
   getTokenReport(sessionId: string) {

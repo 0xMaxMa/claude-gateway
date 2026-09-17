@@ -248,8 +248,8 @@ describe('dashboard HTML — mode toggle + embedded JS (Issue #201)', () => {
 
   test('U-UI-08: the Logout button is grouped beside the auto-refresh indicator', () => {
     const html = generateDashboardHtml()
-    // Both live in the same top-right cluster (Logout, then the refresh status).
-    const cluster = html.match(/<span id="top-right">([\s\S]*?)<\/span><\/h1>/)
+    // Both live in the same top-right header cluster.
+    const cluster = html.match(/<div id="top-right">([\s\S]*?)<\/div><\/header>/)
     expect(cluster).not.toBeNull()
     expect(cluster![1]).toContain('id="logout-btn"')
     expect(cluster![1]).toContain('id="refresh-indicator"')

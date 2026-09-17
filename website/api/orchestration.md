@@ -109,11 +109,11 @@ Speech uses a bounded MP3 file pinned to the selected provider/voice/model. Disc
 
 ## Dashboard and retention {#dashboard-and-retention}
 
-Dashboard managed Sessions follow the current runtime lifecycle: only Agent sessions used or Worker sessions admitted in this runtime make a parent row visible. Stored conversations remain available through history; reading the dashboard does not activate them.
+Dashboard Conversations include retained managed sessions from previous gateway runs. Lists are paginated at 25 sessions per agent; reading them never starts a session or worker. Empty token fields mean instrumentation was not recorded, not zero usage.
 
 `GET /status` retains legacy sessions and includes managed sessions in `agents[].sessions`, marked `orchestration: true`. Managed rows carry `status` (`thinking`, `working`, `queued`, `waiting_input`, `needs_reconciliation` or `idle`), nested `tasks` and `workerIds`. `agents[].orchestration` includes `agentProcesses`, task summaries and `workerPool` (`maxWorkers`, `idleTtlMs`, `workers`). Worker records expose worker/session/workstream IDs, busy/idle state and idle `expiresAt`. Task summaries expose predecessor, worker session, resume status, active host PID and latest tool. A container PID here is the host Docker client PID. Finished tasks do not claim a stale PID is still running.
 
-`/dashboard` displays managed and legacy sessions together; expanding a managed row reveals its worker/task details. Headless sessions have no interactive PTY viewer. The direct path is `/dashboard`; `/gateway/dashboard` requires a reverse-proxy prefix.
+`/dashboard` displays managed and legacy sessions together; opening a managed session shows its assignments, recorded turns and worker attempts. Task details identify the exact worker session and attempt; task totals include recorded retries while the latest-attempt column does not. Headless sessions have no interactive PTY viewer. The direct path is `/dashboard`; `/gateway/dashboard` requires a reverse-proxy prefix.
 
 Worker idle expiry (default 10 minutes) retires a pool slot, not the task. Task records in the per-agent `orchestration.db` have **no automatic deletion policy yet**. Event/tool activity defaults to seven-day retention. Eligible private task workspaces are archived separately after seven days by default; host/container user files are excluded. Existing chat-history retention does not delete task records.
 
@@ -137,8 +137,21 @@ Unreadable journal records are retained for operator inspection with a bounded d
 - `GET /dashboard/token-report?agentId=AGENT_ID&sessionId=SESSION_ID` renders the English HTML report.
 - `GET /token-report?agentId=AGENT_ID&sessionId=SESSION_ID` returns its JSON data.
 
+Reports page through 50 turns at a time with `offset=0`, `offset=50`, and so on. Totals and distribution always cover the complete recorded session, not just the current page.
+
 Both routes use the dashboard administrative access gate: a valid dashboard session or an admin API key under the existing loopback/local-access policy. An ordinary agent-scoped API key does not grant access. Responses use `Cache-Control: no-store`. A reverse-proxy prefix such as `/gateway` must be applied consistently to the dashboard and these routes.
 
 The report separates user-input handling, Agent reporting turns and worker attempts. It contains available per-request and per-turn fresh-input, cache-creation, cache-read and output counts, tool inventories and actual tool calls, plus corresponding task/input/result context. Background learning usage is separate. Request IDs deduplicate repeated stream/content-block usage; CLI aggregate usage is reconciled with the request breakdown rather than counted twice. Thinking is part of output. Percentages are token volume, not provider billing.
 
 The durable `token_turns` ledger starts recording after deployment; it does not reconstruct earlier usage. Unknown or incomplete measurements are explicitly identified. This report can contain conversation and task content and must remain behind the administrative gate.
+
+## Dashboard data and live updates
+
+- `GET /status?offset=0` returns a snapshot, including retained session pagination, task counts, and recorded token activity for the current UTC day.
+- `GET /dashboard/events?offset=0` streams `snapshot` events with event IDs. Reconnecting receives a fresh snapshot; `Last-Event-ID` can suppress an unchanged snapshot. This is a snapshot stream, not a durable event-log replay.
+- `GET /dashboard/session?agentId=AGENT_ID&sessionId=SESSION_ID&offset=0` returns session metadata, up to 50 tasks and 50 recorded turns. These lists have independent totals; their common offset advances each list by 50.
+- `GET /dashboard/task?agentId=AGENT_ID&sessionId=SESSION_ID&taskId=TASK_ID&offset=0` returns the assignment, latest result and up to 25 attempts with their own token measurements and latest 30 recorded events. The task must belong to the requested session.
+
+These routes require the same admin credentials as `/status`, return `Cache-Control: no-store`, and never accept filesystem paths from callers. Gateway-owned paths are read with read-only SQLite connections on a dedicated worker thread. A bounded request queue, coalesced reads and short snapshot caches isolate database work from chat delivery. New token measurements maintain a small projection alongside the ledger atomically; older ledger entries remain readable without a synchronous startup backfill. Details load on demand. Hidden browser tabs disconnect their live stream, and slow clients do not accumulate unlimited snapshots. Process diagnostics load only on the System view.
+
+The dashboard and login use the same local pastel theme and bundled Poppins font. Login still exchanges an **admin API key** for the existing HttpOnly session cookie; scoped agent keys cannot access cross-agent monitoring. Font assets are public static files and contain no gateway information.

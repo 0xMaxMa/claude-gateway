@@ -1,10 +1,12 @@
+import { dashboardTheme, dashboardFontLink } from './dashboard-theme';
+import { dashboardClient } from './dashboard-client';
 /**
  * Generates a self-contained HTML dashboard page for the gateway status UI.
  * No external dependencies except xterm.js CDN for PTY viewer.
  */
 export function generateDashboardHtml(): string {
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -399,24 +401,14 @@ export function generateDashboardHtml(): string {
     .kb-md li.kb-task { list-style: none; margin-left: -18px; }
     .kb-md li.kb-task input { margin-right: 7px; vertical-align: middle; accent-color: #63b3ed; }
     .kb-note-loading { color: #718096; font-size: 0.82rem; margin-top: 12px; }
+  ${dashboardTheme}
   </style>
-</head>
-<body>
-  <h1><span class="rainbow">Claude Gateway</span> <span id="gateway-version" style="font-size:0.75rem;color:#718096;"></span> <span id="top-right"><button id="logout-btn">Logout</button><span id="refresh-indicator">refreshing...</span></span></h1>
-  <div class="meta">
-    Uptime: <span id="uptime">&mdash;</span> &nbsp;|&nbsp;
-    Started: <span id="started-at">&mdash;</span> &nbsp;|&nbsp;
-    Last updated: <span id="last-updated">&mdash;</span>
-  </div>
-
-  <!-- Tab switcher: Sessions (live PTY + table) | Knowledge base (shared-KB graph) -->
-  <div class="tabs">
-    <button class="tab active" id="tab-sessions" data-view="view-sessions">Sessions</button>
-    <button class="tab" id="tab-kb" data-view="view-kb">Knowledge base</button>
-    <button class="tab" id="tab-dreams" data-view="view-dreams">Nightly dreaming</button>
-  </div>
-
-  <div id="view-sessions" class="view">
+${dashboardFontLink}</head>
+<body><div class="layout"><aside class="sidebar"><div class="brand row"><div class="brandmark">✳</div><div>Claude Gateway<small>OPERATIONS CONSOLE</small></div></div><div class="navlabel">WORKSPACE</div><nav class="tabs" aria-label="Main navigation"><button class="tab active" id="tab-overview" data-view="view-overview"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h7v7H3zM14 3h7v4h-7zM14 11h7v10h-7zM3 14h7v7H3z"/></svg>Overview</button><button class="tab " id="tab-sessions" data-view="view-sessions"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11a8 8 0 0 1-8 8H6l-4 3 1-7a8 8 0 1 1 18-4Z"/></svg>Conversations</button><button class="tab " id="tab-tasks" data-view="view-tasks"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5h12M9 12h12M9 19h12M3 5l1 1 2-3M3 12l1 1 2-3M3 19l1 1 2-3"/></svg>Tasks</button><button class="tab " id="tab-usage" data-view="view-usage"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10m8 10V4m8 16v-7"/></svg>Usage & tokens</button><button class="tab " id="tab-kb" data-view="view-kb"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h7v18H4zM14 3h7v18h-7zM7 7h1m9 0h1"/></svg>Knowledge base</button><button class="tab " id="tab-dreams" data-view="view-dreams"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15A9 9 0 0 1 9 4 9 9 0 1 0 20 15Z"/></svg>Nightly dreaming</button><button class="tab " id="tab-system" data-view="view-system"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v6H3zM3 14h18v6H3zM6 7h1M6 17h1"/></svg>System</button></nav><div class="sidebarfoot"><div class="instance">Admin workspace<br><span id="gateway-version"></span></div></div></aside><div class="main"><header class="topbar"><div class="row"><button id="dash-menu" class="mobilemenu" aria-label="Toggle navigation">☰</button><h1 id="dash-current-view">Overview</h1></div><div id="top-right"><span id="refresh-indicator">Connecting…</span><button class="theme-toggle" id="dash-theme" aria-label="Toggle light and dark theme">◐</button><button id="logout-btn">Logout</button></div></header><main class="shell-content"><div class="meta">Uptime: <span id="uptime">—</span> · Started: <span id="started-at">—</span> · Updated: <span id="last-updated">—</span></div>
+<div id="view-overview" class="view"><div class="heading" style="margin-top:24px"><div class="eyebrow">ONE WORKSPACE. EVERY CONVERSATION.</div><h1>Good work, <span class="gradient-title">in motion.</span></h1><p>Your agents, ongoing work, and what needs your attention.</p></div><div class="dash-grid" id="overview-stats"></div><div class="columns"><section class="dash-panel"><h2>Token activity</h2><p class="live-note">Today · UTC · Workers (violet) / Agent (blue)</p><div id="overview-chart"></div><p class="live-note">Recorded token volume, including cache. Not billing cost.</p></section><section class="dash-panel"><h2>Needs your attention</h2><div class="dash-mini-list" id="overview-attention"></div></section></div><section class="dash-panel"><h2>Active & recent work</h2><div id="overview-tasks"></div></section></div>
+<div class="dash-filter"><input id="dash-search" type="search" aria-label="Filter displayed sessions" placeholder="Filter this page by session, chat or model…"><select id="dash-agent-filter" aria-label="Filter agent"><option value="">All agents</option></select></div><div class="dash-pager"><span data-dash-page></span><div class="row"><button data-dash-prev disabled>← Previous</button><button data-dash-next disabled>Next →</button></div></div>
+<div id="view-tasks" class="view" style="display:none"><h2>Tasks & workers</h2><p id="tasks-scope" class="live-note"></p><div id="task-results"></div></div><div id="view-usage" class="view" style="display:none"><h2>Usage & tokens</h2><p class="live-note">Session totals include every recorded attempt, including retries. Missing measurements stay unavailable. Open a report for fresh input, cache creation, cache reads, output and per-turn details.</p><div id="usage-results"></div></div>
+  <div id="view-system" class="view" style="display:none">
   <!-- Row: Processes 70% | Agent badges 30% (collapses on narrow screens) -->
   <div class="top-grid">
     <div>
@@ -446,33 +438,7 @@ export function generateDashboardHtml(): string {
     <div id="pty-terminal" tabindex="0"></div>
   </div>
 
-  <!-- Sessions — full width (session-centric, flat list) -->
-  <h2>Sessions</h2>
-  <div class="table-wrap">
-    <table id="sessions-table">
-      <thead>
-        <tr>
-          <th>Agent</th>
-          <th>Session ID</th>
-          <th>Chat ID</th>
-          <th>Source</th>
-          <th>Mode</th>
-          <th>Model</th>
-          <th>Agent / Total tokens</th>
-          <th>Tools</th>
-          <th>Status</th>
-          <th>Uptime</th>
-          <th>Spawned</th>
-          <th>Shell</th>
-        </tr>
-      </thead>
-      <tbody id="sessions-tbody">
-        <tr><td colspan="12" class="ts">Loading...</td></tr>
-      </tbody>
-    </table>
-  </div>
-  </div><!-- /view-sessions -->
-
+</div><div id="view-sessions" class="view" style="display:none"><h2>Conversations</h2><p class="live-note">Inspect a session for its Agent turns and Worker attempts. Loaded tools and used tools are recorded separately.</p><div id="session-results"></div></div>
   <!-- Knowledge base — a 3D force-directed graph over the shared vault / an agent's memory.
        Zero external deps: the spherical layout + canvas render + rotation are hand-rolled. -->
   <div id="view-kb" class="view" style="display:none;">
@@ -527,7 +493,7 @@ export function generateDashboardHtml(): string {
     <div id="dreams-empty" class="dreams-empty" style="display:none;"></div>
   </div><!-- /view-dreams -->
 
-  <div id="error-msg" class="error" style="display:none;"></div>
+  <div id="error-msg" class="error" style="display:none;" role="status"></div><footer class="footer">Claude Gateway · Admin dashboard</footer></main></div></div><div id="dash-drawer-back" class="dash-drawer-back"><section id="dash-drawer" class="dash-drawer" role="dialog" aria-modal="true" aria-label="Recorded session and task details" tabindex="-1"></section></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js"
     integrity="sha384-pELe6ZHtFxFcuYBq3gMkqvmnNIqUWnAYjBG5gThqQQCjWp8PJ/65MLK4lMIfEK1e" crossorigin="anonymous"></script>
@@ -858,7 +824,7 @@ export function generateDashboardHtml(): string {
 
     const expandedSessionRows = new Set();
     // Event delegation for Live buttons (avoids inline onclick + HTML injection)
-    document.getElementById('sessions-tbody').addEventListener('click', function(e) {
+    document.getElementById('session-results').addEventListener('click', function(e) {
       const toggle = e.target.closest('.btn-workers');
       if (toggle) {
         const key=toggle.getAttribute('data-expand-key'), open=!expandedSessionRows.has(key);
@@ -868,8 +834,8 @@ export function generateDashboardHtml(): string {
         const detail=document.getElementById(toggle.getAttribute('aria-controls'));if(detail)detail.hidden=!open;
         return;
       }
-      const btn = e.target.closest('button.btn-stream');
-      if (btn) void openPtyViewer(btn.getAttribute('data-agent-id'), btn.getAttribute('data-session-id'));
+      const btn = e.target.closest('button.btn-stream[data-agent-id][data-session-id]');
+      if (btn) { document.getElementById('tab-system').click(); void openPtyViewer(btn.getAttribute('data-agent-id'), btn.getAttribute('data-session-id')); }
     });
 
     function escHtml(s) {
@@ -931,15 +897,7 @@ export function generateDashboardHtml(): string {
       return '<span title="' + v.toLocaleString() + ' tokens">' + label + '</span>';
     }
 
-    // ── Status Refresh ────────────────────────────────────────────────────────
-    async function refresh() {
-      document.getElementById('refresh-indicator').textContent = 'refreshing...';
-      try {
-        const res = await fetch(apiUrl('/status'));
-        if (res.status === 401) { onUnauthorized(); return; }
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-
+    function applyDashboardSnapshot(data) {
         document.getElementById('uptime').textContent = fmtUptime(data.uptime || 0);
         document.getElementById('started-at').textContent = data.startedAt
           ? new Date(data.startedAt).toLocaleString() : '\\u2014';
@@ -961,67 +919,29 @@ export function generateDashboardHtml(): string {
         });
         document.getElementById('agents-bar').innerHTML = badges.join('') || '<span class="ts">No agents</span>';
 
-        // Sessions table — flat, session-centric. One row per real session across
-        // all agents; agents with no session do not produce a row.
-        const rows = [];
-        agents.forEach(function(a) {
-          (a.sessions || []).forEach(function(s) {
-            const statusBadge = s.orchestration ? '<span class="badge '+(['thinking','working'].includes(s.status) ? 'badge-green' : 'badge-gray')+'">'+escHtml(s.status)+'</span>' : s.isRunning
-              ? '<span class="badge badge-green">running</span>'
-              : '<span class="badge badge-gray">stopped</span>';
-            const uptime = s.isRunning ? fmtUptime(s.uptimeSec || 0) : '<span class="ts">&mdash;</span>';
-            const sessId = s.sessionId
-              ? '<span class="session-id">' + escHtml(s.sessionId) + '</span>'
-              : '<span class="ts">&mdash;</span>';
-            const chatCell = s.chatId
-              ? '<span class="session-id">' + escHtml(String(s.chatId)) + '</span>'
-              : '<span class="ts">&mdash;</span>';
-            const liveBtn = (s.hasPtyStream && s.isRunning && s.mode === 'pty-shell')
-              ? '<button class="btn-stream" data-agent-id="' + escHtml(a.id) + '" data-session-id="' + escHtml(s.sessionId || '') + '">💻 View</button>'
-              : '<span class="ts">&mdash;</span>';
-            const key=a.id+':'+s.sessionId, detailId='workers-'+encodeURIComponent(key), open=expandedSessionRows.has(key);
-            const childTasks=s.tasks||[], count=childTasks.length;
-            const label='Workers / tasks ('+count+')';
-            const expand=s.orchestration ? '<br><button class="btn-stream btn-workers" data-expand-key="'+escHtml(key)+'" data-label="'+escHtml(label)+'" aria-expanded="'+open+'" aria-controls="'+escHtml(detailId)+'">'+(open?'▾ ':'▸ ')+escHtml(label)+'</button>' : '';
-            rows.push(
-              '<tr class="session-row" data-agent="'+escHtml(a.id)+'" data-session="'+escHtml(s.sessionId)+'">' +
-              '<td><span style="color:#90cdf4;font-weight:600;">' + escHtml(a.id) + '</span></td>' +
-              '<td>' + sessId + expand + '</td>' +
-              '<td>' + chatCell + '</td>' +
-              '<td>' + sourceBadge(s.source) + '</td>' +
-              '<td><div class="session-modes">' + (s.orchestration ? '<span class="badge badge-purple">orchestration</span>' : '') + modeBadge(s.mode) + '</div></td>' +
-              '<td>' + fmtModel(s.model) + '</td>' +
-              '<td>' + (s.tokenSummary ? fmtRecordedTokens(s.tokenSummary.agentTokens)+' / '+fmtRecordedTokens(s.tokenSummary.totalTokens) : (s.orchestration ? 'Unavailable' : fmtTokens(s.tokens))) + (s.orchestration ? '<br><a class="btn-stream" target="_blank" rel="noopener" href="'+escHtml(apiUrl('/dashboard/token-report')+'?agentId='+encodeURIComponent(a.id)+'&sessionId='+encodeURIComponent(s.sessionId))+'">View token report</a>' : '') + '</td>' +
-              '<td>' + toolInventory(s.loadedTools, s.usedTools) + '</td>' +
-              '<td>' + statusBadge + '</td>' +
-              '<td>' + uptime + '</td>' +
-              '<td>' + fmtTs(s.spawnedAt ? new Date(s.spawnedAt).toISOString() : null) + '</td>' +
-              '<td>' + liveBtn + '</td>' +
-              '</tr>'
-            );
-            if (s.orchestration) {
-              const pool=a.orchestration.workerPool, slots=pool ? pool.workers.filter(w => (s.workerIds||[]).includes(w.workerId)) : [];
-              let content='<div style="padding:12px 20px;border-left:3px solid #805ad5"><div class="ts">'+escHtml(a.orchestration.workspaceMode)+(a.container ? ' · '+escHtml(a.container) : '')+(pool ? ' · Agent pool '+pool.workers.length+'/'+pool.maxWorkers+' · idle TTL '+Math.round(pool.idleTtlMs/60000)+' min' : '')+'</div>';
-              slots.forEach(function(w){content+='<div class="worker-slot">'+escHtml(w.state)+' · Worker '+escHtml(w.workerId)+' · session '+escHtml(w.sessionId)+(w.expiresAt ? ' · expires '+escHtml(new Date(w.expiresAt).toLocaleTimeString()) : '')+'</div>';});
-              if (count) {
-                content+='<table class="worker-tasks"><thead><tr><th>Worker / Session</th><th>Task</th><th>Status</th><th>Latest attempt tokens</th><th>Latest attempt tools</th><th>Latest tool</th><th>Process</th></tr></thead><tbody>';
-                childTasks.forEach(function(t){content+='<tr data-task="'+escHtml(t.taskId)+'"><td>'+escHtml(t.workerId||'Unassigned')+'<br><span class="ts">'+escHtml(t.workerSessionId||'')+(t.resumed?' · resumed':'')+'</span></td><td>'+escHtml(t.title)+'<br><span class="ts">'+escHtml(t.taskId)+(t.continueTaskId?' · follows '+escHtml(t.continueTaskId):'')+'</span></td><td>'+escHtml(t.state)+'</td><td>'+(t.tokenSummary ? fmtRecordedTokens(t.tokenSummary.totalTokens) : 'Unavailable')+'</td><td>'+toolInventory(t.loadedTools,t.usedTools)+'</td><td>'+escHtml(t.lastTool ? t.lastTool.name+' · '+t.lastTool.type+(t.lastTool.is_error?' (error)':'') : '—')+'</td><td>'+escHtml(t.hostProcessId ? String(t.hostProcessId)+(t.container?' (docker exec)':'') : '—')+'</td></tr>';});
-                content+='</tbody></table>';
-              } else content+='<div class="ts">No worker tasks in this session</div>';
-              rows.push('<tr class="session-workers" id="'+escHtml(detailId)+'"'+(open?'':' hidden')+'><td colspan="12">'+content+'</div></td></tr>');
-            }
-          });
-        });
+        renderDashboard(data);
 
-        document.getElementById('sessions-tbody').innerHTML =
-          rows.length ? rows.join('') : '<tr><td colspan="12" class="ts">No active sessions</td></tr>';
+        document.getElementById('refresh-indicator').textContent = 'Live · updated';
+    }
 
-        document.getElementById('refresh-indicator').textContent = 'auto-refresh 3s';
+    // ── Status Refresh ────────────────────────────────────────────────────────
+    async function refresh() {
+      if (dashboardBusy || document.hidden) return;
+      dashboardBusy = true;
+      const requestedOffset = dashboardOffset;
+      document.getElementById('refresh-indicator').textContent = 'Updating…';
+      try {
+        const res = await fetch(apiUrl('/status')+'?offset='+requestedOffset);
+        if (res.status === 401) { onUnauthorized(); return; }
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+
+        if (requestedOffset === dashboardOffset) applyDashboardSnapshot(data);
       } catch(e) {
         document.getElementById('error-msg').textContent = 'Error fetching status: ' + e.message;
         document.getElementById('error-msg').style.display = 'block';
-        document.getElementById('refresh-indicator').textContent = 'error';
-      }
+        document.getElementById('refresh-indicator').textContent = 'Reconnecting…';
+      } finally {dashboardBusy=false;}
     }
 
     // ── Process Tree ─────────────────────────────────────────────────────────
@@ -1178,11 +1098,12 @@ export function generateDashboardHtml(): string {
       window.location.href = apiUrl('/dashboard');
     });
 
+    ${dashboardClient}
     refresh();
-    refreshProcesses();
-    setInterval(refresh, 3000);
-    // Process tree (with CPU/mem) is heavier (spawns ps) — refresh a bit slower.
-    setInterval(refreshProcesses, 6000);
+    connectDashboardStream();
+    setInterval(function(){if(!dashboardStream || dashboardStream.readyState!==1)refresh();},15000);
+    setInterval(function(){if(!document.hidden && document.getElementById('view-system').style.display!=='none')refreshProcesses();},10000);
+    document.addEventListener('visibilitychange',function(){if(document.hidden){dashboardStream?.close();dashboardStream=null;}else{refresh();connectDashboardStream();}});
   </script>
 
   <!-- Knowledge base graph: tab switching + hand-rolled force-directed renderer.
@@ -2082,15 +2003,15 @@ export function generateLoginHtml(disabledReason = ''): string {
     ? `    <h1>Claude Gateway</h1>
     <div class="sub">${safeReason}</div>`
     : `    <h1>Claude Gateway</h1>
-    <div class="sub">Enter an API key to access the dashboard.</div>
+    <div class="sub">Sign in with your admin API key to inspect agents, workers and usage.</div>
     <form id="login-form" autocomplete="off">
-      <label for="key">API key</label>
-      <input id="key" type="password" placeholder="sk-gateway-..." autofocus>
+      <label for="key">Admin API key</label>
+      <input id="key" type="password" placeholder="Enter your admin API key" required autocomplete="current-password" autofocus>
       <button type="submit">Sign in</button>
-      <div id="err"></div>
+      <div id="err" role="alert" aria-live="polite"></div>
     </form>`;
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -2120,12 +2041,12 @@ export function generateLoginHtml(disabledReason = ''): string {
     }
     button:hover { background: #2b6cb0; }
     #err { color: #fc8181; font-size: 0.8rem; margin-top: 12px; min-height: 1em; }
+    ${dashboardTheme}
+    body{display:grid;place-items:center;min-height:100vh;padding:24px;background:var(--bg)}.login-layout{display:grid;grid-template-columns:1fr 1fr;width:min(980px,100%);background:var(--panel);border:1px solid var(--line);border-radius:28px;overflow:hidden;box-shadow:var(--shadow)}.login-intro{padding:48px;background:var(--lavender);display:flex;flex-direction:column;justify-content:space-between;gap:48px}.login-intro h2{font-size:36px;font-weight:400;line-height:1.25;color:var(--text);margin:0 0 20px}.login-intro p{font-size:13px;line-height:1.8;color:var(--muted)}.login-card{padding:52px 40px;align-self:center}.login-card h1{font-size:26px;margin-bottom:16px}.login-card .sub{color:var(--muted);font-size:13px;line-height:1.7;margin-bottom:28px}.login-card label{color:var(--text);font-size:12px;margin-bottom:10px}.login-card input{background:var(--panel);border-color:var(--line);padding:13px;font-size:13px}.login-card button{border-radius:160px;background:#6161ff;padding:13px;color:white;font-size:13px}.login-card button:disabled{opacity:.6}#err{color:var(--yellow);font-size:12px;line-height:1.6}.login-caption{font-size:11px;color:var(--muted);margin-top:22px;line-height:1.7}@media(max-width:760px){.login-layout{grid-template-columns:1fr;max-width:440px}.login-intro{padding:28px;gap:24px}.login-intro h2{font-size:28px}.login-card{padding:30px 26px}.login-intro .login-description{display:none}}
   </style>
-</head>
+${dashboardFontLink}</head>
 <body>
-  <div class="card">
-${bodyInner}
-  </div>
+  <main class="login-layout"><section class="login-intro"><div class="brand row" style="padding:0"><div class="brandmark">✳</div>Claude Gateway</div><div><h2>Your agents.<br>Your workspace.</h2><p class="login-description">A clear view of conversations, worker activity and token usage. All in one place.</p></div><p>Orchestration · Voice · Multi-channel</p></section><section class="login-card">${bodyInner}<p class="login-caption">Admin access only. Your key is exchanged for a secure session cookie and is not saved in browser storage.</p></section></main>
   <script>
     function basePath() {
       var p = window.location.pathname;
@@ -2139,6 +2060,7 @@ ${bodyInner}
       var err = document.getElementById('err');
       err.textContent = '';
       var key = document.getElementById('key').value;
+      var button = loginForm.querySelector('button'); button.disabled = true;
       try {
         var res = await fetch(basePath() + '/dashboard/login', {
           method: 'POST',
@@ -2148,8 +2070,8 @@ ${bodyInner}
         if (res.ok) { window.location.href = basePath() + '/dashboard'; return; }
         err.textContent = res.status === 401 ? 'Invalid API key.' : ('Login failed (HTTP ' + res.status + ').');
       } catch (e2) {
-        err.textContent = 'Network error.';
-      }
+        err.textContent = 'Unable to connect. Please try again.';
+      } finally { button.disabled = false; }
     });
   </script>
 </body>

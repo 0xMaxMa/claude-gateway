@@ -42,3 +42,14 @@ for (const path of ['/token-report', '/dashboard/token-report']) {
     });
   });
 }
+
+
+test.each(['/dashboard/session','/dashboard/task','/dashboard/events'])('%s rejects non-admin access before resolving agent data', async path=>{
+ const {app,getTokenReport}=setup();
+ for(const key of ['', 'scoped-secret']) expect((await supertest(app).get(path).query({agentId:'agent',sessionId:'session',taskId:'task'}).set('X-Api-Key',key)).status).toBe(401);
+ expect(getTokenReport).not.toHaveBeenCalled();
+});
+test.each(['/dashboard/session','/dashboard/task','/dashboard/events','/status'])('%s validates pagination',async path=>{
+ const {app}=setup();
+ for(const offset of ['NaN','-1','1.5','1000001']) expect((await supertest(app).get(path).query({agentId:'agent',sessionId:'session',taskId:'task',offset}).set('X-Api-Key','admin-secret')).status).toBe(400);
+});

@@ -1,3 +1,4 @@
+import { runInNewContext } from 'vm';
 import { generateTokenReportHtml, TokenReportView } from '../../src/ui/token-report';
 import { generateDashboardHtml } from '../../src/ui/web-ui';
 
@@ -27,7 +28,7 @@ test('dashboard inline script stays valid with token/tool details and separate r
     if (match[1].trim()) expect(() => new Function(match[1])).not.toThrow();
   }
   expect(html).toContain('View token report'); expect(html).toContain('target="_blank"');
-  expect(html).toContain('Agent / Total tokens');
+  expect(html).toContain('Agent / combined · recorded only');
 });
 test('missing usage is unavailable and per-request records remain separate from the turn aggregate', () => {
   const missing = generateTokenReportHtml('agent', { ...report, turns: [{ ...report.turns[0], usage: null }] });
@@ -68,8 +69,28 @@ test('one measured role never turns another role with unknown usage into zero', 
 
 test('worker rows describe latest-attempt token and inventory scope', () => {
   const html = generateDashboardHtml();
-  expect(html).toContain('Latest attempt tokens');
+  expect(html).toContain('Latest attempt');
   expect(html).toContain('Latest attempt tools');
-  expect(html).toContain("fmtRecordedTokens(s.tokenSummary.agentTokens)");
+  expect(html).toContain("dashCount(s.tokenSummary?.agentTokens)");
   expect(html).toContain("n == null ? 'Unavailable' : n === 0 ? '0'");
+});
+
+test('paginated reports keep whole-session totals and distribution when a role is absent from the page',()=>{
+ const html=generateTokenReportHtml('a', {...report,turns:[report.turns[0]],pagination:{offset:0,limit:1,total:2},distribution:[{category:'input',tokens:30},{category:'worker',tokens:70}]});
+ expect(html).toContain('Worker tokens<strong>70');expect(html).toContain('70.0%');expect(html).toContain('Next turns');expect(html).toContain('offset=1');
+});
+
+test('a slow prior-page response cannot replace a newer session page', async()=>{
+ const html=generateDashboardHtml();
+ const start=html.indexOf('async function refresh()');
+ const end=html.indexOf('// ── Process Tree',start);
+ let complete!: (value:unknown)=>void;
+ const apply=jest.fn();
+ const context:any={dashboardBusy:false,dashboardOffset:0,document:{hidden:false,getElementById:()=>({textContent:'',style:{}})},apiUrl:(p:string)=>p,
+  fetch:()=>new Promise(resolve=>{complete=resolve;}),applyDashboardSnapshot:apply,onUnauthorized:jest.fn()};
+ const pending=runInNewContext(html.slice(start,end)+';refresh()',context);
+ context.dashboardOffset=25;
+ complete({ok:true,status:200,json:async()=>({agents:[]})});
+ await pending;
+ expect(apply).not.toHaveBeenCalled();expect(context.dashboardBusy).toBe(false);
 });
