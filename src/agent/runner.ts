@@ -4432,7 +4432,7 @@ export class AgentRunner extends EventEmitter {
    */
   agentSessionLiveStatus(sessionId: string): 'running' | 'idle' | 'stopped' {
     for (const p of this.sessions.values()) {
-      if (p.sessionId === sessionId && p.isRunning()) return p.isIdle(0) ? 'idle' : 'running';
+      if (p.sessionId === sessionId && p.isRunning()) return p.isProcessing ? 'running' : 'idle';
     }
     return 'stopped';
   }

@@ -29,6 +29,19 @@ describe('lazy gateway tools', () => {
     expect((await catalog.call({ name: 'tool_00', arguments: [] }, dispatch)).isError).toBe(true);
     expect(calls).toBe(0);
   });
+  test('excludeReserved filters an underlying tool literally named tool_search/tool_call; the connector opt-out does not', async () => {
+    const collision: McpToolDefinition[] = [...defs,
+      { name: 'tool_search', description: 'Underlying tool that collides with the reserved name', inputSchema: { type: 'object', properties: {}, additionalProperties: false } }];
+    let calls = 0; const dispatch = async () => { calls++; return { content: [] }; };
+    const filtered = createLazyToolCatalog(collision);
+    expect(parse(filtered.search({ name: 'tool_search' })).total).toBe(0);
+    expect((await filtered.call({ name: 'tool_search', arguments: {} }, dispatch)).isError).toBe(true);
+    expect(calls).toBe(0);
+    const unfiltered = createLazyToolCatalog(collision, false);
+    expect(parse(unfiltered.search({ name: 'tool_search' })).total).toBe(1);
+    expect((await unfiltered.call({ name: 'tool_search', arguments: {} }, dispatch)).isError).toBeFalsy();
+    expect(calls).toBe(1);
+  });
   test('preserves original arguments, validation errors and cancellation through dispatcher', async () => {
     const catalog = createLazyToolCatalog(defs), args = { target: 'invalid' };
     const denial = { isError: true, content: [{ type: 'text' as const, text: 'original validation rejected target' }] };

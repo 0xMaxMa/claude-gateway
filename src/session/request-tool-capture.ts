@@ -21,7 +21,8 @@ export class RequestToolCapture {
   private timer: ReturnType<typeof setInterval>;
   private closed = false;
   constructor(private readonly emit: (value: RequestToolSchemas) => void) {
-    fs.chmodSync(this.directory, 0o700);
+    try { fs.chmodSync(this.directory, 0o700); }
+    catch (error) { try { fs.rmSync(this.directory, {recursive:true,force:true}); } catch {} throw error; }
     this.timer = setInterval(() => this.scan(), 200);
     this.timer.unref();
   }

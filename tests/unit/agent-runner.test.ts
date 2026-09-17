@@ -363,6 +363,31 @@ describe('AgentRunner (session pool)', () => {
 
     expect(fs.existsSync(liveDir)).toBe(true);
   }, 15000);
+
+  // --------------------------------------------------------------------------
+  // LIVE-STATUS-01: agentSessionLiveStatus reflects isProcessing, not wall-clock
+  // idleness. Regression test for a bug where it checked isIdle(0) — true the
+  // instant any time at all has elapsed since the last activity tick, so it
+  // reported 'idle' even while a turn was actively processing.
+  // --------------------------------------------------------------------------
+  it('LIVE-STATUS-01: reports running while processing, idle once the turn ends, stopped once gone', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await sendChannelPost(port, 'chat:live', 'hello');
+    await waitForSession(runner, 'chat:live');
+    const sess = getSessions(runner).get('chat:live')!;
+    expect(sess.isProcessing).toBe(true);
+    // Time must actually elapse so a wall-clock isIdle(0) check would (incorrectly) flip to idle.
+    await new Promise(r => setTimeout(r, 20));
+    expect(runner.agentSessionLiveStatus(sess.sessionId)).toBe('running');
+
+    sess.setProcessing(false);
+    expect(runner.agentSessionLiveStatus(sess.sessionId)).toBe('idle');
+
+    expect(runner.agentSessionLiveStatus('no-such-session')).toBe('stopped');
+  }, 15000);
 });
 
 // ── tokenUsage → session model persistence (#273) ────────────────────────────

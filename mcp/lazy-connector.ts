@@ -31,11 +31,14 @@ async function discover() {
   if(catalog)return catalog;
   if(!loading)loading=(async()=>{
     await connect();
-    const tools:any[]=[];const cursors=new Set<string>();let cursor:string|undefined;
+    const tools:any[]=[];const cursors=new Set<string>();let cursor:string|undefined;let pages=0;let bytes=0;
     do {
+      if(++pages>500)throw Error('Connector catalog pagination exceeded page limit');
       const page=await client.listTools(cursor?{cursor}:{},{timeout:10000,signal:shutdown.signal});
-      tools.push(...page.tools.map(t=>({...t,description:t.description??''})));
-      if(tools.length>10000||Buffer.byteLength(JSON.stringify(tools))>8*1024*1024)throw Error('Connector catalog too large');
+      const pageTools=page.tools.map(t=>({...t,description:t.description??''}));
+      bytes+=Buffer.byteLength(JSON.stringify(pageTools));
+      if(tools.length+pageTools.length>10000||bytes>8*1024*1024)throw Error('Connector catalog too large');
+      tools.push(...pageTools);
       cursor=page.nextCursor;
       if(cursor&&cursors.has(cursor))throw Error('Invalid catalog pagination');
       if(cursor)cursors.add(cursor);
@@ -56,7 +59,7 @@ server.setRequestHandler(CallToolRequestSchema,async(req,extra)=>{
       return result;
     }
     return await tools.call(args,async(name,input)=>await client.callTool({name,arguments:input},undefined,{signal:AbortSignal.any([extra.signal,shutdown.signal]),timeout:600000,onprogress:progress=>{const token=req.params._meta?.progressToken;if(token!==undefined)void server.notification({method:'notifications/progress',params:{...progress,progressToken:token}}).catch(()=>{});}}) as any);
-  }catch{return {isError:true,content:[{type:'text',text:shutdown.signal.aborted||extra.signal.aborted?'Connector call cancelled.':'Connector request failed. Check the connector connection and permissions. Do not repeat a mutation without checking whether it succeeded.'}]};}
+  }catch(error){console.error('[gateway-lazy-connector] tool call failed:',error);return {isError:true,content:[{type:'text',text:shutdown.signal.aborted||extra.signal.aborted?'Connector call cancelled.':'Connector request failed. Check the connector connection and permissions. Do not repeat a mutation without checking whether it succeeded.'}]};}
 });
 await server.connect(new StdioServerTransport());
 let closing=false;

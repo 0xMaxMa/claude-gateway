@@ -131,3 +131,31 @@ test('request rows omit repeated tool inventories while the turn retains its mea
  const requests=html.split('<div class="request-details">')[1].split('</tbody></table></div>')[0];
  expect(requests).not.toContain('Loaded');expect(requests).not.toContain('Bash');
 });
+
+// ── Context window box: '-' only for a genuinely stopped session, never a mid-turn gap ──
+function contextWindowBox(view: Partial<TokenReportView>): string {
+ const html = generateTokenReportHtml('agent', { ...report, contextWindow: { used: 42000, total: 200000, model: 'claude-sonnet-5' }, ...view });
+ return html.split('class="card box-context">')[1].split('</div>')[0];
+}
+test('Context window shows "-" only when sessionStatus is stopped AND there is no active/idle-kept-alive activity', () => {
+ expect(contextWindowBox({ sessionStatus: 'stopped', activityStatus: 'idle' })).toContain('<strong>-</strong>');
+ expect(contextWindowBox({ sessionStatus: 'stopped', activityStatus: '' })).toContain('<strong>-</strong>');
+});
+test('Context window does NOT show "-" while activity is reported, even if the per-turn session process already tore down (sessionStatus stopped)', () => {
+ for (const activityStatus of ['thinking', 'working', 'waiting_input', 'queued']) {
+  const box = contextWindowBox({ sessionStatus: 'stopped', activityStatus });
+  expect(box).not.toContain('<strong>-</strong>');
+  expect(box).toContain('42.00K / 200K'); // the real measured window, not suppressed
+ }
+});
+test('Context window does NOT show "-" for a live (running/idle) session even with no activity', () => {
+ expect(contextWindowBox({ sessionStatus: 'running', activityStatus: '' })).not.toContain('<strong>-</strong>');
+ expect(contextWindowBox({ sessionStatus: 'idle', activityStatus: 'idle' })).not.toContain('<strong>-</strong>');
+});
+test('Context window falls back to an em dash (unmeasured), distinct from the stopped hyphen, when no window snapshot exists yet', () => {
+ const html = generateTokenReportHtml('agent', { ...report, contextWindow: null, sessionStatus: 'running', activityStatus: '' });
+ const box = html.split('class="card box-context">')[1].split('</div>')[0];
+ expect(box).toContain('<strong>—</strong>');
+ expect(box).not.toContain('<strong>-</strong>');
+});
+
