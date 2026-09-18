@@ -34,11 +34,8 @@ function modelContextWindow(model: unknown): number {
   if (typeof model === 'string' && model.includes('[1m]')) return model.startsWith('gpt') ? 1050000 : 1000000;
   return 200000;
 }
-/** Current agent context window: the latest agent turn's single largest request
- *  by sent context (input + cacheRead + cacheCreation); its usage.totalTokens is
- *  the numerator, the model's window is the denominator. Agent only — workers are
- *  separate processes and do not share the agent's context. Scope-independent so
- *  it reflects the true current state even after an auto-compact. */
+/** Latest observed request in the most recent agent turn, including its output.
+ * A peak earlier in the turn may predate compaction and is not current context. */
 function latestAgentContextWindow(store: Pick<OrchestrationStore, 'get'>, sessionId: string): { used: number; total: number; model: string | null } | null {
   const row = store.get(`SELECT payload_json FROM token_turns WHERE session_id=? AND role='agent' ORDER BY started_at DESC,id DESC LIMIT 1`, sessionId);
   if (!row) return null;
@@ -50,7 +47,7 @@ function latestAgentContextWindow(store: Pick<OrchestrationStore, 'get'>, sessio
     const usage = request?.usage;
     if (!usage) continue;
     const context = Number(usage.inputTokens ?? 0) + Number(usage.cacheReadTokens ?? 0) + Number(usage.cacheCreationTokens ?? 0);
-    if (!best || context > best.context) best = { context, total: Number(usage.totalTokens ?? 0) };
+    best = { context, total: Number(usage.totalTokens ?? 0) };
   }
   if (!best) return null;
   return { used: best.total, total: modelContextWindow(turn.model), model: typeof turn.model === 'string' ? turn.model : null };

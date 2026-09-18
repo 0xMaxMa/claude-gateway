@@ -159,3 +159,20 @@ test('Context window falls back to an em dash (unmeasured), distinct from the st
  expect(box).not.toContain('<strong>-</strong>');
 });
 
+
+test('live refresh updates status without replacing the scope toggle or its handler', async () => {
+ const {tokenReportClient} = require('../../src/ui/token-report-client');
+ const scope = {onclick: jest.fn()};
+ const nodes: Record<string, any> = Object.fromEntries(['report-status','report-totals','report-footprint','report-distribution','report-live'].map(id=>[id,{innerHTML:id==='report-status'?'Thinking':'old'}]));
+ nodes['report-scope']=scope;
+ const body={innerHTML:'old rows'};
+ const fresh={getElementById:(id:string)=>id==='login-form'?null:{innerHTML:id==='report-status'?'Idle':'new'},querySelector:()=>({innerHTML:'new rows'}),querySelectorAll:()=>[]};
+ const context:any={document:{hidden:false,getElementById:(id:string)=>nodes[id],querySelector:()=>body,querySelectorAll:()=>[],addEventListener:jest.fn()},
+  fetch:async()=>({ok:true,status:200,text:async()=>''}),DOMParser:class{parseFromString(){return fresh;}},location:{href:'https://fixture/report'},setInterval:jest.fn(),scrollX:0,scrollY:0,scrollTo:jest.fn(),filter:jest.fn()};
+ runInNewContext(tokenReportClient,context);
+ await context.refreshReport();
+ expect(nodes['report-status'].innerHTML).toBe('Idle');
+ expect(body.innerHTML).toBe('new rows');
+ expect(nodes['report-scope']).toBe(scope);
+ expect(typeof scope.onclick).toBe('function');
+});

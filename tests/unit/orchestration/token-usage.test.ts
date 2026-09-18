@@ -147,3 +147,14 @@ test('lazy connector calls count the underlying tool without a phantom partial w
  collector.observe({type:'assistant',message:{content:[{type:'tool_use',name:'mcp__browser__tool_call',input:{name:'page_observe',arguments:{tabId:42}}}]}});
  expect(collector.snapshot().usedTools).toEqual(['mcp__browser__page_observe']);
 });
+
+
+test('current context uses the latest request after compaction, not the turn peak', () => {
+  const store = new OrchestrationStore(':memory:', 'agent');
+  try {
+    const usage = (inputTokens: number) => ({inputTokens, cacheCreationTokens:0, cacheReadTokens:0, outputTokens:1000, totalTokens:inputTokens+1000});
+    recordTokenTurn(store, {id:'decision',sessionId:'session',role:'agent',category:'input',toolIds:[],inputTokens:0,totalTokens:0,startedAt:1,model:'fixture',
+      requests:[{id:'before-compaction',usage:usage(190000)},{id:'after-compaction',usage:usage(24000)}]});
+    expect(tokenReport(store,'session').contextWindow?.used).toBe(25000);
+  } finally { store.close(); }
+});
