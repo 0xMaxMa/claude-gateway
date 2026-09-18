@@ -47,3 +47,23 @@ test('channel session status omits legacy message counts and only suggests compa
  await runner.handleCommandSessionInfo('a','c');
  expect(send.mock.calls[1][1]).not.toContain('Near limit');
 });
+
+test('legacy session status retains measured usage while absent and stale values stay unknown', async () => {
+ const send = jest.fn();
+ const meta = {id:'legacy',name:'Legacy',lastActive:Date.now(),lastInputTokens:180000,model:'measured-model'};
+ const runner = Object.assign(Object.create(AgentRunner.prototype), {
+  sessionStore:{listSessions:async()=>({activeSessionId:'legacy',sessions:[meta]})},
+  agentConfig:{claude:{model:'default-model'}},channelFor:()=> 'telegram',writeAutoForward:send,
+  dashboardContextWindow:jest.fn(async()=>200000),
+ });
+ await runner.handleCommandSessionInfo('a','c');
+ expect(send.mock.calls[0][1]).toContain('180K / 200K · 90%');
+ expect(runner.dashboardContextWindow).toHaveBeenCalledWith('measured-model');
+ expect((await runner.sessionContextInfo('legacy',{...meta,lastActive:Date.now()-3600001})).contextTokens).toBeNull();
+ expect((await runner.sessionContextInfo('legacy',{...meta,lastInputTokens:undefined})).contextTokens).toBeNull();
+ // An expired orchestration measurement must not fall back to old legacy metadata.
+ runner.orchestration={sessionContextWindow:()=>null,ownsSession:()=>true};
+ expect((await runner.sessionContextInfo('legacy',meta)).contextTokens).toBeNull();
+ runner.orchestration.ownsSession=()=>false;
+ expect((await runner.sessionContextInfo('legacy',meta)).contextTokens).toBe(180000);
+});

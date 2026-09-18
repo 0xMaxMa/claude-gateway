@@ -1414,9 +1414,9 @@ export class AgentRunner extends EventEmitter {
         const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId, this.channelFor(chatId));
         const meta = index.sessions.find(s => s.id === index.activeSessionId);
         if (!meta) {
-          return respond({ success: true, text: 'No active session found.' });
+          return respond({ success: true, sessionId: null, text: 'No active session found.' });
         }
-        const context = await this.sessionContextInfo(meta.id);
+        const context = await this.sessionContextInfo(meta.id, meta);
         const lines = [
           `📌 Current Session: ${meta.name}`,
           `<code>${meta.id}</code>`,
@@ -2990,8 +2990,15 @@ export class AgentRunner extends EventEmitter {
   /**
    * /session — show info about the current active session.
    */
-  private async sessionContextInfo(sessionId: string) {
-    const context = this.orchestration?.sessionContextWindow(sessionId);
+  private async sessionContextInfo(sessionId: string, meta?: { lastInputTokens?: number; lastActive: number; model?: string }) {
+    let context = this.orchestration?.sessionContextWindow(sessionId);
+    // Legacy sessions do not write the orchestration ledger. Keep their measured
+    // usage, but never resurrect stale metadata for an orchestration-owned session.
+    if (!context && meta && !this.orchestration?.ownsSession(sessionId) &&
+        Number.isFinite(meta.lastInputTokens) && meta.lastInputTokens! >= 0 &&
+        Number.isFinite(meta.lastActive) && Date.now() - meta.lastActive <= 3600000) {
+      context = { used: meta.lastInputTokens!, total: null, model: meta.model ?? this.agentConfig.claude.model };
+    }
     if (!context) return {contextUsedPct:null,contextTokens:null,contextWindow:null,contextModel:null,text:'—'};
     const total = context.model ? await this.dashboardContextWindow(context.model) : null;
     const pct = total && total > 0 ? Math.round(context.used / total * 100) : null;
@@ -3008,7 +3015,7 @@ export class AgentRunner extends EventEmitter {
       return;
     }
 
-    const context = await this.sessionContextInfo(meta.id);
+    const context = await this.sessionContextInfo(meta.id, meta);
 
     const lines = [
       `📌 Current Session: ${meta.name}`,
@@ -5332,7 +5339,7 @@ export class AgentRunner extends EventEmitter {
         // The api append path doesn't maintain the index messageCount, so count the flat store
         // (the real conversation) directly rather than trusting meta.messageCount.
         const messageCount = (await this.sessionStore.loadSession(agentId, sessionId).catch(() => [])).length;
-        const context = await this.sessionContextInfo(sessionId);
+        const context = await this.sessionContextInfo(sessionId, meta);
         const {text:contextText,...contextFields} = context;
         result = {sessionId,sessionName:meta?.name ?? null,messageCount,archivedCount:meta?.archivedCount ?? 0,
           ...contextFields,model:meta?.model ?? effectiveModel};
@@ -5548,7 +5555,7 @@ export class AgentRunner extends EventEmitter {
     const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId, 'api').catch(() => null);
     const meta = index?.sessions.find((s) => s.id === sessionId);
     if (!meta) return null;
-    const {text: _contextText, ...context} = await this.sessionContextInfo(sessionId);
+    const {text: _contextText, ...context} = await this.sessionContextInfo(sessionId, meta);
     return {
       sessionId: meta.id,
       sessionName: meta.name,

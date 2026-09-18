@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { parseSessionInfo } from './session-browser';
 /**
  * Telegram channel for Claude Gateway.
  *
@@ -1526,9 +1527,7 @@ const liveSessionBrowser = new LiveTaskBrowser({
       method:'POST', headers:{'Content-Type':'application/json'}, signal:AbortSignal.timeout(10000),
       body:JSON.stringify({command:'session_info',chat_id:chat}),
     })
-    const result = await response.json() as {success:boolean;sessionId:string;text:string}
-    if (!response.ok || !result.success || !result.sessionId || typeof result.text !== 'string') throw new Error('Session info unavailable')
-    return result
+    return parseSessionInfo(response.ok, await response.json())
   },
   render: result => ({text:(result as {sessionId:string;text:string}).text,reply_markup:{inline_keyboard:[]}}),
   send: async (chat,menu) => (await bot.api.sendMessage(chat,menu.text,{parse_mode:'HTML'})).message_id,

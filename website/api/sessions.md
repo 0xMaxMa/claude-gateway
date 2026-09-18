@@ -152,7 +152,7 @@ curl -H "X-Api-Key: my-secret-key-123" \
 }
 ```
 
-Context fields use the latest measured agent request, matching the dashboard token report, rather than message counts or a pre-compaction peak. Measurements expire when the latest agent decision is older than one hour. Missing measurements are `null`; unknown capacity leaves `contextWindow` and `contextUsedPct` null. `contextModel` identifies the measured model, while `model` is the selected model. Message counts remain in the structured API for compatibility; `/session` text omits them and displays `—` when context is unavailable.
+Context fields use the latest measured agent request, matching the dashboard token report, rather than message counts or a pre-compaction peak. Measurements expire when the latest agent decision is older than one hour. Missing measurements are `null`; unknown capacity leaves `contextWindow` and `contextUsedPct` null. `contextModel` identifies the measured model, while `model` is the selected model. Sessions outside orchestration use their stored `lastInputTokens` and model, with freshness based on `lastActive`; they do not have an orchestration request ledger. Message counts remain in the structured API for compatibility; `/session` text omits them and displays `—` when context is unavailable.
 
 **Error responses:**
 
