@@ -51,10 +51,11 @@ test('persona native tools keep container and explicitly isolated workspace boun
 
 // A system prompt naming HEARTBEAT.md alongside an agent instruction to reply
 // HEARTBEAT_OK is rejected by the provider, so API session rules must not carry
-// the filename. The memory-store prohibition itself is unchanged.
-test('API source rules forbid memory writes without naming the heartbeat file',()=>{
+// the filename. Keep both memory and scheduled-task configuration protected.
+test('API source rules forbid memory and schedule configuration writes without naming the heartbeat file',()=>{
  expect(API_SOURCE_RULES).not.toMatch(/HEARTBEAT\.md/);
  expect(API_SOURCE_RULES).toContain('Memory updates are not supported in API sessions.');
  expect(API_SOURCE_RULES).toContain('MEMORY.md');
  expect(API_SOURCE_RULES).toContain('USER.md');
+ expect(API_SOURCE_RULES).toContain('Do not create or update heartbeat or scheduled-task configuration files.');
 });
