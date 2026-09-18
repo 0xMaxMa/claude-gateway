@@ -20,7 +20,7 @@ jest.mock('../../../src/voice/providers/registry', () => ({
 
 test('voice ticket requires scoped auth and origin-bound tickets without URL registration, is single-use, and releases its mic lease on disconnect', async () => {
   const agent = { id: 'a', orchestration: { enabled: true }, voice: { ...ORCHESTRATION_DEFAULTS.voice, enabled: true, tts: { ...ORCHESTRATION_DEFAULTS.voice.tts, voiceId: 'fixture' } } } as AgentConfig;
-  const runner = { subscribeVoiceResults: async () => () => {}, apiSessionExists: async () => true, authorizeVoiceSession: async () => {}, submitVoiceUtterance: jest.fn(), stopVoiceResponse: jest.fn(), recordVoicePlayback: jest.fn() } as unknown as AgentRunner;
+  const runner = { setBrowserVoice: async () => {}, pendingVoiceSpeech: async () => [], subscribeVoiceResults: async () => () => {}, apiSessionExists: async () => true, authorizeVoiceSession: async () => {}, submitVoiceUtterance: jest.fn(), stopVoiceResponse: jest.fn(), recordVoicePlayback: jest.fn() } as unknown as AgentRunner;
   const api = new VoiceApi(new Map([['a', runner]]), new Map([['a', agent]]), [{ id: 'owner', key: 'fixture', agents: ['a'] }]);
   const app = express(); app.use(express.json()); app.use('/api', api.router);
   const server = createServer(app); server.on('upgrade', (req, socket, head) => { api.upgrade(req, socket, head); });
@@ -81,7 +81,7 @@ test('STT disconnect closes with a retryable transport code and a new ticket ope
  const {sttProvider}=await import('../../../src/voice/providers/registry');
  const factory=sttProvider as jest.Mock;
  const agent={id:'a',orchestration:{enabled:true},voice:{...ORCHESTRATION_DEFAULTS.voice,enabled:true}} as AgentConfig;
- const runner={subscribeVoiceResults:async()=>()=>{},apiSessionExists:async()=>true,authorizeVoiceSession:async()=>{},stopVoiceResponse:jest.fn(),recordVoicePlayback:jest.fn()} as unknown as AgentRunner;
+ const runner={setBrowserVoice: async () => {}, pendingVoiceSpeech: async () => [], subscribeVoiceResults:async()=>()=>{},apiSessionExists:async()=>true,authorizeVoiceSession:async()=>{},stopVoiceResponse:jest.fn(),recordVoicePlayback:jest.fn()} as unknown as AgentRunner;
  const api=new VoiceApi(new Map([['a',runner]]),new Map([['a',agent]]),[{id:'owner',key:'fixture',agents:['a']}]);
  const app=express();app.use(express.json());app.use('/api',api.router);
  const server=createServer(app);server.on('upgrade',(req,socket,head)=>{api.upgrade(req,socket,head);});
@@ -116,7 +116,7 @@ test('a failed STT handshake releases the lease and requests a fresh connection'
  jest.spyOn(stt,'open').mockRejectedValue(new VoiceError('STT_PROVIDER_ERROR_HTTP_503'));
  (sttProvider as jest.Mock).mockReturnValueOnce(stt);
  const agent={id:'a',orchestration:{enabled:true},voice:{...ORCHESTRATION_DEFAULTS.voice,enabled:true}} as AgentConfig;
- const runner={subscribeVoiceResults:async()=>()=>{},apiSessionExists:async()=>true,authorizeVoiceSession:async()=>{},stopVoiceResponse:jest.fn(),recordVoicePlayback:jest.fn()} as unknown as AgentRunner;
+ const runner={setBrowserVoice: async () => {}, pendingVoiceSpeech: async () => [], subscribeVoiceResults:async()=>()=>{},apiSessionExists:async()=>true,authorizeVoiceSession:async()=>{},stopVoiceResponse:jest.fn(),recordVoicePlayback:jest.fn()} as unknown as AgentRunner;
  const api=new VoiceApi(new Map([['a',runner]]),new Map([['a',agent]]),[{id:'owner',key:'fixture',agents:['a']}]);
  const app=express();app.use(express.json());app.use('/api',api.router);
  const server=createServer(app);server.on('upgrade',(req,socket,head)=>{api.upgrade(req,socket,head);});
@@ -136,4 +136,47 @@ test('a failed STT handshake releases the lease and requests a fresh connection'
   expect((await request(app).post(endpoint).set('Authorization','Bearer fixture').send({chat_id:'c'})).status).toBe(200);
   expect(runner.stopVoiceResponse).not.toHaveBeenCalled();
  }finally{ws?.terminate();await api.close();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+
+test('returning muted plays missed and later speech once, and preference/ticket writes retain auth and lease exclusion', async () => {
+  const agent = {id:'a', orchestration:{enabled:true}, voice:{...ORCHESTRATION_DEFAULTS.voice,enabled:true}} as AgentConfig;
+  const pending = [{responseId:'missed',text:'Display',spoken:'Speak'}];
+  const runner = {
+    setBrowserVoice: jest.fn(async () => { await new Promise(resolve => setImmediate(resolve)); }),
+    pendingVoiceSpeech: async () => pending,
+    subscribeVoiceResults: async () => () => {}, apiSessionExists: async () => true,
+    authorizeVoiceSession: async () => {}, stopVoiceResponse: jest.fn(), recordVoicePlayback: jest.fn(),
+  } as unknown as AgentRunner;
+  const api = new VoiceApi(new Map([['a',runner]]),new Map([['a',agent]]),[{id:'owner',key:'fixture',agents:['a']}]);
+  const app=express(); app.use(express.json()); app.use('/api',api.router);
+  const server=createServer(app); server.on('upgrade',(req,socket,head)=>{api.upgrade(req,socket,head);});
+  server.listen(0,'127.0.0.1'); await once(server,'listening');
+  const endpoint='/api/v1/agents/a/sessions/s/voice-sessions';
+  let ws:WebSocket|undefined;
+  const waitFor=async(predicate:()=>boolean)=>{const deadline=Date.now()+3500;while(!predicate()&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));expect(predicate()).toBe(true);};
+  try {
+    expect((await request(app).put(`${endpoint}/preference`).send({enabled:false})).status).toBe(401);
+    expect((await request(app).put(`${endpoint}/preference`).set('Authorization','Bearer fixture').send({enabled:true})).status).toBe(400);
+    const tickets=await Promise.all([0,1].map(()=>request(app).post(endpoint).set('Authorization','Bearer fixture').send({chat_id:'c'})));
+    expect(tickets.map(t=>t.status).sort()).toEqual([200,409]);
+    const ticket=tickets.find(t=>t.status===200)!;
+    ws=new WebSocket(`ws://127.0.0.1:${(server.address() as {port:number}).port}${ticket.body.stream_path}?ticket=${ticket.body.ticket}`);
+    const controls:any[]=[];
+    ws.on('message',(data,binary)=>{
+      if(!binary){controls.push(JSON.parse(String(data)));return;}
+      const {decodeVoiceFrame}=require('../../../src/voice/protocol');
+      const frame=decodeVoiceFrame(Buffer.from(data as Buffer));
+      ws!.send(JSON.stringify({type:'playback.progress',epoch:frame.epoch,sample_offset:frame.audio.length/2}));
+    });
+    await once(ws,'open'); await waitFor(()=>controls.some(c=>c.state==='ready'));
+    ws.send(JSON.stringify({type:'voice.start',muted:true}));
+    await waitFor(()=>controls.some(c=>c.type==='playback.end'));
+    expect(controls.some(c=>c.state==='muted')).toBe(true);
+    expect(controls.some(c=>c.state==='listening')).toBe(false);
+    pending.push({responseId:'finished-after-return',text:'Later',spoken:'Later speech'});
+    await waitFor(()=>controls.filter(c=>c.type==='playback.end').length===2);
+    expect(controls.filter(c=>c.type==='playback.start').map(c=>c.response_id)).toEqual(['missed','finished-after-return']);
+    expect((await request(app).put(`${endpoint}/preference`).set('Authorization','Bearer fixture').send({enabled:false})).status).toBe(204);
+    expect(runner.setBrowserVoice).toHaveBeenLastCalledWith('s','api:owner',false);
+  } finally {ws?.terminate();await api.close();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });

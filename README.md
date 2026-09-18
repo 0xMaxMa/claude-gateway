@@ -77,3 +77,7 @@ Run `claude-gateway doctor` to check startup and voice dependencies, even when t
 server is down. Use `claude-gateway doctor fix` for supported local repairs and
 installation of missing `ffmpeg`/`ffprobe`. Repair asks for confirmation and never
 starts or restarts the gateway. See [diagnosis and repair](https://0xmaxma.github.io/claude-gateway/guide/troubleshooting.html#gateway-will-not-start-doctor-and-repair).
+
+Browser voice can resume unheard approved replies after navigation. Clients retain
+per-session mode/mute intent and reconnect with playback receipts; see the
+[voice resume protocol](website/api/voice.md#resume-browser-voice-after-navigation).

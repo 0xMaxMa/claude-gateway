@@ -38,7 +38,7 @@ export class VoiceApi {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.removeHeader('Access-Control-Allow-Credentials');
       if (req.method === 'OPTIONS') {
-        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Authorization, X-Api-Key, Content-Type'); res.status(204).end(); return;
       }
       next();
@@ -66,6 +66,15 @@ export class VoiceApi {
         res.type('audio/wav').send(result);
       } catch { res.status(403).end(); }
     });
+    this.router.put('/v1/agents/:agentId/sessions/:sessionId/voice-sessions/preference', auth, async (req: Request, res: Response) => {
+      const agentId = String(req.params.agentId), sessionId = String(req.params.sessionId);
+      const key = (req as Request & { apiKey: ApiKey }).apiKey, runner = this.agents.get(agentId);
+      if (!runner || !canAccessAgent(key, agentId)) { res.status(403).end(); return; }
+      // Enabling requires the normal ticket/credit checks; this endpoint only stops intent.
+      if (req.body?.enabled !== false) { res.status(400).json({ error: 'Expected enabled=false' }); return; }
+      try { await runner.setBrowserVoice(sessionId, apiPrincipal(key), false); res.status(204).end(); }
+      catch { res.status(403).end(); }
+    });
     this.router.post('/v1/agents/:agentId/sessions/:sessionId/voice-sessions', auth, async (req: Request, res: Response) => {
       const agentId = String(req.params.agentId), sessionId = String(req.params.sessionId);
       const key = (req as Request & { apiKey: ApiKey }).apiKey;
@@ -88,11 +97,18 @@ export class VoiceApi {
       this.prune();
       const leaseKey = `${agentId}:${sessionId}`;
       if (this.leases.has(leaseKey)) { res.status(409).json({ error: 'Voice session already active' }); return; }
-      if (this.tickets.size + this.sessions.size >= 100) { res.status(503).json({ error: 'Voice capacity exceeded' }); return; }
+      if (this.leases.size >= 100) { res.status(503).json({ error: 'Voice capacity exceeded' }); return; }
       const ticket = randomBytes(32).toString('hex'), voiceSessionId = randomUUID();
+      // Reserve synchronously before persistence yields, including capacity accounting.
+      this.leases.set(leaseKey, voiceSessionId);
+      try { await runner.setBrowserVoice(sessionId, apiPrincipal(key), true); }
+      catch {
+        if (this.leases.get(leaseKey) === voiceSessionId) this.leases.delete(leaseKey);
+        res.status(403).json({ error: 'Session access denied' }); return;
+      }
       const value: VoiceTicket = { agentId, sessionId, chatId, principalId: apiPrincipal(key), voiceSessionId,
         expiresAt: Date.now() + 30000, origin, allowTools: config.allow_tools ?? Boolean(key.allow_tools) };
-      this.tickets.set(ticket, value); this.leases.set(leaseKey, voiceSessionId);
+      this.tickets.set(ticket, value);
       res.json({ voice_session_id: voiceSessionId, ticket, expires_at: value.expiresAt, input_format: PCM16, output_format: PCM16,
         capabilities: { full_duplex: true, playback_clear: true, playback_progress: true },
         stream_path: `/api/v1/agents/${encodeURIComponent(agentId)}/voice-sessions/${voiceSessionId}/stream` });
@@ -160,10 +176,26 @@ export class VoiceApi {
           event => console.info(JSON.stringify({ ts: new Date().toISOString(), level: 'info', event: 'Voice timing', agentId: ticket.agentId, sessionId: ticket.sessionId, voiceSessionId: ticket.voiceSessionId, ...event, provider: voice[event.operation].provider, model: voice[event.operation].model })));
       } catch { send({ type: 'voice.error', code: 'PROVIDER_CONFIGURATION_ERROR' }); ws.close(); this.releaseLease(ticket); return; }
       this.sessions.set(ticket.voiceSessionId, { session, socket: ws, ticket });
-      let started = false;
+      let started = false, playbackReady = false;
       let selectedGender: string | undefined;
       let unsubscribe: (() => void) | undefined;
       let alive = true;
+      let catchingUp = false, resumeFailed = false;
+      const catchUp = async () => {
+        if (!playbackReady || catchingUp || ws.readyState !== WebSocket.OPEN) return;
+        catchingUp = true;
+        try {
+          const pending = await runner.pendingVoiceSpeech(ticket.sessionId, ticket.principalId, session.speechClaims());
+          if (ws.readyState === WebSocket.OPEN) for (const result of pending) session.notifyResult(result);
+          resumeFailed = false;
+        } catch {
+          if (!resumeFailed) send({ type: 'voice.notice', code: 'VOICE_RESUME_UNAVAILABLE' });
+          resumeFailed = true;
+        }
+        finally { catchingUp = false; }
+      };
+      const resumeTimer = setInterval(() => { void catchUp(); }, 1000);
+      resumeTimer.unref();
       const heartbeat = setInterval(() => { if (!alive || !started) { ws.terminate(); return; } alive = false; ws.ping(); }, 30000);
       heartbeat.unref(); ws.on('pong', () => { alive = true; });
       ws.on('message', (data, binary) => {
@@ -177,7 +209,7 @@ export class VoiceApi {
             send({ type: 'voice.configured', model: ticket.model });
           }
           switch (control.type) {
-            case 'voice.start': if (started) throw new Error('VOICE_ALREADY_STARTED'); started = true;
+            case 'voice.start': if (control.muted !== undefined && typeof control.muted !== 'boolean') throw new Error('INVALID_CONTROL'); if (started) throw new Error('VOICE_ALREADY_STARTED'); started = true;
               if (control.voice_id !== undefined) {
                 const choice = (await voiceChoices(voice.tts)).find(choice => choice.id === control.voice_id);
                 if (typeof control.voice_id !== 'string' || !choice) throw new Error('INVALID_CONTROL');
@@ -195,7 +227,10 @@ export class VoiceApi {
               }
               unsubscribe = await runner.subscribeVoiceResults(ticket.sessionId, ticket.principalId, result => session.notifyResult(result), () => selectedGender);
               if (ws.readyState !== WebSocket.OPEN) { unsubscribe(); break; }
-              await session.start(); break;
+              if (control.muted === true) await session.mute(true, 'discard');
+              else await session.start();
+              playbackReady = true;
+              void catchUp(); break;
             case 'voice.configure': {
               if (control.voice_id === undefined && control.model !== undefined) break;
               if (typeof control.voice_id !== 'string') throw new Error('INVALID_CONTROL');
@@ -218,7 +253,7 @@ export class VoiceApi {
         })().catch(error => send({ type: 'voice.error', code: error.code ?? 'INVALID_CONTROL' }));
       });
       ws.on('error', () => { void session.close(); });
-      ws.on('close', () => { unsubscribe?.(); clearInterval(heartbeat); void session.close(); this.sessions.delete(ticket.voiceSessionId); this.releaseLease(ticket); });
+      ws.on('close', () => { clearInterval(resumeTimer); unsubscribe?.(); clearInterval(heartbeat); void session.close(); this.sessions.delete(ticket.voiceSessionId); this.releaseLease(ticket); });
       send({ type: 'voice.state', state: 'ready', turn_grouping: true, voice_session_id: ticket.voiceSessionId, generation: session.playback.generation });
     }); } catch {
       this.releaseLease(ticket);

@@ -248,7 +248,7 @@ test('discard mute resets STT so discarded speech cannot leak into the next utte
   } finally { await session.close(); }
 });
 
-test.each(['active', 'finalizing', 'pending'] as const)('mute commits %s speech immediately once and allows unmute', async phase => {
+test.each(['active', 'finalizing', 'pending', 'rapid'] as const)('mute commits %s speech immediately once and allows unmute', async phase => {
   const stt = new FakeSttProvider(), controls: Record<string, any>[] = [];
   const submit = jest.fn(async () => ({ inputId: 'one', response: Promise.resolve('done') }));
   const stop = jest.fn();
@@ -260,9 +260,10 @@ test.each(['active', 'finalizing', 'pending'] as const)('mute commits %s speech 
     session.speechActivity();
     await session.audio({ generation: turn.generation, epoch: 0, sequence: 1, segmentId: turn.utterance_id, audio: Buffer.alloc(320) });
     let committing: Promise<void> | undefined;
-    if (phase !== 'active') committing = session.commit(1);
+    if (phase !== 'active' && phase !== 'rapid') committing = session.commit(1);
     let muting: Promise<void> | undefined;
-    if (phase !== 'pending') muting = session.mute(true, 'commit', phase === 'active' ? 1 : undefined);
+    if (phase !== 'pending') muting = session.mute(true, 'commit', phase === 'active' || phase === 'rapid' ? 1 : undefined);
+    const unmuting = phase === 'rapid' ? session.mute(false, 'commit') : undefined;
     while (!stt.sessions[0].commitId) await new Promise(r => setTimeout(r, 1));
     stt.sessions[0].emit({ type: 'segment_final', segmentId: 's', text: 'ช่วยแนะนำตัวหน่อย' });
     stt.sessions[0].emit({ type: 'commit_done', commitId: stt.sessions[0].commitId! });
@@ -272,7 +273,8 @@ test.each(['active', 'finalizing', 'pending'] as const)('mute commits %s speech 
     expect(submit).toHaveBeenCalledTimes(1);
     expect(controls.filter(c => c.type === 'utterance.accepted')).toHaveLength(1);
     expect(stop).not.toHaveBeenCalled();
-    await session.mute(false, 'commit');
+    if (unmuting) await unmuting; else await session.mute(false, 'commit');
+    expect(controls.at(-1)).toMatchObject({state:'listening'});
     expect(controls.some(c => c.type === 'voice.state' && c.state === 'listening' && c.utterance_id !== turn.utterance_id && c.utterance_id)).toBe(true);
   } finally { await session.close(); }
 });

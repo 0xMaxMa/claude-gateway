@@ -540,6 +540,12 @@ export class AgentRunner extends EventEmitter {
   async subscribeResponseText(sessionId: string, principalId: string, receive: (value: { responseId: string; text: string; final: boolean }) => void) {
     return (await this.getOrchestration()).subscribeText(sessionId, principalId, receive);
   }
+  async setBrowserVoice(sessionId: string, principalId: string, enabled: boolean) {
+    return (await this.getOrchestration()).setBrowserVoice(sessionId, principalId, enabled);
+  }
+  async pendingVoiceSpeech(sessionId: string, principalId: string, claimed: string[] = []) {
+    return (await this.getOrchestration()).pendingVoiceSpeech(sessionId, principalId, claimed);
+  }
   async voiceReplay(sessionId: string, principalId: string, responseId?: string) {
     return (await this.getOrchestration()).voiceAudio(sessionId, principalId, responseId);
   }

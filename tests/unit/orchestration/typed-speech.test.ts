@@ -28,6 +28,16 @@ test('typed chat speaks only to the connected same-principal listener and retain
   expect(runtime.store.all('SELECT DISTINCT modality FROM conversation_inputs')).toEqual([{modality:'text'}]);
   expect(()=>runtime.subscribeVoiceResults(sid,'other',received)).toThrow();
   unsubscribe();await send();expect(received).toHaveBeenCalledTimes(1);
+  runtime.store.run('UPDATE assistant_responses SET created_at=1');
+  runtime.setBrowserVoice(sid,'owner',true);
+  await send(); // No transport is subscribed while the response completes.
+  expect(received).toHaveBeenCalledTimes(1);
+  expect(runtime.pendingVoiceSpeech(sid,'owner')).toEqual([expect.objectContaining({spoken:'Hello aloud',text:'Hello in chat'})]);
+  expect(()=>runtime.pendingVoiceSpeech(sid,'other')).toThrow();
+  expect(()=>runtime.setBrowserVoice(sid,'other',false)).toThrow();
+  runtime.setBrowserVoice(sid,'owner',false);
+  expect(runtime.pendingVoiceSpeech(sid,'owner')).toEqual([]);
+
  }finally{await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
 });
 
