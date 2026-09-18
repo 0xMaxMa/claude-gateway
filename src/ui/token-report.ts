@@ -9,8 +9,7 @@ export interface TokenReportView {
   contextFootprint?: ContextFootprint;
   contextWindow?: { used: number; total: number | null; model: string | null } | null;
   sessionId: string;
-  // Live session lifecycle from the runner's in-memory map: 'running'/'idle' =
-  // session kept alive, 'stopped' = killed/removed. Drives the Context window '-'.
+  // Legacy caller metadata; managed display uses activityStatus.
   sessionStatus?: 'running' | 'idle' | 'stopped';
   // Activity status derived exactly like the dashboard Conversations "Status" column
   // (thinking/working/waiting_input/queued/idle); drives the header badge.
@@ -130,19 +129,9 @@ export function generateTokenReportHtml(agentId: string, report: TokenReportView
  const totalU=(agentU||workerU)?{inputTokens:(agentU?.inputTokens||0)+(workerU?.inputTokens||0),cacheReadTokens:(agentU?.cacheReadTokens||0)+(workerU?.cacheReadTokens||0),cacheCreationTokens:(agentU?.cacheCreationTokens||0)+(workerU?.cacheCreationTokens||0)}:undefined;
  const windowCap=(t:number)=>t>=1e6?+(t/1e6).toFixed(2)+'M':Math.round(t/1000)+'K';
  const cw=report.contextWindow;
- // Header badge mirrors the Conversations "Status" column exactly: show the live
- // activity status (thinking/working/…). Only with no active work does it fall back
- // to idle (session kept alive) or stopped (dropped from the live map) — the same
- // disambiguation sessionDisplayStatus() applies in the dashboard.
- const activity=report.activityStatus||'';
- // Orchestration recreates the per-turn session process and tears it down as soon as
- // that turn's decision finishes (see runtime.ts's `finally` releaseAgentSession call) —
- // agentSessionLiveStatus() reports 'stopped' between turns even while a dispatched
- // background task keeps the conversation busy. Only trust that live-map 'stopped'
- // reading when activity also agrees nothing is going on; a conversation with active
- // work is never "stopped" for the Context window box, even mid-turn-gap.
- const cwStopped=(!activity||activity==='idle')&&report.sessionStatus==='stopped';
- const headerStatus=(!activity||activity==='idle')?(cwStopped?'stopped':'idle'):activity;
+ // Use the same durable session status as the dashboard, independent of process teardown.
+ const headerStatus=report.activityStatus||'stopped';
+ const cwStopped=headerStatus==='stopped';
  const contextWindowBox=`<div class="card box-context">Context window<strong>${cwStopped?'-':(cw?n(cw.used)+' / '+(cw.total==null?'—':windowCap(cw.total)):'—')}</strong>${!cwStopped&&cw&&cw.model?`<span class="card-cached" title="${escape(cw.model)}">Model: ${escape(cw.model)}</span>`:''}</div>`;
  const models=[...new Set(report.turns.map(t=>t.model).filter((m):m is string=>Boolean(m)))].sort();
  // Fixed status buckets; raw turn/attempt states are mapped into these client-side.

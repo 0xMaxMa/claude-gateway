@@ -156,5 +156,7 @@ test('current context uses the latest request after compaction, not the turn pea
     recordTokenTurn(store, {id:'decision',sessionId:'session',role:'agent',category:'input',toolIds:[],inputTokens:0,totalTokens:0,startedAt:1,model:'fixture',
       requests:[{id:'before-compaction',usage:usage(190000)},{id:'after-compaction',usage:usage(24000)}]});
     expect(tokenReport(store,'session').contextWindow?.used).toBe(25000);
+    recordTokenTurn(store, {id:'new-unmeasured',sessionId:'session',role:'agent',category:'input',toolIds:[],inputTokens:0,totalTokens:0,startedAt:2});
+    expect(tokenReport(store,'session').contextWindow?.used).toBe(25000);
   } finally { store.close(); }
 });

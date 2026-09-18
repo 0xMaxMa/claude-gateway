@@ -102,3 +102,7 @@ Gateway execution tools in host/isolated workers use `tool_search` to retrieve o
 Discovery adds a model/tool round trip on first use. Smaller schema payloads do not guarantee lower end-to-end latency or billing. Compare the same model and task with measured cache usage before concluding that a workload is cheaper. The initial implementation has protocol/fixture coverage; matched live-model A/B measurements are required to establish production savings.
 
 The dashboard uses the same **admin API key** login as before. Conversations and Tasks open detail drawers with retained session records and individual worker attempts; token reports open in a separate tab. Overview displays recorded UTC token activity, while Usage & tokens separates Agent and Worker totals. Reads run in a dedicated worker thread with bounded caches, pagination, and live updates; missing measurements are shown as unavailable.
+
+### Dashboard session activity
+
+The dashboard and Session token report share the same session status. After the last Agent turn ends, a conversation without active work stays **Idle** for one hour, even though its per-turn Claude Code process has been released. After more than one hour it shows **Stopped**, and both Context window cards show **—**. Active turns and non-terminal tasks retain their activity status. Context window retains the latest recorded measurement during the idle period; these display rules do not expire or delete conversation history or imply provider cache expiry.

@@ -35,12 +35,9 @@ function dashboardTaskRows(){return dashboardRows().flatMap(({a,s})=>(s.tasks||[
 function dashText(value){return escHtml(value==null?'—':String(value));}
 function dashCount(value){return compactNumber(value);}
 function dashStatus(value){return taskStatusBadge(value);}
-// Managed sessions carry a DB-derived status where 'idle' cannot tell a kept-alive
-// session from one already killed by the idle cleaner; sessionAlive (from the live
-// runner map) disambiguates: alive -> idle, gone -> stopped. Real busy states
-// (working/thinking/waiting_input/queued/…) are meaningful and left untouched.
+// Managed status is derived from durable activity and the last turn, not process lifetime.
 function sessionDisplayStatus(s){
- if(s.orchestration){var st=s.status||'';return(!st||st==='idle')?(s.sessionAlive?'idle':'stopped'):st;}
+ if(s.orchestration)return s.status||'stopped';
  return s.status||(s.isRunning?'running':'stopped');
 }
 function dashReportUrl(a,s){return apiUrl('/dashboard/token-report')+'?agentId='+encodeURIComponent(a)+'&sessionId='+encodeURIComponent(s)+'&scope='+dashboardScope;}
@@ -116,7 +113,7 @@ async function dashDetail(agentId,sessionId,taskId,offset=0){
       var cw=detail.contextWindow;
       var windowCap=function(t){return t>=1e6?(+(t/1e6).toFixed(2))+'M':Math.round(t/1000)+'K';};
       var detailActivity=detail.activityStatus||'';
-      var cwStopped=(!detailActivity||detailActivity==='idle')&&detail.sessionStatus==='stopped';
+      var cwStopped=detailActivity==='stopped';
       body+='<div class="dash-grid session-token-totals"><div class="dash-stat box-context"><span>Context window</span><strong>'+(cwStopped?'-':(cw?dashCount(cw.used)+' / '+(cw.total==null?'—':windowCap(cw.total)):'—'))+'</strong>'+((!cwStopped&&cw&&cw.model)?'<span class="card-cached">Model: '+escHtml(cw.model)+'</span>':'')+'</div><div class="dash-stat box-agent"><span>Agent tokens</span><strong>'+dashCount(detail.totals.agentTokens)+'</strong>'+cachedLineFor(uAgent)+'</div><div class="dash-stat box-worker"><span>Worker tokens</span><strong>'+dashCount(detail.totals.workerTokens)+'</strong>'+cachedLineFor(uWorker)+'</div></div><p class="live-note">Recorded turns only. Missing measurements are shown as —, not zero. Token volume is not billing cost.</p>';
       body+='<details class="detail-block turn-disclosure session-tasks" data-detail-turn="section:tasks"><summary>Tasks ('+dashCount(detail.totalTasks)+')</summary><div class="dash-mini-list">'+(detail.tasks||[]).map(t=>'<div class="session-task-row"><span class="session-task-title">'+dashText(t.title)+'</span>'+dashStatus(t.state)+'</div>').join('')+(!detail.tasks?.length?'<p class="muted">No tasks recorded.</p>':'')+'</div></details><h2>Turns & worker attempts</h2>';
       body+=detail.turns.map(t=>'<details class="detail-block turn-disclosure" data-detail-turn="'+dashText(t.id)+'"><summary>'+dashText(t.role)+' · '+dashText(t.category)+' · '+dashText(new Date(t.startedAt).toLocaleString())+' · '+dashCount(t.usage?.totalTokens)+' tokens</summary><p class="live-note">'+dashText(t.id)+' · '+dashText(t.model)+' · '+dashText(t.state)+'</p>'+(t.taskId?'<p>Task '+dashText(t.taskId)+'</p>':'')+toolInventory(t.loadedTools,t.usedTools,t.contextTools)+(t.contextTools?'<h3>Loaded tools</h3>'+toolNameList(t.contextTools):'')+'<h3>Used tools</h3>'+toolNameList(t.usedTools)+(t.inputTexts||[]).map(text=>'<pre>'+dashText(text)+'</pre>').join('')+(t.responseText?'<h3>Response / result</h3><pre>'+dashText(t.responseText)+'</pre>':'')+'</details>').join('');

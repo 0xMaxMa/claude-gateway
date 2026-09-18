@@ -18,9 +18,11 @@ function conversationActivityStatus(
   all: (sql: string, ...params: any[]) => Record<string, any>[],
   conversationId: unknown,
 ): { status: string; thinking: boolean } {
-  const thinking = Boolean(get("SELECT id FROM conversation_decisions WHERE conversation_id=? AND state='running' LIMIT 1", conversationId));
+  const thinking = Boolean(get("SELECT id FROM conversation_decisions WHERE conversation_id=? AND state IN ('running','interrupting') LIMIT 1", conversationId));
   const states = all("SELECT DISTINCT state FROM tasks WHERE conversation_id=? AND state NOT IN ('completed','failed','cancelled')", conversationId).map(t => t.state);
-  const status = thinking ? 'thinking' : states.includes('needs_reconciliation') ? 'needs_reconciliation' : states.some(s => ['starting', 'running', 'interrupting', 'cancel_requested'].includes(s)) ? 'working' : states.includes('waiting_input') ? 'waiting_input' : states.includes('queued') ? 'queued' : 'idle';
+  const lastTurn = get('SELECT MAX(ended_at) ended_at FROM conversation_decisions WHERE conversation_id=?', conversationId)?.ended_at;
+  const resting = lastTurn != null && Date.now() - Number(lastTurn) <= 3600000 ? 'idle' : 'stopped';
+  const status = thinking ? 'thinking' : states.includes('needs_reconciliation') ? 'needs_reconciliation' : states.some(s => ['starting', 'running', 'interrupting', 'cancel_requested', 'recovering'].includes(s)) ? 'working' : states.includes('waiting_input') ? 'waiting_input' : states.includes('queued') ? 'queued' : resting;
   return { status, thinking };
 }
 

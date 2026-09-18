@@ -26,6 +26,14 @@ test('isolated reader preserves historical sessions, exact attempt totals, owner
   const one=await reader.read('summary',file,{offset:0});const two=await reader.read('summary',file,{offset:25});
   expect(one.pagination.total).toBe(28);expect(one.sessions).toHaveLength(25);expect(two.sessions).toHaveLength(3);
   const session=[...one.sessions,...two.sessions].find(s=>s.sessionId==='session');
+  expect(session.status).toBe('idle');
+  expect((await reader.read('report',file,{sessionId:'session',probe:'fresh'})).activityStatus).toBe('idle');
+  store.run('UPDATE conversation_decisions SET ended_at=? WHERE id=?',Date.now()-3601000,d.decisionId);
+  expect((await reader.read('report',file,{sessionId:'session',probe:'expired'})).activityStatus).toBe('stopped');
+  expect((await reader.read('session',file,{sessionId:'session',probe:'expired'})).activityStatus).toBe('stopped');
+  store.run("UPDATE conversation_decisions SET state='running' WHERE id=?",d.decisionId);
+  expect((await reader.read('report',file,{sessionId:'session',probe:'busy'})).activityStatus).toBe('thinking');
+  store.run("UPDATE conversation_decisions SET state='completed',ended_at=? WHERE id=?",Date.now(),d.decisionId);
   expect(session.tokenSummary).toEqual({agentTokens:10,workerTokens:30,totalTokens:40});
   expect(session.tasks[0].tokenSummary).toEqual({totalTokens:30,allAttemptsTokens:30});
   expect(session.tasks[0].loadedTools).toEqual(['Bash','Read']);expect(session.tasks[0].usedTools).toEqual(['Read']);
