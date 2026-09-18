@@ -1,4 +1,4 @@
-import { MutationAttempt, unresolvedMutations } from '../../../src/orchestration/mutation-recovery';
+import { MutationAttempt, retryableMutation, unresolvedMutations } from '../../../src/orchestration/mutation-recovery';
 const failed: MutationAttempt = {actionId:'first',tool:'task_spawn',args:{title:'Merge approved PR',continue_task_id:'previous-task',instructions:'Verify and merge',target_profile:'default-worker',skill_name:'fixture'},committed:false,errorCode:'INVALID_INPUT'};
 const retry: MutationAttempt = {actionId:'second',tool:'task_spawn',args:{title:'Merge approved PR',continue_task_id:'previous-task',instructions:'Verify checks then squash merge',target_profile:'default-worker'},committed:true};
 test('a corrected continuation clears its earlier validation failure only',()=>{
@@ -35,3 +35,14 @@ test('partial failures, same-action conflicts and non-spawn failures stay visibl
   expect(unresolvedMutations([failed,{...retry,args:{...retry.args,retry_of:'unknown'}}])).toBe(true);
   expect(unresolvedMutations([{...failed,errorCode:'ACCESS_DENIED'},{...retry,args:{...retry.args,retry_of:failed.actionId}}])).toBe(true);
  });
+test('a corrected update revision resolves only the same task and instruction',()=>{
+ const first:MutationAttempt={actionId:'update-1',tool:'task_update',args:{task_id:'task-a',instruction:'Inspect again',mode:'when_ready',expected_revision:1},committed:false,errorCode:'REVISION_CONFLICT'};
+ const next:MutationAttempt={...first,actionId:'update-2',committed:true,args:{...first.args,expected_revision:2}};
+ expect(retryableMutation(first.tool,first.errorCode)).toBe(true);
+ expect(unresolvedMutations([first,next])).toBe(false);
+ expect(unresolvedMutations([first,{...next,args:{...next.args,instruction:'Unrelated'}}])).toBe(true);
+ expect(unresolvedMutations([first,{...next,args:{...next.args,instruction:'Corrected brief',retry_of:first.actionId}}])).toBe(false);
+ expect(unresolvedMutations([first,{...next,args:{...next.args,task_id:'task-b',retry_of:first.actionId}}])).toBe(true);
+ expect(unresolvedMutations([{...first,errorCode:'ACCESS_DENIED'},next])).toBe(true);
+ expect(unresolvedMutations([first,{...next,committed:false}])).toBe(true);
+});
