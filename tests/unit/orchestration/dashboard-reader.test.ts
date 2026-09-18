@@ -54,3 +54,35 @@ test('isolated reader preserves historical sessions, exact attempt totals, owner
   expect((await reader.read('session',file,{sessionId:'session'})).tasks[0].taskId).toBe(task.taskId);
  }finally{await reader.close();store.close();rmSync(root,{recursive:true,force:true});}
 });
+
+// The assignment text only ever exists in task_revisions — reading it off the task
+// snapshot yields undefined for every task, which is what made the drawer claim
+// "No assignment recorded" for tasks that had a perfectly good brief.
+test('task detail exposes the effective assignment from task_revisions, normalized and with an honest empty case', async()=>{
+ const root=mkdtempSync(join(tmpdir(),'dashboard-instructions-')),file=join(root,'db');
+ const store=new OrchestrationStore(file,'a'),reader=new DashboardReader(join(process.cwd(),'dist/orchestration/dashboard-reader-worker.js'));
+ try {
+  const scope={agentId:'a',agentSessionId:'session',source:'api' as const,accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'};
+  const input=store.acceptInput({scope,text:'work'}),decisions=new DecisionService(store),d=decisions.begin(input.conversationId,'owner',[input.inputId]);
+  const service=new TaskService(store);
+  const context={...input,...d,principalId:'owner',execute:true,writeMemory:false};
+  const task=service.spawn({...context,actionId:'spawn-one'},{title:'Instructed task',instructions:'Fix the drawer <script>alert(1)</script>',targetProfile:'default-worker'});
+  expect(store.get('SELECT snapshot_json FROM tasks WHERE id=?',task.taskId)!.snapshot_json).not.toContain('"instructions"');
+
+  const single=await reader.read('task',file,{taskId:task.taskId,sessionId:'session',probe:'single'});
+  expect(single.instructions).toBe('Fix the drawer <script>alert(1)</script>');
+
+  // revision > 1: an append-only answer row must resolve to the effective brief the
+  // worker received, not the prior instructions with the answer text concatenated on.
+  service.update({...context,actionId:'update-one'},task.taskId,1,'Fix the drawer <script>alert(1)</script>\n\nAnswer to q1: use the revisions table','when_ready');
+  expect(store.get('SELECT COUNT(*) n FROM task_revisions WHERE task_id=?',task.taskId)!.n).toBe(2);
+  const amended=await reader.read('task',file,{taskId:task.taskId,sessionId:'session',probe:'amended'});
+  expect(amended.instructions).toBe('Fix the drawer <script>alert(1)</script>');
+  expect(amended.snapshot.revision).toBe(2);
+
+  // No revisions at all: report absence instead of inventing text.
+  store.run('DELETE FROM task_revisions WHERE task_id=?',task.taskId);
+  const empty=await reader.read('task',file,{taskId:task.taskId,sessionId:'session',probe:'empty'});
+  expect(empty.instructions).toBeUndefined();
+ }finally{await reader.close();store.close();rmSync(root,{recursive:true,force:true});}
+});

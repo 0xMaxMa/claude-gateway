@@ -3,7 +3,8 @@ import { parentPort } from 'worker_threads';
 import { DatabaseSync } from 'node:sqlite';
 import { existsSync } from 'fs';
 import { readTokenReport, summarizeTokenTurns, TokenTurn } from './token-ledger';
-import type { TaskAttempt } from './types';
+import { normalizeTaskRevisions } from './tasks/task-directive';
+import type { TaskAttempt, TaskRevision } from './types';
 
 /**
  * Conversation activity status — the single source shared by the dashboard
@@ -69,6 +70,14 @@ function read(filename: string, operation: string, options: Record<string, any>)
       const row = get('SELECT t.*,c.agent_session_id FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.id=? AND c.agent_session_id=?', options.taskId, options.sessionId);
       if (!row) return undefined;
       const snapshot = JSON.parse(row.snapshot_json);
+      // The assignment text is never stored on the task snapshot — it lives in task_revisions.
+      // Read the revisions the worker actually received (appliedRevision, or the newest authored
+      // one before the first claim) and normalize them exactly like TaskService.revision() does,
+      // so a revision > 1 shows the effective brief instead of append-only answer text.
+      const effectiveRevision = Number(snapshot.appliedRevision) || Number(snapshot.revision) || Number.MAX_SAFE_INTEGER;
+      const revisions = all('SELECT payload_json FROM task_revisions WHERE task_id=? AND revision<=? ORDER BY revision', options.taskId, effectiveRevision)
+        .map(r => JSON.parse(String(r.payload_json)) as TaskRevision);
+      const instructions = revisions.length ? normalizeTaskRevisions(revisions).instructions : undefined;
       const offset = Math.max(0, Number(options.offset) || 0);
       const attempts = all(`SELECT payload_json FROM task_attempts WHERE task_id=? AND COALESCE(json_extract(payload_json,'$.startedAt'),0)>=? ORDER BY generation DESC LIMIT 25 OFFSET ?`, options.taskId, since, offset).map(r => {
         const attempt = JSON.parse(r.payload_json);
@@ -76,7 +85,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
         const events = all('SELECT type,payload_json,occurred_at FROM worker_events WHERE attempt_id=? ORDER BY local_seq DESC LIMIT 30', attempt.attemptId).map(e=>({type:e.type,at:e.occurred_at,payload:JSON.parse(e.payload_json)}));
         return {...attempt, metrics: metrics ? JSON.parse(metrics.payload_json) : null, events};
       });
-      return {snapshot, attempts, totalAttempts:Number(get("SELECT COUNT(*) n FROM task_attempts WHERE task_id=? AND COALESCE(json_extract(payload_json,'$.startedAt'),0)>=?", options.taskId,since)!.n), offset};
+      return {snapshot, instructions, attempts, totalAttempts:Number(get("SELECT COUNT(*) n FROM task_attempts WHERE task_id=? AND COALESCE(json_extract(payload_json,'$.startedAt'),0)>=?", options.taskId,since)!.n), offset};
     }
     const offset = Math.max(0, Number(options.offset) || 0), limit = 25;
     const conversations = all('SELECT c.* FROM conversations c WHERE c.updated_at>=? ORDER BY c.updated_at DESC,c.id DESC LIMIT ? OFFSET ?', since, limit, offset);
