@@ -25,10 +25,12 @@ test('receipt context retains mutation evidence without repeating old task paylo
   } finally { store.close(); }
 });
 
-test('dynamic previously communicated reports are lossless user context, not part of stable policy', () => {
+test('old report excerpts are bounded without mutating full reports or system policy', () => {
   expect(communicatedProgressContext([])).toBe('');
   const messages=['Completed first phase','Evidence '+ 'unchanged '.repeat(2000)];
-  expect(communicatedProgressContext(messages)).toContain(JSON.stringify(messages));
+  expect(communicatedProgressContext(messages).length).toBeLessThan(6200);
+  expect(communicatedProgressContext(messages)).toContain('middle omitted');
+  expect(messages[1]).toHaveLength(('Evidence '+ 'unchanged '.repeat(2000)).length);
 });
 
 test('skill catalog ordering is stable across filesystem discovery order without mutating registries', () => {

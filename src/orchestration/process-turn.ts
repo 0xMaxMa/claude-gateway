@@ -180,7 +180,10 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
         ? /^(mcp__gateway__(capabilities_list|conversation_intake|memory_(get|search)|task_(spawn|status|cancel|update|answer|question)))$/
         : /^(Read|Glob|Grep|Bash|Edit|Write|Skill|mcp__gateway__(tool_search|tool_call|browser_[a-z_]+|generate_image|generate_video|share_file|share_image|memory_(get|search|shared_(get|create|update|delete))|task_(report_progress|request_input|stage_file|memory_append)))$/;
       if (!Array.isArray(event.tools) || event.tools.some((name: unknown) => typeof name !== 'string' || (!(role === 'worker' && process.runtimeProfile?.hostExecution) && !(role === 'agent' && process.runtimeProfile?.responseSchema && name === 'StructuredOutput') && !process.isSpawnedConnectorTool?.(name) && !allowed.test(name)))) {
-        fail(new OrchestrationError('PROFILE_INVENTORY_MISMATCH'));
+        const rejectedTools = Array.isArray(event.tools) ? event.tools.filter((name: unknown) => typeof name !== 'string' ||
+          (!(role === 'worker' && process.runtimeProfile?.hostExecution) && !(role === 'agent' && process.runtimeProfile?.responseSchema && name === 'StructuredOutput') && !process.isSpawnedConnectorTool?.(name) && !allowed.test(name)))
+          .slice(0,100).map((name: unknown) => typeof name === 'string' ? name.replace(/[^a-zA-Z0-9_.:-]/g,'?').slice(0,160) : '<invalid-name>') : ['<missing-inventory>'];
+        fail(Object.assign(new OrchestrationError('PROFILE_INVENTORY_MISMATCH'), { rejectedTools }));
         void process.stop(); return;
       }
     }

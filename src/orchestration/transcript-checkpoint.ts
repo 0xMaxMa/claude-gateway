@@ -1,11 +1,11 @@
-import { constants } from 'fs';
-import { open, writeFile } from 'fs/promises';
-import { randomUUID } from 'crypto';
-
 export interface TranscriptCheckpoint { path: string; size: number; ino: number; dev: number; }
 
 /** Only existing, private CLI transcripts are eligible. Never rewind a fresh session. */
 export async function checkpointTranscript(path: string): Promise<TranscriptCheckpoint | undefined> {
+  // Self-contained so the same implementation can run through containerNode;
+  // container recovery must not read/write host transcripts.
+  const { constants } = require('fs');
+  const { open } = require('fs/promises');
   try {
     const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
@@ -21,6 +21,9 @@ export async function checkpointTranscript(path: string): Promise<TranscriptChec
  * unknown records fail closed. Keep the discarded bytes in a private diagnostic
  * archive; the user's input and task receipts remain in the orchestration DB. */
 export async function rollbackUnansweredTranscript(checkpoint: TranscriptCheckpoint): Promise<boolean> {
+  const { constants } = require('fs');
+  const { open, writeFile } = require('fs/promises');
+  const { randomUUID } = require('crypto');
   const metadata = new Set(['queue-operation', 'attachment', 'last-prompt', 'ai-title', 'mode', 'atis-latch']);
   try {
     const file = await open(checkpoint.path, constants.O_RDWR | constants.O_NOFOLLOW);

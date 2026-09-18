@@ -248,6 +248,22 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     priv.sessions.delete(chatId); // keep teardown off the fake session
   }, 15000);
 
+  it('keeps managed agent and worker processes alive when changing model', async () => {
+    const port = await startRunner();
+    const priv = runner as any;
+    const stop = jest.fn();
+    priv.sessions.set(chatId, { source: 'discord', runtimeProfile: {role:'agent'}, stop });
+    priv.sessions.set('worker', { source: 'discord', runtimeProfile: {role:'worker'}, stop });
+    const restart = jest.spyOn(priv,'restartProcess');
+    try {
+      await postChannelMessage(port,chatId,'/model opus','discord');
+      await waitForForward();
+      expect(restart).not.toHaveBeenCalled();
+      expect(stop).not.toHaveBeenCalled();
+      expect(forwardText()).toContain('Applies to the next response');
+    } finally {priv.sessions.delete(chatId);priv.sessions.delete('worker');restart.mockRestore();}
+  },15000);
+
   it('refuses to switch models from a group chat', async () => {
     // /model <x> rewrites config.json for the whole agent and restarts every
     // session in every chat. Discord's guild gate checks guild, channel and

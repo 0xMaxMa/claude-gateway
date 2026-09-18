@@ -23,7 +23,9 @@ test('the per-turn message ends with the user text, keeping the volatile bytes b
   const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a'), sid = randomUUID();
   await sessions.ensureApiSession('a', 'chat', sid);
   const prompts: string[] = [], overlays: string[] = [];
+  const registry = {skills:new Map(),cliSkills:[]} as any;
   const runtime = await AgentOrchestrationRuntime.open(agent, gateway, dir, sessions, history, {
+    skills:()=>registry,
     createAgentSession: async (_id, profile) => Object.assign(new EventEmitter(), {
       start: async () => {}, stop: async () => {},
       sendMessage: function (this: EventEmitter, prompt: string) {
@@ -48,6 +50,12 @@ test('the per-turn message ends with the user text, keeping the volatile bytes b
     expect(prompt).not.toContain('Current orchestration request');
     // The cached prefix stays free of per-turn content, as PR #502's invariance fix requires.
     expect(overlays[0]).not.toContain(USER_TEXT);
+    expect(overlays[0]).not.toContain('Installed skill catalog');
+    expect(prompt).toContain('Installed skill catalog');
+    registry.skills.set('new-skill',{userInvocable:true,description:'New reusable capability',content:'body'});
+    await runtime.send({scope,text:'What can you do now?'},{execute:true,writeMemory:false},{timeoutMs:2000});
+    expect(overlays[1]).toBe(overlays[0]);
+    expect(prompts[1]).toContain('new-skill');
   } finally { await runtime.close(); (history as never as {db:{close():void}}).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -60,5 +60,5 @@ test('an agent still cannot receive a tool outside its declared inventory', asyn
       process.emit('output',JSON.stringify({type:'system',subtype:'init',tools:['mcp__gateway__conversation_intake','mcp__gateway__task_stage_file']}));
       process.emit('output',JSON.stringify({type:'result',result:'done'}));
     }});
-  await expect(startProcessTurn(process,'task',1000).result).rejects.toMatchObject({code:'PROFILE_INVENTORY_MISMATCH'});
+  await expect(startProcessTurn(process,'task',1000).result).rejects.toMatchObject({code:'PROFILE_INVENTORY_MISMATCH',rejectedTools:['mcp__gateway__task_stage_file']});
 });

@@ -143,7 +143,7 @@ test.each([
   const f = await fixture(source); let calls = 0;
   (f.host.transcribeNote as jest.Mock).mockResolvedValue('ช่วยตรวจโค้ด PR 465');
   (f.host.createAgentSession as jest.Mock).mockImplementation(async (_, profile) => {
-    expect(profile.overlay).toContain('"name":"review"');
+    expect(profile.overlay).not.toContain('"name":"review"');
     expect(profile.overlay).not.toContain('Review $ARGUMENTS');
     const config = JSON.parse(readFileSync(profile.mcpConfigPath, 'utf8'));
     const ticket = JSON.parse(readFileSync(config.mcpServers.gateway.env.GATEWAY_ORCHESTRATION_TICKET_FILE, 'utf8'));
@@ -152,6 +152,7 @@ test.each([
     session.sendMessage = prompt => { void (async () => {
       if (calls++ === 0) {
         expect(prompt).toContain(text);
+        expect(prompt).toContain('"name":"review"');
         const command = { tool: 'task_spawn', action_id: 'implicit-review', args: { title: 'Review PR 465', instructions: 'Review PR 465 and report findings.', target_profile: 'skill-worker', skill_name: 'review', skill_args: '465', spoken_acknowledgement: 'ผมจะตรวจโค้ด PR 465 และสรุปจุดที่ควรแก้ให้ครับ' } };
         for (const args of [ { ...command.args, skill_name: 'unknown' }, { ...command.args, skill_name: '../review' }, { ...command.args, target_profile: 'default-worker' } ]) {
           const denied = await fetch(ticket.url, { method: 'POST', headers: { Authorization: `Bearer ${ticket.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...command, args }) });

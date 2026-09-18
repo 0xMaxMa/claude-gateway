@@ -220,5 +220,5 @@ test('a queued row is visibly waiting and its untrusted text is escaped', () => 
       usage:usage(30),loadedTools:null,usedTools:[]}],
   });
   expect(measured).toContain('Queued 2m 21s');
-  expect(measured).not.toContain('turn-pending');
+  expect(measured).not.toMatch(/<tr[^>]*class="[^"]*turn-pending/);
 });

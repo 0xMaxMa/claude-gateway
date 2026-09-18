@@ -1363,7 +1363,7 @@ export class AgentRunner extends EventEmitter {
 
       const restarted = await this.restartChannelSessions();
 
-      respond({ success: true, model: newModel, restarted });
+      respond({ success: true, model: newModel, restarted, appliesNextTurn: !restarted });
       return;
     }
 
@@ -2945,7 +2945,7 @@ export class AgentRunner extends EventEmitter {
       this.writeAutoForward(
         chatId,
         'Switching models is only available in a direct message with the bot — '
-        + 'it changes the model for every chat of this agent and restarts them. '
+        + 'it changes the model for every chat of this agent. '
         + 'Use /models here to see the list.',
       );
       return;
@@ -2962,12 +2962,12 @@ export class AgentRunner extends EventEmitter {
       return;
     }
     await this.setModel(match.id);
-    // Same restart the Telegram picker's set_model does — the running session
-    // was spawned with the old model and would otherwise keep using it.
+    // Legacy sessions need respawning; managed decisions pick up the new model
+    // on their next spawn without terminating the response in progress.
     const restarted = await this.restartChannelSessions();
     this.writeAutoForward(
       chatId,
-      `Model set to ${match.label} (${match.id}).${restarted ? ' Restarting the session…' : ''}`,
+      `Model set to ${match.label} (${match.id}).${restarted ? ' Restarting the session…' : ' Applies to the next response; current work continues.'}`,
     );
   }
 
@@ -5484,17 +5484,20 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
-   * Restart every non-api session so a model change actually takes effect.
+   * Restart legacy non-api sessions so a model change actually takes effect.
    *
    * `setModel` only rewrites config — a session process was spawned with the
    * old model on its command line and keeps using it until it is restarted.
    * Reporting "model set" without this is a false success: the next turn still
-   * runs on the previous model. Returns whether anything was restarted.
+   * runs on the previous model. Managed decisions already spawn per turn and
+   * must finish with the model they started with. Returns whether anything restarted.
    */
   private async restartChannelSessions(): Promise<boolean> {
     const restartPromises: Promise<void>[] = [];
     for (const [key, session] of this.sessions) {
-      if (session.source !== 'api') restartPromises.push(this.restartProcess(key));
+      // Managed decisions spawn a new process on every turn. Killing the current
+      // one here bypasses orchestration cancellation and reports PROCESS_EXITED.
+      if (session.source !== 'api' && !session.runtimeProfile) restartPromises.push(this.restartProcess(key));
     }
     await Promise.all(restartPromises);
     return restartPromises.length > 0;

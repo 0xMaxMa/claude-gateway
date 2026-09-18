@@ -1880,10 +1880,10 @@ bot.on('callback_query:data', async ctx => {
           payload: { model: newModel },
         }),
       })
-      const result = (await res.json()) as { success?: boolean; error?: string; restarted?: boolean }
+      const result = (await res.json()) as { success?: boolean; error?: string; restarted?: boolean; appliesNextTurn?: boolean }
       if (result.success) {
         await ctx.answerCallbackQuery({ text: `✅ Model changed to ${newModel}` }).catch(() => {})
-        await ctx.editMessageText(`\u2705 Model changed to ${newModel}`).catch(() => {})
+        await ctx.editMessageText(`\u2705 Model changed to ${newModel}${result.appliesNextTurn ? "\nApplies to the next response; current work continues." : ""}`).catch(() => {})
       } else {
         await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
       }
@@ -1920,7 +1920,7 @@ bot.on('callback_query:data', async ctx => {
           chat_id: String(ctx.callbackQuery.message?.chat.id),
         }),
       })
-      const result = (await res.json()) as { success?: boolean; error?: string; restarted?: boolean }
+      const result = (await res.json()) as { success?: boolean; error?: string; restarted?: boolean; appliesNextTurn?: boolean }
       if (result.success) {
         if (result.restarted === false) {
           // No active session — nothing to restart
