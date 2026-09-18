@@ -343,3 +343,90 @@ test.each([false,true])('corrected skill/profile dispatch preserves unrelated fa
   });
   try{expect(await f.send('Check it')).toBe('I am checking it.');expect(f.failures).toEqual([]);}finally{await f.close();}
  });
+
+test.each([false, true])('deferred dispatch survives a casual reply or is explicitly cancelled: %s', async cancel => {
+ let ready!:()=>void, release!:()=>void, recovered!:()=>void;
+ const reading = new Promise<void>(resolve=>{ready=resolve;});
+ const resume = new Promise<void>(resolve=>{release=resolve;});
+ const recovery = new Promise<void>(resolve=>{recovered=resolve;});
+ const f = await fixture(async (call, text, turn) => {
+  if (turn === 1) {
+   ready(); await resume;
+   expect((await call('conversation_intake',{mode:'ready',acknowledgement:'I will review it.',preparation:'Authorized report review is not queued yet'})).deferred).toBe(true);
+   expect(await call('task_spawn',spawnArgs)).toEqual({error:'NEW_INPUT_PENDING'});
+  } else if (turn === 2) {
+   expect(text).toContain('"deferredDispatch":true');
+   if (cancel) {
+    expect(await call('conversation_intake',{mode:'resolve',resolution:'The user cancelled the pending review.'})).toEqual({resolved:true});
+    return 'Cancelled.';
+   }
+   return 'Understood.';
+  } else {
+   expect(turn).toBe(3);
+   expect(text).toContain('"deferredDispatch":true');
+   expect(text).toContain('Authorized report review is not queued yet');
+   await call('conversation_intake',{mode:'ready',acknowledgement:'I am reviewing it now.'});
+   expect((await call('task_spawn',spawnArgs)).taskId).toBeTruthy();
+   recovered();
+  }
+ });
+ try {
+  const first=f.runtime.submitInput({scope:f.scope,text:'Review the report'},{execute:true,writeMemory:false});
+  await reading;
+  const second=f.runtime.submitInput({scope:f.scope,text:cancel?'Cancel the review':'I will wait'},{execute:true,writeMemory:false});
+  release(); await first.response; await second.response;
+  if (!cancel) await Promise.race([recovery,new Promise((_,reject)=>{setTimeout(()=>reject(new Error('No reconciliation turn')),2000).unref();})]);
+  for(let i=0;i<100 && f.runtime.store.get('SELECT count(*) n FROM conversation_intake')!.n;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  expect(f.failures).toEqual([]);
+  expect(f.runtime.store.get('SELECT count(*) n FROM conversation_intake')!.n).toBe(0);
+  expect(f.runtime.store.get('SELECT count(*) n FROM tasks')!.n).toBe(cancel?0:1);
+  expect(f.runtime.store.get("SELECT count(*) n FROM conversation_inputs WHERE store_user_message=0 AND ingress_json LIKE '%intake-recovery:%'")!.n).toBe(cancel?0:1);
+ } finally {release();await f.close();}
+});
+
+test('a rejected continuation spawn followed by the intended update has no false warning',async()=>{
+ let taskId='';
+ const f=await fixture(async(call,_text,turn)=>{
+  if(turn===1){
+   await call('conversation_intake',{mode:'ready',acknowledgement:'I am reviewing it.'});
+   taskId=(await call('task_spawn',spawnArgs)).taskId;
+  }else{
+   await call('conversation_intake',{mode:'update',task_id:taskId,acknowledgement:'I will include the appendix.'});
+   expect(await call('task_spawn',{...spawnArgs,continue_task_id:taskId})).toEqual({error:'INTAKE_TASK_MISMATCH'});
+   expect((await call('task_update',{task_id:taskId,expected_revision:1,instruction:'Review the report and appendix.',mode:'when_ready'})).revision).toBe(2);
+  }
+ });
+ try{
+  await f.send('Review this');
+  expect(await f.send('Include appendix')).toBe('I will include the appendix.');
+  expect(f.failures).toEqual([]);
+ }finally{await f.close();}
+});
+
+test('reconciliation is bounded if the model only replies again',async()=>{
+ let ready!:()=>void,release!:()=>void,reconciled!:()=>void;
+ const reading=new Promise<void>(resolve=>{ready=resolve;});
+ const resume=new Promise<void>(resolve=>{release=resolve;});
+ const recovery=new Promise<void>(resolve=>{reconciled=resolve;});
+ let turns=0;
+ const f=await fixture(async(call,_text,turn)=>{
+  turns=turn;
+  if(turn===1){
+   ready();await resume;
+   expect((await call('conversation_intake',{mode:'ready',acknowledgement:'I will review it.'})).deferred).toBe(true);
+  }else if(turn===3)reconciled();
+  return 'Understood.';
+ });
+ try{
+  const first=f.runtime.submitInput({scope:f.scope,text:'Review this'},{execute:true,writeMemory:false});
+  await reading;
+  const second=f.runtime.submitInput({scope:f.scope,text:'I will wait'},{execute:true,writeMemory:false});
+  release();await first.response;await second.response;
+  await recovery;
+  await new Promise(resolve=>setTimeout(resolve,100));
+  expect(f.failures).toEqual([]);
+  expect(turns).toBe(3);
+  expect(f.runtime.store.get('SELECT count(*) n FROM tasks')!.n).toBe(0);
+  expect(JSON.parse(String(f.runtime.store.get('SELECT data_json FROM conversation_intake')!.data_json)).deferredDispatch).toBe(true);
+ }finally{release();await f.close();}
+});

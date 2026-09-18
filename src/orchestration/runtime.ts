@@ -751,8 +751,13 @@ export class AgentOrchestrationRuntime {
         if (acknowledgementReady) return {acknowledged:true,responseId:acknowledgementId};
         if (!acknowledgementId) intakeChoice = this.intake.choose(intakeContext, choice);
         if (choice.mode !== 'wait' && newerInputPending()) {
+          if (choice.mode !== 'resolve') this.intake.deferDispatch(receipt.inputId);
           intakeDeferred = true;
           return {deferred:true, reason:'NEW_INPUT_PENDING', instruction:'New user input is already queued. End without another reply or task mutation; the next turn will receive these materials and the new instruction.'};
+        }
+        if (choice.mode === 'resolve') {
+          this.intake.consume(receipt.inputId, true);
+          return {resolved:true};
         }
         if (choice.mode === 'wait') return {waiting:true, prepared:true};
         const alreadyPublished = !!acknowledgementId;
@@ -820,9 +825,13 @@ export class AgentOrchestrationRuntime {
           // Resolving a pending question is not admission of a new task. A slow or failed
           // acknowledgement must not block saving it; authorization stays in TaskService.
           if (tool !== 'task_answer' && acknowledgementInFlight) await acknowledgementInFlight;
-          if (intakeDeferred || newerInputPending()) { intakeDeferred = true; throw new OrchestrationError('NEW_INPUT_PENDING'); }
+          if (intakeDeferred || newerInputPending()) {
+            if (tool === 'task_spawn' || tool === 'task_update') this.intake.deferDispatch(receipt.inputId);
+            intakeDeferred = true;
+            throw new OrchestrationError('NEW_INPUT_PENDING');
+          }
           if (tool === 'task_answer') return;
-          if (!intakeChoice || intakeChoice.mode==='wait' || !acknowledgementReady) throw new OrchestrationError('ACKNOWLEDGEMENT_REQUIRED');
+          if (!intakeChoice || intakeChoice.mode==='wait' || intakeChoice.mode==='resolve' || !acknowledgementReady) throw new OrchestrationError('ACKNOWLEDGEMENT_REQUIRED');
           if (tool==='task_spawn' && preparedInputs.length) args.context_refs=[...new Set([...(Array.isArray(args.context_refs) ? args.context_refs : []),...preparedRefs,...preparedInputs.map(row=>String(row.id))])];
           if (intakeChoice.mode==='update' && (tool==='task_spawn' || args.task_id!==intakeChoice.task_id)) {
             const attempt = attemptedTaskActions.get(actionId);
@@ -1041,7 +1050,22 @@ export class AgentOrchestrationRuntime {
       if (!silent && (active.notification || (typedSpeech && !taskSpeech)) && speechEnabled && !response.interrupted && listener?.principalId === input.scope.principalId) {
         try { listener.receive({ responseId: decision.responseId!, text: display, spoken: surfaces.spoken, requestId: input.requestId, speechOnly: typedSpeech }); } catch { /* playback cannot fail a persisted report */ }
       }
-      if (semantic && intakeChoice?.mode!=='wait' && (intakeChoice || display.trim()) && !intakeDeferred && !newerInputPending() && !response.interrupted) this.intake.consume(receipt.inputId);
+      if (semantic && intakeChoice?.mode!=='wait' && (intakeChoice || display.trim()) && !intakeDeferred && !newerInputPending() && !response.interrupted) this.intake.consume(receipt.inputId, Boolean(committedTaskCommand) && !failedTaskActions);
+      const pendingDispatch = semantic && this.intake.context(receipt.conversationId, input.scope.principalId, String(admitted!.binding_id));
+      if (pendingDispatch?.deferredDispatch && pendingDispatch.mode !== 'wait' && capabilities.execute &&
+          !input.ingressKey?.startsWith('intake-recovery:') && !intakeDeferred && !newerInputPending() &&
+          !response.interrupted && !active.stopping) {
+        // One bounded reconciliation turn after a direct reply, never an automatic
+        // replay of the rejected command. It sees current instructions and uses
+        // the same principal, binding and execution permissions as this turn.
+        try { this.store.acceptInput({scope:input.scope, storeUserMessage:false,
+          ingressKey:`intake-recovery:${receipt.inputId}`, capabilities, model:options.model,
+          text:'Reconcile the pending deferred dispatch with the latest user instructions. Earlier NEW_INPUT_PENDING was temporary. If still authorized, acknowledge and commit the appropriate task command now. If cancelled, replaced, or already satisfied, use conversation_intake mode=resolve with a concrete resolution. Do not merely repeat a promise or the earlier rejection. If a new decision is necessary, ask a specific question and preserve the pending work.' + '\nLatest user input to reconcile (data): ' + JSON.stringify(input.text)}, this.config.conversation.maxPendingInputs);
+        } catch (error) {
+          if (!(error instanceof OrchestrationError) || error.code !== 'QUEUE_FULL') throw error;
+          // Keep the durable pending dispatch for the next input when admission is full.
+        }
+      }
       return silent ? acknowledgement : display || acknowledgement;
     } catch (error) {
       // Retain a safe diagnostic code; never log prompts, credentials or provider bodies.

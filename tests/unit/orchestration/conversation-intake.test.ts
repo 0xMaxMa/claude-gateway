@@ -79,3 +79,21 @@ describe('durable material waiting', () => {
     expect(() => recovered.context(first.conversationId, 'stranger')).toThrow();
   });
 });
+
+test('deferred execution survives ordinary consumption and a rebuilt intake service',()=>{
+ const store=new OrchestrationStore(':memory:','a');
+ const intake=new ConversationIntake(store),decisions=new DecisionService(store);
+ const scope={agentId:'a',agentSessionId:'s',source:'api' as const,accountId:'key',chatId:'c',threadKey:'',principalId:'p'};
+ try{
+  const input=store.acceptInput({scope,text:'Review this'});
+  const decision=decisions.begin(input.conversationId,'p',[input.inputId]);
+  intake.choose({...input,...decision,principalId:'p',execute:true,writeMemory:false,actionId:'intake'}, {mode:'ready',acknowledgement:'Reviewing.'});
+  intake.deferDispatch(input.inputId);
+  intake.consume(input.inputId);
+  const restored=new ConversationIntake(store);
+  expect(restored.context(input.conversationId,'p')?.deferredDispatch).toBe(true);
+  expect(()=>restored.choose({...input,...decision,principalId:'p',execute:true,writeMemory:false,actionId:'resolve'}, {mode:'resolve',resolution:''})).toThrow();
+  restored.consume(input.inputId,true);
+  expect(restored.context(input.conversationId,'p')).toBeUndefined();
+ }finally{store.close();}
+});

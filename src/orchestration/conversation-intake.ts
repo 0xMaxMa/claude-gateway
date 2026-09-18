@@ -2,13 +2,15 @@ import { OrchestrationStore, boundedText } from './store';
 import { CommandContext, OrchestrationError } from './types';
 
 export interface IntakeChoice {
-  mode: 'ready' | 'wait' | 'update';
+  mode: 'ready' | 'wait' | 'update' | 'resolve';
+  resolution?: string;
   acknowledgement?: string;
   preparation?: string;
   clarification?: string;
   task_id?: string;
 }
 export const INTAKE_OVERLAY = `Use conversation_intake only for executable work, incomplete materials, or amendments to an existing task. Greetings, introductions, casual conversation and questions you can answer directly need one normal answer: do not call conversation_intake or emit a separate acknowledgement for them.
+Pending deferredDispatch means an earlier authorized task command did not commit because newer input arrived. Reconcile it with the latest user messages now: dispatch the still-authorized work (including queued continuations), or use mode=resolve with a concrete resolution explaining cancellation, replacement, or why no work remains. A casual reply or acknowledgement does not resolve it. NEW_INPUT_PENDING applies only to that earlier turn, not a permanent execution outage. Never blindly replay a deferred command against changed instructions.
 Before any work mutation, use conversation_intake to decide how to handle the user's latest input together with pending materials and current tasks.
 ready: the requested executable action and required material are complete. Supply a brief, specific acknowledgement addressed directly to the user, in their language and your existing persona. This text is immediately displayed to the user and speech is attempted when enabled; it is not a private classification, instruction to yourself, or reasoning field. Do not add a waiting period. A successful acknowledgement permits dispatch even when audio is unavailable. If a task tool fails, explain the failure and never claim work started without a successful receipt.
 wait: the user is supplying materials without an action, promises an attachment that has not arrived, or says the instruction will follow. Inspect available images now. Preserve useful facts in preparation, clearly distinguishing observed contents from instructions. Supply one short clarification to ask only if no further input arrives for the configured intake wait interval. Do not speculate about unavailable link contents. End this turn without user-facing text; the gateway owns the waiting timer. Each new item will be read as it arrives.
@@ -39,23 +41,29 @@ export class ConversationIntake {
       WHERE conversation_id=? AND principal_id=? AND binding_id=? AND latest_input_seq<?`,
     input.input_seq, input.created_at, input.conversation_id, input.principal_id, input.binding_id, input.input_seq);
   }
-  /** A direct answer can consume preparation from an older decision. Never
-   * discard newer material or another binding's pending context. */
-  consume(inputId: string): void {
+  /** Persist interrupted admission without replaying an uncommitted command. */
+  deferDispatch(inputId: string): void {
+    const input = this.store.get('SELECT * FROM conversation_inputs WHERE id=?', inputId);
+    if (!input) throw new OrchestrationError('INPUT_NOT_FOUND');
+    this.store.run(`UPDATE conversation_intake SET data_json=json_set(data_json,'$.deferredDispatch',json('true'))
+      WHERE conversation_id=? AND principal_id=? AND binding_id=?`, input.conversation_id, input.principal_id, input.binding_id);
+  }
+  /** Direct replies consume materials, but not unresolved deferred work. */
+  consume(inputId: string, dispatchResolved = false): void {
     const input = this.store.get('SELECT * FROM conversation_inputs WHERE id=?', inputId);
     if (!input) throw new OrchestrationError('INPUT_NOT_FOUND');
     this.store.run(`DELETE FROM conversation_intake WHERE conversation_id=? AND principal_id=?
-      AND binding_id=? AND latest_input_seq<=?`, input.conversation_id, input.principal_id, input.binding_id, input.input_seq);
+      AND binding_id=? AND latest_input_seq<=? AND (? OR COALESCE(json_extract(data_json,'$.deferredDispatch'),0)=0)`, input.conversation_id, input.principal_id, input.binding_id, input.input_seq, dispatchResolved ? 1 : 0);
   }
   choose(context: CommandContext, choice: IntakeChoice) {
     this.store.assertMember(context.conversationId, context.principalId);
     const decision = this.store.get("SELECT * FROM conversation_decisions WHERE id=? AND conversation_id=? AND epoch=? AND state='running'", context.decisionId, context.conversationId, context.epoch);
     const input = this.store.get('SELECT * FROM conversation_inputs WHERE id=? AND conversation_id=? AND principal_id=?', context.inputId, context.conversationId, context.principalId);
     if (!decision || !input) throw new OrchestrationError('STALE_DECISION');
-    if (!['ready','wait','update'].includes(choice.mode)) throw new OrchestrationError('INVALID_INPUT');
-    const acknowledgement = choice.mode !== 'wait' ? boundedText(choice.acknowledgement ?? '', 600) : '';
+    if (!['ready','wait','update','resolve'].includes(choice.mode)) throw new OrchestrationError('INVALID_INPUT');
+    const acknowledgement = choice.mode !== 'wait' && choice.mode !== 'resolve' ? boundedText(choice.acknowledgement ?? '', 600) : '';
     const clarification = choice.mode === 'wait' ? boundedText(choice.clarification ?? '', 600) : '';
-    if ((choice.mode !== 'wait' && !acknowledgement.trim()) || (choice.mode === 'wait' && !clarification.trim())) throw new OrchestrationError('INTAKE_MESSAGE_REQUIRED');
+    if ((choice.mode !== 'wait' && choice.mode !== 'resolve' && !acknowledgement.trim()) || (choice.mode === 'wait' && !clarification.trim())) throw new OrchestrationError('INTAKE_MESSAGE_REQUIRED');
     const preparation = choice.preparation?.trim() ? boundedText(choice.preparation, 12000) : ''; 
     if (choice.mode === 'update') {
       const task = choice.task_id && this.store.task(choice.task_id);
@@ -66,7 +74,10 @@ export class ConversationIntake {
     const previous = previousRow?.binding_id === input.binding_id ? JSON.parse(String(previousRow.data_json)) : undefined;
     const inputIds: string[] = [...new Set([...(previous?.inputIds ?? []), context.inputId])];
     if (inputIds.length > 100) throw new OrchestrationError('INTAKE_TOO_MANY_INPUTS');
-    const data = { ...choice, acknowledgement, clarification, preparation, inputIds, preparedInputSeq: input.input_seq };
+    const resolution = choice.mode === 'resolve' ? boundedText(choice.resolution ?? '', 2000).trim() : '';
+    if (choice.mode === 'resolve' && (!resolution || !previous?.deferredDispatch)) throw new OrchestrationError('INVALID_INPUT');
+    const data = { ...choice, resolution, acknowledgement, clarification, preparation, inputIds, preparedInputSeq: input.input_seq,
+      ...(previous?.deferredDispatch ? {deferredDispatch:true} : {}) };
     this.store.run(`INSERT INTO conversation_intake (conversation_id,principal_id,binding_id,mode,data_json,
       latest_input_seq,last_received_at,clarified_seq,decision_id) VALUES(?,?,?,?,?,?,?,?,?)
       ON CONFLICT(conversation_id,principal_id) DO UPDATE SET binding_id=excluded.binding_id,mode=excluded.mode,data_json=excluded.data_json,
