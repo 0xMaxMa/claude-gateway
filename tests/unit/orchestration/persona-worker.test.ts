@@ -6,7 +6,7 @@ import { DecisionService } from '../../../src/orchestration/decisions';
 import { TaskService } from '../../../src/orchestration/tasks/service';
 import { TaskBridge } from '../../../src/orchestration/bridge';
 import { TaskFiles } from '../../../src/orchestration/task-files';
-import { personaWorkspaceRules } from '../../../src/orchestration/source-policy';
+import { personaWorkspaceRules, API_SOURCE_RULES } from '../../../src/orchestration/source-policy';
 import { runtimeProfileArgs } from '../../../src/session/runtime-profile';
 
 test('API persona work delegates normally without enabling general memory writes or direct identity tools', async () => {
@@ -47,4 +47,14 @@ test('persona native tools keep container and explicitly isolated workspace boun
  const args=runtimeProfileArgs({role:'worker',containerExecution:true,mcpConfigPath:'/tmp/mcp.json',overlay:''},[]);
  for(const tool of ['Read','Edit','Write']) expect(args[args.indexOf('--tools')+1]).toContain(tool);
  expect(args[args.indexOf('--setting-sources')+1]).toBe('');
+});
+
+// A system prompt naming HEARTBEAT.md alongside an agent instruction to reply
+// HEARTBEAT_OK is rejected by the provider, so API session rules must not carry
+// the filename. The memory-store prohibition itself is unchanged.
+test('API source rules forbid memory writes without naming the heartbeat file',()=>{
+ expect(API_SOURCE_RULES).not.toMatch(/HEARTBEAT\.md/);
+ expect(API_SOURCE_RULES).toContain('Memory updates are not supported in API sessions.');
+ expect(API_SOURCE_RULES).toContain('MEMORY.md');
+ expect(API_SOURCE_RULES).toContain('USER.md');
 });
