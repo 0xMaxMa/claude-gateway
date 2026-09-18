@@ -33,7 +33,7 @@ function providerErrorText(value: unknown, codes: string[], depth = 0, budget = 
   if (typeof value === 'number') return String(value);
   return '';
 }
-export function startProcessTurn(process: SessionProcess, prompt: string, timeoutMs: number | undefined, onText: (text: string) => void = () => {}, onMetrics?: (metrics: ManagedTurnMetrics) => void, images: readonly InputImage[] = [], policy?: TurnTimeoutPolicy, onStructured?: (chunk: string) => void): ProcessTurn {
+export function startProcessTurn(process: SessionProcess, prompt: string, timeoutMs: number | undefined, onText: (text: string) => void = () => {}, onMetrics?: (metrics: ManagedTurnMetrics) => void, images: readonly InputImage[] = [], policy?: TurnTimeoutPolicy, onStructured?: (chunk: string) => void, alreadyStarted = false): ProcessTurn {
   let resolveAccepted!: () => void, rejectAccepted!: (error: Error) => void;
   let resolveResult!: (result: ProcessResult) => void, rejectResult!: (error: Error) => void;
   const accepted = new Promise<void>((resolve, reject) => { resolveAccepted = resolve; rejectAccepted = reject; });
@@ -228,7 +228,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
   const timer = timeoutMs === undefined ? undefined : setTimeout(() => expire('total'), timeoutMs);
   if (policy) arm('startup', policy.startupTimeoutMs);
   process.on('output', output); process.on('exit', exit); process.on('startup-error', startupError);
-  void process.start().then(() => {
+  void (alreadyStarted ? Promise.resolve() : process.start()).then(() => {
     if (stopped || settled) return process.stop();
     process.sendMessage(prompt, images);
   }).catch(error => { fail(error); void process.stop(); });

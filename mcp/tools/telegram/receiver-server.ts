@@ -878,7 +878,7 @@ const BOT_COMMANDS = [
   { command: 'new', description: 'Create a new session' },
   { command: 'rename', description: 'Rename current session' },
   { command: 'clear', description: 'Clear current session history' },
-  { command: 'compact', description: 'Summarize and compress session history' },
+  { command: 'compact', description: 'Compact Claude Code context' },
   { command: 'stop', description: ORCHESTRATION_ENABLED ? 'Stop the agent reply and choose a task to cancel' : 'Interrupt the agent and stop current work' },
   { command: 'restart', description: 'Graceful restart session' },
   { command: 'model', description: 'Show current AI model' },
@@ -1170,7 +1170,7 @@ bot.command('help', async ctx => {
     `/new <name> — create a new session\n` +
     `/rename <name> — rename current session\n` +
     `/clear — clear current session history\n` +
-    `/compact — summarise and compress session history\n` +
+    `/compact — compact Claude Code context; keep chat history\n` +
     (ORCHESTRATION_ENABLED ? `/stop — stop the reply and choose a task to cancel\n` : `/stop — interrupt the running turn\n`) +
     `/restart — graceful restart session\n\n` +
     `*Agent*\n` +
@@ -1355,7 +1355,7 @@ bot.command('compact', async ctx => {
     .text('\u274c Cancel', 'compact:cancel')
 
   await ctx.reply(
-    '🧠 Compact session?\nThis will summarise old messages and keep only recent history.',
+    '🧠 Compact session?\nThis compacts Claude Code context. Your chat history stays unchanged.',
     { reply_markup: keyboard },
   )
 })

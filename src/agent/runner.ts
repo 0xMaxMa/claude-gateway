@@ -26,7 +26,7 @@ import { withConfigWriteLock, writeConfigAtomicSync } from '../config/config-wri
 import { createLogger } from '../logger';
 import { SessionProcess, MAX_HISTORY_MESSAGES, resolveMaxHistoryMessages, INTERRUPTED_NO_REPLY_TEXT } from '../session/process';
 import { SessionStore, SessionNotInIndexError } from '../session/store';
-import { SessionCompactor } from '../session/compactor';
+import { startNativeCompact } from '../orchestration/native-compact';
 import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
 import { LineReplyManager } from './line-reply-manager';
@@ -3130,60 +3130,33 @@ export class AgentRunner extends EventEmitter {
     this.restartProcess(chatId).catch(() => {});
   }
 
-  /**
-   * /compact — summarise old history and keep only recent messages.
-   */
+  private readonly compactingSessions = new Set<string>();
+
+  /** Native CLI compaction leaves canonical chat history intact. */
+  private async compactContext(sessionId: string, model?: string): Promise<void> {
+    if(this.compactingSessions.has(sessionId)) throw new Error('Context compaction is already running for this session.');
+    this.compactingSessions.add(sessionId);
+    try {
+    const runtime = this.orchestration ?? (this.agentConfig.orchestration?.enabled ? await this.getOrchestration() : undefined);
+    if (runtime?.ownsSession(sessionId)) return await runtime.compactSession(sessionId, model);
+    const process = [...this.sessions.values()].find(p=>p.sessionId===sessionId && p.isRunning());
+    if (!process) throw new Error('No active Claude Code context to compact. Send a message first; chat history was not changed.');
+    if (process.isProcessing) throw new Error('The agent is responding. Try /compact after the current response finishes.');
+    if (this.gatewayConfig.gateway.headless === false) throw new Error('Native /compact currently requires the headless Claude Code backend. Chat history was not changed.');
+    await startNativeCompact(process, true).result;
+    } finally {this.compactingSessions.delete(sessionId);}
+  }
+
   private async handleCommandCompact(agentId: string, chatId: string): Promise<void> {
     const ch = this.channelFor(chatId);
     const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId, ch);
-    const index = await this.sessionStore.listSessions(agentId, chatId, ch);
-    const meta = index.sessions.find(s => s.id === sessionId);
-    const name = meta?.name ?? 'Session';
-
-    const compactModel = this.agentConfig.claude.model;
-    const contextWindow = await this.contextWindowFor(compactModel);
-
-    this.writeAutoForward(chatId, `⏳ Compacting session "${name}"...`);
-
+    this.writeAutoForward(chatId, '⏳ Compacting Claude Code context…');
     try {
-      const compactor = new SessionCompactor(this.sessionStore);
-      // Large sessions summarize in many chunks (see compactor.ts); post a status
-      // update at each ~25% step so the channel doesn't look dead mid-compact.
-      // Throttled (not per-chunk) to avoid spamming the chat on a 16+ chunk job.
-      let lastReportedPct = -1;
-      const onProgress = (done: number, total: number): void => {
-        if (total <= 1) return;
-        const pct = Math.floor((done / total) * 100);
-        if (pct - lastReportedPct >= 25) {
-          lastReportedPct = pct;
-          this.writeAutoForward(chatId, `⏳ Compacting session "${name}"... ${done}/${total} parts summarized`);
-        }
-      };
-      const result = await compactor.compact(agentId, chatId, sessionId, compactModel, contextWindow, ch, onProgress);
-      await this.sessionStore.updateSessionMeta(agentId, chatId, sessionId, {
-        loadedAtSpawn: undefined,
-        archivedCount: undefined,
-        messageCountAtSpawn: undefined,
-      }, ch);
-      await this.restartProcess(chatId);
-
-      const summary = [
-        `✅ Session compacted`,
-        '',
-        `Before: ${result.beforeMessages} messages (~${result.beforeTokens.toLocaleString()} tokens)  →  ${result.contextPctBefore}% of context`,
-        `After:  ${result.afterMessages} messages (~${result.afterTokens.toLocaleString()} tokens)   →  ${result.contextPctAfter}% of context`,
-        `Reduced by: ${result.reductionPct}%`,
-        '',
-        'Summary preserved. Full history before compaction is archived.',
-      ].join('\n');
-      this.writeAutoForward(chatId, summary);
+      await this.compactContext(sessionId);
+      this.writeAutoForward(chatId, '✅ Claude Code context compacted. Chat history is unchanged.');
     } catch (err) {
-      if ((err as Error).name === 'NotEnoughMessagesError') {
-        this.writeAutoForward(chatId, `⚠️ ${(err as Error).message}`);
-      } else {
-        this.logger.error('Compact failed', { error: (err as Error).message });
-        this.writeAutoForward(chatId, `❌ Compact failed: ${(err as Error).message}\n\nYour session history is unchanged.`);
-      }
+      this.logger.error('Compact failed', { error: (err as Error).message });
+      this.writeAutoForward(chatId, 'Context compaction failed: ' + (err as Error).message + '\nChat history is unchanged.');
     }
   }
 
@@ -5430,20 +5403,9 @@ export class AgentRunner extends EventEmitter {
         result = { success: true };
         responseText = 'Session cleared.';
       } else if (cmd === '/compact') {
-        const ch = 'api' as const;
-        const activeSession = this.sessions.get(sessionId);
-        const compactEffectiveModel = opts?.model ?? activeSession?.modelOverride ?? this.agentConfig.claude.model;
-        const contextWindow = await this.contextWindowFor(compactEffectiveModel);
-        const compactor = new SessionCompactor(this.sessionStore);
-        const compactResult = await compactor.compact(agentId, storeChatId, sessionId, compactEffectiveModel, contextWindow, ch);
-        await this.sessionStore.updateSessionMeta(agentId, storeChatId, sessionId, {
-          loadedAtSpawn: undefined,
-          archivedCount: undefined,
-          messageCountAtSpawn: undefined,
-        }, ch);
-        await this.restartProcess(sessionId);
-        result = { success: true, keptMessages: compactResult.afterMessages, archivedMessages: compactResult.beforeMessages - compactResult.afterMessages };
-        responseText = `Session compacted. Kept ${compactResult.afterMessages} messages, archived ${compactResult.beforeMessages - compactResult.afterMessages}.`;
+        await this.compactContext(sessionId, opts?.model);
+        result = { success: true, native: true, historyUnchanged: true };
+        responseText = 'Claude Code context compacted. Chat history is unchanged.';
       } else {
         // Passed the gate but has no dispatch branch — BUILTIN_COMMANDS drifted from this
         // table. Throw so the failure surfaces (and ends history with an assistant turn via

@@ -16,7 +16,7 @@ import type { IntakeChoice } from './conversation-intake';
 import { resolveNamedSkill } from './skills';
 import type { SkillRegistry } from '../skills';
 
-type Scope = { role: 'agent'; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; onMutationResult?: (actionId: string, committed: boolean, errorCode?: string) => void; beforeMutation?: (tool: string, args: Record<string, unknown>, actionId: string) => Promise<void> } |
+type Scope = { role: 'agent'; compactOnly?: boolean; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; onMutationResult?: (actionId: string, committed: boolean, errorCode?: string) => void; beforeMutation?: (tool: string, args: Record<string, unknown>, actionId: string) => Promise<void> } |
   { role: 'worker'; attemptId: string; generation: number };
 
 /** Private MCP bridge: host loopback or an app-local Unix socket. No public task API. */
@@ -39,7 +39,7 @@ export class TaskBridge {
         if (request.method !== 'POST' || request.url !== '/call' || request.headers.origin) throw new OrchestrationError('ACCESS_DENIED');
         const token = request.headers.authorization?.replace(/^Bearer /, '');
         const scope = token && this.scopes.get(token);
-        if (!scope) throw new OrchestrationError('ACCESS_DENIED');
+        if (!scope || (scope.role === 'agent' && scope.compactOnly)) throw new OrchestrationError('ACCESS_DENIED');
         let bytes = 0;
         const chunks: Buffer[] = [];
         for await (const chunk of request) {

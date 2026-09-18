@@ -123,7 +123,7 @@ describe('agent decision turns over one CLI session', () => {
         observed.push(profile.cliSession);
         return Object.assign(new EventEmitter(), {
           start: async () => {}, stop: async () => {},
-          sendMessage: function (this: EventEmitter) { this.emit('output', JSON.stringify({ type: 'result', result: 'Done.' })); },
+          sendMessage: function (this: EventEmitter, text: string) { if(text==='/compact') this.emit('output',JSON.stringify({type:'system',subtype:'compact_boundary'})); this.emit('output', JSON.stringify({ type: 'result', result: 'Done.' })); },
         }) as unknown as SessionProcess;
       }, releaseAgentSession: async () => {},
     });
@@ -144,6 +144,15 @@ describe('agent decision turns over one CLI session', () => {
       expect(runtime.store.all("SELECT type FROM conversation_events WHERE type='session.transcript_unavailable'")).toHaveLength(0);
       expect(warn).not.toHaveBeenCalled();
 
+      const historyBefore = await sessions.loadSession('a',sid);
+      const decisionsBefore = runtime.store.get('SELECT COUNT(*) n FROM conversation_decisions')!.n;
+      const compact = runtime.compactSession(sid);
+      await expect(runtime.compactSession(sid)).rejects.toMatchObject({code:'AGENT_BUSY'});
+      await compact;
+      expect(observed[2]).toEqual({id:cliSessionId,resume:true});
+      expect(await sessions.loadSession('a',sid)).toEqual(historyBefore);
+      expect(runtime.store.get('SELECT COUNT(*) n FROM conversation_decisions')!.n).toBe(decisionsBefore);
+      observed.pop();
       unlinkSync(transcripts.pop()!);
       await send();
       expect(observed[2]).toMatchObject({ resume: false });

@@ -223,7 +223,7 @@ curl -X POST \
 
 ## POST /api/v1/agents/:agentId/sessions/:sessionId/compact {#post-apiv1agentsagentidsessionssessionidcompact}
 
-Summarise old history and keep only recent messages, reducing context usage.
+Run native Claude Code `/compact` on the existing CLI session. Gateway chat history stays unchanged; recent messages are not appended again. A busy response must finish first. Missing transcripts and unconfirmed CLI compaction fail explicitly, without falling back to history summarization.
 
 **Request body:** `{ "chat_id": "myapp" }`
 
@@ -236,7 +236,7 @@ curl -X POST \
 ```
 
 ```json
-{ "success": true, "keptMessages": 10, "archivedMessages": 42 }
+{ "success": true, "native": true, "historyUnchanged": true }
 ```
 
 ---

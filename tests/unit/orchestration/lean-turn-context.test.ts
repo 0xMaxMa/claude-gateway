@@ -50,12 +50,13 @@ test('the per-turn message ends with the user text, keeping the volatile bytes b
     expect(prompt).not.toContain('Current orchestration request');
     // The cached prefix stays free of per-turn content, as PR #502's invariance fix requires.
     expect(overlays[0]).not.toContain(USER_TEXT);
-    expect(overlays[0]).not.toContain('Installed skill catalog');
-    expect(prompt).toContain('Installed skill catalog');
+    expect(overlays[0]).toContain('Installed skill catalog');
+    expect(prompt).not.toContain('Installed skill catalog');
     registry.skills.set('new-skill',{userInvocable:true,description:'New reusable capability',content:'body'});
     await runtime.send({scope,text:'What can you do now?'},{execute:true,writeMemory:false},{timeoutMs:2000});
-    expect(overlays[1]).toBe(overlays[0]);
-    expect(prompts[1]).toContain('new-skill');
+    expect(overlays[1]).not.toBe(overlays[0]);
+    expect(overlays[1]).toContain('new-skill');
+    expect(prompts[1]).not.toContain('Installed skill catalog');
   } finally { await runtime.close(); (history as never as {db:{close():void}}).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true }); }
 });
 

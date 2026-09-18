@@ -182,11 +182,18 @@ export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 
               if (initial) turn.inputTexts.unshift(`Assignment at attempt start, revision ${turn.taskRevision}:\n${String(initial.payload_json)}`);
             }
           }
-          turn.state = attempt.state;
+          const latestAttempt = snapshot.activeAttemptId === turn.id || store.get('SELECT id FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', turn.taskId)?.id === turn.id;
+          turn.state = attempt.state === 'ended'
+            ? latestAttempt && snapshot.state === 'cancelled' ? 'cancelled'
+              : attempt.result ? 'completed'
+              : attempt.failure ? (attempt.failure.code === 'WORKER_STOPPED' ? 'interrupted' : 'failed') : 'ended'
+            : attempt.state;
+          if (attempt.failure && turn.state !== 'cancelled') turn.failureCode = attempt.failure.code;
+          if (attempt.result) turn.responseText = attempt.result.summary;
           // Stored, stable label for a worker row: it has no input_seq of its own.
           turn.attemptGeneration = Number(attempt.generation);
           // A task's newest result must not be attributed to an older retry.
-          if (snapshot.activeAttemptId === turn.id || store.get('SELECT id FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', turn.taskId)?.id === turn.id) turn.responseText = snapshot.result?.summary;
+          if (!attempt.result && latestAttempt) turn.responseText = snapshot.result?.summary;
         }
       }
       return turn;

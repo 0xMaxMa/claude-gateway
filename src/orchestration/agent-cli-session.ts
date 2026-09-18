@@ -42,27 +42,35 @@ export class AgentCliSessions {
   }
 
   /** Decide the CLI session for the next decision turn of `sessionId`, running in `cwd`. */
-  resolve(sessionId: string, cwd: string): CliSessionDecision {
+  resolve(sessionId: string, cwd: string, requireExisting = false): CliSessionDecision {
+    const start = (fallback?: CliSessionFallback) => {
+      if (requireExisting) throw new OrchestrationError('NO_CLI_SESSION', 'No existing Claude Code transcript to compact. Chat history was not changed.');
+      return this.start(sessionId, cwd, fallback);
+    };
     const row = this.store.get('SELECT cli_session_id,cwd FROM agent_cli_sessions WHERE session_id=?', sessionId);
     if (row) {
       const previous = String(row.cli_session_id);
       // A different working directory means a different project slug, so the stored id
       // names a transcript this process would not be resuming into.
-      if (String(row.cwd) !== cwd) return this.start(sessionId, cwd, 'WORKSPACE_CHANGED');
+      if (String(row.cwd) !== cwd) return start('WORKSPACE_CHANGED');
       if (this.transcriptReadable(cwd, previous)) return { id: previous, resume: true };
-      return this.start(sessionId, cwd, 'TRANSCRIPT_UNAVAILABLE');
+      return start('TRANSCRIPT_UNAVAILABLE');
     }
-    return this.start(sessionId, cwd);
+    return start();
   }
 
   /** Probe in the exact execution boundary; a Docker failure is not a missing
    * transcript and must never trigger host execution or silently discard history. */
-  async resolveContainer(sessionId: string, agent: AgentConfig): Promise<CliSessionDecision> {
+  async resolveContainer(sessionId: string, agent: AgentConfig, requireExisting = false): Promise<CliSessionDecision> {
     await validateContainer(agent);
     const cwd = `container:${agent.container}:/workspace`;
+    const start = (fallback?: CliSessionFallback) => {
+      if (requireExisting) throw new OrchestrationError('NO_CLI_SESSION', 'No existing container Claude Code transcript to compact. Chat history was not changed.');
+      return this.start(sessionId, cwd, fallback);
+    };
     const row = this.store.get('SELECT cli_session_id,cwd FROM agent_cli_sessions WHERE session_id=?', sessionId);
-    if (!row) return this.start(sessionId,cwd);
-    if (row.cwd !== cwd) return this.start(sessionId,cwd,'WORKSPACE_CHANGED');
+    if (!row) return start();
+    if (row.cwd !== cwd) return start('WORKSPACE_CHANGED');
     const id = String(row.cli_session_id);
     const result = await containerNode(agent.container!, `
       const fs=require('fs'),path=require('path');
@@ -72,7 +80,7 @@ export class AgentCliSessions {
       catch(e){if(e.code==='ENOENT')process.stdout.write('missing');else throw e;}
     `,[id,homedir()]);
     if (result === 'present') return {id,resume:true};
-    if (result === 'missing') return this.start(sessionId,cwd,'TRANSCRIPT_UNAVAILABLE');
+    if (result === 'missing') return start('TRANSCRIPT_UNAVAILABLE');
     throw new OrchestrationError('CONTAINER_TRANSCRIPT_CHECK_FAILED');
   }
 

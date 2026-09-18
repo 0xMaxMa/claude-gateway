@@ -30,7 +30,7 @@ import { TaskBridge } from '../../../src/orchestration/bridge';
     };
     const rejected = await call('default-worker');
     expect(rejected.status).toBe(400);
-    expect(onMutationResult).toHaveBeenCalledWith(`${input.inputId}:default-worker`, false);
+    expect(onMutationResult).toHaveBeenCalledWith(`${input.inputId}:default-worker`, false, 'WORKER_GIT_PROJECT_REQUIRED');
     expect(rejected.body).toMatchObject({error:'WORKER_GIT_PROJECT_REQUIRED',retryable:true});
     expect(rejected.body.message).toContain('media-worker');
     expect(store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(1);

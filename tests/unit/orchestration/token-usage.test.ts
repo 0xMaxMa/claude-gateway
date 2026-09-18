@@ -160,3 +160,21 @@ test('current context uses the latest request after compaction, not the turn pea
     expect(tokenReport(store,'session').contextWindow?.used).toBe(25000);
   } finally { store.close(); }
 });
+
+test.each(['failed','completed','cancelled'] as const)('worker report preserves %s outcome instead of only process ended',state=>{
+ const store=new OrchestrationStore(':memory:','fixture');
+ try{
+  const input=store.acceptInput({scope:{agentId:'fixture',agentSessionId:'session',source:'api',accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'},text:'test'});
+  const decision=new DecisionService(store).begin(input.conversationId,'owner',[input.inputId]);
+  const tasks=new TaskService(store),context={...input,...decision,principalId:'owner',actionId:'spawn',execute:true,writeMemory:false};
+  const task=tasks.spawn(context,{title:'fixture',instructions:'fixture',targetProfile:'default-worker'}),attempt=tasks.claim(task.taskId)!;
+  if(state==='cancelled')tasks.cancel({...context,actionId:'cancel'},task.taskId);
+  tasks.finish(attempt.attemptId,attempt.generation,state==='completed'?{type:'completed',result:{summary:'actual result',artifactIds:[]}}:{type:state==='cancelled'?'stopped':'failed',failure:{code:'WORKER_FAILED',message:'fixture error',observedAt:Date.now()}});
+  recordTokenTurn(store,{id:attempt.attemptId,sessionId:'session',taskId:task.taskId,role:'worker',category:'worker',startedAt:1,toolIds:[],inputTokens:1,totalTokens:1});
+  const turn=tokenReport(store,'session').turns[0];
+  expect(turn.state).toBe(state);
+  if(state==='failed')expect(turn.failureCode).toBe('WORKER_FAILED');
+  if(state==='completed')expect(turn.responseText).toBe('actual result');
+  if(state==='cancelled')expect(turn.failureCode).toBeUndefined();
+ }finally{store.close();}
+});

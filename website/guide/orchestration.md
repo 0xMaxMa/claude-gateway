@@ -106,3 +106,9 @@ The dashboard uses the same **admin API key** login as before. Conversations and
 ### Dashboard session activity
 
 The dashboard and Session token report share the same session status. After the last Agent turn ends, a conversation without active work stays **Idle** for one hour, even though its per-turn Claude Code process has been released. After more than one hour it shows **Stopped**, and both Context window cards show **—**. Active turns and non-terminal tasks retain their activity status. Context window retains the latest recorded measurement during the idle period; these display rules do not expire or delete conversation history or imply provider cache expiry.
+
+### Native context compaction
+
+Use `/compact` in a supported chat channel or the session compact API to ask Claude Code to compact its existing session. The gateway resumes that exact transcript, requires a native `compact_boundary` confirmation, and leaves all gateway chat-history files intact. It never reattaches a recent-message window after compaction. Busy sessions reject compaction until their current response finishes; workers continue independently. Missing transcripts and unsupported CLI behavior return an explicit error instead of invoking a separate history summarizer. Legacy sessions require an existing idle headless process.
+
+Installed skill metadata is kept in the stable Agent system prefix, not appended to every resumed user message. Catalog changes refresh that prefix. Worker turn reports distinguish completed, failed and cancelled outcomes from the process lifecycle and expose recorded failure codes.
