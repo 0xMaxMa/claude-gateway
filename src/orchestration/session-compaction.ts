@@ -64,6 +64,11 @@ export class SessionCompaction {
     }));
   }
   private skip(sessionId:string,cfg:ResolvedSessionCompaction):string|undefined {
+    const cli=this.store.get('SELECT cli_session_id,cwd FROM agent_cli_sessions WHERE session_id=?',sessionId);
+    const aliases=cli?this.store.all('SELECT session_id FROM agent_cli_sessions WHERE cli_session_id=? AND cwd=?',cli.cli_session_id,cli.cwd):[{session_id:sessionId}];
+    for(const alias of aliases){const reason=this.skipSingle(String(alias.session_id),cfg);if(reason)return reason;}
+  }
+  private skipSingle(sessionId:string,cfg:ResolvedSessionCompaction):string|undefined {
     if(this.deps.stopping())return 'gateway_stopping';
     if(this.deps.busy(sessionId))return 'agent_busy';
     if(this.store.get("SELECT t.id FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE c.agent_session_id=? AND t.state NOT IN ('completed','failed','cancelled') LIMIT 1",sessionId))return 'active_tasks';
@@ -72,6 +77,13 @@ export class SessionCompaction {
       SELECT MAX(COALESCE(ended_at,started_at)) at FROM conversation_decisions WHERE session_id=?
       UNION ALL SELECT MAX(i.created_at) at FROM conversation_inputs i JOIN conversations c ON c.id=i.conversation_id WHERE c.agent_session_id=? AND i.store_user_message=1)`,sessionId,sessionId)?.at;
     if(last!=null && Date.now()-Number(last)<cfg.quietMinutes*60000)return 'recent_activity';
+  }
+  private contextChangedAt(sessionId:string, measuredAt:number):boolean {
+    const cli=this.store.get('SELECT cli_session_id,cwd FROM agent_cli_sessions WHERE session_id=?',sessionId);
+    if(this.store.get("SELECT seq FROM conversation_events WHERE occurred_at>=? AND ((type='session.context_reset' AND json_extract(payload_json,'$.payload.sessionId')=?) OR (type='session.context_compacted' AND (json_extract(payload_json,'$.payload.sessionId')=? OR json_extract(payload_json,'$.payload.cliSessionId')=?))) LIMIT 1",measuredAt,sessionId,sessionId,cli?.cli_session_id??''))return true;
+    // Aliases can share a native transcript. An uncertain interrupted attempt on
+    // one alias must fence the others until their measurements become fresh.
+    return Boolean(cli&&this.store.get('SELECT m.session_id FROM session_compaction_marks m JOIN agent_cli_sessions c ON c.session_id=m.session_id WHERE c.cli_session_id=? AND c.cwd=? AND m.completed_at>=? LIMIT 1',cli.cli_session_id,cli.cwd,measuredAt));
   }
   run(cfg:ResolvedSessionCompaction):Promise<CompactionRun> {
     if(this.running)return this.running;
@@ -89,7 +101,7 @@ export class SessionCompaction {
     let attempted=0,status='completed';
     try {
       if(!cfg.enabled){status='disabled';return {id,agent:this.agentId,kind:'session_compaction',startedAt,endedAt:Date.now(),status,config:cfg,items};}
-      const sessions=this.store.all('SELECT session_id FROM agent_cli_sessions ORDER BY updated_at DESC LIMIT 1000');
+      const sessions=this.store.all('SELECT session_id,cli_session_id,cwd FROM agent_cli_sessions ORDER BY updated_at DESC LIMIT 1000');
       for(const row of sessions) {
         if(this.deps.stopping()){status='interrupted';break;}
         const sessionId=String(row.session_id);
@@ -103,12 +115,18 @@ export class SessionCompaction {
         if(!measured || !context || !Number.isFinite(context.used)){finish('no_measurement');continue;}
         item.beforeTokens=context.used;
         if(this.store.get('SELECT session_id FROM session_compaction_marks WHERE session_id=? AND measurement_id=?',sessionId,measured.id)){finish('unchanged_measurement');continue;}
-        if(this.store.get("SELECT seq FROM conversation_events WHERE type='session.context_compacted' AND json_extract(payload_json,'$.payload.sessionId')=? AND occurred_at>=? LIMIT 1",sessionId,measured.started_at)){finish('already_compacted');continue;}
+        if(this.contextChangedAt(sessionId,Number(measured.started_at))){finish('context_changed');continue;}
         const model=this.deps.model();
         try {item.contextWindow=await this.deps.window(model);}catch{finish('model_window_unavailable');continue;}
         if(!Number.isFinite(item.contextWindow)||item.contextWindow<=0){finish('model_window_unavailable');continue;}
         if(context.used<=item.contextWindow*cfg.thresholdPercent/100){finish('below_threshold');continue;}
         const changed=this.skip(sessionId,cfg);if(changed){finish(changed);continue;}
+        // Catalog lookup yields: manual /clear or /compact can finish meanwhile.
+        // Never use the pre-lookup measurement against a different CLI context.
+        const current=this.store.get('SELECT cli_session_id,cwd FROM agent_cli_sessions WHERE session_id=?',sessionId);
+        const latest=this.store.get("SELECT id FROM token_turns WHERE session_id=? AND role='agent' AND EXISTS (SELECT 1 FROM json_each(payload_json,'$.requests') r WHERE json_type(r.value,'$.usage')='object') ORDER BY started_at DESC,id DESC LIMIT 1",sessionId);
+        if(this.deps.model()!==model || !current || current.cli_session_id!==row.cli_session_id || current.cwd!==row.cwd || latest?.id!==measured.id || this.contextChangedAt(sessionId,Number(measured.started_at))){finish('context_changed');continue;}
+
         item.status='running';save(item);attempted++;
         // Fence even an uncertain crash after compaction: next user turn produces a new measurement.
         this.store.run('INSERT INTO session_compaction_marks VALUES(?,?,?) ON CONFLICT(session_id) DO UPDATE SET measurement_id=excluded.measurement_id,completed_at=excluded.completed_at',sessionId,measured.id,Date.now());

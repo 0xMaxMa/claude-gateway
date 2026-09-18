@@ -120,3 +120,29 @@ test('runtime startup recovers crashed audit state before any nightly manager is
     store=new OrchestrationStore(join(root,'orchestration.db'),'a');
   }
 });
+test.each(['session.context_reset','session.context_compacted'])('ignores measurements older than %s',async type=>{
+  const receipt=seed();store.transaction(()=>store.appendEvent(receipt.conversationId,type,{sessionId:'s'}));
+  const {manager,deps}=maintenance();expect((await manager.run(cfg)).items[0].reason).toBe('context_changed');expect(deps.compact).not.toHaveBeenCalled();
+});
+test.each(['reset','compact','mapping'])('rechecks %s completed during model lookup',async kind=>{
+  const receipt=seed();const {manager,deps}=maintenance({window:async()=>{
+    if(kind==='mapping')store.run("UPDATE agent_cli_sessions SET cli_session_id='new-cli' WHERE session_id='s'");
+    else store.transaction(()=>store.appendEvent(receipt.conversationId,kind==='reset'?'session.context_reset':'session.context_compacted',{sessionId:'s'}));
+    return 1000000;
+  }});
+  expect((await manager.run(cfg)).items[0].reason).toBe('context_changed');expect(deps.compact).not.toHaveBeenCalled();
+});
+test('does not compact with a model replaced during catalog lookup',async()=>{
+  seed();let model='first';const {manager,deps}=maintenance({model:()=>model,window:async()=>{model='second';return 1000000;}});
+  expect((await manager.run(cfg)).items[0].reason).toBe('context_changed');expect(deps.compact).not.toHaveBeenCalled();
+});
+test('busy alias protects the shared native transcript',async()=>{
+  seed('s');seed('alias');store.run("UPDATE agent_cli_sessions SET cli_session_id='cli-s' WHERE session_id='alias'");
+  const {manager,deps}=maintenance({busy:(id:string)=>id==='alias'});
+  const run=await manager.run(cfg);expect(run.items.every(i=>i.reason==='agent_busy')).toBe(true);expect(deps.compact).not.toHaveBeenCalled();
+});
+test('compacting one alias fences the other stale measurement',async()=>{
+  seed('s');seed('alias');store.run("UPDATE agent_cli_sessions SET cli_session_id='cli-s' WHERE session_id='alias'");
+  const {manager,deps}=maintenance();const run=await manager.run(cfg);
+  expect(deps.compact).toHaveBeenCalledTimes(1);expect(run.items.some(i=>i.reason==='context_changed')).toBe(true);
+});
