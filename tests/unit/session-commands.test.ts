@@ -210,7 +210,7 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
     await waitForForward();
 
     const text = getForwardText();
-    expect(text).toContain('Context: 40%');
+    expect(text).toContain('Context: 80K / 200K · 40%');
     expect(text).not.toContain('Near limit');
   }, 15000);
 
@@ -225,7 +225,7 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
     await waitForForward();
 
     const text = getForwardText();
-    expect(text).toContain('Context: 0%');
+    expect(text).toContain('Context: 0 / 200K · 0%');
   }, 15000);
 
   // -------------------------------------------------------------------------
@@ -274,7 +274,7 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
     await waitForForward();
 
     const text = getForwardText();
-    expect(text).toContain('Context: 65%');
+    expect(text).toContain('Context: 130K / 200K · 65%');
     expect(text).not.toContain('Near limit');
   }, 15000);
 
@@ -293,7 +293,7 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
 
     const text = getForwardText();
     expect(text).toContain('Test Session');
-    expect(text).toContain('Context: 25%');     // 50000/200000 = 25%
+    expect(text).toContain('Context: 50K / 200K · 25%');     // 50000/200000 = 25%
   }, 15000);
 });
 

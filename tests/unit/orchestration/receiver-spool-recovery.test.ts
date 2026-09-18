@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ReceiverSpool } from '../../../mcp/tools/receiver-spool';
@@ -271,6 +271,7 @@ test.each([undefined, 'not-json', 'null', '{}', '[]', '[1]', '[""]', JSON.string
     const album = input('a','album',metadata);
     const broken = persist(root,album,10000);
     const original = readFileSync(join(root,broken),'utf8');
+    const originalTime = statSync(join(root,broken)).mtime;
     persist(root,input('a','tail'),9000);
     persist(root,input('b','healthy'),8000);
     const diagnostic = jest.spyOn(process.stderr,'write').mockReturnValue(true);
@@ -290,7 +291,7 @@ test.each([undefined, 'not-json', 'null', '{}', '[]', '[1]', '[""]', JSON.string
     expect(diagnostic).toHaveBeenCalledTimes(2);
     // Repairing the retained record restores its original conversation order.
     writeFileSync(join(root,broken),JSON.stringify({...album,meta:{...metadata,...album.meta,message_ids_json:'["1"]'}}));
-    utimesSync(join(root,broken),new Date(Date.now()-10000),new Date(Date.now()-10000));
+    utimesSync(join(root,broken),originalTime,originalTime);
     await spool.flush();
     expect(request.mock.calls.map(call=>JSON.parse(String(call[1]?.body)).content)).toEqual(['healthy','after restart','album','tail']);
     expect(readdirSync(root).filter(file=>file.endsWith('.json'))).toHaveLength(0);
