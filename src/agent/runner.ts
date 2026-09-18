@@ -4363,7 +4363,7 @@ export class AgentRunner extends EventEmitter {
   }
 
   getDashboardSource() {
-    return { workspace: this.agentConfig.type === 'app-agent' ? undefined : this.agentConfig.workspace, semanticIntake: this.agentConfig.orchestration?.conversation?.semanticIntake ?? false, filename: path.join(this.agentDir, 'orchestration.db'), historyFilename: path.join(this.agentDir, 'history.db'),
+    return { workspace: this.agentConfig.type === 'app-agent' ? undefined : this.agentConfig.workspace, filename: path.join(this.agentDir, 'orchestration.db'), historyFilename: path.join(this.agentDir, 'history.db'),
       enabled: Boolean(this.orchestration || this.agentConfig.orchestration?.enabled),
       workspaceMode: this.agentConfig.type === 'app-agent' ? 'container' : this.agentConfig.orchestration?.tasks?.workspaceMode ?? 'host',
       maxWorkers: this.agentConfig.orchestration?.tasks?.maxConcurrentPerAgent ?? ORCHESTRATION_DEFAULTS.tasks.maxConcurrentPerAgent,

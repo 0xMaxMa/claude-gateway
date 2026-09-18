@@ -53,7 +53,14 @@ for (const mod of modules) {
   }
 }
 
-const taskTools = ORCHESTRATION_ROLE === 'agent' ? AGENT_TASK_TOOLS.filter(tool => (tool.name !== 'conversation_intake' || process.env.GATEWAY_SEMANTIC_INTAKE === 'true') && (tool.name !== 'capabilities_list' || process.env.GATEWAY_CAPABILITY_CATALOG === 'true')) : ORCHESTRATION_ROLE === 'worker' ? WORKER_REPORT_TOOLS.filter(tool => tool.name !== 'task_memory_append' || process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true') : [];
+// conversation_intake is declared on every agent turn, whatever the semantic-intake feature
+// state. The advertised tool list is position 0 of Anthropic's cached [tools, system, messages]
+// prefix, and the feature is decided per turn (runtime.ts computes it from the flag AND from
+// whether this turn is a notification), so filtering the declaration here re-wrote the prefix
+// mid-session and invalidated the whole cache — the same defect ee800a7 fixed for the response
+// schema. The turn's INTAKE_OVERLAY prompt text, below the cache breakpoint, is what asks for
+// the tool; the bridge refuses the call outright when the feature is not active.
+const taskTools = ORCHESTRATION_ROLE === 'agent' ? AGENT_TASK_TOOLS.filter(tool => tool.name !== 'capabilities_list' || process.env.GATEWAY_CAPABILITY_CATALOG === 'true') : ORCHESTRATION_ROLE === 'worker' ? WORKER_REPORT_TOOLS.filter(tool => tool.name !== 'task_memory_append' || process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true') : [];
 if (ORCHESTRATION_ROLE && process.env.GATEWAY_ORCHESTRATION_TICKET_FILE) visibleTools.push(...taskTools);
 
 // Preserve the full policy-filtered inventory internally; only schema exposure is lazy.

@@ -12,7 +12,6 @@ export interface RuntimeProfile {
   mcpConfigPath: string;
   overlay: string;
   responseSchema?: Record<string, unknown>;
-  semanticIntake?: boolean;
   /** Existing loadWorkspace/CLAUDE.md composition, supplied without rewriting files. */
   context?: string;
   /** Scheduler already holds a gateway-wide process lease for this worker. */

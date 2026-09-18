@@ -949,7 +949,7 @@ export class GatewayRouter {
         if (!runner) { res.status(404).json({ error: 'Unknown agent' }); return; }
         try {
           const source = runner.getDashboardSource?.();
-          const report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, semanticIntake:source.semanticIntake, sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h')), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
+          const report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h')), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
           if (!report) { res.status(404).json({ error: 'No recorded session token report' }); return; }
           if (reportPath === '/token-report') res.json(report);
           else res.type('html').send(generateTokenReportHtml(agentId, {...report, scope:dashboardRange(req.query.scope), sessionStatus: runner.agentSessionLiveStatus?.(sessionId) ?? 'stopped'}));

@@ -62,7 +62,18 @@ export class TaskBridge {
                 result = { ...(await scope.capabilities(a) as Record<string, unknown>), executionAllowedForThisTurn: context.execute, memoryWriteAllowedForThisTurn: context.writeMemory }; break;
               }
               case 'conversation_intake': {
-                if (!scope.onIntake) throw new OrchestrationError('SEMANTIC_INTAKE_DISABLED');
+                // The tool is declared on every turn to keep the cached tools prefix
+                // byte-identical, so the model can reach this handler on a turn where the
+                // feature is not active (flag off, or an internal notification turn). Refuse
+                // explicitly and tell it what to do instead: an error result would make the
+                // model guess, and a bare success would imply the user had been acknowledged.
+                if (!scope.onIntake) {
+                  console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn',
+                    event: 'conversation_intake called while semantic intake is inactive',
+                    agentId: this.tasks.store.agentId, referenceId: context.actionId, mode: typeof a.mode === 'string' ? a.mode : null }));
+                  result = { intake_required: false, instruction: 'Semantic intake is not active for this turn. Do not call conversation_intake again now: answer the user directly, and queue any authorized work with the task tools without a separate acknowledgement.' };
+                  break;
+                }
                 result = await scope.onIntake(a); break;
               }
               case 'task_spawn': {
@@ -139,10 +150,10 @@ export class TaskBridge {
     const ticketPath = join(directory, 'ticket.json'), mcpConfigPath = join(directory, 'mcp.json');
     const worker = scope.role === 'worker' && this.files ? this.files.scope(scope.attemptId, scope.generation) : undefined;
     const workerMemory = Boolean(worker?.task.capabilities.writeMemory && worker.conversation.source !== 'api');
-    writeFileSync(ticketPath, JSON.stringify({ url: this.url, token, ...(this.container ? { socket: this.url, tools: containerTaskTools(scope.role, scope.role==='agent' && !!scope.onIntake) } : {}) }), { mode: 0o600, flag: 'wx' });
+    writeFileSync(ticketPath, JSON.stringify({ url: this.url, token, ...(this.container ? { socket: this.url, tools: containerTaskTools(scope.role) } : {}) }), { mode: 0o600, flag: 'wx' });
     writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: { gateway: { command: 'bun', args: [resolve(__dirname, '../../mcp/server.ts')], env: {
       GATEWAY_CAPABILITY_CATALOG: scope.role === 'agent' && scope.capabilities ? 'true' : '',
-      GATEWAY_ORCHESTRATION_ROLE: scope.role, GATEWAY_SEMANTIC_INTAKE: scope.role==='agent' && scope.onIntake ? 'true' : '', GATEWAY_ORCHESTRATION_TICKET_FILE: ticketPath,
+      GATEWAY_ORCHESTRATION_ROLE: scope.role, GATEWAY_ORCHESTRATION_TICKET_FILE: ticketPath,
       GATEWAY_WORKSPACE_DIR: workspace, GATEWAY_SHARED_KB_DIR: sharedKbDir,
       GATEWAY_RECORD_RETRIEVALS: this.recordRetrievals ? '1' : '',
       GATEWAY_ORIGIN_CHANNEL: workerMemory ? String(worker!.conversation.source) : 'api', GATEWAY_AGENT_ID: this.tasks.store.agentId,
@@ -170,7 +181,7 @@ export class TaskBridge {
     const writeMemory = workerMemory || (scope.role === 'agent' && scope.context.writeMemory && this.tasks.store.get('SELECT source FROM conversations WHERE id=?', scope.context.conversationId)?.source !== 'api');
     const personaContext = scope.role === 'agent' ? `This agent persona workspace: ${JSON.stringify(this.container ? '/workspace' : workspace)}.` : '';
     const sourceRules = `${personaContext}\n${writeMemory ? `Channel memory updates use scoped memory tools. ${SECRET_RULES}` : API_SOURCE_RULES}\n${IDENTITY_EDIT_RULES}`;
-    return { profile: { role: scope.role, checkpointCommand, semanticIntake: scope.role === 'agent' && Boolean(scope.onIntake), containerExecution: Boolean(this.container), mcpConfigPath, overlay: `${scope.role === 'agent' ? AGENT_OVERLAY : WORKER_OVERLAY}\n\n${sourceRules}` },
+    return { profile: { role: scope.role, checkpointCommand, containerExecution: Boolean(this.container), mcpConfigPath, overlay: `${scope.role === 'agent' ? AGENT_OVERLAY : WORKER_OVERLAY}\n\n${sourceRules}` },
       revoke: () => { this.scopes.delete(token); if (scope.role === 'worker') this.files?.releaseCaptured(scope.attemptId); } };
   }
   async close(): Promise<void> {
@@ -180,12 +191,14 @@ export class TaskBridge {
   }
 }
 
-/** Container task-only MCP inventory; no host media/browser/memory delegation. */
-export function containerTaskTools(role: 'agent' | 'worker', semanticIntake = false) {
+/** Container task-only MCP inventory; no host media/browser/memory delegation.
+ * Invariant per role for the same reason as AGENT_TASK_TOOLS: this array becomes the
+ * container agent's advertised tool list, i.e. the head of its cached prompt prefix. */
+export function containerTaskTools(role: 'agent' | 'worker') {
   const text = { type: 'string' };
   const entries: Array<[string, Record<string, unknown>, string[], string]> = role === 'agent' ? [
     ['capabilities_list',{query:text,catalog_version:text,offset:{type:'integer',minimum:0}},[],'Read this app agent capability catalog without granting host access. Follow next_offset with catalog_version for the complete list; restart at 0 on CAPABILITY_CATALOG_CHANGED.'],
-    ['conversation_intake',{mode:{type:'string',enum:['ready','wait','update']},acknowledgement:text,preparation:text,clarification:text,task_id:text},['mode'],'Classify readiness, acknowledge complete instructions before execution, or prepare incomplete materials and wait.'],
+    ['conversation_intake',{mode:{type:'string',enum:['ready','wait','update']},acknowledgement:text,preparation:text,clarification:text,task_id:text},['mode'],'Only when this turn\'s instructions explicitly ask you to run intake: classify readiness, acknowledge complete instructions before execution, or prepare incomplete materials and wait. Without that instruction this turn, answer directly and use the task tools directly instead.'],
     ['task_spawn', { title:text, instructions:text, target_profile:text, spoken_acknowledgement:text, skill_name:text, skill_args:text, continue_task_id:text, continuation_policy:{type:'string',enum:['after_success','after_terminal']}, context_refs:{type:'array',items:text} }, ['title','instructions','target_profile'], 'Queue work inside this app container and return a durable receipt.'],
     ['task_status',{task_id:text},[],'Read task status without waiting. Pass task_id to retrieve its complete stored result and evidence; task indexes in conversation context are not result reports.'],
     ['task_cancel',{task_id:text},['task_id'],'Request cancellation.'],
@@ -197,5 +210,5 @@ export function containerTaskTools(role: 'agent' | 'worker', semanticIntake = fa
     ['task_request_input',{question:text},['question'],'Ask for input then end the turn.'],
     ['task_stage_file',{path:text,caption:text},['path'],'Stage a finished file from /workspace or /tmp inside the container.'],
   ];
-  return entries.filter(([name])=>name!=='conversation_intake' || semanticIntake).map(([name,properties,required,description])=>({name,description,inputSchema:{type:'object',properties,required,additionalProperties:false}}));
+  return entries.map(([name,properties,required,description])=>({name,description,inputSchema:{type:'object',properties,required,additionalProperties:false}}));
 }

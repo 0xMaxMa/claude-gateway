@@ -167,9 +167,9 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
     if (event.type === 'system' && event.subtype === 'init' && process.runtimeProfile) {
       const role = process.runtimeProfile.role;
       const allowed = role === 'agent'
-        ? /^(mcp__gateway__(capabilities_list|memory_(get|search)|task_(spawn|status|cancel|update|answer|question)))$/
+        ? /^(mcp__gateway__(capabilities_list|conversation_intake|memory_(get|search)|task_(spawn|status|cancel|update|answer|question)))$/
         : /^(Read|Glob|Grep|Bash|Edit|Write|Skill|mcp__gateway__(tool_search|tool_call|browser_[a-z_]+|generate_image|generate_video|share_file|share_image|memory_(get|search|shared_(get|create|update|delete))|task_(report_progress|request_input|stage_file|memory_append)))$/;
-      if (!Array.isArray(event.tools) || event.tools.some((name: unknown) => typeof name !== 'string' || (!(role === 'worker' && process.runtimeProfile?.hostExecution) && !(role === 'agent' && process.runtimeProfile?.responseSchema && name === 'StructuredOutput') && !(role === 'agent' && process.runtimeProfile?.semanticIntake && name === 'mcp__gateway__conversation_intake') && !process.isSpawnedConnectorTool?.(name) && !allowed.test(name)))) {
+      if (!Array.isArray(event.tools) || event.tools.some((name: unknown) => typeof name !== 'string' || (!(role === 'worker' && process.runtimeProfile?.hostExecution) && !(role === 'agent' && process.runtimeProfile?.responseSchema && name === 'StructuredOutput') && !process.isSpawnedConnectorTool?.(name) && !allowed.test(name)))) {
         fail(new OrchestrationError('PROFILE_INVENTORY_MISMATCH'));
         void process.stop(); return;
       }

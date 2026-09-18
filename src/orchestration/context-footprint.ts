@@ -14,9 +14,9 @@ export interface ContextFootprint {
   rows: Array<{name:string;tokens:number|null;characters:number|null;hasContent?:boolean;note:string}>;
 }
 /** Run in the dashboard reader thread. Never launch a CLI/model or return file content. */
-export function contextFootprint(workspace: string | undefined, semanticIntake: boolean): ContextFootprint {
+export function contextFootprint(workspace: string | undefined): ContextFootprint {
   if (!workspace) return {observedAt:Date.now(),rows:[]};
-  const key=workspace+':'+semanticIntake, previous=cache.get(key);
+  const key=workspace, previous=cache.get(key);
   if(previous && Date.now()-previous.at<30000)return previous.value;
   const rows:ContextFootprint['rows']=[];
   const read=(name:string):string|undefined=>{
@@ -35,8 +35,9 @@ export function contextFootprint(workspace: string | undefined, semanticIntake: 
     }
   }
   for(const name of ['AGENTS.md','IDENTITY.md','SOUL.md','USER.md','MEMORY.md','HEARTBEAT.md'])add(name+' · source file',read(name),'Current file on disk before budget/index/truncation. Reference only; not added to composed context.');
-  const tools=AGENT_TASK_TOOLS.filter(t=>t.name!=='conversation_intake'||semanticIntake);
-  add('Agent gateway tool schemas ('+tools.length+')',JSON.stringify(tools),'Current host Agent MCP definitions: name, description and inputSchema. Excludes native CLI tools, worker tools and provider framing.');
+  // Every agent tool is declared on every turn, so the measured schema cost does not
+  // depend on any feature flag. Filtering one out here would under-report the real prefix.
+  add('Agent gateway tool schemas ('+AGENT_TASK_TOOLS.length+')',JSON.stringify(AGENT_TASK_TOOLS),'Current host Agent MCP definitions: name, description and inputSchema. Excludes native CLI tools, worker tools and provider framing.');
   const value={observedAt:Date.now(),rows};
   if(cache.size>=32)cache.delete(cache.keys().next().value!);
   cache.set(key,{at:Date.now(),value});return value;
