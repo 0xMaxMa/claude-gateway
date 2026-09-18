@@ -150,3 +150,19 @@ test('image aliases commit only on delivery and legacy fingerprints cannot imply
   expect(resumed.commit()).toBe(false);
   expect(delivery.begin(scope).imageReference('alias')).toBeUndefined();
 });
+
+test('compaction invalidates every conversation sharing the CLI session but not another session', () => {
+  const second = store.acceptInput({scope:{...ingress,chatId:'second'},text:'second'});
+  const unrelated = store.acceptInput({scope:{...ingress,agentSessionId:'separate',chatId:'third'},text:'third'});
+  const secondScope = {...scope,...second};
+  const unrelatedScope = {...scope,...unrelated,cliSessionId:'other-cli'};
+  for(const current of [scope,secondScope,unrelatedScope]) {
+    const plan=delivery.begin(current);plan.rememberImage('image','digest');plan.select('tasks',[item],key);plan.commit();
+  }
+  const pending=delivery.begin(secondScope);
+  delivery.invalidateConversation(scope.conversationId);
+  expect(pending.commit()).toBe(false);
+  expect(delivery.begin(secondScope).imageReference('image')).toBeUndefined();
+  expect(delivery.begin(secondScope).select('tasks',[item],key)).toEqual([item]);
+  expect(delivery.begin(unrelatedScope).imageReference('image')).toBe('image');
+});

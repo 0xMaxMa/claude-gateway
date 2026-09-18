@@ -40,12 +40,16 @@ export class ContextDelivery {
       conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),generation INTEGER NOT NULL)`);
   }
 
-  /** Trusted runtime hook for manual compact, including plans not yet committed. */
+  /** A CLI transcript can serve several channel conversations in one session. */
   invalidateConversation(conversationId: string): void {
     this.store.transaction(() => {
-      this.store.run(`INSERT INTO context_delivery_generations VALUES(?,1)
-        ON CONFLICT(conversation_id) DO UPDATE SET generation=generation+1`, conversationId);
-      this.store.run("UPDATE context_delivery SET revision=revision+1,fingerprints_json='[]' WHERE conversation_id=?", conversationId);
+      const conversations=this.store.all(`SELECT id FROM conversations WHERE agent_session_id=
+        (SELECT agent_session_id FROM conversations WHERE id=?)`,conversationId);
+      for(const row of conversations) {
+        this.store.run(`INSERT INTO context_delivery_generations VALUES(?,1)
+          ON CONFLICT(conversation_id) DO UPDATE SET generation=generation+1`, row.id);
+        this.store.run("UPDATE context_delivery SET revision=revision+1,fingerprints_json='[]' WHERE conversation_id=?", row.id);
+      }
     });
   }
 
