@@ -1414,34 +1414,21 @@ export class AgentRunner extends EventEmitter {
         const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId, this.channelFor(chatId));
         const meta = index.sessions.find(s => s.id === index.activeSessionId);
         if (!meta) {
-          return respond({ success: true, text: 'No active session found.' });
+          return respond({ success: true, sessionId: null, text: 'No active session found.' });
         }
-        const effectiveModel = this.agentConfig.claude.model;
-        const contextWindow = await this.contextWindowFor(effectiveModel);
-        const contextTokens = meta.lastInputTokens ?? 0;
-        const usedPct = Math.round((contextTokens / contextWindow) * 100);
-        let msgs: string;
-        if (meta.messageCount <= 0) {
-          msgs = 'No messages yet';
-        } else if ((meta.archivedCount ?? 0) > 0 && meta.loadedAtSpawn != null && meta.messageCountAtSpawn != null) {
-          const newMessagesSinceSpawn = meta.messageCount - meta.messageCountAtSpawn;
-          const inContext = meta.loadedAtSpawn + Math.max(0, newMessagesSinceSpawn);
-          msgs = `${meta.messageCount} (${inContext} in context / ${meta.archivedCount} archived)`;
-        } else {
-          msgs = `${meta.messageCount}`;
-        }
+        const context = await this.sessionContextInfo(meta.id, meta);
         const lines = [
           `📌 Current Session: ${meta.name}`,
           `<code>${meta.id}</code>`,
           '',
-          `📥 Messages: ${msgs}`,
-          `👉 Context: ${usedPct}%`,
+          `👉 Context: ${context.text}`,
+          `🤖 Model: ${String(this.agentConfig.claude.model).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}`,
         ];
-        if (usedPct >= 80) {
+        if (context.contextUsedPct != null && context.contextUsedPct >= 80) {
           lines.push('', '💡 Near limit — consider /compact');
         }
         lines.push('', 'Commands: /sessions /new /rename /clear /compact');
-        return respond({ success: true, text: lines.join('\n'), format: 'html' });
+        return respond({ success: true, sessionId: meta.id, text: lines.join('\n'), format: 'html' });
       } catch {
         return respond({ success: false, text: 'Failed to get session info.' });
       }
@@ -3003,6 +2990,23 @@ export class AgentRunner extends EventEmitter {
   /**
    * /session — show info about the current active session.
    */
+  private async sessionContextInfo(sessionId: string, meta?: { lastInputTokens?: number; lastActive: number; model?: string }) {
+    let context = this.orchestration?.sessionContextWindow(sessionId);
+    // Legacy sessions do not write the orchestration ledger. Keep their measured
+    // usage, but never resurrect stale metadata for an orchestration-owned session.
+    if (!context && meta && !this.orchestration?.ownsSession(sessionId) &&
+        Number.isFinite(meta.lastInputTokens) && meta.lastInputTokens! >= 0 &&
+        Number.isFinite(meta.lastActive) && Date.now() - meta.lastActive <= 3600000) {
+      context = { used: meta.lastInputTokens!, total: null, model: meta.model ?? this.agentConfig.claude.model };
+    }
+    if (!context) return {contextUsedPct:null,contextTokens:null,contextWindow:null,contextModel:null,text:'—'};
+    const total = context.model ? await this.dashboardContextWindow(context.model) : null;
+    const pct = total && total > 0 ? Math.round(context.used / total * 100) : null;
+    const format = (n:number) => n >= 1000000 ? `${Number((n/1000000).toFixed(2))}M` : n >= 1000 ? `${Number((n/1000).toFixed(2))}K` : String(n);
+    return {contextUsedPct:pct,contextTokens:context.used,contextWindow:total,contextModel:context.model,
+      text:`${format(context.used)} / ${total == null ? '—' : format(total)}${pct == null ? '' : ` · ${pct}%`}`};
+  }
+
   private async handleCommandSessionInfo(agentId: string, chatId: string): Promise<void> {
     const index = await this.sessionStore.listSessions(agentId, chatId, this.channelFor(chatId));
     const meta = index.sessions.find(s => s.id === index.activeSessionId);
@@ -3011,33 +3015,17 @@ export class AgentRunner extends EventEmitter {
       return;
     }
 
-    const effectiveModel = this.agentConfig.claude.model;
-    const contextWindow = await this.contextWindowFor(effectiveModel);
-    const contextTokens = meta.lastInputTokens ?? 0;
-    const usedPct = Math.round((contextTokens / contextWindow) * 100);
-
-    let msgs: string;
-    if (meta.messageCount <= 0) {
-      msgs = 'No messages yet';
-    } else if ((meta.archivedCount ?? 0) > 0 && meta.loadedAtSpawn != null && meta.messageCountAtSpawn != null) {
-      const newMessagesSinceSpawn = meta.messageCount - meta.messageCountAtSpawn;
-      const inContext = meta.loadedAtSpawn + Math.max(0, newMessagesSinceSpawn);
-      msgs = `${meta.messageCount} (${inContext} in context / ${meta.archivedCount} archived)`;
-    } else {
-      msgs = `${meta.messageCount}`;
-    }
-
-    const contextLine = `${usedPct}%`;
+    const context = await this.sessionContextInfo(meta.id, meta);
 
     const lines = [
       `📌 Current Session: ${meta.name}`,
       `<code>${index.activeSessionId}</code>`,
       '',
-      `📥 Messages: ${msgs}`,
-      `👉 Context: ${contextLine}`,
+      `👉 Context: ${context.text}`,
+      `🤖 Model: ${String(this.agentConfig.claude.model).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}`,
     ];
 
-    if (usedPct >= 80) {
+    if (context.contextUsedPct != null && context.contextUsedPct >= 80) {
       lines.push('', '💡 Near limit — consider /compact');
     }
 
@@ -5351,20 +5339,13 @@ export class AgentRunner extends EventEmitter {
         // The api append path doesn't maintain the index messageCount, so count the flat store
         // (the real conversation) directly rather than trusting meta.messageCount.
         const messageCount = (await this.sessionStore.loadSession(agentId, sessionId).catch(() => [])).length;
-        if (!meta) {
-          result = { sessionId, sessionName: null, messageCount, archivedCount: 0, contextUsedPct: 0, model: effectiveModel };
-          responseText = `Session: (unnamed)\nMessages: ${messageCount}\nContext used: 0%\nModel: ${effectiveModel}`;
-        } else {
-          const contextWindow = await this.contextWindowFor(effectiveModel);
-          const contextUsedPct = Math.round(((meta.lastInputTokens ?? 0) / contextWindow) * 100);
-          result = { sessionId, sessionName: meta.name, messageCount, archivedCount: meta.archivedCount ?? 0, contextUsedPct, model: effectiveModel };
-          responseText = [
-            `Session: ${meta.name ?? '(unnamed)'}`,
-            `Messages: ${messageCount}${(meta.archivedCount ?? 0) > 0 ? ` (${meta.archivedCount} archived)` : ''}`,
-            `Context used: ${contextUsedPct}%`,
-            `Model: ${effectiveModel}`,
-          ].join('\n');
-        }
+        const context = await this.sessionContextInfo(sessionId, meta);
+        const {text:contextText,...contextFields} = context;
+        result = {sessionId,sessionName:meta?.name ?? null,messageCount,archivedCount:meta?.archivedCount ?? 0,
+          ...contextFields,model:effectiveModel};
+        responseText = [`📌 Current Session: ${meta?.name ?? '(unnamed)'}`,sessionId,'',`👉 Context: ${contextText}`,`🤖 Model: ${effectiveModel}`,
+          ...(context.contextUsedPct != null && context.contextUsedPct >= 80 ? ['', '💡 Near limit — consider /compact'] : []),
+          '', 'Commands: /sessions /new /rename /clear /compact'].join('\n');
       } else if (cmd === '/sessions') {
         // Advertised for the api channel (BUILTIN_COMMANDS), so handle it here — mirrors the
         // telegram /sessions list. Marks the session this command runs in as (current).
@@ -5574,16 +5555,14 @@ export class AgentRunner extends EventEmitter {
     const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId, 'api').catch(() => null);
     const meta = index?.sessions.find((s) => s.id === sessionId);
     if (!meta) return null;
-    const effectiveModel = this.agentConfig.claude.model;
-    const contextWindow = await this.contextWindowFor(effectiveModel);
-    const contextUsedPct = Math.round(((meta.lastInputTokens ?? 0) / contextWindow) * 100);
+    const {text: _contextText, ...context} = await this.sessionContextInfo(sessionId, meta);
     return {
       sessionId: meta.id,
       sessionName: meta.name,
       messageCount: meta.messageCount,
       archivedCount: meta.archivedCount ?? 0,
-      contextUsedPct,
-      model: effectiveModel,
+      ...context,
+      model: this.agentConfig.claude.model,
     };
   }
 

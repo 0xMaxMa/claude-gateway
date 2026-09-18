@@ -7,7 +7,7 @@ import type { InputImage } from '../session/input-image';
 import { SessionProcess } from '../session/process';
 import { OrchestrationError } from './types';
 
-export interface TurnTimeoutPolicy { onUsage?: (metrics: ManagedTurnMetrics) => void; startupTimeoutMs: number; firstResponseTimeoutMs: number; idleTimeoutMs: number; acceptToolProgress?: boolean; idleAction?: 'observe'; onObservation?: (value: TurnObservation) => void; }
+export interface TurnTimeoutPolicy { onUsage?: (metrics: ManagedTurnMetrics) => void; startupTimeoutMs: number; firstResponseTimeoutMs: number; compactionTimeoutMs?: number; idleTimeoutMs: number; acceptToolProgress?: boolean; idleAction?: 'observe'; onObservation?: (value: TurnObservation) => void; }
 export interface TurnTimeoutDetails { phase: 'startup' | 'first_response' | 'compaction' | 'idle' | 'total'; elapsedMs: number; idleMs: number; }
 export interface ProcessResult { text: string; interrupted: boolean; }
 export interface ProcessTurn {
@@ -154,7 +154,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
       // the parent. Do not kill it with the first-answer silence timer. The
       // caller's hard deadline remains in force, including repeated status events.
       if (event.type === 'system' && event.subtype === 'status' && event.status === 'compacting' && phase !== 'compaction') {
-        arm('compaction', timeoutMs ?? policy.firstResponseTimeoutMs);
+        arm('compaction', policy.compactionTimeoutMs ?? 300000);
       }
       if (phase === 'compaction' && event.type === 'system' &&
           (event.subtype === 'compact_boundary' || (event.subtype === 'status' && event.status === null))) {

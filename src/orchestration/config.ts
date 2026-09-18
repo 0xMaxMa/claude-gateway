@@ -21,6 +21,8 @@ export interface OrchestrationConfig {
     idleTimeoutMs?: number;
     startupTimeoutMs?: number;
     firstResponseTimeoutMs?: number;
+    /** Per-compaction deadline for agents and workers, independent of first-token wait. */
+    compactionTimeoutMs?: number;
     maxDecisionDurationMs?: number;
     preemptionGraceMs?: number;
     maxPendingInputs?: number;
@@ -70,7 +72,7 @@ export const ORCHESTRATION_DEFAULTS = {
   enabled: false,
   channels: ['api'],
   conversation: { backend: 'inherit' as const, semanticIntake: false, intakeWaitMs: 2000, maxActiveSessions: 2, notificationPolicy: 'existing_receive_path' as const,
-    decisionTimeoutMs: 120000, idleTimeoutMs: 120000, startupTimeoutMs: 120000, firstResponseTimeoutMs: 120000, maxDecisionDurationMs: 600000, preemptionGraceMs: 250, maxPendingInputs: 100 },
+    decisionTimeoutMs: 120000, idleTimeoutMs: 120000, startupTimeoutMs: 120000, firstResponseTimeoutMs: 120000, compactionTimeoutMs: 300000, maxDecisionDurationMs: 600000, preemptionGraceMs: 250, maxPendingInputs: 100 },
   tasks: { maxConcurrentPerAgent: 10, maxConcurrentPerConversation: 10, workerIdleTtlMs: 600000, maxQueuedPerConversation: 20,
     maxQueuedPerAgent: 100, defaultTimeoutMs: 1800000, idleTimeoutMs: 300000, maxDurationMs: 0, questionReminderMs: 600000, progressStaleMs: 180000, progressNotifyCooldownMs: 300000, repeatedToolThreshold: 6, interruptAckTimeoutMs: 5000, workspaceMode: 'host' as const, projectRoot: '', resourceRetentionDays: 7 },
   events: { retentionDays: 7, maxSubscriberBufferBytes: 1048576 },

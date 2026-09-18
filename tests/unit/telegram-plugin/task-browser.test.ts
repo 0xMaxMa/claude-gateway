@@ -73,3 +73,18 @@ test('rapid opens and refresh in flight serialize so old updates cannot overwrit
  expect(io.send).toHaveBeenCalledTimes(3);
  set({sessionId:'session-a',page:0,state:'done'});await browser.tick();expect(io.edit.mock.calls.at(-1)?.[1]).toBe(13);
 });
+
+test('session status stays live without tasks, refreshes model/context and replaces only its own message',async()=>{
+ const {io,browser,set}=setup();
+ const tasks=setup();await tasks.browser.open('1','1');
+ set({sessionId:'session-a',text:'Context: —\nModel: model-a'});
+ await browser.open('1','1');await browser.tick();expect(io.edit).not.toHaveBeenCalled();
+ set({sessionId:'session-a',text:'Context: 180K / 200K · 90%\nModel: model-b'});
+ await browser.tick();expect(io.edit.mock.calls.at(-1)![2].text).toContain('model-b');
+ set({sessionId:'session-a',text:'Context: —\nModel: model-b'});
+ await browser.tick();expect(io.edit).toHaveBeenCalledTimes(2);
+ await browser.open('1','1');expect(io.remove).toHaveBeenCalledWith('1',11);
+ expect(tasks.io.remove).not.toHaveBeenCalled();
+ set({sessionId:'session-b',text:'New session'});await browser.tick();
+ expect(io.remove).toHaveBeenLastCalledWith('1',12);
+});

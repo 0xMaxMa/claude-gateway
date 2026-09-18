@@ -39,6 +39,7 @@ This is an agent-entry fragment. Keep the agent's existing workspace, Claude mod
 | `idleTimeoutMs` | `120000` | Conversation decision inactivity budget; progress renews the idle clock |
 | `startupTimeoutMs` | `120000` | Startup budget |
 | `firstResponseTimeoutMs` | `120000` | Budget for first response activity |
+| `compactionTimeoutMs` | `300000` | Per-compaction deadline for agents and workers; independent of first-response and idle budgets. Any configured total deadline still applies. |
 | `maxDecisionDurationMs` | `600000` | Total decision budget; separate from worker task runtime |
 | `preemptionGraceMs` | `250` | Accepted configuration field; currently not consumed by runtime preemption |
 | `maxPendingInputs` | `100` | Bound queued conversation input |
