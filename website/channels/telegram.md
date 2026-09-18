@@ -77,7 +77,7 @@ Once paired, use these commands in the bot's private chat:
 | Command | Behavior |
 | --- | --- |
 | `/start`, `/status`, `/help` | Pairing instructions, pairing status, available commands |
-| `/session` | Current session name, message count and context usage |
+| `/session` | Current session name, selected model and measured context usage |
 | `/sessions` | List, switch or delete sessions using buttons |
 | `/new <name>` | Create a session; name is optional |
 | `/rename <name>` | Rename the current session |
@@ -96,7 +96,7 @@ With `gateway.orchestration: true`, Telegram voice notes and audio attachments c
 
 In a paired private chat, `/voice` opens Always / Only reply voice message / Off buttons. `/voice on`, `/voice auto` and `/voice off` also set the mode directly. Every chat starts Off, and its choice persists across session switches and gateway restarts. `auto` adds audio to replies originating from voice input and their task results; a later typed instruction makes that turn text-only. `/voices` selects a voice through a paginated provider catalog. Agent voice must be enabled and `voice.notes.replyWithVoice` must permit spoken replies. Voice capability and chat preference are separate settings.
 
-`/tasks` opens the current session's pending work, ten tasks per page. Open a task for status, progress, a pending question or task-specific stop. The browser refreshes automatically; Back and Dismiss do not cancel work or call a model. `/session` and `/sessions` also act as direct gateway controls in orchestration mode. Typing reflects queued inputs, active agent work and workers, stopping when only user-input/reconciliation waits remain. See [orchestration](/guide/orchestration).
+`/tasks` opens the current session's pending work, ten tasks per page. Open a task for status, progress, a pending question or task-specific stop. The browser refreshes automatically; Back and Dismiss do not cancel work or call a model. `/session` shows the selected model and measured context usage. Its message refreshes every three seconds when values change. Calling `/session` again replaces the previous status message at the bottom of the chat; switching sessions retires the old status message. `/session` and `/sessions` also act as direct gateway controls in orchestration mode. Typing reflects queued inputs, active agent work and workers, stopping when only user-input/reconciliation waits remain. See [orchestration](/guide/orchestration).
 
 ## Troubleshooting
 

@@ -35,11 +35,12 @@ test('channel session status omits legacy message counts and only suggests compa
  const send=jest.fn();
  const runner=Object.assign(Object.create(AgentRunner.prototype),{
   sessionStore:{listSessions:async()=>({activeSessionId:'s',sessions:[{id:'s',name:'Session 1',messageCount:2596,archivedCount:1159,lastInputTokens:999999}]})},
-  channelFor:()=> 'telegram',writeAutoForward:send,
+  channelFor:()=> 'telegram',writeAutoForward:send,agentConfig:{claude:{model:'selected-model'}},
   sessionContextInfo:async()=>({text:'180K / 200K · 90%',contextUsedPct:90}),
  });
  await runner.handleCommandSessionInfo('a','c');
  expect(send.mock.calls[0][1]).toContain('180K / 200K · 90%');
+ expect(send.mock.calls[0][1]).toContain('Model: selected-model');
  expect(send.mock.calls[0][1]).toContain('consider /compact');
  expect(send.mock.calls[0][1]).not.toMatch(/Messages:|archived|2596/);
  runner.sessionContextInfo=async()=>({text:'—',contextUsedPct:null});

@@ -1422,12 +1422,13 @@ export class AgentRunner extends EventEmitter {
           `<code>${meta.id}</code>`,
           '',
           `👉 Context: ${context.text}`,
+          `🤖 Model: ${String(meta.model ?? this.agentConfig.claude.model).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}`,
         ];
         if (context.contextUsedPct != null && context.contextUsedPct >= 80) {
           lines.push('', '💡 Near limit — consider /compact');
         }
         lines.push('', 'Commands: /sessions /new /rename /clear /compact');
-        return respond({ success: true, text: lines.join('\n'), format: 'html' });
+        return respond({ success: true, sessionId: meta.id, text: lines.join('\n'), format: 'html' });
       } catch {
         return respond({ success: false, text: 'Failed to get session info.' });
       }
@@ -3014,6 +3015,7 @@ export class AgentRunner extends EventEmitter {
       `<code>${index.activeSessionId}</code>`,
       '',
       `👉 Context: ${context.text}`,
+      `🤖 Model: ${String(meta.model ?? this.agentConfig.claude.model).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}`,
     ];
 
     if (context.contextUsedPct != null && context.contextUsedPct >= 80) {
@@ -5334,7 +5336,7 @@ export class AgentRunner extends EventEmitter {
         const {text:contextText,...contextFields} = context;
         result = {sessionId,sessionName:meta?.name ?? null,messageCount,archivedCount:meta?.archivedCount ?? 0,
           ...contextFields,model:meta?.model ?? effectiveModel};
-        responseText = [`📌 Current Session: ${meta?.name ?? '(unnamed)'}`,sessionId,'',`👉 Context: ${contextText}`,
+        responseText = [`📌 Current Session: ${meta?.name ?? '(unnamed)'}`,sessionId,'',`👉 Context: ${contextText}`,`🤖 Model: ${meta?.model ?? effectiveModel}`,
           ...(context.contextUsedPct != null && context.contextUsedPct >= 80 ? ['', '💡 Near limit — consider /compact'] : []),
           '', 'Commands: /sessions /new /rename /clear /compact'].join('\n');
       } else if (cmd === '/sessions') {

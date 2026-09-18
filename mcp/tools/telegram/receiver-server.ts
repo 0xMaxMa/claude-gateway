@@ -1514,24 +1514,39 @@ bot.command('voice', async ctx => {
   } catch { await ctx.reply('Voice settings are unavailable. Check the agent TTS configuration.') }
 })
 
-// /session — show current session info (direct command, no typing manager)
-bot.command('session', async ctx => {
-  if (ctx.chat?.type !== 'private') return
-  const access = loadAccess()
-  if (!access.allowFrom.includes(String(ctx.from!.id))) return
-  if (!CALLBACK_URL_BASE) return
-
-  try {
-    const res = await fetch(CALLBACK_URL_BASE + '/command', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: 'session_info', chat_id: String(ctx.chat.id) }),
+// Reuse the /tasks live-message lifecycle: serialize reads/replacement, edit only
+// changes, persist the last message across restart, and honor Telegram backoff.
+const SESSION_BROWSER_FILE = join(STATE_DIR, 'session-browser.json')
+let restoredSessionBrowsers: TaskBrowserMessage[] = []
+try { const saved = JSON.parse(readFileSync(SESSION_BROWSER_FILE, 'utf8')); if (Array.isArray(saved)) restoredSessionBrowsers = saved } catch {}
+const liveSessionBrowser = new LiveTaskBrowser({
+  read: async (chat) => {
+    if (!CALLBACK_URL_BASE) throw new Error('not_configured')
+    const response = await fetch(CALLBACK_URL_BASE + '/command', {
+      method:'POST', headers:{'Content-Type':'application/json'}, signal:AbortSignal.timeout(10000),
+      body:JSON.stringify({command:'session_info',chat_id:chat}),
     })
-    const data = await res.json() as { success: boolean; text?: string }
-    await ctx.reply(data.text ?? '⚠️ Could not get session info.', { parse_mode: 'HTML' })
-  } catch {
-    await ctx.reply('⚠️ Could not connect to gateway.')
-  }
+    const result = await response.json() as {success:boolean;sessionId:string;text:string}
+    if (!response.ok || !result.success || !result.sessionId || typeof result.text !== 'string') throw new Error('Session info unavailable')
+    return result
+  },
+  render: result => ({text:(result as {sessionId:string;text:string}).text,reply_markup:{inline_keyboard:[]}}),
+  send: async (chat,menu) => (await bot.api.sendMessage(chat,menu.text,{parse_mode:'HTML'})).message_id,
+  edit: (chat,id,menu) => bot.api.editMessageText(chat,id,menu.text,{parse_mode:'HTML'}),
+  remove: (chat,id) => bot.api.deleteMessage(chat,id),
+  close: (chat,id) => bot.api.editMessageText(chat,id,'Session view closed.'),
+  allowed: (chat,user) => chat === user && loadAccess().allowFrom.includes(user),
+  persist: entries => {
+    mkdirSync(STATE_DIR,{recursive:true,mode:0o700})
+    const temp=SESSION_BROWSER_FILE+'.tmp'
+    writeFileSync(temp,JSON.stringify(entries),{mode:0o600});renameSync(temp,SESSION_BROWSER_FILE)
+  },
+},restoredSessionBrowsers)
+setInterval(()=>{void liveSessionBrowser.tick().catch(()=>{})},3000).unref()
+bot.command('session',async ctx=>{
+  if(ctx.chat?.type!=='private'||!isCallbackAuthorized(ctx))return
+  try{await liveSessionBrowser.open(String(ctx.chat.id),String(ctx.from!.id))}
+  catch{await ctx.reply('Could not load session info. Please try /session again.')}
 })
 
 // /sessions — list sessions with inline keyboard for switching/deleting
