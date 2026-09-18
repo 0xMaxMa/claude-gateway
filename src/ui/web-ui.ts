@@ -1322,7 +1322,11 @@ ${dashboardFontLink}<script>try{document.documentElement.dataset.sidebarCollapse
         // Labels: hubs always; hovered / selected / search-hit reveal on demand.
         var showLabel = (o.deg >= LABEL_MIN_DEG) || isHov || isSel || (searching && o.hit);
         if (showLabel && !dim){
-          ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text').trim();
+          // White, not var(--text): .kb-stage paints a fixed deep-space backdrop in BOTH
+          // themes, but --text flips to near-black under the light theme (the page default),
+          // which left labels unreadable on the dark canvas. Matches the white the hover /
+          // selection rings above already use.
+          ctx.fillStyle = '#fff';
           ctx.font = (isHov || isSel ? '12px ' : '11px ') + 'ui-sans-serif, system-ui, sans-serif';
           ctx.fillText(nd.title, p.sx + p.r + 4, p.sy + 3);
         }
