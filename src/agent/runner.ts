@@ -901,6 +901,7 @@ export class AgentRunner extends EventEmitter {
               .then(() => this.writeTypingDone(chatId))
               .catch((err) => {
                 this.logger.error('Session command failed', { error: (err as Error).message });
+                this.writeAutoForward(chatId, 'Command failed: ' + (err as Error).message);
                 this.writeTypingDone(chatId);
               });
             return;

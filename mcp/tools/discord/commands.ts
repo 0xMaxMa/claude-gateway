@@ -11,6 +11,8 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     description: 'Ask the agent a question',
     options: [{ name: 'question', description: 'Your question', required: true, type: 'STRING' }],
   },
+  { name: 'clear', description: 'Reset model context without deleting chat history' },
+  { name: 'compact', description: 'Compact Claude Code context without changing chat history' },
   { name: 'session', description: 'Show current session info' },
   {
     name: 'new',

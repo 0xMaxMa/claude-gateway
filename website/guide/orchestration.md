@@ -118,3 +118,7 @@ Installed skill metadata is kept in the stable Agent system prefix, not appended
 ### Reset model context
 
 `/clear` drops the agent's CLI resume mapping without deleting chat history, attachments, tasks, or worker context. Your next message starts a new Claude Code session with the latest 50 history messages (or all available messages if fewer), then later turns resume that new session. `/compact` instead compacts the existing CLI transcript. Wait for an active response or compaction to finish before using `/clear`.
+
+### Context commands across channels
+
+`/clear` and `/compact` share the same context handlers in Telegram, Discord, LINE, Slack, WhatsApp, WhatsApp Cloud, WeChat, and the Chat API (including streaming requests and the dedicated session endpoints). They preserve gateway chat history. Telegram adds a confirmation step; this does not change the operation. Discord registers native slash commands when its receiver starts. In Slack, register the slash commands in the Slack app or send them as an app mention; native slash commands cannot be used inside threads. Other chat channels accept the commands as message text. Normal channel access checks still apply.

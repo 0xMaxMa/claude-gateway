@@ -1,3 +1,4 @@
+import { CHAT_CHANNELS } from '../../src/history/types';
 import { isBuiltinCommand, BUILTIN_COMMANDS } from '../../src/agent/builtin-commands';
 
 describe('isBuiltinCommand', () => {
@@ -127,7 +128,7 @@ describe('isBuiltinCommand', () => {
       // Counting channels ("commands with 3 entries are on telegram/discord/api")
       // silently mis-asserted as soon as a command gained a fourth channel or
       // took 'line' as its third. Assert the declaration itself instead.
-      const allChannels = ['telegram', 'discord', 'line', 'slack', 'api'] as const;
+      const allChannels = [...CHAT_CHANNELS, 'api'] as const;
       for (const [cmd, def] of Object.entries(BUILTIN_COMMANDS)) {
         for (const ch of allChannels) {
           expect({ cmd, ch, matched: isBuiltinCommand(`/${cmd}`, ch) })
@@ -157,14 +158,8 @@ describe('isBuiltinCommand', () => {
     });
   });
 
-  // ── Zero-command channel — regression for the empty-regex blocker ──────────
-  // buildRegex for a channel with no registered commands used to produce
-  // `new RegExp('')`, which matches EVERY string: all of that channel's
-  // messages were misrouted into the command handler and never reached the
-  // agent. The guard returns /(?!)/ (matches nothing) instead. LINE was the
-  // channel that exposed this; it has commands now, so Slack — which has none —
-  // is what keeps the guard covered.
-  describe('slack (no registered commands)', () => {
+  // Slack context commands must not capture ordinary messages or other commands.
+  describe('slack', () => {
     it('never treats a normal message as a command', () => {
       expect(isBuiltinCommand('hi', 'slack')).toBe(false);
       expect(isBuiltinCommand('', 'slack')).toBe(false);
@@ -175,4 +170,12 @@ describe('isBuiltinCommand', () => {
       expect(isBuiltinCommand('/models', 'slack')).toBe(false);
     });
   });
+});
+
+test.each([...CHAT_CHANNELS, 'api'] as const)('%s routes context commands without treating ordinary text as a command', channel => {
+  for (const command of ['/clear', '/compact']) {
+    expect(isBuiltinCommand(command, channel)).toBe(true);
+    expect(isBuiltinCommand(command + 'all', channel)).toBe(false);
+    expect(isBuiltinCommand('please ' + command, channel)).toBe(false);
+  }
 });
