@@ -357,6 +357,7 @@ export interface AgentConfig {
   memory?: GatewayConfig['gateway']['memory'];
   /** Per-agent dreaming override (field-level over the global gateway default). */
   dreaming?: GatewayConfig['gateway']['dreaming'];
+  sessionCompaction?: GatewayConfig['gateway']['sessionCompaction'];
   /** Per-agent knowledge-archive override (field-level over the global gateway default). */
   knowledge?: GatewayConfig['gateway']['knowledge'];
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
@@ -570,6 +571,8 @@ export interface GatewayConfig {
       writeRouting?: boolean;
       episodicArchiveDir?: string;   // where episodic notes land (rel to workspace), default "memory"
     };
+    /** Opt-in native Claude Code session compaction on the dreaming schedule. */
+    sessionCompaction?: import('./orchestration/session-compaction').SessionCompactionConfig;
     /**
      * Nightly memory "dreaming" (issue #325). A print-only reviewer reads a
      * lookback window of the agent's own session transcripts and proposes memory

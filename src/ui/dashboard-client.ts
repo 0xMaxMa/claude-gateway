@@ -127,7 +127,7 @@ async function dashDetail(agentId,sessionId,taskId,offset=0){
 function restoreDashboardDetails(){
  const record=[...dashboardExpanded.values()][0];
  const back=document.getElementById('dash-drawer-back'),panel=document.getElementById('dash-drawer');
- back.classList.toggle('open',Boolean(record));document.body.style.overflow=record?'hidden':'';
+ back.classList.toggle('open',Boolean(record));document.body.style.overflow=record||document.getElementById('memory-back')?.classList.contains('open')?'hidden':'';
  document.querySelectorAll('tr[data-dash-agent]').forEach(row=>row.setAttribute('aria-expanded',String(Boolean(record&&row.dataset.dashAgent===record.agentId&&row.dataset.dashSession===record.sessionId&&(row.dataset.dashTask||'')===(record.taskId||'')))));
  if(!record){panel.innerHTML='';delete panel.dataset.html;return;}
  const html='<button data-dash-close aria-label="Close details">Close ×</button>'+record.html;

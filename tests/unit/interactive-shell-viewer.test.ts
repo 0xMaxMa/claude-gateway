@@ -168,9 +168,11 @@ describe('dashboard HTML — mode toggle + embedded JS (Issue #201)', () => {
     const html = generateDashboardHtml()
     const body = html.match(/<script id="kb-dreams">([\s\S]*?)<\/script>/)![1]!
     // The accept action POSTs the run + selected indexes to the apply endpoint.
-    expect(body).toContain('function acceptDreams')
+    expect(body).toContain("method:'POST'")
+    expect(body).toContain("button.dataset.memoryAccept!=='all'") // bulk omits indexes
+    expect(body).toContain('payload.indexes=[Number(button.dataset.memoryAccept)]')
     expect(body).toContain("apiUrl('/knowledge/dreams/apply')")
-    expect(body).toContain('run.ts') // targets a specific run
+    expect(body).toContain('agentId:target.agent,ts:Number(button.dataset.memoryTs)') // targets selected agent/run
     expect(body).toContain('p.accepted') // renders per-proposal accepted state
     expect(body).toContain('Accept all') // bulk action per run
     // Parse-only: a syntax error in the hand-rolled renderer would break the dashboard.
@@ -230,8 +232,8 @@ describe('dashboard HTML — mode toggle + embedded JS (Issue #201)', () => {
     const m = html.match(/<script id="kb-dreams">([\s\S]*?)<\/script>/)
     expect(m).not.toBeNull()
     const body = m![1]!
-    expect(body).toContain("apiUrl('/knowledge/dreams')") // fetches the audit trail
-    expect(body).toContain('function loadDreams')
+    expect(body).toContain("apiUrl('/dashboard/memory-activity')") // combined dream/compaction audit
+    expect(body).toContain('async function load(force)')
     expect(body).toContain('window.__loadDreams') // exposed for the tab switcher
     // Parse-only guard against a syntax error breaking the dashboard.
     expect(() => new Function(body)).not.toThrow()

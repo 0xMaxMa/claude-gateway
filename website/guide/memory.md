@@ -66,3 +66,7 @@ Automatic application keeps pre-images under `.dreaming/backups/`, checks that s
 Staleness handling defaults to a 90-day TTL, retaining important or sufficiently retrieved entries according to its policy and limiting invalidations to 50 per run. Personal notes under `memory/pinned/` are searchable but exempt from archive aging. Shared knowledge also has staleness settings; weekly shared reflection is enabled by default for Sunday at 04:00, processing up to five clusters per run.
 
 Source: [dreaming defaults](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/agent/dreaming/config.ts), [cycle implementation](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/agent/dreaming/index.ts), [safe applier](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/agent/dreaming/applier.ts), and [archive lifecycle](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/agent/knowledge/lifecycle.ts).
+
+## Compact large resumed conversations at night
+
+[Opt-in nightly session compaction](../reference/memory-settings.md#nightly-session-compaction) invokes Claude Code’s native `/compact` on quiet, oversized sessions. This is separate from consolidating memory files and preserves stored chat history. The **Nightly dreaming** dashboard combines both activities with filters, paginated run summaries and detailed outcomes.

@@ -123,3 +123,38 @@ Two read-only MCP tools expose it to the agent: **`memory_search`** (keyword/FTS
 **Nightly dreaming viewer.** A **Nightly dreaming** tab renders each agent's memory-consolidation audit trail (`.dreaming/DREAMS.md` + `promotions.jsonl`) as a newest-first timeline of runs — mode (propose/auto), outcome, the proposed/applied changes with scores + anchors, and per-run token/session counts — fed by `GET /knowledge/dreams` and filterable by agent. For a `propose`-mode run you can **accept** proposals directly from the tab: an **Accept** button per proposal (and **Accept all** per run) POSTs to `POST /knowledge/dreams/apply`, which applies the selected ops to `MEMORY.md`/`USER.md` through the same K4 safe applier auto mode uses (backup + bounded-loss + net-negative + CAS; memory-only ⇒ no restart) and — when the shared KB is `auto` — promotes applied `add`s to the shared vault. Accepts are idempotent (recorded to `.dreaming/accepted.jsonl`); applied proposals show ✓ and a proposal whose anchor has since drifted is safely skipped and stays pending for a later retry.
 
 Implementation: [config loader](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/config/loader.ts), [configuration template](https://github.com/0xMaxMa/claude-gateway/blob/b917843/config.template.json).
+
+## Nightly session compaction
+
+Memory dreaming consolidates workspace memory files. **Session compaction** separately reduces a resumed Claude Code conversation using its native `/compact` command. It does not delete stored chat history, rebuild the conversation from recent messages, or ask a question when a user returns.
+
+Enable it explicitly in `gateway.sessionCompaction`; individual `agents[].sessionCompaction` fields override the gateway values:
+
+```json
+{
+  "gateway": {
+    "sessionCompaction": {
+      "enabled": true,
+      "thresholdPercent": 50,
+      "quietMinutes": 60,
+      "maxSessionsPerRun": 5
+    },
+    "dreaming": {
+      "dreamHour": 3,
+      "dreamMinute": 0,
+      "dreamTimezone": "Asia/Bangkok",
+      "staggerWindowMinutes": 30
+    }
+  }
+}
+```
+
+The compaction defaults are `enabled: false`, `thresholdPercent: 50`, `quietMinutes: 60`, and `maxSessionsPerRun: 5`. The threshold is clamped to 1–99%, quiet time to 1–10,080 minutes, and the run limit to 1–100 sessions. The schedule inherits the agent's effective dreaming hour, minute, timezone and deterministic staggering. Memory dreaming may be disabled while session compaction remains enabled. Orchestration must be enabled. Restart the gateway after editing these configuration fields to apply the schedule consistently.
+
+Each nightly sweep examines up to 1,000 recently mapped native sessions. A session qualifies only when its latest measured context exceeds the configured percentage of the selected model's known context window. Sessions with active tasks, a running agent, pending input, recent conversation activity, missing measurements, an unknown model window or an unavailable native transcript are skipped. Eligibility is checked again immediately before compaction; normal incoming messages retain their usual admission path.
+
+Only one nightly compaction runs at a time across the gateway. The per-agent limit bounds native compaction attempts, and a shutdown stops new attempts. A successful compaction is not repeated against the same old measurement; another conversation turn must first produce fresh usage. A previously recorded manual compaction also prevents a redundant nightly attempt. Runs interrupted by process termination remain visible in the audit report.
+
+Open **Nightly dreaming** in the admin dashboard to see both memory dreaming and session compaction, newest first, with date, agent, kind and status filters. Select a run to see proposals or per-session outcomes, skip reasons and safe failure codes. The view refreshes while visible. Audits persist in the agent's orchestration database; memory dreaming retains its workspace audit files.
+
+`beforeTokens` is the latest recorded context measurement, not a new tokenization of the transcript. Native `/compact` does not currently provide a verified post-compaction measurement, so `afterTokens` stays unknown and appears as **—**. It is not reported as zero or an estimated saving. Compaction itself calls the model and can consume provider quota; `thresholdPercent` is a trigger, not a promised resulting context size.

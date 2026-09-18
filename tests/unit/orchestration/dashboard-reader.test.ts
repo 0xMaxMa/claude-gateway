@@ -94,3 +94,22 @@ test('task detail exposes the effective assignment from task_revisions, normaliz
   expect(empty.instructions).toBeUndefined();
  }finally{await reader.close();store.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('compaction reader is read-only and separates bounded summaries from detail items',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'dashboard-compaction-')),file=join(root,'db');
+ const store=new OrchestrationStore(file,'a'),reader=new DashboardReader(join(process.cwd(),'dist/orchestration/dashboard-reader-worker.js'));
+ try{
+  expect(await reader.read('compaction',file,{agentId:'a'})).toEqual([]);
+  expect(store.get("SELECT name FROM sqlite_master WHERE name='session_compaction_runs'")).toBeUndefined();
+  store.run('CREATE TABLE session_compaction_runs(id TEXT PRIMARY KEY,started_at INTEGER,ended_at INTEGER,status TEXT,config_json TEXT)');
+  store.run('CREATE TABLE session_compaction_items(run_id TEXT,session_id TEXT,payload_json TEXT,PRIMARY KEY(run_id,session_id))');
+  store.transaction(()=>{
+   for(let i=0;i<101;i++)store.run('INSERT INTO session_compaction_runs VALUES(?,?,?,?,?)','run-'+i,i,null,'completed','{}');
+   for(let i=0;i<1001;i++)store.run('INSERT INTO session_compaction_items VALUES(?,?,?)','run-100','session-'+i,JSON.stringify({sessionId:'session-'+i,status:'completed',afterTokens:null}));
+  });
+  const runs=await reader.read('compaction',file,{agentId:'a'});
+  expect(runs).toHaveLength(100);expect(runs[0]).toMatchObject({id:'run-100',itemCount:1001,completedSessions:1001});expect(runs[0].items).toBeUndefined();
+  const detail=await reader.read('compaction',file,{agentId:'a',runId:'run-100'});expect(detail.items).toHaveLength(1000);expect(detail.itemCount).toBe(1001);expect(detail.items[0].afterTokens).toBeNull();
+  expect(await reader.read('compaction',file,{agentId:'a',runId:'missing'})).toBeUndefined();
+ }finally{await reader.close();store.close();rmSync(root,{recursive:true,force:true});}
+});

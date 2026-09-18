@@ -5834,6 +5834,14 @@ describe('AgentRunner — history cleanup scheduler timezone', () => {
     jest.restoreAllMocks();
   });
 
+  it('rearms nightly session maintenance after an agent lifecycle restart', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    const startMaintenance = jest.spyOn(runner, 'startSessionCompaction');
+    await runner.start();
+    await runner.restart();
+    expect(startMaintenance).toHaveBeenCalledTimes(2);
+  }, 15000);
+
   it('U-AR-TZ-GW: gateway.timezone is the shared fallback when history.cleanupTimezone is unset', async () => {
     const spy = jest.spyOn(historyCleanup, 'scheduleCleanup');
     gatewayConfig.gateway.timezone = 'Asia/Bangkok';

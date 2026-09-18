@@ -1,3 +1,4 @@
+import { SessionCompaction, recoverSessionCompaction, type ResolvedSessionCompaction } from './session-compaction';
 import { ContextDelivery } from './context-delivery';
 import { startNativeCompact } from './native-compact';
 import { BrowserVoice } from './browser-voice';
@@ -91,6 +92,7 @@ export class AgentOrchestrationRuntime {
   readonly tasks: TaskService;
   readonly intake: ConversationIntake;
   readonly contextDelivery: ContextDelivery;
+  private sessionCompaction?: SessionCompaction;
   private readonly cliSessions: AgentCliSessions;
   readonly stopControls: StopControls;
   readonly taskControls: TaskControls;
@@ -202,6 +204,7 @@ export class AgentOrchestrationRuntime {
     bridge.recordRetrievals = (personalRetention.enabled && personalRetention.recordRetrievals) || (sharedRetention.enabled && sharedRetention.recordRetrievals);
     try {
       recoverOrchestration(store);
+      recoverSessionCompaction(store);
       // A prior gateway cannot prove that these processes stopped. Reserve
       // their global capacity conservatively as well as the per-agent slots.
       const recoveredReservations = new Map<string, () => void>();
@@ -363,6 +366,18 @@ export class AgentOrchestrationRuntime {
         finally {this.active.delete(sessionId);}
       }
     })();
+    this.pending.add(operation);
+    void operation.finally(()=>this.pending.delete(operation)).catch(()=>{});
+    return operation;
+  }
+  private compactionMaintenance(window:(model:string)=>Promise<number>):SessionCompaction {
+    return this.sessionCompaction ??= new SessionCompaction(this.store,this.agent.id,{
+      busy:id=>this.active.has(id),stopping:()=>this.closing||this.draining,
+      model:()=>this.agent.claude.model,window,compact:(id,model)=>this.compactSession(id,model),
+    });
+  }
+  runSessionCompaction(config:ResolvedSessionCompaction,window:(model:string)=>Promise<number>) {
+    const operation=this.compactionMaintenance(window).run(config);
     this.pending.add(operation);
     void operation.finally(()=>this.pending.delete(operation)).catch(()=>{});
     return operation;

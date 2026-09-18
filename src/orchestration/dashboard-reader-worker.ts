@@ -51,6 +51,18 @@ function read(filename: string, operation: string, options: Record<string, any>)
   db.exec('BEGIN');
   try {
     const adapter = { all, get, attempt: (id: string) => { const row = get('SELECT payload_json FROM task_attempts WHERE id=?', id); return row ? JSON.parse(row.payload_json) as TaskAttempt : undefined; } };
+    if (operation === 'compaction') {
+      if (!exists('session_compaction_runs') || !exists('session_compaction_items')) return options.runId ? undefined : [];
+      const rows=options.runId ? all('SELECT * FROM session_compaction_runs WHERE id=?',options.runId) : all('SELECT * FROM session_compaction_runs ORDER BY started_at DESC,id DESC LIMIT 100');
+      const runs=rows.map(row=>{
+        const counts=get("SELECT COUNT(*) total,SUM(json_extract(payload_json,'$.status')='completed') completed,SUM(json_extract(payload_json,'$.status')='failed') failed FROM session_compaction_items WHERE run_id=?",row.id)!;
+        return {id:String(row.id),agent:options.agentId,kind:'session_compaction',startedAt:Number(row.started_at),endedAt:row.ended_at==null?null:Number(row.ended_at),status:String(row.status),config:JSON.parse(row.config_json),
+          itemCount:Number(counts.total),completedSessions:Number(counts.completed??0),failedSessions:Number(counts.failed??0),
+          ...(options.runId?{items:all('SELECT payload_json FROM session_compaction_items WHERE run_id=? ORDER BY rowid LIMIT 1000',row.id).map(item=>JSON.parse(item.payload_json))}:{}),
+        };
+      });
+      return options.runId ? runs[0] : runs;
+    }
     if (operation === 'report' || operation === 'session') {
       if (!get('SELECT id FROM conversations WHERE agent_session_id=?', options.sessionId)) return undefined;
       // Before the ledger table exists (an agent whose very first turn has not recorded

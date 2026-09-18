@@ -10,7 +10,7 @@ export class DashboardReader {
   private inflight = new Map<string, Promise<any>>();
   private cache = new Map<string, { until: number; value: any }>();
   private closed = false;
-  read(operation: 'summary' | 'report' | 'task' | 'session', filename: string, options: Record<string, unknown> = {}): Promise<any> {
+  read(operation: 'summary' | 'report' | 'task' | 'session' | 'compaction', filename: string, options: Record<string, unknown> = {}): Promise<any> {
     if (this.closed) return Promise.reject(new Error('Dashboard reader is closed'));
     const key = JSON.stringify([operation, filename, options]);
     const cached = this.cache.get(key);

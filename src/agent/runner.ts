@@ -1,3 +1,6 @@
+import { SessionCompactionScheduler } from './session-compaction-scheduler';
+import { resolveSessionCompaction } from '../orchestration/session-compaction';
+import { resolveDreamingConfig } from './dreaming/config';
 import { presentedResponseError } from '../orchestration/response-errors';
 import { ChannelMediaError } from '../orchestration/channel-media-error';
 import { payloadHash, type AcceptInput } from '../orchestration/store';
@@ -427,6 +430,7 @@ export class AgentRunner extends EventEmitter {
   // Skill self-improvement (planning-62). Optional — set by index.ts per agent.
   // All calls are guarded (`this.skillLearning?.`) and best-effort.
   private skillLearning?: SkillLearningManager;
+  private sessionCompactionScheduler?: SessionCompactionScheduler;
   private readonly skillNotificationOrigins = new Map<string, { source: ChatChannel; chatId: string; thread: string }>();
 
   // Path to gateway config.json for persisting model changes
@@ -704,6 +708,24 @@ export class AgentRunner extends EventEmitter {
     if (result.state !== 'delivered') this.logger.warn('Skill notification delivery failed', { sessionId, code: result.code });
   }
 
+  private sessionCompactionSettings() {
+    const config=resolveSessionCompaction(this.agentConfig.sessionCompaction,this.gatewayConfig.gateway.sessionCompaction);
+    if(!this.agentConfig.orchestration?.enabled)config.enabled=false;
+    const dream=resolveDreamingConfig(this.agentConfig.dreaming,this.gatewayConfig.gateway.dreaming,this.gatewayConfig.gateway.timezone);
+    return {config,hour:dream.dreamHour,minute:dream.dreamMinute,timezone:dream.dreamTimezone,stagger:dream.staggerWindowMinutes};
+  }
+  startSessionCompaction():void {
+    this.sessionCompactionScheduler??=new SessionCompactionScheduler(this.agentConfig.id,()=>this.sessionCompactionSettings(),async()=>{
+      if(this.stopping)return;
+      const runtime=await this.getOrchestration();
+      return runtime.runSessionCompaction(this.sessionCompactionSettings().config,model=>this.contextWindowFor(model,true));
+    },error=>this.logger.warn('Nightly session compaction failed',{error:String(error)}));
+    this.sessionCompactionScheduler.start();
+  }
+  async sessionCompactionReport() {
+    const cfg=this.sessionCompactionSettings();
+    return {schedule:{...cfg.config,nextRunAt:this.sessionCompactionScheduler?.nextRunAt??null,timezone:cfg.timezone}};
+  }
   setSkillLearning(manager: SkillLearningManager | undefined): void {
     this.skillLearning = manager;
   }
@@ -3738,6 +3760,7 @@ export class AgentRunner extends EventEmitter {
     await this.wechat?.resumeIfLinked();
     this.startIdleCleaner();
     this._startCleanupScheduler();
+    this.startSessionCompaction();
     this.logger.info('AgentRunner started', { agentId: this.agentConfig.id });
   }
 
@@ -3803,6 +3826,7 @@ export class AgentRunner extends EventEmitter {
     newConfig=applyGatewayOrchestration(newConfig,this.gatewayConfig);
     this.orchestration?.updateAgentConfig(newConfig);
     this.agentConfig = newConfig;
+    this.sessionCompactionScheduler?.start();
     this.refreshTelegramCommands();
     // Restart LineReplyManager if the LINE config changed so the live instance
     // picks up a new access token, threshold, or labels without a full restart.
@@ -4233,6 +4257,7 @@ export class AgentRunner extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    this.sessionCompactionScheduler?.stop();
     if (this.orchestrationStarting) {
       const orchestration = await this.orchestrationStarting.catch(() => undefined);
       await orchestration?.close();
@@ -5463,7 +5488,7 @@ export class AgentRunner extends EventEmitter {
    * honest for a model that exists only upstream — before, any such model fell
    * through to the 200k default no matter how large its real window.
    */
-  private async contextWindowFor(modelId: string): Promise<number> {
+  private async contextWindowFor(modelId: string, requireKnown = false): Promise<number> {
     const models = await this.availableModels();
     // Configured list second, not just as the catalog's fallback: the catalog
     // *replaces* the list rather than merging with it, so a configured model
@@ -5473,7 +5498,7 @@ export class AgentRunner extends EventEmitter {
     // SessionCompactor a window small enough to compact far too early.
     return models.find((m) => m.id === modelId)?.contextWindow
       ?? (this.gatewayConfig.gateway.models ?? DEFAULT_MODELS).find((m) => m.id === modelId)?.contextWindow
-      ?? DEFAULT_CONTEXT_WINDOW;
+      ?? (requireKnown ? 0 : DEFAULT_CONTEXT_WINDOW);
   }
 
   /**

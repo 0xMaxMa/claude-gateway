@@ -1,3 +1,4 @@
+import { readMemoryActivity, activitySummary, MaintenanceReader } from './memory-activity';
 import { dashboardRange, dashboardSince } from '../ui/dashboard-range';
 import { DashboardReader } from '../orchestration/dashboard-reader';
 import express, { Request, Response } from 'express';
@@ -1215,6 +1216,38 @@ export class GatewayRouter {
       }
     });
 
+    let memorySnapshot: Promise<Awaited<ReturnType<typeof readMemoryActivity>>> | undefined;
+    let memorySnapshotUntil = 0;
+    this.app.get('/dashboard/memory-activity', async (req: Request, res: Response) => {
+      if (!this.requireDashOrApiKey(req,res)) return;
+      res.setHeader('Cache-Control','no-store');
+      const {agentId,kind,status,id,scope}=req.query, page=Number(req.query.page??0);
+      if (!Number.isSafeInteger(page)||page<0||page>1000000 ||
+        [agentId,kind,status,id,scope].some(v=>v!==undefined&&(typeof v!=='string'||v.length>256)) ||
+        (kind!==undefined&&!['all','memory_dream','session_compaction'].includes(String(kind))) ||
+        (scope!==undefined&&!['24h','7d','30d','90d','all'].includes(String(scope)))) {
+        res.status(400).json({error:'Invalid activity filters'});return;
+      }
+      if(agentId&&!this.agents.has(String(agentId))){res.status(404).json({error:'Unknown agent'});return;}
+      try {
+        if(!memorySnapshot||Date.now()>=memorySnapshotUntil){
+          memorySnapshotUntil=Infinity;
+          const snapshot=readMemoryActivity(this.agents as unknown as Map<string,MaintenanceReader>,this.agentsRoot(),(filename,agentId)=>this.dashboardReader.read('compaction',filename,{agentId})).then(data=>{if(memorySnapshot===snapshot)memorySnapshotUntil=Date.now()+5000;return data;},error=>{if(memorySnapshot===snapshot)memorySnapshot=undefined;throw error;});
+          memorySnapshot=snapshot;
+        }
+        const data=await memorySnapshot;
+        if(id){let run=data.runs.find(r=>r.id===id&&r.agent===agentId);if(!run){res.status(404).json({error:'Activity not found'});return;}
+          const source=this.agents.get(String(agentId))?.getDashboardSource?.();
+          if(run.kind==='session_compaction'&&source)run=await this.dashboardReader.read('compaction',source.filename,{agentId,runId:id});
+          if(!run){res.status(404).json({error:'Activity not found'});return;}res.json({run});return;}
+        const runs=data.runs.filter(r=>(!agentId||r.agent===agentId)&&(!kind||kind==='all'||r.kind===kind)&&(!status||status==='all'||r.status===status)&&r.startedAt>=dashboardSince(scope));
+        res.json({runs:runs.slice(page*25,page*25+25).map(activitySummary),total:runs.length,page,pageSize:25,
+          agents:data.agents,schedules:data.schedules.filter(s=>!agentId||s.agent===agentId),unavailable:data.unavailable,
+          counts:{runs:runs.length,pendingProposals:runs.reduce((n,r)=>n+(r.pendingProposals??0),0),failed:runs.filter(r=>['failed','partial_failure','interrupted'].includes(r.status)).length},
+          historyLimit:100});
+      }catch{res.status(503).json({error:'Memory activity temporarily unavailable'});}
+    });
+
     // Nightly dreaming report — parses every agent's `.dreaming/` audit trail
     // (DREAMS.md + promotions.jsonl) into newest-first runs for the dashboard's
     // "Nightly dreaming" tab. Auth: dashboard session cookie OR API key. Payload is
@@ -1228,7 +1261,7 @@ export class GatewayRouter {
         const runs: Array<Record<string, unknown>> = [];
         const agents: string[] = [];
         for (const id of this.agents.keys()) {
-          const dir = path.join(root, id, 'workspace', DREAMING_DIR);
+          const dir = path.join(this.agents.get(id)?.workspacePath ?? path.join(root,id,'workspace'), DREAMING_DIR);
           let dreams: string;
           try {
             dreams = fs.readFileSync(path.join(dir, 'DREAMS.md'), 'utf8');
@@ -1279,6 +1312,7 @@ export class GatewayRouter {
     // Body: { agentId: string, ts: number, indexes?: number[] } (omit indexes ⇒ whole run).
     this.app.post('/knowledge/dreams/apply', (req: Request, res: Response) => {
       if (!this.requireDashOrApiKey(req, res)) return;
+      memorySnapshot=undefined;
       try {
         const body = (req.body ?? {}) as Record<string, unknown>;
         const agentId = typeof body.agentId === 'string' ? body.agentId : '';
@@ -1306,7 +1340,7 @@ export class GatewayRouter {
           indexes = body.indexes as number[];
         }
 
-        const workspaceDir = path.join(this.agentsRoot(), agentId, 'workspace');
+        const workspaceDir = this.agents.get(agentId)?.workspacePath ?? path.join(this.agentsRoot(), agentId, 'workspace');
         const budget = resolveMemoryBudget({
           ...this.gatewayConfig?.gateway?.memory,
           ...this.configs.get(agentId)?.memory,
