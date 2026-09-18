@@ -37,6 +37,31 @@ export function claudeSettingsPath(
 }
 
 /**
+ * cwd → Claude Code project-dir slug. Verified against v2.1.274 by running the CLI in
+ * `/tmp/Rp_dot.test dir` and reading back the directory it created (`-tmp-Rp-dot-test-dir`):
+ * every character outside `[A-Za-z0-9-]` becomes `-`, one dash per character, and letter
+ * case is preserved. `/` and `.` are the common cases, but `_` and spaces convert too —
+ * an agent id containing one would otherwise resolve to a slug that does not exist.
+ */
+export function projectSlug(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9-]/g, '-');
+}
+
+/**
+ * Where Claude Code stores the transcript of one session: `<config>/projects/<slug>/<id>.jsonl`.
+ * This is the file `--resume <id>` reads, so its presence is what decides whether a session
+ * can be resumed at all.
+ */
+export function transcriptPath(
+  cwd: string,
+  sessionId: string,
+  env: NodeJS.ProcessEnv = process.env,
+  homeDir: string = os.homedir(),
+): string {
+  return path.join(claudeConfigDir(env, homeDir), 'projects', projectSlug(cwd), `${sessionId}.jsonl`);
+}
+
+/**
  * Parsed `settings.json`, or null when it is absent, unreadable, or not valid
  * JSON — all three are ordinary states, not errors, so callers fall back to
  * whatever other source they have.

@@ -25,8 +25,11 @@ export interface RuntimeProfile {
   connectorsAllowed?: boolean;
   originSessionId?: string;
   taskId?: string;
-  /** Explicit durable CLI session used by the worker pool. */
-  workerSession?: { id: string; resume: boolean };
+  /** Durable CLI session for this process: `--resume id` continues the transcript Claude Code
+   * already persisted, `--session-id id` starts it. Used by the worker pool and by agent
+   * decision turns, which both spawn a fresh process per turn and would otherwise lose the
+   * conversation — and its cached prefix — every time. */
+  cliSession?: { id: string; resume: boolean };
   attemptId?: string;
   /** Gateway-built plugin containing only this task skill and its resources. */
   skillPluginDir?: string;

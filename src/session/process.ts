@@ -326,6 +326,9 @@ export class SessionProcess extends EventEmitter {
   // chunks is not captured as two partial lines.
   private lastClaudeBin = 'claude';
   private lastStderrLine: string | null = null;
+  /** Last stderr line the child produced. A failed turn is diagnosed from this, so a
+   * caller can tell a rejected `--resume` apart from an ordinary process exit. */
+  get lastStderr(): string | null { return this.lastStderrLine; }
   private stderrBuffer = '';
   // Log the resolved-binary source once per instance, not on every restart spawn.
   private resolvedBinLogged = false;
@@ -463,6 +466,16 @@ export class SessionProcess extends EventEmitter {
   }
 
   private async buildInitialPrompt(): Promise<{ historyPrompt: string | null; loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number }> {
+    // Resuming means Claude Code's own transcript already holds this conversation. Seeding
+    // our flattened copy on top would send every message twice and, because the duplicate
+    // grows and shifts each turn, would also break the prefix the resume exists to reuse.
+    // The gateway's own history in the database is untouched; this is only what the model sees.
+    if (this.runtimeProfile?.cliSession?.resume) {
+      const stored = this.source !== 'api'
+        ? await this.sessionStore.loadTelegramSession(this.agentConfig.id, this.chatId, this.sessionId, this.sessionChannel)
+        : await this.sessionStore.loadSession(this.agentConfig.id, this.sessionId);
+      return { historyPrompt: null, loadedAtSpawn: 0, archivedCount: stored.length, messageCountAtSpawn: stored.length };
+    }
     const history = this.source !== 'api'
       ? await this.sessionStore.loadTelegramSession(this.agentConfig.id, this.chatId, this.sessionId, this.sessionChannel)
       : await this.sessionStore.loadSession(this.agentConfig.id, this.sessionId);
@@ -958,8 +971,8 @@ export class SessionProcess extends EventEmitter {
         }
       }
       args.push(...runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: this.containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${this.containerAttempt.directory}/checkpoint.cjs ${this.containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: this.containerAttempt && this.runtimeProfile.skillPluginDir ? this.containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []));
-      if (this.runtimeProfile.workerSession) {
-        const session = this.runtimeProfile.workerSession;
+      if (this.runtimeProfile.cliSession) {
+        const session = this.runtimeProfile.cliSession;
         args.push(session.resume ? '--resume' : '--session-id', session.id);
       }
       args.push('--dangerously-skip-permissions');

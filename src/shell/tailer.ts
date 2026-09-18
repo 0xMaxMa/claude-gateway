@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { TUI_REQUEST_TOO_LARGE, TUI_SYNTHETIC_MODEL } from './screen';
+import { claudeConfigDir, projectSlug, transcriptPath } from '../config/claude-settings';
 
 export interface UsageInfo {
   input_tokens?: number;
@@ -87,17 +88,13 @@ export function isSyntheticRequestTooLarge(message: AssistantRecord['message']):
 }
 
 /**
- * cwd → Claude Code project-dir slug (verified against v2.1.x: `/` and `.` both become `-`).
- * If Claude Code ever changes this scheme, findFile()'s fallback UUID scan will still
- * locate the transcript — the primary path is just an optimistic fast path.
+ * The transcript path helpers live with the rest of Claude Code's config-directory
+ * layout, so the orchestration resume check and this tailer cannot drift apart.
+ * Re-exported here because both were originally part of this module's surface.
+ * If Claude Code ever changes the slug scheme, findFile()'s fallback UUID scan will
+ * still locate the transcript — the primary path is just an optimistic fast path.
  */
-export function projectSlug(cwd: string): string {
-  return cwd.replace(/[/.]/g, '-');
-}
-
-export function transcriptPath(cwd: string, sessionId: string): string {
-  return path.join(os.homedir(), '.claude', 'projects', projectSlug(cwd), `${sessionId}.jsonl`);
-}
+export { projectSlug, transcriptPath };
 
 /**
  * Incrementally reads the session transcript JSONL that interactive Claude
@@ -149,7 +146,7 @@ export class TranscriptTailer {
     const now = Date.now();
     if (now - this.lastFallbackScanMs < TranscriptTailer.FALLBACK_SCAN_INTERVAL_MS) return null;
     this.lastFallbackScanMs = now;
-    const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
+    const projectsRoot = path.join(claudeConfigDir(), 'projects');
     let dirs: string[] = [];
     try { dirs = fs.readdirSync(projectsRoot); } catch { return null; }
     for (const dir of dirs) {

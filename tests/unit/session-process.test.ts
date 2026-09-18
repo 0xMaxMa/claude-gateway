@@ -1038,6 +1038,83 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
+  // U-SP-CLI-01: an orchestration turn names its CLI session so the next process
+  //   can resume the transcript Claude Code persisted, instead of getting a fresh
+  //   random session and paying a full cache write every turn.
+  // --------------------------------------------------------------------------
+  const orchestrationProfile = (cliSession?: { id: string; resume: boolean }) =>
+    ({ role: 'agent', context: 'fixture', overlay: '', mcpConfigPath: '', ...(cliSession ? { cliSession } : {}) }) as never;
+
+  it('U-SP-CLI-01: starts a named CLI session with --session-id and resumes it with --resume', async () => {
+    const id = '33333333-4444-5555-6666-777777777777';
+    const fresh = makeSp('api:1', 'api', agentConfig, gatewayConfig, sessionStore, undefined, orchestrationProfile({ id, resume: false }));
+    await fresh.start();
+    const firstArgs = spawnMock.mock.calls[0][1] as string[];
+    expect(firstArgs).toContain('--session-id');
+    expect(firstArgs[firstArgs.indexOf('--session-id') + 1]).toBe(id);
+    expect(firstArgs).not.toContain('--resume');
+
+    spawnMock.mockClear();
+    const resumed = makeSp('api:1', 'api', agentConfig, gatewayConfig, sessionStore, undefined, orchestrationProfile({ id, resume: true }));
+    await resumed.start();
+    const secondArgs = spawnMock.mock.calls[0][1] as string[];
+    expect(secondArgs).toContain('--resume');
+    expect(secondArgs[secondArgs.indexOf('--resume') + 1]).toBe(id);
+    expect(secondArgs).not.toContain('--session-id');
+  });
+
+  it('U-SP-CLI-02: seeds flattened history when starting a session and never again when resuming', async () => {
+    for (let i = 0; i < 4; i++) {
+      await sessionStore.appendMessage('alfred', 'api:1', { role: 'user', content: `Earlier ${i}`, ts: Date.now() + i });
+    }
+    const id = '88888888-9999-aaaa-bbbb-cccccccccccc';
+
+    const fresh = makeSp('api:1', 'api', agentConfig, gatewayConfig, sessionStore, undefined, orchestrationProfile({ id, resume: false }));
+    await fresh.start();
+    fresh.sendMessage('new turn');
+    const seeded: string = JSON.parse(lastProcess!.stdin!.write.mock.calls[0][0] as string).message.content[0].text;
+    expect(seeded).toContain('Conversation history with this user');
+    expect(seeded).toContain('Earlier 3');
+
+    const resumed = makeSp('api:1', 'api', agentConfig, gatewayConfig, sessionStore, undefined, orchestrationProfile({ id, resume: true }));
+    await resumed.start();
+    resumed.sendMessage('new turn');
+    const sent: string = JSON.parse(lastProcess!.stdin!.write.mock.calls[0][0] as string).message.content[0].text;
+    // The resumed transcript already holds these turns; sending them again would both
+    // duplicate the conversation and shift the prefix the resume exists to reuse.
+    expect(sent).not.toContain('Conversation history with this user');
+    expect(sent).not.toContain('Earlier 3');
+    expect(sent).toBe('new turn');
+  });
+
+  it('U-SP-CLI-03: a profile without a CLI session behaves exactly as before — no session flag, history still seeded', async () => {
+    // This is the container-agent path: the orchestration runtime deliberately leaves
+    // cliSession unset there, so that path must keep its previous argv and prompt.
+    await sessionStore.appendMessage('alfred', 'api:1', { role: 'user', content: 'Container turn', ts: Date.now() });
+    const sp = makeSp('api:1', 'api', agentConfig, gatewayConfig, sessionStore, undefined, orchestrationProfile());
+    await sp.start();
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).not.toContain('--resume');
+    expect(args).not.toContain('--session-id');
+    sp.sendMessage('new turn');
+    const sent: string = JSON.parse(lastProcess!.stdin!.write.mock.calls[0][0] as string).message.content[0].text;
+    expect(sent).toContain('Conversation history with this user');
+    expect(sent).toContain('Container turn');
+  });
+
+  it('U-SP-CLI-04: a fallback turn re-seeds history so nothing is lost when the transcript is gone', async () => {
+    await sessionStore.appendMessage('alfred', 'api:1', { role: 'user', content: 'Before the transcript vanished', ts: Date.now() });
+    // resume:false is what AgentCliSessions returns on the fallback, with a brand new id.
+    const sp = makeSp('api:1', 'api', agentConfig, gatewayConfig, sessionStore, undefined,
+      orchestrationProfile({ id: 'dddddddd-eeee-ffff-0000-111111111111', resume: false }));
+    await sp.start();
+    sp.sendMessage('new turn');
+    const sent: string = JSON.parse(lastProcess!.stdin!.write.mock.calls[0][0] as string).message.content[0].text;
+    expect(sent).toContain('Conversation history with this user');
+    expect(sent).toContain('Before the transcript vanished');
+  });
+
+  // --------------------------------------------------------------------------
   // U-SP-RESTART-01: subprocess crash + restart with prior history must produce
   //   exactly ONE stdin write when the next user message arrives (no double-response).
   //   Before the fix, activation was sent at spawn (Turn 1) and the channel XML

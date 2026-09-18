@@ -23,6 +23,7 @@ import { StopControls } from './stop-controls';
 import { resolveDreamingConfig } from '../agent/dreaming/config';
 import { validateContainer } from './container';
 import { ConversationIntake, INTAKE_OVERLAY, IntakeChoice } from './conversation-intake';
+import { AgentCliSessions, resumeRejected } from './agent-cli-session';
 import { replyContext, storedReplyContext, resolveStoredReply } from './reply-context';
 import { pendingReports } from './notification-mailbox';
 import { toolActivity, ToolActivity } from './tool-activity';
@@ -78,6 +79,7 @@ export class AgentOrchestrationRuntime {
   readonly store: OrchestrationStore;
   readonly tasks: TaskService;
   readonly intake: ConversationIntake;
+  private readonly cliSessions: AgentCliSessions;
   readonly stopControls: StopControls;
   readonly taskControls: TaskControls;
   readonly questionControls: TaskQuestions;
@@ -130,6 +132,7 @@ export class AgentOrchestrationRuntime {
   private constructor(private readonly agent: AgentConfig, private readonly root: string, private readonly host: AgentOrchestrationHost,
     store: OrchestrationStore, history: OrchestrationHistoryWriter, scheduler: WorkerScheduler, bridge: TaskBridge, tasks: TaskService) {
     this.intake = new ConversationIntake(store);
+    this.cliSessions = new AgentCliSessions(store);
     this.store = store; this.history = history; this.scheduler = scheduler; this.bridge = bridge; this.tasks = tasks;
     this.telegramVoices = new TelegramVoices(store, () => this.config.voice.tts);
     this.taskControls = new TaskControls(store, tasks);
@@ -811,6 +814,25 @@ export class AgentOrchestrationRuntime {
       // produced, while speech and review turns fill the optional fields their per-turn overlay
       // asks for. This restores the structured-output guarantee without a per-turn tools diff.
       ticket.profile.responseSchema = ORCHESTRATION_RESPONSE_SCHEMA;
+      // Continue the CLI session this agent session already has a transcript for. Each decision
+      // turn is still its own process; resuming is what lets the next one reuse the previous
+      // turn's cached prefix instead of paying a full cache write, and it replaces the flattened
+      // history copy SessionProcess used to seed (see buildInitialPrompt). Container agents run
+      // the CLI inside the container, where this host-side transcript check does not apply, so
+      // they keep the previous behaviour.
+      if (this.agent.type !== 'app-agent') {
+        const cliSession = this.cliSessions.resolve(sessionId, this.agent.workspace);
+        ticket.profile.cliSession = { id: cliSession.id, resume: cliSession.resume };
+        if (cliSession.fallback) {
+          // No silent failure: a session we had already started could not be continued, so this
+          // turn re-seeds history and pays a cache write. Record why before it happens.
+          this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'session.transcript_unavailable',
+            { sessionId, cliSessionId: cliSession.id, reason: cliSession.fallback }));
+          console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn',
+            event: 'Agent CLI session could not be resumed; reseeding history', agentId: this.agent.id,
+            sessionId, cliSessionId: cliSession.id, reason: cliSession.fallback }));
+        }
+      }
       agentSession = await this.host.createAgentSession(sessionId, ticket.profile, options.model, input.scope);
       const snapshots = this.tasks.context(receipt.conversationId, input.scope.principalId, decision.decisionId);
       const committed = committedCommandContext(this.store, receipt.conversationId);
@@ -942,6 +964,18 @@ export class AgentOrchestrationRuntime {
       const failure = error as { code?: string; name?: string; stack?: string };
       const failureCode = /^[A-Za-z0-9_]{1,80}$/.test(failure?.code ?? '') ? failure.code! : failure?.name ?? 'ERROR';
       console.error('[orchestration] response failed', { sessionId, code: failureCode, origin: failure?.stack?.split('\n').slice(1, 4) });
+      // The transcript passed the pre-spawn check but the CLI still refused to resume it
+      // (deleted between the check and the spawn, or unreadable). Drop the stored id so the
+      // next turn starts a fresh session and seeds history instead of failing the same way.
+      if (agentSession && resumeRejected(agentSession.lastStderr)) {
+        this.cliSessions.forget(sessionId);
+        const conversation = this.store.get('SELECT id FROM conversations WHERE agent_session_id=? ORDER BY updated_at DESC LIMIT 1', sessionId);
+        if (conversation) this.store.transaction(() => this.store.appendEvent(String(conversation.id), 'session.transcript_unavailable',
+          { sessionId, reason: 'RESUME_REJECTED' }));
+        console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn',
+          event: 'Claude Code rejected the stored CLI session; the next turn starts a fresh one',
+          agentId: this.agent.id, sessionId }));
+      }
       if (active.decision) {
         const row = this.store.get('SELECT state,conversation_id FROM conversation_decisions WHERE id=?', active.decision.decisionId);
         if (active.stopReason === 'barge-in' && (row?.state === 'running' || row?.state === 'interrupting')) {
