@@ -976,7 +976,7 @@ export class AgentOrchestrationRuntime {
       }, visualInput.images, {
         onUsage: metrics => recordTokenTurn(this.store, {id: decision.decisionId, sessionId, role: 'agent', category: active.notification ? 'report' : 'input', ...metrics}),
         startupTimeoutMs: this.config.conversation.startupTimeoutMs,
-        firstResponseTimeoutMs: this.config.conversation.firstResponseTimeoutMs,
+        firstResponseTimeoutMs: this.config.conversation.firstResponseTimeoutMs, compactionTimeoutMs: this.config.conversation.compactionTimeoutMs,
         idleTimeoutMs: this.config.conversation.idleTimeoutMs,
       }, chunk => {
         // StructuredOutput tool arguments are a separate JSON stream from commentary.

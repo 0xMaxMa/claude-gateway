@@ -97,3 +97,9 @@ test('deferred execution survives ordinary consumption and a rebuilt intake serv
   expect(restored.context(input.conversationId,'p')).toBeUndefined();
  }finally{store.close();}
 });
+
+test('compaction timeout defaults independently and rejects unbounded values',()=>{
+ expect(resolveOrchestrationConfig().conversation.compactionTimeoutMs).toBe(300000);
+ expect(resolveOrchestrationConfig({conversation:{firstResponseTimeoutMs:1000,compactionTimeoutMs:600000}}).conversation.compactionTimeoutMs).toBe(600000);
+ for(const compactionTimeoutMs of [0,-1,Infinity,NaN])expect(()=>resolveOrchestrationConfig({conversation:{compactionTimeoutMs}})).toThrow();
+});

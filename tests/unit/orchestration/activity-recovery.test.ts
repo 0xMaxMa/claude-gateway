@@ -180,3 +180,31 @@ test.each(['duplicate','unrelated','completed'] as const)('worker ignores %s too
   await failed;expect(proc.stop).toHaveBeenCalledTimes(1);
  }finally{jest.useRealTimers();}
 });
+
+test('a worker without a total deadline survives the first-response budget during compaction',async()=>{
+ jest.useFakeTimers();
+ const proc=Object.assign(new EventEmitter(),{start:async()=>{},sendMessage:jest.fn(),stop:jest.fn(async()=>{}),interrupt:jest.fn()}) as unknown as SessionProcess;
+ try{
+  const turn=startProcessTurn(proc,'work',undefined,undefined,undefined,[],{startupTimeoutMs:120000,firstResponseTimeoutMs:120000,idleTimeoutMs:300000,idleAction:'observe'});
+  proc.emit('output',JSON.stringify({type:'system',subtype:'status',status:'compacting'}));
+  await jest.advanceTimersByTimeAsync(121000);
+  expect(proc.stop).not.toHaveBeenCalled();
+  proc.emit('output',JSON.stringify({type:'system',subtype:'compact_boundary'}));
+  proc.emit('output',JSON.stringify({type:'result',result:'Finished'}));
+  await expect(turn.result).resolves.toMatchObject({text:'Finished'});
+ }finally{jest.useRealTimers();}
+});
+
+test.each([undefined,10000])('compaction has its own bounded deadline even with total=%s',async total=>{
+ jest.useFakeTimers();
+ const proc=Object.assign(new EventEmitter(),{start:async()=>{},sendMessage:jest.fn(),stop:jest.fn(async()=>{}),interrupt:jest.fn()}) as unknown as SessionProcess;
+ try{
+  const turn=startProcessTurn(proc,'work',total,undefined,undefined,[],{startupTimeoutMs:100,firstResponseTimeoutMs:100,compactionTimeoutMs:500,idleTimeoutMs:100,idleAction:'observe'});
+  const failed=expect(turn.result).rejects.toMatchObject({code:'TIMEOUT',timeout:{phase:'compaction'}});
+  for(let i=0;i<5;i++){
+   proc.emit('output',JSON.stringify({type:'system',subtype:'status',status:'compacting'}));
+   await jest.advanceTimersByTimeAsync(100);
+  }
+  await failed;expect(proc.stop).toHaveBeenCalledTimes(1);
+ }finally{jest.useRealTimers();}
+});
