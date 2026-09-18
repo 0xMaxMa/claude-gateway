@@ -24,6 +24,9 @@ import { resolveDreamingConfig } from '../agent/dreaming/config';
 import { validateContainer } from './container';
 import { ConversationIntake, INTAKE_OVERLAY, IntakeChoice } from './conversation-intake';
 import { AgentCliSessions, resumeRejected } from './agent-cli-session';
+import { transcriptPath } from '../config/claude-settings';
+import { checkpointTranscript, rollbackUnansweredTranscript, TranscriptCheckpoint } from './transcript-checkpoint';
+import { unansweredInputContext } from './unanswered-inputs';
 import { replyContext, storedReplyContext, resolveStoredReply } from './reply-context';
 import { pendingReports } from './notification-mailbox';
 import { toolActivity, ToolActivity } from './tool-activity';
@@ -581,6 +584,8 @@ export class AgentOrchestrationRuntime {
     const active: { decision?: DecisionReceipt; turn?: ProcessTurn; stopping: boolean; stopReason?: 'user' | 'barge-in'; modality?: string; notification?: boolean } = { stopping: false, modality: input.modality, notification: input.ingressKey?.startsWith('notification:') || input.ingressKey?.startsWith('question-review:') };
     this.active.set(sessionId, active);
     let agentSession: SessionProcess | undefined, revoke: (() => void) | undefined;
+    let transcriptCheckpoint: TranscriptCheckpoint | undefined;
+    let failedTurn = false;
     const questionReview = Boolean(input.ingressKey?.startsWith('question-review:'));
     let internalReview = false;
     let streamedDisplay = '';
@@ -823,6 +828,7 @@ export class AgentOrchestrationRuntime {
       if (this.agent.type !== 'app-agent') {
         const cliSession = this.cliSessions.resolve(sessionId, this.agent.workspace);
         ticket.profile.cliSession = { id: cliSession.id, resume: cliSession.resume };
+        if (cliSession.resume) transcriptCheckpoint = await checkpointTranscript(transcriptPath(this.agent.workspace, cliSession.id));
         if (cliSession.fallback) {
           // No silent failure: a session we had already started could not be continued, so this
           // turn re-seeds history and pays a cache write. Record why before it happens.
@@ -833,6 +839,9 @@ export class AgentOrchestrationRuntime {
             sessionId, cliSessionId: cliSession.id, reason: cliSession.fallback }));
         }
       }
+      ticket.profile.excludedHistoryOperationIds = this.store.all(`SELECT r.id FROM assistant_responses r
+        JOIN conversation_decisions d ON d.id=r.decision_id WHERE d.session_id=? AND r.state='failed'`, sessionId)
+        .map(row => `response:${row.id}`);
       agentSession = await this.host.createAgentSession(sessionId, ticket.profile, options.model, input.scope);
       const snapshots = this.tasks.context(receipt.conversationId, input.scope.principalId, decision.decisionId);
       const committed = committedCommandContext(this.store, receipt.conversationId);
@@ -874,7 +883,7 @@ export class AgentOrchestrationRuntime {
         this.publishText(sessionId, decision.responseId!, streamedDisplay);
         options.onText?.(chunk);
       };
-      const turn = startProcessTurn(agentSession, prompt, Math.min(options.timeoutMs, this.config.conversation.maxDecisionDurationMs), text => {
+      const turn = startProcessTurn(agentSession, unansweredInputContext(this.store, receipt.conversationId, receipt.inputId) + prompt, Math.min(options.timeoutMs, this.config.conversation.maxDecisionDurationMs), text => {
         displayChunk(text);
       }, metrics => {
         recordTokenTurn(this.store, { id: decision.decisionId, sessionId, role: 'agent', category: active.notification ? 'report' : 'input', ...metrics });
@@ -968,6 +977,7 @@ export class AgentOrchestrationRuntime {
       return silent ? acknowledgement : display || acknowledgement;
     } catch (error) {
       // Retain a safe diagnostic code; never log prompts, credentials or provider bodies.
+      failedTurn = true;
       const failure = error as { code?: string; name?: string; stack?: string };
       const failureCode = /^[A-Za-z0-9_]{1,80}$/.test(failure?.code ?? '') ? failure.code! : failure?.name ?? 'ERROR';
       console.error('[orchestration] response failed', { sessionId, code: failureCode, origin: failure?.stack?.split('\n').slice(1, 4) });
@@ -1009,6 +1019,9 @@ export class AgentOrchestrationRuntime {
     } finally {
       revoke?.();
       if (agentSession) await this.host.releaseAgentSession(sessionId, agentSession);
+      if (failedTurn && transcriptCheckpoint && agentSession?.managedGroupStopped === true) {
+        await rollbackUnansweredTranscript(transcriptCheckpoint);
+      }
       this.active.delete(sessionId);
     }
   }

@@ -29,6 +29,8 @@ export interface RuntimeProfile {
    * decision turns, which both spawn a fresh process per turn and would otherwise lose the
    * conversation — and its cached prefix — every time. */
   cliSession?: { id: string; resume: boolean };
+  /** Diagnostics stay in history, but are excluded before selecting the context window. */
+  excludedHistoryOperationIds?: string[];
   attemptId?: string;
   /** Gateway-built plugin containing only this task skill and its resources. */
   skillPluginDir?: string;

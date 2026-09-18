@@ -2851,6 +2851,20 @@ describe('SessionProcess — buildInitialPrompt system role', () => {
     jest.clearAllMocks();
   });
 
+  it('excludes recorded failures before applying the history window, preserving real user messages and diagnostics', async () => {
+    await sessionStore.appendMessage('alfred','s',{role:'user',content:'Keep my actual request',ts:1});
+    for(let i=0;i<5;i++) await sessionStore.appendMessage('alfred','s',{role:'assistant',content:'Timeout diagnostic',ts:2+i,operationId:`response:failed-${i}`});
+    const sp=makeSp('s','api',agentConfig,gatewayConfig,sessionStore,undefined,{
+      role:'agent',mcpConfigPath:'',overlay:'',excludedHistoryOperationIds:Array.from({length:5},(_,i)=>`response:failed-${i}`),
+    });
+    sp.historyLimit=2;
+    const result=await (sp as any).buildInitialPrompt();
+    expect(result.historyPrompt).toContain('Keep my actual request');
+    expect(result.historyPrompt).not.toContain('Timeout diagnostic');
+    expect(result.messageCountAtSpawn).toBe(6);
+    expect(await sessionStore.loadSession('alfred','s')).toHaveLength(6);
+  });
+
   it('U-SP-SYS-01: system messages are formatted as "System:" in initial prompt', async () => {
     await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
       role: 'user',

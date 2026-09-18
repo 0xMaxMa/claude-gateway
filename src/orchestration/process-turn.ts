@@ -8,7 +8,7 @@ import { SessionProcess } from '../session/process';
 import { OrchestrationError } from './types';
 
 export interface TurnTimeoutPolicy { onUsage?: (metrics: ManagedTurnMetrics) => void; startupTimeoutMs: number; firstResponseTimeoutMs: number; idleTimeoutMs: number; acceptToolProgress?: boolean; idleAction?: 'observe'; onObservation?: (value: TurnObservation) => void; }
-export interface TurnTimeoutDetails { phase: 'startup' | 'first_response' | 'idle' | 'total'; elapsedMs: number; idleMs: number; }
+export interface TurnTimeoutDetails { phase: 'startup' | 'first_response' | 'compaction' | 'idle' | 'total'; elapsedMs: number; idleMs: number; }
 export interface ProcessResult { text: string; interrupted: boolean; }
 export interface ProcessTurn {
   accepted: Promise<void>;
@@ -150,6 +150,16 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
     }
     if (policy) {
       if (event.type === 'system' && event.subtype === 'init' && phase === 'startup') arm('first_response', policy.firstResponseTimeoutMs);
+      // Compaction is a separate model request whose tokens are not streamed to
+      // the parent. Do not kill it with the first-answer silence timer. The
+      // caller's hard deadline remains in force, including repeated status events.
+      if (event.type === 'system' && event.subtype === 'status' && event.status === 'compacting' && phase !== 'compaction') {
+        arm('compaction', timeoutMs ?? policy.firstResponseTimeoutMs);
+      }
+      if (phase === 'compaction' && event.type === 'system' &&
+          (event.subtype === 'compact_boundary' || (event.subtype === 'status' && event.status === null))) {
+        arm('first_response', policy.firstResponseTimeoutMs);
+      }
       // Ignore keepalives, status chatter and stderr. Only actual inference or
       // tool-result progress renews the silence budget. Worker tool_progress
       // must refer to an active tool and advance; generic keepalives do not count.

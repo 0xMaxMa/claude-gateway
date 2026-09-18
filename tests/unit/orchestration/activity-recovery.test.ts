@@ -43,6 +43,30 @@ function timeoutFixture(total=2000) {
  const emit=(event:unknown)=>proc.emit('output',JSON.stringify(event));
  return {proc,turn,emit};
 }
+test('CLI compaction may finish beyond the first-response budget, then normal silence checks resume',async()=>{
+ jest.useFakeTimers();
+ try {
+  const {proc,turn,emit}=timeoutFixture();
+  emit({type:'system',subtype:'init'});
+  emit({type:'system',subtype:'status',status:'compacting'});
+  await jest.advanceTimersByTimeAsync(1000);
+  expect(proc.stop).not.toHaveBeenCalled();
+  emit({type:'system',subtype:'compact_boundary'});
+  await jest.advanceTimersByTimeAsync(250);
+  emit({type:'result',result:'Recovered'});
+  await expect(turn.result).resolves.toMatchObject({text:'Recovered'});
+ } finally {jest.useRealTimers();}
+});
+test('repeated compacting status cannot extend the total deadline',async()=>{
+ jest.useFakeTimers();
+ try {
+  const {proc,turn,emit}=timeoutFixture(1000);
+  const failed=expect(turn.result).rejects.toMatchObject({code:'TIMEOUT',timeout:{phase:'total'}});
+  emit({type:'system',subtype:'init'});
+  for(let i=0;i<5;i++) {emit({type:'system',subtype:'status',status:'compacting'});await jest.advanceTimersByTimeAsync(200);}
+  await failed;expect(proc.stop).toHaveBeenCalledTimes(1);
+ } finally {jest.useRealTimers();}
+});
 test('cold startup and first-token wait do not consume the progress silence budget',async()=>{
  jest.useFakeTimers();
  try {

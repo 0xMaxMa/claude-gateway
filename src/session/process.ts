@@ -476,9 +476,11 @@ export class SessionProcess extends EventEmitter {
         : await this.sessionStore.loadSession(this.agentConfig.id, this.sessionId);
       return { historyPrompt: null, loadedAtSpawn: 0, archivedCount: stored.length, messageCountAtSpawn: stored.length };
     }
-    const history = this.source !== 'api'
+    const storedHistory = this.source !== 'api'
       ? await this.sessionStore.loadTelegramSession(this.agentConfig.id, this.chatId, this.sessionId, this.sessionChannel)
       : await this.sessionStore.loadSession(this.agentConfig.id, this.sessionId);
+    const excluded = new Set(this.runtimeProfile?.excludedHistoryOperationIds ?? []);
+    const history = storedHistory.filter(message => !message.operationId || !excluded.has(message.operationId));
 
     // If history exceeds the limit and history[0] is a compaction summary, rescue it
     // so the model retains context from before the truncation window.
@@ -501,8 +503,8 @@ export class SessionProcess extends EventEmitter {
         : history.slice(-limit);
 
     const loadedAtSpawn = recent.length;
-    const archivedCount = history.length - recent.length;
-    const messageCountAtSpawn = history.length;
+    const archivedCount = storedHistory.length - recent.length;
+    const messageCountAtSpawn = storedHistory.length;
 
     if (recent.length === 0) {
       return { historyPrompt: null, loadedAtSpawn, archivedCount, messageCountAtSpawn };
