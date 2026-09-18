@@ -102,13 +102,19 @@ export class VoiceSession {
     if (this.closed) return;
     if (!Number.isSafeInteger(epoch) || epoch < 0 || epoch > 0xffffffff) throw new VoiceError('INVALID_EPOCH');
     if (epoch <= this.playback.epoch) return;
-    clearTimeout(this.silenceTimer); clearTimeout(this.admissionTimer); this.speaking = true; this.interruption++;
-    const previous = this.playback.epoch;
+    clearTimeout(this.silenceTimer); clearTimeout(this.admissionTimer); this.speaking = true;
+    this.stopPlayback(epoch);
+    this.stopResponse();
+  }
+  stopPlayback(epoch: number): void {
+    if (this.closed) return;
+    if (!Number.isSafeInteger(epoch) || epoch < 0 || epoch > 0xffffffff) throw new VoiceError('INVALID_EPOCH');
+    if (epoch <= this.playback.epoch) return;
+    this.interruption++;
     this.recordPlayback('interrupted');
     this.playingResponseId = undefined;
     const current = this.playback.clear(epoch);
     this.client.control({ type: 'playback.clear', epoch: current, generation: this.playback.generation });
-    if (current > previous) this.stopResponse();
   }
   speechEnded(lastAudioSeq: number): void {
     if (!Number.isSafeInteger(lastAudioSeq) || lastAudioSeq < 0) throw new VoiceError('INVALID_AUDIO_SEQUENCE');
@@ -136,7 +142,8 @@ export class VoiceSession {
       if (this.closed) return;
       // Some providers deliver no partial words. A confirmed continuation still
       // supersedes the previous reply before this text is admitted. Tasks survive.
-      if (this.responses.size) { this.speechStarted(this.playback.epoch + 1); this.speaking = false; }
+      const playback = this.playback.snapshot();
+      if (this.responses.size || (this.playingResponseId && (this.completedPlaybackEpoch !== playback.epoch || playback.playedSamples < playback.generatedSamples))) { this.speechStarted(this.playback.epoch + 1); this.speaking = false; }
       if (this.options.mergeWindowMs) {
         if (this.pendingText.reduce((n, p) => n + p.text.length, text.length) > 65536) throw new VoiceError('TRANSCRIPT_TOO_LARGE');
         this.pendingText.push({ text, utteranceId: turn.utteranceId });

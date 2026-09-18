@@ -43,6 +43,7 @@ test.each([false,true])('real runtime publishes incremental response text before
   const responseId=updates.mock.calls[0][0].responseId;
   runtime.saveVoiceAudio(sid,'owner',responseId,Buffer.from('original'));
   expect(()=>runtime.voiceAudio(sid,'intruder',responseId)).toThrow();
+  expect(()=>runtime.voiceReplaySpeech(sid,'intruder',responseId)).toThrow();
  }finally{stopOutsider();unsub();await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
 });
 

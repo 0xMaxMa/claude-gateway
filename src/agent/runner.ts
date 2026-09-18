@@ -549,6 +549,12 @@ export class AgentRunner extends EventEmitter {
   async voiceReplay(sessionId: string, principalId: string, responseId?: string) {
     return (await this.getOrchestration()).voiceAudio(sessionId, principalId, responseId);
   }
+  async replayableVoiceResponses(sessionId: string, principalId: string) {
+    return (await this.getOrchestration()).replayableVoiceResponses(sessionId, principalId);
+  }
+  async voiceReplaySpeech(sessionId: string, principalId: string, responseId: string) {
+    return (await this.getOrchestration()).voiceReplaySpeech(sessionId, principalId, responseId);
+  }
   saveVoiceReplay(sessionId: string, principalId: string, responseId: string, audio: Buffer): void {
     this.orchestration?.saveVoiceAudio(sessionId, principalId, responseId, audio);
   }

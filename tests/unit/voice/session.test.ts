@@ -371,3 +371,52 @@ test.each([false, true])('response rejection only notifies the current voice tur
     expect(controls.filter(event => event.type === 'voice.error')).toEqual(interrupted ? [] : [{ type: 'voice.error', code: 'INFERENCE_FAILED' }]);
   } finally { await session.close(); }
 });
+
+
+test('batch STT only interrupts completed response playback after confirmed words; empty noise preserves it', async () => {
+  const { FakeTtsProvider } = await import('../../../src/voice/providers/fake');
+  const stt=new FakeSttProvider(), controls:any[]=[], audio:Buffer[]=[], stop=jest.fn(), receipts=jest.fn();
+  const session=new VoiceSession(stt,new FakeTtsProvider(),'voice',{
+    control:m=>controls.push(m),audio:b=>audio.push(b),bufferedBytes:()=>0,
+  },async()=>({inputId:'next',response:Promise.resolve('')}),stop,undefined,receipts);
+  const waitFor=async(fn:()=>boolean)=>{for(let i=0;i<100&&!fn();i++)await new Promise(r=>setTimeout(r,5));expect(fn()).toBe(true);};
+  const commit=async(text:string)=>{
+    const turn=[...controls].reverse().find(c=>c.state==='listening'&&c.utterance_id);
+    await session.audio({generation:turn.generation,epoch:session.playback.epoch,sequence:1,segmentId:turn.utterance_id,audio:Buffer.alloc(640)});
+    stt.sessions[0].commitId=undefined;
+    const pending=session.commit(1);
+    const outcome=pending.then(()=>undefined,error=>error);
+    await waitFor(()=>!!stt.sessions[0].commitId);
+    if(text)stt.sessions[0].emit({type:'segment_final',segmentId:'words',text});
+    stt.sessions[0].emit({type:'commit_done',commitId:stt.sessions[0].commitId!});
+    return outcome;
+  };
+  try {
+    await session.start();
+    session.notifyResult({responseId:'completed',text:'Answer',spoken:'Approved answer'});
+    await waitFor(()=>controls.some(c=>c.type==='playback.end'));
+    const epoch=session.playback.epoch;
+    expect((await commit(''))?.code).toBe('EMPTY_TRANSCRIPT');
+    expect(session.playback.epoch).toBe(epoch);expect(stop).not.toHaveBeenCalled();
+    await commit('please wait');
+    expect(session.playback.epoch).toBeGreaterThan(epoch);expect(stop).toHaveBeenCalledTimes(1);
+    expect(receipts).toHaveBeenCalledWith('completed',expect.anything(),'interrupted');
+  } finally {await session.close();}
+});
+
+test('manual replay stops the old audio without cancelling an agent task', async () => {
+  const {FakeTtsProvider}=await import('../../../src/voice/providers/fake');
+  const stop=jest.fn(),controls:any[]=[],receipts=jest.fn();
+  const session=new VoiceSession(new FakeSttProvider(),new FakeTtsProvider(),'voice',{
+    control:m=>controls.push(m),audio:()=>{},bufferedBytes:()=>0,
+  },async()=>({inputId:'next',response:Promise.resolve('')}),stop,undefined,receipts);
+  try {
+    session.notifyResult({responseId:'original',text:'Answer',spoken:'Answer'});
+    for(let i=0;i<100&&!controls.some(c=>c.type==='playback.end');i++)await new Promise(r=>setTimeout(r,5));
+    expect(controls.some(c=>c.type==='playback.end')).toBe(true);
+    session.stopPlayback(session.playback.epoch+1);
+    expect(stop).not.toHaveBeenCalled();
+    expect(receipts).toHaveBeenCalledWith('original',expect.anything(),'interrupted');
+    expect(session.speechClaims()).toContain('original');
+  } finally {await session.close();}
+});

@@ -356,6 +356,14 @@ export class AgentOrchestrationRuntime {
     this.authorizeSession(sessionId, principalId);
     return this.store.responseAudio(sessionId, responseId);
   }
+  replayableVoiceResponses(sessionId: string, principalId: string): string[] {
+    this.authorizeSession(sessionId, principalId);
+    return this.store.replayableResponses(sessionId);
+  }
+  voiceReplaySpeech(sessionId: string, principalId: string, responseId: string): string | undefined {
+    this.authorizeSession(sessionId, principalId);
+    return this.store.replaySpeech(sessionId, responseId);
+  }
   authorizeSession(sessionId: string, principalId: string): void {
     for (const row of this.store.all('SELECT id FROM conversations WHERE agent_session_id=?', sessionId)) this.store.assertMember(String(row.id), principalId);
   }
