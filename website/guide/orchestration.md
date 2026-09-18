@@ -52,6 +52,8 @@ If an automatic task report fails, its result stays pending for a later reportin
 
 A corrected task-spawn validation error does not produce a partial-failure notice when a later command in the same turn successfully queues the same work. Automatic matching requires the same title, exact brief, predecessor, context references and continuation policy. If the brief changes, the caller must copy `retry_of` from the rejected spawn response to explicitly identify the correction. The reference only reconciles reporting for a validation failure in the same decision; it never bypasses admission or permissions. Unrelated failures, conflicting replays, permission errors and uncertain outcomes still produce a warning. Original tool errors remain in the transcript; this changes reporting, not authorization or execution.
 
+Corrected `task_update` validation, revision-conflict, and acknowledgement errors follow the same reporting rule. The successful correction must target the same task; automatic matching also requires the same instruction and mode. A changed instruction or mode requires an explicit `retry_of` reference. Permission failures and unrelated errors remain visible.
+
 A finished investigation and a proposed implementation are different stages. Completion reports should identify what finished and whether a follow-up task is actually queued/running. A suggested next step is not a promise that execution has started, and read-only investigation does not authorize deployment.
 
 ## Cancel and reconcile
@@ -90,7 +92,7 @@ Open the admin dashboard and select **View token report** on a managed Agent ses
 
 Token volume includes input, cache creation, cache reads and output. Thinking is already included in output and is not added twice. Cache creation duration is shown when the CLI reports it. These percentages describe token volume, **not billing cost**: cached reads and input may have different prices.
 
-Each recorded turn includes the available request-level usage and its input/task/result context. Repeated content blocks and stream usage are deduplicated by provider message ID. A CLI turn aggregate is reconciled with request usage, not added as another request. Some providers expose only aggregate usage, so a turn total can be available without a complete request breakdown. Missing usage or tool inventory is **Unavailable**, not an inferred zero.
+Each recorded turn includes the available request-level usage and its input/task/result context. Repeated content blocks and stream usage are deduplicated by provider message ID. A CLI turn aggregate is reconciled with request usage, not added as another request. Some providers expose only aggregate usage, so a turn total can be available without a complete request breakdown. Missing usage or tool inventory is shown as **—**, not an inferred zero.
 
 Usage is persisted in the per-agent `orchestration.db` table `token_turns` for turns recorded after this feature is installed. It survives gateway restarts; earlier sessions are not retroactively assigned estimated usage. Background skill-learning reviews are accounted for separately from foreground Agent/Worker totals. See the [report endpoints](../api/orchestration.md#session-token-reports) for programmatic access.
 
@@ -101,7 +103,7 @@ Gateway execution tools in host/isolated workers use `tool_search` to retrieve o
 
 Discovery adds a model/tool round trip on first use. Smaller schema payloads do not guarantee lower end-to-end latency or billing. Compare the same model and task with measured cache usage before concluding that a workload is cheaper. The initial implementation has protocol/fixture coverage; matched live-model A/B measurements are required to establish production savings.
 
-The dashboard uses the same **admin API key** login as before. Conversations and Tasks open detail drawers with retained session records and individual worker attempts; token reports open in a separate tab. Overview displays recorded UTC token activity, while Usage & tokens separates Agent and Worker totals. Reads run in a dedicated worker thread with bounded caches, pagination, and live updates; missing measurements are shown as unavailable.
+The dashboard uses the same **admin API key** login as before. Conversations and Tasks open detail drawers with retained session records and individual worker attempts; token reports open in a separate tab. Overview displays recorded UTC token activity, while Usage & tokens separates Agent and Worker totals. Reads run in a dedicated worker thread with bounded caches, pagination, and live updates; missing measurements are shown as **—**.
 
 ### Dashboard session activity
 

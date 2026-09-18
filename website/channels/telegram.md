@@ -82,7 +82,7 @@ Once paired, use these commands in the bot's private chat:
 | `/new <name>` | Create a session; name is optional |
 | `/rename <name>` | Rename the current session |
 | `/clear` | Reset model context after confirmation; history stays unchanged |
-| `/compact` | Summarize older history |
+| `/compact` | Compact Claude Code context; keep chat history unchanged |
 | `/stop` | Interrupt the active turn |
 | `/restart` | Confirm a graceful session restart |
 | `/model` | Show the current model |
