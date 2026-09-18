@@ -13,6 +13,14 @@ test('new work requires an identical brief; success before failure is not recove
  expect(unresolvedMutations([first,{...retry,args:first.args}])).toBe(false);
  expect(unresolvedMutations([retry,failed])).toBe(true);
 });
+test.each([{title:'',instructions:'Inspect'}, {title:'Inspect',instructions:''}, {}])('explicit retries recover invalid assignment fields: %j',args=>{
+ const rejected={...failed,args};
+ const corrected={...retry,args:{title:'Inspect',instructions:'Inspect the requested item',retry_of:failed.actionId}};
+ expect(unresolvedMutations([rejected,corrected])).toBe(false);
+ expect(unresolvedMutations([rejected,{...corrected,args:{...corrected.args,retry_of:undefined}}])).toBe(true);
+ expect(unresolvedMutations([rejected,{...corrected,args:{...corrected.args,retry_of:'other'}}])).toBe(true);
+ expect(unresolvedMutations([rejected,{...corrected,committed:false}])).toBe(true);
+});
 test.each(['ACCESS_DENIED','ACTION_CONFLICT',undefined])('never clears unknown or authorization/replay errors: %s',errorCode=>{
  expect(unresolvedMutations([{...failed,errorCode},retry])).toBe(true);
 });

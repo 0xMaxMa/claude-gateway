@@ -15,7 +15,10 @@ export function unresolvedMutations(attempts: MutationAttempt[]): boolean {
     if (attempt.committed) return false;
     if (attempt.tool !== 'task_spawn' || !['INVALID_INPUT','UNKNOWN_SKILL','ACKNOWLEDGEMENT_REQUIRED'].includes(attempt.errorCode ?? '')) return true;
     const identity = spawnIdentity(attempt.args);
-    return !identity || !attempts.slice(index + 1).some(next => next.actionId !== attempt.actionId &&
-      next.committed && next.tool === 'task_spawn' && (spawnIdentity(next.args) === identity || next.args.retry_of === attempt.actionId));
+    // Invalid required fields cannot form an identity, but the bridge's explicit
+    // retry reference still identifies the rejected command being corrected.
+    return !attempts.slice(index + 1).some(next => next.actionId !== attempt.actionId &&
+      next.committed && next.tool === 'task_spawn' && (next.args.retry_of === attempt.actionId ||
+        (identity !== undefined && spawnIdentity(next.args) === identity)));
   });
 }
