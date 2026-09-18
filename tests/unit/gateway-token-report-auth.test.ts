@@ -6,10 +6,11 @@ const report = { sessionId: 'session', coverage: 'recorded-turns-only', totals: 
 function setup(keyless = false, bind = '127.0.0.1') {
   const getTokenReport = jest.fn().mockResolvedValue(report);
   const dashboardContextWindow=jest.fn().mockResolvedValue(32768);
-  const router = new GatewayRouter(new Map([['agent', { getTokenReport, dashboardContextWindow } as unknown as AgentRunner]]), new Map(), undefined, {
+  const isSessionCompacting=jest.fn().mockReturnValue(false);
+  const router = new GatewayRouter(new Map([['agent', { getTokenReport, dashboardContextWindow, isSessionCompacting } as unknown as AgentRunner]]), new Map(), undefined, {
     gateway: { bind, logDir: '/tmp', timezone: 'UTC', api: { keys: keyless ? [] : [{ key: 'admin-secret', admin: true, agents: '*' }, { key: 'scoped-secret', agents: ['agent'] }] } }, agents: [],
   });
-  return { app: router.getApp(), getTokenReport, dashboardContextWindow };
+  return { app: router.getApp(), getTokenReport, dashboardContextWindow, isSessionCompacting };
 }
 for (const path of ['/token-report', '/dashboard/token-report']) {
   describe(path, () => {
@@ -92,3 +93,13 @@ test('JSON report uses resolved capacity instead of guessing from the model ID',
  expect(response.body.contextWindow).toEqual({used:11000,total:32768,model:'custom-model'});
  expect(dashboardContextWindow).toHaveBeenCalledWith('custom-model');
 });
+
+ test('reports live compaction without retaining stale status after it finishes',async()=>{
+  const {app,getTokenReport,isSessionCompacting}=setup();
+  getTokenReport.mockResolvedValue({...report,activityStatus:'idle'});
+  isSessionCompacting.mockReturnValue(true);
+  const request=()=>supertest(app).get('/token-report').query({agentId:'agent',sessionId:'session'}).set('X-Api-Key','admin-secret');
+  expect((await request()).body.activityStatus).toBe('compacting');
+  isSessionCompacting.mockReturnValue(false);
+  expect((await request()).body.activityStatus).toBe('idle');
+ });

@@ -112,3 +112,7 @@ The dashboard and Session token report share the same session status. After the 
 Use `/compact` in a supported chat channel or the session compact API to ask Claude Code to compact its existing session. The gateway resumes that exact transcript, requires a native `compact_boundary` confirmation, and leaves all gateway chat-history files intact. It never reattaches a recent-message window after compaction. Busy sessions reject compaction until their current response finishes; workers continue independently. Missing transcripts and unsupported CLI behavior return an explicit error instead of invoking a separate history summarizer. Legacy sessions require an existing idle headless process.
 
 Installed skill metadata is kept in the stable Agent system prefix, not appended to every resumed user message. Catalog changes refresh that prefix. Worker turn reports distinguish completed, failed and cancelled outcomes from the process lifecycle and expose recorded failure codes.
+
+### Reset model context
+
+`/clear` drops the agent's CLI resume mapping without deleting chat history, attachments, tasks, or worker context. Your next message starts a new Claude Code session with the latest 50 history messages (or all available messages if fewer), then later turns resume that new session. `/compact` instead compacts the existing CLI transcript. Wait for an active response or compaction to finish before using `/clear`.

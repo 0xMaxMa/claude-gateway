@@ -73,7 +73,7 @@ curl http://localhost:10850/api/v1/commands | jq
 {
   "commands": [
     { "name": "/session",  "description": "Show current session info (name, message count, context %)" },
-    { "name": "/clear",    "description": "Clear current session history" },
+    { "name": "/clear",    "description": "Reset Claude Code context; keep chat history" },
     { "name": "/compact",  "description": "Summarise old history and keep only recent messages" },
     { "name": "/stop",     "description": "Interrupt the in-flight turn" },
     { "name": "/restart",  "description": "Graceful session restart" },

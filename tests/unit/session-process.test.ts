@@ -2851,6 +2851,28 @@ describe('SessionProcess — buildInitialPrompt system role', () => {
     jest.clearAllMocks();
   });
 
+  it('context reset survives store recreation and loads exactly the latest 50 messages without editing history', async () => {
+    for (let i=0;i<60;i++) await sessionStore.appendMessage('alfred','reset-session',{role:'assistant',content:`fixture-message-${i}.`,ts:i});
+    const before=await sessionStore.loadSession('alfred','reset-session');
+    sessionStore.requestContextReset('alfred','reset-session');
+    const restored=new SessionStore(sessionStore.getAgentsBaseDir());
+    const reset=restored.getContextReset('alfred','reset-session')!;
+    const sp=makeSp('reset-session','api',agentConfig,gatewayConfig,restored);
+    sp.historyLimit=5;
+    const result=await (sp as any).buildInitialPrompt();
+    expect(result.loadedAtSpawn).toBe(50);
+    expect(result.historyPrompt).not.toContain('fixture-message-9.');
+    expect(result.historyPrompt).toContain('fixture-message-10.');
+    expect(result.historyPrompt).toContain('fixture-message-59.');
+    expect(await restored.loadSession('alfred','reset-session')).toEqual(before);
+    sp.historyRecoveryActive=true;
+    expect((await (sp as any).buildInitialPrompt()).loadedAtSpawn).toBe(5);
+    restored.completeContextReset('alfred','reset-session','wrong-id');
+    expect(restored.getContextReset('alfred','reset-session')).toEqual(reset);
+    restored.completeContextReset('alfred','reset-session',reset.id);
+    expect(restored.getContextReset('alfred','reset-session')).toBeUndefined();
+  });
+
   it('excludes recorded failures before applying the history window, preserving real user messages and diagnostics', async () => {
     await sessionStore.appendMessage('alfred','s',{role:'user',content:'Keep my actual request',ts:1});
     for(let i=0;i<5;i++) await sessionStore.appendMessage('alfred','s',{role:'assistant',content:'Timeout diagnostic',ts:2+i,operationId:`response:failed-${i}`});

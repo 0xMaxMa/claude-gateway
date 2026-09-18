@@ -147,8 +147,10 @@ describe('agent decision turns over one CLI session', () => {
       const historyBefore = await sessions.loadSession('a',sid);
       const decisionsBefore = runtime.store.get('SELECT COUNT(*) n FROM conversation_decisions')!.n;
       const compact = runtime.compactSession(sid);
+      expect(runtime.isCompacting(sid)).toBe(true);
       await expect(runtime.compactSession(sid)).rejects.toMatchObject({code:'AGENT_BUSY'});
       await compact;
+      expect(runtime.isCompacting(sid)).toBe(false);
       expect(observed[2]).toEqual({id:cliSessionId,resume:true});
       expect(await sessions.loadSession('a',sid)).toEqual(historyBefore);
       expect(runtime.store.get('SELECT COUNT(*) n FROM conversation_decisions')!.n).toBe(decisionsBefore);
@@ -164,6 +166,17 @@ describe('agent decision turns over one CLI session', () => {
       const logged = warn.mock.calls.map(call => String(call[0])).find(line => line.includes('could not be resumed'));
       expect(logged).toBeDefined();
       expect(JSON.parse(logged!)).toMatchObject({ level: 'warn', sessionId: sid, reason: 'TRANSCRIPT_UNAVAILABLE' });
+      const beforeReset = await sessions.loadSession('a',sid);
+      const previousId = observed[2]!.id;
+      transcripts.push(writeTranscript(workspace,previousId));
+      runtime.resetSessionContext(sid);
+      expect(await sessions.loadSession('a',sid)).toEqual(beforeReset);
+      await send();
+      expect(observed[3]!.resume).toBe(false);
+      expect(observed[3]!.id).not.toBe(previousId);
+      transcripts.push(writeTranscript(workspace,observed[3]!.id));
+      await send();
+      expect(observed[4]).toEqual({id:observed[3]!.id,resume:true});
     } finally {
       warn.mockRestore();
       for (const file of transcripts) { try { unlinkSync(file); } catch { /* already gone */ } }

@@ -2252,6 +2252,7 @@ export class AgentRunner extends EventEmitter {
     // size when the cap has been lowered.
     const recoveryCount = this.tooLargeRecoveries.get(mapKey) ?? 0;
     proc.historyLimit = this.spawnHistoryLimit(configuredMax, recoveryCount);
+    proc.historyRecoveryActive = recoveryCount > 0;
     if (recoveryCount > 0) {
       this.logger.info('Spawning with reduced history after request_too_large', {
         mapKey, recoveryCount, historyLimit: proc.historyLimit,
@@ -2873,6 +2874,7 @@ export class AgentRunner extends EventEmitter {
       await this.handleCommandNew(agentId, chatId, name);
     } else if (content.startsWith('/clear')) {
       await this.handleCommandClear(agentId, chatId);
+      this.writeAutoForward(chatId, 'Claude Code context reset. Chat history is unchanged. The next message loads the latest 50 messages.');
     } else if (content.startsWith('/compact')) {
       await this.handleCommandCompact(agentId, chatId);
     } else if (content.startsWith('/rename')) {
@@ -3096,38 +3098,34 @@ export class AgentRunner extends EventEmitter {
     this.writeAutoForward(chatId, stopped ? 'Stopped.' : 'No turn in progress.');
   }
 
-  /**
-   * /clear — clear history of the current session and restart the process.
-   * Also clears the permanent history DB and media files for this chat.
-   */
+  /** /clear rotates model context while preserving history, media and tasks. */
+  private async clearContext(sessionId: string): Promise<void> {
+    if (this.compactingSessions.has(sessionId)) throw new Error('Context maintenance is already running for this session.');
+    this.compactingSessions.add(sessionId);
+    try {
+      const runtime = this.orchestration ?? (this.agentConfig.orchestration?.enabled ? await this.getOrchestration() : undefined);
+      if (runtime?.isBusy(sessionId)) throw new Error('The agent is responding. Try /clear after the current response finishes.');
+      const sessions = [...this.sessions.entries()].filter(([, process]) => process.sessionId === sessionId);
+      if (sessions.some(([, process]) => process.isProcessing)) throw new Error('The agent is responding. Try /clear after the current response finishes.');
+      for (const [key, process] of sessions) {
+        await process.stop();
+        if (this.sessions.get(key) === process) this.sessions.delete(key);
+      }
+      // No await between persisting the seed window and dropping the resume mapping.
+      // The marker survives gateway restarts until a successful turn consumes it.
+      if (runtime?.isBusy(sessionId)) throw new Error('The agent is responding. Try /clear after the current response finishes.');
+      this.sessionStore.requestContextReset(this.agentConfig.id, sessionId);
+      if (runtime?.ownsSession(sessionId)) runtime.resetSessionContext(sessionId);
+      for (const key of [sessionId, ...sessions.map(([key]) => key)]) {
+        this.tooLargeRecoveries.delete(key);
+        this.tooLargeExhausted.delete(key);
+      }
+    } finally { this.compactingSessions.delete(sessionId); }
+  }
+
   private async handleCommandClear(agentId: string, chatId: string): Promise<void> {
-    const ch = this.channelFor(chatId);
-    const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId, ch);
-
-    // Clear messages and reset all metadata in-place (preserves session ID and name)
-    await this.sessionStore.clearTelegramSessionHistory(agentId, chatId, sessionId, ch);
-    await this.sessionStore.updateSessionMeta(agentId, chatId, sessionId, {
-      totalTokensUsed: 0,
-      lastInputTokens: 0,
-      archivedCount: 0,
-      loadedAtSpawn: undefined,
-      messageCountAtSpawn: undefined,
-    }, ch);
-
-    // Clear permanent history DB for this chat
-    const historyChatId = `${ch}-${chatId}`;
-    this.historyDb.clearChat(historyChatId);
-
-    // Delete persisted media files for this chat
-    MediaStore.clearChatMedia(this.agentsBaseDir, agentId, historyChatId);
-
-    // Reset any request_too_large escalation — the context is now empty, so the
-    // next spawn should start fresh at the top of the history ladder.
-    this.tooLargeRecoveries.delete(chatId);
-    this.tooLargeExhausted.delete(chatId);
-
-    // Kill old process so next message spawns fresh
-    this.restartProcess(chatId).catch(() => {});
+    const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId, this.channelFor(chatId));
+    await this.clearContext(sessionId);
   }
 
   private readonly compactingSessions = new Set<string>();
@@ -4410,6 +4408,8 @@ export class AgentRunner extends EventEmitter {
    * - 'stopped' → gone from the map (idle-timeout kill or otherwise released)
    * Display-only; does not touch token accounting.
    */
+  isSessionCompacting(sessionId: string): boolean { return this.orchestration?.isCompacting(sessionId) ?? false; }
+
   agentSessionLiveStatus(sessionId: string): 'running' | 'idle' | 'stopped' {
     for (const p of this.sessions.values()) {
       if (p.sessionId === sessionId && p.isRunning()) return p.isProcessing ? 'running' : 'idle';
@@ -5291,10 +5291,7 @@ export class AgentRunner extends EventEmitter {
     };
 
     // Persist the full user command before executing so it appears in history.
-    // Skip for /clear — clearSession() below wipes the table anyway; only the response survives.
-    if (cmd !== '/clear') {
-      persist('user', opts?.displayCommand ?? command);
-    }
+    persist('user', opts?.displayCommand ?? command);
 
     let result: Record<string, unknown>;
     let responseText: string;
@@ -5388,20 +5385,9 @@ export class AgentRunner extends EventEmitter {
           responseText = `Sessions (${withCounts.length}):\n${lines.join('\n')}`;
         }
       } else if (cmd === '/clear') {
-        const ch = 'api' as const;
-        await this.sessionStore.clearTelegramSessionHistory(agentId, storeChatId, sessionId, ch);
-        await this.sessionStore.updateSessionMeta(agentId, storeChatId, sessionId, {
-          totalTokensUsed: 0,
-          lastInputTokens: 0,
-          archivedCount: 0,
-          loadedAtSpawn: undefined,
-          messageCountAtSpawn: undefined,
-        }, ch);
-        const mediaPaths = this.historyDb.clearSession(dbChatId, sessionId);
-        MediaStore.deleteMediaFiles(this.agentsBaseDir, agentId, mediaPaths);
-        this.restartProcess(sessionId).catch(() => {});
-        result = { success: true };
-        responseText = 'Session cleared.';
+        await this.clearContext(sessionId);
+        result = { success: true, historyUnchanged: true, historyLimit: 50 };
+        responseText = 'Claude Code context reset. Chat history is unchanged. Your next message starts a new context with the latest 50 messages.';
       } else if (cmd === '/compact') {
         await this.compactContext(sessionId, opts?.model);
         result = { success: true, native: true, historyUnchanged: true };

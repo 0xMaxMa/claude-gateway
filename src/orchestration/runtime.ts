@@ -99,7 +99,7 @@ export class AgentOrchestrationRuntime {
   private nextQuestionCheck = 0;
   private readonly scheduledReports = new Set<string>();
   private readonly seenSessions = new Set<string>();
-  private readonly active = new Map<string, { decision?: DecisionReceipt; turn?: ProcessTurn; stopping: boolean; stopReason?: 'user' | 'barge-in'; modality?: string; notification?: boolean }>();
+  private readonly active = new Map<string, { decision?: DecisionReceipt; turn?: ProcessTurn; stopping: boolean; stopReason?: 'user' | 'barge-in'; modality?: string; notification?: boolean; maintenance?: 'compact' }>();
   private capabilityCatalog?: CapabilityCatalog;
   private config;
   private draining = false;
@@ -261,6 +261,7 @@ export class AgentOrchestrationRuntime {
     return { cursor: tools.length === 500 ? tools[tools.length - 1].seq : Number(conversation.last_event_seq), tasks, responses, tools, busy: this.isBusy(sessionId) };
   }
   isBusy(sessionId: string): boolean { return this.active.has(sessionId); }
+  isCompacting(sessionId: string): boolean { return this.active.get(sessionId)?.maintenance === 'compact'; }
   responseFiles(sessionId: string, requestId?: string): string[] {
     const response = this.store.get(`SELECT r.id FROM assistant_responses r JOIN conversations c ON c.id=r.conversation_id WHERE c.agent_session_id=?
       ${requestId === undefined ? '' : 'AND r.request_id=?'} ORDER BY r.created_at DESC,r.rowid DESC LIMIT 1`, ...[sessionId, ...(requestId === undefined ? [] : [requestId])]);
@@ -307,6 +308,18 @@ export class AgentOrchestrationRuntime {
     if (!this.config.enabled) this.drain();
     else { this.draining = false; this.store.run("UPDATE conversations SET status='active' WHERE status='draining'"); }
   }
+  /** Rotate only the agent CLI context. Tasks and canonical history remain intact. */
+  resetSessionContext(sessionId: string): void {
+    if (this.closing || this.draining) throw new OrchestrationError('ORCHESTRATION_CLOSING');
+    if (this.active.has(sessionId)) throw new OrchestrationError('AGENT_BUSY', 'The agent is responding. Try /clear after the current response finishes.');
+    const conversation = this.store.get('SELECT id FROM conversations WHERE agent_session_id=?', sessionId);
+    if (!conversation) throw new OrchestrationError('NO_CLI_SESSION');
+    this.store.transaction(() => {
+      this.cliSessions.forget(sessionId);
+      this.store.appendEvent(String(conversation.id), 'session.context_reset', { sessionId, historyLimit: 50 });
+    });
+  }
+
   /** An exclusive maintenance operation on the existing CLI transcript, not a chat summary. */
   compactSession(sessionId: string, model?: string): Promise<void> {
     if (this.closing || this.draining) return Promise.reject(new OrchestrationError('ORCHESTRATION_CLOSING'));
@@ -314,7 +327,7 @@ export class AgentOrchestrationRuntime {
     const conversation = this.store.get('SELECT * FROM conversations WHERE agent_session_id=?', sessionId);
     const stored = this.store.get('SELECT cli_session_id,cwd FROM agent_cli_sessions WHERE session_id=?', sessionId);
     if (!conversation || !stored) return Promise.reject(new OrchestrationError('NO_CLI_SESSION', 'No existing Claude Code context to compact. Chat history was not changed.'));
-    const active: {turn?: ProcessTurn; stopping: boolean} = {stopping:false};
+    const active: {turn?: ProcessTurn; stopping: boolean; maintenance: 'compact'} = {stopping:false,maintenance:'compact'};
     this.active.set(sessionId,active);
     const operation = (async () => {
       let process: SessionProcess | undefined;

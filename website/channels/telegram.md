@@ -81,7 +81,7 @@ Once paired, use these commands in the bot's private chat:
 | `/sessions` | List, switch or delete sessions using buttons |
 | `/new <name>` | Create a session; name is optional |
 | `/rename <name>` | Rename the current session |
-| `/clear` | Clear history after confirmation |
+| `/clear` | Reset model context after confirmation; history stays unchanged |
 | `/compact` | Summarize older history |
 | `/stop` | Interrupt the active turn |
 | `/restart` | Confirm a graceful session restart |

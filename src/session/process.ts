@@ -258,6 +258,8 @@ export class SessionProcess extends EventEmitter {
   // re-loads less context until it drops under Anthropic's request ceiling.
   // 0 = inject no history at all (fully fresh context).
   historyLimit: number = MAX_HISTORY_MESSAGES;
+  /** Oversized-request recovery must still shrink an explicit /clear seed window. */
+  historyRecoveryActive = false;
   // Safe-mode override (Epic #195, Phase 3): when true, this session is forced
   // to the headless backend even if gateway.headless===false. The runner sets
   // it from SafeModeManager before start() so a repeatedly-wedged PTY agent
@@ -465,7 +467,10 @@ export class SessionProcess extends EventEmitter {
     });
   }
 
+  private contextResetId?: string;
   private async buildInitialPrompt(): Promise<{ historyPrompt: string | null; loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number }> {
+    const reset = this.sessionStore.getContextReset(this.agentConfig.id, this.sessionId);
+    this.contextResetId = reset?.id;
     // Resuming means Claude Code's own transcript already holds this conversation. Seeding
     // our flattened copy on top would send every message twice and, because the duplicate
     // grows and shifts each turn, would also break the prefix the resume exists to reuse.
@@ -488,8 +493,9 @@ export class SessionProcess extends EventEmitter {
     const firstMsg = history[0];
     // Clamp to a sane range; the runner uses this to escalate-shrink history on
     // repeated request_too_large (50→40→30→20→10→0). limit === 0 → no history.
-    const limit = Math.max(0, this.historyLimit);
+    const limit = Math.max(0, reset && !this.historyRecoveryActive ? reset.historyLimit : this.historyLimit);
     const hasSummary =
+      !reset &&
       limit > 1 &&
       history.length > limit &&
       firstMsg?.role === 'system' &&
@@ -1462,6 +1468,12 @@ export class SessionProcess extends EventEmitter {
           }
           // result = end of turn
           if (obj.type === 'result') {
+            if (!obj.is_error && this.contextResetId) {
+              try {
+                this.sessionStore.completeContextReset(this.agentConfig.id, this.sessionId, this.contextResetId);
+                this.contextResetId = undefined;
+              } catch { this.logger.warn('Unable to finish context reset bookkeeping'); }
+            }
             lastPartialText = ''; // reset for next turn
             writeStatus(obj.is_error ? 'error' : 'done');
             // A clean turn means the in-memory history is healthy again — refill the budget.

@@ -206,14 +206,32 @@ describe('executeApiCommand session counting (#160)', () => {
     ).rejects.toThrow('Unknown command: /bogus');
   });
 
-  it('U-RUN-07: /clear empties the flat store the model reloads at spawn', async () => {
+  it('U-RUN-07: /clear preserves history and requests a durable 50-message bootstrap', async () => {
     await seedFlatStore(sessionId, 6);
+    const db = (runner as any).historyDb;
+    const clearChat = jest.spyOn(db, 'clearChat');
+    const clearSession = jest.spyOn(db, 'clearSession');
     expect(await getSessionStore(runner).loadSession(agentId, sessionId)).toHaveLength(6);
 
     const { result } = await runner.executeApiCommand(sessionId, chatId, '/clear', { skipPersist: true });
 
     expect(result.success).toBe(true);
-    expect(await getSessionStore(runner).loadSession(agentId, sessionId)).toEqual([]);
+    expect(await getSessionStore(runner).loadSession(agentId, sessionId)).toHaveLength(6);
+    expect(getSessionStore(runner).getContextReset(agentId, sessionId)).toMatchObject({historyLimit:50});
+    expect(result.historyUnchanged).toBe(true);
+    expect(clearChat).not.toHaveBeenCalled();
+    expect(clearSession).not.toHaveBeenCalled();
+  });
+  it('/clear rejects an active managed response without changing history or the next bootstrap', async () => {
+    await seedFlatStore(sessionId, 6);
+    const reset = jest.fn();
+    (runner as any).orchestration = {isBusy:()=>true,ownsSession:()=>true,resetSessionContext:reset};
+    try {
+      await expect((runner as any).clearContext(sessionId)).rejects.toThrow('responding');
+      expect(reset).not.toHaveBeenCalled();
+      expect(getSessionStore(runner).getContextReset(agentId,sessionId)).toBeUndefined();
+      expect(await getSessionStore(runner).loadSession(agentId,sessionId)).toHaveLength(6);
+    } finally {(runner as any).orchestration=undefined;}
   });
   test('managed /stop persists the numbered prompt and numeric replies cancel only the selected task',async()=>{
     const store=new OrchestrationStore(':memory:',agentId),tasks=new TaskService(store),decisions=new DecisionService(store);
