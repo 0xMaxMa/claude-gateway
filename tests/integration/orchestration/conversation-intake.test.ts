@@ -181,7 +181,9 @@ test('new input arriving while reading defers stale execution and preserves the 
     }else{
       expect(text).toContain('Review the report');expect(text).toContain('Include appendix');
       expect((await call('conversation_intake',{mode:'ready',acknowledgement:'I am reviewing the report and appendix.'})).acknowledged).toBe(true);
-      expect((await call('task_spawn',spawnArgs)).taskId).toBeTruthy();
+      const task=await call('task_spawn',spawnArgs);
+      expect(task.taskId).toBeTruthy();
+      expect(await call('conversation_intake',{mode:'resolve',task_id:task.taskId,resolution:'The pending review and appendix are queued.'})).toEqual({resolved:true});
     }
   });
   try{
@@ -366,7 +368,9 @@ test.each([false, true])('deferred dispatch survives a casual reply or is explic
    expect(text).toContain('"deferredDispatch":true');
    expect(text).toContain('Authorized report review is not queued yet');
    await call('conversation_intake',{mode:'ready',acknowledgement:'I am reviewing it now.'});
-   expect((await call('task_spawn',spawnArgs)).taskId).toBeTruthy();
+   const task=await call('task_spawn',spawnArgs);
+   expect(task.taskId).toBeTruthy();
+   expect(await call('conversation_intake',{mode:'resolve',task_id:task.taskId,resolution:'The original review is now queued.'})).toEqual({resolved:true});
    recovered();
   }
  });
@@ -377,6 +381,7 @@ test.each([false, true])('deferred dispatch survives a casual reply or is explic
   release(); await first.response; await second.response;
   if (!cancel) await Promise.race([recovery,new Promise((_,reject)=>{setTimeout(()=>reject(new Error('No reconciliation turn')),2000).unref();})]);
   for(let i=0;i<100 && f.runtime.store.get('SELECT count(*) n FROM conversation_intake')!.n;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  await settleAgent(f.runtime);
   expect(f.failures).toEqual([]);
   expect(f.runtime.store.get('SELECT count(*) n FROM conversation_intake')!.n).toBe(0);
   expect(f.runtime.store.get('SELECT count(*) n FROM tasks')!.n).toBe(cancel?0:1);
@@ -429,4 +434,68 @@ test('reconciliation is bounded if the model only replies again',async()=>{
   expect(f.runtime.store.get('SELECT count(*) n FROM tasks')!.n).toBe(0);
   expect(JSON.parse(String(f.runtime.store.get('SELECT data_json FROM conversation_intake')!.data_json)).deferredDispatch).toBe(true);
  }finally{release();await f.close();}
+});
+
+test.each([false,true])('unrelated task success preserves deferred work; long input recovery uses a reference: %s',async longInput=>{
+ let ready!:()=>void,release!:()=>void,finished!:()=>void;
+ const reading=new Promise<void>(r=>{ready=r;}),resume=new Promise<void>(r=>{release=r;}),done=new Promise<void>(r=>{finished=r;});
+ const latest=longInput?'x'.repeat(65500):'Also review report B';
+ const f=await fixture(async(call,text,turn)=>{
+  if(turn===1){
+   ready();await resume;
+   expect((await call('conversation_intake',{mode:'ready',acknowledgement:'Reviewing A.',preparation:'Original report A'})).deferred).toBe(true);
+  }else if(turn===2){
+   if(!longInput){
+    await call('conversation_intake',{mode:'ready',acknowledgement:'Reviewing B.'});
+    expect((await call('task_spawn',{...spawnArgs,title:'Report B',instructions:'Only review B'})).taskId).toBeTruthy();
+   }
+   return 'Understood.';
+  }else{
+   expect(turn).toBe(3);
+   expect(text).toContain('"deferredDispatch":true');
+   expect(text).toContain('Review report A');
+   expect(text).toContain(latest);
+   expect(await call('conversation_intake',{mode:'resolve',task_id:'uncommitted-task',resolution:'Already queued'})).toEqual({error:'INTAKE_RESOLUTION_UNCOMMITTED'});
+   await call('conversation_intake',{mode:'ready',acknowledgement:'Reviewing A now.'});
+   const task=await call('task_spawn',{...spawnArgs,title:'Report A',instructions:'Review A'});
+   expect(task.taskId).toBeTruthy();
+   expect(await call('conversation_intake',{mode:'resolve',task_id:task.taskId,resolution:'Report A is now queued.'})).toEqual({resolved:true});
+   finished();
+  }
+ });
+ try{
+  const first=f.runtime.submitInput({scope:f.scope,text:'Review report A'},{execute:true,writeMemory:false});await reading;
+  const second=f.runtime.submitInput({scope:f.scope,text:latest},{execute:true,writeMemory:false});
+  release();await first.response;await second.response;
+  await Promise.race([done,new Promise((_,reject)=>{setTimeout(()=>reject(new Error('Recovery missing')),2500).unref();})]);
+  await settleAgent(f.runtime);
+  expect(f.failures).toEqual([]);
+  const rows=f.runtime.store.all("SELECT text FROM conversation_inputs WHERE store_user_message=0 AND ingress_json LIKE '%intake-recovery:%'");
+  expect(rows).toHaveLength(1);expect(String(rows[0].text).length).toBeLessThan(1000);
+  expect(f.runtime.store.get('SELECT count(*) n FROM conversation_intake')!.n).toBe(0);
+  expect(f.runtime.store.get('SELECT count(*) n FROM tasks')!.n).toBe(longInput?1:2);
+ }finally{release();await f.close();}
+});
+
+async function settleAgent(runtime: AgentOrchestrationRuntime) {
+ for(let i=0;i<200;i++) {
+  if(!runtime.store.get("SELECT id FROM conversation_decisions WHERE state IN ('running','interrupting') LIMIT 1")) {
+   await new Promise(resolve=>setTimeout(resolve,10));
+   return;
+  }
+  await new Promise(resolve=>setTimeout(resolve,10));
+ }
+ throw new Error('Agent decision did not settle');
+}
+
+test('recovery references cannot read inputs from another conversation',async()=>{
+ const f=await fixture(async(_call,text)=>{
+  expect(text).not.toContain('PRIVATE_OTHER_CONVERSATION');
+  return 'No pending work.';
+ });
+ try{
+  const other=f.runtime.store.acceptInput({scope:{...f.scope,agentSessionId:'other-session',chatId:'other-chat'},text:'PRIVATE_OTHER_CONVERSATION'});
+  await f.runtime.send({scope:f.scope,text:'Reconcile pending work',ingressKey:`intake-recovery:${other.inputId}`,storeUserMessage:false},{execute:false,writeMemory:false},{timeoutMs:3000});
+  expect(f.failures).toEqual([]);
+ }finally{await f.close();}
 });

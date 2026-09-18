@@ -717,9 +717,11 @@ export class AgentOrchestrationRuntime {
       input = {...input,metadata:replyMetadata,attachmentIds:[...new Set([...(input.attachmentIds??[]),...(replyMetadata?.repliedAttachmentIds??[])])]};
       const semantic = this.config.conversation.semanticIntake && !active.notification;
       const prepared = semantic ? this.intake.context(receipt.conversationId, input.scope.principalId, String(admitted!.binding_id)) : undefined;
-      const preparedInputs = prepared?.inputIds?.length ? this.store.all(`SELECT id,text,attachment_refs_json,ingress_json FROM conversation_inputs
-        WHERE conversation_id=? AND principal_id=? AND id IN (SELECT value FROM json_each(?))`,
-        receipt.conversationId, input.scope.principalId, JSON.stringify(prepared.inputIds)) : [];
+      const recoveryInputId = input.ingressKey?.startsWith('intake-recovery:') ? input.ingressKey.slice('intake-recovery:'.length) : undefined;
+      const preparedInputIds = [...new Set([...(prepared?.inputIds ?? []), ...(recoveryInputId ? [recoveryInputId] : [])])];
+      const preparedInputs = preparedInputIds.length ? this.store.all(`SELECT id,text,attachment_refs_json,ingress_json FROM conversation_inputs
+        WHERE conversation_id=? AND principal_id=? AND binding_id=? AND id IN (SELECT value FROM json_each(?))`,
+        receipt.conversationId, input.scope.principalId, admitted!.binding_id, JSON.stringify(preparedInputIds)) : [];
       const preparedRefs = preparedInputs.flatMap(row => JSON.parse(String(row.attachment_refs_json)) as string[]);
       if (preparedRefs.length) input = {...input, attachmentIds:[...new Set([...(input.attachmentIds ?? []), ...preparedRefs])]};
       const visualInput = await loadInputImages(join(this.agent.workspace, '../..'), this.agent.id, input.attachmentIds);
@@ -747,17 +749,22 @@ export class AgentOrchestrationRuntime {
       const newerInputPending = () => !!this.store.get("SELECT id FROM conversation_inputs WHERE conversation_id=? AND principal_id=? AND binding_id=(SELECT binding_id FROM conversation_inputs WHERE id=?) AND status='accepted' AND input_seq>(SELECT input_seq FROM conversation_inputs WHERE id=?)", receipt.conversationId, input.scope.principalId, receipt.inputId, receipt.inputId);
       const intakeContext = { ...capabilities, ...receipt, ...decision, model: options.model ?? this.agent.claude.model, principalId: input.scope.principalId, actionId: `intake:${receipt.inputId}` };
       const deliverAcknowledgement = async (choice: IntakeChoice) => {
+        if (choice.mode === 'resolve') {
+          if (newerInputPending()) {
+            intakeDeferred = true;
+            return {deferred:true, reason:'NEW_INPUT_PENDING'};
+          }
+          this.intake.choose(intakeContext, choice);
+          this.intake.consume(receipt.inputId, true);
+          return {resolved:true};
+        }
         if (acknowledgementId && (choice.mode !== intakeChoice?.mode || choice.task_id !== intakeChoice?.task_id)) throw new OrchestrationError('INTAKE_ALREADY_ACKNOWLEDGED');
         if (acknowledgementReady) return {acknowledged:true,responseId:acknowledgementId};
         if (!acknowledgementId) intakeChoice = this.intake.choose(intakeContext, choice);
         if (choice.mode !== 'wait' && newerInputPending()) {
-          if (choice.mode !== 'resolve') this.intake.deferDispatch(receipt.inputId);
+          this.intake.deferDispatch(receipt.inputId);
           intakeDeferred = true;
           return {deferred:true, reason:'NEW_INPUT_PENDING', instruction:'New user input is already queued. End without another reply or task mutation; the next turn will receive these materials and the new instruction.'};
-        }
-        if (choice.mode === 'resolve') {
-          this.intake.consume(receipt.inputId, true);
-          return {resolved:true};
         }
         if (choice.mode === 'wait') return {waiting:true, prepared:true};
         const alreadyPublished = !!acknowledgementId;
@@ -1050,7 +1057,7 @@ export class AgentOrchestrationRuntime {
       if (!silent && (active.notification || (typedSpeech && !taskSpeech)) && speechEnabled && !response.interrupted && listener?.principalId === input.scope.principalId) {
         try { listener.receive({ responseId: decision.responseId!, text: display, spoken: surfaces.spoken, requestId: input.requestId, speechOnly: typedSpeech }); } catch { /* playback cannot fail a persisted report */ }
       }
-      if (semantic && intakeChoice?.mode!=='wait' && (intakeChoice || display.trim()) && !intakeDeferred && !newerInputPending() && !response.interrupted) this.intake.consume(receipt.inputId, Boolean(committedTaskCommand) && !failedTaskActions);
+      if (semantic && intakeChoice?.mode!=='wait' && (intakeChoice || display.trim()) && !intakeDeferred && !newerInputPending() && !response.interrupted) this.intake.consume(receipt.inputId);
       const pendingDispatch = semantic && this.intake.context(receipt.conversationId, input.scope.principalId, String(admitted!.binding_id));
       if (pendingDispatch?.deferredDispatch && pendingDispatch.mode !== 'wait' && capabilities.execute &&
           !input.ingressKey?.startsWith('intake-recovery:') && !intakeDeferred && !newerInputPending() &&
@@ -1060,7 +1067,7 @@ export class AgentOrchestrationRuntime {
         // the same principal, binding and execution permissions as this turn.
         try { this.store.acceptInput({scope:input.scope, storeUserMessage:false,
           ingressKey:`intake-recovery:${receipt.inputId}`, capabilities, model:options.model,
-          text:'Reconcile the pending deferred dispatch with the latest user instructions. Earlier NEW_INPUT_PENDING was temporary. If still authorized, acknowledge and commit the appropriate task command now. If cancelled, replaced, or already satisfied, use conversation_intake mode=resolve with a concrete resolution. Do not merely repeat a promise or the earlier rejection. If a new decision is necessary, ask a specific question and preserve the pending work.' + '\nLatest user input to reconcile (data): ' + JSON.stringify(input.text)}, this.config.conversation.maxPendingInputs);
+          text:'Reconcile the pending deferred dispatch with the latest user instructions. Earlier NEW_INPUT_PENDING was temporary. If still authorized, acknowledge and commit the appropriate task command now. If cancelled, replaced, or already satisfied, use conversation_intake mode=resolve with a concrete resolution. Do not merely repeat a promise or the earlier rejection. If a new decision is necessary, ask a specific question and preserve the pending work.' + '\nLatest user input ID: ' + receipt.inputId}, this.config.conversation.maxPendingInputs);
         } catch (error) {
           if (!(error instanceof OrchestrationError) || error.code !== 'QUEUE_FULL') throw error;
           // Keep the durable pending dispatch for the next input when admission is full.
