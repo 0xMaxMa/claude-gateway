@@ -1422,7 +1422,7 @@ export class AgentRunner extends EventEmitter {
           `<code>${meta.id}</code>`,
           '',
           `👉 Context: ${context.text}`,
-          `🤖 Model: ${String(meta.model ?? this.agentConfig.claude.model).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}`,
+          `🤖 Model: ${String(this.agentConfig.claude.model).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}`,
         ];
         if (context.contextUsedPct != null && context.contextUsedPct >= 80) {
           lines.push('', '💡 Near limit — consider /compact');
@@ -3022,7 +3022,7 @@ export class AgentRunner extends EventEmitter {
       `<code>${index.activeSessionId}</code>`,
       '',
       `👉 Context: ${context.text}`,
-      `🤖 Model: ${String(meta.model ?? this.agentConfig.claude.model).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}`,
+      `🤖 Model: ${String(this.agentConfig.claude.model).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}`,
     ];
 
     if (context.contextUsedPct != null && context.contextUsedPct >= 80) {
@@ -5342,8 +5342,8 @@ export class AgentRunner extends EventEmitter {
         const context = await this.sessionContextInfo(sessionId, meta);
         const {text:contextText,...contextFields} = context;
         result = {sessionId,sessionName:meta?.name ?? null,messageCount,archivedCount:meta?.archivedCount ?? 0,
-          ...contextFields,model:meta?.model ?? effectiveModel};
-        responseText = [`📌 Current Session: ${meta?.name ?? '(unnamed)'}`,sessionId,'',`👉 Context: ${contextText}`,`🤖 Model: ${meta?.model ?? effectiveModel}`,
+          ...contextFields,model:effectiveModel};
+        responseText = [`📌 Current Session: ${meta?.name ?? '(unnamed)'}`,sessionId,'',`👉 Context: ${contextText}`,`🤖 Model: ${effectiveModel}`,
           ...(context.contextUsedPct != null && context.contextUsedPct >= 80 ? ['', '💡 Near limit — consider /compact'] : []),
           '', 'Commands: /sessions /new /rename /clear /compact'].join('\n');
       } else if (cmd === '/sessions') {
@@ -5562,7 +5562,7 @@ export class AgentRunner extends EventEmitter {
       messageCount: meta.messageCount,
       archivedCount: meta.archivedCount ?? 0,
       ...context,
-      model: meta.model ?? this.agentConfig.claude.model,
+      model: this.agentConfig.claude.model,
     };
   }
 

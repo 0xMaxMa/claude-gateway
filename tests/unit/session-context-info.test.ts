@@ -67,3 +67,19 @@ test('legacy session status retains measured usage while absent and stale values
  runner.orchestration.ownsSession=()=>false;
  expect((await runner.sessionContextInfo('legacy',meta)).contextTokens).toBe(180000);
 });
+
+
+test('session displays the selected next-turn model without replacing the observed context model', async () => {
+ const send = jest.fn();
+ const runner = Object.assign(Object.create(AgentRunner.prototype), {
+  agentConfig:{id:'a',claude:{model:'old-selected-model'}},persistModelToConfig:jest.fn(async()=>{}),
+  sessionStore:{listSessions:async()=>({activeSessionId:'s',sessions:[{id:'s',name:'Session',model:'old-observed-model'}]})},
+  channelFor:()=> 'telegram',writeAutoForward:send,
+  sessionContextInfo:async()=>({text:'180K / 200K · 90%',contextModel:'old-observed-model',contextTokens:180000,contextWindow:200000,contextUsedPct:90}),
+ });
+ await runner.setModel('claude-sonnet-5[1m]');
+ await runner.handleCommandSessionInfo('a','c');
+ expect(send.mock.calls[0][1]).toContain('Model: claude-sonnet-5[1m]');
+ expect(send.mock.calls[0][1]).toContain('180K / 200K · 90%');
+ expect(await runner.getApiSessionInfo('c','s')).toMatchObject({model:'claude-sonnet-5[1m]',contextModel:'old-observed-model'});
+});
