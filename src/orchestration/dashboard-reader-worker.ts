@@ -2,7 +2,7 @@ import { contextFootprint } from './context-footprint';
 import { parentPort } from 'worker_threads';
 import { DatabaseSync } from 'node:sqlite';
 import { existsSync } from 'fs';
-import { readTokenReport, summarizeTokenTurns, TokenTurn } from './token-ledger';
+import { readTokenReport, summarizeTokenTurns, pendingInputTurns, TokenTurn } from './token-ledger';
 import { normalizeTaskRevisions } from './tasks/task-directive';
 import type { TaskAttempt, TaskRevision } from './types';
 
@@ -51,7 +51,10 @@ function read(filename: string, operation: string, options: Record<string, any>)
     const adapter = { all, get, attempt: (id: string) => { const row = get('SELECT payload_json FROM task_attempts WHERE id=?', id); return row ? JSON.parse(row.payload_json) as TaskAttempt : undefined; } };
     if (operation === 'report' || operation === 'session') {
       if (!get('SELECT id FROM conversations WHERE agent_session_id=?', options.sessionId)) return undefined;
-      const report = exists('token_turns') ? readTokenReport(adapter, options.sessionId, true, {offset:Math.max(0,Number(options.offset)||0),limit:operation==='report'?25:50,since,newestFirst:true}) : { sessionId: options.sessionId, turns: [], totals: {agentTokens:null, workerTokens:null, totalTokens:null}, coverage:'recorded-turns-only' };
+      // Before the ledger table exists (an agent whose very first turn has not recorded
+      // usage yet) a queued input still has to be visible, so derive the pending rows
+      // without the token_turns lookup instead of returning an empty list.
+      const report = exists('token_turns') ? readTokenReport(adapter, options.sessionId, true, {offset:Math.max(0,Number(options.offset)||0),limit:operation==='report'?25:50,since,newestFirst:true}) : { sessionId: options.sessionId, turns: pendingInputTurns(adapter, options.sessionId, since, false), totals: {agentTokens:null, workerTokens:null, totalTokens:null}, coverage:'recorded-turns-only' };
       if(operation==='session') {
         const session = get('SELECT * FROM conversations WHERE agent_session_id=?',options.sessionId)!;
         const offset=Math.max(0,Number(options.offset)||0);

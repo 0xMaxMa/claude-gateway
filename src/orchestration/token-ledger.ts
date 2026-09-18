@@ -16,6 +16,15 @@ export interface TokenTurn extends ManagedTurnMetrics {
   taskTitle?: string;
   state?: string;
   failureCode?: string;
+  /** Stored attempt number for a worker turn; the stable label for a row that has
+   *  no input_seq of its own. */
+  attemptGeneration?: number;
+  /** This row is an accepted input that has no measured turn yet. Never real usage:
+   *  it is derived on read and is absent from token_turns, so no aggregate sees it. */
+  pending?: true;
+  /** How long the input waited between acceptance and its turn starting — or, on a
+   *  pending row, how long it has been waiting so far. */
+  queuedMs?: number;
 }
 const initialized = new WeakSet<OrchestrationStore>();
 /** Context-window size for a model id. The `[1m]` variant buys the 1M window
@@ -100,6 +109,45 @@ export function tokenReport(store: OrchestrationStore, sessionId: string, includ
   ensure(store);
   return readTokenReport(store, sessionId, includeDetails);
 }
+/** Accepted inputs that have no measured ledger turn yet.
+ *
+ * Turns are serialised per session on purpose (runtime.ts skips a session that already
+ * has a decision in flight), so a message sent while the previous turn is still running
+ * waits — occasionally minutes — before its own decision starts, and the token_turns row
+ * only appears with that turn's first usage event. Until then the report had no row for
+ * the message at all, which is why a queued message looked lost.
+ *
+ * These rows are DERIVED ON EVERY READ from conversation_inputs rather than written into
+ * token_turns, which is what the rest of this read path already does for decisions,
+ * responses, tasks and attempts. Two properties fall out of that choice for free:
+ *  - the ledger stays purely measured usage, so no total, average, distribution or
+ *    %cached query can ever see a pending row (they all sum token_turns);
+ *  - a pending row cannot get stuck. It exists only while the input is genuinely still
+ *    'accepted'/'assigned' with no measured turn, so a handled, interrupted or replaced
+ *    input drops out immediately, and a gateway restart (recovery.ts resets 'assigned'
+ *    back to 'accepted') leaves it truthfully queued rather than permanently "running".
+ */
+export function pendingInputTurns(store: Pick<OrchestrationStore, 'all'>, sessionId: string,
+  since = 0, hasLedger = true, now = Date.now()): TokenTurn[] {
+  // An input whose decision already recorded usage is represented by that real turn.
+  const measured = hasLedger ? `AND NOT EXISTS (SELECT 1 FROM conversation_decisions d JOIN token_turns t ON t.id=d.id
+      WHERE d.conversation_id=i.conversation_id
+      AND EXISTS (SELECT 1 FROM json_each(d.input_ids_json) j WHERE j.value=i.id))` : '';
+  return store.all(`SELECT i.id,i.input_seq,i.text,i.modality,i.created_at,i.status,i.store_user_message
+    FROM conversation_inputs i JOIN conversations c ON c.id=i.conversation_id
+    WHERE c.agent_session_id=? AND i.status IN ('accepted','assigned') AND i.created_at>=? ${measured}
+    ORDER BY i.created_at DESC,i.input_seq DESC LIMIT 50`, sessionId, since).map(row => ({
+      id: String(row.id), sessionId, role: 'agent' as const,
+      // store_user_message=0 is an orchestration report request, not a user message.
+      category: row.store_user_message ? 'input' as const : 'report' as const,
+      pending: true as const, startedAt: Number(row.created_at),
+      queuedMs: Math.max(0, now - Number(row.created_at)),
+      toolIds: [], inputTokens: 0, totalTokens: 0, usage: null,
+      inputTexts: [String(row.text)], inputModalities: [String(row.modality)], inputSequences: [Number(row.input_seq)],
+      // 'assigned' means its decision has begun but no usage has been reported yet.
+      state: String(row.status) === 'assigned' ? 'starting' : 'queued',
+    }));
+}
 export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 'attempt'>, sessionId: string, includeDetails = true, page?: {offset: number; limit: number; since?: number; newestFirst?: boolean}) {
   const since = page?.since ?? 0;
   const order = page?.newestFirst ? 'DESC' : 'ASC';
@@ -110,10 +158,15 @@ export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 
       if (turn.role === 'agent') {
         const decision = store.get('SELECT d.* FROM conversation_decisions d JOIN conversations c ON c.id=d.conversation_id WHERE d.id=? AND c.agent_session_id=?', turn.id, sessionId);
         if (decision) {
-          const inputs = store.all('SELECT text,modality,input_seq FROM conversation_inputs WHERE conversation_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY input_seq', decision.conversation_id, decision.input_ids_json);
+          const inputs = store.all('SELECT text,modality,input_seq,created_at FROM conversation_inputs WHERE conversation_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY input_seq', decision.conversation_id, decision.input_ids_json);
           turn.inputTexts = inputs.map(input => String(input.text));
           turn.inputModalities = inputs.map(input => String(input.modality));
           turn.inputSequences = inputs.map(input => Number(input.input_seq));
+          // How long the earliest input waited for this turn to start. Serialised turns
+          // mean a short message can sit queued for minutes; without this the turn just
+          // looks slow instead of "queued behind the previous turn".
+          const accepted = inputs.map(input => Number(input.created_at)).filter(value => Number.isFinite(value) && value > 0);
+          if (accepted.length && Number.isFinite(Number(decision.started_at))) turn.queuedMs = Math.max(0, Number(decision.started_at) - Math.min(...accepted));
           turn.responseText = store.all('SELECT generated_text FROM assistant_responses WHERE decision_id=? ORDER BY created_at,id', turn.id).map(response => String(response.generated_text)).join('\n\n');
           turn.state = String(decision.state);
           if (turn.state === 'failed') {
@@ -140,12 +193,18 @@ export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 
             }
           }
           turn.state = attempt.state;
+          // Stored, stable label for a worker row: it has no input_seq of its own.
+          turn.attemptGeneration = Number(attempt.generation);
           // A task's newest result must not be attributed to an older retry.
           if (snapshot.activeAttemptId === turn.id || store.get('SELECT id FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', turn.taskId)?.id === turn.id) turn.responseText = snapshot.result?.summary;
         }
       }
       return turn;
     });
+  // Newest page only: a queued input is by definition newer than every recorded turn, so
+  // repeating it while paging back through history would be noise. Pending rows are
+  // appended to the view, never to token_turns, so every aggregate below ignores them.
+  if (includeDetails && !(page?.offset ?? 0)) turns.push(...pendingInputTurns(store, sessionId, since));
   const totalsByRole = store.all(`SELECT role, SUM(json_extract(payload_json,'$.usage.totalTokens')) total FROM token_turns WHERE session_id=? AND started_at>=? GROUP BY role`,sessionId,since);
   const agentTokens = totalsByRole.find(row=>row.role==='agent')?.total ?? null;
   const workerTokens = totalsByRole.find(row=>row.role==='worker')?.total ?? null;
@@ -161,8 +220,7 @@ export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 
   return { sessionId, turns, usageByRole, contextWindow: latestAgentContextWindow(store, sessionId), totals: {agentTokens:agentTokens===null?null:Number(agentTokens),workerTokens:workerTokens===null?null:Number(workerTokens),totalTokens}, distribution,
     pagination: page ? {...page,total:Number(store.get('SELECT COUNT(*) n FROM token_turns WHERE session_id=? AND started_at>=?',sessionId,since)!.n)} : undefined,
     coverage: 'recorded-turns-only' as const };
-}
-export function summarizeTokenTurns(turns: TokenTurn[]) {
+}export function summarizeTokenTurns(turns: TokenTurn[]) {
   const measured = turns.filter(turn => turn.usage);
   const usage = measured.length ? sumUsage(measured.map(turn => turn.usage!)) : null;
   return {totalTokens: usage?.totalTokens ?? null,
