@@ -50,6 +50,8 @@ These commands and the [task answer API](../api/tasks.md#answer-a-task-question)
 
 If an automatic task report fails, its result stays pending for a later reporting attempt. Retry delays increase exponentially from five seconds to at most one hour and survive gateway restarts. These background failures remain in diagnostics rather than generating repeated chat or voice error messages. A new user message can trigger a turn immediately and still receives provider error details if that turn fails; it does not have to wait for the background retry delay. The retry delay is a fallback policy, not a prediction of the provider's quota reset time.
 
+A corrected task-spawn validation error does not produce a partial-failure notice when a later command in the same turn successfully queues the same work. Matching uses the title and predecessor for a continuation, or the title and exact brief for a new task, with the same context references and continuation policy. Unrelated failures, conflicting replays, permission errors and uncertain outcomes still produce a warning. Original tool errors remain in the transcript; this changes reporting, not authorization or execution.
+
 A finished investigation and a proposed implementation are different stages. Completion reports should identify what finished and whether a follow-up task is actually queued/running. A suggested next step is not a promise that execution has started, and read-only investigation does not authorize deployment.
 
 ## Cancel and reconcile

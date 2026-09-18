@@ -16,7 +16,7 @@ import type { IntakeChoice } from './conversation-intake';
 import { resolveNamedSkill } from './skills';
 import type { SkillRegistry } from '../skills';
 
-type Scope = { role: 'agent'; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; onMutationResult?: (actionId: string, committed: boolean) => void; beforeMutation?: (tool: string, args: Record<string, unknown>, actionId: string) => Promise<void> } |
+type Scope = { role: 'agent'; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; onMutationResult?: (actionId: string, committed: boolean, errorCode?: string) => void; beforeMutation?: (tool: string, args: Record<string, unknown>, actionId: string) => Promise<void> } |
   { role: 'worker'; attemptId: string; generation: number };
 
 /** Private MCP bridge: host loopback or an app-local Unix socket. No public task API. */
@@ -106,7 +106,7 @@ export class TaskBridge {
             }
             if (mutation) scope.onMutationResult?.(context.actionId, true);
           } catch (error) {
-            if (mutation) scope.onMutationResult?.(context.actionId, false);
+            if (mutation) scope.onMutationResult?.(context.actionId, false, error instanceof OrchestrationError ? error.code : undefined);
             throw error;
           }
         } else {

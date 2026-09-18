@@ -63,12 +63,12 @@ test('materials survive a silent turn; complete instruction acknowledges before 
     const started = Date.now();
     const result = await runtime.send({scope,text:'Please review it.'},{execute:true,writeMemory:false},{timeoutMs:2000,onText:text=>{if(text.includes('reviewing'))order.push('ack');}});
     expect(failures).toEqual([]);
-    expect(result).toBe('Some task commands were rejected. Other commands succeeded; please check /tasks for the current task status.');
+    expect(result).toBe('I am reviewing the report now.');
     expect(Date.now()-started).toBeLessThan(2000);
     expect(order).toEqual(['ack','task']);
     const messages=await sessions.loadSession('a','s');
-    expect(messages.map(message=>message.role)).toEqual(['user','user','assistant','assistant']);
-    expect(messages.slice(-2).map(message=>message.content)).toEqual(['I am reviewing the report now.',result]);
+    expect(messages.map(message=>message.role)).toEqual(['user','user','assistant']);
+    expect(messages.slice(-1).map(message=>message.content)).toEqual(['I am reviewing the report now.']);
   } finally { await runtime.close(); (history as any).db.close(); HistoryDB.evict(root,'a'); rmSync(root,{recursive:true,force:true}); }
 });
 
@@ -314,4 +314,21 @@ test('activity orders a completed answer after its earlier acknowledgement', asy
   expect(rows.map(r=>r.text)).toEqual(['I am checking the supplied material.','The supplied material has two sections.']);
   expect(Number(rows[1].createdAt)).toBeGreaterThanOrEqual(Number(rows[0].createdAt));
  }finally{await f.close();}
+});
+
+test.each([false,true])('corrected skill/profile dispatch preserves unrelated failures: %s', async extraFailure => {
+ const f=await fixture(async call=>{
+  await call('conversation_intake',{mode:'ready',acknowledgement:'I am reviewing the material.'});
+  expect(await call('task_spawn',{...spawnArgs,skill_name:'fixture',skill_args:''})).toEqual({error:'INVALID_INPUT'});
+  expect((await call('task_spawn',spawnArgs)).taskId).toBeTruthy();
+  if(extraFailure)expect(await call('task_spawn',{...spawnArgs,title:'A different assignment',skill_name:'fixture'})).toEqual({error:'INVALID_INPUT'});
+  return 'Work started.';
+ });
+ try {
+  const result=await f.send('Review the material');
+  expect(f.failures).toEqual([]);
+  expect(f.runtime.store.get('SELECT count(*) n FROM tasks')!.n).toBe(1);
+  if(extraFailure)expect(result).toContain('Some task commands were rejected');
+  else expect(result).toBe('I am reviewing the material.'); // Return the delivered acknowledgement, not a second warning.
+ } finally {await f.close();}
 });

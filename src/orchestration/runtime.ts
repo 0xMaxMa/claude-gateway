@@ -1,4 +1,5 @@
 import { BrowserVoice } from './browser-voice';
+import { MutationAttempt, unresolvedMutations } from './mutation-recovery';
 import { committedCommandContext, communicatedProgressContext } from './decision-context';
 import { recordTokenTurn, tokenReport, summarizeTokenTurns, measuredTurns } from './token-ledger';
 import { TaskQuestions } from './task-questions';
@@ -679,7 +680,7 @@ export class AgentOrchestrationRuntime {
       }
       let intakeChoice: IntakeChoice | undefined, acknowledgement = '', acknowledgementId = '', acknowledgementReady = false;
       let intakeDeferred = false, taskMutationAttempted = false;
-      const attemptedTaskActions = new Set<string>();
+      const attemptedTaskActions = new Map<string, MutationAttempt>();
       const taskActionResults = new Map<string, boolean>();
       let acknowledgementInFlight: Promise<unknown> | undefined;
       let acknowledgementTextIds: string[] = [];
@@ -752,9 +753,9 @@ export class AgentOrchestrationRuntime {
         return readCapabilityPage(await this.capabilityCatalog.snapshot(), this.host.skills?.(), args);
       },
         onIntake: semantic ? acknowledge : undefined,
-        onMutationResult: semantic ? (actionId, committed) => { taskActionResults.set(actionId, committed); } : undefined,
+        onMutationResult: semantic ? (actionId, committed, errorCode) => { taskActionResults.set(actionId, committed); const attempt = attemptedTaskActions.get(actionId); if (attempt) Object.assign(attempt, {committed, errorCode}); } : undefined,
         beforeMutation: semantic ? async (tool, args, actionId) => {
-          if (actionId) attemptedTaskActions.add(actionId);
+          if (actionId && !attemptedTaskActions.has(actionId)) attemptedTaskActions.set(actionId, {actionId, tool, args: JSON.parse(JSON.stringify(args))});
           if (tool === 'task_spawn' || tool === 'task_update') taskMutationAttempted = true;
           // Resolving a pending question is not admission of a new task. A slow or failed
           // acknowledgement must not block saving it; authorization stays in TaskService.
@@ -931,11 +932,10 @@ export class AgentOrchestrationRuntime {
       const committedTaskCommand = semantic && taskMutationAttempted && this.store.get(`SELECT tc.action_id FROM task_commands tc JOIN conversation_decisions d ON d.id=tc.decision_id
         WHERE tc.conversation_id=? AND tc.command_type IN ('spawn','update','answer')
         AND EXISTS(SELECT 1 FROM json_each(d.input_ids_json) WHERE value=?) LIMIT 1`,receipt.conversationId,receipt.inputId);
-      const failedTaskActions = [...attemptedTaskActions].some(actionId => {
-        const result = taskActionResults.get(actionId);
-        if (result !== undefined) return !result;
-        return !this.store.get('SELECT action_id FROM task_commands WHERE conversation_id=? AND action_id=?', receipt.conversationId, actionId);
-      });
+      const failedTaskActions = unresolvedMutations([...attemptedTaskActions.values()].map(attempt => ({
+        ...attempt, committed: taskActionResults.get(attempt.actionId) ?? Boolean(this.store.get(
+          'SELECT action_id FROM task_commands WHERE conversation_id=? AND action_id=?', receipt.conversationId, attempt.actionId)),
+      })));
       const uncommittedDispatch = semantic && taskMutationAttempted && (!committedTaskCommand || failedTaskActions) && !intakeDeferred && !newerInputPending() && !response.interrupted;
       if (uncommittedDispatch) {
         // Never turn a rejected tool call into a false promise of background work.
