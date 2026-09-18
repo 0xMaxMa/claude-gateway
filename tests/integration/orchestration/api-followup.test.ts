@@ -26,7 +26,7 @@ test.each([false, true])('API worker completion persists result, tools and optio
       process.start = async () => {}; process.stop = async () => {};
       process.sendMessage = prompt => {
         const d = runtime.store.get("SELECT * FROM conversation_decisions WHERE state='running'")!;
-        if (prompt.startsWith('Report the persisted')) {
+        if (prompt.includes('Report the persisted')) {
           followups++;
           expect(prompt).toContain(JSON.stringify(fullResult));
           // Cache-lineage: the tools/system prefix must stay byte-identical whether or not
@@ -83,7 +83,7 @@ test('a user message arriving during an automatic task report waits and runs onc
       process.start = async () => {}; process.stop = async () => {};
       process.sendMessage = prompt => {
         prompts.push(prompt);
-        if (prompt.startsWith('Report the persisted')) { report = process; return; }
+        if (prompt.includes('Report the persisted')) { report = process; return; }
         if (prompts.length === 1) {
           const d = runtime.store.get("SELECT * FROM conversation_decisions WHERE state='running'")!;
           runtime.tasks.spawn({ conversationId: String(d.conversation_id), principalId: 'p', inputId: JSON.parse(String(d.input_ids_json))[0], decisionId: String(d.id), epoch: Number(d.epoch), actionId: 'a', execute: true, writeMemory: false }, { title: 'Fixture', instructions: 'Do fixture', targetProfile: 'media-worker' });
@@ -100,7 +100,9 @@ test('a user message arriving during an automatic task report waits and runs onc
     expect(prompts).toHaveLength(2);
     report!.emit('output', JSON.stringify({ type: 'result', result: 'Task finished.' }));
     await expect(pending).resolves.toBe('Your follow-up was received.');
-    expect(prompts.filter(p => p.startsWith('Follow up during report'))).toHaveLength(1);
+    // The user's text is the last thing in the per-turn message, so a waiting follow-up is
+    // matched at the end of the prompt rather than at its start.
+    expect(prompts.filter(p => p.endsWith('\nFollow up during report'))).toHaveLength(1);
   } finally { await runtime.close(); (history as any).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -116,7 +118,7 @@ test('live task requires Agent contextual speech, flushes it before terminal res
       const process = new EventEmitter() as SessionProcess;
       process.start = async () => {}; process.stop = async () => {};
       process.sendMessage = prompt => {
-        if (prompt.startsWith('Report the persisted')) { process.emit('output', JSON.stringify({ type: 'result', result: JSON.stringify({ display_text: 'Python returned 5050', spoken_text: 'The result is 5050.' }) })); return; }
+        if (prompt.includes('Report the persisted')) { process.emit('output', JSON.stringify({ type: 'result', result: JSON.stringify({ display_text: 'Python returned 5050', spoken_text: 'The result is 5050.' }) })); return; }
         void (async () => {
           const config = JSON.parse(readFileSync(profile.mcpConfigPath!, 'utf8'));
           const ticket = JSON.parse(readFileSync(config.mcpServers.gateway.env.GATEWAY_ORCHESTRATION_TICKET_FILE, 'utf8'));
@@ -164,7 +166,7 @@ test('a failed automatic report retries only the persisted result, without runni
    const process=new EventEmitter() as SessionProcess;
    process.start=async()=>{};process.stop=async()=>{};
    process.sendMessage=prompt=>{
-    if(prompt.startsWith('Report the persisted')){
+    if(prompt.includes('Report the persisted')){
      reports++;
      expect(prompt).toContain('Original complete result');
      expect(prompt).toContain('Execution eligible: false');
