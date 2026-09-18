@@ -188,3 +188,53 @@ describe('SkillLearningManager — review path', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe('review eligibility without another model call', () => {
+  const none = async () => ({ stdout: JSON.stringify({ result: '{"action":"none"}' }) });
+  function qualify(mgr: SkillLearningManager, correction = false) {
+    mgr.onTurnStart('chat', 'session', correction ? 'wrong result' : 'work');
+    mgr.onToolUse('chat', 'tool');
+    mgr.onTurnEnd('chat', 'session');
+  }
+  it('skips exact unchanged content, but keeps novel content, recovery and corrections eligible', async () => {
+    const spawn = jest.fn(none);
+    const { db, mgr, dir } = setup({ minToolCalls: 1 }, spawn);
+    try {
+      seedTranscript(db, 'session');
+      qualify(mgr); await mgr.runReviewNow('chat', 'session');
+      qualify(mgr); await mgr.runReviewNow('chat', 'session');
+      expect(spawn).toHaveBeenCalledTimes(1);
+      qualify(mgr, true); await mgr.runReviewNow('chat', 'session');
+      expect(spawn).toHaveBeenCalledTimes(2);
+      qualify(mgr); mgr.onRecoveryFired('chat'); await mgr.runReviewNow('chat', 'session');
+      expect(spawn).toHaveBeenCalledTimes(3);
+      db.insertMessage({ chatId: 'chat', sessionId: 'session', source: 'telegram', role: 'assistant', content: 'new reusable procedure', ts: NOW + 1 });
+      qualify(mgr); await mgr.runReviewNow('chat', 'session');
+      expect(spawn).toHaveBeenCalledTimes(4);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+  it('does not erase a new qualifying turn while the previous reviewer is running', async () => {
+    let finish!: (value: { stdout: string }) => void;
+    const spawn = jest.fn<ReturnType<ClaudeSpawnFn>, Parameters<ClaudeSpawnFn>>()
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+      .mockImplementation(none);
+    const { db, mgr, dir } = setup({ minToolCalls: 1 }, spawn);
+    try {
+      seedTranscript(db, 'session'); qualify(mgr);
+      const pending = mgr.runReviewNow('chat', 'session');
+      qualify(mgr, true);
+      finish(await none()); await pending;
+      await mgr.runReviewNow('chat', 'session');
+      expect(spawn).toHaveBeenCalledTimes(2);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+  it.each(['invalid', JSON.stringify({type:'result',result:JSON.stringify({action:'create'})})])('retries after invalid reviewer output %s rather than caching it as unchanged', async stdout => {
+    const spawn = jest.fn().mockResolvedValueOnce({ stdout }).mockImplementation(none);
+    const { db, mgr, dir } = setup({ minToolCalls: 1 }, spawn);
+    try {
+      seedTranscript(db, 'session'); qualify(mgr); await mgr.runReviewNow('chat', 'session');
+      qualify(mgr); await mgr.runReviewNow('chat', 'session');
+      expect(spawn).toHaveBeenCalledTimes(2);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+});

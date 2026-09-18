@@ -1,6 +1,7 @@
 import { presentedResponseError } from '../orchestration/response-errors';
 import { ChannelMediaError } from '../orchestration/channel-media-error';
 import { payloadHash, type AcceptInput } from '../orchestration/store';
+import { ORCHESTRATION_DEFAULTS } from '../orchestration/config';
 import { channelInputMedia } from '../orchestration/channel-input-media';
 import { chunkText } from '../telegram/chunks';
 import { resolveChannelFile } from '../orchestration/file-delivery';
@@ -25,7 +26,7 @@ import { withConfigWriteLock, writeConfigAtomicSync } from '../config/config-wri
 import { createLogger } from '../logger';
 import { SessionProcess, MAX_HISTORY_MESSAGES, resolveMaxHistoryMessages, INTERRUPTED_NO_REPLY_TEXT } from '../session/process';
 import { SessionStore, SessionNotInIndexError } from '../session/store';
-import { SessionCompactor } from '../session/compactor';
+import { startNativeCompact } from '../orchestration/native-compact';
 import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
 import { LineReplyManager } from './line-reply-manager';
@@ -906,6 +907,7 @@ export class AgentRunner extends EventEmitter {
               .then(() => this.writeTypingDone(chatId))
               .catch((err) => {
                 this.logger.error('Session command failed', { error: (err as Error).message });
+                this.writeAutoForward(chatId, 'Command failed: ' + (err as Error).message);
                 this.writeTypingDone(chatId);
               });
             return;
@@ -1368,7 +1370,7 @@ export class AgentRunner extends EventEmitter {
 
       const restarted = await this.restartChannelSessions();
 
-      respond({ success: true, model: newModel, restarted });
+      respond({ success: true, model: newModel, restarted, appliesNextTurn: !restarted });
       return;
     }
 
@@ -2257,6 +2259,7 @@ export class AgentRunner extends EventEmitter {
     // size when the cap has been lowered.
     const recoveryCount = this.tooLargeRecoveries.get(mapKey) ?? 0;
     proc.historyLimit = this.spawnHistoryLimit(configuredMax, recoveryCount);
+    proc.historyRecoveryActive = recoveryCount > 0;
     if (recoveryCount > 0) {
       this.logger.info('Spawning with reduced history after request_too_large', {
         mapKey, recoveryCount, historyLimit: proc.historyLimit,
@@ -2878,6 +2881,7 @@ export class AgentRunner extends EventEmitter {
       await this.handleCommandNew(agentId, chatId, name);
     } else if (content.startsWith('/clear')) {
       await this.handleCommandClear(agentId, chatId);
+      this.writeAutoForward(chatId, 'Claude Code context reset. Chat history is unchanged. The next message loads the latest 50 messages.');
     } else if (content.startsWith('/compact')) {
       await this.handleCommandCompact(agentId, chatId);
     } else if (content.startsWith('/rename')) {
@@ -2950,7 +2954,7 @@ export class AgentRunner extends EventEmitter {
       this.writeAutoForward(
         chatId,
         'Switching models is only available in a direct message with the bot — '
-        + 'it changes the model for every chat of this agent and restarts them. '
+        + 'it changes the model for every chat of this agent. '
         + 'Use /models here to see the list.',
       );
       return;
@@ -2967,12 +2971,12 @@ export class AgentRunner extends EventEmitter {
       return;
     }
     await this.setModel(match.id);
-    // Same restart the Telegram picker's set_model does — the running session
-    // was spawned with the old model and would otherwise keep using it.
+    // Legacy sessions need respawning; managed decisions pick up the new model
+    // on their next spawn without terminating the response in progress.
     const restarted = await this.restartChannelSessions();
     this.writeAutoForward(
       chatId,
-      `Model set to ${match.label} (${match.id}).${restarted ? ' Restarting the session…' : ''}`,
+      `Model set to ${match.label} (${match.id}).${restarted ? ' Restarting the session…' : ' Applies to the next response; current work continues.'}`,
     );
   }
 
@@ -3101,94 +3105,63 @@ export class AgentRunner extends EventEmitter {
     this.writeAutoForward(chatId, stopped ? 'Stopped.' : 'No turn in progress.');
   }
 
-  /**
-   * /clear — clear history of the current session and restart the process.
-   * Also clears the permanent history DB and media files for this chat.
-   */
-  private async handleCommandClear(agentId: string, chatId: string): Promise<void> {
-    const ch = this.channelFor(chatId);
-    const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId, ch);
-
-    // Clear messages and reset all metadata in-place (preserves session ID and name)
-    await this.sessionStore.clearTelegramSessionHistory(agentId, chatId, sessionId, ch);
-    await this.sessionStore.updateSessionMeta(agentId, chatId, sessionId, {
-      totalTokensUsed: 0,
-      lastInputTokens: 0,
-      archivedCount: 0,
-      loadedAtSpawn: undefined,
-      messageCountAtSpawn: undefined,
-    }, ch);
-
-    // Clear permanent history DB for this chat
-    const historyChatId = `${ch}-${chatId}`;
-    this.historyDb.clearChat(historyChatId);
-
-    // Delete persisted media files for this chat
-    MediaStore.clearChatMedia(this.agentsBaseDir, agentId, historyChatId);
-
-    // Reset any request_too_large escalation — the context is now empty, so the
-    // next spawn should start fresh at the top of the history ladder.
-    this.tooLargeRecoveries.delete(chatId);
-    this.tooLargeExhausted.delete(chatId);
-
-    // Kill old process so next message spawns fresh
-    this.restartProcess(chatId).catch(() => {});
+  /** /clear rotates model context while preserving history, media and tasks. */
+  private async clearContext(sessionId: string): Promise<void> {
+    if (this.compactingSessions.has(sessionId)) throw new Error('Context maintenance is already running for this session.');
+    this.compactingSessions.add(sessionId);
+    try {
+      const runtime = this.orchestration ?? (this.agentConfig.orchestration?.enabled ? await this.getOrchestration() : undefined);
+      if (runtime?.isBusy(sessionId)) throw new Error('The agent is responding. Try /clear after the current response finishes.');
+      const sessions = [...this.sessions.entries()].filter(([, process]) => process.sessionId === sessionId);
+      if (sessions.some(([, process]) => process.isProcessing)) throw new Error('The agent is responding. Try /clear after the current response finishes.');
+      for (const [key, process] of sessions) {
+        await process.stop();
+        if (this.sessions.get(key) === process) this.sessions.delete(key);
+      }
+      // No await between persisting the seed window and dropping the resume mapping.
+      // The marker survives gateway restarts until a successful turn consumes it.
+      if (runtime?.isBusy(sessionId)) throw new Error('The agent is responding. Try /clear after the current response finishes.');
+      this.sessionStore.requestContextReset(this.agentConfig.id, sessionId);
+      if (runtime?.ownsSession(sessionId)) runtime.resetSessionContext(sessionId);
+      for (const key of [sessionId, ...sessions.map(([key]) => key)]) {
+        this.tooLargeRecoveries.delete(key);
+        this.tooLargeExhausted.delete(key);
+      }
+    } finally { this.compactingSessions.delete(sessionId); }
   }
 
-  /**
-   * /compact — summarise old history and keep only recent messages.
-   */
+  private async handleCommandClear(agentId: string, chatId: string): Promise<void> {
+    const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId, this.channelFor(chatId));
+    await this.clearContext(sessionId);
+  }
+
+  private readonly compactingSessions = new Set<string>();
+
+  /** Native CLI compaction leaves canonical chat history intact. */
+  private async compactContext(sessionId: string, model?: string): Promise<void> {
+    if(this.compactingSessions.has(sessionId)) throw new Error('Context compaction is already running for this session.');
+    this.compactingSessions.add(sessionId);
+    try {
+    const runtime = this.orchestration ?? (this.agentConfig.orchestration?.enabled ? await this.getOrchestration() : undefined);
+    if (runtime?.ownsSession(sessionId)) return await runtime.compactSession(sessionId, model);
+    const process = [...this.sessions.values()].find(p=>p.sessionId===sessionId && p.isRunning());
+    if (!process) throw new Error('No active Claude Code context to compact. Send a message first; chat history was not changed.');
+    if (process.isProcessing) throw new Error('The agent is responding. Try /compact after the current response finishes.');
+    if (this.gatewayConfig.gateway.headless === false) throw new Error('Native /compact currently requires the headless Claude Code backend. Chat history was not changed.');
+    await startNativeCompact(process, true).result;
+    } finally {this.compactingSessions.delete(sessionId);}
+  }
+
   private async handleCommandCompact(agentId: string, chatId: string): Promise<void> {
     const ch = this.channelFor(chatId);
     const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId, ch);
-    const index = await this.sessionStore.listSessions(agentId, chatId, ch);
-    const meta = index.sessions.find(s => s.id === sessionId);
-    const name = meta?.name ?? 'Session';
-
-    const compactModel = this.agentConfig.claude.model;
-    const contextWindow = await this.contextWindowFor(compactModel);
-
-    this.writeAutoForward(chatId, `⏳ Compacting session "${name}"...`);
-
+    this.writeAutoForward(chatId, '⏳ Compacting Claude Code context…');
     try {
-      const compactor = new SessionCompactor(this.sessionStore);
-      // Large sessions summarize in many chunks (see compactor.ts); post a status
-      // update at each ~25% step so the channel doesn't look dead mid-compact.
-      // Throttled (not per-chunk) to avoid spamming the chat on a 16+ chunk job.
-      let lastReportedPct = -1;
-      const onProgress = (done: number, total: number): void => {
-        if (total <= 1) return;
-        const pct = Math.floor((done / total) * 100);
-        if (pct - lastReportedPct >= 25) {
-          lastReportedPct = pct;
-          this.writeAutoForward(chatId, `⏳ Compacting session "${name}"... ${done}/${total} parts summarized`);
-        }
-      };
-      const result = await compactor.compact(agentId, chatId, sessionId, compactModel, contextWindow, ch, onProgress);
-      await this.sessionStore.updateSessionMeta(agentId, chatId, sessionId, {
-        loadedAtSpawn: undefined,
-        archivedCount: undefined,
-        messageCountAtSpawn: undefined,
-      }, ch);
-      await this.restartProcess(chatId);
-
-      const summary = [
-        `✅ Session compacted`,
-        '',
-        `Before: ${result.beforeMessages} messages (~${result.beforeTokens.toLocaleString()} tokens)  →  ${result.contextPctBefore}% of context`,
-        `After:  ${result.afterMessages} messages (~${result.afterTokens.toLocaleString()} tokens)   →  ${result.contextPctAfter}% of context`,
-        `Reduced by: ${result.reductionPct}%`,
-        '',
-        'Summary preserved. Full history before compaction is archived.',
-      ].join('\n');
-      this.writeAutoForward(chatId, summary);
+      await this.compactContext(sessionId);
+      this.writeAutoForward(chatId, '✅ Claude Code context compacted. Chat history is unchanged.');
     } catch (err) {
-      if ((err as Error).name === 'NotEnoughMessagesError') {
-        this.writeAutoForward(chatId, `⚠️ ${(err as Error).message}`);
-      } else {
-        this.logger.error('Compact failed', { error: (err as Error).message });
-        this.writeAutoForward(chatId, `❌ Compact failed: ${(err as Error).message}\n\nYour session history is unchanged.`);
-      }
+      this.logger.error('Compact failed', { error: (err as Error).message });
+      this.writeAutoForward(chatId, 'Context compaction failed: ' + (err as Error).message + '\nChat history is unchanged.');
     }
   }
 
@@ -4367,6 +4340,26 @@ export class AgentRunner extends EventEmitter {
     return this.receiver?.isRunning() ?? false;
   }
 
+  getDashboardSource() {
+    return { workspace: this.agentConfig.type === 'app-agent' ? undefined : this.agentConfig.workspace, filename: path.join(this.agentDir, 'orchestration.db'), historyFilename: path.join(this.agentDir, 'history.db'),
+      enabled: Boolean(this.orchestration || this.agentConfig.orchestration?.enabled),
+      workspaceMode: this.agentConfig.type === 'app-agent' ? 'container' : this.agentConfig.orchestration?.tasks?.workspaceMode ?? 'host',
+      maxWorkers: this.agentConfig.orchestration?.tasks?.maxConcurrentPerAgent ?? ORCHESTRATION_DEFAULTS.tasks.maxConcurrentPerAgent,
+      idleTtlMs: this.agentConfig.orchestration?.tasks?.workerIdleTtlMs ?? ORCHESTRATION_DEFAULTS.tasks.workerIdleTtlMs };
+  }
+
+  async dashboardContextWindow(model: string): Promise<number | null> {
+    const models = await this.availableModels();
+    return models.find(m => m.id === model)?.contextWindow
+      ?? (this.gatewayConfig.gateway.models ?? DEFAULT_MODELS).find(m => m.id === model)?.contextWindow
+      ?? null;
+  }
+
+  getTokenReport(sessionId: string) {
+    const report = this.orchestration?.tokenReport(sessionId);
+    return report ? {...report, backgroundReviews: this.historyDb.listReviewRuns().filter(run => run.sessionId === sessionId)} : undefined;
+  }
+
   getOrchestrationSummary() {
     if (!this.agentConfig.orchestration?.enabled && !this.orchestration) return undefined;
     const summary = this.orchestration?.dashboardSummary() ?? { enabled: true, backend: 'headless', workspaceMode: this.agentConfig.type === 'app-agent' ? 'container' : this.agentConfig.orchestration?.tasks?.workspaceMode ?? 'host', activeAgentSessions: [], tasks: [], sessions: [] };
@@ -4404,6 +4397,31 @@ export class AgentRunner extends EventEmitter {
       out.push({ ...e, chatId, isRunning, uptimeSec: Math.floor((now - e.spawnedAt) / 1000), tokens });
     }
     return out;
+  }
+
+  /**
+   * Session IDs currently alive in the in-memory session map. Display-only
+   * liveness signal for the dashboard: a session removed by the idle cleaner
+   * (kept-alive window elapsed) or released is no longer present here.
+   */
+  liveSessionIds(): string[] {
+    return [...this.sessions.values()].filter(p => p.isRunning()).map(p => p.sessionId);
+  }
+
+  /**
+   * Live status of one agent session derived from the in-memory session map:
+   * - 'running' → alive and processing a turn right now
+   * - 'idle'    → alive and kept warm, not currently processing
+   * - 'stopped' → gone from the map (idle-timeout kill or otherwise released)
+   * Display-only; does not touch token accounting.
+   */
+  isSessionCompacting(sessionId: string): boolean { return this.orchestration?.isCompacting(sessionId) ?? false; }
+
+  agentSessionLiveStatus(sessionId: string): 'running' | 'idle' | 'stopped' {
+    for (const p of this.sessions.values()) {
+      if (p.sessionId === sessionId && p.isRunning()) return p.isProcessing ? 'running' : 'idle';
+    }
+    return 'stopped';
   }
 
   /**
@@ -5280,10 +5298,7 @@ export class AgentRunner extends EventEmitter {
     };
 
     // Persist the full user command before executing so it appears in history.
-    // Skip for /clear — clearSession() below wipes the table anyway; only the response survives.
-    if (cmd !== '/clear') {
-      persist('user', opts?.displayCommand ?? command);
-    }
+    persist('user', opts?.displayCommand ?? command);
 
     let result: Record<string, unknown>;
     let responseText: string;
@@ -5377,35 +5392,13 @@ export class AgentRunner extends EventEmitter {
           responseText = `Sessions (${withCounts.length}):\n${lines.join('\n')}`;
         }
       } else if (cmd === '/clear') {
-        const ch = 'api' as const;
-        await this.sessionStore.clearTelegramSessionHistory(agentId, storeChatId, sessionId, ch);
-        await this.sessionStore.updateSessionMeta(agentId, storeChatId, sessionId, {
-          totalTokensUsed: 0,
-          lastInputTokens: 0,
-          archivedCount: 0,
-          loadedAtSpawn: undefined,
-          messageCountAtSpawn: undefined,
-        }, ch);
-        const mediaPaths = this.historyDb.clearSession(dbChatId, sessionId);
-        MediaStore.deleteMediaFiles(this.agentsBaseDir, agentId, mediaPaths);
-        this.restartProcess(sessionId).catch(() => {});
-        result = { success: true };
-        responseText = 'Session cleared.';
+        await this.clearContext(sessionId);
+        result = { success: true, historyUnchanged: true, historyLimit: 50 };
+        responseText = 'Claude Code context reset. Chat history is unchanged. Your next message starts a new context with the latest 50 messages.';
       } else if (cmd === '/compact') {
-        const ch = 'api' as const;
-        const activeSession = this.sessions.get(sessionId);
-        const compactEffectiveModel = opts?.model ?? activeSession?.modelOverride ?? this.agentConfig.claude.model;
-        const contextWindow = await this.contextWindowFor(compactEffectiveModel);
-        const compactor = new SessionCompactor(this.sessionStore);
-        const compactResult = await compactor.compact(agentId, storeChatId, sessionId, compactEffectiveModel, contextWindow, ch);
-        await this.sessionStore.updateSessionMeta(agentId, storeChatId, sessionId, {
-          loadedAtSpawn: undefined,
-          archivedCount: undefined,
-          messageCountAtSpawn: undefined,
-        }, ch);
-        await this.restartProcess(sessionId);
-        result = { success: true, keptMessages: compactResult.afterMessages, archivedMessages: compactResult.beforeMessages - compactResult.afterMessages };
-        responseText = `Session compacted. Kept ${compactResult.afterMessages} messages, archived ${compactResult.beforeMessages - compactResult.afterMessages}.`;
+        await this.compactContext(sessionId, opts?.model);
+        result = { success: true, native: true, historyUnchanged: true };
+        responseText = 'Claude Code context compacted. Chat history is unchanged.';
       } else {
         // Passed the gate but has no dispatch branch — BUILTIN_COMMANDS drifted from this
         // table. Throw so the failure surfaces (and ends history with an assistant turn via
@@ -5453,17 +5446,20 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
-   * Restart every non-api session so a model change actually takes effect.
+   * Restart legacy non-api sessions so a model change actually takes effect.
    *
    * `setModel` only rewrites config — a session process was spawned with the
    * old model on its command line and keeps using it until it is restarted.
    * Reporting "model set" without this is a false success: the next turn still
-   * runs on the previous model. Returns whether anything was restarted.
+   * runs on the previous model. Managed decisions already spawn per turn and
+   * must finish with the model they started with. Returns whether anything restarted.
    */
   private async restartChannelSessions(): Promise<boolean> {
     const restartPromises: Promise<void>[] = [];
     for (const [key, session] of this.sessions) {
-      if (session.source !== 'api') restartPromises.push(this.restartProcess(key));
+      // Managed decisions spawn a new process on every turn. Killing the current
+      // one here bypasses orchestration cancellation and reports PROCESS_EXITED.
+      if (session.source !== 'api' && !session.runtimeProfile) restartPromises.push(this.restartProcess(key));
     }
     await Promise.all(restartPromises);
     return restartPromises.length > 0;

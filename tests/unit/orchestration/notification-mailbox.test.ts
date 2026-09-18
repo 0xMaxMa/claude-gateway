@@ -69,3 +69,24 @@ test.each(['failed','interrupted'] as const)('a batch report %s applies retry/st
   expect(pendingReports(store,[],[],true,ended+5000)).toHaveLength(state==='failed'?1:0);
  }finally{store.close();}
 });
+
+
+test('a prolonged report outage backs off to one hour across restart without consuming its result',()=>{
+ const root=mkdtempSync(join(tmpdir(),'notification-long-outage-')),file=join(root,'db');
+ let store=new OrchestrationStore(file,'a');
+ try {
+  const f=seed(store,'one');let ended=0;
+  for(let i=0;i<12;i++)ended=f.report('failed',`notification:${f.notificationId}:retry:${i}`);
+  expect(pendingReports(store,[],[],true,ended+300000)).toHaveLength(0);
+  store.close();store=new OrchestrationStore(file,'a');
+  expect(pendingReports(store,[],[],true,ended+3599999)).toHaveLength(0);
+  expect(pendingReports(store,[],[],true,ended+3600000)[0].notification_id).toBe(f.notificationId);
+  expect(store.get('SELECT status FROM notifications WHERE id=?',f.notificationId)?.status).toBe('pending');
+  // An explicit user request can recover immediately; it is not gated by report cooldown.
+  const input=store.acceptInput({scope:{agentId:'a',agentSessionId:'one',source:'api',accountId:'owner',chatId:'one',threadKey:'',principalId:'owner'},text:'Try again'});
+  const decisions=new DecisionService(store),decision=decisions.begin(f.conversationId,'owner',[input.inputId]);
+  decisions.finish(decision,'Full result');
+  expect(pendingReports(store,[],[],true,ended+7200000)).toHaveLength(0);
+  expect(store.get('SELECT status FROM notifications WHERE id=?',f.notificationId)?.status).toBe('handled');
+ }finally{store.close();rmSync(root,{recursive:true,force:true});}
+});

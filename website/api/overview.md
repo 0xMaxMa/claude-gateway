@@ -66,7 +66,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `GET` | `/api/v1/agents/:agentId/sessions/:sessionId/stream` | Key | Re-attach to the session's in-flight turn (SSE, resumable from a `seq` cursor) |
 | `PATCH` | `/api/v1/agents/:agentId/sessions/:sessionId` | Key | Rename a session |
 | `DELETE` | `/api/v1/agents/:agentId/sessions/:sessionId` | Key | Delete a session |
-| `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/clear` | Key | Clear session history |
+| `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/clear` | Key | Reset model context; preserve history |
 | `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/compact` | Key | Summarise old history, keep only recent messages |
 | `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/stop` | Key | Interrupt the in-flight turn |
 | `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/restart` | Key | Graceful session restart |

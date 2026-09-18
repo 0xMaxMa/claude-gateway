@@ -1,5 +1,6 @@
 import { resolveSkill, resolveNamedSkill, skillCatalog } from '../../../src/orchestration/skills';
-import { SPEECH_SCHEMA, splitSpeechResponse } from '../../../src/orchestration/speech';
+import { splitSpeechResponse } from '../../../src/orchestration/speech';
+import { ORCHESTRATION_RESPONSE_SCHEMA } from '../../../src/orchestration/response-schema';
 import { parseSkill } from '../../../src/skills/parser';
 import { runtimeProfileArgs } from '../../../src/session/runtime-profile';
 import { resolveOrchestrationConfig } from '../../../src/orchestration/config';
@@ -23,9 +24,9 @@ test('agent cannot use Skill while a worker can load only its gateway-built skil
 
 test('invalid and overlong speech never falls back to reading the full report', () => {
   const report = 'A detailed report. '.repeat(100);
-  expect(splitSpeechResponse(report)).toEqual({ display: report, spoken: '' });
-  for (const spoken_text of ['a'.repeat(601), '```code```']) expect(splitSpeechResponse(JSON.stringify({ display_text: report, spoken_text }))).toEqual({ display: report, spoken: '' });
-  expect(splitSpeechResponse(JSON.stringify({ display_text: report, spoken_text: 'พบปัญหาหนึ่งจุดครับ' }))).toEqual({ display: report, spoken: 'พบปัญหาหนึ่งจุดครับ' });
+  expect(splitSpeechResponse(report)).toEqual({ display: report, spoken: '', outcome: 'plain' });
+  for (const spoken_text of ['a'.repeat(601), '```code```']) expect(splitSpeechResponse(JSON.stringify({ display_text: report, spoken_text }))).toEqual({ display: report, spoken: '', outcome: 'structured' });
+  expect(splitSpeechResponse(JSON.stringify({ display_text: report, spoken_text: 'พบปัญหาหนึ่งจุดครับ' }))).toEqual({ display: report, spoken: 'พบปัญหาหนึ่งจุดครับ', outcome: 'structured' });
 });
 
 test('channels default to proactive existing receive path; voice notes need no TTS voice ID', () => {
@@ -45,12 +46,14 @@ test('implicit skill catalog hides worker bodies and paths; named dispatch rejec
 
 test('uses explicit trailing speech JSON after CLI progress text without reading the prefix or accepting truncated JSON', () => {
   const fields = { display_text: 'Worker is running', spoken_text: 'กำลังรันอยู่ครับ' };
-  expect(splitSpeechResponse('Progress before a tool call.\n\n' + JSON.stringify(fields))).toEqual({ display: fields.display_text, spoken: fields.spoken_text });
-  expect(splitSpeechResponse('Progress.\n```json\n' + JSON.stringify(fields) + '\n```')).toEqual({ display: fields.display_text, spoken: fields.spoken_text });
+  expect(splitSpeechResponse('Progress before a tool call.\n\n' + JSON.stringify(fields))).toEqual({ display: fields.display_text, spoken: fields.spoken_text, outcome: 'structured' });
+  expect(splitSpeechResponse('Progress.\n```json\n' + JSON.stringify(fields) + '\n```')).toEqual({ display: fields.display_text, spoken: fields.spoken_text, outcome: 'structured' });
+  // A truncated object is still not accepted as structured, and it is no longer published
+  // either: only the prose that preceded it reaches the user.
   const partial = 'Progress.\n' + JSON.stringify(fields).slice(0, -1);
-  expect(splitSpeechResponse(partial)).toEqual({ display: partial, spoken: '' });
+  expect(splitSpeechResponse(partial)).toEqual({ display: 'Progress.', spoken: 'Progress.', outcome: 'unreadable' });
   const long = JSON.stringify({ ...fields, spoken_text: 'x'.repeat(601) });
-  expect(splitSpeechResponse('Progress.\n' + long)).toEqual({ display: fields.display_text, spoken: '' });
+  expect(splitSpeechResponse('Progress.\n' + long)).toEqual({ display: fields.display_text, spoken: '', outcome: 'structured' });
 });
 
 test('host workers use default CLI tools and inherited settings instead of isolated execution flags', () => {
@@ -63,12 +66,17 @@ test('host workers use default CLI tools and inherited settings instead of isola
   expect(agentArgs).toContain('--strict-mcp-config');
 });
 
-test('voice schema requires both surfaces and applies only to voice Agent profiles',()=>{
+test('the union response schema reaches the CLI for Agent profiles only, and never a worker',()=>{
  const profile={role:'agent' as const,mcpConfigPath:'/mcp',overlay:''};
- const args=runtimeProfileArgs({...profile,responseSchema:SPEECH_SCHEMA},[]);
- expect(JSON.parse(args[args.indexOf('--json-schema')+1])).toMatchObject({required:['display_text','spoken_text']});
+ const args=runtimeProfileArgs({...profile,responseSchema:ORCHESTRATION_RESPONSE_SCHEMA},[]);
+ // Only the main text field is required: an ordinary turn satisfies the union with exactly
+ // what it already returned, while the mode-specific fields stay optional.
+ expect(JSON.parse(args[args.indexOf('--json-schema')+1])).toMatchObject({required:['display_text'],additionalProperties:false,properties:{display_text:{type:'string'},spoken_text:{type:'string'},notify_user:{type:'boolean'}}});
+ // minLength/maxLength are not enforced server-side by structured outputs, so they must not
+ // appear here; the spoken budget is enforced by splitSpeechResponse/progressReviewResult.
+ expect(args[args.indexOf('--json-schema')+1]).not.toMatch(/minLength|maxLength/);
  expect(runtimeProfileArgs(profile,[])).not.toContain('--json-schema');
- expect(runtimeProfileArgs({...profile,role:'worker',responseSchema:SPEECH_SCHEMA},[])).not.toContain('--json-schema');
- expect(splitSpeechResponse('ได้เลยค่ะ **กำลังตรวจให้**')).toEqual({display:'ได้เลยค่ะ **กำลังตรวจให้**',spoken:'ได้เลยค่ะ กำลังตรวจให้'});
+ expect(runtimeProfileArgs({...profile,role:'worker',responseSchema:ORCHESTRATION_RESPONSE_SCHEMA},[])).not.toContain('--json-schema');
+ expect(splitSpeechResponse('ได้เลยค่ะ **กำลังตรวจให้**')).toEqual({display:'ได้เลยค่ะ **กำลังตรวจให้**',spoken:'ได้เลยค่ะ กำลังตรวจให้',outcome:'plain'});
  for(const text of ['https://example.com','```code```','a'.repeat(601)])expect(splitSpeechResponse(text).spoken).toBe('');
 });

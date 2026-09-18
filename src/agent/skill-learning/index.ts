@@ -7,6 +7,7 @@
  * are best-effort and MUST never throw into the runner's hot path.
  */
 
+import { createHash } from 'crypto';
 import { loadSkills } from '../../skills/loader';
 import { extractFrontmatter } from '../../skills/parser';
 import { HistoryDB } from '../../history/db';
@@ -31,6 +32,7 @@ interface Accum {
   turnIdx: number;
   // per-turn (reset each onTurnStart)
   startedAt: number;
+  active: boolean;
   toolUseIds: Set<string>;
   toolCalls: number;
   tokensIn: number;
@@ -42,6 +44,8 @@ interface Accum {
   sigMaxToolCalls: number;
   sigRecovery: boolean;
   sigCorrection: boolean;
+  /** Exact reviewed content only: never infer equivalence from an intent or topic. */
+  reviewedTranscriptHash?: string;
 }
 
 export interface SkillLearningManagerOpts {
@@ -112,6 +116,9 @@ export class SkillLearningManager {
   /** A user turn begins. `invokedSkills` = skills detected in the incoming message. */
   onTurnStart(mapKey: string, sessionId: string, firstUserMessage: string, invokedSkills: string[] = [], startedAt?: number): void {
     try {
+      const pending = this.idleTimers.get(mapKey);
+      if (pending) clearTimeout(pending);
+      this.idleTimers.delete(mapKey);
       let a = this.accum.get(mapKey);
       if (!a || a.sessionId !== sessionId) {
         a = this.freshAccum(sessionId);
@@ -119,6 +126,7 @@ export class SkillLearningManager {
         a.turnIdx += 1;
       }
       a.startedAt = startedAt ?? this.now();
+      a.active = true;
       a.toolUseIds.clear();
       a.toolCalls = 0;
       a.tokensIn = 0;
@@ -163,6 +171,7 @@ export class SkillLearningManager {
     try {
       const a = this.accum.get(mapKey);
       if (!a || a.sessionId !== sessionId) return;
+      a.active = false;
       const ts = this.now();
       const skills = [...a.skillsLoaded];
       this.db.insertTurnMetric({
@@ -209,7 +218,7 @@ export class SkillLearningManager {
     if (!this.cfg.enabled) return;
     if (this.reviewInFlight.has(sessionId)) return;
     const a = this.accum.get(mapKey);
-    if (!a || a.sessionId !== sessionId) return;
+    if (!a || a.sessionId !== sessionId || a.active) return;
 
     const signals: SessionSignals = {
       toolCalls: a.sigMaxToolCalls,
@@ -222,13 +231,20 @@ export class SkillLearningManager {
     if (!decision.review) return;
 
     this.reviewInFlight.add(sessionId);
+    // Consume only this batch before awaiting: a newer turn may accumulate while
+    // the reviewer runs and must not have its evidence erased in finally.
+    a.sigMaxToolCalls = 0;
+    a.sigRecovery = false;
+    a.sigCorrection = false;
     try {
       const transcript = this.gatherTranscript(sessionId);
       if (!transcript.trim()) return;
+      const transcriptHash = createHash('sha256').update(transcript).digest('hex');
+      if (a.reviewedTranscriptHash === transcriptHash && !signals.recoveryFired && !signals.userCorrection) return;
       const existing = this.loadExistingSkills();
 
-      const { proposal, tokensSpent } = await runReviewer(
-        { transcript, existingSkills: existing.map((s) => ({ name: s.name, description: s.description })) },
+      const { proposal, tokensSpent, reviewed } = await runReviewer(
+        { transcript: transcript.slice(-20_000), existingSkills: existing.map((s) => ({ name: s.name, description: s.description })) },
         this.cfg,
         this.reviewSpawn,
       );
@@ -240,6 +256,9 @@ export class SkillLearningManager {
         mode: this.cfg.mode,
         existing,
       });
+
+      // Malformed/rejected write proposals must not suppress a later retry.
+      if (reviewed && (proposal.action === 'none' || outcome.written)) a.reviewedTranscriptHash = transcriptHash;
 
       // Record provenance only on a genuine create — an edit's skill_stats row
       // already exists (from the original create), so re-recording would reset
@@ -283,10 +302,11 @@ export class SkillLearningManager {
       this.logger?.warn?.(`[skill-learning:${this.agentId}] review failed: ${(err as Error).message}`);
     } finally {
       this.reviewInFlight.delete(sessionId);
-      // Reset session signals so the next batch of turns re-qualifies from scratch.
-      a.sigMaxToolCalls = 0;
-      a.sigRecovery = false;
-      a.sigCorrection = false;
+      // The newer batch's timer may have fired while this review was in flight.
+      if (!a.active && (a.sigMaxToolCalls > 0 || a.sigRecovery || a.sigCorrection) &&
+          this.accum.get(mapKey) === a && !this.idleTimers.has(mapKey)) {
+        this.scheduleIdleReview(mapKey, sessionId);
+      }
     }
   }
 
@@ -330,6 +350,7 @@ export class SkillLearningManager {
       sessionId,
       turnIdx: 0,
       startedAt: this.now(),
+      active: false,
       toolUseIds: new Set(),
       toolCalls: 0,
       tokensIn: 0,
@@ -347,8 +368,7 @@ export class SkillLearningManager {
     const rows = this.db.getSessionTranscript(sessionId, 200);
     return rows
       .map((r) => `${r.role === 'assistant' ? 'assistant' : 'user'}: ${r.content}`)
-      .join('\n')
-      .slice(-20_000); // bound the reviewer prompt
+      .join('\n');
   }
 
   /** All loaded skills with resolved provenance + path (for dedup + guards). */

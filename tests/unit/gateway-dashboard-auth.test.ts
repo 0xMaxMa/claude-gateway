@@ -88,7 +88,7 @@ describe('gateway dashboard auth hardening (bind 0.0.0.0)', () => {
     it('GET /dashboard unauthenticated serves the login page (no dashboard, no token in HTML)', async () => {
       const res = await supertest(buildApp(WITH_KEYS)).get('/dashboard');
       expect(res.status).toBe(200);
-      expect(res.text).toContain('Enter an API key');
+      expect(res.text).toContain('Sign in with your admin API key');
       expect(res.text).not.toContain('name="dash-token"');
     });
 
@@ -119,7 +119,7 @@ describe('gateway dashboard auth hardening (bind 0.0.0.0)', () => {
       const dash = await supertest(app).get('/dashboard').set('Cookie', cookie);
       expect(dash.status).toBe(200);
       expect(dash.text).toContain('Claude Gateway');
-      expect(dash.text).not.toContain('Enter an API key');
+      expect(dash.text).not.toContain('Sign in with your admin API key');
     });
 
     it('logout revokes the session — the same cookie no longer authorizes /status', async () => {
@@ -151,7 +151,7 @@ describe('gateway dashboard auth hardening (bind 0.0.0.0)', () => {
     it('GET /dashboard serves the dashboard directly (not the login page) with no keys', async () => {
       const res = await supertest(buildApp([])).get('/dashboard');
       expect(res.status).toBe(200);
-      expect(res.text).not.toContain('Enter an API key');
+      expect(res.text).not.toContain('Sign in with your admin API key');
     });
 
     it('explicit loopback bind (127.0.0.1) keyless is still open', async () => {

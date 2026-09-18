@@ -12,7 +12,6 @@ export interface RuntimeProfile {
   mcpConfigPath: string;
   overlay: string;
   responseSchema?: Record<string, unknown>;
-  semanticIntake?: boolean;
   /** Existing loadWorkspace/CLAUDE.md composition, supplied without rewriting files. */
   context?: string;
   /** Scheduler already holds a gateway-wide process lease for this worker. */
@@ -25,8 +24,13 @@ export interface RuntimeProfile {
   connectorsAllowed?: boolean;
   originSessionId?: string;
   taskId?: string;
-  /** Explicit durable CLI session used by the worker pool. */
-  workerSession?: { id: string; resume: boolean };
+  /** Durable CLI session for this process: `--resume id` continues the transcript Claude Code
+   * already persisted, `--session-id id` starts it. Used by the worker pool and by agent
+   * decision turns, which both spawn a fresh process per turn and would otherwise lose the
+   * conversation — and its cached prefix — every time. */
+  cliSession?: { id: string; resume: boolean };
+  /** Diagnostics stay in history, but are excluded before selecting the context window. */
+  excludedHistoryOperationIds?: string[];
   attemptId?: string;
   /** Gateway-built plugin containing only this task skill and its resources. */
   skillPluginDir?: string;
@@ -60,7 +64,9 @@ Return a concise result describing the outcome, relevant artifacts and verificat
 export function runtimeProfileArgs(profile: RuntimeProfile, extraFlags: string[]): string[] {
   if (extraFlags.length) throw new OrchestrationError('PROFILE_FLAGS_CONFLICT', 'Orchestration profiles require empty claude.extraFlags; configure model through the existing model field');
   if (profile.role === 'worker' && profile.hostExecution) {
-    return ['--tools', 'default', '--mcp-config', profile.mcpConfigPath,
+    // Omitted means the complete native inventory (including Bash). An explicit
+    // resolved policy must not silently widen back to all tools on the host.
+    return ['--tools', profile.workerTools === undefined ? 'default' : profile.workerTools.join(','), '--mcp-config', profile.mcpConfigPath,
       ...(profile.checkpointCommand ? ['--settings', JSON.stringify({hooks:checkpointSettings(profile.checkpointCommand).hooks})] : []),
       ...(profile.skillPluginDir ? ['--plugin-dir', profile.skillPluginDir] : []),
       '--append-system-prompt', [profile.context, profile.overlay].filter(Boolean).join('\n\n')];

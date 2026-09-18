@@ -594,8 +594,8 @@ export function createApiRouter(
     res.json({
       commands: [
         { name: '/session',  description: 'Show current session info (name, message count, context %)' },
-        { name: '/clear',    description: 'Clear current session history' },
-        { name: '/compact',  description: 'Summarise old history and keep only recent messages' },
+        { name: '/clear',    description: 'Reset Claude Code context; keep chat history' },
+        { name: '/compact',  description: 'Compact Claude Code context without changing chat history' },
         { name: '/stop',     description: 'Interrupt the in-flight turn' },
         { name: '/restart',  description: 'Graceful session restart' },
         { name: '/model',    description: 'Show the current AI model' },

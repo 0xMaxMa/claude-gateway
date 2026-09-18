@@ -1,4 +1,4 @@
-import type { ChatChannelOrApi } from '../history/types';
+import { CHAT_CHANNELS, type ChatChannelOrApi } from '../history/types';
 
 export type CommandChannel = ChatChannelOrApi;
 
@@ -13,8 +13,8 @@ export const BUILTIN_COMMANDS: Record<string, CommandDef> = {
   sessions: { channels: ['telegram', 'discord', 'api'] },
   new:      { channels: ['telegram', 'discord'], wordBoundary: false },
   rename:   { channels: ['telegram'], wordBoundary: false },
-  clear:    { channels: ['telegram', 'api'] },
-  compact:  { channels: ['telegram', 'api'] },
+  clear:    { channels: [...CHAT_CHANNELS, 'api'] },
+  compact:  { channels: [...CHAT_CHANNELS, 'api'] },
   stop:     { channels: ['telegram', 'api'], wordBoundary: false },
   model:    { channels: ['telegram', 'discord', 'line', 'api'] },
   models:   { channels: ['telegram', 'discord', 'line'] },

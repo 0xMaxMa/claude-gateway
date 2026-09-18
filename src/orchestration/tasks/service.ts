@@ -13,6 +13,32 @@ import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAtt
 
 export interface SpawnTask { title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal'; }
 
+/** How many finished tasks the per-turn index page keeps. Unfinished tasks are never dropped;
+ * older finished ones stay reachable through task_status with an explicit task_id. */
+const INDEXED_FINISHED_TASKS = 20;
+
+export type TaskIndexEntry = ReturnType<typeof taskIndexEntry>;
+/** One index row: identity, live state and how to fetch the rest — never a report body.
+ * A finished task's progress, execution observation and workflow checkpoint/review history
+ * are report bodies, so they are dropped here and read back via task_status when needed.
+ */
+export function taskIndexEntry(task: TaskSnapshot) {
+  const terminal = TERMINAL_TASK_STATES.has(task.state);
+  return {
+    taskId: task.taskId, title: task.title, state: task.state,
+    stateVersion: task.stateVersion, revision: task.revision, appliedRevision: task.appliedRevision,
+    createdAt: task.createdAt, updatedAt: task.updatedAt,
+    workflow: terminal ? undefined : task.workflow,
+    latestProgress: terminal ? undefined : task.latestProgress,
+    execution: terminal ? undefined : task.execution,
+    pendingQuestion: task.pendingQuestion, failure: task.failure,
+    cancellation: task.cancellation, replacedByTaskId: task.replacedByTaskId,
+    workstreamId: task.workstreamId, continueTaskId: task.continueTaskId, continuationPolicy: task.continuationPolicy,
+    resultAvailable: Boolean(task.result),
+    details: { tool: 'task_status', task_id: task.taskId },
+  };
+}
+
 /** Task mutations use short durable transactions; admission probes are read-only. */
 export class TaskService {
   private config;
@@ -94,28 +120,31 @@ export class TaskService {
       return this.withRecentTools(task);
     });
   }
-  /** Current reports are lossless. Other tasks are an index, never partial reports. */
+  /** Current reports are lossless. Other tasks are an index, never partial reports.
+   * Every decision turn carries this, so it is a bounded page of the recent tasks rather
+   * than the whole history: an index entry is identity, live state and how to fetch the
+   * rest, and task_status with a task_id returns the complete stored snapshot on demand.
+   */
   context(conversationId: string, principalId: string, decisionId: string) {
-    const tasks = new Map(this.status(conversationId, principalId).map(task => [task.taskId, task]));
+    this.store.assertMember(conversationId, principalId);
     const reporting = new Set(this.store.all(
       "SELECT DISTINCT task_id FROM notifications WHERE conversation_id=? AND decision_id=? AND status='assigned'",
       conversationId, decisionId,
     ).map(row => String(row.task_id)));
+    // Only a reporting task is hydrated. Indexed rows are read straight from the stored
+    // snapshot, so they cost no per-task evidence queries and no report bodies either.
+    const rows = new Map<string, TaskSnapshot | TaskIndexEntry>(
+      this.indexPage(conversationId).map(task => [task.taskId, taskIndexEntry(task)]));
     // An old task can finish after it has fallen outside the recent-task page.
-    for (const id of reporting) if (!tasks.has(id)) tasks.set(id, this.status(conversationId, principalId, id)[0]);
-    return [...tasks.values()].map(task => reporting.has(task.taskId) ? task : {
-      taskId: task.taskId, title: task.title, state: task.state,
-      stateVersion: task.stateVersion, revision: task.revision, appliedRevision: task.appliedRevision,
-      createdAt: task.createdAt, updatedAt: task.updatedAt,
-      workflow: task.workflow,
-      latestProgress: TERMINAL_TASK_STATES.has(task.state) ? undefined : task.latestProgress,
-      execution: TERMINAL_TASK_STATES.has(task.state) ? undefined : task.execution,
-      pendingQuestion: task.pendingQuestion, failure: task.failure,
-      cancellation: task.cancellation, replacedByTaskId: task.replacedByTaskId,
-      workstreamId: task.workstreamId, continueTaskId: task.continueTaskId, continuationPolicy: task.continuationPolicy,
-      resultAvailable: Boolean(task.result),
-      details: { tool: 'task_status', task_id: task.taskId },
-    });
+    for (const id of reporting) rows.set(id, this.status(conversationId, principalId, id)[0]);
+    return [...rows.values()];
+  }
+  /** Bounded recent-task page: every unfinished task, plus only the newest finished ones. */
+  private indexPage(conversationId: string): TaskSnapshot[] {
+    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR id IN
+      (SELECT id FROM tasks WHERE conversation_id=? AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT ${INDEXED_FINISHED_TASKS}))
+      ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`,
+      conversationId, conversationId).map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot);
   }
   private withRecentTools(task: TaskSnapshot): TaskSnapshot {
     task.recentTools = this.store.all("SELECT payload_json,occurred_at FROM conversation_events WHERE conversation_id=? AND type='tool.activity' AND json_extract(payload_json,'$.task_id')=? ORDER BY seq DESC LIMIT 8", task.conversationId, task.taskId).map(row => {

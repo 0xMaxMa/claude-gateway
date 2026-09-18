@@ -29,13 +29,15 @@ test.each([false,true])('real runtime publishes incremental response text before
  try{
   await started;
   const emit=(event:unknown)=>process.emit('output',JSON.stringify(event));
-  const chunk=(text:string)=>emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:voice?{type:'input_json_delta',partial_json:text}:{type:'text_delta',text}}});
-  if(voice) emit({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',id:'structured',name:'StructuredOutput'}}});
+  // Cache-lineage fix: no native schema/tool is ever attached (responseSchema stays
+  // undefined for every agent turn), so a voice turn streams plain text_delta events too —
+  // the speech-shaped JSON is the model's own raw text, per SPEECH_OVERLAY, not a tool call.
+  const chunk=(text:string)=>emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text}}});
   chunk(voice?'{"display_text":"Hello':'Hello');
   expect(updates).toHaveBeenLastCalledWith(expect.objectContaining({text:'Hello',final:false}));expect(settled).toBe(false);expect(outsider).not.toHaveBeenCalled();
   chunk(voice?' world","spoken_text":"Hi"}':' world');
   expect(foreground.mock.calls.map(c=>c[0]).join('')).toBe('Hello world');
-  emit({type:'result',result:'Hello world',...(voice?{structured_output:{display_text:'Hello world',spoken_text:'Hi'}}:{})});
+  emit({type:'result',result:voice?JSON.stringify({display_text:'Hello world',spoken_text:'Hi'}):'Hello world'});
   await expect(result).resolves.toBe('Hello world');
   expect(foreground.mock.calls.map(c=>c[0]).join('')).toBe('Hello world');
   expect(updates).toHaveBeenLastCalledWith(expect.objectContaining({text:'Hello world',final:true}));

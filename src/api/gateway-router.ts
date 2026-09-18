@@ -1,3 +1,5 @@
+import { dashboardRange, dashboardSince } from '../ui/dashboard-range';
+import { DashboardReader } from '../orchestration/dashboard-reader';
 import express, { Request, Response } from 'express';
 import * as http from 'node:http';
 import { exec } from 'child_process';
@@ -16,6 +18,7 @@ import { getWatcherHealth } from '../watch/factory';
 import { CronScheduler } from '../cron/scheduler';
 import { CronManager } from '../cron/manager';
 import { generateDashboardHtml, generateLoginHtml } from '../ui/web-ui';
+import { generateTokenReportHtml } from '../ui/token-report';
 import { resolveSharedConfig, sharedVaultDir, buildGraphModel, demoGraphModel, demoGraphModelSized, readVaultPages, makeSharedPromoter } from '../agent/knowledge';
 import { createLogger } from '../logger';
 import { parseDreamReport } from '../agent/dreaming/report';
@@ -222,6 +225,8 @@ class RateLimiter {
 }
 
 export class GatewayRouter {
+  private readonly dashboardReader = new DashboardReader();
+  private readonly dashboardStreams = new Set<Response>();
   private readonly agents: Map<string, AgentRunner>;
 
   // ─── App proxy ──────────────────────────────────────────────────────────
@@ -877,6 +882,17 @@ export class GatewayRouter {
       res.json({ status: 'ok' });
     });
 
+    // Public static typeface assets contain no gateway data.
+    this.app.get('/dashboard/fonts.css', (_req: Request, res: Response) => {
+      res.setHeader('Cache-Control','public, max-age=86400');
+      res.type('css').send([300,400,500,600].map(weight=>`@font-face{font-family:Poppins;font-style:normal;font-weight:${weight};font-display:swap;src:url(fonts/poppins-${weight}.woff2) format('woff2')}`).join('\n'));
+    });
+    this.app.get('/dashboard/fonts/:font', (req: Request,res: Response) => {
+      if(!/^poppins-(300|400|500|600)\.woff2$/.test(req.params.font)){res.sendStatus(404);return;}
+      res.setHeader('Cache-Control','public, max-age=86400');
+      res.sendFile(path.resolve(__dirname,'../../resource/dashboard',req.params.font));
+    });
+
     // Web dashboard. When API keys are configured, require a live dashboard
     // session cookie; otherwise serve the login page (API-key form). Keyless
     // installs have no credential to check, so the dashboard stays open there —
@@ -905,6 +921,73 @@ export class GatewayRouter {
       } else {
         res.send(generateDashboardHtml());
       }
+    });
+
+    // Reports expose cross-agent usage/tool inventories: the same admin gate as status.
+    for (const reportPath of ['/dashboard/token-report', '/token-report']) {
+      this.app.get(reportPath, async (req: Request, res: Response) => {
+        res.setHeader('Cache-Control', 'no-store');
+        // The HTML page requires an explicit dashboard login, just like /dashboard.
+        // Reverse proxies may inject an admin API key: that must not log a browser in.
+        // The JSON /token-report endpoint retains API-key access for API clients.
+        if (reportPath === '/dashboard/token-report' && this.apiKeys.length > 0 && !this.hasValidDashSession(req)) {
+          // Relative redirect preserves deployment prefixes (e.g. /gateway) without
+          // trusting forwarded headers. Also handle Express's optional trailing slash.
+          const query = new URLSearchParams();
+          for (const key of ['agentId','sessionId','scope','offset']) if (typeof req.query[key] === 'string') query.set(key, req.query[key] as string);
+          res.redirect(303, (req.path.endsWith('/') ? '../' : './') + '?returnTo=' + encodeURIComponent('token-report?' + query.toString()));
+          return;
+        }
+        if (!this.requireDashOrApiKey(req, res)) return;
+        const { agentId, sessionId } = req.query;
+        const offset = Number(req.query.offset ?? 0);
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1000000) {res.status(400).json({error:'Invalid offset'});return;}
+        if (typeof agentId !== 'string' || typeof sessionId !== 'string' || !sessionId || sessionId.length > 256) {
+          res.status(400).json({ error: 'agentId and sessionId are required' }); return;
+        }
+        const runner = this.agents.get(agentId);
+        if (!runner) { res.status(404).json({ error: 'Unknown agent' }); return; }
+        try {
+          const source = runner.getDashboardSource?.();
+          let report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h')), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
+          if (!report) { res.status(404).json({ error: 'No recorded session token report' }); return; }
+          if (runner.isSessionCompacting?.(sessionId)) report = {...report, activityStatus:'compacting'};
+          if (report.contextWindow) report.contextWindow.total = report.contextWindow.model ? await runner.dashboardContextWindow?.(report.contextWindow.model) ?? null : null;
+          if (reportPath === '/token-report') res.json(report);
+          else res.type('html').send(generateTokenReportHtml(agentId, {...report, scope:dashboardRange(req.query.scope), sessionStatus: runner.agentSessionLiveStatus?.(sessionId) ?? 'stopped'}));
+        } catch {
+          res.status(500).json({ error: 'Unable to load session token report' });
+        }
+      });
+    }
+
+    this.app.get('/dashboard/session',async(req:Request,res:Response)=>{
+      if(!this.requireDashOrApiKey(req,res))return;
+      res.setHeader('Cache-Control','no-store');
+      const {agentId,sessionId}=req.query,offset=Number(req.query.offset??0);
+      if([agentId,sessionId].some(v=>typeof v!=='string'||!v||v.length>256)||!Number.isSafeInteger(offset)||offset<0||offset>1000000){res.status(400).json({error:'Invalid session query'});return;}
+      const detailRunner=this.agents.get(String(agentId));
+      const source=detailRunner?.getDashboardSource?.();
+      if(!source){res.status(404).json({error:'Unknown agent'});return;}
+      try{const detail=await this.dashboardReader.read('session',source.filename,{sessionId,offset,since:dashboardSince(req.query.scope),historyFilename:source.historyFilename});if(!detail){res.status(404).json({error:'Session not found'});return;}if(detailRunner?.isSessionCompacting?.(String(sessionId)))detail.activityStatus='compacting';if(detail.contextWindow)detail.contextWindow.total=detail.contextWindow.model?await detailRunner?.dashboardContextWindow?.(detail.contextWindow.model)??null:null;res.json({...detail,sessionStatus:detailRunner?.agentSessionLiveStatus?.(String(sessionId))??'stopped'});}
+      catch{res.status(503).json({error:'Dashboard data temporarily unavailable'});}
+    });
+
+    this.app.get('/dashboard/task', async (req: Request, res: Response) => {
+      if (!this.requireDashOrApiKey(req, res)) return;
+      res.setHeader('Cache-Control', 'no-store');
+      const {agentId,sessionId,taskId} = req.query;
+      const offset = Number(req.query.offset ?? 0);
+      if ([agentId,sessionId,taskId].some(v=>typeof v !== 'string' || !v || v.length>256) || !Number.isSafeInteger(offset) || offset<0 || offset>1000000) {
+        res.status(400).json({error:'Valid agentId, sessionId, taskId and offset are required'}); return;
+      }
+      const source = this.agents.get(String(agentId))?.getDashboardSource?.();
+      if (!source) {res.status(404).json({error:'Unknown agent'});return;}
+      try {
+        const task = await this.dashboardReader.read('task',source.filename,{sessionId,taskId,offset,since:dashboardSince(req.query.scope)});
+        if (!task) {res.status(404).json({error:'Task not found in this session'});return;}
+        res.json(task);
+      } catch {res.status(503).json({error:'Dashboard data temporarily unavailable'});}
     });
 
     // Dashboard login — exchange a configured API key for an HttpOnly session
@@ -1287,12 +1370,9 @@ export class GatewayRouter {
       });
     });
 
-    // Status endpoint — per-agent stats + heartbeat history
-    this.app.get('/status', (req: Request, res: Response) => {
-      if (!this.requireDashOrApiKey(req, res)) return;
+    const dashboardSnapshot = async (offset: number, scope: unknown = 'all') => {
       const uptimeMs = Date.now() - this.startedAt.getTime();
-
-      const agentsStatus = [...this.agents.entries()].map(([id, runner]) => {
+      const agentsStatus = await Promise.all([...this.agents.entries()].map(async ([id, runner]) => {
         const scheduler = this.schedulers.get(id);
         const history = scheduler?.getHistory();
         const agentConfig = this.configs.get(id);
@@ -1318,10 +1398,20 @@ export class GatewayRouter {
 
         const lastActivity = this.lastActivityAt.get(id);
         // PTY streams are keyed per session, so liveness is per session too.
-        const orchestration = runner.getOrchestrationSummary?.();
-        const managedSessions = orchestration?.sessions ?? [];
-        const managedIds = new Set(managedSessions.map(s => s.sessionId));
-        const sessions = [...runner.getSessionsSummary().filter(s => !managedIds.has(s.sessionId)), ...managedSessions].map((s) => ({
+        const source = runner.getDashboardSource?.();
+        const legacySessions = runner.getSessionsSummary();
+        const liveSessionIds = new Set(runner.liveSessionIds?.() ?? []);
+        const orchestration = source ? (source.enabled ? await this.dashboardReader.read('summary',source.filename,{...source,offset,since:dashboardSince(scope),legacyIds:legacySessions.map(s=>s.sessionId)}) : undefined) : runner.getOrchestrationSummary?.();
+        const managedSessions = (orchestration?.sessions ?? []).map((s: { sessionId: string }) => ({
+          ...s,
+          // Live liveness from the runner's in-memory map: the DB-derived status
+          // reports 'idle' for both a kept-alive session and one already killed by
+          // the idle cleaner; sessionAlive disambiguates them for the dashboard.
+          sessionAlive: liveSessionIds.has(s.sessionId),
+          ...(runner.isSessionCompacting?.(s.sessionId) ? {status:'compacting',isRunning:true} : {}),
+        }));
+        const managedIds = new Set([...managedSessions.map((s: {sessionId:string}) => s.sessionId),...(orchestration?.managedLegacyIds??[])]);
+        const sessions = [...legacySessions.filter(s => !managedIds.has(s.sessionId) && (!dashboardSince(scope) || Number((s as any).updatedAt || s.spawnedAt || 0) >= dashboardSince(scope))), ...managedSessions].map((s) => ({
           ...s,
           hasPtyStream: ptyStreamRegistry.hasSockets(s.sessionId),
         }));
@@ -1349,16 +1439,51 @@ export class GatewayRouter {
           },
           sessions,
         };
-      });
+      }));
 
-      res.json({
+      return {
         agents: agentsStatus,
         uptime: Math.floor(uptimeMs / 1000),
         startedAt: this.startedAt.toISOString(),
         version: GATEWAY_VERSION,
         // Degraded file watchers (e.g. inotify ENOSPC). Empty array when healthy.
         watchers: getWatcherHealth(),
-      });
+      };
+    };
+    this.app.get('/status', async (req: Request,res: Response) => {
+      if(!this.requireDashOrApiKey(req,res))return;
+      res.setHeader('Cache-Control','no-store');
+      const offset=Number(req.query.offset??0);
+      if(!Number.isSafeInteger(offset)||offset<0||offset>1000000){res.status(400).json({error:'Invalid offset'});return;}
+      try {res.json(await dashboardSnapshot(offset,req.query.scope ?? 'all'));}
+      catch {res.status(503).json({error:'Dashboard data temporarily unavailable'});}
+    });
+    this.app.get('/dashboard/events', async (req: Request,res: Response) => {
+      if(!this.requireDashOrApiKey(req,res))return;
+      const offset=Number(req.query.offset??0);
+      if(!Number.isSafeInteger(offset)||offset<0||offset>1000000){res.status(400).json({error:'Invalid offset'});return;}
+      if(this.dashboardStreams.size>=32){res.status(503).json({error:'Too many dashboard streams'});return;}
+      res.setHeader('Content-Type','text/event-stream');res.setHeader('Cache-Control','no-store');res.setHeader('X-Accel-Buffering','no');res.flushHeaders();
+      this.dashboardStreams.add(res);
+      let closed=false,busy=false,last=String(req.headers['last-event-id']??'');
+      const stop=()=>{closed=true;clearInterval(timer);this.dashboardStreams.delete(res);res.end();};
+      const tick=async()=>{
+        if(closed||busy)return;
+        // Recheck cookie expiration/revocation without writing HTTP errors into SSE.
+        if(this.apiKeys.length && !this.hasValidDashSession(req) && !timingSafeAdminKeyMatch(this.apiKeys,this.extractApiToken(req))){res.write('event: unauthorized\ndata: {}\n\n');stop();return;}
+        // Never queue snapshots behind a slow browser.
+        if(res.writableLength>256*1024){stop();return;}
+        busy=true;
+        try {
+          const data=await dashboardSnapshot(offset,req.query.scope ?? 'all');
+          if(closed)return;
+          const payload=JSON.stringify(data),id=crypto.createHash('sha256').update(JSON.stringify({agents:data.agents,watchers:data.watchers,version:data.version})).digest('hex').slice(0,24);
+          if(id!==last){res.write('id: '+id+'\nevent: snapshot\ndata: '+payload+'\n\n');last=id;}
+          else res.write(': heartbeat\n\n');
+        }catch{if(!closed)res.write('event: unavailable\ndata: {}\n\n');}
+        finally{busy=false;}
+      };
+      const timer=setInterval(()=>void tick(),5000);timer.unref();req.on('close',stop);void tick();
     });
   }
 
@@ -1569,6 +1694,9 @@ export class GatewayRouter {
   }
 
   async stop(): Promise<void> {
+    for(const response of this.dashboardStreams)response.end();
+    this.dashboardStreams.clear();
+    await this.dashboardReader.close();
     await this.voiceApi?.close();
     if (this.ticketPruner) clearInterval(this.ticketPruner);
     // Terminate live WebSocket clients first. The dashboard PTY viewer holds these

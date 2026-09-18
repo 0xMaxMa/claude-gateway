@@ -1,3 +1,4 @@
+import { recordTokenTurn } from '../token-ledger';
 import { storedReplyContext, resolveStoredReply } from '../reply-context';
 import { observeToolRepetition } from './tool-repetition';
 import { taskDirective } from './task-directive';
@@ -84,11 +85,11 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const context = this.agent.type === 'app-agent'
       ? await containerNode(this.agent.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))")
       : await readFile(join(this.agent.workspace, 'CLAUDE.md'), 'utf8');
-    this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway }));
+    this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway, toolExposure: 'lazy-connectors-v1' }));
     const shared = resolveSharedConfig(this.agent.knowledge?.shared, this.gateway.gateway.knowledge?.shared);
     const ticket = this.bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation }, directory, this.agent.workspace, shared.enabled ? sharedVaultDir(shared) : '');
     try {
-      const profile = { ...ticket.profile, hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, workerSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir };
+      const profile = { ...ticket.profile, hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir };
       const workerConfig: AgentConfig = { ...this.agent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
         claude: { ...this.agent.claude, model: task.model ?? this.agent.claude.model, extraFlags: [] } };
       const process = new SessionProcess(attempt.sessionId, 'api', workerConfig, this.gateway, new SessionStore(join(this.privateRoot, 'logs')), undefined, profile);
@@ -139,9 +140,13 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       let observing = false, observationClosed = false, lastActivityAt = Date.now();
       const limits = resolveOrchestrationConfig(this.agent.orchestration);
       const turn = startProcessTurn(process, prompt, limits.tasks.maxDurationMs || undefined, undefined,
-        metrics => this.onManagedTurn?.(task.agentSessionId, revision.instructions, metrics, task.skill ? [task.skill.name] : []), [],
+        metrics => {
+          recordTokenTurn(this.tasks.store, { id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics });
+          this.onManagedTurn?.(task.agentSessionId, revision.instructions, metrics, task.skill ? [task.skill.name] : []);
+        }, [],
         {startupTimeoutMs: limits.conversation.startupTimeoutMs, firstResponseTimeoutMs: limits.conversation.firstResponseTimeoutMs,
           idleTimeoutMs: limits.tasks.idleTimeoutMs, acceptToolProgress: true, idleAction: 'observe',
+          onUsage: metrics => recordTokenTurn(this.tasks.store, {id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics}),
           onObservation: observation => {
             if (observing || observationClosed) return;
             observing = true;

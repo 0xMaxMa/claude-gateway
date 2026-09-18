@@ -72,7 +72,8 @@ export class OrchestrationStore {
           CREATE TABLE IF NOT EXISTS task_question_messages(
           response_id TEXT NOT NULL REFERENCES assistant_responses(id), question_id TEXT NOT NULL REFERENCES task_questions(question_id), PRIMARY KEY(response_id,question_id));
           CREATE INDEX IF NOT EXISTS task_question_messages_question ON task_question_messages(question_id);
-          CREATE INDEX IF NOT EXISTS deliveries_provider_message ON deliveries(provider_message_id,binding_id);`);
+          CREATE INDEX IF NOT EXISTS deliveries_provider_message ON deliveries(provider_message_id,binding_id);
+          CREATE INDEX IF NOT EXISTS conversation_events_task_tool ON conversation_events(json_extract(payload_json,'$.task_id'),seq DESC) WHERE type='tool.activity';`);
         // Existing installations mapped one question per message. Natural reminders
         // can combine several questions without losing their reply associations.
         if (!Number(this.all('PRAGMA table_info(task_question_messages)').find(row => row.name === 'question_id')?.pk)) {

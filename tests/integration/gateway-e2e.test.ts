@@ -409,7 +409,7 @@ describe('Gateway E2E (Option A — monitoring only)', () => {
       // no longer embeds any token in the HTML.
       const dashRes = await supertest(router.getApp()).get('/dashboard');
       expect(dashRes.status).toBe(200);
-      expect(dashRes.text).toContain('Enter an API key');
+      expect(dashRes.text).toContain('Enter your admin API key');
       expect(dashRes.text).not.toContain('name="dash-token"');
 
       // Log in with a configured API key → HttpOnly session cookie.

@@ -181,21 +181,23 @@ describe('executeApiCommand session counting (#160)', () => {
     expect(responseText).toContain('(current)');
   });
 
-  it('U-RUN-05: /compact end-to-end — compacts the flat store and returns keptMessages count', async () => {
-    await seedFlatStore(sessionId, 6);
-    mockCompactorCli.mockReturnValueOnce({ status: 0, stdout: 'Compact summary.', stderr: '', error: undefined });
-
+  it('U-RUN-05: /compact invokes native CLI and preserves every flat-store message', async () => {
+    await seedFlatStore(sessionId, 60);
+    const before = await getSessionStore(runner).loadSession(agentId, sessionId);
+    const process = Object.assign(new EventEmitter(), {
+      sessionId, isRunning:()=>true, isProcessing:false, start:jest.fn(async()=>{}),
+      sendMessage:jest.fn(function(this:EventEmitter,text:string){
+        this.emit('output',JSON.stringify({type:'system',subtype:'compact_boundary'}));
+        this.emit('output',JSON.stringify({type:'result',result:'Compacted'}));
+      }),stop:async()=>{},
+    });
+    (runner as any).sessions.set(sessionId,process);
     const { result, responseText } = await runner.executeApiCommand(sessionId, chatId, '/compact', { skipPersist: true });
-
-    expect(result.success).toBe(true);
-    // afterMessages = 1 summary + 6 verbatim (all < KEEP_LAST_MESSAGES default)
-    expect(result.keptMessages).toBe(7);
-    expect(responseText).toContain('compacted');
-    // The flat store must have been overwritten with the compacted result.
-    const flat = await getSessionStore(runner).loadSession(agentId, sessionId);
-    expect(flat.length).toBeGreaterThan(0);
-    expect(flat[0].role).toBe('system');
-    expect((flat[0].content as string)).toContain('[Conversation Summary]');
+    expect(result).toEqual({success:true,native:true,historyUnchanged:true});
+    expect(process.sendMessage).toHaveBeenCalledWith('/compact',[]);
+    expect(process.start).not.toHaveBeenCalled();
+    expect(responseText).toContain('history is unchanged');
+    expect(await getSessionStore(runner).loadSession(agentId, sessionId)).toEqual(before);
   });
 
   it('U-RUN-06: an unknown command throws before persisting anything', async () => {
@@ -204,14 +206,32 @@ describe('executeApiCommand session counting (#160)', () => {
     ).rejects.toThrow('Unknown command: /bogus');
   });
 
-  it('U-RUN-07: /clear empties the flat store the model reloads at spawn', async () => {
+  it('U-RUN-07: /clear preserves history and requests a durable 50-message bootstrap', async () => {
     await seedFlatStore(sessionId, 6);
+    const db = (runner as any).historyDb;
+    const clearChat = jest.spyOn(db, 'clearChat');
+    const clearSession = jest.spyOn(db, 'clearSession');
     expect(await getSessionStore(runner).loadSession(agentId, sessionId)).toHaveLength(6);
 
     const { result } = await runner.executeApiCommand(sessionId, chatId, '/clear', { skipPersist: true });
 
     expect(result.success).toBe(true);
-    expect(await getSessionStore(runner).loadSession(agentId, sessionId)).toEqual([]);
+    expect(await getSessionStore(runner).loadSession(agentId, sessionId)).toHaveLength(6);
+    expect(getSessionStore(runner).getContextReset(agentId, sessionId)).toMatchObject({historyLimit:50});
+    expect(result.historyUnchanged).toBe(true);
+    expect(clearChat).not.toHaveBeenCalled();
+    expect(clearSession).not.toHaveBeenCalled();
+  });
+  it('/clear rejects an active managed response without changing history or the next bootstrap', async () => {
+    await seedFlatStore(sessionId, 6);
+    const reset = jest.fn();
+    (runner as any).orchestration = {isBusy:()=>true,ownsSession:()=>true,resetSessionContext:reset};
+    try {
+      await expect((runner as any).clearContext(sessionId)).rejects.toThrow('responding');
+      expect(reset).not.toHaveBeenCalled();
+      expect(getSessionStore(runner).getContextReset(agentId,sessionId)).toBeUndefined();
+      expect(await getSessionStore(runner).loadSession(agentId,sessionId)).toHaveLength(6);
+    } finally {(runner as any).orchestration=undefined;}
   });
   test('managed /stop persists the numbered prompt and numeric replies cancel only the selected task',async()=>{
     const store=new OrchestrationStore(':memory:',agentId),tasks=new TaskService(store),decisions=new DecisionService(store);

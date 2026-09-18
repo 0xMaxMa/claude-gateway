@@ -56,3 +56,23 @@ test('expired continuation starts a new worker session and retains explicit pred
  const next=spawn(first.taskId),b=tasks.claim(next.taskId)!;
  expect(b.workerId).not.toBe(a.workerId);expect(b.sessionId).not.toBe(a.sessionId);expect(next.continueTaskId).toBe(first.taskId);
 });
+
+test('unrelated work keeps warm continuation sessions while slots remain available',()=>{
+ const first=spawn(),a=tasks.claim(first.taskId)!;tasks.pool.bind(a,'same-config');done(a);
+ const unrelated=spawn(),b=tasks.claim(unrelated.taskId)!;
+ expect(b.workerId).not.toBe(a.workerId);expect(b.resumeSession).toBe(false);done(b);
+ const next=tasks.claim(spawn(first.taskId).taskId)!;
+ expect(next).toMatchObject({workerId:a.workerId,sessionId:a.sessionId,resumeSession:true});
+ tasks.pool.bind(next,'same-config');expect(next.resumeSession).toBe(true);
+});
+
+test('at capacity unrelated work evicts the oldest idle session, retaining recent continuations',()=>{
+ tasks.configure({tasks:{workspaceMode:'host',maxConcurrentPerAgent:2,maxConcurrentPerConversation:2,workerIdleTtlMs:600000}});
+ const first=spawn(),a=tasks.claim(first.taskId)!;tasks.pool.bind(a,'same-config');done(a);
+ const second=spawn(),b=tasks.claim(second.taskId)!;tasks.pool.bind(b,'same-config');done(b);
+ store.run('UPDATE worker_pool SET idle_since=? WHERE id=?',Date.now()-1000,a.workerId!);
+ store.run('UPDATE worker_pool SET idle_since=? WHERE id=?',Date.now(),b.workerId!);
+ const third=tasks.claim(spawn().taskId)!;expect(third.workerId).toBe(a.workerId);done(third);
+ const continuation=tasks.claim(spawn(second.taskId).taskId)!;
+ expect(continuation).toMatchObject({workerId:b.workerId,sessionId:b.sessionId,resumeSession:true});
+});

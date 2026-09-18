@@ -203,7 +203,7 @@ curl -X DELETE \
 
 ## POST /api/v1/agents/:agentId/sessions/:sessionId/clear {#post-apiv1agentsagentidsessionssessionidclear}
 
-Clear all history for a session.
+Reset the Claude Code context for this session without deleting chat history or attachments. The next message starts a new CLI session and loads up to the latest 50 history messages once; subsequent managed turns resume the new CLI session. Existing tasks remain unchanged. An active response or compaction must finish before clearing. The reset survives a gateway restart.
 
 **Request body:** `{ "chat_id": "myapp" }`
 
@@ -216,14 +216,14 @@ curl -X POST \
 ```
 
 ```json
-{ "cleared": true, "sessionId": "da19d84a-6a36-4f57-b419-d322d82c4db8" }
+{ "success": true, "historyUnchanged": true, "historyLimit": 50 }
 ```
 
 ---
 
 ## POST /api/v1/agents/:agentId/sessions/:sessionId/compact {#post-apiv1agentsagentidsessionssessionidcompact}
 
-Summarise old history and keep only recent messages, reducing context usage.
+Run native Claude Code `/compact` on the existing CLI session. Gateway chat history stays unchanged; recent messages are not appended again. A busy response must finish first. Missing transcripts and unconfirmed CLI compaction fail explicitly, without falling back to history summarization.
 
 **Request body:** `{ "chat_id": "myapp" }`
 
@@ -236,7 +236,7 @@ curl -X POST \
 ```
 
 ```json
-{ "success": true, "keptMessages": 10, "archivedMessages": 42 }
+{ "success": true, "native": true, "historyUnchanged": true }
 ```
 
 ---

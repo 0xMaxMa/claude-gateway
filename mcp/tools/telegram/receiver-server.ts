@@ -877,8 +877,8 @@ const BOT_COMMANDS = [
   { command: 'sessions', description: 'Manage conversation sessions' },
   { command: 'new', description: 'Create a new session' },
   { command: 'rename', description: 'Rename current session' },
-  { command: 'clear', description: 'Clear current session history' },
-  { command: 'compact', description: 'Summarize and compress session history' },
+  { command: 'clear', description: 'Reset Claude Code context; keep chat history' },
+  { command: 'compact', description: 'Compact Claude Code context' },
   { command: 'stop', description: ORCHESTRATION_ENABLED ? 'Stop the agent reply and choose a task to cancel' : 'Interrupt the agent and stop current work' },
   { command: 'restart', description: 'Graceful restart session' },
   { command: 'model', description: 'Show current AI model' },
@@ -1169,8 +1169,8 @@ bot.command('help', async ctx => {
     `/sessions — list and switch between sessions\n` +
     `/new <name> — create a new session\n` +
     `/rename <name> — rename current session\n` +
-    `/clear — clear current session history\n` +
-    `/compact — summarise and compress session history\n` +
+    `/clear — reset context; keep chat history\n` +
+    `/compact — compact Claude Code context; keep chat history\n` +
     (ORCHESTRATION_ENABLED ? `/stop — stop the reply and choose a task to cancel\n` : `/stop — interrupt the running turn\n`) +
     `/restart — graceful restart session\n\n` +
     `*Agent*\n` +
@@ -1355,7 +1355,7 @@ bot.command('compact', async ctx => {
     .text('\u274c Cancel', 'compact:cancel')
 
   await ctx.reply(
-    '🧠 Compact session?\nThis will summarise old messages and keep only recent history.',
+    '🧠 Compact session?\nThis compacts Claude Code context. Your chat history stays unchanged.',
     { reply_markup: keyboard },
   )
 })
@@ -1583,18 +1583,18 @@ bot.command('sessions', async ctx => {
   }
 })
 
-// /clear — show Yes/No confirmation before clearing session history
+// /clear — confirm a fresh CLI context without deleting history
 bot.command('clear', async ctx => {
   if (ctx.chat?.type !== 'private') return
   const access = loadAccess()
   if (!access.allowFrom.includes(String(ctx.from!.id))) return
 
   await ctx.reply(
-    '🗑️ Clear session?\n\nThis will delete all message history. This cannot be undone.',
+    'Reset Claude Code context?\n\nChat history and attachments stay unchanged. Your next message starts a new context with the latest 50 messages.',
     {
       reply_markup: {
         inline_keyboard: [[
-          { text: '✅ Yes, clear it', callback_data: 'session_clear_confirm' },
+          { text: '✅ Reset context', callback_data: 'session_clear_confirm' },
           { text: '❌ Cancel', callback_data: 'session_clear_cancel' },
         ]],
       },
@@ -1880,10 +1880,10 @@ bot.on('callback_query:data', async ctx => {
           payload: { model: newModel },
         }),
       })
-      const result = (await res.json()) as { success?: boolean; error?: string; restarted?: boolean }
+      const result = (await res.json()) as { success?: boolean; error?: string; restarted?: boolean; appliesNextTurn?: boolean }
       if (result.success) {
         await ctx.answerCallbackQuery({ text: `✅ Model changed to ${newModel}` }).catch(() => {})
-        await ctx.editMessageText(`\u2705 Model changed to ${newModel}`).catch(() => {})
+        await ctx.editMessageText(`\u2705 Model changed to ${newModel}${result.appliesNextTurn ? "\nApplies to the next response; current work continues." : ""}`).catch(() => {})
       } else {
         await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
       }
@@ -1920,7 +1920,7 @@ bot.on('callback_query:data', async ctx => {
           chat_id: String(ctx.callbackQuery.message?.chat.id),
         }),
       })
-      const result = (await res.json()) as { success?: boolean; error?: string; restarted?: boolean }
+      const result = (await res.json()) as { success?: boolean; error?: string; restarted?: boolean; appliesNextTurn?: boolean }
       if (result.success) {
         if (result.restarted === false) {
           // No active session — nothing to restart
@@ -2085,8 +2085,8 @@ bot.on('callback_query:data', async ctx => {
     }
     const chatId = String(ctx.callbackQuery.message?.chat.id)
     try {
-      await ctx.answerCallbackQuery({ text: 'Clearing...' }).catch(() => {})
-      await ctx.editMessageText('\u23f3 Clearing session...').catch(() => {})
+      await ctx.answerCallbackQuery({ text: 'Resetting context...' }).catch(() => {})
+      await ctx.editMessageText('\u23f3 Resetting context...').catch(() => {})
       const res = await fetch(CALLBACK_URL_BASE + '/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2094,7 +2094,7 @@ bot.on('callback_query:data', async ctx => {
       })
       const result = (await res.json()) as { success?: boolean; error?: string }
       if (result.success) {
-        await ctx.reply('\uD83D\uDCA1 Session has been cleared').catch(() => {})
+        await ctx.reply('\uD83D\uDCA1 Claude Code context reset. Chat history is unchanged. The next message loads the latest 50 messages.').catch(() => {})
       } else {
         await ctx.reply(`\u274C Clear failed: ${result.error ?? 'Unknown error'}`).catch(() => {})
       }

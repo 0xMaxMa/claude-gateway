@@ -19,13 +19,15 @@ describe('SLASH_COMMANDS', () => {
     expect(questionOpt!.required).toBe(true);
   });
 
-  it('defines exactly 4 slash commands', () => {
-    expect(SLASH_COMMANDS).toHaveLength(4);
+  it('defines exactly 6 slash commands', () => {
+    expect(SLASH_COMMANDS).toHaveLength(6);
     const names = SLASH_COMMANDS.map(c => c.name);
     expect(names).toContain('ask');
     expect(names).toContain('session');
     expect(names).toContain('new');
     expect(names).toContain('model');
+    expect(names).toContain('clear');
+    expect(names).toContain('compact');
   });
 });
 

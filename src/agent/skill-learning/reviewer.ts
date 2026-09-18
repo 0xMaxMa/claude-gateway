@@ -28,9 +28,11 @@ export interface ReviewerInput {
 
 export interface ReviewerResult {
   proposal: ReviewProposal;
-  /** Tokens the reviewer spent (input+output), for the net-token ledger. 0 if unknown. */
+  /** Token volume including fresh input, cache creation/read, and output, for the net-token ledger. 0 if unknown. */
   tokensSpent: number;
   timedOut?: boolean;
+  /** A valid proposal was received; failures are not deduplication evidence. */
+  reviewed?: boolean;
 }
 
 /**
@@ -199,8 +201,11 @@ function parseEnvelope(stdout: string): { resultText: string; tokens: number } {
   try {
     const env = JSON.parse(stdout) as Record<string, unknown>;
     const resultText = typeof env['result'] === 'string' ? (env['result'] as string) : '';
-    const usage = env['usage'] as { input_tokens?: number; output_tokens?: number } | undefined;
-    const tokens = (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0);
+    const usage = env['usage'] as Record<string, unknown> | undefined;
+    const count = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+    // Cache TTL sub-buckets and modelUsage repeat these counts; never add them.
+    const tokens = ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens']
+      .reduce((sum, key) => sum + count(usage?.[key]), 0);
     return { resultText, tokens };
   } catch {
     // Not an envelope — treat the whole stdout as the model text (e.g. text format in tests).
@@ -261,5 +266,6 @@ export async function runReviewer(
   } catch {
     return { proposal: { action: 'none' }, tokensSpent: tokens };
   }
-  return { proposal: coerceProposal(parsed), tokensSpent: tokens };
+  return { proposal: coerceProposal(parsed), tokensSpent: tokens,
+    reviewed: !!parsed && typeof parsed === 'object' && ['none', 'create', 'edit'].includes((parsed as { action?: string }).action ?? '') };
 }

@@ -48,6 +48,12 @@ Explicit controls remain available for clients that intentionally bypass interpr
 
 These commands and the [task answer API](../api/tasks.md#answer-a-task-question) require a current question and the correct authenticated conversation. An accepted answer is saved before work resumes when a worker slot is available.
 
+If an automatic task report fails, its result stays pending for a later reporting attempt. Retry delays increase exponentially from five seconds to at most one hour and survive gateway restarts. These background failures remain in diagnostics rather than generating repeated chat or voice error messages. A new user message can trigger a turn immediately and still receives provider error details if that turn fails; it does not have to wait for the background retry delay. The retry delay is a fallback policy, not a prediction of the provider's quota reset time.
+
+A corrected task-spawn validation error does not produce a partial-failure notice when a later command in the same turn successfully queues the same work. Automatic matching requires the same title, exact brief, predecessor, context references and continuation policy. If the brief changes, the caller must copy `retry_of` from the rejected spawn response to explicitly identify the correction. The reference only reconciles reporting for a validation failure in the same decision; it never bypasses admission or permissions. Unrelated failures, conflicting replays, permission errors and uncertain outcomes still produce a warning. Original tool errors remain in the transcript; this changes reporting, not authorization or execution.
+
+Corrected `task_update` validation, revision-conflict, and acknowledgement errors follow the same reporting rule. The successful correction must target the same task; automatic matching also requires the same instruction and mode. A changed instruction or mode requires an explicit `retry_of` reference. Permission failures and unrelated errors remain visible.
+
 A finished investigation and a proposed implementation are different stages. Completion reports should identify what finished and whether a follow-up task is actually queued/running. A suggested next step is not a promise that execution has started, and read-only investigation does not authorize deployment.
 
 ## Cancel and reconcile
@@ -67,3 +73,52 @@ The `tasks.idleTimeoutMs` defaults to 300000 and marks quiet workers for inspect
 `ORCHESTRATION_DISABLED` indicates legacy mode. `PROFILE_INVENTORY_MISMATCH` indicates a subprocess exposed tools outside its profile: restore a consistent gateway/MCP revision and retain the inventory check.
 
 Orchestration covers text orchestration across Telegram, Discord, LINE, Slack, WhatsApp, WeChat, and API conversations. WeChat staged attachments are unsupported. Voice channel support is narrower; see [voice](./voice.md).
+
+## Context and worker continuity
+
+The Agent receives complete retained results for the tasks being reported in its current turn. Other tasks appear as an index with links to `task_status`, so old results do not have to be inserted again into every prompt. Historical command receipts retain mutation IDs, versions and question state, with a reference to current task details instead of repeated progress, workflow and result payloads. This changes prompt composition, not the stored results or user authorization.
+
+Related work can use `continue_task_id` to resume a compatible Claude Code session. The pool keeps idle continuation slots while it has room, and evicts the oldest idle slot when full. Idle slots contain no running process. Expiry, changed permissions/model/configuration, different workspaces and incompatible execution profiles can require a fresh CLI session. Reusing a worker ID alone is not proof that its CLI history was resumed. Unrelated work always receives a fresh session.
+
+Installed skill metadata is sorted deterministically, and changing previously communicated reports are supplied as turn data rather than appended to system instructions. This keeps stable prompt prefixes stable without dropping the historical messages used to avoid duplicate updates. Cache reuse still depends on the model/provider; it is not guaranteed by gateway composition alone.
+
+Capability discovery remains separate from execution permission. The Agent can inspect the enabled tools and skills catalog and delegate worker-only capabilities. General host workers retain the broad native tool inventory, including Bash, unless an explicit internal tool policy is supplied. Narrowing an inventory must preserve the tools required to finish the task; the gateway does not assume it can hot-load missing tools into an already running CLI session.
+
+Task state notifications are coalesced before inference. Repeated delivery of the same task version does not create another notification; active or queued conversation input prevents another automatic report from being scheduled alongside it. A completed report consumes its assigned notifications. Failed reports retry with backoff without replaying the task itself. Internal supervision can still inspect a quiet worker even when there is no user-facing update: silence does not prove that intervention is unnecessary. Reporting decisions may choose silence when no meaningful new information should be sent.
+
+## Inspect token usage
+
+Open the admin dashboard and select **View token report** on a managed Agent session. The report opens in a new tab and separates Agent input handling, Agent progress/result reporting, and Worker execution. Session rows show Agent usage alongside the combined Agent/Worker total; task rows show the latest attempt’s usage and tools, matching the displayed worker/session identity. Earlier retries remain in the full report and combined session totals. Loaded tools and tools actually called are shown separately.
+
+Token volume includes input, cache creation, cache reads and output. Thinking is already included in output and is not added twice. Cache creation duration is shown when the CLI reports it. These percentages describe token volume, **not billing cost**: cached reads and input may have different prices.
+
+Each recorded turn includes the available request-level usage and its input/task/result context. Repeated content blocks and stream usage are deduplicated by provider message ID. A CLI turn aggregate is reconciled with request usage, not added as another request. Some providers expose only aggregate usage, so a turn total can be available without a complete request breakdown. Missing usage or tool inventory is shown as **—**, not an inferred zero.
+
+Usage is persisted in the per-agent `orchestration.db` table `token_turns` for turns recorded after this feature is installed. It survives gateway restarts; earlier sessions are not retroactively assigned estimated usage. Background skill-learning reviews are accounted for separately from foreground Agent/Worker totals. See the [report endpoints](../api/orchestration.md#session-token-reports) for programmatic access.
+
+Use matched tasks, models, permissions and cache conditions when comparing releases. A smaller prompt or fewer repeated fields alone is not evidence of measured end-to-end savings or unchanged task quality.
+
+
+Gateway execution tools in host/isolated workers use `tool_search` to retrieve original argument schemas and `tool_call` to invoke them. Discovery only searches tools already allowed by the worker policy. Calls keep the same task-ticket validation, original handler validation and cancellation path. Task reporting and memory tools remain direct; native tools retain their resolved policy. GetPod-configured connectors use a worker-local discovery/invocation adapter; MCP servers inherited directly from Claude Code configuration remain governed by Claude Code’s own loading behavior. This avoids depending on provider-specific support for deferred-tool reference blocks. A capability may remain available even when its full schema is not initially loaded; the dashboard distinguishes loaded schemas from the underlying tools actually called.
+
+Discovery adds a model/tool round trip on first use. Smaller schema payloads do not guarantee lower end-to-end latency or billing. Compare the same model and task with measured cache usage before concluding that a workload is cheaper. The initial implementation has protocol/fixture coverage; matched live-model A/B measurements are required to establish production savings.
+
+The dashboard uses the same **admin API key** login as before. Conversations and Tasks open detail drawers with retained session records and individual worker attempts; token reports open in a separate tab. Overview displays recorded UTC token activity, while Usage & tokens separates Agent and Worker totals. Reads run in a dedicated worker thread with bounded caches, pagination, and live updates; missing measurements are shown as **—**.
+
+### Dashboard session activity
+
+The dashboard and Session token report share the same session status. After the last Agent turn ends, a conversation without active work stays **Idle** for one hour, even though its per-turn Claude Code process has been released. After more than one hour it shows **Stopped**, and both Context window cards show **—**. Active turns and non-terminal tasks retain their activity status. Context window retains the latest recorded measurement during the idle period; these display rules do not expire or delete conversation history or imply provider cache expiry.
+
+### Native context compaction
+
+Use `/compact` in a supported chat channel or the session compact API to ask Claude Code to compact its existing session. The gateway resumes that exact transcript, requires a native `compact_boundary` confirmation, and leaves all gateway chat-history files intact. It never reattaches a recent-message window after compaction. Busy sessions reject compaction until their current response finishes; workers continue independently. Missing transcripts and unsupported CLI behavior return an explicit error instead of invoking a separate history summarizer. Legacy sessions require an existing idle headless process.
+
+Installed skill metadata is kept in the stable Agent system prefix, not appended to every resumed user message. Catalog changes refresh that prefix. Worker turn reports distinguish completed, failed and cancelled outcomes from the process lifecycle and expose recorded failure codes.
+
+### Reset model context
+
+`/clear` drops the agent's CLI resume mapping without deleting chat history, attachments, tasks, or worker context. Your next message starts a new Claude Code session with the latest 50 history messages (or all available messages if fewer), then later turns resume that new session. `/compact` instead compacts the existing CLI transcript. Wait for an active response or compaction to finish before using `/clear`.
+
+### Context commands across channels
+
+`/clear` and `/compact` share the same context handlers in Telegram, Discord, LINE, Slack, WhatsApp, WhatsApp Cloud, WeChat, and the Chat API (including streaming requests and the dedicated session endpoints). They preserve gateway chat history. Telegram adds a confirmation step; this does not change the operation. Discord registers native slash commands when its receiver starts. In Slack, register the slash commands in the Slack app or send them as an app mention; native slash commands cannot be used inside threads. Other chat channels accept the commands as message text. Normal channel access checks still apply.

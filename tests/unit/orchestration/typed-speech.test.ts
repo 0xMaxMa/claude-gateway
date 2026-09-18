@@ -6,6 +6,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
+import { ORCHESTRATION_RESPONSE_SCHEMA } from '../../../src/orchestration/response-schema';
 import { SessionProcess } from '../../../src/session/process';
 import { SessionStore } from '../../../src/session/store';
 import { HistoryDB } from '../../../src/history/db';
@@ -41,16 +42,19 @@ test('typed chat speaks only to the connected same-principal listener and retain
  }finally{await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
 });
 
-test.each([[true,'json'],[true,'plain'],[true,'structured'],[false,'plain']] as const)('Telegram voice opt-in %s with %s output persists speech for text and voice', async (enabled,format) => {
+test.each([[true,'json'],[true,'plain'],[false,'plain']] as const)('Telegram voice opt-in %s with %s output persists speech for text and voice', async (enabled,format) => {
  const root=mkdtempSync(join(tmpdir(),'tg-speech-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Identity');
  const a={id:'a',description:'fixture',env:'',workspace,claude:{model:'fixture',extraFlags:[]},orchestration:{enabled:true,channels:['telegram'],voice:{enabled:true,notes:{enabled:true,replyWithVoice:enabled},tts:{voiceId:'chosen'}}}} as AgentConfig;
  const c={gateway:{ orchestration: true,headless:true},agents:[a]} as GatewayConfig,sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a');
  const sid=randomUUID();await sessions.ensureApiSession('a','chat',sid);
  const runtime=await AgentOrchestrationRuntime.open(a,c,dir,sessions,history,{
   transcribeNote:async()=> '日本語で自己紹介してください',
-  createAgentSession:async(id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));if(enabled) expect(profile.responseSchema).toBeDefined();
+  createAgentSession:async(id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));
+    // Cache-lineage: the SAME invariant union schema is attached voice-enabled or not —
+    // the tools+system prefix has to stay byte-identical across the toggle.
+    expect(profile.responseSchema).toBe(ORCHESTRATION_RESPONSE_SCHEMA);
     const fields={display_text:'こんにちは。アシスタントです。',spoken_text:'こんにちは。アシスタントです。'};
-    this.emit('output',JSON.stringify({type:'result',result:format==='json'?JSON.stringify(fields):'こんにちは。アシスタントです。',...(format==='structured'?{structured_output:fields}:{})}));}}) as unknown as SessionProcess,
+    this.emit('output',JSON.stringify({type:'result',result:format==='json'?JSON.stringify(fields):'こんにちは。アシスタントです。'}));}}) as unknown as SessionProcess,
   releaseAgentSession:async()=>{},
  });
  if(enabled) runtime.store.setTelegramVoice('chat',true);
@@ -108,7 +112,7 @@ test('voice and task follow-ups launch the same selected model as typed chat', a
  const c={gateway:{orchestration:true,headless:true},agents:[a]} as GatewayConfig,sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a');
  const sid=randomUUID();await sessions.ensureApiSession('a','chat',sid);const models:(string|undefined)[]=[];
  const runtime=await AgentOrchestrationRuntime.open(a,c,dir,sessions,history,{
-  createAgentSession:async(id,profile,model)=>{models.push(model);return Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){this.emit('output',JSON.stringify({type:'result',result:'OK',...(profile.responseSchema?{structured_output:{display_text:'OK',spoken_text:'OK'}}:{})}));}}) as unknown as SessionProcess;},
+  createAgentSession:async(id,profile,model)=>{models.push(model);expect(profile.responseSchema).toBe(ORCHESTRATION_RESPONSE_SCHEMA);return Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){this.emit('output',JSON.stringify({type:'result',result:'OK'}));}}) as unknown as SessionProcess;},
   releaseAgentSession:async()=>{},
  });
  const scope={agentId:'a',agentSessionId:sid,source:'api' as const,accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'};
@@ -121,6 +125,34 @@ test('voice and task follow-ups launch the same selected model as typed chat', a
  } finally {await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
 });
 
+test('speech and non-speech turns render a byte-identical cached tools+system prefix', async () => {
+ // Regression for the cache-lineage-break bug (issue: switching in/out of speech mode mid-
+ // conversation invalidated Anthropic's prompt cache). ticket.profile.overlay becomes
+ // --append-system-prompt and ticket.profile.responseSchema becomes --json-schema; per
+ // Anthropic's prompt-caching semantics these render into [tools, system, ...] ahead of the
+ // per-turn message, so both must be identical across the toggle or the whole prefix misses.
+ const root=mkdtempSync(join(tmpdir(),'cache-prefix-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Identity');
+ const a={id:'a',description:'fixture',env:'',workspace,claude:{model:'fixture',extraFlags:[]},orchestration:{enabled:true,channels:['api']}} as AgentConfig;
+ const c={gateway:{orchestration:true,headless:true},agents:[a]} as GatewayConfig,sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a');
+ const sid=randomUUID();await sessions.ensureApiSession('a','chat',sid);
+ const profiles:{overlay:string;responseSchema:unknown}[]=[];
+ const runtime=await AgentOrchestrationRuntime.open(a,c,dir,sessions,history,{
+  createAgentSession:async(id,profile)=>{profiles.push({overlay:profile.overlay,responseSchema:profile.responseSchema});return Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){this.emit('output',JSON.stringify({type:'result',result:'OK'}));}}) as unknown as SessionProcess;},
+  releaseAgentSession:async()=>{},
+ });
+ const scope={agentId:'a',agentSessionId:sid,source:'api' as const,accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'};
+ const capabilities={execute:false,writeMemory:false};
+ try {
+  await runtime.send({scope,text:'Hello'},capabilities,{timeoutMs:1000});
+  await runtime.submitInput({scope,text:'Voice follow-up',modality:'live_voice',ingressKey:'utterance:test'},capabilities).response;
+  expect(profiles).toHaveLength(2);
+  // Byte comparison, not shape comparison: the serialized --json-schema argument and the
+  // --append-system-prompt overlay must be the identical bytes across the speech toggle.
+  expect(JSON.stringify(profiles[1].responseSchema)).toBe(JSON.stringify(profiles[0].responseSchema));
+  expect(JSON.stringify(profiles[0].responseSchema)).toBe(JSON.stringify(ORCHESTRATION_RESPONSE_SCHEMA));
+  expect(profiles[1].overlay).toBe(profiles[0].overlay);
+ } finally {await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
+});
 
 test('failed voice note retains provider code and returns a readable diagnostic with a reference', async () => {
  const root=mkdtempSync(join(tmpdir(),'voice-note-failure-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Identity');
@@ -198,5 +230,28 @@ test.each(['api', 'telegram'] as const)('%s orchestration persists unrecognized 
   expect(row?.state).toBe('failed');
   expect(row?.generated_text).toBe('API Error: 400 Third-party apps now draw from your extra usage, not your plan limits.');
   if(source==='telegram')expect(runtime.store.all('SELECT delivered_text FROM deliveries')).toEqual([{delivered_text:row?.generated_text}]);
+ }finally{await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
+});
+
+test.each(['api', 'telegram'] as const)('%s automatic report failures remain silent while retaining diagnostics', async source => {
+ const root=mkdtempSync(join(tmpdir(),'quota-response-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Identity');
+ const a={id:'a',description:'fixture',env:'',workspace,claude:{model:'fixture',extraFlags:[]},orchestration:{enabled:true,channels:['api','telegram']}} as AgentConfig;
+ const c={gateway:{orchestration:true,headless:true},agents:[a]} as GatewayConfig,sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a');
+ const sid=randomUUID();if(source==='api')await sessions.ensureApiSession('a','chat',sid);
+ const runtime=await AgentOrchestrationRuntime.open(a,c,dir,sessions,history,{
+  createAgentSession:async(id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+   this.emit('output',JSON.stringify({type:'assistant',error:'rate_limit',message:{content:[{type:'text',text:'Daily credit limit reached. Resets in 2 hours. Bearer secret-value /internal/path'}]}}));
+   this.emit('output',JSON.stringify({type:'result',is_error:true,result:'Inference failed'}));
+  }}) as unknown as SessionProcess,
+  releaseAgentSession:async()=>{},
+ });
+ try {
+  await expect(runtime.send({scope:{agentId:'a',agentSessionId:sid,source,accountId:'owner',chatId:'chat',threadKey:source==='telegram'?'123':'',principalId:'owner'},text:'status',storeUserMessage:false,ingressKey:'notification:fixture'},{execute:false,writeMemory:false},{timeoutMs:1000})).rejects.toMatchObject({code:'INFERENCE_FAILED'});
+  const row=runtime.store.get('SELECT state,generated_text FROM assistant_responses');
+  expect(row?.state).toBe('failed');
+  expect(row?.generated_text).toBe('');
+  expect(runtime.store.all("SELECT * FROM conversation_events WHERE type='response.error'")).toHaveLength(1);
+  expect(runtime.store.all('SELECT * FROM deliveries')).toHaveLength(0);
+  expect(runtime.store.all('SELECT * FROM response_speech')).toHaveLength(0);
  }finally{await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
 });

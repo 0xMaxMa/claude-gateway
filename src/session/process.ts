@@ -1,3 +1,4 @@
+import { RequestToolCapture, RequestToolSchemas } from './request-tool-capture';
 import type { InputImage } from './input-image';
 import { prepareContainerProfile, stopContainerProfile, CONTAINER_SUPERVISOR, containerNode, assertContainerBinding } from '../orchestration/container';
 import { spawn, ChildProcess } from 'child_process';
@@ -257,6 +258,8 @@ export class SessionProcess extends EventEmitter {
   // re-loads less context until it drops under Anthropic's request ceiling.
   // 0 = inject no history at all (fully fresh context).
   historyLimit: number = MAX_HISTORY_MESSAGES;
+  /** Oversized-request recovery must still shrink an explicit /clear seed window. */
+  historyRecoveryActive = false;
   // Safe-mode override (Epic #195, Phase 3): when true, this session is forced
   // to the headless backend even if gateway.headless===false. The runner sets
   // it from SafeModeManager before start() so a repeatedly-wedged PTY agent
@@ -325,6 +328,9 @@ export class SessionProcess extends EventEmitter {
   // chunks is not captured as two partial lines.
   private lastClaudeBin = 'claude';
   private lastStderrLine: string | null = null;
+  /** Last stderr line the child produced. A failed turn is diagnosed from this, so a
+   * caller can tell a rejected `--resume` apart from an ordinary process exit. */
+  get lastStderr(): string | null { return this.lastStderrLine; }
   private stderrBuffer = '';
   // Log the resolved-binary source once per instance, not on every restart spawn.
   private resolvedBinLogged = false;
@@ -461,10 +467,25 @@ export class SessionProcess extends EventEmitter {
     });
   }
 
+  private contextResetId?: string;
   private async buildInitialPrompt(): Promise<{ historyPrompt: string | null; loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number }> {
-    const history = this.source !== 'api'
+    const reset = this.sessionStore.getContextReset(this.agentConfig.id, this.sessionId);
+    this.contextResetId = reset?.id;
+    // Resuming means Claude Code's own transcript already holds this conversation. Seeding
+    // our flattened copy on top would send every message twice and, because the duplicate
+    // grows and shifts each turn, would also break the prefix the resume exists to reuse.
+    // The gateway's own history in the database is untouched; this is only what the model sees.
+    if (this.runtimeProfile?.cliSession?.resume) {
+      const stored = this.source !== 'api'
+        ? await this.sessionStore.loadTelegramSession(this.agentConfig.id, this.chatId, this.sessionId, this.sessionChannel)
+        : await this.sessionStore.loadSession(this.agentConfig.id, this.sessionId);
+      return { historyPrompt: null, loadedAtSpawn: 0, archivedCount: stored.length, messageCountAtSpawn: stored.length };
+    }
+    const storedHistory = this.source !== 'api'
       ? await this.sessionStore.loadTelegramSession(this.agentConfig.id, this.chatId, this.sessionId, this.sessionChannel)
       : await this.sessionStore.loadSession(this.agentConfig.id, this.sessionId);
+    const excluded = new Set(this.runtimeProfile?.excludedHistoryOperationIds ?? []);
+    const history = storedHistory.filter(message => !message.operationId || !excluded.has(message.operationId));
 
     // If history exceeds the limit and history[0] is a compaction summary, rescue it
     // so the model retains context from before the truncation window.
@@ -472,8 +493,9 @@ export class SessionProcess extends EventEmitter {
     const firstMsg = history[0];
     // Clamp to a sane range; the runner uses this to escalate-shrink history on
     // repeated request_too_large (50→40→30→20→10→0). limit === 0 → no history.
-    const limit = Math.max(0, this.historyLimit);
+    const limit = Math.max(0, reset && !this.historyRecoveryActive ? reset.historyLimit : this.historyLimit);
     const hasSummary =
+      !reset &&
       limit > 1 &&
       history.length > limit &&
       firstMsg?.role === 'system' &&
@@ -487,8 +509,8 @@ export class SessionProcess extends EventEmitter {
         : history.slice(-limit);
 
     const loadedAtSpawn = recent.length;
-    const archivedCount = history.length - recent.length;
-    const messageCountAtSpawn = history.length;
+    const archivedCount = storedHistory.length - recent.length;
+    const messageCountAtSpawn = storedHistory.length;
 
     if (recent.length === 0) {
       return { historyPrompt: null, loadedAtSpawn, archivedCount, messageCountAtSpawn };
@@ -689,6 +711,7 @@ export class SessionProcess extends EventEmitter {
   }
 
   private managedMcpConfigPath?: string;
+  private managedConnectorPaths = new Set<string>();
 
   private writeMcpConfig(): string | null {
     if (this.runtimeProfile) {
@@ -704,7 +727,13 @@ export class SessionProcess extends EventEmitter {
         if (isReservedConnectorId(id)) continue;
         this.spawnedConnectors.set(id, connectorFingerprint(server));
       }
-      const servers = Object.fromEntries([...this.spawnedConnectors.keys()].map(id => [id, connectors[id]]));
+      const servers = Object.fromEntries([...this.spawnedConnectors.keys()].map((id, index) => {
+        const connectorPath = path.join(path.dirname(this.runtimeProfile!.mcpConfigPath), `connector-${index}.json`);
+        fs.writeFileSync(connectorPath, JSON.stringify(connectors[id]), {mode:0o600});
+        fs.chmodSync(connectorPath, 0o600);
+        this.managedConnectorPaths.add(connectorPath);
+        return [id, {command:'bun', args:[path.resolve(__dirname, '../../mcp/lazy-connector.ts'), connectorPath]}];
+      }));
       const configPath = path.join(path.dirname(this.runtimeProfile.mcpConfigPath), 'managed-connectors.json');
       fs.writeFileSync(configPath, JSON.stringify({ mcpServers: { ...servers, ...ticket.mcpServers } }), { mode: 0o600 });
       fs.chmodSync(configPath, 0o600);
@@ -950,8 +979,8 @@ export class SessionProcess extends EventEmitter {
         }
       }
       args.push(...runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: this.containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${this.containerAttempt.directory}/checkpoint.cjs ${this.containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: this.containerAttempt && this.runtimeProfile.skillPluginDir ? this.containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []));
-      if (this.runtimeProfile.workerSession) {
-        const session = this.runtimeProfile.workerSession;
+      if (this.runtimeProfile.cliSession) {
+        const session = this.runtimeProfile.cliSession;
         args.push(session.resume ? '--resume' : '--session-id', session.id);
       }
       args.push('--dangerously-skip-permissions');
@@ -1150,12 +1179,19 @@ export class SessionProcess extends EventEmitter {
     const capacityEnabled = Boolean(this.runtimeProfile || this.gatewayConfig.gateway.processLimits || this.gatewayConfig.agents?.some(agent => agent.orchestration?.enabled));
     const releaseCapacity = this.runtimeProfile?.capacityReserved ? () => {} : gatewayCapacity(this.gatewayConfig).acquire(this.runtimeProfile?.role ?? 'legacy', capacityEnabled);
     if (!releaseCapacity) throw Object.assign(new Error('Gateway process capacity exceeded'), { code: 'CAPACITY_EXCEEDED' });
+    this.toolCapture?.close(); this.toolCapture = undefined;
+    if (this.runtimeProfile && !isAppAgent) {
+      try { this.toolCapture = new RequestToolCapture(value => this.emit('request-tools', value)); }
+      catch { /* Schema telemetry cannot block a session. */ }
+    }
+    const toolCapture = this.toolCapture;
     let proc: ReturnType<typeof spawn>;
     try { proc = spawn(spawnBin, spawnArgs, {
       env: {
         ...process.env,
         ...(!isAppAgent && this.runtimeProfile?.checkpointCommand && !this.runtimeProfile.hostExecution ? Object.fromEntries(CONTAINER_CREDENTIAL_KEYS.map(key=>[key,undefined])) : {}),
         ...containerAuthEnv,
+        ...(toolCapture ? {OTEL_LOG_RAW_API_BODIES:'file:'+toolCapture.directory} : {}),
         ...(hardenedPath ? { PATH: hardenedPath } : {}),
         GATEWAY_ORIGIN_SESSION_ID: this.runtimeProfile?.originSessionId ?? this.sessionId,
         GATEWAY_TASK_ID: this.runtimeProfile?.taskId ?? '',
@@ -1170,10 +1206,12 @@ export class SessionProcess extends EventEmitter {
       cwd: this.agentConfig.workspace,
       ...(this.runtimeProfile?.role === 'worker' && process.platform === 'linux' ? { detached: true } : {}),
       stdio: ['pipe', 'pipe', 'pipe'],
-    }); } catch (error) { releaseCapacity(); throw error; }
+    }); } catch (error) { toolCapture?.close(); releaseCapacity(); throw error; }
 
     this.process = proc;
     proc.once('exit', releaseCapacity);
+    proc.once('exit', () => { setTimeout(() => toolCapture?.close(), 200).unref(); });
+    proc.once('error', () => toolCapture?.close());
     proc.once('error', releaseCapacity);
     if (this.runtimeProfile?.role === 'worker' && process.platform === 'linux') this.managedProcessGroup = proc.pid;
     // Fresh child is alive: clear any exit observed for a prior process (e.g.
@@ -1430,6 +1468,12 @@ export class SessionProcess extends EventEmitter {
           }
           // result = end of turn
           if (obj.type === 'result') {
+            if (!obj.is_error && this.contextResetId) {
+              try {
+                this.sessionStore.completeContextReset(this.agentConfig.id, this.sessionId, this.contextResetId);
+                this.contextResetId = undefined;
+              } catch { this.logger.warn('Unable to finish context reset bookkeeping'); }
+            }
             lastPartialText = ''; // reset for next turn
             writeStatus(obj.is_error ? 'error' : 'done');
             // A clean turn means the in-memory history is healthy again — refill the budget.
@@ -1968,6 +2012,9 @@ export class SessionProcess extends EventEmitter {
     return this.process !== null && !this._exited;
   }
 
+  private toolCapture?: RequestToolCapture;
+  async flushToolSchemas(expectedIds?: string[]): Promise<RequestToolSchemas[]> { return this.toolCapture?.flush(expectedIds) ?? []; }
+
   async stop(): Promise<void> {
     this.stopping = true;
     if (this.containerAttempt && this.agentConfig.container) {
@@ -1995,6 +2042,8 @@ export class SessionProcess extends EventEmitter {
     // bind-mounts this path) can be alive for up to the 10s graceful-shutdown
     // window immediately after this point, and must not find it gone under it.
     const removeSessionDir = (): void => {
+      for (const filename of this.managedConnectorPaths) { try { fs.rmSync(filename, {force:true}); } catch {} }
+      this.managedConnectorPaths.clear();
       if (this.managedMcpConfigPath) {
         try { fs.rmSync(this.managedMcpConfigPath, { force: true }); } catch {}
         this.managedMcpConfigPath = undefined;

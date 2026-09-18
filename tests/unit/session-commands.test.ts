@@ -60,6 +60,7 @@ jest.mock('child_process', () => ({
 import { AgentRunner } from '../../src/agent/runner';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 import { SessionStore } from '../../src/session/store';
+import { CHAT_CHANNELS } from '../../src/history/types';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -98,13 +99,14 @@ function getCallbackPort(runner: AgentRunner): number {
   return (runner as unknown as { callbackPort: number }).callbackPort;
 }
 
-async function postChannelMessage(port: number, chatId: string, content: string): Promise<void> {
+async function postChannelMessage(port: number, chatId: string, content: string, source = 'telegram'): Promise<void> {
   await fetch(`http://127.0.0.1:${port}/channel`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       content,
       meta: {
+        source,
         chat_id: chatId,
         message_id: '1',
         user: 'testuser',
@@ -177,6 +179,25 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
   // -------------------------------------------------------------------------
   // U22: session with totalTokensUsed < 50% of contextWindow → "plenty of room"
   // -------------------------------------------------------------------------
+  it.each(CHAT_CHANNELS)('%s dispatches context commands through shared handlers', async source => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const compact = jest.spyOn(runner as any, 'compactContext').mockResolvedValue(undefined);
+    const clear = jest.spyOn(runner as any, 'clearContext').mockResolvedValue(undefined);
+    const forwarded = jest.spyOn(runner as any, 'writeAutoForward');
+    const scopedChat = 'context-' + source;
+    await postChannelMessage(getCallbackPort(runner), scopedChat, '/compact', source);
+    await waitFor(() => forwarded.mock.calls.some(call => String(call[1]).includes('context compacted')), 3000);
+    expect(compact).toHaveBeenCalledTimes(1);
+    await postChannelMessage(getCallbackPort(runner), scopedChat, '/clear', source);
+    await waitFor(() => forwarded.mock.calls.some(call => String(call[1]).includes('context reset')), 3000);
+    expect(clear.mock.calls[0][0]).toBe(compact.mock.calls[0][0]);
+    clear.mockRejectedValueOnce(new Error('The agent is responding.'));
+    await postChannelMessage(getCallbackPort(runner), scopedChat, '/clear', source);
+    await waitFor(() => forwarded.mock.calls.some(call => String(call[1]).includes('Command failed: The agent is responding.')), 3000);
+    compact.mockRestore(); clear.mockRestore(); forwarded.mockRestore();
+  });
+
   it('U22: session with tokens < 50% of contextWindow shows "plenty of room"', async () => {
     // contextWindow = 200000; 40% = 80000 tokens
     await setupSession(80000);

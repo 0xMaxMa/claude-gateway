@@ -185,18 +185,14 @@ describe('executeApiCommand persistence + dispatch (#157)', () => {
     expect(historyRows()).toHaveLength(0);
   });
 
-  it('U-P-09: /clear persists no user row and ends with a single assistant turn', async () => {
-    // Seed some prior history so we can see /clear wipe it.
+  it('U-P-09: /clear retains previous history and records the command and confirmation', async () => {
     runner.getHistoryDb().insertMessage({ chatId: dbChatId, sessionId, source: 'api', role: 'user', content: 'earlier', ts: Date.now() });
-
     const { responseText } = await runner.executeApiCommand(sessionId, chatId, '/clear');
-
     const rows = historyRows();
-    // clearSession wiped the table; only the assistant confirmation survives.
-    expect(rows).toHaveLength(1);
+    expect(rows).toHaveLength(3);
+    expect(rows.map(row => row.content)).toEqual([responseText,'/clear','earlier']);
     expect(rows[0].role).toBe('assistant');
-    expect(rows[0].content).toBe(responseText);
-    expect(responseText).toBe('Session cleared.');
+    expect(responseText).toContain('Chat history is unchanged');
   });
 
   it('U-P-10: a successful command persists both a user row and an assistant row', async () => {

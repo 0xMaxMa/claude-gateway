@@ -1,10 +1,13 @@
+import { rangeButtons } from './dashboard-range';
+import { dashboardTheme, dashboardFontLink } from './dashboard-theme';
+import { dashboardClient } from './dashboard-client';
 /**
  * Generates a self-contained HTML dashboard page for the gateway status UI.
  * No external dependencies except xterm.js CDN for PTY viewer.
  */
 export function generateDashboardHtml(): string {
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -337,97 +340,78 @@ export function generateDashboardHtml(): string {
     .dream-accept-all:disabled { opacity: 0.55; cursor: default; }
     /* Note detail — full-width card below the graph. Shows the whole file. */
     .kb-note {
-      margin-top: 12px; background: #131a2b; border: 1px solid #2d3748; border-radius: 8px;
-      padding: 16px 18px; font-size: 0.85rem; color: #cbd5e0;
+      margin-top: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+      padding: 16px 18px; font-size: 0.85rem; color: var(--text);
     }
     .kb-note-head { display: flex; align-items: flex-start; gap: 10px; }
-    .kb-note-head h3 { margin: 0; font-size: 1.02rem; color: #e2e8f0; flex: 1; word-break: break-word; }
+    .kb-note-head h3 { margin: 0; font-size: 1.02rem; color: var(--text); flex: 1; word-break: break-word; }
     .kb-note-close {
-      cursor: pointer; color: #718096; background: #1a202c; border: 1px solid #2d3748;
+      cursor: pointer; color: var(--muted); background: var(--panel); border: 1px solid var(--line);
       border-radius: 4px; padding: 1px 8px; font-size: 0.9rem; line-height: 1.4;
     }
-    .kb-note-close:hover { color: #e2e8f0; background: #2d3748; }
+    .kb-note-close:hover { color: var(--text); background: var(--line); }
     /* Metadata chips row. */
     .kb-note-meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
     .kb-note-chip {
-      display: inline-flex; align-items: center; gap: 5px; background: #0e1420;
-      border: 1px solid #1e2740; border-radius: 999px; padding: 2px 10px; font-size: 0.72rem; color: #a0aec0;
+      display: inline-flex; align-items: center; gap: 5px; background: var(--raised);
+      border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 0.72rem; color: var(--muted);
     }
-    .kb-note-chip b { color: #cbd5e0; font-weight: 600; }
+    .kb-note-chip b { color: var(--text); font-weight: 600; }
     .kb-note-chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
     /* File path line under the chips — full width, monospace, wraps on long paths. */
     .kb-note-path {
       margin: 6px 0 2px; font-size: 0.72rem; font-family: ui-monospace, monospace;
-      color: #718096; word-break: break-all;
+      color: var(--muted); word-break: break-all;
     }
-    .kb-note-path b { color: #a0aec0; font-weight: 600; }
+    .kb-note-path b { color: var(--muted); font-weight: 600; }
     /* Rendered Markdown body. */
     .kb-md {
-      margin-top: 12px; padding-top: 12px; border-top: 1px solid #222c40;
-      line-height: 1.62; color: #cbd5e0; word-break: break-word;
+      margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line);
+      line-height: 1.62; color: var(--text); word-break: break-word;
     }
     .kb-md > :first-child { margin-top: 0; }
-    .kb-md h1, .kb-md h2, .kb-md h3, .kb-md h4 { color: #e2e8f0; line-height: 1.3; margin: 18px 0 8px; }
-    .kb-md h1 { font-size: 1.25rem; border-bottom: 1px solid #222c40; padding-bottom: 5px; }
-    .kb-md h2 { font-size: 1.1rem; border-bottom: 1px solid #1e2740; padding-bottom: 4px; }
-    .kb-md h3 { font-size: 1rem; } .kb-md h4 { font-size: 0.9rem; color: #a0aec0; }
+    .kb-md h1, .kb-md h2, .kb-md h3, .kb-md h4 { color: var(--text); line-height: 1.3; margin: 18px 0 8px; }
+    .kb-md h1 { font-size: 1.25rem; border-bottom: 1px solid var(--line); padding-bottom: 5px; }
+    .kb-md h2 { font-size: 1.1rem; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+    .kb-md h3 { font-size: 1rem; } .kb-md h4 { font-size: 0.9rem; color: var(--muted); }
     .kb-md p { margin: 8px 0; }
     .kb-md ul, .kb-md ol { margin: 8px 0; padding-left: 22px; }
     .kb-md li { margin: 3px 0; }
-    .kb-md a { color: #63b3ed; text-decoration: none; } .kb-md a:hover { text-decoration: underline; }
+    .kb-md a { color: var(--accent); text-decoration: none; } .kb-md a:hover { text-decoration: underline; }
     .kb-md code {
-      background: #0d1117; border: 1px solid #1e2740; border-radius: 4px;
-      padding: 1px 5px; font-size: 0.82em; font-family: ui-monospace, monospace; color: #e2e8f0;
+      background: var(--raised); border: 1px solid var(--line); border-radius: 4px;
+      padding: 1px 5px; font-size: 0.82em; font-family: ui-monospace, monospace; color: var(--text);
     }
     .kb-md pre {
-      background: #0a0e17; border: 1px solid #1e2740; border-radius: 6px; padding: 10px 12px;
+      background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px;
       overflow-x: auto; margin: 10px 0;
     }
     .kb-md pre code { background: none; border: none; padding: 0; font-size: 0.8rem; line-height: 1.5; }
     .kb-md blockquote {
-      margin: 10px 0; padding: 2px 14px; border-left: 3px solid #2d3748; color: #a0aec0;
+      margin: 10px 0; padding: 2px 14px; border-left: 3px solid var(--line); color: var(--muted);
     }
-    .kb-md hr { border: none; border-top: 1px solid #222c40; margin: 14px 0; }
-    .kb-md strong { color: #e2e8f0; } .kb-md table { border-collapse: collapse; margin: 0; width: 100%; font-size: 0.82rem; }
-    .kb-md th, .kb-md td { border: 1px solid #222c40; padding: 5px 10px; text-align: left; }
-    .kb-md th { background: #0e1420; color: #e2e8f0; font-weight: 600; }
-    .kb-md tbody tr:nth-child(even) { background: #0e1420; }
+    .kb-md hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
+    .kb-md strong { color: var(--text); } .kb-md table { border-collapse: collapse; margin: 0; width: 100%; font-size: 0.82rem; }
+    .kb-md th, .kb-md td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; }
+    .kb-md th { background: var(--raised); color: var(--text); font-weight: 600; }
+    .kb-md tbody tr:nth-child(even) { background: var(--raised); }
     /* Wide tables scroll horizontally instead of breaking the panel. */
     .kb-table-wrap { overflow-x: auto; margin: 10px 0; border-radius: 6px; }
-    .kb-md del { color: #718096; }
+    .kb-md del { color: var(--muted); }
     /* Task-list items: bullet replaced by a real (disabled) checkbox. */
     .kb-md li.kb-task { list-style: none; margin-left: -18px; }
-    .kb-md li.kb-task input { margin-right: 7px; vertical-align: middle; accent-color: #63b3ed; }
-    .kb-note-loading { color: #718096; font-size: 0.82rem; margin-top: 12px; }
+    .kb-md li.kb-task input { margin-right: 7px; vertical-align: middle; accent-color: var(--accent); }
+    .kb-note-loading { color: var(--muted); font-size: 0.82rem; margin-top: 12px; }
+  ${dashboardTheme}
   </style>
-</head>
-<body>
-  <h1><span class="rainbow">Claude Gateway</span> <span id="gateway-version" style="font-size:0.75rem;color:#718096;"></span> <span id="top-right"><button id="logout-btn">Logout</button><span id="refresh-indicator">refreshing...</span></span></h1>
-  <div class="meta">
-    Uptime: <span id="uptime">&mdash;</span> &nbsp;|&nbsp;
-    Started: <span id="started-at">&mdash;</span> &nbsp;|&nbsp;
-    Last updated: <span id="last-updated">&mdash;</span>
-  </div>
-
-  <!-- Tab switcher: Sessions (live PTY + table) | Knowledge base (shared-KB graph) -->
-  <div class="tabs">
-    <button class="tab active" id="tab-sessions" data-view="view-sessions">Sessions</button>
-    <button class="tab" id="tab-kb" data-view="view-kb">Knowledge base</button>
-    <button class="tab" id="tab-dreams" data-view="view-dreams">Nightly dreaming</button>
-  </div>
-
-  <div id="view-sessions" class="view">
-  <!-- Row: Processes 70% | Agent badges 30% (collapses on narrow screens) -->
-  <div class="top-grid">
-    <div>
-      <h2>Processes</h2>
-      <div class="proc-tree" id="proc-tree">Loading...</div>
-    </div>
-    <div>
-      <h2>Agents</h2>
-      <div class="agents-bar" id="agents-bar"></div>
-    </div>
-  </div>
+${dashboardFontLink}<script>try{document.documentElement.dataset.sidebarCollapsed=localStorage.getItem("gateway-sidebar-collapsed")==="true"?"true":"false";}catch{}</script></head>
+<body><div class="layout"><aside class="sidebar" id="dashboard-sidebar"><div class="brand row" id="sidebar-brand" role="button" tabindex="0" aria-label="Collapse sidebar" aria-expanded="true" aria-controls="dashboard-sidebar"><div class="brandmark">✳</div><div>Claude Gateway<small>OPERATIONS CONSOLE</small></div></div><div class="navlabel">WORKSPACE</div><nav class="tabs" aria-label="Main navigation"><button class="tab active" id="tab-overview" data-view="view-overview"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h7v7H3zM14 3h7v4h-7zM14 11h7v10h-7zM3 14h7v7H3z"/></svg>Overview</button><button class="tab " id="tab-sessions" data-view="view-sessions"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11a8 8 0 0 1-8 8H6l-4 3 1-7a8 8 0 1 1 18-4Z"/></svg>Conversations</button><button class="tab " id="tab-tasks" data-view="view-tasks"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5h12M9 12h12M9 19h12M3 5l1 1 2-3M3 12l1 1 2-3M3 19l1 1 2-3"/></svg>Tasks</button><button class="tab " id="tab-usage" data-view="view-usage"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10m8 10V4m8 16v-7"/></svg>Usage & tokens</button><button class="tab " id="tab-kb" data-view="view-kb"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h7v18H4zM14 3h7v18h-7zM7 7h1m9 0h1"/></svg>Knowledge base</button><button class="tab " id="tab-dreams" data-view="view-dreams"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15A9 9 0 0 1 9 4 9 9 0 1 0 20 15Z"/></svg>Nightly dreaming</button><button class="tab " id="tab-system" data-view="view-system"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v6H3zM3 14h18v6H3zM6 7h1M6 17h1"/></svg>System</button></nav><div class="sidebarfoot"><div class="instance">Claude Gateway<br><span id="gateway-version"></span></div></div></aside><div class="main"><header class="topbar"><div class="row"><button id="dash-menu" class="mobilemenu" aria-label="Collapse sidebar" aria-expanded="true" aria-controls="dashboard-sidebar" title="Collapse sidebar"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button><h1 id="dash-current-view">Overview</h1></div><div id="top-right"><span id="refresh-indicator">Connecting…</span><button class="theme-toggle" id="dash-theme" aria-label="Toggle light and dark theme">◐</button><button id="logout-btn">Logout</button></div></header><main class="shell-content"><div class="meta">Uptime: <span id="uptime">—</span> · Started: <span id="started-at">—</span> · Updated: <span id="last-updated">—</span></div>
+<div id="view-overview" class="view"><div class="heading" style="margin-top:24px"><div class="eyebrow">ONE WORKSPACE. EVERY CONVERSATION.</div><h1>Good work, <span class="gradient-title">in motion.</span></h1><p>Your agents, ongoing work, and what needs your attention.</p></div><div class="dash-grid" id="overview-stats"></div><div class="columns"><section class="dash-panel"><h2>Token activity</h2><p class="live-note">Today · UTC · Workers (violet) / Agent (blue)</p><div id="overview-chart"></div><p class="live-note">Recorded token volume, including cache. Not billing cost.</p></section><section class="dash-panel"><h2>Needs your attention</h2><div class="dash-mini-list" id="overview-attention"></div></section></div><section class="dash-panel"><h2>Agents</h2><div class="agents-bar" id="agents-bar"></div></section><section class="dash-panel"><h2>Active & recent work</h2><div id="overview-tasks"></div></section></div>
+<div class="dash-filter"><input id="dash-search" type="search" aria-label="Filter displayed sessions" placeholder="Filter this page by session, chat or model…">${rangeButtons("dash-scope","24h")}<select id="dash-agent-filter" aria-label="Filter agent"><option value="">All agents</option></select></div><div class="dash-pager"><span data-dash-page></span><div class="row"><button data-dash-prev disabled>← Previous</button><button data-dash-next disabled>Next →</button></div></div>
+<div id="view-tasks" class="view" style="display:none"><h2>Tasks & workers</h2><p id="tasks-scope" class="live-note"></p><div id="task-results"></div></div><div id="view-usage" class="view" style="display:none"><h2>Usage & tokens</h2><p class="live-note">Session totals include every recorded attempt, including retries. Missing measurements are shown as —. Open a report for input, cache write, cache read, output and per-turn details.</p><div id="usage-results"></div></div>
+  <div id="view-system" class="view" style="display:none">
+  <h2>Processes</h2>
+  <div class="proc-tree" id="proc-tree">Loading...</div>
 
   <!-- PTY viewer — full width so the native 200-col terminal has room.
        Placed above the Sessions table so the live mirror is the first thing
@@ -446,32 +430,7 @@ export function generateDashboardHtml(): string {
     <div id="pty-terminal" tabindex="0"></div>
   </div>
 
-  <!-- Sessions — full width (session-centric, flat list) -->
-  <h2>Sessions</h2>
-  <div class="table-wrap">
-    <table id="sessions-table">
-      <thead>
-        <tr>
-          <th>Agent</th>
-          <th>Session ID</th>
-          <th>Chat ID</th>
-          <th>Source</th>
-          <th>Mode</th>
-          <th>Model</th>
-          <th>Tokens</th>
-          <th>Status</th>
-          <th>Uptime</th>
-          <th>Spawned</th>
-          <th>Shell</th>
-        </tr>
-      </thead>
-      <tbody id="sessions-tbody">
-        <tr><td colspan="11" class="ts">Loading...</td></tr>
-      </tbody>
-    </table>
-  </div>
-  </div><!-- /view-sessions -->
-
+</div><div id="view-sessions" class="view" style="display:none"><h2>Conversations</h2><p class="live-note">Inspect a session for its Agent turns and Worker attempts. Inspect the tools used in each session and worker attempt.</p><div id="session-results"></div></div>
   <!-- Knowledge base — a 3D force-directed graph over the shared vault / an agent's memory.
        Zero external deps: the spherical layout + canvas render + rotation are hand-rolled. -->
   <div id="view-kb" class="view" style="display:none;">
@@ -526,7 +485,7 @@ export function generateDashboardHtml(): string {
     <div id="dreams-empty" class="dreams-empty" style="display:none;"></div>
   </div><!-- /view-dreams -->
 
-  <div id="error-msg" class="error" style="display:none;"></div>
+  <div id="error-msg" class="error" style="display:none;" role="status"></div><footer class="footer">Claude Gateway · Admin dashboard</footer></main></div></div><div id="dash-drawer-back" class="dash-drawer-back"><section id="dash-drawer" class="dash-drawer" role="dialog" aria-modal="true" aria-label="Recorded session and task details" tabindex="-1"></section></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js"
     integrity="sha384-pELe6ZHtFxFcuYBq3gMkqvmnNIqUWnAYjBG5gThqQQCjWp8PJ/65MLK4lMIfEK1e" crossorigin="anonymous"></script>
@@ -536,7 +495,7 @@ export function generateDashboardHtml(): string {
     // page (nothing for view-source/XSS to steal). If any read returns 401 the
     // session has expired or is missing, so bounce to /dashboard (login page).
     function onUnauthorized() {
-      window.location.href = apiUrl('/dashboard');
+      window.location.reload();
     }
 
     // Must match the server PTY size (src/shell/screen.ts ScreenModel defaults).
@@ -857,7 +816,7 @@ export function generateDashboardHtml(): string {
 
     const expandedSessionRows = new Set();
     // Event delegation for Live buttons (avoids inline onclick + HTML injection)
-    document.getElementById('sessions-tbody').addEventListener('click', function(e) {
+    document.getElementById('session-results').addEventListener('click', function(e) {
       const toggle = e.target.closest('.btn-workers');
       if (toggle) {
         const key=toggle.getAttribute('data-expand-key'), open=!expandedSessionRows.has(key);
@@ -867,8 +826,8 @@ export function generateDashboardHtml(): string {
         const detail=document.getElementById(toggle.getAttribute('aria-controls'));if(detail)detail.hidden=!open;
         return;
       }
-      const btn = e.target.closest('.btn-stream');
-      if (btn) void openPtyViewer(btn.getAttribute('data-agent-id'), btn.getAttribute('data-session-id'));
+      const btn = e.target.closest('button.btn-stream[data-agent-id][data-session-id]');
+      if (btn) { document.getElementById('tab-system').click(); void openPtyViewer(btn.getAttribute('data-agent-id'), btn.getAttribute('data-session-id')); }
     });
 
     function escHtml(s) {
@@ -912,22 +871,25 @@ export function generateDashboardHtml(): string {
 
     // Format a context-window token count compactly: 1234 -> "1.2k", 45000 -> "45k".
     // Full value is kept in the tooltip. 0/unknown renders as a dash.
+    function toolInventory(loaded, used, contextTools) {
+      function list(label, names) {
+        return '<div title="'+(Array.isArray(names)?escHtml(names.join(', ')||'None'):'Not recorded')+'">'+label+': '+(Array.isArray(names)?compactNumber(names.length):'—')+'</div>';
+      }
+      return list('Loaded', contextTools)+list('Used', used);
+    }
+
+    function fmtRecordedTokens(n) {
+      return n == null ? '—' : n === 0 ? '0' : fmtTokens(n);
+    }
+
     function fmtTokens(n) {
       const v = Number(n) || 0;
       if (v <= 0) return '<span class="ts">&mdash;</span>';
-      const label = v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1) + 'k' : String(v);
+      const label = compactNumber(v);
       return '<span title="' + v.toLocaleString() + ' tokens">' + label + '</span>';
     }
 
-    // ── Status Refresh ────────────────────────────────────────────────────────
-    async function refresh() {
-      document.getElementById('refresh-indicator').textContent = 'refreshing...';
-      try {
-        const res = await fetch(apiUrl('/status'));
-        if (res.status === 401) { onUnauthorized(); return; }
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-
+    function applyDashboardSnapshot(data) {
         document.getElementById('uptime').textContent = fmtUptime(data.uptime || 0);
         document.getElementById('started-at').textContent = data.startedAt
           ? new Date(data.startedAt).toLocaleString() : '\\u2014';
@@ -945,70 +907,33 @@ export function generateDashboardHtml(): string {
         const badges = agents.map(function(a) {
           const ok = a.hasChannel ? a.isRunning : true;
           const dot = ok ? '<span class="dot-green">&#x25CF;</span>' : '<span class="dot-red">&#x25CF;</span>';
-          return '<span class="agent-badge">' + dot + ' <span class="agent-name">' + escHtml(a.id) + '</span></span>';
+          return agentBadge(a.id);
         });
         document.getElementById('agents-bar').innerHTML = badges.join('') || '<span class="ts">No agents</span>';
 
-        // Sessions table — flat, session-centric. One row per real session across
-        // all agents; agents with no session do not produce a row.
-        const rows = [];
-        agents.forEach(function(a) {
-          (a.sessions || []).forEach(function(s) {
-            const statusBadge = s.orchestration ? '<span class="badge '+(['thinking','working'].includes(s.status) ? 'badge-green' : 'badge-gray')+'">'+escHtml(s.status)+'</span>' : s.isRunning
-              ? '<span class="badge badge-green">running</span>'
-              : '<span class="badge badge-gray">stopped</span>';
-            const uptime = s.isRunning ? fmtUptime(s.uptimeSec || 0) : '<span class="ts">&mdash;</span>';
-            const sessId = s.sessionId
-              ? '<span class="session-id">' + escHtml(s.sessionId) + '</span>'
-              : '<span class="ts">&mdash;</span>';
-            const chatCell = s.chatId
-              ? '<span class="session-id">' + escHtml(String(s.chatId)) + '</span>'
-              : '<span class="ts">&mdash;</span>';
-            const liveBtn = (s.hasPtyStream && s.isRunning && s.mode === 'pty-shell')
-              ? '<button class="btn-stream" data-agent-id="' + escHtml(a.id) + '" data-session-id="' + escHtml(s.sessionId || '') + '">💻 View</button>'
-              : '<span class="ts">&mdash;</span>';
-            const key=a.id+':'+s.sessionId, detailId='workers-'+encodeURIComponent(key), open=expandedSessionRows.has(key);
-            const childTasks=s.tasks||[], count=childTasks.length;
-            const label='Workers / tasks ('+count+')';
-            const expand=s.orchestration ? '<br><button class="btn-stream btn-workers" data-expand-key="'+escHtml(key)+'" data-label="'+escHtml(label)+'" aria-expanded="'+open+'" aria-controls="'+escHtml(detailId)+'">'+(open?'▾ ':'▸ ')+escHtml(label)+'</button>' : '';
-            rows.push(
-              '<tr class="session-row" data-agent="'+escHtml(a.id)+'" data-session="'+escHtml(s.sessionId)+'">' +
-              '<td><span style="color:#90cdf4;font-weight:600;">' + escHtml(a.id) + '</span></td>' +
-              '<td>' + sessId + expand + '</td>' +
-              '<td>' + chatCell + '</td>' +
-              '<td>' + sourceBadge(s.source) + '</td>' +
-              '<td><div class="session-modes">' + (s.orchestration ? '<span class="badge badge-purple">orchestration</span>' : '') + modeBadge(s.mode) + '</div></td>' +
-              '<td>' + fmtModel(s.model) + '</td>' +
-              '<td>' + fmtTokens(s.tokens) + '</td>' +
-              '<td>' + statusBadge + '</td>' +
-              '<td>' + uptime + '</td>' +
-              '<td>' + fmtTs(s.spawnedAt ? new Date(s.spawnedAt).toISOString() : null) + '</td>' +
-              '<td>' + liveBtn + '</td>' +
-              '</tr>'
-            );
-            if (s.orchestration) {
-              const pool=a.orchestration.workerPool, slots=pool ? pool.workers.filter(w => (s.workerIds||[]).includes(w.workerId)) : [];
-              let content='<div style="padding:12px 20px;border-left:3px solid #805ad5"><div class="ts">'+escHtml(a.orchestration.workspaceMode)+(a.container ? ' · '+escHtml(a.container) : '')+(pool ? ' · Agent pool '+pool.workers.length+'/'+pool.maxWorkers+' · idle TTL '+Math.round(pool.idleTtlMs/60000)+' min' : '')+'</div>';
-              slots.forEach(function(w){content+='<div class="worker-slot">'+escHtml(w.state)+' · Worker '+escHtml(w.workerId)+' · session '+escHtml(w.sessionId)+(w.expiresAt ? ' · expires '+escHtml(new Date(w.expiresAt).toLocaleTimeString()) : '')+'</div>';});
-              if (count) {
-                content+='<table class="worker-tasks"><thead><tr><th>Worker / Session</th><th>Task</th><th>Status</th><th>Tool</th><th>Process</th></tr></thead><tbody>';
-                childTasks.forEach(function(t){content+='<tr data-task="'+escHtml(t.taskId)+'"><td>'+escHtml(t.workerId||'Unassigned')+'<br><span class="ts">'+escHtml(t.workerSessionId||'')+(t.resumed?' · resumed':'')+'</span></td><td>'+escHtml(t.title)+'<br><span class="ts">'+escHtml(t.taskId)+(t.continueTaskId?' · follows '+escHtml(t.continueTaskId):'')+'</span></td><td>'+escHtml(t.state)+'</td><td>'+escHtml(t.lastTool ? t.lastTool.name+' · '+t.lastTool.type+(t.lastTool.is_error?' (error)':'') : '—')+'</td><td>'+escHtml(t.hostProcessId ? String(t.hostProcessId)+(t.container?' (docker exec)':'') : '—')+'</td></tr>';});
-                content+='</tbody></table>';
-              } else content+='<div class="ts">No worker tasks in this session</div>';
-              rows.push('<tr class="session-workers" id="'+escHtml(detailId)+'"'+(open?'':' hidden')+'><td colspan="11">'+content+'</div></td></tr>');
-            }
-          });
-        });
+        renderDashboard(data);
 
-        document.getElementById('sessions-tbody').innerHTML =
-          rows.length ? rows.join('') : '<tr><td colspan="11" class="ts">No active sessions</td></tr>';
+        document.getElementById('refresh-indicator').textContent = 'Live · updated';
+    }
 
-        document.getElementById('refresh-indicator').textContent = 'auto-refresh 3s';
+    // ── Status Refresh ────────────────────────────────────────────────────────
+    async function refresh() {
+      if (dashboardBusy || document.hidden) return;
+      dashboardBusy = true;
+      const requestedOffset = dashboardOffset, requestedScope = dashboardScope;
+      document.getElementById('refresh-indicator').textContent = 'Updating…';
+      try {
+        const res = await fetch(apiUrl('/status')+'?offset='+requestedOffset+'&scope='+requestedScope);
+        if (res.status === 401) { onUnauthorized(); return; }
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+
+        if (requestedOffset === dashboardOffset && requestedScope === dashboardScope) applyDashboardSnapshot(data);
       } catch(e) {
         document.getElementById('error-msg').textContent = 'Error fetching status: ' + e.message;
         document.getElementById('error-msg').style.display = 'block';
-        document.getElementById('refresh-indicator').textContent = 'error';
-      }
+        document.getElementById('refresh-indicator').textContent = 'Reconnecting…';
+      } finally {dashboardBusy=false;}
     }
 
     // ── Process Tree ─────────────────────────────────────────────────────────
@@ -1162,14 +1087,15 @@ export function generateDashboardHtml(): string {
       try {
         await fetch(apiUrl('/dashboard/logout'), { method: 'POST' });
       } catch (e) { /* best-effort; navigate regardless */ }
-      window.location.href = apiUrl('/dashboard');
+      window.location.reload();
     });
 
+    ${dashboardClient}
     refresh();
-    refreshProcesses();
-    setInterval(refresh, 3000);
-    // Process tree (with CPU/mem) is heavier (spawns ps) — refresh a bit slower.
-    setInterval(refreshProcesses, 6000);
+    connectDashboardStream();
+    setInterval(function(){if(!dashboardStream || dashboardStream.readyState!==1)refresh();},15000);
+    setInterval(function(){if(!document.hidden && document.getElementById('view-system').style.display!=='none')refreshProcesses();},10000);
+    document.addEventListener('visibilitychange',function(){if(document.hidden){dashboardStream?.close();dashboardStream=null;}else{refresh();connectDashboardStream();}});
   </script>
 
   <!-- Knowledge base graph: tab switching + hand-rolled force-directed renderer.
@@ -1396,7 +1322,11 @@ export function generateDashboardHtml(): string {
         // Labels: hubs always; hovered / selected / search-hit reveal on demand.
         var showLabel = (o.deg >= LABEL_MIN_DEG) || isHov || isSel || (searching && o.hit);
         if (showLabel && !dim){
-          ctx.fillStyle = (isHov || isSel) ? '#e6edf3' : 'rgba(213,222,236,' + (0.25 + 0.6 * near) + ')';
+          // White, not var(--text): .kb-stage paints a fixed deep-space backdrop in BOTH
+          // themes, but --text flips to near-black under the light theme (the page default),
+          // which left labels unreadable on the dark canvas. Matches the white the hover /
+          // selection rings above already use.
+          ctx.fillStyle = '#fff';
           ctx.font = (isHov || isSel ? '12px ' : '11px ') + 'ui-sans-serif, system-ui, sans-serif';
           ctx.fillText(nd.title, p.sx + p.r + 4, p.sy + 3);
         }
@@ -1526,7 +1456,7 @@ export function generateDashboardHtml(): string {
         o.hit = hay.indexOf(q) >= 0;
         if (o.hit) hits.push(o);
       });
-      if (elSearchCount) elSearchCount.textContent = hits.length + ' / ' + G.nodes.length;
+      if (elSearchCount) elSearchCount.textContent = compactNumber(hits.length) + ' / ' + compactNumber(G.nodes.length);
       invalidate();
       return hits;
     }
@@ -1808,7 +1738,7 @@ export function generateDashboardHtml(): string {
         sourceSel.textContent = '';
         (data.sources || [{ id: 'shared', label: 'Shared Knowledge Base', count: 0 }]).forEach(function(s){
           var o = document.createElement('option');
-          o.value = s.id; o.textContent = s.label + (typeof s.count === 'number' ? ' (' + s.count + ')' : '');
+          o.value = s.id; o.textContent = s.label + (typeof s.count === 'number' ? ' (' + compactNumber(s.count) + ')' : '');
           sourceSel.appendChild(o);
         });
         // Restore prior selection if it still exists, else fall back to Shared KB.
@@ -1851,7 +1781,7 @@ export function generateDashboardHtml(): string {
         }
         buildModel(data);
         renderLegend();
-        elStats.textContent = data.nodes.length + ' notes, ' + data.edges.length + ' links';
+        elStats.textContent = compactNumber(data.nodes.length) + ' notes, ' + compactNumber(data.edges.length) + ' links';
       }).catch(function(err){
         elStats.textContent = ''; elEmpty.textContent = 'Failed to load graph: ' + err.message; elEmpty.style.display = '';
       });
@@ -1934,11 +1864,11 @@ export function generateDashboardHtml(): string {
       function renderRun(run){
         var box = el('div', 'dream-run');
         var head = el('div', 'dream-run-head');
-        if (run.agent) head.appendChild(el('span', 'agent', run.agent));
+        if (run.agent) { var agentEl=el('span'); agentEl.innerHTML=agentBadge(run.agent); head.appendChild(agentEl); }
         var modeCls = run.mode === 'auto' ? 'auto' : 'propose';
         head.appendChild(el('span', 'dream-badge ' + modeCls, run.mode));
         head.appendChild(el('span', 'dream-badge outcome', run.outcome));
-        head.appendChild(el('span', 'when', run.iso));
+        head.appendChild(el('span', 'when', new Date(run.iso).toLocaleString()));
 
         // Pending = a propose-run proposal not yet manually accepted. Accept-all
         // shows only when there is something to apply.
@@ -1990,13 +1920,14 @@ export function generateDashboardHtml(): string {
         }
 
         var applied = (run.applied != null) ? (', applied ' + run.applied) : '';
-        box.appendChild(el('div', 'dream-meta', 'tokens ' + (run.tokens||0) + ' · sessions ' + (run.sessions||0) + applied));
+        box.appendChild(el('div', 'dream-meta', 'tokens ' + compactNumber(run.tokens||0) + ' · sessions ' + compactNumber(run.sessions||0) + applied));
         return box;
       }
 
       function render(){
         var filter = agentSel ? agentSel.value : '';
         var runs = filter ? allRuns.filter(function(r){ return r.agent === filter; }) : allRuns;
+        runs=runs.filter(function(r){return Date.parse(r.iso)>=dashboardSince(dashboardScope);}).sort(function(a,b){return Date.parse(b.iso)-Date.parse(a.iso);});
         listEl.textContent = '';
         if (!runs.length){
           emptyEl.textContent = allRuns.length ? 'No dream runs for this agent.' : 'No dream runs yet. The nightly dreaming pass writes here after it first runs (auto or propose mode).';
@@ -2010,8 +1941,8 @@ export function generateDashboardHtml(): string {
           if (r.mode === 'auto') return;
           (r.proposals || []).forEach(function(p){ if (!p.accepted) pendingTotal++; });
         });
-        statsEl.textContent = runs.length + ' run' + (runs.length === 1 ? '' : 's')
-          + (pendingTotal ? ' · ' + pendingTotal + ' pending' : '');
+        statsEl.textContent = compactNumber(runs.length) + ' run' + (runs.length === 1 ? '' : 's')
+          + (pendingTotal ? ' · ' + compactNumber(pendingTotal) + ' pending' : '');
         if (pendingNotice){
           statsEl.textContent += ' — ' + pendingNotice;
           pendingNotice = '';
@@ -2069,15 +2000,15 @@ export function generateLoginHtml(disabledReason = ''): string {
     ? `    <h1>Claude Gateway</h1>
     <div class="sub">${safeReason}</div>`
     : `    <h1>Claude Gateway</h1>
-    <div class="sub">Enter an API key to access the dashboard.</div>
+    <div class="sub">Sign in with your admin API key to inspect agents, workers and usage.</div>
     <form id="login-form" autocomplete="off">
-      <label for="key">API key</label>
-      <input id="key" type="password" placeholder="sk-gateway-..." autofocus>
+      <label for="key">Admin API key</label>
+      <input id="key" type="password" placeholder="Enter your admin API key" required autocomplete="current-password" autofocus>
       <button type="submit">Sign in</button>
-      <div id="err"></div>
+      <div id="err" role="alert" aria-live="polite"></div>
     </form>`;
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -2107,12 +2038,12 @@ export function generateLoginHtml(disabledReason = ''): string {
     }
     button:hover { background: #2b6cb0; }
     #err { color: #fc8181; font-size: 0.8rem; margin-top: 12px; min-height: 1em; }
+    ${dashboardTheme}
+    body{display:grid;place-items:center;min-height:100vh;padding:24px;background:var(--bg)}.login-layout{display:grid;grid-template-columns:1fr 1fr;width:min(980px,100%);background:var(--panel);border:1px solid var(--line);border-radius:28px;overflow:hidden;box-shadow:var(--shadow)}.login-intro{padding:48px;background:var(--lavender);display:flex;flex-direction:column;justify-content:space-between;gap:48px}.login-intro h2{font-size:36px;font-weight:400;line-height:1.25;color:var(--text);margin:0 0 20px}.login-intro p{font-size:13px;line-height:1.8;color:var(--muted)}.login-card{padding:52px 40px;align-self:center}.login-card h1{font-size:26px;margin-bottom:16px}.login-card .sub{color:var(--muted);font-size:13px;line-height:1.7;margin-bottom:28px}.login-card label{color:var(--text);font-size:12px;margin-bottom:10px}.login-card input{background:var(--panel);border-color:var(--line);padding:13px;font-size:13px}.login-card button{border-radius:160px;background:#6161ff;padding:13px;color:white;font-size:13px}.login-card button:disabled{opacity:.6}#err{color:var(--yellow);font-size:12px;line-height:1.6}.login-caption{font-size:11px;color:var(--muted);margin-top:22px;line-height:1.7}@media(max-width:760px){.login-layout{grid-template-columns:1fr;max-width:440px}.login-intro{padding:28px;gap:24px}.login-intro h2{font-size:28px}.login-card{padding:30px 26px}.login-intro .login-description{display:none}}
   </style>
-</head>
+${dashboardFontLink}</head>
 <body>
-  <div class="card">
-${bodyInner}
-  </div>
+  <main class="login-layout"><section class="login-intro"><div class="brand row" style="padding:0"><div class="brandmark">✳</div>Claude Gateway</div><div><h2>Your agents.<br>Your workspace.</h2><p class="login-description">A clear view of conversations, worker activity and token usage. All in one place.</p></div><p>Orchestration · Voice · Multi-channel</p></section><section class="login-card">${bodyInner}<p class="login-caption">Admin access only. Your key is exchanged for a secure session cookie and is not saved in browser storage.</p></section></main>
   <script>
     function basePath() {
       var p = window.location.pathname;
@@ -2126,17 +2057,29 @@ ${bodyInner}
       var err = document.getElementById('err');
       err.textContent = '';
       var key = document.getElementById('key').value;
+      var button = loginForm.querySelector('button'); button.disabled = true;
       try {
         var res = await fetch(basePath() + '/dashboard/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ key: key }),
         });
-        if (res.ok) { window.location.href = basePath() + '/dashboard'; return; }
+        if (res.ok) {
+          var root = basePath() + '/dashboard';
+          var target = new URL(window.location.href);
+          var requested = target.searchParams.get('returnTo');
+          if (requested) {
+            var candidate = new URL(requested, window.location.origin + root + '/');
+            if (candidate.origin === window.location.origin && candidate.pathname === root + '/token-report') target = candidate;
+            else target = new URL(root, window.location.origin);
+          }
+          target.searchParams.delete('returnTo');
+          window.location.replace(target.pathname + target.search + target.hash); return;
+        }
         err.textContent = res.status === 401 ? 'Invalid API key.' : ('Login failed (HTTP ' + res.status + ').');
       } catch (e2) {
-        err.textContent = 'Network error.';
-      }
+        err.textContent = 'Unable to connect. Please try again.';
+      } finally { button.disabled = false; }
     });
   </script>
 </body>

@@ -434,24 +434,32 @@ describe('SessionProcess', () => {
       const sp = makeSp('managed-connector', 'api', agentConfig, gatewayConfig, sessionStore, undefined, profile);
       await sp.start();
       const args = (require('child_process').spawn as jest.Mock).mock.calls.slice(-1)[0]![1] as string[];
+      const captureEnv = (require('child_process').spawn as jest.Mock).mock.calls.slice(-1)[0]![2].env.OTEL_LOG_RAW_API_BODIES;
+      expect(captureEnv).toMatch(/^file:/);
+      expect(fs.statSync(captureEnv.slice(5)).mode & 0o777).toBe(0o700);
       const configPath = args[args.indexOf('--mcp-config')+1];
       const servers=JSON.parse(fs.readFileSync(configPath,'utf8')).mcpServers;
-      expect(servers.github.headers.Authorization).toBe('Bearer fixture-old');
+      expect(servers.github.command).toBe('bun');
+      expect(servers.github.args[0]).toContain('lazy-connector.ts');
+      const connectorPath=servers.github.args[1];
+      const upstream=JSON.parse(fs.readFileSync(connectorPath,'utf8'));
+      expect(upstream.headers.Authorization).toBe('Bearer fixture-old');
+      expect(fs.statSync(connectorPath).mode & 0o777).toBe(0o600);
       expect(servers.gateway.command).toBe('fixture-bridge');
       expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
-      expect(sp.connectorConfigChanged('github',servers.github)).toBe(false);
+      expect(sp.connectorConfigChanged('github',upstream)).toBe(false);
       expect(sp.isSpawnedConnectorTool('mcp__github__list_issues')).toBe(true);
       expect(sp.isSpawnedConnectorTool('mcp__unknown__list_issues')).toBe(false);
       expect(sp.isSpawnedConnectorTool('mcp__github__')).toBe(false);
       expect(sp.isSpawnedConnectorTool('mcp__github_other__list_issues')).toBe(false);
-      expect(sp.connectorConfigChanged('github',{...servers.github,headers:{Authorization:'Bearer fixture-new'}})).toBe(true);
+      expect(sp.connectorConfigChanged('github',{...upstream,headers:{Authorization:'Bearer fixture-new'}})).toBe(true);
       expect(sp.connectorConfigChanged('github',undefined)).toBe(true);
-      await sp.stop();expect(fs.existsSync(configPath)).toBe(false);
+      await sp.stop();expect(fs.existsSync(configPath)).toBe(false);expect(fs.existsSync(connectorPath)).toBe(false);
       expect(fs.existsSync(ticket)).toBe(true);
       fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=fixture-new\n');
       const next=makeSp('managed-next','api',agentConfig,gatewayConfig,sessionStore,undefined,profile);
       const fresh=(next as any).writeMcpConfig();
-      expect(JSON.parse(fs.readFileSync(fresh,'utf8')).mcpServers.github.headers.Authorization).toBe('Bearer fixture-new');
+      expect(JSON.parse(fs.readFileSync(JSON.parse(fs.readFileSync(fresh,'utf8')).mcpServers.github.args[1],'utf8')).headers.Authorization).toBe('Bearer fixture-new');
       agentConfig.connectors={github:{enabled:false}};
       expect(JSON.parse(fs.readFileSync((next as any).writeMcpConfig(),'utf8')).mcpServers.github).toBeUndefined();
     });
@@ -1027,6 +1035,83 @@ describe('SessionProcess', () => {
     expect(text).not.toContain('Fresh 0');
     expect(text).not.toContain('Fresh 4');
     expect(text).not.toContain('Conversation history with this user');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-CLI-01: an orchestration turn names its CLI session so the next process
+  //   can resume the transcript Claude Code persisted, instead of getting a fresh
+  //   random session and paying a full cache write every turn.
+  // --------------------------------------------------------------------------
+  const orchestrationProfile = (cliSession?: { id: string; resume: boolean }) =>
+    ({ role: 'agent', context: 'fixture', overlay: '', mcpConfigPath: '', ...(cliSession ? { cliSession } : {}) }) as never;
+
+  it('U-SP-CLI-01: starts a named CLI session with --session-id and resumes it with --resume', async () => {
+    const id = '33333333-4444-5555-6666-777777777777';
+    const fresh = makeSp('api:1', 'api', agentConfig, gatewayConfig, sessionStore, undefined, orchestrationProfile({ id, resume: false }));
+    await fresh.start();
+    const firstArgs = spawnMock.mock.calls[0][1] as string[];
+    expect(firstArgs).toContain('--session-id');
+    expect(firstArgs[firstArgs.indexOf('--session-id') + 1]).toBe(id);
+    expect(firstArgs).not.toContain('--resume');
+
+    spawnMock.mockClear();
+    const resumed = makeSp('api:1', 'api', agentConfig, gatewayConfig, sessionStore, undefined, orchestrationProfile({ id, resume: true }));
+    await resumed.start();
+    const secondArgs = spawnMock.mock.calls[0][1] as string[];
+    expect(secondArgs).toContain('--resume');
+    expect(secondArgs[secondArgs.indexOf('--resume') + 1]).toBe(id);
+    expect(secondArgs).not.toContain('--session-id');
+  });
+
+  it('U-SP-CLI-02: seeds flattened history when starting a session and never again when resuming', async () => {
+    for (let i = 0; i < 4; i++) {
+      await sessionStore.appendMessage('alfred', 'api:1', { role: 'user', content: `Earlier ${i}`, ts: Date.now() + i });
+    }
+    const id = '88888888-9999-aaaa-bbbb-cccccccccccc';
+
+    const fresh = makeSp('api:1', 'api', agentConfig, gatewayConfig, sessionStore, undefined, orchestrationProfile({ id, resume: false }));
+    await fresh.start();
+    fresh.sendMessage('new turn');
+    const seeded: string = JSON.parse(lastProcess!.stdin!.write.mock.calls[0][0] as string).message.content[0].text;
+    expect(seeded).toContain('Conversation history with this user');
+    expect(seeded).toContain('Earlier 3');
+
+    const resumed = makeSp('api:1', 'api', agentConfig, gatewayConfig, sessionStore, undefined, orchestrationProfile({ id, resume: true }));
+    await resumed.start();
+    resumed.sendMessage('new turn');
+    const sent: string = JSON.parse(lastProcess!.stdin!.write.mock.calls[0][0] as string).message.content[0].text;
+    // The resumed transcript already holds these turns; sending them again would both
+    // duplicate the conversation and shift the prefix the resume exists to reuse.
+    expect(sent).not.toContain('Conversation history with this user');
+    expect(sent).not.toContain('Earlier 3');
+    expect(sent).toBe('new turn');
+  });
+
+  it('U-SP-CLI-03: a profile without a CLI session behaves exactly as before — no session flag, history still seeded', async () => {
+    // This is the container-agent path: the orchestration runtime deliberately leaves
+    // cliSession unset there, so that path must keep its previous argv and prompt.
+    await sessionStore.appendMessage('alfred', 'api:1', { role: 'user', content: 'Container turn', ts: Date.now() });
+    const sp = makeSp('api:1', 'api', agentConfig, gatewayConfig, sessionStore, undefined, orchestrationProfile());
+    await sp.start();
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).not.toContain('--resume');
+    expect(args).not.toContain('--session-id');
+    sp.sendMessage('new turn');
+    const sent: string = JSON.parse(lastProcess!.stdin!.write.mock.calls[0][0] as string).message.content[0].text;
+    expect(sent).toContain('Conversation history with this user');
+    expect(sent).toContain('Container turn');
+  });
+
+  it('U-SP-CLI-04: a fallback turn re-seeds history so nothing is lost when the transcript is gone', async () => {
+    await sessionStore.appendMessage('alfred', 'api:1', { role: 'user', content: 'Before the transcript vanished', ts: Date.now() });
+    // resume:false is what AgentCliSessions returns on the fallback, with a brand new id.
+    const sp = makeSp('api:1', 'api', agentConfig, gatewayConfig, sessionStore, undefined,
+      orchestrationProfile({ id: 'dddddddd-eeee-ffff-0000-111111111111', resume: false }));
+    await sp.start();
+    sp.sendMessage('new turn');
+    const sent: string = JSON.parse(lastProcess!.stdin!.write.mock.calls[0][0] as string).message.content[0].text;
+    expect(sent).toContain('Conversation history with this user');
+    expect(sent).toContain('Before the transcript vanished');
   });
 
   // --------------------------------------------------------------------------
@@ -2764,6 +2849,42 @@ describe('SessionProcess — buildInitialPrompt system role', () => {
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
     jest.clearAllMocks();
+  });
+
+  it('context reset survives store recreation and loads exactly the latest 50 messages without editing history', async () => {
+    for (let i=0;i<60;i++) await sessionStore.appendMessage('alfred','reset-session',{role:'assistant',content:`fixture-message-${i}.`,ts:i});
+    const before=await sessionStore.loadSession('alfred','reset-session');
+    sessionStore.requestContextReset('alfred','reset-session');
+    const restored=new SessionStore(sessionStore.getAgentsBaseDir());
+    const reset=restored.getContextReset('alfred','reset-session')!;
+    const sp=makeSp('reset-session','api',agentConfig,gatewayConfig,restored);
+    sp.historyLimit=5;
+    const result=await (sp as any).buildInitialPrompt();
+    expect(result.loadedAtSpawn).toBe(50);
+    expect(result.historyPrompt).not.toContain('fixture-message-9.');
+    expect(result.historyPrompt).toContain('fixture-message-10.');
+    expect(result.historyPrompt).toContain('fixture-message-59.');
+    expect(await restored.loadSession('alfred','reset-session')).toEqual(before);
+    sp.historyRecoveryActive=true;
+    expect((await (sp as any).buildInitialPrompt()).loadedAtSpawn).toBe(5);
+    restored.completeContextReset('alfred','reset-session','wrong-id');
+    expect(restored.getContextReset('alfred','reset-session')).toEqual(reset);
+    restored.completeContextReset('alfred','reset-session',reset.id);
+    expect(restored.getContextReset('alfred','reset-session')).toBeUndefined();
+  });
+
+  it('excludes recorded failures before applying the history window, preserving real user messages and diagnostics', async () => {
+    await sessionStore.appendMessage('alfred','s',{role:'user',content:'Keep my actual request',ts:1});
+    for(let i=0;i<5;i++) await sessionStore.appendMessage('alfred','s',{role:'assistant',content:'Timeout diagnostic',ts:2+i,operationId:`response:failed-${i}`});
+    const sp=makeSp('s','api',agentConfig,gatewayConfig,sessionStore,undefined,{
+      role:'agent',mcpConfigPath:'',overlay:'',excludedHistoryOperationIds:Array.from({length:5},(_,i)=>`response:failed-${i}`),
+    });
+    sp.historyLimit=2;
+    const result=await (sp as any).buildInitialPrompt();
+    expect(result.historyPrompt).toContain('Keep my actual request');
+    expect(result.historyPrompt).not.toContain('Timeout diagnostic');
+    expect(result.messageCountAtSpawn).toBe(6);
+    expect(await sessionStore.loadSession('alfred','s')).toHaveLength(6);
   });
 
   it('U-SP-SYS-01: system messages are formatted as "System:" in initial prompt', async () => {

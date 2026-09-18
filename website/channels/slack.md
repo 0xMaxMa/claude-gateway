@@ -65,7 +65,7 @@ Administrators can inspect `GET /api/v1/agents/assistant/slack/pending`, then PA
 
 ## Enable chat controls and voice
 
-With `gateway.orchestration: true`, register these commands under **Slash Commands**, each with the same signed webhook Request URL: `/session`, `/sessions`, `/voice`, `/voices`, `/tasks`, `/stop`, `/help`. Enable **Interactivity & Shortcuts** and set its Request URL to that webhook too, so button actions reach the gateway. Configuring Events API alone does not register slash commands or interactive callbacks.
+With `gateway.orchestration: true`, register these commands under **Slash Commands**, each with the same signed webhook Request URL: `/session`, `/sessions`, `/clear`, `/compact`, `/voice`, `/voices`, `/tasks`, `/stop`, `/help`. Enable **Interactivity & Shortcuts** and set its Request URL to that webhook too, so button actions reach the gateway. Configuring Events API alone does not register slash commands or interactive callbacks.
 
 You can also send `@bot /command` messages through the Events API.
 

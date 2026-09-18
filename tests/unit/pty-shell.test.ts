@@ -757,10 +757,26 @@ describe('pty-shell transcript path', () => {
       .toBe('-home-ubuntu--claude-gateway-agents-x-workspace');
   });
 
+  // Verified against claude 2.1.274 by running it in `/tmp/Rp_dot.test dir` and reading back
+  // the project directory it created: every character outside [A-Za-z0-9-] becomes a dash and
+  // case is preserved. An agent id with an underscore used to resolve to a slug that does not
+  // exist, which silently makes a transcript look missing.
+  it('slugifies every non-alphanumeric character, not only / and .', () => {
+    expect(projectSlug('/tmp/Rp_dot.test dir')).toBe('-tmp-Rp-dot-test-dir');
+    expect(projectSlug('/home/x/.claude-gateway/agents/my_agent/workspace'))
+      .toBe('-home-x--claude-gateway-agents-my-agent-workspace');
+  });
+
   it('builds the transcript path under ~/.claude/projects', () => {
     const uuid = '11111111-2222-3333-4444-555555555555';
     expect(transcriptPath('/tmp/pty-poc', uuid))
       .toBe(`${os.homedir()}/.claude/projects/-tmp-pty-poc/${uuid}.jsonl`);
+  });
+
+  it('honours a relocated CLAUDE_CONFIG_DIR', () => {
+    const uuid = '11111111-2222-3333-4444-555555555555';
+    expect(transcriptPath('/tmp/pty-poc', uuid, { CLAUDE_CONFIG_DIR: '/srv/cc' }))
+      .toBe(`/srv/cc/projects/-tmp-pty-poc/${uuid}.jsonl`);
   });
 });
 

@@ -30,7 +30,7 @@ test.each(cases)('$source $mode $modality queues TTS only when policy allows the
       process.start = async () => {}; process.stop = async () => {};
       process.sendMessage = prompt => {
         if (expectsSpeech) expect(profile.overlay).toContain('spoken_text');
-        if (prompt.startsWith('Report the persisted')) {
+        if (prompt.includes('Report the persisted')) {
           followups++;
           expect(prompt).toContain('verified result');
           process.emit('output', JSON.stringify({ type: 'result', result: expectsSpeech ? JSON.stringify({ display_text: '調査が完了しました。', spoken_text: '調査が完了しました。' }) : '調査が完了しました。' }));

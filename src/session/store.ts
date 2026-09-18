@@ -32,6 +32,33 @@ export class SessionStore {
     return this.agentsBaseDir;
   }
 
+  /** Durable one-shot context reset. This never edits messages or media. */
+  requestContextReset(agentId: string, sessionId: string): void {
+    const filename = this.resolvePath(agentId, sessionId) + '.context-reset.json';
+    fs.mkdirSync(path.dirname(filename), { recursive: true });
+    const temporary = filename + '.' + randomUUID();
+    fs.writeFileSync(temporary, JSON.stringify({ id: randomUUID(), historyLimit: 50 }), { mode: 0o600 });
+    fs.renameSync(temporary, filename);
+  }
+
+  getContextReset(agentId: string, sessionId: string): { id: string; historyLimit: number } | undefined {
+    const filename = this.resolvePath(agentId, sessionId) + '.context-reset.json';
+    try {
+      const value = JSON.parse(fs.readFileSync(filename, 'utf8'));
+      if (typeof value.id !== 'string' || value.historyLimit !== 50) throw new Error('Invalid context reset marker');
+      return value;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+  }
+
+  completeContextReset(agentId: string, sessionId: string, id: string): void {
+    if (this.getContextReset(agentId, sessionId)?.id === id) {
+      fs.unlinkSync(this.resolvePath(agentId, sessionId) + '.context-reset.json');
+    }
+  }
+
   /**
    * Return the session key for a given agent + chat combination.
    */

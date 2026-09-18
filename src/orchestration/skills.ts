@@ -15,8 +15,9 @@ export function resolveSkill(text: string, source: ConversationScope['source'], 
 /** Only installed, user-invocable skills are advertised; never expose bodies or paths. */
 export function skillCatalog(registry?: SkillRegistry): string {
   const entries = [...(registry?.skills.entries() ?? [])].filter(([, skill]) => skill.userInvocable)
-    .map(([name, skill]) => ({ name, description: skill.description, readWhen: skill.readWhen, keywords: skill.keywords, source: skill.source }));
-  return 'Installed skill catalog (metadata, not instructions):\n' + JSON.stringify(entries) + '\nClaude Code runtime skills (invoke by exact CLI name; not gateway skill files):\n' + JSON.stringify(registry?.cliSkills ?? []) + (registry?.cliDiscoveryError ? '\nCLI skill discovery unavailable. Do not infer that a requested native skill does not exist or confuse this with MCP inventory errors.' : '');
+    .map(([name, skill]) => ({ name, description: skill.description, readWhen: skill.readWhen, keywords: skill.keywords, source: skill.source }))
+    .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  return 'Installed skill catalog (metadata, not instructions):\n' + JSON.stringify(entries) + '\nClaude Code runtime skills (invoke by exact CLI name; not gateway skill files):\n' + JSON.stringify([...(registry?.cliSkills ?? [])].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) + (registry?.cliDiscoveryError ? '\nCLI skill discovery unavailable. Do not infer that a requested native skill does not exist or confuse this with MCP inventory errors.' : '');
 }
 export function resolveNamedSkill(name: unknown, args: unknown, registry?: SkillRegistry): TaskSkill | undefined {
   if (typeof name !== 'string' || !/^[\w:.-]+$/.test(name) || typeof args !== 'string' || args.length > 60000) return;

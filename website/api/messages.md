@@ -33,8 +33,8 @@ If `message` starts with `/`, the endpoint executes the command instead of forwa
 | Command | Description |
 |---------|-------------|
 | `/session` | Return current session info (name, message count, context %) |
-| `/clear` | Clear the session history |
-| `/compact` | Summarise old history and keep only recent messages |
+| `/clear` | Reset model context; keep history and seed the next context with 50 recent messages |
+| `/compact` | Compact Claude Code context without changing chat history |
 | `/stop` | Interrupt the in-flight turn |
 | `/restart` | Gracefully restart the session |
 | `/model` | Return the current model for this agent |

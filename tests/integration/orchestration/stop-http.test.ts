@@ -23,7 +23,7 @@ test('web Stop returns numbered tasks; numeric selection stops one real schedule
  let runtime:AgentOrchestrationRuntime,userTurns=0;const stopped:string[]=[],finish=new Map<string,(r:any)=>void>();
  runtime=await AgentOrchestrationRuntime.open(agent,gateway,dir,sessions,history,{
   createAgentSession:async()=>{const p=new EventEmitter() as SessionProcess;p.start=async()=>{};p.stop=async()=>{};p.sendMessage=prompt=>{
-   if(!prompt.startsWith('Report the persisted')){userTurns++;const d=runtime.store.get("SELECT d.*,c.owner_principal_id FROM conversation_decisions d JOIN conversations c ON c.id=d.conversation_id WHERE d.state='running'")!;
+   if(!prompt.includes('Report the persisted')){userTurns++;const d=runtime.store.get("SELECT d.*,c.owner_principal_id FROM conversation_decisions d JOIN conversations c ON c.id=d.conversation_id WHERE d.state='running'")!;
     for(let i=1;i<=2;i++)runtime.tasks.spawn({conversationId:String(d.conversation_id),principalId:String(d.owner_principal_id),inputId:JSON.parse(String(d.input_ids_json))[0],decisionId:String(d.id),epoch:Number(d.epoch),actionId:'spawn'+i,execute:true,writeMemory:false},{title:'Task '+i,instructions:'Fixture',targetProfile:'default-worker'});
    }
    p.emit('output',JSON.stringify({type:'result',result:'Task status received.'}));};return p;},releaseAgentSession:async()=>{},
