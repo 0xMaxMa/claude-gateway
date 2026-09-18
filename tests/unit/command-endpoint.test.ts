@@ -455,6 +455,7 @@ describe('SessionProcess restart watcher notify payload', () => {
   let agentConfig: AgentConfig;
   let gatewayConfig: GatewayConfig;
   let sessionStore: jest.Mocked<{
+    getContextReset: jest.Mock;
     loadSession: jest.Mock;
     appendMessage: jest.Mock;
     loadTelegramSession: jest.Mock;
@@ -471,6 +472,7 @@ describe('SessionProcess restart watcher notify payload', () => {
 
     // Create a mock session store
     sessionStore = {
+      getContextReset: jest.fn().mockReturnValue(undefined),
       loadSession: jest.fn().mockResolvedValue([]),
       appendMessage: jest.fn().mockResolvedValue(undefined),
       loadTelegramSession: jest.fn().mockResolvedValue([]),
