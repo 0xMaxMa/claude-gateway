@@ -1,6 +1,6 @@
-/** Match only corrected spawn validation failures within one decision. No inference,
- * replay or authorization change: the later action must have actually committed. */
-export interface MutationAttempt { actionId: string; tool: string; args: Record<string, unknown>; committed?: boolean; errorCode?: string; }
+/** Match recovered mutations within one decision. This only controls reporting;
+ * authorization and admission still run before any command can commit. */
+export interface MutationAttempt { actionId: string; tool: string; args: Record<string, unknown>; committed?: boolean; errorCode?: string; intendedUpdateTaskId?: string; }
 export function retryableMutation(tool: string, code?: string): boolean {
   return tool === 'task_spawn' ? ['INVALID_INPUT','UNKNOWN_SKILL','ACKNOWLEDGEMENT_REQUIRED'].includes(code ?? '')
     : tool === 'task_update' && ['INVALID_INPUT','REVISION_CONFLICT','ACKNOWLEDGEMENT_REQUIRED'].includes(code ?? '');
@@ -21,6 +21,14 @@ function spawnIdentity(a: Record<string, unknown>): string | undefined {
 export function unresolvedMutations(attempts: MutationAttempt[]): boolean {
   return attempts.some((attempt, index) => {
     if (attempt.committed) return false;
+    // Update intake forbids spawning even a continuation of the selected task.
+    // A later committed update of that exact task is the corrected operation.
+    // Use the intake target captured at rejection, never a later intake choice.
+    if (attempt.tool === 'task_spawn' && attempt.errorCode === 'INTAKE_TASK_MISMATCH' &&
+        attempt.intendedUpdateTaskId && attempt.args.continue_task_id === attempt.intendedUpdateTaskId) {
+      return !attempts.slice(index + 1).some(next => next.actionId !== attempt.actionId &&
+        next.committed && next.tool === 'task_update' && next.args.task_id === attempt.intendedUpdateTaskId);
+    }
     if (!retryableMutation(attempt.tool, attempt.errorCode)) return true;
     const identify = attempt.tool === 'task_update' ? updateIdentity : spawnIdentity;
     const identity = identify(attempt.args);

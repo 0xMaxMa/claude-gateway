@@ -824,7 +824,11 @@ export class AgentOrchestrationRuntime {
           if (tool === 'task_answer') return;
           if (!intakeChoice || intakeChoice.mode==='wait' || !acknowledgementReady) throw new OrchestrationError('ACKNOWLEDGEMENT_REQUIRED');
           if (tool==='task_spawn' && preparedInputs.length) args.context_refs=[...new Set([...(Array.isArray(args.context_refs) ? args.context_refs : []),...preparedRefs,...preparedInputs.map(row=>String(row.id))])];
-          if (intakeChoice.mode==='update' && (tool==='task_spawn' || args.task_id!==intakeChoice.task_id)) throw new OrchestrationError('INTAKE_TASK_MISMATCH');
+          if (intakeChoice.mode==='update' && (tool==='task_spawn' || args.task_id!==intakeChoice.task_id)) {
+            const attempt = attemptedTaskActions.get(actionId);
+            if (attempt) attempt.intendedUpdateTaskId = intakeChoice.task_id;
+            throw new OrchestrationError('INTAKE_TASK_MISMATCH');
+          }
         } : undefined,
         onTaskQueued: !semantic && speechEnabled && !active.notification ? spoken => {
         if (taskSpeech) return; // A turn may delegate several tasks, but has one initial reply.

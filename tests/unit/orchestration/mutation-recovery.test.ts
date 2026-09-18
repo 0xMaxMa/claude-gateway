@@ -46,3 +46,36 @@ test('a corrected update revision resolves only the same task and instruction',(
  expect(unresolvedMutations([{...first,errorCode:'ACCESS_DENIED'},next])).toBe(true);
  expect(unresolvedMutations([first,{...next,committed:false}])).toBe(true);
 });
+
+const wrongSpawn: MutationAttempt = {
+ actionId: 'wrong-spawn', tool: 'task_spawn',
+ args: {continue_task_id: 'task-a', instructions: 'Revise the existing assignment'},
+ intendedUpdateTaskId: 'task-a', errorCode: 'INTAKE_TASK_MISMATCH', committed: false,
+};
+const correctedUpdate: MutationAttempt = {
+ actionId: 'correct-update', tool: 'task_update', committed: true,
+ args: {task_id: 'task-a', instruction: 'Complete revised assignment', mode: 'when_ready'},
+};
+test('a committed update recovers a continuation mistakenly spawned during update intake', () => {
+ expect(unresolvedMutations([wrongSpawn, correctedUpdate])).toBe(false);
+});
+test('cross-tool recovery requires the captured intake target and matching predecessor', () => {
+ for (const first of [
+  {...wrongSpawn, intendedUpdateTaskId: undefined},
+  {...wrongSpawn, intendedUpdateTaskId: 'task-b'},
+  {...wrongSpawn, args: {}},
+  {...wrongSpawn, args: {continue_task_id: 'task-b'}},
+  {...wrongSpawn, errorCode: 'ACCESS_DENIED'},
+  {...wrongSpawn, errorCode: 'INVALID_INPUT'},
+ ]) expect(unresolvedMutations([first, correctedUpdate])).toBe(true);
+});
+test('failed, earlier, unrelated or same-action updates cannot recover a rejected spawn', () => {
+ expect(unresolvedMutations([correctedUpdate, wrongSpawn])).toBe(true);
+ for (const next of [
+  {...correctedUpdate, committed: false},
+  {...correctedUpdate, actionId: wrongSpawn.actionId},
+  {...correctedUpdate, tool: 'task_answer'},
+  {...correctedUpdate, args: {...correctedUpdate.args, task_id: 'task-b'}},
+ ]) expect(unresolvedMutations([wrongSpawn, next])).toBe(true);
+ expect(unresolvedMutations([wrongSpawn, correctedUpdate, failed])).toBe(true);
+});
