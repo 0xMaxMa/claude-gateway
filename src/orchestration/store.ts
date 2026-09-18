@@ -119,6 +119,17 @@ export class OrchestrationStore {
     const row = this.db.prepare('SELECT a.audio' + sql + ' AND a.response_id=?').get(sessionId, cutoff, responseId) as { audio: Uint8Array } | undefined;
     return row ? Buffer.from(row.audio) : undefined;
   }
+  replaySpeech(sessionId: string, responseId: string): string | undefined {
+    const row = this.get(`SELECT s.text FROM response_speech s JOIN assistant_responses r ON r.id=s.response_id
+      JOIN conversations c ON c.id=r.conversation_id WHERE c.agent_session_id=? AND r.id=? AND r.state='completed'`, sessionId, responseId);
+    return row?.text ? String(row.text) : undefined;
+  }
+  replayableResponses(sessionId: string): string[] {
+    return this.all(`SELECT r.id FROM assistant_responses r JOIN conversations c ON c.id=r.conversation_id
+      WHERE c.agent_session_id=? AND (EXISTS(SELECT 1 FROM response_audio a WHERE a.response_id=r.id AND a.created_at>?)
+      OR (r.state='completed' AND EXISTS(SELECT 1 FROM response_speech s WHERE s.response_id=r.id AND length(trim(s.text))>0)))`,
+      sessionId, Date.now()-30*86400000).map(r => String(r.id));
+  }
   channelVoice(channel: string, chatId: string, thread = ''): boolean { return this.telegramVoice(channelVoiceKey(channel,chatId,thread)); }
   setChannelVoice(channel: string, chatId: string, thread: string, enabled: boolean): void { this.setTelegramVoice(channelVoiceKey(channel,chatId,thread),enabled); }
   channelVoiceMode(channel: string, chatId: string, thread = ''): VoiceReplyMode { return this.telegramVoiceMode(channelVoiceKey(channel,chatId,thread)); }

@@ -81,3 +81,8 @@ starts or restarts the gateway. See [diagnosis and repair](https://0xmaxma.githu
 Browser voice can resume unheard approved replies after navigation. Clients retain
 per-session mode/mute intent and reconnect with playback receipts; see the
 [voice resume protocol](website/api/voice.md#resume-browser-voice-after-navigation).
+
+Browser replay is available for approved spoken replies before their original
+recording completes, including interrupted playback. Explicit replay can generate
+missing audio with the configured TTS provider (normal provider charges apply).
+See the [replay and playback controls](website/api/voice.md#retained-speech-replay).

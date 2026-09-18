@@ -26,6 +26,7 @@ export class VoiceSession {
   private muted = false;
   private playingResponseId?: string;
   private interruption = 0;
+  private pausedUntil = 0;
   private playbackTrace?: { epoch: number; firstProgress: boolean; trace: ReturnType<typeof voiceTrace> };
   private readonly claimedSpeech = new Set<string>();
   private completedPlaybackEpoch?: number;
@@ -102,13 +103,33 @@ export class VoiceSession {
     if (this.closed) return;
     if (!Number.isSafeInteger(epoch) || epoch < 0 || epoch > 0xffffffff) throw new VoiceError('INVALID_EPOCH');
     if (epoch <= this.playback.epoch) return;
-    clearTimeout(this.silenceTimer); clearTimeout(this.admissionTimer); this.speaking = true; this.interruption++;
-    const previous = this.playback.epoch;
+    clearTimeout(this.silenceTimer); clearTimeout(this.admissionTimer); this.speaking = true;
+    this.clearPlayback(epoch);
+    this.stopResponse();
+  }
+  stopPlayback(epoch: number, requestId?: number): void {
+    if (this.closed) return;
+    if (!Number.isSafeInteger(epoch) || epoch < 0 || epoch >= 0xffffffff) throw new VoiceError('INVALID_EPOCH');
+    if (requestId !== undefined && (!Number.isSafeInteger(requestId) || requestId < 1)) throw new VoiceError('INVALID_CONTROL');
+    // The browser may not have received our latest playback.start yet.
+    this.clearPlayback(Math.max(epoch, this.playback.epoch + 1));
+    this.client.control({ type: 'playback.stopped', request_id: requestId, epoch: this.playback.epoch, generation: this.playback.generation });
+  }
+  pausePlayback(epoch: number, paused: boolean): void {
+    if (typeof paused !== 'boolean' || !Number.isSafeInteger(epoch)) throw new VoiceError('INVALID_CONTROL');
+    if (this.closed || epoch !== this.playback.epoch) return;
+    // A paused recognizer is bounded by its utterance and finalization budgets.
+    // Repeated pause messages cannot extend that budget indefinitely.
+    if (!paused) this.pausedUntil = 0;
+    else if (!this.pausedUntil) this.pausedUntil = Date.now() + this.options.maxUtteranceMs + Math.max(this.options.finalizationTimeoutMs, this.stt.capabilities.finalizationTimeoutMs ?? 0) + 1000;
+  }
+  private clearPlayback(epoch: number): void {
+    this.pausedUntil = 0;
+    this.interruption++;
     this.recordPlayback('interrupted');
     this.playingResponseId = undefined;
     const current = this.playback.clear(epoch);
     this.client.control({ type: 'playback.clear', epoch: current, generation: this.playback.generation });
-    if (current > previous) this.stopResponse();
   }
   speechEnded(lastAudioSeq: number): void {
     if (!Number.isSafeInteger(lastAudioSeq) || lastAudioSeq < 0) throw new VoiceError('INVALID_AUDIO_SEQUENCE');
@@ -136,7 +157,8 @@ export class VoiceSession {
       if (this.closed) return;
       // Some providers deliver no partial words. A confirmed continuation still
       // supersedes the previous reply before this text is admitted. Tasks survive.
-      if (this.responses.size) { this.speechStarted(this.playback.epoch + 1); this.speaking = false; }
+      const playback = this.playback.snapshot();
+      if (this.responses.size || (this.playingResponseId && (this.completedPlaybackEpoch !== playback.epoch || playback.playedSamples < playback.generatedSamples))) { this.speechStarted(this.playback.epoch + 1); this.speaking = false; }
       if (this.options.mergeWindowMs) {
         if (this.pendingText.reduce((n, p) => n + p.text.length, text.length) > 65536) throw new VoiceError('TRANSCRIPT_TOO_LARGE');
         this.pendingText.push({ text, utteranceId: turn.utteranceId });
@@ -215,10 +237,11 @@ export class VoiceSession {
       await this.speak(text, this.playback.epoch, responseId, trace);
       // Synthesis completion is not playback completion. Preserve the tail before
       // the next utterance clears the playback epoch.
-      const epoch = this.playback.epoch, deadline = Date.now() + 10000;
+      const epoch = this.playback.epoch; let deadline = Date.now() + 10000;
       while (!this.closed && interruption === this.interruption && epoch === this.playback.epoch) {
         const progress = this.playback.snapshot();
         if (progress.playedSamples >= progress.generatedSamples) break;
+        if (Date.now() < this.pausedUntil) deadline = Date.now() + 10000;
         if (Date.now() > deadline) { this.error('CLIENT_TOO_SLOW'); break; }
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -230,6 +253,7 @@ export class VoiceSession {
     if (this.closed) return;
     if (this.speaking || expectedEpoch !== this.playback.epoch) return;
     const epoch = this.playback.clear(), segmentId = randomUUID();
+    this.pausedUntil = 0;
     this.playingResponseId = responseId;
     let voiceId = this.voiceId;
     if (!voiceId.trim()) {
@@ -262,10 +286,12 @@ export class VoiceSession {
         const bytesPerFrame = Math.min(3200, Math.max(2, Math.floor(this.options.maxBufferedAudioMs * 16) * 2));
         for (let offset = 0; offset < chunk.bytes.length; offset += bytesPerFrame) {
           const bytes = chunk.bytes.subarray(offset, offset + bytesPerFrame);
-          const deadline = Date.now() + 10000;
+          let deadline = Date.now() + 10000;
           while (!signal.aborted && epoch === this.playback.epoch) {
             const progress = this.playback.snapshot();
-            if (progress.generatedSamples - progress.playedSamples + bytes.length / 2 <= this.options.maxBufferedAudioMs * 16 && this.client.bufferedBytes() <= this.options.maxBufferedAudioMs * 32) break;
+            const paused = Date.now() < this.pausedUntil;
+            if (paused) deadline = Date.now() + 10000;
+            if (!paused && progress.generatedSamples - progress.playedSamples + bytes.length / 2 <= this.options.maxBufferedAudioMs * 16 && this.client.bufferedBytes() <= this.options.maxBufferedAudioMs * 32) break;
             if (Date.now() > deadline) throw new VoiceError('CLIENT_TOO_SLOW');
             await new Promise(resolve => setTimeout(resolve, 10));
           }

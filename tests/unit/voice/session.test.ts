@@ -371,3 +371,95 @@ test.each([false, true])('response rejection only notifies the current voice tur
     expect(controls.filter(event => event.type === 'voice.error')).toEqual(interrupted ? [] : [{ type: 'voice.error', code: 'INFERENCE_FAILED' }]);
   } finally { await session.close(); }
 });
+
+
+test('batch STT only interrupts completed response playback after confirmed words; empty noise preserves it', async () => {
+  const { FakeTtsProvider } = await import('../../../src/voice/providers/fake');
+  const stt=new FakeSttProvider(), controls:any[]=[], audio:Buffer[]=[], stop=jest.fn(), receipts=jest.fn();
+  const session=new VoiceSession(stt,new FakeTtsProvider(),'voice',{
+    control:m=>controls.push(m),audio:b=>audio.push(b),bufferedBytes:()=>0,
+  },async()=>({inputId:'next',response:Promise.resolve('')}),stop,undefined,receipts);
+  const waitFor=async(fn:()=>boolean)=>{for(let i=0;i<100&&!fn();i++)await new Promise(r=>setTimeout(r,5));expect(fn()).toBe(true);};
+  const commit=async(text:string)=>{
+    const turn=[...controls].reverse().find(c=>c.state==='listening'&&c.utterance_id);
+    await session.audio({generation:turn.generation,epoch:session.playback.epoch,sequence:1,segmentId:turn.utterance_id,audio:Buffer.alloc(640)});
+    stt.sessions[0].commitId=undefined;
+    const pending=session.commit(1);
+    const outcome=pending.then(()=>undefined,error=>error);
+    await waitFor(()=>!!stt.sessions[0].commitId);
+    if(text)stt.sessions[0].emit({type:'segment_final',segmentId:'words',text});
+    stt.sessions[0].emit({type:'commit_done',commitId:stt.sessions[0].commitId!});
+    return outcome;
+  };
+  try {
+    await session.start();
+    session.notifyResult({responseId:'completed',text:'Answer',spoken:'Approved answer'});
+    await waitFor(()=>controls.some(c=>c.type==='playback.end'));
+    const epoch=session.playback.epoch;
+    expect((await commit(''))?.code).toBe('EMPTY_TRANSCRIPT');
+    expect(session.playback.epoch).toBe(epoch);expect(stop).not.toHaveBeenCalled();
+    await commit('please wait');
+    expect(session.playback.epoch).toBeGreaterThan(epoch);expect(stop).toHaveBeenCalledTimes(1);
+    expect(receipts).toHaveBeenCalledWith('completed',expect.anything(),'interrupted');
+  } finally {await session.close();}
+});
+
+test('manual replay stops the old audio without cancelling an agent task', async () => {
+  const {FakeTtsProvider}=await import('../../../src/voice/providers/fake');
+  const stop=jest.fn(),controls:any[]=[],receipts=jest.fn();
+  const session=new VoiceSession(new FakeSttProvider(),new FakeTtsProvider(),'voice',{
+    control:m=>controls.push(m),audio:()=>{},bufferedBytes:()=>0,
+  },async()=>({inputId:'next',response:Promise.resolve('')}),stop,undefined,receipts);
+  try {
+    session.notifyResult({responseId:'original',text:'Answer',spoken:'Answer'});
+    for(let i=0;i<100&&!controls.some(c=>c.type==='playback.end');i++)await new Promise(r=>setTimeout(r,5));
+    expect(controls.some(c=>c.type==='playback.end')).toBe(true);
+    session.stopPlayback(session.playback.epoch+1);
+    expect(stop).not.toHaveBeenCalled();
+    expect(receipts).toHaveBeenCalledWith('original',expect.anything(),'interrupted');
+    expect(session.speechClaims()).toContain('original');
+  } finally {await session.close();}
+});
+
+
+test('manual stop advances beyond an unseen server epoch and acknowledges the request', async () => {
+  const {FakeTtsProvider}=await import('../../../src/voice/providers/fake');
+  const controls:any[]=[],stop=jest.fn();
+  const session=new VoiceSession(new FakeSttProvider(),new FakeTtsProvider(),'voice',{
+    control:m=>controls.push(m),audio:()=>{},bufferedBytes:()=>0,
+  },async()=>({inputId:'i',response:Promise.resolve('')}),stop);
+  try {
+    session.notifyResult({responseId:'r',text:'Answer',spoken:'Answer'});
+    for(let i=0;i<100&&!controls.some(c=>c.type==='playback.start');i++)await new Promise(r=>setTimeout(r,5));
+    const unseen=controls.find(c=>c.type==='playback.start');expect(unseen).toBeDefined();
+    session.stopPlayback(unseen.epoch,42);
+    expect(session.playback.epoch).toBeGreaterThan(unseen.epoch);
+    expect(controls.at(-1)).toMatchObject({type:'playback.stopped',request_id:42,epoch:session.playback.epoch});
+    expect(stop).not.toHaveBeenCalled();
+  }finally{await session.close();}
+});
+
+test('STT candidate pause preserves backpressured audio past the normal client timeout', async () => {
+  jest.useFakeTimers();
+  const controls:any[]=[],audio:Buffer[]=[];
+  const tts:TtsProvider={id:'fake',capabilities:{textStreaming:true,wordAlignment:false,outputFormats:[PCM16]},
+    synthesize:async function*(){yield {bytes:Buffer.alloc(6400),format:PCM16,chunkSeq:0};}};
+  const session=new VoiceSession(new FakeSttProvider(),tts,'voice',{
+    control:m=>controls.push(m),audio:b=>audio.push(b),bufferedBytes:()=>0,
+  },async()=>({inputId:'i',response:Promise.resolve('')}),jest.fn(),
+    {silenceCommitMs:650,finalizationTimeoutMs:5000,maxUtteranceMs:60000,maxBufferedAudioMs:100});
+  try{
+    session.notifyResult({responseId:'r',text:'Answer',spoken:'Answer'});
+    await jest.advanceTimersByTimeAsync(20);
+    expect(audio).toHaveLength(1);
+    const epoch=session.playback.epoch;
+    session.pausePlayback(epoch,true);
+    await jest.advanceTimersByTimeAsync(15000);
+    expect(audio).toHaveLength(1);
+    expect(controls.some(c=>c.type==='voice.error')).toBe(false);
+    session.pausePlayback(epoch,false);session.progress(epoch,1600);
+    await jest.advanceTimersByTimeAsync(20);
+    expect(audio).toHaveLength(2);
+    expect(controls.some(c=>c.type==='playback.end')).toBe(true);
+  }finally{await session.close();jest.useRealTimers();}
+});

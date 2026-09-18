@@ -72,6 +72,8 @@ test('voice ticket requires scoped auth and origin-bound tickets without URL reg
     const rejected = await new Promise<Error>(resolve => replay.once('error', resolve));
     expect(rejected.message).toContain('403');
     const closed = once(ws, 'close'); ws.close(); await closed;
+    // Browser cleanup follows the WebSocket close; the server has already retired it.
+    expect((await request(app).delete(`${endpoint}/${ticket.body.voice_session_id}`).set('Authorization', 'Bearer fixture')).status).toBe(404);
     const replacement = await request(app).post(endpoint).set('Authorization', 'Bearer fixture').send({ chat_id: 'c' });
     expect(replacement.status).toBe(200);
   } finally { ws?.terminate(); await api.close(); await new Promise<void>(resolve => server.close(() => resolve())); }

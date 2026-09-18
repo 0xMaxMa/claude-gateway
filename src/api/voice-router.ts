@@ -14,6 +14,7 @@ import { sttProvider, ttsProvider } from '../voice/providers/registry';
 import { VoiceSession } from '../voice/session';
 import { decodeVoiceFrame } from '../voice/protocol';
 import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
+import { VoiceReplays } from '../voice/replay';
 import { PCM16 } from '../voice/types';
 
 interface VoiceTicket {
@@ -23,6 +24,7 @@ interface VoiceTicket {
 /** Authenticated voice sessions share conversation ownership with text and task controls. */
 export class VoiceApi {
   readonly router = Router();
+  private readonly replays = new VoiceReplays();
   private readonly wss = new WebSocketServer({ noServer: true, maxPayload: 65536 });
   private readonly tickets = new Map<string, VoiceTicket>();
   private readonly leases = new Map<string, string>();
@@ -61,10 +63,39 @@ export class VoiceApi {
       try {
         const result = await runner.voiceReplay(sessionId, apiPrincipal(key), responseId);
         res.setHeader('Cache-Control', 'private, no-store');
-        if (!responseId) { res.json({ response_ids: result }); return; }
+        if (!responseId) { res.json({ response_ids: result, replayable_response_ids: await runner.replayableVoiceResponses(sessionId, apiPrincipal(key)) }); return; }
         if (!Buffer.isBuffer(result)) { res.status(404).end(); return; }
         res.type('audio/wav').send(result);
       } catch { res.status(403).end(); }
+    });
+    this.router.post('/v1/agents/:agentId/sessions/:sessionId/voice-sessions/replays/:responseId', auth, async (req: Request, res: Response) => {
+      const agentId = String(req.params.agentId), sessionId = String(req.params.sessionId), responseId = String(req.params.responseId);
+      const key = (req as Request & { apiKey: ApiKey }).apiKey, principal = apiPrincipal(key);
+      const runner = this.agents.get(agentId), config = this.configs.get(agentId);
+      if (!runner || !canAccessAgent(key, agentId)) { res.status(403).end(); return; }
+      if (!/^[a-f0-9-]{36}$/i.test(responseId)) { res.status(400).end(); return; }
+      let audio: Buffer | string[] | undefined, spoken: string | undefined;
+      try {
+        audio = await runner.voiceReplay(sessionId, principal, responseId);
+        if (!Buffer.isBuffer(audio)) spoken = await runner.voiceReplaySpeech(sessionId, principal, responseId);
+      } catch { res.status(403).end(); return; }
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (Buffer.isBuffer(audio)) { res.type('audio/wav').send(audio); return; }
+      if (!spoken) { res.status(404).json({ error: 'Speech is not available for this response' }); return; }
+      if (!config?.orchestration?.enabled || !config.voice?.enabled) { res.status(409).json({ error: 'Voice disabled' }); return; }
+      const voice = resolveOrchestrationConfig(config.orchestration, config.voice).voice;
+      try {
+        if (voice.tts.provider.startsWith('managed:')) await requireManagedVoiceCredit(voice.tts.provider);
+        const voiceId = await resolveVoiceId(voice.tts);
+        // A concurrent replay or the original stream may have completed during catalog lookup.
+        const retained = await runner.voiceReplay(sessionId, principal, responseId);
+        const audio = Buffer.isBuffer(retained) ? retained : await this.replays.generate(JSON.stringify([agentId, sessionId, principal, responseId]), ttsProvider(voice.tts), voiceId, spoken);
+        runner.saveVoiceReplay(sessionId, principal, responseId, audio);
+        if (!res.destroyed) res.type('audio/wav').send(audio);
+      } catch (error) {
+        const code = error instanceof Error ? error.message : 'TTS_UNAVAILABLE';
+        if (!res.destroyed) res.status(code === 'MANAGED_VOICE_QUOTA_EXHAUSTED' ? 429 : 503).json({ error: 'Unable to prepare voice replay', code });
+      }
     });
     this.router.put('/v1/agents/:agentId/sessions/:sessionId/voice-sessions/preference', auth, async (req: Request, res: Response) => {
       const agentId = String(req.params.agentId), sessionId = String(req.params.sessionId);
@@ -244,6 +275,8 @@ export class VoiceApi {
             case 'speech.started': session.speechStarted(control.epoch); break;
             case 'speech.ended': session.speechEnded(control.last_audio_seq); break;
             case 'utterance.commit': await session.commit(control.last_audio_seq, control.final === true); break;
+            case 'playback.stop': session.stopPlayback(control.epoch, control.request_id); break;
+            case 'playback.pause': session.pausePlayback(control.epoch, control.paused); break;
             case 'playback.progress': session.progress(control.epoch, control.sample_offset); break;
             case 'playback.clear.ack': break;
             case 'voice.mute': if (typeof control.muted !== 'boolean' || !['discard', 'commit'].includes(control.policy)) throw new Error('INVALID_CONTROL'); await session.mute(control.muted, control.policy, control.last_audio_seq); break;
@@ -269,7 +302,7 @@ export class VoiceApi {
     for (const [key, ticket] of this.tickets) if (ticket.expiresAt < Date.now()) { this.tickets.delete(key); this.releaseLease(ticket); }
   }
   async close(): Promise<void> {
-    clearInterval(this.pruner);
+    clearInterval(this.pruner); this.replays.close();
     await Promise.allSettled([...this.sessions.values()].map(async value => { value.socket.terminate(); await value.session.close(); }));
     this.sessions.clear(); this.tickets.clear(); this.leases.clear(); this.wss.close();
   }
