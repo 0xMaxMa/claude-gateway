@@ -897,18 +897,25 @@ export class AgentOrchestrationRuntime {
       // unwrapped now, not just speech turns: display_text is the reply on a structured turn,
       // and splitSpeechResponse falls back to the raw text verbatim when the model answered
       // in plain text, which is what a normal turn produced before the schema was invariant.
+      // When a payload is present but unusable it falls back to the prose around it instead,
+      // so the JSON itself can never become the chat or spoken surface.
       const review = internalReview ? progressReviewResult(response.text, previousReports) : undefined;
       const parsed = splitSpeechResponse(response.text);
       const surfaces = review ?? { display: parsed.display, spoken: speechEnabled ? parsed.spoken : '' };
-      // No silent failures, without turning an ordinary turn into an anomaly: a plain-text
-      // reply loses nothing (the fallback IS the reply), but a review turn whose decision
-      // could not be read dropped a user-facing update, and a speech turn without its JSON
-      // fell back to a heuristic spoken surface. Both are recorded and warned about.
-      const droppedSurface = review ? review.outcome === 'unparsed' : speechEnabled && !parsed.structured;
-      if (droppedSurface) {
-        const code = review ? 'PROGRESS_REVIEW_UNPARSED' : 'SPEECH_UNSTRUCTURED';
-        this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.schema_unstructured', { responseId: decision.responseId, code, bytes: Buffer.byteLength(response.text) }));
-        console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Agent turn did not honour the declared response schema', agentId: this.agent.id, sessionId, referenceId: decision.responseId, code }));
+      // No silent failures. A plain-text reply loses nothing (the fallback IS the reply), so
+      // an ordinary turn that answered in prose is still not an anomaly; but a turn that DID
+      // emit the declared payload and left it unusable (no display_text, or JSON we could not
+      // parse) lost the reply the model composed, and that is a failure on every turn kind —
+      // not only on the review and speech turns whose extra surface was dropped. Recording it
+      // only for internal reviews is how an ordinary turn used to fail in complete silence.
+      const turnKind = internalReview ? 'review' : speechEnabled ? 'speech' : 'text';
+      const code = review ? (review.outcome === 'unparsed' ? 'PROGRESS_REVIEW_UNPARSED' : '')
+        : parsed.outcome === 'empty_display' ? 'RESPONSE_DISPLAY_EMPTY'
+        : parsed.outcome === 'unreadable' ? 'RESPONSE_PAYLOAD_UNREADABLE'
+        : parsed.outcome === 'plain' && speechEnabled ? 'SPEECH_UNSTRUCTURED' : '';
+      if (code) {
+        this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.schema_unstructured', { responseId: decision.responseId, code, turn: turnKind, bytes: Buffer.byteLength(response.text) }));
+        console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Agent turn did not honour the declared response schema', agentId: this.agent.id, sessionId, referenceId: decision.responseId, decisionId: decision.decisionId, turn: turnKind, code, bytes: Buffer.byteLength(response.text) }));
       }
       const committedTaskCommand = semantic && taskMutationAttempted && this.store.get(`SELECT tc.action_id FROM task_commands tc JOIN conversation_decisions d ON d.id=tc.decision_id
         WHERE tc.conversation_id=? AND tc.command_type IN ('spawn','update','answer')
@@ -940,7 +947,7 @@ export class AgentOrchestrationRuntime {
       // back to the extracted stream instead of publishing raw arguments; a turn that did
       // complete its object still resolves to display_text, exactly as before.
       const display = silent ? '' : response.interrupted
-        ? (speechEnabled || active.stopReason === 'barge-in' || !parsed.structured ? stoppedDisplay : surfaces.display || 'Response stopped.')
+        ? (speechEnabled || active.stopReason === 'barge-in' || parsed.outcome !== 'structured' ? stoppedDisplay : surfaces.display || 'Response stopped.')
         : surfaces.display || '';
       this.decisions.finish(decision, display, response.interrupted ? 'interrupted' : 'completed', channelSpeech && !silent ? taskSpeech || surfaces.spoken : undefined, !active.stopping && !silent);
       if (!silent && speechEnabled && !response.interrupted && !taskSpeech) {

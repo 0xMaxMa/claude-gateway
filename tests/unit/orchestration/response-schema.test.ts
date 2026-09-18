@@ -6,7 +6,8 @@ import { randomUUID } from 'crypto';
 import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
 import { ORCHESTRATION_RESPONSE_SCHEMA } from '../../../src/orchestration/response-schema';
 import { progressReviewResult } from '../../../src/orchestration/progress-review';
-import { splitSpeechResponse } from '../../../src/orchestration/speech';
+import { splitSpeechResponse, UNREADABLE_DISPLAY_NOTICE } from '../../../src/orchestration/speech';
+import { displayPrefix } from '../../../src/orchestration/display-stream';
 import { runtimeProfileArgs } from '../../../src/session/runtime-profile';
 import { SessionStore } from '../../../src/session/store';
 import { HistoryDB } from '../../../src/history/db';
@@ -138,6 +139,85 @@ test('an unreadable progress review reports why it was dropped instead of lookin
   expect(progressReviewResult(report, [])).toMatchObject({ silent: false, outcome: 'reported' });
   expect(progressReviewResult(report, ['Tests passed.'])).toMatchObject({ silent: true, outcome: 'duplicate' });
   // The speech path reports the same fact: the declared schema was not honoured.
-  expect(splitSpeechResponse('Plain prose')).toMatchObject({ structured: false });
-  expect(splitSpeechResponse(JSON.stringify({ display_text: 'Answer' }))).toMatchObject({ display: 'Answer', spoken: '', structured: true });
+  expect(splitSpeechResponse('Plain prose')).toMatchObject({ outcome: 'plain' });
+  expect(splitSpeechResponse(JSON.stringify({ display_text: 'Answer' }))).toMatchObject({ display: 'Answer', spoken: '', outcome: 'structured' });
+});
+
+test('an unusable structured payload is never published raw, on any turn kind', () => {
+  // Regression: every one of these used to return `display: raw`, i.e. the model's JSON
+  // object itself was the text sent to the user's chat (and offered to TTS).
+  const notice = UNREADABLE_DISPLAY_NOTICE;
+  // (a) the payload parsed but carried no reply.
+  expect(splitSpeechResponse(JSON.stringify({ display_text: '', spoken_text: 'ignored' })))
+    .toEqual({ display: notice, spoken: notice, outcome: 'empty_display' });
+  expect(splitSpeechResponse(JSON.stringify({ display_text: '   ' })))
+    .toMatchObject({ display: notice, outcome: 'empty_display' });
+  // (b) prose appended after a complete object: the object is now read, not printed.
+  expect(splitSpeechResponse(`${JSON.stringify({ display_text: 'Answer', spoken_text: 'Answer' })}\n\nLet me know if you want more.`))
+    .toEqual({ display: 'Answer', spoken: 'Answer', outcome: 'structured' });
+  // (c) prose before a fenced object, which the trailing-fence strip alone did not cover.
+  expect(splitSpeechResponse('Sure, here you go:\n\n```json\n{"display_text":"Answer"}\n```\n\nAnything else?'))
+    .toEqual({ display: 'Answer', spoken: '', outcome: 'structured' });
+  // (d) truncated JSON: the surrounding prose survives, the fragment does not.
+  expect(splitSpeechResponse('Checking that now.\n{"display_text":"Half of the ans'))
+    .toEqual({ display: 'Checking that now.', spoken: 'Checking that now.', outcome: 'unreadable' });
+  expect(splitSpeechResponse('{"display_text":"Half of the ans'))
+    .toEqual({ display: notice, spoken: notice, outcome: 'unreadable' });
+  for (const raw of ['{"display_text":"", "spoken_text":""}', '{"display_tex', '{"display_text":"x"} tail', 'lead {"display_text":', '```json\n{"display_text":\n```'])
+    expect(splitSpeechResponse(raw).display).not.toMatch(/display_text/);
+  // A reply that legitimately contains JSON the user asked for is not a payload and is
+  // still published untouched.
+  const json = '```json\n{"port":8080,"host":"localhost"}\n```';
+  expect(splitSpeechResponse(json)).toEqual({ display: json, spoken: '', outcome: 'plain' });
+  // Neither is a reply that quotes the payload format and then keeps explaining it: the
+  // object is an example inside the answer, so the answer must survive verbatim.
+  const explained = 'The agent answers with {"display_text":"hi"} and the gateway unwraps it, '
+    + 'which is why the JSON never reaches your chat window. The same object carries spoken_text '
+    + 'on a voice turn, and the dashboard stores only the unwrapped text for history.';
+  expect(splitSpeechResponse(explained)).toEqual({ display: explained, spoken: '', outcome: 'plain' });
+});
+
+test('a partially streamed payload is withheld whether or not it opens the turn', () => {
+  // The streaming layer is the other half of the same leak: raw JSON must not be published
+  // chunk by chunk either, including when the model emits prose before its object.
+  const payload = '{"display_text":"Answer","spoken_text":"Answer"}';
+  for (let i = 1; i <= payload.length; i++) expect(displayPrefix(`Working on it.\n${payload.slice(0, i)}`)).toBe('Working on it.\n');
+  for (let i = 1; i <= payload.length; i++) expect(displayPrefix(payload.slice(0, i))).not.toMatch(/display_text|\{/);
+  expect(displayPrefix('Here you go:\n```json\n{"display_text":"A"}')).toBe('Here you go:\n');
+  // Ordinary prose, including fenced code and braces mid-answer, still streams unchanged.
+  expect(displayPrefix('Use `npm run build`; the config is {"port":8080} in config.json.')).toBe('Use `npm run build`; the config is {"port":8080} in config.json.');
+  expect(displayPrefix('Here is the fix:\n```ts\nif (x) { return 1; }\n```\n')).toBe('Here is the fix:\n```ts\nif (x) { return 1; }\n```\n');
+});
+
+test('an ordinary turn whose payload cannot be read records the failure instead of dropping it', async () => {  // The no-silent-failures regression: before this, only internal review turns reported an
+  // unusable payload, so an ordinary chat turn lost its reply without a single trace.
+  const session = await driveEveryTurnShape(() => JSON.stringify({ display_text: '', spoken_text: 'ignored' }));
+  try {
+    expect(session.events.map(event => [event.turn, event.code])).toEqual([
+      ['text', 'RESPONSE_DISPLAY_EMPTY'], ['speech', 'RESPONSE_DISPLAY_EMPTY'], ['review', 'PROGRESS_REVIEW_UNPARSED'],
+    ]);
+    expect(session.results.text).toBe(UNREADABLE_DISPLAY_NOTICE);
+    expect(session.results.text).not.toMatch(/display_text/);
+    expect(session.results.speech).toBe(UNREADABLE_DISPLAY_NOTICE);
+    expect(session.results.review).toBe('');
+    for (const text of session.speech) expect(text).not.toMatch(/display_text/);
+    for (const call of session.seen.mock.calls) expect(String(call[0])).not.toMatch(/display_text/);
+  } finally { await session.close(); }
+});
+
+test('an answer that quotes the payload format is delivered unchanged and raises nothing', async () => {
+  // The false-positive direction of the same guard: explaining the schema in a reply must not
+  // be unwrapped, stripped, replaced by the notice, or recorded as a schema violation.
+  const explained = 'The agent answers with {"display_text":"hi"} and the gateway unwraps it, '
+    + 'so the JSON never reaches your chat. Here is the shape:\n\n```json\n{"display_text":"hi"}\n```\n\n'
+    + 'On a voice turn the same object also carries spoken_text, and the dashboard stores only '
+    + 'the unwrapped text, which is why history never shows an object either.';
+  const session = await driveEveryTurnShape(() => explained);
+  try {
+    expect(session.results.text).toBe(explained);
+    // Only the speech and review surfaces are genuinely missing; the ordinary turn is intact.
+    expect(session.events.map(event => [event.turn, event.code])).toEqual([
+      ['speech', 'SPEECH_UNSTRUCTURED'], ['review', 'PROGRESS_REVIEW_UNPARSED'],
+    ]);
+  } finally { await session.close(); }
 });

@@ -51,6 +51,26 @@ export function partialDisplay(raw: string): string {
   return '';
 }
 
+/** An object opening with one of the union response schema's own field names. Ordinary
+ * replies contain braces and fenced code blocks legitimately, so only this shape counts
+ * as our payload; anything looser would hold back or mangle real answers. */
+const UNION_KEYS = ['display_text', 'spoken_text', 'notify_user'];
+const PAYLOAD_OBJECT = /\{\s*"(?:display_text|spoken_text|notify_user)"\s*:/;
+
+/** `index` moved back over the opening fence that announces the object there, if any: a
+ * fenced payload is announced by its fence, so the fence belongs to the payload rather than
+ * being left behind as stray markdown. */
+export function fenceAdjusted(raw: string, index: number): number {
+  const fence = /```(?:json)?[ \t]*\r?\n?$/.exec(raw.slice(0, index));
+  return fence ? fence.index : index;
+}
+
+/** Index at which the first union-schema payload starts inside otherwise plain text, or -1. */
+export function payloadStart(raw: string): number {
+  const match = PAYLOAD_OBJECT.exec(raw);
+  return match ? fenceAdjusted(raw, match.index) : -1;
+}
+
 /** The incremental text safe to publish for a partial agent turn.
  *
  * The union response schema is declared on every turn, so the dominant case is a
@@ -58,7 +78,18 @@ export function partialDisplay(raw: string): string {
  * still answer in plain text (the CLI never forces the tool), and that text is the reply
  * itself — publish it as it arrives, exactly as before the schema became invariant.
  * Anything that opens like an object or a fenced block is treated as structured and held
- * until display_text is parseable, so raw JSON is never shown to the user. */
+ * until display_text is parseable, so raw JSON is never shown to the user. A turn that
+ * opens with prose and only then emits its payload is the same leak one token later: the
+ * prose streams, but everything from the payload on is withheld for the final parse. */
 export function displayPrefix(raw: string): string {
-  return /^\s*[{`]/.test(raw) ? partialDisplay(raw) : raw;
+  if (/^\s*[{`]/.test(raw)) return partialDisplay(raw);
+  const start = payloadStart(raw);
+  if (start >= 0) return raw.slice(0, start);
+  // The opener arrives a character at a time, so an object whose key is still being typed
+  // must be held too — otherwise `{"display_text"` publishes before the colon identifies it.
+  // Only a key that can still become a union field holds; braces in ordinary prose (and the
+  // JSON a user actually asked for) keep streaming.
+  const opening = /\{\s*(?:"([a-z_]*)"?\s*:?)?$/.exec(raw);
+  const typed = opening?.[1] ?? '';
+  return opening && UNION_KEYS.some(key => key.startsWith(typed)) ? raw.slice(0, opening.index) : raw;
 }
