@@ -951,6 +951,7 @@ export class GatewayRouter {
           const source = runner.getDashboardSource?.();
           const report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h')), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
           if (!report) { res.status(404).json({ error: 'No recorded session token report' }); return; }
+          if (report.contextWindow) report.contextWindow.total = report.contextWindow.model ? await runner.dashboardContextWindow?.(report.contextWindow.model) ?? null : null;
           if (reportPath === '/token-report') res.json(report);
           else res.type('html').send(generateTokenReportHtml(agentId, {...report, scope:dashboardRange(req.query.scope), sessionStatus: runner.agentSessionLiveStatus?.(sessionId) ?? 'stopped'}));
         } catch {
@@ -967,7 +968,7 @@ export class GatewayRouter {
       const detailRunner=this.agents.get(String(agentId));
       const source=detailRunner?.getDashboardSource?.();
       if(!source){res.status(404).json({error:'Unknown agent'});return;}
-      try{const detail=await this.dashboardReader.read('session',source.filename,{sessionId,offset,since:dashboardSince(req.query.scope),historyFilename:source.historyFilename});if(!detail){res.status(404).json({error:'Session not found'});return;}res.json({...detail,sessionStatus:detailRunner?.agentSessionLiveStatus?.(String(sessionId))??'stopped'});}
+      try{const detail=await this.dashboardReader.read('session',source.filename,{sessionId,offset,since:dashboardSince(req.query.scope),historyFilename:source.historyFilename});if(!detail){res.status(404).json({error:'Session not found'});return;}if(detail.contextWindow)detail.contextWindow.total=detail.contextWindow.model?await detailRunner?.dashboardContextWindow?.(detail.contextWindow.model)??null:null;res.json({...detail,sessionStatus:detailRunner?.agentSessionLiveStatus?.(String(sessionId))??'stopped'});}
       catch{res.status(503).json({error:'Dashboard data temporarily unavailable'});}
     });
 

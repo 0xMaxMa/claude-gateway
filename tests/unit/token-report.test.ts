@@ -165,6 +165,7 @@ test('live refresh updates status without replacing the scope toggle or its hand
  const scope = {onclick: jest.fn()};
  const nodes: Record<string, any> = Object.fromEntries(['report-status','report-totals','report-footprint','report-distribution','report-live'].map(id=>[id,{innerHTML:id==='report-status'?'Thinking':'old'}]));
  nodes['report-scope']=scope;
+ nodes['turn-model']={value:'',innerHTML:'old',options:[]};
  const body={innerHTML:'old rows'};
  const fresh={getElementById:(id:string)=>id==='login-form'?null:{innerHTML:id==='report-status'?'Idle':'new'},querySelector:()=>({innerHTML:'new rows'}),querySelectorAll:()=>[]};
  const context:any={document:{hidden:false,getElementById:(id:string)=>nodes[id],querySelector:()=>body,querySelectorAll:()=>[],addEventListener:jest.fn()},

@@ -2,7 +2,8 @@ import { MutationAttempt, unresolvedMutations } from '../../../src/orchestration
 const failed: MutationAttempt = {actionId:'first',tool:'task_spawn',args:{title:'Merge approved PR',continue_task_id:'previous-task',instructions:'Verify and merge',target_profile:'default-worker',skill_name:'fixture'},committed:false,errorCode:'INVALID_INPUT'};
 const retry: MutationAttempt = {actionId:'second',tool:'task_spawn',args:{title:'Merge approved PR',continue_task_id:'previous-task',instructions:'Verify checks then squash merge',target_profile:'default-worker'},committed:true};
 test('a corrected continuation clears its earlier validation failure only',()=>{
- expect(unresolvedMutations([failed,retry])).toBe(false);
+ expect(unresolvedMutations([failed,retry])).toBe(true);
+ expect(unresolvedMutations([failed,{...retry,args:{...retry.args,retry_of:failed.actionId}}])).toBe(false);
  expect(unresolvedMutations([failed,{...retry,args:{...retry.args,continue_task_id:'different-task'}}])).toBe(true);
  expect(unresolvedMutations([failed,{...retry,args:{...retry.args,title:'Other work'}}])).toBe(true);
 });
@@ -21,3 +22,8 @@ test('partial failures, same-action conflicts and non-spawn failures stay visibl
  expect(unresolvedMutations([{...failed,tool:'task_update'},retry])).toBe(true);
  expect(unresolvedMutations([failed,{...retry,committed:false}])).toBe(true);
 });
+
+ test('explicit retry references cannot resolve another action or an unsafe failure',()=>{
+  expect(unresolvedMutations([failed,{...retry,args:{...retry.args,retry_of:'unknown'}}])).toBe(true);
+  expect(unresolvedMutations([{...failed,errorCode:'ACCESS_DENIED'},{...retry,args:{...retry.args,retry_of:failed.actionId}}])).toBe(true);
+ });

@@ -4370,6 +4370,13 @@ export class AgentRunner extends EventEmitter {
       idleTtlMs: this.agentConfig.orchestration?.tasks?.workerIdleTtlMs ?? ORCHESTRATION_DEFAULTS.tasks.workerIdleTtlMs };
   }
 
+  async dashboardContextWindow(model: string): Promise<number | null> {
+    const models = await this.availableModels();
+    return models.find(m => m.id === model)?.contextWindow
+      ?? (this.gatewayConfig.gateway.models ?? DEFAULT_MODELS).find(m => m.id === model)?.contextWindow
+      ?? null;
+  }
+
   getTokenReport(sessionId: string) {
     const report = this.orchestration?.tokenReport(sessionId);
     return report ? {...report, backgroundReviews: this.historyDb.listReviewRuns().filter(run => run.sessionId === sessionId)} : undefined;

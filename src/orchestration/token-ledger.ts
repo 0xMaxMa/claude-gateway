@@ -27,16 +27,9 @@ export interface TokenTurn extends ManagedTurnMetrics {
   queuedMs?: number;
 }
 const initialized = new WeakSet<OrchestrationStore>();
-/** Context-window size for a model id. The `[1m]` variant buys the 1M window
- *  (1.05M for the GPT rows); every base id resolves to the standard 200K. This
- *  mirrors DEFAULT_MODELS in agent/runner.ts without importing that heavy module. */
-function modelContextWindow(model: unknown): number {
-  if (typeof model === 'string' && model.includes('[1m]')) return model.startsWith('gpt') ? 1050000 : 1000000;
-  return 200000;
-}
 /** Latest observed request in the most recent agent turn, including its output.
  * A peak earlier in the turn may predate compaction and is not current context. */
-function latestAgentContextWindow(store: Pick<OrchestrationStore, 'get'>, sessionId: string): { used: number; total: number; model: string | null } | null {
+function latestAgentContextWindow(store: Pick<OrchestrationStore, 'get'>, sessionId: string): { used: number; total: number | null; model: string | null } | null {
   const row = store.get(`SELECT payload_json FROM token_turns WHERE session_id=? AND role='agent' ORDER BY started_at DESC,id DESC LIMIT 1`, sessionId);
   if (!row) return null;
   let turn: TokenTurn;
@@ -50,7 +43,7 @@ function latestAgentContextWindow(store: Pick<OrchestrationStore, 'get'>, sessio
     best = { context, total: Number(usage.totalTokens ?? 0) };
   }
   if (!best) return null;
-  return { used: best.total, total: modelContextWindow(turn.model), model: typeof turn.model === 'string' ? turn.model : null };
+  return { used: best.total, total: null, model: typeof turn.model === 'string' ? turn.model : null };
 }
 // Dashboard polling never reloads full request arrays or conversation text.
 // Cache only projected measurements, invalidate the affected session on writes.

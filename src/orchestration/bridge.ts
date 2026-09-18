@@ -34,6 +34,7 @@ export class TaskBridge {
   async start(): Promise<void> {
     const server = createServer(async (request, response) => {
       response.setHeader('Content-Type', 'application/json');
+      let retryOf: string | undefined;
       try {
         if (request.method !== 'POST' || request.url !== '/call' || request.headers.origin) throw new OrchestrationError('ACCESS_DENIED');
         const token = request.headers.authorization?.replace(/^Bearer /, '');
@@ -106,6 +107,7 @@ export class TaskBridge {
             }
             if (mutation) scope.onMutationResult?.(context.actionId, true);
           } catch (error) {
+            if (command.tool === 'task_spawn' && error instanceof OrchestrationError && ['INVALID_INPUT','UNKNOWN_SKILL','ACKNOWLEDGEMENT_REQUIRED'].includes(error.code)) retryOf = context.actionId;
             if (mutation) scope.onMutationResult?.(context.actionId, false, error instanceof OrchestrationError ? error.code : undefined);
             throw error;
           }
@@ -131,7 +133,7 @@ export class TaskBridge {
       } catch (error) {
         const code = error instanceof OrchestrationError ? error.code : 'INVALID_REQUEST';
         response.statusCode = code === 'ACCESS_DENIED' ? 403 : 400;
-        response.end(JSON.stringify({ error: code, ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        response.end(JSON.stringify({ error: code, ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;
@@ -199,7 +201,7 @@ export function containerTaskTools(role: 'agent' | 'worker') {
   const entries: Array<[string, Record<string, unknown>, string[], string]> = role === 'agent' ? [
     ['capabilities_list',{query:text,catalog_version:text,offset:{type:'integer',minimum:0}},[],'Read this app agent capability catalog without granting host access. Follow next_offset with catalog_version for the complete list; restart at 0 on CAPABILITY_CATALOG_CHANGED.'],
     ['conversation_intake',{mode:{type:'string',enum:['ready','wait','update']},acknowledgement:text,preparation:text,clarification:text,task_id:text},['mode'],'Only when this turn\'s instructions explicitly ask you to run intake: classify readiness, acknowledge complete instructions before execution, or prepare incomplete materials and wait. Without that instruction this turn, answer directly and use the task tools directly instead.'],
-    ['task_spawn', { title:text, instructions:text, target_profile:text, spoken_acknowledgement:text, skill_name:text, skill_args:text, continue_task_id:text, continuation_policy:{type:'string',enum:['after_success','after_terminal']}, context_refs:{type:'array',items:text} }, ['title','instructions','target_profile'], 'Queue work inside this app container and return a durable receipt.'],
+    ['task_spawn', { retry_of:text, title:text, instructions:text, target_profile:text, spoken_acknowledgement:text, skill_name:text, skill_args:text, continue_task_id:text, continuation_policy:{type:'string',enum:['after_success','after_terminal']}, context_refs:{type:'array',items:text} }, ['title','instructions','target_profile'], 'Queue work inside this app container and return a durable receipt.'],
     ['task_status',{task_id:text},[],'Read task status without waiting. Pass task_id to retrieve its complete stored result and evidence; task indexes in conversation context are not result reports.'],
     ['task_cancel',{task_id:text},['task_id'],'Request cancellation.'],
     ['task_update',{task_id:text,expected_revision:{type:'integer'},instruction:text,mode:{type:'string',enum:['when_ready','interrupt_and_resume']}},['task_id','expected_revision','instruction','mode'],'Replace the current task instructions when the user changes the goal or constraints. Write the complete updated brief, preserving unchanged requirements and citing relevant user input IDs.'],

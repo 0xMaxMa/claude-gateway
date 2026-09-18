@@ -18,6 +18,8 @@ async function refreshReport(){
   var body=document.querySelector('.report-table tbody'),freshBody=next.querySelector('.report-table tbody');
   if(body.innerHTML!==freshBody.innerHTML)body.innerHTML=freshBody.innerHTML;
   var pagers=next.querySelectorAll('.report-pager');document.querySelectorAll('.report-pager').forEach(function(el,i){if(pagers[i])el.innerHTML=pagers[i].innerHTML;});
+  var model=document.getElementById('turn-model'),freshModel=next.getElementById('turn-model'),selected=model.value;
+  if(model.innerHTML!==freshModel.innerHTML){model.innerHTML=freshModel.innerHTML;if(selected&&!Array.from(model.options).some(function(o){return o.value===selected;})){var option=document.createElement('option');option.value=selected;option.textContent=selected+' (no turns on this page)';model.appendChild(option);}model.value=selected;}
   filter();if(typeof reportRenderDrawer==='function')reportRenderDrawer();document.querySelectorAll('.table-scroll').forEach(function(el,i){el.scrollLeft=scrolls[i]||0;});scrollTo(x,y);
   status.textContent='Live · updated '+new Date().toLocaleTimeString();
  }catch(e){status.textContent='Reconnecting… · data may be outdated';}

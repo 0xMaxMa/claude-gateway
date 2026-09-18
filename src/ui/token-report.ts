@@ -7,7 +7,7 @@ import { dashboardTheme, dashboardFontLink } from './dashboard-theme';
 /** Read-only admin report. Escape all stored model/tool metadata as untrusted text. */
 export interface TokenReportView {
   contextFootprint?: ContextFootprint;
-  contextWindow?: { used: number; total: number; model: string | null } | null;
+  contextWindow?: { used: number; total: number | null; model: string | null } | null;
   sessionId: string;
   // Live session lifecycle from the runner's in-memory map: 'running'/'idle' =
   // session kept alive, 'stopped' = killed/removed. Drives the Context window '-'.
@@ -143,7 +143,7 @@ export function generateTokenReportHtml(agentId: string, report: TokenReportView
  // work is never "stopped" for the Context window box, even mid-turn-gap.
  const cwStopped=(!activity||activity==='idle')&&report.sessionStatus==='stopped';
  const headerStatus=(!activity||activity==='idle')?(cwStopped?'stopped':'idle'):activity;
- const contextWindowBox=`<div class="card box-context">Context window<strong>${cwStopped?'-':(cw?n(cw.used)+' / '+windowCap(cw.total):'—')}</strong>${!cwStopped&&cw&&cw.model?`<span class="card-cached" title="${escape(cw.model)}">Model: ${escape(cw.model)}</span>`:''}</div>`;
+ const contextWindowBox=`<div class="card box-context">Context window<strong>${cwStopped?'-':(cw?n(cw.used)+' / '+(cw.total==null?'—':windowCap(cw.total)):'—')}</strong>${!cwStopped&&cw&&cw.model?`<span class="card-cached" title="${escape(cw.model)}">Model: ${escape(cw.model)}</span>`:''}</div>`;
  const models=[...new Set(report.turns.map(t=>t.model).filter((m):m is string=>Boolean(m)))].sort();
  // Fixed status buckets; raw turn/attempt states are mapped into these client-side.
  const statusBuckets: Array<[string,string]>=[['running','Running'],['completed','Completed'],['ended','Ended'],['fail','Fail']];

@@ -39,7 +39,7 @@ test('materials survive a silent turn; complete instruction acknowledges before 
         } else {
           expect(text).toContain('quarterly report');
           const spawn = {title:'Review the report',instructions:'Review the original quarterly report.',target_profile:'default-worker'};
-          expect(await call('task_spawn', spawn)).toEqual({error:'ACKNOWLEDGEMENT_REQUIRED'});
+          expect(await call('task_spawn', spawn)).toMatchObject({error:'ACKNOWLEDGEMENT_REQUIRED'});
           const ack = await call('conversation_intake',{mode:'ready',acknowledgement:'I am reviewing the report now.'});
           expect(ack).not.toHaveProperty('error');
           expect(ack.acknowledged).toBe(true);
@@ -319,9 +319,9 @@ test('activity orders a completed answer after its earlier acknowledgement', asy
 test.each([false,true])('corrected skill/profile dispatch preserves unrelated failures: %s', async extraFailure => {
  const f=await fixture(async call=>{
   await call('conversation_intake',{mode:'ready',acknowledgement:'I am reviewing the material.'});
-  expect(await call('task_spawn',{...spawnArgs,skill_name:'fixture',skill_args:''})).toEqual({error:'INVALID_INPUT'});
+  expect(await call('task_spawn',{...spawnArgs,skill_name:'fixture',skill_args:''})).toMatchObject({error:'INVALID_INPUT'});
   expect((await call('task_spawn',spawnArgs)).taskId).toBeTruthy();
-  if(extraFailure)expect(await call('task_spawn',{...spawnArgs,title:'A different assignment',skill_name:'fixture'})).toEqual({error:'INVALID_INPUT'});
+  if(extraFailure)expect(await call('task_spawn',{...spawnArgs,title:'A different assignment',skill_name:'fixture'})).toMatchObject({error:'INVALID_INPUT'});
   return 'Work started.';
  });
  try {
@@ -332,3 +332,14 @@ test.each([false,true])('corrected skill/profile dispatch preserves unrelated fa
   else expect(result).toBe('I am reviewing the material.'); // Return the delivered acknowledgement, not a second warning.
  } finally {await f.close();}
 });
+
+ test('explicit retry reference links a corrected brief through the real bridge',async()=>{
+  const f=await fixture(async call=>{
+   await call('conversation_intake',{mode:'ready',acknowledgement:'I am checking it.'});
+   const rejected=await call('task_spawn',{...spawnArgs,skill_name:'fixture'});
+   expect(rejected.error).toBe('INVALID_INPUT');expect(typeof rejected.retry_of).toBe('string');
+   const accepted=await call('task_spawn',{...spawnArgs,instructions:'Corrected brief for the same authorized work',retry_of:rejected.retry_of});
+   expect(accepted.taskId).toBeTruthy();return 'Started.';
+  });
+  try{expect(await f.send('Check it')).toBe('I am checking it.');expect(f.failures).toEqual([]);}finally{await f.close();}
+ });

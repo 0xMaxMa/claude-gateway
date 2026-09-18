@@ -3,11 +3,11 @@
 export interface MutationAttempt { actionId: string; tool: string; args: Record<string, unknown>; committed?: boolean; errorCode?: string; }
 function spawnIdentity(a: Record<string, unknown>): string | undefined {
   if (typeof a.title !== 'string' || !a.title.trim()) return;
-  // A continuation identifies existing work. For new work the brief must also
-  // match exactly; a successful unrelated task cannot clear a rejected command.
+  // Titles and predecessor IDs do not identify a unique assignment. The brief
+  // must match too unless the caller explicitly references the rejected action.
   const continuation = typeof a.continue_task_id === 'string' && a.continue_task_id ? a.continue_task_id : null;
-  if (!continuation && (typeof a.instructions !== 'string' || !a.instructions.trim())) return;
-  return JSON.stringify([a.title, continuation, continuation ? null : a.instructions,
+  if (typeof a.instructions !== 'string' || !a.instructions.trim()) return;
+  return JSON.stringify([a.title, continuation, a.instructions,
     a.continuation_policy ?? 'after_success', a.context_refs ?? []]);
 }
 export function unresolvedMutations(attempts: MutationAttempt[]): boolean {
@@ -16,6 +16,6 @@ export function unresolvedMutations(attempts: MutationAttempt[]): boolean {
     if (attempt.tool !== 'task_spawn' || !['INVALID_INPUT','UNKNOWN_SKILL','ACKNOWLEDGEMENT_REQUIRED'].includes(attempt.errorCode ?? '')) return true;
     const identity = spawnIdentity(attempt.args);
     return !identity || !attempts.slice(index + 1).some(next => next.actionId !== attempt.actionId &&
-      next.committed && next.tool === 'task_spawn' && spawnIdentity(next.args) === identity);
+      next.committed && next.tool === 'task_spawn' && (spawnIdentity(next.args) === identity || next.args.retry_of === attempt.actionId));
   });
 }
