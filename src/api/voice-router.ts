@@ -189,7 +189,7 @@ export class VoiceApi {
           if (ws.readyState === WebSocket.OPEN) for (const result of pending) session.notifyResult(result);
           resumeFailed = false;
         } catch {
-          if (!resumeFailed) send({ type: 'voice.notice', code: 'VOICE_RESUME_UNAVAILABLE' });
+          if (!resumeFailed) send({ type: 'voice.notice', code: 'VOICE_RESUME_UNAVAILABLE', message: 'Unable to load missed speech. Voice will retry while connected.' });
           resumeFailed = true;
         }
         finally { catchingUp = false; }
