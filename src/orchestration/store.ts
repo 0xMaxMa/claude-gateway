@@ -90,6 +90,10 @@ export class OrchestrationStore {
           id TEXT PRIMARY KEY, decision_id TEXT NOT NULL REFERENCES conversation_decisions(id),
           conversation_id TEXT NOT NULL REFERENCES conversations(id), binding_id TEXT NOT NULL REFERENCES conversation_bindings(id),
           question_ids_json TEXT NOT NULL, text TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending');`);
+        this.db.exec(`CREATE INDEX IF NOT EXISTS conversations_session ON conversations(agent_session_id);
+          CREATE INDEX IF NOT EXISTS response_voice_resume ON assistant_responses(conversation_id,created_at,id) WHERE state='completed';
+          CREATE INDEX IF NOT EXISTS delivery_voice_resume ON deliveries(response_id,state) WHERE modality='audio';`);
+        this.db.exec('CREATE TABLE IF NOT EXISTS browser_voice(session_id TEXT NOT NULL, principal_id TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), since INTEGER NOT NULL, PRIMARY KEY(session_id,principal_id))');
         this.db.exec('CREATE TABLE IF NOT EXISTS response_audio(response_id TEXT PRIMARY KEY REFERENCES assistant_responses(id),audio BLOB NOT NULL,created_at INTEGER NOT NULL)');
         this.db.exec('CREATE TABLE IF NOT EXISTS telegram_tts_voices(chat_id TEXT PRIMARY KEY, provider TEXT NOT NULL, voice_id TEXT NOT NULL)');
         this.db.exec('CREATE TABLE IF NOT EXISTS telegram_voice_preferences(chat_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)))');

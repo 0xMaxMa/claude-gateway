@@ -1,3 +1,4 @@
+import { BrowserVoice } from './browser-voice';
 import { TaskQuestions } from './task-questions';
 import { isProgressReview, recentCommunicatedProgress, progressReviewResult, PROGRESS_REVIEW_SCHEMA, PROGRESS_REVIEW_OVERLAY } from './progress-review';
 import { canonicalVoiceProvider } from '../voice/providers/model-ref';
@@ -104,6 +105,14 @@ export class AgentOrchestrationRuntime {
   private readonly inputResponses = new Map<string, Promise<string>>();
   private readonly inputTools = new Map<string, (event: ToolActivity) => void>();
   private readonly voiceListeners = new Map<string, { principalId: string; receive: (result: { responseId: string; text: string; spoken: string; requestId?: string; speechOnly?: boolean }) => void; gender?: () => string | undefined }>();
+  setBrowserVoice(sessionId: string, principalId: string, enabled: boolean): void {
+    this.authorizeSession(sessionId, principalId);
+    new BrowserVoice(this.store).set(sessionId, principalId, enabled);
+  }
+  pendingVoiceSpeech(sessionId: string, principalId: string, claimed: string[] = []) {
+    this.authorizeSession(sessionId, principalId);
+    return new BrowserVoice(this.store).pending(sessionId, principalId, claimed);
+  }
   subscribeVoiceResults(sessionId: string, principalId: string, receive: (result: { responseId: string; text: string; spoken: string; requestId?: string; speechOnly?: boolean }) => void, gender?: () => string | undefined): () => void {
     this.authorizeSession(sessionId, principalId);
     const listener = { principalId, receive, gender };
@@ -530,7 +539,7 @@ export class AgentOrchestrationRuntime {
         this.store.acceptInput({ scope: { agentId: this.agent.id, agentSessionId: String(row.agent_session_id), source: row.source as ConversationScope['source'],
           accountId: String(row.account_id), chatId: String(row.chat_id), threadKey: String(row.thread_key), principalId: String(row.owner_principal_id) },
           text: supervision + 'Report the persisted task status update as your own work, preserving your persona. Write a concise, natural first-person progress update in the existing persona: what you have completed, what you are doing now, and any concrete blocker. Use direct sentences such as "I have fixed both issues and the tests pass. I am now reviewing the PR diff." rather than labels such as "What is happening now:" or an outside observer account. Do not narrate receiving a worker report, forwarding instructions, or waiting for a summary to come back. Mention only meaningful new progress; do not repeat the entire root-cause analysis in every update unless asked. State the current action directly when supported by recent evidence. If an action is only planned, describe it as the next step, not as already happening; do not turn guesses into facts or claim a PR was opened or merged without confirmation. If a task was cancelled, briefly confirm which task stopped. When cancellation.requestedBy is user, explicitly treat it as the user’s intentional stop, never an execution failure or an unexplained interruption. Do not retry or restart it. If cancellation is still pending, say stopping, not stopped. Do not start tasks or change their goal. Only a progress-alert turn may append scoped planning advice as described above. This is a reporting-only turn by design, not an execution outage. Do not promise an automatic future retry or claim the execution system is unavailable. When reporting completion, inspect current task states: distinguish the finished investigation from an implementation merely proposed in its result. If no follow-up task is queued or running, say that this stage is complete and the proposed next step has not started. Do not promise to continue or imply background work without a committed task receipt. Preserve the original user scope; a request to investigate does not itself authorize edits or deployment. If a genuinely new decision is needed, ask it clearly instead of ending with an ambiguous future-work statement. If a worker repeats an answered question, explain the specific unresolved discrepancy instead of asking the user to repeat the same approval.', storeUserMessage: false,
-          modality: this.voiceListeners.get(String(row.agent_session_id))?.principalId === row.owner_principal_id ? 'live_voice' : undefined,
+          modality: (this.voiceListeners.get(String(row.agent_session_id))?.principalId === row.owner_principal_id || new BrowserVoice(this.store).enabled(String(row.agent_session_id), String(row.owner_principal_id))) ? 'live_voice' : undefined,
           ingressKey: `notification:${row.notification_id}${row.previous_input_id ? `:retry:${row.previous_seq}` : ''}`, capabilities: { execute: false, writeMemory: false } }, this.config.conversation.maxPendingInputs);
       }
     }
@@ -583,7 +592,7 @@ export class AgentOrchestrationRuntime {
       await this.host.refreshSkills?.();
       if (!input.skill) input = {...input, skill: resolveSkill(input.text, input.scope.source, this.host.skills?.())};
       const channelSpeech = ['telegram','discord','line','slack'].includes(input.scope.source) && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && voiceReplyAllowed(this.store.channelVoiceMode(input.scope.source,input.scope.chatId,input.scope.threadKey), responseHasVoiceOrigin(this.store,decision.responseId!));
-      const speechEnabled = channelSpeech || input.modality === 'live_voice' || this.voiceListeners.get(sessionId)?.principalId === input.scope.principalId;
+      const speechEnabled = channelSpeech || new BrowserVoice(this.store).enabled(sessionId, input.scope.principalId) || input.modality === 'live_voice' || this.voiceListeners.get(sessionId)?.principalId === input.scope.principalId;
       const typedSpeech = speechEnabled && input.modality !== 'live_voice';
 
       if (!internalReview) this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.started', { responseId: decision.responseId }));
@@ -666,7 +675,7 @@ export class AgentOrchestrationRuntime {
         if (choice.mode === 'wait') return {waiting:true, prepared:true};
         const alreadyPublished = !!acknowledgementId;
         acknowledgement = intakeChoice!.acknowledgement!;
-        acknowledgementId = this.decisions.acknowledge(decision, acknowledgement, channelSpeech ? acknowledgement : undefined);
+        acknowledgementId = this.decisions.acknowledge(decision, acknowledgement, speechEnabled ? acknowledgement : undefined);
         // Capture only the original acknowledgement chunks, before asynchronous delivery
         // can enqueue optional speech-failure notices under the same response.
         if (!alreadyPublished) acknowledgementTextIds = this.store.all("SELECT id FROM deliveries WHERE response_id=? AND modality='text'", acknowledgementId).map(row => String(row.id));

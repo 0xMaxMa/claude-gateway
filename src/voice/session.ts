@@ -27,6 +27,9 @@ export class VoiceSession {
   private playingResponseId?: string;
   private interruption = 0;
   private playbackTrace?: { epoch: number; firstProgress: boolean; trace: ReturnType<typeof voiceTrace> };
+  private readonly claimedSpeech = new Set<string>();
+  private completedPlaybackEpoch?: number;
+  private muteQueue: Promise<void> = Promise.resolve();
   private speechQueue: Promise<void> = Promise.resolve();
   private silenceTimer?: ReturnType<typeof setTimeout>;
   private admissionTimer?: ReturnType<typeof setTimeout>;
@@ -182,9 +185,10 @@ export class VoiceSession {
     try { await this.enqueueSpeech(source(), first.value.responseId, epoch); }
     finally { await iterator.return?.(); }
   }
+  speechClaims(): string[] { return [...this.claimedSpeech]; }
   /** Only approved summaries from authenticated automatic task reports enter here. */
   notifyResult(result: { responseId: string; text: string; spoken: string; requestId?: string; speechOnly?: boolean }): void {
-    if (this.closed) return;
+    if (this.closed || this.claimedSpeech.has(result.responseId)) return;
     if (!result.speechOnly) this.client.control({ type: 'response.text', response_id: result.responseId, request_id: result.requestId, text: result.text, final: true });
     if (!result.spoken) { this.speechUnavailable(); return; }
     const client = this.client;
@@ -194,12 +198,20 @@ export class VoiceSession {
     })(), result.responseId);
   }
   private enqueueSpeech(text: AsyncIterable<string>, responseId?: string, interruption = this.interruption): Promise<void> {
+    if (responseId) {
+      if (this.claimedSpeech.has(responseId)) return Promise.resolve();
+      this.claimedSpeech.add(responseId);
+    }
     const trace = voiceTrace('tts', this.diagnostic, { responseId });
     trace.emit('speech_ready');
     const queued = this.speechQueue.then(async () => {
-      if (this.closed || interruption !== this.interruption) return;
       while (!this.closed && interruption === this.interruption && (this.speaking || this.finalizing || this.pendingText.length)) await new Promise(resolve => setTimeout(resolve, 10));
-      if (this.closed || interruption !== this.interruption) return;
+      if (this.closed || interruption !== this.interruption) {
+        // This response never began playback. Let catch-up reserve it again;
+        // the interrupted response that actually played keeps its claim/receipt.
+        if (responseId) this.claimedSpeech.delete(responseId);
+        return;
+      }
       await this.speak(text, this.playback.epoch, responseId, trace);
       // Synthesis completion is not playback completion. Preserve the tail before
       // the next utterance clears the playback epoch.
@@ -273,6 +285,7 @@ export class VoiceSession {
           try { this.saveAudio(responseId, pcmToWav(Buffer.concat(recording))); } catch { /* Playback remains usable if storage is full. */ }
         }
         trace.emit('audio_sent_complete');
+        this.completedPlaybackEpoch = epoch;
         this.recordPlayback('streamed'); this.client.control({ type: 'playback.end', response_id: responseId, epoch, generated_samples: this.playback.snapshot().generatedSamples }); }
     } catch (error) { if (!this.closed && epoch === this.playback.epoch) { trace.emit('failed', { code: error instanceof VoiceError ? error.code : 'TTS_UNAVAILABLE' }); this.recordPlayback('failed'); this.error(error instanceof VoiceError ? error.code : 'TTS_UNAVAILABLE'); } }
   }
@@ -280,8 +293,18 @@ export class VoiceSession {
     const state = this.playbackTrace;
     if (state && state.epoch === epoch && epoch === this.playback.epoch && !state.firstProgress && this.playback.snapshot().playedSamples > 0) { state.firstProgress = true; state.trace.emit('first_playback_progress'); }
     if (epoch === this.playback.epoch) this.recordPlayback('playback_progress'); }
-  private recordPlayback(state: string): void { if (this.playingResponseId) this.record?.(this.playingResponseId, this.playback.snapshot(), state); }
-  async mute(muted: boolean, policy: 'discard' | 'commit', lastAudioSeq?: number): Promise<void> {
+  private recordPlayback(state: string): void {
+    const progress = this.playback.snapshot();
+    if (this.completedPlaybackEpoch === progress.epoch && progress.generatedSamples > 0 && progress.playedSamples >= progress.generatedSamples) state = 'played';
+    if (this.playingResponseId) this.record?.(this.playingResponseId, progress, state);
+  }
+  mute(muted: boolean, policy: 'discard' | 'commit', lastAudioSeq?: number): Promise<void> {
+    const operation = this.muteQueue.then(() => this.applyMute(muted, policy, lastAudioSeq));
+    this.muteQueue = operation.catch(() => {});
+    return operation;
+  }
+  private async applyMute(muted: boolean, policy: 'discard' | 'commit', lastAudioSeq?: number): Promise<void> {
+    if (this.closed) return;
     this.muted = muted;
     try {
       if (muted) {

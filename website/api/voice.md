@@ -68,7 +68,7 @@ The `upstream:elevenlabs` provider (`upstream` is a legacy alias) uses the origi
 
 Voice settings `language` is a recognition hint for STT. TTS follows the language of the approved spoken response, including typed messages while the microphone is muted. Model and voice catalog permissions are independent: a missing model-list permission returns usable voices and supported synthesis defaults marked `catalog_source: supported_defaults`, with a warning to enable `models_read` for the complete provider catalog.
 
-After connecting, send JSON `{ "type": "voice.start", "voice_id": "<catalog-id>" }` (`voice_id` is optional). Wait for `voice.state` with `state: "listening"`, `generation`, `epoch` and `utterance_id` before sending microphone frames.
+After connecting, send JSON `{ "type": "voice.start", "voice_id": "<catalog-id>" }` (`voice_id` is optional). Include `muted: true` to restore a muted microphone without opening STT; the server reports `state: "muted"` and TTS remains available. Wait for `voice.state` with `state: "listening"`, `generation`, `epoch` and `utterance_id` before sending microphone frames.
 
 Binary audio uses a 44-byte header followed by PCM bytes: ASCII `CGV1` (4 bytes), generation UUID (16 bytes), epoch (uint32 big-endian), sequence (uint32 big-endian), segment UUID (16 bytes). Microphone segment IDs are the current utterance ID; playback frames identify the segment from `playback.start`. Reject stale generations/epochs. Payloads must have an even byte length and are bounded to 32,000 bytes per frame.
 
@@ -146,3 +146,30 @@ Explicit `managed:elevenlabs` and `managed:paxalabs` routes use the authenticate
 ### OpenRouter voice catalog
 
 `GET /api/v1/agents/:agentId/voice-settings/catalog?provider=upstream:openrouter` discovers connected OpenRouter speech/transcription models and their supported voices. Direct `openrouter` uses `OPENROUTER_API_KEY`; `upstream:openrouter` uses the upstream account credentials. Select models by their catalog capabilities: TTS uses the speech endpoint, while browser segments and uploaded voice messages use the transcription endpoint. OpenRouter browser STT is recorded, not realtime.
+
+
+## Resume browser voice after navigation
+
+A successful voice ticket saves voice intent for the authenticated principal and
+chat session. Closing the socket or deleting its lease releases microphone
+resources but preserves that intent. After reconnecting, the gateway queues
+approved spoken summaries of completed responses since voice was enabled,
+including replies completed while disconnected or after returning. It reuses
+canonical response IDs and the normal TTS queue; no full-report text fallback is
+introduced. Catch-up uses current voice settings and may incur TTS usage.
+
+Clients must send accurate `playback.progress` receipts. Fully played responses
+and responses explicitly interrupted by barge-in are not replayed automatically.
+A partially heard response detached by navigation restarts from its beginning.
+Repeated catch-up checks and live notifications do not synthesize the same
+response twice within one connection. Provider failures remain visible and are
+not repeatedly retried on that connection.
+
+Explicitly switching to text mode requires closing the current connection, then
+`PUT /api/v1/agents/:agentId/sessions/:sessionId/voice-sessions/preference` with
+`{"enabled":false}` (204). The endpoint requires API authentication, Agent access
+and conversation membership; enabling still requires the normal ticket and
+credit checks. Switching voice back on starts a new catch-up window. Navigation
+alone must not send this preference update. Browser clients should save mode and
+mute per authenticated pod/Agent/session, disable media tracks before connecting
+when muted, and wait for old lease deletion before opening a replacement.
