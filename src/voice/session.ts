@@ -205,9 +205,13 @@ export class VoiceSession {
     const trace = voiceTrace('tts', this.diagnostic, { responseId });
     trace.emit('speech_ready');
     const queued = this.speechQueue.then(async () => {
-      if (this.closed || interruption !== this.interruption) return;
       while (!this.closed && interruption === this.interruption && (this.speaking || this.finalizing || this.pendingText.length)) await new Promise(resolve => setTimeout(resolve, 10));
-      if (this.closed || interruption !== this.interruption) return;
+      if (this.closed || interruption !== this.interruption) {
+        // This response never began playback. Let catch-up reserve it again;
+        // the interrupted response that actually played keeps its claim/receipt.
+        if (responseId) this.claimedSpeech.delete(responseId);
+        return;
+      }
       await this.speak(text, this.playback.epoch, responseId, trace);
       // Synthesis completion is not playback completion. Preserve the tail before
       // the next utterance clears the playback epoch.

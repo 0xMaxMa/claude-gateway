@@ -59,3 +59,30 @@ test('catch-up and live results synthesize a response once; playback completion 
     expect(receipts).toHaveBeenLastCalledWith('response',expect.objectContaining({playedSamples:320,generatedSamples:320}),'played');
   } finally { await session.close(); }
 });
+
+test('barge-in releases a queued unheard reply for catch-up without replaying the interrupted reply', async () => {
+  const controls: Record<string, any>[] = [], receipts = jest.fn();
+  const synthesize = jest.fn(async function* () { yield {bytes: Buffer.alloc(640), format: PCM16, chunkSeq: 0}; });
+  const tts: TtsProvider = {id:'fixture', capabilities:{textStreaming:true,wordAlignment:false,outputFormats:[PCM16]}, synthesize};
+  const session = new VoiceSession(new FakeSttProvider(), tts, 'voice', {control:v=>controls.push(v), audio:()=>{}, bufferedBytes:()=>0}, jest.fn(), jest.fn(), undefined, receipts);
+  const first = {responseId:'first',text:'First',spoken:'First'};
+  const waiting = {responseId:'waiting',text:'Waiting',spoken:'Waiting'};
+  const until = async (predicate:()=>boolean) => {
+    const deadline=Date.now()+1000;
+    while(!predicate() && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,5));
+    expect(predicate()).toBe(true);
+  };
+  try {
+    session.notifyResult(first); session.notifyResult(waiting);
+    await until(()=>controls.some(c=>c.type==='playback.end'));
+    session.speechStarted(session.playback.epoch+1);
+    await session.mute(true,'discard');
+    await until(()=>!session.speechClaims().includes('waiting'));
+    expect(receipts).toHaveBeenCalledWith('first',expect.anything(),'interrupted');
+    expect(session.speechClaims()).toContain('first');
+    session.notifyResult(waiting); session.notifyResult(waiting); session.notifyResult(first);
+    await until(()=>controls.filter(c=>c.type==='playback.end').length===2);
+    expect(controls.filter(c=>c.type==='playback.start').map(c=>c.response_id)).toEqual(['first','waiting']);
+    expect(synthesize).toHaveBeenCalledTimes(2);
+  } finally { await session.close(); }
+});
