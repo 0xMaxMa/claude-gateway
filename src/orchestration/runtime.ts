@@ -3,11 +3,12 @@ import { committedCommandContext, communicatedProgressContext } from './decision
 import { recordTokenTurn, tokenReport, summarizeTokenTurns, measuredTurns } from './token-ledger';
 import { TaskQuestions } from './task-questions';
 import { isProgressReview, recentCommunicatedProgress, progressReviewResult, PROGRESS_REVIEW_OVERLAY } from './progress-review';
+import { ORCHESTRATION_RESPONSE_SCHEMA } from './response-schema';
 import { canonicalVoiceProvider } from '../voice/providers/model-ref';
 import { CapabilityCatalog, readCapabilityPage } from './capabilities';
 import { browserRouting } from './browser-routing';
 import { responseFailureMessage } from './response-errors';
-import { partialDisplay } from './display-stream';
+import { displayPrefix } from './display-stream';
 import { responseHasVoiceOrigin, voiceReplyAllowed } from './voice-reply-policy';
 import { taskReport } from './task-report';
 import { TelegramToolStatus } from './telegram-tool-status';
@@ -791,28 +792,25 @@ export class AgentOrchestrationRuntime {
       // Anthropic's prompt cache is a strict prefix match over [tools, system, messages],
       // evaluated ahead of the per-turn user message. Mutating ticket.profile.overlay (which
       // becomes --append-system-prompt, part of the cached system block) or attaching
-      // ticket.profile.responseSchema (which adds a synthetic StructuredOutput tool, part of
-      // the cached tools block) for only SOME turns of a session (report/internalReview turns,
-      // semantic-intake turns, speech-enabled turns) would make those turns' byte-prefix
-      // diverge from every other turn in the same session, forcing a full cache-write every
-      // time such a turn interleaves with a differently shaped one. INTAKE_OVERLAY, the review
-      // directive and the speech directive below all move into the per-turn prompt instead —
-      // that is new message content every turn regardless, so it was never part of the cached
-      // prefix and appending it there costs nothing extra.
-      // ticket.profile.responseSchema is deliberately left unset here, on every turn shape,
-      // including speech and internalReview: the CLI's --json-schema flag both declares the
-      // StructuredOutput tool AND forces tool_choice to it (verified against the installed
-      // claude-code binary), so "declare the schema always, only toggle its use via per-turn
-      // text" is not reachable through this flag — declaring it on every turn would force
-      // every plain conversational turn through a JSON tool call instead of free text, which
-      // is exactly the output-contract change per-turn schema swapping was meant to avoid.
-      // Speech/review output shape is instead governed purely by SPEECH_OVERLAY and
-      // PROGRESS_REVIEW_OVERLAY prompt text (both already per-turn, below the cache
-      // breakpoint), parsed by splitSpeechResponse()/progressReviewResult(), which already
-      // tolerate free-form/unvalidated JSON text — this was already the dominant, shipped code
-      // path for internalReview (native schema was previously attached there only in the
-      // narrow speech+review combination). Speech now runs the same proven fallback instead of
-      // a second, cache-breaking enforcement mechanism.
+      // ticket.profile.responseSchema (which becomes --json-schema, appending a synthetic
+      // StructuredOutput tool to the cached tools block) for only SOME turns of a session
+      // (report/internalReview turns, semantic-intake turns, speech-enabled turns) makes
+      // those turns' byte-prefix diverge from every other turn in the same session, forcing a
+      // full cache-write every time such a turn interleaves with a differently shaped one.
+      // INTAKE_OVERLAY, the review directive and the speech directive below all live in the
+      // per-turn prompt instead — that is new message content every turn regardless, so it was
+      // never part of the cached prefix and appending it there costs nothing extra.
+      // The schema is resolved the other way round: ONE invariant union schema on every turn
+      // shape, which is Anthropic's own remedy for mode switching (keep the tool set fixed,
+      // convey the mode in message content). Verified against claude-code 2.1.274: --json-schema
+      // only appends the StructuredOutput tool and a bounded turn-end nudge to call it; it does
+      // not set tool_choice (the main query loop always sends toolChoice: undefined), so this
+      // neither forces an ordinary reply through a tool call nor removes the plain-text path —
+      // splitSpeechResponse()/progressReviewResult() stay as the tolerant second layer. Only
+      // display_text is required, so a normal turn satisfies it with the field it already
+      // produced, while speech and review turns fill the optional fields their per-turn overlay
+      // asks for. This restores the structured-output guarantee without a per-turn tools diff.
+      ticket.profile.responseSchema = ORCHESTRATION_RESPONSE_SCHEMA;
       agentSession = await this.host.createAgentSession(sessionId, ticket.profile, options.model, input.scope);
       const snapshots = this.tasks.context(receipt.conversationId, input.scope.principalId, decision.decisionId);
       const committed = committedCommandContext(this.store, receipt.conversationId);
@@ -831,14 +829,15 @@ export class AgentOrchestrationRuntime {
       const displayChunk = (chunk: string) => {
         if (internalReview || questionReview) return; // Buffer until the notify/silence decision is final.
         if (semantic && (intakeChoice?.mode==='wait' || intakeDeferred || acknowledgementId)) return;
-        if (speechEnabled) {
-          rawDisplay += chunk;
-          if (Buffer.byteLength(rawDisplay) > 262144) throw new OrchestrationError('RESPONSE_TOO_LARGE');
-          const next = partialDisplay(rawDisplay);
-          if (!next || !next.startsWith(streamedDisplay)) return;
-          chunk = next.slice(streamedDisplay.length);
-          streamedDisplay = next;
-        } else streamedDisplay += chunk;
+        // The union schema is declared on every turn now, so every turn may stream
+        // StructuredOutput arguments and only display_text may be published. A plain-text
+        // answer (the CLI never forces the tool call) still streams through unchanged.
+        rawDisplay += chunk;
+        if (Buffer.byteLength(rawDisplay) > 262144) throw new OrchestrationError('RESPONSE_TOO_LARGE');
+        const next = displayPrefix(rawDisplay);
+        if (!next || !next.startsWith(streamedDisplay)) return;
+        chunk = next.slice(streamedDisplay.length);
+        streamedDisplay = next;
         if (!chunk) return;
         this.publishText(sessionId, decision.responseId!, streamedDisplay);
         options.onText?.(chunk);
@@ -860,8 +859,25 @@ export class AgentOrchestrationRuntime {
       });
       active.turn = turn;
       const response = await turn.result;
+      // Single conversion point from the raw turn text to the user-facing surfaces; every
+      // downstream consumer (channels, web, dashboard, history, token accounting) reads the
+      // result of this boundary, so the union schema stays invisible to them. Every turn is
+      // unwrapped now, not just speech turns: display_text is the reply on a structured turn,
+      // and splitSpeechResponse falls back to the raw text verbatim when the model answered
+      // in plain text, which is what a normal turn produced before the schema was invariant.
       const review = internalReview ? progressReviewResult(response.text, previousReports) : undefined;
-      const surfaces = review ?? (speechEnabled ? splitSpeechResponse(response.text) : { display: response.text, spoken: '' });
+      const parsed = splitSpeechResponse(response.text);
+      const surfaces = review ?? { display: parsed.display, spoken: speechEnabled ? parsed.spoken : '' };
+      // No silent failures, without turning an ordinary turn into an anomaly: a plain-text
+      // reply loses nothing (the fallback IS the reply), but a review turn whose decision
+      // could not be read dropped a user-facing update, and a speech turn without its JSON
+      // fell back to a heuristic spoken surface. Both are recorded and warned about.
+      const droppedSurface = review ? review.outcome === 'unparsed' : speechEnabled && !parsed.structured;
+      if (droppedSurface) {
+        const code = review ? 'PROGRESS_REVIEW_UNPARSED' : 'SPEECH_UNSTRUCTURED';
+        this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.schema_unstructured', { responseId: decision.responseId, code, bytes: Buffer.byteLength(response.text) }));
+        console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Agent turn did not honour the declared response schema', agentId: this.agent.id, sessionId, referenceId: decision.responseId, code }));
+      }
       const committedTaskCommand = semantic && taskMutationAttempted && this.store.get(`SELECT tc.action_id FROM task_commands tc JOIN conversation_decisions d ON d.id=tc.decision_id
         WHERE tc.conversation_id=? AND tc.command_type IN ('spawn','update','answer')
         AND EXISTS(SELECT 1 FROM json_each(d.input_ids_json) WHERE value=?) LIMIT 1`,receipt.conversationId,receipt.inputId);
@@ -887,13 +903,21 @@ export class AgentOrchestrationRuntime {
       }
       const silent = Boolean(questionReview || intakeSilent || review?.silent);
       const stoppedDisplay = active.stopReason === 'barge-in' ? streamedDisplay : streamedDisplay || 'Response stopped.';
-      const display = silent ? '' : response.interrupted && (speechEnabled || active.stopReason === 'barge-in') ? stoppedDisplay : surfaces.display || (response.interrupted ? 'Response stopped.' : '');
+      // An interrupted turn keeps what was already published. Every turn can now carry a
+      // structured payload, so an unparsed interruption (a half-written JSON object) falls
+      // back to the extracted stream instead of publishing raw arguments; a turn that did
+      // complete its object still resolves to display_text, exactly as before.
+      const display = silent ? '' : response.interrupted
+        ? (speechEnabled || active.stopReason === 'barge-in' || !parsed.structured ? stoppedDisplay : surfaces.display || 'Response stopped.')
+        : surfaces.display || '';
       this.decisions.finish(decision, display, response.interrupted ? 'interrupted' : 'completed', channelSpeech && !silent ? taskSpeech || surfaces.spoken : undefined, !active.stopping && !silent);
       if (!silent && speechEnabled && !response.interrupted && !taskSpeech) {
         if (!channelSpeech) this.store.run('INSERT INTO response_speech VALUES(?,?)', decision.responseId!, surfaces.spoken);
         if (surfaces.spoken) this.inputStreams.get(receipt.inputId)?.push({ responseId: decision.responseId!, text: surfaces.spoken });
       }
-      if (!silent && (speechEnabled || internalReview) && display.startsWith(streamedDisplay)) options.onText?.(display.slice(streamedDisplay.length));
+      // The published stream may lag the final display on any turn now (structured arguments
+      // arrive after any commentary), so the tail correction is no longer speech/review-only.
+      if (!silent && display.startsWith(streamedDisplay) && display.length > streamedDisplay.length) options.onText?.(display.slice(streamedDisplay.length));
       if (!silent) this.publishText(sessionId, decision.responseId!, display, true);
       this.questionControls.flushPrompts();
       await this.flushHistory();

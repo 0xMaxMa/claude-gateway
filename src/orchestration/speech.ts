@@ -1,12 +1,8 @@
-/** Both surfaces are generated in one inference; validate them at the CLI boundary. */
-export const SPEECH_SCHEMA = {
-  type: 'object', additionalProperties: false,
-  properties: {
-    display_text: {type: 'string', minLength: 1},
-    spoken_text: {type: 'string', minLength: 1, maxLength: 600},
-  },
-  required: ['display_text', 'spoken_text'],
-};
+import { SPOKEN_TEXT_LIMIT } from './response-schema';
+
+/** Both surfaces are generated in one inference. The field contract itself lives in the
+ * invariant ORCHESTRATION_RESPONSE_SCHEMA declared on every turn; this overlay is the
+ * per-turn text (below the cache breakpoint) that tells the model to fill spoken_text. */
 export const SPEECH_OVERLAY = `For this voice-enabled turn return ONLY one JSON object with exactly two string fields:
 {"display_text":"complete answer for chat, including all useful detail", "spoken_text":"brief natural spoken answer"}.
 First understand the user's intent and conversation context. For greetings, casual conversation or a question you can answer directly, answer naturally; do not announce work or give a generic acknowledgement.
@@ -21,7 +17,7 @@ For reviews/reports speak the conclusion, most important issue and next step; re
 Do not read code, diffs, tables, URLs or raw tool receipts aloud. For follow-up questions answer the specific point using existing task results, without re-running work unnecessarily.
 If the user explicitly requests a longer oral explanation, explain the requested part within 600 characters and offer to continue.
 Never claim a task finished before its persisted result. Both fields must agree on facts and uncertainty. Do not infer that TTS is unavailable from earlier conversation complaints: the gateway handles playback. Speak the requested answer itself rather than announcing that you wrote it in chat or speculating about playback status.`;
-export function splitSpeechResponse(raw: string): { display: string; spoken: string } {
+export function splitSpeechResponse(raw: string): { display: string; spoken: string; structured: boolean } {
   const normalized = raw.trim().replace(/^```(?:json)?\s*\n/, '').replace(/\n```$/, '');
   // Some CLI turns prepend a progress sentence to their final JSON. Accept
   // only a complete trailing object with explicit speech fields; never infer
@@ -33,15 +29,18 @@ export function splitSpeechResponse(raw: string): { display: string; spoken: str
       if (typeof value.display_text === 'string' && value.display_text.trim() ) {
         const spoken = typeof value.spoken_text === 'string' ? value.spoken_text.trim() : '';
         // Fail closed for malformed/over-budget speech, rather than reading the full report.
-        return { display: value.display_text, spoken: spoken.length <= 600 && !/```/.test(spoken) ? spoken : '' };
+        return { display: value.display_text, spoken: spoken.length <= SPOKEN_TEXT_LIMIT && !/```/.test(spoken) ? spoken : '', structured: true };
       }
     } catch { /* Try the final explicit object, then keep the text-only fallback. */ }
   }
   // A short conversational answer is already suitable speech. Preserve its
   // language and wording; never truncate reports or read code/URLs/JSON aloud.
+  // structured:false is reported to the caller rather than swallowed: the union schema is
+  // declared on every turn, so reaching this fallback means the model did not honour it
+  // and a spoken surface may have been dropped. See runtime.ts's schema_unstructured event.
   const plain = raw.trim().replace(/\*\*([^*]+)\*\*/g, '$1');
-  const spoken = plain && plain.length <= 600 && !/[{}\[\]`|]|https?:\/\/|^\s*#/m.test(plain) ? plain : '';
-  return { display: raw, spoken };
+  const spoken = plain && plain.length <= SPOKEN_TEXT_LIMIT && !/[{}\[\]`|]|https?:\/\/|^\s*#/m.test(plain) ? plain : '';
+  return { display: raw, spoken, structured: false };
 }
 
 

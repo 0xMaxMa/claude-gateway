@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
+import { ORCHESTRATION_RESPONSE_SCHEMA } from '../../../src/orchestration/response-schema';
 import { SessionStore } from '../../../src/session/store';
 import { SessionProcess } from '../../../src/session/process';
 import { HistoryDB } from '../../../src/history/db';
@@ -28,9 +29,9 @@ test.each([false, true])('API worker completion persists result, tools and optio
         if (prompt.startsWith('Report the persisted')) {
           followups++;
           expect(prompt).toContain(JSON.stringify(fullResult));
-          // Cache-lineage: the tools/system prefix must stay byte-identical whether or
-          // not this turn is speech-enabled — the schema toggle must never come back.
-          expect(profile.responseSchema).toBeUndefined();
+          // Cache-lineage: the tools/system prefix must stay byte-identical whether or not
+          // this turn is speech-enabled — one invariant union schema, never a per-turn toggle.
+          expect(profile.responseSchema).toBe(ORCHESTRATION_RESPONSE_SCHEMA);
           process.emit('output', JSON.stringify({ type: 'result', result: voice ? JSON.stringify({ display_text: 'Finished: verified worker result.', spoken_text: 'Work finished.' }) : 'Finished: verified worker result.' }));
         } else {
           const task = runtime.tasks.spawn({ conversationId: String(d.conversation_id), principalId: 'p', inputId: JSON.parse(String(d.input_ids_json))[0], decisionId: String(d.id), epoch: Number(d.epoch), actionId: 'a', execute: true, writeMemory: false }, { title: 'Fixture', instructions: 'Do fixture', targetProfile: 'media-worker' });

@@ -6,6 +6,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
+import { ORCHESTRATION_RESPONSE_SCHEMA } from '../../../src/orchestration/response-schema';
 import { SessionProcess } from '../../../src/session/process';
 import { SessionStore } from '../../../src/session/store';
 import { HistoryDB } from '../../../src/history/db';
@@ -49,9 +50,9 @@ test.each([[true,'json'],[true,'plain'],[false,'plain']] as const)('Telegram voi
  const runtime=await AgentOrchestrationRuntime.open(a,c,dir,sessions,history,{
   transcribeNote:async()=> '日本語で自己紹介してください',
   createAgentSession:async(id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));
-    // Cache-lineage: a native schema/tool must never be attached, voice-enabled or not —
+    // Cache-lineage: the SAME invariant union schema is attached voice-enabled or not —
     // the tools+system prefix has to stay byte-identical across the toggle.
-    expect(profile.responseSchema).toBeUndefined();
+    expect(profile.responseSchema).toBe(ORCHESTRATION_RESPONSE_SCHEMA);
     const fields={display_text:'こんにちは。アシスタントです。',spoken_text:'こんにちは。アシスタントです。'};
     this.emit('output',JSON.stringify({type:'result',result:format==='json'?JSON.stringify(fields):'こんにちは。アシスタントです。'}));}}) as unknown as SessionProcess,
   releaseAgentSession:async()=>{},
@@ -111,7 +112,7 @@ test('voice and task follow-ups launch the same selected model as typed chat', a
  const c={gateway:{orchestration:true,headless:true},agents:[a]} as GatewayConfig,sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a');
  const sid=randomUUID();await sessions.ensureApiSession('a','chat',sid);const models:(string|undefined)[]=[];
  const runtime=await AgentOrchestrationRuntime.open(a,c,dir,sessions,history,{
-  createAgentSession:async(id,profile,model)=>{models.push(model);expect(profile.responseSchema).toBeUndefined();return Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){this.emit('output',JSON.stringify({type:'result',result:'OK'}));}}) as unknown as SessionProcess;},
+  createAgentSession:async(id,profile,model)=>{models.push(model);expect(profile.responseSchema).toBe(ORCHESTRATION_RESPONSE_SCHEMA);return Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){this.emit('output',JSON.stringify({type:'result',result:'OK'}));}}) as unknown as SessionProcess;},
   releaseAgentSession:async()=>{},
  });
  const scope={agentId:'a',agentSessionId:sid,source:'api' as const,accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'};
@@ -145,8 +146,10 @@ test('speech and non-speech turns render a byte-identical cached tools+system pr
   await runtime.send({scope,text:'Hello'},capabilities,{timeoutMs:1000});
   await runtime.submitInput({scope,text:'Voice follow-up',modality:'live_voice',ingressKey:'utterance:test'},capabilities).response;
   expect(profiles).toHaveLength(2);
-  expect(profiles[0].responseSchema).toBeUndefined();
-  expect(profiles[1].responseSchema).toBeUndefined();
+  // Byte comparison, not shape comparison: the serialized --json-schema argument and the
+  // --append-system-prompt overlay must be the identical bytes across the speech toggle.
+  expect(JSON.stringify(profiles[1].responseSchema)).toBe(JSON.stringify(profiles[0].responseSchema));
+  expect(JSON.stringify(profiles[0].responseSchema)).toBe(JSON.stringify(ORCHESTRATION_RESPONSE_SCHEMA));
   expect(profiles[1].overlay).toBe(profiles[0].overlay);
  } finally {await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
 });
