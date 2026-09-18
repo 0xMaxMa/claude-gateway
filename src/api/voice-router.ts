@@ -275,7 +275,8 @@ export class VoiceApi {
             case 'speech.started': session.speechStarted(control.epoch); break;
             case 'speech.ended': session.speechEnded(control.last_audio_seq); break;
             case 'utterance.commit': await session.commit(control.last_audio_seq, control.final === true); break;
-            case 'playback.stop': session.stopPlayback(control.epoch); break;
+            case 'playback.stop': session.stopPlayback(control.epoch, control.request_id); break;
+            case 'playback.pause': session.pausePlayback(control.epoch, control.paused); break;
             case 'playback.progress': session.progress(control.epoch, control.sample_offset); break;
             case 'playback.clear.ack': break;
             case 'voice.mute': if (typeof control.muted !== 'boolean' || !['discard', 'commit'].includes(control.policy)) throw new Error('INVALID_CONTROL'); await session.mute(control.muted, control.policy, control.last_audio_seq); break;

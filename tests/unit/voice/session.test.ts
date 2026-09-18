@@ -420,3 +420,46 @@ test('manual replay stops the old audio without cancelling an agent task', async
     expect(session.speechClaims()).toContain('original');
   } finally {await session.close();}
 });
+
+
+test('manual stop advances beyond an unseen server epoch and acknowledges the request', async () => {
+  const {FakeTtsProvider}=await import('../../../src/voice/providers/fake');
+  const controls:any[]=[],stop=jest.fn();
+  const session=new VoiceSession(new FakeSttProvider(),new FakeTtsProvider(),'voice',{
+    control:m=>controls.push(m),audio:()=>{},bufferedBytes:()=>0,
+  },async()=>({inputId:'i',response:Promise.resolve('')}),stop);
+  try {
+    session.notifyResult({responseId:'r',text:'Answer',spoken:'Answer'});
+    for(let i=0;i<100&&!controls.some(c=>c.type==='playback.start');i++)await new Promise(r=>setTimeout(r,5));
+    const unseen=controls.find(c=>c.type==='playback.start');expect(unseen).toBeDefined();
+    session.stopPlayback(unseen.epoch,42);
+    expect(session.playback.epoch).toBeGreaterThan(unseen.epoch);
+    expect(controls.at(-1)).toMatchObject({type:'playback.stopped',request_id:42,epoch:session.playback.epoch});
+    expect(stop).not.toHaveBeenCalled();
+  }finally{await session.close();}
+});
+
+test('STT candidate pause preserves backpressured audio past the normal client timeout', async () => {
+  jest.useFakeTimers();
+  const controls:any[]=[],audio:Buffer[]=[];
+  const tts:TtsProvider={id:'fake',capabilities:{textStreaming:true,wordAlignment:false,outputFormats:[PCM16]},
+    synthesize:async function*(){yield {bytes:Buffer.alloc(6400),format:PCM16,chunkSeq:0};}};
+  const session=new VoiceSession(new FakeSttProvider(),tts,'voice',{
+    control:m=>controls.push(m),audio:b=>audio.push(b),bufferedBytes:()=>0,
+  },async()=>({inputId:'i',response:Promise.resolve('')}),jest.fn(),
+    {silenceCommitMs:650,finalizationTimeoutMs:5000,maxUtteranceMs:60000,maxBufferedAudioMs:100});
+  try{
+    session.notifyResult({responseId:'r',text:'Answer',spoken:'Answer'});
+    await jest.advanceTimersByTimeAsync(20);
+    expect(audio).toHaveLength(1);
+    const epoch=session.playback.epoch;
+    session.pausePlayback(epoch,true);
+    await jest.advanceTimersByTimeAsync(15000);
+    expect(audio).toHaveLength(1);
+    expect(controls.some(c=>c.type==='voice.error')).toBe(false);
+    session.pausePlayback(epoch,false);session.progress(epoch,1600);
+    await jest.advanceTimersByTimeAsync(20);
+    expect(audio).toHaveLength(2);
+    expect(controls.some(c=>c.type==='playback.end')).toBe(true);
+  }finally{await session.close();jest.useRealTimers();}
+});

@@ -83,10 +83,12 @@ Client JSON controls:
 | `utterance.commit` | `last_audio_seq`, optional `final: true`; finalize received audio |
 | `voice.mute` | `muted` boolean, `policy: "commit"` or `"discard"`, `last_audio_seq`; commit pending input before muting or discard it |
 | `playback.progress` | `epoch`, `sample_offset`; samples actually played, not merely received |
+| `playback.stop` | `epoch`, `request_id` (positive integer); stop live output without cancelling agent work. The server advances beyond its current epoch even when the browser has not seen the latest start, clears output, then acknowledges with `playback.stopped` carrying the request ID, generation and authoritative epoch. Ignore start/audio events until this acknowledgement; only then begin explicit replay. |
+| `playback.pause` | `epoch`, `paused` boolean; preserve queued output while STT classifies a microphone candidate. Pause-aware backpressure is bounded by the configured utterance plus STT finalization budget; repeated pause messages do not extend it. Resume after empty STT or microphone cancellation, not a fixed classification timer. |
 | `playback.clear.ack` | Acknowledge that queued audio was cleared |
 | `voice.stop` | Close voice transport; does not cancel background tasks |
 
-Server controls include `voice.state`, `voice.configured`, `stt.partial`, `stt.segment`, `stt.final`, `utterance.accepted`, `response.text`, `response.speech`, `playback.start`, `playback.end`, `playback.clear`, `voice.notice` and `voice.error`. Correlate chat/voice output using `response_id` and `request_id` when present; avoid rendering duplicate bubbles. Clear local queued audio on `playback.clear`. `SPEECH_SUMMARY_UNAVAILABLE` is a notice that approved spoken text is unavailable; retain the text response instead of reading the full report aloud.
+Server controls include `voice.state`, `voice.configured`, `stt.partial`, `stt.segment`, `stt.final`, `utterance.accepted`, `response.text`, `response.speech`, `playback.start`, `playback.end`, `playback.clear`, `playback.stopped`, `voice.notice` and `voice.error`. Correlate chat/voice output using `response_id` and `request_id` when present; avoid rendering duplicate bubbles. Clear local queued audio on `playback.clear`. `SPEECH_SUMMARY_UNAVAILABLE` is a notice that approved spoken text is unavailable; retain the text response instead of reading the full report aloud.
 
 If the STT provider connection ends unexpectedly, the gateway sends `voice.notice` with `reconnect: true` and `retryable: true`, then closes the WebSocket with code `1012`. Obtain a fresh ticket and reconnect with backoff; never reuse the consumed ticket. Committed conversation work continues. Audio from an unfinished utterance is not replayed automatically; the user may need to repeat it. Authentication, billing and other non-retryable errors remain `voice.error` and must not trigger an automatic retry loop.
 
@@ -113,10 +115,12 @@ BYOK catalog IDs use `<provider>/<native-model>`, e.g. `gemini/gemini-3.1-flash-
 
 ## Retained speech replay
 
-`GET /api/v1/agents/:agentId/sessions/:sessionId/voice-sessions/replays` returns `{response_ids: string[]}` for retained completed browser TTS recordings.
+`GET /api/v1/agents/:agentId/sessions/:sessionId/voice-sessions/replays` returns `{response_ids: string[], replayable_response_ids: string[]}`. `response_ids` preserves the retained-recording contract; `replayable_response_ids` also includes completed responses with approved spoken text, even when the original audio was interrupted.
 
 `GET /api/v1/agents/:agentId/sessions/:sessionId/voice-sessions/replays/:responseId` returns the original synthesized audio as `audio/wav`, or 404 if missing/expired. This GET never invokes a TTS provider. Both endpoints use API authentication, Agent access and conversation membership; no bearer credential belongs in the URL. Recordings are retained for at most 30 days with a 64 MiB per-Agent budget, oldest first eviction, and a 16 MiB per-recording limit. Disabling new voice synthesis does not delete existing recordings.
 
+
+`POST /api/v1/agents/:agentId/sessions/:sessionId/voice-sessions/replays/:responseId` returns retained WAV audio or generates and retains missing audio from the response's approved spoken text. It never falls back to arbitrary display text. Generation requires voice and orchestration enabled, session membership and managed voice credit where applicable. Missing speech returns 404; disabled synthesis returns 409; exhausted managed credit returns 429; generation failures return 503. Missing-audio synthesis uses the current configured TTS provider and can incur normal provider charges. Concurrent generation is shared for the same principal/session/response and bounded to four jobs, 60 seconds per synthesis and 16 MiB per recording. Stop live playback before starting replay and cancel obsolete browser downloads on navigation.
 
 ## Agent model selection in a voice connection
 
