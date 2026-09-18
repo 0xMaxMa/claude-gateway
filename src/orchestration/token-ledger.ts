@@ -29,7 +29,7 @@ export interface TokenTurn extends ManagedTurnMetrics {
 const initialized = new WeakSet<OrchestrationStore>();
 /** Latest observed request in the most recent agent turn, including its output.
  * A peak earlier in the turn may predate compaction and is not current context. */
-function latestAgentContextWindow(store: Pick<OrchestrationStore, 'get'>, sessionId: string): { used: number; total: number | null; model: string | null } | null {
+export function latestAgentContextWindow(store: Pick<OrchestrationStore, 'get'>, sessionId: string): { used: number; total: number | null; model: string | null } | null {
   const row = store.get(`SELECT payload_json FROM token_turns WHERE session_id=? AND role='agent' AND EXISTS (SELECT 1 FROM json_each(token_turns.payload_json,'$.requests') r WHERE json_type(r.value,'$.usage')='object') ORDER BY started_at DESC,id DESC LIMIT 1`, sessionId);
   if (!row) return null;
   let turn: TokenTurn;

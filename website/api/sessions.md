@@ -143,11 +143,16 @@ curl -H "X-Api-Key: my-secret-key-123" \
   "sessionId": "da19d84a-6a36-4f57-b419-d322d82c4db8",
   "sessionName": "Q3 Deployment Plan",
   "messageCount": 42,
-  "contextPercent": 18,
-  "createdAt": 1775737709000,
-  "lastActivity": 1775823600000
+  "archivedCount": 0,
+  "contextUsedPct": 90,
+  "contextTokens": 180000,
+  "contextWindow": 200000,
+  "contextModel": "claude-sonnet-5",
+  "model": "claude-sonnet-5"
 }
 ```
+
+Context fields use the latest measured agent request, matching the dashboard token report, rather than message counts or a pre-compaction peak. Measurements expire when the latest agent decision is older than one hour. Missing measurements are `null`; unknown capacity leaves `contextWindow` and `contextUsedPct` null. `contextModel` identifies the measured model, while `model` is the selected model. Message counts remain in the structured API for compatibility; `/session` text omits them and displays `—` when context is unavailable.
 
 **Error responses:**
 

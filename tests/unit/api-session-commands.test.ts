@@ -141,14 +141,16 @@ describe('executeApiCommand session counting (#160)', () => {
     const { result, responseText } = await runner.executeApiCommand(sessionId, chatId, '/session', { skipPersist: true });
 
     expect(result.messageCount).toBe(5);
-    expect(responseText).toContain('Messages: 5');
+    expect(responseText).not.toContain('Messages:');
+    expect(responseText).toContain('Context: —');
   });
 
   it('U-RUN-02: /session reports 0 for an empty session without throwing', async () => {
     const { result, responseText } = await runner.executeApiCommand(sessionId, chatId, '/session', { skipPersist: true });
 
     expect(result.messageCount).toBe(0);
-    expect(responseText).toContain('Messages: 0');
+    expect(responseText).not.toContain('Messages:');
+    expect(responseText).toContain('Context: —');
   });
 
   it('U-RUN-03: /session dispatches on the first token, so trailing args still resolve', async () => {

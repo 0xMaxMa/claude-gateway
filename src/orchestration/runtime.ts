@@ -2,7 +2,7 @@ import { startNativeCompact } from './native-compact';
 import { BrowserVoice } from './browser-voice';
 import { MutationAttempt, unresolvedMutations } from './mutation-recovery';
 import { committedCommandContext, communicatedProgressContext } from './decision-context';
-import { recordTokenTurn, tokenReport, summarizeTokenTurns, measuredTurns } from './token-ledger';
+import { latestAgentContextWindow, recordTokenTurn, tokenReport, summarizeTokenTurns, measuredTurns } from './token-ledger';
 import { TaskQuestions } from './task-questions';
 import { isProgressReview, recentCommunicatedProgress, progressReviewResult, PROGRESS_REVIEW_OVERLAY } from './progress-review';
 import { ORCHESTRATION_RESPONSE_SCHEMA } from './response-schema';
@@ -357,6 +357,13 @@ export class AgentOrchestrationRuntime {
     this.pending.add(operation);
     void operation.finally(()=>this.pending.delete(operation)).catch(()=>{});
     return operation;
+  }
+  sessionContextWindow(sessionId: string) {
+    if (!this.store.get("SELECT name FROM sqlite_master WHERE name='token_turns'")) return null;
+    const last = this.store.get(`SELECT MAX(COALESCE(d.ended_at,d.started_at)) at FROM conversation_decisions d
+      JOIN conversations c ON c.id=d.conversation_id WHERE c.agent_session_id=?`,sessionId)?.at;
+    if (last == null || Date.now()-Number(last)>3600000) return null;
+    return latestAgentContextWindow(this.store,sessionId);
   }
   tokenReport(sessionId: string) {
     if (!this.ownsSession(sessionId)) return undefined;
