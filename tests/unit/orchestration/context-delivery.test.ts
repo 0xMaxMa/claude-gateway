@@ -130,3 +130,23 @@ test('atomic CAS rejects older plans across connections, including concurrent bo
     expect(result.select('tasks', [item], key)).toEqual([]);
   } finally { secondStore.close(); }
 });
+
+
+test('image aliases commit only on delivery and legacy fingerprints cannot imply a mapping', () => {
+  const legacy = delivery.begin(scope);
+  legacy.mark('images', 'old-ref', true);
+  legacy.mark('image-content', 'digest', true);
+  legacy.commit();
+  const failed = delivery.begin(scope);
+  expect(failed.imageReference('old-ref')).toBeUndefined();
+  expect(failed.rememberImage('first', 'digest')).toBeUndefined();
+  expect(failed.rememberImage('alias', 'digest')).toBe('first');
+  expect(delivery.begin(scope).imageReference('alias')).toBeUndefined();
+  expect(failed.commit()).toBe(true);
+  const resumed = delivery.begin(scope);
+  expect(resumed.imageReference('alias')).toBe('first');
+  expect(resumed.rememberImage('another', 'digest')).toBe('first');
+  delivery.invalidateConversation(scope.conversationId);
+  expect(resumed.commit()).toBe(false);
+  expect(delivery.begin(scope).imageReference('alias')).toBeUndefined();
+});

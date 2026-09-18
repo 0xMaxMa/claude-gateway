@@ -200,3 +200,26 @@ test('identical image bytes at new refs are omitted until an automatic compact b
     expect(f.failures).toEqual([]);
   } finally { await f.close(); }
 });
+
+test('deduplicated image aliases identify the original among multiple images and survive restart', async () => {
+  const f = await fixture();
+  try {
+    const media = join((f.runtime as any).agent.workspace, '../media/c');
+    writeFileSync(join(media, 'different.png'), Buffer.concat([png, Buffer.from('different')]));
+    await f.send('First screenshot', ['media/c/image.png']);
+    await f.send('Second screenshot', ['media/c/different.png']);
+    await f.send('What is in this screenshot?', ['media/c/image-alias.png']);
+    expect(f.images[2]).toEqual([]);
+    expect(f.prompts[2]).toContain('media/c/image-alias.png');
+    const mapping = {ref: 'media/c/image-alias.png', originalRef: 'media/c/image.png'};
+    expect(f.prompts[2]).toContain(JSON.stringify([mapping]));
+    await f.restart();
+    await f.send('Look at that same screenshot again', ['media/c/image-alias.png']);
+    expect(f.images[3]).toEqual([]);
+    expect(f.prompts[3]).toContain(JSON.stringify([mapping]));
+    f.newCli();
+    await f.send('Inspect in a new context', ['media/c/image-alias.png']);
+    expect(f.images[4]).toHaveLength(1);
+    expect(f.prompts[4]).not.toContain(JSON.stringify(mapping));
+  } finally { await f.close(); }
+});

@@ -15,6 +15,10 @@ export interface ContextDeliveryPlan {
   select<T>(bucket: string, items: T[], key: (value: T) => string): T[];
   includes(bucket: string, key: string): boolean;
   mark(bucket: string, key: string, value: unknown): void;
+  /** Canonical reference whose image bytes were supplied to this CLI context. */
+  imageReference(ref: string): string | undefined;
+  /** Stage an image reference; return the prior canonical ref if its bytes are known. */
+  rememberImage(ref: string, digest: string): string | undefined;
   /** Call only after successful, noninterrupted CLI completion. False means stale. */
   commit(): boolean;
   /** A compact boundary forgets delivery knowledge, never canonical history. */
@@ -75,6 +79,14 @@ export class ContextDelivery {
       },
       includes: (bucket, key) => hashes.has(entryKey(bucket, key)),
       mark: (bucket, key, value) => { hashes.set(entryKey(bucket, key), payloadHash(value)); },
+      imageReference: ref => hashes.get(entryKey('image-ref', ref)),
+      rememberImage(ref, digest) {
+        const prior = hashes.get(entryKey('image-digest-ref', digest));
+        const canonical = prior ?? ref;
+        hashes.set(entryKey('image-digest-ref', digest), canonical);
+        hashes.set(entryKey('image-ref', ref), canonical);
+        return prior;
+      },
       commit(): boolean {
         if (closed) return false;
         closed = true;
