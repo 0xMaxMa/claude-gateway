@@ -1,0 +1,119 @@
+import { OrchestrationStore, payloadHash } from './store';
+import { OrchestrationError } from './types';
+
+export interface ContextDeliveryScope {
+  conversationId: string;
+  principalId: string;
+  bindingId: string;
+  cliSessionId: string;
+  resume: boolean;
+}
+
+export interface ContextDeliveryPlan {
+  readonly fresh: boolean;
+  /** Select complete changed/new values and stage their fingerprints. */
+  select<T>(bucket: string, items: T[], key: (value: T) => string): T[];
+  includes(bucket: string, key: string): boolean;
+  mark(bucket: string, key: string, value: unknown): void;
+  /** Canonical reference whose image bytes were supplied to this CLI context. */
+  imageReference(ref: string): string | undefined;
+  /** Stage an image reference; return the prior canonical ref if its bytes are known. */
+  rememberImage(ref: string, digest: string): string | undefined;
+  /** Call only after successful, noninterrupted CLI completion. False means stale. */
+  commit(): boolean;
+  /** A compact boundary forgets delivery knowledge, never canonical history. */
+  invalidate(): void;
+}
+
+/** Durable knowledge of what this CLI context has seen; contains no prompt payloads. */
+export class ContextDelivery {
+  constructor(private readonly store: OrchestrationStore) {
+    store.run(`CREATE TABLE IF NOT EXISTS context_delivery(
+      conversation_id TEXT NOT NULL REFERENCES conversations(id),
+      principal_id TEXT NOT NULL,
+      binding_id TEXT NOT NULL REFERENCES conversation_bindings(id),
+      cli_session_id TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      fingerprints_json TEXT NOT NULL,
+      PRIMARY KEY(conversation_id,principal_id,binding_id))`);
+    store.run(`CREATE TABLE IF NOT EXISTS context_delivery_generations(
+      conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),generation INTEGER NOT NULL)`);
+  }
+
+  /** A CLI transcript can serve several channel conversations in one session. */
+  invalidateConversation(conversationId: string): void {
+    this.store.transaction(() => {
+      const conversations=this.store.all(`SELECT id FROM conversations WHERE agent_session_id=
+        (SELECT agent_session_id FROM conversations WHERE id=?)`,conversationId);
+      for(const row of conversations) {
+        this.store.run(`INSERT INTO context_delivery_generations VALUES(?,1)
+          ON CONFLICT(conversation_id) DO UPDATE SET generation=generation+1`, row.id);
+        this.store.run("UPDATE context_delivery SET revision=revision+1,fingerprints_json='[]' WHERE conversation_id=?", row.id);
+      }
+    });
+  }
+
+  begin(scope: ContextDeliveryScope): ContextDeliveryPlan {
+    const { conversationId, principalId, bindingId, cliSessionId, resume } = scope;
+    const store = this.store;
+    store.assertMember(conversationId, principalId);
+    if (!store.get('SELECT id FROM conversation_bindings WHERE id=? AND conversation_id=?', bindingId, conversationId))
+      throw new OrchestrationError('ACCESS_DENIED');
+    if (!cliSessionId) throw new OrchestrationError('INVALID_INPUT');
+    const ids = [conversationId, principalId, bindingId];
+    const row = store.get('SELECT * FROM context_delivery WHERE conversation_id=? AND principal_id=? AND binding_id=?', ...ids);
+    const revision = row ? Number(row.revision) : 0;
+    const generation = Number(store.get('SELECT generation FROM context_delivery_generations WHERE conversation_id=?', conversationId)?.generation ?? 0);
+    const fresh = !resume || row?.cli_session_id !== cliSessionId || row.fingerprints_json === '[]';
+    // Existing installations have no checkpoint: replay once, then remember only
+    // the data delivered by the successful turn. A failed bootstrap writes nothing.
+    const hashes = new Map<string, string>(resume && row?.cli_session_id === cliSessionId
+      ? JSON.parse(String(row.fingerprints_json)) : []);
+    const entryKey = (bucket: string, key: string) => JSON.stringify([bucket, key]);
+    let closed = false;
+    return {
+      fresh,
+      select<T>(bucket: string, items: T[], key: (value: T) => string): T[] {
+        return items.filter(value => {
+          const id = entryKey(bucket, key(value)), hash = payloadHash(value);
+          if (hashes.get(id) === hash) return false;
+          hashes.set(id, hash);
+          return true;
+        });
+      },
+      includes: (bucket, key) => hashes.has(entryKey(bucket, key)),
+      mark: (bucket, key, value) => { hashes.set(entryKey(bucket, key), payloadHash(value)); },
+      imageReference: ref => hashes.get(entryKey('image-ref', ref)),
+      rememberImage(ref, digest) {
+        const prior = hashes.get(entryKey('image-digest-ref', digest));
+        const canonical = prior ?? ref;
+        hashes.set(entryKey('image-digest-ref', digest), canonical);
+        hashes.set(entryKey('image-ref', ref), canonical);
+        return prior;
+      },
+      commit(): boolean {
+        if (closed) return false;
+        closed = true;
+        return store.transaction(() => {
+          if (Number(store.get('SELECT generation FROM context_delivery_generations WHERE conversation_id=?', conversationId)?.generation ?? 0) !== generation) return false;
+          const serialized = JSON.stringify([...hashes]);
+          const result = row
+            ? store.run(`UPDATE context_delivery SET cli_session_id=?,revision=revision+1,fingerprints_json=?
+                WHERE conversation_id=? AND principal_id=? AND binding_id=? AND revision=?`,
+              cliSessionId, serialized, ...ids, revision)
+            : store.run('INSERT OR IGNORE INTO context_delivery VALUES(?,?,?,?,1,?)', ...ids, cliSessionId, serialized);
+          return Number(result.changes) === 1;
+        });
+      },
+      invalidate(): void {
+        closed = true;
+        // Keep a revision tombstone even if no successful turn has committed yet;
+        // otherwise an older bootstrap plan could resurrect pre-compact knowledge.
+        store.run(`INSERT INTO context_delivery VALUES(?,?,?,?,1,'[]')
+          ON CONFLICT(conversation_id,principal_id,binding_id) DO UPDATE SET
+          revision=context_delivery.revision+1,fingerprints_json='[]'`, ...ids, cliSessionId);
+        hashes.clear();
+      },
+    };
+  }
+}

@@ -128,3 +128,13 @@ Installed skill metadata is kept in the stable Agent system prefix, not appended
 `/clear` and `/compact` share the same context handlers in Telegram, Discord, LINE, Slack, WhatsApp, WhatsApp Cloud, WeChat, and the Chat API (including streaming requests and the dedicated session endpoints). They preserve gateway chat history. Telegram adds a confirmation step; this does not change the operation. Discord registers native slash commands when its receiver starts. In Slack, register the slash commands in the Slack app or send them as an app mention; native slash commands cannot be used inside threads. Other chat channels accept the commands as message text. Normal channel access checks still apply.
 
 A continuation mistakenly spawned during update intake can also recover: a later committed update must target both the captured intake task and the rejected continuation’s predecessor. Unrelated successes do not clear the warning.
+
+### Incremental context delivery
+
+Resumed agent turns receive new or changed task snapshots rather than another copy of the entire recent-task index. A fresh CLI context starts with active/waiting tasks and currently pending reports; `task_status` remains available for past tasks and full original results. Receipts from completed turns are already present as tool results. Committed commands from failed/interrupted turns are supplied as recovery evidence once, without replaying their mutations.
+
+A durable checkpoint is scoped to the conversation, authenticated principal, binding and CLI session. It stores fingerprints and IDs, not another copy of private prompts. Pending intake preserves unfinished user intent and canonical source references independently of whether their text/images have already been delivered. Repeated image references and identical image content are not attached again to the same resumed context; workers retain the original references. When an image is reused, the prompt maps its current reference to the original reference whose bytes were supplied, including after restart.
+
+Checkpoints advance after successful, noninterrupted CLI completion. Failed turns replay unconfirmed context safely. Restart preserves checkpoints; a new/missing CLI transcript or an observed compact boundary resets delivery knowledge so required material can be supplied again. This does not trigger compaction, rewrite chat history, or truncate worker results. Stable intake and worker instructions live in the system prefix; current authorization flags remain explicit on each turn.
+
+These changes reduce unnecessary context growth. They do not delete duplicates already present in old transcripts, nor guarantee that unlimited genuinely new conversation stays below a fixed token count.

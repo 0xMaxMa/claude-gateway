@@ -17,9 +17,9 @@ const RECEIPT_FIELDS = ['taskId', 'title', 'state', 'targetProfile', 'stateVersi
  * Keep their versions and question/answer data, and fetch full current state via
  * task_status. Persisted receipts and full worker reports are never rewritten.
  */
-export function committedCommandContext(store: OrchestrationStore, conversationId: string) {
+export function committedCommandContext(store: OrchestrationStore, conversationId: string, recoveryOnly = false) {
   return store.all(`SELECT action_id,decision_id,created_at,command_type,receipt_json
-    FROM task_commands WHERE conversation_id=? ORDER BY created_at DESC,rowid DESC LIMIT ${COMMITTED_RECEIPT_WINDOW}`, conversationId).map(row => {
+    FROM task_commands WHERE conversation_id=? ${recoveryOnly ? "AND decision_id IN (SELECT id FROM conversation_decisions WHERE state IN ('failed','interrupted','interrupting'))" : ''} ORDER BY created_at DESC,rowid DESC ${recoveryOnly ? '' : `LIMIT ${COMMITTED_RECEIPT_WINDOW}`}`, conversationId).map(row => {
     const stored = JSON.parse(String(row.receipt_json));
     // Non-task receipts (for example grouped question presentation) are already
     // compact and must retain their specific question IDs and acknowledgement.
