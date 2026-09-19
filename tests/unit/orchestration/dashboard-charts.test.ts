@@ -23,6 +23,17 @@ describe('overview chart accounting',()=>{
   expect(data.reuse).toEqual({fresh:14,write:26,read:100,measuredTurns:2,missingTurns:0});
   expect(data.reuse.read/(data.reuse.fresh+data.reuse.write+data.reuse.read)).toBeCloseTo(100/140);
  });
+ it('compares today with yesterday independently of selected range without mixing yesterday into today charts',()=>{
+  write('y','worker','2026-09-18T20:00Z','a',usage(20,0,80,5));
+  write('t','agent','2026-09-19T01:00Z','a',usage(10,0,90,5));
+  write('old','agent','2026-09-17T01:00Z','a',usage(100,0,0,0));
+  for(const scope of ['24h','7d','30d','90d']){
+   const data=readDashboardCharts(db,scope,'UTC',Date.parse('2026-09-19T04:00Z'));
+   expect(data.reuseComparison.today).toMatchObject({fresh:10,read:90,measuredTurns:1});
+   expect(data.reuseComparison.yesterday).toMatchObject({fresh:20,read:80,measuredTurns:1});
+   if(scope==='24h'){expect(data.agent+data.worker).toBe(105);expect(data.buckets).toHaveLength(1);}
+  }
+ });
  it('uses configured local midnight, daily buckets and fractional-hour timezones',()=>{
   write('before','agent','2026-09-18T18:14:59Z','a',usage(1,0,0,0));
   write('midnight','agent','2026-09-18T18:15:00Z','a',usage(2,0,0,0));

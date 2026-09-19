@@ -4,8 +4,11 @@ import type { DatabaseSync } from 'node:sqlite';
 /** Aggregate projected measurements in the isolated reader, never transcripts on the event loop. */
 export function readDashboardCharts(db: DatabaseSync, scope: string, timezone: string, now: number) {
   const since = dashboardSince(scope, now, timezone);
+  const today = dashboardSince('24h', now, timezone);
+  const yesterday = dashboardSince('24h', today - 1, timezone);
+  const dayReuse = () => ({ fresh:0, write:0, read:0, measuredTurns:0, missingTurns:0 });
   const exists = (name: string) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
-  const empty = { buckets: [] as any[], models: [] as any[], agent: 0, worker: 0,
+  const empty = { reuseComparison: { today:dayReuse(), yesterday:dayReuse() }, buckets: [] as any[], models: [] as any[], agent: 0, worker: 0,
     reuse: { fresh: 0, write: 0, read: 0, measuredTurns: 0, missingTurns: 0 } };
   if (!exists('token_turns')) return empty;
   // Older ledgers may have only part of the lightweight projection: fall back per row.
@@ -19,7 +22,7 @@ export function readDashboardCharts(db: DatabaseSync, scope: string, timezone: s
     return scope==='24h' ? part('hour') : part('year')+'-'+part('month')+'-'+part('day');
   });
   const rows = db.prepare(`WITH turns AS (
-    SELECT t.role, dashboard_chart_bucket(t.started_at) bucket,
+    SELECT t.role, t.started_at>=? in_period, CASE WHEN t.started_at>=? THEN 1 WHEN t.started_at>=? THEN 0 ELSE -1 END comparison_day, dashboard_chart_bucket(t.started_at) bucket,
       json_extract(${payload},'$.model') model, json_extract(${payload},'$.usage') usage
     FROM token_turns t ${join} WHERE t.started_at>=? AND t.started_at<=?
   ), measured AS (
@@ -27,17 +30,23 @@ export function readDashboardCharts(db: DatabaseSync, scope: string, timezone: s
       json_extract(usage,'$.inputTokens') fresh,
       json_extract(usage,'$.cacheCreationTokens') cache_write,
       json_extract(usage,'$.cacheReadTokens') cache_read FROM turns
-  ) SELECT role,bucket,model,SUM(total) tokens,
+  ) SELECT role,bucket,model,in_period,comparison_day,SUM(total) tokens,
     SUM(CASE WHEN fresh>=0 AND cache_write>=0 AND cache_read>=0 THEN fresh ELSE 0 END) fresh,
     SUM(CASE WHEN fresh>=0 AND cache_write>=0 AND cache_read>=0 THEN cache_write ELSE 0 END) cache_write,
     SUM(CASE WHEN fresh>=0 AND cache_write>=0 AND cache_read>=0 THEN cache_read ELSE 0 END) cache_read,
     SUM(CASE WHEN fresh>=0 AND cache_write>=0 AND cache_read>=0 THEN 1 ELSE 0 END) measured,
     SUM(CASE WHEN fresh>=0 AND cache_write>=0 AND cache_read>=0 THEN 0 ELSE 1 END) missing
-    FROM measured GROUP BY role,bucket,model ORDER BY bucket`).all(since, now) as Record<string, any>[];
+    FROM measured GROUP BY role,bucket,model,in_period,comparison_day ORDER BY bucket`).all(since, today, yesterday, Math.min(since,yesterday), now) as Record<string, any>[];
   const buckets = new Map<string, { key: string; agent: number; worker: number; fresh:number; write:number; read:number }>();
   const models = new Map<string, number>();
   for (const row of rows) {
     if (row.role !== 'agent' && row.role !== 'worker') continue;
+    if (row.comparison_day===0 || row.comparison_day===1) {
+      const day=empty.reuseComparison[row.comparison_day===1?'today':'yesterday'];
+      day.fresh+=Number(row.fresh); day.write+=Number(row.cache_write); day.read+=Number(row.cache_read);
+      day.measuredTurns+=Number(row.measured); day.missingTurns+=Number(row.missing);
+    }
+    if (!row.in_period) continue;
     const key = String(row.bucket);
     const bucket = buckets.get(key) ?? {key,agent:0,worker:0,fresh:0,write:0,read:0};
     const tokens = Number(row.tokens ?? 0);
