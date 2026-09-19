@@ -13,9 +13,12 @@ const channelIcons: Record<string,string> = {"telegram": "<svg role=\"img\" view
 export function dashboardEscape(value: unknown): string {
  return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 }
-export function agentBadge(value: string): string {
+export function agentHue(value: string): number {
  let hash=0; for(const ch of value) hash=(hash*31+ch.charCodeAt(0))>>>0;
- return '<span class="identity-badge" style="--agent-hue:'+(hash%360)+'" title="'+dashboardEscape(value)+'">'+dashboardEscape(value)+'</span>';
+ return hash%360;
+}
+export function agentBadge(value: string): string {
+ return '<span class="identity-badge" style="--agent-hue:'+agentHue(value)+'" title="'+dashboardEscape(value)+'">'+dashboardEscape(value)+'</span>';
 }
 export function channelBadge(value: string): string {
  const key=String(value||'unknown').toLowerCase();
@@ -34,4 +37,4 @@ export function toolNameList(names: string[] | null | undefined): string {
  if (!names.length) return '<p class="muted">None</p>';
  return '<ul class="tool-name-list">'+[...new Set(names)].sort().map(name=>'<li><code>'+dashboardEscape(name)+'</code></li>').join('')+'</ul>';
 }
-export const dashboardPresentationClient = compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';'+taskStatusBadge.toString()+';'+toolNameList.toString()+';';
+export const dashboardPresentationClient = compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentHue.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';'+taskStatusBadge.toString()+';'+toolNameList.toString()+';';
