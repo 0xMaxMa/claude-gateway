@@ -482,8 +482,15 @@ tr[data-dash-agent],.turn-row{cursor:pointer}tr[data-dash-agent]:hover,.turn-row
 #memory-drawer{overflow-x:hidden}#memory-drawer .table-wrap{max-width:100%;overflow-x:auto}#memory-drawer pre{white-space:pre-wrap;overflow-wrap:anywhere}#memory-stats{grid-template-columns:repeat(3,minmax(0,1fr))}#memory-stats .dash-stat{padding:18px}#memory-stats .dash-stat strong{font-size:26px;margin-top:6px}@media(max-width:520px){#memory-stats{grid-template-columns:1fr}}
 #view-dreams .heading h2{color:var(--text)}.memory-schedules{margin:16px 0 20px;border:1px solid var(--line);border-radius:16px;background:var(--panel)}.memory-schedules>summary{padding:14px 18px;font-weight:500;color:var(--text);cursor:pointer}.memory-schedules[open]>summary{border-bottom:1px solid var(--line)}#memory-schedule-table{padding:0 12px 12px}#memory-schedule-table .table-wrap{margin-top:12px}#memory-error[hidden]{display:none}
 
-.memory-activity-label{display:inline-block;padding:4px 8px;border-radius:8px;font-size:12px;font-weight:600;line-height:1.4;background:color-mix(in srgb,var(--activity-color) 10%,var(--panel));color:var(--activity-color)}
+.memory-activity-label{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:500;line-height:1.4;color:var(--activity-color)}
+.memory-activity-label::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;flex-shrink:0}
 .memory-activity-label.memory-dream{--activity-color:var(--accent)}
 .memory-activity-label.session-compaction{--activity-color:var(--blue)}
+.memory-filters{display:flex;flex-wrap:nowrap;align-items:flex-end;gap:12px;margin:20px 0 12px;max-width:100%;overflow-x:auto;padding-bottom:8px}
+.memory-filters .memory-filter-group{display:flex;flex-direction:column;align-items:flex-start;gap:8px;flex:0 0 auto}
+.memory-filters .range-toggle{flex-wrap:nowrap;white-space:nowrap}
+.memory-filters .range-toggle button{font-size:12px;padding:5px;min-height:28px}
+.memory-filters #memory-agent{width:145px;height:38px;min-width:0;font-size:12px}
+.memory-filters #memory-refresh{flex:0 0 auto;height:38px;padding:7px 14px;font-size:12px;white-space:nowrap}
 `;
 export const dashboardFontLink = "<script>(function(){var i=location.pathname.lastIndexOf('/dashboard');if(i<0)return;var l=document.createElement('link');l.rel='stylesheet';l.href=location.pathname.slice(0,i)+'/dashboard/fonts.css';document.head.appendChild(l);})();</script>";
