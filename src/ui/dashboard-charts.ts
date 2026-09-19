@@ -13,7 +13,13 @@ const chartRendered=new WeakMap();
 let chartPointer=null;
 document.addEventListener('pointermove',event=>{chartPointer={x:event.clientX,y:event.clientY};});
 document.addEventListener('pointerout',event=>{if(!event.relatedTarget)chartPointer=null;});
-try{const saved=JSON.parse(sessionStorage.getItem('gateway-overview-charts')||'{}');Object.keys(overviewChartRanges).forEach(key=>{if(['24h','7d','30d','90d'].includes(saved[key]))overviewChartRanges[key]=saved[key];});}catch{}
+const chartPreferenceKey='gateway-overview-charts:'+location.pathname.replace(/\/$/,'');
+try{
+ const saved=JSON.parse(localStorage.getItem(chartPreferenceKey)||'{}');
+ Object.keys(overviewChartRanges).forEach(key=>{if(['24h','7d','30d','90d'].includes(saved?.[key]))overviewChartRanges[key]=saved[key];});
+}catch{}
+// Restore controls before the first fetch, including when Overview is initially hidden.
+Object.keys(overviewChartRanges).forEach(key=>document.querySelectorAll('[data-chart="'+key+'"] [data-chart-range]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.chartRange===overviewChartRanges[key]))));
 function chartPeriod(data){const fmt=new Intl.DateTimeFormat('en-GB',{timeZone:data.timezone,day:'numeric',month:'short'});return (data.scope==='24h'?'Today · from 00:00':fmt.format(data.since)+' – '+fmt.format(data.asOf))+' · '+data.timezone;}
 function chartEmpty(){return '<p class="empty">No recorded token usage in this period.</p>';}
 function chartTooltipRow(label,value,color='var(--text)'){
@@ -107,7 +113,7 @@ document.addEventListener('focusout',hideModelTooltip);
 document.addEventListener('click',event=>{
  const button=event.target.closest('[data-chart-range]');if(button){
   const key=button.closest('[data-chart]').dataset.chart,scope=button.dataset.chartRange;overviewChartRanges[key]=scope;
-  try{sessionStorage.setItem('gateway-overview-charts',JSON.stringify(overviewChartRanges));}catch{}
+  try{localStorage.setItem(chartPreferenceKey,JSON.stringify(overviewChartRanges));}catch{}
   const cached=overviewChartSnapshots.get(scope);if(cached)drawOverviewChart(key,cached.data);else {chartRendered.delete(document.getElementById('chart-'+key));document.getElementById('chart-'+key).innerHTML='<p class="empty">Loading recorded usage…</p>';document.querySelector('[data-chart="'+key+'"] .chart-period').textContent='';}
   refreshOverviewCharts();
  }else if(event.target.closest('#tab-overview'))refreshOverviewCharts();
