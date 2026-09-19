@@ -36,7 +36,7 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
     const namespace=body.tools?.find(t=>t.type==='namespace'&&t.name==='mcp__gateway');
     const tool=namespace?.tools.find(t=>t.name==='fixture_echo') ?? body.tools?.find(t=>t.name?.includes('fixture_echo'));
     const output=sequence===1&&tool?[{type:'function_call',id:'fc_1',call_id:'call_fixture_1',name:tool.name,...(namespace?{namespace:namespace.name}:{}),arguments:JSON.stringify({value:'hello'})}]:[{type:'message',id:messageId,role:'assistant',phase:'final_answer',status:'completed',content:[{type:'output_text',text:'Canonical fixture result '+sequence,annotations:[]}]}];
-    const response={id,object:'response',created_at:Math.floor(Date.now()/1000),status:'completed',model:'gpt-test',output,usage:{input_tokens:100,input_tokens_details:{cached_tokens:40},output_tokens:20,output_tokens_details:{reasoning_tokens:5},total_tokens:120}};
+    const response={id,object:'response',created_at:Math.floor(Date.now()/1000),status:'completed',model:'gpt-test',output,usage:{input_tokens:100,input_tokens_details:{cached_tokens:40,cache_write_tokens:20},output_tokens:20,output_tokens_details:{reasoning_tokens:5},total_tokens:120}};
     res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache'});
     const emit=(type,payload)=>res.write('event: '+type+'\ndata: '+JSON.stringify({type,...payload})+'\n\n');
     emit('response.created',{response:{...response,status:'in_progress',output:[]}});
@@ -80,13 +80,13 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
     const {readFile}=require('fs/promises');assert.match(await readFile(calls,'utf8'),/hello/);
     assert(first.events.some(e=>e.type==='assistant'&&e.message.content.some(b=>b.name==='mcp__gateway__fixture_echo')),'native MCP tool was not observed');
     assert(acknowledged,'native steering was not acknowledged');assert(requests.some(r=>JSON.stringify(r.input).includes('native checkpoint revision')),'native revision never reached Responses input');
-    assert.equal(first.terminal.usage.input_tokens,sequence*60);assert.equal(first.terminal.usage.cache_read_input_tokens,sequence*40);assert.equal(first.terminal.usage.output_tokens,sequence*20);
-    const resumed=await run();assert.equal(resumed.terminal.usage.input_tokens,60);assert.equal(resumed.terminal.usage.cache_read_input_tokens,40);assert.equal(resumed.terminal.usage.output_tokens,20);
+    assert.equal(first.terminal.usage.input_tokens,sequence*40);assert.equal(first.terminal.usage.cache_read_input_tokens,sequence*40);assert.equal(first.terminal.usage.cache_creation_input_tokens,sequence*20);assert.equal(first.terminal.usage.output_tokens,sequence*20);
+    const resumed=await run();assert.equal(resumed.terminal.usage.input_tokens,40);assert.equal(resumed.terminal.usage.cache_read_input_tokens,40);assert.equal(resumed.terminal.usage.cache_creation_input_tokens,20);assert.equal(resumed.terminal.usage.output_tokens,20);
     assert(requests[requests.length-1].input.some(i=>i.type==='function_call_output'),'resumed transcript lost MCP history');
     hanging=true;const cancelled=new CodexProcess({...options,sessionId:'cancel-fixture'});adapters.push(cancelled);await cancelled.start();cancelled.sendMessage('Wait for cancellation.');
     const deadline=Date.now()+10000;const before=requests.length;while(requests.length===before&&Date.now()<deadline)await new Promise(r=>setTimeout(r,25));
     await cancelled.stop();assert(cancelled.managedGroupStopped,'cancelled native process group survived');
-    console.log('PASS native Codex '+(containerMode?'container':'host')+': local Responses, MCP ticket roundtrip, canonical summary, usage, explicit resume, mid-turn revision, cancellation');
+    console.log('PASS native Codex '+(containerMode?'container':'host')+': local Responses, MCP ticket roundtrip, canonical summary, nonzero cache-write usage, explicit resume, mid-turn revision, cancellation');
   }finally{
     await Promise.allSettled(adapters.map(a=>a.stop()));for(const socket of sockets)socket.destroy();server.close();bridge?.close();if(containerName){try{execFileSync('docker',['rm','-f',containerName],{stdio:'pipe'});}catch{}}delete process.env.GATEWAY_CODEX_SMOKE_KEY;await rm(directory,{recursive:true,force:true});
   }

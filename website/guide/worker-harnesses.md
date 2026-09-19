@@ -69,4 +69,8 @@ Explicit environment values take precedence over local settings. To compare both
 
 The JSON report contains correctness, elapsed time, CLI status, tool/provider error counts, and available input/cache/output token totals. It does not save raw provider output, account identifiers, credential files, or endpoint URLs. Token accounting differs between CLIs; unavailable values are `null`.
 
+Codex reports inclusive input tokens. When supplied, `cacheWriteInputTokens` in App Server events and `cache_write_input_tokens` in CLI output are recorded as cache creation separately from cached reads. Fresh input subtracts both measured categories from inclusive input. A measured zero differs from an absent field; do not infer a cache write from prompt length or a billing discount. Caching options supported by the public OpenAI API may differ from those accepted by a subscription-backed endpoint.
+
+Native events and the benchmark retain that presence distinction. Existing gateway usage aggregates normalize missing cache-creation counters to zero, so a dashboard zero alone does not prove the upstream explicitly reported zero.
+
 This is a native CLI coding smoke check, **not** a gateway integration benchmark or proof of quality parity. Different endpoint/account routes, cache state, model mappings, and CLI settings can affect results. A timing or token difference does not establish a controlled cost comparison. Test real gateway tasks separately, including MCP calls, cancellation, progress/checkpoint behavior, and container execution.

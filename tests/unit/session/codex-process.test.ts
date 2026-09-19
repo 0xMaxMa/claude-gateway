@@ -240,3 +240,57 @@ test('cleanup rejects forged container homes and retries offline containers with
   await expect(cleanupCodexSessions({agent:options.agent,stateDirectory:directory,retainedSessionIds:[]})).resolves.toBe(1);
   expect(containerNode).toHaveBeenLastCalledWith('worker-container',expect.any(String),[home]);
 });
+
+test.each([undefined, 0, 20])('preserves cache-write presence (%s) and partitions inclusive input usage', async cacheWriteInputTokens => {
+  await launch();
+  const total = { inputTokens: 100, cachedInputTokens: 40, outputTokens: 15, reasoningOutputTokens: 5, ...(cacheWriteInputTokens === undefined ? {} : {cacheWriteInputTokens}) };
+  notify('thread/tokenUsage/updated', {turnId:'turn-1',tokenUsage:{total}});
+  notify('turn/completed', {turn:{id:'turn-1',status:'completed'}});
+  await waitUntil(() => events.some(event => event.type === 'result'));
+  const live = events.find(event => event.subtype === 'native_usage').usage;
+  const final = events.find(event => event.type === 'result').usage;
+  expect(final).toEqual(live);
+  expect(final.input_tokens).toBe(60 - (cacheWriteInputTokens ?? 0));
+  if (cacheWriteInputTokens === undefined) expect(final).not.toHaveProperty('cache_creation_input_tokens');
+  else expect(final).toHaveProperty('cache_creation_input_tokens', cacheWriteInputTokens);
+  const collector = new TurnUsageCollector();events.forEach(event => collector.observe(event));
+  expect(collector.snapshot().usage).toMatchObject({inputTokens:60-(cacheWriteInputTokens??0),cacheReadTokens:40,cacheCreationTokens:cacheWriteInputTokens??0,outputTokens:15,totalTokens:115});
+});
+
+test('persists cumulative cache writes and accounts only the resumed attempt delta', async () => {
+  await launch();
+  const oldHome = (spawn as jest.Mock).mock.calls[0][2].env.CODEX_HOME;
+  await mkdir(join(oldHome,'sessions'));await writeFile(join(oldHome,'sessions','transcript.jsonl'),'{}');
+  notify('thread/tokenUsage/updated',{turnId:'turn-1',tokenUsage:{total:{inputTokens:100,cachedInputTokens:40,cacheWriteInputTokens:20,outputTokens:10}}});
+  notify('turn/completed',{turn:{id:'turn-1',status:'completed'}});
+  await waitUntil(() => events.some(event => event.type === 'result'));await adapter.stop();
+  const saved=JSON.parse(await readFile(join(await sessionDirectory(),'thread.json'),'utf8'));
+  expect(saved.usage.cacheWriteInputTokens).toBe(20);
+  rpc=[];events=[];adapter=new CodexProcess(options);adapter.on('output',line=>events.push(JSON.parse(line)));await launch();
+  notify('thread/tokenUsage/updated',{turnId:'turn-2',tokenUsage:{total:{inputTokens:180,cachedInputTokens:70,cacheWriteInputTokens:45,outputTokens:25}}});
+  notify('turn/completed',{turn:{id:'turn-2',status:'completed'}});
+  await waitUntil(() => events.some(event => event.type === 'result'));
+  expect(events.find(event => event.type === 'result').usage).toEqual({input_tokens:25,cache_read_input_tokens:30,cache_creation_input_tokens:25,output_tokens:15});
+  const collector=new TurnUsageCollector();events.forEach(event=>collector.observe(event));
+  expect(collector.snapshot().usage?.totalTokens).toBe(95);
+});
+
+test.each([undefined, 0])('resumed cache writes preserve an unknown versus zero baseline (%s)', async previousWrites => {
+  await launch();
+  const home=(spawn as jest.Mock).mock.calls[0][2].env.CODEX_HOME;
+  await mkdir(join(home,'sessions'));await writeFile(join(home,'sessions','transcript.jsonl'),'{}');
+  notify('thread/tokenUsage/updated',{turnId:'turn-1',tokenUsage:{total:{inputTokens:100,cachedInputTokens:40,outputTokens:10,...(previousWrites===undefined?{}:{cacheWriteInputTokens:previousWrites})}}});
+  notify('turn/completed',{turn:{id:'turn-1',status:'completed'}});
+  await waitUntil(()=>events.some(event=>event.type==='result'));await adapter.stop();
+  rpc=[];events=[];adapter=new CodexProcess(options);adapter.on('output',line=>events.push(JSON.parse(line)));await launch();
+  notify('thread/tokenUsage/updated',{turnId:'turn-2',tokenUsage:{total:{inputTokens:180,cachedInputTokens:70,cacheWriteInputTokens:20,outputTokens:25}}});
+  notify('turn/completed',{turn:{id:'turn-2',status:'completed'}});
+  await waitUntil(()=>events.some(event=>event.type==='result'));
+  const final=events.find(event=>event.type==='result').usage;
+  if(previousWrites===undefined) {
+    expect(final).not.toHaveProperty('cache_creation_input_tokens');
+    expect(final.input_tokens).toBe(50);
+  } else expect(final).toMatchObject({input_tokens:30,cache_creation_input_tokens:20});
+  const collector=new TurnUsageCollector();events.forEach(event=>collector.observe(event));
+  expect(collector.snapshot().usage?.totalTokens).toBe(95);
+});

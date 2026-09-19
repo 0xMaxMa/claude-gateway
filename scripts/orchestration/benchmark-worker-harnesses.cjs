@@ -42,6 +42,7 @@ function metrics(harness, text) {
       if (event.type === 'turn.completed' && event.usage) {
         result.inputTokens = event.usage.input_tokens ?? null;
         result.cachedInputTokens = event.usage.cached_input_tokens ?? null;
+        result.cacheCreationTokens = event.usage.cache_write_input_tokens ?? null;
         result.outputTokens = event.usage.output_tokens ?? null;
       }
       if (event.type === 'item.completed' && (event.item?.status === 'failed' || (typeof event.item?.exit_code === 'number' && event.item.exit_code !== 0))) result.toolErrors++;
@@ -59,9 +60,9 @@ function metrics(harness, text) {
       for (const block of event.message?.content ?? []) if (block.type === 'tool_result' && block.is_error) result.toolErrors++;
     }
   }
-  // Codex includes cache reads in input_tokens; Claude reports disjoint input categories.
+  // Codex includes reads and writes in input_tokens; Claude reports disjoint categories.
   result.freshInputTokens = result.inputTokens === null ? null : harness === 'codex'
-    ? Math.max(0, result.inputTokens - (result.cachedInputTokens ?? 0)) : result.inputTokens;
+    ? Math.max(0, result.inputTokens - (result.cachedInputTokens ?? 0) - (result.cacheCreationTokens ?? 0)) : result.inputTokens;
   result.totalInputTokens = result.inputTokens === null ? null : harness === 'codex'
     ? result.inputTokens : result.inputTokens + (result.cachedInputTokens ?? 0) + (result.cacheCreationTokens ?? 0);
   return result;

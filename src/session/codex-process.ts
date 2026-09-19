@@ -23,7 +23,7 @@ const quote = (value: string): string => JSON.stringify(value);
 const MAX_LINE = 4 * 1024 * 1024;
 const threadPattern = /^[a-f0-9-]{36}$/i;
 interface SavedThread { threadId: string; home: string; container?: string; identity?: string; usage?: NativeUsage; }
-interface NativeUsage { inputTokens: number; cachedInputTokens: number; outputTokens: number; }
+interface NativeUsage { inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens?: number; outputTokens: number; }
 
 interface SessionHomes { sessionId: string; workspace: string; container?: string; homes: string[]; }
 function sessionRoot(stateDirectory: string, workspace: string, sessionId: string): string {
@@ -380,10 +380,20 @@ export class CodexProcess extends EventEmitter {
     this.terminal = true;
     this.output({ type: 'result', result: this.finalText, ...(this.nativeUsage ? { usage: this.normalizedUsage() } : {}) });
   }
-  private normalizedUsage(): { input_tokens: number; cache_read_input_tokens: number; output_tokens: number } {
-    const difference = (field: keyof NativeUsage) => Math.max(0, (this.nativeUsage?.[field] ?? 0) - (this.saved?.usage?.[field] ?? 0));
+  private normalizedUsage(): { input_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens?: number; output_tokens: number } {
+    const count = (value: unknown): number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+    const difference = (field: keyof NativeUsage) => Math.max(0, count(this.nativeUsage?.[field]) - count(this.saved?.usage?.[field]));
     const input = difference('inputTokens'), cached = Math.min(input, difference('cachedInputTokens'));
-    return { input_tokens: input - cached, cache_read_input_tokens: cached, output_tokens: difference('outputTokens') };
+    // Codex's input total includes cache reads AND writes. Preserve a reported
+    // zero, but do not manufacture a measurement when either cumulative endpoint
+    // is unknown (notably a resumed transcript from an older Codex version).
+    const reportedWrites = this.nativeUsage?.cacheWriteInputTokens;
+    const previousWrites = this.saved?.usage?.cacheWriteInputTokens;
+    const writesKnown = typeof reportedWrites === 'number' && Number.isSafeInteger(reportedWrites) && reportedWrites >= 0 &&
+      (!this.saved?.usage || (typeof previousWrites === 'number' && Number.isSafeInteger(previousWrites) && previousWrites >= 0));
+    const written = writesKnown ? Math.min(input - cached, difference('cacheWriteInputTokens')) : 0;
+    return { input_tokens: input - cached - written, cache_read_input_tokens: cached,
+      ...(writesKnown ? { cache_creation_input_tokens: written } : {}), output_tokens: difference('outputTokens') };
   }
   private async persist(): Promise<void> {
     if (!this.threadId) throw new Error('Codex omitted its thread identity');
