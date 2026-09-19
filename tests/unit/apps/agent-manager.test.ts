@@ -123,6 +123,27 @@ describe('AgentManager', () => {
       expect(agentSvc['container_name']).toBe('my-app-agent');
     });
 
+    it('installs a pinned integrity-checked Codex runtime without adding host mounts', () => {
+      const entry = makeEntry(tmpDir);
+      manager.injectAgentService(entry);
+      const dockerfile = fs.readFileSync(path.join(entry.installPath, 'Dockerfile.agent'), 'utf8');
+      expect(dockerfile).toContain('codex-0.154.0-linux-${arch}.tgz');
+      expect(dockerfile).toContain('amd64) arch=x64; triple=x86_64-unknown-linux-musl;');
+      expect(dockerfile).toContain('arm64) arch=arm64; triple=aarch64-unknown-linux-musl;');
+      expect(dockerfile.match(/checksum=[a-f0-9]{128}/g)).toHaveLength(2);
+      expect(dockerfile).toContain('Unsupported Codex container architecture');
+      expect(dockerfile).toContain('RUN set -eu;');
+      expect(dockerfile.indexOf('sha512sum --check --strict')).toBeLessThan(dockerfile.indexOf('tar -xzf'));
+      // Preserve upstream sibling binaries/resources needed by native Codex.
+      expect(dockerfile).toContain('--strip-components=3 "package/vendor/${triple}"');
+      expect(dockerfile).toContain('ln -s /opt/codex/bin/codex /usr/local/bin/codex');
+      expect(dockerfile).toContain('/usr/local/bin/codex --version');
+      const compose = yaml.load(fs.readFileSync(path.join(entry.installPath, 'docker-compose.yml'), 'utf8')) as any;
+      expect(compose.services.agent.volumes).toHaveLength(6);
+      expect(compose.services.agent.volumes.join('\n')).not.toMatch(/\.codex|codex|docker\.sock/);
+      expect(dockerfile).not.toMatch(/auth\.json|OPENAI_API_KEY|COPY.*\.codex/);
+    });
+
     it('injects security_opt no-new-privileges', () => {
       const entry = makeEntry(tmpDir);
       manager.injectAgentService(entry);

@@ -4,12 +4,15 @@ import { executionTool } from './tool-name';
 import { TurnUsageCollector, TokenUsage, RequestUsage } from './token-usage';
 import { toolOutcome, TurnObservation, ToolOutcome } from './execution-observation';
 import type { InputImage } from '../session/input-image';
-import { SessionProcess } from '../session/process';
+import type { SessionProcess } from '../session/process';
 import { OrchestrationError } from './types';
 
 export interface TurnTimeoutPolicy { onUsage?: (metrics: ManagedTurnMetrics) => void; startupTimeoutMs: number; firstResponseTimeoutMs: number; compactionTimeoutMs?: number; idleTimeoutMs: number; acceptToolProgress?: boolean; idleAction?: 'observe'; onObservation?: (value: TurnObservation) => void; }
 export interface TurnTimeoutDetails { phase: 'startup' | 'first_response' | 'compaction' | 'idle' | 'total'; elapsedMs: number; idleMs: number; }
 export interface ProcessResult { text: string; interrupted: boolean; }
+/** Shared lifecycle contract; each backend normalizes its own native event protocol. */
+export type WorkerProcess = { on(event: string, listener: (...args: any[]) => void): unknown; off(event: string, listener: (...args: any[]) => void): unknown } & Pick<SessionProcess, 'start' | 'sendMessage' | 'interrupt' | 'stop' | 'runtimeProfile' | 'managedProcessId' | 'spawnedAt' | 'managedGroupStopped'> &
+  Partial<Pick<SessionProcess, 'isSpawnedConnectorTool' | 'flushToolSchemas'>>;
 export interface ProcessTurn {
   accepted: Promise<void>;
   result: Promise<ProcessResult>;
@@ -33,7 +36,7 @@ function providerErrorText(value: unknown, codes: string[], depth = 0, budget = 
   if (typeof value === 'number') return String(value);
   return '';
 }
-export function startProcessTurn(process: SessionProcess, prompt: string, timeoutMs: number | undefined, onText: (text: string) => void = () => {}, onMetrics?: (metrics: ManagedTurnMetrics) => void, images: readonly InputImage[] = [], policy?: TurnTimeoutPolicy, onStructured?: (chunk: string) => void, alreadyStarted = false): ProcessTurn {
+export function startProcessTurn(process: WorkerProcess, prompt: string, timeoutMs: number | undefined, onText: (text: string) => void = () => {}, onMetrics?: (metrics: ManagedTurnMetrics) => void, images: readonly InputImage[] = [], policy?: TurnTimeoutPolicy, onStructured?: (chunk: string) => void, alreadyStarted = false): ProcessTurn {
   let resolveAccepted!: () => void, rejectAccepted!: (error: Error) => void;
   let resolveResult!: (result: ProcessResult) => void, rejectResult!: (error: Error) => void;
   const accepted = new Promise<void>((resolve, reject) => { resolveAccepted = resolve; rejectAccepted = reject; });
@@ -104,7 +107,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
       return;
     }
     usageCollector.observe(event);
-    if ((event.type === 'assistant' && event.message?.usage) || (event.type === 'system' && event.subtype === 'init') || (event.type === 'stream_event' && event.event?.type === 'message_stop')) {
+    if ((event.type === 'assistant' && event.message?.usage) || (event.type === 'system' && ['init','native_usage'].includes(event.subtype)) || (event.type === 'stream_event' && event.event?.type === 'message_stop')) {
       try {
         const measured = usageCollector.snapshot();
         policy?.onUsage?.({toolIds: [...tools], inputTokens: measured.usage ? measured.usage.inputTokens + measured.usage.cacheCreationTokens + measured.usage.cacheReadTokens : 0, totalTokens: measured.usage?.totalTokens ?? 0, startedAt, ...measured});
@@ -149,7 +152,7 @@ export function startProcessTurn(process: SessionProcess, prompt: string, timeou
       toolProgress = true;
     }
     if (policy) {
-      if (event.type === 'system' && event.subtype === 'init' && phase === 'startup') arm('first_response', policy.firstResponseTimeoutMs);
+      if (event.type === 'system' && ['init', 'native_init'].includes(event.subtype) && phase === 'startup') arm('first_response', policy.firstResponseTimeoutMs);
       // Compaction is a separate model request whose tokens are not streamed to
       // the parent. Do not kill it with the first-answer silence timer. The
       // caller's hard deadline remains in force, including repeated status events.

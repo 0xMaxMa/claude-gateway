@@ -89,6 +89,9 @@ export interface TaskRevision {
   originatingInputId: string;
 }
 export interface TaskAttempt {
+  /** Immutable execution choice for this attempt; never infer it from today's agent model. */
+  harness?: 'claude' | 'codex';
+  harnessModel?: string;
   startedAt?: number;
   workerId?: string;
   resumeSession?: boolean;
