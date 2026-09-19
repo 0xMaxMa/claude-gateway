@@ -1,3 +1,5 @@
+/** One brand asset for the sidebar, login and browser tab. */
+export const dashboardIconUrl = 'data:image/svg+xml,'+encodeURIComponent("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\"><defs><linearGradient id=\"rainbow\" x2=\"1\" y2=\"1\"><stop stop-color=\"#c785f6\"/><stop offset=\".3\" stop-color=\"#7899f3\"/><stop offset=\".55\" stop-color=\"#68cbc9\"/><stop offset=\".8\" stop-color=\"#a7d97b\"/><stop offset=\"1\" stop-color=\"#f6e68a\"/></linearGradient><radialGradient id=\"warm\" cx=\"0\" cy=\"1\" r=\"1\"><stop stop-color=\"#ffe58e\"/><stop offset=\".45\" stop-color=\"#ffb7cb\" stop-opacity=\".8\"/><stop offset=\"1\" stop-color=\"#ffb7cb\" stop-opacity=\"0\"/></radialGradient></defs><rect width=\"64\" height=\"64\" rx=\"18\" fill=\"url(#rainbow)\"/><rect width=\"64\" height=\"64\" rx=\"18\" fill=\"url(#warm)\"/><path d=\"M32 17v30M17 32h30M21.4 21.4l21.2 21.2M21.4 42.6l21.2-21.2\" fill=\"none\" stroke=\"#e87524\" stroke-width=\"4.5\" stroke-linecap=\"round\"/></svg>");
 /** Shared tokens from the approved pastel dashboard direction. */
 export const dashboardTheme = String.raw`
 :root{color-scheme:dark;--bg:#101113;--side:#141517;--panel:#181a1d;--raised:#202226;--line:#2b2e33;--text:#eeeef0;--muted:#989da7;--accent:#ff935c;--accentbg:#35261f;--green:#78d5aa;--greenbg:#1e3029;--blue:#8dbdff;--bluebg:#202c3f;--yellow:#ebc978;--yellowbg:#342e20;--red:#efa19e;--redbg:#362426;--shadow:0 24px 100px #0008;--radius:14px}
@@ -199,7 +201,7 @@ h3{font-weight:500}
 .layout{grid-template-columns:242px minmax(0,1fr)}
 .sidebar{width:242px;padding:30px 18px 18px}
 .brand{font-size:15px;font-weight:600;padding:0 8px 24px;gap:10px}
-.brandmark{border:0;border-radius:12px;background:var(--prism);color:#333;width:35px;height:35px}
+.brandmark{border:0;border-radius:12px;background:transparent url("${dashboardIconUrl}") center/contain no-repeat;width:35px;height:35px}
 .brand small{font-size:9px;letter-spacing:1.1px;margin-top:6px}
 .navlabel{font-weight:500;letter-spacing:1.5px;font-size:9px;margin-top:28px}
 .nav{gap:6px}
@@ -527,7 +529,8 @@ button.theme-toggle{width:38px;height:38px;min-height:38px;flex:0 0 38px;padding
 .chart-hit-grid{position:absolute;inset:0;display:grid}.chart-hit{position:relative;outline:none;background:transparent}
 .chart-line-dot{display:none;position:absolute;width:8px;height:8px;transform:translate(-50%,-50%);border:2px solid var(--panel);border-radius:50%;background:var(--dot-color);box-shadow:0 0 0 1px var(--dot-color);pointer-events:none}
 .chart-hit:hover .chart-line-dot,.chart-hit:focus-visible .chart-line-dot{display:block}
-.chart-popover{display:none;position:absolute;z-index:5;top:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:var(--shadow);font-size:12px;line-height:1.7;white-space:nowrap;pointer-events:none;color:var(--text)}
+.chart-popover{width:max-content;max-width:calc(100vw - 32px);display:none;position:absolute;z-index:5;top:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:var(--shadow);font-size:12px;line-height:1.7;white-space:nowrap;pointer-events:none;color:var(--text)}
+.chart-tooltip-row{display:grid;grid-template-columns:auto auto;gap:16px;align-items:baseline;margin-top:4px}.chart-tooltip-row>span{color:var(--muted)}.chart-tooltip-row>strong{font-weight:650;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}.chart-popover>strong{display:block;margin-bottom:6px;color:var(--muted);font-weight:500}
 .chart-popover.align-left{left:0}.chart-popover.align-right{right:0}
 .chart-hit:hover .chart-popover,.chart-hit:focus-visible .chart-popover,.agent-bar-space:hover~.chart-popover,.agent-column:focus-visible .chart-popover{display:block}
 .chart-x-labels{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:8px}
@@ -552,4 +555,4 @@ button.theme-toggle{width:38px;height:38px;min-height:38px;flex:0 0 38px;padding
 .kb-toolbar button:hover{background:var(--raised)}
 #kb-source,#kb-demo-size,#kb-search{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px 12px;font:12px/1.5 Poppins,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:38px}
 `;
-export const dashboardFontLink = '<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2214%22%20fill%3D%22%23181a1d%22%2F%3E%3Cg%20stroke%3D%22%23ff935c%22%20stroke-width%3D%226%22%20stroke-linecap%3D%22round%22%3E%3Cpath%20d%3D%22M32%2012v40M12%2032h40M18%2018l28%2028M18%2046l28-28%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E">' + "<script>(function(){var i=location.pathname.lastIndexOf('/dashboard');if(i<0)return;var l=document.createElement('link');l.rel='stylesheet';l.href=location.pathname.slice(0,i)+'/dashboard/fonts.css';document.head.appendChild(l);})();</script>";
+export const dashboardFontLink = '<link rel="icon" type="image/svg+xml" href="'+dashboardIconUrl+'">' + "<script>(function(){var i=location.pathname.lastIndexOf('/dashboard');if(i<0)return;var l=document.createElement('link');l.rel='stylesheet';l.href=location.pathname.slice(0,i)+'/dashboard/fonts.css';document.head.appendChild(l);})();</script>";
