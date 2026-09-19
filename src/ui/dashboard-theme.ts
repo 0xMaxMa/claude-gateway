@@ -488,6 +488,7 @@ tr[data-dash-agent],.turn-row{cursor:pointer}tr[data-dash-agent]:hover,.turn-row
 .memory-activity-label.session-compaction{--activity-color:var(--blue)}
 .memory-filters{display:flex;flex-wrap:nowrap;align-items:flex-end;gap:12px;margin:20px 0 12px;max-width:100%;overflow-x:auto;padding-bottom:8px}
 .memory-filters .memory-filter-group{display:flex;flex-direction:column;align-items:flex-start;gap:8px;flex:0 0 auto}
+.memory-filters .memory-filter-group>.live-note{margin:0}
 .memory-filters .range-toggle{flex-wrap:nowrap;white-space:nowrap}
 .memory-filters .range-toggle button{font-size:12px;padding:5px;min-height:28px}
 .memory-filters #memory-agent{width:145px;height:38px;min-width:0;font-size:12px}
