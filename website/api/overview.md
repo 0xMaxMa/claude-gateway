@@ -210,3 +210,5 @@ See [File Share Bridge API](/api/shares).
 See [PTY Shell API](/api/pty).
 
 Dashboard date filters use `gateway.timezone` (UTC by default). `24h` starts at local midnight; `7d`, `30d`, and `90d` include today. The memory-activity list includes `timezone` and `since` to explain its time boundary. Relative ages represent elapsed time.
+
+The memory-activity `status` filter accepts a comma-separated set of statuses, `all`, or `none`. The dashboard selects every status except `skipped` initially; status selection applies before pagination and counts.

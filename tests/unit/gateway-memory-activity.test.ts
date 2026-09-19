@@ -31,7 +31,7 @@ test.each([{page:-1},{page:'NaN'},{page:1.5},{kind:'bad'},{scope:'bad'},{agentId
  const {app,sessionCompactionReport}=setup();expect((await supertest(app).get('/dashboard/memory-activity').set('X-Api-Key','admin').query(query)).status).toBe(400);expect(sessionCompactionReport).not.toHaveBeenCalled();
 });
 test('dashboard exposes compact maintenance filters and executable client',()=>{
- const html=generateDashboardHtml();expect(html).toContain('memory-kind');expect(html).toContain('Session compaction');expect(html).toContain('memory-drawer');
+ const html=generateDashboardHtml();expect(html).toContain('memory-kind');expect(html).toContain('Session Compaction');expect(html).toContain('memory-drawer');
  expect(()=>new Function(memoryActivityClient)).not.toThrow();
  expect(memoryActivityClient).toContain("txt(p.content)");expect(memoryActivityClient).toContain('/knowledge/dreams/apply');
 });
@@ -54,4 +54,13 @@ test('24h includes overnight runs in the configured timezone and hides empty swe
  expect(response.status).toBe(200);expect(response.body.timezone).toBe('Asia/Bangkok');expect(response.body.runs.map((r:any)=>r.id)).toEqual(['done']);
  expect(response.body.runs[0]).toMatchObject({beforeTokens:653464,afterTokens:4191,measuredReduction:649273});
  }finally{now.mockRestore();}
+});
+
+test('status selections filter before pagination and summary counts',async()=>{
+ const {app}=setup();
+ const get=(status:string)=>supertest(app).get('/dashboard/memory-activity').set('X-Api-Key','admin').query({scope:'all',status});
+ const both=await get('completed,failed');expect(both.body.total).toBe(30);expect(both.body.counts.failed).toBe(1);
+ const failed=await get('failed,running');expect(failed.body.total).toBe(1);expect(failed.body.runs[0].status).toBe('failed');
+ expect((await get('none')).body.total).toBe(0);
+ expect((await get('completed,invalid')).status).toBe(400);
 });

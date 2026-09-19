@@ -1226,6 +1226,7 @@ export class GatewayRouter {
         [agentId,kind,status,id,scope].some(v=>v!==undefined&&(typeof v!=='string'||v.length>256)) ||
         (completedOnly!==undefined&&completedOnly!=='true'&&completedOnly!=='false') ||
         (kind!==undefined&&!['all','memory_dream','session_compaction'].includes(String(kind))) ||
+        (status!==undefined&&!String(status).split(',').every(s=>['all','none','pending','running','completed','failed','partial_failure','interrupted','skipped'].includes(s))) ||
         (scope!==undefined&&!['24h','7d','30d','90d','all'].includes(String(scope)))) {
         res.status(400).json({error:'Invalid activity filters'});return;
       }
@@ -1244,7 +1245,7 @@ export class GatewayRouter {
           res.json({run});return;}
         const timezone=this.gatewayConfig?.gateway?.timezone || 'UTC';
         const since=dashboardSince(scope,Date.now(),timezone);
-        const runs=data.runs.filter(r=>(completedOnly!=='true'||r.kind!=='session_compaction'||r.completedSessions>0||(r.items??[]).some((i:any)=>i.status==='completed'))&&(!agentId||r.agent===agentId)&&(!kind||kind==='all'||r.kind===kind)&&(!status||status==='all'||r.status===status)&&r.startedAt>=since);
+        const runs=data.runs.filter(r=>(completedOnly!=='true'||r.kind!=='session_compaction'||r.completedSessions>0||(r.items??[]).some((i:any)=>i.status==='completed'))&&(!agentId||r.agent===agentId)&&(!kind||kind==='all'||r.kind===kind)&&(!status||status==='all'||String(status).split(',').includes(r.status))&&r.startedAt>=since);
         res.json({timezone,since,runs:runs.slice(page*25,page*25+25).map(activitySummary),total:runs.length,page,pageSize:25,
           agents:data.agents,schedules:data.schedules.filter(s=>!agentId||s.agent===agentId),unavailable:data.unavailable,
           counts:{compactedSessions:runs.reduce((n,r)=>n+(r.completedSessions??r.items?.filter((i:any)=>i.status==='completed').length??0),0),measuredReduction:runs.reduce((n,r)=>n+(activitySummary(r).measuredReduction??0),0),measuredSessions:runs.reduce((n,r)=>n+(activitySummary(r).measuredSessions??0),0),runs:runs.length,pendingProposals:runs.reduce((n,r)=>n+(r.pendingProposals??0),0),failed:runs.filter(r=>['failed','partial_failure','interrupted'].includes(r.status)).length},
