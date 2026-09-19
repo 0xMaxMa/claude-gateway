@@ -488,10 +488,10 @@ tr[data-dash-agent],.turn-row{cursor:pointer}tr[data-dash-agent]:hover,.turn-row
 .memory-activity-label.session-compaction{--activity-color:var(--blue)}
 .memory-filters{display:flex;flex-wrap:nowrap;align-items:flex-end;gap:12px;margin:20px 0 12px;max-width:100%;overflow-x:auto;padding-bottom:8px}
 .memory-filters .memory-filter-group{display:flex;flex-direction:column;align-items:flex-start;gap:8px;flex:0 0 auto}
-.memory-filters .memory-filter-group>.live-note{margin:0}
+.memory-filters .memory-filter-group>.live-note{margin:0;font-size:12px}
 .memory-filters .range-toggle{flex-wrap:nowrap;white-space:nowrap}
-.memory-filters .range-toggle button{font-size:12px;padding:5px;min-height:28px}
-.memory-filters #memory-agent{width:145px;height:38px;min-width:0;font-size:12px}
-.memory-filters #memory-refresh{flex:0 0 auto;height:38px;padding:7px 14px;font-size:12px;white-space:nowrap}
+.memory-filters .range-toggle button{font-size:13px;padding:6px 7px;min-height:32px}
+.memory-filters #memory-agent{width:160px;height:42px;min-width:0;font-size:13px}
+.memory-filters #memory-refresh{flex:0 0 auto;height:42px;padding:8px 16px;font-size:13px;white-space:nowrap}
 `;
 export const dashboardFontLink = "<script>(function(){var i=location.pathname.lastIndexOf('/dashboard');if(i<0)return;var l=document.createElement('link');l.rel='stylesheet';l.href=location.pathname.slice(0,i)+'/dashboard/fonts.css';document.head.appendChild(l);})();</script>";
