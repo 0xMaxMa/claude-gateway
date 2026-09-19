@@ -2,15 +2,14 @@
 export const memoryActivityHtml = String.raw`
 <div class="heading"><h2>Nightly dreaming</h2><p>Completed compactions and memory reports, newest first.</p></div>
 <div class="dash-grid" id="memory-stats"></div>
-<div class="dash-filter memory-filters">
-<div class="memory-filter-group"><span class="live-note">Activity</span><div id="memory-kind" class="range-toggle" role="group" aria-label="Activity"><button type="button" data-kind="all" aria-pressed="true">All</button><button type="button" data-kind="memory_dream" aria-pressed="false">Memory Dream</button><button type="button" data-kind="session_compaction" aria-pressed="false">Session Compaction</button></div></div>
-<div class="memory-filter-group"><span class="live-note">Status</span><div id="memory-status" class="range-toggle" role="group" aria-label="Status"><button type="button" data-status="all" aria-pressed="false">All</button><button type="button" data-status="pending" aria-pressed="true">Pending</button><button type="button" data-status="running" aria-pressed="true">Running</button><button type="button" data-status="completed" aria-pressed="true">Completed</button><button type="button" data-status="failed" aria-pressed="true">Failed</button><button type="button" data-status="partial_failure" aria-pressed="true">Partially failed</button><button type="button" data-status="interrupted" aria-pressed="true">Interrupted</button><button type="button" data-status="skipped" aria-pressed="false">Skipped</button></div></div>
-<label class="memory-filter-group"><span class="live-note">Agent</span><select id="memory-agent"><option value="">All agents</option></select></label>
-<button id="memory-refresh">Refresh</button>
+<div class="report-toolbar turn-filters memory-filters">
+<div id="memory-kind" class="range-toggle" role="group" aria-label="Activity"><button type="button" data-kind="all" aria-pressed="true">All</button><button type="button" data-kind="memory_dream" aria-pressed="false">Memory Dream</button><button type="button" data-kind="session_compaction" aria-pressed="false">Session Compaction</button></div>
+<div id="memory-status" class="range-toggle" role="group" aria-label="Status"><button type="button" data-status="all" aria-pressed="false">All</button><button type="button" data-status="pending" aria-pressed="true">Pending</button><button type="button" data-status="running" aria-pressed="true">Running</button><button type="button" data-status="completed" aria-pressed="true">Completed</button><button type="button" data-status="failed" aria-pressed="true">Failed</button><button type="button" data-status="partial_failure" aria-pressed="true">Partially failed</button><button type="button" data-status="interrupted" aria-pressed="true">Interrupted</button><button type="button" data-status="skipped" aria-pressed="false">Skipped</button></div>
+<select id="memory-agent" aria-label="Filter by agent"><option value="">All agents</option></select>
 </div>
 <p class="live-note"><span id="memory-updated" role="status"></span> · <span id="memory-range-note">Uses the date range above.</span> Up to 100 recorded runs per activity per agent. Only successful compactions are shown. Missing measurements are shown as —.</p>
 <p id="memory-error" class="error" role="status" hidden></p>
-<div id="memory-results"></div><div class="dash-pager"><span id="memory-page"></span><div class="row"><button id="memory-prev">← Previous</button><button id="memory-next">Next →</button></div></div>
+<div id="memory-results"></div><div class="dash-pager"><span id="memory-page"></span><div class="row"><button id="memory-prev">← Previous</button><button id="memory-next">Next →</button></div>
 <div id="memory-back" class="dash-drawer-back"><section id="memory-drawer" class="dash-drawer" role="dialog" aria-modal="true" aria-label="Memory activity details" tabindex="-1"></section></div>
 `;
 export const memoryActivityClient = String.raw`
@@ -104,7 +103,7 @@ export const memoryActivityClient = String.raw`
  byId('memory-agent').addEventListener('change',()=>{close();load(true);});
  byId('memory-kind').addEventListener('click',e=>{const button=e.target.closest('[data-kind]');if(!button)return;activity=button.dataset.kind;byId('memory-kind').querySelectorAll('[data-kind]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.kind===activity)));close();load(true);});
  byId('memory-status').addEventListener('click',e=>{const button=e.target.closest('[data-status]');if(!button)return;const status=button.dataset.status;if(status==='all'){statuses.forEach(s=>selectedStatuses.add(s));}else if(selectedStatuses.has(status)){selectedStatuses.delete(status);}else{selectedStatuses.add(status);}byId('memory-status').querySelectorAll('[data-status]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.status==='all'?selectedStatuses.size===statuses.length:selectedStatuses.has(b.dataset.status))));close();load(true);});
- byId('memory-refresh').onclick=()=>load(true);byId('memory-prev').onclick=()=>{page=Math.max(0,page-1);controller?.abort();busy=false;load(false);};byId('memory-next').onclick=()=>{page++;controller?.abort();busy=false;load(false);};
+ byId('memory-prev').onclick=()=>{page=Math.max(0,page-1);controller?.abort();busy=false;load(false);};byId('memory-next').onclick=()=>{page++;controller?.abort();busy=false;load(false);};
  document.addEventListener('click',e=>{if(e.target.closest('.tab')&&selected)close();});
  document.addEventListener('visibilitychange',()=>{if(!document.hidden)load(false);});
  setInterval(()=>load(false),15000);window.__loadDreams=force=>load(Boolean(force));

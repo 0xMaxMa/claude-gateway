@@ -486,12 +486,12 @@ tr[data-dash-agent],.turn-row{cursor:pointer}tr[data-dash-agent]:hover,.turn-row
 .memory-activity-label::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;flex-shrink:0}
 .memory-activity-label.memory-dream{--activity-color:var(--accent)}
 .memory-activity-label.session-compaction{--activity-color:var(--blue)}
-.memory-filters{display:flex;flex-wrap:nowrap;align-items:flex-end;gap:12px;margin:20px 0 12px;max-width:100%;overflow-x:auto;padding-bottom:8px}
-.memory-filters .memory-filter-group{display:flex;flex-direction:column;align-items:flex-start;gap:8px;flex:0 0 auto}
-.memory-filters .memory-filter-group>.live-note{margin:0;font-size:12px}
-.memory-filters .range-toggle{flex-wrap:nowrap;white-space:nowrap}
-.memory-filters .range-toggle button{font-size:13px;padding:6px 7px;min-height:32px}
-.memory-filters #memory-agent{width:160px;height:42px;min-width:0;font-size:13px}
-.memory-filters #memory-refresh{flex:0 0 auto;height:42px;padding:8px 16px;font-size:13px;white-space:nowrap}
+/* One filter component shared with the Turn details report. */
+.turn-filters{display:flex;gap:12px;flex-wrap:wrap;align-items:stretch;font:15px/1.7 system-ui,-apple-system,"Noto Sans Thai",sans-serif}
+.turn-filters .range-toggle button,.turn-filters select,.turn-filters input{font-size:12px}
+.turn-filters input{flex:1;min-width:160px;max-width:380px}
+.memory-filters{flex-wrap:nowrap;gap:12px;margin:20px 0 12px;max-width:100%;overflow-x:auto;padding-bottom:8px}
+.memory-filters .range-toggle{flex:0 0 auto;flex-wrap:nowrap;white-space:nowrap}
+.memory-filters #memory-agent{flex:0 0 auto;width:160px}
 `;
 export const dashboardFontLink = "<script>(function(){var i=location.pathname.lastIndexOf('/dashboard');if(i<0)return;var l=document.createElement('link');l.rel='stylesheet';l.href=location.pathname.slice(0,i)+'/dashboard/fonts.css';document.head.appendChild(l);})();</script>";
