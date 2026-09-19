@@ -508,11 +508,41 @@ button.theme-toggle{width:38px;height:38px;min-height:38px;flex:0 0 38px;padding
 [data-theme=dark] .theme-toggle .theme-moon{display:none}[data-theme=dark] .theme-toggle .theme-sun{display:block}
 #report-theme{margin-left:auto}
 
-.token-activity-chart{position:relative;height:180px}.chart-hour-grid{position:absolute;inset:0;display:grid;grid-template-columns:repeat(24,minmax(0,1fr))}.chart-hour{position:relative;outline-offset:-2px}.chart-hour:hover,.chart-hour:focus-visible{background:color-mix(in srgb,var(--accent) 10%,transparent);outline:1px solid var(--accent)}
-.chart-tooltip{display:none;position:absolute;z-index:3;top:12px;left:50%;transform:translateX(-50%);padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:var(--shadow);white-space:nowrap;font-size:12px;line-height:1.7;pointer-events:none}
-.chart-hour:hover .chart-tooltip,.chart-hour:focus-visible .chart-tooltip{display:block}.chart-hour:nth-child(-n+4) .chart-tooltip{left:0;transform:none}.chart-hour:nth-last-child(-n+4) .chart-tooltip{left:auto;right:0;transform:none}
-.agent-token-bars{display:grid;gap:14px;max-height:380px;overflow:auto;padding:4px}.agent-token-row{display:grid;grid-template-columns:minmax(100px,180px) minmax(60px,1fr) 80px;gap:16px;align-items:center}.agent-token-row>.identity-badge{justify-self:start;max-width:100%;overflow-wrap:anywhere}.agent-token-row>strong{text-align:right;font-size:13px}.agent-token-track{height:16px;border-radius:6px;overflow:hidden;background:var(--raised);display:flex}.agent-token-track>span{height:100%}@media(max-width:520px){.agent-token-row{grid-template-columns:110px minmax(50px,1fr) 60px;gap:8px}}
-#overview-attention-panel[hidden]{display:none}#overview-charts.no-attention{grid-template-columns:minmax(0,1fr)}
+/* Overview charts share card sizing, range controls and numeric typography. */
+#overview-charts{--orange:#ce8040;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin:24px 0}
+#overview-charts .overview-chart-card{margin:0;padding:24px;min-width:0;overflow:visible}
+.chart-card-header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.chart-card-header h2{margin:0;font-size:17px;font-weight:550;line-height:1.5}
+.chart-range{margin-left:auto;flex-wrap:nowrap;font-size:12px}.chart-range button{padding:6px 9px;min-height:30px}
+.chart-period{margin:0 0 22px;min-height:20px}.chart-content{min-height:274px;min-width:0}.chart-content>.empty{min-height:220px;display:flex;align-items:center;justify-content:center}
+.chart-status{margin:4px 0 0!important;min-height:0}.chart-status:empty{display:none}
+.activity-frame,.agent-column-plot{display:flex;gap:10px;height:216px;padding-top:16px}
+.chart-y-labels{width:40px;flex:none;display:flex;flex-direction:column;justify-content:space-between;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums;text-align:right;height:180px;padding-top:4px}
+.activity-plot{position:relative;flex:1;min-width:0;height:190px}.activity-plot>svg{display:block;width:100%;height:190px;overflow:visible}
+.chart-hit-grid{position:absolute;inset:0;display:grid}.chart-hit{position:relative;outline:none;background:transparent}
+.chart-line-dot{display:none;position:absolute;width:8px;height:8px;transform:translate(-50%,-50%);border:2px solid var(--panel);border-radius:50%;background:var(--dot-color);box-shadow:0 0 0 1px var(--dot-color);pointer-events:none}
+.chart-hit:hover .chart-line-dot,.chart-hit:focus-visible .chart-line-dot{display:block}
+.chart-popover{display:none;position:absolute;z-index:5;top:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:var(--shadow);font-size:12px;line-height:1.7;white-space:nowrap;pointer-events:none;color:var(--text)}
+.chart-popover.align-left{left:0}.chart-popover.align-right{right:0}
+.chart-hit:hover .chart-popover,.chart-hit:focus-visible .chart-popover,.agent-bar:hover .chart-popover,.agent-bar:focus-visible .chart-popover{display:block}
+.chart-x-labels{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:8px}
+.chart-key{display:flex;gap:18px;font-size:12px;margin:18px 0 10px;color:var(--muted)}.chart-key span{display:inline-flex;align-items:center;gap:7px}
+.chart-key i,.model-chart-legend i,.reuse-legend i{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none}
+.agent-columns{flex:1;min-width:0;display:flex;justify-content:space-evenly;gap:10px;position:relative;border-bottom:1px solid var(--line);height:180px;background:repeating-linear-gradient(to top,transparent 0,transparent 88px,var(--line) 89px,transparent 90px)}
+.agent-column{width:66px;min-width:0;flex:0 1 66px;text-align:center;position:relative}.agent-bar-space{height:180px;display:flex;justify-content:center;align-items:flex-end}
+.agent-bar{position:relative;width:32px;flex:none;display:flex;flex-direction:column;border-radius:5px 5px 0 0;outline-offset:3px}.agent-bar>span:not(.chart-popover):not(.agent-bar-total){display:block;flex-shrink:0}.agent-bar>span:first-child{border-radius:5px 5px 0 0}
+.agent-bar-total{position:absolute;top:-22px;left:50%;transform:translateX(-50%);font-size:11px;font-weight:600;white-space:nowrap}
+.agent-bar .chart-popover{left:50%;transform:translateX(-50%);top:0}.agent-bar-label{display:block;margin-top:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--muted)}
+.model-donut-layout{display:flex;gap:20px;align-items:center;min-height:230px}.model-donut{position:relative;width:190px;flex:0 0 190px}.model-donut svg{display:block;width:100%;height:auto}.model-donut circle:hover,.model-donut circle:focus{filter:brightness(1.15);outline:none}
+.donut-center{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;pointer-events:none}.donut-center strong{font-size:24px;font-weight:600}.donut-center span{font-size:11px;color:var(--muted)}
+.model-chart-legend,.reuse-legend{list-style:none;margin:0;padding:0;min-width:0;flex:1}.model-chart-legend li{display:grid;grid-template-columns:8px minmax(0,1fr) auto;gap:4px 8px;align-items:center;margin:13px 0;font-size:11px}.model-chart-legend li>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.model-chart-legend li>small{grid-column:2/4;color:var(--muted)}.model-chart-legend strong,.reuse-legend strong{font-weight:600;font-variant-numeric:tabular-nums}
+.reuse-headline{display:flex;align-items:center;gap:20px;margin:16px 0 24px}.reuse-headline>strong{font-size:44px;line-height:1.2;font-weight:550;color:var(--blue);letter-spacing:-1px;white-space:nowrap}.reuse-headline strong small{font-size:23px}.reuse-headline>div{font-size:13px}.reuse-headline>div>span{display:block;color:var(--muted);font-size:11px;margin-top:4px}
+.reuse-bar{height:18px;border-radius:6px;overflow:hidden;display:flex;margin-bottom:22px;background:var(--raised)}.reuse-bar span{height:100%}
+.reuse-legend li{display:grid;grid-template-columns:8px 1fr auto 46px;align-items:center;gap:10px;font-size:12px;margin:13px 0}.reuse-legend small{color:var(--muted);text-align:right}.chart-content>.live-note{margin-bottom:0;font-size:11px;line-height:1.7}
+#overview-attention-panel[hidden]{display:none}
+@media(max-width:1200px){.model-donut-layout{gap:8px}.model-donut{width:150px;flex-basis:150px}.donut-center strong{font-size:21px}.reuse-headline{gap:12px}.reuse-headline>strong{font-size:36px}}
+@media(max-width:1000px){#overview-charts{grid-template-columns:1fr}.model-donut{width:190px;flex-basis:190px}.model-chart-legend{max-width:360px}}
+@media(max-width:520px){#overview-charts .overview-chart-card{padding:18px}.chart-card-header h2{font-size:16px}.chart-card-header{gap:8px}.chart-range button{padding:5px 7px}.model-donut-layout{flex-direction:column;gap:0}.model-chart-legend{width:100%;max-width:none}.reuse-legend li{font-size:11px;gap:7px}.reuse-headline>strong{font-size:34px}.chart-period{font-size:10px}}
 
 .kb-toolbar button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:160px;padding:8px 14px;font-size:12px;min-height:38px}
 .kb-toolbar button:hover{background:var(--raised)}

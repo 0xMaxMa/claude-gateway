@@ -1489,6 +1489,27 @@ export class GatewayRouter {
         watchers: getWatcherHealth(),
       };
     };
+    this.app.get('/dashboard/charts', async (req: Request, res: Response) => {
+      if (!this.requireDashOrApiKey(req, res)) return;
+      res.setHeader('Cache-Control', 'no-store');
+      const scope = req.query.scope ?? '24h';
+      if (typeof scope !== 'string' || !['24h','7d','30d','90d'].includes(scope)) {
+        res.status(400).json({error:'Invalid chart range'}); return;
+      }
+      const timezone = this.gatewayConfig?.gateway?.timezone || 'UTC';
+      // Stable snapshot timestamp coalesces all four cards and concurrent browsers.
+      const now = Math.floor(Date.now()/10000)*10000;
+      try {
+        const agents = [];
+        for (const [id, runner] of this.agents) {
+          const source = runner.getDashboardSource?.();
+          if (!source?.enabled) continue;
+          const usage = await this.dashboardReader.read('charts', source.filename, {scope,timezone,now});
+          if (usage) agents.push({id,...usage});
+        }
+        res.json({scope,timezone,asOf:now,since:dashboardSince(scope,now,timezone),agents});
+      } catch { res.status(503).json({error:'Chart data temporarily unavailable'}); }
+    });
     this.app.get('/status', async (req: Request,res: Response) => {
       if(!this.requireDashOrApiKey(req,res))return;
       res.setHeader('Cache-Control','no-store');

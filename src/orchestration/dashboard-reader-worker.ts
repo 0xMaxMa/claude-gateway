@@ -1,3 +1,4 @@
+import { readDashboardCharts } from './dashboard-charts';
 import {dashboardSince} from '../ui/dashboard-range';
 import { compactionTotals } from './compact-measurements';
 import { contextFootprint } from './context-footprint';
@@ -53,6 +54,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
   db.exec('BEGIN');
   try {
     const adapter = { all, get, attempt: (id: string) => { const row = get('SELECT payload_json FROM task_attempts WHERE id=?', id); return row ? JSON.parse(row.payload_json) as TaskAttempt : undefined; } };
+    if (operation === 'charts') return readDashboardCharts(db, options.scope, options.timezone || 'UTC', options.now);
     if (operation === 'compaction') {
       if (!exists('session_compaction_runs') || !exists('session_compaction_items')) return options.runId ? undefined : [];
       const rows=options.runId ? all('SELECT * FROM session_compaction_runs WHERE id=?',options.runId) : all('SELECT * FROM session_compaction_runs ORDER BY started_at DESC,id DESC LIMIT 100');
@@ -140,12 +142,10 @@ function read(filename: string, operation: string, options: Record<string, any>)
         workerIds:all('SELECT id FROM worker_pool WHERE conversation_id=?',c.id).map(w=>w.id),spawnedAt:0,uptimeSec:0,tokens:0};
     });
     const today=dashboardSince('24h',Date.now(),options.timezone || 'UTC');
-    const hourFormat=new Intl.DateTimeFormat('en-GB',{timeZone:options.timezone||'UTC',hour:'2-digit',hourCycle:'h23'});
-    const usageToday=exists('token_turns')?all(`SELECT role,CAST(started_at/60000 AS INTEGER)*60000 at,SUM(json_extract(payload_json,'$.usage.totalTokens')) tokens FROM token_turns WHERE started_at>=? AND json_type(payload_json,'$.usage')='object' GROUP BY role,at`,Math.max(today,since)).map(r=>({...r,hour:Number(hourFormat.format(r.at))})):[];
     const attention=all(`SELECT t.id taskId,t.state,t.snapshot_json,c.agent_session_id sessionId FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.updated_at>=? AND t.state IN ('waiting_input','needs_reconciliation') ORDER BY t.updated_at DESC LIMIT 8`,since).map(t=>({taskId:t.taskId,state:t.state,sessionId:t.sessionId,title:JSON.parse(t.snapshot_json).title}));
     const recentWork=all(`SELECT t.id taskId,t.state,t.snapshot_json,t.updated_at updatedAt,c.agent_session_id sessionId FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.updated_at>=? ORDER BY t.updated_at DESC,t.id DESC LIMIT 6`,today).map(t=>({taskId:t.taskId,state:t.state,sessionId:t.sessionId,updatedAt:t.updatedAt,title:JSON.parse(t.snapshot_json).title}));
     const pool = exists('worker_pool') ? all('SELECT * FROM worker_pool') : [];
-    return {usageToday,attention,recentWork,managedLegacyIds:all('SELECT agent_session_id FROM conversations WHERE agent_session_id IN (SELECT value FROM json_each(?))',JSON.stringify(options.legacyIds??[])).map(c=>c.agent_session_id),enabled:true,backend:'headless',workspaceMode:options.workspaceMode,sessions,tasks:sessions.flatMap(s=>s.tasks),
+    return {attention,recentWork,managedLegacyIds:all('SELECT agent_session_id FROM conversations WHERE agent_session_id IN (SELECT value FROM json_each(?))',JSON.stringify(options.legacyIds??[])).map(c=>c.agent_session_id),enabled:true,backend:'headless',workspaceMode:options.workspaceMode,sessions,tasks:sessions.flatMap(s=>s.tasks),
       pagination:{offset,limit,total:Number(get('SELECT COUNT(*) n FROM conversations WHERE updated_at>=?',since)!.n)},
       counts:{sessions:Number(get('SELECT COUNT(*) n FROM conversations WHERE updated_at>=?',since)!.n),tasks:all('SELECT state,COUNT(*) count FROM tasks WHERE updated_at>=? GROUP BY state',since)},
       activeAgentSessions:sessions.filter(s=>s.isRunning).map(s=>s.sessionId),

@@ -107,7 +107,18 @@ Gateway execution tools in host/isolated workers use `tool_search` to retrieve o
 
 Discovery adds a model/tool round trip on first use. Smaller schema payloads do not guarantee lower end-to-end latency or billing. Compare the same model and task with measured cache usage before concluding that a workload is cheaper. The initial implementation has protocol/fixture coverage; matched live-model A/B measurements are required to establish production savings.
 
-The dashboard uses the same **admin API key** login as before. Conversations and Tasks open detail drawers with retained session records and individual worker attempts; token reports open in a separate tab. Overview displays recorded UTC token activity, while Usage & tokens separates Agent and Worker totals. Reads run in a dedicated worker thread with bounded caches, pagination, and live updates; missing measurements are shown as **—**.
+The dashboard uses the same **admin API key** login as before. Conversations and Tasks open detail drawers with retained session records and individual worker attempts; token reports open in a separate tab. Overview displays four independently filtered charts in the configured gateway timezone, while Usage & tokens separates Agent and Worker totals. Reads run in a dedicated worker thread with bounded caches, pagination, and live updates; missing measurements are shown as **—**.
+
+### Overview charts
+
+Each card has independent **24h / 7d / 30d / 90d** controls, retained for the browser tab. **24h starts at 00:00 in `gateway.timezone`**; longer ranges include today. While Overview is visible, charts refresh every 10 seconds and share requests for identical ranges. Changing one card does not change the other cards or the session list.
+
+- **Token activity:** hourly points for today, daily points for longer ranges. Hover or focus a point for its Agent and Worker totals.
+- **Tokens by agent:** vertical bars ranked by recorded token volume. Each bar is 32 px wide; card width determines the top 2–8 agents shown. The caption states how many are included. Hover or focus for the full agent name and role split.
+- **Tokens by model:** total Agent + Worker volume grouped by the model recorded on each turn. The top five models are named; the remainder are **Other models**. Missing identifiers appear as **Unspecified model**.
+- **Context reuse:** `cache read / (fresh input + cache write + cache read)`. **Reused input** means cache read; **New · saved for reuse** means cache write; **New · not cached** means fresh input. Output is excluded. Turns missing a breakdown field are excluded from the ratio and counted in the caption. This measures input reuse, **not a percentage of money saved**.
+
+Charts count each recorded turn once, including its latest in-progress measurement, attributed to its start time and recorded model. They do not split long-running turns across hours. Total volume includes cache reads/writes and output; background skill reviews remain separate. Queries use the isolated read-only SQLite worker and token projections, with a fallback for older rows. No model or provider call is made to collect chart data.
 
 ### Dashboard session activity
 

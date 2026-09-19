@@ -279,3 +279,16 @@ describe('gateway dashboard auth hardening (bind 0.0.0.0)', () => {
     });
   });
 });
+
+describe('overview chart ranges and permissions',()=>{
+ it('requires admin access and rejects unbounded or malformed ranges',async()=>{
+  const app=buildApp(WITH_KEYS);
+  expect((await supertest(app).get('/dashboard/charts')).status).toBe(401);
+  expect((await supertest(app).get('/dashboard/charts').set('X-Api-Key',NON_ADMIN_KEY)).status).toBe(401);
+  expect((await supertest(app).get('/dashboard/charts?scope=all').set('X-Api-Key',KEY)).status).toBe(400);
+  expect((await supertest(app).get('/dashboard/charts?scope=7d&scope=90d').set('X-Api-Key',KEY)).status).toBe(400);
+  const result=await supertest(app).get('/dashboard/charts?scope=7d').set('X-Api-Key',KEY);
+  expect(result.status).toBe(200);expect(result.headers['cache-control']).toBe('no-store');
+  expect(result.body).toMatchObject({scope:'7d',timezone:'UTC',agents:[]});
+ });
+});
