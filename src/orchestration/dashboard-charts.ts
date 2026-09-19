@@ -34,14 +34,15 @@ export function readDashboardCharts(db: DatabaseSync, scope: string, timezone: s
     SUM(CASE WHEN fresh>=0 AND cache_write>=0 AND cache_read>=0 THEN 1 ELSE 0 END) measured,
     SUM(CASE WHEN fresh>=0 AND cache_write>=0 AND cache_read>=0 THEN 0 ELSE 1 END) missing
     FROM measured GROUP BY role,bucket,model ORDER BY bucket`).all(since, now) as Record<string, any>[];
-  const buckets = new Map<string, { key: string; agent: number; worker: number }>();
+  const buckets = new Map<string, { key: string; agent: number; worker: number; fresh:number; write:number; read:number }>();
   const models = new Map<string, number>();
   for (const row of rows) {
     if (row.role !== 'agent' && row.role !== 'worker') continue;
     const key = String(row.bucket);
-    const bucket = buckets.get(key) ?? {key,agent:0,worker:0};
+    const bucket = buckets.get(key) ?? {key,agent:0,worker:0,fresh:0,write:0,read:0};
     const tokens = Number(row.tokens ?? 0);
     bucket[row.role as 'agent'|'worker'] += tokens;
+    bucket.fresh+=Number(row.fresh); bucket.write+=Number(row.cache_write); bucket.read+=Number(row.cache_read);
     buckets.set(key,bucket);
     empty[row.role as 'agent'|'worker'] += tokens;
     const model = typeof row.model==='string' && row.model ? row.model : 'Unspecified model';

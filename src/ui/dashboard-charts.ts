@@ -2,14 +2,14 @@ export function dashboardChartsHtml(timezone: string): string {
   const zone=timezone.replace(/[^A-Za-z0-9_+\/.-]/g,'');
   return '<div id="overview-charts" class="overview-chart-grid">'+[
     ['activity','Token activity'],['agents','Tokens by agent'],['models','Tokens by model'],['reuse','Context reuse'],
-  ].map(([key,title])=>'<section class="dash-panel overview-chart-card" data-chart="'+key+'"><div class="chart-card-header"><h2>'+title+'</h2><div class="range-toggle chart-range" role="group" aria-label="'+title+' date range">'+['24h','7d','30d','90d'].map(range=>'<button type="button" data-chart-range="'+range+'" aria-pressed="'+(range==='24h')+'" title="'+(range==='24h'?'Today from 00:00 ':range+' including today · ')+zone+'">'+range+'</button>').join('')+'</div></div><p class="live-note chart-period"></p><div class="chart-content" id="chart-'+key+'"><p class="empty">Loading recorded usage…</p></div><p class="live-note chart-status" role="status"></p></section>').join('')+'</div>';
+  ].map(([key,title])=>'<section class="dash-panel overview-chart-card" data-chart="'+key+'"><div class="chart-card-header"><h2>'+title+'</h2><div class="range-toggle chart-range" role="group" aria-label="'+title+' date range">'+(key==='reuse'?['7d','30d','90d']:['24h','7d','30d','90d']).map(range=>'<button type="button" data-chart-range="'+range+'" aria-pressed="'+(range===(key==='reuse'?'7d':'24h'))+'" title="'+(range==='24h'?'Today from 00:00 ':range+' including today · ')+zone+'">'+range+'</button>').join('')+'</div></div><p class="live-note chart-period"></p><div class="chart-content" id="chart-'+key+'"><p class="empty">Loading recorded usage…</p></div><p class="live-note chart-status" role="status"></p></section>').join('')+'</div>';
 }
 
 export const dashboardChartsClient=String.raw`
-const overviewChartRanges={activity:'24h',agents:'24h',models:'24h',reuse:'24h'};
+const overviewChartRanges={activity:'24h',agents:'24h',models:'24h',reuse:'7d'};
 const overviewChartSnapshots=new Map(),overviewChartInflight=new Map();
 const chartColors=dashboardChartPalette;
-try{const saved=JSON.parse(sessionStorage.getItem('gateway-overview-charts')||'{}');Object.keys(overviewChartRanges).forEach(key=>{if(['24h','7d','30d','90d'].includes(saved[key]))overviewChartRanges[key]=saved[key];});}catch{}
+try{const saved=JSON.parse(sessionStorage.getItem('gateway-overview-charts')||'{}');Object.keys(overviewChartRanges).forEach(key=>{if((key==='reuse'?['7d','30d','90d']:['24h','7d','30d','90d']).includes(saved[key]))overviewChartRanges[key]=saved[key];});}catch{}
 function chartPeriod(data){const fmt=new Intl.DateTimeFormat('en-GB',{timeZone:data.timezone,day:'numeric',month:'short'});return (data.scope==='24h'?'Today · from 00:00':fmt.format(data.since)+' – '+fmt.format(data.asOf))+' · '+data.timezone;}
 function chartEmpty(){return '<p class="empty">No recorded token usage in this period.</p>';}
 function chartActivity(data){
@@ -45,14 +45,22 @@ function chartModels(data){
 function chartReuse(data){
  const sum=data.agents.reduce((r,a)=>{Object.keys(r).forEach(k=>r[k]+=a.reuse[k]||0);return r;},{fresh:0,write:0,read:0,measuredTurns:0,missingTurns:0});
  const total=sum.fresh+sum.write+sum.read;if(!total)return '<p class="empty">No measured input breakdown in this period.</p>';
- const pct=sum.read/total*100;
- const pieces=[['Reused input',sum.read,'var(--token-agent)','Cache read · existing input used again'],['New · saved for reuse',sum.write,'var(--token-worker)','Cache write · new input stored for later requests'],['New · not cached',sum.fresh,'var(--token-report)','Fresh input · newly processed input']];
- return '<div class="reuse-headline"><strong>'+pct.toFixed(1)+'<small>%</small></strong><div>of measured input reused<span>Less input processed from scratch.</span></div></div><div class="reuse-bar" role="img" aria-label="'+pct.toFixed(1)+' percent of measured input reused">'+pieces.map(([label,n,color,hint])=>'<span style="width:'+(n/total*100)+'%;background:'+color+'" title="'+hint+': '+compactNumber(n)+'"></span>').join('')+'</div><ul class="reuse-legend">'+pieces.map(([label,n,color,hint])=>'<li title="'+hint+'"><i style="background:'+color+'"></i><span>'+label+'</span><strong>'+compactNumber(n)+'</strong><small>'+(n/total*100).toFixed(1)+'%</small></li>').join('')+'</ul><p class="live-note">Based on input tokens only. Reuse is not a cost-saving percentage.'+(sum.missingTurns?' '+compactNumber(sum.missingTurns)+' turns excluded: incomplete measurements.':'')+'</p>';
+ const parts=new Intl.DateTimeFormat('en-CA',{timeZone:data.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(data.asOf),v=k=>Number(parts.find(p=>p.type===k).value),end=Date.UTC(v('year'),v('month')-1,v('day'));
+ const days=Number(data.scope.slice(0,-1)),slots=new Map();
+ for(let i=days-1;i>=0;i--)slots.set(new Date(end-i*86400000).toISOString().slice(0,10),{fresh:0,write:0,read:0});
+ data.agents.forEach(a=>a.buckets.forEach(b=>{const slot=slots.get(b.key);if(slot)['fresh','write','read'].forEach(k=>slot[k]+=Number(b[k]||0));}));
+ const groups=[...slots].map(([key,value])=>({start:key,end:key,...value,total:value.fresh+value.write+value.read}));
+ const peak=Math.max(1,...groups.map(g=>g.total)),label=key=>key.slice(8,10)+'/'+key.slice(5,7);
+ const pieces=[['read','Reused','var(--token-agent)'],['write','New · saved','var(--token-worker)'],['fresh','New · not cached','var(--token-report)']];
+ return '<div class="agent-column-plot reuse-column-plot"><div class="chart-y-labels"><span>'+compactNumber(peak)+'</span><span>'+compactNumber(peak/2)+'</span><span>0</span></div><div class="reuse-plot-body"><div class="reuse-timeline" style="min-width:'+(groups.length*24)+'px"><div class="reuse-columns">'+groups.map((g,index)=>{const title=g.start===g.end?g.start:g.start+' – '+g.end;return '<div class="reuse-column" tabindex="0" role="img" aria-label="'+title+': reused '+compactNumber(g.read)+', saved '+compactNumber(g.write)+', new '+compactNumber(g.fresh)+'"><div class="reuse-hit"><div class="reuse-stack" style="height:'+(g.total/peak*100)+'%">'+pieces.map(([key,label,color])=>'<span style="height:'+(g.total?g[key]/g.total*100:0)+'%;background:'+color+'"></span>').join('')+'</div></div>'+((days===7||index%7===0||index===groups.length-1)?'<span class="reuse-date">'+label(g.start)+'</span>':'')+'<span class="chart-popover"><strong>'+title+'</strong><br>Cache read · '+compactNumber(g.read)+'<br>Cache write · '+compactNumber(g.write)+'<br>Fresh input · '+compactNumber(g.fresh)+'<br>Total input · '+compactNumber(g.total)+'<br>Reused · '+(g.total?(g.read/g.total*100).toFixed(1)+'%':'—')+'</span></div>';}).join('')+'</div></div></div></div><div class="chart-key reuse-key">'+pieces.map(([key,label,color])=>'<span><i style="background:'+color+'"></i>'+label+'</span>').join('')+'</div><p class="reuse-summary"><strong>'+(sum.read/total*100).toFixed(1)+'%</strong> of measured input reused</p><p class="live-note">Daily totals · Input tokens only, not billing savings.'+(sum.missingTurns?' '+compactNumber(sum.missingTurns)+' turns excluded: incomplete measurements.':'')+'</p>';
 }
 function drawOverviewChart(key,data){
  const card=document.querySelector('[data-chart="'+key+'"]'),element=card.querySelector('.chart-content');
+ const oldScroll=element.dataset.scope===data.scope?element.querySelector('.reuse-plot-body')?.scrollLeft:undefined;
+ element.dataset.scope=data.scope;
  card.querySelector('.chart-period').textContent=chartPeriod(data);
  element.innerHTML=key==='activity'?chartActivity(data):key==='agents'?chartAgents(data,element):key==='models'?chartModels(data):chartReuse(data);
+ const scroll=element.querySelector('.reuse-plot-body');if(scroll)scroll.scrollLeft=oldScroll??scroll.scrollWidth;
  card.querySelector('.chart-status').textContent='';
 }
 function refreshOverviewCharts(force=false){
@@ -67,6 +75,12 @@ function refreshOverviewCharts(force=false){
   overviewChartInflight.set(scope,request);
  });
 }
+function positionReuseTooltip(column){
+ const tip=column.querySelector('.chart-popover'),viewport=column.closest('.reuse-plot-body').getBoundingClientRect(),box=column.getBoundingClientRect(),width=tip.getBoundingClientRect().width;
+ const left=Math.max(viewport.left+4,Math.min(box.left+box.width/2-width/2,viewport.right-width-4));tip.style.left=(left-box.left)+'px';tip.style.right='auto';tip.style.transform='none';
+}
+document.addEventListener('pointerover',event=>{const hit=event.target.closest('.reuse-hit');if(hit)positionReuseTooltip(hit.closest('.reuse-column'));});
+document.addEventListener('focusin',event=>{const column=event.target.closest('.reuse-column');if(column)positionReuseTooltip(column);});
 document.addEventListener('click',event=>{
  const button=event.target.closest('[data-chart-range]');if(button){
   const key=button.closest('[data-chart]').dataset.chart,scope=button.dataset.chartRange;overviewChartRanges[key]=scope;

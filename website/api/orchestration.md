@@ -174,7 +174,7 @@ The response contains `scope`, configured `timezone`, `since`, `asOf` (a snapsho
 | --- | --- |
 | `id` | Agent identifier |
 | `agent`, `worker` | Total recorded tokens by role |
-| `buckets` | `{key, agent, worker}`; local hour `00`–`23` for today or `YYYY-MM-DD` for longer ranges |
+| `buckets` | `{key, agent, worker, fresh, write, read}`; input breakdown fields include only measured turns, matching `reuse`; local hour `00`–`23` for today or `YYYY-MM-DD` for longer ranges |
 | `models` | `{name, tokens}` sorted by recorded volume |
 | `reuse` | `fresh`, `write`, `read`, `measuredTurns`, `missingTurns` |
 

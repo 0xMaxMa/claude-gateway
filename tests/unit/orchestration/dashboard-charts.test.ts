@@ -17,7 +17,9 @@ describe('overview chart accounting',()=>{
   const data=readDashboardCharts(db,'24h','UTC',Date.parse('2026-09-19T12:00Z'));
   expect(data.agent).toBe(105);expect(data.worker).toBe(54);
   expect(data.models).toEqual([{name:'model-a',tokens:105},{name:'model-b',tokens:54}]);
-  expect(data.buckets).toEqual([{key:'00',agent:105,worker:0},{key:'01',agent:0,worker:54}]);
+  expect(data.buckets.map(({key,agent,worker})=>({key,agent,worker}))).toEqual([{key:'00',agent:105,worker:0},{key:'01',agent:0,worker:54}]);
+  expect(data.buckets[0]).toMatchObject({fresh:10,write:20,read:70});
+  expect(data.buckets.reduce((n,b)=>n+b.fresh+b.write+b.read,0)).toBe(140);
   expect(data.reuse).toEqual({fresh:14,write:26,read:100,measuredTurns:2,missingTurns:0});
   expect(data.reuse.read/(data.reuse.fresh+data.reuse.write+data.reuse.read)).toBeCloseTo(100/140);
  });
@@ -26,8 +28,8 @@ describe('overview chart accounting',()=>{
   write('midnight','agent','2026-09-18T18:15:00Z','a',usage(2,0,0,0));
   write('next-hour','worker','2026-09-18T19:15:00Z','b',usage(3,0,0,0));
   const now=Date.parse('2026-09-19T04:00Z');
-  expect(readDashboardCharts(db,'24h','Asia/Kathmandu',now).buckets).toEqual([{key:'00',agent:2,worker:0},{key:'01',agent:0,worker:3}]);
-  expect(readDashboardCharts(db,'7d','Asia/Kathmandu',now).buckets).toEqual([{key:'2026-09-18',agent:1,worker:0},{key:'2026-09-19',agent:2,worker:3}]);
+  expect(readDashboardCharts(db,'24h','Asia/Kathmandu',now).buckets.map(({key,agent,worker})=>({key,agent,worker}))).toEqual([{key:'00',agent:2,worker:0},{key:'01',agent:0,worker:3}]);
+  expect(readDashboardCharts(db,'7d','Asia/Kathmandu',now).buckets.map(({key,agent,worker})=>({key,agent,worker}))).toEqual([{key:'2026-09-18',agent:1,worker:0},{key:'2026-09-19',agent:2,worker:3}]);
  });
  it('falls back per missing projection row and excludes incomplete usage from reuse rather than assuming zero',()=>{
   write('a','agent','2026-09-19T01:00Z','old',usage(999,0,0,0));
