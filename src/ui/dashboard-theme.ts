@@ -490,7 +490,9 @@ tr[data-dash-agent],.turn-row{cursor:pointer}tr[data-dash-agent]:hover,.turn-row
 .turn-filters{display:flex;gap:12px;flex-wrap:wrap;align-items:stretch;font:15px/1.7 system-ui,-apple-system,"Noto Sans Thai",sans-serif}
 .turn-filters .range-toggle button,.turn-filters select,.turn-filters input{font-size:12px}
 .turn-filters input{flex:1;min-width:160px;max-width:380px}
-.memory-filters{flex-wrap:nowrap;gap:12px;margin:20px 0 12px;max-width:100%;overflow-x:auto;padding-bottom:8px}
+.report-toolbar.turn-filters{align-items:stretch}
+.turn-filters>select,.turn-filters>input{height:48px;margin:0;align-self:stretch}
+.memory-filters{flex-wrap:nowrap;gap:12px;margin:20px 0 12px;max-width:100%;overflow-x:auto;padding:6px 6px 8px}
 .memory-filters .range-toggle{flex:0 0 auto;flex-wrap:nowrap;white-space:nowrap}
 .memory-filters #memory-agent{flex:0 0 auto;width:160px}
 `;
