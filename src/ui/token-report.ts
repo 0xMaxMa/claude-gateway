@@ -3,7 +3,7 @@ import type { RequestToolSchemas } from '../session/request-tool-capture';
 import { dashboardRange, rangeButtons } from './dashboard-range';
 import type { ContextFootprint } from '../orchestration/context-footprint';
 import { tokenReportClient } from './token-report-client';
-import { agentBadge, channelBadge, compactNumber, taskStatusBadge, toolNameList } from './dashboard-presentation';
+import { dashboardChartPalette, agentBadge, channelBadge, compactNumber, taskStatusBadge, toolNameList } from './dashboard-presentation';
 import { dashboardTheme, dashboardFontLink } from './dashboard-theme';
 /** Read-only admin report. Escape all stored model/tool metadata as untrusted text. */
 export interface TokenReportView {
@@ -109,7 +109,7 @@ function relativeTime(value: string | number, timezone = 'UTC'): { label: string
 function footprintHtml(footprint?: ContextFootprint, timezone = 'UTC'): string {
  const parts=(footprint?.rows||[]).filter(r=>(r.name.startsWith('↳ ')||r.name.startsWith('Agent gateway tool schemas'))&&r.hasContent!==false&&r.tokens!=null&&r.tokens>0);
  const total=parts.reduce((sum,r)=>sum+r.tokens!,0);
- const colors=['#e98524','#8e65d1','#258fca','#cf528b','#359986','#c19527','#5c78d2','#b66645','#77843f','#986499'];
+ const colors=dashboardChartPalette;
  const names=['AGENTS.md','IDENTITY.md','SOUL.md','USER.md','MEMORY.md','HEARTBEAT.md','Skill catalog','Memory rules','Memory retrieval instructions'];
  const color=(name:string)=>{const i=names.indexOf(name.replace(/^↳ /,''));return colors[i<0?9:i];};
  const items=parts.map(r=>{const name=r.name.replace(/^↳ /,'');const source=footprint?.rows.find(row=>row.name===name+' · source file');return {name,tokens:r.tokens!,color:color(r.name),note:source?.tokens!=null?'Included in bootstrap: '+n(r.tokens)+'; full source file: '+n(source.tokens)+' estimated tokens.':r.note};});

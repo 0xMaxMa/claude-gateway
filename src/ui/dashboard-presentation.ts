@@ -1,3 +1,5 @@
+/** Chart palette shared with the Context bootstrap report. */
+export const dashboardChartPalette=['#e98524','#8e65d1','#258fca','#cf528b','#359986','#c19527','#5c78d2','#b66645','#77843f','#986499'];
 /** Shared display-only formatting; stored values and identifiers remain unchanged. */
 export function compactNumber(value: unknown): string {
  if(value==null)return '—';
@@ -37,4 +39,4 @@ export function toolNameList(names: string[] | null | undefined): string {
  if (!names.length) return '<p class="muted">None</p>';
  return '<ul class="tool-name-list">'+[...new Set(names)].sort().map(name=>'<li><code>'+dashboardEscape(name)+'</code></li>').join('')+'</ul>';
 }
-export const dashboardPresentationClient = compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentHue.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';'+taskStatusBadge.toString()+';'+toolNameList.toString()+';';
+export const dashboardPresentationClient = 'const dashboardChartPalette='+JSON.stringify(dashboardChartPalette)+';'+compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentHue.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';'+taskStatusBadge.toString()+';'+toolNameList.toString()+';';
