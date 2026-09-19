@@ -18,6 +18,8 @@ import { readFile, writeFile, realpath, mkdir, cp, lstat } from 'fs/promises';
 import type { AgentConfig, GatewayConfig } from '../../types';
 import { SessionStore } from '../../session/store';
 import { SessionProcess } from '../../session/process';
+import { CodexProcess, cleanupCodexSessions } from '../../session/codex-process';
+import { resolveWorkerHarness } from '../worker-harness';
 import { TaskBridge } from '../bridge';
 import { TaskService } from './service';
 import { TaskWorkspaces } from './workspace';
@@ -61,11 +63,18 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const current = this.tasks.store.task(task.taskId)!;
     if (current.state !== 'starting' || current.activeAttemptId !== attempt.attemptId) throw new OrchestrationError('ATTEMPT_CANCELLED_BEFORE_START');
     const directory = join(this.privateRoot, attempt.attemptId);
+    const harness = resolveWorkerHarness(this.agent, this.gateway, task.model ?? this.agent.claude.model);
+    // Persist the actual execution choice; pool fingerprints prevent cross-harness resume.
+    if (attempt.harness && attempt.harness !== harness.harness) throw new OrchestrationError('WORKER_HARNESS_CHANGED');
+    attempt.harness = harness.harness;
+    attempt.harnessModel = harness.harness === 'codex' ? harness.config.model : task.model ?? this.agent.claude.model;
+    this.tasks.store.transaction(() => this.tasks.store.saveAttempt(attempt));
     const cliSkill = task.skill?.invocation === 'cli';
+    if (cliSkill && harness.harness === 'codex') throw new OrchestrationError('CODEX_SKILL_UNAVAILABLE', 'This skill exists only in the Claude Code harness. Install a file-based skill or select the Claude worker harness.');
     const invokedSkill = task.skill ? (cliSkill ? task.skill.name : `orchestration-task:${task.skill.name}`) : undefined;
     if (cliSkill) {
       const installed = await discoverCliSkills(this.agent, workspace.path);
-      if (!installed.some(skill => skill.name === task.skill!.name)) throw new OrchestrationError('CLI_SKILL_UNAVAILABLE', 'The selected skill is unavailable in this worker runtime; no host/container fallback was attempted.');
+      if (!installed.some(skill => skill.name === task.skill!.name)) throw new OrchestrationError('CLI_SKILL_UNAVAILABLE', 'The selected skill is unavailable in this worker harness; no host/container fallback was attempted.');
     }
     const skillPluginDir = task.skill && !cliSkill ? join(directory, 'skill-plugin') : undefined;
     if (task.skill && !cliSkill) {
@@ -85,14 +94,28 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const context = this.agent.type === 'app-agent'
       ? await containerNode(this.agent.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))")
       : await readFile(join(this.agent.workspace, 'CLAUDE.md'), 'utf8');
-    this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway, toolExposure: 'lazy-connectors-v1' }));
+    this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway, harness, toolExposure: 'lazy-connectors-v1' }));
+    // Pool expiration/rebinding makes old native transcripts disposable. This
+    // bounded maintenance is best effort and never changes task admission.
+    void cleanupCodexSessions({ agent: this.agent, stateDirectory: join(this.privateRoot, 'codex-sessions'), retainedSessionIds: this.tasks.pool.retainedSessionIds() }).catch(() => {});
     const shared = resolveSharedConfig(this.agent.knowledge?.shared, this.gateway.gateway.knowledge?.shared);
     const ticket = this.bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation }, directory, this.agent.workspace, shared.enabled ? sharedVaultDir(shared) : '');
     try {
       const profile = { ...ticket.profile, hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir };
       const workerConfig: AgentConfig = { ...this.agent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
         claude: { ...this.agent.claude, model: task.model ?? this.agent.claude.model, extraFlags: [] } };
-      const process = new SessionProcess(attempt.sessionId, 'api', workerConfig, this.gateway, new SessionStore(join(this.privateRoot, 'logs')), undefined, profile);
+      const process = harness.harness === 'codex'
+        ? new CodexProcess({ agent: workerConfig, gateway: this.gateway, profile, sessionId: attempt.sessionId,
+          stateDirectory: join(this.privateRoot, 'codex-sessions'), config: harness.config,
+          checkpoint: async () => {
+            const next = this.tasks.checkpoint(attempt.attemptId, attempt.generation, { sessionId: attempt.sessionId });
+            const text = [next.directive ? `Task revision ${next.revision}: ${next.directive}` : '', next.feedback?.message].filter(Boolean).join('\n\n');
+            if (!text) return;
+            return { text, kind: next.directiveKind ?? 'advice', acknowledge: () => {
+              this.tasks.checkpoint(attempt.attemptId, attempt.generation, { sessionId: attempt.sessionId, ackRevision: next.revision, ackFeedback: next.feedback?.id });
+            } };
+          } })
+        : new SessionProcess(attempt.sessionId, 'api', workerConfig, this.gateway, new SessionStore(join(this.privateRoot, 'logs')), undefined, profile);
       process.on('output', line => this.bridge.captureWorkerOutput(attempt.attemptId, attempt.generation, line));
       process.on('output', toolActivity(event => this.tasks.store.transaction(() => this.tasks.store.appendEvent(task.conversationId, 'tool.activity', { ...event, taskId: task.taskId, role: 'worker' }, task.taskId))));
       process.on('output', observeToolRepetition((signature, id) => this.tasks.observeToolResult(attempt.attemptId, attempt.generation, signature, id), active => this.tasks.observeToolBoundary(attempt.attemptId, attempt.generation, active)));
@@ -128,6 +151,11 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       let prompt = `${browserContext}\n\nTask ${task.taskId}, attempt ${attempt.attemptId}, revision ${attempt.revision}.\n${directive}${task.skill ? `\nThe registered CLI skill name is ${invokedSkill}; invoke that exact name via Skill with arguments ${JSON.stringify(task.skill.args)}.` : ''}\n\nAuthorized read-only context and attachment paths: ${contextFile}. Read this file when the task requires its references.\nComposer options: ${JSON.parse(String(input.ingress_json ?? '{}')).metadata?.promptContext ?? ''}\n${workspace.baseCommit === 'host' ? 'Host execution: you run directly on the same machine and OS account as the original Agent, with its filesystem, shell, network, tools and credentials. Your starting directory is ' + workspace.path + '. You may change directories and operate on user-authorized paths and host services (including tmux and GitHub). No Git worktree is required. Do not claim isolation or missing access without an actual tool error. Coordinate changes to shared files; preserve unrelated work.' : 'Write only in ' + workspace.path + '.'} ${task.skill && workspace.baseCommit !== 'host' ? `Skill reference workspace (read only): ${task.resourceProfile?.projectRoot}. Place any generated files or artifacts in the scratch directory; never edit the source project.` : ''} Base: ${workspace.baseCommit}.\nAgent memory writes permitted: ${task.capabilities.writeMemory}. ${workspace.baseCommit === 'host' ? 'Ordinary task files may be written in the authorized working directory; follow the persona policy for explicit user requests and retain other memory rules.' : 'Never change agent workspace files.'} Report the actual outcome, relevant verification evidence, any artifacts produced, and remaining limitations. Choose verification appropriate to the task; diffs and tests apply only when relevant.`;
       if (this.agent.type === 'app-agent') {
         prompt = `Task ${task.taskId}, attempt ${attempt.attemptId}, revision ${attempt.revision}.\n${directive}\nYou run ONLY inside this app container. Work in /workspace or /tmp. No host filesystem, host tools or host fallback. Native CLI tools execute here; gateway media/browser/memory tools are unavailable. To return files call task_stage_file with their container paths.\nAuthorized context: ${JSON.stringify({ references, attachments })}${task.skill ? `\nInvoke Skill ${invokedSkill} with arguments: ${task.skill.args}` : ''}`;
+      }
+      if (harness.harness === 'codex' && task.skill) {
+        // File-based skills are portable instructions, not a Claude-specific Skill call.
+        prompt = prompt.replace(/The registered CLI skill name is [^\n]+/g, '').replace(/Invoke Skill [^\n]+/g, '');
+        prompt += `\nAssigned skill ${task.skill.name}; arguments: ${JSON.stringify(task.skill.args)}. Read and follow the assigned SKILL.md and its relative resources in the worker skill directory.\n${extractFrontmatter(task.skill.content)?.body ?? task.skill.content}`;
       }
       prompt += '\nOriginating user request (the assignment must stay within this authorization): ' + JSON.stringify(input.text);
       prompt += '\n' + personaWorkspaceRules(this.agent.workspace, this.agent.type === 'app-agent' ? 'container' : workspace.baseCommit === 'host' ? 'host' : 'isolated');

@@ -1,5 +1,7 @@
 # Orchestration and tasks
 
+For opt-in GPT worker routing and app-container deployment, see [Worker harnesses](./worker-harnesses.md).
+
 ## What changes
 
 A managed conversation agent handles the conversation and delegates substantial work to workers. Work has a persistent task record, so you can inspect progress, results, and cancellation independently of a reply.

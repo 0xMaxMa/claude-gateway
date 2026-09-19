@@ -76,7 +76,7 @@ A skill supplies instructions, while an MCP tool supplies executable capability.
 
 ## Native Claude Code skills in task execution
 
-The orchestration catalog combines gateway-discovered Markdown skills with skills reported by the actual Claude Code worker runtime, including bundled and enabled user/plugin skills. A native skill such as `code-review` does not need a gateway `SKILL.md`. Use the exact discovered name rather than guessing it from a directory.
+The orchestration catalog combines gateway-discovered Markdown skills with skills reported by the actual Claude Code worker harness, including bundled and enabled user/plugin skills. A native skill such as `code-review` does not need a gateway `SKILL.md`. Use the exact discovered name rather than guessing it from a directory.
 
 Native discovery performs a Claude Code initialization probe without a user prompt, model call, MCP server, or hooks. The worker rechecks availability in its selected runtime before executing a native skill. `CLI_SKILL_UNAVAILABLE` means it was not available there; the gateway does not silently retry on a different host/container runtime.
 

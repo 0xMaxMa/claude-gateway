@@ -493,7 +493,7 @@ export class CapabilityCatalog {
           ? 'Claude Code default tools'
           : DEFAULT_WORKER_TOOLS.join(', '),
         description: host
-          ? 'Native Claude Code execution tools, resolved by the worker runtime. This entry is a tool set, not an exhaustive list of individual native names.'
+          ? 'Native Claude Code execution tools, resolved by the worker harness. This entry is a tool set, not an exhaustive list of individual native names.'
           : 'Native tools restricted by the isolated worker profile.',
         server: 'claude-code',
         status: 'available',

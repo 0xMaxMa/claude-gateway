@@ -49,6 +49,8 @@ export class TurnUsageCollector {
   model?: string;
   observe(event: any): void {
     if (!event || typeof event !== 'object') return;
+    // Native backends can report model identity without claiming a tool inventory.
+    if (event.type === 'system' && event.subtype === 'native_init' && typeof event.model === 'string') this.model = event.model;
     if (event.type === 'system' && event.subtype === 'init') {
       if (Array.isArray(event.tools) && event.tools.every((name: unknown) => typeof name === 'string')) this.loadedTools = [...new Set<string>(event.tools)].sort();
       if (typeof event.model === 'string') this.model = event.model;
@@ -61,6 +63,7 @@ export class TurnUsageCollector {
     }
     if (stream?.type === 'message_delta' && this.currentId && stream.usage) this.merge(this.currentId, stream.usage);
     if (event.type === 'result' && event.usage && typeof event.usage === 'object') this.aggregate = normalize(event.usage);
+    if (event.type === 'system' && event.subtype === 'native_usage' && event.usage && typeof event.usage === 'object') this.aggregate = normalize(event.usage);
     const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
     for (const block of [...blocks, stream?.content_block]) if (block?.type === 'tool_use' && typeof block.name === 'string' && !(/^mcp__[a-zA-Z0-9_-]+__tool_call$/.test(block.name) && !block.input?.name)) this.usedTools.add(executionTool(block).name);
   }

@@ -21,7 +21,8 @@ export default defineConfig({
         { text: 'Quickstart', link: '/guide/quickstart' },
         { text: 'Architecture', link: '/reference/architecture' },
         { text: 'Agents & sessions', link: '/guide/agents' },
-        { text: 'Orchestration & tasks', link: '/guide/orchestration' }
+        { text: 'Orchestration & tasks', link: '/guide/orchestration' },
+        { text: 'Worker harnesses', link: '/guide/worker-harnesses' }
       ] },
       { text: 'Connect a channel', link: '/guide/channels', collapsed: false, items: [
         { text: 'Telegram', link: '/channels/telegram' },

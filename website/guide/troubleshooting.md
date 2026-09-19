@@ -69,7 +69,7 @@ Read the persisted task state before retrying. `queued` means execution has not 
 | --- | --- | --- |
 | `ORCHESTRATION_DISABLED` | The task path is not enabled | Gateway-wide orchestration switch |
 | `PROFILE_FLAGS_CONFLICT` | Custom Claude flags conflict with a managed profile | Remove conflicting `claude.extraFlags`; use supported settings |
-| `CLI_SKILL_UNAVAILABLE` | Native skill absent from this worker runtime | Actual host/container skill inventory |
+| `CLI_SKILL_UNAVAILABLE` | Native skill absent from this worker harness | Actual host/container skill inventory |
 | `WORKER_GIT_PROJECT_REQUIRED` | Explicit worktree policy requires a Git project | Selected workspace mode and project root |
 | `SHARED_PROJECT_MUST_DIFFER_FROM_IDENTITY_WORKSPACE` | Shared-lock project overlaps identity workspace | Use a separate project directory |
 | `CONTAINER_ISOLATION_REQUIRED` | App container fails admission | Runtime privileges, namespaces, capabilities, and mounts |

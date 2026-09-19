@@ -339,6 +339,7 @@ export interface AgentConfig {
     dangerouslySkipPermissions?: boolean;
     extraFlags: string[];
   };
+  workers?: WorkerHarnessConfig;
   /** Heartbeat / cron settings */
   heartbeat?: {
     rateLimitMinutes?: number; // default 30
@@ -396,6 +397,21 @@ export interface ModelConfig {
   alias: string;
   contextWindow: number;
   multiplier?: number;
+  /** Explicit worker harness selection for aliases that do not identify a model family. */
+  workerHarness?: 'claude' | 'codex';
+  /** Model identifier accepted by the native worker provider (without gateway display suffixes). */
+  workerModel?: string;
+}
+
+export interface WorkerHarnessConfig {
+  /** Opt in to auto routing; conversational agent decisions always remain on Claude Code. */
+  harness?: 'claude' | 'auto' | 'codex';
+  codex?: {
+    baseUrl?: string;
+    apiKeyEnv?: string;
+    reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+    bin?: string;
+  };
 }
 
 /**
@@ -456,6 +472,7 @@ export interface GatewayConfig {
      */
     oauthReturnUrl?: string;
     models?: ModelConfig[];
+    workers?: WorkerHarnessConfig;
     api?: {
       keys: ApiKey[];
     };
