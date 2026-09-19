@@ -495,5 +495,27 @@ tr[data-dash-agent],.turn-row{cursor:pointer}tr[data-dash-agent]:hover,.turn-row
 .memory-filters{flex-wrap:nowrap;gap:12px;margin:20px 0 12px;max-width:100%;overflow-x:auto;padding:6px 6px 8px}
 .memory-filters .range-toggle{flex:0 0 auto;flex-wrap:nowrap;white-space:nowrap}
 .memory-filters #memory-agent{flex:0 0 auto;width:160px}
+
+/* Drawer chrome must not inherit report section/card decoration. */
+.dash-drawer{margin:0;border:0;border-radius:0;height:100%;max-height:100%;font:13px/1.6 Poppins,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+.dash-drawer .drawer-actions{display:flex;justify-content:flex-end;margin:0 0 16px}
+.dash-drawer .drawer-close{font:500 12px/1.5 Poppins,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;border-radius:160px;min-height:38px;padding:8px 14px}
+.dash-drawer .drawer-actions+h1{margin-top:0}
+.dash-drawer h3{font-size:14px;font-weight:600;margin:18px 0 8px}
+.dash-drawer .muted{font-size:12px}
+button.theme-toggle{width:38px;height:38px;min-height:38px;flex:0 0 38px;padding:9px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center}
+.theme-toggle svg{display:block;flex-shrink:0}.theme-toggle .theme-sun{display:none}
+[data-theme=dark] .theme-toggle .theme-moon{display:none}[data-theme=dark] .theme-toggle .theme-sun{display:block}
+#report-theme{margin-left:auto}
+
+.token-activity-chart{position:relative;height:180px}.chart-hour-grid{position:absolute;inset:0;display:grid;grid-template-columns:repeat(24,minmax(0,1fr))}.chart-hour{position:relative;outline-offset:-2px}.chart-hour:hover,.chart-hour:focus-visible{background:color-mix(in srgb,var(--accent) 10%,transparent);outline:1px solid var(--accent)}
+.chart-tooltip{display:none;position:absolute;z-index:3;top:12px;left:50%;transform:translateX(-50%);padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:var(--shadow);white-space:nowrap;font-size:12px;line-height:1.7;pointer-events:none}
+.chart-hour:hover .chart-tooltip,.chart-hour:focus-visible .chart-tooltip{display:block}.chart-hour:nth-child(-n+4) .chart-tooltip{left:0;transform:none}.chart-hour:nth-last-child(-n+4) .chart-tooltip{left:auto;right:0;transform:none}
+.agent-token-bars{display:grid;gap:14px;max-height:380px;overflow:auto;padding:4px}.agent-token-row{display:grid;grid-template-columns:minmax(100px,180px) minmax(60px,1fr) 80px;gap:16px;align-items:center}.agent-token-row>.identity-badge{justify-self:start;max-width:100%;overflow-wrap:anywhere}.agent-token-row>strong{text-align:right;font-size:13px}.agent-token-track{height:16px;border-radius:6px;overflow:hidden;background:var(--raised);display:flex}.agent-token-track>span{height:100%}@media(max-width:520px){.agent-token-row{grid-template-columns:110px minmax(50px,1fr) 60px;gap:8px}}
+#overview-attention-panel[hidden]{display:none}#overview-charts.no-attention{grid-template-columns:minmax(0,1fr)}
+
+.kb-toolbar button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:160px;padding:8px 14px;font-size:12px;min-height:38px}
+.kb-toolbar button:hover{background:var(--raised)}
+#kb-source,#kb-demo-size,#kb-search{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px 12px;font:12px/1.5 Poppins,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:38px}
 `;
 export const dashboardFontLink = "<script>(function(){var i=location.pathname.lastIndexOf('/dashboard');if(i<0)return;var l=document.createElement('link');l.rel='stylesheet';l.href=location.pathname.slice(0,i)+'/dashboard/fonts.css';document.head.appendChild(l);})();</script>";

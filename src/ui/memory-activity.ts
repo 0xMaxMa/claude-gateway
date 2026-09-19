@@ -60,12 +60,12 @@ export const memoryActivityClient = String.raw`
    const version=++detailGeneration;detailBusy=true;
    if(!refresh){dashClose();focus=document.activeElement;selected={agent,id};}
    const panel=byId('memory-drawer');
-   if(!refresh){byId('memory-back').classList.add('open');document.body.style.overflow='hidden';panel.focus();panel.innerHTML='<button data-memory-close>Close ×</button><p>Loading recorded details…</p>';}
+   if(!refresh){byId('memory-back').classList.add('open');document.body.style.overflow='hidden';panel.focus();panel.innerHTML=dashboardCloseButton('memory')+'<p>Loading recorded details…</p>';}
    try{
     const response=await fetch(apiUrl('/dashboard/memory-activity')+'?'+new URLSearchParams({agentId:agent,id,completedOnly:'true'}));
     if(response.status===401){onUnauthorized();return;}if(!response.ok)throw Error('HTTP '+response.status);
     const {run:r}=await response.json();if(version!==detailGeneration)return;
-    let body='<button data-memory-close>Close ×</button><h1>'+title(r.kind)+'</h1><p class="live-note">'+agentBadge(agent)+' · '+txt(time(r.startedAt))+'</p>'+badge(r.status)+'<p id="memory-apply-result" role="status"></p>';
+    let body=dashboardCloseButton('memory')+'<h1>'+title(r.kind)+'</h1><p class="live-note">'+agentBadge(agent)+' · '+txt(time(r.startedAt))+'</p>'+badge(r.status)+'<p id="memory-apply-result" role="status"></p>';
     if(r.kind==='memory_dream'){
       body+='<h2>Summary</h2><p>'+txt(r.summary||'No summary recorded')+'</p><p class="live-note">Mode: '+txt(r.mode)+' · Outcome: '+txt(r.outcome)+' · Tokens: '+number(r.tokens)+' · Sessions: '+number(r.sessions)+'</p>';
       if(r.pendingProposals)body+='<button data-memory-accept="all" data-memory-ts="'+Number(r.ts)+'">Accept all pending ('+number(r.pendingProposals)+')</button>';
@@ -82,7 +82,7 @@ export const memoryActivityClient = String.raw`
       byId('memory-apply-result').textContent=notice;
       if(inside){const replacement=accept!==undefined?[...panel.querySelectorAll('[data-memory-accept]')].find(b=>b.dataset.memoryAccept===accept):active?.hasAttribute('data-memory-close')?panel.querySelector('[data-memory-close]'):panel; (replacement||panel).focus({preventScroll:true});}
     }
-   }catch(error){if(version===detailGeneration){if(refresh&&byId('memory-apply-result'))byId('memory-apply-result').textContent='Detail refresh unavailable; retrying.';else panel.innerHTML='<button data-memory-close>Close ×</button><p class="error">Unable to read details: '+txt(error.message)+'</p>';}}finally{if(version===detailGeneration)detailBusy=false;}
+   }catch(error){if(version===detailGeneration){if(refresh&&byId('memory-apply-result'))byId('memory-apply-result').textContent='Detail refresh unavailable; retrying.';else panel.innerHTML=dashboardCloseButton('memory')+'<p class="error">Unable to read details: '+txt(error.message)+'</p>';}}finally{if(version===detailGeneration)detailBusy=false;}
  }
  byId('memory-results').addEventListener('click',e=>{const row=e.target.closest('[data-memory-id]');if(row)detail(row.dataset.memoryAgent,row.dataset.memoryId);});
  byId('memory-back').addEventListener('click',async e=>{
