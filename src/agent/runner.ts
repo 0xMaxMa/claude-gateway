@@ -3153,7 +3153,7 @@ export class AgentRunner extends EventEmitter {
     this.compactingSessions.add(sessionId);
     try {
     const runtime = this.orchestration ?? (this.agentConfig.orchestration?.enabled ? await this.getOrchestration() : undefined);
-    if (runtime?.ownsSession(sessionId)) return await runtime.compactSession(sessionId, model);
+    if (runtime?.ownsSession(sessionId)) {await runtime.compactSession(sessionId, model);return;}
     const process = [...this.sessions.values()].find(p=>p.sessionId===sessionId && p.isRunning());
     if (!process) throw new Error('No active Claude Code context to compact. Send a message first; chat history was not changed.');
     if (process.isProcessing) throw new Error('The agent is responding. Try /compact after the current response finishes.');

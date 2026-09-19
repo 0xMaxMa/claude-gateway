@@ -22,3 +22,8 @@ test('provider failure stays a failure, even after a boundary',async()=>{
  const p=fixture([{type:'system',subtype:'compact_boundary'},{type:'result',is_error:true,result:'API Error: 503 unavailable'}]);
  await expect(startNativeCompact(p).result).rejects.toMatchObject({code:'PROVIDER_UNAVAILABLE'});
 });
+test('captures boundary measurements without another request',async()=>{
+ const p=fixture([{type:'system',subtype:'compact_boundary',compact_metadata:{pre_tokens:600000,post_tokens:4000}},{type:'result',result:'Compacted'}]);
+ const turn=startNativeCompact(p);await turn.result;
+ expect(turn.measurements()).toEqual({beforeTokens:600000,afterTokens:4000});expect(p.sendMessage).toHaveBeenCalledTimes(1);
+});

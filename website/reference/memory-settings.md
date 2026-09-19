@@ -157,4 +157,10 @@ Only one nightly compaction runs at a time across the gateway. Sessions sharing 
 
 Open **Nightly dreaming** in the admin dashboard to see both memory dreaming and session compaction, newest first, with date, agent, kind and status filters. Select a run to see proposals or per-session outcomes, skip reasons and safe failure codes. The view refreshes while visible. Audits persist in the agent's orchestration database; memory dreaming retains its workspace audit files.
 
-`beforeTokens` is the latest recorded context measurement, not a new tokenization of the transcript. Native `/compact` does not currently provide a verified post-compaction measurement, so `afterTokens` stays unknown and appears as **—**. It is not reported as zero or an estimated saving. Compaction itself calls the model and can consume provider quota; `thresholdPercent` is a trigger, not a promised resulting context size.
+`beforeTokens` initially uses the latest recorded context measurement. When the confirmed native compact boundary supplies `preTokens` and `postTokens`, the audit stores those values instead. Host sessions can also read this metadata from at most the last 1 MiB of their existing CLI transcript, matched to that compaction's time interval. This is a passive file read, never an additional model request. Missing values remain **—**; no follow-up prompt or repeated compaction is sent to measure savings.
+
+The dashboard defaults to successful session compactions and omits scheduled agents, empty sweeps and skipped sessions. It shows before/after tokens, both as percentages of the recorded context window, plus reduction in tokens and percent of the before value. Unknown after values have no reduction estimate. Memory dreaming reports remain available under the Activity filter; raw audit outcomes remain available through the API without `completedOnly=true`.
+
+Compaction itself calls the model and can consume provider quota; the report does not. The threshold is a trigger, not a promised resulting context size.
+
+Dashboard dates, date-range boundaries, and Overview hourly charts use `gateway.timezone` (UTC by default). `24h` means today since local midnight, not a rolling 24-hour period. Compaction summaries show before → after tokens, context-window percentages, and the reduction relative to the before value; timestamps also show elapsed age.

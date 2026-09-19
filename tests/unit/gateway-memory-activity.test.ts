@@ -5,10 +5,10 @@ import { AgentRunner } from '../../src/agent/runner';
 import { generateDashboardHtml } from '../../src/ui/web-ui';
 import { memoryActivityClient } from '../../src/ui/memory-activity';
 
-function setup() {
+function setup(timezone='UTC') {
  const runs=Array.from({length:30},(_,i)=>({id:'run-'+i,agent:'agent',kind:'session_compaction',startedAt:Date.now()-i*1000,endedAt:null,status:i===0?'failed':'completed',config:{thresholdPercent:70,quietMinutes:30,maxSessionsPerRun:4},items:[{sessionId:'session',status:'completed',beforeTokens:100,afterTokens:null,contextWindow:200,startedAt:1,endedAt:2}]}));
  const sessionCompactionReport=jest.fn().mockResolvedValue({runs,schedule:{enabled:true,nextRunAt:Date.now()+10000,timezone:'UTC',thresholdPercent:70,quietMinutes:30,maxSessionsPerRun:4}});
- const router=new GatewayRouter(new Map([['agent',{sessionCompactionReport,workspacePath:'/tmp/custom-memory-workspace'} as unknown as AgentRunner]]),new Map(),undefined,{gateway:{bind:'127.0.0.1',logDir:'/tmp',timezone:'UTC',api:{keys:[{key:'admin',admin:true,agents:'*'},{key:'scoped',agents:['agent']}]}},agents:[]});
+ const router=new GatewayRouter(new Map([['agent',{sessionCompactionReport,workspacePath:'/tmp/custom-memory-workspace'} as unknown as AgentRunner]]),new Map(),undefined,{gateway:{bind:'127.0.0.1',logDir:'/tmp',timezone,api:{keys:[{key:'admin',admin:true,agents:'*'},{key:'scoped',agents:['agent']}]}},agents:[]});
  return {app:router.getApp(),sessionCompactionReport};
 }
 test('memory activity requires admin before invoking a runner',async()=>{
@@ -39,4 +39,19 @@ test('dashboard exposes compact maintenance filters and executable client',()=>{
 test('proposal application resolves the configured runner workspace',async()=>{
  const accept=jest.spyOn(dreamingAccept,'acceptDreamProposals').mockReturnValue({requested:1,applied:1,skipped:0,alreadyAccepted:0,files:[],backups:[]});
  try{const {app}=setup();const response=await supertest(app).post('/knowledge/dreams/apply').set('X-Api-Key','admin').send({agentId:'agent',ts:1,indexes:[0]});expect(response.status).toBe(200);expect(accept).toHaveBeenCalledWith('/tmp/custom-memory-workspace',1,[0],expect.any(Object));}finally{accept.mockRestore();}
+});
+
+test('24h includes overnight runs in the configured timezone and hides empty sweeps',async()=>{
+ const now=jest.spyOn(Date,'now').mockReturnValue(Date.parse('2026-09-19T01:00:00Z'));
+ try {
+ const {app,sessionCompactionReport}=setup('Asia/Bangkok');
+ sessionCompactionReport.mockResolvedValue({runs:[
+ {id:'done',agent:'agent',kind:'session_compaction',startedAt:Date.parse('2026-09-18T20:00:00Z'),status:'completed',items:[{sessionId:'s',status:'completed',beforeTokens:653464,afterTokens:4191,contextWindow:1000000}]},
+ {id:'empty',agent:'agent',kind:'session_compaction',startedAt:Date.now(),status:'completed',items:[]},
+ {id:'previous-day',agent:'agent',kind:'session_compaction',startedAt:Date.parse('2026-09-18T16:59:59Z'),status:'completed',items:[{status:'completed',beforeTokens:1,afterTokens:1,contextWindow:100}]}
+ ]});
+ const response=await supertest(app).get('/dashboard/memory-activity').set('X-Api-Key','admin').query({scope:'24h',completedOnly:'true'});
+ expect(response.status).toBe(200);expect(response.body.timezone).toBe('Asia/Bangkok');expect(response.body.runs.map((r:any)=>r.id)).toEqual(['done']);
+ expect(response.body.runs[0]).toMatchObject({beforeTokens:653464,afterTokens:4191,measuredReduction:649273});
+ }finally{now.mockRestore();}
 });

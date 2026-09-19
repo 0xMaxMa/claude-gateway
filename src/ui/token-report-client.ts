@@ -21,7 +21,7 @@ async function refreshReport(){
   var model=document.getElementById('turn-model'),freshModel=next.getElementById('turn-model'),selected=model.value;
   if(model.innerHTML!==freshModel.innerHTML){model.innerHTML=freshModel.innerHTML;if(selected&&!Array.from(model.options).some(function(o){return o.value===selected;})){var option=document.createElement('option');option.value=selected;option.textContent=selected+' (no turns on this page)';model.appendChild(option);}model.value=selected;}
   filter();if(typeof reportRenderDrawer==='function')reportRenderDrawer();document.querySelectorAll('.table-scroll').forEach(function(el,i){el.scrollLeft=scrolls[i]||0;});scrollTo(x,y);
-  status.textContent='Live · updated '+new Date().toLocaleTimeString();
+  status.textContent='Live · updated '+new Date().toLocaleTimeString('en-GB',{timeZone:dashboardTimezone});
  }catch(e){status.textContent='Reconnecting… · data may be outdated';}
  finally{reportRefreshing=false;}
 }

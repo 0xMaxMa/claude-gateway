@@ -1,3 +1,4 @@
+import { compactionTotals } from '../orchestration/compact-measurements';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { parseDreamReport } from '../agent/dreaming/report';
@@ -40,7 +41,7 @@ export async function readMemoryActivity(agents: Map<string, MaintenanceReader>,
 }
 export function activitySummary(run: any) {
   const {proposals,items,...summary}=run;
-  return {...summary,summary:typeof summary.summary==='string'?summary.summary.slice(0,400):undefined,
+  return {...summary,...(items?compactionTotals(items):{}),summary:typeof summary.summary==='string'?summary.summary.slice(0,400):undefined,
     proposalCount:proposals?.length??0,itemCount:items?.length??summary.itemCount??0,
     completedSessions:items?.filter((item:any)=>item.status==='completed').length??summary.completedSessions??0,
     failedSessions:items?.filter((item:any)=>item.status==='failed').length??summary.failedSessions??0};

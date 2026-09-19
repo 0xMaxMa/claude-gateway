@@ -19,3 +19,12 @@ test('each task lifecycle status has a distinct color',()=>{
  const colors=states.map(state=>taskStatusBadge(state).match(/--status-color:([^";]+)/)![1]);
  expect(new Set(colors).size).toBe(states.length);
 });
+
+test('nightly reports use local midnight, including last night in UTC',()=>{
+ const now=Date.parse('2026-09-19T01:00:00Z');
+ const since=dashboardSince('24h',now,'Asia/Bangkok');
+ expect(since).toBe(Date.parse('2026-09-18T17:00:00Z'));
+ expect(Date.parse('2026-09-18T20:09:30Z')).toBeGreaterThan(since);
+ expect(dashboardSince('7d',Date.parse('2026-03-10T12:00:00Z'),'America/New_York')).toBe(Date.parse('2026-03-04T05:00:00Z'));
+ expect(dashboardSince('24h',Date.parse('2026-03-10T12:00:00Z'),'America/New_York')).toBe(Date.parse('2026-03-10T04:00:00Z'));
+});

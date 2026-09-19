@@ -1,3 +1,5 @@
+import {dashboardSince} from '../ui/dashboard-range';
+import { compactionTotals } from './compact-measurements';
 import { contextFootprint } from './context-footprint';
 import { parentPort } from 'worker_threads';
 import { DatabaseSync } from 'node:sqlite';
@@ -56,7 +58,8 @@ function read(filename: string, operation: string, options: Record<string, any>)
       const rows=options.runId ? all('SELECT * FROM session_compaction_runs WHERE id=?',options.runId) : all('SELECT * FROM session_compaction_runs ORDER BY started_at DESC,id DESC LIMIT 100');
       const runs=rows.map(row=>{
         const counts=get("SELECT COUNT(*) total,SUM(json_extract(payload_json,'$.status')='completed') completed,SUM(json_extract(payload_json,'$.status')='failed') failed FROM session_compaction_items WHERE run_id=?",row.id)!;
-        return {id:String(row.id),agent:options.agentId,kind:'session_compaction',startedAt:Number(row.started_at),endedAt:row.ended_at==null?null:Number(row.ended_at),status:String(row.status),config:JSON.parse(row.config_json),
+        const completed=all("SELECT payload_json FROM session_compaction_items WHERE run_id=? AND json_extract(payload_json,'$.status')='completed' LIMIT 1000",row.id).map(item=>JSON.parse(item.payload_json));
+        return {...compactionTotals(completed),id:String(row.id),agent:options.agentId,kind:'session_compaction',startedAt:Number(row.started_at),endedAt:row.ended_at==null?null:Number(row.ended_at),status:String(row.status),config:JSON.parse(row.config_json),
           itemCount:Number(counts.total),completedSessions:Number(counts.completed??0),failedSessions:Number(counts.failed??0),
           ...(options.runId?{items:all('SELECT payload_json FROM session_compaction_items WHERE run_id=? ORDER BY rowid LIMIT 1000',row.id).map(item=>JSON.parse(item.payload_json))}:{}),
         };
@@ -136,8 +139,9 @@ function read(filename: string, operation: string, options: Record<string, any>)
         tasks,totalTasks:Number(get('SELECT COUNT(*) n FROM tasks WHERE conversation_id=? AND updated_at>=?',c.id,since)!.n),
         workerIds:all('SELECT id FROM worker_pool WHERE conversation_id=?',c.id).map(w=>w.id),spawnedAt:0,uptimeSec:0,tokens:0};
     });
-    const today=Date.now()-Date.now()%86400000;
-    const usageToday=exists('token_turns')?all(`SELECT role,CAST((started_at-?)/3600000 AS INTEGER) hour,SUM(json_extract(payload_json,'$.usage.totalTokens')) tokens FROM token_turns WHERE started_at>=? AND json_type(payload_json,'$.usage')='object' GROUP BY role,hour`,today,Math.max(today,since)):[];
+    const today=dashboardSince('24h',Date.now(),options.timezone || 'UTC');
+    const hourFormat=new Intl.DateTimeFormat('en-GB',{timeZone:options.timezone||'UTC',hour:'2-digit',hourCycle:'h23'});
+    const usageToday=exists('token_turns')?all(`SELECT role,CAST(started_at/60000 AS INTEGER)*60000 at,SUM(json_extract(payload_json,'$.usage.totalTokens')) tokens FROM token_turns WHERE started_at>=? AND json_type(payload_json,'$.usage')='object' GROUP BY role,at`,Math.max(today,since)).map(r=>({...r,hour:Number(hourFormat.format(r.at))})):[];
     const attention=all(`SELECT t.id taskId,t.state,t.snapshot_json,c.agent_session_id sessionId FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.updated_at>=? AND t.state IN ('waiting_input','needs_reconciliation') ORDER BY t.updated_at DESC LIMIT 8`,since).map(t=>({taskId:t.taskId,state:t.state,sessionId:t.sessionId,title:JSON.parse(t.snapshot_json).title}));
     const recentWork=all(`SELECT t.id taskId,t.state,t.snapshot_json,t.updated_at updatedAt,c.agent_session_id sessionId FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.updated_at>=? ORDER BY t.updated_at DESC,t.id DESC LIMIT 6`,today).map(t=>({taskId:t.taskId,state:t.state,sessionId:t.sessionId,updatedAt:t.updatedAt,title:JSON.parse(t.snapshot_json).title}));
     const pool = exists('worker_pool') ? all('SELECT * FROM worker_pool') : [];

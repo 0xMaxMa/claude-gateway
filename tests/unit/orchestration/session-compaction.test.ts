@@ -146,3 +146,7 @@ test('compacting one alias fences the other stale measurement',async()=>{
   const {manager,deps}=maintenance();const run=await manager.run(cfg);
   expect(deps.compact).toHaveBeenCalledTimes(1);expect(run.items.some(i=>i.reason==='context_changed')).toBe(true);
 });
+test('saves native before and after measurements from the existing compact result',async()=>{
+ seed();const {manager,deps}=maintenance({compact:jest.fn(async()=>({beforeTokens:600041,afterTokens:4000}))});
+ const run=await manager.run(cfg);expect(run.items[0]).toMatchObject({beforeTokens:600041,afterTokens:4000,status:'completed'});expect(deps.compact).toHaveBeenCalledTimes(1);
+});

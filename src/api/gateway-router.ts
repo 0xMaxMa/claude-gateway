@@ -918,9 +918,9 @@ export class GatewayRouter {
         delete require.cache[webUiPath];
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { generateDashboardHtml: fresh } = require('../ui/web-ui') as typeof import('../ui/web-ui');
-        res.send(fresh());
+        res.send(fresh(this.gatewayConfig?.gateway?.timezone));
       } else {
-        res.send(generateDashboardHtml());
+        res.send(generateDashboardHtml(this.gatewayConfig?.gateway?.timezone));
       }
     });
 
@@ -950,12 +950,12 @@ export class GatewayRouter {
         if (!runner) { res.status(404).json({ error: 'Unknown agent' }); return; }
         try {
           const source = runner.getDashboardSource?.();
-          let report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h')), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
+          let report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h'),Date.now(),this.gatewayConfig?.gateway?.timezone), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
           if (!report) { res.status(404).json({ error: 'No recorded session token report' }); return; }
           if (runner.isSessionCompacting?.(sessionId)) report = {...report, activityStatus:'compacting'};
           if (report.contextWindow) report.contextWindow.total = report.contextWindow.model ? await runner.dashboardContextWindow?.(report.contextWindow.model) ?? null : null;
           if (reportPath === '/token-report') res.json(report);
-          else res.type('html').send(generateTokenReportHtml(agentId, {...report, scope:dashboardRange(req.query.scope), sessionStatus: runner.agentSessionLiveStatus?.(sessionId) ?? 'stopped'}));
+          else res.type('html').send(generateTokenReportHtml(agentId, {...report, timezone:this.gatewayConfig?.gateway?.timezone, scope:dashboardRange(req.query.scope), sessionStatus: runner.agentSessionLiveStatus?.(sessionId) ?? 'stopped'}));
         } catch {
           res.status(500).json({ error: 'Unable to load session token report' });
         }
@@ -970,7 +970,7 @@ export class GatewayRouter {
       const detailRunner=this.agents.get(String(agentId));
       const source=detailRunner?.getDashboardSource?.();
       if(!source){res.status(404).json({error:'Unknown agent'});return;}
-      try{const detail=await this.dashboardReader.read('session',source.filename,{sessionId,offset,since:dashboardSince(req.query.scope),historyFilename:source.historyFilename});if(!detail){res.status(404).json({error:'Session not found'});return;}if(detailRunner?.isSessionCompacting?.(String(sessionId)))detail.activityStatus='compacting';if(detail.contextWindow)detail.contextWindow.total=detail.contextWindow.model?await detailRunner?.dashboardContextWindow?.(detail.contextWindow.model)??null:null;res.json({...detail,sessionStatus:detailRunner?.agentSessionLiveStatus?.(String(sessionId))??'stopped'});}
+      try{const detail=await this.dashboardReader.read('session',source.filename,{sessionId,offset,since:dashboardSince(req.query.scope,Date.now(),this.gatewayConfig?.gateway?.timezone),historyFilename:source.historyFilename});if(!detail){res.status(404).json({error:'Session not found'});return;}if(detailRunner?.isSessionCompacting?.(String(sessionId)))detail.activityStatus='compacting';if(detail.contextWindow)detail.contextWindow.total=detail.contextWindow.model?await detailRunner?.dashboardContextWindow?.(detail.contextWindow.model)??null:null;res.json({...detail,sessionStatus:detailRunner?.agentSessionLiveStatus?.(String(sessionId))??'stopped'});}
       catch{res.status(503).json({error:'Dashboard data temporarily unavailable'});}
     });
 
@@ -985,7 +985,7 @@ export class GatewayRouter {
       const source = this.agents.get(String(agentId))?.getDashboardSource?.();
       if (!source) {res.status(404).json({error:'Unknown agent'});return;}
       try {
-        const task = await this.dashboardReader.read('task',source.filename,{sessionId,taskId,offset,since:dashboardSince(req.query.scope)});
+        const task = await this.dashboardReader.read('task',source.filename,{sessionId,taskId,offset,since:dashboardSince(req.query.scope,Date.now(),this.gatewayConfig?.gateway?.timezone)});
         if (!task) {res.status(404).json({error:'Task not found in this session'});return;}
         res.json(task);
       } catch {res.status(503).json({error:'Dashboard data temporarily unavailable'});}
@@ -1221,9 +1221,10 @@ export class GatewayRouter {
     this.app.get('/dashboard/memory-activity', async (req: Request, res: Response) => {
       if (!this.requireDashOrApiKey(req,res)) return;
       res.setHeader('Cache-Control','no-store');
-      const {agentId,kind,status,id,scope}=req.query, page=Number(req.query.page??0);
+      const {agentId,kind,status,id,scope,completedOnly}=req.query, page=Number(req.query.page??0);
       if (!Number.isSafeInteger(page)||page<0||page>1000000 ||
         [agentId,kind,status,id,scope].some(v=>v!==undefined&&(typeof v!=='string'||v.length>256)) ||
+        (completedOnly!==undefined&&completedOnly!=='true'&&completedOnly!=='false') ||
         (kind!==undefined&&!['all','memory_dream','session_compaction'].includes(String(kind))) ||
         (scope!==undefined&&!['24h','7d','30d','90d','all'].includes(String(scope)))) {
         res.status(400).json({error:'Invalid activity filters'});return;
@@ -1239,11 +1240,14 @@ export class GatewayRouter {
         if(id){let run=data.runs.find(r=>r.id===id&&r.agent===agentId);if(!run){res.status(404).json({error:'Activity not found'});return;}
           const source=this.agents.get(String(agentId))?.getDashboardSource?.();
           if(run.kind==='session_compaction'&&source)run=await this.dashboardReader.read('compaction',source.filename,{agentId,runId:id});
-          if(!run){res.status(404).json({error:'Activity not found'});return;}res.json({run});return;}
-        const runs=data.runs.filter(r=>(!agentId||r.agent===agentId)&&(!kind||kind==='all'||r.kind===kind)&&(!status||status==='all'||r.status===status)&&r.startedAt>=dashboardSince(scope));
-        res.json({runs:runs.slice(page*25,page*25+25).map(activitySummary),total:runs.length,page,pageSize:25,
+          if(!run){res.status(404).json({error:'Activity not found'});return;}if(completedOnly==='true'&&run.kind==='session_compaction'){run={...run,items:(run.items??[]).filter((item:any)=>item.status==='completed'),itemCount:run.completedSessions};}
+          res.json({run});return;}
+        const timezone=this.gatewayConfig?.gateway?.timezone || 'UTC';
+        const since=dashboardSince(scope,Date.now(),timezone);
+        const runs=data.runs.filter(r=>(completedOnly!=='true'||r.kind!=='session_compaction'||r.completedSessions>0||(r.items??[]).some((i:any)=>i.status==='completed'))&&(!agentId||r.agent===agentId)&&(!kind||kind==='all'||r.kind===kind)&&(!status||status==='all'||r.status===status)&&r.startedAt>=since);
+        res.json({timezone,since,runs:runs.slice(page*25,page*25+25).map(activitySummary),total:runs.length,page,pageSize:25,
           agents:data.agents,schedules:data.schedules.filter(s=>!agentId||s.agent===agentId),unavailable:data.unavailable,
-          counts:{runs:runs.length,pendingProposals:runs.reduce((n,r)=>n+(r.pendingProposals??0),0),failed:runs.filter(r=>['failed','partial_failure','interrupted'].includes(r.status)).length},
+          counts:{compactedSessions:runs.reduce((n,r)=>n+(r.completedSessions??r.items?.filter((i:any)=>i.status==='completed').length??0),0),measuredReduction:runs.reduce((n,r)=>n+(activitySummary(r).measuredReduction??0),0),measuredSessions:runs.reduce((n,r)=>n+(activitySummary(r).measuredSessions??0),0),runs:runs.length,pendingProposals:runs.reduce((n,r)=>n+(r.pendingProposals??0),0),failed:runs.filter(r=>['failed','partial_failure','interrupted'].includes(r.status)).length},
           historyLimit:100});
       }catch{res.status(503).json({error:'Memory activity temporarily unavailable'});}
     });
@@ -1435,7 +1439,7 @@ export class GatewayRouter {
         const source = runner.getDashboardSource?.();
         const legacySessions = runner.getSessionsSummary();
         const liveSessionIds = new Set(runner.liveSessionIds?.() ?? []);
-        const orchestration = source ? (source.enabled ? await this.dashboardReader.read('summary',source.filename,{...source,offset,since:dashboardSince(scope),legacyIds:legacySessions.map(s=>s.sessionId)}) : undefined) : runner.getOrchestrationSummary?.();
+        const orchestration = source ? (source.enabled ? await this.dashboardReader.read('summary',source.filename,{...source,timezone:this.gatewayConfig?.gateway?.timezone,offset,since:dashboardSince(scope,Date.now(),this.gatewayConfig?.gateway?.timezone),legacyIds:legacySessions.map(s=>s.sessionId)}) : undefined) : runner.getOrchestrationSummary?.();
         const managedSessions = (orchestration?.sessions ?? []).map((s: { sessionId: string }) => ({
           ...s,
           // Live liveness from the runner's in-memory map: the DB-derived status
@@ -1445,7 +1449,7 @@ export class GatewayRouter {
           ...(runner.isSessionCompacting?.(s.sessionId) ? {status:'compacting',isRunning:true} : {}),
         }));
         const managedIds = new Set([...managedSessions.map((s: {sessionId:string}) => s.sessionId),...(orchestration?.managedLegacyIds??[])]);
-        const sessions = [...legacySessions.filter(s => !managedIds.has(s.sessionId) && (!dashboardSince(scope) || Number((s as any).updatedAt || s.spawnedAt || 0) >= dashboardSince(scope))), ...managedSessions].map((s) => ({
+        const sessions = [...legacySessions.filter(s => !managedIds.has(s.sessionId) && (!dashboardSince(scope,Date.now(),this.gatewayConfig?.gateway?.timezone) || Number((s as any).updatedAt || s.spawnedAt || 0) >= dashboardSince(scope,Date.now(),this.gatewayConfig?.gateway?.timezone))), ...managedSessions].map((s) => ({
           ...s,
           hasPtyStream: ptyStreamRegistry.hasSockets(s.sessionId),
         }));

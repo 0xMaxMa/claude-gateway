@@ -1,3 +1,4 @@
+import type { CompactMeasurements } from './compact-measurements';
 import { randomUUID } from 'crypto';
 import { OrchestrationStore } from './store';
 import { latestAgentContextWindow } from './token-ledger';
@@ -50,7 +51,7 @@ export class SessionCompaction {
   private running?:Promise<CompactionRun>;
   constructor(private store:OrchestrationStore,private agentId:string,private deps:{
     busy:(sessionId:string)=>boolean; stopping:()=>boolean; model:()=>string;
-    window:(model:string)=>Promise<number>; compact:(sessionId:string,model:string)=>Promise<void>;
+    window:(model:string)=>Promise<number>; compact:(sessionId:string,model:string)=>Promise<void|CompactMeasurements|null>;
   }) {
     store.run(`CREATE TABLE IF NOT EXISTS session_compaction_runs(id TEXT PRIMARY KEY,started_at INTEGER NOT NULL,ended_at INTEGER,status TEXT NOT NULL,config_json TEXT NOT NULL)`);
     store.run(`CREATE TABLE IF NOT EXISTS session_compaction_items(run_id TEXT NOT NULL REFERENCES session_compaction_runs(id),session_id TEXT NOT NULL,payload_json TEXT NOT NULL,PRIMARY KEY(run_id,session_id))`);
@@ -130,7 +131,7 @@ export class SessionCompaction {
         item.status='running';save(item);attempted++;
         // Fence even an uncertain crash after compaction: next user turn produces a new measurement.
         this.store.run('INSERT INTO session_compaction_marks VALUES(?,?,?) ON CONFLICT(session_id) DO UPDATE SET measurement_id=excluded.measurement_id,completed_at=excluded.completed_at',sessionId,measured.id,Date.now());
-        try {await this.deps.compact(sessionId,model);item.status='completed';}
+        try {const measured=await this.deps.compact(sessionId,model);item.status='completed';if(measured?.beforeTokens!=null)item.beforeTokens=measured.beforeTokens;item.afterTokens=measured?.afterTokens??null;}
         catch(error) {
           item.status='failed';const code=(error as {code?:unknown}).code;
           item.errorCode=typeof code==='string'&&/^[A-Z_0-9]{1,80}$/.test(code)?code:'COMPACTION_FAILED';
