@@ -137,7 +137,7 @@ Unreadable journal records are retained for operator inspection with a bounded d
 - `GET /dashboard/token-report?agentId=AGENT_ID&sessionId=SESSION_ID` renders the English HTML report.
 - `GET /token-report?agentId=AGENT_ID&sessionId=SESSION_ID` returns its JSON data.
 
-Reports show newest turns first, 25 at a time (`offset=0`, `offset=25`, and so on). The HTML report defaults to `scope=24h`: today from 00:00 UTC. The toggle supports `24h`, `7d`, `30d`, `90d`, and `all`; multi-day windows include today and start at midnight UTC. The JSON endpoint keeps its all-history default when no scope is supplied. Totals and distribution cover every turn in the selected scope, not just the current page.
+Reports show newest turns first, 25 at a time (`offset=0`, `offset=25`, and so on). The HTML report defaults to `scope=24h`: today from 00:00 in `gateway.timezone` (UTC by default). The toggle supports `24h`, `7d`, `30d`, `90d`, and `all`; multi-day windows include today and start at midnight in that timezone. The JSON endpoint keeps its all-history default when no scope is supplied. Totals and distribution cover every turn in the selected scope, not just the current page.
 
 When API keys are configured, the HTML report requires a live dashboard session cookie, exactly like the dashboard page. An API key injected by a reverse proxy does not bypass this login; visitors without a valid cookie are redirected to the dashboard login before any report is read. The JSON route accepts either a dashboard session or an admin API key for programmatic clients. Keyless installations retain the existing loopback/local-access policy. An ordinary agent-scoped API key does not grant access. Responses use `Cache-Control: no-store`. A reverse-proxy prefix such as `/gateway` must be applied consistently to the dashboard and these routes.
 
@@ -163,3 +163,22 @@ Session token reports refresh visible data every five seconds while the tab is v
 Dashboard rows open session/task/turn detail drawers on click (Enter/Space also work), preserving the selected record across refresh. Session IDs are displayed in full. Missing values render as —. **Used** counts distinct observed tool names, not calls. The legacy JSON `loadedTools` field is the inventory reported by CLI `system.init`, not proof of model-context loading. **Loaded** uses `contextTools`: distinct schemas observed in captured outbound requests, including referenced deferred tools. Schema coverage identifies measured versus observed requests; uncaptured turns remain —. Raw capture files are temporary and private; retained telemetry contains tool names only. Failed agent turns include a recorded response failure code where available; a failed report turn does not imply a failed worker.
 
 The Context window card uses the latest observed request in the newest agent turn, including output, rather than the pre-compaction peak. Capacity resolves from the agent model catalog and configured models; unknown capacity remains null/— rather than an assumed 200K. This is the latest recorded request measurement, not an exact live tokenizer reading. Auto-refresh updates the session header status, model-filter choices, totals and turn rows. A selected model remains selected even when it no longer has rows on the current page.
+
+## Overview chart measurements
+
+`GET /dashboard/charts?scope=24h` requires an admin API key or dashboard login. Accepted ranges are `24h`, `7d`, `30d`, and `90d`; unsupported or repeated range values return `400`. The response has `Cache-Control: no-store`.
+
+The response contains `scope`, configured `timezone`, `since`, `asOf` (a snapshot timestamp rounded down to 10 seconds), and `agents`. Each agent includes:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Agent identifier |
+| `agent`, `worker` | Total recorded tokens by role |
+| `buckets` | `{key, agent, worker, fresh, write, read}`; input breakdown fields include only measured turns, matching `reuse`; local hour `00`–`23` for today or `YYYY-MM-DD` for longer ranges |
+| `models` | `{name, tokens}` sorted by recorded volume |
+| `reuse` | Selected-range totals: `fresh`, `write`, `read`, `measuredTurns`, `missingTurns` |
+| `reuseComparison` | `today` and `yesterday`, each containing `fresh`, `write`, `read`, `measuredTurns`, `missingTurns`; independent of the selected range |
+
+Input reuse is `read / (fresh + write + read)`; missing breakdowns are excluded, not replaced with zeros. All totals use one latest measurement per recorded turn, attributed to its start time. These are token volumes, not billing charges. The read worker coalesces requests for the same range and snapshot; it does not read full transcripts on the gateway event loop or request new provider measurements. A temporary reader failure returns `503` rather than a partial total.
+
+`reuseComparison.today` covers local midnight through `asOf`; `yesterday` covers the previous full calendar day in `timezone`. The UI subtracts yesterday’s reuse percentage from today’s to show a percentage-point change. A zero input denominator means no measured input: show no rate/comparison, not 0% reuse. These comparison totals do not add yesterday into the selected-range chart buckets, role totals or model totals.

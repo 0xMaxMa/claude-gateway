@@ -10,7 +10,7 @@ export class DashboardReader {
   private inflight = new Map<string, Promise<any>>();
   private cache = new Map<string, { until: number; value: any }>();
   private closed = false;
-  read(operation: 'summary' | 'report' | 'task' | 'session', filename: string, options: Record<string, unknown> = {}): Promise<any> {
+  read(operation: 'summary' | 'report' | 'task' | 'session' | 'compaction' | 'charts', filename: string, options: Record<string, unknown> = {}): Promise<any> {
     if (this.closed) return Promise.reject(new Error('Dashboard reader is closed'));
     const key = JSON.stringify([operation, filename, options]);
     const cached = this.cache.get(key);
@@ -39,9 +39,9 @@ export class DashboardReader {
       this.worker!.ref();
       this.worker!.postMessage({ id, operation, filename, options });
     }).then(value => {
-      if (operation === 'summary') {
+      if (operation === 'summary' || operation === 'charts') {
         if (this.cache.size >= 64) this.cache.delete(this.cache.keys().next().value!);
-        this.cache.set(key, { until: Date.now() + 2000, value });
+        this.cache.set(key, { until: Date.now() + (operation === 'charts' ? 10000 : 2000), value });
       }
       return value;
     }).finally(() => this.inflight.delete(key));

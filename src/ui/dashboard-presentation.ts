@@ -1,3 +1,5 @@
+/** Chart palette shared with the Context bootstrap report. */
+export const dashboardChartPalette=['#e98524','#8e65d1','#258fca','#cf528b','#359986','#c19527','#5c78d2','#b66645','#77843f','#986499'];
 /** Shared display-only formatting; stored values and identifiers remain unchanged. */
 export function compactNumber(value: unknown): string {
  if(value==null)return '—';
@@ -13,9 +15,12 @@ const channelIcons: Record<string,string> = {"telegram": "<svg role=\"img\" view
 export function dashboardEscape(value: unknown): string {
  return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 }
-export function agentBadge(value: string): string {
+export function agentHue(value: string): number {
  let hash=0; for(const ch of value) hash=(hash*31+ch.charCodeAt(0))>>>0;
- return '<span class="identity-badge" style="--agent-hue:'+(hash%360)+'" title="'+dashboardEscape(value)+'">'+dashboardEscape(value)+'</span>';
+ return hash%360;
+}
+export function agentBadge(value: string): string {
+ return '<span class="identity-badge" style="--agent-hue:'+agentHue(value)+'" title="'+dashboardEscape(value)+'">'+dashboardEscape(value)+'</span>';
 }
 export function channelBadge(value: string): string {
  const key=String(value||'unknown').toLowerCase();
@@ -25,7 +30,7 @@ export function channelBadge(value: string): string {
 }
 export function taskStatusBadge(value: string): string {
  const state=String(value||'unknown');
- const colors:Record<string,string>={running:'#e07a1e',working:'#e07a1e',thinking:'#d6459b',completed:'#24834a',succeeded:'#24834a',success:'#24834a',failed:'#c73946',queued:'#a16c11',starting:'#4d63c9',recovering:'#188b80',ended:'#607244',waiting_input:'#ba681c',needs_reconciliation:'#b345a4',cancel_requested:'#8c603c',interrupting:'#9e4d76',interrupted:'#7c6352',cancelled:'#657080',stopped:'#65605a',idle:'#287fc2',compacting:'#7655bd',unknown:'#737373'};
+ const colors:Record<string,string>={pending:'#a16c11',skipped:'#657080',accepted:'#24834a',partial_failure:'#c73946',running:'#e07a1e',working:'#e07a1e',thinking:'#d6459b',completed:'#24834a',succeeded:'#24834a',success:'#24834a',failed:'#c73946',queued:'#a16c11',starting:'#4d63c9',recovering:'#188b80',ended:'#607244',waiting_input:'#ba681c',needs_reconciliation:'#b345a4',cancel_requested:'#8c603c',interrupting:'#9e4d76',interrupted:'#7c6352',cancelled:'#657080',stopped:'#65605a',idle:'#287fc2',compacting:'#7655bd',unknown:'#737373'};
  const color=colors[state]||'#737373';
  return '<span class="badge status-badge" style="--status-color:'+color+'">'+dashboardEscape(state.replace(/_/g,' ').replace(/^./,c=>c.toUpperCase()))+'</span>';
 }
@@ -34,4 +39,4 @@ export function toolNameList(names: string[] | null | undefined): string {
  if (!names.length) return '<p class="muted">None</p>';
  return '<ul class="tool-name-list">'+[...new Set(names)].sort().map(name=>'<li><code>'+dashboardEscape(name)+'</code></li>').join('')+'</ul>';
 }
-export const dashboardPresentationClient = compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';'+taskStatusBadge.toString()+';'+toolNameList.toString()+';';
+export const dashboardPresentationClient = 'const dashboardChartPalette='+JSON.stringify(dashboardChartPalette)+';'+compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentHue.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';'+taskStatusBadge.toString()+';'+toolNameList.toString()+';';

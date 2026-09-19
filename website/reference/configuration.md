@@ -38,6 +38,7 @@ Website checks validate JSON syntax only; they do not compare fields or types ag
 | `agents[].session` | Legacy idle timeout and concurrency |
 | `gateway.history` / `agents[].history` | Chat/media retention |
 | `gateway.memory`, `gateway.knowledge`, `gateway.dreaming` | Memory budget, indexing, consolidation |
+| `gateway.sessionCompaction` / `agents[].sessionCompaction` | Optional nightly native session compaction; see [memory settings](./memory-settings.md#nightly-session-compaction) |
 | `gateway.skillLearning` | Automatic skill review and limits |
 
 Fresh configurations and the server fallback bind to `127.0.0.1`. Migration preserves older externally reachable deployments by pinning `0.0.0.0` when needed; check your actual configuration after upgrading. A public URL does not itself configure a reverse proxy or make a loopback server reachable.

@@ -1,3 +1,5 @@
+import { readCompactMeasurements, type CompactMeasurements } from './compact-measurements';
+import { SessionCompaction, recoverSessionCompaction, type ResolvedSessionCompaction } from './session-compaction';
 import { ContextDelivery } from './context-delivery';
 import { startNativeCompact } from './native-compact';
 import { BrowserVoice } from './browser-voice';
@@ -91,6 +93,7 @@ export class AgentOrchestrationRuntime {
   readonly tasks: TaskService;
   readonly intake: ConversationIntake;
   readonly contextDelivery: ContextDelivery;
+  private sessionCompaction?: SessionCompaction;
   private readonly cliSessions: AgentCliSessions;
   readonly stopControls: StopControls;
   readonly taskControls: TaskControls;
@@ -202,6 +205,7 @@ export class AgentOrchestrationRuntime {
     bridge.recordRetrievals = (personalRetention.enabled && personalRetention.recordRetrievals) || (sharedRetention.enabled && sharedRetention.recordRetrievals);
     try {
       recoverOrchestration(store);
+      recoverSessionCompaction(store);
       // A prior gateway cannot prove that these processes stopped. Reserve
       // their global capacity conservatively as well as the per-agent slots.
       const recoveredReservations = new Map<string, () => void>();
@@ -329,7 +333,7 @@ export class AgentOrchestrationRuntime {
   }
 
   /** An exclusive maintenance operation on the existing CLI transcript, not a chat summary. */
-  compactSession(sessionId: string, model?: string): Promise<void> {
+  compactSession(sessionId: string, model?: string): Promise<CompactMeasurements | null> {
     if (this.closing || this.draining) return Promise.reject(new OrchestrationError('ORCHESTRATION_CLOSING'));
     if (this.active.has(sessionId)) return Promise.reject(new OrchestrationError('AGENT_BUSY', 'The agent is responding. Try /compact after the current response finishes.'));
     const conversation = this.store.get('SELECT * FROM conversations WHERE agent_session_id=?', sessionId);
@@ -354,15 +358,34 @@ export class AgentOrchestrationRuntime {
         process=await this.host.createAgentSession(sessionId,ticket.profile,model,{agentId:this.agent.id,agentSessionId:sessionId,source:conversation.source as ConversationScope['source'],accountId:String(conversation.account_id),chatId:String(conversation.chat_id),threadKey:String(conversation.thread_key),principalId:String(conversation.owner_principal_id)});
         if(active.stopping || this.closing) throw new OrchestrationError('INTERRUPTED');
         this.contextDelivery.invalidateConversation(String(conversation.id));
-        active.turn=startNativeCompact(process);
-        await active.turn.result;
+        const startedAt=Date.now(),compact=startNativeCompact(process);
+        active.turn=compact;
+        await compact.result;
+        let measured=compact.measurements();
+        if(this.agent.type!=='app-agent'&&measured?.afterTokens==null){
+          const storedMetrics=await readCompactMeasurements(transcriptPath(this.agent.workspace,cli.id),startedAt,Date.now());
+          if(storedMetrics)measured=storedMetrics;
+        }
         this.store.transaction(()=>this.store.appendEvent(String(conversation.id),'session.context_compacted',{sessionId,cliSessionId:cli.id}));
+        return measured;
       } finally {
         revoke?.();
         try {if(process)await this.host.releaseAgentSession(sessionId,process);}
         finally {this.active.delete(sessionId);}
       }
     })();
+    this.pending.add(operation);
+    void operation.finally(()=>this.pending.delete(operation)).catch(()=>{});
+    return operation;
+  }
+  private compactionMaintenance(window:(model:string)=>Promise<number>):SessionCompaction {
+    return this.sessionCompaction ??= new SessionCompaction(this.store,this.agent.id,{
+      busy:id=>this.active.has(id),stopping:()=>this.closing||this.draining,
+      model:()=>this.agent.claude.model,window,compact:(id,model)=>this.compactSession(id,model),
+    });
+  }
+  runSessionCompaction(config:ResolvedSessionCompaction,window:(model:string)=>Promise<number>) {
+    const operation=this.compactionMaintenance(window).run(config);
     this.pending.add(operation);
     void operation.finally(()=>this.pending.delete(operation)).catch(()=>{});
     return operation;
