@@ -25,7 +25,7 @@ function chartEmpty(){return '<p class="empty">No recorded token usage in this p
 function chartTooltipRow(label,value,color='var(--text)'){
  return '<span class="chart-tooltip-row"><span>'+escHtml(label)+'</span><strong style="color:'+color+'">'+escHtml(value)+'</strong></span>';
 }
-function chartInputShare(value,total){return total>0?(value/total*100).toFixed(1)+'% · '+compactNumber(value):'—';}
+function chartInputShare(value,total){return total>0?(value/total*100).toFixed(1)+'% ('+compactNumber(value)+')':'—';}
 function chartActivity(data,reuse=false){
  const series=reuse?[['read','Reused','var(--token-agent)'],['write','New · saved','var(--token-worker)'],['fresh','New · not cached','var(--token-report)']]:[['agent','Agent','var(--token-agent)'],['worker','Workers','var(--token-worker)']];
  const blank=()=>Object.fromEntries(series.map(([key])=>[key,0]));
@@ -102,7 +102,7 @@ function showModelTooltip(target){
  const tip=arc.closest('.model-donut').querySelector('.model-tooltip');
  const color=arc.getAttribute('stroke');
  // Stroke comes only from our fixed chart palette, never provider metadata.
- tip.innerHTML='<strong>'+escHtml(arc.dataset.modelName)+'</strong>'+chartTooltipRow('Tokens',arc.dataset.modelTokens,color)+chartTooltipRow('Share',arc.dataset.modelShare,color);
+ tip.innerHTML='<strong>'+escHtml(arc.dataset.modelName)+'</strong>'+chartTooltipRow('Tokens',arc.dataset.modelShare+' ('+arc.dataset.modelTokens+')',color);
  tip.style.display='block';
 }
 document.addEventListener('pointerover',event=>showModelTooltip(event.target));
