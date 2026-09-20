@@ -7,7 +7,7 @@ import { SafemodeStore, SafemodeSession, Owner, alive, atomicJson } from './stor
 import { buildNativeInvocation, discoverCodexSession, extractNativeSessionId } from './native';
 import { prepareContext } from './context';
 
-export interface RunOptions { mode: 'interactive' | 'headless'; prompt?: string; requestId?: string; configPath?: string }
+export interface RunOptions { nativeArgs?: string[]; mode: 'interactive' | 'headless'; prompt?: string; requestId?: string; configPath?: string }
 const STOP_TIMEOUT = 15000;
 export function controlPath(store: SafemodeStore, id: string): string {
   // A bounded socket path also supports long HOME paths on macOS/Linux.
@@ -47,6 +47,7 @@ export function getRequest(store: SafemodeStore, id: string, requestId: string):
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; }
 }
 export async function runSession(store: SafemodeStore, session: SafemodeSession, options: RunOptions): Promise<number> {
+  if (options.nativeArgs !== undefined && options.mode !== 'interactive') throw new Error('Native params are interactive-only');
   const owner = store.acquire(session.id, options.mode);
   const workspace = path.join(store.dir(session.id), 'workspace');
   let server: net.Server | undefined;
@@ -103,7 +104,7 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
     const { prompt: context } = await prepareContext(workspace, session.configPath, options.prompt);
     if (stopping) throw new Error('Stopped before native CLI launch');
     const invocation = await buildNativeInvocation({ cli: session.cli, mode: options.mode, cwd: workspace,
-      prompt: options.prompt, context, model: session.model, nativeSessionId: session.nativeSessionId, resume: !!session.nativeSessionId });
+      nativeArgs: options.nativeArgs, prompt: options.prompt, context, model: session.model, nativeSessionId: session.nativeSessionId, resume: !!session.nativeSessionId });
     if (invocation.nativeSessionId) session.nativeSessionId = invocation.nativeSessionId;
     store.save(session);
     process.stderr.write(`Safemode ${session.name}: ${session.cli}, model ${session.model === 'inherit' ? 'inherited from native CLI' : session.model}\n`);

@@ -113,7 +113,7 @@ export function parseCliArgs(tokens: string[], booleanFlags: ReadonlySet<string>
         continue;
       }
       const next = tokens[i + 1];
-      if (next !== undefined && !looksLikeFlag(next)) {
+      if (next !== undefined && (body === 'params' || !looksLikeFlag(next))) {
         flags[body] = next;
         i++;
       } else {

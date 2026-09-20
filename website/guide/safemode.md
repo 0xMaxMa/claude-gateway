@@ -63,3 +63,34 @@ Each run refreshes bounded redacted config/log/SQLite snapshots, health evidence
 Safemode never resets the running checkout, executes fetched source, takes its process lease, or writes the live database. Claude headless has read-only file tools confined to the investigation workspace. Codex headless uses its native read-only sandbox and no approvals; external MCP servers, hooks, plugins and app/browser tools are disabled. Native CLI platform sandbox requirements still apply. Interactive changes require native approval. Headless cannot silently escalate to an unrestricted host shell.
 
 Ask for a diagnosis with evidence, hypotheses, proposed repair and regression tests. To file an issue, explicitly request it in the interactive investigation: the CLI should search duplicates, prepare sanitized English content, and use authenticated `gh` with approval. Restricted headless execution supplies a draft when publication is not permitted. Automatic redaction is best effort; inspect content before publishing. Safemode does not automatically merge, deploy, restart the gateway or publish issues merely because diagnostics were collected.
+
+## Native interactive parameters
+
+Use `--params` for native Claude Code or Codex options from your terminal:
+
+```bash
+make cli ARGS="safemode --cli codex --params '--dangerously-bypass-approvals-and-sandbox resume 01a0ad6e-812d-7892-9532-20b45a56a553'"
+make cli ARGS="safemode --resume investigation-name --params '--model gpt-5'"
+```
+
+Safemode splits the quoted value into arguments without shell evaluation, variable
+expansion or command substitution. Your calling shell and Make still process their
+own quoting; do not interpolate untrusted text into a shell command.
+
+Explicit parameters replace the default interactive permission/MCP isolation
+options with the native CLI's configuration and your supplied options. Provider
+credentials still use the filtered environment. Without `--params`, existing
+interactive defaults remain unchanged. Parameters are not saved or reused by
+headless requests. `send` and the MCP tools do not accept this option.
+
+Outer `--resume` selects a saved safemode investigation. Native `resume UUID`
+(Codex) or `--resume UUID` (Claude Code) inside `--params` attaches that exact
+native conversation to a new investigation. Combining the two is an error.
+If an investigation already owns that native ID, use its outer `--resume`.
+A native process already using the conversation must exit before attachment.
+
+Session identity, noninteractive execution, remote endpoints and working-directory
+switches are not passthrough options: safemode needs a locally trackable interactive
+conversation. Picker/`--last`, continuation and fork modes are unsupported. Use
+`--prompt` for initial prompt text. Native flags are validated by the installed CLI;
+unsupported flags fail normally rather than being silently ignored.

@@ -15,6 +15,7 @@ export interface NativeOptions {
   model?: string;
   nativeSessionId?: string;
   resume?: boolean;
+  nativeArgs?: string[];
   env?: NodeJS.ProcessEnv;
 }
 export interface NativeInvocation {
@@ -61,6 +62,7 @@ function disabledCodexServers(command: string, cwd: string, env: NodeJS.ProcessE
 
 /** Args are passed directly to spawn, never evaluated by a shell. */
 export function buildNativeInvocation(options: NativeOptions): NativeInvocation {
+  if (options.nativeArgs !== undefined && options.mode !== 'interactive') throw new Error('Native params are interactive-only');
   if (options.resume && !options.nativeSessionId) throw new Error('Native session ID is required to resume.');
   if (options.nativeSessionId && !UUID.test(options.nativeSessionId)) throw new Error('Invalid native session ID.');
   let env = nativeEnvironment(options.cli, options.env);
@@ -83,6 +85,17 @@ export function buildNativeInvocation(options: NativeOptions): NativeInvocation 
     if (!model) model = env.ANTHROPIC_MODEL || nativeModel;
   }
   const prompt = [options.context, options.prompt].filter(Boolean).join('\n\n');
+  if (options.nativeArgs !== undefined) {
+    // Explicit operator options replace interactive defaults, never headless restrictions.
+    const args = [...options.nativeArgs];
+    if (model && !args.some(a => a === '--model' || a === '-m' || a.startsWith('--model=') || a.startsWith('-m='))) args.unshift('--model', model);
+    const nativeSessionId = options.nativeSessionId || (options.cli === 'claude' ? randomUUID() : undefined);
+    if (options.cli === 'claude') args.push(options.resume ? '--resume' : '--session-id', nativeSessionId!);
+    else if (options.resume) args.push('resume', nativeSessionId!);
+    if (prompt) args.push('--', prompt);
+    const command = options.cli === 'claude' ? options.env?.CLAUDE_BIN || process.env.CLAUDE_BIN || resolveClaudeBin(env).bin : options.env?.CODEX_BIN || process.env.CODEX_BIN || 'codex';
+    return { command, args, env, cwd: options.cwd, nativeSessionId };
+  }
   if (options.cli === 'claude') {
     const command = options.env?.CLAUDE_BIN || process.env.CLAUDE_BIN || resolveClaudeBin(env).bin;
     const nativeSessionId = options.nativeSessionId || randomUUID();

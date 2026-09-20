@@ -32,6 +32,24 @@ describe('safemode detached CLI worker', () => {
     const {stdout}=await exec(process.execPath,[entry,'safemode',...args,'--json'],{env,timeout:10000});
     return JSON.parse(stdout);
   }
+  test.each(['claude', 'codex'])('interactive %s params reach the native process, retain imported ID and cannot be imported twice', async cli => {
+    const capture = path.join(home, 'captured.json');
+    const fake = path.join(home, 'native-cli');
+    fs.writeFileSync(fake, '#!/usr/bin/env node\nrequire("fs").writeFileSync(process.env.HOME + "/captured.json", JSON.stringify(process.argv.slice(2)));\n', {mode: 0o700});
+    const importedId = '22222222-2222-4222-8222-222222222222';
+    const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
+    const permission = cli === 'claude' ? '--dangerously-skip-permissions' : '--dangerously-bypass-approvals-and-sandbox';
+    const resume = cli === 'claude' ? '--resume' : 'resume';
+    env.CODEX_BIN = fake;
+    const cmd = [process.execPath, entry, 'safemode', '--cli', cli, '--name', 'imported',
+      '--params', permission + ' ' + resume + ' ' + importedId].map(quote).join(' ');
+    await exec('script', ['-q', '-e', '-c', cmd, '/dev/null'], {env, timeout: 15000});
+    const args = JSON.parse(fs.readFileSync(capture, 'utf8'));
+    expect(args.slice(0, 3)).toEqual([permission, resume, importedId]);
+    expect(args).not.toContain('--permission-mode');
+    expect((await command('status', 'imported')).nativeSessionId).toBe(importedId);
+    await expect(exec('script', ['-q', '-e', '-c', cmd.replace("'imported'", "'duplicate'"), '/dev/null'], {env, timeout: 15000})).rejects.toThrow();
+  });
   test('returns receipt then durable result for same native session, including a dash-leading prompt',async()=>{
     const receipt=await command('send','investigation','--prompt=--inspect this','--request-id=once');
     expect(receipt).toMatchObject({id,requestId:'once',status:'accepted'});

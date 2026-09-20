@@ -42,7 +42,22 @@ export class SafemodeStore {
     if (matches.length !== 1) throw new Error(matches.length ? 'Ambiguous safemode name; use ID' : 'Safemode session not found');
     return matches[0];
   }
-  save(session: SafemodeSession): void { atomicJson(path.join(this.dir(session.id), 'session.json'), session); }
+  save(session: SafemodeSession): void {
+    if (session.nativeSessionId) {
+      const bindings = path.join(this.root, 'native-bindings');
+      fs.mkdirSync(bindings, { recursive: true, mode: 0o700 });
+      if (!/^[0-9a-f-]{36}$/i.test(session.nativeSessionId)) throw new Error('Invalid native session ID');
+      const file = path.join(bindings, session.cli + '-' + session.nativeSessionId.toLowerCase());
+      const prior = this.list().find(s => s.id !== session.id && s.cli === session.cli && s.nativeSessionId?.toLowerCase() === session.nativeSessionId!.toLowerCase());
+      if (prior) throw new Error('Native session already belongs to another safemode investigation');
+      try { fs.writeFileSync(file, session.id, { flag: 'wx', mode: 0o600 }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (fs.readFileSync(file, 'utf8') !== session.id) throw new Error('Native session already belongs to another safemode investigation');
+      }
+    }
+    atomicJson(path.join(this.dir(session.id), 'session.json'), session);
+  }
   create(name: string | undefined, cli: SafemodeCli, model: string, configPath?: string): SafemodeSession {
     if (name && (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(name) || this.list().some(s => s.name === name))) {
       throw new Error('Safemode name must be unique and contain 1-64 letters, digits, dots, underscores or hyphens');
@@ -62,6 +77,10 @@ export class SafemodeStore {
     } catch (error) { fs.rmSync(reservation, { force: true }); throw error; }
   }
   removeName(session: SafemodeSession): void {
+    if (session.nativeSessionId) {
+      const binding = path.join(this.root, 'native-bindings', session.cli + '-' + session.nativeSessionId.toLowerCase());
+      if (fs.existsSync(binding) && fs.readFileSync(binding, 'utf8') === session.id) fs.unlinkSync(binding);
+    }
     const file = path.join(this.root, 'names', session.name);
     if (fs.existsSync(file) && fs.readFileSync(file, 'utf8') === session.id) fs.unlinkSync(file);
   }

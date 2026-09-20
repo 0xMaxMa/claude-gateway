@@ -19,6 +19,25 @@ describe('safemode CLI boundaries', () => {
     await expect(runSafemode([], {session:'gateway-session'})).rejects.toThrow('Unknown safemode flag');
     await expect(runSafemode([], {model:true})).rejects.toThrow('requires a value');
   });
+  test('native and outer resume conflict before stopping any owner', async () => {
+    const input = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    const output = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+    Object.defineProperty(process.stdin, 'isTTY', {value: true, configurable: true});
+    Object.defineProperty(process.stdout, 'isTTY', {value: true, configurable: true});
+    const store = new SafemodeStore();
+    const session = store.create('existing', 'codex', 'inherit');
+    const owner = store.acquire(session.id, 'interactive');
+    try {
+      await expect(runSafemode([], {resume: 'existing', takeover: true, params: 'resume 01a0ad6e-812d-7892-9532-20b45a56a553'})).rejects.toThrow('Do not combine');
+      expect(store.owner(session.id)).toEqual(owner);
+    } finally {
+      if (input) Object.defineProperty(process.stdin, 'isTTY', input); else Reflect.deleteProperty(process.stdin, 'isTTY');
+      if (output) Object.defineProperty(process.stdout, 'isTTY', output); else Reflect.deleteProperty(process.stdout, 'isTTY');
+    }
+  });
+  test('headless CLI rejects params before any launch', async () => {
+    await expect(runSafemode(['send', 'anything'], {params: '--dangerously-skip-permissions', prompt: 'inspect'})).rejects.toThrow('Unknown safemode flag');
+  });
   test('duplicate request with takeover does not stop its running owner', async () => {
     const store = new SafemodeStore();
     const session = store.create('test','claude','inherit');

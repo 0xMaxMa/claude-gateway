@@ -6,15 +6,20 @@ import { SafemodeStore, alive } from '../../safemode/store';
 import { resolveSafemodeSettings, resolveSafemodeConfigPath } from '../../safemode/config';
 import { getRequest, recoverSession, runSession, stopSession } from '../../safemode/runner';
 import { unknownFlagNames } from '../args';
+import { assertNoExternalNativeOwner, findExternalNativeOwners } from '../../safemode/external-owners';
+import { SafemodeSession } from '../../safemode/store';
+import { inspectNativeParams, splitNativeParams } from '../../safemode/params';
 import { redactLine } from '../redact';
 
-const HELP = `Usage: claude-gateway safemode [--name NAME] [--cli claude|codex] [--model MODEL] [--prompt TEXT]
+const HELP = `Usage: claude-gateway safemode [--name NAME] [--cli claude|codex] [--model MODEL] [--prompt TEXT] [--params NATIVE_ARGS]
        claude-gateway safemode --resume NAME_OR_ID [--takeover] [--prompt TEXT]
        claude-gateway safemode list
        claude-gateway safemode status NAME_OR_ID [--request-id ID]
        claude-gateway safemode send NAME_OR_ID --prompt TEXT [--request-id ID] [--takeover] [--wait]
        claude-gateway safemode logs|stop|delete|recover NAME_OR_ID
 
+--params is interactive-only, parsed as argv without shell evaluation. Native resume requires a UUID.
+Do not combine native resume in --params with safemode --resume.
 Default: native interactive Claude Code, inheriting its configured model.
 --resume refers to a safemode investigation. Put gateway session IDs in --prompt.
 Headless send runs in the background; --wait waits for its result. There is no job queue.
@@ -29,14 +34,14 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
   const verb = positionals[0] || 'open';
   const common = ['help', 'json', 'config'];
   const allowed: Record<string, string[]> = {
-    open: ['name', 'cli', 'model', 'prompt', 'resume', 'takeover'], list: [],
+    open: ['name', 'cli', 'model', 'prompt', 'resume', 'takeover', 'params'], list: [],
     status: ['request-id'], logs: [], stop: [], delete: [], recover: [],
     send: ['prompt', 'request-id', 'takeover', 'wait', 'model'],
   };
   if (!allowed[verb]) throw new Error('Unknown safemode command');
   const unknown = unknownFlagNames(flags, new Set([...common, ...allowed[verb]]));
   if (unknown.length) throw new Error(`Unknown safemode flag(s): ${unknown.map(n => '--' + n).join(', ')}`);
-  for (const key of ['name', 'cli', 'model', 'prompt', 'resume', 'request-id', 'config']) {
+  for (const key of ['name', 'cli', 'model', 'prompt', 'resume', 'request-id', 'config', 'params']) {
     if (flags[key] !== undefined && (typeof flags[key] !== 'string' || !(flags[key] as string).trim())) throw new Error(`--${key} requires a value`);
   }
   if (typeof flags.prompt === 'string' && flags.prompt.length > 100000) throw new Error('Prompt exceeds 100000 characters');
@@ -51,8 +56,20 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
     const previous = typeof flags.resume === 'string' ? store.find(flags.resume) : undefined;
     if (previous && flags.name) throw new Error('--name cannot rename a resumed investigation');
     const settings = resolveSafemodeSettings(flags, previous);
+    const native = typeof flags.params === 'string' ? inspectNativeParams(settings.cli, splitNativeParams(flags.params)) : undefined;
+    if (previous && native?.resumeId) throw new Error('Do not combine safemode --resume with native resume in --params');
+    if (native?.resumeId) {
+      const bound = store.list().find(s => s.cli === settings.cli && s.nativeSessionId?.toLowerCase() === native.resumeId);
+      if (bound) throw new Error('Native session already belongs to a safemode investigation; use safemode --resume ' + bound.id);
+      assertNoExternalNativeOwner({ cli: settings.cli, nativeSessionId: native.resumeId, cwd: store.root });
+    }
     const configPath = resolveSafemodeConfigPath(flags, previous);
     const session = previous ? { ...previous, ...settings, configPath } : store.create(flags.name as string | undefined, settings.cli, settings.model, configPath);
+    if (native?.resumeId) {
+      session.nativeSessionId = native.resumeId;
+      try { store.save(session); }
+      catch (error) { store.removeName(session); fs.rmSync(store.dir(session.id), { recursive: true, force: true }); throw error; }
+    }
     if (previous) {
       if (store.owner(session.id)) {
         if (!flags.takeover) throw new Error('Busy: use --takeover to stop the current owner first');
@@ -62,7 +79,7 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
       if (!refreshed.nativeSessionId) throw new Error('Native conversation ID is not available; refusing to start a different conversation');
       session.nativeSessionId = refreshed.nativeSessionId;
     }
-    return runSession(store, session, { mode: 'interactive', prompt: flags.prompt as string | undefined, configPath: session.configPath });
+    return runSession(store, session, { mode: 'interactive', nativeArgs: native?.args, prompt: flags.prompt as string | undefined, configPath: session.configPath });
   }
   if (positionals.length !== 2) throw new Error(`safemode ${verb} requires one session name or ID`);
   const session = store.find(positionals[1]);
