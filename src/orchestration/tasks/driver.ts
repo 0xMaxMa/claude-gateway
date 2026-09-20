@@ -74,7 +74,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         authFingerprint = (await resolveCodexCredentials({ ...harness.config, bin: runtime.executable, allowDockerHost: this.agent.type === 'app-agent' })).fingerprint;
         if (this.agent.type === 'app-agent') await inspectSelectedCodexRuntime(this.agent, runtime);
       } catch (error) {
-        const selector = this.agent.workers?.harness ?? this.gateway.gateway.workers?.harness ?? 'claude';
+        const selector = this.agent.workers?.harness ?? this.gateway.gateway.workers?.harness ?? 'auto';
         if (selector !== 'auto' || attempt.harness) throw error;
         harness = { ...harness, harness: 'claude' };
         this.tasks.store.transaction(() => this.tasks.store.appendEvent(task.conversationId, 'worker.harness_fallback',

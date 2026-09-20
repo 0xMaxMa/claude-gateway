@@ -50,7 +50,7 @@ This is an agent-entry fragment. Keep the agent's existing workspace, Claude mod
 
 ## Worker pool and queue
 
-Worker execution defaults to Claude Code. The separate `gateway.workers` and per-agent `workers` settings can select native Codex for GPT tasks without changing the conversational agent runtime. See [worker harness configuration](../guide/worker-harnesses.md) for routing, Responses credentials, container installation, and restart requirements.
+Worker execution defaults to `auto`: GPT tasks select native Codex when ready and fall back to Claude Code before dispatch when it is unavailable. The separate `gateway.workers` and per-agent `workers` settings can select native Codex for GPT tasks without changing the conversational agent runtime. See [worker harness configuration](../guide/worker-harnesses.md) for routing, Responses credentials, container installation, and restart requirements.
 
 | Field under `tasks` | Runtime default | Meaning |
 | --- | --- | --- |

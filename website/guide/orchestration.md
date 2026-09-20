@@ -1,6 +1,6 @@
 # Orchestration and tasks
 
-For opt-in GPT worker routing and app-container deployment, see [Worker harnesses](./worker-harnesses.md).
+For automatic GPT worker routing, explicit overrides and app-container deployment, see [Worker harnesses](./worker-harnesses.md).
 
 ## What changes
 

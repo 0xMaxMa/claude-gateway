@@ -404,7 +404,7 @@ export interface ModelConfig {
 }
 
 export interface WorkerHarnessConfig {
-  /** Opt in to auto routing; conversational agent decisions always remain on Claude Code. */
+  /** Defaults to auto routing; conversational agent decisions always remain on Claude Code. */
   harness?: 'claude' | 'auto' | 'codex';
   codex?: {
     baseUrl?: string;

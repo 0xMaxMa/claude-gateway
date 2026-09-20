@@ -1,10 +1,10 @@
 # Worker harnesses
 
-The conversational Agent continues to run Claude Code. Background workers can opt into native Codex for GPT models while retaining the gateway's task lifecycle and scoped MCP tools. The default remains Claude for all workers.
+The conversational Agent continues to run Claude Code. Background workers default to automatic routing: GPT models use native Codex when its runtime and portable native authentication are ready, otherwise they fall back to Claude Code before dispatch. Other models use Claude unless model metadata selects another harness. Explicit `claude` or `codex` selections are preserved. The gateway's task lifecycle and scoped MCP tools apply to both harnesses.
 
 ## Configure routing
 
-Set `gateway.workers` in the gateway configuration, then restart the gateway while idle to apply harness changes:
+Omitting `workers.harness` uses `auto`; existing configurations do not need migration. To configure routing explicitly, set `gateway.workers` below. Use `harness: "claude"` to keep all workers on Claude Code, or `harness: "codex"` to require Codex and report readiness failures. Restart the gateway while idle to apply harness changes:
 
 ```json
 {

@@ -391,6 +391,19 @@ export class AgentOrchestrationRuntime {
     void operation.finally(()=>this.pending.delete(operation)).catch(()=>{});
     return operation;
   }
+  /** Lightweight live ownership only: no transcript or token-ledger scans. */
+  processOwners(): import('../api/dashboard-processes').ProcessOwner[] {
+    return this.store.all(`SELECT t.snapshot_json,a.payload_json FROM tasks t JOIN task_attempts a
+      ON a.id=t.active_attempt_id WHERE t.active_attempt_id IS NOT NULL`).flatMap(row => {
+      const task = JSON.parse(String(row.snapshot_json)), attempt = JSON.parse(String(row.payload_json));
+      const pid = attempt.processIdentity?.pid;
+      return Number.isInteger(pid) ? [{pid,startTicks:attempt.processIdentity?.startTicks,group:'worker' as const,agentId:this.agent.id,
+        sessionId:task.agentSessionId,taskId:task.taskId,title:task.title,
+        harness:attempt.harness ?? 'claude',model:attempt.harnessModel ?? task.model,
+        container:this.agent.type === 'app-agent' ? this.agent.container : undefined}] : [];
+    });
+  }
+
   sessionContextWindow(sessionId: string) {
     if (!this.store.get("SELECT name FROM sqlite_master WHERE name='token_turns'")) return null;
     const last = this.store.get(`SELECT MAX(COALESCE(d.ended_at,d.started_at)) at FROM conversation_decisions d

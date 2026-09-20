@@ -1,3 +1,4 @@
+import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
 jest.mock('../../../src/orchestration/container', () => ({ ...jest.requireActual('../../../src/orchestration/container'), validateContainer: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../../../src/session/codex-container-runtime', () => ({ inspectSelectedCodexRuntime: jest.fn().mockResolvedValue('fixture-container') }));
 jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn().mockReturnValue({executable:'codex'}) }));
@@ -77,12 +78,12 @@ test('auto routes GPT workers to Codex and persists native identity without chan
   expect(agent.claude.model).toBe('claude-sonnet-4-6');
 });
 
-test('Claude remains the default harness even for a GPT selection unless routing is enabled', async () => {
+test('defaults to Codex for GPT when no worker routing is configured', async () => {
   delete gateway.gateway.workers;
   const {attempt} = await run('gpt-5.6-luna[1m]');
-  expect(SessionProcess).toHaveBeenCalledTimes(1);
-  expect(CodexProcess).not.toHaveBeenCalled();
-  expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'claude',harnessModel:'gpt-5.6-luna[1m]'});
+  expect(CodexProcess).toHaveBeenCalledTimes(1);
+  expect(SessionProcess).not.toHaveBeenCalled();
+  expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'codex',harnessModel:'gpt-5.6-luna'});
 });
 
 test('explicit model metadata resolves non-GPT aliases to the native provider model', async () => {
@@ -191,7 +192,8 @@ test('transcript cleanup retains the newly bound slot and cannot reject an admit
   expect(tasks.pool.retainedSessionIds()).toEqual([]);
 });
 
-test('auto falls back before dispatch when native auth is unavailable and records the reason', async () => {
+test.each([undefined, 'auto'] as const)('falls back before dispatch without auth (selector=%s)', async selector => {
+  gateway.gateway.workers = selector ? {harness:selector} : undefined;
   jest.mocked(resolveCodexCredentials).mockRejectedValueOnce(new CodexReadinessError('CODEX_AUTH_REQUIRED','missing'));
   const {attempt} = await run('gpt-fixture');
   expect(attempt.harness).toBe('claude');
@@ -235,4 +237,15 @@ test.each([false, true])('Docker host HTTP auth policy matches worker placement 
   else await expect(driver.start(task, attempt)).rejects.toMatchObject({ code: 'CODEX_PROVIDER_INVALID' });
   expect(CodexProcess).not.toHaveBeenCalled();
   expect(SessionProcess).not.toHaveBeenCalled();
+});
+
+
+test('default auto falls back to Claude when Codex is not installed', async () => {
+  delete gateway.gateway.workers;
+  jest.mocked(resolveCodexRuntime).mockImplementationOnce(() => { throw new Error('Codex executable missing'); });
+  const {attempt} = await run('gpt-fixture');
+  expect(attempt.harness).toBe('claude');
+  expect(CodexProcess).not.toHaveBeenCalled();
+  expect(SessionProcess).toHaveBeenCalledTimes(1);
+  expect(resolveCodexCredentials).not.toHaveBeenCalled();
 });

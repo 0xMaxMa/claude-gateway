@@ -895,145 +895,66 @@ ${dashboardFontLink}<script>try{document.documentElement.dataset.sidebarCollapse
       try {
         const res = await fetch(apiUrl('/processes'));
         if (res.status === 401) { onUnauthorized(); return; }
-        if (!res.ok) return;
+        if (!res.ok) throw new Error('Process inspection unavailable (HTTP '+res.status+')');
         const data = await res.json();
-        renderProcessTree(data.processes || [], data.numCpus || 1);
+        renderProcessTree(data.processes || [], data.numCpus || 1, data.containers || [], data.warnings || []);
       } catch(e) {
         document.getElementById('proc-tree').textContent = 'Error: ' + e.message;
       }
     }
 
-    function renderProcessTree(procs, numCpus) {
-      if (!procs.length) {
-        document.getElementById('proc-tree').textContent = '— no gateway processes found —';
-        return;
-      }
-
-      const pidMap = {};
-      procs.forEach(function(p) { pidMap[p.pid] = p; });
-
-      // Aggregate resource usage across the whole gateway process tree.
-      // ps %cpu is per-core (100% = 1 core), so divide by numCpus to get
-      // a normalized 0–100% load figure across all available cores.
-      // RSS is summed and may slightly over-count shared pages.
-      let rawCpuSum = 0, totalRssKb = 0;
-      procs.forEach(function(p) {
-        rawCpuSum += Number(p.cpu) || 0;
-        totalRssKb += Number(p.rssKb) || 0;
-      });
-      const totalCpu = rawCpuSum / (numCpus || 1);
-      const totalMemMb = totalRssKb / 1024;
-      const memStr = totalMemMb >= 1024
-        ? (totalMemMb / 1024).toFixed(2) + ' GB'
-        : totalMemMb.toFixed(0) + ' MB';
-
-      function cat(p) {
-        const a = p.args;
-        if (a.includes('node') && (a.includes('dist/index') || a.includes('dist/entry'))) return 'orchestrator';
-        if (a.includes('claude-pty-shell')) return 'pty';
-        if (a.includes('bun') && a.includes('mcp/server')) return 'mcp';
-        if (a.includes('bun') && a.includes('telegram') && a.includes('receiver')) return 'telegram';
-        if (a.includes('bun') && a.includes('discord') && a.includes('receiver')) return 'discord';
-        if (a.includes('--mcp-config') && (a.includes('--session-id') || a.includes('--print'))) {
-          if (a.includes('--session-id')) {
-            const parent = pidMap[p.ppid];
-            return (parent && cat(parent) === 'pty') ? 'claude-pty' : 'claude-headless';
-          }
-          return 'claude-headless';
+    function renderProcessTree(procs, numCpus, containers, warnings) {
+      const unique = Array.from(new Map(procs.map(p=>[p.pid,p])).values());
+      const memory = kb => kb >= 1048576 ? (kb/1048576).toFixed(2)+' GB' : (kb/1024).toFixed(0)+' MB';
+      const resources = rows => 'CPU '+(rows.reduce((s,p)=>s+(Number(p.cpu)||0),0)/numCpus).toFixed(1)+'% · MEM '+memory(rows.reduce((s,p)=>s+(Number(p.rssKb)||0),0));
+      const lines = ['<span class="proc-summary">∑ '+unique.length+' procs · '+resources(unique)+'</span>',
+        '<span class="ts">CPU: lifetime average, normalized across cores · MEM: summed RSS</span>',''];
+      const label = p => [p.group==='container' ? p.role : '',p.agentId,p.harness === 'codex' ? 'Codex' : p.harness === 'claude' ? 'Claude Code' : '',p.name,p.mode,p.model].filter(Boolean).map(escHtml).join(' · ');
+      function processRows(rows) {
+        const ids = new Set(rows.map(p=>p.pid));
+        const children = new Map();
+        rows.forEach(p=>{if(!children.has(p.ppid))children.set(p.ppid,[]);children.get(p.ppid).push(p);});
+        const printed = new Set();
+        function print(p,depth) {
+          if(printed.has(p.pid))return;
+          printed.add(p.pid);
+          const prefix = '  '.repeat(Math.min(depth,6)+1);
+          const root = p.pid === p.rootPid;
+          lines.push(prefix+(depth?'└─ ':'')+'PID '+p.pid+(p.group==='container'?' · Container PID '+(p.containerPid||'—'):'')+'  '+escHtml(p.command)+' · '+resources([p]));
+          if(root && label(p))lines.push(prefix+'   '+label(p));
+          if(root && p.sessionId)lines.push(prefix+'   Session '+escHtml(p.sessionId));
+          if(root && p.taskId)lines.push(prefix+'   Task '+escHtml(p.taskId)+(p.title?' · '+escHtml(p.title):''));
+          (children.get(p.pid)||[]).forEach(child=>print(child,depth+1));
         }
-        return 'other';
+        rows.filter(p=>!ids.has(p.ppid)).forEach(p=>print(p,0));
+        rows.forEach(p=>print(p,0));
+        if(!rows.length)lines.push('  <span class="ts">— none —</span>');
       }
-
-      // Show full command lines (no truncation) — text wraps inside the box.
-      function full(args) {
-        return escHtml(args);
-      }
-
-      function sessionId(args) {
-        const m = args.match(/--session-id\\s+(\\S+)/);
-        return m ? escHtml(m[1]) : '?';
-      }
-
-      function agentName(args) {
-        const m = args.match(/agents\\/([^/]+)\\/workspace/);
-        return m ? m[1] : '?';
-      }
-
-      const lines = [];
-      // First line: total resource usage across the whole gateway tree.
-      lines.push(
-        '<span class="proc-summary">' +
-        '\\u2211 ' + procs.length + ' procs' +
-        '  \\u00b7  CPU ' + totalCpu.toFixed(1) + '%' +
-        '  \\u00b7  MEM ' + memStr +
-        '</span>'
-      );
-      lines.push('');
-      const orchestrator = procs.find(function(p) { return cat(p) === 'orchestrator'; });
-      const ptys = procs.filter(function(p) { return cat(p) === 'pty'; });
-      const headless = procs.filter(function(p) { return cat(p) === 'claude-headless'; });
-      const telegramReceivers = procs.filter(function(p) { return cat(p) === 'telegram'; });
-      const discordReceivers = procs.filter(function(p) { return cat(p) === 'discord'; });
-      const mcpServers = procs.filter(function(p) { return cat(p) === 'mcp'; });
-
-      const gatewayPids = new Set(procs.map(function(p) { return p.pid; }));
-      const orphans = procs.filter(function(p) {
-        const c = cat(p);
-        return (c === 'claude-pty' || c === 'claude-headless' || c === 'pty' || c === 'mcp')
-          && !gatewayPids.has(p.ppid)
-          && p.pid !== (orchestrator && orchestrator.pid);
+      [['gateway','Gateway'],['agent','Agents'],['worker','Workers']].forEach(pair=>{
+        const rows=unique.filter(p=>p.group===pair[0]);
+        lines.push('<span class="proc-label">'+pair[1]+'</span>');processRows(rows);lines.push('');
       });
-
-      if (orchestrator) {
-        lines.push('<span class="proc-orchestrator">Orchestrator</span>');
-        lines.push('  PID ' + orchestrator.pid + '  <span class="proc-orchestrator">' + full(orchestrator.args) + '</span>');
-        lines.push('');
-      }
-
-      const sessionCount = ptys.length + headless.length;
-      lines.push('<span class="proc-label">Sessions (' + sessionCount + ')</span>');
-
-      ptys.forEach(function(pty) {
-        const agent = agentName(pty.args);
-        lines.push('  PID ' + pty.pid + '  <span class="proc-pty">wrap-shell</span>  [' + agent + ']');
-        const claudeChild = procs.find(function(p) { return p.ppid === pty.pid && cat(p) === 'claude-pty'; });
-        if (claudeChild) {
-          lines.push('  \\u2514\\u2500 PID ' + claudeChild.pid + '  <span class="proc-claude">claude ' + sessionId(claudeChild.args) + '</span>');
-          const mcp = mcpServers.find(function(p) { return p.ppid === claudeChild.pid; });
-          if (mcp) {
-            lines.push('     \\u2514\\u2500 PID ' + mcp.pid + '  <span class="proc-mcp">mcp</span>');
-          }
-        }
+      lines.push('<span class="proc-label">App containers</span>');
+      containers.forEach(c=>{
+        const rows=unique.filter(p=>p.group==='container'&&p.container===c.name);
+        lines.push('  '+escHtml(c.name)+' · '+escHtml(c.state)+' · '+(c.error?'CPU — · MEM —':resources(rows)));
+        lines.push('  Agents: '+c.agentIds.map(escHtml).join(', '));
+        if(c.id)lines.push('  Container '+escHtml(c.id));
+        if(c.error)lines.push('  <span class="ts">'+escHtml(c.error)+'</span>');
+        processRows(rows);
       });
-
-      headless.forEach(function(cl) {
-        const agent = agentName(cl.args);
-        lines.push('  PID ' + cl.pid + '  <span class="proc-claude">claude --print</span>' + (agent !== '?' ? '  [' + agent + ']' : ''));
-        const mcp = mcpServers.find(function(p) { return p.ppid === cl.pid; });
-        if (mcp) {
-          lines.push('  \\u2514\\u2500 PID ' + mcp.pid + '  <span class="proc-mcp">mcp</span>');
-        }
-      });
-
-      if (sessionCount === 0) lines.push('  <span class="ts">\\u2014 none \\u2014</span>');
-      lines.push('');
-
-      lines.push('<span class="proc-label">Receivers</span>');
-      if (telegramReceivers.length) lines.push('  Telegram \\u00d7' + telegramReceivers.length);
-      if (discordReceivers.length) lines.push('  Discord \\u00d7' + discordReceivers.length);
-      if (!telegramReceivers.length && !discordReceivers.length) lines.push('  <span class="ts">\\u2014 none \\u2014</span>');
-      lines.push('');
-
-      lines.push('<span class="proc-label">Orphans</span>');
-      if (orphans.length) {
-        orphans.forEach(function(p) {
-          lines.push('  \\u26a0 PID ' + p.pid + '  <span class="proc-orphan">' + full(p.args) + '</span>');
-        });
-      } else {
-        lines.push('  <span class="ts">none \\u2705</span>');
-      }
-
-      document.getElementById('proc-tree').innerHTML = lines.join('\\n');
+      if(!containers.length)lines.push('  <span class="ts">— none —</span>');
+      lines.push('','<span class="proc-label">Safemode</span>');
+      processRows(unique.filter(p=>p.group==='safemode'));
+      lines.push('','<span class="proc-label">Receivers</span>');
+      const receivers=unique.filter(p=>p.group==='receiver');
+      ['telegram','discord'].forEach(name=>{const count=receivers.filter(p=>p.receiver===name).length;if(count)lines.push('  '+name[0].toUpperCase()+name.slice(1)+' ×'+count);});
+      if(!receivers.length)lines.push('  <span class="ts">— none —</span>');
+      lines.push('','<span class="proc-label">Orphans</span>');
+      const orphans=unique.filter(p=>p.group==='orphan');
+      if(orphans.length)processRows(orphans);else lines.push('  <span class="ts">none</span>');
+      warnings.forEach(w=>lines.push('<span class="ts">'+escHtml(w)+'</span>'));
+      document.getElementById('proc-tree').innerHTML=lines.join('\\n');
     }
 
     // Logout — revoke the session cookie server-side, then land on the login page.

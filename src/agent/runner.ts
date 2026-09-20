@@ -4394,6 +4394,14 @@ export class AgentRunner extends EventEmitter {
     return report ? {...report, backgroundReviews: this.historyDb.listReviewRuns().filter(run => run.sessionId === sessionId)} : undefined;
   }
 
+  getProcessOwners(): import('../api/dashboard-processes').ProcessOwner[] {
+    const agents = [...this.sessions.values()].flatMap(p => p.processId ? [{
+      pid:p.processId,group:'agent' as const,agentId:this.agentConfig.id,sessionId:p.sessionId,
+      model:p.model,harness:'claude',container:this.agentConfig.container,
+    }] : []);
+    return [...agents,...(this.orchestration?.processOwners() ?? [])];
+  }
+
   getOrchestrationSummary() {
     if (!this.agentConfig.orchestration?.enabled && !this.orchestration) return undefined;
     const summary = this.orchestration?.dashboardSummary() ?? { enabled: true, backend: 'headless', workspaceMode: this.agentConfig.type === 'app-agent' ? 'container' : this.agentConfig.orchestration?.tasks?.workspaceMode ?? 'host', activeAgentSessions: [], tasks: [], sessions: [] };

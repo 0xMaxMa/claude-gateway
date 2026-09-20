@@ -30,7 +30,7 @@ export function resolveWorkerHarness(agent: AgentConfig, gateway: GatewayConfig,
   const metadata = gateway.gateway.models?.find(m => m.id === model || m.alias === model);
   if (metadata) validateWorkerModel(metadata);
   const canonical = metadata?.id ?? model;
-  const selector = settings.harness ?? 'claude';
+  const selector = settings.harness ?? 'auto';
   const harness = selector === 'auto'
     ? metadata?.workerHarness ?? (/^(?:(?:openai|chatgpt)\/)?gpt-[a-z0-9]/i.test(canonical) ? 'codex' : 'claude')
     : selector;

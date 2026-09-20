@@ -3,8 +3,10 @@ import type { AgentConfig, GatewayConfig } from '../../../src/types';
 const agent = { id: 'sample', description:'Sample', workspace:'/tmp/sample', env: '', claude: { model: 'gpt-example[1m]', extraFlags: [] } } as AgentConfig;
 const gateway = {gateway: {logDir:'/tmp/logs',timezone:'UTC'}, agents: [agent]} as GatewayConfig;
 describe('worker harness selection', () => {
-  it('preserves existing Claude execution until configured', () => {
-    expect(resolveWorkerHarness(agent, gateway, agent.claude.model).harness).toBe('claude');
+  it('defaults GPT workers to Codex and other models to Claude', () => {
+    expect(resolveWorkerHarness(agent, gateway, agent.claude.model).harness).toBe('codex');
+    expect(resolveWorkerHarness(agent, gateway, 'claude-example').harness).toBe('claude');
+    expect(resolveWorkerHarness(agent, {...gateway, gateway: {...gateway.gateway, workers: {harness: 'claude'}}}, agent.claude.model).harness).toBe('claude');
   });
   it('routes known GPT identities and honors explicit metadata for opaque aliases', () => {
     const g: GatewayConfig = {...gateway, gateway: {...gateway.gateway,workers: {harness:'auto'}, models:[{id:'opaque-alias',alias:'fast',label:'Example',contextWindow:1000,workerHarness:'codex',workerModel:'gpt-native'}]}};
