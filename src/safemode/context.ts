@@ -64,6 +64,19 @@ async function databaseSnapshot(filename: string, targetIds: string[]): Promise<
     const result: Record<string, unknown> = {};
     let remaining = 1024 * 1024;
     const knownTables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
+    // Find the requested evidence before applying the snapshot/agent limits.
+    // Otherwise an alphabetically late agent can disappear from a targeted investigation.
+    if (targetIds.length) {
+      let matches = false;
+      for (const table of TABLES.filter(name => knownTables.has(name))) {
+        const columns = new Set(db.prepare(`PRAGMA table_info("${table}")`).all().map(row => String(row.name)));
+        const ids = ['id', 'session_id', 'agent_session_id', 'conversation_id', 'response_id', 'task_id'].filter(name => columns.has(name));
+        if (!ids.length) continue;
+        const filter = ids.map(name => `"${name}" IN (${targetIds.map(() => '?').join(',')})`).join(' OR ');
+        if (db.prepare(`SELECT 1 FROM "${table}" WHERE ${filter} LIMIT 1`).get(...ids.flatMap(() => targetIds))) { matches = true; break; }
+      }
+      if (!matches) { db.exec('ROLLBACK'); return undefined; }
+    }
     const conversationIds = knownTables.has('conversations') && targetIds.length
       ? db.prepare(`SELECT id FROM conversations WHERE agent_session_id IN (${targetIds.map(() => '?').join(',')}) LIMIT 50`).all(...targetIds).map(row => String(row.id)) : [];
     const linkedIds: Record<string, string[]> = {};
@@ -180,15 +193,22 @@ export async function prepareContext(workspace: string, configPath?: string, req
   const agentsDir = agentsDirForConfig(configFile);
   const databases: Record<string, unknown> = {};
   try {
-    for (const entry of fs.readdirSync(agentsDir, { withFileTypes: true }).filter(item => item.isDirectory()).slice(0, 8)) {
+    const entries = fs.readdirSync(agentsDir, { withFileTypes: true }).filter(item => item.isDirectory());
+    let includedAgents = 0;
+    for (const entry of entries) {
+      if (includedAgents >= 8) { notes.push('Agent snapshot limit reached (8 agents); additional evidence may be omitted.'); break; }
+      let included = false;
       for (const filename of ['orchestration.db', 'history.db']) {
         const file = path.join(agentsDir, entry.name, filename);
         try {
           if (!fs.lstatSync(file).isFile()) continue;
-          databases[`${entry.name}/${filename}`] = await databaseSnapshot(file, targets);
+          const snapshot = await databaseSnapshot(file, targets);
+          if (snapshot !== undefined) { databases[`${entry.name}/${filename}`] = snapshot; included = true; }
         } catch { notes.push(`Database unavailable or unsupported: ${entry.name}/${filename}`); }
       }
+      if (included) includedAgents++;
     }
+    if (targets.length && !includedAgents) notes.push('No matching database evidence found for the requested IDs.');
   } catch { notes.push('Agent data directory unavailable.'); }
   writeArtifact(diagnostics, 'databases.json', databases);
   // Bound the response body as well as the request duration; never forward admin credentials.

@@ -137,3 +137,28 @@ else process.exit(1);
     expect(artifact('coverage.json').notes.join(' ')).toContain('version mismatch');
   } finally { process.env.PATH = originalPath; }
 });
+
+test('targeted evidence includes agents beyond the first eight without unrelated snapshots', async () => {
+  for (let i = 0; i < 10; i++) {
+    const dir = path.join(root, 'agents', `agent-${String(i).padStart(2,'0')}`);
+    fs.mkdirSync(dir, {recursive:true});
+    const db = new DatabaseSync(path.join(dir, 'orchestration.db'));
+    db.exec('CREATE TABLE conversations(id TEXT, agent_session_id TEXT);');
+    db.prepare('INSERT INTO conversations VALUES (?,?)').run(`conversation-${i}`, i === 9 ? ID : OTHER);
+    db.close();
+  }
+  await prepareContext(workspace, config, `Investigate ${ID}`);
+  const evidence = artifact('databases.json');
+  expect(Object.keys(evidence)).toEqual(['agent-09/orchestration.db']);
+  expect(evidence['agent-09/orchestration.db'].tables.conversations[0].agent_session_id).toBe(ID);
+});
+
+test('unmatched target IDs are reported instead of substituting unrelated rows', async () => {
+  const dir = path.join(root,'agents','example'); fs.mkdirSync(dir,{recursive:true});
+  const db = new DatabaseSync(path.join(dir,'orchestration.db'));
+  db.exec('CREATE TABLE conversations(id TEXT, agent_session_id TEXT);');
+  db.prepare('INSERT INTO conversations VALUES (?,?)').run('other',OTHER); db.close();
+  await prepareContext(workspace,config,ID);
+  expect(artifact('databases.json')).toEqual({});
+  expect(artifact('coverage.json').notes).toContain('No matching database evidence found for the requested IDs.');
+});
