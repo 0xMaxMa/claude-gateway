@@ -51,6 +51,7 @@ export default defineConfig({
         { text: 'CLI & API overview', link: '/reference/cli-api' },
         { text: 'CLI command reference', link: '/reference/cli' },
         { text: 'Operations & upgrades', link: '/guide/operations' },
+        { text: 'Safemode', link: '/guide/safemode' },
         { text: 'Troubleshooting', link: '/guide/troubleshooting' },
         { text: 'Development & docs deployment', link: '/reference/development' }
       ] },

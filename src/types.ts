@@ -434,6 +434,7 @@ export interface LogsConfig {
 }
 
 export interface GatewayConfig {
+  safemode?: { cli?: 'claude' | 'codex'; claude?: { model?: string }; codex?: { model?: string }; allowedAgentIds?: string[] };
   gateway: {
     /** One switch for every Agent/channel; object form supplies shared defaults. */
     orchestration?: import('./orchestration/gateway-config').GatewayOrchestration;

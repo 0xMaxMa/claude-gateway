@@ -87,3 +87,13 @@ Browser replay is available for approved spoken replies before their original
 recording completes, including interrupted playback. Explicit replay can generate
 missing audio with the configured TTS provider (normal provider charges apply).
 See the [replay and playback controls](website/api/voice.md#retained-speech-replay).
+
+### Safemode investigations
+
+Run `claude-gateway safemode --name investigation --prompt "Inspect this gateway problem"`
+for a native interactive Claude Code investigation without stopping the gateway.
+Use `--cli codex` to select Codex, `--model` to override the native model, and
+`--resume investigation` to return to the same investigation. Safemode preserves
+build/startup evidence and uses a separate source snapshot. Headless takeover,
+request IDs and trusted operator agent controls are described in the
+[safemode guide](website/guide/safemode.md).

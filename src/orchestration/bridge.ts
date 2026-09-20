@@ -29,7 +29,7 @@ export class TaskBridge {
   private readonly scopes = new Map<string, Scope>();
   private readonly cancellations = new Map<string, AbortController>();
   constructor(private readonly tasks: TaskService, private readonly files?: TaskFiles,
-    private readonly shareCall?: (attemptId: string, generation: number, args: Record<string, unknown>) => Promise<unknown>, private readonly skills?: () => SkillRegistry, private readonly container?: { agent: AgentConfig; spool: string }, private readonly cronCall?: (attemptId: string, generation: number, tool: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>) {}
+    private readonly shareCall?: (attemptId: string, generation: number, args: Record<string, unknown>) => Promise<unknown>, private readonly skills?: () => SkillRegistry, private readonly container?: { agent: AgentConfig; spool: string }, private readonly cronCall?: (attemptId: string, generation: number, tool: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>, private readonly safemodeAccess = false) {}
   captureWorkerOutput(attemptId: string, generation: number, line: string): void {
     try { this.files?.captureOutput(attemptId, generation, line); }
     catch { /* A failed image capture must not break worker execution. Staging reports missing capture. */ }
@@ -60,6 +60,16 @@ export class TaskBridge {
           try {
             if (mutation) await scope.beforeMutation?.(command.tool, a, context.actionId);
             switch (command.tool) {
+              case 'safemode_validate': {
+                this.tasks.store.assertMember(context.conversationId, context.principalId);
+                if (!this.safemodeAccess || this.container) throw new OrchestrationError('ACCESS_DENIED');
+                if (!['list', 'status', 'logs', 'send', 'stop'].includes(a.operation)) throw new OrchestrationError('INVALID_INPUT');
+                if (a.operation === 'send' || a.operation === 'stop') {
+                  if (!context.execute) throw new OrchestrationError('ACCESS_DENIED');
+                  await scope.beforeMutation?.(command.tool, a, context.actionId);
+                }
+                result = { allowed: true }; break;
+              }
               case 'capabilities_list': {
                 this.tasks.store.assertMember(context.conversationId, context.principalId);
                 if (!scope.capabilities) throw new OrchestrationError('CAPABILITY_DISCOVERY_UNAVAILABLE');

@@ -1,0 +1,65 @@
+# Safemode investigations
+
+`claude-gateway safemode` opens the real Claude Code terminal UI in a private investigation workspace. The gateway continues running. Codex is also supported:
+
+```sh
+claude-gateway safemode --name voice-debug --prompt "Inspect the gateway session mentioned below"
+claude-gateway safemode --cli codex --name codex-debug --model YOUR_MODEL
+claude-gateway safemode --resume voice-debug
+```
+
+`--resume` selects a **safemode investigation name or ID**, not a gateway chat session. Put gateway chat session IDs in the initial prompt, or tell the interactive CLI after it opens. Initial prompts collect matching bounded database evidence; for later chat session IDs, send a fresh prompt through safemode to refresh the snapshot.
+
+## Models and config
+
+Add an optional top-level `safemode` section to the gateway config:
+
+```json
+{
+  "safemode": {
+    "cli": "claude",
+    "claude": { "model": "inherit" },
+    "codex": { "model": "inherit" },
+    "allowedAgentIds": []
+  }
+}
+```
+
+The resolved target config path is saved with the investigation, including through agent takeover. Use an explicit `--config` to change it.
+
+The model selection order is command override, saved investigation selection, safemode config, native CLI default. First launch defaults to Claude Code and `inherit`. Inherit deliberately follows the native CLI's current configuration; it does not pin an unknown concrete model. Choose an explicit model to pin it across resumes. Gateway conversation/worker model settings are independent. A native conversation cannot switch between Claude and Codex.
+
+Native authentication must already be configured. This implementation uses Claude Code's `--safe-mode` / `--restricted` and Codex's `exec resume` / `--ignore-rules`; older CLIs without these flags fail rather than silently removing restrictions. Tested with Claude Code 2.1.274 and Codex 0.154.0. Claude headless inheritance reads only the user's model setting, because restricted mode deliberately ignores user permission configuration.
+
+## Local controls and takeover
+
+```sh
+claude-gateway safemode list --json
+claude-gateway safemode status voice-debug --json
+claude-gateway safemode send voice-debug --takeover --request-id investigate-1 --prompt "Inspect the latest interruption" --json
+claude-gateway safemode status voice-debug --request-id investigate-1 --json
+claude-gateway safemode logs voice-debug --json
+claude-gateway safemode stop voice-debug
+claude-gateway safemode --resume voice-debug --takeover
+claude-gateway safemode delete voice-debug
+```
+
+`send` starts headless execution in the background; `--wait` runs it in the foreground. One owner is allowed per investigation. Without explicit `--takeover`, an active owner returns `BUSY`. A send can take over an interactive owner; an already running headless request remains busy and must be explicitly stopped first. Takeover announces the stop in the existing terminal, sends graceful termination, waits for exit, and then resumes the same native conversation. A timeout does not authorize starting a second owner or killing an unrelated process.
+
+Request IDs prevent duplicate work. Reusing an ID returns its recorded outcome; changing its prompt/model is rejected. After an unexpected crash, a running request's outcome can remain unknown: inspect it before choosing a new ID. Safemode has no internal work queue. The caller/orchestrator owns scheduling, dependencies and retries.
+
+Private state, request receipts and bounded headless output live under `~/.claude-gateway/safemode`. Interactive output remains in the native terminal/history. `delete` removes safemode-owned artifacts, not the native provider's conversation history. If a supervisor crashes, `recover NAME` clears stale ownership only after both recorded processes have exited. It never signals a PID recovered from disk. An unresponsive live owner must be dealt with manually before recovery.
+
+## Agent control
+
+Trusted host operator agents can use `safemode_list`, `safemode_send`, `safemode_status`, `safemode_logs`, and `safemode_stop`. Add their exact agent IDs to `safemode.allowedAgentIds` and restart the gateway to enable access. This grants access to the host user's safemode investigations and diagnostic output; keep the list limited to operator agents. Default is no agent access. App/container agents and ordinary workers cannot invoke these host controls.
+
+Create an investigation interactively first. Then an authorized operator agent can send prompts, including through its Telegram channel. Sending/stopping requires an execution-authorized turn; takeover must be explicitly requested. Scoped admission is checked before invoking the local command. Local controls work while the gateway is down; communication through Telegram requires the gateway/channel to be available. Inspect status and logs to retrieve the result; acceptance alone is not completion.
+
+## Evidence and permissions
+
+Each run refreshes bounded redacted config/log/SQLite snapshots, health evidence and startup/build provenance. Source snapshots come from `0xMaxMa/claude-gateway` at the recorded build revision. Build commit and startup checkout state are separate evidence: moving a checkout after launch does not change the recorded build. Dirty builds, legacy builds, stale startup records and unavailable evidence are explicitly marked uncertain. A release tag is only an inferred reference unless exact build evidence exists. Main is never substituted as the running source.
+
+Safemode never resets the running checkout, executes fetched source, takes its process lease, or writes the live database. Claude headless has read-only file tools confined to the investigation workspace. Codex headless uses its native read-only sandbox and no approvals; external MCP servers, hooks, plugins and app/browser tools are disabled. Native CLI platform sandbox requirements still apply. Interactive changes require native approval. Headless cannot silently escalate to an unrestricted host shell.
+
+Ask for a diagnosis with evidence, hypotheses, proposed repair and regression tests. To file an issue, explicitly request it in the interactive investigation: the CLI should search duplicates, prepare sanitized English content, and use authenticated `gh` with approval. Restricted headless execution supplies a draft when publication is not permitted. Automatic redaction is best effort; inspect content before publishing. Safemode does not automatically merge, deploy, restart the gateway or publish issues merely because diagnostics were collected.

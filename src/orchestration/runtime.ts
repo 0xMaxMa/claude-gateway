@@ -200,7 +200,7 @@ export class AgentOrchestrationRuntime {
     } catch (error) { store.close(); releaseLock(); throw error; }
     const tasks = new TaskService(store, agent.orchestration, agent.workspace);
     const files = new TaskFiles(store, join(agent.workspace, '../..'), agent.type === 'app-agent' ? join(root, 'container-files') : undefined, agent.workspace);
-    const bridge = new TaskBridge(tasks, files, workerShares(files, agent, gateway), host.skills ? () => host.skills!() : undefined, agent.type === 'app-agent' ? { agent, spool: join(root, 'container-files') } : undefined, workerCrons(files, agent, gateway));
+    const bridge = new TaskBridge(tasks, files, workerShares(files, agent, gateway), host.skills ? () => host.skills!() : undefined, agent.type === 'app-agent' ? { agent, spool: join(root, 'container-files') } : undefined, workerCrons(files, agent, gateway), Array.isArray(gateway.safemode?.allowedAgentIds) && gateway.safemode.allowedAgentIds.includes(agent.id));
     const personalRetention = resolveDreamingConfig(agent.dreaming, gateway.gateway.dreaming, gateway.gateway.timezone).staleness;
     const sharedRetention = resolveSharedConfig(agent.knowledge?.shared, gateway.gateway.knowledge?.shared).staleness;
     bridge.recordRetrievals = (personalRetention.enabled && personalRetention.recordRetrievals) || (sharedRetention.enabled && sharedRetention.recordRetrievals);

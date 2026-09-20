@@ -45,6 +45,7 @@ import { SocketServer, parseTimeoutMs } from './apps/socket-server';
 import { parseAppYaml, AppYamlService, AppYamlScript } from './apps/compose-generator';
 import { claimSupervisorEnv, classifyInvocation, resolveInvocationSignals } from './cli/command-names';
 import { defaultPidfilePath } from './cli/manager';
+import { captureRuntimeProvenance, writeRuntimeProvenance } from './safemode/provenance';
 import { expandHome as expandTilde } from './utils/paths';
 
 
@@ -538,6 +539,7 @@ let isShuttingDown = false;
 let registeredShutdown: ((signal: string) => Promise<void>) | null = null;
 
 async function main(): Promise<void> {
+  const runtimeProvenance = captureRuntimeProvenance({ configPath: CONFIG_PATH });
   // Load agent .env files before config interpolation so ${TOKEN} vars resolve.
   // ConfigWatcher repeats this before every reload, so agents that appear later
   // resolve too — see src/config/agent-env.ts.
@@ -882,6 +884,12 @@ async function main(): Promise<void> {
     fs.writeFileSync(PIDFILE_PATH, `${process.pid}\n${router.listeningPort() ?? PORT}\n`);
   } catch (e) {
     globalLogger.warn?.('Could not write pidfile', { path: PIDFILE_PATH, error: (e as Error).message });
+  }
+
+  try {
+    writeRuntimeProvenance({ ...runtimeProvenance, port: router.listeningPort() ?? PORT });
+  } catch (e) {
+    globalLogger.warn('Could not write runtime provenance', { error: (e as Error).message });
   }
 
   // Wire installer callbacks now that the router is available

@@ -46,7 +46,7 @@ for (const mod of modules) {
   if (!visible) continue;
 
   for (const tool of mod.getTools()) {
-    if (ORCHESTRATION_ROLE && !['memory_search', 'memory_get'].includes(tool.name) && !(ORCHESTRATION_ROLE === 'worker' &&
+    if (ORCHESTRATION_ROLE && !(ORCHESTRATION_ROLE === 'agent' && mod.id === 'safemode') && !['memory_search', 'memory_get'].includes(tool.name) && !(ORCHESTRATION_ROLE === 'worker' &&
       ((mod.id === 'cron' || mod.id === 'image' || mod.id === 'video' || mod.id === 'share-file' || mod.id === 'browser') || (mod.id === 'memory' && process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true')))) continue;
     toolMap.set(tool.name, mod);
     visibleTools.push(tool);
@@ -114,6 +114,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         content: [{ type: 'text', text: `unknown tool: ${toolName}` }],
         isError: true,
       };
+    }
+    if (mod.id === 'safemode') {
+      if (ORCHESTRATION_ROLE !== 'agent' || !process.env.GATEWAY_ORCHESTRATION_TICKET_FILE) {
+        return { content: [{ type: 'text', text: 'SAFEMODE_AGENT_TICKET_REQUIRED' }], isError: true };
+      }
+      const validation = await callTaskBridge('safemode_validate', { operation: toolName.slice('safemode_'.length) }, String(extra.requestId), AbortSignal.any([extra.signal, shutdownController.signal]));
+      if (validation.isError) return validation;
     }
     if (ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_ORCHESTRATION_MEDIA === 'true') {
       const validation = await callTaskBridge('task_validate', {}, String(extra.requestId), AbortSignal.any([extra.signal, shutdownController.signal]));

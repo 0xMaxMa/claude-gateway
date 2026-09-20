@@ -15,6 +15,7 @@ import { ShareFileModule } from './tools/share-file/module';
 import { AppsModule } from './tools/apps/module';
 import { ApiModule } from './tools/api/module';
 import { MemoryModule } from './tools/memory/module';
+import { SafemodeModule } from './tools/safemode/module';
 import type { ChannelModule, ToolModule } from './types';
 
 /** Shared registration for execution and read-only capability discovery. */
@@ -26,6 +27,7 @@ export function gatewayModules(
     ? [
         new MemoryModule(),
         ...(role === 'worker' ? [new CronModule()] : []),
+        ...(role === 'agent' ? [new SafemodeModule()] : []),
         ...(role === 'worker' && media
           ? [
               new ImageModule(),

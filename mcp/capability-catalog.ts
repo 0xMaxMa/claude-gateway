@@ -5,6 +5,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { gatewayModules } from './modules';
 import { AGENT_TASK_TOOLS, WORKER_REPORT_TOOLS } from './tools/tasks/module';
+import { SAFEMODE_TOOLS } from './tools/safemode/module';
 
 type Entry = {
   name: string;
@@ -69,7 +70,7 @@ for (const module of gatewayModules()) {
             : 'unavailable',
     });
 }
-for (const tool of AGENT_TASK_TOOLS)
+for (const tool of [...AGENT_TASK_TOOLS, ...SAFEMODE_TOOLS])
   entries.push({
     name: `mcp__gateway__${tool.name}`,
     description: tool.description,
