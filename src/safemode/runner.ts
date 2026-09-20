@@ -119,7 +119,7 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
     if (stopping) throw new Error('Stopped before native CLI launch');
     const invocation = await buildNativeInvocation({ cli: session.cli, mode: options.mode, cwd: workspace,
       nativeArgs: options.nativeArgs, nativeResumeIndex: options.nativeResumeIndex, prompt: options.prompt, context, model: session.model, nativeSessionId: session.nativeSessionId, resume: !!session.nativeSessionId && session.nativeStarted !== false });
-    if (session.cli === 'codex' && options.nativeArgs === undefined) invocation.env = await codexSafemodeEnvironment(invocation.command, invocation.env);
+    if (session.cli === 'codex') invocation.env = await codexSafemodeEnvironment(invocation.command, invocation.env, { nativeArgs: options.nativeArgs });
     if (stopping) throw new Error('Stopped during native CLI readiness check');
     if (invocation.nativeSessionId) session.nativeSessionId = invocation.nativeSessionId;
     store.save(session);

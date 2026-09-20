@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { resolveCodexCredentials, inspectCodexAccount } from '../../../src/session/codex-auth';
+import { resolveCodexCredentials, inspectCodexAccount, codexSafemodeEnvironment } from '../../../src/session/codex-auth';
 let root: string, bin: string;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'codex-native-auth-'));
@@ -52,4 +52,41 @@ test('rotation changes the pool fingerprint before a different account can resum
   const first=await resolveCodexCredentials({bin,env:{HOME:root}});
   fixture(config,{type:'apiKey'},{OPENAI_API_KEY:'rotated'});
   expect((await resolveCodexCredentials({bin,env:{HOME:root}})).fingerprint).not.toBe(first.fingerprint);
+});
+
+
+test('interactive params retain only the selected native provider env key', async () => {
+  fixture({...config,model_providers:{fixture:{env_key:'FIXTURE_KEY'}}},null,{});
+  const result=await codexSafemodeEnvironment(bin,{HOME:root},{nativeArgs:['--model','gpt-fixture'],source:{HOME:root,FIXTURE_KEY:'selected',UNRELATED_KEY:'private',GITHUB_TOKEN:'private'}});
+  expect(result).toEqual({HOME:root,FIXTURE_KEY:'selected'});
+});
+test('profile provider and header credentials are selected before CLI overrides', async () => {
+  fixture({...config,model_providers:{fixture:{env_key:'FIRST_KEY'},override:{env_key:'OVERRIDE_KEY'}}},null,{});
+  writeFileSync(join(root,'.codex','alternate.config.toml'),'model_provider="alternate"\n[model_providers.alternate]\nenv_key="PROFILE_KEY"\n[model_providers.alternate.env_http_headers]\nX-Tenant="TENANT_KEY"\n');
+  const source={HOME:root,FIRST_KEY:'first',PROFILE_KEY:'profile',TENANT_KEY:'tenant',OVERRIDE_KEY:'override'};
+  expect(await codexSafemodeEnvironment(bin,{HOME:root},{nativeArgs:['-p','alternate'],source})).toEqual({HOME:root,PROFILE_KEY:'profile',TENANT_KEY:'tenant'});
+  expect(await codexSafemodeEnvironment(bin,{HOME:root},{nativeArgs:['--profile=alternate','--config=model_provider=override'],source})).toEqual({HOME:root,OVERRIDE_KEY:'override'});
+});
+test('native config overrides can define a new selected provider credential', async () => {
+  fixture(config,null,{});
+  const result=await codexSafemodeEnvironment(bin,{HOME:root},{nativeArgs:['-cmodel_provider="custom"','-c','model_providers.custom.env_key="CUSTOM_KEY"'],source:{HOME:root,CUSTOM_KEY:'custom'}});
+  expect(result).toEqual({HOME:root,CUSTOM_KEY:'custom'});
+});
+test('legacy profile config still resolves its selected native provider', async () => {
+  fixture({...config,profiles:{legacy:{model_provider:'other'}},model_providers:{other:{env_key:'OTHER_KEY'}}},null,{});
+  expect(await codexSafemodeEnvironment(bin,{HOME:root},{nativeArgs:['-p','legacy'],source:{HOME:root,OTHER_KEY:'other'}})).toEqual({HOME:root,OTHER_KEY:'other'});
+});
+test('interactive params delegate missing login to native CLI but defaults require readiness', async () => {
+  fixture(config,null,{});
+  await expect(codexSafemodeEnvironment(bin,{HOME:root},{nativeArgs:[],source:{HOME:root}})).resolves.toEqual({HOME:root});
+  await expect(codexSafemodeEnvironment(bin,{HOME:root},{source:{HOME:root}})).rejects.toMatchObject({code:'CODEX_AUTH_REQUIRED'});
+});
+test.each(['GITHUB_TOKEN','CLAUDE_CODE_OAUTH_TOKEN','GATEWAY_KEY','NODE_OPTIONS'])('never forwards protected credential %s via native params', async name => {
+  fixture({...config,model_providers:{fixture:{env_key:name}}},null,{});
+  await expect(codexSafemodeEnvironment(bin,{HOME:root},{nativeArgs:[],source:{HOME:root,[name]:'private'}})).rejects.toMatchObject({code:'CODEX_AUTH_REQUIRED'});
+});
+test('malformed profile fails without exposing its contents', async () => {
+  fixture(config,null,{});
+  writeFileSync(join(root,'.codex','broken.config.toml'),'secret="private-token\n');
+  await expect(codexSafemodeEnvironment(bin,{HOME:root},{nativeArgs:['--profile','broken'],source:{HOME:root}})).rejects.toMatchObject({code:'CODEX_CONFIG_UNAVAILABLE',message:expect.not.stringContaining('private-token')});
 });

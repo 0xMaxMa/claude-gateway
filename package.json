@@ -61,6 +61,7 @@
     "pino": "^10.3.1",
     "qrcode": "^1.5.4",
     "sharp": "^0.35.4",
+    "smol-toml": "^1.8.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {

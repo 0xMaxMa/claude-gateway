@@ -7,6 +7,15 @@ import { randomUUID } from 'crypto';
 const exec = promisify(execFile);
 const entry = path.resolve(__dirname, '../../dist/entry.js');
 
+// Configuration/account probe without a thread or provider request.
+const nativeProbe = `if(process.argv[2]==='app-server'){
+ require('readline').createInterface({input:process.stdin}).on('line',line=>{
+  const q=JSON.parse(line);if(!q.id)return;
+  const result=q.method==='config/read'?{config:{model_provider:'fixture',model_providers:{fixture:{env_key:'FIXTURE_NATIVE_KEY'}}}}:q.method==='account/read'?{account:null}:{};
+  console.log(JSON.stringify({id:q.id,result}));
+ });
+}else`;
+
 describe('safemode detached CLI worker', () => {
   let home: string;
   let env: NodeJS.ProcessEnv;
@@ -35,18 +44,20 @@ describe('safemode detached CLI worker', () => {
   test.each(['claude', 'codex'])('interactive %s params reach the native process, retain imported ID and cannot be imported twice', async cli => {
     const capture = path.join(home, 'captured.json');
     const fake = path.join(home, 'native-cli');
-    fs.writeFileSync(fake, '#!/usr/bin/env node\nrequire("fs").writeFileSync(process.env.HOME + "/captured.json", JSON.stringify(process.argv.slice(2)));\n', {mode: 0o700});
+    fs.writeFileSync(fake, '#!/usr/bin/env node\n' + nativeProbe + '{require("fs").writeFileSync(process.env.HOME + "/captured.json", JSON.stringify(process.argv.slice(2)));require("fs").writeFileSync(process.env.HOME + "/credential-present", String(!!process.env.FIXTURE_NATIVE_KEY));}\n', {mode: 0o700});
     const importedId = '22222222-2222-4222-8222-222222222222';
     const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
     const permission = cli === 'claude' ? '--dangerously-skip-permissions' : '--dangerously-bypass-approvals-and-sandbox';
     const resume = cli === 'claude' ? '--resume' : 'resume';
     env.CODEX_BIN = fake;
+    env.FIXTURE_NATIVE_KEY = 'test-only-native-key';
     const cmd = [process.execPath, entry, 'safemode', '--cli', cli, '--name', 'imported',
       '--params', permission + ' ' + resume + ' ' + importedId].map(quote).join(' ');
     await exec('script', ['-q', '-e', '-c', cmd, '/dev/null'], {env, timeout: 15000});
     const args = JSON.parse(fs.readFileSync(capture, 'utf8'));
     expect(args.slice(0, 3)).toEqual([permission, resume, importedId]);
     expect(args).not.toContain('--permission-mode');
+    if (cli === 'codex') expect(fs.readFileSync(path.join(home,'credential-present'),'utf8')).toBe('true');
     expect((await command('status', importedId)).id).toBe(importedId);
     await expect(exec('script', ['-q', '-e', '-c', cmd.replace("'imported'", "'duplicate'"), '/dev/null'], {env, timeout: 15000})).rejects.toThrow();
   });
@@ -54,12 +65,14 @@ describe('safemode detached CLI worker', () => {
     const native = '33333333-3333-4333-8333-333333333333';
     const fake = path.join(home, 'codex-fixture');
     fs.writeFileSync(fake, `#!/usr/bin/env node
+${nativeProbe}{
 const fs=require('fs'), path=require('path');
 const now=new Date().toISOString();
 const dir=path.join(process.env.HOME,'.codex','sessions',now.slice(0,10).replace(/-/g,'/'));
 fs.mkdirSync(dir,{recursive:true});
 fs.writeFileSync(path.join(dir,'rollout.jsonl'),JSON.stringify({type:'session_meta',payload:{id:'${native}',cwd:process.cwd(),timestamp:now,source:'cli'}})+'\\n');
 setTimeout(()=>process.exit(0),1600);
+}
 `, {mode: 0o700});
     env.CODEX_BIN = fake;
     const cmd = [process.execPath, entry, 'safemode', '--cli', 'codex', '--params=--no-alt-screen'].map(v => "'" + v + "'").join(' ');

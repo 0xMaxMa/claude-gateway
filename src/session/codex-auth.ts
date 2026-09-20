@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
-import { readFile } from 'fs/promises';
+import { readFile, stat } from 'fs/promises';
+import { parse as parseToml } from 'smol-toml';
 import { join } from 'path';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
@@ -95,18 +96,82 @@ export async function resolveCodexCredentials(options: { bin: string; baseUrl?: 
   return credentials(base, auth.OPENAI_API_KEY, options.allowDockerHost);
 }
 
-/** Safemode stays in the native HOME, so OAuth/keyring refresh remains CLI-owned. */
-export async function codexSafemodeEnvironment(bin: string, env: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
-  const { config, account } = await inspectCodexAccount(bin);
+/** Overlay native config data without inheriting object prototypes. */
+function overlayConfig(base: any, next: any): any {
+  const result = Object.assign(Object.create(null), base);
+  for (const [name, value] of Object.entries(next ?? {})) {
+    if (['__proto__', 'prototype', 'constructor'].includes(name)) continue;
+    result[name] = value && typeof value === 'object' && !Array.isArray(value)
+      ? overlayConfig(result[name], value) : value;
+  }
+  return result;
+}
+
+/** Select auth using the same profile then CLI-override precedence as native Codex.
+ * Only configuration is read; interactive permission flags are never used by the probe. */
+async function safemodeProviderConfig(config: any, args: string[], source: NodeJS.ProcessEnv): Promise<any> {
+  let profile: string | undefined;
+  const overrides: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--') break;
+    if (arg === '-p' || arg === '--profile') profile = args[++i];
+    else if (arg.startsWith('--profile=')) profile = arg.slice(10);
+    else if (/^-p.+/.test(arg)) profile = arg.slice(2).replace(/^=/, '');
+    else if (arg === '-c' || arg === '--config') overrides.push(args[++i]);
+    else if (arg.startsWith('--config=')) overrides.push(arg.slice(9));
+    else if (/^-c.+/.test(arg)) overrides.push(arg.slice(2).replace(/^=/, ''));
+  }
+  if (profile) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(profile)) return unavailable('CODEX_PROVIDER_INVALID', 'Invalid native Codex profile name.');
+    const home = source.CODEX_HOME || join(source.HOME || homedir(), '.codex');
+    const file = join(home, `${profile}.config.toml`);
+    try {
+      const info = await stat(file);
+      if (!info.isFile() || info.size > 1024 * 1024) throw new Error('Invalid profile');
+      config = overlayConfig(config, parseToml(await readFile(file, 'utf8')));
+    } catch (error) {
+      // Older native CLIs store named profiles inside config.toml.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && config.profiles?.[profile]) config = overlayConfig(config, config.profiles[profile]);
+      else return unavailable('CODEX_CONFIG_UNAVAILABLE', 'Cannot inspect the selected native Codex profile safely. Check its configuration file.');
+    }
+  }
+  for (const override of overrides) {
+    if (typeof override !== 'string' || !override.includes('=')) return unavailable('CODEX_PROVIDER_INVALID', 'Invalid native Codex configuration override.');
+    let parsed: unknown;
+    try { parsed = parseToml(override); }
+    catch {
+      // Native -c treats non-TOML values as literal strings.
+      const at = override.indexOf('=');
+      try { parsed = parseToml(`${override.slice(0, at)} = ${JSON.stringify(override.slice(at + 1))}`); }
+      catch { return unavailable('CODEX_PROVIDER_INVALID', 'Invalid native Codex configuration override.'); }
+    }
+    config = overlayConfig(config, parsed);
+  }
+  return config;
+}
+
+/** Safemode stays in the native HOME, so OAuth/keyring refresh remains CLI-owned.
+ * Explicit params delegate login validation, but never drop selected provider credentials. */
+export async function codexSafemodeEnvironment(bin: string, env: NodeJS.ProcessEnv,
+  options: { nativeArgs?: string[]; source?: NodeJS.ProcessEnv } = {}): Promise<NodeJS.ProcessEnv> {
+  const source = options.source ?? process.env;
+  const inspected = await inspectCodexAccount(bin, source);
+  const config = await safemodeProviderConfig(inspected.config, options.nativeArgs ?? [], source);
   const id = config.model_provider ?? 'openai';
   const provider = config.model_providers?.[id];
-  if (provider?.env_key && !provider.requires_openai_auth) {
-    const name = provider.env_key;
-    if (!/^[A-Z_][A-Z0-9_]*$/.test(name) || /^(GH_|GITHUB_|GATEWAY_|ANTHROPIC_|CLAUDE_)/.test(name) || !process.env[name]) {
-      return unavailable('CODEX_AUTH_REQUIRED', 'The native Codex provider credential is unavailable to safemode. Check its env_key under the gateway service user.');
+  const result = { ...env };
+  const names = new Set<string>(Object.values(provider?.env_http_headers ?? {}) as string[]);
+  if (provider?.env_key && !provider.requires_openai_auth) names.add(provider.env_key);
+  for (const name of names) {
+    if (typeof name !== 'string' || !/^[A-Z_][A-Z0-9_]*$/.test(name) || /^(GH_|GITHUB_|GATEWAY_|ANTHROPIC_|CLAUDE_|LD_|DYLD_)/.test(name) || ['NODE_OPTIONS','BASH_ENV','ENV','SHELLOPTS'].includes(name)) {
+      return unavailable('CODEX_AUTH_REQUIRED', 'The selected native Codex credential variable is not permitted in safemode.');
     }
-    return { ...env, [name]: process.env[name] };
+    if (source[name]) result[name] = source[name];
+    else if (options.nativeArgs === undefined) return unavailable('CODEX_AUTH_REQUIRED', 'The native Codex provider credential is unavailable to safemode. Check its env_key under the gateway service user.');
   }
-  if (!account?.account) return unavailable('CODEX_AUTH_REQUIRED', 'Codex is not logged in. Run codex login first, or start safemode --cli claude. An existing session will not switch harnesses.');
-  return env;
+  if (options.nativeArgs === undefined && !(provider?.env_key && !provider.requires_openai_auth) && !inspected.account?.account) {
+    return unavailable('CODEX_AUTH_REQUIRED', 'Codex is not logged in. Run codex login first, or start safemode --cli claude. An existing session will not switch harnesses.');
+  }
+  return result;
 }
