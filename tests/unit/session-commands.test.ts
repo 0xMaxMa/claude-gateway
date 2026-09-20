@@ -179,9 +179,13 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
   // -------------------------------------------------------------------------
   // U22: session with totalTokensUsed < 50% of contextWindow → "plenty of room"
   // -------------------------------------------------------------------------
-  it.each(CHAT_CHANNELS)('%s dispatches context commands through shared handlers', async source => {
+  it.each(CHAT_CHANNELS.flatMap(source => [false,true].map(orchestrated => ({source,orchestrated}))))('$source dispatches context commands through shared handlers (orchestration=$orchestrated)', async ({source,orchestrated}) => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
+    if (orchestrated) {
+      (runner as any).agentConfig.orchestration={enabled:true,channels:[source]};
+      jest.spyOn(runner as any,'getOrchestration').mockResolvedValue({store:{channelReceipt:()=>undefined}});
+    }
     const compact = jest.spyOn(runner as any, 'compactContext').mockResolvedValue(undefined);
     const clear = jest.spyOn(runner as any, 'clearContext').mockResolvedValue(undefined);
     const forwarded = jest.spyOn(runner as any, 'writeAutoForward');
@@ -192,6 +196,9 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
     await postChannelMessage(getCallbackPort(runner), scopedChat, '/clear', source);
     await waitFor(() => forwarded.mock.calls.some(call => String(call[1]).includes('context reset')), 3000);
     expect(clear.mock.calls[0][0]).toBe(compact.mock.calls[0][0]);
+    compact.mockRejectedValueOnce(new Error('Provider unavailable'));
+    await postChannelMessage(getCallbackPort(runner), scopedChat, '/compact', source);
+    await waitFor(() => forwarded.mock.calls.some(call => String(call[1]).includes('Context compaction failed: Provider unavailable')), 3000);
     clear.mockRejectedValueOnce(new Error('The agent is responding.'));
     await postChannelMessage(getCallbackPort(runner), scopedChat, '/clear', source);
     await waitFor(() => forwarded.mock.calls.some(call => String(call[1]).includes('Command failed: The agent is responding.')), 3000);

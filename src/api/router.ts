@@ -593,7 +593,7 @@ export function createApiRouter(
   router.get('/v1/commands', (_req: Request, res: Response) => {
     res.json({
       commands: [
-        { name: '/session',  description: 'Show current session info (name, message count, context %)' },
+        { name: '/session',  description: 'Show current session, selected model and measured context usage' },
         { name: '/clear',    description: 'Reset Claude Code context; keep chat history' },
         { name: '/compact',  description: 'Compact Claude Code context without changing chat history' },
         { name: '/stop',     description: 'Interrupt the in-flight turn' },

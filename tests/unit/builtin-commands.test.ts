@@ -153,7 +153,7 @@ describe('isBuiltinCommand', () => {
     });
 
     it('does not match commands LINE has no handler for', () => {
-      expect(isBuiltinCommand('/session', 'line')).toBe(false);
+      expect(isBuiltinCommand('/session', 'line')).toBe(true);
       expect(isBuiltinCommand('/help', 'line')).toBe(false);
     });
   });
@@ -166,7 +166,7 @@ describe('isBuiltinCommand', () => {
     });
 
     it('does not match command syntax from other channels', () => {
-      expect(isBuiltinCommand('/session', 'slack')).toBe(false);
+      expect(isBuiltinCommand('/session', 'slack')).toBe(true);
       expect(isBuiltinCommand('/models', 'slack')).toBe(false);
     });
   });
@@ -178,4 +178,8 @@ test.each([...CHAT_CHANNELS, 'api'] as const)('%s routes context commands withou
     expect(isBuiltinCommand(command + 'all', channel)).toBe(false);
     expect(isBuiltinCommand('please ' + command, channel)).toBe(false);
   }
+});
+
+test.each([...CHAT_CHANNELS, 'api'] as const)('%s registers the same context commands', channel => {
+  for (const command of ['/session','/sessions','/compact','/clear']) expect(isBuiltinCommand(command, channel)).toBe(true);
 });

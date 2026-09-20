@@ -9,8 +9,8 @@ interface CommandDef {
 }
 
 export const BUILTIN_COMMANDS: Record<string, CommandDef> = {
-  session:  { channels: ['telegram', 'discord', 'api'] },
-  sessions: { channels: ['telegram', 'discord', 'api'] },
+  session:  { channels: [...CHAT_CHANNELS, 'api'] },
+  sessions: { channels: [...CHAT_CHANNELS, 'api'] },
   new:      { channels: ['telegram', 'discord'], wordBoundary: false },
   rename:   { channels: ['telegram'], wordBoundary: false },
   clear:    { channels: [...CHAT_CHANNELS, 'api'] },
