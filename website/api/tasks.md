@@ -2,6 +2,8 @@
 
 Worker execution defaults to the host Agent's existing workspace, or its app container. `default-worker` accepts general-purpose tasks without Git or `tasks.projectRoot`; an authorized directory can be included in task instructions. Explicit workspace policies remain unchanged.
 
+New worker attempts record optional `harness` (`claude` or `codex`) and `harnessModel` fields. Older attempts can omit them. These describe actual worker routing; the conversational agent still uses Claude Code. Codex usage records contain observed aggregate input/cache/output counters, not an invented per-request breakdown or loaded-tool inventory. See [worker harnesses](../guide/worker-harnesses.md).
+
 Worker MCP admission: only explicitly configured `isolated-worktree` execution of `default-worker` can return `WORKER_GIT_PROJECT_REQUIRED` with an actionable message and `retryable: true` before creating a task. Correct the worker profile or project configuration before resubmitting; retain `continue_task_id` for related work. This does not change public API authentication or container permissions.
 
 Manual `POST /api/v1/crons/:id/run` for an orchestration agent remains pending through delegated work and the final Agent report. A queue acknowledgement is not a successful run result. The job timeout covers this wait; absent an explicit value, managed jobs have no fixed total wait deadline when worker maxDurationMs is zero. Normal chat/API requests still return their initial Agent response without waiting for workers.
@@ -99,3 +101,9 @@ App-Agent cold boot: registered orchestration App Agents defer admission until t
 ## Report retries
 
 Automatic task-report failures retry the persisted result with exponential backoff (5 seconds initially, capped at 5 minutes), without spawning/replaying the worker or granting execution permission. The retry clock is derived from durable decision history, so restart and pre-upgrade failed reports retain their state. Eligible/scheduled conversations are filtered before pagination; cooling-down or busy chats do not block other reports. A stopped reporting turn is not automatically retried. A later user turn can still consume its pending updates. Successful reports mark their notifications handled and are not sent again.
+
+Worker cron requests preserve the manual-run wait semantics above. A lost response
+from a dispatched mutation is reported as `CRON_OUTCOME_UNKNOWN` with
+`retryable: false` on the private task bridge. Revoking the worker ticket aborts
+its HTTP wait, not the separately executing cron job; inspect run history before
+retrying. This does not change the public cron endpoint response schema.

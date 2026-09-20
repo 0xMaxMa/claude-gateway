@@ -135,6 +135,26 @@ describe('executeApiCommand session counting (#160)', () => {
     }
   }
 
+  it('/help executes locally and lists all API commands without inference', async () => {
+    const {result,responseText}=await runner.executeApiCommand(sessionId,chatId,'/help',{skipPersist:true});
+    expect(result.text).toBe(responseText);
+    for(const command of ['/help','/session','/sessions','/clear','/compact','/stop','/restart','/model']) expect(responseText).toContain(command+' —');
+    expect(responseText).not.toContain('/voices');
+  });
+
+  it('/restart awaits the actual stop instead of reporting success early', async () => {
+    let finish!: () => void;
+    const restart = jest.spyOn(runner as any, 'restartProcess').mockImplementation(() => new Promise<void>(resolve => {finish=resolve;}));
+    let settled = false;
+    const response = runner.executeApiCommand(sessionId, chatId, '/restart', {skipPersist:true}).then(result => {settled=true;return result;});
+    while (!finish) await new Promise(resolve => setImmediate(resolve));
+    expect(settled).toBe(false);
+    finish();
+    await expect(response).resolves.toMatchObject({result:{restarting:true}});
+    expect(restart).toHaveBeenCalledWith(sessionId, sessionId);
+    restart.mockRestore();
+  });
+
   it('U-RUN-01: /session reports the real flat-store message count, not the stale index 0', async () => {
     await seedFlatStore(sessionId, 5);
 

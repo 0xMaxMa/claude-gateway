@@ -9,18 +9,18 @@ interface CommandDef {
 }
 
 export const BUILTIN_COMMANDS: Record<string, CommandDef> = {
-  session:  { channels: ['telegram', 'discord', 'api'] },
-  sessions: { channels: ['telegram', 'discord', 'api'] },
+  session:  { channels: [...CHAT_CHANNELS, 'api'] },
+  sessions: { channels: [...CHAT_CHANNELS, 'api'] },
   new:      { channels: ['telegram', 'discord'], wordBoundary: false },
   rename:   { channels: ['telegram'], wordBoundary: false },
   clear:    { channels: [...CHAT_CHANNELS, 'api'] },
   compact:  { channels: [...CHAT_CHANNELS, 'api'] },
-  stop:     { channels: ['telegram', 'api'], wordBoundary: false },
+  stop:     { channels: [...CHAT_CHANNELS, 'api'], wordBoundary: false },
   model:    { channels: ['telegram', 'discord', 'line', 'api'] },
   models:   { channels: ['telegram', 'discord', 'line'] },
-  restart:  { channels: ['telegram', 'api'], wordBoundary: false },
+  restart:  { channels: [...CHAT_CHANNELS, 'api'], wordBoundary: false },
   start:    { channels: ['telegram'] },
-  help:     { channels: ['telegram'] },
+  help:     { channels: [...CHAT_CHANNELS, 'api'] },
   status:   { channels: ['telegram'] },
 };
 

@@ -1,3 +1,4 @@
+import { formatSessionStatus } from './session-status';
 import { SessionCompactionScheduler } from './session-compaction-scheduler';
 import { resolveSessionCompaction } from '../orchestration/session-compaction';
 import { resolveDreamingConfig } from './dreaming/config';
@@ -50,6 +51,8 @@ import { recordDeniedSender, getPendingSender, generatePairingCode, clearPending
 import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml, containsTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
+import { commandHelp } from './command-help';
+import { SessionConfirmations } from './session-confirmations';
 import { fetchModelCatalog, DEFAULT_CONTEXT_WINDOW } from './model-catalog';
 import { SafeModeManager } from './safe-mode';
 import { isValidTimezone } from './skill-learning/config';
@@ -480,6 +483,8 @@ export class AgentRunner extends EventEmitter {
     } catch { return {state: 'unknown', code: 'PROVIDER_RECEIPT_UNKNOWN'}; }
   }
 
+  private readonly sessionConfirmations = new SessionConfirmations();
+
   private async sendOrchestrationControl(channel: string, chatId: string, menu: ControlMenu, meta: Record<string, string>): Promise<void> {
     if (!['telegram', 'whatsapp', 'whatsapp_cloud', 'wechat'].includes(channel)) return sendControlMenu(this.agentConfig, channel, chatId, menu, meta);
     const text = [menu.text, ...menu.buttons.map(button => `${button.label}: /orch ${button.data.replace(/^orch:/, '')}`)].join('\n');
@@ -827,12 +832,45 @@ export class AgentRunner extends EventEmitter {
               res.writeHead(200);res.end('recovered');return;
             }
           }
+          if (channelSource !== 'telegram' && content.trim() === '/help') {
+            await this.sendOrchestrationControl(channelSource, chatId, {text:commandHelp(channelSource, !!channelOrchestration, this.gatewayConfig.gateway.headless === false), buttons:[]}, meta);
+            res.writeHead(200); res.end('ok'); return;
+          }
+          if (channelSource !== 'telegram' && (/^\/(compact|restart)(?:\s|$)/.test(content.trim()) || this.sessionConfirmations.owns(content.trim()))) {
+            const sessionId = await this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, channelSource);
+            const scope = {channel:channelSource, chatId, thread:channelSource === 'whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : meta.thread_ts ?? meta.message_thread_id ?? '', sessionId, principalId:`${channelSource}:${meta.user_id ?? meta.user ?? chatId}`};
+            if (!content.trim().startsWith('/orch ')) {
+              const operation = content.trim().startsWith('/compact') ? 'compact' : 'restart';
+              await this.sendOrchestrationControl(channelSource, chatId, this.sessionConfirmations.open(scope, operation), meta);
+              res.writeHead(200); res.end('ok'); return;
+            }
+            let operation;
+            try { operation = this.sessionConfirmations.choose(scope, content.trim()); }
+            catch (error) {
+              await this.sendOrchestrationControl(channelSource, chatId, {text:(error as Error).message, buttons:[]}, meta);
+              res.writeHead(200); res.end('ok'); return;
+            }
+            // Acknowledge before a potentially long native compaction. Only this consumed action can start it.
+            await this.sendOrchestrationControl(channelSource, chatId, {text:operation === 'cancel' ? 'Cancelled.' : operation === 'compact' ? 'Compacting Claude Code context…' : 'Restarting session process…', buttons:[]}, meta);
+            res.writeHead(200); res.end('ok');
+            if (operation !== 'cancel') void (async () => {
+              let text: string;
+              try {
+                if (operation === 'compact') await this.compactContext(sessionId);
+                else await this.restartProcess(chatId, sessionId);
+                text = operation === 'compact' ? 'Claude Code context compacted. Chat history is unchanged.' : 'Session process restarted. It starts again with your next message. Chat history is unchanged.';
+              } catch (error) { text = `Command failed: ${(error as Error).message}`; }
+              const deliveryMeta = {...meta}; delete deliveryMeta.reply_token; delete deliveryMeta.control_message_id;
+              await this.sendOrchestrationControl(channelSource, chatId, {text, buttons:[]}, deliveryMeta);
+            })().catch(error => this.logger.error('Session control delivery failed', {error:String(error)}));
+            return;
+          }
           if (channelSource!=='telegram' && this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels??['api']).includes(channelSource) && /^\/sessions?(?:\s|$)/.test(content.trim())) {
             const index=await this.sessionStore.listSessions(this.agentConfig.id,chatId,channelSource);
             const current=index.sessions.find(session=>session.id===index.activeSessionId);
             const text=content.trim()==='/sessions'
               ? `Sessions\n${index.sessions.slice(0,15).map(session=>`${session.id===index.activeSessionId?'✅ ':''}${session.name}\n${session.id}`).join('\n\n')}`
-              : `Current session: ${current?.name??'(unnamed)'}\n${index.activeSessionId}\nMode: Orchestration\nModel: ${this.agentConfig.claude.model}\nMessages: ${current?.messageCount??0}\n\nCommands: /session /sessions /voice /voices /tasks /stop`;
+              : formatSessionStatus(index.activeSessionId, current?.name ?? '(unnamed)', this.agentConfig.claude.model, await this.sessionContextInfo(index.activeSessionId, current), false, channelSource);
             await this.sendOrchestrationControl(channelSource,chatId,{text,buttons:[]},meta);
             res.writeHead(200);res.end('ok');return;
           }
@@ -1439,18 +1477,7 @@ export class AgentRunner extends EventEmitter {
           return respond({ success: true, sessionId: null, text: 'No active session found.' });
         }
         const context = await this.sessionContextInfo(meta.id, meta);
-        const lines = [
-          `📌 Current Session: ${meta.name}`,
-          `<code>${meta.id}</code>`,
-          '',
-          `👉 Context: ${context.text}`,
-          `🤖 Model: ${String(this.agentConfig.claude.model).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}`,
-        ];
-        if (context.contextUsedPct != null && context.contextUsedPct >= 80) {
-          lines.push('', '💡 Near limit — consider /compact');
-        }
-        lines.push('', 'Commands: /sessions /new /rename /clear /compact');
-        return respond({ success: true, sessionId: meta.id, text: lines.join('\n'), format: 'html' });
+        return respond({ success: true, sessionId: meta.id, text: formatSessionStatus(meta.id, meta.name, this.agentConfig.claude.model, context, true), format: 'html' });
       } catch {
         return respond({ success: false, text: 'Failed to get session info.' });
       }
@@ -2881,7 +2908,12 @@ export class AgentRunner extends EventEmitter {
   ): Promise<void> {
     const agentId = this.agentConfig.id;
 
-    if (content.startsWith('/sessions')) {
+    if (content.trim() === '/help') {
+      this.writeAutoForward(chatId, commandHelp(this.channelFor(chatId), !!this.agentConfig.orchestration?.enabled, this.gatewayConfig.gateway.headless === false));
+    } else if (/^\/restart(?:\s|$)/.test(content)) {
+      await this.restartProcess(chatId);
+      this.writeAutoForward(chatId, 'Session process restarted. It starts again with your next message.');
+    } else if (content.startsWith('/sessions')) {
       await this.handleCommandSessions(agentId, chatId);
     } else if (content.startsWith('/session') && !content.startsWith('/sessions')) {
       await this.handleCommandSessionInfo(agentId, chatId);
@@ -3039,23 +3071,7 @@ export class AgentRunner extends EventEmitter {
 
     const context = await this.sessionContextInfo(meta.id, meta);
 
-    const lines = [
-      `📌 Current Session: ${meta.name}`,
-      `<code>${index.activeSessionId}</code>`,
-      '',
-      `👉 Context: ${context.text}`,
-      `🤖 Model: ${String(this.agentConfig.claude.model).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}`,
-    ];
-
-    if (context.contextUsedPct != null && context.contextUsedPct >= 80) {
-      lines.push('', '💡 Near limit — consider /compact');
-    }
-
-    lines.push('', 'Commands: /sessions /new /rename /clear /compact');
-
-    const info = lines.join('\n');
-
-    this.writeAutoForward(chatId, info, 'html');
+    this.writeAutoForward(chatId, formatSessionStatus(meta.id, meta.name, this.agentConfig.claude.model, context, true, this.channelFor(chatId)), 'html');
   }
 
   /**
@@ -3192,11 +3208,16 @@ export class AgentRunner extends EventEmitter {
    * Restart the process for a given chatId (stop + remove from map).
    * The process will be lazily re-spawned on the next incoming message.
    */
-  private async restartProcess(chatId: string): Promise<void> {
+  private async restartProcess(chatId: string, expectedSessionId?: string): Promise<void> {
     const existing = this.sessions.get(chatId);
+    if (existing && expectedSessionId && existing.sessionId !== expectedSessionId) throw new Error('The active session changed. Run /restart again.');
+    // Mark the managed turn as intentionally interrupted before stopping its process.
+    // This also cancels a turn still preparing, before a process has been registered.
+    const sessionId = expectedSessionId ?? existing?.sessionId ?? chatId;
+    this.orchestration?.stopResponse(sessionId);
     if (existing) {
       await existing.stop();
-      this.sessions.delete(chatId);
+      if (this.sessions.get(chatId) === existing) this.sessions.delete(chatId);
     }
     // Process will be re-spawned on next incoming message
   }
@@ -5317,7 +5338,10 @@ export class AgentRunner extends EventEmitter {
     let responseText: string;
     let forcePersist = false;
     try {
-      if (cmd === '/model') {
+      if (cmd === '/help') {
+        responseText = commandHelp('api', !!this.agentConfig.orchestration?.enabled);
+        result = {text:responseText};
+      } else if (cmd === '/model') {
         const model = this.agentConfig.claude.model;
         const hasArg = command.trim().includes(' ');
         result = { model };
@@ -5354,7 +5378,7 @@ export class AgentRunner extends EventEmitter {
 
         }
       } else if (cmd === '/restart') {
-        this.restartProcess(sessionId).catch(() => {});
+        await this.restartProcess(sessionId, sessionId);
         result = { restarting: true };
         responseText = 'Session is restarting.';
       } else if (cmd === '/session') {
@@ -5365,12 +5389,10 @@ export class AgentRunner extends EventEmitter {
         // (the real conversation) directly rather than trusting meta.messageCount.
         const messageCount = (await this.sessionStore.loadSession(agentId, sessionId).catch(() => [])).length;
         const context = await this.sessionContextInfo(sessionId, meta);
-        const {text:contextText,...contextFields} = context;
+        const {text: _contextText,...contextFields} = context;
         result = {sessionId,sessionName:meta?.name ?? null,messageCount,archivedCount:meta?.archivedCount ?? 0,
           ...contextFields,model:effectiveModel};
-        responseText = [`📌 Current Session: ${meta?.name ?? '(unnamed)'}`,sessionId,'',`👉 Context: ${contextText}`,`🤖 Model: ${effectiveModel}`,
-          ...(context.contextUsedPct != null && context.contextUsedPct >= 80 ? ['', '💡 Near limit — consider /compact'] : []),
-          '', 'Commands: /sessions /new /rename /clear /compact'].join('\n');
+        responseText = formatSessionStatus(sessionId, meta?.name ?? '(unnamed)', effectiveModel, context, false, 'api');
       } else if (cmd === '/sessions') {
         // Advertised for the api channel (BUILTIN_COMMANDS), so handle it here — mirrors the
         // telegram /sessions list. Marks the session this command runs in as (current).

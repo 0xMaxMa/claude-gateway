@@ -16,7 +16,7 @@ test('container profiles do not inherit executable settings or host MCP inventor
   expect(args).toContain('--strict-mcp-config');
   expect(args[args.indexOf('--setting-sources')+1]).toBe('');
   expect(args[args.indexOf('--tools')+1]).not.toBe('default');
-  expect(containerTaskTools('worker').map(t=>t.name)).toEqual(['task_report_progress','task_request_input','task_stage_file']);
+  expect(containerTaskTools('worker').map(t=>t.name)).toEqual(['task_report_progress','task_request_input','task_stage_file','cron_list','cron_create','cron_delete','cron_update','cron_get_runs']);
   // Invariant per role: conversation_intake is always declared so the container agent's
   // cached tools prefix cannot change when semantic intake turns on or off.
   expect(containerTaskTools('agent').map(t=>t.name)).toEqual(['capabilities_list','conversation_intake','task_spawn','task_status','task_cancel','task_update','task_question','task_answer']);
@@ -63,3 +63,27 @@ test('app configuration automatically selects container and rejects host/project
   }) as AgentOrchestrationRuntime;
   expect(()=>host.configure({tasks:{workspaceMode:'container'}})).toThrow('CONTAINER_REQUIRED');
 });
+
+// Exercise the actual init validator, not just the tools/list schema snapshot.
+test.each([undefined, 'cron_run', 'generate_image', 'agent_create'])(
+  'Claude container worker accepts its declared tools but rejects extra %s', async extra => {
+    const { EventEmitter } = await import('events');
+    const { startProcessTurn } = await import('../../../src/orchestration/process-turn');
+    class Process extends EventEmitter {
+      runtimeProfile = { role: 'worker' as const, containerExecution: true, mcpConfigPath: '', overlay: '' };
+      spawnedAt = Date.now(); managedGroupStopped = false; managedProcessId = undefined;
+      async start() {}
+      interrupt() { return true; }
+      async stop() { this.managedGroupStopped = true; }
+      sendMessage() {
+        const tools = containerTaskTools('worker').map(tool => `mcp__gateway__${tool.name}`);
+        if (extra) tools.push(`mcp__gateway__${extra}`);
+        this.emit('output', JSON.stringify({ type: 'system', subtype: 'init', tools }));
+        this.emit('output', JSON.stringify({ type: 'result', result: 'Completed fixture' }));
+      }
+    }
+    const process = new Process(), turn = startProcessTurn(process, 'fixture', 1000);
+    if (extra) await expect(turn.result).rejects.toMatchObject({ code: 'PROFILE_INVENTORY_MISMATCH', rejectedTools: [`mcp__gateway__${extra}`] });
+    else await expect(turn.result).resolves.toMatchObject({ text: 'Completed fixture', interrupted: false });
+    await process.stop();
+  });

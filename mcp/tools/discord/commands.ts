@@ -13,6 +13,10 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
   },
   { name: 'clear', description: 'Reset model context without deleting chat history' },
   { name: 'compact', description: 'Compact Claude Code context without changing chat history' },
+  { name: 'help', description: 'Show all supported commands' },
+  { name: 'restart', description: 'Restart the session process after confirmation' },
+  { name: 'sessions', description: 'List sessions' },
+  { name: 'models', description: 'List and select a model' },
   { name: 'session', description: 'Show current session info' },
   {
     name: 'new',
@@ -32,7 +36,6 @@ export function commandDefinitions(orchestration:boolean,interactive:boolean):Sl
       {name:'voice',description:'Turn automatic voice replies on or off',options:[{name:'mode',description:'on or off (omit to show buttons)',required:false,type:'STRING' as const}]},
       {name:'voices',description:'Choose the agent voice'},
       {name:'tasks',description:'View pending tasks in this conversation'},
-      {name:'help',description:'Show available orchestration controls'},
     ] : []),
     {name:'stop',description:orchestration?'Stop a response or choose a task to stop':'Stop the agent response'},
     ...(interactive && !orchestration ? [{name:'cli',description:'Open the live terminal viewer'}] : []),

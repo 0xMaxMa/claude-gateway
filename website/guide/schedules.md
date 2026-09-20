@@ -2,6 +2,12 @@
 
 Use `HEARTBEAT.md` for workspace-defined proactive behavior. Use the cron API or CLI when you need managed jobs, explicit run history, and manual triggering.
 
+## Schedule from a conversation
+
+Ask your agent to create or update a schedule, or use `/cron`. In orchestration mode, the agent delegates to a worker which discovers the cron tools on demand. The worker can access only schedules owned by its agent; API credentials remain in the gateway. Existing jobs are updated in place.
+
+App-agent workers may create and manage schedules that run agent prompts inside their container. They cannot schedule host shell commands or trigger jobs with `cron_run`; use the authorized operator API for immediate runs. Revoked or completed worker attempts cannot continue changing schedules.
+
 ## Add a heartbeat
 
 Put this YAML in the agent's `HEARTBEAT.md`:
@@ -83,3 +89,28 @@ With orchestration enabled, a scheduled agent prompt can create managed executio
 An explicit job `timeoutMs` takes precedence. Otherwise the orchestration cron wait uses the worker total deadline plus the conversation decision ceiling when a worker total deadline is configured. With the default `tasks.maxDurationMs: 0`, that outer wait has no total deadline; worker startup, response, and inactivity controls still apply. A timeout log can include `phase`, elapsed time, and idle time, which helps distinguish slow startup from a task that stopped making progress.
 
 Source: [cron orchestration integration](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/cron/manager.ts).
+
+## Worker capability limits
+
+The skill catalog describes installed instructions, not an authorization grant.
+`capabilities_list` marks skills with known unavailable declared gateway tools as
+`tool_access_limited`. For example, app installation/management and agent creation
+are administrative capabilities, not automatically granted to orchestration workers.
+Retrying such a skill or entering its slash command does not bypass that boundary.
+
+Host workers can discover configured browser, image, video, file sharing and scoped
+memory capabilities through the gateway catalog. Channel delivery is performed by
+the orchestrator, not by worker bot credentials. Container workers have a separate
+restricted inventory; host media, browser and shared-memory access is not implied.
+External MCP servers depend on the selected worker harness and its configuration.
+
+## Manual runs from workers
+
+For a host worker, `cron_run` waits for the real job result, including delegated
+work and the final agent report. It does not use the short 15-second CRUD deadline.
+Worker cancellation, ticket revocation, gateway shutdown or a disconnected MCP
+caller interrupts the wait; **it does not cancel an already dispatched cron job**.
+If the response is lost, `CRON_OUTCOME_UNKNOWN` means the execution or mutation
+may still complete. Inspect `cron_get_runs` and `cron_list` before retrying; never
+interpret this as proof that nothing happened. Lookup and HTTP API errors remain
+explicit `CRON_API_ERROR` results. MCP clients may impose their own wait limits.

@@ -1,5 +1,6 @@
+import { CRON_TOOLS } from '../cron/tool-schemas';
+import { containerTaskTools } from './container-tool-schemas';
 import { retryableMutation } from './mutation-recovery';
-import { WORKFLOW_SCHEMA } from './workflow';
 import { CHECKPOINT_HOOK } from './tasks/checkpoint-hook';
 import { createServer, Server } from 'http';
 import { randomBytes } from 'crypto';
@@ -26,8 +27,9 @@ export class TaskBridge {
   private url = '';
   recordRetrievals = false;
   private readonly scopes = new Map<string, Scope>();
+  private readonly cancellations = new Map<string, AbortController>();
   constructor(private readonly tasks: TaskService, private readonly files?: TaskFiles,
-    private readonly shareCall?: (attemptId: string, generation: number, args: Record<string, unknown>) => Promise<unknown>, private readonly skills?: () => SkillRegistry, private readonly container?: { agent: AgentConfig; spool: string }) {}
+    private readonly shareCall?: (attemptId: string, generation: number, args: Record<string, unknown>) => Promise<unknown>, private readonly skills?: () => SkillRegistry, private readonly container?: { agent: AgentConfig; spool: string }, private readonly cronCall?: (attemptId: string, generation: number, tool: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>) {}
   captureWorkerOutput(attemptId: string, generation: number, line: string): void {
     try { this.files?.captureOutput(attemptId, generation, line); }
     catch { /* A failed image capture must not break worker execution. Staging reports missing capture. */ }
@@ -128,13 +130,25 @@ export class TaskBridge {
             this.files.scope(scope.attemptId, scope.generation);
             result = await this.shareCall(scope.attemptId, scope.generation, a);
           }
+          else if (CRON_TOOLS.some(tool => tool.name === command.tool) && this.files && this.cronCall) {
+            this.files.scope(scope.attemptId, scope.generation);
+            const cancelled = this.cancellations.get(token!);
+            if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
+            const disconnected = new AbortController();
+            const onClose = () => { if (!response.writableFinished) disconnected.abort(); };
+            response.once('close', onClose);
+            try {
+              result = await this.cronCall(scope.attemptId, scope.generation, command.tool, a,
+                AbortSignal.any([cancelled.signal, disconnected.signal]));
+            } finally { response.off('close', onClose); }
+          }
           else throw new OrchestrationError('TOOL_DENIED');
         }
         response.end(JSON.stringify(result));
       } catch (error) {
         const code = error instanceof OrchestrationError ? error.code : 'INVALID_REQUEST';
         response.statusCode = code === 'ACCESS_DENIED' ? 403 : 400;
-        response.end(JSON.stringify({ error: code, ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        response.end(JSON.stringify({ error: code, ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;
@@ -147,6 +161,7 @@ export class TaskBridge {
     if (!this.server) throw new Error('Bridge is not started');
     const token = randomBytes(32).toString('hex');
     this.scopes.set(token, scope);
+    this.cancellations.set(token, new AbortController());
     // A ticket is immutable for the lifetime of this MCP process. Never replace
     // a shared ticket file at the next turn: late calls must keep their epoch.
     mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -163,6 +178,7 @@ export class TaskBridge {
       GATEWAY_SESSION_ID: worker?.task.agentSessionId ?? '', GATEWAY_SESSION_MEDIA_DIR: worker?.mediaDir ?? '',
       GATEWAY_ORCHESTRATION_MEDIA: worker ? 'true' : '',
       GATEWAY_LAZY_TOOLS: worker ? 'true' : '',
+      GATEWAY_ORCHESTRATION_CRON: worker && this.cronCall ? 'true' : '',
       GETPOD_BROWSER_URL: worker ? process.env.GETPOD_BROWSER_URL ?? 'http://127.0.0.1:10880' : '',
       GETPOD_BROWSER_API_KEY: worker ? process.env.GETPOD_BROWSER_API_KEY ?? '' : '',
       GETPOD_BROWSER_DISABLED: worker ? process.env.GETPOD_BROWSER_DISABLED ?? '' : 'true',
@@ -185,33 +201,15 @@ export class TaskBridge {
     const personaContext = scope.role === 'agent' ? `This agent persona workspace: ${JSON.stringify(this.container ? '/workspace' : workspace)}.` : '';
     const sourceRules = `${personaContext}\n${writeMemory ? `Channel memory updates use scoped memory tools. ${SECRET_RULES}` : API_SOURCE_RULES}\n${IDENTITY_EDIT_RULES}`;
     return { profile: { role: scope.role, checkpointCommand, containerExecution: Boolean(this.container), mcpConfigPath, overlay: `${scope.role === 'agent' ? AGENT_OVERLAY : WORKER_OVERLAY}\n\n${sourceRules}` },
-      revoke: () => { this.scopes.delete(token); if (scope.role === 'worker') this.files?.releaseCaptured(scope.attemptId); } };
+      revoke: () => { this.cancellations.get(token)?.abort(); this.cancellations.delete(token); this.scopes.delete(token); if (scope.role === 'worker') this.files?.releaseCaptured(scope.attemptId); } };
   }
   async close(): Promise<void> {
+    for (const controller of this.cancellations.values()) controller.abort();
+    this.cancellations.clear();
     this.scopes.clear();
     const server = this.server; this.server = undefined;
     if (server) { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
   }
 }
 
-/** Container task-only MCP inventory; no host media/browser/memory delegation.
- * Invariant per role for the same reason as AGENT_TASK_TOOLS: this array becomes the
- * container agent's advertised tool list, i.e. the head of its cached prompt prefix. */
-export function containerTaskTools(role: 'agent' | 'worker') {
-  const text = { type: 'string' };
-  const entries: Array<[string, Record<string, unknown>, string[], string]> = role === 'agent' ? [
-    ['capabilities_list',{query:text,catalog_version:text,offset:{type:'integer',minimum:0}},[],'Read this app agent capability catalog without granting host access. Follow next_offset with catalog_version for the complete list; restart at 0 on CAPABILITY_CATALOG_CHANGED.'],
-    ['conversation_intake',{mode:{type:'string',enum:['ready','wait','update','resolve']},resolution:text,acknowledgement:text,preparation:text,clarification:text,task_id:text},['mode'],'Only when this turn\'s instructions explicitly ask you to run intake: classify readiness, acknowledge complete instructions before execution, or prepare incomplete materials and wait. Without that instruction this turn, answer directly and use the task tools directly instead.'],
-    ['task_spawn', { retry_of:text, title:text, instructions:text, target_profile:text, spoken_acknowledgement:text, skill_name:text, skill_args:text, continue_task_id:text, continuation_policy:{type:'string',enum:['after_success','after_terminal']}, context_refs:{type:'array',items:text} }, ['title','instructions','target_profile'], 'Queue work inside this app container and return a durable receipt.'],
-    ['task_status',{task_id:text},[],'Read task status without waiting. Pass task_id to retrieve its complete stored result and evidence; task indexes in conversation context are not result reports.'],
-    ['task_cancel',{task_id:text},['task_id'],'Request cancellation.'],
-    ['task_update',{retry_of:text,task_id:text,expected_revision:{type:'integer'},instruction:text,mode:{type:'string',enum:['when_ready','interrupt_and_resume']}},['task_id','expected_revision','instruction','mode'],'Replace the current task instructions when the user changes the goal or constraints. Write the complete updated brief, preserving unchanged requirements and citing relevant user input IDs.'],
-    ['task_question',{action:{type:'string',enum:['ask','discuss','defer','mute','resume']},question_ids:{type:'array',items:text,minItems:1,maxItems:20},text,delay_ms:{type:'integer',minimum:60000,maximum:2592000000}},['action','question_ids'],'Manage pending questions without answering or resuming work. Ask stages one natural separate message after your reply; discuss marks ongoing consultation; defer/mute/resume persist the user reminder preference.'],
-    ['task_answer',{task_id:text,question_id:text,answer:text},['task_id','question_id','answer'],'Answer a pending worker question. Cite the user input IDs supporting any authorization; distinguish direct user statements from your interpretation. For a changed goal, prefer task_update with a complete replacement brief instead of repeatedly answering the same question.'],
-  ] : [
-    ['task_report_progress',{text,checkpoint:WORKFLOW_SCHEMA},['text'],'Report current phase, versioned evidence, checks and findings internally; no user notification is implied.'],
-    ['task_request_input',{question:text},['question'],'Ask for input then end the turn.'],
-    ['task_stage_file',{path:text,caption:text},['path'],'Stage a finished file from /workspace or /tmp inside the container.'],
-  ];
-  return entries.map(([name,properties,required,description])=>({name,description,inputSchema:{type:'object',properties,required,additionalProperties:false}}));
-}
+export { containerTaskTools } from './container-tool-schemas';

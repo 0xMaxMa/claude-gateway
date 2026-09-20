@@ -24,7 +24,7 @@ claude-gateway gateway logs --follow --agent assistant
 claude-gateway doctor
 ```
 
-Use `/dashboard` for sessions and knowledge views. Log in with an admin key. Keep `/health` checks alongside a real agent round trip: a responsive HTTP listener does not prove a channel or model works.
+Use `/dashboard` for sessions and knowledge views. Log in with an admin key. Dashboard login lasts eight hours from sign-in and survives gateway restarts; requests and restarts do not extend that expiry. The gateway keeps hashed session records in `dashboard-sessions.db` beside `config.json`, with owner-only file permissions. Logout revokes that browser session; removing, rotating or demoting its admin key also invalidates it when checked. Other admin keys retain their own sessions. Cookies issued by older, memory-only versions require one new login after upgrading. Keep the config directory persistent when recreating a container. Keep `/health` checks alongside a real agent round trip: a responsive HTTP listener does not prove a channel or model works.
 
 ## Upgrade deliberately
 

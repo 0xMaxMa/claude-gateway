@@ -11,6 +11,10 @@ export class WorkerPool {
       binding_key TEXT NOT NULL, session_id TEXT NOT NULL, active_task_id TEXT,
       idle_since INTEGER NOT NULL, resumable INTEGER NOT NULL DEFAULT 0, fingerprint TEXT)`);
   }
+  /** Includes both active leases and idle resumable slots for native transcript retention. */
+  retainedSessionIds(): string[] {
+    return this.store.all('SELECT session_id FROM worker_pool').map(row => String(row.session_id));
+  }
   prune(ttl: number, now = Date.now()): void {
     this.store.run('DELETE FROM worker_pool WHERE active_task_id IS NULL AND idle_since <= ?', now - ttl);
   }

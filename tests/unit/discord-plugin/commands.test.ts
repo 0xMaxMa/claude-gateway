@@ -19,8 +19,9 @@ describe('SLASH_COMMANDS', () => {
     expect(questionOpt!.required).toBe(true);
   });
 
-  it('defines exactly 6 slash commands', () => {
-    expect(SLASH_COMMANDS).toHaveLength(6);
+  it('registers session commands, help and model selection without duplicates', () => {
+    expect(new Set(SLASH_COMMANDS.map(c=>c.name)).size).toBe(SLASH_COMMANDS.length);
+    for(const command of ['help','restart','sessions','models']) expect(SLASH_COMMANDS.some(c=>c.name===command)).toBe(true);
     const names = SLASH_COMMANDS.map(c => c.name);
     expect(names).toContain('ask');
     expect(names).toContain('session');

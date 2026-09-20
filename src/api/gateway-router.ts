@@ -1,3 +1,4 @@
+import { DashboardSessions } from './dashboard-sessions';
 import { readMemoryActivity, activitySummary, MaintenanceReader } from './memory-activity';
 import { dashboardRange, dashboardSince } from '../ui/dashboard-range';
 import { DashboardReader } from '../orchestration/dashboard-reader';
@@ -253,10 +254,8 @@ export class GatewayRouter {
   private readonly ptyStreamTickets = new Map<string, { agentId: string; sessionId: string; expiresAt: number }>();
   private ticketPruner: ReturnType<typeof setInterval> | null = null;
 
-  /** Dashboard session tokens (DASH_SESSION_TTL_MS). Issued at POST /dashboard/login
-   *  and carried by the HttpOnly `dash_session` cookie — never embedded in the HTML,
-   *  so no token is exposed to view-source/XSS. token → expiresAt. */
-  private readonly dashboardTokens = new Map<string, number>();
+  /** Persistent, hashed login sessions; embedded routers without a config path use memory. */
+  private readonly dashboardSessions: DashboardSessions;
 
   /** Failed-login throttle for /dashboard/login, keyed by client IP.
    *  ip → { count, resetAt }. Blocks brute-forcing configured API keys. */
@@ -315,6 +314,7 @@ export class GatewayRouter {
     this.gatewayConfig = gatewayConfig;
     this.cronManager = cronManager;
     this.configPath = configPath;
+    this.dashboardSessions = new DashboardSessions(configPath ? path.join(path.dirname(configPath), 'dashboard-sessions.db') : undefined);
     this.appsRegistry = appsRegistry;
     this.appInstaller = appInstaller;
     this.appRegistryClient = appRegistryClient;
@@ -375,8 +375,8 @@ export class GatewayRouter {
   private hasValidDashSession(req: Request): boolean {
     const token = parseCookies(req.headers['cookie'])[DASH_SESSION_COOKIE];
     if (!token) return false;
-    const exp = this.dashboardTokens.get(token) ?? 0;
-    return exp > Date.now();
+    try { return this.dashboardSessions.valid(token, this.apiKeys); }
+    catch { return false; } // Unreadable/corrupt auth storage must never grant access.
   }
 
   /**
@@ -1016,8 +1016,9 @@ export class GatewayRouter {
       }
       // Success: clear this IP's failure window.
       this.loginAttempts.delete(this.clientIp(req));
-      const token = crypto.randomBytes(32).toString('hex');
-      this.dashboardTokens.set(token, Date.now() + DASH_SESSION_TTL_MS);
+      let token: string;
+      try { token = this.dashboardSessions.issue(key, DASH_SESSION_TTL_MS); }
+      catch { res.status(503).json({error:'Dashboard session storage is unavailable.'}); return; }
       res.setHeader('Set-Cookie', this.buildSessionCookie(req, token, DASH_SESSION_TTL_MS));
       res.json({ ok: true });
     });
@@ -1025,7 +1026,8 @@ export class GatewayRouter {
     // Dashboard logout — revoke the session token and clear the cookie.
     this.app.post('/dashboard/logout', (req: Request, res: Response) => {
       const token = parseCookies(req.headers['cookie'])[DASH_SESSION_COOKIE];
-      if (token) this.dashboardTokens.delete(token);
+      try { if (token) this.dashboardSessions.revoke(token); }
+      catch { res.status(503).json({error:'Could not revoke the dashboard session. Please try again.'}); return; }
       res.setHeader('Set-Cookie', this.buildSessionCookie(req, '', 0));
       res.json({ ok: true });
     });
@@ -1602,9 +1604,7 @@ export class GatewayRouter {
         for (const [k, v] of this.ptyStreamTickets) {
           if (v.expiresAt < now) this.ptyStreamTickets.delete(k);
         }
-        for (const [k, exp] of this.dashboardTokens) {
-          if (exp < now) this.dashboardTokens.delete(k);
-        }
+        try { this.dashboardSessions.prune(); } catch { /* Login reports unavailable storage; auth fails closed. */ }
         for (const [ip, rec] of this.loginAttempts) {
           if (rec.resetAt < now) this.loginAttempts.delete(ip);
         }
@@ -1759,6 +1759,7 @@ export class GatewayRouter {
     await this.dashboardReader.close();
     await this.voiceApi?.close();
     if (this.ticketPruner) clearInterval(this.ticketPruner);
+    this.dashboardSessions.close();
     // Terminate live WebSocket clients first. The dashboard PTY viewer holds these
     // open indefinitely; without an explicit terminate, server.close() below would
     // wait forever for them to drain (the "Ctrl+C twice" hang).

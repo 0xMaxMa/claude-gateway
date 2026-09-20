@@ -7,6 +7,7 @@ import { GatewayConfig, Logger } from '../types';
 import { resolveGatewayPublicUrl } from './public-url';
 import { upgradeAgentWhatsAppAccounts } from './whatsapp-accounts';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../orchestration/config';
+import { validateWorkerHarness, validateWorkerModel } from '../orchestration/worker-harness';
 
 export class ConfigValidationError extends Error {
   constructor(message: string) {
@@ -74,6 +75,7 @@ function interpolateObject(obj: unknown): unknown {
  * Validate an agent config. Returns an error message if invalid, or null if valid.
  */
 function validateAgent(agent: Record<string, unknown>, index: number, orchestration?: GatewayOrchestration): string | null {
+  try { validateWorkerHarness(agent.workers); } catch (error) { return `agent '${agent.id}': ${(error as Error).message}`; }
   if (agent.voice !== undefined || agent.orchestration !== undefined || orchestration !== undefined) {
     try { resolveOrchestrationConfig(effectiveOrchestration(agent.orchestration as OrchestrationConfig,orchestration), agent.voice as import('../orchestration/config').AgentVoiceConfig); }
     catch (error) { return `agent '${agent.id}': ${(error as Error).message}`; }
@@ -238,7 +240,11 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
   if (!config.gateway || typeof config.gateway !== 'object') {
     throw new ConfigValidationError('Config is missing required "gateway" object');
   }
-  try {validateGatewayOrchestration((config.gateway as any).orchestration);}catch(error){throw new ConfigValidationError((error as Error).message);}
+  try {
+    validateGatewayOrchestration((config.gateway as any).orchestration);
+    validateWorkerHarness((config.gateway as any).workers);
+    for (const model of (config.gateway as any).models ?? []) validateWorkerModel(model);
+  } catch(error){throw new ConfigValidationError((error as Error).message);}
   let migratedVoice = false;
   try { migratedVoice = migrateAgentVoiceConfig(config as any); }
   catch (error) { throw new ConfigValidationError((error as Error).message); }

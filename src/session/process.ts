@@ -1,3 +1,4 @@
+import { prepareManagedConnectors } from './managed-connectors';
 import { RequestToolCapture, RequestToolSchemas } from './request-tool-capture';
 import type { InputImage } from './input-image';
 import { prepareContainerProfile, stopContainerProfile, CONTAINER_SUPERVISOR, containerNode, assertContainerBinding } from '../orchestration/container';
@@ -720,20 +721,8 @@ export class SessionProcess extends EventEmitter {
       // or start host-configured stdio servers inside their execution boundary.
       if (this.runtimeProfile.role === 'agent' || this.agentConfig.allow_tools === false || this.runtimeProfile.connectorsAllowed === false || this.agentConfig.type === 'app-agent' || (this.runtimeProfile.role === 'worker' && !this.runtimeProfile.hostExecution)) return this.runtimeProfile.mcpConfigPath;
       const ticket = JSON.parse(fs.readFileSync(this.runtimeProfile.mcpConfigPath, 'utf8'));
-      const connectors = resolveEnabledConnectors(this.agentConfig, this.gatewayConfig.gateway.customConnectors,
-        this.gatewayConfig.gateway.connectorsDefaultEnabled ?? true);
-      this.spawnedConnectors = new Map();
-      for (const [id, server] of Object.entries(connectors)) {
-        if (isReservedConnectorId(id)) continue;
-        this.spawnedConnectors.set(id, connectorFingerprint(server));
-      }
-      const servers = Object.fromEntries([...this.spawnedConnectors.keys()].map((id, index) => {
-        const connectorPath = path.join(path.dirname(this.runtimeProfile!.mcpConfigPath), `connector-${index}.json`);
-        fs.writeFileSync(connectorPath, JSON.stringify(connectors[id]), {mode:0o600});
-        fs.chmodSync(connectorPath, 0o600);
-        this.managedConnectorPaths.add(connectorPath);
-        return [id, {command:'bun', args:[path.resolve(__dirname, '../../mcp/lazy-connector.ts'), connectorPath]}];
-      }));
+      const { servers, connectors } = prepareManagedConnectors(this.agentConfig, this.gatewayConfig, this.runtimeProfile, this.managedConnectorPaths);
+      this.spawnedConnectors = new Map(Object.entries(connectors).map(([id, server]) => [id, connectorFingerprint(server)]));
       const configPath = path.join(path.dirname(this.runtimeProfile.mcpConfigPath), 'managed-connectors.json');
       fs.writeFileSync(configPath, JSON.stringify({ mcpServers: { ...servers, ...ticket.mcpServers } }), { mode: 0o600 });
       fs.chmodSync(configPath, 0o600);

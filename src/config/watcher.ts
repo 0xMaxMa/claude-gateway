@@ -242,6 +242,7 @@ export class ConfigWatcher extends EventEmitter {
       const fieldPairs: Array<{ field: string; oldVal: unknown; newVal: unknown }> = [
         { field: 'orchestration', oldVal: oldAgent.orchestration, newVal: newAgent.orchestration },
         { field: 'voice', oldVal: oldAgent.voice, newVal: newAgent.voice },
+        { field: 'workers', oldVal: oldAgent.workers, newVal: newAgent.workers },
         { field: 'claude.model', oldVal: oldAgent.claude.model, newVal: newAgent.claude.model },
         { field: 'claude.extraFlags', oldVal: oldAgent.claude.extraFlags, newVal: newAgent.claude.extraFlags },
         { field: 'session.idleTimeoutMinutes', oldVal: oldAgent.session?.idleTimeoutMinutes, newVal: newAgent.session?.idleTimeoutMinutes },
@@ -270,6 +271,7 @@ export class ConfigWatcher extends EventEmitter {
     // Gateway-level fields (emitted with agentId: '')
     const gatewayFieldPairs: Array<{ field: string; oldVal: unknown; newVal: unknown }> = [
       {field:'gateway.orchestration',oldVal:oldCfg.gateway.orchestration,newVal:newCfg.gateway.orchestration},
+      {field:'gateway.workers',oldVal:oldCfg.gateway.workers,newVal:newCfg.gateway.workers},
       { field: 'gateway.headless', oldVal: oldCfg.gateway.headless, newVal: newCfg.gateway.headless },
       { field: 'gateway.publicUrl', oldVal: oldCfg.gateway.publicUrl, newVal: newCfg.gateway.publicUrl },
       { field: 'gateway.logs', oldVal: oldCfg.gateway.logs, newVal: newCfg.gateway.logs },

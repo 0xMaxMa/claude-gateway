@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { commandHelp } from '../../../dist/agent/command-help.js';
 import { parseSessionInfo } from './session-browser';
 /**
  * Telegram channel for Claude Gateway.
@@ -1162,28 +1163,7 @@ bot.command('start', async ctx => {
 
 bot.command('help', async ctx => {
   if (ctx.chat?.type !== 'private') return
-  await ctx.reply(
-    `Messages you send here route to a paired Claude Code session. ` +
-    `Text and photos are forwarded; replies and reactions come back.\n\n` +
-    `*Session management*\n` +
-    `/session — show current session info\n` +    
-    `/sessions — list and switch between sessions\n` +
-    `/new <name> — create a new session\n` +
-    `/rename <name> — rename current session\n` +
-    `/clear — reset context; keep chat history\n` +
-    `/compact — compact Claude Code context; keep chat history\n` +
-    (ORCHESTRATION_ENABLED ? `/stop — stop the reply and choose a task to cancel\n` : `/stop — interrupt the running turn\n`) +
-    `/restart — graceful restart session\n\n` +
-    `*Agent*\n` +
-    `/model — show current AI model\n` +
-    `/models — switch AI model\n` +
-    (ORCHESTRATION_ENABLED ? `/tasks — view pending tasks in this chat\n/voice — turn automatic voice replies on/off (default off)\n/voices — choose the agent voice\n` : '') +
-    (INTERACTIVE_CLI_ENABLED ? `/cli — open the live terminal viewer\n\n` : '\n') +
-    `*Account*\n` +
-    `/start — pairing instructions\n` +
-    `/status — check your pairing state`,
-    { parse_mode: 'Markdown' }
-  )
+  await ctx.reply(commandHelp('telegram', ORCHESTRATION_ENABLED, INTERACTIVE_CLI_ENABLED))
 })
 
 bot.command('status', async ctx => {

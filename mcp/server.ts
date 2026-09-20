@@ -47,7 +47,7 @@ for (const mod of modules) {
 
   for (const tool of mod.getTools()) {
     if (ORCHESTRATION_ROLE && !['memory_search', 'memory_get'].includes(tool.name) && !(ORCHESTRATION_ROLE === 'worker' &&
-      ((mod.id === 'image' || mod.id === 'video' || mod.id === 'share-file' || mod.id === 'browser') || (mod.id === 'memory' && process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true')))) continue;
+      ((mod.id === 'cron' || mod.id === 'image' || mod.id === 'video' || mod.id === 'share-file' || mod.id === 'browser') || (mod.id === 'memory' && process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true')))) continue;
     toolMap.set(tool.name, mod);
     visibleTools.push(tool);
   }

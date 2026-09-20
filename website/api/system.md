@@ -73,8 +73,10 @@ curl http://localhost:10850/api/v1/commands | jq
 {
   "commands": [
     { "name": "/session",  "description": "Show current session info (name, selected model, measured context usage)" },
+    { "name": "/sessions", "description": "List sessions" },
+    { "name": "/help",     "description": "Show available commands" },
     { "name": "/clear",    "description": "Reset Claude Code context; keep chat history" },
-    { "name": "/compact",  "description": "Summarise old history and keep only recent messages" },
+    { "name": "/compact",  "description": "Compact Claude Code context; keep chat history" },
     { "name": "/stop",     "description": "Interrupt the in-flight turn" },
     { "name": "/restart",  "description": "Graceful session restart" },
     { "name": "/model",    "description": "Show the current AI model" }

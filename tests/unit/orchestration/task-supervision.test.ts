@@ -201,3 +201,12 @@ test('a later advisory cannot conceal an unacknowledged user amendment at Stop',
  expect(pending.directiveKind).toBe('assignment');expect(pending.directive).toContain('Also inspect the attachment');
  }finally{x.store.close();}
 });
+
+test.each([true,false])('unresolved structured blocker=%s is reflected in terminal state and full result',blocked=>{
+ const x=setup();try{
+ x.tasks.progress(x.attempt.attemptId,x.attempt.generation,'Checked capability', 'progress-block', {phase:blocked?'blocked':'complete',evidenceVersion:'v1',nextAction:'Report',checks:[],findings:[{id:'capability',status:blocked?'open':'resolved',summary:'Required capability unavailable'}]});
+ const result=x.tasks.finish(x.attempt.attemptId,x.attempt.generation,{type:'completed',result:{summary:'Full findings retained',artifactIds:[]}});
+ expect(result.state).toBe(blocked?'failed':'completed');expect(result.result?.summary).toBe('Full findings retained');
+ if(blocked)expect(result.failure?.code).toBe('WORKER_BLOCKED');
+ }finally{x.store.close();}
+});

@@ -150,3 +150,32 @@ test('real lazy inventory preserves every execution schema and successful browse
     local.stop(true); rmSync(dir, { recursive: true, force: true });
   }
 }, 15000);
+
+test('cron tools survive module registration and lazy discovery, while privileged modules remain unavailable', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cron-lazy-'));
+  const calls: string[] = [];
+  const bridge = Bun.serve({hostname:'127.0.0.1',port:0,async fetch(req) {
+    const body=await req.json(); calls.push(body.tool);
+    return Response.json(body.tool === 'cron_list' ? {jobs:[]} : {active:true});
+  }});
+  const ticket=join(dir,'ticket.json');writeFileSync(ticket,JSON.stringify({url:`http://127.0.0.1:${bridge.port}`,token:'fixture'}));
+  const client=new Client({name:'cron-test',version:'1'});
+  try{
+    await client.connect(new StdioClientTransport({command:'bun',args:[join(import.meta.dir,'server.ts')],stderr:'ignore',env:{PATH:process.env.PATH??'',HOME:dir,GATEWAY_AGENT_ID:'fixture',GATEWAY_WORKSPACE_DIR:dir,GATEWAY_ORCHESTRATION_ROLE:'worker',GATEWAY_ORCHESTRATION_MEDIA:'true',GATEWAY_ORCHESTRATION_CRON:'true',GATEWAY_ORCHESTRATION_TICKET_FILE:ticket,GATEWAY_LAZY_TOOLS:'true'}}));
+    const search=await client.callTool({name:'tool_search',arguments:{query:'cron'}});
+    expect(JSON.parse((search.content as any)[0].text).total).toBe(6);
+    const result=await client.callTool({name:'tool_call',arguments:{name:'cron_list',arguments:{}}});
+    expect(result.isError).not.toBe(true);expect(calls).toEqual(['task_validate','cron_list']);
+    for(const name of ['agent_create','install_app','skill_install','api_request','telegram_send_message']){
+      const denied=await client.callTool({name:'tool_call',arguments:{name,arguments:{}}});expect(denied.isError).toBe(true);
+    }
+  }finally{await client.close();bridge.stop(true);rmSync(dir,{recursive:true,force:true});}
+},15000);
+
+test('all registered worker modules follow the scoped execution policy',async()=>{
+ const {gatewayModules}=await import('./modules');
+ expect(gatewayModules('agent').map(m=>m.id)).toEqual(['memory']);
+ expect(gatewayModules('worker',true).map(m=>m.id)).toEqual(['memory','cron','image','video','share-file','browser']);
+ const standalone=gatewayModules().map(m=>m.id);
+ for(const id of ['cron','image','video','share-file','browser','skills','apps','agent','api','telegram','discord','line','slack','whatsapp','whatsapp_cloud','wechat'])expect(standalone).toContain(id);
+});
