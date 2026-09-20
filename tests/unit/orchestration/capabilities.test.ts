@@ -288,3 +288,10 @@ test('real MCP metadata discovery follows all pages without invoking tools or ex
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('skill metadata cannot claim execution when its declared gateway tool is restricted', () => {
+  const snapshot = {observedAt:'now',servers:[],entries:[{name:'mcp__gateway__list_apps',description:'Apps',server:'gateway',status:'not_exposed_to_workers',via:'unavailable'}]};
+  const registry = {skills:new Map([['apps:list-apps',{description:'List apps',source:'module',userInvocable:true,allowedTools:['mcp__gateway__list_apps']}]]),cliSkills:[]} as unknown as SkillRegistry;
+  const page=readCapabilityPage(snapshot,registry,{});
+  expect(page.entries.find(e=>e.name==='apps:list-apps')).toMatchObject({status:'tool_access_limited',via:'unavailable'});
+});

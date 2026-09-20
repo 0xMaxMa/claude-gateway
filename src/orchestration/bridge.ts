@@ -1,3 +1,4 @@
+import { CRON_TOOLS, CONTAINER_CRON_TOOLS } from '../cron/tool-schemas';
 import { retryableMutation } from './mutation-recovery';
 import { WORKFLOW_SCHEMA } from './workflow';
 import { CHECKPOINT_HOOK } from './tasks/checkpoint-hook';
@@ -27,7 +28,7 @@ export class TaskBridge {
   recordRetrievals = false;
   private readonly scopes = new Map<string, Scope>();
   constructor(private readonly tasks: TaskService, private readonly files?: TaskFiles,
-    private readonly shareCall?: (attemptId: string, generation: number, args: Record<string, unknown>) => Promise<unknown>, private readonly skills?: () => SkillRegistry, private readonly container?: { agent: AgentConfig; spool: string }) {}
+    private readonly shareCall?: (attemptId: string, generation: number, args: Record<string, unknown>) => Promise<unknown>, private readonly skills?: () => SkillRegistry, private readonly container?: { agent: AgentConfig; spool: string }, private readonly cronCall?: (attemptId: string, generation: number, tool: string, args: Record<string, unknown>) => Promise<unknown>) {}
   captureWorkerOutput(attemptId: string, generation: number, line: string): void {
     try { this.files?.captureOutput(attemptId, generation, line); }
     catch { /* A failed image capture must not break worker execution. Staging reports missing capture. */ }
@@ -128,13 +129,17 @@ export class TaskBridge {
             this.files.scope(scope.attemptId, scope.generation);
             result = await this.shareCall(scope.attemptId, scope.generation, a);
           }
+          else if (CRON_TOOLS.some(tool => tool.name === command.tool) && this.files && this.cronCall) {
+            this.files.scope(scope.attemptId, scope.generation);
+            result = await this.cronCall(scope.attemptId, scope.generation, command.tool, a);
+          }
           else throw new OrchestrationError('TOOL_DENIED');
         }
         response.end(JSON.stringify(result));
       } catch (error) {
         const code = error instanceof OrchestrationError ? error.code : 'INVALID_REQUEST';
         response.statusCode = code === 'ACCESS_DENIED' ? 403 : 400;
-        response.end(JSON.stringify({ error: code, ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        response.end(JSON.stringify({ error: code, ...(error instanceof OrchestrationError && code === 'CRON_API_ERROR' ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;
@@ -163,6 +168,7 @@ export class TaskBridge {
       GATEWAY_SESSION_ID: worker?.task.agentSessionId ?? '', GATEWAY_SESSION_MEDIA_DIR: worker?.mediaDir ?? '',
       GATEWAY_ORCHESTRATION_MEDIA: worker ? 'true' : '',
       GATEWAY_LAZY_TOOLS: worker ? 'true' : '',
+      GATEWAY_ORCHESTRATION_CRON: worker && this.cronCall ? 'true' : '',
       GETPOD_BROWSER_URL: worker ? process.env.GETPOD_BROWSER_URL ?? 'http://127.0.0.1:10880' : '',
       GETPOD_BROWSER_API_KEY: worker ? process.env.GETPOD_BROWSER_API_KEY ?? '' : '',
       GETPOD_BROWSER_DISABLED: worker ? process.env.GETPOD_BROWSER_DISABLED ?? '' : 'true',
@@ -213,5 +219,5 @@ export function containerTaskTools(role: 'agent' | 'worker') {
     ['task_request_input',{question:text},['question'],'Ask for input then end the turn.'],
     ['task_stage_file',{path:text,caption:text},['path'],'Stage a finished file from /workspace or /tmp inside the container.'],
   ];
-  return entries.map(([name,properties,required,description])=>({name,description,inputSchema:{type:'object',properties,required,additionalProperties:false}}));
+  return [...entries.map(([name,properties,required,description])=>({name,description,inputSchema:{type:'object',properties,required,additionalProperties:false}})), ...(role === 'worker' ? CONTAINER_CRON_TOOLS : [])];
 }

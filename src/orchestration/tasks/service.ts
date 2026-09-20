@@ -585,6 +585,14 @@ export class TaskService {
     }
     return this.store.transaction(() => {
       const { task, attempt } = this.active(attemptId, generation);
+      // A structured unresolved blocker is not successful task completion.
+      // Keep the full final report, and preserve cancellation / new revisions / questions.
+      const blocked = outcome.type === 'completed' && task.workflow?.attemptId === attemptId &&
+        task.workflow.checkpoint.phase === 'blocked' && task.workflow.checkpoint.findings.some(f => f.status === 'open');
+      if (blocked && outcome.type === 'completed') {
+        attempt.result = outcome.result; task.result = outcome.result;
+        outcome = { type: 'failed', failure: { code: 'WORKER_BLOCKED', message: task.workflow!.checkpoint.findings.filter(f => f.status === 'open').map(f => f.summary).join('\n').slice(0, 4096), observedAt: Date.now() } };
+      }
       if (outcome.type !== 'completed') {
         attempt.failure = outcome.failure ?? taskFailure(undefined, outcome.type === 'stopped' ? 'WORKER_STOPPED' : 'WORKER_FAILED');
         task.failure = attempt.failure;

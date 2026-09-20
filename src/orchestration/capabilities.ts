@@ -211,13 +211,20 @@ export function readCapabilityPage(
   if (!Number.isSafeInteger(offset) || offset < 0)
     throw new OrchestrationError('INVALID_CAPABILITY_OFFSET');
   const skills: CapabilityEntry[] = [...(registry?.skills.entries() ?? [])].map(
-    ([name, skill]) => ({
-      name,
-      description: skill.description,
-      server: `skill:${skill.source}`,
-      status: skill.userInvocable ? 'available' : 'automatic_only',
-      via: skill.userInvocable ? 'skill-worker' : 'runtime',
-    })
+    ([name, skill]) => {
+      // A skill file existing does not grant its declared gateway tools.
+      const limited = (skill.allowedTools ?? []).flatMap(tool => {
+        const entry = snapshot.entries.find(e => e.name === (tool.startsWith('mcp__') ? tool : `mcp__gateway__${tool}`));
+        return entry && !['worker', 'agent'].includes(entry.via) ? [entry.name] : [];
+      });
+      return {
+        name,
+        description: skill.description + (limited.length ? ` Declared gateway tools unavailable in this profile: ${limited.join(', ')}. Do not promise execution or retry this skill as a workaround for denied tools.` : ''),
+        server: `skill:${skill.source}`,
+        status: limited.length ? 'tool_access_limited' : skill.userInvocable ? 'available' : 'automatic_only',
+        via: limited.length ? 'unavailable' : skill.userInvocable ? 'skill-worker' : 'runtime',
+      };
+    }
   );
   for (const skill of registry?.cliSkills ?? [])
     if (!skills.some((s) => s.name === skill.name))

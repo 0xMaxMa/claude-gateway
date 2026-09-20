@@ -27,12 +27,14 @@ const input = JSON.parse(Buffer.concat(chunks).toString());
 const profileKeys = [
   'GATEWAY_ORCHESTRATION_ROLE',
   'GATEWAY_ORCHESTRATION_MEDIA',
+  'GATEWAY_ORCHESTRATION_CRON',
   'GATEWAY_ORCHESTRATION_TICKET_FILE',
 ];
 const original = profileKeys.map((key) => process.env[key]);
 Object.assign(process.env, {
   GATEWAY_ORCHESTRATION_ROLE: 'worker',
   GATEWAY_ORCHESTRATION_MEDIA: 'true',
+  GATEWAY_ORCHESTRATION_CRON: 'true',
   GATEWAY_ORCHESTRATION_TICKET_FILE: '/capability-discovery-no-execution',
 });
 const worker = new Set(

@@ -198,6 +198,22 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
     compact.mockRestore(); clear.mockRestore(); forwarded.mockRestore();
   });
 
+  it.each(CHAT_CHANNELS.filter(source => source !== 'telegram'))('orchestrated %s /session uses measured context, not message counts', async source => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    (runner as any).agentConfig.orchestration = {enabled:true,channels:[source]};
+    jest.spyOn(runner as any,'getOrchestration').mockResolvedValue({store:{channelReceipt:()=>undefined}});
+    jest.spyOn(runner as any,'sessionContextInfo').mockResolvedValue({text:'50K / 200K · 25%',contextUsedPct:25});
+    const send=jest.spyOn(runner as any,'sendOrchestrationControl').mockResolvedValue(undefined);
+    await postChannelMessage(getCallbackPort(runner),'scoped-status','/session',source);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][0]).toBe(source);
+    const text=(send.mock.calls[0][2] as any).text;
+    expect(text).toContain('Context: 50K / 200K · 25%');
+    expect(text).toContain('Model: claude-sonnet-4-6');
+    expect(text).not.toMatch(/Messages:|Mode: Orchestration|<code>/);
+  });
+
   it('U22: session with tokens < 50% of contextWindow shows "plenty of room"', async () => {
     // contextWindow = 200000; 40% = 80000 tokens
     await setupSession(80000);

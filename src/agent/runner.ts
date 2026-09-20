@@ -1,3 +1,4 @@
+import { formatSessionStatus } from './session-status';
 import { SessionCompactionScheduler } from './session-compaction-scheduler';
 import { resolveSessionCompaction } from '../orchestration/session-compaction';
 import { resolveDreamingConfig } from './dreaming/config';
@@ -832,7 +833,7 @@ export class AgentRunner extends EventEmitter {
             const current=index.sessions.find(session=>session.id===index.activeSessionId);
             const text=content.trim()==='/sessions'
               ? `Sessions\n${index.sessions.slice(0,15).map(session=>`${session.id===index.activeSessionId?'✅ ':''}${session.name}\n${session.id}`).join('\n\n')}`
-              : `Current session: ${current?.name??'(unnamed)'}\n${index.activeSessionId}\nMode: Orchestration\nModel: ${this.agentConfig.claude.model}\nMessages: ${current?.messageCount??0}\n\nCommands: /session /sessions /voice /voices /tasks /stop`;
+              : formatSessionStatus(index.activeSessionId, current?.name ?? '(unnamed)', this.agentConfig.claude.model, await this.sessionContextInfo(index.activeSessionId, current));
             await this.sendOrchestrationControl(channelSource,chatId,{text,buttons:[]},meta);
             res.writeHead(200);res.end('ok');return;
           }
@@ -1439,18 +1440,7 @@ export class AgentRunner extends EventEmitter {
           return respond({ success: true, sessionId: null, text: 'No active session found.' });
         }
         const context = await this.sessionContextInfo(meta.id, meta);
-        const lines = [
-          `📌 Current Session: ${meta.name}`,
-          `<code>${meta.id}</code>`,
-          '',
-          `👉 Context: ${context.text}`,
-          `🤖 Model: ${String(this.agentConfig.claude.model).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}`,
-        ];
-        if (context.contextUsedPct != null && context.contextUsedPct >= 80) {
-          lines.push('', '💡 Near limit — consider /compact');
-        }
-        lines.push('', 'Commands: /sessions /new /rename /clear /compact');
-        return respond({ success: true, sessionId: meta.id, text: lines.join('\n'), format: 'html' });
+        return respond({ success: true, sessionId: meta.id, text: formatSessionStatus(meta.id, meta.name, this.agentConfig.claude.model, context, true), format: 'html' });
       } catch {
         return respond({ success: false, text: 'Failed to get session info.' });
       }
@@ -3039,23 +3029,7 @@ export class AgentRunner extends EventEmitter {
 
     const context = await this.sessionContextInfo(meta.id, meta);
 
-    const lines = [
-      `📌 Current Session: ${meta.name}`,
-      `<code>${index.activeSessionId}</code>`,
-      '',
-      `👉 Context: ${context.text}`,
-      `🤖 Model: ${String(this.agentConfig.claude.model).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}`,
-    ];
-
-    if (context.contextUsedPct != null && context.contextUsedPct >= 80) {
-      lines.push('', '💡 Near limit — consider /compact');
-    }
-
-    lines.push('', 'Commands: /sessions /new /rename /clear /compact');
-
-    const info = lines.join('\n');
-
-    this.writeAutoForward(chatId, info, 'html');
+    this.writeAutoForward(chatId, formatSessionStatus(meta.id, meta.name, this.agentConfig.claude.model, context, true), 'html');
   }
 
   /**
@@ -5365,12 +5339,10 @@ export class AgentRunner extends EventEmitter {
         // (the real conversation) directly rather than trusting meta.messageCount.
         const messageCount = (await this.sessionStore.loadSession(agentId, sessionId).catch(() => [])).length;
         const context = await this.sessionContextInfo(sessionId, meta);
-        const {text:contextText,...contextFields} = context;
+        const {text: _contextText,...contextFields} = context;
         result = {sessionId,sessionName:meta?.name ?? null,messageCount,archivedCount:meta?.archivedCount ?? 0,
           ...contextFields,model:effectiveModel};
-        responseText = [`📌 Current Session: ${meta?.name ?? '(unnamed)'}`,sessionId,'',`👉 Context: ${contextText}`,`🤖 Model: ${effectiveModel}`,
-          ...(context.contextUsedPct != null && context.contextUsedPct >= 80 ? ['', '💡 Near limit — consider /compact'] : []),
-          '', 'Commands: /sessions /new /rename /clear /compact'].join('\n');
+        responseText = formatSessionStatus(sessionId, meta?.name ?? '(unnamed)', effectiveModel, context);
       } else if (cmd === '/sessions') {
         // Advertised for the api channel (BUILTIN_COMMANDS), so handle it here — mirrors the
         // telegram /sessions list. Marks the session this command runs in as (current).

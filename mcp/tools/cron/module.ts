@@ -1,3 +1,5 @@
+import { CRON_TOOLS } from '../../../dist/cron/tool-schemas.js';
+import { callTaskBridge } from '../tasks/module';
 /**
  * Cron tool module — implements ToolModule interface.
  * Provides cron job management tools via the gateway REST API.
@@ -21,7 +23,7 @@ export class CronModule implements ToolModule {
   private client: CronClient | null = null;
 
   isEnabled(): boolean {
-    return Boolean(process.env.GATEWAY_API_URL && process.env.GATEWAY_AGENT_ID);
+    return Boolean((process.env.GATEWAY_ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_ORCHESTRATION_CRON === 'true' && process.env.GATEWAY_ORCHESTRATION_TICKET_FILE) || (process.env.GATEWAY_API_URL && process.env.GATEWAY_AGENT_ID));
   }
 
   private getClient(): CronClient {
@@ -35,121 +37,13 @@ export class CronModule implements ToolModule {
   }
 
   getTools(): McpToolDefinition[] {
-    return [
-      {
-        name: 'cron_list',
-        description: 'List scheduled cron jobs for this agent',
-        inputSchema: {
-          type: 'object',
-          properties: {},
-          additionalProperties: false,
-        },
-      },
-      {
-        name: 'cron_create',
-        description: 'Create a new cron job',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Job name' },
-            schedule: { type: 'string', description: '5-field cron expression' },
-            type: { type: 'string', enum: ['command', 'agent'], description: 'Job type' },
-            command: { type: 'string', description: 'Shell command (type=command)' },
-            prompt: { type: 'string', description: 'Agent prompt (type=agent)' },
-            telegram: { type: 'string', description: 'Telegram chat_id for delivery — full response on success (type=agent), or a short failure notice on error (any type)' },
-            discord: { type: 'string', description: 'Discord channel_id for delivery — full response on success (type=agent), or a short failure notice on error (any type)' },
-            timeout_ms: { type: 'number', description: 'Timeout in milliseconds' },
-            scheduleKind: {
-              type: 'string',
-              enum: ['cron', 'at'],
-              description: 'Schedule type: "cron" for recurring (default), "at" for one-shot at a specific ISO datetime',
-            },
-            scheduleAt: {
-              type: 'string',
-              description: 'ISO 8601 datetime for one-shot execution (required when scheduleKind=at)',
-            },
-            deleteAfterRun: {
-              type: 'boolean',
-              description: 'Delete the job after it runs once. Defaults to true for scheduleKind=at, false for cron',
-            },
-          },
-          required: ['name', 'type'],
-          additionalProperties: false,
-        },
-      },
-      {
-        name: 'cron_delete',
-        description: 'Delete a cron job by ID',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            job_id: { type: 'string', description: 'Job ID to delete' },
-          },
-          required: ['job_id'],
-          additionalProperties: false,
-        },
-      },
-      {
-        name: 'cron_update',
-        description: 'Update an existing cron job. Provide job_id plus only the fields to change.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            job_id: { type: 'string', description: 'ID of the job to update' },
-            name: { type: 'string', description: 'Job name' },
-            schedule: { type: 'string', description: '5-field cron expression' },
-            type: { type: 'string', enum: ['command', 'agent'], description: 'Job type' },
-            command: { type: 'string', description: 'Shell command (type=command)' },
-            prompt: { type: 'string', description: 'Agent prompt (type=agent)' },
-            telegram: { type: 'string', description: 'Telegram chat_id for delivery — full response on success (type=agent), or a short failure notice on error (any type)' },
-            discord: { type: 'string', description: 'Discord channel_id for delivery — full response on success (type=agent), or a short failure notice on error (any type)' },
-            timeout_ms: { type: 'number', description: 'Timeout in milliseconds' },
-            scheduleKind: {
-              type: 'string',
-              enum: ['cron', 'at'],
-              description: 'Schedule type: "cron" for recurring, "at" for one-shot at a specific ISO datetime',
-            },
-            scheduleAt: {
-              type: 'string',
-              description: 'ISO 8601 datetime for one-shot execution (required when scheduleKind=at)',
-            },
-            deleteAfterRun: {
-              type: 'boolean',
-              description: 'Delete the job after it runs once',
-            },
-          },
-          required: ['job_id'],
-          additionalProperties: false,
-        },
-      },
-      {
-        name: 'cron_run',
-        description: 'Run a cron job immediately',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            job_id: { type: 'string', description: 'Job ID to run' },
-          },
-          required: ['job_id'],
-          additionalProperties: false,
-        },
-      },
-      {
-        name: 'cron_get_runs',
-        description: 'Get run history for a cron job',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            job_id: { type: 'string', description: 'Job ID' },
-          },
-          required: ['job_id'],
-          additionalProperties: false,
-        },
-      },
-    ];
+    return CRON_TOOLS;
   }
 
-  async handleTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
+  async handleTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolResult> {
+    if (process.env.GATEWAY_ORCHESTRATION_ROLE === 'worker') {
+      return callTaskBridge(name, args, crypto.randomUUID(), signal ?? AbortSignal.timeout(20000));
+    }
     const client = this.getClient();
 
     try {

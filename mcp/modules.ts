@@ -25,6 +25,7 @@ export function gatewayModules(
   return role
     ? [
         new MemoryModule(),
+        ...(role === 'worker' ? [new CronModule()] : []),
         ...(role === 'worker' && media
           ? [
               new ImageModule(),
