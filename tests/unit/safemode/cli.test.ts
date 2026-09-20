@@ -38,6 +38,14 @@ describe('safemode CLI boundaries', () => {
   test('headless CLI rejects params before any launch', async () => {
     await expect(runSafemode(['send', 'anything'], {params: '--dangerously-skip-permissions', prompt: 'inspect'})).rejects.toThrow('Unknown safemode flag');
   });
+  test('rename CLI accepts current name or native ID and validates arity', async () => {
+    const store = new SafemodeStore();
+    const session = store.create('before', 'claude', 'inherit');
+    expect(await runSafemode(['rename', session.id, 'after'], {})).toBe(0);
+    expect(store.find('after').id).toBe(session.id);
+    expect(out).toHaveBeenCalledWith(expect.stringContaining('"renamed": true'));
+    await expect(runSafemode(['rename', session.id], {})).rejects.toThrow('requires');
+  });
   test('duplicate request with takeover does not stop its running owner', async () => {
     const store = new SafemodeStore();
     const session = store.create('test','claude','inherit');

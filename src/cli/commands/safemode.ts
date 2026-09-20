@@ -13,6 +13,7 @@ import { redactLine } from '../redact';
 
 const HELP = `Usage: claude-gateway safemode [--name NAME] [--cli claude|codex] [--model MODEL] [--prompt TEXT] [--params NATIVE_ARGS]
        claude-gateway safemode --resume NAME_OR_ID [--takeover] [--prompt TEXT]
+       claude-gateway safemode rename NAME_OR_ID NEW_NAME
        claude-gateway safemode list
        claude-gateway safemode status NAME_OR_ID [--request-id ID]
        claude-gateway safemode send NAME_OR_ID --prompt TEXT [--request-id ID] [--takeover] [--wait]
@@ -46,7 +47,7 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
   const common = ['help', 'json', 'config'];
   const allowed: Record<string, string[]> = {
     open: ['name', 'cli', 'model', 'prompt', 'resume', 'takeover', 'params'], list: [],
-    status: ['request-id'], logs: [], stop: [], delete: [], recover: [],
+    rename: [], status: ['request-id'], logs: [], stop: [], delete: [], recover: [],
     send: ['prompt', 'request-id', 'takeover', 'wait', 'model'],
   };
   if (!allowed[verb]) throw new Error('Unknown safemode command');
@@ -57,6 +58,11 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
   }
   if (typeof flags.prompt === 'string' && flags.prompt.length > 100000) throw new Error('Prompt exceeds 100000 characters');
   const store = new SafemodeStore();
+  if (verb === 'rename') {
+    if (positionals.length !== 3) throw new Error('safemode rename requires a session ID/name and a new name');
+    output({ ...publicSession(store.rename(positionals[1], positionals[2])), renamed: true });
+    return 0;
+  }
   if (verb === 'list') {
     if (positionals.length !== 1) throw new Error('Unexpected safemode list argument');
     output(store.list().map(s => ({ ...publicSession(s), owner: store.owner(s.id), ...nativeOwnership(store, s) }))); return 0;

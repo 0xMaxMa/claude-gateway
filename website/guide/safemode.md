@@ -117,3 +117,17 @@ details, not another session ID. Native conversation history is never rewritten.
 kills processes by command-line pattern. Safemode opened independently in another
 terminal remains running when the gateway stops or restarts. Closing that terminal,
 stopping its enclosing service/container, or rebooting the host still stops it.
+
+## Rename a safemode conversation
+
+```bash
+make cli ARGS="safemode rename 01a0ad6e-812d-7892-9532-20b45a56a553 gateway-debug"
+make cli ARGS="safemode --resume gateway-debug"
+```
+
+The first argument accepts the native session ID or the current name. Names
+contain 1–64 letters, digits, dots, underscores or hyphens and must be unique.
+Renaming works while the native CLI is running; it does not stop or restart it,
+change its native ID, or move its workspace/history. The old name stops resolving,
+while the native ID continues to work. Rename changes the safemode alias, not the
+native CLI's own conversation title.

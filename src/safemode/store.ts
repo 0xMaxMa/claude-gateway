@@ -53,20 +53,57 @@ export class SafemodeStore {
     if (matches.length > 1) throw new Error('Ambiguous native session ID');
     return matches[0]?.directory ?? path.join(this.root, id);
   }
-  private canonical(session: SafemodeSession): SafemodeSession {
+  private canonical(session: SafemodeSession, directory: string): SafemodeSession {
+    let renamed: string | undefined;
+    try { renamed = JSON.parse(fs.readFileSync(path.join(directory, 'name.json'), 'utf8')).name; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (renamed) session = { ...session, name: renamed, autoName: false };
     if (!session.nativeSessionId) return session;
     return { ...session, nativeSessionId: session.nativeSessionId.toLowerCase(), id: session.nativeSessionId.toLowerCase(), name: session.autoName || session.name === session.id ? session.nativeSessionId.toLowerCase() : session.name };
   }
-  list(): SafemodeSession[] { return this.records().map(r => this.canonical(r.session)); }
-  read(id: string): SafemodeSession { return this.canonical(JSON.parse(fs.readFileSync(path.join(this.dir(id), 'session.json'), 'utf8'))); }
+  list(): SafemodeSession[] { return this.records().map(r => this.canonical(r.session, r.directory)); }
+  read(id: string): SafemodeSession { const directory = this.dir(id); return this.canonical(JSON.parse(fs.readFileSync(path.join(directory, 'session.json'), 'utf8')), directory); }
   find(ref: string): SafemodeSession {
     const matches = this.list().filter(s => s.id === ref || s.name === ref);
     if (matches.length !== 1) throw new Error(matches.length ? 'Ambiguous safemode name; use native ID' : 'Safemode session not found');
     return matches[0];
   }
+  rename(ref: string, name: string): SafemodeSession {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(name)) throw new Error('Name must contain 1-64 letters, digits, dots, underscores or hyphens');
+    const session = this.find(ref);
+    const directory = this.dir(session.id), storageKey = path.basename(directory);
+    const lock = path.join(directory, 'renaming');
+    let fd: number;
+    try { fd = fs.openSync(lock, 'wx', 0o600); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('Busy: another rename is in progress'); throw error; }
+    let reserved = false, committed = false;
+    const reservation = path.join(this.root, 'names', name);
+    try {
+      const current = this.read(session.id);
+      if (this.list().some(s => s.id !== current.id && (s.name === name || s.id === name))) throw new Error('Safemode name already exists');
+      fs.mkdirSync(path.dirname(reservation), { recursive: true, mode: 0o700 });
+      try { fs.writeFileSync(reservation, storageKey, { flag: 'wx', mode: 0o600 }); reserved = true; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (fs.readFileSync(reservation, 'utf8') !== storageKey) throw new Error('Safemode name already exists');
+      }
+      // Separate metadata lets even an older live supervisor save progress
+      // without overwriting a rename or losing its owner/native session state.
+      atomicJson(path.join(directory, 'name.json'), { name });
+      committed = true;
+      if (current.name !== name) {
+        const old = path.join(this.root, 'names', current.name);
+        if (fs.existsSync(old) && fs.readFileSync(old, 'utf8') === storageKey) fs.unlinkSync(old);
+      }
+      return this.read(session.id);
+    } finally {
+      if (reserved && !committed) fs.rmSync(reservation, { force: true });
+      fs.closeSync(fd); fs.unlinkSync(lock);
+    }
+  }
   save(session: SafemodeSession): void {
     const directory = this.dir(session.id);
-    const canonical = this.canonical(session);
+    const canonical = this.canonical(session, directory);
     let saved: SafemodeSession | undefined;
     try { saved = JSON.parse(fs.readFileSync(path.join(directory, 'session.json'), 'utf8')); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }

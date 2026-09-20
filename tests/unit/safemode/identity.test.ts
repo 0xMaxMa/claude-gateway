@@ -63,3 +63,24 @@ test('a recorded native identity cannot be replaced by another conversation', ()
   expect(() => store.save({...s, nativeSessionId: native})).toThrow('Cannot change');
   expect(store.read(original).nativeSessionId).toBe(original);
 });
+test('rename works with a live owner and survives a stale supervisor save', () => {
+  const store = new SafemodeStore(root), session = store.create('old', 'claude', 'inherit');
+  const owner = store.acquire(session.id, 'interactive');
+  const stale = {...session}, workspace = store.dir(session.id), socket = controlPath(store, session.id);
+  expect(store.rename(session.id, 'gateway-debug')).toMatchObject({id: session.id, name: 'gateway-debug'});
+  stale.lastRequest = {id:'progress', promptHash:'hash', status:'completed'};
+  store.save(stale);
+  expect(store.find('gateway-debug')).toMatchObject({id: session.id, lastRequest:{id:'progress'}});
+  expect(() => store.find('old')).toThrow('not found');
+  expect(store.owner(session.id)).toEqual(owner);
+  expect(store.dir(session.id)).toBe(workspace);
+  expect(controlPath(store, session.id)).toBe(socket);
+  expect(new SafemodeStore(root).find('gateway-debug').name).toBe('gateway-debug');
+  expect(store.create('old', 'claude', 'inherit').name).toBe('old');
+});
+test('rename rejects collisions, native IDs of other sessions, and unsafe names', () => {
+  const store = new SafemodeStore(root), a = store.create('one', 'claude', 'inherit'), b = store.create('two', 'claude', 'inherit');
+  for (const name of ['two', b.id, '../escape', '', 'a'.repeat(65)]) expect(() => store.rename(a.id, name)).toThrow();
+  expect(store.find('one').id).toBe(a.id);
+  expect(store.rename('one', 'one').id).toBe(a.id);
+});
