@@ -74,7 +74,7 @@ API documentation lives on the documentation website. [CLI command reference](ht
 
 ### Installation health
 
-Run `claude-gateway doctor` to check startup and voice dependencies, even when the
+Run `claude-gateway doctor` to check startup, voice and optional Codex dependencies, even when the
 server is down. Use `claude-gateway doctor fix` for supported local repairs and
 installation of missing `ffmpeg`/`ffprobe`. Repair asks for confirmation and never
 starts or restarts the gateway. See [diagnosis and repair](https://0xmaxma.github.io/claude-gateway/guide/troubleshooting.html#gateway-will-not-start-doctor-and-repair).

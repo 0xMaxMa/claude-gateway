@@ -1,5 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { homedir } from 'os';
+import type { AgentConfig } from '../../types';
 import { unknownFlagNames, parseKeyValueList } from '../args';
 import { parseDotenv } from '../../load-dotenv';
 import { CliConfigView, expandHome, resolveUrlPlan, resolveReachableUrl, resolveKey, request, TransportError } from '../http-client';
@@ -10,7 +12,7 @@ import type { JobState } from '../../apps/installer';
 
 /**
  * `app list|start|stop|restart|uninstall|install` — a thin CLI wrapper over the
- * existing `/v1/apps` REST API (src/api/apps-router.ts). This never talks to
+ * existing `/v1/apps` REST API (src/api/apps-router.ts). Except for explicit local refresh-runtime maintenance, this never talks to
  * Docker directly: every action is the same admin-gated HTTP call the
  * dashboard's App Store UI makes, so authorization and behavior can't drift
  * between the two clients.
@@ -24,7 +26,7 @@ import type { JobState } from '../../apps/installer';
  * or the CLI was interrupted).
  */
 
-const VERBS = ['list', 'start', 'stop', 'restart', 'uninstall', 'install'] as const;
+const VERBS = ['list', 'start', 'stop', 'restart', 'uninstall', 'install', 'refresh-runtime'] as const;
 type Verb = (typeof VERBS)[number];
 
 /** Every flag `app` accepts, in any verb — the six every command takes plus
@@ -336,6 +338,7 @@ export async function runApp(
     printHelp(false);
     return 1;
   }
+  if (verb === 'refresh-runtime') return refreshRuntime(name, positionals, flags);
   const installBody = verb === 'install' ? buildInstallBody(name, flags) : undefined;
   if (installBody === null) return 1;
 
@@ -389,8 +392,39 @@ export async function runApp(
   return 0;
 }
 
+/** Local maintenance intentionally bypasses HTTP; never resolve a remote target. */
+async function refreshRuntime(name: string, positionals: string[], flags: Record<string, string | boolean>): Promise<number> {
+  if (positionals.length !== 2 || Object.keys(flags).some(k => !['config', 'json', 'yes'].includes(k)) || process.env.CLAUDE_GATEWAY_URL) {
+    process.stderr.write('refresh-runtime is local only: use <name> [--config <path>] [--json]; remove --url and CLAUDE_GATEWAY_URL.\n');
+    return 1;
+  }
+  if (flags.config !== undefined && (typeof flags.config !== 'string' || !flags.config.trim())) {
+    process.stderr.write('--config requires a path.\n'); return 1;
+  }
+  const configFile = path.resolve(expandHome(strFlag(flags.config) || process.env.GATEWAY_CONFIG || path.join(homedir(), '.claude-gateway', 'config.json')));
+  try {
+    // Read raw local files: loadConfig and registry getters perform startup or lock writes.
+    const raw = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    const apps = JSON.parse(fs.readFileSync(path.join(path.dirname(configFile), 'apps.json'), 'utf8'));
+    const entry = apps.apps?.find((app: {name: string}) => app.name === name);
+    const agent = raw.agents?.find((a: AgentConfig) => a.id === entry?.agentDeclaration?.name);
+    if (!entry || !agent) throw new Error('APP_AGENT_NOT_FOUND in local config and apps registry');
+    const { assertLocalCodexDocker } = await import('../../session/codex-container-runtime');
+    await assertLocalCodexDocker();
+    const { AgentManager } = await import('../../apps/agent-manager');
+    const { refreshAppAgentRuntime } = await import('../../apps/agent-container-migration');
+    await refreshAppAgentRuntime(entry, agent, new AgentManager(configFile, path.join(path.dirname(configFile), 'agents')));
+    printResult({ app: name, status: 'runtime-refreshed', container: agent.container, next: 'Run claude-gateway doctor to check Codex runtime availability; refreshing does not install Codex.' }, flags.json === true);
+    return 0;
+  } catch (error) {
+    process.stderr.write(`Runtime refresh failed: ${redactLine(error instanceof Error ? error.message : String(error))}\n`);
+    return 1;
+  }
+}
+
 function printHelp(requested: boolean): void {
   const rows: Array<[string, string]> = [
+    ['app refresh-runtime <name> [--config <path>]', 'Local only: refresh a drained, stopped agent; recreate/start only agent'],
     ['app list', 'List installed apps and their status'],
     ['app start <name>', 'Start a stopped app'],
     ['app stop <name>', 'Stop a running app'],
@@ -417,7 +451,7 @@ function printHelp(requested: boolean): void {
     requested,
     'app',
     'manage installed Docker-compose apps (wraps the /v1/apps REST API)',
-    'claude-gateway app <list|start|stop|restart|uninstall|install> [args] [--flags]',
+    'claude-gateway app <list|start|stop|restart|uninstall|install|refresh-runtime> [args] [--flags]',
     lines,
   );
 }

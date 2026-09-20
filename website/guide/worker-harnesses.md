@@ -42,9 +42,37 @@ A missing executable, credential, incompatible endpoint, or unsupported model fa
 
 ## Deploy app containers
 
-New generated app-agent images install native Codex 0.154.0 for AMD64 or ARM64. Downloads are pinned and verified with SHA-512, and the image retains the native runtime's bundled resources. Host Codex configuration and credential directories are not mounted.
+Generated app-agent images do **not** download or install Codex. Claude-only apps work without a host Codex installation. To enable Codex, explicitly install an official standalone or npm Codex distribution on the gateway host. The resolver uses the effective agent `workers.codex.bin`, then the gateway value, then the gateway process's `PATH`. It resolves executable symlinks and finds the native payload and bundled resources behind an npm launcher. Host workers retain the npm launcher; app workers use the native executable at `/opt/gateway-codex/bin/codex`.
 
-Existing app-agent containers need their generated image rebuilt and the **agent service** recreated before using Codex. Merely restarting the gateway, restarting a container, or running the legacy credential-mount migration does not install the new executable. Regenerate the app service configuration through the normal app update/reconfiguration flow, then rebuild/recreate the agent service during a suitable maintenance window. Do not recreate the database or delete app volumes.
+Only the native executable and recognized bundled resource paths are mounted read-only. Host Codex home, authentication, configuration and sessions are not added to the container. Per-attempt state and credential delivery remain isolated. A missing executable, unsupported layout or unavailable mount never causes installation, a Claude fallback, or host execution of an app task. All agents sharing an app container must resolve to the same native runtime; conflicting overrides leave Codex unavailable until aligned and refreshed.
+
+Container mounts require a local Linux Docker daemon on the gateway host, matching x64 or arm64 architecture. Remote Docker and Docker Desktop are unsupported. Official self-contained distributions are supported; custom host launcher scripts may work for host workers but cannot be mounted. ELF format/architecture and resources are checked before mounting; arbitrary external shared-library dependencies are not packaged for you. `claude-gateway doctor` reports resolved executable/version and layout compatibility, but cannot certify every container image or the running service's PATH. Run diagnostics in the gateway service environment when an interactive shell gives different results.
+
+### Install, upgrade or refresh a runtime
+
+Each Codex task checks the selected runtime against the container's generated mount fingerprint and verifies the mounted executable's SHA-256. A late host install, a changed override, or an upgrade returns `CODEX_CONTAINER_RUNTIME_STALE` until the agent is refreshed. It never recreates a container underneath running work.
+
+1. Drain tasks and pause new work for the app agent. Keep other launchers from starting it during maintenance.
+2. Stop **only** its agent service with `docker compose -p APP_NAME -f /absolute/app/docker-compose.yml stop agent`.
+3. Run `claude-gateway app refresh-runtime APP_NAME --config /path/to/config.json` on the gateway/Docker host.
+4. Run `claude-gateway doctor --config /path/to/config.json`, then retry a Codex task.
+
+Native Codex transcripts live in the container's writable layer. Normal reuse within
+one container resumes its native conversation. After recreation, the gateway detects
+the new Docker container ID and starts a fresh native conversation with the task's
+current assignment/context, emitting `native_session_reset`. It does not pretend the
+old transcript survived or retry a missing path. Older mappings without a container ID
+resume only when their transcript directory still exists. Gateway task history remains
+on the host; previous native conversation context is not preserved by recreation.
+
+Docker context/info/inspection preflights run asynchronously with bounded timeouts,
+so a slow Docker daemon does not block gateway HTTP, voice processing or timers.
+
+The refresh command refuses running/restarting containers, verifies installer ownership and isolation, backs up generated files under `.gateway-agent-migrations`, regenerates mounts, rechecks the stopped container identity and recreates **only** `agent` with `--no-deps --no-build`. App/database services and volumes are untouched. The existing generated image can be reused; no Codex image rebuild is required. Refresh is also supported for older generated deployments and deleted old runtime paths when their mounts match the saved generated Compose specification. Missing optional Codex still permits refresh; the success message does not imply Codex was installed.
+
+On failure the generated files are restored and the backup retained. The command does not automatically recreate a rejected old container or claim to roll back an already recreated container. Inspect the error and backup before explicit recovery. Docker does not provide an atomic stopped-state/Compose recreation transaction, so keep the agent stopped until this command takes ownership of the recreation.
+
+Removing host runtime files while their mounts are still configured can also block Claude admission: the gateway refuses to trust unresolvable host mounts. Use the same stopped-agent refresh to remove those mounts. Removing Codex entirely then leaves a Claude-only deployment functional.
 
 Execution stays inside the admitted app container under its normal UID and security restrictions. The gateway bridges only the existing scoped container task tools: progress reporting, requesting input, staging files, and agent-owned cron schedules. Scoped cron tools can schedule agent prompts; host commands and immediate `cron_run` remain unavailable in containers. Container workers do not gain host media/browser/memory access. Missing or rejected container bindings never select a host process.
 
@@ -87,3 +115,13 @@ To verify the native Codex proxy path without provider billing, run
 `node scripts/orchestration/smoke-codex-worker.cjs --connector` from a development
 checkout with Codex and the MCP dependencies installed. This uses a local fake
 Responses server and a fixture MCP connector; it does not test a real vendor.
+
+## Container runtime smoke test
+
+From a development checkout with Docker and Codex installed, run:
+
+```bash
+node scripts/orchestration/smoke-codex-worker.cjs --container
+```
+
+This creates a temporary plain Debian container, mounts the resolved host Codex runtime read-only, and uses a local fake Responses API. It verifies scoped MCP, native resume, steering and cancellation without provider billing. The temporary container is removed afterward. It does not change a running gateway or installed app.

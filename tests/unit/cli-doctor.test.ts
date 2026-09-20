@@ -76,6 +76,15 @@ describe('cli doctor', () => {
     expect(repairVoiceDependencies).not.toHaveBeenCalled();
   });
 
+  it('passes local config to dependency inspection and keeps missing Codex advisory', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
+    (checkDependencies as jest.Mock).mockResolvedValueOnce([{ name: 'codex', ok: false, required: false, detail: 'missing optional Codex' }]);
+    expect(await runDoctor({}, { keys: [{ key: 'test', agents: '*', admin: true }] })).toBe(0);
+    expect(checkDependencies).toHaveBeenCalledWith({ configPath: '/tmp/doctor-config' });
+    expect(report().checks).toContainEqual(expect.objectContaining({ name: 'codex', ok: false, warn: true }));
+    expect(repairVoiceDependencies).not.toHaveBeenCalled();
+  });
+
   it('explicit fix repairs without a live API and still reports health failure', async () => {
     global.fetch = jest.fn().mockRejectedValue(new Error('offline'));
     const result = await runDoctor({ yes: true }, {}, ['fix']);

@@ -80,7 +80,7 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
       config = loadCliConfig(file);
     }
     checks.push(...inspectStartup(file), ...inspectUserService());
-    for (const dependency of await checkDependencies()) checks.push({ name: dependency.name, ok: dependency.ok, detail: dependency.detail, warn: !dependency.ok && !dependency.required });
+    for (const dependency of await checkDependencies({ configPath: file })) checks.push({ name: dependency.name, ok: dependency.ok, detail: dependency.detail, warn: !dependency.ok && !dependency.required });
   }
 
   const hasKeys = !!(config.keys && config.keys.length);

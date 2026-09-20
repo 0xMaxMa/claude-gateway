@@ -1,3 +1,7 @@
+import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
+import { assertLocalCodexDocker, CODEX_RUNTIME_LABEL } from '../../../src/session/codex-container-runtime';
+jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn() }));
+jest.mock('../../../src/session/codex-container-runtime', () => ({ assertLocalCodexDocker: jest.fn(), CODEX_RUNTIME_LABEL: 'ai.claude-gateway.codex-runtime' }));
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -88,6 +92,8 @@ describe('AgentManager', () => {
   let manager: AgentManager;
 
   beforeEach(() => {
+    (resolveCodexRuntime as jest.Mock).mockReset().mockImplementation(() => { throw new Error('missing optional Codex'); });
+    (assertLocalCodexDocker as jest.Mock).mockReset();
     tmpDir = makeTmpDir();
     // Fixture home: injectAgentService() stages ~/.claude.json into the seed dir.
     mockHomeDir = path.join(tmpDir, 'home');
@@ -104,9 +110,9 @@ describe('AgentManager', () => {
   // ─── injectAgentService() ──────────────────────────────────────────────────
 
   describe('injectAgentService()', () => {
-    it('adds agent service to docker-compose.yml', () => {
+    it('adds agent service to docker-compose.yml', async () => {
       const entry = makeEntry(tmpDir);
-      manager.injectAgentService(entry);
+      await manager.injectAgentService(entry);
 
       const composePath = path.join(entry.installPath, 'docker-compose.yml');
       const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
@@ -123,30 +129,44 @@ describe('AgentManager', () => {
       expect(agentSvc['container_name']).toBe('my-app-agent');
     });
 
-    it('installs a pinned integrity-checked Codex runtime without adding host mounts', () => {
+    it('does not download or install Codex in a Claude-only agent image', async () => {
       const entry = makeEntry(tmpDir);
-      manager.injectAgentService(entry);
+      await manager.injectAgentService(entry);
       const dockerfile = fs.readFileSync(path.join(entry.installPath, 'Dockerfile.agent'), 'utf8');
-      expect(dockerfile).toContain('codex-0.154.0-linux-${arch}.tgz');
-      expect(dockerfile).toContain('amd64) arch=x64; triple=x86_64-unknown-linux-musl;');
-      expect(dockerfile).toContain('arm64) arch=arm64; triple=aarch64-unknown-linux-musl;');
-      expect(dockerfile.match(/checksum=[a-f0-9]{128}/g)).toHaveLength(2);
-      expect(dockerfile).toContain('Unsupported Codex container architecture');
-      expect(dockerfile).toContain('RUN set -eu;');
-      expect(dockerfile.indexOf('sha512sum --check --strict')).toBeLessThan(dockerfile.indexOf('tar -xzf'));
-      // Preserve upstream sibling binaries/resources needed by native Codex.
-      expect(dockerfile).toContain('--strip-components=3 "package/vendor/${triple}"');
-      expect(dockerfile).toContain('ln -s /opt/codex/bin/codex /usr/local/bin/codex');
-      expect(dockerfile).toContain('/usr/local/bin/codex --version');
-      const compose = yaml.load(fs.readFileSync(path.join(entry.installPath, 'docker-compose.yml'), 'utf8')) as any;
-      expect(compose.services.agent.volumes).toHaveLength(6);
-      expect(compose.services.agent.volumes.join('\n')).not.toMatch(/\.codex|codex|docker\.sock/);
-      expect(dockerfile).not.toMatch(/auth\.json|OPENAI_API_KEY|COPY.*\.codex/);
+      expect(dockerfile).not.toMatch(/codex|registry.npmjs.org|sha512sum/);
+      expect(dockerfile).toContain('ca-certificates');
     });
 
-    it('injects security_opt no-new-privileges', () => {
+    it('mounts only resolved optional runtime read-only with effective agent override', async () => {
       const entry = makeEntry(tmpDir);
-      manager.injectAgentService(entry);
+      const runtime = { fingerprint: 'runtime-hash', mounts: [{ source: '/opt/host runtime/bin/codex', target: '/opt/gateway-codex/bin/codex', readOnly: true }] };
+      (resolveCodexRuntime as jest.Mock).mockReturnValue(runtime);
+      fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({ gateway: { workers: { codex: { bin: '/global/codex' } } }, agents: [{ id: 'my-agent', workers: { codex: { bin: '/override/codex' } } }] }));
+      await manager.injectAgentService(entry);
+      const compose = yaml.load(fs.readFileSync(path.join(entry.installPath, 'docker-compose.yml'), 'utf8')) as any;
+      expect(resolveCodexRuntime).toHaveBeenCalledWith('/override/codex', path.join(entry.installPath, 'agent'));
+      expect(compose.services.agent.volumes).toContainEqual({ type: 'bind', source: '/opt/host runtime/bin/codex', target: '/opt/gateway-codex/bin/codex', read_only: true, bind: { create_host_path: false } });
+      expect(compose.services.agent.labels[CODEX_RUNTIME_LABEL]).toBe('runtime-hash');
+      expect(compose.services.app.image).toBe('nginx:1.25');
+    });
+
+    it.each(['missing', 'incompatible', 'remote', 'conflicting'])('keeps Claude generation working with %s Codex runtime', async kind => {
+      const entry = makeEntry(tmpDir);
+      if (kind !== 'missing') (resolveCodexRuntime as jest.Mock).mockReturnValue({ fingerprint: 'one', mounts: [], containerError: kind === 'incompatible' ? 'wrong arch' : undefined });
+      if (kind === 'remote') (assertLocalCodexDocker as jest.Mock).mockImplementation(() => { throw new Error('remote daemon'); });
+      if (kind === 'conflicting') {
+        fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({ gateway: {}, agents: [{ id: 'my-agent' }, { id: 'second', container: 'my-app-agent', workers: { codex: { bin: '/other/codex' } } }] }));
+        (resolveCodexRuntime as jest.Mock).mockImplementation(bin => ({ fingerprint: bin ?? 'one', mounts: [] }));
+      }
+      await manager.injectAgentService(entry);
+      const compose = yaml.load(fs.readFileSync(path.join(entry.installPath, 'docker-compose.yml'), 'utf8')) as any;
+      expect(compose.services.agent.labels[CODEX_RUNTIME_LABEL]).toBe('unavailable');
+      expect(compose.services.agent.volumes).toHaveLength(6);
+    });
+
+    it('injects security_opt no-new-privileges', async () => {
+      const entry = makeEntry(tmpDir);
+      await manager.injectAgentService(entry);
 
       const composePath = path.join(entry.installPath, 'docker-compose.yml');
       const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
@@ -155,9 +175,9 @@ describe('AgentManager', () => {
       expect(agentSvc['security_opt']).toEqual(['no-new-privileges']);
     });
 
-    it('preserves existing services', () => {
+    it('preserves existing services', async () => {
       const entry = makeEntry(tmpDir);
-      manager.injectAgentService(entry);
+      await manager.injectAgentService(entry);
 
       const composePath = path.join(entry.installPath, 'docker-compose.yml');
       const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
@@ -167,9 +187,9 @@ describe('AgentManager', () => {
       expect(services['agent']).toBeDefined();
     });
 
-    it('mounts binaries, auth files, and workspace as volumes', () => {
+    it('mounts binaries, auth files, and workspace as volumes', async () => {
       const entry = makeEntry(tmpDir);
-      manager.injectAgentService(entry);
+      await manager.injectAgentService(entry);
 
       const composePath = path.join(entry.installPath, 'docker-compose.yml');
       const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
@@ -186,7 +206,7 @@ describe('AgentManager', () => {
       expect(volumes.some((v) => v.includes('.claude-seed') && v.endsWith(':ro'))).toBe(true);
     });
 
-    it('never bind-mounts an individual host Claude config file (regression: stale inode => "Not logged in")', () => {
+    it('never bind-mounts an individual host Claude config file (regression: stale inode => "Not logged in")', async () => {
       // A Docker *file* bind mount pins an inode, not a path. Claude Code rewrites
       // ~/.claude/settings.json and ~/.claude.json by atomic rename, which
       // allocates a new inode on the host and unlinks the old one — leaving a
@@ -195,7 +215,7 @@ describe('AgentManager', () => {
       // every app-agent turn returned "Not logged in · Please run /login" with no
       // crash and nothing in the logs. Mount sources must therefore be directories.
       const entry = makeEntry(tmpDir);
-      manager.injectAgentService(entry);
+      await manager.injectAgentService(entry);
 
       const composePath = path.join(entry.installPath, 'docker-compose.yml');
       const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
@@ -209,9 +229,9 @@ describe('AgentManager', () => {
       expect(sources).not.toContain(path.join(home, '.claude.json'));
     });
 
-    it('stages the Claude config seed as a private directory the gateway owns', () => {
+    it('stages the Claude config seed as a private directory the gateway owns', async () => {
       const entry = makeEntry(tmpDir);
-      manager.injectAgentService(entry);
+      await manager.injectAgentService(entry);
 
       const composePath = path.join(entry.installPath, 'docker-compose.yml');
       const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
@@ -238,7 +258,7 @@ describe('AgentManager', () => {
       expect(seedMount!.split(':')[0]).toBe(fs.realpathSync(seedDir));
     });
 
-    it('seeds a writable ~/.claude.json via copy instead of a read-only mount at its real path (regression: app-agent "Not logged in")', () => {
+    it('seeds a writable ~/.claude.json via copy instead of a read-only mount at its real path (regression: app-agent "Not logged in")', async () => {
       // Claude Code rewrites ~/.claude.json atomically at startup (write temp +
       // rename over the target). Bind-mounting the host file at its real container
       // path makes that rename fail with EBUSY, so auth state is never persisted
@@ -246,7 +266,7 @@ describe('AgentManager', () => {
       // Fix: stage the host file in a read-only seed dir and copy it into a
       // writable ~/.claude.json at container start.
       const entry = makeEntry(tmpDir);
-      manager.injectAgentService(entry);
+      await manager.injectAgentService(entry);
 
       const composePath = path.join(entry.installPath, 'docker-compose.yml');
       const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
@@ -269,10 +289,10 @@ describe('AgentManager', () => {
       expect(command).toContain('; exec sleep infinity');
     });
 
-    it('omits the seed copy when the host has no ~/.claude.json', () => {
+    it('omits the seed copy when the host has no ~/.claude.json', async () => {
       fs.rmSync(path.join(mockHomeDir!, '.claude.json'));
       const entry = makeEntry(tmpDir);
-      manager.injectAgentService(entry);
+      await manager.injectAgentService(entry);
 
       const composePath = path.join(entry.installPath, 'docker-compose.yml');
       const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
@@ -285,14 +305,14 @@ describe('AgentManager', () => {
       expect(command).toContain('sleep infinity');
     });
 
-    it('mounts the agent media dir at the identical host path (:rw) and pre-creates it', () => {
+    it('mounts the agent media dir at the identical host path (:rw) and pre-creates it', async () => {
       // Regression for app-agent containers being unable to read uploaded images:
       // the gateway hands the agent raw host paths under
       // <home>/.claude-gateway/agents/<name>/media (a sibling of workspace, outside
       // the /workspace mount). Mounting that dir at the same absolute path lets the
       // raw image_path resolve inside the container.
       const entry = makeEntry(tmpDir);
-      manager.injectAgentService(entry);
+      await manager.injectAgentService(entry);
 
       const composePath = path.join(entry.installPath, 'docker-compose.yml');
       const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
@@ -315,24 +335,24 @@ describe('AgentManager', () => {
       expect(mediaVol!.split(':')[1]).toBe(expectedMediaDir);
     });
 
-    it('is a no-op when agentDeclaration is null', () => {
+    it('is a no-op when agentDeclaration is null', async () => {
       const entry = makeEntry(tmpDir);
       const noAgentEntry = { ...entry, agentDeclaration: null };
       const composePath = path.join(entry.installPath, 'docker-compose.yml');
       const before = fs.readFileSync(composePath, 'utf-8');
 
-      manager.injectAgentService(noAgentEntry);
+      await manager.injectAgentService(noAgentEntry);
 
       expect(fs.readFileSync(composePath, 'utf-8')).toBe(before);
     });
 
-    it('is a no-op when agentPaths is missing', () => {
+    it('is a no-op when agentPaths is missing', async () => {
       const entry = makeEntry(tmpDir);
       const noPathsEntry = { ...entry, agentPaths: undefined };
       const composePath = path.join(entry.installPath, 'docker-compose.yml');
       const before = fs.readFileSync(composePath, 'utf-8');
 
-      manager.injectAgentService(noPathsEntry);
+      await manager.injectAgentService(noPathsEntry);
 
       expect(fs.readFileSync(composePath, 'utf-8')).toBe(before);
     });
@@ -557,7 +577,7 @@ describe('AgentManager', () => {
       // a copy of the host's Claude config behind — unlike sessions, which are
       // kept so a reinstall resumes the same conversations.
       const entry = makeEntry(tmpDir);
-      manager.injectAgentService(entry);
+      await manager.injectAgentService(entry);
       await manager.upsertAgent(entry);
 
       const agentDir = path.join(tmpDir, 'agents', 'my-agent');

@@ -255,7 +255,7 @@ claude-gateway doctor fix
 claude-gateway doctor fix --yes --config /path/to/config.json --json
 ```
 
-`doctor` is read-only. It checks Node.js 22+, Claude Code, Bun, ffmpeg and ffprobe;
+`doctor` is read-only. It checks Node.js 22+, Claude Code, Bun, ffmpeg, ffprobe and optional Codex;
 configuration readability, basic structure and owner permissions; runtime/log paths;
 failed Linux user-service state; known startup log signatures; and the existing
 API connectivity checks. It does not validate provider credentials, inspect every
@@ -288,3 +288,15 @@ before it can copy the contents into a private backup. It does not change file
 contents during this step. Linux supports mode `000` through a pinned file
 descriptor and `/proc`; other systems can recover write-only files. If neither
 method is available, restore owner read access manually and rerun doctor.
+
+### Refresh an app agent runtime
+
+`claude-gateway app refresh-runtime APP_NAME [--config PATH]` regenerates optional
+host Codex mounts and recreates only an already stopped installer-owned agent
+service. It is local-only, keeps backups, and never installs Codex or stops active
+workers. Drain new work and stop only the agent first; see the
+[maintenance workflow](../guide/worker-harnesses.md#install-upgrade-or-refresh-a-runtime).
+
+Doctor reports effective Codex executable selections, resolved paths, versions
+and container layout compatibility as optional checks. `doctor fix` does not
+install Codex. Service PATH may differ from the interactive doctor environment.

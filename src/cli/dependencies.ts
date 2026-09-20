@@ -1,4 +1,7 @@
 import { execFile } from 'child_process';
+import { homedir } from 'os';
+import { readFileSync } from 'fs';
+import { resolveCodexRuntime } from '../session/codex-runtime';
 
 export interface DependencyCheck { name: string; ok: boolean; detail: string; required: boolean }
 export type DependencyRunner = (file: string, args: string[], timeout: number) => Promise<string>;
@@ -7,6 +10,8 @@ export interface DependencyOptions {
   platform?: NodeJS.Platform;
   nodeVersion?: string;
   uid?: number;
+  /** Read only the worker executable selections; never load/migrate server config. */
+  configPath?: string;
 }
 const runCommand: DependencyRunner = (file, args, timeout) => new Promise((resolve, reject) => {
   // Gracefully ask the direct child to stop. sudo/package-manager descendants
@@ -45,6 +50,63 @@ export async function checkDependencies(options: DependencyOptions = {}): Promis
   const checks: DependencyCheck[] = [node];
   for (const name of ['claude', 'bun', 'ffmpeg', 'ffprobe']) {
     checks.push(await probe(name, options.run ?? runCommand, name === 'claude' || name === 'bun'));
+  }
+  checks.push(...await checkCodexDependencies(options));
+  return checks;
+}
+
+async function checkCodexDependencies(options: DependencyOptions): Promise<DependencyCheck[]> {
+  const checks: DependencyCheck[] = [];
+  const selections = new Map<string, { bin: unknown; cwd: string; scopes: string[] }>();
+  const add = (bin: unknown, scope: string, cwd = process.cwd()) => {
+    const key = JSON.stringify([bin, cwd]);
+    const old = selections.get(key);
+    selections.set(key, { bin, cwd, scopes: [...(old?.scopes ?? []), scope] });
+  };
+  if (options.configPath) {
+    try {
+      const config = JSON.parse(readFileSync(options.configPath, 'utf8'));
+      const gatewayBin = config.gateway?.workers?.codex?.bin;
+      add(gatewayBin, 'gateway');
+      if (Array.isArray(config.agents)) config.agents.forEach((agent: any, index: number) => {
+        add(agent?.workers?.codex?.bin ?? gatewayBin, `agents[${index}]`, typeof agent?.workspace === 'string' ? agent.workspace : process.cwd());
+      });
+    } catch {
+      checks.push({ name: 'codexConfig', ok: false, required: false,
+        detail: 'Cannot read worker executable selections from local config; checking default Codex only.' });
+      add(undefined, 'default');
+    }
+  } else add(undefined, 'default');
+  for (const { bin: selection, cwd, scopes } of selections.values()) {
+    const scope = scopes.join(', ');
+    const context = `${scope}; optional for Codex workers/safemode. This checks the doctor process environment; gateway service PATH may differ.`;
+    const name = selections.size === 1 ? 'codex' : `codex:${scopes[0]}`;
+    let runtime: ReturnType<typeof resolveCodexRuntime>;
+    try {
+      if (selection !== undefined && typeof selection !== 'string') throw new Error('invalid selection');
+      const expand = (value: string) => value.replace(/\$\{([^}]+)\}/g, (_match, key: string) => {
+        if (process.env[key] === undefined) throw new Error('unresolved environment');
+        return process.env[key]!;
+      }).replace(/^~(?=\/|$)/, homedir());
+      runtime = resolveCodexRuntime(selection === undefined ? undefined : expand(selection as string), expand(cwd));
+    } catch {
+      checks.push({ name, ok: false, required: false, detail: `Codex executable is missing, invalid, or cannot be resolved. Install Codex separately or correct workers.codex.bin/PATH. ${context}` });
+      continue;
+    }
+    try {
+      const output = await (options.run ?? runCommand)(runtime.executable, ['--version'], 5000);
+      // Version output is executable-controlled: do not print arbitrary output or config values.
+      const version = output.match(/\b(?:codex-cli|codex)\s+(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)/i)?.[1];
+      const executable = JSON.stringify(runtime.executable.length > 240 ? `${runtime.executable.slice(0, 237)}...` : runtime.executable);
+      checks.push({ name, ok: !!version, required: false,
+        detail: `${version ? `Codex ${version}` : 'Codex ran but returned no recognizable version'}; executable ${executable}. ${context}` });
+    } catch {
+      checks.push({ name, ok: false, required: false, detail: `Codex executable could not run --version. ${context}` });
+    }
+    checks.push({ name: `${name}Container`, ok: !runtime.containerError, required: false,
+      detail: runtime.containerError
+        ? `Codex installation is not compatible with the container runtime layout. Install a supported native binary or npm distribution. ${context}`
+        : `Codex runtime files are available for container mounting; container engine/image readiness is not checked. ${context}` });
   }
   return checks;
 }
