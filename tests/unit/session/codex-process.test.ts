@@ -55,7 +55,8 @@ afterEach(async () => { await adapter.stop(); await rm(directory, { recursive: t
 test('uses private Responses configuration, MCP ticket env and sandbox without credential argv', async () => {
   await launch();
   const [bin, args, settings] = (spawn as jest.Mock).mock.calls[0];
-  expect(bin).toBe('codex'); expect(args).toEqual(['app-server', '--listen', 'stdio://']);
+  expect(bin).toBe('codex'); expect(args.slice(-3)).toEqual(['app-server', '--listen', 'stdio://']);
+  expect(args).toEqual(expect.arrayContaining(['notify=[]', 'features.hooks=false', 'features.plugins=false', 'features.apps=false', 'features.multi_agent=false']));
   expect(JSON.stringify(args)).not.toMatch(/secret/);
   const config = await readFile(join(settings.env.CODEX_HOME, 'config.toml'), 'utf8');
   expect(config).toContain('sandbox_mode = "workspace-write"');
@@ -410,4 +411,34 @@ test('native credential probe uses the resolved executable for a relative worker
   adapter.sendMessage('run fixture');
   await waitUntil(() => (spawn as jest.Mock).mock.calls.length === 2);
   expect((spawn as jest.Mock).mock.calls[1][0]).toBe(absoluteBin);
+});
+
+
+test.each(['notify', 'hooks', 'apps', 'plugins', 'browser_use', 'computer_use', 'multi_agent', 'image_generation', 'skill_mcp_dependency_install', 'workspace_dependencies', 'web_search'])('rejects unexpected native capability %s before starting a thread', async capability => {
+  const autoReply = child.stdin.listeners('data')[0]; child.stdin.removeAllListeners('data');
+  child.stdin.on('data', (chunk: Buffer) => {
+    const request = JSON.parse(chunk.toString());
+    if (request.method !== 'config/read') return autoReply(chunk);
+    const config: any = { model_provider: 'gateway', model_providers: { gateway: { base_url: options.config.baseUrl, env_key: 'GATEWAY_CODEX_API_KEY', wire_api: 'responses' } }, mcp_servers: { gateway: { command: 'node', args: ['bridge.js'], env: { TICKET: 'secret-ticket' } } } };
+    if (capability === 'notify') config.notify = ['unexpected-program'];
+    else if (capability === 'hooks') config.hooks = { SessionStart: [{}] };
+    else if (capability === 'web_search') config.web_search = 'live';
+    else config.features = { [capability]: true };
+    setImmediate(() => emit({ id: request.id, result: { config, layers: [] } }));
+  });
+  const errors: Error[] = []; adapter.on('startup-error', error => errors.push(error));
+  await adapter.start(); adapter.sendMessage('never execute');
+  await waitUntil(() => errors.length > 0);
+  expect(errors[0].message).toMatch(/not permitted|exceed/);
+  expect(rpc.some(r => r.method === 'thread/start')).toBe(false);
+});
+
+test.each(['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval', 'item/tool/call'])('never grants unexpected native request %s', async method => {
+  await launch();
+  emit({ id: 'unapproved-request', method, params: { threadId: thread } });
+  await waitUntil(() => events.some(event => event.type === 'result'));
+  expect(rpc).toContainEqual({ id: 'unapproved-request', error: { code: -32601, message: 'Interactive requests are not supported by gateway workers' } });
+  expect(events).toContainEqual(expect.objectContaining({ type: 'result', is_error: true, result: expect.stringContaining('unsupported interaction') }));
+  await waitUntil(() => (stopProcessGroup as jest.Mock).mock.calls.length > 0);
+  expect(stopProcessGroup).toHaveBeenCalledWith(54321);
 });

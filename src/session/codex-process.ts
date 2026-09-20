@@ -1,4 +1,5 @@
 import { resolveCodexCredentials, CodexCredentials } from './codex-auth';
+import { codexPolicyArgs, DISABLED_CODEX_FEATURES } from './codex-policy';
 import { resolveCodexRuntime } from './codex-runtime';
 import { inspectSelectedCodexRuntime, CODEX_RUNTIME_MAINTENANCE } from './codex-container-runtime';
 import { prepareManagedConnectors } from './managed-connectors';
@@ -241,7 +242,7 @@ export class CodexProcess extends EventEmitter {
       input.push({ type: 'localImage', path: filename });
     }
     if (this.cancelled) return;
-    const args = ['app-server', '--listen', 'stdio://'];
+    const args = [...codexPolicyArgs(), 'app-server', '--listen', 'stdio://'];
     const key = 'GATEWAY_CODEX_API_KEY';
     const env: NodeJS.ProcessEnv = profile.hostExecution ? { ...process.env } : Object.fromEntries(['PATH', 'HOME', 'LANG', 'TMPDIR', 'SSL_CERT_FILE', 'SSL_CERT_DIR'].flatMap(k => process.env[k] === undefined ? [] : [[k, process.env[k]]]));
     for (const k of Object.keys(env)) if (/^(ANTHROPIC_|CLAUDE_|CODEX_|OPENAI_)/.test(k)) delete env[k];
@@ -300,6 +301,8 @@ export class CodexProcess extends EventEmitter {
       if (server.command !== expected.command || JSON.stringify(server.args) !== JSON.stringify(expected.args) || Object.keys(server.env ?? {}).length !== Object.keys(expected.env ?? {}).length || Object.entries(expected.env ?? {}).some(([key, value]) => server.env?.[key] !== value)) throw new Error('Codex MCP server configuration mismatch');
     }
     if (effective.notify?.length || (effective.hooks && Object.keys(effective.hooks).length)) throw new Error('Codex executable hooks are not permitted');
+    if (DISABLED_CODEX_FEATURES.some(name => effective.features?.[name] === true) ||
+        (effective.web_search !== undefined && effective.web_search !== 'disabled')) throw new Error('Codex native capabilities exceed the gateway worker policy');
     const provider = effective.model_providers?.gateway;
     if (effective.model_provider !== 'gateway' || provider?.base_url !== this.credentials!.baseUrl || provider?.env_key !== 'GATEWAY_CODEX_API_KEY' || provider?.wire_api !== 'responses') throw new Error('Codex provider configuration mismatch');
   }

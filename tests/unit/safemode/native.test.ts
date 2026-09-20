@@ -39,7 +39,7 @@ it('Claude takeover resumes the identical conversation and removes writing/comma
 it('Codex explicitly disables configured MCP servers instead of trusting an empty merged table', () => {
   exec.mockReturnValue(JSON.stringify([{ name: 'shell' }, { name: 'quoted.server' }]));
   const inv = buildNativeInvocation({ cli: 'codex', mode: 'headless', cwd: root, nativeSessionId: id, resume: true, prompt: 'continue' });
-  expect(inv.args).toEqual(expect.arrayContaining(['sandbox_mode="read-only"', 'approval_policy="never"', 'features.hooks=false', 'features.plugins=false', 'mcp_servers."shell".enabled=false', 'mcp_servers."quoted.server".enabled=false', '--ignore-rules', 'resume', id]));
+  expect(inv.args).toEqual(expect.arrayContaining(['sandbox_mode="read-only"', 'approval_policy="never"', 'notify=[]', 'features.hooks=false', 'features.plugins=false', 'mcp_servers."shell".enabled=false', 'mcp_servers."quoted.server".enabled=false', '--ignore-rules', 'resume', id]));
   expect(inv.args).not.toContain('--last');
   expect(inv.args).not.toContain('--dangerously-bypass-approvals-and-sandbox');
   expect(inv.args.slice(-2)).toEqual(['--', 'continue']);
@@ -85,4 +85,12 @@ it('preserves the native Claude model when restricted mode excludes user customi
   expect(inv.args.join(' ')).not.toContain('unsafe');
   expect(inv.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('test-auth');
   expect(inv.env.NODE_OPTIONS).toBeUndefined();
+});
+
+
+it('keeps deliberate interactive params separate from restricted defaults', () => {
+  const inv = buildNativeInvocation({ cli: 'codex', mode: 'interactive', cwd: root, nativeArgs: ['--model', 'gpt-test'] });
+  expect(inv.args).not.toContain('notify=[]');
+  const restricted = buildNativeInvocation({ cli: 'codex', mode: 'interactive', cwd: root });
+  expect(restricted.args).toContain('notify=[]');
 });

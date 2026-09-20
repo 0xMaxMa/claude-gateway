@@ -143,3 +143,10 @@ node scripts/orchestration/smoke-codex-worker.cjs --container
 ```
 
 This creates a temporary plain Debian container, mounts the resolved host Codex runtime read-only, and uses a local fake Responses API. It verifies scoped MCP, native resume, steering and cancellation without provider billing. The temporary container is removed afterward. It does not change a running gateway or installed app.
+
+
+## Native capability boundaries
+
+Gateway workers disable native notification programs, hooks, plugins, apps, browser/computer tools, image generation, shell snapshots, native multi-agent and automatic skill/dependency installation before starting Codex. They use the gateway-selected MCP configuration; unexpected effective capabilities or interactive approval requests fail the attempt. Explicit shell commands and coding tools remain available within the authorized worker profile.
+
+For app workers, Docker is the filesystem and process boundary (`externalSandbox`). Workers can edit the app workspace and writable container layer and use network access. Tasks sharing the same app container are not separate security identities. Host-execution workers remain trusted with the host user's authority; a worktree is not an OS sandbox. These controls prevent unintended native integrations, not arbitrary actions by a trusted worker with shell access.

@@ -4,6 +4,7 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { execFileSync } from 'child_process';
 import { resolveClaudeBin } from '../session/claude-bin';
+import { codexPolicyArgs } from '../session/codex-policy';
 
 export type SafemodeCli = 'claude' | 'codex';
 export interface NativeOptions {
@@ -110,9 +111,7 @@ export function buildNativeInvocation(options: NativeOptions): NativeInvocation 
   }
   const command = options.env?.CODEX_BIN || process.env.CODEX_BIN || 'codex';
   const args = [
-    '-c', 'features.hooks=false', '-c', 'features.plugins=false', '-c', 'features.apps=false',
-    '-c', 'features.browser_use=false', '-c', 'features.computer_use=false',
-    '-c', 'features.multi_agent=false', '-c', 'features.shell_snapshot=false',
+    ...codexPolicyArgs(),
     '-c', 'shell_environment_policy.inherit="none"',
     '-c', 'shell_environment_policy.set={}',
     '-c', 'sandbox_mode="read-only"',
