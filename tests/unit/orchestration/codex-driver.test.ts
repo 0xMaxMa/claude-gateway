@@ -1,3 +1,5 @@
+import { discoverCliSkills } from '../../../src/orchestration/cli-skills';
+jest.mock('../../../src/orchestration/cli-skills',()=>({discoverCliSkills:jest.fn().mockResolvedValue([{name:'native-only'}])}));
 import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
 jest.mock('../../../src/orchestration/container', () => ({ ...jest.requireActual('../../../src/orchestration/container'), validateContainer: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../../../src/session/codex-container-runtime', () => ({ inspectSelectedCodexRuntime: jest.fn().mockResolvedValue('fixture-container') }));
@@ -130,7 +132,8 @@ test('file skill material is pinned and its resources are supplied to the native
   expect(process.sendMessage).not.toHaveBeenCalledWith(expect.stringContaining('invoke that exact name via Skill'), []);
 });
 
-test('CLI-only skills fail explicitly without starting Claude as fallback', async () => {
+test('explicit Codex CLI-only skills fail without starting Claude as fallback', async () => {
+  gateway.gateway.workers!.harness='codex';
   const task = spawn('gpt-5.6-luna',{targetProfile:'skill-worker',skill:{invocation:'cli',name:'native-only',args:'',content:'',filePath:''}});
   const attempt = tasks.claim(task.taskId)!;
   await expect(driver.start(task,attempt)).rejects.toMatchObject({code:'CODEX_SKILL_UNAVAILABLE'});
@@ -248,4 +251,12 @@ test('default auto falls back to Claude when Codex is not installed', async () =
   expect(CodexProcess).not.toHaveBeenCalled();
   expect(SessionProcess).toHaveBeenCalledTimes(1);
   expect(resolveCodexCredentials).not.toHaveBeenCalled();
+});
+
+test('auto keeps native Claude skills on Claude before dispatch and records why',async()=>{
+ await run('gpt-5.6-luna',{targetProfile:'skill-worker',skill:{invocation:'cli',name:'native-only',args:'',content:'',filePath:''}});
+ expect(discoverCliSkills).toHaveBeenCalled();
+ expect(CodexProcess).not.toHaveBeenCalled();expect(SessionProcess).toHaveBeenCalled();
+ expect(store.get("SELECT payload_json FROM task_attempts ORDER BY rowid DESC LIMIT 1")?.payload_json).toContain('"harness":"claude"');
+ expect(store.get("SELECT payload_json FROM conversation_events WHERE type='worker.harness_fallback'")?.payload_json).toContain('CODEX_SKILL_UNAVAILABLE');
 });

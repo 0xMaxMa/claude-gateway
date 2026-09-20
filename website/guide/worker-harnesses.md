@@ -1,6 +1,6 @@
 # Worker harnesses
 
-The conversational Agent continues to run Claude Code. Background workers default to automatic routing: GPT models use native Codex when its runtime and portable native authentication are ready, otherwise they fall back to Claude Code before dispatch. Other models use Claude unless model metadata selects another harness. Explicit `claude` or `codex` selections are preserved. The gateway's task lifecycle and scoped MCP tools apply to both harnesses.
+The conversational Agent continues to run Claude Code. Background workers default to automatic routing: GPT models use native Codex when its runtime and native authentication are ready, otherwise they fall back to Claude Code before dispatch. Other models use Claude unless model metadata selects another harness. Explicit `claude` or `codex` selections are preserved. The gateway's task lifecycle and scoped MCP tools apply to both harnesses.
 
 ## Configure routing
 
@@ -23,7 +23,7 @@ The optional `codex.baseUrl` and `codex.apiKeyEnv` fields are **explicit overrid
 Omit both to use the provider selected by native Codex configuration under the
 gateway service user's `CODEX_HOME` (default `~/.codex`). Log into Codex separately;
 gateway never copies Claude credentials and never installs or logs into Codex for you.
-Native API-key file login and selected providers using `env_key` are supported.
+Native API-key login (file or OS keyring), ChatGPT login (browser or device login), and selected providers using `env_key` are supported. The gateway asks the installed Codex app-server for its selected account and access credential; it does not parse a particular auth-file layout. File, keyring and auto credential storage remain owned by Codex.
 With overrides, set the named environment variable in the service environment;
 existing explicit settings retain precedence. URLs must expose Responses over
 HTTPS (local HTTP is allowed), without embedded credentials or query strings.
@@ -31,15 +31,14 @@ HTTPS (local HTTP is allowed), without embedded credentials or query strings.
 `harness: "auto"` selects Codex for GPT model IDs when its runtime and isolated
 worker credentials are ready. Otherwise it selects Claude **before dispatch**
 and records a `worker.harness_fallback` event. A Codex turn that has started is
-never replayed through Claude after an auth, quota, network or execution error.
+never replayed through Claude after an auth, quota, network or execution error. Tasks assigned a Claude CLI-only skill also choose Claude before dispatch (`CODEX_SKILL_UNAVAILABLE`); file-based skills can run on either harness.
 Explicit `harness: "codex"` fails with a readiness error rather than switching.
 
-Agent-level worker settings override gateway defaults. Native OAuth/ChatGPT and
-OS-keyring login remain available in **safemode**, where Codex owns its original
-auth store and refresh lifecycle. They are currently **not portable to isolated
-workers**: auto routing falls back to Claude with `CODEX_AUTH_NOT_PORTABLE`.
-Gateway does not copy rotating refresh tokens or mount a personal Codex home.
-Use native API-key file login or an `env_key` provider for Codex workers.
+Agent-level worker settings override gateway defaults. Host workers and app-container workers use the same native login as terminal Codex. For ChatGPT, the host CLI exports only the current access token through `getAuthStatus`; an isolated app-server receives it through `account/login/start` with `chatgptAuthTokens` and ephemeral storage. Refresh requests go back to the host CLI, concurrent refreshes are coalesced, and an account change fails the running worker rather than switching identities. Gateway never copies refresh tokens, writes native auth configuration, or mounts a personal Codex home into a container. Safemode continues to use the native auth store directly.
+
+Local readiness is not a live provider test: subscription model access, quota and connectivity can still fail after dispatch. An installed CLI that cannot export its selected authentication reports a specific readiness error; auto routing falls back before execution. Custom providers needing extra headers, query parameters or provider-specific signing require additional support and are not silently remapped. Terminal-only environment settings must also be available to the gateway service user.
+
+Worker Turn details, task attempt details and `/tasks` detail show **Harness: Codex** or **Harness: Claude Code** from the recorded attempt, including the actual result of auto fallback. Historical attempts without a recorded harness are not inferred from model names. `doctor` groups agents sharing the same executable/auth configuration and reports distinct readiness failures once per configuration.
 
 Existing model entries in `gateway.models` can declare worker routing and provider model names:
 
@@ -62,7 +61,7 @@ Relative `codex.bin` paths resolve against the agent workspace; the credential p
 
 Generated app-agent images do **not** download or install Codex. Claude-only apps work without a host Codex installation. To enable Codex, explicitly install an official standalone or npm Codex distribution on the gateway host. The resolver uses the effective agent `workers.codex.bin`, then the gateway value, then the gateway process's `PATH`. It resolves executable symlinks and finds the native payload and bundled resources behind an npm launcher. Host workers retain the npm launcher; app workers use the native executable at `/opt/gateway-codex/bin/codex`.
 
-Only when a compatible runtime and portable native auth are ready are the native executable and recognized bundled resource paths mounted read-only. Host Codex home, authentication, configuration and sessions are not added to the container. Per-attempt state and credential delivery remain isolated. A missing executable, incompatible layout, unavailable mount or unportable auth never causes installation or host execution. Auto mode can select the Claude container worker before dispatch. All agents sharing an app container must resolve to the same native runtime; conflicting overrides leave Codex unavailable until aligned and refreshed.
+Only when a compatible runtime and native auth are ready are the native executable and recognized bundled resource paths mounted read-only. Host Codex home, authentication, configuration and sessions are not added to the container. Per-attempt state and credential delivery remain isolated. A missing executable, incompatible layout, unavailable mount or unavailable native auth never causes installation or host execution. Auto mode can select the Claude container worker before dispatch. All agents sharing an app container must resolve to the same native runtime; conflicting overrides leave Codex unavailable until aligned and refreshed.
 
 Container mounts require a local Linux Docker daemon on the gateway host, matching x64 or arm64 architecture. Remote Docker and Docker Desktop are unsupported. Official self-contained distributions are supported; custom host launcher scripts may work for host workers but cannot be mounted. ELF format/architecture and resources are checked before mounting; arbitrary external shared-library dependencies are not packaged for you. `claude-gateway doctor` reports resolved executable/version and layout compatibility, but cannot certify every container image or the running service's PATH. Run diagnostics in the gateway service environment when an interactive shell gives different results.
 

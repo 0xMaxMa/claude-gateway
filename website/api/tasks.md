@@ -4,6 +4,8 @@ Worker execution defaults to the host Agent's existing workspace, or its app con
 
 New worker attempts record optional `harness` (`claude` or `codex`) and `harnessModel` fields. Older attempts can omit them. These describe actual worker routing; the conversational agent still uses Claude Code. Codex usage records contain observed aggregate input/cache/output counters, not an invented per-request breakdown or loaded-tool inventory. See [worker harnesses](../guide/worker-harnesses.md).
 
+Task detail includes optional `harness` (`claude` or `codex`) from the latest recorded attempt. Queued work without a chosen harness and older records without this metadata omit it; clients must not infer it from the model name.
+
 Worker MCP admission: only explicitly configured `isolated-worktree` execution of `default-worker` can return `WORKER_GIT_PROJECT_REQUIRED` with an actionable message and `retryable: true` before creating a task. Correct the worker profile or project configuration before resubmitting; retain `continue_task_id` for related work. This does not change public API authentication or container permissions.
 
 Manual `POST /api/v1/crons/:id/run` for an orchestration agent remains pending through delegated work and the final Agent report. A queue acknowledgement is not a successful run result. The job timeout covers this wait; absent an explicit value, managed jobs have no fixed total wait deadline when worker maxDurationMs is zero. Normal chat/API requests still return their initial Agent response without waiting for workers.

@@ -94,3 +94,8 @@ it('keeps deliberate interactive params separate from restricted defaults', () =
   const restricted = buildNativeInvocation({ cli: 'codex', mode: 'interactive', cwd: root });
   expect(restricted.args).toContain('notify=[]');
 });
+
+it('keeps native Codex access-token and OS keyring discovery environment',()=>{
+ const env=nativeEnvironment('codex',{HOME:'/home/operator',CODEX_ACCESS_TOKEN:'native-access',DBUS_SESSION_BUS_ADDRESS:'unix:path=/run/user/1000/bus',XDG_RUNTIME_DIR:'/run/user/1000',GATEWAY_API_KEY:'private',ANTHROPIC_API_KEY:'unrelated'});
+ expect(env).toEqual({HOME:'/home/operator',CODEX_ACCESS_TOKEN:'native-access',DBUS_SESSION_BUS_ADDRESS:'unix:path=/run/user/1000/bus',XDG_RUNTIME_DIR:'/run/user/1000'});
+});

@@ -70,6 +70,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     let authFingerprint: string | undefined;
     if (harness.harness === 'codex') {
       try {
+        if (task.skill?.invocation === 'cli') throw new CodexReadinessError('CODEX_SKILL_UNAVAILABLE', 'This task requires a Claude Code native skill. Use the Claude Code harness or install a portable file-based skill.');
         const runtime = resolveCodexRuntime(harness.config.bin, this.agent.workspace);
         authFingerprint = (await resolveCodexCredentials({ ...harness.config, bin: runtime.executable, allowDockerHost: this.agent.type === 'app-agent' })).fingerprint;
         if (this.agent.type === 'app-agent') await inspectSelectedCodexRuntime(this.agent, runtime);
@@ -89,7 +90,6 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     attempt.harnessModel = harness.harness === 'codex' ? harness.config.model : task.model ?? this.agent.claude.model;
     this.tasks.store.transaction(() => this.tasks.store.saveAttempt(attempt));
     const cliSkill = task.skill?.invocation === 'cli';
-    if (cliSkill && harness.harness === 'codex') throw new OrchestrationError('CODEX_SKILL_UNAVAILABLE', 'This skill exists only in the Claude Code harness. Install a file-based skill or select the Claude worker harness.');
     const invokedSkill = task.skill ? (cliSkill ? task.skill.name : `orchestration-task:${task.skill.name}`) : undefined;
     if (cliSkill) {
       const installed = await discoverCliSkills(this.agent, workspace.path);
@@ -188,12 +188,12 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       const limits = resolveOrchestrationConfig(this.agent.orchestration);
       const turn = startProcessTurn(process, prompt, limits.tasks.maxDurationMs || undefined, undefined,
         metrics => {
-          recordTokenTurn(this.tasks.store, { id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics });
+          recordTokenTurn(this.tasks.store, { id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics, harness: attempt.harness });
           this.onManagedTurn?.(task.agentSessionId, revision.instructions, metrics, task.skill ? [task.skill.name] : []);
         }, [],
         {startupTimeoutMs: limits.conversation.startupTimeoutMs, firstResponseTimeoutMs: limits.conversation.firstResponseTimeoutMs, compactionTimeoutMs: limits.conversation.compactionTimeoutMs,
           idleTimeoutMs: limits.tasks.idleTimeoutMs, acceptToolProgress: true, idleAction: 'observe',
-          onUsage: metrics => recordTokenTurn(this.tasks.store, {id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics}),
+          onUsage: metrics => recordTokenTurn(this.tasks.store, {id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics, harness: attempt.harness}),
           onObservation: observation => {
             if (observing || observationClosed) return;
             observing = true;

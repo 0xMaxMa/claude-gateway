@@ -8,7 +8,7 @@ const exec = promisify(execFile);
 const entry = path.resolve(__dirname, '../../dist/entry.js');
 
 // Configuration/account probe without a thread or provider request.
-const nativeProbe = `if(process.argv[2]==='app-server'){
+const nativeProbe = `if(process.argv.includes('app-server')){
  require('readline').createInterface({input:process.stdin}).on('line',line=>{
   const q=JSON.parse(line);if(!q.id)return;
   const result=q.method==='config/read'?{config:{model_provider:'fixture',model_providers:{fixture:{env_key:'FIXTURE_NATIVE_KEY'}}}}:q.method==='account/read'?{account:null}:{};
@@ -115,7 +115,7 @@ setTimeout(()=>process.exit(0),1600);
     fs.writeFileSync(fake, `#!/usr/bin/env node
 const fs=require('fs'),args=process.argv.slice(2);
 if(args[0]==='mcp'&&args[1]==='list'){console.log('[]');process.exit(0);}
-if(args[0]==='app-server'){
+if(args.includes('app-server')){
  require('readline').createInterface({input:process.stdin}).on('line',line=>{
   const q=JSON.parse(line);if(!q.id)return;
   const result=q.method==='config/read'?{config:{model_provider:'openai'}}:q.method==='account/read'?{account:{type:'chatgpt'}}:{};

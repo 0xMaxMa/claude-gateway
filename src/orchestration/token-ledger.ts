@@ -6,6 +6,7 @@ export interface TokenTurn extends ManagedTurnMetrics {
   id: string;
   sessionId: string;
   role: 'agent' | 'worker';
+  harness?: 'claude' | 'codex';
   category: 'input' | 'report' | 'worker';
   taskId?: string;
   taskRevision?: number;
@@ -169,6 +170,7 @@ export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 
         const task = store.get('SELECT t.snapshot_json FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.id=? AND c.agent_session_id=?', turn.taskId, sessionId);
         const attempt = store.attempt(turn.id);
         if (task && attempt) {
+          turn.harness = attempt.harness ?? turn.harness;
           const snapshot = JSON.parse(String(task.snapshot_json));
           const revision = store.get('SELECT payload_json FROM task_revisions WHERE task_id=? AND revision=?', turn.taskId, attempt.revision);
           turn.taskTitle = snapshot.title;

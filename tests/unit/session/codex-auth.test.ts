@@ -10,14 +10,14 @@ beforeEach(() => {
   writeFileSync(bin, `#!${process.execPath}
 const fs=require('fs'),path=require('path'),rl=require('readline').createInterface({input:process.stdin});
 rl.on('line',line=>{const q=JSON.parse(line); if(!q.id)return;
-const fixture=JSON.parse(fs.readFileSync(path.join(process.env.HOME,'fixture.json')));
-let result=q.method==='config/read'?{config:fixture.config}:q.method==='account/read'?{account:fixture.account}:{};
+const fixture=JSON.parse(fs.readFileSync(path.join(process.env.HOME,'fixture.json')));fs.appendFileSync(path.join(process.env.HOME,'calls.jsonl'),JSON.stringify({method:q.method,refresh:q.params?.refreshToken})+'\\n');
+let result=q.method==='config/read'?{config:fixture.config}:q.method==='account/read'?{account:fixture.account}:q.method==='getAuthStatus'?fixture.exported:{};
 process.stdout.write(JSON.stringify({id:q.id,result})+'\\n');});
 `, { mode: 0o700 });
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 function fixture(config: any, account: any = {type:'apiKey'}, auth: any = {auth_mode:'apikey',OPENAI_API_KEY:'native-secret'}) {
-  writeFileSync(join(root,'fixture.json'), JSON.stringify({config,account}));
+  writeFileSync(join(root,'fixture.json'), JSON.stringify({config,account,exported:{authMethod:auth.auth_mode ?? 'apikey',authToken:auth.OPENAI_API_KEY ?? auth.tokens?.access_token}}));
   writeFileSync(join(root,'.codex','auth.json'), JSON.stringify(auth));
 }
 const config = {model_provider:'fixture',cli_auth_credentials_store:'file',model_providers:{fixture:{base_url:'https://native.example/v1',wire_api:'responses',requires_openai_auth:true}}};
@@ -31,14 +31,29 @@ test('resolves selected provider env auth without requiring an auth.json login',
   fixture({...config,model_providers:{fixture:{base_url:'https://native.example/v1',env_key:'FIXTURE_KEY'}}},null,{});
   await expect(resolveCodexCredentials({bin,env:{HOME:root,FIXTURE_KEY:'env-key'}})).resolves.toMatchObject({key:'env-key'});
 });
-test('does not misreport native OAuth as unauthenticated or export its refresh token', async () => {
-  fixture(config,{type:'chatgpt'},{tokens:{refresh_token:'do-not-copy'}});
-  expect((await inspectCodexAccount(bin,{HOME:root})).account.account.type).toBe('chatgpt');
-  await expect(resolveCodexCredentials({bin,env:{HOME:root}})).rejects.toMatchObject({code:'CODEX_AUTH_NOT_PORTABLE'});
+test.each(['file','keyring','auto'])('uses native ChatGPT %s auth without copying its refresh token', async storage => {
+  const token = 'header.' + Buffer.from(JSON.stringify({sub:'user-one','https://api.openai.com/auth':{chatgpt_account_id:'account-one',chatgpt_plan_type:'plus'}})).toString('base64url') + '.signature';
+  fixture({model_provider:'openai',cli_auth_credentials_store:storage},{type:'chatgpt'}, {auth_mode:'chatgpt', tokens:{access_token:token,refresh_token:'do-not-copy'}});
+  const result=await resolveCodexCredentials({bin,env:{HOME:root}});
+  expect(result.chatgpt).toEqual({accessToken:token,chatgptAccountId:'account-one',chatgptPlanType:'plus'});
+  expect(JSON.stringify(result)).not.toContain('do-not-copy');
+  expect(result.key).toBe('');
 });
-test('never substitutes stale file credentials for keyring auth', async () => {
+test('keyring API auth uses the native export, never the stale auth file', async () => {
   fixture({...config,cli_auth_credentials_store:'keyring'});
-  await expect(resolveCodexCredentials({bin,env:{HOME:root}})).rejects.toMatchObject({code:'CODEX_AUTH_NOT_PORTABLE'});
+  writeFileSync(join(root,'.codex','auth.json'),JSON.stringify({OPENAI_API_KEY:'stale'}));
+  await expect(resolveCodexCredentials({bin,env:{HOME:root}})).resolves.toMatchObject({key:'native-secret'});
+});
+test('missing native export fails without falling back to a stale auth file', async () => {
+  fixture(config,null,{});
+  writeFileSync(join(root,'.codex','auth.json'),JSON.stringify({OPENAI_API_KEY:'stale'}));
+  await expect(resolveCodexCredentials({bin,env:{HOME:root}})).rejects.toMatchObject({code:'CODEX_AUTH_REQUIRED'});
+});
+test('ChatGPT account identity survives token rotation and changes on account switch', async () => {
+  const setup=(account:string,rotation:string)=>fixture({model_provider:'openai'},{type:'chatgpt'},{auth_mode:'chatgpt',tokens:{access_token:'header.'+Buffer.from(JSON.stringify({sub:'user-one',rotation,'https://api.openai.com/auth':{chatgpt_account_id:account}})).toString('base64url')+'.sig'}});
+  setup('first','old');const first=await resolveCodexCredentials({bin,env:{HOME:root}});
+  setup('first','new');expect((await resolveCodexCredentials({bin,env:{HOME:root}})).fingerprint).toBe(first.fingerprint);
+  setup('second','new');expect((await resolveCodexCredentials({bin,env:{HOME:root}})).fingerprint).not.toBe(first.fingerprint);
 });
 test('explicit worker settings retain precedence and never use Claude auth', async () => {
   await expect(resolveCodexCredentials({bin,baseUrl:'https://explicit.example/v1',apiKeyEnv:'WORKER_KEY',env:{WORKER_KEY:'explicit'}})).resolves.toMatchObject({key:'explicit'});
@@ -89,4 +104,15 @@ test('malformed profile fails without exposing its contents', async () => {
   fixture(config,null,{});
   writeFileSync(join(root,'.codex','broken.config.toml'),'secret="private-token\n');
   await expect(codexSafemodeEnvironment(bin,{HOME:root},{nativeArgs:['--profile','broken'],source:{HOME:root}})).rejects.toMatchObject({code:'CODEX_CONFIG_UNAVAILABLE',message:expect.not.stringContaining('private-token')});
+});
+
+test('concurrent native refresh requests share one CLI probe', async () => {
+  fixture(config);
+  await Promise.all(Array.from({length:8},()=>resolveCodexCredentials({bin,env:{HOME:root},refreshToken:true})));
+  const calls=require('fs').readFileSync(join(root,'calls.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+  expect(calls.filter((c:any)=>c.method==='getAuthStatus')).toEqual([{method:'getAuthStatus',refresh:true}]);
+});
+test.each([null,{}, {sub:'user'}, {'https://api.openai.com/auth':{chatgpt_account_id:'account-without-user'}}])('malformed ChatGPT identity is an actionable readiness error (%j)', claims => {
+  fixture({model_provider:'openai'},{type:'chatgpt'},{auth_mode:'chatgpt',tokens:{access_token:'header.'+Buffer.from(JSON.stringify(claims)).toString('base64url')+'.secret'}});
+  return expect(resolveCodexCredentials({bin,env:{HOME:root}})).rejects.toMatchObject({code:'CODEX_AUTH_REQUIRED',message:expect.not.stringContaining('.secret')});
 });

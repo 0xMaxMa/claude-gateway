@@ -1,3 +1,4 @@
+import * as codexAuth from '../../../src/session/codex-auth';
 import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
 import { inspectSelectedCodexRuntime } from '../../../src/session/codex-container-runtime';
 jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn() }));
@@ -24,6 +25,7 @@ let adapter: CodexProcess;
 let events: any[];
 let rpc: any[];
 let turnNumber: number;
+let chatgptMode = false;
 function emit(event: any) { child.stdout.write(JSON.stringify(event) + '\n'); }
 function notify(method: string, params: any) { emit({ method, params: { threadId: thread, ...params } }); }
 function item(value: any, completed = true) { notify(completed ? 'item/completed' : 'item/started', { turnId: 'turn-1', item: value }); }
@@ -32,6 +34,7 @@ async function waitUntil(predicate: () => boolean) { const deadline = Date.now()
 async function launch() { await adapter.start(); adapter.sendMessage('do the task'); await waitUntil(() => rpc.some(r => r.method === 'turn/start')); }
 beforeEach(async () => {
   jest.clearAllMocks();
+  chatgptMode = false;
   (resolveCodexRuntime as jest.Mock).mockReset().mockImplementation(bin => ({ executable: bin ?? 'codex', containerExecutable: '/opt/gateway-codex/bin/codex', nativeSha256: 'fixture-sha' }));
   (inspectSelectedCodexRuntime as jest.Mock).mockReset().mockResolvedValue('container-one');
   directory = await mkdtemp(join(tmpdir(), 'codex-adapter-'));
@@ -44,14 +47,14 @@ beforeEach(async () => {
     for (const line of chunk.toString().trim().split('\n')) {
       const request = JSON.parse(line); rpc.push(request);
       if (request.id === undefined) continue;
-      const result = request.method === 'config/read' ? { layers: [], config: { model_provider: 'gateway', model_providers: { gateway: { base_url: options.config.baseUrl, env_key: "GATEWAY_CODEX_API_KEY", wire_api: 'responses' } }, mcp_servers: options.agent.type === 'app-agent' ? { gateway: { command: 'node', args: ['container-bridge.js'] } } : { gateway: { command: 'node', args: ['bridge.js'], env: { TICKET: 'secret-ticket' } } } } } : request.method === 'thread/start' || request.method === 'thread/resume' ? { thread: { id: thread } } : request.method === 'turn/start' ? { turn: { id: 'turn-' + (++turnNumber) } } : {};
+      const result = request.method === 'config/read' ? { layers: [], config: { model_provider: chatgptMode ? 'openai' : 'gateway', cli_auth_credentials_store: chatgptMode ? 'ephemeral' : 'file', model_providers: { gateway: { base_url: options.config.baseUrl, env_key: "GATEWAY_CODEX_API_KEY", wire_api: 'responses' } }, mcp_servers: options.agent.type === 'app-agent' ? { gateway: { command: 'node', args: ['container-bridge.js'] } } : { gateway: { command: 'node', args: ['bridge.js'], env: { TICKET: 'secret-ticket' } } } } } : request.method === 'thread/start' || request.method === 'thread/resume' ? { thread: { id: thread } } : request.method === 'turn/start' ? { turn: { id: 'turn-' + (++turnNumber) } } : {};
       setImmediate(() => { emit({ id: request.id, result }); if (request.method === 'turn/start') notify('turn/started', result); });
     }
   });
   (spawn as jest.Mock).mockReturnValue(child);
   adapter = new CodexProcess(options); events = []; adapter.on('output', line => events.push(JSON.parse(line)));
 });
-afterEach(async () => { await adapter.stop(); await rm(directory, { recursive: true, force: true }); delete process.env.TEST_CODEX_KEY; });
+afterEach(async () => { await adapter.stop(); jest.restoreAllMocks(); await rm(directory, { recursive: true, force: true }); delete process.env.TEST_CODEX_KEY; });
 test('uses private Responses configuration, MCP ticket env and sandbox without credential argv', async () => {
   await launch();
   const [bin, args, settings] = (spawn as jest.Mock).mock.calls[0];
@@ -441,4 +444,39 @@ test.each(['item/commandExecution/requestApproval', 'item/fileChange/requestAppr
   expect(events).toContainEqual(expect.objectContaining({ type: 'result', is_error: true, result: expect.stringContaining('unsupported interaction') }));
   await waitUntil(() => (stopProcessGroup as jest.Mock).mock.calls.length > 0);
   expect(stopProcessGroup).toHaveBeenCalledWith(54321);
+});
+
+test.each(['host','container'])('native ChatGPT %s uses access-only RPC and refreshes without mounting auth', async kind => {
+  chatgptMode = true;
+  const current = {baseUrl:'https://chatgpt.com/backend-api/codex',key:'',fingerprint:'account-one',chatgpt:{accessToken:'access-one',chatgptAccountId:'account-one'}};
+  const resolve=jest.spyOn(codexAuth,'resolveCodexCredentials').mockResolvedValue(current);
+  if(kind==='container') {
+    options.agent={...options.agent,type:'app-agent',container:'fixture'};
+    options.profile={...options.profile,containerExecution:true};
+    (prepareContainerProfile as jest.Mock).mockResolvedValue({directory:'/tmp/gateway-orch-fixture',config:'/tmp/mcp.json'});
+    (containerNode as jest.Mock).mockImplementation(async (_container,script)=>script.includes('createHash')?'fixture-sha':script.includes('process.stdout.write(require')?JSON.stringify({mcpServers:{gateway:{command:'node',args:['container-bridge.js']}}}):'');
+    adapter=new CodexProcess(options);adapter.on('output',line=>events.push(JSON.parse(line)));
+  }
+  await launch();
+  const [_,argv,settings]=(spawn as jest.Mock).mock.calls[0];
+  expect(JSON.stringify(argv)).not.toContain('access-one');
+  expect(settings.env.GATEWAY_CODEX_API_KEY).toBeUndefined();
+  expect(rpc.find(r=>r.method==='account/login/start').params).toEqual({type:'chatgptAuthTokens',...current.chatgpt});
+  expect(rpc.findIndex(r=>r.method==='account/login/start')).toBeLessThan(rpc.findIndex(r=>r.method==='thread/start'));
+  resolve.mockResolvedValue({...current,chatgpt:{...current.chatgpt,accessToken:'access-two'}});
+  emit({id:'refresh-1',method:'account/chatgptAuthTokens/refresh',params:{previousAccountId:'account-one'}});
+  await waitUntil(()=>rpc.some(r=>r.id==='refresh-1'));
+  expect(rpc.find(r=>r.id==='refresh-1').result.accessToken).toBe('access-two');
+  expect(resolve).toHaveBeenLastCalledWith(expect.objectContaining({refreshToken:true}));
+  expect(JSON.stringify(events)).not.toContain('access-');
+});
+test('refresh cannot move an existing worker into another native account', async () => {
+  chatgptMode=true;
+  const resolve=jest.spyOn(codexAuth,'resolveCodexCredentials').mockResolvedValue({baseUrl:'https://chatgpt.com/backend-api/codex',key:'',fingerprint:'one',chatgpt:{accessToken:'one',chatgptAccountId:'one'}});
+  await launch();
+  resolve.mockResolvedValue({baseUrl:'https://chatgpt.com/backend-api/codex',key:'',fingerprint:'two',chatgpt:{accessToken:'two',chatgptAccountId:'two'}});
+  emit({id:'refresh-2',method:'account/chatgptAuthTokens/refresh',params:{previousAccountId:'one'}});
+  await waitUntil(()=>events.some(e=>e.type==='result'));
+  expect(rpc.find(r=>r.id==='refresh-2').error.code).toBe(-32001);
+  expect(events.find(e=>e.type==='result').result).toContain('CODEX_AUTH_REFRESH_FAILED');
 });

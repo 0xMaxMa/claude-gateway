@@ -121,6 +121,8 @@ export class CodexProcess extends EventEmitter {
   private nativeUsage?: NativeUsage;
   private identity = '';
   private credentials?: CodexCredentials;
+  private authExecutable?: string;
+  private refreshingAuth = false;
   private homePersisted = false;
   private leaseOwned = false;
   private readonly connectorPaths = new Set<string>();
@@ -153,6 +155,7 @@ export class CodexProcess extends EventEmitter {
       this.containerId = await inspectSelectedCodexRuntime(agent, runtime);
       this.nativeSha256 = runtime.nativeSha256;
     }
+    this.authExecutable = runtime.executable;
     this.credentials = await resolveCodexCredentials({ ...config, bin: runtime.executable, allowDockerHost: agent.type === 'app-agent' });
     const key = 'GATEWAY_CODEX_API_KEY';
     this.identity = this.credentials.fingerprint;
@@ -196,13 +199,12 @@ export class CodexProcess extends EventEmitter {
     }
     this.approvedMcp = mcp.mcpServers ?? {};
     const lines = [
-      `model = ${quote(config.model)}`, 'model_provider = "gateway"', 'approval_policy = "never"',
+      `model = ${quote(config.model)}`, `model_provider = ${quote(this.credentials.chatgpt ? 'openai' : 'gateway')}`, 'approval_policy = "never"',
       `sandbox_mode = ${quote(profile.hostExecution || agent.type === 'app-agent' ? 'danger-full-access' : 'workspace-write')}`,
       'web_search = "disabled"', 'project_doc_fallback_filenames = ["CLAUDE.md"]',
       `developer_instructions = ${quote([profile.context, profile.overlay, profile.skillPluginDir ? `Task skill resources: ${this.containerAttempt ? this.containerAttempt.directory + '/skill-plugin' : profile.skillPluginDir}` : undefined].filter(Boolean).join('\n\n'))}`,
       ...(config.reasoningEffort ? [`model_reasoning_effort = ${quote(config.reasoningEffort)}`] : []),
-      '[model_providers.gateway]', 'name = "Gateway Responses"', 'wire_api = "responses"',
-      `base_url = ${quote(this.credentials!.baseUrl)}`, `env_key = ${quote(key)}`,
+      ...(this.credentials.chatgpt ? ['cli_auth_credentials_store = "ephemeral"'] : ['[model_providers.gateway]', 'name = "Gateway Responses"', 'wire_api = "responses"', `base_url = ${quote(this.credentials.baseUrl)}`, `env_key = ${quote(key)}`]),
       '[features]', 'multi_agent = false',
       `[projects.${quote(agent.type === 'app-agent' ? '/workspace' : agent.workspace)}]`, 'trust_level = "untrusted"',
     ];
@@ -246,7 +248,8 @@ export class CodexProcess extends EventEmitter {
     const key = 'GATEWAY_CODEX_API_KEY';
     const env: NodeJS.ProcessEnv = profile.hostExecution ? { ...process.env } : Object.fromEntries(['PATH', 'HOME', 'LANG', 'TMPDIR', 'SSL_CERT_FILE', 'SSL_CERT_DIR'].flatMap(k => process.env[k] === undefined ? [] : [[k, process.env[k]]]));
     for (const k of Object.keys(env)) if (/^(ANTHROPIC_|CLAUDE_|CODEX_|OPENAI_)/.test(k)) delete env[k];
-    env.CODEX_HOME = this.home; env[key] = this.credentials!.key;
+    env.CODEX_HOME = this.home;
+    if (this.credentials!.chatgpt) delete env[key]; else env[key] = this.credentials!.key;
     const bin = this.executable;
     const child = this.child = agent.type === 'app-agent'
       ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', `HOME=${homedir()}`, '-e', key, agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
@@ -265,10 +268,14 @@ export class CodexProcess extends EventEmitter {
       if (!this.terminal && !this.cancelled) this.fail(this.lastError || this.stderr.trim() || `Codex exited without a completed turn (${code ?? signal})`);
       this.emit('exit', code, signal);
     });
-    await this.request('initialize', { clientInfo: { name: 'claude_gateway', version: '1.0.0' } });
+    await this.request('initialize', { clientInfo: { name: 'claude_gateway', version: '1.0.0' }, capabilities: { experimentalApi: true } });
     this.write({ method: 'initialized', params: {} });
     await this.validateConfiguration();
-    const parameters = { model: config.model, modelProvider: 'gateway', cwd: agent.type === 'app-agent' ? '/workspace' : agent.workspace, approvalPolicy: 'never', sandbox: profile.hostExecution || agent.type === 'app-agent' ? 'danger-full-access' : 'workspace-write' };
+    if (this.credentials!.chatgpt) {
+      try { await this.request('account/login/start', { type: 'chatgptAuthTokens', ...this.credentials!.chatgpt }); }
+      catch { throw new Error('CODEX_AUTH_REQUIRED: Codex rejected the native ChatGPT access credential. Check codex login status or update Codex.'); }
+    }
+    const parameters = { model: config.model, modelProvider: this.credentials!.chatgpt ? 'openai' : 'gateway', cwd: agent.type === 'app-agent' ? '/workspace' : agent.workspace, approvalPolicy: 'never', sandbox: profile.hostExecution || agent.type === 'app-agent' ? 'danger-full-access' : 'workspace-write' };
     const response = await this.request(this.saved ? 'thread/resume' : 'thread/start', { ...parameters, ...(this.saved ? { threadId: this.saved.threadId } : {}) });
     if (!threadPattern.test(response.thread?.id) || (this.saved && response.thread.id !== this.saved.threadId)) throw new Error('Codex thread identity mismatch');
     this.threadId = response.thread.id;
@@ -304,6 +311,10 @@ export class CodexProcess extends EventEmitter {
     if (DISABLED_CODEX_FEATURES.some(name => effective.features?.[name] === true) ||
         (effective.web_search !== undefined && effective.web_search !== 'disabled')) throw new Error('Codex native capabilities exceed the gateway worker policy');
     const provider = effective.model_providers?.gateway;
+    if (this.credentials!.chatgpt) {
+      if (effective.model_provider !== 'openai' || effective.cli_auth_credentials_store !== 'ephemeral' || effective.model_providers?.openai?.base_url) throw new Error('Codex native account configuration mismatch');
+      return;
+    }
     if (effective.model_provider !== 'gateway' || provider?.base_url !== this.credentials!.baseUrl || provider?.env_key !== 'GATEWAY_CODEX_API_KEY' || provider?.wire_api !== 'responses') throw new Error('Codex provider configuration mismatch');
   }
   private write(message: unknown): void {
@@ -330,6 +341,22 @@ export class CodexProcess extends EventEmitter {
     if (typeof response.turn?.id !== 'string') throw new Error('Codex omitted turn identity');
     this.turnId = response.turn.id;
   }
+  private async refreshAuthentication(id: string | number, previousAccountId?: string): Promise<void> {
+    try {
+      if (this.refreshingAuth || (previousAccountId && previousAccountId !== this.credentials?.chatgpt?.chatgptAccountId)) throw new Error('Invalid authentication refresh');
+      this.refreshingAuth = true;
+      const next = await resolveCodexCredentials({ ...this.options.config, bin: this.authExecutable!, refreshToken: true });
+      if (!next.chatgpt || next.fingerprint !== this.identity) throw new Error('Native Codex account changed');
+      if (!this.cancelled && !this.exited) this.write({ id, result: next.chatgpt });
+      this.credentials = next;
+    } catch {
+      if (!this.cancelled && !this.exited) {
+        this.write({ id, error: { code: -32001, message: 'Native Codex authentication refresh failed. Check codex login status under the gateway service user.' } });
+        this.fail('CODEX_AUTH_REFRESH_FAILED: Native Codex authentication could not be refreshed.');
+        void this.stop();
+      }
+    } finally { this.refreshingAuth = false; }
+  }
   private event(event: any): void {
     if (typeof event.id === 'number' && !event.method) {
       const pending = this.requests.get(event.id);
@@ -337,6 +364,9 @@ export class CodexProcess extends EventEmitter {
       return;
     }
     if (event.id !== undefined && event.method) {
+      if (event.method === 'account/chatgptAuthTokens/refresh' && this.credentials?.chatgpt) {
+        void this.refreshAuthentication(event.id, event.params?.previousAccountId); return;
+      }
       // This worker is noninteractive. Unexpected approval/tool requests fail closed.
       this.write({ id: event.id, error: { code: -32601, message: 'Interactive requests are not supported by gateway workers' } });
       this.fail(`Codex requested unsupported interaction: ${event.method}`); void this.stop(); return;

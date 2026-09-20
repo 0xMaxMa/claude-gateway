@@ -1,7 +1,8 @@
-import { resolveCodexCredentials } from '../session/codex-auth';
+import { CodexReadinessError, resolveCodexCredentials } from '../session/codex-auth';
 import { execFile } from 'child_process';
 import { homedir } from 'os';
 import { readFileSync } from 'fs';
+import { delimiter, isAbsolute } from 'path';
 import { resolveCodexRuntime } from '../session/codex-runtime';
 
 export interface DependencyCheck { name: string; ok: boolean; detail: string; required: boolean }
@@ -60,7 +61,9 @@ async function checkCodexDependencies(options: DependencyOptions): Promise<Depen
   const checks: DependencyCheck[] = [];
   const selections = new Map<string, { bin: unknown; cwd: string; scopes: string[]; auth: { baseUrl?: string; apiKeyEnv?: string } }>();
   const add = (bin: unknown, scope: string, cwd = process.cwd(), auth: { baseUrl?: string; apiKeyEnv?: string } = {}) => {
-    const key = JSON.stringify([bin, cwd, auth]);
+    const relative = typeof bin === 'string' && (bin.includes('${') || !bin.startsWith('/') && !bin.startsWith('~') && /[/\\]/.test(bin)) ||
+      (!bin || typeof bin === 'string' && !/[/\\]/.test(bin)) && (process.env.PATH ?? '').split(delimiter).some((part: string) => part && !isAbsolute(part));
+    const key = JSON.stringify([bin, relative ? cwd : '', auth.baseUrl, auth.apiKeyEnv]);
     const old = selections.get(key);
     selections.set(key, { bin, cwd, auth, scopes: [...(old?.scopes ?? []), scope] });
   };
@@ -79,7 +82,7 @@ async function checkCodexDependencies(options: DependencyOptions): Promise<Depen
     }
   } else add(undefined, 'default');
   for (const { bin: selection, cwd, scopes, auth } of selections.values()) {
-    const scope = scopes.join(', ');
+    const scope = scopes.length > 3 ? `${scopes.includes('gateway') ? 'gateway and ' : ''}${scopes.filter(s => s !== 'gateway').length} agents (shared configuration)` : scopes.join(', ');
     const context = `${scope}; optional for Codex workers/safemode. This checks the doctor process environment; gateway service PATH may differ.`;
     const name = selections.size === 1 ? 'codex' : `codex:${scopes[0]}`;
     let runtime: ReturnType<typeof resolveCodexRuntime>;
@@ -106,16 +109,17 @@ async function checkCodexDependencies(options: DependencyOptions): Promise<Depen
     }
     if (!options.run) {
       try {
-        await resolveCodexCredentials({ ...auth, bin: runtime.executable });
-        checks.push({ name: `${name}Auth`, ok: true, required: false, detail: 'Native API-key provider configured locally. Network access, model entitlement and quota have not been verified.' });
-      } catch {
-        checks.push({ name: `${name}Auth`, ok: false, required: false, detail: 'Native credentials are absent or not portable to isolated workers. Use codex login status under the gateway service user; native safemode can still use ChatGPT/keyring login. Auto workers fall back to Claude before dispatch.' });
+        const credentials = await resolveCodexCredentials({ ...auth, bin: runtime.executable });
+        checks.push({ name: `${name}Auth`, ok: true, required: false, detail: `${credentials.chatgpt ? 'Native ChatGPT login' : 'Native API-key provider'} available for workers. Network access, model entitlement and quota have not been verified.` });
+      } catch (error) {
+        const reason = error instanceof CodexReadinessError ? `${error.code}: ${error.message}` : 'Native Codex readiness could not be checked. Run codex login status under the gateway service user.';
+        checks.push({ name: `${name}Auth`, ok: false, required: false, detail: `${reason} Auto routing can use Claude Code; explicit Codex requires this check to pass.` });
       }
     }
     checks.push({ name: `${name}Container`, ok: !runtime.containerError, required: false,
       detail: runtime.containerError
         ? `Codex installation is not compatible with the container runtime layout. Install a supported native binary or npm distribution. ${context}`
-        : `Codex runtime files are available for container mounting; container engine/image readiness is not checked. ${context}` });
+        : `Runtime files available for container mounting. Docker engine/image readiness is not checked.` });
   }
   return checks;
 }

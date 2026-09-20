@@ -4,6 +4,7 @@ import type { ProcessSample } from '../../../src/orchestration/process-activity'
 import type { ToolOutcome } from '../../../src/orchestration/execution-observation';
 
 export interface TaskDetail {
+  harness?: 'claude' | 'codex';
   title: string; state: string; startedAt?: number; finishedAt?: number;
   timing?: Partial<Record<'working' | 'tool' | 'input' | 'queued' | 'other' | 'finished', number>>;
   timingMeasuredFrom?: number;
@@ -28,7 +29,7 @@ export function formatTaskDetail(task: TaskDetail, label: string): string {
   const lastTool = activity?.lastTool;
   const diagnostics = [counters, lastTool ? `Last tool: ${lastTool.name} · ${lastTool.status === 'error' ? 'Reported error' : 'Result received'}${lastTool.exitCode === undefined ? '' : ` · Exit code: ${lastTool.exitCode}`}\nReported at: ${new Date(lastTool.observedAt).toISOString().replace('T',' ').replace(/\.\d{3}Z$/, ' UTC')}` : '', activity?.observationStatus ?? activity?.status, activity?.quiet ? 'No recent tool/model progress; task retained for inspection or cancellation.' : ''].filter(Boolean);
   return [
-    `${task.title}\n${label} · Elapsed: ${formatTaskElapsed(task.startedAt,task.finishedAt)}`,
+    `${task.title}\n${label} · Elapsed: ${formatTaskElapsed(task.startedAt,task.finishedAt)}${task.harness ? `\nHarness: ${task.harness === 'codex' ? 'Codex' : 'Claude Code'}` : ''}`,
     formatTiming(task.timing) ? 'Time breakdown\n' + formatTiming(task.timing) + (task.timingMeasuredFrom && task.startedAt && task.timingMeasuredFrom > task.startedAt + 1000 ? '\nMeasured since ' + new Date(task.timingMeasuredFrom).toISOString() : '') : '',
     progressLines.length ? `Progress\n${progressLines.join('\n')}` : '',
     diagnostics.length ? `Diagnostics\n${diagnostics.join('\n')}` : '',
