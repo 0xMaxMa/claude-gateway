@@ -14,7 +14,7 @@ export interface SafemodeSession {
   nativeStarted?: boolean;
   autoName?: boolean;
   configPath?: string;
-  lastRequest?: { id: string; promptHash: string; status: 'running' | 'completed' | 'failed'; exitCode?: number };
+  lastRequest?: { id: string; promptHash: string; status: 'running' | 'completed' | 'failed'; exitCode?: number; error?: string };
 }
 export interface Owner { token: string; pid: number; childPid?: number; launching?: boolean; mode: 'interactive' | 'headless' }
 export function safemodeRoot(): string { return path.join(os.homedir(), '.claude-gateway', 'safemode'); }

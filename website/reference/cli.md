@@ -297,6 +297,6 @@ service. It is local-only, keeps backups, and never installs Codex or stops acti
 workers. Drain new work and stop only the agent first; see the
 [maintenance workflow](../guide/worker-harnesses.md#install-upgrade-or-refresh-a-runtime).
 
-Doctor reports effective Codex executable selections, resolved paths, versions
+Doctor reports native worker auth portability (local configuration, not network or quota verification), effective Codex executable selections, resolved paths, versions
 and container layout compatibility as optional checks. `doctor fix` does not
 install Codex. Service PATH may differ from the interactive doctor environment.

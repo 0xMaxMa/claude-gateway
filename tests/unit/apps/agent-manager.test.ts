@@ -1,3 +1,5 @@
+import { resolveCodexCredentials, CodexReadinessError } from '../../../src/session/codex-auth';
+jest.mock('../../../src/session/codex-auth', () => ({ ...jest.requireActual('../../../src/session/codex-auth'), resolveCodexCredentials: jest.fn().mockResolvedValue({baseUrl:'https://fixture.invalid/v1',key:'fixture-key',fingerprint:'fixture'}) }));
 import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
 import { assertLocalCodexDocker, CODEX_RUNTIME_LABEL } from '../../../src/session/codex-container-runtime';
 jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn() }));

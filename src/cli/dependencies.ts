@@ -1,3 +1,4 @@
+import { resolveCodexCredentials } from '../session/codex-auth';
 import { execFile } from 'child_process';
 import { homedir } from 'os';
 import { readFileSync } from 'fs';
@@ -57,19 +58,19 @@ export async function checkDependencies(options: DependencyOptions = {}): Promis
 
 async function checkCodexDependencies(options: DependencyOptions): Promise<DependencyCheck[]> {
   const checks: DependencyCheck[] = [];
-  const selections = new Map<string, { bin: unknown; cwd: string; scopes: string[] }>();
-  const add = (bin: unknown, scope: string, cwd = process.cwd()) => {
-    const key = JSON.stringify([bin, cwd]);
+  const selections = new Map<string, { bin: unknown; cwd: string; scopes: string[]; auth: { baseUrl?: string; apiKeyEnv?: string } }>();
+  const add = (bin: unknown, scope: string, cwd = process.cwd(), auth: { baseUrl?: string; apiKeyEnv?: string } = {}) => {
+    const key = JSON.stringify([bin, cwd, auth]);
     const old = selections.get(key);
-    selections.set(key, { bin, cwd, scopes: [...(old?.scopes ?? []), scope] });
+    selections.set(key, { bin, cwd, auth, scopes: [...(old?.scopes ?? []), scope] });
   };
   if (options.configPath) {
     try {
       const config = JSON.parse(readFileSync(options.configPath, 'utf8'));
       const gatewayBin = config.gateway?.workers?.codex?.bin;
-      add(gatewayBin, 'gateway');
+      add(gatewayBin, 'gateway', process.cwd(), config.gateway?.workers?.codex);
       if (Array.isArray(config.agents)) config.agents.forEach((agent: any, index: number) => {
-        add(agent?.workers?.codex?.bin ?? gatewayBin, `agents[${index}]`, typeof agent?.workspace === 'string' ? agent.workspace : process.cwd());
+        add(agent?.workers?.codex?.bin ?? gatewayBin, `agents[${index}]`, typeof agent?.workspace === 'string' ? agent.workspace : process.cwd(), { ...config.gateway?.workers?.codex, ...agent?.workers?.codex });
       });
     } catch {
       checks.push({ name: 'codexConfig', ok: false, required: false,
@@ -77,7 +78,7 @@ async function checkCodexDependencies(options: DependencyOptions): Promise<Depen
       add(undefined, 'default');
     }
   } else add(undefined, 'default');
-  for (const { bin: selection, cwd, scopes } of selections.values()) {
+  for (const { bin: selection, cwd, scopes, auth } of selections.values()) {
     const scope = scopes.join(', ');
     const context = `${scope}; optional for Codex workers/safemode. This checks the doctor process environment; gateway service PATH may differ.`;
     const name = selections.size === 1 ? 'codex' : `codex:${scopes[0]}`;
@@ -102,6 +103,14 @@ async function checkCodexDependencies(options: DependencyOptions): Promise<Depen
         detail: `${version ? `Codex ${version}` : 'Codex ran but returned no recognizable version'}; executable ${executable}. ${context}` });
     } catch {
       checks.push({ name, ok: false, required: false, detail: `Codex executable could not run --version. ${context}` });
+    }
+    if (!options.run) {
+      try {
+        await resolveCodexCredentials({ ...auth, bin: runtime.executable });
+        checks.push({ name: `${name}Auth`, ok: true, required: false, detail: 'Native API-key provider configured locally. Network access, model entitlement and quota have not been verified.' });
+      } catch {
+        checks.push({ name: `${name}Auth`, ok: false, required: false, detail: 'Native credentials are absent or not portable to isolated workers. Use codex login status under the gateway service user; native safemode can still use ChatGPT/keyring login. Auto workers fall back to Claude before dispatch.' });
+      }
     }
     checks.push({ name: `${name}Container`, ok: !runtime.containerError, required: false,
       detail: runtime.containerError

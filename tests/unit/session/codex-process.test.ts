@@ -44,7 +44,7 @@ beforeEach(async () => {
     for (const line of chunk.toString().trim().split('\n')) {
       const request = JSON.parse(line); rpc.push(request);
       if (request.id === undefined) continue;
-      const result = request.method === 'config/read' ? { layers: [], config: { model_provider: 'gateway', model_providers: { gateway: { base_url: options.config.baseUrl, env_key: options.config.apiKeyEnv, wire_api: 'responses' } }, mcp_servers: options.agent.type === 'app-agent' ? { gateway: { command: 'node', args: ['container-bridge.js'] } } : { gateway: { command: 'node', args: ['bridge.js'], env: { TICKET: 'secret-ticket' } } } } } : request.method === 'thread/start' || request.method === 'thread/resume' ? { thread: { id: thread } } : request.method === 'turn/start' ? { turn: { id: 'turn-' + (++turnNumber) } } : {};
+      const result = request.method === 'config/read' ? { layers: [], config: { model_provider: 'gateway', model_providers: { gateway: { base_url: options.config.baseUrl, env_key: "GATEWAY_CODEX_API_KEY", wire_api: 'responses' } }, mcp_servers: options.agent.type === 'app-agent' ? { gateway: { command: 'node', args: ['container-bridge.js'] } } : { gateway: { command: 'node', args: ['bridge.js'], env: { TICKET: 'secret-ticket' } } } } } : request.method === 'thread/start' || request.method === 'thread/resume' ? { thread: { id: thread } } : request.method === 'turn/start' ? { turn: { id: 'turn-' + (++turnNumber) } } : {};
       setImmediate(() => { emit({ id: request.id, result }); if (request.method === 'turn/start') notify('turn/started', result); });
     }
   });
@@ -59,7 +59,7 @@ test('uses private Responses configuration, MCP ticket env and sandbox without c
   expect(JSON.stringify(args)).not.toMatch(/secret/);
   const config = await readFile(join(settings.env.CODEX_HOME, 'config.toml'), 'utf8');
   expect(config).toContain('sandbox_mode = "workspace-write"');
-  expect(config).toContain('env_key = "TEST_CODEX_KEY"'); expect(config).not.toContain('api-secret');
+  expect(config).toContain('env_key = "GATEWAY_CODEX_API_KEY"'); expect(config).not.toContain('api-secret');
   expect(config).toContain('"TICKET" = "secret-ticket"');
   expect(config).toContain('developer_instructions = "agent context\\n\\nworker rules"');
   expect(settings.env.ANTHROPIC_API_KEY).toBeUndefined();
@@ -103,7 +103,7 @@ test('cancellation while preparing prevents spawn and confirms no process remain
 });
 test('fails closed on invalid container binding and missing independent credential', async () => {
   options.agent.type = 'app-agent'; await expect(adapter.start()).rejects.toThrow(); expect(spawn).not.toHaveBeenCalled();
-  options.agent.type = undefined as any; delete process.env.TEST_CODEX_KEY; adapter = new CodexProcess(options); await expect(adapter.start()).rejects.toThrow(/credential/);
+  options.agent.type = undefined as any; delete process.env.TEST_CODEX_KEY; adapter = new CodexProcess(options); await expect(adapter.start()).rejects.toThrow(/native API key/);
 });
 test('bounded stdout fails and stops process group', async () => {
   await launch(); child.stdout.write('x'.repeat(4 * 1024 * 1024 + 1)); await tick();

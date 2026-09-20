@@ -1,3 +1,6 @@
+jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn().mockReturnValue({executable:'codex'}) }));
+import { resolveCodexCredentials, CodexReadinessError } from '../../../src/session/codex-auth';
+jest.mock('../../../src/session/codex-auth', () => ({ ...jest.requireActual('../../../src/session/codex-auth'), resolveCodexCredentials: jest.fn().mockResolvedValue({baseUrl:'https://fixture.invalid/v1',key:'fixture-key',fingerprint:'fixture'}) }));
 import { EventEmitter } from 'events';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -34,6 +37,7 @@ let root: string, store: OrchestrationStore, tasks: TaskService, bridge: TaskBri
 let agent: AgentConfig, gateway: GatewayConfig, driver: ClaudeWorkerDriver, context: CommandContext, sequence: number;
 beforeEach(async () => {
   jest.clearAllMocks(); sequence = 0;
+  jest.mocked(resolveCodexCredentials).mockResolvedValue({baseUrl:'https://fixture.invalid/v1',key:'fixture-key',fingerprint:'fixture'});
   root = mkdtempSync(join(tmpdir(),'codex-driver-'));
   writeFileSync(join(root,'CLAUDE.md'),'Agent persona stays Claude.');
   store = new OrchestrationStore(':memory:','a');
@@ -183,4 +187,30 @@ test('transcript cleanup retains the newly bound slot and cannot reject an admit
   expect(tasks.pool.retainedSessionIds()).toEqual([attempt.sessionId]);
   tasks.pool.prune(0, Date.now() + 1);
   expect(tasks.pool.retainedSessionIds()).toEqual([]);
+});
+
+test('auto falls back before dispatch when native auth is unavailable and records the reason', async () => {
+  jest.mocked(resolveCodexCredentials).mockRejectedValueOnce(new CodexReadinessError('CODEX_AUTH_REQUIRED','missing'));
+  const {attempt} = await run('gpt-fixture');
+  expect(attempt.harness).toBe('claude');
+  expect(CodexProcess).not.toHaveBeenCalled();
+  expect(SessionProcess).toHaveBeenCalledTimes(1);
+});
+test('explicit Codex never silently changes the selected harness', async () => {
+  gateway.gateway.workers = {harness:'codex'};
+  jest.mocked(resolveCodexCredentials).mockRejectedValueOnce(new CodexReadinessError('CODEX_AUTH_REQUIRED','missing'));
+  const task=spawn('gpt-fixture'),attempt=tasks.claim(task.taskId)!;
+  await expect(driver.start(task,attempt)).rejects.toMatchObject({code:'CODEX_AUTH_REQUIRED'});
+  expect(CodexProcess).not.toHaveBeenCalled(); expect(SessionProcess).not.toHaveBeenCalled();
+});
+
+
+test('cancellation during native readiness cannot launch either worker harness', async () => {
+  const task = spawn('gpt-fixture'), attempt = tasks.claim(task.taskId)!;
+  jest.mocked(resolveCodexCredentials).mockImplementationOnce(async () => {
+    tasks.cancel({...context, actionId:'cancel-during-readiness'}, task.taskId);
+    return {baseUrl:'https://fixture.invalid/v1',key:'fixture-key',fingerprint:'fixture'};
+  });
+  await expect(driver.start(task,attempt)).rejects.toMatchObject({code:'ATTEMPT_CANCELLED_BEFORE_START'});
+  expect(CodexProcess).not.toHaveBeenCalled(); expect(SessionProcess).not.toHaveBeenCalled();
 });

@@ -1,3 +1,4 @@
+import { codexSafemodeEnvironment } from '../session/codex-auth';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as net from 'net';
@@ -6,6 +7,7 @@ import { createHash } from 'crypto';
 import { SafemodeStore, SafemodeSession, Owner, alive, atomicJson } from './store';
 import { buildNativeInvocation, discoverCodexSession, extractNativeSessionId } from './native';
 import { prepareContext } from './context';
+import { assertNoExternalNativeOwner } from './external-owners';
 
 export interface RunOptions { nativeArgs?: string[]; nativeResumeIndex?: number; mode: 'interactive' | 'headless'; prompt?: string; requestId?: string; configPath?: string }
 const STOP_TIMEOUT = 15000;
@@ -13,16 +15,19 @@ export function controlPath(store: SafemodeStore, id: string): string {
   // A bounded socket path also supports long HOME paths on macOS/Linux.
   return path.join(store.root, `${path.basename(store.dir(id))}.sock`);
 }
-export async function stopSession(store: SafemodeStore, id: string): Promise<void> {
-  if (!store.owner(id)) return;
+export async function stopSession(store: SafemodeStore, id: string, expectedOwner?: Owner): Promise<void> {
+  const current = store.owner(id);
+  if (!current) return;
+  const expected = expectedOwner ?? current;
+  if (current.token !== expected.token) throw new Error('Busy: safemode owner changed; stop request refused');
   await new Promise<void>((resolve, reject) => {
     const socket = net.createConnection(controlPath(store, id));
     const timer = setTimeout(() => { socket.destroy(); reject(new Error('Owner did not stop; no replacement was launched')); }, STOP_TIMEOUT);
     let response = '';
-    socket.on('connect', () => socket.write('stop\n'));
+    socket.on('connect', () => socket.write(JSON.stringify({ action: 'stop', ownerToken: expected.token }) + '\n'));
     socket.on('data', chunk => { response += chunk.toString(); });
     socket.on('error', () => { clearTimeout(timer); reject(new Error('Owner cannot be reached; use safemode recover only after its processes exit')); });
-    socket.on('end', () => { clearTimeout(timer); response.trim() === 'stopped' ? resolve() : reject(new Error('Owner refused to stop')); });
+    socket.on('end', () => { clearTimeout(timer); response.trim() === 'stopped' ? resolve() : reject(new Error(response.trim() === 'owner-changed' ? 'Busy: safemode owner changed; stop request refused' : 'Owner refused to stop')); });
   });
 }
 export function recoverSession(store: SafemodeStore, id: string): void {
@@ -63,6 +68,8 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
     child?.kill('SIGTERM');
   };
   let discovery: NodeJS.Timeout | undefined;
+  let ownershipMonitor: NodeJS.Timeout | undefined;
+  let ownershipError: string | undefined;
   let request: SafemodeSession['lastRequest'];
   let exitCode = 1;
   const startedAt = Date.now();
@@ -70,6 +77,7 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
     // Read current state only after exclusive ownership, avoiding stale saves.
     const latest = store.read(session.id);
     session = { ...latest, model: session.model, configPath: options.configPath ?? session.configPath };
+    assertNoExternalNativeOwner({ cli: session.cli, nativeSessionId: session.nativeSessionId, cwd: workspace });
     if (options.requestId) {
       const promptHash = createHash('sha256').update(JSON.stringify([options.prompt, session.cli, session.model])).digest('hex');
       const existing = getRequest(store, session.id, options.requestId);
@@ -90,8 +98,13 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
       let data = '';
       socket.on('data', chunk => {
         data += chunk.toString();
-        if (data.length > 32) { socket.destroy(); return; }
-        if (data === 'stop\n') { stopClients.add(socket); stop(); }
+        if (data.length > 256) { socket.destroy(); return; }
+        if (!data.endsWith('\n')) return;
+        try {
+          const command = JSON.parse(data);
+          if (command.action !== 'stop' || command.ownerToken !== owner.token) { socket.end('owner-changed\n'); return; }
+          stopClients.add(socket); stop();
+        } catch { socket.end('invalid-command\n'); }
       });
       socket.on('error', () => {});
       socket.on('close', () => stopClients.delete(socket));
@@ -106,6 +119,8 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
     if (stopping) throw new Error('Stopped before native CLI launch');
     const invocation = await buildNativeInvocation({ cli: session.cli, mode: options.mode, cwd: workspace,
       nativeArgs: options.nativeArgs, nativeResumeIndex: options.nativeResumeIndex, prompt: options.prompt, context, model: session.model, nativeSessionId: session.nativeSessionId, resume: !!session.nativeSessionId && session.nativeStarted !== false });
+    if (session.cli === 'codex' && options.nativeArgs === undefined) invocation.env = await codexSafemodeEnvironment(invocation.command, invocation.env);
+    if (stopping) throw new Error('Stopped during native CLI readiness check');
     if (invocation.nativeSessionId) session.nativeSessionId = invocation.nativeSessionId;
     store.save(session);
     process.stderr.write(`Safemode ${session.id.startsWith('starting-') ? 'starting (waiting for native session ID)' : session.name}: ${session.cli}, model ${session.model === 'inherit' ? 'inherited from native CLI' : session.model}\n`);
@@ -145,6 +160,16 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
     let logBytes = 0;
     const logFile = path.join(store.dir(session.id), 'output.log');
     if (options.mode === 'headless') fs.writeFileSync(logFile, '', { mode: 0o600 });
+    const maxLogBytes = 5 * 1024 * 1024;
+    const appendOutput = (chunk: Buffer) => {
+      if (logBytes + chunk.length > maxLogBytes) {
+        // Compact in large batches, retaining the newest output rather than
+        // dropping the final diagnosis once verbose tool events fill the log.
+        const previous = fs.readFileSync(logFile);
+        const tail = Buffer.concat([previous.subarray(-Math.floor(maxLogBytes / 2)), chunk]).subarray(-maxLogBytes);
+        fs.writeFileSync(logFile, tail); logBytes = tail.length;
+      } else { fs.appendFileSync(logFile, chunk); logBytes += chunk.length; }
+    };
     child.stdout?.on('data', (chunk: Buffer) => {
       buffered += chunk.toString();
       if (buffered.length > 1024 * 1024) buffered = '';
@@ -153,13 +178,28 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
         const line = buffered.slice(0, newline); buffered = buffered.slice(newline + 1);
         captureId(extractNativeSessionId(session.cli, line));
       }
-      if (logBytes < 5 * 1024 * 1024) { fs.appendFileSync(logFile, chunk); logBytes += chunk.length; }
+      appendOutput(chunk);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      if (logBytes < 5 * 1024 * 1024) { fs.appendFileSync(logFile, chunk); logBytes += chunk.length; }
+      appendOutput(chunk);
     });
+    ownershipMonitor = setInterval(() => {
+      if (childClosed || ownershipError) return;
+      try {
+        assertNoExternalNativeOwner({ cli: session.cli, nativeSessionId: session.nativeSessionId, cwd: workspace,
+          env: invocation.env, ignorePids: child?.pid ? [child.pid] : [] });
+      } catch (error) {
+        ownershipError = (error as Error).message;
+        // Only our ChildProcess handle is signalled. External/native owners are
+        // never killed based on PIDs found in registries or /proc.
+        child?.kill('SIGTERM');
+        const notice = `Stopping safemode: ${ownershipError}\n`;
+        process.stderr.write(notice);
+        if (options.mode === 'headless') appendOutput(Buffer.from(notice));
+      }
+    }, 1000);
     const result = await completion;
-    exitCode = result.code;
+    exitCode = ownershipError ? 1 : result.code;
     if (result.error) throw result.error;
     if (session.cli === 'codex' && !session.nativeSessionId) {
       try { captureId(discoverCodexSession({ cwd: workspace, startedAt })); } catch { /* No guessed conversation identity. */ }
@@ -175,11 +215,13 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
     }
     const canRelease = !child || childClosed;
     if (discovery) clearInterval(discovery);
+    if (ownershipMonitor) clearInterval(ownershipMonitor);
     process.removeListener('SIGTERM', stop);
     process.removeListener('SIGHUP', stop);
     process.removeListener('SIGINT', stop);
     if (request) {
       request.status = exitCode === 0 ? 'completed' : 'failed'; request.exitCode = exitCode;
+      if (ownershipError) request.error = ownershipError;
       atomicJson(requestFile(store, session.id, request.id), request);
       session.lastRequest = request; store.save(session);
     }

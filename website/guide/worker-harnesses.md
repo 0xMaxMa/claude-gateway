@@ -12,8 +12,6 @@ Set `gateway.workers` in the gateway configuration, then restart the gateway whi
     "workers": {
       "harness": "auto",
       "codex": {
-        "baseUrl": "https://your-provider.example/v1",
-        "apiKeyEnv": "OPENAI_API_KEY",
         "reasoningEffort": "medium"
       }
     }
@@ -21,9 +19,27 @@ Set `gateway.workers` in the gateway configuration, then restart the gateway whi
 }
 ```
 
-Set the named credential environment variable in the gateway service environment. Configuration stores its name, never its value. The URL must support the **Responses API**; an Anthropic Messages endpoint is not compatible. Do not reuse `ANTHROPIC_BASE_URL` unless that service separately exposes a supported Responses endpoint. URLs must use HTTPS, except local HTTP, and cannot contain credentials, query strings, or fragments.
+The optional `codex.baseUrl` and `codex.apiKeyEnv` fields are **explicit overrides**.
+Omit both to use the provider selected by native Codex configuration under the
+gateway service user's `CODEX_HOME` (default `~/.codex`). Log into Codex separately;
+gateway never copies Claude credentials and never installs or logs into Codex for you.
+Native API-key file login and selected providers using `env_key` are supported.
+With overrides, set the named environment variable in the service environment;
+existing explicit settings retain precedence. URLs must expose Responses over
+HTTPS (local HTTP is allowed), without embedded credentials or query strings.
 
-`harness: "auto"` selects Codex for GPT model IDs, including `openai/` and `chatgpt/` prefixes; other models use Claude. `harness: "claude"` retains the existing worker harness. `harness: "codex"` explicitly routes workers to Codex; select a model supported by your Responses provider. Agent-level `workers` settings override the gateway defaults, and nested Codex settings merge field by field.
+`harness: "auto"` selects Codex for GPT model IDs when its runtime and isolated
+worker credentials are ready. Otherwise it selects Claude **before dispatch**
+and records a `worker.harness_fallback` event. A Codex turn that has started is
+never replayed through Claude after an auth, quota, network or execution error.
+Explicit `harness: "codex"` fails with a readiness error rather than switching.
+
+Agent-level worker settings override gateway defaults. Native OAuth/ChatGPT and
+OS-keyring login remain available in **safemode**, where Codex owns its original
+auth store and refresh lifecycle. They are currently **not portable to isolated
+workers**: auto routing falls back to Claude with `CODEX_AUTH_NOT_PORTABLE`.
+Gateway does not copy rotating refresh tokens or mount a personal Codex home.
+Use native API-key file login or an `env_key` provider for Codex workers.
 
 Existing model entries in `gateway.models` can declare worker routing and provider model names:
 
@@ -38,13 +54,13 @@ Existing model entries in `gateway.models` can declare worker routing and provid
 
 `workerHarness` affects automatic routing. `workerModel` maps a gateway selection to the native provider model. Without an explicit mapping, native model names drop only Claude context suffixes such as `[1m]`; provider namespaces such as `chatgpt/` are preserved so BYOK routing cannot silently switch to a managed pool. Available reasoning settings are `low`, `medium`, `high`, and `xhigh`; support depends on the chosen model/provider. `codex.bin` may specify an executable path, not a shell command with arguments.
 
-A missing executable, credential, incompatible endpoint, or unsupported model fails the task explicitly. There is no silent switch to Claude or host execution.
+Runtime/auth preflight can fall back only in auto mode. Endpoint/model/quota failures after dispatch fail the task explicitly. App tasks never fall back to host execution.
 
 ## Deploy app containers
 
 Generated app-agent images do **not** download or install Codex. Claude-only apps work without a host Codex installation. To enable Codex, explicitly install an official standalone or npm Codex distribution on the gateway host. The resolver uses the effective agent `workers.codex.bin`, then the gateway value, then the gateway process's `PATH`. It resolves executable symlinks and finds the native payload and bundled resources behind an npm launcher. Host workers retain the npm launcher; app workers use the native executable at `/opt/gateway-codex/bin/codex`.
 
-Only the native executable and recognized bundled resource paths are mounted read-only. Host Codex home, authentication, configuration and sessions are not added to the container. Per-attempt state and credential delivery remain isolated. A missing executable, unsupported layout or unavailable mount never causes installation, a Claude fallback, or host execution of an app task. All agents sharing an app container must resolve to the same native runtime; conflicting overrides leave Codex unavailable until aligned and refreshed.
+Only when a compatible runtime and portable native auth are ready are the native executable and recognized bundled resource paths mounted read-only. Host Codex home, authentication, configuration and sessions are not added to the container. Per-attempt state and credential delivery remain isolated. A missing executable, incompatible layout, unavailable mount or unportable auth never causes installation or host execution. Auto mode can select the Claude container worker before dispatch. All agents sharing an app container must resolve to the same native runtime; conflicting overrides leave Codex unavailable until aligned and refreshed.
 
 Container mounts require a local Linux Docker daemon on the gateway host, matching x64 or arm64 architecture. Remote Docker and Docker Desktop are unsupported. Official self-contained distributions are supported; custom host launcher scripts may work for host workers but cannot be mounted. ELF format/architecture and resources are checked before mounting; arbitrary external shared-library dependencies are not packaged for you. `claude-gateway doctor` reports resolved executable/version and layout compatibility, but cannot certify every container image or the running service's PATH. Run diagnostics in the gateway service environment when an interactive shell gives different results.
 

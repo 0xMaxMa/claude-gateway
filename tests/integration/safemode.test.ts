@@ -102,6 +102,14 @@ setTimeout(()=>process.exit(0),1600);
     fs.writeFileSync(fake, `#!/usr/bin/env node
 const fs=require('fs'),args=process.argv.slice(2);
 if(args[0]==='mcp'&&args[1]==='list'){console.log('[]');process.exit(0);}
+if(args[0]==='app-server'){
+ require('readline').createInterface({input:process.stdin}).on('line',line=>{
+  const q=JSON.parse(line);if(!q.id)return;
+  const result=q.method==='config/read'?{config:{model_provider:'openai'}}:q.method==='account/read'?{account:{type:'chatgpt'}}:{};
+  console.log(JSON.stringify({id:q.id,result}));
+ });
+}else {
+
 const key=args.includes('resume')?'resume':args.includes('--resume')?'--resume':'--session-id';
 const id=args[args.indexOf(key)+1];
 fs.appendFileSync(process.env.HOME+'/events.jsonl',JSON.stringify({id,args,pid:process.pid})+'\\n');
@@ -109,6 +117,7 @@ if(args.includes('--print')||args.includes('exec')){
  console.log(JSON.stringify({type:'system',subtype:'init',session_id:id}));
  console.log(JSON.stringify({type:'result',result:'mock diagnosis complete'}));
 }else{setTimeout(()=>process.exit(0),20000);}
+}
 `, {mode:0o700});
     const terminal = (...args: string[]) => {
       const cmd = [process.execPath, entry, 'safemode', ...args].map(v => "'" + v.replace(/'/g, "'\\''") + "'").join(' ');

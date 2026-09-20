@@ -83,9 +83,10 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
     const configPath = resolveSafemodeConfigPath(flags, previous);
     const session = previous ? { ...previous, ...settings, configPath } : store.create(flags.name as string | undefined, settings.cli, settings.model, configPath, native?.resumeId);
     if (previous) {
-      if (store.owner(session.id)) {
+      const currentOwner = store.owner(session.id);
+      if (currentOwner) {
         if (!flags.takeover) throw new Error('Busy: use --takeover to stop the current owner first');
-        await stopSession(store, session.id);
+        await stopSession(store, session.id, currentOwner);
       }
       const refreshed = store.read(session.id);
       if (!refreshed.nativeSessionId) throw new Error('Native conversation ID is not available; refusing to start a different conversation');
@@ -128,7 +129,7 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
   if (currentOwner) {
     if (currentOwner.mode === 'headless') throw new Error('Busy: a headless request is already running; inspect status or stop it explicitly');
     if (!flags.takeover) throw new Error('Busy: use --takeover to stop the current owner first');
-    await stopSession(store, session.id);
+    await stopSession(store, session.id, currentOwner);
   }
   const refreshed = { ...store.read(session.id), ...settings, configPath: resolveSafemodeConfigPath(flags, session) };
   if (!refreshed.nativeSessionId || refreshed.nativeStarted === false) throw new Error('Native conversation ID is not available; refusing to start a different conversation');

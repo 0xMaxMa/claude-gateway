@@ -1,3 +1,4 @@
+import { resolveCodexCredentials } from '../session/codex-auth';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -268,6 +269,10 @@ export class AgentManager {
       }).replace(/^~(?=\/|$)/, os.homedir());
       const runtimes = selections.map(({ bin, cwd }) => resolveCodexRuntime(bin === undefined ? undefined : expand(bin), expand(cwd)));
       if (runtimes.some(r => r.containerError || r.fingerprint !== runtimes[0].fingerprint)) return undefined;
+      for (let i = 0; i < selections.length; i++) {
+        const settings = { ...(config.gateway.workers as any)?.codex, ...(agents[i]?.workers as any)?.codex };
+        await resolveCodexCredentials({ ...settings, bin: runtimes[i].executable });
+      }
       await assertLocalCodexDocker();
       return runtimes[0];
     } catch { return undefined; } // Codex is optional; selecting it reports an actionable task error.

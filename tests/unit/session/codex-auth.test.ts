@@ -1,0 +1,55 @@
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import { resolveCodexCredentials, inspectCodexAccount } from '../../../src/session/codex-auth';
+let root: string, bin: string;
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), 'codex-native-auth-'));
+  mkdirSync(join(root, '.codex'));
+  bin = join(root, 'codex');
+  writeFileSync(bin, `#!${process.execPath}
+const fs=require('fs'),path=require('path'),rl=require('readline').createInterface({input:process.stdin});
+rl.on('line',line=>{const q=JSON.parse(line); if(!q.id)return;
+const fixture=JSON.parse(fs.readFileSync(path.join(process.env.HOME,'fixture.json')));
+let result=q.method==='config/read'?{config:fixture.config}:q.method==='account/read'?{account:fixture.account}:{};
+process.stdout.write(JSON.stringify({id:q.id,result})+'\\n');});
+`, { mode: 0o700 });
+});
+afterEach(() => rmSync(root, { recursive: true, force: true }));
+function fixture(config: any, account: any = {type:'apiKey'}, auth: any = {auth_mode:'apikey',OPENAI_API_KEY:'native-secret'}) {
+  writeFileSync(join(root,'fixture.json'), JSON.stringify({config,account}));
+  writeFileSync(join(root,'.codex','auth.json'), JSON.stringify(auth));
+}
+const config = {model_provider:'fixture',cli_auth_credentials_store:'file',model_providers:{fixture:{base_url:'https://native.example/v1',wire_api:'responses',requires_openai_auth:true}}};
+test('uses native API-key login and the native provider instead of Claude credentials', async () => {
+  fixture(config);
+  const result=await resolveCodexCredentials({bin,env:{HOME:root,PATH:process.env.PATH,ANTHROPIC_API_KEY:'wrong-secret'}});
+  expect(result).toMatchObject({baseUrl:'https://native.example/v1',key:'native-secret'});
+  expect(result.fingerprint).not.toContain('secret');
+});
+test('resolves selected provider env auth without requiring an auth.json login', async () => {
+  fixture({...config,model_providers:{fixture:{base_url:'https://native.example/v1',env_key:'FIXTURE_KEY'}}},null,{});
+  await expect(resolveCodexCredentials({bin,env:{HOME:root,FIXTURE_KEY:'env-key'}})).resolves.toMatchObject({key:'env-key'});
+});
+test('does not misreport native OAuth as unauthenticated or export its refresh token', async () => {
+  fixture(config,{type:'chatgpt'},{tokens:{refresh_token:'do-not-copy'}});
+  expect((await inspectCodexAccount(bin,{HOME:root})).account.account.type).toBe('chatgpt');
+  await expect(resolveCodexCredentials({bin,env:{HOME:root}})).rejects.toMatchObject({code:'CODEX_AUTH_NOT_PORTABLE'});
+});
+test('never substitutes stale file credentials for keyring auth', async () => {
+  fixture({...config,cli_auth_credentials_store:'keyring'});
+  await expect(resolveCodexCredentials({bin,env:{HOME:root}})).rejects.toMatchObject({code:'CODEX_AUTH_NOT_PORTABLE'});
+});
+test('explicit worker settings retain precedence and never use Claude auth', async () => {
+  await expect(resolveCodexCredentials({bin,baseUrl:'https://explicit.example/v1',apiKeyEnv:'WORKER_KEY',env:{WORKER_KEY:'explicit'}})).resolves.toMatchObject({key:'explicit'});
+  await expect(resolveCodexCredentials({bin,apiKeyEnv:'CLAUDE_CODE_OAUTH_TOKEN',env:{CLAUDE_CODE_OAUTH_TOKEN:'wrong'}})).rejects.toMatchObject({code:'CODEX_PROVIDER_INVALID'});
+});
+test('missing binary gives a bounded actionable error without raw native stderr', async () => {
+  await expect(inspectCodexAccount(join(root,'missing'))).rejects.toMatchObject({code:'CODEX_UNAVAILABLE'});
+});
+test('rotation changes the pool fingerprint before a different account can resume', async () => {
+  fixture(config);
+  const first=await resolveCodexCredentials({bin,env:{HOME:root}});
+  fixture(config,{type:'apiKey'},{OPENAI_API_KEY:'rotated'});
+  expect((await resolveCodexCredentials({bin,env:{HOME:root}})).fingerprint).not.toBe(first.fingerprint);
+});

@@ -1,10 +1,14 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as net from 'net';
 import { SafemodeStore, alive } from '../../src/safemode/store';
 import { resolveSafemodeSettings } from '../../src/safemode/config';
-import { getRequest, recoverSession, runSession, stopSession } from '../../src/safemode/runner';
+import { controlPath, getRequest, recoverSession, runSession, stopSession } from '../../src/safemode/runner';
 import { buildNativeInvocation } from '../../src/safemode/native';
+import { assertNoExternalNativeOwner } from '../../src/safemode/external-owners';
+
+jest.mock('../../src/safemode/external-owners', () => ({assertNoExternalNativeOwner: jest.fn()}));
 
 jest.mock('../../src/safemode/context', () => ({prepareContext: jest.fn(async () => ({prompt: 'Test context'}))}));
 jest.mock('../../src/safemode/native', () => ({buildNativeInvocation: jest.fn(), discoverCodexSession: jest.fn(), extractNativeSessionId: jest.fn()}));
@@ -12,7 +16,7 @@ jest.mock('../../src/safemode/native', () => ({buildNativeInvocation: jest.fn(),
 describe('safemode ownership and native lifecycle', () => {
   let root: string;
   let store: SafemodeStore;
-  beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'safemode-test-')); store = new SafemodeStore(root); });
+  beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'safemode-test-')); store = new SafemodeStore(root); (assertNoExternalNativeOwner as jest.Mock).mockReset(); });
   afterEach(() => { fs.rmSync(root, { recursive: true, force: true }); jest.clearAllMocks(); });
   test('exclusive ownership refuses a second launch, including recovery of a live owner', () => {
     const session = store.create('test', 'claude', 'inherit');
@@ -61,6 +65,55 @@ describe('safemode ownership and native lifecycle', () => {
     expect(await running).toBe(1);
     expect(store.owner(session.id)).toBeUndefined();
     expect(store.read(session.id).nativeSessionId).toBe(session.id);
+  });
+  test('takeover refuses a replacement owner on both client and receiver', async () => {
+    const session = store.create('test', 'claude', 'inherit');
+    const previous = store.acquire(session.id, 'interactive');
+    store.release(session.id, previous);
+    (buildNativeInvocation as jest.Mock).mockImplementation(o => ({ command: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'], env: process.env, cwd: o.cwd }));
+    const running = runSession(store, session, { mode: 'headless' });
+    try {
+      for (let i=0;i<100 && !store.owner(session.id)?.childPid;i++) await new Promise(resolve=>setTimeout(resolve,10));
+      const replacement = store.owner(session.id)!;
+      await expect((stopSession as any)(store, session.id, previous)).rejects.toThrow('owner changed');
+      const response = await new Promise<string>((resolve,reject) => {
+        const socket=net.createConnection(controlPath(store,session.id));
+        let data='';
+        socket.on('connect',()=>socket.end(JSON.stringify({action:'stop',ownerToken:previous.token})+'\n'));
+        socket.on('data',chunk=>data+=chunk.toString());
+        socket.on('close',()=>resolve(data.trim()));socket.on('error',reject);
+      });
+      expect(response).toBe('owner-changed');
+      expect(store.owner(session.id)?.token).toBe(replacement.token);
+      expect(alive(replacement.childPid)).toBe(true);
+    } finally { await stopSession(store,session.id); await running; }
+  });
+  test('bounded output keeps the final diagnosis after verbose output exceeds the cap', async () => {
+    const session=store.create('test','claude','inherit');
+    (buildNativeInvocation as jest.Mock).mockImplementation(o=>({command:process.execPath,args:['-e', "process.stdout.write('x'.repeat(6*1024*1024));process.stdout.write('\\nFINAL_DIAGNOSIS_MARKER\\n')"],cwd:o.cwd,env:process.env}));
+    expect(await runSession(store,session,{mode:'headless',requestId:'large',prompt:'inspect'})).toBe(0);
+    const log=fs.readFileSync(path.join(store.dir(session.id),'output.log'));
+    expect(log.length).toBeLessThanOrEqual(5*1024*1024);
+    expect(log.toString()).toContain('FINAL_DIAGNOSIS_MARKER');
+    expect(getRequest(store,session.id,'large')?.status).toBe('completed');
+  });
+  test('an external native owner blocks launch despite an empty safemode lock', async () => {
+    const session=store.create('test','claude','inherit');
+    (assertNoExternalNativeOwner as jest.Mock).mockImplementation(()=>{throw new Error('Busy: external native owner');});
+    await expect(runSession(store,session,{mode:'headless'})).rejects.toThrow('external native owner');
+    expect(buildNativeInvocation).not.toHaveBeenCalled();
+    expect(store.owner(session.id)).toBeUndefined();
+  });
+  test('a later external owner stops only the managed process and fails the request', async () => {
+    const session=store.create('test','claude','inherit');
+    (buildNativeInvocation as jest.Mock).mockImplementation(o=>({command:process.execPath,args:['-e','setInterval(()=>{},1000)'],env:process.env,cwd:o.cwd}));
+    (assertNoExternalNativeOwner as jest.Mock).mockImplementation(options=>{
+      if(options.ignorePids?.length)throw new Error('Busy: external native owner appeared');
+    });
+    expect(await runSession(store,session,{mode:'headless',prompt:'inspect',requestId:'collision'})).toBe(1);
+    expect(getRequest(store,session.id,'collision')).toMatchObject({status:'failed',error:'Busy: external native owner appeared'});
+    expect(store.owner(session.id)).toBeUndefined();
+    expect(fs.readFileSync(path.join(store.dir(session.id),'output.log'),'utf8')).toContain('external native owner appeared');
   });
   test('post-spawn setup failure terminates child before releasing ownership', async () => {
     const session = store.create('test', 'claude', 'inherit');

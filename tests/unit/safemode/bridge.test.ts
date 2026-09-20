@@ -17,7 +17,7 @@ async function fixture(allowed?: boolean, container = false) {
   const decision = new DecisionService(store).begin(input.conversationId, 'owner', [input.inputId]);
   const context = { ...input, ...decision, principalId: 'owner', execute: true, writeMemory: false };
   const bridge = new TaskBridge(tasks, undefined, undefined, undefined,
-    container ? { agent: { id: 'operator', workspace } as AgentConfig, spool: join(root, 'spool') } : undefined, allowed);
+    container ? { agent: { id: 'operator', workspace } as AgentConfig, spool: join(root, 'spool') } : undefined, undefined, allowed);
   await bridge.start();
   let count = 0;
   function issue(overrides: Partial<Parameters<TaskBridge['issue']>[0]> = {}) {

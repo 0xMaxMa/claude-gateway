@@ -1,3 +1,6 @@
+import { resolveCodexCredentials, CodexReadinessError } from '../../session/codex-auth';
+import { resolveCodexRuntime } from '../../session/codex-runtime';
+import { inspectSelectedCodexRuntime } from '../../session/codex-container-runtime';
 import { recordTokenTurn } from '../token-ledger';
 import { storedReplyContext, resolveStoredReply } from '../reply-context';
 import { observeToolRepetition } from './tool-repetition';
@@ -63,7 +66,23 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const current = this.tasks.store.task(task.taskId)!;
     if (current.state !== 'starting' || current.activeAttemptId !== attempt.attemptId) throw new OrchestrationError('ATTEMPT_CANCELLED_BEFORE_START');
     const directory = join(this.privateRoot, attempt.attemptId);
-    const harness = resolveWorkerHarness(this.agent, this.gateway, task.model ?? this.agent.claude.model);
+    let harness = resolveWorkerHarness(this.agent, this.gateway, task.model ?? this.agent.claude.model);
+    let authFingerprint: string | undefined;
+    if (harness.harness === 'codex') {
+      try {
+        const runtime = resolveCodexRuntime(harness.config.bin, this.agent.workspace);
+        authFingerprint = (await resolveCodexCredentials({ ...harness.config, bin: runtime.executable })).fingerprint;
+        if (this.agent.type === 'app-agent') await inspectSelectedCodexRuntime(this.agent, runtime);
+      } catch (error) {
+        const selector = this.agent.workers?.harness ?? this.gateway.gateway.workers?.harness ?? 'claude';
+        if (selector !== 'auto' || attempt.harness) throw error;
+        harness = { ...harness, harness: 'claude' };
+        this.tasks.store.transaction(() => this.tasks.store.appendEvent(task.conversationId, 'worker.harness_fallback',
+          { taskId: task.taskId, from: 'codex', to: 'claude', reason: error instanceof CodexReadinessError ? error.code : 'CODEX_RUNTIME_UNAVAILABLE' }, task.taskId));
+      }
+    }
+    const afterReadiness = this.tasks.store.task(task.taskId);
+    if (afterReadiness?.state !== 'starting' || afterReadiness.activeAttemptId !== attempt.attemptId) throw new OrchestrationError('ATTEMPT_CANCELLED_BEFORE_START');
     // Persist the actual execution choice; pool fingerprints prevent cross-harness resume.
     if (attempt.harness && attempt.harness !== harness.harness) throw new OrchestrationError('WORKER_HARNESS_CHANGED');
     attempt.harness = harness.harness;
@@ -94,7 +113,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const context = this.agent.type === 'app-agent'
       ? await containerNode(this.agent.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))")
       : await readFile(join(this.agent.workspace, 'CLAUDE.md'), 'utf8');
-    this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway, harness, toolExposure: 'lazy-connectors-v1' }));
+    this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway, harness, authFingerprint, toolExposure: 'lazy-connectors-v1' }));
     // Pool expiration/rebinding makes old native transcripts disposable. This
     // bounded maintenance is best effort and never changes task admission.
     void cleanupCodexSessions({ agent: this.agent, stateDirectory: join(this.privateRoot, 'codex-sessions'), retainedSessionIds: this.tasks.pool.retainedSessionIds() }).catch(() => {});

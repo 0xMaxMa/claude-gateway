@@ -13,6 +13,8 @@ const {once} = require('events');
 const {randomUUID} = require('crypto');
 const {execFileSync} = require('child_process');
 const containerMode = process.argv.includes('--container');
+const nativeAuthMode = process.argv.includes('--native-auth');
+const originalCodexHome = process.env.CODEX_HOME;
 const connectorMode = process.argv.includes('--connector');
 if (containerMode && connectorMode) throw new Error('Custom connectors are host-only');
 const MCP = String.raw`
@@ -78,6 +80,12 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
   }
   if(createContainer)createContainer();
   const options={agent:{workspace:directory,...(containerMode?{type:'app-agent',container:containerName}:{})},gateway:{gateway:{}},profile:{role:'worker',mcpConfigPath:mcp,overlay:'Use fixture_echo once, then return a brief result.',hostExecution:!containerMode,containerExecution:containerMode},sessionId:'fixture-logical-session',stateDirectory:join(directory,'state'),config:{model:'gpt-test',baseUrl:`http://${containerMode?'host.docker.internal':'127.0.0.1'}:${server.address().port}/v1`,apiKeyEnv:'GATEWAY_CODEX_SMOKE_KEY'}};
+  if(nativeAuthMode){
+    const home=join(directory,'native-auth');await mkdir(home,{mode:0o700});
+    await writeFile(join(home,'config.toml'), 'model_provider="fixture"\ncli_auth_credentials_store="file"\n[model_providers.fixture]\nname="Fixture"\nwire_api="responses"\nrequires_openai_auth=true\nbase_url='+JSON.stringify(options.config.baseUrl)+'\n',{mode:0o600});
+    execFileSync(resolveCodexRuntime().executable,['login','--with-api-key'],{env:{...process.env,CODEX_HOME:home},input:process.env.GATEWAY_CODEX_SMOKE_KEY,stdio:['pipe','pipe','pipe'],timeout:10000});
+    process.env.CODEX_HOME=home;delete options.config.baseUrl;delete options.config.apiKeyEnv;
+  }
   if(connectorMode) options.gateway.gateway.customConnectors={fixture:{label:'Fixture connector',secretNames:[],credentialOwner:'none',config:{command:process.execPath,args:[join(directory,'mcp.cjs')],env:{FIXTURE_TICKET:join(directory,'ticket'),FIXTURE_CALLS:calls}}}};
   options.checkpoint=async()=>{if(amended)return;amended=true;return {text:'Apply the native checkpoint revision before finishing.',kind:'assignment',acknowledge:()=>{acknowledged=true;}};};
   async function run(){
@@ -106,6 +114,6 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
     await cancelled.stop();assert(cancelled.managedGroupStopped,'cancelled native process group survived');
     console.log('PASS native Codex '+(containerMode?'container':connectorMode?'host custom connector':'host')+': local Responses, MCP ticket roundtrip, canonical summary, nonzero cache-write usage, explicit resume, recreation recovery, mid-turn revision, cancellation');
   }finally{
-    await Promise.allSettled(adapters.map(a=>a.stop()));for(const socket of sockets)socket.destroy();server.close();bridge?.close();if(containerName){try{execFileSync('docker',['rm','-f',containerName],{stdio:'pipe'});}catch{}}delete process.env.GATEWAY_CODEX_SMOKE_KEY;await rm(directory,{recursive:true,force:true});
+    await Promise.allSettled(adapters.map(a=>a.stop()));for(const socket of sockets)socket.destroy();server.close();bridge?.close();if(containerName){try{execFileSync('docker',['rm','-f',containerName],{stdio:'pipe'});}catch{}}delete process.env.GATEWAY_CODEX_SMOKE_KEY;if(originalCodexHome===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=originalCodexHome;await rm(directory,{recursive:true,force:true});
   }
 })().catch(error=>{console.error(error.message);process.exitCode=1;});

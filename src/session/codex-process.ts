@@ -1,3 +1,4 @@
+import { resolveCodexCredentials, CodexCredentials } from './codex-auth';
 import { resolveCodexRuntime } from './codex-runtime';
 import { inspectSelectedCodexRuntime, CODEX_RUNTIME_MAINTENANCE } from './codex-container-runtime';
 import { prepareManagedConnectors } from './managed-connectors';
@@ -81,7 +82,7 @@ export function cleanupCodexSessions(options: { agent: AgentConfig; stateDirecto
   return run;
 }
 
-/** A bounded native Codex app-server session. No Claude auth or user Codex configuration is inherited. */
+/** A bounded native Codex app-server session. Only native Codex provider/auth is selected; user executable configuration is not inherited. */
 export class CodexProcess extends EventEmitter {
   readonly spawnedAt = Date.now();
   readonly runtimeProfile: RuntimeProfile;
@@ -118,6 +119,7 @@ export class CodexProcess extends EventEmitter {
   private amendment?: { text: string; kind?: 'assignment' | 'advice'; acknowledge: () => void | Promise<void> };
   private nativeUsage?: NativeUsage;
   private identity = '';
+  private credentials?: CodexCredentials;
   private homePersisted = false;
   private leaseOwned = false;
   private readonly connectorPaths = new Set<string>();
@@ -150,11 +152,9 @@ export class CodexProcess extends EventEmitter {
       this.containerId = await inspectSelectedCodexRuntime(agent, runtime);
       this.nativeSha256 = runtime.nativeSha256;
     }
-    const key = config.apiKeyEnv ?? 'OPENAI_API_KEY';
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /^ANTHROPIC_|^CLAUDE_/.test(key)) throw new Error('Codex requires an independent API key environment variable');
-    if (!process.env[key]) throw new Error(`Codex API credential environment variable ${key} is not set`);
-    if (config.baseUrl) { const url = new URL(config.baseUrl); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid Codex Responses base URL'); }
-    this.identity = createHash('sha256').update(JSON.stringify([config.baseUrl ?? 'https://api.openai.com/v1', key, process.env[key]])).digest('hex');
+    this.credentials = await resolveCodexCredentials({ bin: runtime.executable, ...config, allowDockerHost: agent.type === 'app-agent' });
+    const key = 'GATEWAY_CODEX_API_KEY';
+    this.identity = this.credentials.fingerprint;
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     await mkdir(join(this.root, '.active'), { mode: 0o700 });
     this.leaseOwned = true;
@@ -201,7 +201,7 @@ export class CodexProcess extends EventEmitter {
       `developer_instructions = ${quote([profile.context, profile.overlay, profile.skillPluginDir ? `Task skill resources: ${this.containerAttempt ? this.containerAttempt.directory + '/skill-plugin' : profile.skillPluginDir}` : undefined].filter(Boolean).join('\n\n'))}`,
       ...(config.reasoningEffort ? [`model_reasoning_effort = ${quote(config.reasoningEffort)}`] : []),
       '[model_providers.gateway]', 'name = "Gateway Responses"', 'wire_api = "responses"',
-      `base_url = ${quote(config.baseUrl ?? 'https://api.openai.com/v1')}`, `env_key = ${quote(key)}`,
+      `base_url = ${quote(this.credentials!.baseUrl)}`, `env_key = ${quote(key)}`,
       '[features]', 'multi_agent = false',
       `[projects.${quote(agent.type === 'app-agent' ? '/workspace' : agent.workspace)}]`, 'trust_level = "untrusted"',
     ];
@@ -242,10 +242,10 @@ export class CodexProcess extends EventEmitter {
     }
     if (this.cancelled) return;
     const args = ['app-server', '--listen', 'stdio://'];
-    const key = config.apiKeyEnv ?? 'OPENAI_API_KEY';
+    const key = 'GATEWAY_CODEX_API_KEY';
     const env: NodeJS.ProcessEnv = profile.hostExecution ? { ...process.env } : Object.fromEntries(['PATH', 'HOME', 'LANG', 'TMPDIR', 'SSL_CERT_FILE', 'SSL_CERT_DIR'].flatMap(k => process.env[k] === undefined ? [] : [[k, process.env[k]]]));
     for (const k of Object.keys(env)) if (/^(ANTHROPIC_|CLAUDE_|CODEX_|OPENAI_)/.test(k)) delete env[k];
-    env.CODEX_HOME = this.home; env[key] = process.env[key];
+    env.CODEX_HOME = this.home; env[key] = this.credentials!.key;
     const bin = this.executable;
     const child = this.child = agent.type === 'app-agent'
       ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', `HOME=${homedir()}`, '-e', key, agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
@@ -301,7 +301,7 @@ export class CodexProcess extends EventEmitter {
     }
     if (effective.notify?.length || (effective.hooks && Object.keys(effective.hooks).length)) throw new Error('Codex executable hooks are not permitted');
     const provider = effective.model_providers?.gateway;
-    if (effective.model_provider !== 'gateway' || provider?.base_url !== (this.options.config.baseUrl ?? 'https://api.openai.com/v1') || provider?.env_key !== (this.options.config.apiKeyEnv ?? 'OPENAI_API_KEY') || provider?.wire_api !== 'responses') throw new Error('Codex provider configuration mismatch');
+    if (effective.model_provider !== 'gateway' || provider?.base_url !== this.credentials!.baseUrl || provider?.env_key !== 'GATEWAY_CODEX_API_KEY' || provider?.wire_api !== 'responses') throw new Error('Codex provider configuration mismatch');
   }
   private write(message: unknown): void {
     if (!this.child || this.exited) throw new Error('Codex app-server is unavailable');
