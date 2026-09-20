@@ -1,3 +1,5 @@
+jest.mock('../../../src/orchestration/container', () => ({ ...jest.requireActual('../../../src/orchestration/container'), validateContainer: jest.fn().mockResolvedValue(undefined) }));
+jest.mock('../../../src/session/codex-container-runtime', () => ({ inspectSelectedCodexRuntime: jest.fn().mockResolvedValue('fixture-container') }));
 jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn().mockReturnValue({executable:'codex'}) }));
 import { resolveCodexCredentials, CodexReadinessError } from '../../../src/session/codex-auth';
 jest.mock('../../../src/session/codex-auth', () => ({ ...jest.requireActual('../../../src/session/codex-auth'), resolveCodexCredentials: jest.fn().mockResolvedValue({baseUrl:'https://fixture.invalid/v1',key:'fixture-key',fingerprint:'fixture'}) }));
@@ -213,4 +215,24 @@ test('cancellation during native readiness cannot launch either worker harness',
   });
   await expect(driver.start(task,attempt)).rejects.toMatchObject({code:'ATTEMPT_CANCELLED_BEFORE_START'});
   expect(CodexProcess).not.toHaveBeenCalled(); expect(SessionProcess).not.toHaveBeenCalled();
+});
+
+
+test.each([false, true])('Docker host HTTP auth policy matches worker placement (container=%s)', async container => {
+  agent.type = container ? 'app-agent' : 'user' as any;
+  gateway.gateway.workers = { harness: 'codex' };
+  const task = spawn('gpt-fixture'), attempt = tasks.claim(task.taskId)!;
+  if (container) task.resourceProfile = { mode: 'container' } as any;
+  const actual = jest.requireActual('../../../src/session/codex-auth').resolveCodexCredentials;
+  jest.mocked(resolveCodexCredentials).mockImplementationOnce(async options => {
+    // Exercise the real URL policy with a provider discovered from native config.
+    const credentials = await actual({ ...options, baseUrl: 'http://host.docker.internal:8090/v1', apiKeyEnv: 'FIXTURE_KEY', env: { FIXTURE_KEY: 'test-only' } });
+    // Stop before workspace/container execution: this test exercises admission.
+    tasks.cancel({ ...context, actionId: 'cancel-after-provider-check' }, task.taskId);
+    return credentials;
+  });
+  if (container) await expect(driver.start(task, attempt)).rejects.toMatchObject({ code: 'ATTEMPT_CANCELLED_BEFORE_START' });
+  else await expect(driver.start(task, attempt)).rejects.toMatchObject({ code: 'CODEX_PROVIDER_INVALID' });
+  expect(CodexProcess).not.toHaveBeenCalled();
+  expect(SessionProcess).not.toHaveBeenCalled();
 });

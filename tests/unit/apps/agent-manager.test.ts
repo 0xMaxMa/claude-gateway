@@ -152,6 +152,17 @@ describe('AgentManager', () => {
       expect(compose.services.app.image).toBe('nginx:1.25');
     });
 
+    it('retains app runtime mounts for a Docker host HTTP provider', async () => {
+      const entry = makeEntry(tmpDir);
+      (resolveCodexRuntime as jest.Mock).mockReturnValue({ executable: '/fixture/codex', fingerprint: 'docker-provider', mounts: [] });
+      fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({ gateway: { workers: { codex: { baseUrl: 'http://host.docker.internal:8090/v1', apiKeyEnv: 'FIXTURE_KEY' } } }, agents: [] }));
+      const actual = jest.requireActual('../../../src/session/codex-auth').resolveCodexCredentials;
+      jest.mocked(resolveCodexCredentials).mockImplementationOnce(options => actual({ ...options, env: { FIXTURE_KEY: 'test-only' } }));
+      await manager.injectAgentService(entry);
+      const compose = yaml.load(fs.readFileSync(path.join(entry.installPath, 'docker-compose.yml'), 'utf8')) as any;
+      expect(compose.services.agent.labels[CODEX_RUNTIME_LABEL]).toBe('docker-provider');
+    });
+
     it.each(['missing', 'incompatible', 'remote', 'conflicting'])('keeps Claude generation working with %s Codex runtime', async kind => {
       const entry = makeEntry(tmpDir);
       if (kind !== 'missing') (resolveCodexRuntime as jest.Mock).mockReturnValue({ fingerprint: 'one', mounts: [], containerError: kind === 'incompatible' ? 'wrong arch' : undefined });

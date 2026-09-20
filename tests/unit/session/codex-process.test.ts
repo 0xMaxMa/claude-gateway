@@ -388,3 +388,26 @@ test.each(['same', 'recreated', 'legacy-present', 'legacy-missing'])('container 
   const saved = JSON.parse(await readFile(mapping, 'utf8'));
   expect(saved.containerId).toBe(kind === 'recreated' ? 'container-two' : 'container-one');
 });
+
+
+test('native credential probe uses the resolved executable for a relative worker bin', async () => {
+  const absoluteBin = join(directory, 'bin', 'codex');
+  (resolveCodexRuntime as jest.Mock).mockReturnValue({ executable: absoluteBin });
+  options.config = { model: 'gpt-test', bin: './bin/codex' };
+  const probe: any = new EventEmitter();
+  probe.stdin = new PassThrough(); probe.stdout = new PassThrough(); probe.stderr = new PassThrough();
+  probe.kill = jest.fn(); probe.unref = jest.fn();
+  probe.stdin.on('data', (chunk: Buffer) => {
+    const request = JSON.parse(chunk.toString());
+    if (request.id === undefined) return;
+    const result = request.method === 'config/read' ? { config: { model_provider: 'fixture', model_providers: { fixture: { base_url: 'https://responses.example/v1', env_key: 'TEST_CODEX_KEY' } } } } : { account: null };
+    setImmediate(() => probe.stdout.write(JSON.stringify({ id: request.id, result }) + '\n'));
+  });
+  (spawn as jest.Mock).mockReturnValueOnce(probe);
+  await adapter.start();
+  expect(resolveCodexRuntime).toHaveBeenCalledWith('./bin/codex', directory);
+  expect((spawn as jest.Mock).mock.calls[0][0]).toBe(absoluteBin);
+  adapter.sendMessage('run fixture');
+  await waitUntil(() => (spawn as jest.Mock).mock.calls.length === 2);
+  expect((spawn as jest.Mock).mock.calls[1][0]).toBe(absoluteBin);
+});

@@ -152,7 +152,7 @@ export class CodexProcess extends EventEmitter {
       this.containerId = await inspectSelectedCodexRuntime(agent, runtime);
       this.nativeSha256 = runtime.nativeSha256;
     }
-    this.credentials = await resolveCodexCredentials({ bin: runtime.executable, ...config, allowDockerHost: agent.type === 'app-agent' });
+    this.credentials = await resolveCodexCredentials({ ...config, bin: runtime.executable, allowDockerHost: agent.type === 'app-agent' });
     const key = 'GATEWAY_CODEX_API_KEY';
     this.identity = this.credentials.fingerprint;
     await mkdir(this.root, { recursive: true, mode: 0o700 });

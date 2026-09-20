@@ -56,6 +56,8 @@ Existing model entries in `gateway.models` can declare worker routing and provid
 
 Runtime/auth preflight can fall back only in auto mode. Endpoint/model/quota failures after dispatch fail the task explicitly. App tasks never fall back to host execution.
 
+Relative `codex.bin` paths resolve against the agent workspace; the credential probe and worker use that same resolved executable. A native provider using HTTP at `host.docker.internal` is accepted only for app-container workers, not host workers. The container must have that hostname mapped to the gateway host.
+
 ## Deploy app containers
 
 Generated app-agent images do **not** download or install Codex. Claude-only apps work without a host Codex installation. To enable Codex, explicitly install an official standalone or npm Codex distribution on the gateway host. The resolver uses the effective agent `workers.codex.bin`, then the gateway value, then the gateway process's `PATH`. It resolves executable symlinks and finds the native payload and bundled resources behind an npm launcher. Host workers retain the npm launcher; app workers use the native executable at `/opt/gateway-codex/bin/codex`.

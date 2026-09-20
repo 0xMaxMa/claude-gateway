@@ -271,7 +271,7 @@ export class AgentManager {
       if (runtimes.some(r => r.containerError || r.fingerprint !== runtimes[0].fingerprint)) return undefined;
       for (let i = 0; i < selections.length; i++) {
         const settings = { ...(config.gateway.workers as any)?.codex, ...(agents[i]?.workers as any)?.codex };
-        await resolveCodexCredentials({ ...settings, bin: runtimes[i].executable });
+        await resolveCodexCredentials({ ...settings, bin: runtimes[i].executable, allowDockerHost: true });
       }
       await assertLocalCodexDocker();
       return runtimes[0];
