@@ -43,7 +43,7 @@ describe('safemode ownership and native lifecycle', () => {
   });
   test('headless request is idempotent and conflicting request IDs fail', async () => {
     const session = store.create('test', 'claude', 'inherit');
-    (buildNativeInvocation as jest.Mock).mockImplementation((o) => ({command: process.execPath, args: ['-e', 'process.exit(0)'], env: process.env, cwd: o.cwd, nativeSessionId: '11111111-1111-4111-8111-111111111111'}));
+    (buildNativeInvocation as jest.Mock).mockImplementation((o) => ({command: process.execPath, args: ['-e', 'process.exit(0)'], env: process.env, cwd: o.cwd, nativeSessionId: o.nativeSessionId}));
     expect(await runSession(store, session, {mode:'headless', prompt:'inspect', requestId:'request-1'})).toBe(0);
     expect(await runSession(store, session, {mode:'headless', prompt:'inspect', requestId:'request-1'})).toBe(0);
     expect(buildNativeInvocation).toHaveBeenCalledTimes(1);
@@ -53,14 +53,14 @@ describe('safemode ownership and native lifecycle', () => {
   });
   test('stop acknowledges only after native process exits and ownership releases', async () => {
     const session = store.create('test', 'claude', 'inherit');
-    (buildNativeInvocation as jest.Mock).mockImplementation((o) => ({command: process.execPath, args: ['-e', "setInterval(()=>{},1000)"], env: process.env, cwd: o.cwd, nativeSessionId:'11111111-1111-4111-8111-111111111111'}));
+    (buildNativeInvocation as jest.Mock).mockImplementation((o) => ({command: process.execPath, args: ['-e', "setInterval(()=>{},1000)"], env: process.env, cwd: o.cwd, nativeSessionId:o.nativeSessionId}));
     const running = runSession(store, session, {mode:'headless', prompt:'inspect', requestId:'request-2'});
     for (let i=0;i<100 && !store.owner(session.id)?.childPid;i++) await new Promise(resolve => setTimeout(resolve,10));
     expect(store.owner(session.id)?.childPid).toBeDefined();
     await stopSession(store, session.id);
     expect(await running).toBe(1);
     expect(store.owner(session.id)).toBeUndefined();
-    expect(store.read(session.id).nativeSessionId).toBe('11111111-1111-4111-8111-111111111111');
+    expect(store.read(session.id).nativeSessionId).toBe(session.id);
   });
   test('post-spawn setup failure terminates child before releasing ownership', async () => {
     const session = store.create('test', 'claude', 'inherit');

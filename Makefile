@@ -23,16 +23,8 @@ cli: ## Run a CLI command against the local build — make cli ARGS="gateway sta
 	npm run build
 	@node --no-warnings=ExperimentalWarning dist/index.js $(ARGS)
 
-stop: ## Stop claude-gateway (node dist/index.js) and all spawned children
-	@echo "Stopping claude-gateway..."
-	-@pkill -f "[n]ode dist/index\.js" 2>/dev/null || true
-	@sleep 2
-	-@pkill -9 -f "[n]ode dist/index\.js" 2>/dev/null || true
-	-@pkill -9 -f "[b]un .*/claude-gateway/mcp/" 2>/dev/null || true
-	-@pkill -9 -f "[c]laude .*--mcp-config .*/claude-gateway/" 2>/dev/null || true
-	@pgrep -af "[n]ode dist/index\.js|[b]un .*/claude-gateway/mcp/|[c]laude .*--mcp-config .*/claude-gateway/" >/dev/null \
-		&& { echo "WARNING: some processes still alive:"; pgrep -af "[n]ode dist/index\.js|[b]un .*/claude-gateway/mcp/|[c]laude .*--mcp-config .*/claude-gateway/"; exit 1; } \
-		|| echo "Stopped"
+stop: ## Stop only the managed gateway; leave independent safemode CLIs running
+	@node --no-warnings=ExperimentalWarning dist/index.js gateway stop
 
 mcp-install: ## Install MCP gateway dependencies
 	cd mcp && bun install

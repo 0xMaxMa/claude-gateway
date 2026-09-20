@@ -161,7 +161,13 @@ describe('pidLooksLikeGateway', () => {
 
   // U-MG-375b — the case the guard exists for.
   it('U-MG-375b: rejects an unrelated process that inherited the pid', () => {
-    const cases = ['/usr/bin/postgres -D /var/lib/postgresql', 'sshd: ubuntu@pts/3', 'vim notes.md'];
+    const cases = ['/usr/bin/postgres -D /var/lib/postgresql', 'sshd: ubuntu@pts/3', 'vim notes.md',
+      'node /opt/claude-gateway/dist/index.js safemode --cli codex',
+      'node /opt/claude-gateway/dist/index.js safemode --prompt gateway start',
+      'node /opt/claude-gateway/dist/index.js safemode --prompt node /opt/gw/dist/index.js gateway start',
+      'node /opt/claude-gateway/dist/index.js tasks list',
+      '/usr/local/bin/claude-gateway safemode',
+    ];
     for (const cmdline of cases) {
       expect(pidLooksLikeGateway(4242, { readCmdline: () => cmdline })).toBe(false);
     }

@@ -44,7 +44,7 @@ test('native session binding is unique and released only by its own investigatio
     expect(() => store.save(second)).toThrow('already belongs');
     store.removeName(second);
     expect(() => store.save(second)).toThrow('already belongs');
-    store.removeName(first); fs.rmSync(store.dir(first.id), {recursive: true});
+    const firstDir = store.dir(first.id); store.removeName(first); fs.rmSync(firstDir, {recursive: true});
     store.save(second);
     expect(store.read(second.id).nativeSessionId).toBe(id);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }

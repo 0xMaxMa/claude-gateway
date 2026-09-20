@@ -21,12 +21,23 @@ const HELP = `Usage: claude-gateway safemode [--name NAME] [--cli claude|codex] 
 --params is interactive-only, parsed as argv without shell evaluation. Native resume requires a UUID.
 Do not combine native resume in --params with safemode --resume.
 Default: native interactive Claude Code, inheriting its configured model.
---resume refers to a safemode investigation. Put gateway session IDs in --prompt.
+--resume accepts the native Claude Code/Codex session ID or a saved name. Put gateway chat IDs in --prompt.
 Headless send runs in the background; --wait waits for its result. There is no job queue.
 Takeover gracefully stops the previous owner before resuming the same native conversation.
 Use recover only for stale ownership after both supervisor and native CLI have exited.
 Config: safemode.cli and safemode.claude.model / safemode.codex.model (default: inherit).
 `;
+function nativeOwnership(store: SafemodeStore, session: SafemodeSession): object {
+  try { return { nativeOwners: findExternalNativeOwners({ cli: session.cli, nativeSessionId: session.nativeSessionId, cwd: path.join(store.dir(session.id), 'workspace') }) }; }
+  catch (error) { return { nativeOwnershipError: (error as Error).message }; }
+}
+function publicId(session: SafemodeSession): string | null { return session.id.startsWith('starting-') ? null : session.id; }
+function publicSession(session: SafemodeSession): object {
+  const { nativeSessionId, autoName, ...rest } = session;
+  const starting = session.id.startsWith('starting-');
+  return { ...rest, id: starting ? null : session.id, name: session.name,
+    ...(starting ? { status: 'starting', detail: 'Waiting for native session ID' } : {}) };
+}
 function output(value: unknown): void { process.stdout.write(JSON.stringify(value, null, 2) + '\n'); }
 
 export async function runSafemode(positionals: string[], flags: Record<string, string | boolean>): Promise<number> {
@@ -48,7 +59,7 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
   const store = new SafemodeStore();
   if (verb === 'list') {
     if (positionals.length !== 1) throw new Error('Unexpected safemode list argument');
-    output(store.list().map(s => ({ ...s, owner: store.owner(s.id) }))); return 0;
+    output(store.list().map(s => ({ ...publicSession(s), owner: store.owner(s.id), ...nativeOwnership(store, s) }))); return 0;
   }
   if (verb === 'open') {
     if (positionals.length > (positionals[0] === 'open' ? 1 : 0)) throw new Error('Unexpected safemode argument');
@@ -64,12 +75,7 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
       assertNoExternalNativeOwner({ cli: settings.cli, nativeSessionId: native.resumeId, cwd: store.root });
     }
     const configPath = resolveSafemodeConfigPath(flags, previous);
-    const session = previous ? { ...previous, ...settings, configPath } : store.create(flags.name as string | undefined, settings.cli, settings.model, configPath);
-    if (native?.resumeId) {
-      session.nativeSessionId = native.resumeId;
-      try { store.save(session); }
-      catch (error) { store.removeName(session); fs.rmSync(store.dir(session.id), { recursive: true, force: true }); throw error; }
-    }
+    const session = previous ? { ...previous, ...settings, configPath } : store.create(flags.name as string | undefined, settings.cli, settings.model, configPath, native?.resumeId);
     if (previous) {
       if (store.owner(session.id)) {
         if (!flags.takeover) throw new Error('Busy: use --takeover to stop the current owner first');
@@ -85,21 +91,21 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
   const session = store.find(positionals[1]);
   if (verb === 'status') {
     const owner = store.owner(session.id);
-    output({ ...session, owner, ownerAlive: owner ? alive(owner.pid) : false,
+    output({ ...publicSession(session), ...nativeOwnership(store, session), owner, ownerAlive: owner ? alive(owner.pid) : false,
       request: typeof flags['request-id'] === 'string' ? getRequest(store, session.id, flags['request-id']) ?? null : session.lastRequest }); return 0;
   }
   if (verb === 'logs') {
     const file = path.join(store.dir(session.id), 'output.log');
     const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').slice(-65536).split('\n').map(redactLine).join('\n') : '';
-    output({ id: session.id, output: text }); return 0;
+    output({ id: publicId(session), output: text }); return 0;
   }
-  if (verb === 'stop') { await stopSession(store, session.id); output({ id: session.id, stopped: true }); return 0; }
-  if (verb === 'recover') { recoverSession(store, session.id); output({ id: session.id, recovered: true }); return 0; }
+  if (verb === 'stop') { await stopSession(store, session.id); output({ id: publicId(session), stopped: true }); return 0; }
+  if (verb === 'recover') { recoverSession(store, session.id); output({ id: publicId(session), recovered: true }); return 0; }
   if (verb === 'delete') {
     const owner = store.acquire(session.id, 'headless');
-    try { fs.rmSync(store.dir(session.id), { recursive: true }); store.removeName(session); }
+    try { const directory = store.dir(session.id); store.removeName(session); fs.rmSync(directory, { recursive: true }); }
     catch (e) { store.release(session.id, owner); throw e; }
-    output({ id: session.id, deleted: true }); return 0;
+    output({ id: publicId(session), deleted: true }); return 0;
   }
   if (typeof flags.prompt !== 'string') throw new Error('safemode send requires --prompt');
   const requestId = typeof flags['request-id'] === 'string' ? flags['request-id'] : randomUUID();
@@ -109,7 +115,7 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
   if (priorRequest) {
     const hash = createHash('sha256').update(JSON.stringify([flags.prompt, settings.cli, settings.model])).digest('hex');
     if (hash !== priorRequest.promptHash) throw new Error('Request ID was already used with different input');
-    output({ id: session.id, requestId, duplicate: true, request: priorRequest });
+    output({ id: publicId(session), requestId, duplicate: true, request: priorRequest });
     return 0;
   }
   const currentOwner = store.owner(session.id);
@@ -119,7 +125,9 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
     await stopSession(store, session.id);
   }
   const refreshed = { ...store.read(session.id), ...settings, configPath: resolveSafemodeConfigPath(flags, session) };
-  if (!refreshed.nativeSessionId) throw new Error('Native conversation ID is not available; refusing to start a different conversation');
+  if (!refreshed.nativeSessionId || refreshed.nativeStarted === false) throw new Error('Native conversation ID is not available; refusing to start a different conversation');
+  Object.assign(session, refreshed);
+  assertNoExternalNativeOwner({ cli: refreshed.cli, nativeSessionId: refreshed.nativeSessionId, cwd: path.join(store.dir(session.id), 'workspace') });
   if (flags.wait) return runSession(store, refreshed, { mode: 'headless', prompt: flags.prompt, requestId, configPath: refreshed.configPath });
   const args = [path.resolve(__dirname, '../../entry.js'), 'safemode', 'send', session.id, `--prompt=${flags.prompt}`, `--request-id=${requestId}`, '--wait'];
   if (flags.model) args.push('--model', flags.model as string);
@@ -133,13 +141,13 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
       // Worker may still be preparing diagnostics: don't pretend acceptance is
       // failure and submit again. Status/request ID gives the durable outcome.
       worker.disconnect(); worker.unref();
-      output({ id: session.id, requestId, status: 'starting', message: 'Check status with this request ID' }); resolve();
+      output({ id: publicId(session), requestId, status: 'starting', message: 'Check status with this request ID' }); resolve();
     }, 20000);
     worker.once('error', err => { clearTimeout(timer); reject(err); });
     worker.once('message', message => {
       if (!(message as {ready?: boolean}).ready) return;
       clearTimeout(timer); worker.disconnect(); worker.unref();
-      output({ id: session.id, requestId, status: 'accepted' }); resolve();
+      output({ id: publicId(session), requestId, status: 'accepted' }); resolve();
     });
     worker.once('exit', code => {
       clearTimeout(timer);

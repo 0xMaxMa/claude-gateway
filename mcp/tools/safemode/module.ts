@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import type { McpToolDefinition, McpToolResult, ToolModule, ToolVisibility } from '../../types';
 
 const entry = fileURLToPath(new URL('../../../dist/entry.js', import.meta.url));
-const session = { type: 'string', minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$', description: 'Safemode investigation ID or name, not a gateway chat session ID.' };
+const session = { type: 'string', minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$', description: 'Native Claude Code/Codex session ID or saved safemode name, not a gateway chat session ID.' };
 const requestId = { type: 'string', minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$' };
 const schema = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required, additionalProperties: false });
 export const SAFEMODE_TOOLS: McpToolDefinition[] = [

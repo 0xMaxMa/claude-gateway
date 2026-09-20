@@ -11,7 +11,7 @@ export interface RunOptions { nativeArgs?: string[]; mode: 'interactive' | 'head
 const STOP_TIMEOUT = 15000;
 export function controlPath(store: SafemodeStore, id: string): string {
   // A bounded socket path also supports long HOME paths on macOS/Linux.
-  return path.join(store.root, `${id}.sock`);
+  return path.join(store.root, `${path.basename(store.dir(id))}.sock`);
 }
 export async function stopSession(store: SafemodeStore, id: string): Promise<void> {
   if (!store.owner(id)) return;
@@ -104,10 +104,11 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
     const { prompt: context } = await prepareContext(workspace, session.configPath, options.prompt);
     if (stopping) throw new Error('Stopped before native CLI launch');
     const invocation = await buildNativeInvocation({ cli: session.cli, mode: options.mode, cwd: workspace,
-      nativeArgs: options.nativeArgs, prompt: options.prompt, context, model: session.model, nativeSessionId: session.nativeSessionId, resume: !!session.nativeSessionId });
+      nativeArgs: options.nativeArgs, prompt: options.prompt, context, model: session.model, nativeSessionId: session.nativeSessionId, resume: !!session.nativeSessionId && session.nativeStarted !== false });
     if (invocation.nativeSessionId) session.nativeSessionId = invocation.nativeSessionId;
     store.save(session);
-    process.stderr.write(`Safemode ${session.name}: ${session.cli}, model ${session.model === 'inherit' ? 'inherited from native CLI' : session.model}\n`);
+    process.stderr.write(`Safemode ${session.id.startsWith('starting-') ? 'starting (waiting for native session ID)' : session.name}: ${session.cli}, model ${session.model === 'inherit' ? 'inherited from native CLI' : session.model}\n`);
+    assertNoExternalNativeOwner({ cli: session.cli, nativeSessionId: session.nativeSessionId, cwd: workspace, env: invocation.env });
     owner.launching = true;
     store.updateOwner(session.id, owner);
     child = spawn(invocation.command, invocation.args, { cwd: invocation.cwd, env: invocation.env,
@@ -117,12 +118,23 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
       child!.once('error', value => { error = value; });
       child!.once('close', code => { childClosed = true; resolve({ code: code ?? 1, error }); });
     });
-    child.once('spawn', () => { if (process.connected) process.send?.({ ready: true, sessionId: session.id, requestId: options.requestId }); });
+    child.once('spawn', () => {
+      try {
+        session.nativeStarted = true; store.save(session);
+        if (process.connected) process.send?.({ ready: true, sessionId: session.id.startsWith('starting-') ? null : session.id, requestId: options.requestId });
+      } catch (error) { ownershipError = (error as Error).message; child?.kill('SIGTERM'); }
+    });
     owner.childPid = child.pid;
     owner.launching = false;
     store.updateOwner(session.id, owner);
     const captureId = (id: string | undefined) => {
-      if (id && id !== session.nativeSessionId) { session.nativeSessionId = id; store.save(session); }
+      if (!id || id === session.nativeSessionId) return;
+      try {
+        if (session.nativeSessionId) throw new Error('Native CLI returned a different session ID');
+        const identified = { ...session, nativeSessionId: id, nativeStarted: true };
+        store.save(identified); Object.assign(session, identified);
+        process.stderr.write(`Safemode session: ${session.id}\n`);
+      } catch (error) { ownershipError = (error as Error).message; child?.kill('SIGTERM'); }
     };
     if (session.cli === 'codex' && options.mode === 'interactive' && !session.nativeSessionId) {
       const discover = () => { try { captureId(discoverCodexSession({ cwd: workspace, startedAt })); } catch { /* Ambiguous discovery must not guess. */ } };

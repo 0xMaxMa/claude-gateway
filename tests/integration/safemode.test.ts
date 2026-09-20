@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { randomUUID } from 'crypto';
 const exec = promisify(execFile);
@@ -47,12 +47,57 @@ describe('safemode detached CLI worker', () => {
     const args = JSON.parse(fs.readFileSync(capture, 'utf8'));
     expect(args.slice(0, 3)).toEqual([permission, resume, importedId]);
     expect(args).not.toContain('--permission-mode');
-    expect((await command('status', 'imported')).nativeSessionId).toBe(importedId);
+    expect((await command('status', importedId)).id).toBe(importedId);
     await expect(exec('script', ['-q', '-e', '-c', cmd.replace("'imported'", "'duplicate'"), '/dev/null'], {env, timeout: 15000})).rejects.toThrow();
+  });
+  test('fresh interactive Codex publishes its native ID while retaining the launch workspace', async () => {
+    const native = '33333333-3333-4333-8333-333333333333';
+    const fake = path.join(home, 'codex-fixture');
+    fs.writeFileSync(fake, `#!/usr/bin/env node
+const fs=require('fs'), path=require('path');
+const now=new Date().toISOString();
+const dir=path.join(process.env.HOME,'.codex','sessions',now.slice(0,10).replace(/-/g,'/'));
+fs.mkdirSync(dir,{recursive:true});
+fs.writeFileSync(path.join(dir,'rollout.jsonl'),JSON.stringify({type:'session_meta',payload:{id:'${native}',cwd:process.cwd(),timestamp:now,source:'cli'}})+'\\n');
+setTimeout(()=>process.exit(0),1600);
+`, {mode: 0o700});
+    env.CODEX_BIN = fake;
+    const cmd = [process.execPath, entry, 'safemode', '--cli', 'codex', '--params=--no-alt-screen'].map(v => "'" + v + "'").join(' ');
+    await exec('script', ['-q', '-e', '-c', cmd, '/dev/null'], {env, timeout:15000});
+    const status = await command('status', native);
+    expect(status).toMatchObject({id: native, name: native, nativeStarted:true});
+    expect(status).not.toHaveProperty('nativeSessionId');
+    const root = path.join(home, '.claude-gateway', 'safemode');
+    const dirs = fs.readdirSync(root).filter(n => n.startsWith('starting-'));
+    expect(dirs).toHaveLength(1);
+    expect(fs.existsSync(path.join(root, dirs[0], 'workspace', 'diagnostics'))).toBe(true);
+  });
+  test('make stop terminates the gateway only, and rejects a pidfile naming safemode', async () => {
+    const tools = path.join(home, 'bin');
+    fs.mkdirSync(tools);
+    for (const tool of ['systemctl', 'pm2']) fs.writeFileSync(path.join(tools, tool), '#!/bin/sh\nexit 1\n', {mode:0o700});
+    const server = path.join(home, 'server', 'dist', 'index.js');
+    fs.mkdirSync(path.dirname(server), {recursive:true});
+    fs.writeFileSync(server, 'setInterval(()=>{},1000);');
+    const gateway = spawn(process.execPath, [server, 'gateway', 'start'], {stdio:'ignore'});
+    const safemode = spawn(process.execPath, [server, 'safemode', '--cli', 'codex'], {stdio:'ignore'});
+    const closed = new Promise<void>(resolve => gateway.once('close', () => resolve()));
+    const pidfile = path.join(home,'.claude-gateway','gateway.pid');
+    const testEnv = {...env, PATH:tools+path.delimiter+process.env.PATH};
+    const buildRoot = path.resolve(__dirname, '../..');
+    try {
+      fs.writeFileSync(pidfile, gateway.pid + '\n10850\n');
+      await exec('make', ['stop'], {cwd:buildRoot, env:testEnv, timeout:10000});
+      await Promise.race([closed, new Promise((_, reject) => setTimeout(() => reject(new Error('gateway did not stop')), 3000).unref())]);
+      expect(() => process.kill(safemode.pid!, 0)).not.toThrow();
+      fs.writeFileSync(pidfile, safemode.pid + '\n10850\n');
+      await expect(exec('make', ['stop'], {cwd:buildRoot, env:testEnv, timeout:10000})).rejects.toThrow();
+      expect(() => process.kill(safemode.pid!, 0)).not.toThrow();
+    } finally { gateway.kill(); safemode.kill(); }
   });
   test('returns receipt then durable result for same native session, including a dash-leading prompt',async()=>{
     const receipt=await command('send','investigation','--prompt=--inspect this','--request-id=once');
-    expect(receipt).toMatchObject({id,requestId:'once',status:'accepted'});
+    expect(receipt).toMatchObject({id:nativeId,requestId:'once',status:'accepted'});
     let status:any;
     for(let i=0;i<30;i++) {
       status=await command('status','investigation','--request-id=once');
@@ -60,7 +105,7 @@ describe('safemode detached CLI worker', () => {
       await new Promise(resolve=>setTimeout(resolve,50));
     }
     expect(status.request).toMatchObject({id:'once',status:'completed',exitCode:0});
-    expect(status.nativeSessionId).toBe(nativeId);
+    expect(status.id).toBe(nativeId);
     const snapshot=JSON.parse(fs.readFileSync(path.join(home,'.claude-gateway','safemode',id,'workspace','diagnostics','config.json'),'utf8'));
     expect(snapshot.marker).toBe('saved target');
     expect((await command('logs','investigation')).output).toContain('fixture diagnostic completed');

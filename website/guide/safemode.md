@@ -8,7 +8,7 @@ claude-gateway safemode --cli codex --name codex-debug --model YOUR_MODEL
 claude-gateway safemode --resume voice-debug
 ```
 
-`--resume` selects a **safemode investigation name or ID**, not a gateway chat session. Put gateway chat session IDs in the initial prompt, or tell the interactive CLI after it opens. Initial prompts collect matching bounded database evidence; for later chat session IDs, send a fresh prompt through safemode to refresh the snapshot.
+`--resume` selects a **native Claude Code/Codex session ID or saved name**, not a gateway chat session. Put gateway chat session IDs in the initial prompt, or tell the interactive CLI after it opens. Initial prompts collect matching bounded database evidence; for later chat session IDs, send a fresh prompt through safemode to refresh the snapshot.
 
 ## Models and config
 
@@ -83,7 +83,7 @@ credentials still use the filtered environment. Without `--params`, existing
 interactive defaults remain unchanged. Parameters are not saved or reused by
 headless requests. `send` and the MCP tools do not accept this option.
 
-Outer `--resume` selects a saved safemode investigation. Native `resume UUID`
+Outer `--resume` selects a saved safemode conversation by its native session ID or name. Native `resume UUID`
 (Codex) or `--resume UUID` (Claude Code) inside `--params` attaches that exact
 native conversation to a new investigation. Combining the two is an error.
 If an investigation already owns that native ID, use its outer `--resume`.
@@ -94,3 +94,26 @@ switches are not passthrough options: safemode needs a locally trackable interac
 conversation. Picker/`--last`, continuation and fork modes are unsupported. Use
 `--prompt` for initial prompt text. Native flags are validated by the installed CLI;
 unsupported flags fail normally rather than being silently ignored.
+
+## One native session, one ID
+
+Safemode uses the Claude Code or Codex session UUID as its only public session ID.
+The same UUID works with `--resume`, `status`, `send`, `logs`, `stop`, `recover`
+and `delete`. Names are optional aliases, not separate session identities.
+
+Claude Code receives the UUID on its first launch. Codex assigns its own UUID:
+until its authoritative session metadata is available, `list` shows
+`id: null`, `status: "starting"` and a temporary name you can use to stop it.
+Once discovered, safemode publishes the native UUID and keeps the same workspace,
+owner lock and control socket. It never guesses the latest global Codex session.
+
+Older investigations are exposed by their native UUID. Idle metadata migrates
+automatically; live legacy supervisors keep their files and ownership unchanged
+until they exit. Existing workspace directories, diagnostic logs and request
+receipts remain in place. Their storage directory names are private implementation
+details, not another session ID. Native conversation history is never rewritten.
+
+`make stop` uses the gateway CLI's manager-aware stop operation and no longer
+kills processes by command-line pattern. Safemode opened independently in another
+terminal remains running when the gateway stops or restarts. Closing that terminal,
+stopping its enclosing service/container, or rebooting the host still stops it.
