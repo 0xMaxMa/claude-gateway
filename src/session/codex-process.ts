@@ -25,7 +25,7 @@ export interface CodexProcessOptions {
 const quote = (value: string): string => JSON.stringify(value);
 const MAX_LINE = 4 * 1024 * 1024;
 const threadPattern = /^[a-f0-9-]{36}$/i;
-interface SavedThread { threadId: string; home: string; container?: string; identity?: string; usage?: NativeUsage; }
+interface SavedThread { threadId: string; home: string; container?: string; containerId?: string; identity?: string; usage?: NativeUsage; }
 interface NativeUsage { inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens?: number; outputTokens: number; }
 
 interface SessionHomes { sessionId: string; workspace: string; container?: string; homes: string[]; }
@@ -89,6 +89,7 @@ export class CodexProcess extends EventEmitter {
   private child?: ChildProcessWithoutNullStreams;
   private executable = '';
   private nativeSha256?: string;
+  private containerId?: string;
   private group?: number;
   get managedProcessId(): number | undefined { return this.group; }
   private preparing?: Promise<void>;
@@ -146,7 +147,7 @@ export class CodexProcess extends EventEmitter {
     const runtime = resolveCodexRuntime(config.bin, agent.workspace);
     this.executable = agent.type === 'app-agent' ? runtime.containerExecutable : runtime.executable;
     if (agent.type === 'app-agent') {
-      inspectSelectedCodexRuntime(agent, runtime);
+      this.containerId = await inspectSelectedCodexRuntime(agent, runtime);
       this.nativeSha256 = runtime.nativeSha256;
     }
     const key = config.apiKeyEnv ?? 'OPENAI_API_KEY';
@@ -167,6 +168,17 @@ export class CodexProcess extends EventEmitter {
       this.containerAttempt = await prepareContainerProfile(agent, profile);
       const mountedHash = await containerNode(agent.container!, "const fs=require('fs'),crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'));", [this.executable]);
       if (!this.nativeSha256 || mountedHash.trim() !== this.nativeSha256) throw new Error(`CODEX_CONTAINER_RUNTIME_STALE: the mounted executable differs from the host. ${CODEX_RUNTIME_MAINTENANCE}`);
+      if (this.saved) {
+        // Native homes live in the container writable layer. A recreated container
+        // cannot resume them even though its name and the host pool slot survive.
+        // Legacy records have no Docker ID: retain them only if their transcript exists.
+        const sameContainer = !this.saved.containerId || this.saved.containerId === this.containerId;
+        const transcriptExists = sameContainer && await containerNode(agent.container!, "const fs=require('fs');try{process.stdout.write(fs.statSync(process.argv[1]+'/sessions').isDirectory()?'yes':'no');}catch(e){if(e.code!=='ENOENT')throw e;process.stdout.write('no');}", [this.saved.home]) === 'yes';
+        if (!transcriptExists) {
+          this.saved = undefined;
+          this.output({ type: 'system', subtype: 'native_session_reset', reason: 'container_session_unavailable' });
+        }
+      }
       // Existing app-agent images create the installer's home but may have no passwd entry for its numeric UID.
       const containerHome = homedir();
       if (!/^\/(?:home\/[^/]+|root)$/.test(containerHome)) throw new Error('Container requires a writable non-temporary home for Codex');
@@ -414,7 +426,7 @@ export class CodexProcess extends EventEmitter {
   private async persist(): Promise<void> {
     if (!this.threadId) throw new Error('Codex omitted its thread identity');
     const temporary = this.mapping + '.' + randomUUID();
-    await writeFile(temporary, JSON.stringify({ threadId: this.threadId, home: this.home, container: this.options.agent.container, identity: this.identity, usage: this.nativeUsage ?? this.saved?.usage }), { mode: 0o600 });
+    await writeFile(temporary, JSON.stringify({ threadId: this.threadId, home: this.home, container: this.options.agent.container, containerId: this.containerId, identity: this.identity, usage: this.nativeUsage ?? this.saved?.usage }), { mode: 0o600 });
     await rename(temporary, this.mapping);
     this.homePersisted = true;
   }

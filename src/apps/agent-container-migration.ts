@@ -90,7 +90,7 @@ async function recreateAgent(entry: AppEntry, agent: AgentConfig, manager: Pick<
   copyFileSync(compose, join(backup, 'docker-compose.yml'));
   if (previousDockerfile) copyFileSync(dockerfile, join(backup, 'Dockerfile.agent'));
   try {
-    manager.injectAgentService(entry);
+    await manager.injectAgentService(entry);
     await beforeRecreate?.();
     // Existing image already has the CLI runtime/home. Recreate ONLY agent:
     // no app/db restart, dependency traversal, image rebuild or volume removal.

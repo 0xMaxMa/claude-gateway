@@ -57,6 +57,17 @@ Each Codex task checks the selected runtime against the container's generated mo
 3. Run `claude-gateway app refresh-runtime APP_NAME --config /path/to/config.json` on the gateway/Docker host.
 4. Run `claude-gateway doctor --config /path/to/config.json`, then retry a Codex task.
 
+Native Codex transcripts live in the container's writable layer. Normal reuse within
+one container resumes its native conversation. After recreation, the gateway detects
+the new Docker container ID and starts a fresh native conversation with the task's
+current assignment/context, emitting `native_session_reset`. It does not pretend the
+old transcript survived or retry a missing path. Older mappings without a container ID
+resume only when their transcript directory still exists. Gateway task history remains
+on the host; previous native conversation context is not preserved by recreation.
+
+Docker context/info/inspection preflights run asynchronously with bounded timeouts,
+so a slow Docker daemon does not block gateway HTTP, voice processing or timers.
+
 The refresh command refuses running/restarting containers, verifies installer ownership and isolation, backs up generated files under `.gateway-agent-migrations`, regenerates mounts, rechecks the stopped container identity and recreates **only** `agent` with `--no-deps --no-build`. App/database services and volumes are untouched. The existing generated image can be reused; no Codex image rebuild is required. Refresh is also supported for older generated deployments and deleted old runtime paths when their mounts match the saved generated Compose specification. Missing optional Codex still permits refresh; the success message does not imply Codex was installed.
 
 On failure the generated files are restored and the backup retained. The command does not automatically recreate a rejected old container or claim to roll back an already recreated container. Inspect the error and backup before explicit recovery. Docker does not provide an atomic stopped-state/Compose recreation transaction, so keep the agent stopped until this command takes ownership of the recreation.

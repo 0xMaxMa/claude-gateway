@@ -410,7 +410,7 @@ async function refreshRuntime(name: string, positionals: string[], flags: Record
     const agent = raw.agents?.find((a: AgentConfig) => a.id === entry?.agentDeclaration?.name);
     if (!entry || !agent) throw new Error('APP_AGENT_NOT_FOUND in local config and apps registry');
     const { assertLocalCodexDocker } = await import('../../session/codex-container-runtime');
-    assertLocalCodexDocker();
+    await assertLocalCodexDocker();
     const { AgentManager } = await import('../../apps/agent-manager');
     const { refreshAppAgentRuntime } = await import('../../apps/agent-container-migration');
     await refreshAppAgentRuntime(entry, agent, new AgentManager(configFile, path.join(path.dirname(configFile), 'agents')));

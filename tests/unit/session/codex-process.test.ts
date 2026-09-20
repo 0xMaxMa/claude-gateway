@@ -33,7 +33,7 @@ async function launch() { await adapter.start(); adapter.sendMessage('do the tas
 beforeEach(async () => {
   jest.clearAllMocks();
   (resolveCodexRuntime as jest.Mock).mockReset().mockImplementation(bin => ({ executable: bin ?? 'codex', containerExecutable: '/opt/gateway-codex/bin/codex', nativeSha256: 'fixture-sha' }));
-  (inspectSelectedCodexRuntime as jest.Mock).mockReset();
+  (inspectSelectedCodexRuntime as jest.Mock).mockReset().mockResolvedValue('container-one');
   directory = await mkdtemp(join(tmpdir(), 'codex-adapter-'));
   await writeFile(join(directory, 'mcp.json'), JSON.stringify({ mcpServers: { gateway: { command: 'node', args: ['bridge.js'], env: { TICKET: 'secret-ticket' } } } }));
   process.env.TEST_CODEX_KEY = 'api-secret';
@@ -356,4 +356,35 @@ test('detects a stale Docker file inode even when mount labels match', async () 
   (containerNode as jest.Mock).mockResolvedValue('old-binary-sha');
   await expect(adapter.start()).rejects.toThrow('CODEX_CONTAINER_RUNTIME_STALE');
   expect(spawn).not.toHaveBeenCalled();
+});
+
+function mockContainerSession(transcript = 'yes') {
+  options.agent.type = 'app-agent'; options.agent.container = 'worker-container';
+  (prepareContainerProfile as jest.Mock).mockResolvedValue({ directory: '/tmp/gateway-orch-1234', config: '/tmp/gateway-orch-1234/mcp.json' });
+  (containerNode as jest.Mock).mockImplementation(async (_container, script, args) => script.includes('createHash') ? 'fixture-sha' : script.includes("isDirectory()?'yes'") ? transcript : args?.[0]?.endsWith('mcp.json') ? JSON.stringify({ mcpServers: { gateway: { command: 'node', args: ['container-bridge.js'] } } }) : '');
+}
+
+test.each(['same', 'recreated', 'legacy-present', 'legacy-missing'])('container resume handles %s identity without reading vanished transcript', async kind => {
+  mockContainerSession();
+  await launch(); await adapter.stop();
+  const mapping = join(await sessionDirectory(), 'thread.json');
+  const previous = JSON.parse(await readFile(mapping, 'utf8'));
+  expect(previous.containerId).toBe('container-one');
+  if (kind.startsWith('legacy')) {
+    delete previous.containerId;
+    await writeFile(mapping, JSON.stringify(previous));
+  }
+  if (kind === 'recreated') (inspectSelectedCodexRuntime as jest.Mock).mockResolvedValue('container-two');
+  mockContainerSession(kind === 'legacy-missing' ? 'no' : 'yes');
+  rpc = []; events = []; (containerNode as jest.Mock).mockClear();
+  adapter = new CodexProcess(options); adapter.on('output', line => events.push(JSON.parse(line)));
+  await launch();
+  const resumed = kind === 'same' || kind === 'legacy-present';
+  expect(rpc.some(r => r.method === 'thread/resume')).toBe(resumed);
+  expect(rpc.some(r => r.method === 'thread/start')).toBe(!resumed);
+  const createHome = (containerNode as jest.Mock).mock.calls.find(c => c[1].includes('fs.cpSync'));
+  expect(JSON.parse(createHome![3]).previous).toBe(resumed ? previous.home : undefined);
+  expect(events.some(e => e.subtype === 'native_session_reset')).toBe(!resumed);
+  const saved = JSON.parse(await readFile(mapping, 'utf8'));
+  expect(saved.containerId).toBe(kind === 'recreated' ? 'container-two' : 'container-one');
 });

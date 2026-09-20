@@ -139,7 +139,7 @@ export class AgentManager {
    * Uses debian:stable-slim (glibc required — host node binary is glibc-linked).
    * Claude and Node retain their host mounts; Codex is an optional host runtime.
    */
-  injectAgentService(entry: AppEntry): void {
+  async injectAgentService(entry: AppEntry): Promise<void> {
     if (!entry.agentDeclaration || !entry.agentPaths) return;
 
     const composePath = path.join(entry.installPath, 'docker-compose.yml');
@@ -223,7 +223,7 @@ export class AgentManager {
       : '';
 
     // Re-resolve on every generation: apps.json must not pin a stale npm path.
-    const codex = this.codexRuntime(entry);
+    const codex = await this.codexRuntime(entry);
     const agentService = {
       build: { context: entry.installPath, dockerfile: 'Dockerfile.agent' },
       user: `${uid}:${uid}`,
@@ -253,7 +253,7 @@ export class AgentManager {
   }
 
   /** One app container has one native runtime. Conflicting overrides stay unavailable. */
-  private codexRuntime(entry: AppEntry): CodexRuntime | undefined {
+  private async codexRuntime(entry: AppEntry): Promise<CodexRuntime | undefined> {
     try {
       const config = this.readConfig();
       const globalBin = (config.gateway.workers as { codex?: { bin?: string } } | undefined)?.codex?.bin;
@@ -268,7 +268,7 @@ export class AgentManager {
       }).replace(/^~(?=\/|$)/, os.homedir());
       const runtimes = selections.map(({ bin, cwd }) => resolveCodexRuntime(bin === undefined ? undefined : expand(bin), expand(cwd)));
       if (runtimes.some(r => r.containerError || r.fingerprint !== runtimes[0].fingerprint)) return undefined;
-      assertLocalCodexDocker();
+      await assertLocalCodexDocker();
       return runtimes[0];
     } catch { return undefined; } // Codex is optional; selecting it reports an actionable task error.
   }

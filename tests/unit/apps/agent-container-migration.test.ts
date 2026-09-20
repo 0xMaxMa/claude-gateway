@@ -21,7 +21,7 @@ beforeEach(() => {
 afterEach(() => rmSync(root,{recursive:true,force:true}));
 
 test('migration recreates only the agent and leaves workspace intact; subsequent boots are no-ops', async () => {
-  const injectAgentService=jest.fn(() => writeFileSync(join(root,'docker-compose.yml'),'new compose'));
+  const injectAgentService=jest.fn(async () => writeFileSync(join(root,'docker-compose.yml'),'new compose'));
   const run=jest.fn(async (args:string[]) => {
     if(args[0]==='compose'){ inspection.Mounts.pop(); return ''; }
     return JSON.stringify([inspection]);
@@ -47,7 +47,7 @@ test('disabled orchestration leaves the existing container alone', async () => {
   expect(run).not.toHaveBeenCalled();
 });
 test('failed recreate preserves the compose backup and does not restore unsafe mounts automatically', async () => {
-  const injectAgentService=jest.fn(()=>writeFileSync(join(root,'docker-compose.yml'),'new compose'));
+  const injectAgentService=jest.fn(async ()=>writeFileSync(join(root,'docker-compose.yml'),'new compose'));
   const run=jest.fn(async(args:string[])=>{if(args[0]==='compose')throw Error('recreate failed');return JSON.stringify([inspection]);});
   await expect(migrateAppAgentContainer(entry,agent,{injectAgentService},run)).rejects.toThrow('recreate failed');
   expect(readFileSync(join(root,'docker-compose.yml'),'utf8')).toBe('original compose');
@@ -79,7 +79,7 @@ describe('explicit runtime refresh', () => {
     inspection.State = { Running: false, Status: 'exited' };
   });
   test('refreshes only a stopped owned agent, preserving workspace and application services', async () => {
-    const injectAgentService = jest.fn(() => writeFileSync(join(root, 'docker-compose.yml'), 'refreshed compose'));
+    const injectAgentService = jest.fn(async () => writeFileSync(join(root, 'docker-compose.yml'), 'refreshed compose'));
     const run = jest.fn(async (args: string[]) => {
       if (args[0] === 'compose') { inspection.Mounts.pop(); inspection.State = { Running: true, Status: 'running' }; return ''; }
       return JSON.stringify([inspection]);
@@ -129,7 +129,7 @@ describe('explicit runtime refresh', () => {
     expect(require('fs').existsSync(join(root, 'Dockerfile.agent'))).toBe(false);
   });
   test('failed post-refresh admission reports failure without starting other services or rollback recreation', async () => {
-    const injectAgentService = jest.fn(() => writeFileSync(join(root, 'docker-compose.yml'), 'refreshed compose'));
+    const injectAgentService = jest.fn(async () => writeFileSync(join(root, 'docker-compose.yml'), 'refreshed compose'));
     const run = jest.fn(async (args: string[]) => {
       if (args[0] === 'compose') { inspection.HostConfig.Privileged = true; return ''; }
       return JSON.stringify([inspection]);

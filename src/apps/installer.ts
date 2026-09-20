@@ -1851,7 +1851,7 @@ export class AppInstaller {
 
     // Inject agent service into docker-compose.yml before build
     if (generated.agentDeclaration && this.agentManager && agentPaths) {
-      this.agentManager.injectAgentService(entry);
+      await this.agentManager.injectAgentService(entry);
       this.log(job, `Agent service injected for ${generated.agentDeclaration.name}`);
       // Pre-pull the agent base image so compose up --wait doesn't time out during pull
       this.log(job, 'Pre-pulling agent base image');
@@ -2049,7 +2049,7 @@ export class AppInstaller {
       };
 
       if (generated.agentDeclaration && this.agentManager && agentPaths) {
-        this.agentManager.injectAgentService(newEntry);
+        await this.agentManager.injectAgentService(newEntry);
       }
 
       // Pin the images the app is running before the build takes their tags
@@ -2117,7 +2117,7 @@ export class AppInstaller {
         const finalYaml = parseAppYaml(fs.readFileSync(path.join(finalDir, 'app.yaml'), 'utf-8'), finalDir);
         generateCompose(finalYaml, appName, finalDir, finalComposePath);
         if (generated.agentDeclaration && this.agentManager && agentPaths) {
-          this.agentManager.injectAgentService({ ...newEntry, installPath: finalDir });
+          await this.agentManager.injectAgentService({ ...newEntry, installPath: finalDir });
         }
 
         // ── Start new containers ────────────────────────────────────────────
@@ -2429,7 +2429,7 @@ export class AppInstaller {
         fs.writeFileSync(composePath, newComposeContent);
         if (generated.agentDeclaration && this.agentManager) {
           const agentPaths = entry.agentPaths ?? this.agentManager.detectAgentPaths();
-          this.agentManager.injectAgentService({ ...entry, agentPaths });
+          await this.agentManager.injectAgentService({ ...entry, agentPaths });
         }
       }
 
