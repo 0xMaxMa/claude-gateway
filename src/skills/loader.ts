@@ -30,6 +30,8 @@ function menuDescription(skill: SkillDefinition): string {
 export interface SkillRegistry {
   cliSkills?: import('../orchestration/cli-skills').CliSkill[];
   cliDiscoveryError?: string;
+  extensionServers?: string[];
+  extensionNotices?: string[];
   skills: Map<string, SkillDefinition>;
 }
 

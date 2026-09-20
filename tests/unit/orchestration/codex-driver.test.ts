@@ -1,4 +1,5 @@
 import { discoverCliSkills } from '../../../src/orchestration/cli-skills';
+jest.mock('../../../src/session/worker-extensions', () => ({ discoverWorkerExtensions: jest.fn().mockResolvedValue({ skills: [], servers: {}, notices: [] }) }));
 jest.mock('../../../src/orchestration/cli-skills',()=>({discoverCliSkills:jest.fn().mockResolvedValue([{name:'native-only'}])}));
 import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
 jest.mock('../../../src/orchestration/container', () => ({ ...jest.requireActual('../../../src/orchestration/container'), validateContainer: jest.fn().mockResolvedValue(undefined) }));
@@ -138,6 +139,17 @@ test('explicit Codex CLI-only skills fail without starting Claude as fallback', 
   const attempt = tasks.claim(task.taskId)!;
   await expect(driver.start(task,attempt)).rejects.toMatchObject({code:'CODEX_SKILL_UNAVAILABLE'});
   expect(CodexProcess).not.toHaveBeenCalled(); expect(SessionProcess).not.toHaveBeenCalled();
+});
+
+test('a Claude plugin file runs through Codex with pinned instructions and plugin-root resources', async () => {
+  const source = join(root, 'plugin'); mkdirSync(join(source, 'skills', 'review'), { recursive: true }); mkdirSync(join(source, 'shared'));
+  const filePath = join(source, 'skills', 'review', 'SKILL.md'); writeFileSync(filePath, 'changed after admission'); writeFileSync(join(source, 'shared', 'foundation.md'), 'foundation');
+  await run('gpt-5.6-luna', { targetProfile: 'skill-worker', skill: { invocation: 'cli', name: 'workflow:review', args: '123', filePath, resourceRoot: source, content: 'Read shared/foundation.md from the plugin root.' } });
+  expect(SessionProcess).not.toHaveBeenCalled();
+  const copied = join(jest.mocked(CodexProcess).mock.calls[0][0].profile.skillPluginDir!, 'skills', 'workflow:review');
+  expect(readFileSync(join(copied, 'shared', 'foundation.md'), 'utf8')).toBe('foundation');
+  expect(readFileSync(join(copied, 'skills', 'review', 'SKILL.md'), 'utf8')).toContain('Read shared/foundation.md');
+  expect(readFileSync(join(copied, 'SKILL.md'), 'utf8')).toContain('skills/review/SKILL.md');
 });
 
 test('native startup failure is a task failure and never retries through Claude', async () => {

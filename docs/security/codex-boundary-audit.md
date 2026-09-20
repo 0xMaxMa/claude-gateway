@@ -19,9 +19,28 @@ Reviewed for PR #520, 2026-09-20. Native verification used the installed Codex C
 | Provider credentials | Selected native API-key/provider settings use the worker environment. Native ChatGPT access tokens use private app-server stdio and ephemeral auth storage; refresh requests are handled by host Codex. Native refresh tokens, keyring storage and the personal Codex home are never copied or mounted. Credentials are not placed in command arguments. |
 | Native configuration | Private per-attempt Codex home plus startup policy. Effective provider/MCP/config inspection precedes thread start. Only prior native session data is copied on resume. |
 | Gateway MCP | App workers receive the container tool inventory and a scoped revocable task ticket. Host shell/admin, task spawning, host media/browser and unauthorized file operations are rejected by the bridge. |
-| Runtime approvals | Unexpected native server requests for interaction/approval return an error and stop the worker; no automatic approval handler. |
+| Runtime approvals | Native user questions enter the existing task question flow; approval/consent requests are not automatically accepted. Unhandled native requests fail closed. |
 | Resume / cancellation | Native host and container smokes cover MCP, exact resume, container recreation recovery, mid-turn amendments and process cancellation. |
 | Native side effects | Native safemode smoke verifies completion without the inherited notification program, including resume. Tests reject unexpected native features before thread creation. |
+
+## Extension projection follow-up
+
+- Enabled installed Claude plugin skills and native Codex skills are discoverable
+  without injecting every skill body into the model context. Task skill instructions
+  are pinned, plugin-root references are preserved, and disabled/uninstalled cached
+  versions are excluded.
+- Native Codex MCP calls use a model-free sidecar under the native connection
+  configuration, retaining OAuth/keyring ownership and native tool filtering. Only
+  the discovered enabled server/plugin inventory is exposed by its proxy.
+- Container discovery and MCP processes execute inside that container. The same
+  lazy MCP adapter is bundled for Node; no host home, MCP process or new host socket
+  is exposed. Scoped gateway tool permissions remain unchanged.
+- A native CLI smoke verifies tool discovery/call and rejection of a disabled tool.
+  Host and container connector smokes cover schema loading, calls, resume,
+  recreation, steering and cancellation. A billable read-only GPT worker test read
+  the WTB skill, its shared foundation and a native Codex skill, and called the
+  scoped fixture MCP. This is not proof that every third-party vendor is reachable
+  or that executable Claude hooks can be translated to another CLI.
 
 ## Intentional authority and limits
 

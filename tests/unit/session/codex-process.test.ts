@@ -1,4 +1,5 @@
 import * as codexAuth from '../../../src/session/codex-auth';
+jest.mock('../../../src/session/worker-extensions', () => ({ discoverWorkerExtensions: jest.fn().mockResolvedValue({ skills: [], servers: {}, notices: [] }) }));
 import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
 import { inspectSelectedCodexRuntime } from '../../../src/session/codex-container-runtime';
 jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn() }));
@@ -84,6 +85,15 @@ test('maps tools and failures, returns only canonical final and counts cached in
   expect(events.filter(e => e.type === 'result')).toEqual([expect.objectContaining({ result: 'Finished.' })]);
   const usage = new TurnUsageCollector(); events.forEach(e => usage.observe(e));
   expect(usage.snapshot()).toMatchObject({ loadedTools: null, contextTools: null, requests: [], usage: { inputTokens: 30, cacheReadTokens: 70, outputTokens: 20, totalTokens: 120 } });
+});
+
+test('native user questions enter the existing task question flow without inventing an answer', async () => {
+  options.requestInput = jest.fn();
+  await launch();
+  emit({ id: 'question-1', method: 'item/tool/requestUserInput', params: { threadId: thread, questions: [{ id: 'target', question: 'Which target should I use?', options: [{ label: 'Development', description: 'Use the development environment' }] }] } });
+  expect(options.requestInput).toHaveBeenCalledWith('Which target should I use?\nDevelopment: Use the development environment');
+  expect(events).toContainEqual({ type: 'result', is_error: false, result: 'Waiting for user input.' });
+  expect(rpc).toContainEqual({ id: 'question-1', result: { answers: {} } });
 });
 test('resumes the bound thread explicitly with fresh configuration', async () => {
   await launch();

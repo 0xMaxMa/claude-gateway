@@ -10,15 +10,17 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createLazyToolCatalog, LAZY_TOOL_DEFINITIONS } from './lazy-tools';
+import { CodexNativeClient } from '../dist/session/codex-native-mcp-client.js';
 
 const config = JSON.parse(readFileSync(process.argv[2], 'utf8'));
-const client = new Client({name:'gateway-lazy-connector',version:'1'});
+const client: any = config.nativeCodex ? new CodexNativeClient(config.nativeCodex) : new Client({name:'gateway-lazy-connector',version:'1'});
 const shutdown = new AbortController();
 let connection: Promise<void> | undefined;
 let catalog: ReturnType<typeof createLazyToolCatalog> | undefined;
 let loading: Promise<ReturnType<typeof createLazyToolCatalog>> | undefined;
 function connect(): Promise<void> {
   if (!connection) connection = (async()=>{
+    if (config.nativeCodex) { await client.connect(); return; }
     const transport = config.command ? new StdioClientTransport({command:config.command,args:config.args,env:{...process.env,...config.env},cwd:config.cwd,stderr:'inherit'})
       : config.type === 'sse' ? new SSEClientTransport(new URL(config.url),{requestInit:{headers:config.headers}})
       : new StreamableHTTPClientTransport(new URL(config.url),{requestInit:{headers:config.headers}});
@@ -35,7 +37,7 @@ async function discover() {
     do {
       if(++pages>500)throw Error('Connector catalog pagination exceeded page limit');
       const page=await client.listTools(cursor?{cursor}:{},{timeout:10000,signal:shutdown.signal});
-      const pageTools=page.tools.map(t=>({...t,description:t.description??''}));
+      const pageTools=page.tools.filter(t => (!Array.isArray(config.enabled_tools) || config.enabled_tools.includes(t.name)) && !config.disabled_tools?.includes(t.name)).map(t=>({...t,description:t.description??''}));
       bytes+=Buffer.byteLength(JSON.stringify(pageTools));
       if(tools.length+pageTools.length>10000||bytes>8*1024*1024)throw Error('Connector catalog too large');
       tools.push(...pageTools);

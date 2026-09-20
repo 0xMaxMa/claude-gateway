@@ -34,6 +34,8 @@ export interface RuntimeProfile {
   attemptId?: string;
   /** Gateway-built plugin containing only this task skill and its resources. */
   skillPluginDir?: string;
+  /** A trusted container-discovered skill. These paths never refer to host files. */
+  containerSkill?: { name: string; filePath: string; resourceRoot: string; content: string };
   checkpointCommand?: string;
 }
 export const AGENT_OVERLAY = AGENT_WORKFLOW_RULES + `

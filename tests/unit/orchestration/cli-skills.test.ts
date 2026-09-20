@@ -17,7 +17,7 @@ test('runtime native names and aliases resolve without a fabricated file or skil
  expect(resolveNamedSkill('review','local',registry)).toMatchObject({name:'code-review',invocation:'cli'});
  expect(resolveNamedSkill('invented','',registry)).toBeUndefined();
  expect(resolveNamedSkill('../code-review','',registry)).toBeUndefined();
- expect(skillCatalog(registry)).toContain('Claude Code runtime skills');
+ expect(skillCatalog(registry)).toContain('Installed CLI extension skills');
  expect(skillCatalog({...registry,cliDiscoveryError:'unavailable'})).toContain('Do not infer');
 });
 test('shared skills remain discoverable with resources and keep gateway precedence',()=>{

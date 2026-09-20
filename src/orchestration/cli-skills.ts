@@ -10,7 +10,7 @@ import { resolveOrchestrationConfig } from './config';
 import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
 import { validateContainer } from './container';
 
-export interface CliSkill { name: string; description: string; argumentHint?: string; aliases?: string[]; }
+export interface CliSkill { name: string; description: string; argumentHint?: string; aliases?: string[]; filePath?: string; resourceRoot?: string; source?: 'claude' | 'codex'; fileScope?: 'container'; content?: string; }
 const validName = (value: unknown): value is string => typeof value === 'string' && /^[\w:.-]{1,128}$/.test(value);
 export function parseCliSkills(value: unknown): CliSkill[] {
   if (!Array.isArray(value)) throw new Error('CLI_SKILL_DISCOVERY_INVALID');

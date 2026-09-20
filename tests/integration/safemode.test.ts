@@ -38,7 +38,7 @@ describe('safemode detached CLI worker', () => {
   });
   afterEach(()=>fs.rmSync(home,{recursive:true,force:true}));
   async function command(...args:string[]):Promise<any> {
-    const {stdout}=await exec(process.execPath,[entry,'safemode',...args,'--json'],{env,timeout:10000});
+    const {stdout}=await exec(process.execPath,[entry,'safemode',...args,'--json'],{env,timeout:10000}).catch(error => { error.message += '\n' + String(error.stdout) + String(error.stderr); throw error; });
     return JSON.parse(stdout);
   }
   test.each(['claude', 'codex'])('interactive %s params reach the native process, retain imported ID and cannot be imported twice', async cli => {
@@ -53,7 +53,7 @@ describe('safemode detached CLI worker', () => {
     env.FIXTURE_NATIVE_KEY = 'test-only-native-key';
     const cmd = [process.execPath, entry, 'safemode', '--cli', cli, '--name', 'imported',
       '--params', permission + ' ' + resume + ' ' + importedId].map(quote).join(' ');
-    await exec('script', ['-q', '-e', '-c', cmd, '/dev/null'], {env, timeout: 15000});
+    await exec('script', ['-q', '-e', '-c', cmd, '/dev/null'], {env, timeout: 15000}).catch(error => { error.message += '\n' + String(error.stdout) + String(error.stderr); throw error; });
     const args = JSON.parse(fs.readFileSync(capture, 'utf8'));
     expect(args.slice(0, 3)).toEqual([permission, resume, importedId]);
     expect(args).not.toContain('--permission-mode');
@@ -76,7 +76,7 @@ setTimeout(()=>process.exit(0),1600);
 `, {mode: 0o700});
     env.CODEX_BIN = fake;
     const cmd = [process.execPath, entry, 'safemode', '--cli', 'codex', '--params=--no-alt-screen'].map(v => "'" + v + "'").join(' ');
-    await exec('script', ['-q', '-e', '-c', cmd, '/dev/null'], {env, timeout:15000});
+    await exec('script', ['-q', '-e', '-c', cmd, '/dev/null'], {env, timeout:15000}).catch(error => { error.message += '\n' + String(error.stdout) + String(error.stderr); throw error; });
     const status = await command('status', native);
     expect(status).toMatchObject({id: native, name: native, nativeStarted:true});
     expect(status).not.toHaveProperty('nativeSessionId');

@@ -3,6 +3,8 @@ import { codexPolicyArgs, DISABLED_CODEX_FEATURES } from './codex-policy';
 import { resolveCodexRuntime } from './codex-runtime';
 import { inspectSelectedCodexRuntime, CODEX_RUNTIME_MAINTENANCE } from './codex-container-runtime';
 import { prepareManagedConnectors } from './managed-connectors';
+import { discoverWorkerExtensions } from './worker-extensions';
+import { prepareContainerConnectors } from './container-connectors';
 import { EventEmitter } from 'events';
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import { createHash, randomUUID } from 'crypto';
@@ -22,6 +24,7 @@ export interface CodexProcessOptions {
   sessionId: string;
   stateDirectory: string;
   checkpoint?: () => Promise<{ text: string; kind?: 'assignment' | 'advice'; acknowledge: () => void | Promise<void> } | undefined>;
+  requestInput?: (question: string) => void;
   config: { model: string; baseUrl?: string; apiKeyEnv?: string; reasoningEffort?: string; bin?: string };
 }
 const quote = (value: string): string => JSON.stringify(value);
@@ -168,6 +171,7 @@ export class CodexProcess extends EventEmitter {
       !ownedHome(this.root, this.saved.home, agent.container))) throw new Error('Invalid persisted Codex thread binding');
     await this.recordHomes();
     let mcp: any;
+    let extensionInstructions = '';
     if (agent.type === 'app-agent') {
       this.containerAttempt = await prepareContainerProfile(agent, profile);
       const mountedHash = await containerNode(agent.container!, "const fs=require('fs'),crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'));", [this.executable]);
@@ -189,12 +193,27 @@ export class CodexProcess extends EventEmitter {
       this.home = containerHome + '/.gateway-codex-' + randomUUID();
       await this.recordHomes();
       mcp = JSON.parse(await containerNode(agent.container!, "process.stdout.write(require('fs').readFileSync(process.argv[1],'utf8'))", [this.containerAttempt.config]));
+      if (profile.connectorsAllowed !== false) {
+        const extensions = await discoverWorkerExtensions(agent, this.options.gateway);
+        mcp.mcpServers = { ...await prepareContainerConnectors(agent, this.containerAttempt.directory, extensions.servers), ...mcp.mcpServers };
+        extensionInstructions = [
+          'Installed container extension skills: read the selected file and follow relative resources. Nested slash skill names mean read that skill, not invoke a host CLI. All commands and MCP servers execute inside this container. Use task_request_input for user questions.',
+          ...extensions.skills.map(skill => JSON.stringify({ name: skill.name, aliases: skill.aliases, description: skill.description, path: skill.filePath, pluginRoot: skill.resourceRoot })),
+          ...extensions.notices,
+        ].join('\n');
+      }
     } else {
       this.home = join(this.root, 'attempt-' + randomUUID());
       await this.recordHomes();
       await mkdir(this.home, { mode: 0o700 });
       mcp = JSON.parse(await readFile(profile.mcpConfigPath, 'utf8'));
-      const { servers } = prepareManagedConnectors(agent, this.options.gateway, profile, this.connectorPaths);
+      const extensions = profile.hostExecution && profile.connectorsAllowed !== false ? await discoverWorkerExtensions(agent, this.options.gateway) : { skills: [], servers: {}, notices: [] };
+      extensionInstructions = extensions.skills.length || extensions.notices.length ? [
+        'Installed extension skills: read the selected SKILL.md, then follow its instructions and relative references. A slash skill invocation means read and execute that workflow; do not try to call Claude Code or its Skill tool. For nested skill invocations, resolve the name in this catalog and read that file. Plugin-relative paths resolve from the listed plugin root. Use native shell/file tools for equivalent operations; use task_request_input for questions requiring the user. A skill never grants extra permissions.',
+        ...extensions.skills.map(skill => JSON.stringify({ name: skill.name, aliases: skill.aliases, description: skill.description, path: skill.filePath, pluginRoot: skill.resourceRoot, source: skill.source })),
+        ...extensions.notices,
+      ].join('\n') : '';
+      const { servers } = prepareManagedConnectors(agent, this.options.gateway, profile, this.connectorPaths, extensions.servers);
       mcp.mcpServers = { ...servers, ...mcp.mcpServers };
     }
     this.approvedMcp = mcp.mcpServers ?? {};
@@ -202,15 +221,26 @@ export class CodexProcess extends EventEmitter {
       `model = ${quote(config.model)}`, `model_provider = ${quote(this.credentials.chatgpt ? 'openai' : 'gateway')}`, 'approval_policy = "never"',
       `sandbox_mode = ${quote(profile.hostExecution || agent.type === 'app-agent' ? 'danger-full-access' : 'workspace-write')}`,
       'web_search = "disabled"', 'project_doc_fallback_filenames = ["CLAUDE.md"]',
-      `developer_instructions = ${quote([profile.context, profile.overlay, profile.skillPluginDir ? `Task skill resources: ${this.containerAttempt ? this.containerAttempt.directory + '/skill-plugin' : profile.skillPluginDir}` : undefined].filter(Boolean).join('\n\n'))}`,
+      `developer_instructions = ${quote([profile.context, profile.overlay, extensionInstructions, profile.skillPluginDir || profile.containerSkill ? `Task skill resources: ${this.containerAttempt ? this.containerAttempt.directory + '/skill-plugin' : profile.skillPluginDir}. Read the assigned SKILL.md (or RESOURCE_ROOT.txt) and resolve its plugin-relative references from its resource root.` : undefined].filter(Boolean).join('\n\n'))}`,
       ...(config.reasoningEffort ? [`model_reasoning_effort = ${quote(config.reasoningEffort)}`] : []),
       ...(this.credentials.chatgpt ? ['cli_auth_credentials_store = "ephemeral"'] : ['[model_providers.gateway]', 'name = "Gateway Responses"', 'wire_api = "responses"', `base_url = ${quote(this.credentials.baseUrl)}`, `env_key = ${quote(key)}`]),
       '[features]', 'multi_agent = false',
       `[projects.${quote(agent.type === 'app-agent' ? '/workspace' : agent.workspace)}]`, 'trust_level = "untrusted"',
     ];
     for (const [name, server] of Object.entries(mcp.mcpServers ?? {}) as [string, any][]) {
-      if (typeof server.command !== 'string' || !Array.isArray(server.args) || server.args.some((v: unknown) => typeof v !== 'string')) throw new Error('Codex MCP requires a stdio command and string arguments');
-      lines.push(`[mcp_servers.${quote(name)}]`, `command = ${quote(server.command)}`, `args = ${JSON.stringify(server.args)}`, 'required = true');
+      lines.push(`[mcp_servers.${quote(name)}]`, `required = ${name === 'gateway'}`);
+      if (typeof server.command === 'string') {
+        if (!Array.isArray(server.args) || server.args.some((v: unknown) => typeof v !== 'string')) throw new Error('Codex MCP requires string arguments');
+        lines.push(`command = ${quote(server.command)}`, `args = ${JSON.stringify(server.args)}`);
+        if (server.cwd) lines.push(`cwd = ${quote(server.cwd)}`);
+      } else if (typeof server.url === 'string' && server.type !== 'sse') {
+        lines.push(`url = ${quote(server.url)}`);
+      } else throw new Error('CODEX_MCP_TRANSPORT_UNAVAILABLE: this container MCP transport requires a compatible local adapter.');
+      for (const field of ['enabled_tools', 'disabled_tools']) if (Array.isArray(server[field])) lines.push(`${field} = ${JSON.stringify(server[field])}`);
+      if (server.headers) {
+        lines.push(`[mcp_servers.${quote(name)}.http_headers]`);
+        for (const [key, value] of Object.entries(server.headers)) { if (typeof value !== 'string') throw new Error('Invalid MCP header'); lines.push(`${quote(key)} = ${quote(value)}`); }
+      }
       if (server.env) {
         lines.push(`[mcp_servers.${quote(name)}.env]`);
         for (const [k, v] of Object.entries(server.env)) { if (typeof v !== 'string') throw new Error('Invalid MCP environment'); lines.push(`${quote(k)} = ${quote(v)}`); }
@@ -305,7 +335,7 @@ export class CodexProcess extends EventEmitter {
     if (JSON.stringify(Object.keys(actual).sort()) !== JSON.stringify(Object.keys(this.approvedMcp).sort())) throw new Error('Codex MCP server inventory mismatch');
     for (const [name, expected] of Object.entries(this.approvedMcp)) {
       const server = actual[name];
-      if (server.command !== expected.command || JSON.stringify(server.args) !== JSON.stringify(expected.args) || Object.keys(server.env ?? {}).length !== Object.keys(expected.env ?? {}).length || Object.entries(expected.env ?? {}).some(([key, value]) => server.env?.[key] !== value)) throw new Error('Codex MCP server configuration mismatch');
+      if (server.command !== expected.command || server.url !== expected.url || server.cwd !== expected.cwd || JSON.stringify(server.args) !== JSON.stringify(expected.args) || Object.keys(server.env ?? {}).length !== Object.keys(expected.env ?? {}).length || Object.entries(expected.env ?? {}).some(([key, value]) => server.env?.[key] !== value) || Object.entries(expected.headers ?? {}).some(([key,value]) => server.http_headers?.[key] !== value) || ['enabled_tools','disabled_tools'].some(key=>JSON.stringify(server[key])!==JSON.stringify(expected[key]))) throw new Error('Codex MCP server configuration mismatch');
     }
     if (effective.notify?.length || (effective.hooks && Object.keys(effective.hooks).length)) throw new Error('Codex executable hooks are not permitted');
     if (DISABLED_CODEX_FEATURES.some(name => effective.features?.[name] === true) ||
@@ -366,6 +396,18 @@ export class CodexProcess extends EventEmitter {
     if (event.id !== undefined && event.method) {
       if (event.method === 'account/chatgptAuthTokens/refresh' && this.credentials?.chatgpt) {
         void this.refreshAuthentication(event.id, event.params?.previousAccountId); return;
+      }
+      if (event.method === 'item/tool/requestUserInput' && this.options.requestInput) {
+        const questions = event.params?.questions;
+        if (!Array.isArray(questions) || !questions.length || questions.some((q: any) => !q || typeof q.question !== 'string' || q.options !== undefined && (!Array.isArray(q.options) || q.options.some((o: any) => !o || typeof o.label !== 'string' || o.description !== undefined && typeof o.description !== 'string')))) throw new Error('Invalid Codex user-input request');
+        const text = questions.map((q: any) => [q.question, ...(q.options ?? []).map((option: any) => `${option.label}: ${option.description ?? ''}`)].join('\n')).join('\n\n');
+        // The existing task question flow owns delivery and resume. End this
+        // attempt without inventing an answer or holding a worker slot open.
+        this.options.requestInput(text);
+        this.write({ id: event.id, result: { answers: {} } });
+        this.terminal = true;
+        this.output({ type: 'result', is_error: false, result: 'Waiting for user input.' });
+        void this.stop(); return;
       }
       // This worker is noninteractive. Unexpected approval/tool requests fail closed.
       this.write({ id: event.id, error: { code: -32601, message: 'Interactive requests are not supported by gateway workers' } });

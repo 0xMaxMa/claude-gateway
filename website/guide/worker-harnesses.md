@@ -31,7 +31,7 @@ HTTPS (local HTTP is allowed), without embedded credentials or query strings.
 `harness: "auto"` selects Codex for GPT model IDs when its runtime and isolated
 worker credentials are ready. Otherwise it selects Claude **before dispatch**
 and records a `worker.harness_fallback` event. A Codex turn that has started is
-never replayed through Claude after an auth, quota, network or execution error. Tasks assigned a Claude CLI-only skill also choose Claude before dispatch (`CODEX_SKILL_UNAVAILABLE`); file-based skills can run on either harness.
+never replayed through Claude after an auth, quota, network or execution error. Installed file-backed Claude plugin skills can run through Codex, including their plugin-root resources. A genuinely native command with no transferable skill file still reports `CODEX_SKILL_UNAVAILABLE`; automatic routing records a pre-dispatch fallback rather than inventing its instructions.
 Explicit `harness: "codex"` fails with a readiness error rather than switching.
 
 Agent-level worker settings override gateway defaults. Host workers and app-container workers use the same native login as terminal Codex. For ChatGPT, the host CLI exports only the current access token through `getAuthStatus`; an isolated app-server receives it through `account/login/start` with `chatgptAuthTokens` and ephemeral storage. Refresh requests go back to the host CLI, concurrent refreshes are coalesced, and an account change fails the running worker rather than switching identities. Gateway never copies refresh tokens, writes native auth configuration, or mounts a personal Codex home into a container. Safemode continues to use the native auth store directly.
@@ -122,6 +122,40 @@ This is a native CLI coding smoke check, **not** a gateway integration benchmark
 
 ## Custom connectors
 
+### Installed CLI extensions
+
+Codex workers receive a metadata catalog of enabled Claude and Codex skills. Full
+instructions are read only when needed. Named task skills pin their instructions
+at admission; plugin-root resources such as `shared/foundation.md` retain their
+relative layout. Nested skill invocations are resolved through the catalog, and
+unique short names are included as aliases. Disabled plugins, unrelated project
+installations and arbitrary stale cache versions are excluded.
+
+The gateway asks native Codex for its installed skills and plugins. It also reads
+enabled Claude plugin manifests, user/project skills and commands. The Agent can
+advertise these extensions even though execution belongs to a worker. A native
+Claude `Skill` call is not required to read and follow a portable workflow.
+
+Codex workers discover MCP tool schemas on demand through `tool_search`, then
+invoke the original tool through `tool_call`. Claude-configured stdio, Streamable
+HTTP and SSE servers retain their configuration and project consent. Native Codex
+MCP uses a discovery-only native sidecar so Codex continues to own its OAuth/keyring
+connections and tool restrictions. The sidecar creates no model turn. Native
+connection consent and policy approvals are not silently accepted.
+
+App workers discover extensions **inside the app container**. They do not inherit
+host personal MCP servers, credential homes or host executable paths. Their MCP
+adapter is the same proxy bundled as a standalone Node module and executed inside
+the container; no extra Bun installation or host MCP execution is needed there.
+Gateway-provided task skills remain explicitly copied into their scoped attempt.
+
+Codex user-input requests enter the existing task question flow, releasing the
+worker slot until the user answers. Executable Claude hooks, native Claude agent
+APIs and arbitrary CLI-specific commands are not automatically translated into
+Codex equivalents. Instructions do not grant extra tools or bypass container
+permissions. Missing connection credentials or native-only dependencies must be
+reported rather than claimed to work.
+
 Eligible host workers use the same enabled custom connector configuration in both
 Claude and Codex. Each attempt receives private lazy-connector proxies, including
 HTTP connectors; connector credentials are removed with the attempt's temporary
@@ -132,6 +166,13 @@ To verify the native Codex proxy path without provider billing, run
 `node scripts/orchestration/smoke-codex-worker.cjs --connector` from a development
 checkout with Codex and the MCP dependencies installed. This uses a local fake
 Responses server and a fixture MCP connector; it does not test a real vendor.
+
+Add `--container --native-auth` to test a container-local installed MCP connector,
+including resume, container recreation, steering and cancellation. Add `--native-mcp`
+with `--native-auth --connector` to test a Codex-configured MCP connection on the
+host or inside the container. Run
+`bun scripts/orchestration/smoke-codex-extensions.ts` to verify native MCP discovery,
+execution and disabled-tool filtering without any model call.
 
 ## Container runtime smoke test
 
@@ -146,6 +187,14 @@ This creates a temporary plain Debian container, mounts the resolved host Codex 
 
 ## Native capability boundaries
 
-Gateway workers disable native notification programs, hooks, plugins, apps, browser/computer tools, image generation, shell snapshots, native multi-agent and automatic skill/dependency installation before starting Codex. They use the gateway-selected MCP configuration; unexpected effective capabilities or interactive approval requests fail the attempt. Explicit shell commands and coding tools remain available within the authorized worker profile.
+The model-running worker uses a private native configuration. Notification programs,
+executable hooks, automatic plugin startup, browser/computer tools, image generation,
+shell snapshots, native multi-agent and automatic dependency installation remain
+disabled there. Enabled extension instructions and MCP capabilities are projected
+explicitly into that configuration. Native extension discovery and the MCP sidecar
+can read enabled plugins, with executable hooks and notifications disabled before
+startup. Unexpected effective capabilities and unhandled approvals fail closed;
+ordinary user questions use the task question flow. Explicit shell commands and
+coding tools remain available within the authorized worker profile.
 
 For app workers, Docker is the filesystem and process boundary (`externalSandbox`). Workers can edit the app workspace and writable container layer and use network access. Tasks sharing the same app container are not separate security identities. Host-execution workers remain trusted with the host user's authority; a worktree is not an OS sandbox. These controls prevent unintended native integrations, not arbitrary actions by a trusted worker with shell access.
