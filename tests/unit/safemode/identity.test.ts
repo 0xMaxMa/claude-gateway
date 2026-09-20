@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { SafemodeStore, atomicJson } from '../../../src/safemode/store';
-import { controlPath } from '../../../src/safemode/runner';
+import { controlPath, recoverSession } from '../../../src/safemode/runner';
 import { buildNativeInvocation } from '../../../src/safemode/native';
 
 const old = '11111111-1111-4111-8111-111111111111';
@@ -83,4 +83,44 @@ test('rename rejects collisions, native IDs of other sessions, and unsafe names'
   for (const name of ['two', b.id, '../escape', '', 'a'.repeat(65)]) expect(() => store.rename(a.id, name)).toThrow();
   expect(store.find('one').id).toBe(a.id);
   expect(store.rename('one', 'one').id).toBe(a.id);
+});
+test('creating an alias cannot shadow another native session ID', () => {
+  const store = new SafemodeStore(root), first = store.create('existing', 'claude', 'inherit');
+  expect(() => store.create(first.id, 'claude', 'inherit')).toThrow('unique');
+  expect(store.find(first.id).name).toBe('existing');
+});
+test('a progress save cannot reclaim an alias renamed concurrently', () => {
+  const store = new SafemodeStore(root), session = store.create('initial', 'claude', 'inherit');
+  store.rename(session.id, 'first');
+  const originalRead = fs.readFileSync;
+  const aliasFile = path.join(store.dir(session.id), 'name.json');
+  let armed = true;
+  const spy = jest.spyOn(fs, 'readFileSync').mockImplementation(((...args: any[]) => {
+    const result = (originalRead as any)(...args);
+    if (armed && String(args[0]) === aliasFile) {
+      armed = false;
+      store.rename(session.id, 'second');
+      store.create('first', 'claude', 'inherit');
+    }
+    return result;
+  }) as any);
+  try {
+    session.lastRequest = {id:'progress', promptHash:'hash', status:'completed'};
+    expect(() => store.save(session)).not.toThrow();
+    expect(store.find('second').lastRequest?.id).toBe('progress');
+    expect(store.find('first').id).not.toBe(session.id);
+  } finally { spy.mockRestore(); }
+});
+
+test('explicit recovery repairs interrupted rename after its owner exits', () => {
+  const store = new SafemodeStore(root), s = store.create('original','claude','inherit');
+  const dir = store.dir(s.id), lock = path.join(dir,'renaming');
+  atomicJson(lock,{pid:process.pid,name:'reserved'});
+  expect(()=>recoverSession(store,s.id)).toThrow('Rename owner');
+  atomicJson(lock,{pid:2147483647,name:'reserved'});
+  fs.writeFileSync(path.join(root,'names','reserved'),path.basename(dir));
+  recoverSession(store,s.id);
+  expect(fs.existsSync(lock)).toBe(false);
+  expect(fs.existsSync(path.join(root,'names','reserved'))).toBe(false);
+  expect(store.rename(s.id,'reserved').name).toBe('reserved');
 });

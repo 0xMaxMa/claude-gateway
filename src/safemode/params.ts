@@ -26,9 +26,10 @@ export function splitNativeParams(text: string): string[] {
 }
 
 /** Identity/lifecycle switches remain owned by safemode; other options pass through. */
-export function inspectNativeParams(cli: SafemodeCli, args: string[]): { args: string[]; resumeId?: string } {
+export function inspectNativeParams(cli: SafemodeCli, args: string[]): { args: string[]; resumeId?: string; resumeIndex?: number } {
   const remaining: string[] = [];
   let resumeId: string | undefined;
+  let resumeIndex: number | undefined;
   const forbidden = cli === 'codex'
     ? ['exec', 'e', 'review', 'fork', 'app-server', 'exec-server', 'login', 'logout', 'mcp', 'plugin', 'agents', 'queue', 'archive', 'delete', 'unarchive', 'migrate-rollouts', 'remote-control', 'completion', 'update', 'doctor', 'sandbox', 'debug', 'apply', 'a', 'cloud', 'features', 'help', '--last', '--remote', '--cd', '-C']
     : ['--print', '-p', '--continue', '-c', '--fork-session', '--session-id', '--resume-session-at', '--no-session-persistence', '--remote'];
@@ -43,6 +44,7 @@ export function inspectNativeParams(cli: SafemodeCli, args: string[]): { args: s
       const id = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : args[++i];
       if (resumeId || !id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new Error('Native resume requires exactly one explicit session UUID');
       resumeId = id.toLowerCase();
+      resumeIndex = remaining.length;
     } else {
       remaining.push(arg);
       if (valueFlags.includes(arg)) {
@@ -51,5 +53,5 @@ export function inspectNativeParams(cli: SafemodeCli, args: string[]): { args: s
       }
     }
   }
-  return { args: remaining, resumeId };
+  return { args: remaining, resumeId, ...(resumeIndex !== undefined ? { resumeIndex } : {}) };
 }

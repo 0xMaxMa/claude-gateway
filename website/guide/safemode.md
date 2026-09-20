@@ -69,7 +69,7 @@ Ask for a diagnosis with evidence, hypotheses, proposed repair and regression te
 Use `--params` for native Claude Code or Codex options from your terminal:
 
 ```bash
-make cli ARGS="safemode --cli codex --params '--dangerously-bypass-approvals-and-sandbox resume 01a0ad6e-812d-7892-9532-20b45a56a553'"
+make cli ARGS="safemode --cli codex --params '--dangerously-bypass-approvals-and-sandbox resume 11111111-2222-4333-8444-555555555555'"
 make cli ARGS="safemode --resume investigation-name --params '--model gpt-5'"
 ```
 
@@ -121,7 +121,7 @@ stopping its enclosing service/container, or rebooting the host still stops it.
 ## Rename a safemode conversation
 
 ```bash
-make cli ARGS="safemode rename 01a0ad6e-812d-7892-9532-20b45a56a553 gateway-debug"
+make cli ARGS="safemode rename 11111111-2222-4333-8444-555555555555 gateway-debug"
 make cli ARGS="safemode --resume gateway-debug"
 ```
 
@@ -131,3 +131,7 @@ Renaming works while the native CLI is running; it does not stop or restart it,
 change its native ID, or move its workspace/history. The old name stops resolving,
 while the native ID continues to work. Rename changes the safemode alias, not the
 native CLI's own conversation title.
+
+If a rename process is interrupted, close the native conversation and use
+`safemode recover ID` to clear a stale rename claim. Recovery refuses while
+either the conversation owner or rename owner is still alive.

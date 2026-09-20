@@ -95,6 +95,76 @@ setTimeout(()=>process.exit(0),1600);
       expect(() => process.kill(safemode.pid!, 0)).not.toThrow();
     } finally { gateway.kill(); safemode.kill(); }
   });
+  test.each(['claude','codex'])('%s interactive rename, busy refusal, takeover, idempotence and resume keep one native conversation', async cli => {
+    const fake = path.join(home, 'native-cli'), events = path.join(home, 'events.jsonl');
+    const history = path.join(home, 'native-history.jsonl');
+    fs.writeFileSync(history, 'native history survives safemode deletion');
+    fs.writeFileSync(fake, `#!/usr/bin/env node
+const fs=require('fs'),args=process.argv.slice(2);
+if(args[0]==='mcp'&&args[1]==='list'){console.log('[]');process.exit(0);}
+const key=args.includes('resume')?'resume':args.includes('--resume')?'--resume':'--session-id';
+const id=args[args.indexOf(key)+1];
+fs.appendFileSync(process.env.HOME+'/events.jsonl',JSON.stringify({id,args,pid:process.pid})+'\\n');
+if(args.includes('--print')||args.includes('exec')){
+ console.log(JSON.stringify({type:'system',subtype:'init',session_id:id}));
+ console.log(JSON.stringify({type:'result',result:'mock diagnosis complete'}));
+}else{setTimeout(()=>process.exit(0),20000);}
+`, {mode:0o700});
+    const terminal = (...args: string[]) => {
+      const cmd = [process.execPath, entry, 'safemode', ...args].map(v => "'" + v.replace(/'/g, "'\\''") + "'").join(' ');
+      return exec('script', ['-q','-e','-c',cmd,'/dev/null'], {env,timeout:25000}).then(()=>0, e=>e.code);
+    };
+    const recorded = () => fs.existsSync(events) ? fs.readFileSync(events,'utf8').trim().split('\n').filter(Boolean).map(line=>JSON.parse(line)) : [];
+    const waitFor = async (test: () => Promise<boolean> | boolean) => {
+      for(let i=0;i<60;i++){if(await test())return;await new Promise(resolve=>setTimeout(resolve,50));}
+      throw new Error('mock lifecycle did not reach expected state');
+    };
+    let activeId: string | undefined;
+    env.CODEX_BIN = fake;
+    const permission = cli === 'claude' ? '--dangerously-skip-permissions' : '--dangerously-bypass-approvals-and-sandbox';
+    const initial = permission + (cli === 'codex' ? ' resume 44444444-4444-4444-8444-444444444444' : '');
+    const first = terminal('--cli',cli,'--name','live','--params='+initial);
+    try {
+      await waitFor(()=>recorded().length===1);
+      activeId = recorded()[0].id;
+      const before = await command('status',activeId!);
+      const renamed = await command('rename',activeId!,'renamed');
+      expect(renamed).toMatchObject({id:activeId,name:'renamed',renamed:true});
+      expect((await command('status','renamed')).owner).toEqual(before.owner);
+      await expect(command('status','live')).rejects.toThrow();
+      await expect(command('send','renamed','--prompt=inspect','--request-id=e2e')).rejects.toThrow();
+      expect(recorded()).toHaveLength(1);
+      expect(await command('send','renamed','--prompt=inspect','--request-id=e2e','--takeover')).toMatchObject({id:activeId,status:'accepted'});
+      expect(await first).not.toBe(0);
+      await waitFor(async()=> (await command('status',activeId!)).request?.status==='completed');
+      expect(await command('send',activeId!,'--prompt=inspect','--request-id=e2e','--takeover')).toMatchObject({duplicate:true});
+      const second = recorded()[1];
+      expect(second.id).toBe(activeId);
+      expect(second.args).toEqual(expect.arrayContaining(cli === 'claude'
+        ? ['--resume',activeId,'--restricted','Read,Glob,Grep']
+        : ['exec','--json','resume',activeId,'sandbox_mode="read-only"','approval_policy="never"']));
+      expect(second.args).not.toContain(permission);
+      const resumed = terminal('--resume',activeId!,'--params='+permission);
+      await waitFor(()=>recorded().length===3);
+      expect(recorded()[2].id).toBe(activeId);
+      expect(recorded()[2].args).toContain(cli === 'claude' ? '--resume' : 'resume');
+      expect(await command('stop',activeId!)).toMatchObject({id:activeId,stopped:true});
+      expect(await resumed).not.toBe(0);
+      expect((await command('status','renamed')).ownerAlive).toBe(false);
+      expect(await command('delete','renamed')).toMatchObject({deleted:true});
+      expect(fs.readFileSync(history,'utf8')).toContain('survives');
+    } finally {
+      if(activeId) await command('stop',activeId).catch(()=>{});
+      await first;
+    }
+  }, 30000);
+  test('headless native failure persists a failed receipt and releases ownership', async () => {
+    fs.writeFileSync(path.join(home,'native-cli'),'#!/usr/bin/env node\nprocess.exit(7);\n',{mode:0o700});
+    await expect(command('send','investigation','--prompt=fail','--request-id=failed','--wait')).rejects.toMatchObject({code:7});
+    const result = await command('status','investigation','--request-id=failed');
+    expect(result.request).toMatchObject({status:'failed',exitCode:7});
+    expect(result.ownerAlive).toBe(false);
+  });
   test('returns receipt then durable result for same native session, including a dash-leading prompt',async()=>{
     const receipt=await command('send','investigation','--prompt=--inspect this','--request-id=once');
     expect(receipt).toMatchObject({id:nativeId,requestId:'once',status:'accepted'});

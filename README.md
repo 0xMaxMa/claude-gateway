@@ -94,6 +94,8 @@ Run `claude-gateway safemode --name investigation --prompt "Inspect this gateway
 for a native interactive Claude Code investigation without stopping the gateway.
 Use `--cli codex` to select Codex, `--model` to override the native model, and
 `--resume investigation` to return to the same investigation. Safemode preserves
-build/startup evidence and uses a separate source snapshot. Headless takeover,
+build/startup evidence and uses a separate source snapshot. Session IDs are the
+native Claude Code/Codex IDs; `safemode rename ID NEW_NAME` changes the alias
+without interrupting the conversation. Headless takeover,
 request IDs and trusted operator agent controls are described in the
 [safemode guide](website/guide/safemode.md).

@@ -28,7 +28,7 @@ describe('safemode CLI boundaries', () => {
     const session = store.create('existing', 'codex', 'inherit');
     const owner = store.acquire(session.id, 'interactive');
     try {
-      await expect(runSafemode([], {resume: 'existing', takeover: true, params: 'resume 01a0ad6e-812d-7892-9532-20b45a56a553'})).rejects.toThrow('Do not combine');
+      await expect(runSafemode([], {resume: 'existing', takeover: true, params: 'resume 11111111-2222-4333-8444-555555555555'})).rejects.toThrow('Do not combine');
       expect(store.owner(session.id)).toEqual(owner);
     } finally {
       if (input) Object.defineProperty(process.stdin, 'isTTY', input); else Reflect.deleteProperty(process.stdin, 'isTTY');

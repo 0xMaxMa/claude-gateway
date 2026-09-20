@@ -16,6 +16,7 @@ export interface NativeOptions {
   nativeSessionId?: string;
   resume?: boolean;
   nativeArgs?: string[];
+  nativeResumeIndex?: number;
   env?: NodeJS.ProcessEnv;
 }
 export interface NativeInvocation {
@@ -88,10 +89,11 @@ export function buildNativeInvocation(options: NativeOptions): NativeInvocation 
   if (options.nativeArgs !== undefined) {
     // Explicit operator options replace interactive defaults, never headless restrictions.
     const args = [...options.nativeArgs];
-    if (model && !args.some(a => a === '--model' || a === '-m' || a.startsWith('--model=') || a.startsWith('-m='))) args.unshift('--model', model);
+    let prefix = 0;
+    if (model && !args.some(a => a === '--model' || a === '-m' || a.startsWith('--model=') || a.startsWith('-m='))) { args.unshift('--model', model); prefix = 2; }
     const nativeSessionId = options.nativeSessionId || (options.cli === 'claude' ? randomUUID() : undefined);
     if (options.cli === 'claude') args.push(options.resume ? '--resume' : '--session-id', nativeSessionId!);
-    else if (options.resume) args.push('resume', nativeSessionId!);
+    else if (options.resume) args.splice(prefix + (options.nativeResumeIndex ?? 0), 0, 'resume', nativeSessionId!);
     if (prompt) args.push('--', prompt);
     const command = options.cli === 'claude' ? options.env?.CLAUDE_BIN || process.env.CLAUDE_BIN || resolveClaudeBin(env).bin : options.env?.CODEX_BIN || process.env.CODEX_BIN || 'codex';
     return { command, args, env, cwd: options.cwd, nativeSessionId };

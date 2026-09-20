@@ -91,7 +91,7 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
       if (!refreshed.nativeSessionId) throw new Error('Native conversation ID is not available; refusing to start a different conversation');
       session.nativeSessionId = refreshed.nativeSessionId;
     }
-    return runSession(store, session, { mode: 'interactive', nativeArgs: native?.args, prompt: flags.prompt as string | undefined, configPath: session.configPath });
+    return runSession(store, session, { mode: 'interactive', nativeArgs: native?.args, nativeResumeIndex: native?.resumeIndex, prompt: flags.prompt as string | undefined, configPath: session.configPath });
   }
   if (positionals.length !== 2) throw new Error(`safemode ${verb} requires one session name or ID`);
   const session = store.find(positionals[1]);

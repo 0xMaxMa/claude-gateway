@@ -6,13 +6,13 @@ import { parseCliArgs } from '../../../src/cli/args';
 import { buildNativeInvocation } from '../../../src/safemode/native';
 import { SafemodeStore } from '../../../src/safemode/store';
 
-const id = '01a0ad6e-812d-7892-9532-20b45a56a553';
+const id = '11111111-2222-4333-8444-555555555555';
 test('quoted --params starting with flags is one CLI value', () => {
   const raw = '--dangerously-bypass-approvals-and-sandbox resume ' + id;
   expect(parseCliArgs(['safemode', '--cli', 'codex', '--params', raw]).flags.params).toBe(raw);
   const parsed = inspectNativeParams('codex', splitNativeParams(raw));
-  expect(parsed).toEqual({ args: ['--dangerously-bypass-approvals-and-sandbox'], resumeId: id });
-  const invocation = buildNativeInvocation({ cli: 'codex', mode: 'interactive', cwd: '/tmp', nativeArgs: parsed.args, resume: true, nativeSessionId: parsed.resumeId });
+  expect(parsed).toEqual({ args: ['--dangerously-bypass-approvals-and-sandbox'], resumeId: id, resumeIndex: 1 });
+  const invocation = buildNativeInvocation({ cli: 'codex', mode: 'interactive', cwd: '/tmp', nativeArgs: parsed.args, nativeResumeIndex: parsed.resumeIndex, resume: true, nativeSessionId: parsed.resumeId });
   expect(invocation.args).toEqual(['--dangerously-bypass-approvals-and-sandbox', 'resume', id]);
 });
 test('quotes preserve spaces and shell syntax stays literal', () => {
@@ -52,4 +52,10 @@ test('native session binding is unique and released only by its own investigatio
 
 test('option values are not mistaken for native commands', () => {
   expect(inspectNativeParams('codex', ['--model', 'review', '--profile', 'resume']).args).toEqual(['--model', 'review', '--profile', 'resume']);
+});
+test('Codex resume-specific options remain after the resume subcommand', () => {
+  const native = inspectNativeParams('codex', ['--no-alt-screen', 'resume', id, '--all']);
+  const inv = buildNativeInvocation({cli:'codex', mode:'interactive', cwd:'/tmp', nativeArgs:native.args,
+    nativeResumeIndex: native.resumeIndex, nativeSessionId:native.resumeId, resume:true});
+  expect(inv.args).toEqual(['--no-alt-screen', 'resume', id, '--all']);
 });

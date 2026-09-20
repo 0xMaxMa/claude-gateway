@@ -53,9 +53,9 @@ export class SafemodeStore {
     if (matches.length > 1) throw new Error('Ambiguous native session ID');
     return matches[0]?.directory ?? path.join(this.root, id);
   }
-  private canonical(session: SafemodeSession, directory: string): SafemodeSession {
+  private canonical(session: SafemodeSession, directory: string, applyName = true): SafemodeSession {
     let renamed: string | undefined;
-    try { renamed = JSON.parse(fs.readFileSync(path.join(directory, 'name.json'), 'utf8')).name; }
+    try { if (applyName) renamed = JSON.parse(fs.readFileSync(path.join(directory, 'name.json'), 'utf8')).name; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     if (renamed) session = { ...session, name: renamed, autoName: false };
     if (!session.nativeSessionId) return session;
@@ -73,12 +73,22 @@ export class SafemodeStore {
     const session = this.find(ref);
     const directory = this.dir(session.id), storageKey = path.basename(directory);
     const lock = path.join(directory, 'renaming');
-    let fd: number;
-    try { fd = fs.openSync(lock, 'wx', 0o600); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('Busy: another rename is in progress'); throw error; }
+    const recovering = path.join(directory, 'recovering');
+    if (fs.existsSync(recovering)) throw new Error('Busy: recovery in progress');
+    const claim = lock + '.' + randomUUID() + '.tmp';
+    try {
+      fs.writeFileSync(claim, JSON.stringify({pid:process.pid, name}), {flag:'wx',mode:0o600});
+      // Publish complete ownership metadata atomically so recovery never sees
+      // an empty lock if this short-lived CLI exits during rename.
+      fs.linkSync(claim, lock);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('Busy: another rename is in progress');
+      throw error;
+    } finally { fs.rmSync(claim, {force:true}); }
     let reserved = false, committed = false;
     const reservation = path.join(this.root, 'names', name);
     try {
+      if (fs.existsSync(recovering)) throw new Error('Busy: recovery in progress');
       const current = this.read(session.id);
       if (this.list().some(s => s.id !== current.id && (s.name === name || s.id === name))) throw new Error('Safemode name already exists');
       fs.mkdirSync(path.dirname(reservation), { recursive: true, mode: 0o700 });
@@ -98,16 +108,33 @@ export class SafemodeStore {
       return this.read(session.id);
     } finally {
       if (reserved && !committed) fs.rmSync(reservation, { force: true });
-      fs.closeSync(fd); fs.unlinkSync(lock);
+      fs.unlinkSync(lock);
     }
+  }
+  recoverRename(id: string): void {
+    const directory = this.dir(id), lock = path.join(directory, 'renaming');
+    let claim: {pid?: number; name?: string};
+    try { claim = JSON.parse(fs.readFileSync(lock, 'utf8')); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+    if (!Number.isInteger(claim.pid) || claim.pid! <= 0 || alive(claim.pid)) throw new Error('Rename owner is alive or cannot be verified');
+    if (claim.name && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(claim.name) && this.read(id).name !== claim.name) {
+      const reservation = path.join(this.root, 'names', claim.name);
+      if (fs.existsSync(reservation) && fs.readFileSync(reservation, 'utf8') === path.basename(directory)) fs.unlinkSync(reservation);
+    }
+    fs.unlinkSync(lock);
   }
   save(session: SafemodeSession): void {
     const directory = this.dir(session.id);
-    const canonical = this.canonical(session, directory);
+    const canonical = this.canonical(session, directory, false);
     let saved: SafemodeSession | undefined;
     try { saved = JSON.parse(fs.readFileSync(path.join(directory, 'session.json'), 'utf8')); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     if (saved?.nativeSessionId && saved.nativeSessionId.toLowerCase() !== canonical.nativeSessionId?.toLowerCase()) throw new Error('Cannot change the native session ID');
+    // Renames own their alias file/reservations. Progress writers must not
+    // replay a stale name or contend with another rename reusing that alias.
+    if (saved && fs.existsSync(path.join(directory, 'name.json'))) {
+      canonical.name = saved.name; canonical.autoName = saved.autoName;
+    }
     const oldName = saved?.name ?? session.name;
     if (canonical.nativeSessionId) {
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(canonical.nativeSessionId)) throw new Error('Invalid native session ID');
@@ -137,11 +164,11 @@ export class SafemodeStore {
       const old = path.join(this.root, 'names', oldName);
       if (fs.existsSync(old) && fs.readFileSync(old, 'utf8') === path.basename(directory)) fs.unlinkSync(old);
     }
-    Object.assign(session, canonical);
+    Object.assign(session, this.canonical(canonical, directory));
   }
   create(name: string | undefined, cli: SafemodeCli, model: string, configPath?: string, nativeId?: string): SafemodeSession {
     if (nativeId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nativeId)) throw new Error('Invalid native session ID');
-    if (name && (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(name) || this.list().some(s => s.name === name))) {
+    if (name && (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(name) || this.list().some(s => s.name === name || s.id === name))) {
       throw new Error('Safemode name must be unique and contain 1-64 letters, digits, dots, underscores or hyphens');
     }
     // Claude accepts a caller-generated UUID. Codex assigns its own ID later.
