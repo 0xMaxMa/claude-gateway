@@ -1,3 +1,5 @@
+import { resolveCodexRuntime } from './codex-runtime';
+import { inspectSelectedCodexRuntime, CODEX_RUNTIME_MAINTENANCE } from './codex-container-runtime';
 import { prepareManagedConnectors } from './managed-connectors';
 import { EventEmitter } from 'events';
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
@@ -85,6 +87,8 @@ export class CodexProcess extends EventEmitter {
   readonly runtimeProfile: RuntimeProfile;
   managedGroupStopped = false;
   private child?: ChildProcessWithoutNullStreams;
+  private executable = '';
+  private nativeSha256?: string;
   private group?: number;
   get managedProcessId(): number | undefined { return this.group; }
   private preparing?: Promise<void>;
@@ -139,6 +143,12 @@ export class CodexProcess extends EventEmitter {
     assertContainerBinding(agent, profile);
     if (agent.type === 'app-agent' && profile.hostExecution) throw new Error('Container roles cannot use host execution');
     if (profile.workerTools && (!profile.workerTools.includes('Bash') || !profile.workerTools.includes('Edit'))) throw new Error('Codex cannot enforce this restricted native tool profile');
+    const runtime = resolveCodexRuntime(config.bin, agent.workspace);
+    this.executable = agent.type === 'app-agent' ? runtime.containerExecutable : runtime.executable;
+    if (agent.type === 'app-agent') {
+      inspectSelectedCodexRuntime(agent, runtime);
+      this.nativeSha256 = runtime.nativeSha256;
+    }
     const key = config.apiKeyEnv ?? 'OPENAI_API_KEY';
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /^ANTHROPIC_|^CLAUDE_/.test(key)) throw new Error('Codex requires an independent API key environment variable');
     if (!process.env[key]) throw new Error(`Codex API credential environment variable ${key} is not set`);
@@ -155,6 +165,8 @@ export class CodexProcess extends EventEmitter {
     let mcp: any;
     if (agent.type === 'app-agent') {
       this.containerAttempt = await prepareContainerProfile(agent, profile);
+      const mountedHash = await containerNode(agent.container!, "const fs=require('fs'),crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'));", [this.executable]);
+      if (!this.nativeSha256 || mountedHash.trim() !== this.nativeSha256) throw new Error(`CODEX_CONTAINER_RUNTIME_STALE: the mounted executable differs from the host. ${CODEX_RUNTIME_MAINTENANCE}`);
       // Existing app-agent images create the installer's home but may have no passwd entry for its numeric UID.
       const containerHome = homedir();
       if (!/^\/(?:home\/[^/]+|root)$/.test(containerHome)) throw new Error('Container requires a writable non-temporary home for Codex');
@@ -222,7 +234,7 @@ export class CodexProcess extends EventEmitter {
     const env: NodeJS.ProcessEnv = profile.hostExecution ? { ...process.env } : Object.fromEntries(['PATH', 'HOME', 'LANG', 'TMPDIR', 'SSL_CERT_FILE', 'SSL_CERT_DIR'].flatMap(k => process.env[k] === undefined ? [] : [[k, process.env[k]]]));
     for (const k of Object.keys(env)) if (/^(ANTHROPIC_|CLAUDE_|CODEX_|OPENAI_)/.test(k)) delete env[k];
     env.CODEX_HOME = this.home; env[key] = process.env[key];
-    const bin = config.bin ?? 'codex';
+    const bin = this.executable;
     const child = this.child = agent.type === 'app-agent'
       ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', `HOME=${homedir()}`, '-e', key, agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
       : spawn(bin, args, { cwd: agent.workspace, env, stdio: 'pipe', detached: true });

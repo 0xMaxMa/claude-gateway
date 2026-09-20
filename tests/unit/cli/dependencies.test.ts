@@ -1,9 +1,18 @@
 import childProcess = require('child_process');
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
 import { checkDependencies, repairVoiceDependencies } from '../../../src/cli/dependencies';
 
+jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn() }));
+
 describe('doctor dependencies', () => {
+  beforeEach(() => {
+    (resolveCodexRuntime as jest.Mock).mockReset().mockImplementation((bin?: string) => ({ executable: bin ?? '/tools/codex', mounts: [], containerExecutable: '/usr/local/bin/codex', fingerprint: 'test' }));
+  });
   it('accepts supported Node and working startup tools', async () => {
-    const run = jest.fn(async (file: string) => `${file} version 1.2.3\nAdditional version details`);
+    const run = jest.fn(async (file: string) => file === '/tools/codex' ? 'codex-cli 0.154.0' : `${file} version 1.2.3\nAdditional version details`);
     const checks = await checkDependencies({ run, nodeVersion: '22.23.2' });
     expect(checks.every(check => check.ok)).toBe(true);
     expect(checks.filter(check => check.required).map(check => check.name)).toEqual(['node', 'claude', 'bun']);
@@ -13,7 +22,63 @@ describe('doctor dependencies', () => {
     const checks = await checkDependencies({ run, nodeVersion: '20.0.0' });
     expect(checks.find(c => c.name === 'node')).toMatchObject({ ok: false, required: true });
     expect(checks.find(c => c.name === 'ffmpeg')).toMatchObject({ ok: false, required: false });
-    expect(run.mock.calls.map(call => call[0])).toEqual(['claude', 'bun', 'ffmpeg', 'ffprobe']);
+    expect(run.mock.calls.map(call => call[0])).toEqual(['claude', 'bun', 'ffmpeg', 'ffprobe', '/tools/codex']);
+  });
+  it('reports missing optional Codex with service PATH guidance and never installs it', async () => {
+    (resolveCodexRuntime as jest.Mock).mockImplementation(() => { throw new Error('missing PRIVATE_VALUE'); });
+    const run = jest.fn(async () => 'version');
+    const checks = await checkDependencies({ run });
+    expect(checks.find(check => check.name === 'codex')).toMatchObject({ ok: false, required: false });
+    expect(checks.find(check => check.name === 'codex')?.detail).toContain('service PATH may differ');
+    expect(JSON.stringify(checks)).not.toContain('PRIVATE_VALUE');
+    expect(run).toHaveBeenCalledTimes(4);
+  });
+  it('reports host version separately from incompatible container runtime', async () => {
+    (resolveCodexRuntime as jest.Mock).mockReturnValue({ executable: '/tools/codex', containerError: 'private layout error' });
+    const checks = await checkDependencies({ run: async () => 'codex-cli 0.154.0\nPRIVATE_OUTPUT' });
+    expect(checks.find(check => check.name === 'codex')).toMatchObject({ ok: true, required: false });
+    expect(checks.find(check => check.name === 'codex')?.detail).toContain('executable "/tools/codex"');
+    expect(checks.find(check => check.name === 'codexContainer')).toMatchObject({ ok: false, required: false });
+    expect(JSON.stringify(checks)).not.toMatch(/PRIVATE_OUTPUT|private layout error/);
+  });
+  it('escapes and bounds the resolved executable path in local diagnostics', async () => {
+    (resolveCodexRuntime as jest.Mock).mockReturnValue({ executable: `/tools/\n\u001b[31m${'a'.repeat(300)}` });
+    const checks = await checkDependencies({ run: async () => 'codex-cli 0.154.0' });
+    const detail = checks.find(check => check.name === 'codex')!.detail;
+    expect(detail).toContain('executable "/tools/\\n\\u001b[31m');
+    expect(detail).not.toMatch(/[\n\u001b]/);
+    expect(detail).not.toContain('a'.repeat(240));
+    expect(detail).toContain('..."');
+  });
+  it('checks gateway and effective overridden agent selections without revealing config credentials', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-doctor-'));
+    const configPath = path.join(dir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ gateway: { workers: { codex: { bin: '/global/codex' } }, api: { keys: ['PRIVATE_KEY'] } },
+      agents: [{ id: 'PRIVATE_AGENT' }, { workers: { codex: { bin: '/agent/codex' } } }, { workers: { codex: { bin: '/agent/codex' } } }] }));
+    try {
+      const run = jest.fn(async () => 'codex-cli 0.154.0');
+      const checks = await checkDependencies({ run, configPath });
+      expect(resolveCodexRuntime).toHaveBeenCalledTimes(2);
+      expect(resolveCodexRuntime).toHaveBeenNthCalledWith(1, '/global/codex', process.cwd());
+      expect(resolveCodexRuntime).toHaveBeenNthCalledWith(2, '/agent/codex', process.cwd());
+      expect(JSON.stringify(checks)).not.toMatch(/PRIVATE_KEY|PRIVATE_AGENT/);
+      expect(checks.find(check => check.name === 'codex:gateway')?.detail).toContain('agents[0]');
+      expect(checks.find(check => check.name === 'codex:agents[1]')?.detail).toContain('agents[2]');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+  it('resolves a relative override in the configured agent workspace', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-doctor-relative-'));
+    const configPath = path.join(dir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ gateway: {}, agents: [{ workspace: '/agent workspace', workers: { codex: { bin: './bin/codex' } } }] }));
+    try {
+      await checkDependencies({ configPath, run: async () => 'codex-cli 0.154.0' });
+      expect(resolveCodexRuntime).toHaveBeenCalledWith('./bin/codex', '/agent workspace');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+  it('warns on unreadable config and still checks the default executable', async () => {
+    const checks = await checkDependencies({ configPath: '/nonexistent/codex-doctor/config.json', run: async () => 'codex-cli 0.154.0' });
+    expect(checks.find(check => check.name === 'codexConfig')).toMatchObject({ ok: false, required: false });
+    expect(resolveCodexRuntime).toHaveBeenCalledWith(undefined, process.cwd());
   });
   it('does nothing if both tools already work', async () => {
     const run = jest.fn(async () => 'version');

@@ -1,3 +1,7 @@
+import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
+import { assertLocalCodexDocker, CODEX_RUNTIME_LABEL } from '../../../src/session/codex-container-runtime';
+jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn() }));
+jest.mock('../../../src/session/codex-container-runtime', () => ({ assertLocalCodexDocker: jest.fn(), CODEX_RUNTIME_LABEL: 'ai.claude-gateway.codex-runtime' }));
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -88,6 +92,8 @@ describe('AgentManager', () => {
   let manager: AgentManager;
 
   beforeEach(() => {
+    (resolveCodexRuntime as jest.Mock).mockReset().mockImplementation(() => { throw new Error('missing optional Codex'); });
+    (assertLocalCodexDocker as jest.Mock).mockReset();
     tmpDir = makeTmpDir();
     // Fixture home: injectAgentService() stages ~/.claude.json into the seed dir.
     mockHomeDir = path.join(tmpDir, 'home');
@@ -123,25 +129,39 @@ describe('AgentManager', () => {
       expect(agentSvc['container_name']).toBe('my-app-agent');
     });
 
-    it('installs a pinned integrity-checked Codex runtime without adding host mounts', () => {
+    it('does not download or install Codex in a Claude-only agent image', () => {
       const entry = makeEntry(tmpDir);
       manager.injectAgentService(entry);
       const dockerfile = fs.readFileSync(path.join(entry.installPath, 'Dockerfile.agent'), 'utf8');
-      expect(dockerfile).toContain('codex-0.154.0-linux-${arch}.tgz');
-      expect(dockerfile).toContain('amd64) arch=x64; triple=x86_64-unknown-linux-musl;');
-      expect(dockerfile).toContain('arm64) arch=arm64; triple=aarch64-unknown-linux-musl;');
-      expect(dockerfile.match(/checksum=[a-f0-9]{128}/g)).toHaveLength(2);
-      expect(dockerfile).toContain('Unsupported Codex container architecture');
-      expect(dockerfile).toContain('RUN set -eu;');
-      expect(dockerfile.indexOf('sha512sum --check --strict')).toBeLessThan(dockerfile.indexOf('tar -xzf'));
-      // Preserve upstream sibling binaries/resources needed by native Codex.
-      expect(dockerfile).toContain('--strip-components=3 "package/vendor/${triple}"');
-      expect(dockerfile).toContain('ln -s /opt/codex/bin/codex /usr/local/bin/codex');
-      expect(dockerfile).toContain('/usr/local/bin/codex --version');
+      expect(dockerfile).not.toMatch(/codex|registry.npmjs.org|sha512sum/);
+      expect(dockerfile).toContain('ca-certificates');
+    });
+
+    it('mounts only resolved optional runtime read-only with effective agent override', () => {
+      const entry = makeEntry(tmpDir);
+      const runtime = { fingerprint: 'runtime-hash', mounts: [{ source: '/opt/host runtime/bin/codex', target: '/opt/gateway-codex/bin/codex', readOnly: true }] };
+      (resolveCodexRuntime as jest.Mock).mockReturnValue(runtime);
+      fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({ gateway: { workers: { codex: { bin: '/global/codex' } } }, agents: [{ id: 'my-agent', workers: { codex: { bin: '/override/codex' } } }] }));
+      manager.injectAgentService(entry);
       const compose = yaml.load(fs.readFileSync(path.join(entry.installPath, 'docker-compose.yml'), 'utf8')) as any;
+      expect(resolveCodexRuntime).toHaveBeenCalledWith('/override/codex', path.join(entry.installPath, 'agent'));
+      expect(compose.services.agent.volumes).toContainEqual({ type: 'bind', source: '/opt/host runtime/bin/codex', target: '/opt/gateway-codex/bin/codex', read_only: true, bind: { create_host_path: false } });
+      expect(compose.services.agent.labels[CODEX_RUNTIME_LABEL]).toBe('runtime-hash');
+      expect(compose.services.app.image).toBe('nginx:1.25');
+    });
+
+    it.each(['missing', 'incompatible', 'remote', 'conflicting'])('keeps Claude generation working with %s Codex runtime', kind => {
+      const entry = makeEntry(tmpDir);
+      if (kind !== 'missing') (resolveCodexRuntime as jest.Mock).mockReturnValue({ fingerprint: 'one', mounts: [], containerError: kind === 'incompatible' ? 'wrong arch' : undefined });
+      if (kind === 'remote') (assertLocalCodexDocker as jest.Mock).mockImplementation(() => { throw new Error('remote daemon'); });
+      if (kind === 'conflicting') {
+        fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({ gateway: {}, agents: [{ id: 'my-agent' }, { id: 'second', container: 'my-app-agent', workers: { codex: { bin: '/other/codex' } } }] }));
+        (resolveCodexRuntime as jest.Mock).mockImplementation(bin => ({ fingerprint: bin ?? 'one', mounts: [] }));
+      }
+      manager.injectAgentService(entry);
+      const compose = yaml.load(fs.readFileSync(path.join(entry.installPath, 'docker-compose.yml'), 'utf8')) as any;
+      expect(compose.services.agent.labels[CODEX_RUNTIME_LABEL]).toBe('unavailable');
       expect(compose.services.agent.volumes).toHaveLength(6);
-      expect(compose.services.agent.volumes.join('\n')).not.toMatch(/\.codex|codex|docker\.sock/);
-      expect(dockerfile).not.toMatch(/auth\.json|OPENAI_API_KEY|COPY.*\.codex/);
     });
 
     it('injects security_opt no-new-privileges', () => {

@@ -3,6 +3,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execSync } from 'node:child_process';
 import yaml from 'js-yaml';
+import { resolveCodexRuntime, CodexRuntime } from '../session/codex-runtime';
+import { assertLocalCodexDocker, CODEX_RUNTIME_LABEL } from '../session/codex-container-runtime';
 import { AppsRegistry, AppEntry } from './registry';
 import { pathWithNativeBin } from '../session/claude-bin';
 import { agentsDirForConfig } from '../config/agent-env';
@@ -135,7 +137,7 @@ export class AgentManager {
    * No-op if entry has no agentDeclaration or agentPaths.
    *
    * Uses debian:stable-slim (glibc required — host node binary is glibc-linked).
-   * Claude and Node are bind-mounted from resolved host paths; Codex is installed in the image.
+   * Claude and Node retain their host mounts; Codex is an optional host runtime.
    */
   injectAgentService(entry: AppEntry): void {
     if (!entry.agentDeclaration || !entry.agentPaths) return;
@@ -204,22 +206,6 @@ export class AgentManager {
       `    && rm -rf /var/lib/apt/lists/* \\`,
       `    && mkdir -p ${homeDir}/.claude \\`,
       `    && chown -R ${uid}:${uid} ${homeDir}`,
-      // Pin both the native package version and registry SHA-512 integrity. Keep
-      // sibling resources (code-mode host, rg, shell) at their upstream paths.
-      // No npm runtime, host Codex home, or credentials are added to the image.
-      'RUN set -eu; \\',
-      '    case "$(dpkg --print-architecture)" in \\',
-      '      amd64) arch=x64; triple=x86_64-unknown-linux-musl; checksum=6b8148dc0f2c1adc06aceaa5b6b3dbad2da16a3ac7406e7dd44c2645f891a0b31bd74571741b54196e20bba20955810d898180ee4dcfe239511c4a02654fecf5 ;; \\',
-      '      arm64) arch=arm64; triple=aarch64-unknown-linux-musl; checksum=2a64c207a493e3ce3379894fa4a3ff2b93ff8116989ade938a1543fb3a2da1ee8ef6ad094813fe158bc2cf803fcd95d1ef10ce1d44534a31e9d2c0fcc164b461 ;; \\',
-      '      *) echo "Unsupported Codex container architecture" >&2; exit 1 ;; \\',
-      '    esac; \\',
-      '    curl --fail --show-error --silent --location --proto "=https" --tlsv1.2 "https://registry.npmjs.org/@openai/codex/-/codex-0.154.0-linux-${arch}.tgz" -o /tmp/codex.tgz; \\',
-      '    echo "${checksum}  /tmp/codex.tgz" | sha512sum --check --strict -; \\',
-      '    mkdir -p /opt/codex; \\',
-      '    tar -xzf /tmp/codex.tgz -C /opt/codex --strip-components=3 "package/vendor/${triple}"; \\',
-      '    ln -s /opt/codex/bin/codex /usr/local/bin/codex; \\',
-      '    /usr/local/bin/codex --version; \\',
-      '    rm /tmp/codex.tgz',
     ].join('\n') + '\n');
 
     // Seed a writable ~/.claude.json from the read-only seed mount, then idle.
@@ -236,6 +222,8 @@ export class AgentManager {
       ? `cp "${containerSeedDir}/.claude.json" "${homeDir}/.claude.json"; `
       : '';
 
+    // Re-resolve on every generation: apps.json must not pin a stale npm path.
+    const codex = this.codexRuntime(entry);
     const agentService = {
       build: { context: entry.installPath, dockerfile: 'Dockerfile.agent' },
       user: `${uid}:${uid}`,
@@ -245,6 +233,7 @@ export class AgentManager {
       cap_drop: ['ALL'],
       security_opt: ['no-new-privileges'],
       env_file: '.env',
+      labels: { [CODEX_RUNTIME_LABEL]: codex?.fingerprint ?? 'unavailable' },
       volumes: [
         `${claudeBin}:${claudeBin}:ro`,
         `${nodeBin}:/usr/bin/node:ro`,
@@ -252,6 +241,7 @@ export class AgentManager {
         `${seedSource}:${containerSeedDir}:ro`,
         `${workspaceDir}:/workspace`,
         `${agentMediaSource}:${agentMediaDir}:rw`,
+        ...(codex?.mounts.map(m => ({ type: 'bind', source: m.source, target: m.target, read_only: true, bind: { create_host_path: false } })) ?? []),
       ],
     };
 
@@ -260,6 +250,27 @@ export class AgentManager {
     compose['services'] = services;
 
     fs.writeFileSync(composePath, yaml.dump(compose, { lineWidth: -1 }), 'utf-8');
+  }
+
+  /** One app container has one native runtime. Conflicting overrides stay unavailable. */
+  private codexRuntime(entry: AppEntry): CodexRuntime | undefined {
+    try {
+      const config = this.readConfig();
+      const globalBin = (config.gateway.workers as { codex?: { bin?: string } } | undefined)?.codex?.bin;
+      const agents = config.agents.filter(a => a.id === entry.agentDeclaration?.name || a.container === `${entry.name}-agent`);
+      const selections = agents.length ? agents.map(a => ({
+        bin: (a.workers as { codex?: { bin?: string } } | undefined)?.codex?.bin ?? globalBin,
+        cwd: typeof a.workspace === 'string' ? a.workspace : path.join(entry.installPath, entry.agentDeclaration!.path),
+      })) : [{ bin: globalBin, cwd: path.join(entry.installPath, entry.agentDeclaration!.path) }];
+      const expand = (value: string) => value.replace(/\$\{([^}]+)\}/g, (_match, key: string) => {
+        if (process.env[key] === undefined) throw new Error('Unresolved Codex executable variable');
+        return process.env[key]!;
+      }).replace(/^~(?=\/|$)/, os.homedir());
+      const runtimes = selections.map(({ bin, cwd }) => resolveCodexRuntime(bin === undefined ? undefined : expand(bin), expand(cwd)));
+      if (runtimes.some(r => r.containerError || r.fingerprint !== runtimes[0].fingerprint)) return undefined;
+      assertLocalCodexDocker();
+      return runtimes[0];
+    } catch { return undefined; } // Codex is optional; selecting it reports an actionable task error.
   }
 
   /**

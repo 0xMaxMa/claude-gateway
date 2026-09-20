@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Opt-in native-binary smoke: local fake Responses API, no model billing or real credentials.
 require('ts-node/register/transpile-only');
+const {resolveCodexRuntime}=require('../../src/session/codex-runtime');
+const {CODEX_RUNTIME_LABEL}=require('../../src/session/codex-container-runtime');
 const {CodexProcess} = require('../../src/session/codex-process');
 const {mkdir,mkdtemp,writeFile,rm} = require('fs/promises');
 const {join} = require('path');
@@ -70,7 +72,9 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
     const ticket=join(directory,'container-ticket.json');await writeFile(ticket,JSON.stringify({socket,token:'fixture-ticket',tools:[{name:'fixture_echo',description:'Return supplied value.',inputSchema:{type:'object',properties:{value:{type:'string'}},required:['value']}}]}));
     await writeFile(mcp,JSON.stringify({mcpServers:{gateway:{command:'unused',args:[],env:{GATEWAY_ORCHESTRATION_TICKET_FILE:ticket}}}}));
     const installerHome=homedir();
-    execFileSync('docker',['run','-d','--name',containerName,'--cap-drop','ALL','--security-opt','no-new-privileges','--add-host','host.docker.internal:host-gateway','--mount',`type=bind,src=${directory},dst=/workspace`,'--mount',`type=bind,src=${process.execPath},dst=/usr/bin/node,readonly`,process.env.GATEWAY_CODEX_SMOKE_IMAGE || 'gateway-codex-install-check:0.154.0','node','-e',`const fs=require('fs');fs.mkdirSync(${JSON.stringify(installerHome)},{recursive:true,mode:511});fs.chmodSync(${JSON.stringify(installerHome)},511);setInterval(()=>{},10000);`],{stdio:'pipe'});
+    const runtime=resolveCodexRuntime();
+    assert(!runtime.containerError,runtime.containerError);
+    execFileSync('docker',['run','-d','--name',containerName,'--cap-drop','ALL','--security-opt','no-new-privileges','--add-host','host.docker.internal:host-gateway','--label',`${CODEX_RUNTIME_LABEL}=${runtime.fingerprint}`,...runtime.mounts.flatMap(m=>['--mount',`type=bind,src=${m.source},dst=${m.target},readonly`]),'--mount',`type=bind,src=${directory},dst=/workspace`,'--mount',`type=bind,src=${process.execPath},dst=/usr/bin/node,readonly`,process.env.GATEWAY_CODEX_SMOKE_IMAGE || 'debian:stable-slim','node','-e',`const fs=require('fs');fs.mkdirSync(${JSON.stringify(installerHome)},{recursive:true,mode:511});fs.chmodSync(${JSON.stringify(installerHome)},511);setInterval(()=>{},10000);`],{stdio:'pipe'});
   }
   const options={agent:{workspace:directory,...(containerMode?{type:'app-agent',container:containerName}:{})},gateway:{gateway:{}},profile:{role:'worker',mcpConfigPath:mcp,overlay:'Use fixture_echo once, then return a brief result.',hostExecution:!containerMode,containerExecution:containerMode},sessionId:'fixture-logical-session',stateDirectory:join(directory,'state'),config:{model:'gpt-test',baseUrl:`http://${containerMode?'host.docker.internal':'127.0.0.1'}:${server.address().port}/v1`,apiKeyEnv:'GATEWAY_CODEX_SMOKE_KEY'}};
   if(connectorMode) options.gateway.gateway.customConnectors={fixture:{label:'Fixture connector',secretNames:[],credentialOwner:'none',config:{command:process.execPath,args:[join(directory,'mcp.cjs')],env:{FIXTURE_TICKET:join(directory,'ticket'),FIXTURE_CALLS:calls}}}};

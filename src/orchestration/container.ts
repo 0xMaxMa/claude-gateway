@@ -1,3 +1,4 @@
+import { inspectedCodexRuntime } from '../session/codex-container-runtime';
 import { CHECKPOINT_HOOK } from './tasks/checkpoint-hook';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
@@ -47,6 +48,8 @@ export async function validateContainerInspection(agent: AgentConfig, c: any, op
   for (const [destination, source] of [['/usr/local/bin/claude', '/usr/local/bin/claude'], ['/usr/bin/node', process.execPath], [join(dirname(dirname(process.execPath)), 'lib/node_modules'), join(dirname(dirname(process.execPath)), 'lib/node_modules')], [join(homedir(), '.claude-seed'), join(agent.workspace, '..', '.claude-seed')]]) {
     try { ro.set(destination, await realpath(source)); } catch { /* absent optional installer mount */ }
   }
+  const codexRuntime = inspectedCodexRuntime(c);
+  for (const mount of codexRuntime?.mounts ?? []) ro.set(mount.target, mount.source);
   let workspaceFound = false;
   for (const m of c.Mounts ?? []) {
     if (/docker\.sock|containerd\.sock/.test(m.Source + m.Destination)) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
