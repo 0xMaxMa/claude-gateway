@@ -189,20 +189,54 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
     const compact = jest.spyOn(runner as any, 'compactContext').mockResolvedValue(undefined);
     const clear = jest.spyOn(runner as any, 'clearContext').mockResolvedValue(undefined);
     const forwarded = jest.spyOn(runner as any, 'writeAutoForward');
+    const menus = jest.spyOn(runner as any, 'sendOrchestrationControl').mockResolvedValue(undefined);
     const scopedChat = 'context-' + source;
-    await postChannelMessage(getCallbackPort(runner), scopedChat, '/compact', source);
-    await waitFor(() => forwarded.mock.calls.some(call => String(call[1]).includes('context compacted')), 3000);
-    expect(compact).toHaveBeenCalledTimes(1);
+    const runCompact = async () => {
+      const before = compact.mock.calls.length;
+      await postChannelMessage(getCallbackPort(runner), scopedChat, '/compact', source);
+      if (source !== 'telegram') {
+        expect(compact).toHaveBeenCalledTimes(before);
+        const menu = menus.mock.calls.at(-1)![2] as any;
+        expect(menu.buttons.map((b:any)=>b.label)).toEqual(['Yes','No']);
+        await postChannelMessage(getCallbackPort(runner), scopedChat, '/orch '+menu.buttons[0].data.slice(5), source);
+      }
+      await waitFor(() => compact.mock.calls.length === before+1, 3000);
+    };
+    await runCompact();
     await postChannelMessage(getCallbackPort(runner), scopedChat, '/clear', source);
     await waitFor(() => forwarded.mock.calls.some(call => String(call[1]).includes('context reset')), 3000);
     expect(clear.mock.calls[0][0]).toBe(compact.mock.calls[0][0]);
     compact.mockRejectedValueOnce(new Error('Provider unavailable'));
-    await postChannelMessage(getCallbackPort(runner), scopedChat, '/compact', source);
-    await waitFor(() => forwarded.mock.calls.some(call => String(call[1]).includes('Context compaction failed: Provider unavailable')), 3000);
+    await runCompact();
+    await waitFor(() => source === 'telegram'
+      ? forwarded.mock.calls.some(call=>String(call[1]).includes('Context compaction failed: Provider unavailable'))
+      : menus.mock.calls.some(call=>String((call[2] as any).text).includes('Command failed: Provider unavailable')), 3000);
     clear.mockRejectedValueOnce(new Error('The agent is responding.'));
     await postChannelMessage(getCallbackPort(runner), scopedChat, '/clear', source);
     await waitFor(() => forwarded.mock.calls.some(call => String(call[1]).includes('Command failed: The agent is responding.')), 3000);
-    compact.mockRestore(); clear.mockRestore(); forwarded.mockRestore();
+    compact.mockRestore(); clear.mockRestore(); forwarded.mockRestore(); menus.mockRestore();
+  });
+
+  it.each(CHAT_CHANNELS.filter(source=>source!=='telegram'))('%s confirms restart without sending it to the model, and serves complete help', async source => {
+    runner = new AgentRunner(agentConfig, gatewayConfig); await runner.start();
+    const menus=jest.spyOn(runner as any,'sendOrchestrationControl').mockResolvedValue(undefined);
+    const restart=jest.spyOn(runner as any,'restartProcess').mockResolvedValue(undefined);
+    await postChannelMessage(getCallbackPort(runner),'restart-chat','/restart',source);
+    expect(restart).not.toHaveBeenCalled();
+    let menu=menus.mock.calls.at(-1)![2] as any;
+    await postChannelMessage(getCallbackPort(runner),'restart-chat','/orch '+menu.buttons[1].data.slice(5),source);
+    expect(restart).not.toHaveBeenCalled();
+    await postChannelMessage(getCallbackPort(runner),'restart-chat','/restart',source);
+    menu=menus.mock.calls.at(-1)![2] as any;
+    const confirm='/orch '+menu.buttons[0].data.slice(5);
+    await postChannelMessage(getCallbackPort(runner),'restart-chat',confirm,source);
+    await waitFor(()=>restart.mock.calls.length===1,3000);
+    await postChannelMessage(getCallbackPort(runner),'restart-chat',confirm,source);
+    expect(restart).toHaveBeenCalledTimes(1);
+    await postChannelMessage(getCallbackPort(runner),'restart-chat','/help',source);
+    const help=(menus.mock.calls.at(-1)![2] as any).text;
+    for(const command of ['/help','/session','/sessions','/compact','/clear','/restart','/stop']) expect(help).toContain(command);
+    menus.mockRestore(); restart.mockRestore();
   });
 
   it.each(CHAT_CHANNELS.filter(source => source !== 'telegram'))('orchestrated %s /session uses measured context, not message counts', async source => {

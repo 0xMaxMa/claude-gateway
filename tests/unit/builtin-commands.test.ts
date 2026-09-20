@@ -70,7 +70,7 @@ describe('isBuiltinCommand', () => {
     it('does not match telegram-only commands', () => {
       no('/rename');
       no('/start');
-      no('/help');
+      yes('/help');
       no('/status');
     });
 
@@ -99,7 +99,7 @@ describe('isBuiltinCommand', () => {
       no('/new');
       no('/rename');
       no('/start');
-      no('/help');
+      yes('/help');
       no('/status');
       no('/models');
     });
@@ -154,7 +154,7 @@ describe('isBuiltinCommand', () => {
 
     it('does not match commands LINE has no handler for', () => {
       expect(isBuiltinCommand('/session', 'line')).toBe(true);
-      expect(isBuiltinCommand('/help', 'line')).toBe(false);
+      expect(isBuiltinCommand('/help', 'line')).toBe(true);
     });
   });
 

@@ -1,3 +1,5 @@
+import { commandHelp } from '../agent/command-help';
+import type { ChatChannel } from '../history/types';
 import { VoiceReplyMode } from './voice-reply-policy';
 import { formatTiming } from './tasks/timing';
 import { formatTaskElapsed } from '../shared/task-elapsed';
@@ -74,6 +76,6 @@ export class ChannelControls {
       const task=action.kind==='cancel'?this.tasks.cancel(s.sessionId,s.principalId,action.id!):this.tasks.detail(s.sessionId,s.principalId,action.id!);
       return {text:`${task.title}\nStatus: ${task.state}\nElapsed: ${formatTaskElapsed(task.startedAt,task.finishedAt)}${formatTiming(task.timing)?`\n\nTime breakdown\n${formatTiming(task.timing)}`:''}${task.progress?`\n\nLatest progress:\n${task.progress}`:''}${task.question?`\n\nWaiting for your input:\n${task.question}`:''}`,buttons:[...(task.canStop?[b(task.state==='needs_reconciliation'?'🔄 Retry cleanup':'🔴 Stop task',{kind:'cancel',id:task.taskId})]:[]),b('🔄 Refresh',{kind:'detail',id:task.taskId}),b('Back',{kind:'tasks'}),dismiss()]};
     }
-    return {text:'Commands: /session · /sessions · /voice · /voices · /tasks · /stop',buttons:[]};
+    return {text:commandHelp(s.channel as ChatChannel, true),buttons:[]};
   }
 }

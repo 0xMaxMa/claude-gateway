@@ -135,6 +135,13 @@ describe('executeApiCommand session counting (#160)', () => {
     }
   }
 
+  it('/help executes locally and lists all API commands without inference', async () => {
+    const {result,responseText}=await runner.executeApiCommand(sessionId,chatId,'/help',{skipPersist:true});
+    expect(result.text).toBe(responseText);
+    for(const command of ['/help','/session','/sessions','/clear','/compact','/stop','/restart','/model']) expect(responseText).toContain(command+' —');
+    expect(responseText).not.toContain('/voices');
+  });
+
   it('U-RUN-01: /session reports the real flat-store message count, not the stale index 0', async () => {
     await seedFlatStore(sessionId, 5);
 

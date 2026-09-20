@@ -22,6 +22,7 @@ test.each(['discord','line','slack'] as const)('%s signed/native controls pass t
  const store=new OrchestrationStore(':memory:','a'),tasks=new TaskService(store),stop=jest.fn(()=>false);
  const controls=new ChannelControls(store,new TaskControls(store,tasks),new StopControls(store,tasks,stop),new TelegramVoices(store,()=>({provider:'fixture',model:'m',voiceId:'v'}),async()=>[{id:'v',name:'Voice',gender:'female'}]),()=>true);
  (runner as any).orchestration={store,channelControls:controls,updateAgentConfig:jest.fn(),ownsChannel:()=>true};
+ jest.spyOn(runner as any,'sessionContextInfo').mockResolvedValue({text:'10K / 200K · 5%'});
  const sent:Array<{url:string;body:any}>=[];
  global.fetch=(async(url:any,init?:RequestInit)=>{
    if(String(url).startsWith('http://127.0.0.1:'))return originalFetch(url,init);
@@ -48,7 +49,7 @@ test.each(['discord','line','slack'] as const)('%s signed/native controls pass t
    await request(app).post('/webhooks/slack/a').set('Content-Type','application/x-www-form-urlencoded').set('x-slack-request-timestamp',ts).set('x-slack-signature','invalid').send(payload).expect(401);
   }else await callback('/orch '+data.slice(5),{control_message_id:'menu'});
   expect(store.channelVoice(channel,chat)).toBe(true);expect(stop).not.toHaveBeenCalled();
-  await callback('/session');expect(JSON.stringify(sent.at(-1)!.body)).toContain('Mode: Orchestration');
+  await callback('/session');expect(JSON.stringify(sent.at(-1)!.body)).toContain('Context: 10K / 200K');
   await callback('/sessions');expect(JSON.stringify(sent.at(-1)!.body)).toContain('Sessions');
   (runner as any).gatewayConfig.gateway.orchestration=false;runner.updateAgentConfig(agent);await callback('/voice off');expect(store.channelVoice(channel,chat)).toBe(true);
   expect(JSON.stringify(sent.at(-1)!.body)).toContain('require orchestration');

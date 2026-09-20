@@ -32,12 +32,16 @@ If `message` starts with `/`, the endpoint executes the command instead of forwa
 
 | Command | Description |
 |---------|-------------|
-| `/session` | Return current session info (name, message count, context %) |
+| `/help` | List supported API slash commands and their behavior |
+| `/session` | Return the current session, selected model and measured context usage |
+| `/sessions` | List sessions in this API chat |
 | `/clear` | Reset model context; keep history and seed the next context with 50 recent messages |
 | `/compact` | Compact Claude Code context without changing chat history |
 | `/stop` | Interrupt the in-flight turn |
 | `/restart` | Gracefully restart the session |
 | `/model` | Return the current model for this agent |
+
+Commands execute directly; API clients provide any desired Yes/No confirmation before submission. Voice settings and task operations have dedicated REST endpoints rather than `/voice` or `/tasks` slash dispatch. Unknown slash commands can still be application-defined messages.
 
 **Command response:**
 

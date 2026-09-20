@@ -51,6 +51,8 @@ import { recordDeniedSender, getPendingSender, generatePairingCode, clearPending
 import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml, containsTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
+import { commandHelp } from './command-help';
+import { SessionConfirmations } from './session-confirmations';
 import { fetchModelCatalog, DEFAULT_CONTEXT_WINDOW } from './model-catalog';
 import { SafeModeManager } from './safe-mode';
 import { isValidTimezone } from './skill-learning/config';
@@ -481,6 +483,8 @@ export class AgentRunner extends EventEmitter {
     } catch { return {state: 'unknown', code: 'PROVIDER_RECEIPT_UNKNOWN'}; }
   }
 
+  private readonly sessionConfirmations = new SessionConfirmations();
+
   private async sendOrchestrationControl(channel: string, chatId: string, menu: ControlMenu, meta: Record<string, string>): Promise<void> {
     if (!['telegram', 'whatsapp', 'whatsapp_cloud', 'wechat'].includes(channel)) return sendControlMenu(this.agentConfig, channel, chatId, menu, meta);
     const text = [menu.text, ...menu.buttons.map(button => `${button.label}: /orch ${button.data.replace(/^orch:/, '')}`)].join('\n');
@@ -827,6 +831,39 @@ export class AgentRunner extends EventEmitter {
                   platformMessageId:meta.message_id,senderId,senderName:meta.sender_name}});
               res.writeHead(200);res.end('recovered');return;
             }
+          }
+          if (channelSource !== 'telegram' && content.trim() === '/help') {
+            await this.sendOrchestrationControl(channelSource, chatId, {text:commandHelp(channelSource, !!channelOrchestration, this.gatewayConfig.gateway.headless === false), buttons:[]}, meta);
+            res.writeHead(200); res.end('ok'); return;
+          }
+          if (channelSource !== 'telegram' && (/^\/(compact|restart)(?:\s|$)/.test(content.trim()) || this.sessionConfirmations.owns(content.trim()))) {
+            const sessionId = await this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, channelSource);
+            const scope = {channel:channelSource, chatId, thread:channelSource === 'whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : meta.thread_ts ?? meta.message_thread_id ?? '', sessionId, principalId:`${channelSource}:${meta.user_id ?? meta.user ?? chatId}`};
+            if (!content.trim().startsWith('/orch ')) {
+              const operation = content.trim().startsWith('/compact') ? 'compact' : 'restart';
+              await this.sendOrchestrationControl(channelSource, chatId, this.sessionConfirmations.open(scope, operation), meta);
+              res.writeHead(200); res.end('ok'); return;
+            }
+            let operation;
+            try { operation = this.sessionConfirmations.choose(scope, content.trim()); }
+            catch (error) {
+              await this.sendOrchestrationControl(channelSource, chatId, {text:(error as Error).message, buttons:[]}, meta);
+              res.writeHead(200); res.end('ok'); return;
+            }
+            // Acknowledge before a potentially long native compaction. Only this consumed action can start it.
+            await this.sendOrchestrationControl(channelSource, chatId, {text:operation === 'cancel' ? 'Cancelled.' : operation === 'compact' ? 'Compacting Claude Code context…' : 'Restarting session process…', buttons:[]}, meta);
+            res.writeHead(200); res.end('ok');
+            if (operation !== 'cancel') void (async () => {
+              let text: string;
+              try {
+                if (operation === 'compact') await this.compactContext(sessionId);
+                else await this.restartProcess(chatId, sessionId);
+                text = operation === 'compact' ? 'Claude Code context compacted. Chat history is unchanged.' : 'Session process restarted. It starts again with your next message. Chat history is unchanged.';
+              } catch (error) { text = `Command failed: ${(error as Error).message}`; }
+              const deliveryMeta = {...meta}; delete deliveryMeta.reply_token; delete deliveryMeta.control_message_id;
+              await this.sendOrchestrationControl(channelSource, chatId, {text, buttons:[]}, deliveryMeta);
+            })().catch(error => this.logger.error('Session control delivery failed', {error:String(error)}));
+            return;
           }
           if (channelSource!=='telegram' && this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels??['api']).includes(channelSource) && /^\/sessions?(?:\s|$)/.test(content.trim())) {
             const index=await this.sessionStore.listSessions(this.agentConfig.id,chatId,channelSource);
@@ -2871,7 +2908,12 @@ export class AgentRunner extends EventEmitter {
   ): Promise<void> {
     const agentId = this.agentConfig.id;
 
-    if (content.startsWith('/sessions')) {
+    if (content.trim() === '/help') {
+      this.writeAutoForward(chatId, commandHelp(this.channelFor(chatId), !!this.agentConfig.orchestration?.enabled, this.gatewayConfig.gateway.headless === false));
+    } else if (/^\/restart(?:\s|$)/.test(content)) {
+      await this.restartProcess(chatId);
+      this.writeAutoForward(chatId, 'Session process restarted. It starts again with your next message.');
+    } else if (content.startsWith('/sessions')) {
       await this.handleCommandSessions(agentId, chatId);
     } else if (content.startsWith('/session') && !content.startsWith('/sessions')) {
       await this.handleCommandSessionInfo(agentId, chatId);
@@ -3166,8 +3208,9 @@ export class AgentRunner extends EventEmitter {
    * Restart the process for a given chatId (stop + remove from map).
    * The process will be lazily re-spawned on the next incoming message.
    */
-  private async restartProcess(chatId: string): Promise<void> {
+  private async restartProcess(chatId: string, expectedSessionId?: string): Promise<void> {
     const existing = this.sessions.get(chatId);
+    if (existing && expectedSessionId && existing.sessionId !== expectedSessionId) throw new Error('The active session changed. Run /restart again.');
     if (existing) {
       await existing.stop();
       this.sessions.delete(chatId);
@@ -5291,7 +5334,10 @@ export class AgentRunner extends EventEmitter {
     let responseText: string;
     let forcePersist = false;
     try {
-      if (cmd === '/model') {
+      if (cmd === '/help') {
+        responseText = commandHelp('api', !!this.agentConfig.orchestration?.enabled);
+        result = {text:responseText};
+      } else if (cmd === '/model') {
         const model = this.agentConfig.claude.model;
         const hasArg = command.trim().includes(' ');
         result = { model };
