@@ -46,7 +46,7 @@ New generated app-agent images install native Codex 0.154.0 for AMD64 or ARM64. 
 
 Existing app-agent containers need their generated image rebuilt and the **agent service** recreated before using Codex. Merely restarting the gateway, restarting a container, or running the legacy credential-mount migration does not install the new executable. Regenerate the app service configuration through the normal app update/reconfiguration flow, then rebuild/recreate the agent service during a suitable maintenance window. Do not recreate the database or delete app volumes.
 
-Execution stays inside the admitted app container under its normal UID and security restrictions. The gateway bridges only the existing scoped container task tools: progress reporting, requesting input, and staging files. Container workers do not gain host media/browser/memory access. Missing or rejected container bindings never select a host process.
+Execution stays inside the admitted app container under its normal UID and security restrictions. The gateway bridges only the existing scoped container task tools: progress reporting, requesting input, staging files, and agent-owned cron schedules. Scoped cron tools can schedule agent prompts; host commands and immediate `cron_run` remain unavailable in containers. Container workers do not gain host media/browser/memory access. Missing or rejected container bindings never select a host process.
 
 Expired or replaced Codex session homes are reclaimed in bounded background batches when another worker starts. Warm pool sessions and active leases are retained. Leases left after a crash or unconfirmed process stop are conservatively preserved; cleanup does not assume those processes have stopped. Unknown legacy metadata is not deleted automatically.
 
@@ -74,3 +74,16 @@ Codex reports inclusive input tokens. When supplied, `cacheWriteInputTokens` in 
 Native events and the benchmark retain that presence distinction. Existing gateway usage aggregates normalize missing cache-creation counters to zero, so a dashboard zero alone does not prove the upstream explicitly reported zero.
 
 This is a native CLI coding smoke check, **not** a gateway integration benchmark or proof of quality parity. Different endpoint/account routes, cache state, model mappings, and CLI settings can affect results. A timing or token difference does not establish a controlled cost comparison. Test real gateway tasks separately, including MCP calls, cancellation, progress/checkpoint behavior, and container execution.
+
+## Custom connectors
+
+Eligible host workers use the same enabled custom connector configuration in both
+Claude and Codex. Each attempt receives private lazy-connector proxies, including
+HTTP connectors; connector credentials are removed with the attempt's temporary
+configuration. Agent opt-outs and gateway defaults apply to both harnesses.
+Container and isolated workers do not receive host custom connectors.
+
+To verify the native Codex proxy path without provider billing, run
+`node scripts/orchestration/smoke-codex-worker.cjs --connector` from a development
+checkout with Codex and the MCP dependencies installed. This uses a local fake
+Responses server and a fixture MCP connector; it does not test a real vendor.

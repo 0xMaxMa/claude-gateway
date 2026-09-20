@@ -1,3 +1,4 @@
+import { prepareManagedConnectors } from './managed-connectors';
 import { EventEmitter } from 'events';
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import { createHash, randomUUID } from 'crypto';
@@ -114,6 +115,7 @@ export class CodexProcess extends EventEmitter {
   private identity = '';
   private homePersisted = false;
   private leaseOwned = false;
+  private readonly connectorPaths = new Set<string>();
   private approvedMcp: Record<string, any> = {};
   private readonly root: string;
   constructor(private readonly options: CodexProcessOptions) {
@@ -164,6 +166,8 @@ export class CodexProcess extends EventEmitter {
       await this.recordHomes();
       await mkdir(this.home, { mode: 0o700 });
       mcp = JSON.parse(await readFile(profile.mcpConfigPath, 'utf8'));
+      const { servers } = prepareManagedConnectors(agent, this.options.gateway, profile, this.connectorPaths);
+      mcp.mcpServers = { ...servers, ...mcp.mcpServers };
     }
     this.approvedMcp = mcp.mcpServers ?? {};
     const lines = [
@@ -426,6 +430,8 @@ export class CodexProcess extends EventEmitter {
     if (stopped) await this.cleanupHomes();
   }
   private async cleanupHomes(): Promise<void> {
+    for (const filename of this.connectorPaths) await rm(filename, { force: true });
+    this.connectorPaths.clear();
     if (!this.leaseOwned) return;
     // Only the most recent transcript home is needed after its replacement is durable.
     if (this.saved && this.homePersisted && this.home !== this.saved.home) {

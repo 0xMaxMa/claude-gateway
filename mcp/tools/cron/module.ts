@@ -42,7 +42,7 @@ export class CronModule implements ToolModule {
 
   async handleTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolResult> {
     if (process.env.GATEWAY_ORCHESTRATION_ROLE === 'worker') {
-      return callTaskBridge(name, args, crypto.randomUUID(), signal ?? AbortSignal.timeout(20000));
+      return callTaskBridge(name, args, crypto.randomUUID(), signal ?? new AbortController().signal);
     }
     const client = this.getClient();
 

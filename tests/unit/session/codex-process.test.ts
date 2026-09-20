@@ -294,3 +294,38 @@ test.each([undefined, 0])('resumed cache writes preserve an unknown versus zero 
   const collector=new TurnUsageCollector();events.forEach(event=>collector.observe(event));
   expect(collector.snapshot().usage?.totalTokens).toBe(95);
 });
+
+test.each([true, false])('Codex receives enabled custom connectors only in host execution (%s)', async host => {
+  options.profile.hostExecution = host;
+  options.gateway = { gateway: { customConnectors: {
+    'fixture-remote': { label: 'Fixture', config: { type: 'http', url: 'https://fixture.invalid/mcp', headers: { Authorization: 'Bearer fixture-only' } }, secretNames: [], credentialOwner: 'static' },
+    disabled: { label: 'Disabled', config: { command: 'unapproved', args: [] }, secretNames: [], credentialOwner: 'none' },
+  } } } as any;
+  options.agent.connectors = { disabled: { enabled: false } };
+  await adapter.start();
+  const root = await sessionDirectory();
+  const home = (await readdir(root)).find(name => name.startsWith('attempt-'))!;
+  const config = await readFile(join(root, home, 'config.toml'), 'utf8');
+  const file = join(directory, 'connector-0.json');
+  if (host) {
+    expect(config).toContain('[mcp_servers."fixture-remote"]');
+    expect(config).toContain('lazy-connector.ts');
+    expect(config).not.toContain('fixture-only');
+    expect(JSON.parse(await readFile(file, 'utf8')).url).toBe('https://fixture.invalid/mcp');
+    expect((await (await import('fs/promises')).stat(file)).mode & 0o777).toBe(0o600);
+  } else await expect(access(file)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(config).not.toContain('[mcp_servers."disabled"]');
+  await adapter.stop();
+  await expect(access(file)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+test('failed Codex preparation removes already written connector secrets', async () => {
+  options.profile.hostExecution = true;
+  options.gateway = { gateway: { customConnectors: { fixture: {
+    label: 'Fixture', config: { command: 'node', args: ['fixture.js'] }, secretNames: [], credentialOwner: 'none',
+  } } } } as any;
+  // The approved gateway server is invalid; connector preparation precedes validation.
+  await writeFile(options.profile.mcpConfigPath, JSON.stringify({mcpServers:{gateway:{command:'node',args:[42]}}}));
+  await expect(adapter.start()).rejects.toThrow('Codex MCP requires');
+  await expect(access(join(directory,'connector-0.json'))).rejects.toMatchObject({code:'ENOENT'});
+});

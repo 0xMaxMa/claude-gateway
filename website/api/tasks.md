@@ -101,3 +101,9 @@ App-Agent cold boot: registered orchestration App Agents defer admission until t
 ## Report retries
 
 Automatic task-report failures retry the persisted result with exponential backoff (5 seconds initially, capped at 5 minutes), without spawning/replaying the worker or granting execution permission. The retry clock is derived from durable decision history, so restart and pre-upgrade failed reports retain their state. Eligible/scheduled conversations are filtered before pagination; cooling-down or busy chats do not block other reports. A stopped reporting turn is not automatically retried. A later user turn can still consume its pending updates. Successful reports mark their notifications handled and are not sent again.
+
+Worker cron requests preserve the manual-run wait semantics above. A lost response
+from a dispatched mutation is reported as `CRON_OUTCOME_UNKNOWN` with
+`retryable: false` on the private task bridge. Revoking the worker ticket aborts
+its HTTP wait, not the separately executing cron job; inspect run history before
+retrying. This does not change the public cron endpoint response schema.

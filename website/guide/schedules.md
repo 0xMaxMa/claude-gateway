@@ -103,3 +103,14 @@ memory capabilities through the gateway catalog. Channel delivery is performed b
 the orchestrator, not by worker bot credentials. Container workers have a separate
 restricted inventory; host media, browser and shared-memory access is not implied.
 External MCP servers depend on the selected worker harness and its configuration.
+
+## Manual runs from workers
+
+For a host worker, `cron_run` waits for the real job result, including delegated
+work and the final agent report. It does not use the short 15-second CRUD deadline.
+Worker cancellation, ticket revocation, gateway shutdown or a disconnected MCP
+caller interrupts the wait; **it does not cancel an already dispatched cron job**.
+If the response is lost, `CRON_OUTCOME_UNKNOWN` means the execution or mutation
+may still complete. Inspect `cron_get_runs` and `cron_list` before retrying; never
+interpret this as proof that nothing happened. Lookup and HTTP API errors remain
+explicit `CRON_API_ERROR` results. MCP clients may impose their own wait limits.

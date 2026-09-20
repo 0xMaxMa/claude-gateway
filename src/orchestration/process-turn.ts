@@ -1,3 +1,5 @@
+import { containerTaskTools } from './container-tool-schemas';
+import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
 import type { RequestToolSchemas } from '../session/request-tool-capture';
 import { structuredProviderMessage } from './provider-message';
 import { executionTool } from './tool-name';
@@ -182,9 +184,20 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       const allowed = role === 'agent'
         ? /^(mcp__gateway__(capabilities_list|conversation_intake|memory_(get|search)|task_(spawn|status|cancel|update|answer|question)))$/
         : /^(Read|Glob|Grep|Bash|Edit|Write|Skill|mcp__gateway__(tool_search|tool_call|browser_[a-z_]+|generate_image|generate_video|share_file|share_image|memory_(get|search|shared_(get|create|update|delete))|task_(report_progress|request_input|stage_file|memory_append)))$/;
-      if (!Array.isArray(event.tools) || event.tools.some((name: unknown) => typeof name !== 'string' || (!(role === 'worker' && process.runtimeProfile?.hostExecution) && !(role === 'agent' && process.runtimeProfile?.responseSchema && name === 'StructuredOutput') && !process.isSpawnedConnectorTool?.(name) && !allowed.test(name)))) {
-        const rejectedTools = Array.isArray(event.tools) ? event.tools.filter((name: unknown) => typeof name !== 'string' ||
-          (!(role === 'worker' && process.runtimeProfile?.hostExecution) && !(role === 'agent' && process.runtimeProfile?.responseSchema && name === 'StructuredOutput') && !process.isSpawnedConnectorTool?.(name) && !allowed.test(name)))
+      const allowedTool = (name: unknown): boolean => {
+        if (typeof name !== 'string') return false;
+        if (process.runtimeProfile?.containerExecution) {
+          // Validate the same scoped inventory that the container MCP client lists.
+          return containerTaskTools(role).some(tool => name === `mcp__gateway__${tool.name}`) ||
+            (role === 'worker' && (process.runtimeProfile.workerTools ?? DEFAULT_WORKER_TOOLS).includes(name)) ||
+            (role === 'agent' && Boolean(process.runtimeProfile.responseSchema) && name === 'StructuredOutput');
+        }
+        return (role === 'worker' && Boolean(process.runtimeProfile?.hostExecution)) ||
+          (role === 'agent' && Boolean(process.runtimeProfile?.responseSchema) && name === 'StructuredOutput') ||
+          Boolean(process.isSpawnedConnectorTool?.(name)) || allowed.test(name);
+      };
+      if (!Array.isArray(event.tools) || event.tools.some((name: unknown) => !allowedTool(name))) {
+        const rejectedTools = Array.isArray(event.tools) ? event.tools.filter((name: unknown) => !allowedTool(name))
           .slice(0,100).map((name: unknown) => typeof name === 'string' ? name.replace(/[^a-zA-Z0-9_.:-]/g,'?').slice(0,160) : '<invalid-name>') : ['<missing-inventory>'];
         fail(Object.assign(new OrchestrationError('PROFILE_INVENTORY_MISMATCH'), { rejectedTools }));
         void process.stop(); return;

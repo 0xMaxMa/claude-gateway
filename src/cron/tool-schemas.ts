@@ -88,7 +88,7 @@ export const CRON_TOOLS = [
       },
       {
         name: 'cron_run',
-        description: 'Run a cron job immediately',
+        description: 'Run a cron job immediately and wait for its actual result. If the wait is interrupted, the job may still be running: check cron_get_runs before retrying; do not blindly start another run.',
         inputSchema: {
           type: 'object',
           properties: {

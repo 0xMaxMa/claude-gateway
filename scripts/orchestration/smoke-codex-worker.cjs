@@ -11,6 +11,8 @@ const {once} = require('events');
 const {randomUUID} = require('crypto');
 const {execFileSync} = require('child_process');
 const containerMode = process.argv.includes('--container');
+const connectorMode = process.argv.includes('--connector');
+if (containerMode && connectorMode) throw new Error('Custom connectors are host-only');
 const MCP = String.raw`
 const fs=require('fs'),readline=require('readline');
 readline.createInterface({input:process.stdin}).on('line',line=>{const q=JSON.parse(line);if(q.id===undefined)return;let result={};
@@ -33,9 +35,11 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
     if(hanging)return;
     if(sequence>0)await new Promise(resolve=>setTimeout(resolve,75));
     const id='resp_'+(++sequence), messageId='msg_'+sequence;
-    const namespace=body.tools?.find(t=>t.type==='namespace'&&t.name==='mcp__gateway');
-    const tool=namespace?.tools.find(t=>t.name==='fixture_echo') ?? body.tools?.find(t=>t.name?.includes('fixture_echo'));
-    const output=sequence===1&&tool?[{type:'function_call',id:'fc_1',call_id:'call_fixture_1',name:tool.name,...(namespace?{namespace:namespace.name}:{}),arguments:JSON.stringify({value:'hello'})}]:[{type:'message',id:messageId,role:'assistant',phase:'final_answer',status:'completed',content:[{type:'output_text',text:'Canonical fixture result '+sequence,annotations:[]}]}];
+    const namespace=body.tools?.find(t=>t.type==='namespace'&&t.name===(connectorMode?'mcp__fixture':'mcp__gateway'));
+    const toolName=connectorMode?'tool_call':'fixture_echo';
+    const tool=namespace?.tools.find(t=>t.name===toolName) ?? body.tools?.find(t=>t.name===(connectorMode?'mcp__fixture__tool_call':'mcp__gateway__fixture_echo'));
+    const toolArgs=connectorMode?{name:'fixture_echo',arguments:{value:'hello'}}:{value:'hello'};
+    const output=sequence===1&&tool?[{type:'function_call',id:'fc_1',call_id:'call_fixture_1',name:tool.name,...(namespace?{namespace:namespace.name}:{}),arguments:JSON.stringify(toolArgs)}]:[{type:'message',id:messageId,role:'assistant',phase:'final_answer',status:'completed',content:[{type:'output_text',text:'Canonical fixture result '+sequence,annotations:[]}]}];
     const response={id,object:'response',created_at:Math.floor(Date.now()/1000),status:'completed',model:'gpt-test',output,usage:{input_tokens:100,input_tokens_details:{cached_tokens:40,cache_write_tokens:20},output_tokens:20,output_tokens_details:{reasoning_tokens:5},total_tokens:120}};
     res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache'});
     const emit=(type,payload)=>res.write('event: '+type+'\ndata: '+JSON.stringify({type,...payload})+'\n\n');
@@ -68,7 +72,8 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
     const installerHome=homedir();
     execFileSync('docker',['run','-d','--name',containerName,'--cap-drop','ALL','--security-opt','no-new-privileges','--add-host','host.docker.internal:host-gateway','--mount',`type=bind,src=${directory},dst=/workspace`,'--mount',`type=bind,src=${process.execPath},dst=/usr/bin/node,readonly`,process.env.GATEWAY_CODEX_SMOKE_IMAGE || 'gateway-codex-install-check:0.154.0','node','-e',`const fs=require('fs');fs.mkdirSync(${JSON.stringify(installerHome)},{recursive:true,mode:511});fs.chmodSync(${JSON.stringify(installerHome)},511);setInterval(()=>{},10000);`],{stdio:'pipe'});
   }
-  const options={agent:{workspace:directory,...(containerMode?{type:'app-agent',container:containerName}:{})},gateway:{},profile:{role:'worker',mcpConfigPath:mcp,overlay:'Use fixture_echo once, then return a brief result.',hostExecution:!containerMode,containerExecution:containerMode},sessionId:'fixture-logical-session',stateDirectory:join(directory,'state'),config:{model:'gpt-test',baseUrl:`http://${containerMode?'host.docker.internal':'127.0.0.1'}:${server.address().port}/v1`,apiKeyEnv:'GATEWAY_CODEX_SMOKE_KEY'}};
+  const options={agent:{workspace:directory,...(containerMode?{type:'app-agent',container:containerName}:{})},gateway:{gateway:{}},profile:{role:'worker',mcpConfigPath:mcp,overlay:'Use fixture_echo once, then return a brief result.',hostExecution:!containerMode,containerExecution:containerMode},sessionId:'fixture-logical-session',stateDirectory:join(directory,'state'),config:{model:'gpt-test',baseUrl:`http://${containerMode?'host.docker.internal':'127.0.0.1'}:${server.address().port}/v1`,apiKeyEnv:'GATEWAY_CODEX_SMOKE_KEY'}};
+  if(connectorMode) options.gateway.gateway.customConnectors={fixture:{label:'Fixture connector',secretNames:[],credentialOwner:'none',config:{command:process.execPath,args:[join(directory,'mcp.cjs')],env:{FIXTURE_TICKET:join(directory,'ticket'),FIXTURE_CALLS:calls}}}};
   options.checkpoint=async()=>{if(amended)return;amended=true;return {text:'Apply the native checkpoint revision before finishing.',kind:'assignment',acknowledge:()=>{acknowledged=true;}};};
   async function run(){
     const adapter=new CodexProcess(options);adapters.push(adapter);const events=[];
@@ -78,7 +83,7 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
   }
     const first=await run();assert.match(first.terminal.result,/Canonical fixture result/);
     const {readFile}=require('fs/promises');assert.match(await readFile(calls,'utf8'),/hello/);
-    assert(first.events.some(e=>e.type==='assistant'&&e.message.content.some(b=>b.name==='mcp__gateway__fixture_echo')),'native MCP tool was not observed');
+    assert(first.events.some(e=>e.type==='assistant'&&e.message.content.some(b=>b.name===(connectorMode?'mcp__fixture__tool_call':'mcp__gateway__fixture_echo'))),'native MCP tool was not observed');
     assert(acknowledged,'native steering was not acknowledged');assert(requests.some(r=>JSON.stringify(r.input).includes('native checkpoint revision')),'native revision never reached Responses input');
     assert.equal(first.terminal.usage.input_tokens,sequence*40);assert.equal(first.terminal.usage.cache_read_input_tokens,sequence*40);assert.equal(first.terminal.usage.cache_creation_input_tokens,sequence*20);assert.equal(first.terminal.usage.output_tokens,sequence*20);
     const resumed=await run();assert.equal(resumed.terminal.usage.input_tokens,40);assert.equal(resumed.terminal.usage.cache_read_input_tokens,40);assert.equal(resumed.terminal.usage.cache_creation_input_tokens,20);assert.equal(resumed.terminal.usage.output_tokens,20);
@@ -86,7 +91,7 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
     hanging=true;const cancelled=new CodexProcess({...options,sessionId:'cancel-fixture'});adapters.push(cancelled);await cancelled.start();cancelled.sendMessage('Wait for cancellation.');
     const deadline=Date.now()+10000;const before=requests.length;while(requests.length===before&&Date.now()<deadline)await new Promise(r=>setTimeout(r,25));
     await cancelled.stop();assert(cancelled.managedGroupStopped,'cancelled native process group survived');
-    console.log('PASS native Codex '+(containerMode?'container':'host')+': local Responses, MCP ticket roundtrip, canonical summary, nonzero cache-write usage, explicit resume, mid-turn revision, cancellation');
+    console.log('PASS native Codex '+(containerMode?'container':connectorMode?'host custom connector':'host')+': local Responses, MCP ticket roundtrip, canonical summary, nonzero cache-write usage, explicit resume, mid-turn revision, cancellation');
   }finally{
     await Promise.allSettled(adapters.map(a=>a.stop()));for(const socket of sockets)socket.destroy();server.close();bridge?.close();if(containerName){try{execFileSync('docker',['rm','-f',containerName],{stdio:'pipe'});}catch{}}delete process.env.GATEWAY_CODEX_SMOKE_KEY;await rm(directory,{recursive:true,force:true});
   }

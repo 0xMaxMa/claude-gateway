@@ -51,3 +51,69 @@ test('read-only task has no cron execution permission',async()=>{
  const f=fixture();f.scope.mockReturnValue({task:{agentId:'owner',capabilities:{execute:false}}});
  await expect(f.call('a',1,'cron_list',{})).rejects.toThrow('CRON_SCOPE_DENIED');expect(f.request).not.toHaveBeenCalled();
 });
+
+test('manual run waits beyond CRUD deadline and returns the actual result', async () => {
+  const f = fixture(), deadlines = jest.spyOn(AbortSignal, 'timeout');
+  let complete!: (response: Response) => void;
+  f.request.mockImplementation(async url => url.endsWith('/run') ? new Promise<Response>(resolve => { complete = resolve; }) : new Response(JSON.stringify({job:{agentId:'owner',type:'agent'}})));
+  const running = f.call('a', 1, 'cron_run', {job_id:'job'});
+  try {
+    while (!complete) await new Promise(resolve => setImmediate(resolve));
+    expect(deadlines).toHaveBeenCalledTimes(1); // ownership lookup only
+    expect(f.request.mock.calls[1][1].signal).toBeUndefined();
+    complete(new Response(JSON.stringify({run:{status:'ok',durationMs:25000}})));
+    await expect(running).resolves.toMatchObject({run:{status:'ok',durationMs:25000}});
+  } finally { deadlines.mockRestore(); }
+});
+
+test('cancelled run wait preserves unknown execution outcome instead of invalid request', async () => {
+  const f = fixture(), controller = new AbortController();
+  let started = false;
+  f.request.mockImplementation(async (url, init) => {
+    if (!url.endsWith('/run')) return new Response(JSON.stringify({job:{agentId:'owner',type:'agent'}}));
+    started = true;
+    return new Promise<Response>((_resolve,reject) => init.signal!.addEventListener('abort', () => reject(new Error('cancelled')), {once:true}));
+  });
+  const running = f.call('a',1,'cron_run',{job_id:'job'},controller.signal);
+  const outcome = expect(running).rejects.toMatchObject({code:'CRON_OUTCOME_UNKNOWN',message:expect.stringContaining('Do not retry')});
+  while (!started) await new Promise(resolve => setImmediate(resolve));
+  controller.abort(); await outcome;
+  expect(f.request).toHaveBeenCalledTimes(2);
+});
+
+test('lost mutation response is explicitly uncertain and never retried', async () => {
+  const f=fixture(); f.request.mockRejectedValue(new Error('network failure'));
+  await expect(f.call('a',1,'cron_create',{name:'fixture',type:'agent',prompt:'fixture',schedule:'0 * * * *'})).rejects.toMatchObject({code:'CRON_OUTCOME_UNKNOWN'});
+  expect(f.request).toHaveBeenCalledTimes(1);
+});
+
+test.each(['revoke', 'disconnect', 'close'] as const)('bridge %s cancels an in-flight run wait', async reason => {
+  const { TaskBridge } = await import('../../../src/orchestration/bridge');
+  const { mkdtempSync, readFileSync, rmSync } = await import('fs');
+  const { tmpdir } = await import('os');
+  const { join } = await import('path');
+  const f = fixture(); let started = false, aborted = false;
+  f.request.mockImplementation(async (url, init) => {
+    if (!url.endsWith('/run')) return new Response(JSON.stringify({job:{agentId:'owner',type:'agent'}}));
+    started = true;
+    return new Promise<Response>((_resolve,reject) => init.signal!.addEventListener('abort', () => { aborted=true;reject(new Error('cancelled')); }, {once:true}));
+  });
+  const directory = mkdtempSync(join(tmpdir(),'cron-bridge-'));
+  const bridge = new TaskBridge({store:{agentId:'owner'}} as any, {scope:f.scope,releaseCaptured:()=>{}} as any, undefined, undefined, undefined, f.call);
+  try {
+    await bridge.start();
+    const ticket = bridge.issue({role:'worker',attemptId:'a',generation:1},directory,directory);
+    const auth = JSON.parse(readFileSync(join(directory,'ticket.json'),'utf8'));
+    const client = new AbortController();
+    const pending = fetch(auth.url,{method:'POST',headers:{Authorization:`Bearer ${auth.token}`},body:JSON.stringify({tool:'cron_run',args:{job_id:'job'},action_id:'fixture'}),signal:client.signal})
+      .then(async res => ({status:res.status,body:await res.json()})).catch(error => ({error}));
+    while (!started) await new Promise(resolve => setImmediate(resolve));
+    if (reason === 'revoke') ticket.revoke();
+    else if (reason === 'disconnect') client.abort();
+    else await bridge.close();
+    const result = await pending;
+    for(let n=0;n<100&&!aborted;n++) await new Promise(resolve=>setTimeout(resolve,1));
+    expect(aborted).toBe(true);
+    if (reason === 'revoke') expect(result).toMatchObject({status:400,body:{error:'CRON_OUTCOME_UNKNOWN',retryable:false,message:expect.stringContaining('may still complete')}});
+  } finally { await bridge.close();rmSync(directory,{recursive:true,force:true}); }
+});
