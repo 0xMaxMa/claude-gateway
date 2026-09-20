@@ -11,10 +11,18 @@ const descriptions: Record<string, string> = {
   start: 'Show pairing instructions', status: 'Show pairing status', help: 'Show available commands',
 };
 
+/** Shared discoverable built-ins for help, session shortcuts and the API picker. */
+export function commandCatalog(channel: CommandChannel): Array<{name: string; description: string}> {
+  return Object.entries(BUILTIN_COMMANDS)
+    .filter(([, definition]) => definition.channels.includes(channel))
+    .map(([name]) => ({name: `/${name}`, description: descriptions[name]}));
+}
+
 /** Channel-specific help shares the runner command registry instead of a second partial list. */
 export function commandHelp(channel: CommandChannel, orchestration = false, interactive = false): string {
-  const lines = Object.entries(BUILTIN_COMMANDS).filter(([, def]) => def.channels.includes(channel)).map(([name]) => {
-    let description = descriptions[name];
+  const lines = commandCatalog(channel).map(command => {
+    const name = command.name.slice(1);
+    let description = command.description;
     if (name === 'model' && ['telegram', 'discord', 'line'].includes(channel)) description = 'Show the model; change it in a private chat: /model [model ID]';
     if (name === 'stop' && orchestration) description = 'Stop the reply and choose a task to cancel';
     if (name === 'compact' && channel !== 'api') description += '; confirmation required';

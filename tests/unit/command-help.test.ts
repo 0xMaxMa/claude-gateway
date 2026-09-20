@@ -14,3 +14,17 @@ test('mode-specific help does not advertise unsupported voice or API slash contr
  expect(commandHelp('discord',true,true)).not.toContain('/cli');
  expect(commandHelp('telegram',true,true)).toContain('/cli');
 });
+
+import { commandCatalog } from '../../src/agent/command-help';
+import { formatSessionStatus } from '../../src/agent/session-status';
+test.each([...CHAT_CHANNELS,'api'] as const)('%s session shortcuts only advertise supported commands', channel => {
+ const status = formatSessionStatus('session','Fixture','model',{text:'—',contextUsedPct:null},false,channel);
+ const shortcuts = status.split('Commands: ')[1].split(' ');
+ for(const shortcut of shortcuts) expect(commandCatalog(channel).some(c=>c.name===shortcut)).toBe(true);
+ expect(shortcuts).toContain('/help');
+});
+test('API catalog includes help and sessions and excludes channel-only commands', () => {
+ const names=commandCatalog('api').map(c=>c.name);
+ expect(names).toEqual(expect.arrayContaining(['/help','/sessions','/restart','/compact']));
+ expect(names).not.toContain('/new'); expect(names).not.toContain('/rename');
+});

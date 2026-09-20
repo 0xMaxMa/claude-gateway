@@ -1,3 +1,4 @@
+import { canAccessAgent } from '../api/auth';
 import type { AgentConfig, GatewayConfig } from '../types';
 import { CRON_TOOLS } from '../cron/tool-schemas';
 import { OrchestrationError } from './types';
@@ -13,7 +14,7 @@ export function workerCrons(files: TaskFiles, agent: AgentConfig, gateway: Gatew
     validate();
     const definition = CRON_TOOLS.find(t => t.name === tool);
     if (!definition || Object.keys(args).some(k => !Object.prototype.hasOwnProperty.call(definition.inputSchema.properties, k))) throw new OrchestrationError('INVALID_INPUT');
-    const key = gateway.gateway.api?.keys?.find(k => k.agents === '*' || Array.isArray(k.agents) && k.agents.includes(agent.id))?.key;
+    const key = gateway.gateway.api?.keys?.find(k => canAccessAgent(k, agent.id))?.key;
     if (!key) throw new OrchestrationError('CRON_NOT_CONFIGURED');
     const base = (process.env.GATEWAY_API_URL ?? `http://127.0.0.1:${process.env.PORT ?? '10850'}`).replace(/\/+$/, '');
     const call = async (path: string, method = 'GET', body?: Record<string, unknown>) => {

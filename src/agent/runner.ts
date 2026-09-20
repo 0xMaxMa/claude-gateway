@@ -870,7 +870,7 @@ export class AgentRunner extends EventEmitter {
             const current=index.sessions.find(session=>session.id===index.activeSessionId);
             const text=content.trim()==='/sessions'
               ? `Sessions\n${index.sessions.slice(0,15).map(session=>`${session.id===index.activeSessionId?'✅ ':''}${session.name}\n${session.id}`).join('\n\n')}`
-              : formatSessionStatus(index.activeSessionId, current?.name ?? '(unnamed)', this.agentConfig.claude.model, await this.sessionContextInfo(index.activeSessionId, current));
+              : formatSessionStatus(index.activeSessionId, current?.name ?? '(unnamed)', this.agentConfig.claude.model, await this.sessionContextInfo(index.activeSessionId, current), false, channelSource);
             await this.sendOrchestrationControl(channelSource,chatId,{text,buttons:[]},meta);
             res.writeHead(200);res.end('ok');return;
           }
@@ -3071,7 +3071,7 @@ export class AgentRunner extends EventEmitter {
 
     const context = await this.sessionContextInfo(meta.id, meta);
 
-    this.writeAutoForward(chatId, formatSessionStatus(meta.id, meta.name, this.agentConfig.claude.model, context, true), 'html');
+    this.writeAutoForward(chatId, formatSessionStatus(meta.id, meta.name, this.agentConfig.claude.model, context, true, this.channelFor(chatId)), 'html');
   }
 
   /**
@@ -3211,9 +3211,13 @@ export class AgentRunner extends EventEmitter {
   private async restartProcess(chatId: string, expectedSessionId?: string): Promise<void> {
     const existing = this.sessions.get(chatId);
     if (existing && expectedSessionId && existing.sessionId !== expectedSessionId) throw new Error('The active session changed. Run /restart again.');
+    // Mark the managed turn as intentionally interrupted before stopping its process.
+    // This also cancels a turn still preparing, before a process has been registered.
+    const sessionId = expectedSessionId ?? existing?.sessionId ?? chatId;
+    this.orchestration?.stopResponse(sessionId);
     if (existing) {
       await existing.stop();
-      this.sessions.delete(chatId);
+      if (this.sessions.get(chatId) === existing) this.sessions.delete(chatId);
     }
     // Process will be re-spawned on next incoming message
   }
@@ -5374,7 +5378,7 @@ export class AgentRunner extends EventEmitter {
 
         }
       } else if (cmd === '/restart') {
-        this.restartProcess(sessionId).catch(() => {});
+        await this.restartProcess(sessionId, sessionId);
         result = { restarting: true };
         responseText = 'Session is restarting.';
       } else if (cmd === '/session') {
@@ -5388,7 +5392,7 @@ export class AgentRunner extends EventEmitter {
         const {text: _contextText,...contextFields} = context;
         result = {sessionId,sessionName:meta?.name ?? null,messageCount,archivedCount:meta?.archivedCount ?? 0,
           ...contextFields,model:effectiveModel};
-        responseText = formatSessionStatus(sessionId, meta?.name ?? '(unnamed)', effectiveModel, context);
+        responseText = formatSessionStatus(sessionId, meta?.name ?? '(unnamed)', effectiveModel, context, false, 'api');
       } else if (cmd === '/sessions') {
         // Advertised for the api channel (BUILTIN_COMMANDS), so handle it here — mirrors the
         // telegram /sessions list. Marks the session this command runs in as (current).

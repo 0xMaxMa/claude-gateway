@@ -1,3 +1,4 @@
+import { commandCatalog } from '../agent/command-help';
 import { responseFailureMessage } from '../orchestration/response-errors';
 import { voiceSettingsRouter } from './voice-settings-router';
 import { Router, Request, Response } from 'express';
@@ -592,14 +593,7 @@ export function createApiRouter(
    */
   router.get('/v1/commands', (_req: Request, res: Response) => {
     res.json({
-      commands: [
-        { name: '/session',  description: 'Show current session, selected model and measured context usage' },
-        { name: '/clear',    description: 'Reset Claude Code context; keep chat history' },
-        { name: '/compact',  description: 'Compact Claude Code context without changing chat history' },
-        { name: '/stop',     description: 'Interrupt the in-flight turn' },
-        { name: '/restart',  description: 'Graceful session restart' },
-        { name: '/model',    description: 'Show the current AI model' },
-      ],
+      commands: commandCatalog('api'),
     });
   });
 

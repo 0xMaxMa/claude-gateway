@@ -117,3 +117,25 @@ test.each(['revoke', 'disconnect', 'close'] as const)('bridge %s cancels an in-f
     if (reason === 'revoke') expect(result).toMatchObject({status:400,body:{error:'CRON_OUTCOME_UNKNOWN',retryable:false,message:expect.stringContaining('may still complete')}});
   } finally { await bridge.close();rmSync(directory,{recursive:true,force:true}); }
 });
+
+test.each([
+  {admin:true, agents:[]},
+  {admin:true, agents:['different-agent']},
+  {admin:false, agents:['owner']},
+])('cron accepts an API-authorized key: %j', async permissions => {
+  const request = jest.fn(async () => new Response(JSON.stringify({jobs:[]})));
+  const call = workerCrons({scope:()=>({task:{agentId:'owner',capabilities:{execute:true}}})} as unknown as TaskFiles,
+    {id:'owner'} as AgentConfig,
+    {gateway:{api:{keys:[{key:'fixture-only',...permissions}]}}} as GatewayConfig, request);
+  await expect(call('attempt',1,'cron_list',{})).resolves.toEqual({jobs:[]});
+  expect(request).toHaveBeenCalledTimes(1);
+});
+
+test('non-admin key scoped to another agent cannot dispatch cron requests', async () => {
+  const request = jest.fn();
+  const call = workerCrons({scope:()=>({task:{agentId:'owner',capabilities:{execute:true}}})} as unknown as TaskFiles,
+    {id:'owner'} as AgentConfig,
+    {gateway:{api:{keys:[{key:'fixture-only',admin:false,agents:['other']}]}}} as GatewayConfig, request);
+  await expect(call('attempt',1,'cron_list',{})).rejects.toThrow('CRON_NOT_CONFIGURED');
+  expect(request).not.toHaveBeenCalled();
+});

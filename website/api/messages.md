@@ -41,6 +41,10 @@ If `message` starts with `/`, the endpoint executes the command instead of forwa
 | `/restart` | Gracefully restart the session |
 | `/model` | Return the current model for this agent |
 
+`GET /api/v1/commands` returns the supported API slash commands (including `/help` and `/sessions`) for client command pickers. Channel-specific commands such as `/new` and `/rename` are not advertised by this endpoint.
+
+Restarting an active response records an intentional interruption, not a process failure. A restart keeps chat history and does not restart the gateway or app container.
+
 Commands execute directly; API clients provide any desired Yes/No confirmation before submission. Voice settings and task operations have dedicated REST endpoints rather than `/voice` or `/tasks` slash dispatch. Unknown slash commands can still be application-defined messages.
 
 **Command response:**
