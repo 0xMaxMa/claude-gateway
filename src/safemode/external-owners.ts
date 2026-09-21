@@ -15,7 +15,7 @@ export interface ExternalOwnerOptions {
 function vanished(error: unknown): boolean {
   return ['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code || '');
 }
-class ExternalOwnerFound extends Error {
+export class ExternalOwnerFound extends Error {
   constructor(readonly pid: number) { super(`Busy: external native CLI process ${pid} may own this conversation. Close it before resuming; safemode will not stop an unmanaged process.`); }
 }
 function busy(pid: number): never {

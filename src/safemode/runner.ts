@@ -7,7 +7,7 @@ import { createHash } from 'crypto';
 import { SafemodeStore, SafemodeSession, Owner, alive, atomicJson } from './store';
 import { buildNativeInvocation, discoverCodexSession, extractNativeSessionId } from './native';
 import { prepareContext } from './context';
-import { assertNoExternalNativeOwner } from './external-owners';
+import { assertNoExternalNativeOwner, ExternalOwnerFound } from './external-owners';
 
 export interface RunOptions { nativeArgs?: string[]; nativeResumeIndex?: number; mode: 'interactive' | 'headless'; prompt?: string; requestId?: string; configPath?: string }
 const STOP_TIMEOUT = 15000;
@@ -70,6 +70,7 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
   let discovery: NodeJS.Timeout | undefined;
   let ownershipMonitor: NodeJS.Timeout | undefined;
   let ownershipError: string | undefined;
+  let ownershipWarningSent = false;
   let request: SafemodeSession['lastRequest'];
   let exitCode = 1;
   const startedAt = Date.now();
@@ -189,7 +190,19 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
         assertNoExternalNativeOwner({ cli: session.cli, nativeSessionId: session.nativeSessionId, cwd: workspace,
           env: invocation.env, ignorePids: child?.pid ? [child.pid] : [] });
       } catch (error) {
-        ownershipError = (error as Error).message;
+        // Startup verification already admitted this owner. Losing visibility
+        // into an unrelated process is not evidence of a competing writer.
+        // Keep checking, but stop a live session only on a detected conflict.
+        if (!(error instanceof ExternalOwnerFound)) {
+          if (!ownershipWarningSent) {
+            ownershipWarningSent = true;
+            const notice = 'Safemode could not inspect other native processes; keeping this session running and continuing ownership checks.\n';
+            process.stderr.write(notice);
+            if (options.mode === 'headless') appendOutput(Buffer.from(notice));
+          }
+          return;
+        }
+        ownershipError = error.message;
         // Only our ChildProcess handle is signalled. External/native owners are
         // never killed based on PIDs found in registries or /proc.
         child?.kill('SIGTERM');

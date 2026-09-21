@@ -6,9 +6,11 @@ import { SafemodeStore, alive } from '../../src/safemode/store';
 import { resolveSafemodeSettings } from '../../src/safemode/config';
 import { controlPath, getRequest, recoverSession, runSession, stopSession } from '../../src/safemode/runner';
 import { buildNativeInvocation } from '../../src/safemode/native';
-import { assertNoExternalNativeOwner } from '../../src/safemode/external-owners';
+import { assertNoExternalNativeOwner, ExternalOwnerFound } from '../../src/safemode/external-owners';
 
-jest.mock('../../src/safemode/external-owners', () => ({assertNoExternalNativeOwner: jest.fn()}));
+jest.mock('../../src/safemode/external-owners', () => ({...jest.requireActual('../../src/safemode/external-owners'), assertNoExternalNativeOwner: jest.fn()}));
+
+jest.mock('../../src/session/codex-auth', () => ({codexSafemodeEnvironment: jest.fn(async (_bin, env) => env)}));
 
 jest.mock('../../src/safemode/context', () => ({prepareContext: jest.fn(async () => ({prompt: 'Test context'}))}));
 jest.mock('../../src/safemode/native', () => ({buildNativeInvocation: jest.fn(), discoverCodexSession: jest.fn(), extractNativeSessionId: jest.fn()}));
@@ -104,16 +106,16 @@ describe('safemode ownership and native lifecycle', () => {
     expect(buildNativeInvocation).not.toHaveBeenCalled();
     expect(store.owner(session.id)).toBeUndefined();
   });
-  test('a later external owner stops only the managed process and fails the request', async () => {
-    const session=store.create('test','claude','inherit');
+  test.each(['claude','codex'] as const)('%s stops only the managed process when a later external owner is detected', async cli => {
+    const session=store.create('test',cli,'inherit',undefined,'11111111-2222-4333-8444-555555555555');
     (buildNativeInvocation as jest.Mock).mockImplementation(o=>({command:process.execPath,args:['-e','setInterval(()=>{},1000)'],env:process.env,cwd:o.cwd}));
     (assertNoExternalNativeOwner as jest.Mock).mockImplementation(options=>{
-      if(options.ignorePids?.length)throw new Error('Busy: external native owner appeared');
+      if(options.ignorePids?.length)throw new ExternalOwnerFound(9001);
     });
     expect(await runSession(store,session,{mode:'headless',prompt:'inspect',requestId:'collision'})).toBe(1);
-    expect(getRequest(store,session.id,'collision')).toMatchObject({status:'failed',error:'Busy: external native owner appeared'});
+    expect(getRequest(store,session.id,'collision')).toMatchObject({status:'failed',error:expect.stringContaining('external native CLI process 9001')});
     expect(store.owner(session.id)).toBeUndefined();
-    expect(fs.readFileSync(path.join(store.dir(session.id),'output.log'),'utf8')).toContain('external native owner appeared');
+    expect(fs.readFileSync(path.join(store.dir(session.id),'output.log'),'utf8')).toContain('external native CLI process 9001');
   });
   test('post-spawn setup failure terminates child before releasing ownership', async () => {
     const session = store.create('test', 'claude', 'inherit');
@@ -137,4 +139,31 @@ describe('safemode ownership and native lifecycle', () => {
     expect(store.owner(session.id)).toBeUndefined();
     expect(getRequest(store,session.id,'request-3')?.status).toBe('failed');
   });
+  test.each(['claude','codex'] as const)('%s stays alive when monitoring metadata becomes inaccessible', async cli => {
+    const session=store.create('monitor',cli,'inherit',undefined,'11111111-2222-4333-8444-555555555555');
+    (buildNativeInvocation as jest.Mock).mockImplementation(o=>({command:process.execPath,args:['-e','setTimeout(()=>process.exit(0),2400)'],env:process.env,cwd:o.cwd}));
+    let checks=0;
+    (assertNoExternalNativeOwner as jest.Mock).mockImplementation(options=>{
+      if(options.ignorePids?.length){ checks++;throw new Error('Cannot verify external native session ownership: process metadata is inaccessible.'); }
+    });
+    const stderr=jest.spyOn(process.stderr,'write').mockImplementation(()=>true);
+    try {
+      expect(await runSession(store,session,{mode:'headless',prompt:'inspect',requestId:'metadata'})).toBe(0);
+      expect(checks).toBeGreaterThanOrEqual(2);
+      expect(getRequest(store,session.id,'metadata')).toMatchObject({status:'completed',exitCode:0});
+      expect(store.owner(session.id)).toBeUndefined();
+      const log=fs.readFileSync(path.join(store.dir(session.id),'output.log'),'utf8');
+      expect(log.match(/keeping this session running/g)).toHaveLength(1);
+      expect(log).not.toContain('Stopping safemode');
+    } finally { stderr.mockRestore(); }
+  });
+  test('unavailable preflight still refuses a new launch', async()=>{
+    const session=store.create('blocked','claude','inherit');
+    (buildNativeInvocation as jest.Mock).mockClear();
+    (assertNoExternalNativeOwner as jest.Mock).mockImplementation(()=>{throw new Error('metadata inaccessible');});
+    await expect(runSession(store,session,{mode:'headless',prompt:'inspect'})).rejects.toThrow('metadata inaccessible');
+    expect(buildNativeInvocation).not.toHaveBeenCalled();
+    expect(store.owner(session.id)).toBeUndefined();
+  });
+
 });
