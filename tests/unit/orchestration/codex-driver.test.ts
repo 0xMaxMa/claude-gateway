@@ -23,6 +23,7 @@ import { startProcessTurn } from '../../../src/orchestration/process-turn';
 import type { AgentConfig, GatewayConfig } from '../../../src/types';
 import type { CommandContext } from '../../../src/orchestration/types';
 
+let mockFinalText = 'Verified fixture';
 class MockWorker extends EventEmitter {
   managedGroupStopped = true;
   managedProcessId = undefined;
@@ -32,8 +33,8 @@ class MockWorker extends EventEmitter {
   stop = jest.fn(async () => {});
   interrupt = jest.fn(async () => {});
   sendMessage = jest.fn(() => {
-    this.emit('output', JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'Verified fixture'}]}}));
-    this.emit('output', JSON.stringify({type:'result',result:'Verified fixture'}));
+    this.emit('output', JSON.stringify({type:'assistant',message:{content:[{type:'text',text:mockFinalText}]}}));
+    this.emit('output', JSON.stringify({type:'result',result:mockFinalText}));
   });
 }
 jest.mock('../../../src/session/process', () => ({ SessionProcess: jest.fn().mockImplementation((...args: any[]) => new MockWorker(args[6])) }));
@@ -42,6 +43,7 @@ jest.mock('../../../src/session/codex-process', () => ({ cleanupCodexSessions: j
 let root: string, store: OrchestrationStore, tasks: TaskService, bridge: TaskBridge;
 let agent: AgentConfig, gateway: GatewayConfig, driver: ClaudeWorkerDriver, context: CommandContext, sequence: number;
 beforeEach(async () => {
+  mockFinalText = 'Verified fixture';
   jest.clearAllMocks(); sequence = 0;
   jest.mocked(resolveCodexCredentials).mockResolvedValue({baseUrl:'https://fixture.invalid/v1',key:'fixture-key',fingerprint:'fixture'});
   root = mkdtempSync(join(tmpdir(),'codex-driver-'));
@@ -271,4 +273,17 @@ test('auto keeps native Claude skills on Claude before dispatch and records why'
  expect(CodexProcess).not.toHaveBeenCalled();expect(SessionProcess).toHaveBeenCalled();
  expect(store.get("SELECT payload_json FROM task_attempts ORDER BY rowid DESC LIMIT 1")?.payload_json).toContain('"harness":"claude"');
  expect(store.get("SELECT payload_json FROM conversation_events WHERE type='worker.harness_fallback'")?.payload_json).toContain('CODEX_SKILL_UNAVAILABLE');
+});
+
+test.each(['claude-sonnet-4-6','gpt-5.6-luna'])('empty %s worker fails and never admits its after_success continuation',async model=>{
+  mockFinalText = '';
+  const task = spawn(model), next = spawn(model,{continueTaskId:task.taskId});
+  const attempt = tasks.claim(task.taskId)!;
+  const handle = await driver.start(task,attempt);
+  const outcome = await handle.result;
+  expect(outcome).toMatchObject({type:'failed',failure:{code:'WORKER_RESULT_MISSING'}});
+  tasks.finish(attempt.attemptId,attempt.generation,outcome);
+  expect(store.task(task.taskId)?.state).toBe('failed');
+  expect(tasks.claim(next.taskId)).toBeUndefined();
+  expect(store.task(next.taskId)?.activeAttemptId).toBeUndefined();
 });

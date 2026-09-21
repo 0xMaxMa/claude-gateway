@@ -230,6 +230,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
           await process.stop();
           return { type: process.managedGroupStopped ? 'stopped' as const : 'unknown' as const };
         }
+        if (!answer.text.trim()) throw new OrchestrationError('WORKER_RESULT_MISSING', 'The worker ended without a final response. Inspect existing changes before retrying.');
         if (Buffer.byteLength(answer.text) > 262144) throw new OrchestrationError('RESPONSE_TOO_LARGE');
         const artifact = await this.workspaces.artifact(task.taskId);
         await writeFile(join(directory, 'diff.patch'), artifact.diff, { mode: 0o600 });
@@ -238,7 +239,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         if (!process.managedGroupStopped) return { type: 'unknown' as const };
         const diff = boundedDiffText(artifact.diff);
         const fileIds = this.tasks.store.all('SELECT id FROM task_files WHERE attempt_id=? ORDER BY created_at,id', attempt.attemptId).map(row => String(row.id));
-        return { type: 'completed' as const, result: { summary: answer.text || 'Worker turn ended without a text summary.', artifactIds: [artifact.resourceId, ...fileIds],
+        return { type: 'completed' as const, result: { summary: answer.text, artifactIds: [artifact.resourceId, ...fileIds],
           diff: { text: diff, truncated: diff.length < artifact.diff.length } } };
       }).catch(async error => {
         await process.stop();

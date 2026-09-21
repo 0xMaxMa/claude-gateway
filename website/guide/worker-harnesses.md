@@ -403,3 +403,9 @@ node scripts/orchestration/smoke-codex-worker.cjs --shell-environment --containe
 The second command requires local Docker and a compatible native runtime. It
 creates and removes its own test container and checks that host worker environment
 settings are not inherited.
+
+### Completion and native background work
+
+A worker must return a nonempty final report before its task can succeed. An empty or whitespace-only result fails with `WORKER_RESULT_MISSING`; it does not unlock an `after_success` continuation. Existing side effects are retained, so inspect them before retrying.
+
+For Claude Code workers, native `task_started` and `task_notification` events keep background commands and monitors attached to the running gateway task. An interim “waiting” turn does not release the execution slot or close the process. The gateway waits for tracked native tasks to finish and for the worker's subsequent final response. Cancellation, process exit and configured task deadlines still apply. A native completion event alone is not proof that the requested action (such as a merge) succeeded: the worker must inspect and report the outcome. Use gateway cron tools for authorized recurring work rather than promises to wake up after the worker ends.

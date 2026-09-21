@@ -1,4 +1,5 @@
 import type { CodexContextMeasurement } from '../session/codex-context';
+import { BackgroundWork } from './background-work';
 import { containerTaskTools } from './container-tool-schemas';
 import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
 import type { RequestToolSchemas } from '../session/request-tool-capture';
@@ -52,6 +53,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
   let apiErrorCodes: string[] = [];
   let providerMessage: string | undefined;
   const usageCollector = new TurnUsageCollector();
+  const background = new BackgroundWork();
   const startedAt = Date.now(); const tools = new Set<string>(); let inputTokens = 0, totalTokens = 0, recorded = false;
   const activeTools = new Map<string, number>();
   const toolNames = new Map<string, string>();
@@ -104,6 +106,17 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     let event: Record<string, any>;
     if (settled) return;
     try { event = JSON.parse(line); } catch { return; }
+    if (process.runtimeProfile?.role === 'worker') background.observe(event);
+    if (event.type === 'result' && !event.is_error && !stopped && process.runtimeProfile?.role === 'worker' && background.pending) {
+      // Decide at receipt, before asynchronous schema capture: a task may finish
+      // during capture, but that cannot turn this earlier waiting result into
+      // the final answer. Keep accounting for every native turn in the task.
+      usageCollector.observe(event);
+      text = ''; streamed = false;
+      resolveAccepted();
+      if (policy) arm('idle', policy.idleTimeoutMs);
+      return;
+    }
     if(event.type==='result'&&!event.gatewaySchemasFlushed&&typeof process.flushToolSchemas==='function'){
       finalCapturePending=true;
       void process.flushToolSchemas(usageCollector.snapshot().requests.map(r=>r.id)).then(values=>{for(const value of values)usageCollector.observeSchemas(value);}).catch(()=>{}).finally(()=>{finalCapturePending=false;output(JSON.stringify({...event,gatewaySchemasFlushed:true}));});
@@ -228,6 +241,10 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       // a larger canonical/structured result. Apply the same byte limit before
       // publishing or recording success, without silently shortening evidence.
       if (Buffer.byteLength(text) > 262144) { fail(new OrchestrationError('RESPONSE_TOO_LARGE')); void process.stop(); return; }
+      if (!stopped && process.runtimeProfile?.role === 'worker' && !text.trim()) {
+        fail(new OrchestrationError('WORKER_RESULT_MISSING', 'The worker ended without a final response. Inspect its changes before retrying; dependent tasks were not authorized by this empty result.'));
+        return;
+      }
       if (!streamed && text && !publish(text)) return;
       process.recordTurnOutcome?.(stopped ? 'cancelled' : 'completed');
       resolveAccepted(); settled = true; cleanup(); resolveResult({ text, interrupted: stopped });
