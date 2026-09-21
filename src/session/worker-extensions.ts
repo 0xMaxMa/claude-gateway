@@ -1,3 +1,4 @@
+import { sanitizeJevChildEnv } from '../jev/child-env';
 import { readFileSync, readdirSync, realpathSync, statSync, existsSync } from 'fs';
 import { dirname, join, resolve, relative, isAbsolute } from 'path';
 import { homedir } from 'os';
@@ -194,7 +195,7 @@ export function discoverWorkerExtensions(agent: AgentConfig, gateway?: GatewayCo
         }
         const providerEnv = native.config.model_providers?.[native.config.model_provider ?? 'openai']?.env_key;
         if (typeof providerEnv === 'string' && process.env[providerEnv]) env[providerEnv] = process.env[providerEnv]!;
-        result.servers.codex_native = { nativeCodex: { bin: executable, cwd, home: process.env.CODEX_HOME ?? join(process.env.HOME ?? homedir(), '.codex'), servers, pluginIds: native.pluginIds ?? [], env } };
+        result.servers.codex_native = { nativeCodex: { bin: executable, cwd, home: process.env.CODEX_HOME ?? join(process.env.HOME ?? homedir(), '.codex'), servers, pluginIds: native.pluginIds ?? [], env: sanitizeJevChildEnv(env, gateway?.gateway.jev) } };
       }
     }
     catch { result.notices.push('Codex extension discovery is unavailable. Check the native Codex installation and configuration.'); }

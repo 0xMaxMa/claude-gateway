@@ -1,10 +1,12 @@
+import { JEV_TOOL } from './jev-tool';
 import { CONTAINER_CRON_TOOLS } from '../cron/tool-schemas';
 import { WORKFLOW_SCHEMA } from './workflow';
 
 /** Container task-only MCP inventory; no host media/browser/memory delegation.
- * Invariant per role for the same reason as AGENT_TASK_TOOLS: this array becomes the
+ * Core entries are invariant per role; optional Jev is captured at process creation.
+ * Like AGENT_TASK_TOOLS, this array becomes the
  * container agent's advertised tool list, i.e. the head of its cached prompt prefix. */
-export function containerTaskTools(role: 'agent' | 'worker') {
+export function containerTaskTools(role: 'agent' | 'worker', jevEnabled = false, browserEnabled = false) {
   const text = { type: 'string' };
   const entries: Array<[string, Record<string, unknown>, string[], string]> = role === 'agent' ? [
     ['capabilities_list',{query:text,catalog_version:text,offset:{type:'integer',minimum:0}},[],'Read this app agent capability catalog without granting host access. Follow next_offset with catalog_version for the complete list; restart at 0 on CAPABILITY_CATALOG_CHANGED.'],
@@ -20,5 +22,13 @@ export function containerTaskTools(role: 'agent' | 'worker') {
     ['task_request_input',{question:text},['question'],'Ask for input then end the turn.'],
     ['task_stage_file',{path:text,caption:text},['path'],'Stage a finished file from /workspace or /tmp inside the container.'],
   ];
-  return [...entries.map(([name,properties,required,description])=>({name,description,inputSchema:{type:'object',properties,required,additionalProperties:false}})), ...(role === 'worker' ? CONTAINER_CRON_TOOLS : [])];
+  if (role === 'agent' && browserEnabled) {
+    const discovery = entries.find(([name]) => name === 'capabilities_list')!;
+    discovery[1].scope = { type: 'string', enum: ['capabilities', 'browser'] };
+    discovery[3] += ' Use scope=browser to discover installed targets owned by this principal and conversation. No host safemode access is granted.';
+    const spawn = entries.find(([name]) => name === 'task_spawn')!;
+    spawn[1].gateway_target = { type: 'object', additionalProperties: false, properties: { adapter: { type: 'string', enum: ['browser'] }, session_id: text }, required: ['adapter', 'session_id'] };
+    spawn[3] += ' For an authorized installed browser target, use target_profile=gateway-managed and gateway_target with adapter=browser; browser grants remain enforced by its transport.';
+  }
+  return [...(jevEnabled ? [JEV_TOOL] : []), ...entries.map(([name,properties,required,description])=>({name,description,inputSchema:{type:'object',properties,required,additionalProperties:false}})), ...(role === 'worker' ? CONTAINER_CRON_TOOLS : [])];
 }

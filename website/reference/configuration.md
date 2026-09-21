@@ -52,7 +52,7 @@ Environment placeholders use `${VARIABLE_NAME}` syntax. Keep actual values in th
 
 Run `claude-gateway doctor` after changes, then verify the affected capability. Config migration adds new defaults and backs up the previous configuration; preserve those backups when upgrading. Some configuration changes hot-reload, while operations that replace installed code require a restart.
 
-Continue with [gateway settings](./gateway-settings.md), [memory and knowledge settings](./memory-settings.md), [orchestration settings](./orchestration-settings.md), or [voice configuration](../guide/voice.md).
+Continue with [gateway settings](./gateway-settings.md), [memory and knowledge settings](./memory-settings.md), [orchestration settings](./orchestration-settings.md), [voice configuration](../guide/voice.md), or [Jev evaluations](../guide/jev.md).
 
 ## Enable orchestration
 

@@ -89,7 +89,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
       const session=get('SELECT id,source,chat_id FROM conversations WHERE agent_session_id=?',options.sessionId)!;
       // Same activity status the Conversations column shows, so the report header mirrors it.
       const activityStatus=conversationActivityStatus(get,all,session.id).status;
-      return {...report, providerWaiting:providerWaiting('session:'+options.sessionId), source:session.source, chatId:session.chat_id, activityStatus, since, contextFootprint:contextFootprint(options.workspace)};
+      return {...report, providerWaiting:providerWaiting('session:'+options.sessionId), source:session.source, chatId:session.chat_id, activityStatus, since, contextFootprint:contextFootprint(options.workspace, options.jevEnabled === true)};
     }
     if (operation === 'task') {
       const row = get('SELECT t.*,c.agent_session_id FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.id=? AND c.agent_session_id=?', options.taskId, options.sessionId);
