@@ -119,12 +119,8 @@ test('container schemas expose Jev only when explicitly enabled, without host to
 
 test('enabled app browser schemas discover and submit only scoped browser managed work', async () => {
   const adapters = new Map<string, GatewayTaskAdapter>(); const f = fixture(true, adapters);
-  const transport = {
-    observe: async () => ({ revision: 'r', fingerprint: 'f', state: 'Expected result is present', actions: [] }),
-    checkAccess: async () => true, execute: jest.fn(async () => ({ outcome: 'applied' as const })),
-    verifyCompletion: async () => ({ verified: true, evidence: 'Independent result element matched' }),
-  };
-  const binding = { version: 1 as const, id: 'browser-a', name: 'Private browser', principalId: 'u', conversationId: f.context.conversationId, transport };
+  const run=jest.fn(async()=>({status:'succeeded' as const,reason:'VERIFIED',steps:0,evaluations:1}));
+  const binding = { version: 1 as const, id: 'browser-a', name: 'Private browser', principalId: 'u', conversationId: f.context.conversationId, run };
   const browser = new BrowserTaskAdapter({ agentId: 'a', root: join(f.root, 'receipts'), allowed: () => true, bindings: () => [binding], evaluate: async () => ({
     requestId:'r',requestedModel:'jev',model:'jev',usage:{input_tokens:1,output_tokens:1},answers:{
       operation:{type:'choice',choice:'DONE',confidence:1,probabilities:{DONE:1}},target:{type:'choice',choice:'NONE',confidence:1,probabilities:{NONE:1}},
@@ -145,6 +141,6 @@ test('enabled app browser schemas discover and submit only scoped browser manage
     const rows=f.store.all('SELECT id,state FROM tasks'); expect(rows).toHaveLength(1);expect(rows[0].state).toBe('completed');
     expect(f.store.task(String(rows[0].id))?.gatewayTarget).toMatchObject({adapter:'browser',sessionId:'browser-a'});
     expect(f.store.all('SELECT * FROM worker_pool')).toHaveLength(0);
-    expect(transport.execute).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledTimes(1);
   } finally {await controller.close();await browser.close();await f.close();}
 });

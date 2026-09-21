@@ -8,7 +8,8 @@ export interface GatewayTaskAdapter {
   resolve(input: Record<string, unknown>, context?: CommandContext): GatewayTaskTarget;
   close?(): Promise<void>;
   ready?(task: TaskSnapshot): boolean;
-  submit(task: TaskSnapshot, requestId: string, instructions: string): Promise<void>;
+  validateInput?(instructions:string,answers?:import('../types').TaskRevision['answers']):void;
+  submit(task: TaskSnapshot, requestId: string, instructions: string, answers?: import('../types').TaskRevision['answers']): Promise<void>;
   inspect(task: TaskSnapshot, requestId: string): Promise<WorkerOutcome | 'running' | 'pending'>;
   cancel(task: TaskSnapshot, requestId: string): Promise<void>;
 }
@@ -73,11 +74,13 @@ export class GatewayTaskController {
           // Serialize target writers even during the gap before the detached
           // CLI publishes its owner file. This fence survives gateway restart.
           if (this.targetBusy(task) || (adapter.ready && !adapter.ready(task))) continue;
+          const revision=this.tasks.revision(task.taskId,attempt.revision);
+          adapter.validateInput?.(revision.instructions,revision.answers);
           // Commit the dispatch fence BEFORE touching the target. A crash after
           // this point is inspected, never replayed on the assumption of failure.
           task.gatewayDispatch = {requestId, submittedAt:Date.now()};
           this.tasks.store.transaction(() => this.tasks.store.saveTask(task, task.stateVersion));
-          await adapter.submit(task, requestId, this.tasks.revision(task.taskId, attempt.revision).instructions);
+          await adapter.submit(task, requestId, revision.instructions, revision.answers);
         }
         task = this.tasks.store.task(task.taskId)!;
         if (task.state === 'cancel_requested') await adapter.cancel(task, requestId);

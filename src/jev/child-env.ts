@@ -13,6 +13,10 @@ const privateNames = new Set(['TYPESAFE_API_KEY', 'JEV_API_KEY']);
 export function jevCredentialEnvNames(config?: JevConfig): string[] {
   if (config?.apiKeyEnv && isReservedJevCredentialEnv(config.apiKeyEnv)) throw new JevError('INVALID_CONFIG', 'Jev apiKeyEnv must use a dedicated credential variable, not native CLI authentication or process controls.');
   if (config?.apiKeyEnv) privateNames.add(config.apiKeyEnv);
+  for (const binding of config?.browser?.bindings ?? []) {
+    if (binding.apiKeyEnv && isReservedJevCredentialEnv(binding.apiKeyEnv)) throw new JevError('INVALID_CONFIG', 'Browser credentials require a dedicated environment variable.');
+    if (binding.apiKeyEnv) privateNames.add(binding.apiKeyEnv);
+  }
   return [...privateNames];
 }
 /** Apply after overlays. Do not mutate the gateway environment or native CLI authentication. */
