@@ -14,7 +14,7 @@ export interface TurnTimeoutDetails { phase: 'startup' | 'first_response' | 'com
 export interface ProcessResult { text: string; interrupted: boolean; }
 /** Shared lifecycle contract; each backend normalizes its own native event protocol. */
 export type WorkerProcess = { on(event: string, listener: (...args: any[]) => void): unknown; off(event: string, listener: (...args: any[]) => void): unknown } & Pick<SessionProcess, 'start' | 'sendMessage' | 'interrupt' | 'stop' | 'runtimeProfile' | 'managedProcessId' | 'spawnedAt' | 'managedGroupStopped'> &
-  Partial<Pick<SessionProcess, 'isSpawnedConnectorTool' | 'flushToolSchemas'>>;
+  Partial<Pick<SessionProcess, 'isSpawnedConnectorTool' | 'flushToolSchemas' | 'recordTurnOutcome'>>;
 export interface ProcessTurn {
   accepted: Promise<void>;
   result: Promise<ProcessResult>;
@@ -81,7 +81,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     phaseTimer = setTimeout(check, budget);
   };
   const cleanup = () => { if (!recorded) { recorded = true; try { const measured = usageCollector.snapshot(); onMetrics?.({ toolIds: [...tools], inputTokens: measured.usage ? measured.usage.inputTokens + measured.usage.cacheCreationTokens + measured.usage.cacheReadTokens : inputTokens, totalTokens: measured.usage?.totalTokens ?? totalTokens, startedAt, endedAt: Date.now(), ...measured }); } catch { /* telemetry must not break delivery */ } } clearTimeout(timer); clearTimeout(phaseTimer); clearInterval(observationTimer); process.off('output', output); process.off('request-tools', schemaOutput); process.off('exit', exit); process.off('startup-error', startupError); };
-  const fail = (error: Error) => { if (settled) return; settled = true; cleanup(); rejectAccepted(error); rejectResult(error); };
+  const fail = (error: Error) => { if (settled) return; process.recordTurnOutcome?.((error as OrchestrationError).code === 'TIMEOUT' ? 'timeout' : (error as OrchestrationError).code === 'INTERRUPTED' ? 'cancelled' : 'failed', (error as OrchestrationError).code); settled = true; cleanup(); rejectAccepted(error); rejectResult(error); };
   const publish = (chunk: string): boolean => {
     try { onText(chunk); return true; }
     catch { fail(new OrchestrationError('RESPONSE_PERSISTENCE_FAILED')); void process.stop(); return false; }
@@ -228,12 +228,14 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       // publishing or recording success, without silently shortening evidence.
       if (Buffer.byteLength(text) > 262144) { fail(new OrchestrationError('RESPONSE_TOO_LARGE')); void process.stop(); return; }
       if (!streamed && text && !publish(text)) return;
+      process.recordTurnOutcome?.(stopped ? 'cancelled' : 'completed');
       resolveAccepted(); settled = true; cleanup(); resolveResult({ text, interrupted: stopped });
     }
   };
   const stop = (): Promise<void> => {
     if (!stopPromise) {
       stopped = true;
+      if (!settled) process.recordTurnOutcome?.('cancelled');
       // Await real exit; SIGINT's boolean is not an acknowledgment.
       process.interrupt(); stopPromise = process.stop();
     }

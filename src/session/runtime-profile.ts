@@ -23,6 +23,7 @@ export interface RuntimeProfile {
   /** Optional connector restriction for workers. Agent decisions never receive connectors. */
   connectorsAllowed?: boolean;
   originSessionId?: string;
+  responseId?: string;
   taskId?: string;
   /** Durable CLI session for this process: `--resume id` continues the transcript Claude Code
    * already persisted, `--session-id id` starts it. Used by the worker pool and by agent

@@ -1015,6 +1015,7 @@ export class AgentOrchestrationRuntime {
       ticket.profile.excludedHistoryOperationIds = this.store.all(`SELECT r.id FROM assistant_responses r
         JOIN conversation_decisions d ON d.id=r.decision_id WHERE d.session_id=? AND r.state='failed'`, sessionId)
         .map(row => `response:${row.id}`);
+      ticket.profile.responseId = decision.responseId;
       agentSession = await this.host.createAgentSession(sessionId, ticket.profile, options.model, input.scope);
       const reportingTasks = new Set(this.store.all("SELECT task_id FROM notifications WHERE decision_id=? AND status='assigned'",decision.decisionId).map(row=>String(row.task_id)));
       const taskCandidates = this.tasks.context(receipt.conversationId, input.scope.principalId, decision.decisionId)

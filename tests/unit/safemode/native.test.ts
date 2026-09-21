@@ -99,3 +99,9 @@ it('keeps native Codex access-token and OS keyring discovery environment',()=>{
  const env=nativeEnvironment('codex',{HOME:'/home/operator',CODEX_ACCESS_TOKEN:'native-access',DBUS_SESSION_BUS_ADDRESS:'unix:path=/run/user/1000/bus',XDG_RUNTIME_DIR:'/run/user/1000',GATEWAY_API_KEY:'private',ANTHROPIC_API_KEY:'unrelated'});
  expect(env).toEqual({HOME:'/home/operator',CODEX_ACCESS_TOKEN:'native-access',DBUS_SESSION_BUS_ADDRESS:'unix:path=/run/user/1000/bus',XDG_RUNTIME_DIR:'/run/user/1000'});
 });
+
+// Terminal hints affect native theme detection, including tmux background queries.
+it.each(['claude', 'codex'] as const)('preserves caller terminal/color preferences for %s without forwarding arbitrary environment', cli => {
+  const terminal = { TERM: 'tmux-256color', COLORTERM: 'truecolor', TERM_PROGRAM: 'tmux', TERM_PROGRAM_VERSION: '3.4', COLORFGBG: '15;0', NO_COLOR: '', FORCE_COLOR: '0', CLICOLOR: '1', CLICOLOR_FORCE: '0', TMUX: '/tmp/tmux-1000/default,123,0', TMUX_PANE: '%1' };
+  expect(nativeEnvironment(cli, { ...terminal, NODE_OPTIONS: '--require injected', GATEWAY_API_KEY: 'secret' })).toEqual(terminal);
+});

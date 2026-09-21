@@ -1,3 +1,4 @@
+import { ProcessDiagnostics, TurnOutcome } from './process-diagnostics';
 import { prepareManagedConnectors } from './managed-connectors';
 import { RequestToolCapture, RequestToolSchemas } from './request-tool-capture';
 import type { InputImage } from './input-image';
@@ -270,6 +271,9 @@ export class SessionProcess extends EventEmitter {
   spawnContext: { loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number } | null = null;
   private process: ChildProcess | null = null;
   private stopping = false;
+  private readonly diagnostics = new ProcessDiagnostics();
+  recordTurnOutcome(outcome: TurnOutcome, errorCode?: string): void { this.diagnostics.finish(outcome, errorCode); }
+  private diagnosticContext(): object { return { sessionId: this.sessionId, responseId: this.runtimeProfile?.responseId, taskId: this.runtimeProfile?.taskId, attemptId: this.runtimeProfile?.attemptId, model: this._lastModel || this.agentConfig.claude.model }; }
   private restartCount = 0;
   // Wall-clock time the current (or most recent) child was spawned. Used by the
   // exit handler to measure how long that child survived, so a death after
@@ -1289,6 +1293,7 @@ export class SessionProcess extends EventEmitter {
         // Try to capture assistant text for SessionStore + update status file
         try {
           const obj = JSON.parse(line);
+          this.diagnostics.observe(obj);
           // stream-json assistant message (partial or final)
           if (obj.type === 'assistant' && Array.isArray(obj.message?.content)) {
             // Capture the real model from the stream
@@ -1457,6 +1462,7 @@ export class SessionProcess extends EventEmitter {
           }
           // result = end of turn
           if (obj.type === 'result') {
+            this.logger.info('session turn finished', { ...this.diagnosticContext(), ...this.diagnostics.snapshot() });
             if (!obj.is_error && this.contextResetId) {
               try {
                 this.sessionStore.completeContextReset(this.agentConfig.id, this.sessionId, this.contextResetId);
@@ -1542,7 +1548,8 @@ export class SessionProcess extends EventEmitter {
       this.stderrBuffer = lines.pop() ?? '';
       const lastLine = lines.map(l => l.trim()).filter(Boolean).pop();
       if (lastLine) this.lastStderrLine = lastLine;
-      this.logger.warn('session stderr', { stderr: text });
+      this.diagnostics.stderrObserved = true;
+      this.logger.warn('session stderr', { stderr: text, ...this.diagnosticContext(), requestOutcome: this.diagnostics.outcome, outcomeRequiresTerminalEvent: true });
     });
 
     proc.on('exit', (code, signal) => {
@@ -1552,6 +1559,7 @@ export class SessionProcess extends EventEmitter {
       if (trailing) this.lastStderrLine = trailing;
       this.stderrBuffer = '';
       this.logger.info('session subprocess exited', {
+        ...this.diagnosticContext(), ...this.diagnostics.snapshot(),
         code,
         signal,
         sessionId: this.sessionId,
@@ -1698,6 +1706,7 @@ export class SessionProcess extends EventEmitter {
   }
 
   sendMessage(text: string, images: readonly InputImage[] = []): void {
+    this.diagnostics.reset();
     if (!this.process?.stdin?.writable) {
       this.logger.warn('Cannot send message: subprocess not running', {
         sessionId: this.sessionId,
@@ -1922,6 +1931,7 @@ export class SessionProcess extends EventEmitter {
     if (!this.process || this._exited) return false;
     if (!this._processing) return false;
     this.interruptRequested = true;
+    if (this.diagnostics.outcome === 'pending') this.diagnostics.finish('cancelled');
     this.process.kill('SIGINT');
     return true;
   }
@@ -2005,6 +2015,7 @@ export class SessionProcess extends EventEmitter {
   async flushToolSchemas(expectedIds?: string[]): Promise<RequestToolSchemas[]> { return this.toolCapture?.flush(expectedIds) ?? []; }
 
   async stop(): Promise<void> {
+    if (this.diagnostics.outcome === 'pending' && !this.diagnostics.stopReason) this.diagnostics.stopReason = 'shutdown';
     this.stopping = true;
     if (this.containerAttempt && this.agentConfig.container) {
       this.managedGroupStopped = await stopContainerProfile(this.agentConfig.container, this.containerAttempt.directory);

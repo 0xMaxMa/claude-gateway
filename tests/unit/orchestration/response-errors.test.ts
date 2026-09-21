@@ -37,3 +37,12 @@ test.each([['error_max_turns','MODEL_MAX_TURNS'],['error_max_budget_usd','MODEL_
  const failure=await startProcessTurn(p,'hi',1000).result.catch(error=>error);
  expect(failure.code).toBe(code);expect(responseFailureMessage(failure)).toContain(code);
 });
+
+ test('timeout outcome is recorded before interrupt/cleanup', async () => {
+  const p = new EventEmitter() as SessionProcess;
+  const recordTurnOutcome = jest.fn();
+  Object.assign(p,{start:async()=>{},sendMessage:jest.fn(),interrupt:jest.fn(),stop:jest.fn(async()=>{}),recordTurnOutcome});
+  await expect(startProcessTurn(p,'hello',10).result).rejects.toMatchObject({code:'TIMEOUT'});
+  expect(recordTurnOutcome).toHaveBeenCalledWith('timeout','TIMEOUT');
+  expect(recordTurnOutcome).not.toHaveBeenCalledWith('cancelled');
+ });
