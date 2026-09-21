@@ -13,6 +13,7 @@ const {once} = require('events');
 const {randomUUID} = require('crypto');
 const {execFileSync} = require('child_process');
 const shellEnvironmentMode = process.argv.includes('--shell-environment');
+const contextWindowMode = process.argv.includes('--context-window');
 const containerMode = process.argv.includes('--container');
 const nativeAuthMode = process.argv.includes('--native-auth');
 const originalCodexHome = process.env.CODEX_HOME;
@@ -82,6 +83,7 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
   }
   if(createContainer)createContainer();
   const options={agent:{workspace:directory,...(containerMode?{type:'app-agent',container:containerName}:{})},gateway:{gateway:{}},profile:{role:'worker',mcpConfigPath:mcp,overlay:'Use fixture_echo once, then return a brief result.',hostExecution:!containerMode,containerExecution:containerMode},sessionId:'fixture-logical-session',stateDirectory:join(directory,'state'),config:{model:'gpt-test',baseUrl:`http://${containerMode?'host.docker.internal':'127.0.0.1'}:${server.address().port}/v1`,apiKeyEnv:'GATEWAY_CODEX_SMOKE_KEY'}};
+  if(contextWindowMode) Object.assign(options.config,{model:"gpt-5.4-mini",contextWindow:1000000});
   if(nativeAuthMode){
     const home=join(directory,'native-auth');await mkdir(home,{mode:0o700});
     await writeFile(join(home,'config.toml'), 'model_provider="fixture"\ncli_auth_credentials_store="file"\n[model_providers.fixture]\nname="Fixture"\nwire_api="responses"\nrequires_openai_auth=true\nbase_url='+JSON.stringify(options.config.baseUrl)+'\n',{mode:0o600});
@@ -122,8 +124,15 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
     const terminal=await result;const schemas=await adapter.flushToolSchemas();await adapter.stop();return {terminal,events,schemas};
   }
     const first=await run();assert.match(first.terminal.result,/Canonical fixture result/);
+    if(contextWindowMode){
+      const context=first.events.filter(e=>e.subtype==='native_usage').at(-1)?.contextWindow;
+      assert.equal(context?.requested,1000000);assert.equal(context?.configured,400000);
+      assert(context.observed>0 && context.observed<=400000,'native usable context exceeds configured Mini ceiling');
+      console.log('PASS native context '+JSON.stringify(context));
+      return; // Dedicated context probe; the default smoke exercises MCP/resume separately.
+    }
     assert(first.schemas.length>0,'actual request tool schemas were not captured');
-    assert(first.schemas.some(s=>s.loaded.some(name=>name.includes('fixture_echo')||name.includes('tool_call'))),'MCP schema absent from actual request capture');
+    assert(first.schemas.some(s=>s.loaded.some(name=>name.includes('fixture_echo')||name.includes('tool_call'))),'MCP schema absent from actual request capture: '+JSON.stringify(first.schemas.map(s=>s.loaded)));
     assert(first.events.some(e=>e.type==='assistant'&&e.message.usage?.input_tokens===40&&e.message.usage.cache_read_input_tokens===40&&e.message.usage.cache_creation_input_tokens===20),'per-request trace usage was not normalized');
     if(shellEnvironmentMode){
       const outputs=requests.flatMap(r=>r.input).filter(i=>i.type==='function_call_output').map(i=>typeof i.output==='string'?i.output:JSON.stringify(i.output)).join('\n');

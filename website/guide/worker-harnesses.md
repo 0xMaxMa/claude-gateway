@@ -53,16 +53,51 @@ Existing model entries in `gateway.models` can declare worker routing and provid
 
 `workerHarness` affects automatic routing. `workerModel` maps a gateway selection to the native provider model. Without an explicit mapping, native model names drop only Claude context suffixes such as `[1m]`; provider namespaces such as `chatgpt/` are preserved so BYOK routing cannot silently switch to a managed pool. Available reasoning settings are `low`, `medium`, `high`, and `xhigh`; support depends on the chosen model/provider. `codex.bin` may specify an executable path, not a shell command with arguments.
 
-Context suffixes also carry a requested native context size: `[1m]` requests
-1,000,000 tokens and `[200k]` requests 200,000. Without a suffix, configured
-model metadata can supply `contextWindow`; otherwise native defaults apply.
-The request is written to `model_context_window` and checked through
-`config/read`. Native Codex model-catalog caps and reserved headroom can still
-make the usable window smaller. A requested 1M setting is not proof that the
-native runtime or provider accepts 1M; inspect the native
-`thread/tokenUsage/updated` event's `modelContextWindow` for the usable window.
-For example, the installed 0.155.1 catalog caps `gpt-5.6-luna` at 872,000
-raw tokens (828,400 usable with 5% headroom), even with a 1M request.
+### Context windows
+
+Context suffixes express a request, not a guarantee: `[1m]` requests 1,000,000
+raw tokens and `[200k]` requests 200,000. Without a suffix, configured model
+metadata supplies `contextWindow`; otherwise native defaults apply.
+
+**No additional user configuration is required.** Select the model normally.
+Gateway applies known model limits and records native measurements automatically.
+The same policy runs on host and app-container workers.
+
+Versioned model data lives in `src/session/codex-context-defaults.json`, and the
+resolution/measurement rules live in `src/session/codex-context.ts`. Maintainers
+can update model data in one place as official specifications change; users do
+not maintain a second model-size catalog in `config.json`.
+
+The initial safety entry caps GPT-5.4-mini at its documented 400,000-token limit,
+including its explicit OpenAI/ChatGPT IDs. Codex 0.155.1 can otherwise match Mini
+to GPT-5.4's larger window. These are exact model matches, not prefix/family rules.
+Unknown models have no invented provider ceiling; native measurements remain
+available but upstream capacity is unverified. Gateway does not raise Codex's
+own catalog maximum to force a requested 1M window.
+
+Gateway writes the bounded value to `model_context_window` and verifies it through
+`config/read`. It leaves `model_auto_compact_token_limit` unset so native Codex
+computes its default using native model metadata rather than an oversized requested
+window. It does not change the user's global Codex configuration or catalog.
+
+Worker turn details in the token report and dashboard show **Requested**, **Configured**,
+**Provider ceiling**, and **Native context** separately. The native denominator comes
+from `thread/tokenUsage/updated.modelContextWindow`; the numerator is the latest
+request's `last.totalTokens`, never accumulated tokens across all requests.
+Missing measurements show `—`. Recorded older turns are not retroactively guessed.
+Conversational agent `/session` and its report header still describe the Claude Code
+agent; worker context is separate and must not replace the agent's measurement.
+
+For example, Codex 0.155.1 can cap Luna at 872,000 raw / 828,400 usable tokens even
+with a 1M request. Its account and bundled catalogs may differ. A smaller native
+window is displayed explicitly; neither the configured size nor the native
+measurement certifies provider acceptance.
+
+To audit a CLI update without paid inference, run
+`node scripts/orchestration/audit-codex-context.cjs --output /tmp/context-audit.json`.
+The optional `--models-json` accepts an array of model entries, and `--catalog-json`
+replays a `codex debug models` snapshot in a temporary audit home. It uses the real
+native app-server with a local Responses fixture, **not a large upstream request**.
 
 Runtime/auth preflight can fall back only in auto mode. Endpoint/model/quota failures after dispatch fail the task explicitly. App tasks never fall back to host execution.
 

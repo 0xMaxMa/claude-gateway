@@ -145,6 +145,14 @@ The report separates user-input handling, Agent reporting turns and worker attem
 
 The durable `token_turns` ledger starts recording after deployment; it does not reconstruct earlier usage. Unknown or incomplete measurements are explicitly identified. This report can contain conversation and task content and must remain behind the administrative gate.
 
+Codex worker turns may additionally contain `contextWindow`: `requested`, `configured`,
+`providerLimit`, `limitSource` (`documented-model` or `unknown`), `observed`, `used`,
+and `status` (`unverified` or `observed`). Numeric fields are nullable. `observed`
+is the native runtime's usable context limit; `used` is the latest native request's
+total tokens, not cumulative task usage. Requested/configured sizes do not certify
+upstream capacity. Older turns remain unmeasured, and worker measurements do not
+replace the conversational Agent's context window.
+
 ## Dashboard data and live updates
 
 - `GET /status?offset=0` returns a snapshot, including retained session pagination, task counts, and recorded token activity for the current UTC day.

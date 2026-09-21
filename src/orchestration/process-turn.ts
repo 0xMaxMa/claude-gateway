@@ -1,3 +1,4 @@
+import type { CodexContextMeasurement } from '../session/codex-context';
 import { containerTaskTools } from './container-tool-schemas';
 import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
 import type { RequestToolSchemas } from '../session/request-tool-capture';
@@ -22,7 +23,7 @@ export interface ProcessTurn {
 }
 /** Reuses the existing process/history lifecycle; a turn ends on a terminal
  * event or confirmed process exit. The owner decides task recovery policy. */
-export interface ManagedTurnMetrics { toolIds: string[]; inputTokens: number; totalTokens: number; startedAt: number; endedAt?: number; usage?: TokenUsage | null; requests?: RequestUsage[]; loadedTools?: string[] | null; usedTools?: string[]; contextTools?: string[] | null; schemaCoverage?: {measured:number;total:number}; model?: string; }
+export interface ManagedTurnMetrics { contextWindow?: CodexContextMeasurement; toolIds: string[]; inputTokens: number; totalTokens: number; startedAt: number; endedAt?: number; usage?: TokenUsage | null; requests?: RequestUsage[]; loadedTools?: string[] | null; usedTools?: string[]; contextTools?: string[] | null; schemaCoverage?: {measured:number;total:number}; model?: string; }
 function providerErrorText(value: unknown, codes: string[], depth = 0, budget = { nodes: 256 }): string {
   if (depth >= 8 || --budget.nodes < 0) return '';
   if (typeof value === 'string') return value.slice(0, 4096);
@@ -109,7 +110,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       return;
     }
     usageCollector.observe(event);
-    if ((event.type === 'assistant' && event.message?.usage) || (event.type === 'system' && ['init','native_usage'].includes(event.subtype)) || (event.type === 'stream_event' && event.event?.type === 'message_stop')) {
+    if ((event.type === 'assistant' && event.message?.usage) || (event.type === 'system' && ['init','native_init','native_usage'].includes(event.subtype)) || (event.type === 'stream_event' && event.event?.type === 'message_stop')) {
       try {
         const measured = usageCollector.snapshot();
         policy?.onUsage?.({toolIds: [...tools], inputTokens: measured.usage ? measured.usage.inputTokens + measured.usage.cacheCreationTokens + measured.usage.cacheReadTokens : 0, totalTokens: measured.usage?.totalTokens ?? 0, startedAt, ...measured});

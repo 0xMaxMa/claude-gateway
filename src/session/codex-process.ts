@@ -1,3 +1,4 @@
+import { codexContextPolicy, observeCodexContext, CodexContextMeasurement } from './codex-context';
 import { workerEnvironment } from './worker-environment';
 import { scanCodexTrace, CodexTraceState } from './codex-tool-capture';
 import type { RequestToolSchemas } from './request-tool-capture';
@@ -94,6 +95,7 @@ export class CodexProcess extends EventEmitter {
   readonly spawnedAt = Date.now();
   readonly runtimeProfile: RuntimeProfile;
   managedGroupStopped = false;
+  private contextMeasurement?: CodexContextMeasurement;
   private child?: ChildProcessWithoutNullStreams;
   private executable = '';
   private nativeSha256?: string;
@@ -224,12 +226,13 @@ export class CodexProcess extends EventEmitter {
       mcp.mcpServers = { ...servers, ...mcp.mcpServers };
     }
     this.approvedMcp = mcp.mcpServers ?? {};
+    this.contextMeasurement = codexContextPolicy(config.model, config.contextWindow);
     const commandEnvironment = workerEnvironment(agent, this.options.gateway);
     const lines = [
       `model = ${quote(config.model)}`, `model_provider = ${quote(this.credentials.chatgpt ? 'openai' : 'gateway')}`, 'approval_policy = "never"',
       `sandbox_mode = ${quote(profile.hostExecution || agent.type === 'app-agent' ? 'danger-full-access' : 'workspace-write')}`,
       'web_search = "disabled"', 'project_doc_fallback_filenames = ["CLAUDE.md"]',
-      ...(config.contextWindow !== undefined ? [`model_context_window = ${config.contextWindow}`, `model_auto_compact_token_limit = ${Math.floor(config.contextWindow * 0.95)}`] : []),
+      ...(this.contextMeasurement.configured !== null ? [`model_context_window = ${this.contextMeasurement.configured}`] : []),
       `developer_instructions = ${quote([profile.context, profile.overlay, extensionInstructions, profile.skillPluginDir || profile.containerSkill ? `Task skill resources: ${this.containerAttempt ? this.containerAttempt.directory + '/skill-plugin' : profile.skillPluginDir}. Read the assigned SKILL.md (or RESOURCE_ROOT.txt) and resolve its plugin-relative references from its resource root.` : undefined].filter(Boolean).join('\n\n'))}`,
       ...(config.reasoningEffort ? [`model_reasoning_effort = ${quote(config.reasoningEffort)}`] : []),
       ...(this.credentials.chatgpt ? ['cli_auth_credentials_store = "ephemeral"'] : ['[model_providers.gateway]', 'name = "Gateway Responses"', 'wire_api = "responses"', `base_url = ${quote(this.credentials.baseUrl)}`, `env_key = ${quote(key)}`]),
@@ -328,7 +331,7 @@ export class CodexProcess extends EventEmitter {
     if (!threadPattern.test(response.thread?.id) || (this.saved && response.thread.id !== this.saved.threadId)) throw new Error('Codex thread identity mismatch');
     this.threadId = response.thread.id;
     await this.persist();
-    this.output({ type: 'system', subtype: 'native_init', model: config.model });
+    this.output({ type: 'system', subtype: 'native_init', model: config.model, contextWindow: this.contextMeasurement });
     await this.beginTurn(input);
 
   }
@@ -349,8 +352,8 @@ export class CodexProcess extends EventEmitter {
     const effective = reply.config;
     if (!effective || !Array.isArray(reply.layers)) throw new Error('Codex did not provide effective configuration');
     if (reply.layers.some((layer: any) => layer.name?.type === 'project' && !layer.disabledReason)) throw new Error('Codex project executable configuration is not permitted');
-    const requestedWindow = this.options.config.contextWindow;
-    if (requestedWindow !== undefined && (effective.model_context_window !== requestedWindow || effective.model_auto_compact_token_limit !== Math.floor(requestedWindow * 0.95))) throw new Error('Codex context window configuration mismatch');
+    const requestedWindow = this.contextMeasurement?.configured;
+    if (requestedWindow != null && effective.model_context_window !== requestedWindow) throw new Error('Codex context window configuration mismatch');
     const requestedEnvironment = workerEnvironment(this.options.agent, this.options.gateway);
     if (Object.entries(requestedEnvironment).some(([key, value]) => effective.shell_environment_policy?.set?.[key] !== value)) throw new Error('Codex worker environment configuration mismatch');
     const actual = effective.mcp_servers ?? {};
@@ -447,8 +450,13 @@ export class CodexProcess extends EventEmitter {
     } else if (event.method === 'error') {
       this.lastError = p.error?.message || JSON.stringify(p.error);
     } else if (event.method === 'thread/tokenUsage/updated') {
+      this.contextMeasurement = observeCodexContext(this.contextMeasurement ?? codexContextPolicy(this.options.config.model, this.options.config.contextWindow), p.tokenUsage);
       this.nativeUsage = p.tokenUsage?.total;
-      if (this.nativeUsage) this.output({ type: 'system', subtype: 'native_usage', usage: this.normalizedUsage() });
+      this.output({ type: 'system', subtype: 'native_usage', ...(this.nativeUsage ? { usage: this.normalizedUsage() } : {}), contextWindow: this.contextMeasurement });
+      if (this.contextMeasurement.configured !== null && this.contextMeasurement.observed !== null && this.contextMeasurement.observed > this.contextMeasurement.configured) {
+        this.fail('CODEX_CONTEXT_WINDOW_MISMATCH: native usable context exceeds the configured ceiling. Check the selected model and update Codex.');
+        void this.stop(); return;
+      }
     } else if (event.method === 'turn/completed') {
       if (this.turnId && p.turn.id !== this.turnId) return;
       this.turnEnded = true;

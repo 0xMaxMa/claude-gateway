@@ -1,3 +1,4 @@
+import type { CodexContextMeasurement } from '../session/codex-context';
 import type { RequestToolSchemas } from '../session/request-tool-capture';
 import { executionTool } from './tool-name';
 /** Model token volume, not billing cost. Output already includes thinking. */
@@ -47,6 +48,7 @@ export class TurnUsageCollector {
   loadedTools: string[] | null = null;
   readonly usedTools = new Set<string>();
   model?: string;
+  contextWindow?: CodexContextMeasurement;
   observe(event: any): void {
     if (!event || typeof event !== 'object') return;
     // Native backends can report model identity without claiming a tool inventory.
@@ -55,6 +57,7 @@ export class TurnUsageCollector {
       if (Array.isArray(event.tools) && event.tools.every((name: unknown) => typeof name === 'string')) this.loadedTools = [...new Set<string>(event.tools)].sort();
       if (typeof event.model === 'string') this.model = event.model;
     }
+    if (event.type === 'system' && ['native_init', 'native_usage'].includes(event.subtype) && event.contextWindow) this.contextWindow = event.contextWindow;
     const stream = event.type === 'stream_event' ? event.event : undefined;
     const message = event.type === 'assistant' ? event.message : stream?.type === 'message_start' ? stream.message : undefined;
     if (message && typeof message.id === 'string') {
@@ -73,7 +76,7 @@ export class TurnUsageCollector {
     next.totalTokens = next.inputTokens + next.cacheCreationTokens + next.cacheReadTokens + next.outputTokens;
     this.messages.set(id, {id, model: typeof model === 'string' ? model : previous?.model, usage: next, toolSchemas:this.schemas.get(id)});
   }
-  snapshot(): { usage: TokenUsage | null; requests: RequestUsage[]; loadedTools: string[] | null; usedTools: string[]; contextTools: string[] | null; schemaCoverage: {measured:number;total:number}; model?: string } {
+  snapshot(): { usage: TokenUsage | null; requests: RequestUsage[]; loadedTools: string[] | null; usedTools: string[]; contextTools: string[] | null; schemaCoverage: {measured:number;total:number}; model?: string; contextWindow?: CodexContextMeasurement } {
     const requests = [...this.messages.values()];
     // The CLI aggregate includes otherwise unreported subcalls. It is a fallback
     // and reconciliation source, not an extra request or fabricated request ID.
@@ -87,6 +90,6 @@ export class TurnUsageCollector {
     // has a private per-attempt trace that includes in-flight requests here.
     const captures=[...this.schemas.values()].filter(s=>s.source==='codex-request-body'||this.messages.has(s.messageId));
     const contextTools=captures.length?[...new Set(captures.flatMap(s=>s.loaded))].sort():null;
-    return {usage, requests, contextTools, schemaCoverage:{measured:captures.length,total:new Set([...this.messages.keys(),...captures.map(s=>s.messageId)]).size}, loadedTools: this.loadedTools, usedTools: [...this.usedTools].sort(), model: this.model};
+    return {usage, requests, contextTools, schemaCoverage:{measured:captures.length,total:new Set([...this.messages.keys(),...captures.map(s=>s.messageId)]).size}, loadedTools: this.loadedTools, usedTools: [...this.usedTools].sort(), model: this.model, ...(this.contextWindow ? { contextWindow: this.contextWindow } : {})};
   }
 }

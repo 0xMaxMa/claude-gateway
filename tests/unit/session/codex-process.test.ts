@@ -1,3 +1,4 @@
+import { codexContextPolicy } from '../../../src/session/codex-context';
 import { workerEnvironment } from '../../../src/session/worker-environment';
 import * as codexAuth from '../../../src/session/codex-auth';
 jest.mock('../../../src/session/worker-extensions', () => ({ discoverWorkerExtensions: jest.fn().mockResolvedValue({ skills: [], servers: {}, notices: [] }) }));
@@ -49,7 +50,7 @@ beforeEach(async () => {
     for (const line of chunk.toString().trim().split('\n')) {
       const request = JSON.parse(line); rpc.push(request);
       if (request.id === undefined) continue;
-      const result = request.method === 'config/read' ? { layers: [], config: { shell_environment_policy:{set:workerEnvironment(options.agent, options.gateway)}, ...(options.config.contextWindow !== undefined ? {model_context_window:options.config.contextWindow,model_auto_compact_token_limit:Math.floor(options.config.contextWindow * 0.95)} : {}), model_provider: chatgptMode ? 'openai' : 'gateway', cli_auth_credentials_store: chatgptMode ? 'ephemeral' : 'file', model_providers: { gateway: { base_url: options.config.baseUrl, env_key: "GATEWAY_CODEX_API_KEY", wire_api: 'responses' } }, mcp_servers: options.agent.type === 'app-agent' ? { gateway: { command: 'node', args: ['container-bridge.js'] } } : { gateway: { command: 'node', args: ['bridge.js'], env: { TICKET: 'secret-ticket' } } } } } : request.method === 'thread/start' || request.method === 'thread/resume' ? { thread: { id: thread } } : request.method === 'turn/start' ? { turn: { id: 'turn-' + (++turnNumber) } } : {};
+      const result = request.method === 'config/read' ? { layers: [], config: { shell_environment_policy:{set:workerEnvironment(options.agent, options.gateway)}, model_context_window:codexContextPolicy(options.config.model,options.config.contextWindow).configured, model_provider: chatgptMode ? 'openai' : 'gateway', cli_auth_credentials_store: chatgptMode ? 'ephemeral' : 'file', model_providers: { gateway: { base_url: options.config.baseUrl, env_key: "GATEWAY_CODEX_API_KEY", wire_api: 'responses' } }, mcp_servers: options.agent.type === 'app-agent' ? { gateway: { command: 'node', args: ['container-bridge.js'] } } : { gateway: { command: 'node', args: ['bridge.js'], env: { TICKET: 'secret-ticket' } } } } } : request.method === 'thread/start' || request.method === 'thread/resume' ? { thread: { id: thread } } : request.method === 'turn/start' ? { turn: { id: 'turn-' + (++turnNumber) } } : {};
       setImmediate(() => { emit({ id: request.id, result }); if (request.method === 'turn/start') notify('turn/started', result); });
     }
   });
@@ -500,7 +501,7 @@ it('configures the selected 1M window in the actual worker config and validates 
   const settings = jest.mocked(spawn).mock.calls[0][2] as any;
   const config = await readFile(join(settings.env.CODEX_HOME,'config.toml'),'utf8');
   expect(config).toContain('model_context_window = 1000000');
-  expect(config).toContain('model_auto_compact_token_limit = 950000');
+  expect(config).not.toContain('model_auto_compact_token_limit');
   expect(rpc.some(r => r.method === 'config/read')).toBe(true);
 });
 
@@ -515,4 +516,39 @@ test('passes explicit command environment to native config and process without p
   const config=await readFile(join(settings.env.CODEX_HOME,'config.toml'),'utf8');
   expect(config).toContain('[shell_environment_policy.set]');
   expect(config).toContain('"BASH_ENV" = "/explicit/hook"');
+});
+
+ test.each([false, true])('caps Mini and records native usable context separately on container=%s', async container => {
+  if (container) {
+    options.agent.type = 'app-agent'; options.agent.container = 'fixture';
+    (prepareContainerProfile as jest.Mock).mockResolvedValue({ directory:'/tmp/profile',config:'/tmp/profile/mcp.json' });
+    (containerNode as jest.Mock).mockImplementation(async (_container: string, code: string) => code.includes('createHash') ? 'fixture-sha' : code.includes('readFileSync') ? JSON.stringify({mcpServers:{gateway:{command:'node',args:['container-bridge.js']}}}) : '');
+    options.profile.connectorsAllowed = false;
+  }
+  options.config.model = 'gpt-5.4-mini'; options.config.contextWindow = 1000000;
+  await launch();
+  const initial=events.find(e=>e.subtype==='native_init');
+  expect(initial.contextWindow).toMatchObject({requested:1000000,configured:400000,observed:null});
+  notify('thread/tokenUsage/updated', { tokenUsage: { modelContextWindow:380000, last:{totalTokens:12000}, total:{inputTokens:3000000,cachedInputTokens:1000000,outputTokens:5000} } });
+  const collector=new TurnUsageCollector();events.forEach(e=>collector.observe(e));
+  expect(collector.snapshot().contextWindow).toMatchObject({observed:380000,used:12000,status:'observed'});
+ });
+
+test('does not silently accept a native window exceeding the configured ceiling', async () => {
+ options.config.contextWindow=200000;
+ await launch();
+ notify('thread/tokenUsage/updated',{tokenUsage:{modelContextWindow:950000,last:{totalTokens:100}}});
+ expect(events.find(e=>e.type==='result')).toMatchObject({is_error:true,result:expect.stringContaining('CODEX_CONTEXT_WINDOW_MISMATCH')});
+});
+test('rejects incorrect config readback before any model request', async () => {
+ options.config.contextWindow=1000000;
+ const autoReply=child.stdin.listeners('data')[0];child.stdin.removeAllListeners('data');
+ child.stdin.on('data',(chunk:Buffer)=>{
+  const q=JSON.parse(chunk.toString());if(q.method!=='config/read')return autoReply(chunk);
+  rpc.push(q);setImmediate(()=>emit({id:q.id,result:{layers:[],config:{model_context_window:200000}}}));
+ });
+ const errors:Error[]=[];adapter.on('startup-error',e=>errors.push(e));
+ await adapter.start();adapter.sendMessage('never execute');await waitUntil(()=>errors.length>0);
+ expect(errors[0].message).toContain('context window configuration mismatch');
+ expect(rpc.some(r=>r.method==='thread/start')).toBe(false);
 });

@@ -203,3 +203,10 @@ test('Codex used shell commands display as Shell while Claude retains Bash', () 
   expect(html).toContain('<code>'+(harness==='codex'?'Shell':'Bash')+'</code>');
  }
 });
+
+test('renders measured Codex context separately from requested size and agent header',()=>{
+ const html=generateTokenReportHtml('agent',{...report,turns:[{...report.turns[1],harness:'codex',contextWindow:{requested:1000000,configured:400000,providerLimit:400000,limitSource:'documented-model',observed:380000,used:12000,status:'observed'}}]});
+ expect(html).toContain('Native context: 12.00K / 380.00K · 3.2%');
+ expect(html).toContain('Requested: 1.00M · Configured: 400.00K');
+ expect(html).toContain('Native usable context is below the request');
+});
