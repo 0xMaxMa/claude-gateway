@@ -182,46 +182,68 @@ The compatible upstream returns native `model`, `answers`, and `usage` in the Ty
 
 The gateway distinguishes native version from requested catalog ID. A prefixed catalog identifier must never be replaced with an unprefixed native model before upstream routing.
 
-## Browser runner adapter boundary
+## Browser tasks with an installed runner
 
-`src/jev/browser-runner.ts` exports `runBrowserTask()` and `BrowserTransport` for compatible local integrations. It is a transport seam, not a built-in remote browser connection or an automatic browser deployment.
+Gateway owns authorization, task scheduling, cancellation, durable receipts and Jev evaluation. An optional installed **browser runner contract v1** package owns browser observations, decisions, lease acquisition/renewal/release, stale recovery and actions. Gateway does not bundle a second browser decision loop or install a browser product.
 
-A transport supplies:
+Install a reviewed, version-pinned runner package into the gateway installation, retaining its lockfile/tarball integrity. Configure its public package entrypoint (or an absolute ESM integration-module path). Never configure a URL, moving Git branch, or module chosen by an agent. This is trusted executable code with the gateway process's privileges. A package upgrade at the same path requires a gateway restart because Node caches modules.
 
-1. `observe(signal)` — bounded state, revision/fingerprint, and supported opaque action handles.
-2. `checkAccess(observation, action, signal)` — current principal/grant/tab ownership and observation freshness checks.
-3. `execute(input, signal)` — enforce the same owner/revision fence atomically at the side effect.
-4. `verifyCompletion(observation, signal)` — fresh independent evidence for the actual goal.
+Merge the following into an enabled Jev configuration:
 
-Example integration outline:
-
-```ts
-const result = await runBrowserTask({
-  goal: 'Open the requested result',
-  transport: authorizedBrowserTransport,
-  evaluate: (request, signal) => jevService.evaluate(request, {
-    principalId: taskPrincipal,
-    consumer: 'browser',
-    agentId,
-    taskId,
-    signal,
-    authorize: currentTaskMayUseJev,
-  }),
-  fieldValues: { search: 'Explicit user-supplied search text' },
-  budget: { maxSteps: 20, maxEvaluations: 20, timeoutMs: 60000 },
-  signal: taskSignal,
-});
+```json
+{
+  "gateway": {
+    "jev": {
+      "enabled": true,
+      "provider": "typesafe",
+      "model": "jev-1.13.0",
+      "apiKeyEnv": "PRIVATE_JEV_TOKEN",
+      "features": { "browserTasks": { "enabled": true } },
+      "browser": {
+        "runnerModule": "@example/browser-runner",
+        "bindings": [{
+          "id": "approved-browser",
+          "name": "Approved browser tab",
+          "agentId": "assistant",
+          "principalId": "authenticated-principal",
+          "conversationId": "orchestration-conversation-id",
+          "endpoint": "https://browser.example/mcp",
+          "apiKeyFile": "/path/to/private/browser-controller.key",
+          "scope": { "device_id": "device", "grant_id": "approved-grant", "tab_id": "tab" },
+          "fields": [{ "label": "Name", "text": "Explicit user-supplied value" }],
+          "budget": { "maxSteps": 20, "maxEvaluations": 30, "timeoutMs": 120000 }
+        }]
+      }
+    }
+  }
+}
 ```
 
-The runner checks operation and target confidence separately, rejects unsupported/mismatched actions, bounds repeated no-progress observations, and requests explicit missing field values instead of asking Jev to generate prose. It rechecks access after inference. A model-selected DONE is followed by fresh observation and independent verification; otherwise the result is `needs_verification`.
+`@example/browser-runner` is a placeholder for the reviewed package you install. Its public exports must include `BROWSER_RUNNER_CONTRACT_VERSION: 1`, `runBrowserTask(input, dependencies, signal)` and `mcpBrowserTransport(invoke)`. The runner receives `contractVersion: 1`, `goal`, exact browser `scope`, explicit `fields` and optional budgets. Dependencies are `call`, `evaluate`, `progress`, and optional trusted `verify` / `resolveFieldText` callbacks. `evaluate` returns `{model, answers}`; billing and usage stay with the gateway service.
 
-Cancellation/disconnection during a possible mutation returns an uncertain outcome and never automatically replays that action. The adapter must honor abort signals and fence side effects itself. The orchestration runtime can register the included `BrowserTaskAdapter` when a trusted host supplies `host.browserBindings()`. Each version-1 binding has an opaque target ID, name, exact principal ID, exact conversation ID, and a `BrowserTransport`; optional field values and budgets come from the trusted binding, not a model-supplied URL. Enable `gateway.jev.features.browserTasks.enabled` as well as Jev access. Without a host binding, there is no browser target to discover. App-container agent schemas expose the browser discovery scope and browser-only managed-task target only when this integration and permission are enabled at process creation. This does not expose safemode or arbitrary host execution. Existing process inventories remain captured, while every call still checks current access.
+A trusted ESM integration module can re-export the runner and optionally export `verifyBrowserTask(goal, observation, signal)` and/or `resolveFieldText(request, signal)`. A verifier checks the actual requested goal against independently observed evidence. No verifier means `needs_verification`, never success. No text helper or explicit field value means a field-input handoff. These hooks are administrator-installed code, never page/model-generated functions. Text helpers must use an authorized, accounted inference path if they call a model; the gateway does not silently add another provider or generate missing personal information.
 
-Discovery and resolution only return bindings owned by the calling principal **and** conversation, including conversations that share an agent. The adapter runs through the existing gateway-managed task controller, persists a receipt before browser work, and records a verified result separately for each task/request. A receipt left running after restart becomes an uncertain result; the request is not automatically submitted again. Cancelling one task cannot cancel another request with a reused ID. Access is rechecked while the task runs, including after completion verification.
+Each binding belongs to one agent, principal **and orchestration conversation**. A conversation ID is not the native CLI/session ID; obtain it from the authenticated orchestration task/conversation data. Browser device/grant/tab values must come from an already approved browser session. Setting a binding does not grant consent. Shared MCP controller credentials do not permit cross-principal discovery. The gateway checks exact binding ownership before dispatch and callbacks; the extension/relay must independently enforce actual-tab ownership, grant, lease and observation freshness at execution.
 
-The included adapter does not issue browser grants or arbitrate tabs across gateways. The actual browser transport must enforce those controls. A missing explicit field value produces a handoff/unknown task outcome requiring reconciliation; this version does not invent field text or automatically create an interactive form-question workflow. No concrete browser product is installed or connected by enabling this flag.
+The connector uses authenticated Streamable HTTP MCP, accepts HTTPS or loopback HTTP only, refuses redirects and does not expose credentials to agents or app containers. Choose one `apiKeyFile` or dedicated `apiKeyEnv`; browser credential environment variables are stripped from managed children just like Jev credentials. Removing/changing a binding or disabling permissions fences active work; a bounded best-effort lease release may still occur. Credential changes take effect on the next connection. Runtime code/module updates require restart.
 
-The deterministic tests use a fake transport to verify these boundaries. They are not live-browser performance or success-rate measurements. Progress filtering and conversation-intake integrations remain future opt-in consumers; no token-saving claim follows merely from making this evaluator available.
+Agents discover their targets with `capabilities_list(scope="browser")` and submit through `task_spawn(target_profile="gateway-managed", gateway_target={adapter:"browser",session_id:"approved-browser"})`. This uses the same task tracking and completion delivery as other managed work. App agents receive scoped task tools through their bridge, not the MCP controller key, a host shell or safemode permissions. Newly enabled capabilities may require a fresh CLI process inventory.
+
+### Results, recovery and reporting
+
+- `succeeded / VERIFIED` becomes completed only when the runner's trusted independent verifier passed and permission remains valid.
+- `blocked / FIELD_TEXT_REQUIRED` uses the existing task question flow. The parent receives the missing field label when available. Answering is a new authorized bounded attempt; old element refs are not replayed. For an unambiguous missing field, the gateway binds the authenticated task answer to that field label and supplies its exact text to the fresh run. Previously answered fields remain available. Ambiguous labels require parent inspection; no stale element reference is reused. Answers longer than 2,000 characters are rejected before browser dispatch.
+- `needs_verification` and other bounded handoffs require parent reconciliation. Keep the exact reason rather than pretending that DONE proved completion.
+- Any unknown mutation outcome takes precedence, including after cancellation. Preserve operation IDs; do not replay automatically.
+- Confirmed cancellation stops the request. A runner ignoring cancellation is bounded by a watchdog and remains uncertain, not confirmed stopped.
+
+A durable running receipt is written **before** dispatch. A running receipt found after restart becomes `BROWSER_EXECUTION_INTERRUPTED`; no second action is sent. Each private receipt retains the bounded observation and full result for authorized local investigation. Raw page observations are not copied to default logs or conversational token usage. Task status, dashboard detail and channel task detail expose outcome/reason, action/evaluation counts and safe correlation metadata. Jev records link evaluations to agent, session and task independently of conversational model usage.
+
+### Integration validation
+
+`scripts/jev-browser-smoke.cjs` exports `runGatewayBrowserFixture(options)` for a browser project's isolated fixture. It executes the **actual gateway task controller, durable adapter, packaged runner and authenticated MCP connector**. The caller supplies an installed public entrypoint, approved fixture scope, controller credential file, goal/fields and evaluator callback. Use real relay/extension/browser fixtures; fake MCP tests alone do not prove end-to-end integration. No paid inference is performed without an explicitly injected live evaluator.
+
+Test verified effects, missing field input, absent/false verification, stale rejection, uncertain mutations, cancellation/revocation/disconnection, gateway restart, cross-agent/principal/conversation denial and app-agent isolation. Test direct/upstream managed/BYOK accounting separately with live credentials. Do not claim comparative token savings or production browser reliability from a small synthetic sample.
 
 ## Optional skill recommendations
 

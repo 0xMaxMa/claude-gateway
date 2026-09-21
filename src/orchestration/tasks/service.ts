@@ -369,9 +369,11 @@ export class TaskService {
     this.assertQuestion(task, questionId);
     // Persist early answers, while fencing scheduling until the old attempt really ends.
     const previous = this.revision(taskId, task.revision);
+    const browserFieldLabel=task.gatewayTarget?.adapter==='browser' && task.browserReport?.reason==='FIELD_TEXT_REQUIRED' && task.browserReport.fieldRequest?.reason==='missing' ? task.browserReport.fieldRequest.label : undefined;
+    if(browserFieldLabel && answer.length>2000)throw new OrchestrationError('BROWSER_FIELD_VALUE_TOO_LONG');
     task.revision++;
     this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify({ ...previous, revision: task.revision,
-      answers: [...(previous.answers ?? []), { questionId, text: answer, inputId }], originatingInputId: inputId }));
+      answers: [...(previous.answers ?? []), { questionId, text: answer, inputId, ...(browserFieldLabel ? {browserFieldLabel} : {}) }], originatingInputId: inputId }));
     task.pendingQuestion = undefined;
     task.state = task.activeAttemptId ? 'interrupting' : 'queued';
     this.store.saveTask(task, version);
@@ -602,6 +604,7 @@ export class TaskService {
     }
     return this.store.transaction(() => {
       const { task, attempt } = this.active(attemptId, generation);
+      if (task.gatewayTarget?.adapter === 'browser' && outcome.browserReport) task.browserReport=outcome.browserReport;
       // A structured unresolved blocker is not successful task completion.
       if (outcome.type === 'paused' && !(task.state === 'waiting_input' && task.pendingQuestion) &&
         task.state !== 'interrupting' && task.state !== 'cancel_requested') throw new OrchestrationError('STATE_CONFLICT');

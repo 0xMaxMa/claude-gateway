@@ -101,7 +101,7 @@ test('busy targets stay amendable in the queue and leave capacity for an unrelat
  const attempt=tasks.claim(other.taskId);expect(attempt).toBeDefined();
  tasks.finish(attempt!.attemptId,attempt!.generation,{type:'completed',result:{summary:'Done',artifactIds:[]}});
  adapter.ready=()=>true;await controller.tick();
- expect(adapter.submit).toHaveBeenCalledWith(expect.objectContaining({taskId:waiting.taskId}),expect.any(String),'Latest authorized instructions');
+ expect(adapter.submit).toHaveBeenCalledWith(expect.objectContaining({taskId:waiting.taskId}),expect.any(String),'Latest authorized instructions',undefined);
 });
 
 test('a queued busy target can be cancelled without dispatch or an execution attempt',async()=>{
