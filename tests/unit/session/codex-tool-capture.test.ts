@@ -57,3 +57,13 @@ test('does not follow a symlinked payload directory or remove its contents', () 
  expect(scanCodexTrace(root,state).measurements).toEqual([]);
  expect(existsSync(join(outside,'1.json'))).toBe(true);
 });
+test.each([{tools:[{name:'replacement'}]}, {tools:[]}])('explicit tools replace inherited schemas: %j', ({tools}) => {
+ body(1,{tools:[{name:'old'},{name:'deferred',defer_loading:true}]});
+ event({type:'inference_started',inference_call_id:'r1',request_payload:{path:'payloads/1.json'}});
+ body(2,{response_id:'resp_1'});
+ event({type:'inference_completed',inference_call_id:'r1',response_payload:{path:'payloads/2.json'}});
+ body(3,{previous_response_id:'resp_1',tools,input:[{type:'tool_reference',tool_name:'deferred'}]});
+ event({type:'inference_started',inference_call_id:'r2',request_payload:{path:'payloads/3.json'}});
+ const schemas=scanCodexTrace(root,state).measurements.flatMap(m=>m.schemas?[m.schemas]:[]);
+ expect(schemas[1]).toMatchObject({loaded:tools.map(t=>t.name),deferred:[]});
+});

@@ -119,6 +119,7 @@ export function readClaudeExtensions(cwd: string, env: NodeJS.ProcessEnv = proce
 }
 
 export function mergeCodexExtensions(result: WorkerExtensions, native: NativeCodexExtensions, env = process.env): void {
+  result.notices.push(...(native.notices ?? []));
   const roots = new Set<string>();
   for (const plugin of native.plugins ?? []) {
     roots.add(plugin.root);

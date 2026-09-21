@@ -48,7 +48,9 @@ export function scanCodexTrace(root: string, state: CodexTraceState): { state: C
       if (raw === undefined) { waiting.push(entry); continue; }
       let body: any; try { body = JSON.parse(raw); } catch { waiting.push(entry); continue; }
       if (event.type === 'inference_started') {
-        const inherited = typeof body.previous_response_id === 'string' ? state.responses?.[body.previous_response_id] : undefined;
+        // An explicit tools array replaces the preceding request's inventory,
+        // including tools: []; only omitted inventories inherit it.
+        const inherited = !Array.isArray(body.tools) && typeof body.previous_response_id === 'string' ? state.responses?.[body.previous_response_id] : undefined;
         const additional = Array.isArray(body.input) ? body.input.filter((item: any) => item?.type === 'additional_tools' && Array.isArray(item.tools)) : [];
         const known = Array.isArray(body.tools) || additional.length > 0 || inherited !== undefined;
         const loaded = new Set<string>(inherited?.loaded), deferred = new Set<string>(inherited?.deferred);

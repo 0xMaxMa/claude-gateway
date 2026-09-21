@@ -5,7 +5,7 @@ import { join } from 'path';
 import { homedir, userInfo } from 'os';
 
 export interface NativeCodexSkill { name: string; description: string; path: string; enabled: boolean; pluginId?: string | null; }
-export interface NativeCodexExtensions { skills: NativeCodexSkill[]; config: Record<string, any>; plugins?: { name: string; root: string }[]; pluginIds?: string[]; }
+export interface NativeCodexExtensions { skills: NativeCodexSkill[]; config: Record<string, any>; plugins?: { name: string; root: string }[]; pluginIds?: string[]; notices?: string[]; }
 
 /** Ask the installed CLI, rather than guessing cache versions or enabling every
  * directory in its cache. No thread is created and no model request is sent. */
@@ -65,12 +65,25 @@ export function inspectCodexExtensions(bin: string, cwd: string, env = process.e
       const skills: NativeCodexSkill[] = (listing.data ?? []).flatMap((entry: any) => entry.skills ?? []).filter((skill: any) => skill.enabled === true && typeof skill.path === 'string');
       // Remote installed plugins can be omitted from skills/list until explicitly
       // selected. plugin/read gives their installed paths without a model call.
-      const plugins = await rpc('plugin/installed', { cwds: [cwd] });
+      const notices: string[] = [];
+      const plugins = await rpc('plugin/installed', { cwds: [cwd] }).catch(() => {
+        notices.push('Codex plugin inventory is unavailable; native skills and configured MCP remain available.');
+        return { marketplaces: [] };
+      });
       const installed: { name: string; root: string }[] = [];
       const pluginIds: string[] = [];
       for (const marketplace of plugins.marketplaces ?? []) {
         for (const plugin of marketplace.plugins ?? []) {
           if (!plugin.installed || !plugin.enabled || plugin.disabledReason) continue;
+          let detail: any;
+          try {
+            detail = await rpc('plugin/read', { pluginName: plugin.name, marketplacePath: marketplace.path ?? null, remoteMarketplaceName: marketplace.path ? null : marketplace.name });
+            if (!detail?.plugin || typeof detail.plugin !== 'object') throw new Error('CODEX_PLUGIN_METADATA_INVALID');
+          } catch {
+            // Do not discard healthy skills/MCP or expose native diagnostics.
+            notices.push('A Codex plugin could not be read; other native extensions remain available.');
+            continue;
+          }
           pluginIds.push(plugin.id);
           // A remote catalog may return null skill paths even after its exact
           // published version has been materialized locally. Never choose an
@@ -80,13 +93,12 @@ export function inspectCodexExtensions(bin: string, cwd: string, env = process.e
           const root = plugin.source?.type === 'local' ? plugin.source.path : parts.every(part => typeof part === 'string' && /^[\w.-]+$/.test(part) && part !== '.' && part !== '..')
             ? join(env.CODEX_HOME ?? join(env.HOME ?? homedir(), '.codex'), 'plugins', 'cache', ...parts) : undefined;
           if (root && (container || existsSync(join(root, '.codex-plugin', 'plugin.json')))) installed.push({ name: plugin.name, root });
-          const detail = await rpc('plugin/read', { pluginName: plugin.name, marketplacePath: marketplace.path ?? null, remoteMarketplaceName: marketplace.path ? null : marketplace.name });
           for (const skill of detail.plugin?.skills ?? []) {
             if (skill.enabled === true && typeof skill.path === 'string' && !skills.some(entry => entry.path === skill.path)) skills.push({ ...skill, pluginId: plugin.id });
           }
         }
       }
-      finish(undefined, { config, skills, plugins: installed, pluginIds });
+      finish(undefined, { config, skills, plugins: installed, pluginIds, notices });
     })().catch(() => finish(new Error('CODEX_EXTENSION_DISCOVERY_UNAVAILABLE')));
   });
 }

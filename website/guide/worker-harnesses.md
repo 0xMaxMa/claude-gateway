@@ -150,7 +150,9 @@ instructions are read only when needed. Named task skills pin their instructions
 at admission; plugin-root resources such as `shared/foundation.md` retain their
 relative layout. Nested skill invocations are resolved through the catalog, and
 unique short names are included as aliases. Disabled plugins, unrelated project
-installations and arbitrary stale cache versions are excluded.
+installations and arbitrary stale cache versions are excluded. If a native plugin
+metadata request fails, discovery reports a notice and preserves successfully
+discovered skills, configured MCP servers and other plugins.
 
 The gateway asks native Codex for its installed skills and plugins. It also reads
 enabled Claude plugin manifests, user/project skills and commands. The Agent can
