@@ -266,7 +266,7 @@ export function createSharesPrivateRouter(
   store: ShareStore,
   apiKeys: ApiKey[],
   agentsBaseDir: string,
-  publicBaseUrl?: string,
+  publicBaseUrl?: string | (() => string | undefined),
   limitsOverride?: ShareLimits,
 ): Router {
   const router = Router();
@@ -440,7 +440,7 @@ export function createSharesPrivateRouter(
       return {
         share_id: mint.shareId,
         token: mint.token,
-        ...(publicBaseUrl ? { url: `${publicBaseUrl}/shared/${mint.token}` } : {}),
+        ...((typeof publicBaseUrl==='function'?publicBaseUrl():publicBaseUrl) ? { url: `${typeof publicBaseUrl==='function'?publicBaseUrl():publicBaseUrl}/shared/${mint.token}` } : {}),
         expires_at: new Date(mint.expiresAtMs).toISOString(),
         // only present for refs resolved from an artifact_id
         // whose generation recorded a provider task id — the hook a

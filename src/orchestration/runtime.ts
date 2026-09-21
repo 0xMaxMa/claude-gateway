@@ -200,7 +200,7 @@ export class AgentOrchestrationRuntime {
     } catch (error) { store.close(); releaseLock(); throw error; }
     const tasks = new TaskService(store, agent.orchestration, agent.workspace);
     const files = new TaskFiles(store, join(agent.workspace, '../..'), agent.type === 'app-agent' ? join(root, 'container-files') : undefined, agent.workspace);
-    const bridge = new TaskBridge(tasks, files, workerShares(files, agent, gateway), host.skills ? () => host.skills!() : undefined, agent.type === 'app-agent' ? { agent, spool: join(root, 'container-files') } : undefined, workerCrons(files, agent, gateway), Array.isArray(gateway.safemode?.allowedAgentIds) && gateway.safemode.allowedAgentIds.includes(agent.id));
+    const bridge = new TaskBridge(tasks, files, workerShares(files, agent, gateway), host.skills ? () => host.skills!() : undefined, agent.type === 'app-agent' ? { agent, spool: join(root, 'container-files') } : undefined, workerCrons(files, agent, gateway), () => Array.isArray(gateway.safemode?.allowedAgentIds) && gateway.safemode.allowedAgentIds.includes(agent.id));
     const personalRetention = resolveDreamingConfig(agent.dreaming, gateway.gateway.dreaming, gateway.gateway.timezone).staleness;
     const sharedRetention = resolveSharedConfig(agent.knowledge?.shared, gateway.gateway.knowledge?.shared).staleness;
     bridge.recordRetrievals = (personalRetention.enabled && personalRetention.recordRetrievals) || (sharedRetention.enabled && sharedRetention.recordRetrievals);
@@ -1256,6 +1256,9 @@ export class AgentOrchestrationRuntime {
   }
   async flushHistory(): Promise<void> {
     for (const row of this.store.all("SELECT operation_id FROM history_operations WHERE state='pending' ORDER BY updated_at LIMIT 200")) await this.history.write(String(row.operation_id));
+  }
+  hasPendingWork(): boolean {
+    return !!(this.active.size || this.pending.size || this.store.get("SELECT id FROM conversation_inputs WHERE status IN ('accepted','assigned') LIMIT 1") || this.store.get("SELECT id FROM tasks WHERE state NOT IN ('completed','failed','cancelled') LIMIT 1"));
   }
   drain(): void {
     this.draining = true;

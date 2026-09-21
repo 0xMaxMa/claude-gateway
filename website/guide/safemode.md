@@ -75,7 +75,9 @@ Private state, request receipts and bounded headless output live under `~/.claud
 
 ## Agent control
 
-Trusted host operator agents can use `safemode_list`, `safemode_send`, `safemode_status`, `safemode_logs`, and `safemode_stop`. Add their exact agent IDs to `safemode.allowedAgentIds` and restart the gateway to enable access. This grants access to the host user's safemode investigations and diagnostic output; keep the list limited to operator agents. Default is no agent access. App/container agents and ordinary workers cannot invoke these host controls.
+Trusted host operator agents can use `safemode_list`, `safemode_send`, `safemode_status`, `safemode_logs`, and `safemode_stop`. Add their exact agent IDs to `safemode.allowedAgentIds` to enable access. This grants access to the host user's safemode investigations and diagnostic output; keep the list limited to operator agents. Default is no agent access. App/container agents and ordinary workers cannot invoke these host controls.
+
+See [Applying configuration changes](../reference/configuration-changes.md) before changing authorization on a running gateway. Validate access with a new tool request; a saved setting or an earlier `ACCESS_DENIED` message does not establish the current authorization result.
 
 For example, to allow only your host operator agent `claude-founder`, merge this into `config.json`:
 
@@ -87,7 +89,7 @@ For example, to allow only your host operator agent `claude-founder`, merge this
 }
 ```
 
-Keep any other existing `safemode` settings. Use the exact agent ID, not its display name or chat session ID. Restart the gateway when it is idle for this change to take effect. Changes to `safemode.allowedAgentIds`, including removing permissions, are reported by the config watcher as restart-required; existing runtimes retain their prior policy until restart. An empty or omitted list produces `ACCESS_DENIED` with reason `SAFEMODE_AGENT_NOT_ALLOWED` for agent safemode requests, even though the local operator CLI remains available. This permission grants access to investigation contents and controls, not just the list of names.
+Keep any other existing `safemode` settings. Use the exact agent ID, not its display name or chat session ID. Changes to `safemode.allowedAgentIds` hot-reload. Each privileged call checks the current allowlist, so removing an agent revokes access even through an existing ticket. Newly launched MCP processes load the five safemode tool schemas only for allowlisted host agents; existing processes may retain their old schema list, but cannot bypass the live authorization check. An empty or omitted list produces `ACCESS_DENIED` with reason `SAFEMODE_AGENT_NOT_ALLOWED` for agent safemode requests, even though the local operator CLI remains available. This permission grants access to investigation contents and controls, not just the list of names.
 
 Create an investigation interactively first. Then an authorized operator agent can send prompts, including through its Telegram channel. Sending/stopping requires an execution-authorized turn; takeover must be explicitly requested. Scoped admission is checked before invoking the local command. Local controls work while the gateway is down; communication through Telegram requires the gateway/channel to be available. Inspect status and logs to retrieve the result; acceptance alone is not completion.
 
@@ -199,7 +201,7 @@ If you identify a stale client you no longer need, detach only that client with 
 
 | Symptom | Meaning and next step |
 | --- | --- |
-| Agent receives `ACCESS_DENIED` | Inspect the structured `reason` below. This code alone does not prove an allowlist problem. Recheck the tool after changing configuration and restarting; a previous rejection is historical evidence. |
+| Agent receives `ACCESS_DENIED` | Inspect the structured `reason` below. This code alone does not prove an allowlist problem. Recheck the tool after changing configuration; a previous rejection is historical evidence. |
 | `BUSY` | An investigation already has an owner. Inspect `status`; use explicit `--takeover` only when you intend to stop its current interactive owner. Stop an active headless request first. |
 | Native session already belongs to an investigation | Use `safemode --resume NATIVE_ID`; do not attach it again through native `resume` parameters. |
 | Native ownership cannot be verified before launch | Inspect the reported PID and OS process visibility. Safemode refuses a new launch without sufficient evidence. `recover` does not bypass a live owner. |
@@ -230,7 +232,7 @@ the agent ID and reason without credentials or prompt text.
 
 | Reason | Meaning |
 | --- | --- |
-| `SAFEMODE_AGENT_NOT_ALLOWED` | The runtime's allowlist does not include this agent. Update the list and restart when idle. |
+| `SAFEMODE_AGENT_NOT_ALLOWED` | The runtime's allowlist does not include this agent. Update the list and verify the next request after configuration reload. |
 | `SAFEMODE_HOST_ONLY` | An app/container agent cannot control host safemode. |
 | `CONVERSATION_ACCESS_DENIED` | The principal is not a member of the conversation. |
 | `EXECUTION_NOT_AUTHORIZED` | This turn may inspect but cannot send or stop. |

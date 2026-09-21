@@ -6,14 +6,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SafemodeModule, SAFEMODE_TOOLS } from './module';
 
+const originalAccess = process.env.GATEWAY_SAFEMODE_ALLOWED;
 const originalRole = process.env.GATEWAY_ORCHESTRATION_ROLE;
 afterEach(() => {
+  if(originalAccess===undefined)delete process.env.GATEWAY_SAFEMODE_ALLOWED;else process.env.GATEWAY_SAFEMODE_ALLOWED=originalAccess;
   if (originalRole === undefined) delete process.env.GATEWAY_ORCHESTRATION_ROLE;
   else process.env.GATEWAY_ORCHESTRATION_ROLE = originalRole;
 });
 describe('safemode MCP facade', () => {
   test('strict argv preserves prompt text and never implies takeover', async () => {
     process.env.GATEWAY_ORCHESTRATION_ROLE = 'agent';
+    process.env.GATEWAY_SAFEMODE_ALLOWED = 'true';
     const commands: string[][] = [];
     const mod = new SafemodeModule(async args => { commands.push(args); return { stdout: '{"accepted":true}', failed: false }; });
     const prompt = '--dangerously-bypass-approvals-and-sandbox $(touch /tmp/no)';
@@ -30,6 +33,7 @@ describe('safemode MCP facade', () => {
       expect((await mod.handleTool('safemode_list', {})).isError).toBe(true);
     }
     process.env.GATEWAY_ORCHESTRATION_ROLE = 'agent';
+    process.env.GATEWAY_SAFEMODE_ALLOWED = 'true';
     for (const [tool, args] of [
       ['safemode_status', { session: '--config' }], ['safemode_list', { command: 'sh' }],
       ['safemode_send', { session: 'debug', prompt: 'inspect', request_id: 'r', takeover: 'true' }],
@@ -40,6 +44,7 @@ describe('safemode MCP facade', () => {
   });
   test('bounded command errors do not echo executable error containing a prompt', async () => {
     process.env.GATEWAY_ORCHESTRATION_ROLE = 'agent';
+    process.env.GATEWAY_SAFEMODE_ALLOWED = 'true';
     const mod = new SafemodeModule(async () => { throw Error('command contains PRIVATE_PROMPT'); });
     const result = await mod.handleTool('safemode_list', {});
     expect(result.isError).toBe(true);
@@ -56,13 +61,13 @@ describe('safemode MCP facade', () => {
     writeFileSync(ticket, JSON.stringify({ url: `http://127.0.0.1:${bridge.port}`, token: 'synthetic-test' }));
     const clients: Client[] = [];
     try {
-      for (const role of ['agent', 'worker']) {
+      for (const [role, permittedTools] of [['agent',true],['agent',false],['worker',true]] as const) {
         const client = new Client({ name: 'safemode-test', version: '1' }); clients.push(client);
         await client.connect(new StdioClientTransport({ command: 'bun', args: [join(import.meta.dir, '../../server.ts')], stderr: 'ignore', env: {
-          PATH: process.env.PATH ?? '', HOME: directory, GATEWAY_ORCHESTRATION_ROLE: role, GATEWAY_ORCHESTRATION_TICKET_FILE: ticket,
+          PATH: process.env.PATH ?? '', HOME: directory, GATEWAY_ORCHESTRATION_ROLE: role, GATEWAY_SAFEMODE_ALLOWED: permittedTools ? 'true' : '', GATEWAY_ORCHESTRATION_TICKET_FILE: ticket,
         } }));
         const listed = (await client.listTools()).tools.filter(tool => tool.name.startsWith('safemode_'));
-        if (role === 'worker') expect(listed).toEqual([]);
+        if (role === 'worker' || !permittedTools) expect(listed).toEqual([]);
         else {
           expect(listed).toEqual(SAFEMODE_TOOLS);
           const result = await client.callTool({ name: 'safemode_list', arguments: {} });

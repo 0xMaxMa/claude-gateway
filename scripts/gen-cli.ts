@@ -321,6 +321,12 @@ claude-gateway doctor fix
 claude-gateway doctor fix --yes --config /path/to/config.json --json
 \`\`\`
 
+Without \`--json\`, doctor prints only the readable check list; it does not append a
+JSON dump. Use \`doctor --json\` to write a compact JSON report to stdout without the
+readable report. Scripts that previously parsed plain \`doctor\` output must add
+\`--json\`. Exit codes are unchanged. For scripted repairs, use \`doctor fix --yes --json\`;
+interactive confirmation and command errors are separate from the check report.
+
 \`doctor\` is read-only. It checks Node.js 22+, Claude Code, Bun, ffmpeg, ffprobe and optional Codex;
 configuration readability, basic structure and owner permissions; runtime/log paths;
 failed Linux user-service state; known startup log signatures; and the existing

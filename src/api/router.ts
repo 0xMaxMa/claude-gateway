@@ -553,7 +553,7 @@ export function createApiRouter(
   agentConfigs: Map<string, AgentConfig>,
   apiKeys: ApiKey[],
   configPath?: string,
-  models?: ModelConfig[],
+  models?: ModelConfig[] | (() => ModelConfig[] | undefined),
 ): Router {
   const router = Router();
   const auth = createApiAuthMiddleware(apiKeys);
@@ -944,7 +944,7 @@ export function createApiRouter(
     // callers would read that degraded list for the next 60 seconds. It also
     // makes this endpoint agree with the picker on an unconfigured gateway
     // instead of reporting no models at all.
-    const staticModels = models ?? DEFAULT_MODELS;
+    const staticModels = (typeof models==='function'?models():models) ?? DEFAULT_MODELS;
     const available = (await fetchModelCatalog(staticModels)) ?? staticModels;
     res.json({ models: available.map((m) => ({ id: m.id, name: m.label, alias: m.alias, contextWindow: m.contextWindow, multiplier: m.multiplier ?? 1 })) });
   });

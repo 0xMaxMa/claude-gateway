@@ -26,7 +26,7 @@ export class SafemodeModule implements ToolModule {
   id = 'safemode';
   toolVisibility: ToolVisibility = 'all-configured';
   constructor(private readonly run: SafemodeCommandRunner = runSafemodeCommand) {}
-  isEnabled(): boolean { return process.env.GATEWAY_ORCHESTRATION_ROLE === 'agent'; }
+  isEnabled(): boolean { return process.env.GATEWAY_ORCHESTRATION_ROLE === 'agent' && process.env.GATEWAY_SAFEMODE_ALLOWED === 'true'; }
   getTools(): McpToolDefinition[] { return SAFEMODE_TOOLS; }
   async handleTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolResult> {
     const fail = (code: string): McpToolResult => ({ content: [{ type: 'text', text: JSON.stringify({ error: code }) }], isError: true });

@@ -29,7 +29,7 @@ export class TaskBridge {
   private readonly scopes = new Map<string, Scope>();
   private readonly cancellations = new Map<string, AbortController>();
   constructor(private readonly tasks: TaskService, private readonly files?: TaskFiles,
-    private readonly shareCall?: (attemptId: string, generation: number, args: Record<string, unknown>) => Promise<unknown>, private readonly skills?: () => SkillRegistry, private readonly container?: { agent: AgentConfig; spool: string }, private readonly cronCall?: (attemptId: string, generation: number, tool: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>, private readonly safemodeAccess = false) {}
+    private readonly shareCall?: (attemptId: string, generation: number, args: Record<string, unknown>) => Promise<unknown>, private readonly skills?: () => SkillRegistry, private readonly container?: { agent: AgentConfig; spool: string }, private readonly cronCall?: (attemptId: string, generation: number, tool: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>, private readonly safemodeAccess: boolean | (() => boolean) = false) {}
   captureWorkerOutput(attemptId: string, generation: number, line: string): void {
     try { this.files?.captureOutput(attemptId, generation, line); }
     catch { /* A failed image capture must not break worker execution. Staging reports missing capture. */ }
@@ -70,7 +70,7 @@ export class TaskBridge {
                   throw error;
                 }
                 if (this.container) deny('SAFEMODE_HOST_ONLY');
-                if (!this.safemodeAccess) deny('SAFEMODE_AGENT_NOT_ALLOWED');
+                if (!(typeof this.safemodeAccess === 'function' ? this.safemodeAccess() : this.safemodeAccess)) deny('SAFEMODE_AGENT_NOT_ALLOWED');
                 if (!['list', 'status', 'logs', 'send', 'stop'].includes(a.operation)) throw new OrchestrationError('INVALID_INPUT');
                 if (a.operation === 'send' || a.operation === 'stop') {
                   if (!context.execute) deny('EXECUTION_NOT_AUTHORIZED');
@@ -194,6 +194,7 @@ export class TaskBridge {
     writeFileSync(ticketPath, JSON.stringify({ url: this.url, token, ...(this.container ? { socket: this.url, tools: containerTaskTools(scope.role) } : {}) }), { mode: 0o600, flag: 'wx' });
     writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: { gateway: { command: 'bun', args: [resolve(__dirname, '../../mcp/server.ts')], env: {
       GATEWAY_CAPABILITY_CATALOG: scope.role === 'agent' && scope.capabilities ? 'true' : '',
+      GATEWAY_SAFEMODE_ALLOWED: scope.role === 'agent' && !this.container && (typeof this.safemodeAccess==='function'?this.safemodeAccess():this.safemodeAccess) ? 'true' : '',
       GATEWAY_ORCHESTRATION_ROLE: scope.role, GATEWAY_ORCHESTRATION_TICKET_FILE: ticketPath,
       GATEWAY_WORKSPACE_DIR: workspace, GATEWAY_SHARED_KB_DIR: sharedKbDir,
       GATEWAY_RECORD_RETRIEVALS: this.recordRetrievals ? '1' : '',

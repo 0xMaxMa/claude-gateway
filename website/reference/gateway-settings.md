@@ -2,6 +2,8 @@
 
 These settings are read from `config.json`. Examples are partial objects to merge into an existing configuration. Defaults in the tables refer to runtime fallback values; the installed template may explicitly choose a different value.
 
+For when saved values take effect, environment precedence, and verification, see [Applying configuration changes](./configuration-changes.md). A field's presence in this reference does not imply that an existing runtime component hot-reloads it.
+
 ## `gateway.timezone` (optional)
 
 IANA timezone, default `"UTC"`. Shared default for the per-feature scheduling
@@ -18,7 +20,7 @@ than crashing that scheduler.
 The externally reachable gateway base URL. Set it manually to enable short-lived
 public file shares used by `generate_image` reference edits and `share_file`
 (formerly `share_image`, which still works as a deprecated image-only alias).
-The URL must end in `/gateway`; changing it requires a gateway restart.
+The URL must end in `/gateway`; new share links use the reloaded value. Existing links and proxy configuration are unchanged.
 
 ```json
 {
@@ -59,7 +61,7 @@ product-agnostic and never hardcodes a downstream app's domain, so this is opt-i
 Set, the callback issues a real `302` to it on **every** terminal outcome — success, and
 also a denied, expired or failed sign-in, which carries `?connector_oauth_error=<code>`.
 Unset, the callback renders a plain "Connected — you can close this tab" page instead.
-The value is validated once at startup: anything that isn't a well-formed `http(s)` URL
+The value is validated when preparing a redirect: anything that isn't a well-formed `http(s)` URL
 is logged and ignored rather than injecting a broken redirect into every future callback.
 The scheme is part of that check — this value becomes the `Location` of a redirect sent
 to the end user's own browser from a public route, so a `javascript:` or `data:` URL

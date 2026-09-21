@@ -5,8 +5,12 @@ import { OrchestrationError } from './types';
 export class ProcessCapacity {
   private readonly active = new Map<symbol, SessionRole>();
   private readonly workers = new Map<string, () => void>();
-  constructor(readonly total: number, readonly reservedAgent: number) {
+  constructor(public total: number, public reservedAgent: number) {
     if (!Number.isSafeInteger(total) || !Number.isSafeInteger(reservedAgent) || reservedAgent < 1 || total <= reservedAgent) throw new OrchestrationError('INVALID_PROCESS_LIMITS');
+  }
+  configure(total:number,reservedAgent:number):void {
+    if(!Number.isSafeInteger(total)||!Number.isSafeInteger(reservedAgent)||reservedAgent<1||total<=reservedAgent)throw new OrchestrationError('INVALID_PROCESS_LIMITS');
+    this.total=total;this.reservedAgent=reservedAgent;
   }
   acquire(role: SessionRole, enforce = true): (() => void) | undefined {
     if (enforce && this.active.size >= this.total) return undefined;
@@ -36,5 +40,6 @@ export function gatewayCapacity(config: GatewayConfig): ProcessCapacity {
     capacity = new ProcessCapacity(config.gateway.processLimits?.maxTotal ?? 32, config.gateway.processLimits?.reservedAgent ?? 2);
     capacities.set(config, capacity);
   }
+  capacity.configure(config.gateway.processLimits?.maxTotal ?? 32,config.gateway.processLimits?.reservedAgent ?? 2);
   return capacity;
 }

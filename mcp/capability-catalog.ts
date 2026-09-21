@@ -70,7 +70,7 @@ for (const module of gatewayModules()) {
             : 'unavailable',
     });
 }
-for (const tool of [...AGENT_TASK_TOOLS, ...SAFEMODE_TOOLS])
+for (const tool of [...AGENT_TASK_TOOLS, ...(process.env.GATEWAY_SAFEMODE_ALLOWED === 'true' ? SAFEMODE_TOOLS : [])])
   entries.push({
     name: `mcp__gateway__${tool.name}`,
     description: tool.description,

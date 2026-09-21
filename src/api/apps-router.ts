@@ -97,9 +97,7 @@ export function createAppsRouter(
   const router = Router();
 
   // All apps endpoints require authentication
-  if (apiKeys.length) {
-    router.use(createApiAuthMiddleware(apiKeys));
-  }
+  router.use(createApiAuthMiddleware(apiKeys));
 
   // ── Registry browsing (read-only, any authenticated key) ─────────────────
 

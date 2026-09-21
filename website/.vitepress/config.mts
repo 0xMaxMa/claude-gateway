@@ -45,6 +45,7 @@ export default defineConfig({
       ] },
       { text: 'Configuration & operation', collapsed: true, items: [
         { text: 'Configuration overview', link: '/reference/configuration' },
+        { text: 'Applying configuration changes', link: '/reference/configuration-changes' },
         { text: 'Gateway settings', link: '/reference/gateway-settings' },
         { text: 'Orchestration settings', link: '/reference/orchestration-settings' },
         { text: 'Memory & learning settings', link: '/reference/memory-settings' },

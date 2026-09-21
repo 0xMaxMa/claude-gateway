@@ -273,11 +273,22 @@ export interface SharedReflectionManagerDeps {
 }
 
 export class SharedReflectionManager {
-  private readonly deps: SharedReflectionManagerDeps;
+  private deps: SharedReflectionManagerDeps;
   private timer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(deps: SharedReflectionManagerDeps) {
     this.deps = deps;
+  }
+
+  reconfigure(deps: SharedReflectionManagerDeps): void {
+    this.stop();this.deps=deps;this.startReflecting();
+  }
+  private running?: Promise<ReflectionResult>;
+  async reflectOnce(now: number = Date.now(), opts: { consolidate?: boolean } = {}): Promise<ReflectionResult> {
+    if(this.running)return this.running;
+    const snapshot=new SharedReflectionManager({...this.deps});
+    this.running=snapshot.runReflectOnce(now,opts);
+    try{return await this.running;}finally{this.running=undefined;}
   }
 
   private log(msg: string, data?: Record<string, unknown>): void {
@@ -292,7 +303,7 @@ export class SharedReflectionManager {
    * driven and free; consolidation costs a model call per cluster and stays on
    * its weekly slot.
    */
-  async reflectOnce(
+  private async runReflectOnce(
     now: number = Date.now(),
     opts: { consolidate?: boolean } = {},
   ): Promise<ReflectionResult> {
@@ -421,6 +432,7 @@ export class SharedReflectionManager {
    * only a fire whose slot lands on `dayOfWeek` also runs LLM consolidation.
    */
   startReflecting(): void {
+    this.stop();
     if (!this.deps.reflectionCfg.enabled) return;
     const schedule = (): void => {
       const { dayOfWeek, hour, minute, timezone } = this.deps.reflectionCfg;

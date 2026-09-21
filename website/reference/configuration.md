@@ -68,10 +68,14 @@ For a new deployment, create the agent first using the wizard, then merge this b
 
 ## Applying changes
 
-- The config watcher reloads saved `config.json` changes. Agent changes can replace sessions; finish or coordinate active work first.
-- Changes to `~/.claude-gateway/.env` require a process restart. Per-agent environment files are loaded before config reload, but inherited variables can take precedence.
-- Voice settings changes apply to new voice connections and later replies; reconnect a live voice session to use the new settings consistently.
-- Code updates require a matching gateway/MCP deployment and restart; reloading JSON does not load new JavaScript.
+Saving JSON, loading valid configuration, and applying it to a running component are separate operations. A saved value is not proof that an existing model process, channel connection, or scheduler has adopted it. See [Applying configuration changes](./configuration-changes.md) for the lifecycle, environment precedence, and verification steps.
+
+- Live settings affect subsequent operations in the running gateway.
+- Process settings take effect when the affected process is next created; they cannot change the environment or tool inventory of an existing CLI process.
+- Connection and scheduling settings need the affected component to reconnect or reschedule.
+- Startup settings and installed code require a gateway restart. Check active conversations and tasks first.
+
+Voice settings changes apply to new voice connections and later replies; reconnect a live voice session to use the new settings consistently.
 
 Do not copy an entire example over an existing config: this can discard agent entries, credentials, and unrelated settings. The API offers scoped updates to individual resources.
 

@@ -9,7 +9,7 @@ import { DecisionService } from '../../../src/orchestration/decisions';
 import { OrchestrationError } from '../../../src/orchestration/types';
 import type { AgentConfig } from '../../../src/types';
 
-async function fixture(allowed?: boolean, container = false) {
+async function fixture(allowed?: boolean | (() => boolean), container = false) {
   const root = mkdtempSync(join(tmpdir(), 'safemode-bridge-')), workspace = join(root, 'workspace');
   mkdirSync(workspace);
   const store = new OrchestrationStore(join(root, 'db'), 'operator'), tasks = new TaskService(store);
@@ -38,6 +38,17 @@ async function fixture(allowed?: boolean, container = false) {
 }
 
 describe('scoped safemode operator authorization', () => {
+  test('existing ticket observes grants and revocations without restarting the bridge', async()=>{
+    let allowed=false;const f=await fixture(()=>allowed);
+    try{
+      const ticket=f.issue();
+      expect(JSON.parse(readFileSync(ticket.profile.mcpConfigPath,'utf8')).mcpServers.gateway.env.GATEWAY_SAFEMODE_ALLOWED).toBe('');
+      expect((await ticket.call('list')).status).toBe(403);
+      allowed=true;expect((await ticket.call('list')).body).toEqual({allowed:true});
+      const granted=f.issue();expect(JSON.parse(readFileSync(granted.profile.mcpConfigPath,'utf8')).mcpServers.gateway.env.GATEWAY_SAFEMODE_ALLOWED).toBe('true');
+      allowed=false;expect((await ticket.call('list')).body.reason).toBe('SAFEMODE_AGENT_NOT_ALLOWED');
+    }finally{await f.close();}
+  });
   test('default and explicit non-allowlisted agents cannot inspect or mutate global diagnostics', async () => {
     for (const access of [undefined, false]) {
       const f = await fixture(access);

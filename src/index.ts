@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { setConfigValue } from './config/reload-policy';
+import { gatewayCapacity } from './orchestration/capacity';
 
 // Must run before any other imports so env vars are set before modules read them.
 // TypeScript compiles imports to inline require() calls (CommonJS), so placement matters.
@@ -161,10 +163,10 @@ async function startAgent(
   // Per-agent config wins field-by-field over the global gateway default
   // (mirrors the skillLearning override). loadWorkspace defaults any unset
   // field, so a fully-absent config is safe.
-  const memoryBudget = { ...gatewayConfig.gateway.memory, ...agentConfig.memory };
+  let memoryBudget = { ...gatewayConfig.gateway.memory, ...agentConfig.memory };
   // K2 core-shrink is enabled only when the searchable archive is on — otherwise
   // the injected index would point at a memory_search tool with nothing behind it.
-  const coreShrink = resolveArchiveConfig(
+  let coreShrink = resolveArchiveConfig(
     agentConfig.knowledge?.archive,
     gatewayConfig.gateway.knowledge?.archive,
   ).enabled;
@@ -269,6 +271,11 @@ async function startAgent(
 
   agentRunners.set(agentConfig.id, runner);
   agentConfigs.set(agentConfig.id, agentConfig);
+  runner.onConfigReload(() => {
+    agentConfig=agentConfigs.get(agentConfig.id) ?? agentConfig;
+    memoryBudget={...gatewayConfig.gateway.memory,...agentConfig.memory};
+    coreShrink=resolveArchiveConfig(agentConfig.knowledge?.archive,gatewayConfig.gateway.knowledge?.archive).enabled;
+  });
 
   // Skill self-improvement (planning-62): wire the manager (telemetry capture +
   // idle-review trigger + reviewer + writer) and start the daily curator. Shares
@@ -288,14 +295,16 @@ async function startAgent(
       sendNotification: (text, sessionId) => runner.notifySkillLearning(sessionId, text),
     });
     runner.setSkillLearning(skillLearning);
-    skillLearning.startCurator(); // unref'd self-rescheduling timer
+    skillLearning.startCurator();
+    runner.onConfigReload(() => skillLearning.reconfigure({globalCfg:gatewayConfig.gateway.skillLearning,agentCfg:agentConfig.skillLearning,gatewayTimezone:gatewayConfig.gateway.timezone}));
+    runner.onShutdown(()=>skillLearning.stop());
   } catch (err) {
     logger.warn('Failed to wire skill-learning (continuing without it)', { error: (err as Error).message });
   }
 
   // ── Nightly memory dreaming (issue #325) — propose (dry-run) slice ──
   try {
-    const dreaming = new DreamingManager({
+    const dreamingDeps = () => ({
       db: runner.getHistoryDb(),
       agentId: agentConfig.id,
       workspaceDir: agentConfig.workspace,
@@ -332,38 +341,45 @@ async function startAgent(
         logger,
       ),
     });
+    const dreaming = new DreamingManager(dreamingDeps());
+    runner.onConfigReload(()=>dreaming.reconfigure(dreamingDeps()));
+    runner.onShutdown(()=>dreaming.stop());
     dreaming.startDreaming(); // unref'd nightly self-rescheduling timer
   } catch (err) {
     logger.warn('Failed to wire dreaming (continuing without it)', { error: (err as Error).message });
   }
 
-  // ── Weekly shared-KB reflection pass (issue #392 part C) ──
-  // KB-level, not per-agent: only the FIRST agent to resolve a given shared-
-  // vault root starts a manager for it, so N agents sharing one vault still run
-  // exactly one weekly reflection job, not N nightly ones.
-  try {
-    const sharedCfg = resolveSharedConfig(agentConfig.knowledge?.shared, gatewayConfig.gateway.knowledge?.shared);
-    if (sharedCfg.enabled && sharedCfg.mode === 'auto') {
-      const vaultKey = sharedVaultDir(sharedCfg);
-      if (!ctx.reflectionVaultsStarted.has(vaultKey)) {
-        ctx.reflectionVaultsStarted.add(vaultKey);
-        const reflectionCfg = resolveReflectionConfig(
-          agentConfig.knowledge?.reflection,
-          gatewayConfig.gateway.knowledge?.reflection,
-          gatewayConfig.gateway.timezone,
-        );
-        const reflection = new SharedReflectionManager({
-          sharedCfg,
-          reflectionCfg,
-          logger,
-          spawnFn: makeClaudeSpawn(reflectionCfg.reviewModel),
-        });
-        reflection.startReflecting(); // unref'd weekly self-rescheduling timer
-      }
+  // One reflection owner per shared vault; disabled agents do not claim it.
+  let reflection: SharedReflectionManager | undefined;
+  let ownedVault: string | undefined;
+  const refreshReflection=()=>{
+    const sharedCfg=resolveSharedConfig(agentConfig.knowledge?.shared,gatewayConfig.gateway.knowledge?.shared);
+    const reflectionCfg=resolveReflectionConfig(agentConfig.knowledge?.reflection,gatewayConfig.gateway.knowledge?.reflection,gatewayConfig.gateway.timezone);
+    if(!sharedCfg.enabled||sharedCfg.mode!=='auto'||!reflectionCfg.enabled){
+      reflection?.stop();reflection=undefined;if(ownedVault)ctx.reflectionVaultsStarted.delete(ownedVault);ownedVault=undefined;return;
     }
-  } catch (err) {
-    logger.warn('Failed to wire shared-KB reflection (continuing without it)', { error: (err as Error).message });
-  }
+    const key=sharedVaultDir(sharedCfg);
+    if(!reflection&&ctx.reflectionVaultsStarted.has(key))return;
+    const deps={sharedCfg,reflectionCfg,logger,spawnFn:makeClaudeSpawn(reflectionCfg.reviewModel)};
+    if(reflection)reflection.reconfigure(deps);
+    else {reflection=new SharedReflectionManager(deps);reflection.startReflecting();ctx.reflectionVaultsStarted.add(key);ownedVault=key;}
+  };
+  try{refreshReflection();}catch(err){logger.warn('Failed to wire shared-KB reflection',{error:String(err)});}
+  runner.onConfigReload(refreshReflection);
+  runner.onShutdown(()=>{reflection?.stop();if(ownedVault)ctx.reflectionVaultsStarted.delete(ownedVault);});
+
+  let composePolicy=JSON.stringify([memoryBudget,agentConfig.knowledge,gatewayConfig.gateway.knowledge]);
+  let composeReload=Promise.resolve();
+  runner.onConfigReload(()=>{
+    const next=JSON.stringify([memoryBudget,agentConfig.knowledge,gatewayConfig.gateway.knowledge]);
+    if(next===composePolicy)return;composePolicy=next;
+    composeReload=composeReload.then(async()=>{
+      const updated=await loadWorkspace(agentConfig.workspace,{mcpToolsDir,sharedSkillsDir,logger,memoryBudget,coreShrink});
+      await fs.promises.writeFile(path.join(agentConfig.workspace,'CLAUDE.md'),updated.systemPrompt,'utf8');
+      if(updated.skillRegistry)runner.setSkillRegistry(updated.skillRegistry);
+      await runner.restartOrDefer({skipBusy:true,deferIdle:true});
+    }).catch(error=>logger.error('Context configuration refresh failed',{error:String(error)}));
+  });
 
   // Log startup status
   console.log(JSON.stringify({ id: agentConfig.id, status: 'started' }));
@@ -377,7 +393,7 @@ async function startAgent(
   schedulers.push(scheduler);
 
   // Watch workspace for changes
-  watchWorkspace(agentConfig.workspace, async (changedFiles) => {
+  const workspaceWatcher = watchWorkspace(agentConfig.workspace, async (changedFiles) => {
     logger.info('Workspace changed, reloading', { files: changedFiles });
     try {
       const updated = await loadWorkspace(agentConfig.workspace, {
@@ -430,9 +446,11 @@ async function startAgent(
     }
   });
 
+  runner.onShutdown(()=>{void workspaceWatcher.close();scheduler.stop();});
+
   // Watch skill directories for hot-reload (SKILL.md add/modify/delete)
   const workspaceSkillsDir = path.join(agentConfig.workspace, 'skills');
-  watchSkills({
+  const skillWatcher=watchSkills({
     dirs: [workspaceSkillsDir, mcpToolsDir, sharedSkillsDir],
     onChange: async () => {
       logger.info('Skills changed, reloading registry');
@@ -474,6 +492,7 @@ async function startAgent(
   });
 
   startupResults.push({ id: agentConfig.id, status: 'started', workspace: agentConfig.workspace });
+  runner.onShutdown(()=>{void skillWatcher.close();});
 }
 
 async function restoreSockets(registry: AppsRegistry, socketServer: SocketServer): Promise<void> {
@@ -845,7 +864,7 @@ async function main(): Promise<void> {
   // Daily backup-cleanup scheduler (issue #310): prunes every app's backups by
   // the retention-count + max-age union policy. Timer is unref'd, so it never
   // keeps the process alive.
-  appInstaller.startBackupCleanup();
+  let cancelBackupCleanup=appInstaller.startBackupCleanup();
 
   // Log retention (issue #435): sweeps once now and daily thereafter. Session
   // logs are the reason this is age-based — each session writes its own file
@@ -972,85 +991,54 @@ async function main(): Promise<void> {
   const configWatcher = new ConfigWatcher(CONFIG_PATH, config, globalLogger);
 
   configWatcher.on('changes', (changes: ConfigChange[], newConfig: GatewayConfig) => {
-    for (const change of changes) {
-      if (!change.hotReloadable) continue;
-
-      // Gateway-level changes (agentId === '')
-      if (change.agentId === '') {
-        if(change.field==='gateway.orchestration'){
-          config.gateway.orchestration=newConfig.gateway.orchestration;
-          for(const [id,runner] of ctx.agentRunners){const agent=agentConfigs.get(id);if(agent)runner.updateAgentConfig(agent);}
+    const affected=new Set<string>();
+    for(const change of changes){
+      if(!change.hotReloadable)continue;
+      try {
+        if(!change.agentId){
+          if(change.field==='gateway.api.keys')router.updateApiKeys((change.newValue as any[]) ?? []);
+          else setConfigValue(config,change.field,change.newValue);
+          if(change.field==='gateway.logs')configureLogging(config.gateway.logs);
+          if(change.field.startsWith('gateway.')&&!['gateway.api','gateway.logs','gateway.publicUrl','gateway.oauthReturnUrl'].some(p=>change.field===p||change.field.startsWith(p+'.')))
+            for(const id of agentConfigs.keys())affected.add(id);
+        }else{
+          const agent=agentConfigs.get(change.agentId);if(!agent)continue;
+          setConfigValue(agent,change.field,change.newValue);affected.add(change.agentId);
         }
-        if (change.field === 'gateway.headless') {
-          // Applies to sessions spawned after the change; running sessions keep their backend.
-          config.gateway.headless = change.newValue as boolean | undefined;
-          for (const runner of ctx.agentRunners.values()) runner.refreshTelegramCommands();
-        } else if (change.field === 'gateway.customConnectors') {
-          // Same "new spawns only" scope as the agent-level 'connectors' case
-          // below — an already-running session's subprocess isn't hot-patched
-          // (see restartSessionsUsingConnector for that case), but every
-          // subsequent chat/spawn now sees connect/disconnect/add-custom
-          // changes without a gateway restart.
-          config.gateway.customConnectors = change.newValue as GatewayConfig['gateway']['customConnectors'];
-        } else if (change.field === 'gateway.connectorsDefaultEnabled') {
-          // Same "new spawns only" scope as customConnectors: both readers take
-          // this off the live config object at call time, so replacing it is the
-          // whole reload.
-          config.gateway.connectorsDefaultEnabled = change.newValue as boolean | undefined;
-        }
-        if (change.field === 'gateway.logs') {
-          // Re-installing the policy is enough: every logger reads it per call,
-          // and the retention sweep reads `retentionDays` on each run.
-          config.gateway.logs = change.newValue as LogsConfig | undefined;
-          const applied = configureLogging(config.gateway.logs);
-          // warn, not info: raising the level to `warn` would swallow an `info`
-          // confirmation under the very policy just installed, leaving the
-          // operator with no evidence the edit took.
-          globalLogger.warn('Logging policy reloaded', { ...applied });
-        }
-        continue;
-      }
-
-      const agentConfig = agentConfigs.get(change.agentId);
-      if (!agentConfig) continue;
-
-      switch (change.field) {
-        case 'voice':
-          agentConfig.voice = change.newValue as AgentConfig['voice'];
-          ctx.agentRunners.get(change.agentId)?.updateAgentConfig(agentConfig);
-          break;
-        case 'orchestration':
-          agentConfig.orchestration = change.newValue as AgentConfig['orchestration'];
-          ctx.agentRunners.get(change.agentId)?.updateAgentConfig(agentConfig);
-          break;
-        case 'claude.model':
-          agentConfig.claude.model = change.newValue as string;
-          break;
-        case 'claude.extraFlags':
-          agentConfig.claude.extraFlags = change.newValue as string[];
-          break;
-        case 'session.idleTimeoutMinutes':
-          if (!agentConfig.session) agentConfig.session = {};
-          agentConfig.session.idleTimeoutMinutes = change.newValue as number;
-          break;
-        case 'session.maxConcurrent':
-          if (!agentConfig.session) agentConfig.session = {};
-          agentConfig.session.maxConcurrent = change.newValue as number;
-          break;
-        case 'heartbeat.rateLimitMinutes':
-          if (!agentConfig.heartbeat) agentConfig.heartbeat = {};
-          agentConfig.heartbeat.rateLimitMinutes = change.newValue as number;
-          break;
-        case 'connectors':
-          // Per-agent connector enablement toggles — same scope note as
-          // gateway.customConnectors above.
-          agentConfig.connectors = change.newValue as AgentConfig['connectors'];
-          break;
-      }
+        globalLogger.info('Configuration value applied',{agentId:change.agentId,field:change.field,lifecycle:change.reloadMode});
+      }catch(err){globalLogger.error('Configuration application failed',{agentId:change.agentId,field:change.field,error:(err as Error).message});}
+    }
+    if(changes.some(c=>!c.agentId&&c.field.startsWith('gateway.processLimits')))gatewayCapacity(config);
+    if(changes.some(c=>!c.agentId&&c.hotReloadable&&(c.field.startsWith('gateway.app')||c.field==='gateway.timezone'))){
+      appInstaller.configurePolicies(config.gateway.appHousekeeping,config.gateway.appBackup,config.gateway.appRestore,config.gateway.timezone);
+      cancelBackupCleanup();cancelBackupCleanup=appInstaller.startBackupCleanup();
+    }
+    for(const id of affected){
+      const agent=agentConfigs.get(id),runner=ctx.agentRunners.get(id);
+      if(agent&&runner)try{runner.updateAgentConfig(agent);}catch(err){globalLogger.error('Agent configuration refresh failed',{agentId:id,error:(err as Error).message});}
     }
   });
 
+  const pendingRemovals=new Set<string>();
+  let removing=false;
+  const removeIdleAgents=async()=>{
+    if(removing)return;removing=true;
+    try{for(const id of pendingRemovals){
+      if(configWatcher.getConfig().agents.some(a=>a.id===id)){pendingRemovals.delete(id);continue;}
+      const runner=ctx.agentRunners.get(id);
+      if(runner&&!runner.canRemoveFromConfig())continue;
+      if(runner)await runner.stop();
+      ctx.agentRunners.delete(id);agentConfigs.delete(id);
+      config.agents=config.agents.filter(a=>a.id!==id);
+      pendingRemovals.delete(id);globalLogger.info('Agent removed from runtime',{agentId:id});
+    }}catch(err){globalLogger.error('Agent removal deferred',{error:String(err)});}finally{removing=false;}
+  };
+  const removalTimer=setInterval(()=>{void removeIdleAgents();},5000);removalTimer.unref();
+  configWatcher.on('agent.removed',id=>{pendingRemovals.add(id);globalLogger.info('Agent removal pending until work is idle',{agentId:id});void removeIdleAgents();});
+
   configWatcher.on('agent.added', async (newAgentConfig: AgentConfig) => {
+    pendingRemovals.delete(newAgentConfig.id);
+    if(ctx.agentRunners.has(newAgentConfig.id))return;
     globalLogger.info('New agent detected in config, starting dynamically', { id: newAgentConfig.id });
 
     // The agent's .env is already in process.env: ConfigWatcher.reload() folds
@@ -1073,44 +1061,6 @@ async function main(): Promise<void> {
     globalLogger.info('Agent hot-added successfully', { id: newAgentConfig.id });
   });
 
-  configWatcher.on('channel.added', async (agentId: string, channel: string) => {
-    const runner = ctx.agentRunners.get(agentId);
-    if (!runner) return;
-
-    // Reload the agent config so runner has the new token
-    const freshConfig = configWatcher.getConfig();
-    const freshAgent = freshConfig.agents.find(a => a.id === agentId);
-    if (!freshAgent) return;
-
-    // Update runner's agentConfig so it has the new bot token
-    // Expand ~ so downstream path.join calls produce absolute paths
-    freshAgent.workspace = expandTilde(freshAgent.workspace);
-    const agentRunner = runner as import('./agent/runner').AgentRunner;
-    agentRunner.updateAgentConfig(freshAgent);
-
-    if (channel === 'telegram') {
-      agentRunner.startTelegramReceiver();
-      globalLogger.info('Telegram channel hot-added to existing agent', { agentId });
-    } else if (channel === 'discord') {
-      agentRunner.startDiscordReceiver();
-      globalLogger.info('Discord channel hot-added to existing agent', { agentId });
-    }
-  });
-
-  configWatcher.on('channel.removed', (agentId: string, channel: string) => {
-    const runner = ctx.agentRunners.get(agentId);
-    if (!runner) return;
-
-    const agentRunner = runner as import('./agent/runner').AgentRunner;
-    if (channel === 'discord') {
-      agentRunner.stopDiscordReceiver();
-      globalLogger.info('Discord channel hot-removed from agent', { agentId });
-    } else if (channel === 'telegram') {
-      agentRunner.stopTelegramReceiver();
-      globalLogger.info('Telegram channel hot-removed from agent', { agentId });
-    }
-  });
-
   configWatcher.start();
 
   // Graceful shutdown — idempotent: safe to call from multiple signal/error sources.
@@ -1123,6 +1073,8 @@ async function main(): Promise<void> {
 
     cronManager.stop();
     configWatcher.stop();
+    clearInterval(removalTimer);
+    cancelBackupCleanup();
     socketServer.stopAll();
 
     // Every teardown below must run even if an earlier one throws. Previously a

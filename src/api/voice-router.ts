@@ -301,6 +301,11 @@ export class VoiceApi {
   private prune(): void {
     for (const [key, ticket] of this.tickets) if (ticket.expiresAt < Date.now()) { this.tickets.delete(key); this.releaseLease(ticket); }
   }
+  invalidateAuthorization(): void {
+    for(const ticket of this.tickets.values())this.releaseLease(ticket);
+    this.tickets.clear();
+    for(const value of this.sessions.values())value.socket.close(1008,'Authorization changed');
+  }
   async close(): Promise<void> {
     clearInterval(this.pruner); this.replays.close();
     await Promise.allSettled([...this.sessions.values()].map(async value => { value.socket.terminate(); await value.session.close(); }));

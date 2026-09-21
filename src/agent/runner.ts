@@ -321,8 +321,8 @@ export class AgentRunner extends EventEmitter {
   // previously-linked session is resumed at start().
   private wechat: WeChatManager | null = null;
   private readonly sessionStore: SessionStore;
-  private readonly idleTimeoutMs: number;
-  private readonly maxConcurrent: number;
+  private get idleTimeoutMs(): number { return (this.agentConfig.session?.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES)*60000; }
+  private get maxConcurrent(): number { return this.agentConfig.session?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT; }
   private idleCleanerTimer: ReturnType<typeof setInterval> | null = null;
 
   // Tracks session IDs with an in-flight API request (prevents concurrent turns)
@@ -688,9 +688,6 @@ export class AgentRunner extends EventEmitter {
     this.configPath = path.resolve(agentConfig.workspace, '..', '..', '..', 'config.json');
     this.historyDb = HistoryDB.forDir(this.agentDir, agentConfig.id);
 
-    this.idleTimeoutMs =
-      (agentConfig.session?.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES) * 60 * 1000;
-    this.maxConcurrent = agentConfig.session?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
     this.coalesceWindowMs =
       Number(process.env.CHANNEL_COALESCE_WINDOW_MS) || CHANNEL_COALESCE_WINDOW_MS;
   }
@@ -3793,6 +3790,7 @@ export class AgentRunner extends EventEmitter {
     this.startIdleCleaner();
     this._startCleanupScheduler();
     this.startSessionCompaction();
+    for(const channel of ['line','slack','whatsapp_cloud','telegram','discord'])this.channelReloadSnapshot.set(channel,JSON.stringify((this.agentConfig as any)[channel]??null));
     this.logger.info('AgentRunner started', { agentId: this.agentConfig.id });
   }
 
@@ -3854,24 +3852,37 @@ export class AgentRunner extends EventEmitter {
     });
   }
 
+  private configReloadHandlers: Array<() => void> = [];
+  private shutdownHandlers: Array<() => void> = [];
+  onConfigReload(handler: () => void): void { this.configReloadHandlers.push(handler); }
+  onShutdown(handler: () => void): void { this.shutdownHandlers.push(handler); }
+  private receiverReload: Promise<void> = Promise.resolve();
+  private channelReloadSnapshot = new Map<string,string>();
   updateAgentConfig(newConfig: AgentConfig): void {
     newConfig=applyGatewayOrchestration(newConfig,this.gatewayConfig);
     this.orchestration?.updateAgentConfig(newConfig);
     this.agentConfig = newConfig;
     this.sessionCompactionScheduler?.start();
+    if(this.cancelCleanup){this.cancelCleanup();this._startCleanupScheduler();}
     this.refreshTelegramCommands();
     // Restart LineReplyManager if the LINE config changed so the live instance
     // picks up a new access token, threshold, or labels without a full restart.
-    this.stopLineReply();
-    this.startLineReply();
+    const changed = (channel: string) => { const value=JSON.stringify((newConfig as any)[channel]??null);const previous=this.channelReloadSnapshot.get(channel);this.channelReloadSnapshot.set(channel,value);return previous!==value; };
+    const telegramChanged=changed('telegram'),discordChanged=changed('discord');
+    if(telegramChanged||discordChanged){
+      this.receiverReload=this.receiverReload.then(async()=>{
+        if(this.stopping)return;
+        if(telegramChanged){const old=this.receiver;this.receiver=null;await old?.stop();if(!this.stopping)this.startTelegramReceiver();}
+        if(discordChanged){const old=this.discordReceiver;this.discordReceiver=null;await old?.stop();if(!this.stopping)this.startDiscordReceiver();}
+      }).catch(error=>this.logger.error('Channel configuration refresh failed',{error:String(error)}));
+    }
+    if(changed('line')){this.stopLineReply();this.startLineReply();}
     // Slack token/secret may have changed (or been cleared) — rebuild to pick
     // it up, same reasoning as LineReplyManager above.
-    this.stopSlackOutbound();
-    this.startSlackOutbound();
+    if(changed('slack')){this.stopSlackOutbound();this.startSlackOutbound();}
     // WhatsApp Cloud credentials may have changed (or been cleared) — rebuild
     // to pick it up, same reasoning as Slack above.
-    this.stopWhatsAppCloudOutbound();
-    this.startWhatsAppCloudOutbound();
+    if(changed('whatsapp_cloud')){this.stopWhatsAppCloudOutbound();this.startWhatsAppCloudOutbound();}
     // WhatsApp has no credential to rebuild on — push the new config
     // (access-control fields) into every already-running manager, and
     // add/remove managers only if the set of configured accounts changed.
@@ -3880,6 +3891,7 @@ export class AgentRunner extends EventEmitter {
     // just hand the manager the fresh config so its access-control reads
     // (dmPolicy/dmAllowlist/pairing) see the latest values.
     this.wechat?.updateAgentConfig(newConfig);
+    for(const handler of this.configReloadHandlers)handler();
   }
 
   /**
@@ -4287,8 +4299,12 @@ export class AgentRunner extends EventEmitter {
     this.logger.info('DiscordReceiver stopped', { agentId: this.agentConfig.id });
   }
 
-  async stop(): Promise<void> {
+  canRemoveFromConfig(): boolean {
+    return !(this.orchestrationStarting && !this.orchestration) && !this.orchestration?.hasPendingWork() && ![...this.sessions.values()].some(s=>s.isProcessing);
+  }
+  async stop(preserveConfigurationWatchers = false): Promise<void> {
     this.stopping = true;
+    if(!preserveConfigurationWatchers)for(const handler of this.shutdownHandlers.splice(0))handler();
     this.sessionCompactionScheduler?.stop();
     if (this.orchestrationStarting) {
       const orchestration = await this.orchestrationStarting.catch(() => undefined);
@@ -4376,7 +4392,7 @@ export class AgentRunner extends EventEmitter {
   }
 
   async restart(): Promise<void> {
-    await this.stop();
+    await this.stop(true);
     this.stopping = false;
     await this.start();
   }

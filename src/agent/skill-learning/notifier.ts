@@ -317,7 +317,7 @@ export function buildChannelSend(
 
 export class SkillNotifier {
   private readonly workspaceDir: string;
-  private readonly notify: boolean;
+  private notify: boolean;
   private readonly send?: SkillNotifierOpts['send'];
   private readonly logger?: SkillNotifierOpts['logger'];
 
@@ -326,6 +326,8 @@ export class SkillNotifier {
   /** Coalesced writes awaiting a digest flush. */
   private buffer: Array<{ text: string; sessionId: string }> = [];
   private flushTimer?: ReturnType<typeof setTimeout>;
+
+  setEnabled(enabled: boolean): void { this.notify=enabled; }
 
   constructor(opts: SkillNotifierOpts) {
     this.workspaceDir = opts.workspaceDir;

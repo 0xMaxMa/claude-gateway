@@ -39,6 +39,7 @@ function printHelp(): void {
     [
       `  Exits 0 when every check passes. Rows marked ${c.dim('[--]')} are informational and ${c.yellow('[warn]')}`,
       '  rows are advisory — neither fails the command. The key itself is never printed.',
+      '  Default: readable checks only. --json: JSON report on stdout, without the readable report.',
       '  fix: back up and repair owner config permissions/BOM, create missing logs, reset a failed user service,',
       '       and install missing ffmpeg/ffprobe. No automatic start/restart or credential changes.',
       '  --yes confirms repair in scripts. Remote-target diagnosis never repairs this host.',
@@ -207,6 +208,10 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   }
 
   const allOk = checks.every((c) => c.info || c.warn || c.ok);
+  if (flags.json === true) {
+    printJson({ ok: allOk, checks }, flags);
+    return allOk ? 0 : 1;
+  }
   const c = paletteFor(process.stderr);
   // Pad before colouring so escape codes never count toward the column width.
   const lines = checks.map((chk) => {
@@ -239,6 +244,5 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
     }
   }
   process.stderr.write([`${c.bold('claude-gateway doctor')}`, ...lines, ''].join('\n'));
-  printJson({ ok: allOk, checks }, flags);
   return allOk ? 0 : 1;
 }
