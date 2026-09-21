@@ -167,6 +167,16 @@ CLI stderr remains visible and correlated with these records. A model-name warni
 Interactive safemode preserves the caller's terminal identification, tmux and color preferences rather than choosing a separate theme. Reopen the CLI after upgrading for environment changes to take effect; restarting the gateway does not change an already running safemode CLI.
 
 
+When tmux reports a light background through OSC 11 while the attached terminal is dark, Codex can draw pale prompt boxes. Preserving environment variables alone cannot correct a wrong terminal color response. This can occur with differing client themes attached to a shared tmux session. Check the pane/client theme before treating it as a safemode rendering problem.
+
+If you deliberately want a dark palette for the current pane, set it explicitly from a shell in that pane:
+
+```sh
+tmux select-pane -t "$TMUX_PANE" -P 'fg=#d4d4d4,bg=#171717'
+```
+
+Exit the native CLI only when it is idle, then reopen the same safemode session with `--resume` so it queries the new colors. The setting affects that pane, not all tmux sessions; safemode does not force a palette automatically. To restore inherited pane styling, use `tmux select-pane -t "$TMUX_PANE" -P default`. This is a local terminal adjustment, not a provider or authentication change.
+
 ## Troubleshooting
 
 | Symptom | Meaning and next step |
