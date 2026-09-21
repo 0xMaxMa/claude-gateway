@@ -573,8 +573,8 @@ describe('Agent HTTP API integration (planning-05)', () => {
     await runner.stop();
   });
 
-  // ─── I-API-13: API disabled when no keys configured ───────────────────────
-  it('I-API-13: /api routes deny access when no API keys are configured', async () => {
+  // ─── I-API-13: API fails closed when no keys configured ───────────────────────
+  it('I-API-13: live-mounted /api routes reject all credentials when no API keys are configured', async () => {
     const ws = createTempWorkspace('api-13-');
     const logDir = createTempDir('api-13-log-');
     const cfg = makeAgentConfig('alfred', ws);
@@ -592,17 +592,20 @@ describe('Agent HTTP API integration (planning-05)', () => {
     const router = new GatewayRouter(agents, configs, undefined, gatewayCfg);
     await router.start(0);
 
-    const res = await supertest(router.getApp())
-      .get('/api/v1/agents')
-      .set('Authorization', `Bearer ${API_KEY_ADMIN}`);
-
-    // The router initializes an empty mutable key list for key hot-reload.
-    // Routes remain mounted, but no supplied credential can authenticate.
-    expect(res.status).toBe(403);
-    expect(res.body).toEqual({ error: 'Invalid API key' });
-
-    await router.stop();
-    await runner.stop();
+    try {
+      // Routes stay mounted for key hot reload; an empty key list authenticates nobody.
+      const res = await supertest(router.getApp())
+        .get('/api/v1/agents')
+        .set('Authorization', `Bearer ${API_KEY_ADMIN}`);
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Invalid API key' });
+      const missing = await supertest(router.getApp()).get('/api/v1/agents');
+      expect(missing.status).toBe(401);
+      expect(missing.body).toEqual({ error: 'Missing API key' });
+    } finally {
+      await router.stop();
+      await runner.stop();
+    }
   });
 
   // ─── I-DEL-01: Deleted session does not reappear in admin session list ────

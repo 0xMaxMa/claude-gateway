@@ -1,11 +1,12 @@
-import { GatewayTaskTarget, TaskSnapshot, WorkerOutcome } from '../types';
+import { GatewayTaskTarget, TaskSnapshot, WorkerOutcome, CommandContext } from '../types';
 import { TaskService } from '../tasks/service';
 import { taskFailure } from '../tasks/failure';
 
 export interface GatewayTaskAdapter {
   readonly name: string;
-  discover(query?: string, offset?: number): unknown;
-  resolve(input: Record<string, unknown>): GatewayTaskTarget;
+  discover(query?: string, offset?: number, context?: CommandContext): unknown;
+  resolve(input: Record<string, unknown>, context?: CommandContext): GatewayTaskTarget;
+  close?(): Promise<void>;
   ready?(task: TaskSnapshot): boolean;
   submit(task: TaskSnapshot, requestId: string, instructions: string): Promise<void>;
   inspect(task: TaskSnapshot, requestId: string): Promise<WorkerOutcome | 'running' | 'pending'>;
@@ -114,6 +115,7 @@ export class GatewayTaskController {
     this.closed = true;
     if (this.timer) clearInterval(this.timer);
     await this.pending;
+    await Promise.allSettled([...this.adapters.values()].map(adapter => adapter.close?.()));
     // External sessions are intentionally left alive. Persisted receipts are
     // reconciled by the next gateway instance, without another dispatch.
   }

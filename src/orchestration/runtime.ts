@@ -1,3 +1,7 @@
+import { BrowserTaskAdapter, BrowserTaskBinding } from './gateway-tasks/browser';
+import { createHash } from 'crypto';
+import { gatewayJev, jevAllowed } from './jev-gateway';
+import { JevRequest } from '../jev/types';
 import { GatewayTaskController, GatewayTaskAdapter } from './gateway-tasks/controller';
 import { SafemodeTaskAdapter } from './gateway-tasks/safemode';
 import { workerCrons } from './worker-crons';
@@ -86,6 +90,8 @@ const GATEWAY_TASK_INSTRUCTIONS = 'For safemode discovery use capabilities_list(
 const CONTEXT_DELIVERY_INSTRUCTIONS = 'Worker profiles: default-worker is the general-purpose worker for research, files, browser/API operations, services, calculations and code. In host mode it uses the Agent working environment; no Git or projectRoot is required. In container mode it stays inside the app container. Only explicitly configured isolated-worktree mode requires Git for default-worker; media-worker remains available for standalone scratch work in isolated modes. State the authorized working directory in task instructions; workers may change directories only within their execution boundary. Serialize conflicting edits to the same shared files; continue related work with continue_task_id. Task context is incremental within a resumed CLI conversation. Omission means unchanged, not deleted. On a fresh context only active/waiting tasks and current reports are bootstrapped; use task_status for other past work or full results. Receipt recovery is evidence, not authorization to replay a command. Previously supplied materials remain in the resumed context; preserve their references when assigning workers. Never infer that missing image bytes mean a missing attachment if its ref was already supplied.';
 
 export interface AgentOrchestrationHost {
+  /** Trusted integration supplies versioned, principal/conversation-scoped browser transports. */
+  browserBindings?(): BrowserTaskBinding[];
   sendLinkedChannel?: ChannelSender;
   skills?(): SkillRegistry;
   refreshSkills?(): Promise<void>;
@@ -212,7 +218,38 @@ export class AgentOrchestrationRuntime {
     const files = new TaskFiles(store, join(agent.workspace, '../..'), agent.type === 'app-agent' ? join(root, 'container-files') : undefined, agent.workspace);
     const safemodeAllowed = () => agent.type !== 'app-agent' && Boolean(gateway.safemode?.allowedAgentIds?.includes(agent.id));
     const gatewayAdapters = new Map<string, GatewayTaskAdapter>(agent.type === 'app-agent' ? [] : [['safemode',new SafemodeTaskAdapter(agent.id, safemodeAllowed)]]);
+    if (host.browserBindings) gatewayAdapters.set('browser', new BrowserTaskAdapter({agentId:agent.id,root:join(root,'browser-requests'),
+      allowed:()=>jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true,
+      bindings:()=>host.browserBindings!(),
+      onProgress:(task,progress)=>store.transaction(()=>{
+        const current=store.task(task.taskId);
+        if(!current||current.activeAttemptId!==task.activeAttemptId||!['starting','running'].includes(current.state))return;
+        current.latestProgress={source:'runtime',observedAt:Date.now(),text:`Browser ${progress.phase}: ${progress.steps} actions, ${progress.evaluations} evaluations.`};
+        store.saveTask(current,current.stateVersion);
+      }),
+      evaluate:(task,request,signal)=>gatewayJev(gateway).service.evaluate(request,{
+        principalId:task.ownerPrincipalId,agentId:agent.id,sessionId:task.agentSessionId,taskId:task.taskId,consumer:'browser',signal,
+        authorize:()=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true;}catch{return false;}}
+      })}));
     const bridge = new TaskBridge(tasks, files, workerShares(files, agent, gateway), host.skills ? () => host.skills!() : undefined, agent.type === 'app-agent' ? { agent, spool: join(root, 'container-files') } : undefined, workerCrons(files, agent, gateway), gatewayAdapters);
+    bridge.jevEnabled = () => jevAllowed(gateway, agent);
+    bridge.browserEnabled = () => Boolean(host.browserBindings) && jevAllowed(gateway, agent) && gateway.gateway.jev?.features?.browserTasks?.enabled === true;
+    bridge.jevCall = async (scope, args, actionId, signal) => {
+      const current = scope.role === 'worker' ? files.scope(scope.attemptId, scope.generation) : undefined;
+      const conversation = scope.role === 'agent' ? store.assertMember(scope.context.conversationId, scope.context.principalId) : current!.conversation;
+      const principalId = scope.role === 'agent' ? scope.context.principalId : String(conversation.owner_principal_id);
+      const requestId = createHash('sha256').update(JSON.stringify([agent.id,scope.role,scope.role === 'agent' ? scope.context.decisionId : scope.attemptId,actionId])).digest('hex');
+      return gatewayJev(gateway).service.evaluate({...args,requestId} as unknown as JevRequest, {
+        principalId,consumer:scope.role === 'agent' ? 'agent_tool' : 'worker_tool',agentId:agent.id,
+        sessionId:current?.task.agentSessionId ?? String(conversation.agent_session_id),taskId:current?.task.taskId,signal,
+        authorize:() => { try {
+          if(!jevAllowed(gateway,agent)) return false;
+          if(scope.role === 'worker') files.scope(scope.attemptId,scope.generation);
+          else store.assertMember(scope.context.conversationId,scope.context.principalId);
+          return true;
+        } catch {return false;} }
+      });
+    };
     const personalRetention = resolveDreamingConfig(agent.dreaming, gateway.gateway.dreaming, gateway.gateway.timezone).staleness;
     const sharedRetention = resolveSharedConfig(agent.knowledge?.shared, gateway.gateway.knowledge?.shared).staleness;
     bridge.recordRetrievals = (personalRetention.enabled && personalRetention.recordRetrievals) || (sharedRetention.enabled && sharedRetention.recordRetrievals);
@@ -1042,7 +1079,7 @@ export class AgentOrchestrationRuntime {
       };
       let taskSpeech = '';
       const ticket = this.bridge.issue({ role: 'agent', onQuestion: (context, args) => this.questionControls.manage(context, args), capabilities: async args => {
-        this.capabilityCatalog ??= new CapabilityCatalog(this.agent, this.gateway);
+        this.capabilityCatalog ??= new CapabilityCatalog(this.agent, this.gateway, { browserEnabled: () => Boolean(this.bridge.browserEnabled?.()) });
         return readCapabilityPage(await this.capabilityCatalog.snapshot(), this.host.skills?.(), args);
       },
         onIntake: semantic ? acknowledge : undefined,

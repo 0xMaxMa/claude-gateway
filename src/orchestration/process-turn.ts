@@ -208,13 +208,14 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     if (event.type === 'system' && event.subtype === 'init' && process.runtimeProfile) {
       const role = process.runtimeProfile.role;
       const allowed = role === 'agent'
-        ? /^(mcp__gateway__(capabilities_list|conversation_intake|memory_(get|search)|task_(spawn|status|cancel|update|answer|question)))$/
-        : /^(Read|Glob|Grep|Bash|Edit|Write|Skill|mcp__gateway__(tool_search|tool_call|browser_[a-z_]+|generate_image|generate_video|share_file|share_image|memory_(get|search|shared_(get|create|update|delete))|task_(report_progress|request_input|stage_file|memory_append)))$/;
+        ? /^(mcp__gateway__(jev_evaluate|capabilities_list|conversation_intake|memory_(get|search)|task_(spawn|status|cancel|update|answer|question)))$/
+        : /^(Read|Glob|Grep|Bash|Edit|Write|Skill|mcp__gateway__(jev_evaluate|tool_search|tool_call|browser_[a-z_]+|generate_image|generate_video|share_file|share_image|memory_(get|search|shared_(get|create|update|delete))|task_(report_progress|request_input|stage_file|memory_append)))$/;
       const allowedTool = (name: unknown): boolean => {
         if (typeof name !== 'string') return false;
+        if (name === 'mcp__gateway__jev_evaluate' && !process.runtimeProfile?.jevEnabled) return false;
         if (process.runtimeProfile?.containerExecution) {
           // Validate the same scoped inventory that the container MCP client lists.
-          return containerTaskTools(role).some(tool => name === `mcp__gateway__${tool.name}`) ||
+          return containerTaskTools(role, Boolean(process.runtimeProfile?.jevEnabled), Boolean(process.runtimeProfile?.browserEnabled)).some(tool => name === `mcp__gateway__${tool.name}`) ||
             (role === 'worker' && (process.runtimeProfile.workerTools ?? DEFAULT_WORKER_TOOLS).includes(name)) ||
             (role === 'agent' && Boolean(process.runtimeProfile.responseSchema) && name === 'StructuredOutput');
         }

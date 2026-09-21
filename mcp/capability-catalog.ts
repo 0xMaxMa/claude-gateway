@@ -69,7 +69,7 @@ for (const module of gatewayModules()) {
             : 'unavailable',
     });
 }
-for (const tool of AGENT_TASK_TOOLS)
+for (const tool of AGENT_TASK_TOOLS.filter(tool => tool.name !== 'jev_evaluate' || process.env.GATEWAY_JEV_ENABLED === 'true'))
   entries.push({
     name: `mcp__gateway__${tool.name}`,
     description: tool.description,
@@ -80,7 +80,7 @@ for (const tool of AGENT_TASK_TOOLS)
         : 'available',
     via: 'agent',
   });
-for (const tool of WORKER_REPORT_TOOLS)
+for (const tool of WORKER_REPORT_TOOLS.filter(tool => tool.name !== 'jev_evaluate' || process.env.GATEWAY_JEV_ENABLED === 'true'))
   entries.push({
     name: `mcp__gateway__${tool.name}`,
     description: tool.description,

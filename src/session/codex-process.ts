@@ -1,3 +1,4 @@
+import { sanitizeJevChildEnv, jevCredentialEnvNames } from '../jev/child-env';
 import { codexContextPolicy, observeCodexContext, CodexContextMeasurement } from './codex-context';
 import { providerErrorMetadata } from '../orchestration/provider-error-metadata';
 import { workerEnvironment } from './worker-environment';
@@ -230,9 +231,10 @@ export class CodexProcess extends EventEmitter {
       const { servers } = prepareManagedConnectors(agent, this.options.gateway, profile, this.connectorPaths, extensions.servers);
       mcp.mcpServers = { ...servers, ...mcp.mcpServers };
     }
+    for (const server of Object.values(mcp.mcpServers ?? {}) as any[]) if (server?.env) server.env = sanitizeJevChildEnv(server.env, this.options.gateway.gateway?.jev);
     this.approvedMcp = mcp.mcpServers ?? {};
     this.contextMeasurement = codexContextPolicy(config.model, config.contextWindow);
-    const commandEnvironment = workerEnvironment(agent, this.options.gateway);
+    const commandEnvironment = sanitizeJevChildEnv(workerEnvironment(agent, this.options.gateway), this.options.gateway.gateway?.jev);
     const lines = [
       `model = ${quote(config.model)}`, `model_provider = ${quote(this.credentials.chatgpt ? 'openai' : 'gateway')}`, 'approval_policy = "never"',
       `sandbox_mode = ${quote(profile.hostExecution || agent.type === 'app-agent' ? 'danger-full-access' : 'workspace-write')}`,
@@ -296,7 +298,7 @@ export class CodexProcess extends EventEmitter {
     if (this.cancelled) return;
     const args = [...codexPolicyArgs(), 'app-server', '--listen', 'stdio://'];
     const key = 'GATEWAY_CODEX_API_KEY';
-    const env: NodeJS.ProcessEnv = profile.hostExecution ? { ...process.env } : Object.fromEntries(['PATH', 'HOME', 'LANG', 'TMPDIR', 'SSL_CERT_FILE', 'SSL_CERT_DIR'].flatMap(k => process.env[k] === undefined ? [] : [[k, process.env[k]]]));
+    let env: NodeJS.ProcessEnv = profile.hostExecution ? { ...process.env } : Object.fromEntries(['PATH', 'HOME', 'LANG', 'TMPDIR', 'SSL_CERT_FILE', 'SSL_CERT_DIR'].flatMap(k => process.env[k] === undefined ? [] : [[k, process.env[k]]]));
     for (const k of Object.keys(env)) if (/^(ANTHROPIC_|CLAUDE_|CODEX_|OPENAI_)/.test(k)) delete env[k];
     Object.assign(env, workerEnvironment(agent, this.options.gateway));
     env.CODEX_HOME = this.home;
@@ -304,9 +306,10 @@ export class CodexProcess extends EventEmitter {
     if (agent.type === 'app-agent') await containerNode(agent.container!, "require('fs').mkdirSync(process.argv[1],{recursive:true,mode:448})", [env.CODEX_ROLLOUT_TRACE_ROOT]);
     else await mkdir(env.CODEX_ROLLOUT_TRACE_ROOT, { recursive: true, mode: 0o700 });
     if (this.credentials!.chatgpt) delete env[key]; else env[key] = this.credentials!.key;
+    env = sanitizeJevChildEnv(env, this.options.gateway.gateway?.jev);
     const bin = this.executable;
     const child = this.child = agent.type === 'app-agent'
-      ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', 'CODEX_ROLLOUT_TRACE_ROOT', '-e', `HOME=${homedir()}`, '-e', key, ...Object.keys(workerEnvironment(agent, this.options.gateway)).flatMap(name => ['-e', name]), agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
+      ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', 'CODEX_ROLLOUT_TRACE_ROOT', '-e', `HOME=${homedir()}`, '-e', key, ...Object.keys(sanitizeJevChildEnv(workerEnvironment(agent, this.options.gateway), this.options.gateway.gateway?.jev)).flatMap(name => ['-e', name]), ...jevCredentialEnvNames(this.options.gateway.gateway?.jev).flatMap(name => ['-e', `${name}=`]), agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
       : spawn(bin, args, { cwd: agent.workspace, env, stdio: 'pipe', detached: true });
     this.group = child.pid;
     this.traceTimer = setInterval(() => { void this.captureTrace(); }, agent.type === 'app-agent' ? 2000 : 500);
@@ -398,7 +401,7 @@ export class CodexProcess extends EventEmitter {
     if (reply.layers.some((layer: any) => layer.name?.type === 'project' && !layer.disabledReason)) throw new Error('Codex project executable configuration is not permitted');
     const requestedWindow = this.contextMeasurement?.configured;
     if (requestedWindow != null && effective.model_context_window !== requestedWindow) throw new Error('Codex context window configuration mismatch');
-    const requestedEnvironment = workerEnvironment(this.options.agent, this.options.gateway);
+    const requestedEnvironment = sanitizeJevChildEnv(workerEnvironment(this.options.agent, this.options.gateway), this.options.gateway.gateway?.jev);
     if (Object.entries(requestedEnvironment).some(([key, value]) => effective.shell_environment_policy?.set?.[key] !== value)) throw new Error('Codex worker environment configuration mismatch');
     const actual = effective.mcp_servers ?? {};
     if (JSON.stringify(Object.keys(actual).sort()) !== JSON.stringify(Object.keys(this.approvedMcp).sort())) throw new Error('Codex MCP server inventory mismatch');

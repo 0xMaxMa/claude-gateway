@@ -2,6 +2,7 @@
  * silently become live: they are reported as restart-required. */
 export type ReloadMode = 'live' | 'next-process' | 'component' | 'restart' | 'ignored';
 const gateway: Record<string, ReloadMode> = {
+  'gateway.jev': 'live',
   'safemode': 'next-process', 'safemode.allowedAgentIds': 'live',
   'gateway.orchestration': 'component', 'gateway.headless': 'next-process',
   'gateway.logs': 'live', 'gateway.api': 'live', 'gateway.processLimits': 'live',
@@ -17,7 +18,7 @@ const gateway: Record<string, ReloadMode> = {
   'gateway.appHousekeeping': 'component', 'gateway.appBackup': 'component', 'gateway.appRestore': 'component',
 };
 const agent: Record<string, ReloadMode> = {
-  orchestration: 'component', voice: 'component', workers: 'next-process',
+  jev: 'live', orchestration: 'component', voice: 'component', workers: 'next-process',
   'claude.model': 'next-process', 'claude.extraFlags': 'next-process',
   'claude.dangerouslySkipPermissions': 'ignored', claudeBin: 'next-process',
   session: 'live', heartbeat: 'live', connectors: 'next-process', allow_tools: 'live',

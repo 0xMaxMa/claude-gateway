@@ -19,6 +19,33 @@ document.addEventListener('DOMContentLoaded',()=>{
  const tab=[...document.querySelectorAll('.tab')].find(t=>t.dataset.view===savedDashboardState.view)||document.getElementById('tab-overview');tab.click();
 });
 const dashboardExpanded=new Map();
+let jevUsageOffset=0,jevUsageGeneration=0,jevUsageBusy=false,jevUsageScope='';
+async function refreshJevUsage(){
+ const view=document.getElementById('view-usage');
+ if(document.hidden||view.style.display==='none')return;
+ const scope=dashboardScope+':'+dashboardAgent;
+ if(scope!==jevUsageScope){jevUsageScope=scope;jevUsageOffset=0;jevUsageGeneration++;jevUsageBusy=false;document.getElementById('jev-usage-results').textContent='Loading evaluations…';document.getElementById('jev-usage-page').textContent='';}
+ if(jevUsageBusy)return;
+ const generation=++jevUsageGeneration,offset=jevUsageOffset;jevUsageBusy=true;
+ document.getElementById('jev-usage-prev').disabled=true;document.getElementById('jev-usage-next').disabled=true;
+ try{
+  const response=await fetch(apiUrl('/dashboard/jev')+'?scope='+encodeURIComponent(dashboardScope)+'&agentId='+encodeURIComponent(dashboardAgent)+'&offset='+offset);
+  if(response.status===401){onUnauthorized();return;}
+  if(!response.ok)throw Error('Evaluation history unavailable (HTTP '+response.status+').');
+  const data=await response.json();if(generation!==jevUsageGeneration)return;
+  if(!Number.isSafeInteger(data.total)||data.total<0||!Array.isArray(data.records))throw Error('Invalid evaluation history response.');
+  if(offset>0&&offset>=data.total){jevUsageOffset=data.total?Math.floor((data.total-1)/25)*25:0;jevUsageBusy=false;void refreshJevUsage();return;}
+  const headers=['Time / Agent','Consumer / Request','Model','Input / Output','Credits','Latency','Outcome'];
+  document.getElementById('jev-usage-results').innerHTML='<div class="table-wrap"><table class="data-table"><thead><tr>'+headers.map(h=>'<th>'+h+'</th>').join('')+'</tr></thead><tbody>'+(data.records.length?data.records.map(r=>'<tr><td>'+dashText(new Date(r.startedAt).toLocaleString('en-GB',{timeZone:dashboardTimezone}))+'<br>'+agentBadge(r.agentId)+'</td><td>'+dashText(r.consumer)+'<br><small class="ts">'+dashText(r.requestId)+'</small></td><td>'+dashText(r.model||r.requestedModel)+'</td><td>'+dashCount(r.usage?.input_tokens)+' / '+dashCount(r.usage?.output_tokens)+'</td><td>'+dashCount(r.billing?.charged_credits)+'</td><td>'+dashText(r.elapsedMs)+' ms</td><td>'+dashStatus(r.outcome)+(r.errorCode?'<br><small class="ts">'+dashText(r.errorCode)+'</small>':'')+'</td></tr>').join(''):'<tr><td colspan="7" class="empty">No evaluations recorded in this scope.</td></tr>')+'</tbody></table></div>';
+  document.getElementById('jev-usage-page').textContent=(data.total?offset+1:0)+'–'+Math.min(offset+25,data.total)+' of '+data.total;
+  document.getElementById('jev-usage-prev').disabled=offset===0;document.getElementById('jev-usage-next').disabled=offset+25>=data.total;
+ }catch(e){if(generation===jevUsageGeneration)document.getElementById('jev-usage-results').textContent=e.message;}
+ finally{if(generation===jevUsageGeneration)jevUsageBusy=false;}
+}
+document.getElementById('jev-usage-prev').addEventListener('click',()=>{jevUsageOffset=Math.max(0,jevUsageOffset-25);jevUsageGeneration++;jevUsageBusy=false;void refreshJevUsage();});
+document.getElementById('jev-usage-next').addEventListener('click',()=>{jevUsageOffset+=25;jevUsageGeneration++;jevUsageBusy=false;void refreshJevUsage();});
+document.getElementById('tab-usage').addEventListener('click',()=>setTimeout(refreshJevUsage,0));
+setInterval(refreshJevUsage,15000);
 let dashboardFocus=null;
 const dashboardMobile=window.matchMedia('(max-width:760px)');
 function updateSidebarToggle(){
@@ -52,6 +79,7 @@ function dashTable(headers,rows){
 }
 function renderDashboard(data){
   dashboardData=data;
+  void refreshJevUsage();
 
   const rows=dashboardRows(), tasks=dashboardTaskRows();
   const agents=data.agents||[];
@@ -166,7 +194,7 @@ document.addEventListener('keydown',function(e){
  if(e.key==='Tab'&&document.getElementById('dash-drawer-back').classList.contains('open')){const panel=document.getElementById('dash-drawer'),nodes=[...panel.querySelectorAll('button,a,summary')].filter(n=>n.getClientRects().length);const first=nodes[0],last=nodes[nodes.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===panel)){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}
  if((e.key==='Enter'||e.key===' ')&&e.target.matches('tr[data-dash-agent]')){e.preventDefault();e.target.click();}
 });
-document.getElementById('dash-scope').addEventListener('click',e=>{const button=e.target.closest('[data-range]');if(!button)return;dashboardScope=button.dataset.range;document.querySelectorAll('#dash-scope [data-range]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));dashboardOffset=0;dashClose();refresh();connectDashboardStream();window.__loadDreams?.(true);});
+document.getElementById('dash-scope').addEventListener('click',e=>{const button=e.target.closest('[data-range]');if(!button)return;dashboardScope=button.dataset.range;document.querySelectorAll('#dash-scope [data-range]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));dashboardOffset=0;dashClose();void refreshJevUsage();refresh();connectDashboardStream();window.__loadDreams?.(true);});
 document.getElementById('dash-search').addEventListener('input',e=>{dashboardSearch=e.target.value;if(dashboardData)renderDashboard(dashboardData);});
 document.getElementById('dash-agent-filter').addEventListener('change',e=>{dashboardAgent=e.target.value;if(dashboardData)renderDashboard(dashboardData);});
 
@@ -182,4 +210,3 @@ function connectDashboardStream(){
 }
 
 `;
-

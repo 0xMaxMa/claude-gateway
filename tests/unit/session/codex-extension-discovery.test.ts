@@ -49,3 +49,11 @@ test('unavailable plugin inventory preserves the successful native config and sk
 test('failed core config discovery still fails closed without native diagnostics', async()=>{
  await expect(inspectCodexExtensions(bin,root,{HOME:root,FAIL_CONFIG:'1'})).rejects.toThrow('CODEX_EXTENSION_DISCOVERY_UNAVAILABLE');
 });
+test('native extension probe strips explicit and inherited Jev credentials but preserves CLI auth', async () => {
+ const {validateJevConfig}=await import('../../../src/jev/validation');
+ validateJevConfig({enabled:true,provider:'typesafe',model:'jev',apiKeyEnv:'PRIVATE_EXTENSION_JEV_TOKEN'});
+ const original=await import('fs').then(fs=>fs.readFileSync(bin,'utf8'));
+ writeFileSync(bin,original.replace("require('readline')", "if(process.env.TYPESAFE_API_KEY||process.env.JEV_API_KEY||process.env.PRIVATE_EXTENSION_JEV_TOKEN||process.env.OPENAI_API_KEY!=='native-auth')process.exit(47);require('readline')"),{mode:0o700});
+ const result=await inspectCodexExtensions(bin,root,{HOME:root,TYPESAFE_API_KEY:'a',JEV_API_KEY:'b',PRIVATE_EXTENSION_JEV_TOKEN:'c',OPENAI_API_KEY:'native-auth'});
+ expect(result.skills.map(s=>s.name)).toContain('native');
+});

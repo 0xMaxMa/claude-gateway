@@ -1,3 +1,5 @@
+import { gatewayJev, jevAllowed } from '../orchestration/jev-gateway';
+import { createJevRouter } from './jev-router';
 import { collectDashboardProcesses, ProcessOwner } from './dashboard-processes';
 import { DashboardSessions } from './dashboard-sessions';
 import { readMemoryActivity, activitySummary, MaintenanceReader } from './memory-activity';
@@ -718,6 +720,7 @@ export class GatewayRouter {
         this.configPath,
         () => this.gatewayConfig?.gateway.models,
       );
+      this.app.use('/api', createJevRouter(this.gatewayConfig, this.configs));
       this.app.use('/api', apiRouter);
       this.voiceApi = new VoiceApi(this.agents, this.configs, this.gatewayConfig.gateway.api.keys);
       this.app.use('/api', this.voiceApi.router);
@@ -950,7 +953,7 @@ export class GatewayRouter {
         if (!runner) { res.status(404).json({ error: 'Unknown agent' }); return; }
         try {
           const source = runner.getDashboardSource?.();
-          let report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h'),Date.now(),this.gatewayConfig?.gateway?.timezone), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
+          let report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, jevEnabled:Boolean(this.gatewayConfig && this.configs.get(agentId) && jevAllowed(this.gatewayConfig,this.configs.get(agentId)!)), sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h'),Date.now(),this.gatewayConfig?.gateway?.timezone), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
           if (!report) { res.status(404).json({ error: 'No recorded session token report' }); return; }
           if (runner.isSessionCompacting?.(sessionId)) report = {...report, activityStatus:'compacting'};
           if (report.contextWindow) report.contextWindow.total = report.contextWindow.model ? await runner.dashboardContextWindow?.(report.contextWindow.model) ?? null : null;
@@ -1480,6 +1483,16 @@ export class GatewayRouter {
         watchers: getWatcherHealth(),
       };
     };
+    this.app.get('/dashboard/jev', (req: Request,res: Response) => {
+      if(!this.requireDashOrApiKey(req,res))return;
+      res.setHeader('Cache-Control','no-store');
+      const scope=req.query.scope??'24h',agentId=req.query.agentId,offset=req.query.offset===undefined?0:Number(req.query.offset);
+      if(typeof scope!=='string'||!['24h','7d','30d','90d','all'].includes(scope)||(agentId!==undefined&&typeof agentId!=='string')||!Number.isSafeInteger(offset)||offset<0||offset>10000){res.status(400).json({error:'Invalid query'});return;}
+      if(!this.gatewayConfig){res.json({records:[],total:0});return;}
+      const ids=agentId?[agentId as string].filter(id=>this.configs.has(id)):[...this.configs.keys()];
+      try {res.json(gatewayJev(this.gatewayConfig).dashboardHistory(ids,dashboardSince(scope,Date.now(),this.gatewayConfig.gateway.timezone),25,offset));}
+      catch {res.status(503).json({error:'Jev history unavailable'});}
+    });
     this.app.get('/dashboard/charts', async (req: Request, res: Response) => {
       if (!this.requireDashOrApiKey(req, res)) return;
       res.setHeader('Cache-Control', 'no-store');
