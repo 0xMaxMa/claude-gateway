@@ -1,5 +1,9 @@
 # Tasks and worker lifecycle {#tasks-and-worker-lifecycle}
 
+Tasks include **Worker tasks** and **Gateway-managed tasks**. Gateway-managed snapshots use `targetProfile: "gateway-managed"`, `gatewayTarget` (adapter, native session ID, display name and explicit options), and `gatewayDispatch` (request ID and submission timestamp). Task controls expose `executionType: "gateway-managed"` plus `gatewayTarget`; Worker tasks use `executionType: "worker"`, consistently with dashboard summaries. Older snapshots without `gatewayTarget` remain Worker tasks.
+
+External tasks reuse the authenticated task status, cancellation and notification APIs. They do not create worker-pool entries, fake worker turns or token/tool measurements. Their attempts track request lifecycle; `sessionId` identifies the existing native target, not a new worker. Agent tool access is conversation-scoped, and safemode target discovery/dispatch additionally requires a live allowlist grant and explicit local assignment to the calling agent. Only the local operator CLI can change that assignment. See [Gateway-managed safemode tasks](../guide/safemode.md#agent-control).
+
 Worker execution defaults to the host Agent's existing workspace, or its app container. `default-worker` accepts general-purpose tasks without Git or `tasks.projectRoot`; an authorized directory can be included in task instructions. Explicit workspace policies remain unchanged.
 
 New worker attempts record optional `harness` (`claude` or `codex`) and `harnessModel` fields. Older attempts can omit them. These describe actual worker routing; the conversational agent still uses Claude Code. Codex usage records contain observed aggregate input/cache/output counters, not an invented per-request breakdown or loaded-tool inventory. See [worker harnesses](../guide/worker-harnesses.md).

@@ -38,9 +38,9 @@ describe('safemode CLI boundaries', () => {
   test('headless CLI rejects params before any launch', async () => {
     await expect(runSafemode(['send', 'anything'], {params: '--dangerously-skip-permissions', prompt: 'inspect'})).rejects.toThrow('Unknown safemode flag');
   });
-  test('no-bootstrap is resume-only and cannot be used by headless send', async () => {
+  test('no-bootstrap requires a native resume or a valid headless send target', async () => {
     await expect(runSafemode([], {'no-bootstrap':true})).rejects.toThrow('requires safemode --resume');
-    await expect(runSafemode(['send','x'], {'no-bootstrap':true,prompt:'inspect'})).rejects.toThrow('Unknown safemode flag');
+    await expect(runSafemode(['send','x'], {'no-bootstrap':true,prompt:'inspect'})).rejects.toThrow('Safemode session not found');
     await expect(runSafemode([], {'no-bootstrap':'yes'})).rejects.toThrow('boolean flag');
   });
   test('rename CLI accepts current name or native ID and validates arity', async () => {
@@ -50,6 +50,17 @@ describe('safemode CLI boundaries', () => {
     expect(store.find('after').id).toBe(session.id);
     expect(out).toHaveBeenCalledWith(expect.stringContaining('"renamed": true'));
     await expect(runSafemode(['rename', session.id], {})).rejects.toThrow('requires');
+  });
+  test('local assignment grants one agent, refuses active owners, and supports revocation', async () => {
+    const store = new SafemodeStore(); const session = store.create('assigned','claude','inherit');
+    expect(await runSafemode(['assign',session.id], {'agent-id':'operator'})).toBe(0);
+    expect(store.read(session.id).agentId).toBe('operator');
+    const owner = store.acquire(session.id,'interactive');
+    await expect(runSafemode(['assign',session.id], {'agent-id':'other'})).rejects.toThrow();
+    expect(store.read(session.id).agentId).toBe('operator');store.release(session.id,owner);
+    expect(await runSafemode(['assign',session.id], {revoke:true})).toBe(0);
+    expect(store.read(session.id).agentId).toBeFalsy();
+    await expect(runSafemode(['assign',session.id], {'agent-id':'operator',revoke:true})).rejects.toThrow('exactly one');
   });
   test('duplicate request with takeover does not stop its running owner', async () => {
     const store = new SafemodeStore();

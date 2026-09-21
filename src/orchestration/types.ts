@@ -38,7 +38,18 @@ export interface TaskResult {
   artifactIds: string[];
   diff?: { text: string; truncated: boolean };
 }
+/** A fixed gateway adapter, never an arbitrary command or another model worker. */
+export interface GatewayTaskTarget {
+  adapter: string;
+  sessionId: string;
+  name: string;
+  takeover?: boolean;
+  noBootstrap?: boolean;
+}
 export interface TaskSnapshot {
+  gatewayTarget?: GatewayTaskTarget;
+  gatewayDispatch?: { requestId: string; submittedAt: number };
+
   continueTaskId?: string;
   continuationPolicy?: 'after_success' | 'after_terminal';
   workstreamId?: string;
@@ -89,6 +100,8 @@ export interface TaskRevision {
   originatingInputId: string;
 }
 export interface TaskAttempt {
+  executionType?: 'gateway-managed';
+  createdAt?: number;
   /** Immutable execution choice for this attempt; never infer it from today's agent model. */
   harness?: 'claude' | 'codex';
   harnessModel?: string;

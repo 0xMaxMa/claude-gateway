@@ -1,3 +1,4 @@
+import type { GatewayTaskAdapter } from './gateway-tasks/controller';
 import { CRON_TOOLS } from '../cron/tool-schemas';
 import { containerTaskTools } from './container-tool-schemas';
 import { retryableMutation } from './mutation-recovery';
@@ -29,7 +30,7 @@ export class TaskBridge {
   private readonly scopes = new Map<string, Scope>();
   private readonly cancellations = new Map<string, AbortController>();
   constructor(private readonly tasks: TaskService, private readonly files?: TaskFiles,
-    private readonly shareCall?: (attemptId: string, generation: number, args: Record<string, unknown>) => Promise<unknown>, private readonly skills?: () => SkillRegistry, private readonly container?: { agent: AgentConfig; spool: string }, private readonly cronCall?: (attemptId: string, generation: number, tool: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>, private readonly safemodeAccess: boolean | (() => boolean) = false) {}
+    private readonly shareCall?: (attemptId: string, generation: number, args: Record<string, unknown>) => Promise<unknown>, private readonly skills?: () => SkillRegistry, private readonly container?: { agent: AgentConfig; spool: string }, private readonly cronCall?: (attemptId: string, generation: number, tool: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>, private readonly gatewayAdapters = new Map<string, GatewayTaskAdapter>()) {}
   captureWorkerOutput(attemptId: string, generation: number, line: string): void {
     try { this.files?.captureOutput(attemptId, generation, line); }
     catch { /* A failed image capture must not break worker execution. Staging reports missing capture. */ }
@@ -63,27 +64,16 @@ export class TaskBridge {
           try {
             if (mutation) await scope.beforeMutation?.(command.tool, a, context.actionId);
             switch (command.tool) {
-              case 'safemode_validate': {
-                try { this.tasks.store.assertMember(context.conversationId, context.principalId); }
-                catch (error) {
-                  if (error instanceof OrchestrationError && error.code === 'ACCESS_DENIED') deny('CONVERSATION_ACCESS_DENIED');
-                  throw error;
-                }
-                if (this.container) deny('SAFEMODE_HOST_ONLY');
-                if (!(typeof this.safemodeAccess === 'function' ? this.safemodeAccess() : this.safemodeAccess)) deny('SAFEMODE_AGENT_NOT_ALLOWED');
-                if (!['list', 'status', 'logs', 'send', 'stop'].includes(a.operation)) throw new OrchestrationError('INVALID_INPUT');
-                if (a.operation === 'send' || a.operation === 'stop') {
-                  if (!context.execute) deny('EXECUTION_NOT_AUTHORIZED');
-                  try { await scope.beforeMutation?.(command.tool, a, context.actionId); }
-                  catch (error) {
-                    if (error instanceof OrchestrationError && error.code === 'ACCESS_DENIED') deny('ADMISSION_DENIED');
-                    throw error;
-                  }
-                }
-                result = { allowed: true }; break;
-              }
               case 'capabilities_list': {
                 this.tasks.store.assertMember(context.conversationId, context.principalId);
+                if (a.scope === 'safemode') {
+                  if (this.container) deny('SAFEMODE_HOST_ONLY');
+                  const adapter = this.gatewayAdapters.get('safemode');
+                  if (!adapter) throw new OrchestrationError('SAFEMODE_AGENT_NOT_ALLOWED');
+                  if (a.query !== undefined && typeof a.query !== 'string') throw new OrchestrationError('INVALID_INPUT');
+                  result = adapter.discover(a.query, a.offset); break;
+                }
+                if (a.scope !== undefined && a.scope !== 'capabilities') throw new OrchestrationError('INVALID_INPUT');
                 if (!scope.capabilities) throw new OrchestrationError('CAPABILITY_DISCOVERY_UNAVAILABLE');
                 result = { ...(await scope.capabilities(a) as Record<string, unknown>), executionAllowedForThisTurn: context.execute, memoryWriteAllowedForThisTurn: context.writeMemory }; break;
               }
@@ -103,6 +93,14 @@ export class TaskBridge {
                 result = await scope.onIntake(a); break;
               }
               case 'task_spawn': {
+                let gatewayTarget;
+                if (a.target_profile === 'gateway-managed' || a.gateway_target !== undefined) {
+                  if (this.container) deny('SAFEMODE_HOST_ONLY');
+                  if (a.target_profile !== 'gateway-managed' || !a.gateway_target || typeof a.gateway_target !== 'object' || Array.isArray(a.gateway_target)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
+                  const adapter = this.gatewayAdapters.get(a.gateway_target.adapter);
+                  if (!adapter) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
+                  gatewayTarget = adapter.resolve(a.gateway_target);
+                }
                 const skill = resolveNamedSkill(a.skill_name, a.skill_args, this.skills?.());
                 if (a.target_profile === 'skill-worker' && !skill) throw new OrchestrationError('UNKNOWN_SKILL');
                 if (a.target_profile !== 'skill-worker' && (a.skill_name !== undefined || a.skill_args !== undefined)) throw new OrchestrationError('INVALID_INPUT');
@@ -112,7 +110,7 @@ export class TaskBridge {
                 // Profile resolution may yield while another input arrives. Recheck
                 // readiness immediately before the synchronous task transaction.
                 await scope.beforeMutation?.(command.tool, a, context.actionId);
-                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, targetProfile: a.target_profile, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
+                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, targetProfile: a.target_profile, gatewayTarget, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
                 scope.onTaskQueued?.(spoken);
                 const { skill: _workerOnly, ...receipt } = task;
                 result = receipt;
@@ -194,7 +192,6 @@ export class TaskBridge {
     writeFileSync(ticketPath, JSON.stringify({ url: this.url, token, ...(this.container ? { socket: this.url, tools: containerTaskTools(scope.role) } : {}) }), { mode: 0o600, flag: 'wx' });
     writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: { gateway: { command: 'bun', args: [resolve(__dirname, '../../mcp/server.ts')], env: {
       GATEWAY_CAPABILITY_CATALOG: scope.role === 'agent' && scope.capabilities ? 'true' : '',
-      GATEWAY_SAFEMODE_ALLOWED: scope.role === 'agent' && !this.container && (typeof this.safemodeAccess==='function'?this.safemodeAccess():this.safemodeAccess) ? 'true' : '',
       GATEWAY_ORCHESTRATION_ROLE: scope.role, GATEWAY_ORCHESTRATION_TICKET_FILE: ticketPath,
       GATEWAY_WORKSPACE_DIR: workspace, GATEWAY_SHARED_KB_DIR: sharedKbDir,
       GATEWAY_RECORD_RETRIEVALS: this.recordRetrievals ? '1' : '',

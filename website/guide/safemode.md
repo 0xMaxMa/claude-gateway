@@ -21,9 +21,10 @@ claude-gateway safemode --resume voice-debug --no-bootstrap --prompt "Inspect th
 itself. An explicit `--prompt` is still sent. Diagnostics and `INVESTIGATION.md`
 refresh normally, but the model is not automatically asked to read them. Existing
 conversation instructions remain in native history. The flag is per invocation,
-requires an existing conversation selected with `--resume`, and is unavailable
-for new sessions, headless `send` and MCP calls. Omit it to restore the usual
-investigation introduction.
+requires an existing native conversation, and is unavailable for new sessions.
+It also works with `safemode send NAME --prompt TEXT --no-bootstrap` and the
+Gateway-managed task option `gateway_target.no_bootstrap`. A headless send always
+sends its explicit prompt. Omit the flag to restore the investigation introduction.
 
 ## Models and config
 
@@ -67,19 +68,19 @@ On Linux, ownership is checked before preparing diagnostics, immediately before 
 
 **External CLI limitation:** Claude Code 2.1.278 permits concurrent `--resume` of the same native session. Safemode cannot make an arbitrary external Claude CLI honor its lock, so the monitor cannot guarantee zero transient overlap or immediate termination if its child ignores the signal. Codex 0.154.0 rejects concurrent writers through its native writer lock; older versions without that behavior are not a basis for an atomic-exclusion guarantee. Strict exclusion across every possible launcher requires a shared native lock respected by those launchers. Safemode's own launches remain serialized by its private ownership lock.
 
-Request IDs prevent duplicate work. Reusing an ID returns its recorded outcome; changing its prompt/model is rejected. After an unexpected crash, a running request's outcome can remain unknown: inspect it before choosing a new ID. Safemode has no internal work queue. The caller/orchestrator owns scheduling, dependencies and retries.
+Request IDs prevent duplicate work. Reusing an ID returns its recorded outcome; changing its prompt/model/bootstrap option is rejected. After an unexpected crash, a running request's outcome can remain unknown: inspect it before choosing a new ID. Safemode has no internal work queue. The caller owns scheduling, dependencies and retries; Gateway-managed tasks provide this tracking for agent-originated work.
 
-Headless output retains the most recent bytes (up to 5 MiB), so verbose intermediate tool output does not discard the final diagnosis. The logs command returns the latest 64 KiB.
+The final native answer is retained separately in each request receipt (up to 262,144 characters; larger answers fail explicitly). Headless output retains the most recent bytes (up to 5 MiB), so verbose intermediate tool output does not discard the final diagnosis. The logs command returns the latest 64 KiB.
 
 Private state, request receipts and bounded headless output live under `~/.claude-gateway/safemode`. Interactive output remains in the native terminal/history. `delete` removes safemode-owned artifacts, not the native provider's conversation history. If a supervisor crashes, `recover NAME` clears stale ownership only after both recorded processes have exited. It never signals a PID recovered from disk. An unresponsive live owner must be dealt with manually before recovery.
 
 ## Agent control
 
-Trusted host operator agents can use `safemode_list`, `safemode_send`, `safemode_status`, `safemode_logs`, and `safemode_stop`. Add their exact agent IDs to `safemode.allowedAgentIds` to enable access. This grants access to the host user's safemode investigations and diagnostic output; keep the list limited to operator agents. Default is no agent access. App/container agents and ordinary workers cannot invoke these host controls.
+Trusted host agents discover assigned investigations through `capabilities_list` and send work through **Gateway-managed tasks**. The gateway tracks the request and wakes the conversational agent when a result is available. It does not launch a model worker just to poll safemode. The five standalone `safemode_*` agent tools are no longer loaded.
 
-See [Applying configuration changes](../reference/configuration-changes.md) before changing authorization on a running gateway. Validate access with a new tool request; a saved setting or an earlier `ACCESS_DENIED` message does not establish the current authorization result.
+Access requires both an allowlisted agent and an explicit assignment of the native session to that agent. Unassigned sessions are local-operator-only. An agent cannot discover or target another agent's session, even when it knows the native ID. App/container agents and workers cannot use these host controls.
 
-For example, to allow only your host operator agent `claude-founder`, merge this into `config.json`:
+First allow the host agent in `config.json`:
 
 ```json
 {
@@ -89,9 +90,47 @@ For example, to allow only your host operator agent `claude-founder`, merge this
 }
 ```
 
-Keep any other existing `safemode` settings. Use the exact agent ID, not its display name or chat session ID. Changes to `safemode.allowedAgentIds` hot-reload. Each privileged call checks the current allowlist, so removing an agent revokes access even through an existing ticket. Newly launched MCP processes load the five safemode tool schemas only for allowlisted host agents; existing processes may retain their old schema list, but cannot bypass the live authorization check. An empty or omitted list produces `ACCESS_DENIED` with reason `SAFEMODE_AGENT_NOT_ALLOWED` for agent safemode requests, even though the local operator CLI remains available. This permission grants access to investigation contents and controls, not just the list of names.
+Then create an investigation interactively and assign it from the local terminal while it is idle:
 
-Create an investigation interactively first. Then an authorized operator agent can send prompts, including through its Telegram channel. Sending/stopping requires an execution-authorized turn; takeover must be explicitly requested. Scoped admission is checked before invoking the local command. Local controls work while the gateway is down; communication through Telegram requires the gateway/channel to be available. Inspect status and logs to retrieve the result; acceptance alone is not completion.
+```bash
+claude-gateway safemode assign astra2 --agent-id claude-founder
+# Remove agent access without deleting native history:
+claude-gateway safemode assign astra2 --revoke
+```
+
+Assignment changes require local CLI access; agents cannot assign themselves sessions. Assignment is stored separately from native history and refuses changes while a safemode owner is active. [Allowlist changes hot-reload](../reference/configuration-changes.md). Discovery and dispatch check current permissions, including queued work. An existing committed request remains trackable/cancellable by its originating task after revocation; revocation does not terminate that request or expose subsequent requests.
+
+When asked “Can you see astra2?”, the agent calls:
+
+```json
+{"scope":"safemode","query":"astra2"}
+```
+
+This is a `capabilities_list` call, not a task. It returns assigned session names, native IDs, CLI, model and ownership status. A known foreign ID and an unknown ID are both unavailable; knowing an ID grants no access.
+
+To send authorized work, use `task_spawn`:
+
+```json
+{
+  "title": "Inspect the stalled conversation",
+  "instructions": "Investigate the requested session and return evidence and a proposed fix. Do not restart.",
+  "target_profile": "gateway-managed",
+  "gateway_target": {
+    "adapter": "safemode",
+    "session_id": "NATIVE_SESSION_ID",
+    "takeover": true,
+    "no_bootstrap": true
+  }
+}
+```
+
+`takeover` requires explicit user authorization to stop an interactive owner. Another headless request is allowed to finish first. `no_bootstrap` omits the investigation introduction; snapshots still refresh and headless sandbox restrictions remain. Text instructions are supported; attachment references, worker skills and working-directory overrides are rejected rather than silently ignored. Start with an existing native conversation; the task does not create a new investigation.
+
+The task is visible in `/tasks`, CLI/API task views and the dashboard as **Gateway-managed · Safemode · astra2**. Use `task_status` for the full retained result and `task_cancel` to cancel only this request, never a newer owner. Agent task access is scoped to its conversation, not just its agent ID. Dashboard/admin access retains its existing administrator scope.
+
+Request IDs and dispatch intent are persisted before submission. A gateway restart resumes observation without resending the command or stopping the independent safemode process. Ambiguous submission or lost ownership becomes `needs_reconciliation`; it is never blindly retried. Successful native exit without a recorded final answer is an explicit failure, not a fabricated completion report. Results are saved per request; a later request cannot overwrite the prior task's report. External native token/tool usage is not measured as a gateway worker turn, so the dashboard does not invent worker telemetry.
+
+Queued instructions may be amended. Once sent, use a dependent Gateway-managed task with `continue_task_id` for an authorized follow-up; it waits for successful completion by default. Existing task queue limits, membership checks and automatic result delivery apply. Local CLI controls remain available while the gateway is down; channel reporting resumes when the gateway returns.
 
 ## Evidence and permissions
 

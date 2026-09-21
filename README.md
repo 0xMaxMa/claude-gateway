@@ -98,4 +98,4 @@ build/startup evidence and uses a separate source snapshot. Session IDs are the
 native Claude Code/Codex IDs; `safemode rename ID NEW_NAME` changes the alias
 without interrupting the conversation. Headless takeover,
 request IDs and trusted operator agent controls are described in the
-[safemode guide](website/guide/safemode.md).
+[safemode guide](website/guide/safemode.md). Trusted agents can discover explicitly assigned investigations and track them as Gateway-managed tasks, with automatic completion reports and conversation-scoped controls.

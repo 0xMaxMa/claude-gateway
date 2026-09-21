@@ -144,8 +144,9 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/_meta/routes 
 ## Local safemode controls
 
 Safemode has no public HTTP endpoint. Its local CLI works independently of the
-server; allowlisted host operator agents use the scoped `safemode_list`,
-`safemode_status`, `safemode_send`, `safemode_logs`, and `safemode_stop` MCP tools.
+server; allowlisted host agents use `capabilities_list(scope="safemode")` to discover
+explicitly assigned sessions, then `task_spawn` with `target_profile="gateway-managed"`.
+The gateway tracks and reports results through the normal task lifecycle.
 The private orchestration bridge checks membership, operator configuration and
 execution authorization before access. See the [safemode guide](../guide/safemode.md)
 for request IDs, asynchronous receipts, explicit takeover and result retrieval.

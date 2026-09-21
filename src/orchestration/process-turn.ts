@@ -183,7 +183,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     if (event.type === 'system' && event.subtype === 'init' && process.runtimeProfile) {
       const role = process.runtimeProfile.role;
       const allowed = role === 'agent'
-        ? /^(mcp__gateway__(capabilities_list|conversation_intake|safemode_(list|send|status|stop|logs)|memory_(get|search)|task_(spawn|status|cancel|update|answer|question)))$/
+        ? /^(mcp__gateway__(capabilities_list|conversation_intake|memory_(get|search)|task_(spawn|status|cancel|update|answer|question)))$/
         : /^(Read|Glob|Grep|Bash|Edit|Write|Skill|mcp__gateway__(tool_search|tool_call|browser_[a-z_]+|generate_image|generate_video|share_file|share_image|memory_(get|search|shared_(get|create|update|delete))|task_(report_progress|request_input|stage_file|memory_append)))$/;
       const allowedTool = (name: unknown): boolean => {
         if (typeof name !== 'string') return false;

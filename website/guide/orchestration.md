@@ -20,6 +20,12 @@ When new user input arrives before dispatch, `NEW_INPUT_PENDING` defers the old 
 
 If an ordinary reply leaves a deferred dispatch unresolved, the gateway queues one reconciliation turn with the same conversation identity and execution permissions. It references the latest persisted input by ID and reads that input within the same conversation, principal and binding, so long messages are not copied into a larger synthetic input. It does not replay the old command automatically or grant reporting-only turns execution access. A reconciliation turn cannot schedule another copy of itself; unresolved work remains available for the next user turn rather than creating an endless retry loop.
 
+## Worker tasks and Gateway-managed tasks
+
+A **Worker task** runs an independent Claude Code or Codex worker. A **Gateway-managed task** sends a request to an existing external target, initially a safemode investigation, and lets the gateway track its durable result. Both use the same task list, status, cancellation, dependencies and completion notifications. No polling model worker is created for Gateway-managed tasks.
+
+Discovery does not create work: `capabilities_list(scope="safemode")` lists only the host agent's explicitly assigned sessions. Being allowlisted alone does not expose every safemode session. See [safemode setup and examples](./safemode.md#agent-control) for local assignment, `gateway_target`, takeover and bootstrap options.
+
 ## Inspect actual work
 
 After asking an agent to perform a bounded task, inspect it from the same authorized conversation. In supported private chats, `/tasks` opens task controls. CLI equivalents are:

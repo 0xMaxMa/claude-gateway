@@ -19,6 +19,8 @@ test('container profiles do not inherit executable settings or host MCP inventor
   expect(containerTaskTools('worker').map(t=>t.name)).toEqual(['task_report_progress','task_request_input','task_stage_file','cron_list','cron_create','cron_delete','cron_update','cron_get_runs']);
   // Invariant per role: conversation_intake is always declared so the container agent's
   // cached tools prefix cannot change when semantic intake turns on or off.
+  expect(containerTaskTools('agent').find(t=>t.name==='task_spawn')!.inputSchema.properties).not.toHaveProperty('gateway_target');
+  expect(containerTaskTools('agent').find(t=>t.name==='capabilities_list')!.inputSchema.properties).not.toHaveProperty('scope');
   expect(containerTaskTools('agent').map(t=>t.name)).toEqual(['capabilities_list','conversation_intake','task_spawn','task_status','task_cancel','task_update','task_question','task_answer']);
 });
 

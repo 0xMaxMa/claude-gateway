@@ -9,7 +9,7 @@ import { buildNativeInvocation, discoverCodexSession, extractNativeSessionId } f
 import { prepareContext } from './context';
 import { assertNoExternalNativeOwner, ExternalOwnerFound } from './external-owners';
 
-export interface RunOptions { noBootstrap?: boolean; nativeArgs?: string[]; nativeResumeIndex?: number; mode: 'interactive' | 'headless'; prompt?: string; requestId?: string; configPath?: string }
+export interface RunOptions { agentId?: string; noBootstrap?: boolean; nativeArgs?: string[]; nativeResumeIndex?: number; mode: 'interactive' | 'headless'; prompt?: string; requestId?: string; configPath?: string }
 const STOP_TIMEOUT = 15000;
 export function controlPath(store: SafemodeStore, id: string): string {
   // A bounded socket path also supports long HOME paths on macOS/Linux.
@@ -54,7 +54,7 @@ export function getRequest(store: SafemodeStore, id: string, requestId: string):
 }
 export async function runSession(store: SafemodeStore, session: SafemodeSession, options: RunOptions): Promise<number> {
   if (options.nativeArgs !== undefined && options.mode !== 'interactive') throw new Error('Native params are interactive-only');
-  if (options.noBootstrap && (options.mode !== 'interactive' || !session.nativeSessionId || session.nativeStarted === false)) throw new Error('--no-bootstrap requires an interactive native resume');
+  if (options.noBootstrap && (!session.nativeSessionId || session.nativeStarted === false)) throw new Error('--no-bootstrap requires an existing native conversation');
   const owner = store.acquire(session.id, options.mode);
   const workspace = path.join(store.dir(session.id), 'workspace');
   let server: net.Server | undefined;
@@ -78,10 +78,11 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
   try {
     // Read current state only after exclusive ownership, avoiding stale saves.
     const latest = store.read(session.id);
+    if (options.agentId && latest.agentId !== options.agentId) throw new Error('SAFEMODE_SESSION_NOT_AVAILABLE');
     session = { ...latest, model: session.model, configPath: options.configPath ?? session.configPath };
     assertNoExternalNativeOwner({ cli: session.cli, nativeSessionId: session.nativeSessionId, cwd: workspace });
     if (options.requestId) {
-      const promptHash = createHash('sha256').update(JSON.stringify([options.prompt, session.cli, session.model])).digest('hex');
+      const promptHash = createHash('sha256').update(JSON.stringify([options.prompt, session.cli, session.model, ...(options.noBootstrap ? [true] : [])])).digest('hex');
       const existing = getRequest(store, session.id, options.requestId);
       if (existing) {
         if (existing.promptHash !== promptHash) throw new Error('Request ID was already used with different input');
@@ -89,7 +90,7 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
         process.connected && process.send?.({ ready: true, sessionId: session.id, requestId: existing.id, duplicate: true });
         return existing.exitCode ?? 1;
       }
-      request = { id: options.requestId, promptHash, status: 'running' };
+      request = { id: options.requestId, promptHash, status: 'running', ownerToken: owner.token };
       fs.mkdirSync(path.dirname(requestFile(store, session.id, request.id)), { recursive: true, mode: 0o700 });
       atomicJson(requestFile(store, session.id, request.id), request);
       session.lastRequest = request;
@@ -179,6 +180,19 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
       while ((newline = buffered.indexOf('\n')) !== -1) {
         const line = buffered.slice(0, newline); buffered = buffered.slice(newline + 1);
         captureId(extractNativeSessionId(session.cli, line));
+        if (request) {
+          try {
+            const event = JSON.parse(line);
+            const text = session.cli === 'codex'
+              ? (event.type === 'item.completed' && event.item?.type === 'agent_message' ? event.item.text : undefined)
+              : (event.type === 'result' ? event.result : undefined);
+            if (typeof text === 'string') {
+              if (text.length > 262144) { request.error = 'SAFEMODE_RESULT_TOO_LARGE'; delete request.result; }
+              else if (!request.error) request.result = text;
+            }
+            if (event.type === 'result' && event.is_error) request.error = 'SAFEMODE_NATIVE_RESULT_ERROR';
+          } catch { /* Tool output and stderr are not a final result. */ }
+        }
       }
       appendOutput(chunk);
     });
@@ -234,7 +248,8 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
     process.removeListener('SIGHUP', stop);
     process.removeListener('SIGINT', stop);
     if (request) {
-      request.status = exitCode === 0 ? 'completed' : 'failed'; request.exitCode = exitCode;
+      request.status = !canRelease ? 'running' : exitCode === 0 && !request.error ? 'completed' : 'failed';
+      if (!canRelease) request.error = 'SAFEMODE_CLEANUP_UNCONFIRMED'; request.exitCode = exitCode;
       if (ownershipError) request.error = ownershipError;
       atomicJson(requestFile(store, session.id, request.id), request);
       session.lastRequest = request; store.save(session);

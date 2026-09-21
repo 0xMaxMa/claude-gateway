@@ -68,11 +68,13 @@ describe('safemode ownership and native lifecycle', () => {
     expect(await runSession(store,session,{mode:'interactive'})).toBe(0);
     expect(buildNativeInvocation).toHaveBeenLastCalledWith(expect.objectContaining({context:'Test context'}));
   });
-  test('no-bootstrap cannot bypass new/headless investigation instructions', async () => {
+  test('no-bootstrap requires a started native session and supports headless continuation', async () => {
     const session=store.create('fresh','claude','inherit');
-    await expect(runSession(store,session,{mode:'interactive',noBootstrap:true})).rejects.toThrow('interactive native resume');
+    await expect(runSession(store,session,{mode:'interactive',noBootstrap:true})).rejects.toThrow('existing native conversation');
     session.nativeStarted=true;
-    await expect(runSession(store,session,{mode:'headless',noBootstrap:true})).rejects.toThrow('interactive native resume');
+    store.save(session);
+    await expect(runSession(store,session,{mode:'headless',noBootstrap:true,prompt:'inspect'})).resolves.toBe(0);
+    expect(buildNativeInvocation).toHaveBeenLastCalledWith(expect.objectContaining({context:undefined,mode:'headless'}));
     expect(store.owner(session.id)).toBeUndefined();
   });
   test('stop acknowledges only after native process exits and ownership releases', async () => {

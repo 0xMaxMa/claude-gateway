@@ -15,13 +15,14 @@ const HELP = `Usage: claude-gateway safemode [--name NAME] [--cli claude|codex] 
        claude-gateway safemode --resume NAME_OR_ID [--takeover] [--prompt TEXT] [--no-bootstrap]
        claude-gateway safemode rename NAME_OR_ID NEW_NAME
        claude-gateway safemode list
+       claude-gateway safemode assign NAME_OR_ID --agent-id AGENT_ID | --revoke
        claude-gateway safemode status NAME_OR_ID [--request-id ID]
        claude-gateway safemode send NAME_OR_ID --prompt TEXT [--request-id ID] [--takeover] [--wait]
        claude-gateway safemode logs|stop|delete|recover NAME_OR_ID
 
 --params is interactive-only, parsed as argv without shell evaluation. Native resume requires a UUID.
 Do not combine native resume in --params with safemode --resume.
---no-bootstrap resumes interactively without sending the investigation introduction; diagnostics still refresh.
+--no-bootstrap resumes or sends without sending the investigation introduction; diagnostics still refresh.
 Default: native interactive Claude Code, inheriting its configured model.
 --resume accepts the native Claude Code/Codex session ID or a saved name. Put gateway chat IDs in --prompt.
 Headless send runs in the background; --wait waits for its result. There is no job queue.
@@ -48,17 +49,17 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
   const common = ['help', 'json', 'config'];
   const allowed: Record<string, string[]> = {
     open: ['name', 'cli', 'model', 'prompt', 'resume', 'takeover', 'params', 'no-bootstrap'], list: [],
-    rename: [], status: ['request-id'], logs: [], stop: [], delete: [], recover: [],
-    send: ['prompt', 'request-id', 'takeover', 'wait', 'model'],
+    assign: ['agent-id', 'revoke'], rename: [], status: ['request-id'], logs: [], stop: [], delete: [], recover: [],
+    send: ['agent-id', 'prompt', 'request-id', 'takeover', 'wait', 'model', 'no-bootstrap'],
   };
   if (!allowed[verb]) throw new Error('Unknown safemode command');
   const unknown = unknownFlagNames(flags, new Set([...common, ...allowed[verb]]));
   if (unknown.length) throw new Error(`Unknown safemode flag(s): ${unknown.map(n => '--' + n).join(', ')}`);
-  for (const key of ['name', 'cli', 'model', 'prompt', 'resume', 'request-id', 'config', 'params']) {
+  for (const key of ['name', 'cli', 'model', 'prompt', 'resume', 'request-id', 'config', 'params', 'agent-id']) {
     if (flags[key] !== undefined && (typeof flags[key] !== 'string' || !(flags[key] as string).trim())) throw new Error(`--${key} requires a value`);
   }
   if (flags['no-bootstrap'] !== undefined && typeof flags['no-bootstrap'] !== 'boolean') throw new Error('--no-bootstrap is a boolean flag');
-  if (flags['no-bootstrap'] && typeof flags.resume !== 'string') throw new Error('--no-bootstrap requires safemode --resume');
+  if (flags['no-bootstrap'] && verb !== 'send' && typeof flags.resume !== 'string') throw new Error('--no-bootstrap requires safemode --resume');
   if (typeof flags.prompt === 'string' && flags.prompt.length > 100000) throw new Error('Prompt exceeds 100000 characters');
   const store = new SafemodeStore();
   if (verb === 'rename') {
@@ -100,6 +101,10 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
   }
   if (positionals.length !== 2) throw new Error(`safemode ${verb} requires one session name or ID`);
   const session = store.find(positionals[1]);
+  if (verb === 'assign') {
+    if ((typeof flags['agent-id'] === 'string') === (flags.revoke === true) || (flags.revoke !== undefined && flags.revoke !== true)) throw new Error('Specify exactly one of --agent-id AGENT_ID or --revoke');
+    output(publicSession(store.assign(session.id, flags.revoke === true ? null : flags['agent-id'] as string))); return 0;
+  }
   if (verb === 'status') {
     const owner = store.owner(session.id);
     output({ ...publicSession(session), ...nativeOwnership(store, session), owner, ownerAlive: owner ? alive(owner.pid) : false,
@@ -124,11 +129,12 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
   const priorRequest = getRequest(store, session.id, requestId);
   const settings = resolveSafemodeSettings(flags, session);
   if (priorRequest) {
-    const hash = createHash('sha256').update(JSON.stringify([flags.prompt, settings.cli, settings.model])).digest('hex');
+    const hash = createHash('sha256').update(JSON.stringify([flags.prompt, settings.cli, settings.model, ...(flags['no-bootstrap'] ? [true] : [])])).digest('hex');
     if (hash !== priorRequest.promptHash) throw new Error('Request ID was already used with different input');
     output({ id: publicId(session), requestId, duplicate: true, request: priorRequest });
     return 0;
   }
+  if (flags['agent-id'] && store.read(session.id).agentId !== flags['agent-id']) throw new Error('SAFEMODE_SESSION_NOT_AVAILABLE');
   const currentOwner = store.owner(session.id);
   if (currentOwner) {
     if (currentOwner.mode === 'headless') throw new Error('Busy: a headless request is already running; inspect status or stop it explicitly');
@@ -139,8 +145,10 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
   if (!refreshed.nativeSessionId || refreshed.nativeStarted === false) throw new Error('Native conversation ID is not available; refusing to start a different conversation');
   Object.assign(session, refreshed);
   assertNoExternalNativeOwner({ cli: refreshed.cli, nativeSessionId: refreshed.nativeSessionId, cwd: path.join(store.dir(session.id), 'workspace') });
-  if (flags.wait) return runSession(store, refreshed, { mode: 'headless', prompt: flags.prompt, requestId, configPath: refreshed.configPath });
+  if (flags.wait) return runSession(store, refreshed, { mode: 'headless', agentId: flags['agent-id'] as string | undefined, noBootstrap: flags['no-bootstrap'] === true, prompt: flags.prompt, requestId, configPath: refreshed.configPath });
   const args = [path.resolve(__dirname, '../../entry.js'), 'safemode', 'send', session.id, `--prompt=${flags.prompt}`, `--request-id=${requestId}`, '--wait'];
+  if (flags['agent-id']) args.push('--agent-id', flags['agent-id'] as string);
+  if (flags['no-bootstrap']) args.push('--no-bootstrap');
   if (flags.model) args.push('--model', flags.model as string);
   args.push('--config=' + refreshed.configPath);
   const log = fs.openSync(path.join(store.dir(session.id), 'supervisor.log'), 'w', 0o600);

@@ -41,6 +41,55 @@ describe('safemode detached CLI worker', () => {
     const {stdout}=await exec(process.execPath,[entry,'safemode',...args,'--json'],{env,timeout:10000}).catch(error => { error.message += '\n' + String(error.stdout) + String(error.stderr); throw error; });
     return JSON.parse(stdout);
   }
+  test('headless no-bootstrap retains separate full results per request and checks agent assignment', async () => {
+    await command('assign', nativeId, '--agent-id=operator');
+    const fake=path.join(home,'native-cli');
+    fs.writeFileSync(fake,`#!/usr/bin/env node
+const fs=require('fs'),args=process.argv.slice(2);
+fs.writeFileSync(process.env.HOME+'/last-args.json',JSON.stringify(args));
+console.log(JSON.stringify({type:'result',result:'Report: '+args.at(-1)}));
+`,{mode:0o700});
+    for(const request of ['first','second']) {
+      await exec(process.execPath,[entry,'safemode','send',nativeId,'--wait','--no-bootstrap','--agent-id=operator','--request-id='+request,'--prompt='+request],{env,timeout:15000});
+      const args=JSON.parse(fs.readFileSync(path.join(home,'last-args.json'),'utf8'));
+      expect(args.join(' ')).not.toContain('You are investigating');expect(args).toContain('--restricted');
+    }
+    expect((await command('status',nativeId,'--request-id=first')).request.result).toBe('Report: first');
+    expect((await command('status',nativeId,'--request-id=second')).request.result).toBe('Report: second');
+    await expect(exec(process.execPath,[entry,'safemode','send',nativeId,'--wait','--agent-id=other','--prompt=denied'],{env,timeout:10000})).rejects.toThrow();
+    expect(JSON.parse(fs.readFileSync(path.join(home,'last-args.json'),'utf8')).at(-1)).toBe('second');
+  },40000);
+  test('real Gateway-managed adapter survives controller restart and delivers one per-request result', async () => {
+    await command('assign',nativeId,'--agent-id=operator');
+    fs.writeFileSync(path.join(home,'native-cli'),`#!/usr/bin/env node
+const fs=require('fs');fs.appendFileSync(process.env.HOME+'/native-launches','1');
+setTimeout(()=>console.log(JSON.stringify({type:'result',result:'Complete retained report'})),500);
+`,{mode:0o700});
+    const modules=path.dirname(entry);
+    const script=`
+const {OrchestrationStore}=require(${JSON.stringify(path.join(modules,'orchestration/store.js'))});
+const {TaskService}=require(${JSON.stringify(path.join(modules,'orchestration/tasks/service.js'))});
+const {DecisionService}=require(${JSON.stringify(path.join(modules,'orchestration/decisions.js'))});
+const {GatewayTaskController}=require(${JSON.stringify(path.join(modules,'orchestration/gateway-tasks/controller.js'))});
+const {SafemodeTaskAdapter}=require(${JSON.stringify(path.join(modules,'orchestration/gateway-tasks/safemode.js'))});
+const {recoverOrchestration}=require(${JSON.stringify(path.join(modules,'orchestration/recovery.js'))});
+(async()=>{
+ let store=new OrchestrationStore(process.env.HOME+'/task.db','operator'),tasks=new TaskService(store);
+ const input=store.acceptInput({scope:{agentId:'operator',agentSessionId:'chat',source:'api',accountId:'owner',principalId:'owner',chatId:'chat',threadKey:''},text:'inspect'});
+ const context={...input,...new DecisionService(store).begin(input.conversationId,'owner',[input.inputId]),principalId:'owner',execute:true,writeMemory:false,actionId:'spawn'};
+ const target={adapter:'safemode',sessionId:'${nativeId}',name:'investigation',noBootstrap:true};
+ const task=tasks.spawn(context,{title:'Inspect',instructions:'Inspect the error',targetProfile:'gateway-managed',gatewayTarget:target});
+ const adapters=new Map([['safemode',new SafemodeTaskAdapter('operator',()=>true)]]);
+ let controller=new GatewayTaskController(tasks,adapters);await controller.tick();await controller.close();store.close();
+ store=new OrchestrationStore(process.env.HOME+'/task.db','operator');tasks=new TaskService(store);recoverOrchestration(store);controller=new GatewayTaskController(tasks,adapters);
+ for(let i=0;i<100&&store.task(task.taskId).state!=='completed';i++){await new Promise(r=>setTimeout(r,50));await controller.tick();}
+ const result=store.task(task.taskId);const notifications=store.all('SELECT * FROM notifications').length;
+ await controller.close();store.close();console.log(JSON.stringify({state:result.state,summary:result.result?.summary,notifications}));
+})().catch(e=>{console.error(e);process.exitCode=1;});`;
+    const {stdout}=await exec(process.execPath,['-e',script],{env,timeout:15000});
+    expect(JSON.parse(stdout)).toEqual({state:'completed',summary:'Complete retained report',notifications:1});
+    expect(fs.readFileSync(path.join(home,'native-launches'),'utf8')).toBe('1');
+  },20000);
   test.each(['claude', 'codex'])('interactive %s params reach the native process, retain imported ID and cannot be imported twice', async cli => {
     const capture = path.join(home, 'captured.json');
     const fake = path.join(home, 'native-cli');

@@ -1,3 +1,5 @@
+import { GatewayTaskController, GatewayTaskAdapter } from './gateway-tasks/controller';
+import { SafemodeTaskAdapter } from './gateway-tasks/safemode';
 import { workerCrons } from './worker-crons';
 import { readCompactMeasurements, type CompactMeasurements } from './compact-measurements';
 import { SessionCompaction, recoverSessionCompaction, type ResolvedSessionCompaction } from './session-compaction';
@@ -78,6 +80,7 @@ import { workerShares } from './worker-shares';
 
 /** Stable instructions are carried in the system prefix, not appended to every
  * resumed user turn. Per-turn authorization flags remain explicit below it. */
+const GATEWAY_TASK_INSTRUCTIONS = 'For safemode discovery use capabilities_list(scope=safemode); this creates no task. For authorized work on a discovered session use task_spawn(target_profile=gateway-managed, gateway_target={adapter:safemode,session_id:...}). Gateway-managed tasks are followed by the gateway and report results automatically; never spawn a polling worker.';
 const CONTEXT_DELIVERY_INSTRUCTIONS = 'Worker profiles: default-worker is the general-purpose worker for research, files, browser/API operations, services, calculations and code. In host mode it uses the Agent working environment; no Git or projectRoot is required. In container mode it stays inside the app container. Only explicitly configured isolated-worktree mode requires Git for default-worker; media-worker remains available for standalone scratch work in isolated modes. State the authorized working directory in task instructions; workers may change directories only within their execution boundary. Serialize conflicting edits to the same shared files; continue related work with continue_task_id. Task context is incremental within a resumed CLI conversation. Omission means unchanged, not deleted. On a fresh context only active/waiting tasks and current reports are bootstrapped; use task_status for other past work or full results. Receipt recovery is evidence, not authorization to replay a command. Previously supplied materials remain in the resumed context; preserve their references when assigning workers. Never infer that missing image bytes mean a missing attachment if its ref was already supplied.';
 
 export interface AgentOrchestrationHost {
@@ -107,6 +110,7 @@ export class AgentOrchestrationRuntime {
   private readonly history: OrchestrationHistoryWriter;
   private readonly delivery: DeliveryOutbox;
   private readonly scheduler: WorkerScheduler;
+  private gatewayTasks?: GatewayTaskController;
   private nextQuestionCheck = 0;
   private readonly scheduledReports = new Set<string>();
   private readonly seenSessions = new Set<string>();
@@ -200,7 +204,9 @@ export class AgentOrchestrationRuntime {
     } catch (error) { store.close(); releaseLock(); throw error; }
     const tasks = new TaskService(store, agent.orchestration, agent.workspace);
     const files = new TaskFiles(store, join(agent.workspace, '../..'), agent.type === 'app-agent' ? join(root, 'container-files') : undefined, agent.workspace);
-    const bridge = new TaskBridge(tasks, files, workerShares(files, agent, gateway), host.skills ? () => host.skills!() : undefined, agent.type === 'app-agent' ? { agent, spool: join(root, 'container-files') } : undefined, workerCrons(files, agent, gateway), () => Array.isArray(gateway.safemode?.allowedAgentIds) && gateway.safemode.allowedAgentIds.includes(agent.id));
+    const safemodeAllowed = () => agent.type !== 'app-agent' && Boolean(gateway.safemode?.allowedAgentIds?.includes(agent.id));
+    const gatewayAdapters = new Map<string, GatewayTaskAdapter>(agent.type === 'app-agent' ? [] : [['safemode',new SafemodeTaskAdapter(agent.id, safemodeAllowed)]]);
+    const bridge = new TaskBridge(tasks, files, workerShares(files, agent, gateway), host.skills ? () => host.skills!() : undefined, agent.type === 'app-agent' ? { agent, spool: join(root, 'container-files') } : undefined, workerCrons(files, agent, gateway), gatewayAdapters);
     const personalRetention = resolveDreamingConfig(agent.dreaming, gateway.gateway.dreaming, gateway.gateway.timezone).staleness;
     const sharedRetention = resolveSharedConfig(agent.knowledge?.shared, gateway.gateway.knowledge?.shared).staleness;
     bridge.recordRetrievals = (personalRetention.enabled && personalRetention.recordRetrievals) || (sharedRetention.enabled && sharedRetention.recordRetrievals);
@@ -211,6 +217,7 @@ export class AgentOrchestrationRuntime {
       // their global capacity conservatively as well as the per-agent slots.
       const recoveredReservations = new Map<string, () => void>();
       for (const row of store.all("SELECT id FROM tasks WHERE state='needs_reconciliation' AND active_attempt_id IS NOT NULL")) {
+        if (store.task(String(row.id))?.gatewayTarget) continue;
         recoveredReservations.set(String(row.id), gatewayCapacity(gateway).acquireWorker(agent.id, String(row.id), false)!);
       }
       if (agent.orchestration?.enabled) store.run("UPDATE conversations SET status='active' WHERE status='draining'");
@@ -234,6 +241,8 @@ export class AgentOrchestrationRuntime {
       if (!agent.orchestration?.enabled) runtime.drain();
       await runtime.flushHistory();
       scheduler.start();
+      runtime.gatewayTasks = new GatewayTaskController(tasks, gatewayAdapters);
+      runtime.gatewayTasks.start();
       runtime.mailboxTimer = setInterval(() => {
         try { runtime.pumpMailbox(); } catch { /* admission remains durable for retry */ }
         void runtime.delivery.tick().catch(() => {});
@@ -425,8 +434,8 @@ export class AgentOrchestrationRuntime {
       const tool = event ? JSON.parse(String(event.payload_json)).payload : undefined;
       const measured = summarizeTokenTurns(measuredTurns(this.store, String(row.agent_session_id)).filter(turn => turn.id === attempt?.attemptId));
       return { tokenSummary: {totalTokens: measured.totalTokens}, contextTools: measured.contextTools, loadedTools: measured.loadedTools, usedTools: measured.usedTools, taskId: row.id, sessionId: row.agent_session_id, state: row.state, title: snapshot.title,
-        execution: snapshot.execution, workerId: attempt?.workerId, workstreamId: snapshot.workstreamId, continueTaskId: snapshot.continueTaskId, resumed: attempt?.resumeSession,
-        attemptId: attempt?.attemptId, workerSessionId: attempt?.sessionId, hostProcessId: row.active_attempt_id ? attempt?.processIdentity?.pid : undefined,
+        executionType: snapshot.gatewayTarget ? 'gateway-managed' : 'worker', gatewayTarget: snapshot.gatewayTarget, execution: snapshot.execution, workerId: attempt?.workerId, workstreamId: snapshot.workstreamId, continueTaskId: snapshot.continueTaskId, resumed: attempt?.resumeSession,
+        attemptId: attempt?.attemptId, workerSessionId: snapshot.gatewayTarget ? undefined : attempt?.sessionId, targetSessionId: snapshot.gatewayTarget?.sessionId, hostProcessId: row.active_attempt_id ? attempt?.processIdentity?.pid : undefined,
         container: this.agent.type === 'app-agent' ? this.agent.container : undefined,
         lastTool: tool ? { name: tool.name, type: tool.type, is_error: tool.is_error } : undefined };
     });
@@ -993,7 +1002,7 @@ export class AgentOrchestrationRuntime {
       // produced, while speech and review turns fill the optional fields their per-turn overlay
       // asks for. This restores the structured-output guarantee without a per-turn tools diff.
       ticket.profile.responseSchema = ORCHESTRATION_RESPONSE_SCHEMA;
-      ticket.profile.overlay += `\n\n${CONTEXT_DELIVERY_INSTRUCTIONS}\n\nOnly when the current turn explicitly enables semantic intake, apply these rules:\n${INTAKE_OVERLAY}`;
+      ticket.profile.overlay += `\n\n${CONTEXT_DELIVERY_INSTRUCTIONS}${this.agent.type !== 'app-agent' && this.gateway.safemode?.allowedAgentIds?.includes(this.agent.id) ? '\n'+GATEWAY_TASK_INSTRUCTIONS : ''}\n\nOnly when the current turn explicitly enables semantic intake, apply these rules:\n${INTAKE_OVERLAY}`;
       // Continue the CLI session this agent session already has a transcript for. Each decision
       // turn is still its own process; resuming is what lets the next one reuse the previous
       // turn's cached prefix instead of paying a full cache write, and it replaces the flattened
@@ -1282,6 +1291,7 @@ export class AgentOrchestrationRuntime {
     this.deferred.clear();
     this.drain();
     for (const sessionId of this.active.keys()) this.stopResponse(sessionId);
+    await this.gatewayTasks?.close();
     await this.scheduler.close();
     await this.settleResources();
     await Promise.allSettled([...this.pending]);

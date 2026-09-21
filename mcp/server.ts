@@ -115,13 +115,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         isError: true,
       };
     }
-    if (mod.id === 'safemode') {
-      if (ORCHESTRATION_ROLE !== 'agent' || !process.env.GATEWAY_ORCHESTRATION_TICKET_FILE) {
-        return { content: [{ type: 'text', text: 'SAFEMODE_AGENT_TICKET_REQUIRED' }], isError: true };
-      }
-      const validation = await callTaskBridge('safemode_validate', { operation: toolName.slice('safemode_'.length) }, String(extra.requestId), AbortSignal.any([extra.signal, shutdownController.signal]));
-      if (validation.isError) return validation;
-    }
     if (ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_ORCHESTRATION_MEDIA === 'true') {
       const validation = await callTaskBridge('task_validate', {}, String(extra.requestId), AbortSignal.any([extra.signal, shutdownController.signal]));
       if (validation.isError) return validation;

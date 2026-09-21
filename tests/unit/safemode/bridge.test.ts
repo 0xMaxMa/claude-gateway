@@ -6,92 +6,66 @@ import { TaskBridge } from '../../../src/orchestration/bridge';
 import { OrchestrationStore } from '../../../src/orchestration/store';
 import { TaskService } from '../../../src/orchestration/tasks/service';
 import { DecisionService } from '../../../src/orchestration/decisions';
-import { OrchestrationError } from '../../../src/orchestration/types';
+import { SafemodeTaskAdapter } from '../../../src/orchestration/gateway-tasks/safemode';
+import { SafemodeStore, atomicJson } from '../../../src/safemode/store';
 import type { AgentConfig } from '../../../src/types';
 
-async function fixture(allowed?: boolean | (() => boolean), container = false) {
-  const root = mkdtempSync(join(tmpdir(), 'safemode-bridge-')), workspace = join(root, 'workspace');
-  mkdirSync(workspace);
-  const store = new OrchestrationStore(join(root, 'db'), 'operator'), tasks = new TaskService(store);
-  const input = store.acceptInput({ scope: { agentId: 'operator', agentSessionId: 'test-session', source: 'api', accountId: 'owner', chatId: 'chat', threadKey: '', principalId: 'owner' }, text: 'inspect' });
-  const decision = new DecisionService(store).begin(input.conversationId, 'owner', [input.inputId]);
-  const context = { ...input, ...decision, principalId: 'owner', execute: true, writeMemory: false };
-  const bridge = new TaskBridge(tasks, undefined, undefined, undefined,
-    container ? { agent: { id: 'operator', workspace } as AgentConfig, spool: join(root, 'spool') } : undefined, undefined, allowed);
-  await bridge.start();
-  let count = 0;
-  function issue(overrides: Partial<Parameters<TaskBridge['issue']>[0]> = {}) {
-    const directory = join(root, 'ticket-' + ++count);
-    const issued = bridge.issue({ role: 'agent', context, ...overrides } as Parameters<TaskBridge['issue']>[0], directory, workspace);
-    const auth = JSON.parse(readFileSync(join(directory, 'ticket.json'), 'utf8'));
-    return { ...issued, call: (operation: string) => new Promise<{ status: number; body: any }>((resolve, reject) => {
-      const options = { method: 'POST', headers: { Authorization: 'Bearer ' + auth.token } };
-      const onResponse = (res: import('http').IncomingMessage) => {
-        let body = ''; res.on('data', chunk => body += chunk);
-        res.on('end', () => resolve({ status: res.statusCode!, body: JSON.parse(body) }));
-      };
-      const req = auth.socket ? request({ ...options, socketPath: auth.socket, path: '/call' }, onResponse) : request(auth.url, options, onResponse);
-      req.on('error', reject); req.end(JSON.stringify({ tool: 'safemode_validate', args: { operation }, action_id: 'validation' }));
-    }) };
-  }
-  return { issue, context, close: async () => { await bridge.close(); store.close(); rmSync(root, { recursive: true, force: true }); } };
+const nativeId='11111111-1111-4111-8111-111111111111';
+async function fixture(container=false) {
+ const root=mkdtempSync(join(tmpdir(),'safemode-bridge-')),workspace=join(root,'workspace');mkdirSync(workspace);
+ const safeRoot=join(root,'safemode');mkdirSync(join(safeRoot,nativeId),{recursive:true});
+ atomicJson(join(safeRoot,nativeId,'session.json'),{id:nativeId,name:'astra2',nativeSessionId:nativeId,cli:'codex',model:'inherit',createdAt:new Date().toISOString()});
+ const safe=new SafemodeStore(safeRoot);safe.assign(nativeId,'operator');let allowed=true;
+ const adapter=new SafemodeTaskAdapter('operator',()=>allowed,()=>safe);
+ const store=new OrchestrationStore(join(root,'db'),'operator'),tasks=new TaskService(store);
+ function input(sessionId:string,principalId='owner') {
+  const receipt=store.acceptInput({scope:{agentId:'operator',agentSessionId:sessionId,source:'api',accountId:'owner',chatId:sessionId,threadKey:'',principalId},text:'inspect'});
+  return {...receipt,...new DecisionService(store).begin(receipt.conversationId,principalId,[receipt.inputId]),principalId,execute:true,writeMemory:false};
+ }
+ const context=input('chat');
+ const bridge=new TaskBridge(tasks,undefined,undefined,undefined,container?{agent:{id:'operator',workspace} as AgentConfig,spool:join(root,'spool')}:undefined,undefined,new Map([['safemode',adapter]]));await bridge.start();let count=0;
+ function issue(overrides:Partial<Parameters<TaskBridge['issue']>[0]>={}) {
+  const directory=join(root,'ticket-'+ ++count);const ticket=bridge.issue({role:'agent',context,...overrides} as Parameters<TaskBridge['issue']>[0],directory,workspace);
+  const auth=JSON.parse(readFileSync(join(directory,'ticket.json'),'utf8'));let commands=0;
+  return {...ticket,call:(tool:string,args:Record<string,unknown>={})=>new Promise<{status:number;body:any}>((ok,fail)=>{
+   const opts={method:'POST',headers:{Authorization:'Bearer '+auth.token}};
+   const cb=(res:import('http').IncomingMessage)=>{let body='';res.on('data',c=>body+=c);res.on('end',()=>ok({status:res.statusCode!,body:JSON.parse(body)}));};
+   const req=auth.socket?request({...opts,socketPath:auth.socket,path:'/call'},cb):request(auth.url,opts,cb);req.on('error',fail);req.end(JSON.stringify({tool,args,action_id:'cmd-'+ ++commands}));
+  })};
+ }
+ return {issue,context,input,store,safe,adapter,setAllowed:(v:boolean)=>allowed=v,close:async()=>{await bridge.close();store.close();rmSync(root,{recursive:true,force:true});}};
 }
+const spawnArgs={title:'Check astra2',instructions:'Inspect the requested error',target_profile:'gateway-managed',gateway_target:{adapter:'safemode',session_id:nativeId}};
 
-describe('scoped safemode operator authorization', () => {
-  test('existing ticket observes grants and revocations without restarting the bridge', async()=>{
-    let allowed=false;const f=await fixture(()=>allowed);
-    try{
-      const ticket=f.issue();
-      expect(JSON.parse(readFileSync(ticket.profile.mcpConfigPath,'utf8')).mcpServers.gateway.env.GATEWAY_SAFEMODE_ALLOWED).toBe('');
-      expect((await ticket.call('list')).status).toBe(403);
-      allowed=true;expect((await ticket.call('list')).body).toEqual({allowed:true});
-      const granted=f.issue();expect(JSON.parse(readFileSync(granted.profile.mcpConfigPath,'utf8')).mcpServers.gateway.env.GATEWAY_SAFEMODE_ALLOWED).toBe('true');
-      allowed=false;expect((await ticket.call('list')).body.reason).toBe('SAFEMODE_AGENT_NOT_ALLOWED');
-    }finally{await f.close();}
-  });
-  test('default and explicit non-allowlisted agents cannot inspect or mutate global diagnostics', async () => {
-    for (const access of [undefined, false]) {
-      const f = await fixture(access);
-      try {
-        const ticket = f.issue();
-        for (const operation of ['list', 'status', 'logs', 'send', 'stop']) expect(await ticket.call(operation)).toEqual({ status: 403, body: { error: 'ACCESS_DENIED', reason: 'SAFEMODE_AGENT_NOT_ALLOWED' } });
-      } finally { await f.close(); }
-    }
-  });
-  test('allowlisted operator can inspect without execution but cannot send or stop', async () => {
-    const f = await fixture(true);
-    try {
-      const ticket = f.issue({ context: { ...f.context, execute: false } });
-      for (const operation of ['list', 'status', 'logs']) expect(await ticket.call(operation)).toEqual({ status: 200, body: { allowed: true } });
-      for (const operation of ['send', 'stop']) expect((await ticket.call(operation)).body).toEqual({error:'ACCESS_DENIED',reason:'EXECUTION_NOT_AUTHORIZED'});
-    } finally { await f.close(); }
-  });
-  test('mutation admission must pass before send or stop is authorized', async () => {
-    const f = await fixture(true);
-    try {
-      const admission = jest.fn(async () => { throw new OrchestrationError('ACCESS_DENIED'); });
-      const ticket = f.issue({ beforeMutation: admission });
-      for (const operation of ['send', 'stop']) expect((await ticket.call(operation)).body).toEqual({error:'ACCESS_DENIED',reason:'ADMISSION_DENIED'});
-      expect(admission).toHaveBeenCalledTimes(2);
-      const accepted = f.issue({ beforeMutation: async () => {} });
-      expect((await accepted.call('send')).body).toEqual({ allowed: true });
-    } finally { await f.close(); }
-  });
-  test('membership, compaction scopes, revoked tickets and unknown operations cannot bypass admission', async () => {
-    const f = await fixture(true);
-    try {
-      const outsider = f.issue({ context: { ...f.context, principalId: 'another-user' } });
-      expect((await outsider.call('list')).body).toEqual({error:'ACCESS_DENIED',reason:'CONVERSATION_ACCESS_DENIED'});
-      const compact = f.issue({ compactOnly: true }); expect((await compact.call('list')).body).toEqual({error:'ACCESS_DENIED',reason:'COMPACTION_SCOPE'});
-      const revoked = f.issue(); revoked.revoke(); expect((await revoked.call('list')).body).toEqual({error:'ACCESS_DENIED',reason:'TICKET_INVALID_OR_REVOKED'});
-      const valid = f.issue(); expect((await valid.call('delete')).body).toEqual({ error: 'INVALID_INPUT' });
-    } finally { await f.close(); }
-  });
-  test('app agent is denied host diagnostics even when accidentally allowlisted', async () => {
-    const f = await fixture(true, true);
-    try {
-      const ticket = f.issue();
-      for (const operation of ['list', 'send', 'stop']) expect((await ticket.call(operation)).body).toEqual({error:'ACCESS_DENIED',reason:'SAFEMODE_HOST_ONLY'});
-    } finally { await f.close(); }
-  });
+test('discovery creates no task; live revocation affects existing tickets and legacy tools are denied',async()=>{
+ const f=await fixture();try{
+  const t=f.issue();expect((await t.call('capabilities_list',{scope:'safemode',query:'astra2'})).body.sessions).toHaveLength(1);expect(f.store.all('SELECT * FROM tasks')).toHaveLength(0);
+  expect((await t.call('safemode_validate',{operation:'list'})).body.error).toBe('TOOL_DENIED');
+  f.setAllowed(false);expect((await t.call('capabilities_list',{scope:'safemode'})).body.error).toBe('SAFEMODE_AGENT_NOT_ALLOWED');expect((await t.call('task_spawn',spawnArgs)).body.error).toBe('SAFEMODE_AGENT_NOT_ALLOWED');
+  f.setAllowed(true);expect((await t.call('capabilities_list',{scope:'safemode'})).body.sessions).toHaveLength(1);
+ }finally{await f.close();}
+});
+test('a foreign native session ID cannot be discovered or assigned even by an allowlisted operator',async()=>{
+ const f=await fixture();try{
+  f.safe.assign(nativeId,'other-agent');const t=f.issue();expect((await t.call('capabilities_list',{scope:'safemode'})).body.sessions).toEqual([]);
+  for(const id of [nativeId,'22222222-2222-4222-8222-222222222222']) expect((await t.call('task_spawn',{...spawnArgs,gateway_target:{adapter:'safemode',session_id:id}})).body.error).toBe('SAFEMODE_SESSION_NOT_AVAILABLE');
+  expect(f.store.all('SELECT * FROM tasks')).toHaveLength(0);
+ }finally{await f.close();}
+});
+test('task results and cancellation cannot cross conversations, even for the same agent',async()=>{
+ const f=await fixture();try{
+  const t=f.issue(),task=(await t.call('task_spawn',spawnArgs)).body;expect(task.gatewayTarget.sessionId).toBe(nativeId);
+  const other=f.issue({context:f.input('other-chat')});
+  for(const tool of ['task_status','task_cancel']) expect((await other.call(tool,{task_id:task.taskId})).body.error).toBe('ACCESS_DENIED');
+  expect((await t.call('task_status',{task_id:task.taskId})).body[0].taskId).toBe(task.taskId);
+ }finally{await f.close();}
+});
+test('app agents, workers, compact-only scopes and revoked tickets cannot reach host sessions',async()=>{
+ const f=await fixture(true);try{for(const tool of ['capabilities_list','task_spawn']) expect((await f.issue().call(tool,tool==='task_spawn'?spawnArgs:{scope:'safemode'})).body.reason).toBe('SAFEMODE_HOST_ONLY');}finally{await f.close();}
+ const host=await fixture();try{
+  const worker=host.issue({role:'worker',attemptId:'fake',generation:1} as any);expect((await worker.call('capabilities_list',{scope:'safemode'})).body.error).toBe('TOOL_DENIED');
+  const compact=host.issue({compactOnly:true});expect((await compact.call('task_spawn',spawnArgs)).body.reason).toBe('COMPACTION_SCOPE');
+  const revoked=host.issue();revoked.revoke();expect((await revoked.call('capabilities_list',{scope:'safemode'})).body.reason).toBe('TICKET_INVALID_OR_REVOKED');
+  const noExecution=host.issue({context:{...host.context,execute:false}});expect((await noExecution.call('capabilities_list',{scope:'safemode'})).body.sessions).toHaveLength(1);expect((await noExecution.call('task_spawn',spawnArgs)).body.error).toBe('EXECUTION_DENIED');
+ }finally{await host.close();}
 });

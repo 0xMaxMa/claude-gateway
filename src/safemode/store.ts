@@ -13,8 +13,10 @@ export interface SafemodeSession {
   nativeSessionId?: string;
   nativeStarted?: boolean;
   autoName?: boolean;
+  /** Local operator assignment; never inferred from the first agent to call. */
+  agentId?: string;
   configPath?: string;
-  lastRequest?: { id: string; promptHash: string; status: 'running' | 'completed' | 'failed'; exitCode?: number; error?: string };
+  lastRequest?: { id: string; promptHash: string; status: 'running' | 'completed' | 'failed'; ownerToken?: string; result?: string; exitCode?: number; error?: string };
 }
 export interface Owner { token: string; pid: number; childPid?: number; launching?: boolean; mode: 'interactive' | 'headless' }
 export function safemodeRoot(): string { return path.join(os.homedir(), '.claude-gateway', 'safemode'); }
@@ -58,6 +60,12 @@ export class SafemodeStore {
     let renamed: string | undefined;
     try { if (applyName) renamed = JSON.parse(fs.readFileSync(path.join(directory, 'name.json'), 'utf8')).name; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    // Separate metadata prevents a running supervisor saving an older session
+    // snapshot from undoing a local operator's assignment.
+    let agentId: string | undefined;
+    try { agentId = JSON.parse(fs.readFileSync(path.join(directory, 'access.json'), 'utf8')).agentId; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    session = { ...session, agentId };
     if (renamed) session = { ...session, name: renamed, autoName: false };
     if (!session.nativeSessionId) return session;
     return { ...session, nativeSessionId: session.nativeSessionId.toLowerCase(), id: session.nativeSessionId.toLowerCase(), name: session.autoName || session.name === session.id ? session.nativeSessionId.toLowerCase() : session.name };
@@ -68,6 +76,14 @@ export class SafemodeStore {
     const matches = this.list().filter(s => s.id === ref || s.name === ref);
     if (matches.length !== 1) throw new Error(matches.length ? 'Ambiguous safemode name; use native ID' : 'Safemode session not found');
     return matches[0];
+  }
+  assign(ref: string, agentId: string | null): SafemodeSession {
+    if (agentId !== null && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(agentId)) throw new Error('Invalid agent ID');
+    const session = this.find(ref);
+    const owner = this.acquire(session.id, 'headless');
+    try { atomicJson(path.join(this.dir(session.id), 'access.json'), { agentId }); }
+    finally { this.release(session.id, owner); }
+    return this.read(session.id);
   }
   rename(ref: string, name: string): SafemodeSession {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(name)) throw new Error('Name must contain 1-64 letters, digits, dots, underscores or hyphens');

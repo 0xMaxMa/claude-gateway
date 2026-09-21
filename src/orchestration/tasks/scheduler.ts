@@ -51,6 +51,7 @@ export class WorkerScheduler {
         const taskId = String(row.id);
         if (this.active.has(taskId) || this.starting.has(taskId)) continue;
         const task = this.tasks.store.task(taskId)!;
+        if (task.gatewayTarget) continue;
         const attempt = task.activeAttemptId ? this.tasks.store.attempt(task.activeAttemptId) : undefined;
         if (!attempt) continue;
         let stopped = false;
@@ -74,6 +75,7 @@ export class WorkerScheduler {
         for (const row of rows) {
           cursor = {createdAt:Number(row.created_at),id:String(row.id)};
           const taskId = String(row.id);
+          if (this.tasks.store.task(taskId)?.gatewayTarget) continue;
           if (this.starting.has(taskId) || this.active.has(taskId)) continue;
           if (this.driver.available && !this.driver.available(taskId)) continue;
           const release = this.driver.reserve?.(taskId);

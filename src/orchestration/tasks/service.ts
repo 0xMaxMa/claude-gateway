@@ -12,7 +12,7 @@ import { OrchestrationStore, boundedText, payloadHash } from '../store';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../config';
 import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode } from '../types';
 
-export interface SpawnTask { workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal'; }
+export interface SpawnTask { gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal'; }
 
 /** How many finished tasks the per-turn index page keeps. Unfinished tasks are never dropped;
  * older finished ones stay reachable through task_status with an explicit task_id. */
@@ -36,6 +36,7 @@ export function taskIndexEntry(task: TaskSnapshot) {
     cancellation: task.cancellation, replacedByTaskId: task.replacedByTaskId,
     workstreamId: task.workstreamId, continueTaskId: task.continueTaskId, continuationPolicy: task.continuationPolicy,
     resultAvailable: Boolean(task.result),
+    gatewayTarget: task.gatewayTarget,
     details: { tool: 'task_status', task_id: task.taskId },
   };
 }
@@ -170,7 +171,9 @@ export class TaskService {
     if (command.continuationPolicy !== undefined && (!command.continueTaskId || !['after_success', 'after_terminal'].includes(command.continuationPolicy))) throw new OrchestrationError('INVALID_INPUT');
     boundedText(command.title, 512); boundedText(command.instructions); boundedText(command.targetProfile, 128);
     if ((command.contextRefs?.length ?? 0) > 64 || command.contextRefs?.some(ref => typeof ref !== 'string' || ref.length > 1024)) throw new OrchestrationError('INVALID_INPUT');
-    if (!['default-worker', 'media-worker', 'skill-worker'].includes(command.targetProfile)) throw new OrchestrationError('UNKNOWN_WORKER_PROFILE');
+    if (!['default-worker', 'media-worker', 'skill-worker', 'gateway-managed'].includes(command.targetProfile)) throw new OrchestrationError('UNKNOWN_WORKER_PROFILE');
+    if ((command.targetProfile === 'gateway-managed') !== Boolean(command.gatewayTarget)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
+    if (command.gatewayTarget && (command.workingDirectory || command.skill || command.contextRefs?.length)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
     return this.command(context, 'spawn', command, true, () => {
       const conversation = this.store.get('SELECT * FROM conversations WHERE id=?', context.conversationId)!;
       const available = new Set<string>();
@@ -198,10 +201,11 @@ export class TaskService {
         task.continuationPolicy = command.continuationPolicy ?? 'after_success';
         task.latestProgress = { source: 'runtime', observedAt: now, text: `Queued after task ${prior.taskId} (${task.continuationPolicy}).` };
       }
+      if (command.gatewayTarget) task.gatewayTarget = command.gatewayTarget;
       if (command.skill) task.skill = command.skill;
-      if (context.model) task.model = context.model;
+      if (context.model && !command.gatewayTarget) task.model = context.model;
       const projectRoot = command.workingDirectory || (this.config.tasks.workspaceMode === 'host' && prior?.resourceProfile?.mode === 'host' ? prior.resourceProfile.projectRoot : undefined) || this.config.tasks.projectRoot || this.defaultProjectRoot;
-      if (projectRoot) task.resourceProfile = { projectRoot, mode: this.config.tasks.workspaceMode };
+      if (projectRoot && !command.gatewayTarget) task.resourceProfile = { projectRoot, mode: this.config.tasks.workspaceMode };
       this.store.run('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)', task.taskId, task.conversationId, task.state, 1, 1, null, JSON.stringify(task), now, now);
       const revision: TaskRevision = { taskId: task.taskId, revision: 1, instructions: command.instructions,
         contextRefs: command.contextRefs ?? [], mode: 'when_ready', originatingInputId: context.inputId };
@@ -219,6 +223,7 @@ export class TaskService {
       if (TERMINAL_TASK_STATES.has(task.state)) throw new OrchestrationError('TASK_TERMINAL');
       if (['cancel_requested', 'recovering', 'needs_reconciliation', 'interrupting'].includes(task.state)) throw new OrchestrationError('STATE_CONFLICT');
       if (task.revision !== expectedRevision) throw new OrchestrationError('REVISION_CONFLICT');
+      if (task.gatewayTarget && task.state !== 'queued') throw new OrchestrationError('GATEWAY_TASK_ALREADY_SENT', 'This request was already sent. Queue a follow-up task with continue_task_id instead.');
       const priorRevision = this.revision(taskId, expectedRevision);
       if (!context.execute) {
         // A worker progress report increments stateVersion without revoking this
@@ -402,13 +407,14 @@ export class TaskService {
       }
       const active = this.store.all('SELECT conversation_id,COUNT(*) AS n FROM tasks WHERE active_attempt_id IS NOT NULL GROUP BY conversation_id');
       if (active.reduce((n, row) => n + Number(row.n), 0) >= this.config.tasks.maxConcurrentPerAgent || Number(active.find(row => row.conversation_id === task.conversationId)?.n ?? 0) >= this.config.tasks.maxConcurrentPerConversation) return undefined;
-      const worker = this.pool.acquire(task, this.config.tasks.maxConcurrentPerAgent, this.config.tasks.workerIdleTtlMs);
+      const worker = task.gatewayTarget ? { sessionId: task.gatewayTarget.sessionId, workerId: undefined } : this.pool.acquire(task, this.config.tasks.maxConcurrentPerAgent, this.config.tasks.workerIdleTtlMs);
       if (!worker) return undefined;
       task.workerId = worker.workerId;
+      if (task.gatewayTarget) delete task.gatewayDispatch;
       delete task.failure;
       delete task.execution; // A new attempt must not look active on old telemetry.
       const generation = Number(this.store.get('SELECT COALESCE(MAX(generation),0)+1 AS n FROM task_attempts WHERE task_id=?', taskId)!.n);
-      const attempt: TaskAttempt = { attemptId: randomUUID(), taskId, generation, revision: task.revision, ...worker, state: 'starting' };
+      const attempt: TaskAttempt = { attemptId: randomUUID(), taskId, generation, revision: task.revision, ...worker, state: 'starting', ...(task.gatewayTarget ? {executionType:'gateway-managed' as const,createdAt:Date.now()} : {}) };
       this.store.run('INSERT INTO task_attempts VALUES(?,?,?,?,?,?)', attempt.attemptId, taskId, generation, attempt.revision, attempt.state, JSON.stringify(attempt));
       task.state = 'starting'; task.activeAttemptId = attempt.attemptId;
       this.store.saveTask(task, task.stateVersion);
