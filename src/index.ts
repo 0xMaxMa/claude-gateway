@@ -1034,7 +1034,7 @@ async function main(): Promise<void> {
       // Keep the live gateway config reference, not the watcher's snapshot.
       const agent = { ...newAgentConfig, workspace: expandTilde(newAgentConfig.workspace) };
       await startAgent(agent, config, ctx);
-      globalLogger.info('Agent hot-added successfully', { id: agent.id });
+      if (ctx.agentRunners.has(agent.id)) globalLogger.info('Agent hot-added successfully', { id: agent.id });
     },
     error: (id, error) => globalLogger.error('Agent lifecycle reconciliation deferred', { agentId: id, error: String(error) }),
   });

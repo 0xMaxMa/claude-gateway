@@ -111,3 +111,32 @@ test('a queued busy target can be cancelled without dispatch or an execution att
  expect(store.all('SELECT * FROM task_attempts WHERE task_id=?',task.taskId)).toHaveLength(0);
  expect(adapter.submit).not.toHaveBeenCalled();expect(adapter.cancel).not.toHaveBeenCalled();
 });
+
+test.each(['headless', 'interactive'] as const)('dead %s safemode owner fails visibly without dispatch or lock deletion', async mode => {
+  const root = join(directory, 'safemode'), id = target.sessionId, dir = join(root, id);
+  mkdirSync(dir, { recursive: true });
+  atomicJson(join(dir, 'session.json'), { id, name: 'fixture', cli: 'codex', nativeSessionId: id, createdAt: new Date().toISOString() });
+  const local = new SafemodeStore(root); local.assign(id, 'operator');
+  const owner = { pid: 2147483647, childPid: 2147483646, token: 'exited-owner', mode };
+  atomicJson(join(dir, 'owner.json'), owner);
+  const safe = new SafemodeTaskAdapter('operator', () => true, () => new SafemodeStore(root));
+  const submit = jest.spyOn(safe, 'submit');
+  await controller.close(); controller = new GatewayTaskController(tasks, new Map([['safemode', safe]]));
+  const task = spawn();
+  await controller.tick(); await controller.tick();
+  expect(store.task(task.taskId)).toMatchObject({ state: 'failed', failure: { code: 'SAFEMODE_RECOVERY_REQUIRED' } });
+  expect(store.task(task.taskId)?.gatewayDispatch).toBeUndefined();
+  expect(submit).not.toHaveBeenCalled();
+  expect(local.owner(id)).toEqual(owner);
+  expect(store.all('SELECT * FROM notifications')).toHaveLength(1);
+});
+
+test('a live native child still keeps the safemode target busy when its supervisor exited', () => {
+  const root = join(directory, 'safemode'), id = target.sessionId, dir = join(root, id);
+  mkdirSync(dir, { recursive: true });
+  atomicJson(join(dir, 'session.json'), { id, name: 'fixture', cli: 'codex', nativeSessionId: id, createdAt: new Date().toISOString() });
+  const local = new SafemodeStore(root); local.assign(id, 'operator');
+  atomicJson(join(dir, 'owner.json'), { pid: 2147483647, childPid: process.pid, token: 'live-child', mode: 'headless' });
+  const safe = new SafemodeTaskAdapter('operator', () => true, () => new SafemodeStore(root));
+  expect(safe.ready(store.task(spawn().taskId)!)).toBe(false);
+});

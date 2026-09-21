@@ -86,3 +86,5 @@ If validation fails, restore the intended valid fields and check the next reload
 ### Removing and re-adding an agent
 
 Removal waits until the agent is idle. If the same agent is added back while its old runner is stopping, the gateway waits for that stop to finish and starts one fresh runner from the latest configuration. A later removal cancels that replacement; shutdown does not start replacement runners.
+
+If a hot-added agent cannot start (for example, its workspace is not writable), the failure is logged and retried by the five-second lifecycle sweep rather than an immediate loop. Removing the agent cancels pending retries; a retry uses the latest configuration.

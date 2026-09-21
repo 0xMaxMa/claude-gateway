@@ -55,3 +55,42 @@ test('shutdown never starts a replacement after a pending stop', async () => {
   const closing = f.lifecycle.close(); f.release(); await Promise.all([removal, closing]);
   expect(f.start).not.toHaveBeenCalled();
 });
+
+test('startup without a registered runner yields until retry and uses the latest config', async () => {
+  let desired = { id: 'agent', name: 'initial' };
+  let current: { canRemoveFromConfig(): boolean; stop(): Promise<void> } | undefined;
+  const start = jest.fn(async () => {
+    // Bound this regression on the old implementation instead of hanging Jest.
+    if (start.mock.calls.length > 3) throw new Error('unexpected immediate retry');
+  });
+  const error = jest.fn();
+  const lifecycle = new AgentLifecycle({ desired: () => desired, runner: () => current,
+    remove: () => { current = undefined; }, start, error });
+  await lifecycle.reconcile('agent');
+  expect(start).toHaveBeenCalledTimes(1);
+  expect(error).toHaveBeenCalledWith('agent', expect.objectContaining({ message: expect.stringContaining('retry deferred') }));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  expect(start).toHaveBeenCalledTimes(1);
+  desired = { id: 'agent', name: 'updated' };
+  start.mockImplementation(async () => { current = { canRemoveFromConfig: () => true, stop: async () => {} }; });
+  lifecycle.retry();
+  await lifecycle.reconcile('agent');
+  expect(start).toHaveBeenCalledTimes(2);
+  expect(start).toHaveBeenLastCalledWith(desired);
+  await lifecycle.close();
+});
+
+test('removal and shutdown cancel a failed hot-add retry', async () => {
+  let desired: { id: string } | undefined = { id: 'agent' };
+  const start = jest.fn(async () => { if (start.mock.calls.length > 3) throw new Error('bounded regression'); });
+  const lifecycle = new AgentLifecycle({ desired: () => desired, runner: () => undefined,
+    remove: () => {}, start, error: () => {} });
+  await lifecycle.reconcile('agent');
+  expect(start).toHaveBeenCalledTimes(1);
+  desired = undefined;
+  lifecycle.retry(); await lifecycle.reconcile('agent');
+  expect(start).toHaveBeenCalledTimes(1);
+  await lifecycle.close();
+  desired = { id: 'agent' }; lifecycle.retry(); await lifecycle.reconcile('agent');
+  expect(start).toHaveBeenCalledTimes(1);
+});

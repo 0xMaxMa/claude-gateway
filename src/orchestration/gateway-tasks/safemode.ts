@@ -48,6 +48,10 @@ export class SafemodeTaskAdapter implements GatewayTaskAdapter {
     const store = this.createStore();
     if (store.read(task.gatewayTarget!.sessionId).agentId !== this.agentId) throw new OrchestrationError('SAFEMODE_SESSION_NOT_AVAILABLE');
     const owner = store.owner(task.gatewayTarget!.sessionId);
+    if (owner && !alive(owner.pid) && !alive(owner.childPid)) {
+      throw new OrchestrationError('SAFEMODE_RECOVERY_REQUIRED',
+        'The safemode owner has exited. Ask the operator to run safemode recover for this investigation before retrying. No request was sent and the ownership lock was preserved.');
+    }
     // Wait for another headless request; never take it over implicitly.
     return !owner || (owner.mode === 'interactive' && task.gatewayTarget!.takeover === true);
   }

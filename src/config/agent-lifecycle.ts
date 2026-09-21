@@ -27,6 +27,9 @@ export class AgentLifecycle<C extends { id: string }, R extends { canRemoveFromC
           this.pending.delete(id);
           if (!runner) {
             await this.deps.start(desired);
+            // startAgent records startup failures and may return without a
+            // runner. Defer to the periodic retry instead of spinning here.
+            if (!this.deps.runner(id)) throw new Error('Agent startup did not register a runner; retry deferred');
             this.dirty.add(id);
           }
         } else if (runner) {
