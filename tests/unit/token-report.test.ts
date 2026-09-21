@@ -180,5 +180,6 @@ test('live refresh updates status without replacing the scope toggle or its hand
 
 test.each(['codex','claude',undefined] as const)('worker details show recorded harness %s without guessing from model', harness => {
   const html=generateTokenReportHtml('agent',{...report,turns:[{...report.turns[1],role:'worker',harness,model:'gpt-test'}]});
-  expect(html).toContain('Harness: '+(harness==='codex'?'Codex':harness==='claude'?'Claude Code':'—'));
+  expect(html).toContain(harness ? 'class="harness-badge harness-'+harness+'">'+(harness==='codex'?'Codex':'Claude Code')+'</span>' : 'Harness: —');
+  expect(html).toContain('<div>Model: gpt-test</div>');
 });
