@@ -167,15 +167,15 @@ CLI stderr remains visible and correlated with these records. A model-name warni
 Interactive safemode preserves the caller's terminal identification, tmux and color preferences rather than choosing a separate theme. Reopen the CLI after upgrading for environment changes to take effect; restarting the gateway does not change an already running safemode CLI.
 
 
-When tmux reports a light background through OSC 11 while the attached terminal is dark, Codex can draw pale prompt boxes. Preserving environment variables alone cannot correct a wrong terminal color response. This can occur with differing client themes attached to a shared tmux session. Check the pane/client theme before treating it as a safemode rendering problem.
+When tmux reports a light background through OSC 11 while the attached terminal is dark, Codex can draw pale prompt boxes. Preserving environment variables alone cannot correct a wrong terminal color response. Before changing anything, compare direct Codex and safemode using the same binary version, terminal and tmux session.
 
-If you deliberately want a dark palette for the current pane, set it explicitly from a shell in that pane:
+With tmux 3.4, OSC 10/11 default-color queries use the first eligible attached client's colors. A light-themed code-server terminal attached earlier can therefore supply colors for a dark SSH client attached later. Inspect attached clients:
 
 ```sh
-tmux select-pane -t "$TMUX_PANE" -P 'fg=#d4d4d4,bg=#171717'
+tmux list-clients -F '#{client_name} #{session_name} #{client_activity}'
 ```
 
-Exit the native CLI only when it is idle, then reopen the same safemode session with `--resume` so it queries the new colors. The setting affects that pane, not all tmux sessions; safemode does not force a palette automatically. To restore inherited pane styling, use `tmux select-pane -t "$TMUX_PANE" -P default`. This is a local terminal adjustment, not a provider or authentication change.
+If you identify a stale client you no longer need, detach only that client with `tmux detach-client -t /dev/pts/CLIENT_NUMBER`. Detaching a client leaves the tmux session and its processes running. Do not detach clients that are still in use. Reopen the native CLI when idle to refresh its cached palette. For clients that intentionally use different themes, use separate tmux sessions. Safemode must not force a pane palette, detach clients automatically, or silently change the user's terminal theme. Default text colors such as green still follow the actual terminal's configured foreground.
 
 ## Troubleshooting
 
