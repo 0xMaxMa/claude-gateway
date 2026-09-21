@@ -32,7 +32,7 @@ export interface CommandContext extends ExecutionCapabilities {
   actionId: string;
 }
 export interface TaskFailure { code: string; message: string; observedAt: number; }
-export type WorkerOutcome = {type: 'completed'; result: TaskResult} | {type: 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure};
+export type WorkerOutcome = {type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure};
 export interface TaskResult {
   summary: string;
   artifactIds: string[];

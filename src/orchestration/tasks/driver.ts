@@ -211,6 +211,10 @@ export class ClaudeWorkerDriver implements WorkerDriver {
           this.onManagedTurn?.(task.agentSessionId, revision.instructions, metrics, task.skill ? [task.skill.name] : []);
         }, [],
         {startupTimeoutMs: limits.conversation.startupTimeoutMs, firstResponseTimeoutMs: limits.conversation.firstResponseTimeoutMs, compactionTimeoutMs: limits.conversation.compactionTimeoutMs,
+          pauseRequested: () => {
+            const current = this.tasks.store.task(task.taskId);
+            return current?.activeAttemptId === attempt.attemptId && current.state === 'waiting_input' && Boolean(current.pendingQuestion);
+          },
           idleTimeoutMs: limits.tasks.idleTimeoutMs, acceptToolProgress: true, idleAction: 'observe',
           onUsage: metrics => recordTokenTurn(this.tasks.store, {id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics, harness: attempt.harness}),
           onObservation: observation => {
@@ -229,6 +233,10 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         if (answer.interrupted || stopping) {
           await process.stop();
           return { type: process.managedGroupStopped ? 'stopped' as const : 'unknown' as const };
+        }
+        if (answer.paused) {
+          await process.stop();
+          return {type: process.managedGroupStopped ? 'paused' as const : 'unknown' as const};
         }
         if (!answer.text.trim()) throw new OrchestrationError('WORKER_RESULT_MISSING', 'The worker ended without a final response. Inspect existing changes before retrying.');
         if (Buffer.byteLength(answer.text) > 262144) throw new OrchestrationError('RESPONSE_TOO_LARGE');

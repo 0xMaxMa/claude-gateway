@@ -597,6 +597,8 @@ export class TaskService {
     return this.store.transaction(() => {
       const { task, attempt } = this.active(attemptId, generation);
       // A structured unresolved blocker is not successful task completion.
+      if (outcome.type === 'paused' && !(task.state === 'waiting_input' && task.pendingQuestion) &&
+        task.state !== 'interrupting' && task.state !== 'cancel_requested') throw new OrchestrationError('STATE_CONFLICT');
       // Keep the full final report, and preserve cancellation / new revisions / questions.
       const blocked = outcome.type === 'completed' && task.workflow?.attemptId === attemptId &&
         task.workflow.checkpoint.phase === 'blocked' && task.workflow.checkpoint.findings.some(f => f.status === 'open');
@@ -604,7 +606,7 @@ export class TaskService {
         attempt.result = outcome.result; task.result = outcome.result;
         outcome = { type: 'failed', failure: { code: 'WORKER_BLOCKED', message: task.workflow!.checkpoint.findings.filter(f => f.status === 'open').map(f => f.summary).join('\n').slice(0, 4096), observedAt: Date.now() } };
       }
-      if (outcome.type !== 'completed') {
+      if (outcome.type !== 'completed' && outcome.type !== 'paused') {
         attempt.failure = outcome.failure ?? taskFailure(undefined, outcome.type === 'stopped' ? 'WORKER_STOPPED' : 'WORKER_FAILED');
         task.failure = attempt.failure;
       } else { delete task.failure; }
@@ -623,7 +625,7 @@ export class TaskService {
         delete task.failure;
         task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: `Cancelled by ${task.cancellation?.requestedBy ?? 'agent'}. Existing files and prior effects are retained.` };
       }
-      if (outcome.type !== 'unknown') this.pool.release(task.taskId, outcome.type === 'completed');
+      if (outcome.type !== 'unknown') this.pool.release(task.taskId, outcome.type === 'completed' || outcome.type === 'paused');
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
       if (task.state === 'queued') this.store.enqueue('schedule', `schedule:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
       else if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation') this.notify(task);

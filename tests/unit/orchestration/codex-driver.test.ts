@@ -24,6 +24,7 @@ import type { AgentConfig, GatewayConfig } from '../../../src/types';
 import type { CommandContext } from '../../../src/orchestration/types';
 
 let mockFinalText = 'Verified fixture';
+let mockBeforeResult: ((worker: MockWorker) => void) | undefined;
 class MockWorker extends EventEmitter {
   managedGroupStopped = true;
   managedProcessId = undefined;
@@ -34,6 +35,7 @@ class MockWorker extends EventEmitter {
   interrupt = jest.fn(async () => {});
   sendMessage = jest.fn(() => {
     this.emit('output', JSON.stringify({type:'assistant',message:{content:[{type:'text',text:mockFinalText}]}}));
+    mockBeforeResult?.(this);
     this.emit('output', JSON.stringify({type:'result',result:mockFinalText}));
   });
 }
@@ -44,6 +46,7 @@ let root: string, store: OrchestrationStore, tasks: TaskService, bridge: TaskBri
 let agent: AgentConfig, gateway: GatewayConfig, driver: ClaudeWorkerDriver, context: CommandContext, sequence: number;
 beforeEach(async () => {
   mockFinalText = 'Verified fixture';
+  mockBeforeResult = undefined;
   jest.clearAllMocks(); sequence = 0;
   jest.mocked(resolveCodexCredentials).mockResolvedValue({baseUrl:'https://fixture.invalid/v1',key:'fixture-key',fingerprint:'fixture'});
   root = mkdtempSync(join(tmpdir(),'codex-driver-'));
@@ -286,4 +289,50 @@ test.each(['claude-sonnet-4-6','gpt-5.6-luna'])('empty %s worker fails and never
   expect(store.task(task.taskId)?.state).toBe('failed');
   expect(tasks.claim(next.taskId)).toBeUndefined();
   expect(store.task(next.taskId)?.activeAttemptId).toBeUndefined();
+});
+
+test.each(['claude-sonnet-4-6','gpt-5.6-luna'])('%s question pauses background work, releases capacity and resumes only after an answer',async model=>{
+  tasks.configure({tasks:{workspaceMode:'host',maxConcurrentPerAgent:1,maxConcurrentPerConversation:1}});
+  const task=spawn(model), dependent=spawn(model,{continueTaskId:task.taskId});
+  const attempt=tasks.claim(task.taskId)!;
+  let worker!:MockWorker;
+  mockFinalText='';
+  mockBeforeResult=w=>{
+    worker=w;tasks.started(attempt.attemptId,attempt.generation);
+    w.emit('output',JSON.stringify({type:'system',subtype:'task_started',task_id:'monitor',tool_use_id:'monitor-call',is_backgrounded:true}));
+    tasks.requestInput(attempt.attemptId,attempt.generation,'Which branch?');
+  };
+  const handle=await driver.start(task,attempt),outcome=await handle.result;
+  expect(outcome).toEqual({type:'paused'});expect(worker.stop).toHaveBeenCalled();
+  const paused=tasks.finish(attempt.attemptId,attempt.generation,outcome);
+  expect(paused.state).toBe('waiting_input');expect(paused.activeAttemptId).toBeUndefined();expect(paused.failure).toBeUndefined();
+  expect(tasks.claim(dependent.taskId)).toBeUndefined();
+  const unrelated=spawn(model),other=tasks.claim(unrelated.taskId)!;expect(other).toBeDefined();
+  tasks.finish(other.attemptId,other.generation,{type:'completed',result:{summary:'Independent work done',artifactIds:[]}});
+  tasks.answerByUser(task.conversationId,'u',task.taskId,paused.pendingQuestion!.questionId,'staging');
+  const next=tasks.claim(task.taskId)!;expect(next).toBeDefined();
+  expect(tasks.revision(task.taskId,next.revision).answers).toEqual(expect.arrayContaining([expect.objectContaining({text:'staging'})]));
+  mockBeforeResult=undefined;mockFinalText='Verified staging';
+  const resumed=await driver.start(store.task(task.taskId)!,next);
+  const finished=tasks.finish(next.attemptId,next.generation,await resumed.result);
+  expect(finished.state).toBe('completed');expect(finished.result?.summary).toBe('Verified staging');
+  expect(tasks.claim(dependent.taskId)).toBeDefined();
+});
+
+test.each(['answer','cancel'] as const)('%s during question cleanup fences the old attempt before further admission',async action=>{
+  const task=spawn('claude-sonnet-4-6'),attempt=tasks.claim(task.taskId)!;
+  mockFinalText='';
+  mockBeforeResult=w=>{
+    tasks.started(attempt.attemptId,attempt.generation);
+    w.emit('output',JSON.stringify({type:'system',subtype:'task_started',task_id:'monitor',is_backgrounded:true}));
+    const paused=tasks.requestInput(attempt.attemptId,attempt.generation,'Proceed?');
+    w.stop.mockImplementation(async()=>{
+      if(action==='answer' && store.task(task.taskId)?.pendingQuestion) tasks.answerByUser(task.conversationId,'u',task.taskId,paused.pendingQuestion!.questionId,'yes');
+      if(action==='cancel')tasks.cancelByUser(task.conversationId,'u',task.taskId);
+      expect(tasks.claim(task.taskId)).toBeUndefined();
+    });
+  };
+  const handle=await driver.start(task,attempt),outcome=await handle.result;
+  expect(outcome.type).toBe('paused');
+  expect(tasks.finish(attempt.attemptId,attempt.generation,outcome).state).toBe(action==='answer'?'queued':'cancelled');
 });

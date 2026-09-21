@@ -11,9 +11,9 @@ import type { InputImage } from '../session/input-image';
 import type { SessionProcess } from '../session/process';
 import { OrchestrationError } from './types';
 
-export interface TurnTimeoutPolicy { onUsage?: (metrics: ManagedTurnMetrics) => void; startupTimeoutMs: number; firstResponseTimeoutMs: number; compactionTimeoutMs?: number; idleTimeoutMs: number; acceptToolProgress?: boolean; idleAction?: 'observe'; onObservation?: (value: TurnObservation) => void; }
+export interface TurnTimeoutPolicy { pauseRequested?: () => boolean; onUsage?: (metrics: ManagedTurnMetrics) => void; startupTimeoutMs: number; firstResponseTimeoutMs: number; compactionTimeoutMs?: number; idleTimeoutMs: number; acceptToolProgress?: boolean; idleAction?: 'observe'; onObservation?: (value: TurnObservation) => void; }
 export interface TurnTimeoutDetails { phase: 'startup' | 'first_response' | 'compaction' | 'idle' | 'total'; elapsedMs: number; idleMs: number; }
-export interface ProcessResult { text: string; interrupted: boolean; }
+export interface ProcessResult { text: string; interrupted: boolean; paused?: boolean; }
 /** Shared lifecycle contract; each backend normalizes its own native event protocol. */
 export type WorkerProcess = { on(event: string, listener: (...args: any[]) => void): unknown; off(event: string, listener: (...args: any[]) => void): unknown } & Pick<SessionProcess, 'start' | 'sendMessage' | 'interrupt' | 'stop' | 'runtimeProfile' | 'managedProcessId' | 'spawnedAt' | 'managedGroupStopped'> &
   Partial<Pick<SessionProcess, 'isSpawnedConnectorTool' | 'flushToolSchemas' | 'recordTurnOutcome'>>;
@@ -54,6 +54,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
   let providerMessage: string | undefined;
   const usageCollector = new TurnUsageCollector();
   const background = new BackgroundWork();
+  let pauseForInput = false;
   const startedAt = Date.now(); const tools = new Set<string>(); let inputTokens = 0, totalTokens = 0, recorded = false;
   const activeTools = new Map<string, number>();
   const toolNames = new Map<string, string>();
@@ -107,7 +108,8 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     if (settled) return;
     try { event = JSON.parse(line); } catch { return; }
     if (process.runtimeProfile?.role === 'worker') background.observe(event);
-    if (event.type === 'result' && !event.is_error && !stopped && process.runtimeProfile?.role === 'worker' && background.pending) {
+    if (event.type === 'result' && !event.is_error && process.runtimeProfile?.role === 'worker' && policy?.pauseRequested?.()) pauseForInput = true;
+    if (event.type === 'result' && !event.is_error && !stopped && !pauseForInput && process.runtimeProfile?.role === 'worker' && background.pending) {
       // Decide at receipt, before asynchronous schema capture: a task may finish
       // during capture, but that cannot turn this earlier waiting result into
       // the final answer. Keep accounting for every native turn in the task.
@@ -241,13 +243,13 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       // a larger canonical/structured result. Apply the same byte limit before
       // publishing or recording success, without silently shortening evidence.
       if (Buffer.byteLength(text) > 262144) { fail(new OrchestrationError('RESPONSE_TOO_LARGE')); void process.stop(); return; }
-      if (!stopped && process.runtimeProfile?.role === 'worker' && !text.trim()) {
+      if (!stopped && !pauseForInput && process.runtimeProfile?.role === 'worker' && !text.trim()) {
         fail(new OrchestrationError('WORKER_RESULT_MISSING', 'The worker ended without a final response. Inspect its changes before retrying; dependent tasks were not authorized by this empty result.'));
         return;
       }
       if (!streamed && text && !publish(text)) return;
       process.recordTurnOutcome?.(stopped ? 'cancelled' : 'completed');
-      resolveAccepted(); settled = true; cleanup(); resolveResult({ text, interrupted: stopped });
+      resolveAccepted(); settled = true; cleanup(); resolveResult({ text, interrupted: stopped, ...(pauseForInput ? {paused:true} : {}) });
     }
   };
   const stop = (): Promise<void> => {
