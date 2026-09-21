@@ -85,5 +85,29 @@ test('safemode discovery is live-authorized and results are isolated by request,
 test('independent requests to the same target cannot race before its owner file appears',async()=>{
  const first=spawn(),second=spawn();await controller.tick();expect(adapter.submit).toHaveBeenCalledTimes(1);
  expect(store.task(first.taskId)?.gatewayDispatch).toBeDefined();expect(store.task(second.taskId)?.gatewayDispatch).toBeUndefined();
+ expect(store.task(second.taskId)?.state).toBe('queued');expect(store.task(second.taskId)?.activeAttemptId).toBeUndefined();
  outcome={type:'completed',result:{summary:'first done',artifactIds:[]}};await controller.tick();expect(adapter.submit).toHaveBeenCalledTimes(2);
+});
+
+test('busy targets stay amendable in the queue and leave capacity for an unrelated worker',async()=>{
+ tasks.configure({tasks:{workspaceMode:'host',maxConcurrentPerAgent:1,maxConcurrentPerConversation:1}});
+ adapter.ready=()=>false;
+ const waiting=spawn();await controller.tick();
+ expect(store.task(waiting.taskId)).toMatchObject({state:'queued'});
+ expect(store.task(waiting.taskId)?.activeAttemptId).toBeUndefined();
+ const edited=tasks.update({...context,actionId:'amend-waiting'},waiting.taskId,1,'Latest authorized instructions','when_ready');
+ expect(edited.revision).toBe(2);
+ const other=tasks.spawn({...context,actionId:'unrelated-worker'},{title:'Unrelated',instructions:'Do other work',targetProfile:'default-worker'});
+ const attempt=tasks.claim(other.taskId);expect(attempt).toBeDefined();
+ tasks.finish(attempt!.attemptId,attempt!.generation,{type:'completed',result:{summary:'Done',artifactIds:[]}});
+ adapter.ready=()=>true;await controller.tick();
+ expect(adapter.submit).toHaveBeenCalledWith(expect.objectContaining({taskId:waiting.taskId}),expect.any(String),'Latest authorized instructions');
+});
+
+test('a queued busy target can be cancelled without dispatch or an execution attempt',async()=>{
+ adapter.ready=()=>false;const task=spawn();await controller.tick();
+ tasks.cancelByUser(task.conversationId,'owner',task.taskId);await controller.tick();
+ expect(store.task(task.taskId)?.state).toBe('cancelled');
+ expect(store.all('SELECT * FROM task_attempts WHERE task_id=?',task.taskId)).toHaveLength(0);
+ expect(adapter.submit).not.toHaveBeenCalled();expect(adapter.cancel).not.toHaveBeenCalled();
 });

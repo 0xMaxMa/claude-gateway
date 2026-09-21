@@ -279,3 +279,7 @@ the agent ID and reason without credentials or prompt text.
 | `TICKET_INVALID_OR_REVOKED` | The bridge ticket is missing, invalid or revoked. This is not an allowlist verdict. |
 | `COMPACTION_SCOPE` | A compaction-only scope cannot call operational tools. |
 | `INVALID_BRIDGE_REQUEST` | The request method, path or origin is not permitted. |
+
+### Tasks waiting for a busy investigation
+
+A Gateway-managed task waiting for its safemode target stays queued and does not consume an execution slot. Its instructions can still be updated, and cancellation does not send anything to the target. Once dispatched, use a follow-up task for additional instructions.

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { AgentLifecycle } from './config/agent-lifecycle';
 import { setConfigValue } from './config/reload-policy';
 import { gatewayCapacity } from './orchestration/capacity';
 
@@ -1019,47 +1020,31 @@ async function main(): Promise<void> {
     }
   });
 
-  const pendingRemovals=new Set<string>();
-  let removing=false;
-  const removeIdleAgents=async()=>{
-    if(removing)return;removing=true;
-    try{for(const id of pendingRemovals){
-      if(configWatcher.getConfig().agents.some(a=>a.id===id)){pendingRemovals.delete(id);continue;}
-      const runner=ctx.agentRunners.get(id);
-      if(runner&&!runner.canRemoveFromConfig())continue;
-      if(runner)await runner.stop();
-      ctx.agentRunners.delete(id);agentConfigs.delete(id);
-      config.agents=config.agents.filter(a=>a.id!==id);
-      pendingRemovals.delete(id);globalLogger.info('Agent removed from runtime',{agentId:id});
-    }}catch(err){globalLogger.error('Agent removal deferred',{error:String(err)});}finally{removing=false;}
-  };
-  const removalTimer=setInterval(()=>{void removeIdleAgents();},5000);removalTimer.unref();
-  configWatcher.on('agent.removed',id=>{pendingRemovals.add(id);globalLogger.info('Agent removal pending until work is idle',{agentId:id});void removeIdleAgents();});
-
-  configWatcher.on('agent.added', async (newAgentConfig: AgentConfig) => {
-    pendingRemovals.delete(newAgentConfig.id);
-    if(ctx.agentRunners.has(newAgentConfig.id))return;
-    globalLogger.info('New agent detected in config, starting dynamically', { id: newAgentConfig.id });
-
-    // The agent's .env is already in process.env: ConfigWatcher.reload() folds
-    // agents/<id>/.env in before interpolating, which is the only reason this
-    // event can fire for a ${VAR}-token agent at all (#427).
-    newAgentConfig.workspace = expandTilde(newAgentConfig.workspace);
-    // `config`, not `configWatcher.getConfig()`. Every hot-reloadable
-    // gateway-level field is applied by mutating this long-lived object in
-    // place (the `changes` handler above), while getConfig() returns
-    // `currentConfig` — a structuredClone that the NEXT reload() replaces
-    // outright. An agent handed that clone therefore holds a snapshot frozen at
-    // the moment it was added: AgentRunner keeps the reference for its lifetime
-    // and reads `gateway.customConnectors` and `gateway.connectorsDefaultEnabled`
-    // off it at spawn time, so connecting, disconnecting or adding a connector
-    // afterwards would never reach the one agent that was hot-added — with no
-    // error and nothing in the log, and a gateway restart as the only cure.
-    // (`gateway.headless` has the same shape, which is how this got missed.)
-    // Boot-path agents already get exactly this object; see startAgent above.
-    await startAgent(newAgentConfig, config, ctx);
-    globalLogger.info('Agent hot-added successfully', { id: newAgentConfig.id });
+  const agentLifecycle = new AgentLifecycle({
+    desired: (id: string) => configWatcher.getConfig().agents.find(agent => agent.id === id),
+    runner: (id: string) => ctx.agentRunners.get(id),
+    remove: (id, runner) => {
+      if (ctx.agentRunners.get(id) !== runner) return;
+      ctx.agentRunners.delete(id);
+      agentConfigs.delete(id);
+      config.agents = config.agents.filter(agent => agent.id !== id);
+      globalLogger.info('Agent removed from runtime', { agentId: id });
+    },
+    start: async newAgentConfig => {
+      // Keep the live gateway config reference, not the watcher's snapshot.
+      const agent = { ...newAgentConfig, workspace: expandTilde(newAgentConfig.workspace) };
+      await startAgent(agent, config, ctx);
+      globalLogger.info('Agent hot-added successfully', { id: agent.id });
+    },
+    error: (id, error) => globalLogger.error('Agent lifecycle reconciliation deferred', { agentId: id, error: String(error) }),
   });
+  const removalTimer = setInterval(() => agentLifecycle.retry(), 5000);
+  removalTimer.unref();
+  configWatcher.on('agent.removed', id => {
+    globalLogger.info('Agent removal pending until work is idle', { agentId: id });
+    void agentLifecycle.reconcile(id);
+  });
+  configWatcher.on('agent.added', agent => { void agentLifecycle.reconcile(agent.id); });
 
   configWatcher.start();
 
@@ -1074,6 +1059,7 @@ async function main(): Promise<void> {
     cronManager.stop();
     configWatcher.stop();
     clearInterval(removalTimer);
+    await agentLifecycle.close();
     cancelBackupCleanup();
     socketServer.stopAll();
 

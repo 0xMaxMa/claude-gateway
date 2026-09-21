@@ -39,9 +39,23 @@ export class GatewayTaskController {
       if (this.closed) return;
       let task = this.tasks.store.task(String(row.id))!;
       if (!task.gatewayTarget) continue;
+      // Waiting for a target is queueing, not execution. Check before claim so
+      // busy safemode sessions do not consume slots or freeze task revisions.
+      let admissionError: unknown;
+      if (!task.activeAttemptId) {
+        try {
+          const adapter = this.adapters.get(task.gatewayTarget.adapter);
+          if (!adapter) throw new Error('Gateway task adapter is unavailable');
+          if (this.targetBusy(task) || (adapter.ready && !adapter.ready(task))) continue;
+        } catch (error) { admissionError = error; }
+      }
       const attempt = task.activeAttemptId ? this.tasks.store.attempt(task.activeAttemptId) : this.tasks.claim(task.taskId);
       if (!attempt) continue;
       task = this.tasks.store.task(task.taskId)!;
+      if (admissionError) {
+        this.tasks.finish(attempt.attemptId, attempt.generation, {type:'failed', failure:taskFailure(admissionError, 'GATEWAY_REQUEST_DENIED')});
+        continue;
+      }
       const adapter = this.adapters.get(task.gatewayTarget!.adapter);
       if (!adapter) {
         if (attempt.state === 'unknown') this.tasks.finishCleanup(attempt.attemptId, attempt.generation, false);
@@ -57,11 +71,7 @@ export class GatewayTaskController {
           }
           // Serialize target writers even during the gap before the detached
           // CLI publishes its owner file. This fence survives gateway restart.
-          const competing = this.tasks.store.get(`SELECT id FROM tasks WHERE id!=? AND active_attempt_id IS NOT NULL
-            AND json_extract(snapshot_json,'$.gatewayDispatch.requestId') IS NOT NULL
-            AND json_extract(snapshot_json,'$.gatewayTarget.adapter')=?
-            AND json_extract(snapshot_json,'$.gatewayTarget.sessionId')=? LIMIT 1`, task.taskId, task.gatewayTarget!.adapter, task.gatewayTarget!.sessionId);
-          if (competing || (adapter.ready && !adapter.ready(task))) continue;
+          if (this.targetBusy(task) || (adapter.ready && !adapter.ready(task))) continue;
           // Commit the dispatch fence BEFORE touching the target. A crash after
           // this point is inspected, never replayed on the assumption of failure.
           task.gatewayDispatch = {requestId, submittedAt:Date.now()};
@@ -92,6 +102,13 @@ export class GatewayTaskController {
         this.tasks.finish(attempt.attemptId, attempt.generation, {type: task.gatewayDispatch ? 'unknown' : 'failed',failure:taskFailure(error, task.gatewayDispatch ? 'GATEWAY_REQUEST_UNCONFIRMED' : 'GATEWAY_REQUEST_DENIED')});
       }
     }
+  }
+  private targetBusy(task: TaskSnapshot): boolean {
+    return Boolean(this.tasks.store.get(`SELECT id FROM tasks WHERE id!=? AND active_attempt_id IS NOT NULL
+      AND json_extract(snapshot_json,'$.gatewayDispatch.requestId') IS NOT NULL
+      AND json_extract(snapshot_json,'$.gatewayTarget.adapter')=?
+      AND json_extract(snapshot_json,'$.gatewayTarget.sessionId')=? LIMIT 1`,
+    task.taskId, task.gatewayTarget!.adapter, task.gatewayTarget!.sessionId));
   }
   async close(): Promise<void> {
     this.closed = true;

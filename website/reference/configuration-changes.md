@@ -82,3 +82,7 @@ The config watcher watches `config.json`, not every environment file. After chan
 5. If a restart is required, check conversations and `/tasks` first. Restart when no work is active, then repeat the verification. Do not stop independent safemode investigations merely to apply gateway configuration.
 
 If validation fails, restore the intended valid fields and check the next reload result. Avoid sharing complete configuration dumps: they can contain expanded credentials even when the file originally used placeholders.
+
+### Removing and re-adding an agent
+
+Removal waits until the agent is idle. If the same agent is added back while its old runner is stopping, the gateway waits for that stop to finish and starts one fresh runner from the latest configuration. A later removal cancels that replacement; shutdown does not start replacement runners.
