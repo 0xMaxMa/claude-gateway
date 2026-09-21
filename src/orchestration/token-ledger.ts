@@ -157,7 +157,10 @@ export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 
           // mean a short message can sit queued for minutes; without this the turn just
           // looks slow instead of "queued behind the previous turn".
           const accepted = inputs.map(input => Number(input.created_at)).filter(value => Number.isFinite(value) && value > 0);
-          if (accepted.length && Number.isFinite(Number(decision.started_at))) turn.queuedMs = Math.max(0, Number(decision.started_at) - Math.min(...accepted));
+          if (accepted.length && decision.started_at != null && Number.isFinite(Number(decision.started_at))) {
+            const delay = Number(decision.started_at) - Math.min(...accepted);
+            if (delay >= 0) turn.queuedMs = delay;
+          }
           turn.responseText = store.all('SELECT generated_text FROM assistant_responses WHERE decision_id=? ORDER BY created_at,id', turn.id).map(response => String(response.generated_text)).join('\n\n');
           turn.state = String(decision.state);
           if (turn.state === 'failed') {
