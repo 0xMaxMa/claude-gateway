@@ -120,6 +120,27 @@ Native events and the benchmark retain that presence distinction. Existing gatew
 
 This is a native CLI coding smoke check, **not** a gateway integration benchmark or proof of quality parity. Different endpoint/account routes, cache state, model mappings, and CLI settings can affect results. A timing or token difference does not establish a controlled cost comparison. Test real gateway tasks separately, including MCP calls, cancellation, progress/checkpoint behavior, and container execution.
 
+## Tool and timing measurements
+
+Turn details show the recorded harness, model and elapsed execution time. Codex
+command execution is labelled **Shell**; Claude Code retains **Bash**. Used tools
+count distinct executed tools, not the number of calls.
+
+On supported native Codex versions, the gateway reads its per-attempt rollout
+trace to measure schemas actually included in model requests, including MCP
+namespaces, and correlate per-request token usage. Code Mode measurements include
+explicit callable declarations embedded in its execution tool; response
+continuations retain the schemas observed in their referenced response. This works on the host and
+inside app containers; only tool names and numeric usage leave the container.
+Raw trace payloads are removed after extraction and the trace directory is removed
+when the attempt stops. No provider URL or authentication routing is changed.
+Interrupted process cleanup may leave private attempt artifacts until recovery.
+
+Loaded counts distinct observed schemas, not the installed MCP catalog. Missing
+measurements remain **—**, including older attempts and CLI versions without the
+supported trace format. An in-flight request can have measured schemas before its
+token usage arrives. These observations do not generate model requests or billing.
+
 ## Custom connectors
 
 ### Installed CLI extensions

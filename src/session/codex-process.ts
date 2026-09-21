@@ -1,3 +1,5 @@
+import { scanCodexTrace, CodexTraceState } from './codex-tool-capture';
+import type { RequestToolSchemas } from './request-tool-capture';
 import { resolveCodexCredentials, CodexCredentials } from './codex-auth';
 import { codexPolicyArgs, DISABLED_CODEX_FEATURES } from './codex-policy';
 import { resolveCodexRuntime } from './codex-runtime';
@@ -110,6 +112,10 @@ export class CodexProcess extends EventEmitter {
   private threadId?: string;
   private buffer = '';
   private stderr = '';
+  private traceState: CodexTraceState = { files: {}, pending: [], calls: {} };
+  private traceSchemas = new Map<string, RequestToolSchemas>();
+  private traceTimer?: ReturnType<typeof setInterval>;
+  private traceScan?: Promise<void>;
   private lastError = '';
   private finalText = '';
   private readonly tools = new Set<string>();
@@ -279,12 +285,17 @@ export class CodexProcess extends EventEmitter {
     const env: NodeJS.ProcessEnv = profile.hostExecution ? { ...process.env } : Object.fromEntries(['PATH', 'HOME', 'LANG', 'TMPDIR', 'SSL_CERT_FILE', 'SSL_CERT_DIR'].flatMap(k => process.env[k] === undefined ? [] : [[k, process.env[k]]]));
     for (const k of Object.keys(env)) if (/^(ANTHROPIC_|CLAUDE_|CODEX_|OPENAI_)/.test(k)) delete env[k];
     env.CODEX_HOME = this.home;
+    env.CODEX_ROLLOUT_TRACE_ROOT = this.home + '/gateway-trace';
+    if (agent.type === 'app-agent') await containerNode(agent.container!, "require('fs').mkdirSync(process.argv[1],{recursive:true,mode:448})", [env.CODEX_ROLLOUT_TRACE_ROOT]);
+    else await mkdir(env.CODEX_ROLLOUT_TRACE_ROOT, { recursive: true, mode: 0o700 });
     if (this.credentials!.chatgpt) delete env[key]; else env[key] = this.credentials!.key;
     const bin = this.executable;
     const child = this.child = agent.type === 'app-agent'
-      ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', `HOME=${homedir()}`, '-e', key, agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
+      ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', 'CODEX_ROLLOUT_TRACE_ROOT', '-e', `HOME=${homedir()}`, '-e', key, agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
       : spawn(bin, args, { cwd: agent.workspace, env, stdio: 'pipe', detached: true });
     this.group = child.pid;
+    this.traceTimer = setInterval(() => { void this.captureTrace(); }, agent.type === 'app-agent' ? 2000 : 500);
+    this.traceTimer.unref();
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => this.consume(chunk));
     child.stderr.on('data', (chunk: string) => { this.stderr = (this.stderr + chunk).slice(-16384); });
@@ -510,6 +521,30 @@ export class CodexProcess extends EventEmitter {
     this.cancelled = true; this.rejectRequests(new Error('Codex process cancelled'));
     return !!this.child && !this.exited;
   }
+  private captureTrace(): Promise<void> {
+    if (this.traceScan) return this.traceScan;
+    this.traceScan = (async () => {
+      if (!this.home) return;
+      const root = this.home + '/gateway-trace';
+      const captured = this.options.agent.type === 'app-agent'
+        ? JSON.parse(await containerNode(this.options.agent.container!, `let s='';process.stdin.on('data',b=>s+=b);process.stdin.on('end',()=>process.stdout.write(JSON.stringify((${scanCodexTrace.toString()})(process.argv[1],JSON.parse(s)))));`, [root], JSON.stringify(this.traceState)))
+        : scanCodexTrace(root, this.traceState);
+      this.traceState = captured.state;
+      for (const value of captured.measurements) {
+        if (value.schemas) {
+          this.traceSchemas.set(value.schemas.messageId, value.schemas);
+          this.emit('request-tools', value.schemas);
+        }
+        if (value.request) this.output({ type: 'assistant', message: { ...value.request, content: [] } });
+      }
+    })().catch(() => { /* Missing/unsupported trace means unknown, never invented schemas. */ }).finally(() => { this.traceScan = undefined; });
+    return this.traceScan;
+  }
+  async flushToolSchemas(): Promise<RequestToolSchemas[]> {
+    // Native trace writes can trail the terminal app-server notification.
+    for (let i = 0; i < 3; i++) { await new Promise(resolve => setTimeout(resolve, 50)); await this.captureTrace(); }
+    return [...this.traceSchemas.values()];
+  }
   stop(): Promise<void> {
     this.interrupt();
     return this.stopping ??= this.shutdown();
@@ -518,6 +553,8 @@ export class CodexProcess extends EventEmitter {
     await this.preparing?.catch(() => {});
     await this.launching?.catch(() => {});
     await this.completion;
+    if (this.traceTimer) clearInterval(this.traceTimer);
+    await this.traceScan;
     let stopped = true;
     if (this.containerAttempt && this.child) stopped = await stopContainerProfile(this.options.agent.container!, this.containerAttempt.directory);
     if (this.group) stopped = await stopProcessGroup(this.group) && stopped;
@@ -526,7 +563,7 @@ export class CodexProcess extends EventEmitter {
     // Failed/interrupted turns also advance the durable token baseline.
     if (stopped && this.threadId && this.nativeUsage) await this.persist();
     if (!this.child) this.emit('exit', null, 'SIGINT');
-    if (stopped) await this.cleanupHomes();
+    if (stopped) { await this.captureTrace(); await this.cleanupHomes(); }
   }
   private async cleanupHomes(): Promise<void> {
     for (const filename of this.connectorPaths) await rm(filename, { force: true });
@@ -540,6 +577,8 @@ export class CodexProcess extends EventEmitter {
     // Transcripts remain for explicit resume; short-lived MCP ticket configuration does not.
     if (this.containerAttempt) await containerNode(this.options.agent.container!, "require('fs').rmSync(process.argv[1],{recursive:true,force:true})", [this.containerAttempt.directory]);
     if (this.home) {
+      if (this.options.agent.type === 'app-agent') await containerNode(this.options.agent.container!, "require('fs').rmSync(process.argv[1],{recursive:true,force:true})", [this.home + '/gateway-trace']).catch(() => {});
+      else await rm(this.home + '/gateway-trace', { recursive: true, force: true });
       if (this.options.agent.type === 'app-agent') await containerNode(this.options.agent.container!, "require('fs').rmSync(process.argv[1],{force:true})", [this.home + '/config.toml']).catch(() => {});
       else await rm(join(this.home, 'config.toml'), { force: true });
       if (!this.homePersisted) {

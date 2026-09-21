@@ -107,9 +107,12 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
     const adapter=new CodexProcess(options);adapters.push(adapter);const events=[];
     const result=new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error('Smoke turn timed out')),45000);adapter.on('startup-error',e=>{clearTimeout(timeout);reject(e);});adapter.on('output',line=>{const e=JSON.parse(line);events.push(e);if(e.type==='result'){clearTimeout(timeout);e.is_error?reject(new Error(e.result)):resolve(e);}});});
     try { await adapter.start();adapter.sendMessage('Complete the fixture request.'); } catch(error) { adapter.emit('startup-error',error); }
-    const terminal=await result;await adapter.stop();return {terminal,events};
+    const terminal=await result;const schemas=await adapter.flushToolSchemas();await adapter.stop();return {terminal,events,schemas};
   }
     const first=await run();assert.match(first.terminal.result,/Canonical fixture result/);
+    assert(first.schemas.length>0,'actual request tool schemas were not captured');
+    assert(first.schemas.some(s=>s.loaded.some(name=>name.includes('fixture_echo')||name.includes('tool_call'))),'MCP schema absent from actual request capture');
+    assert(first.events.some(e=>e.type==='assistant'&&e.message.usage?.input_tokens===40&&e.message.usage.cache_read_input_tokens===40&&e.message.usage.cache_creation_input_tokens===20),'per-request trace usage was not normalized');
     const {readFile}=require('fs/promises');assert.match(await readFile(calls,'utf8'),/hello/);
     assert(first.events.some(e=>e.type==='assistant'&&e.message.content.some(b=>b.name===(connectorMode?'mcp__'+connectorNamespace+'__tool_call':'mcp__gateway__fixture_echo'))),'native MCP tool was not observed');
     assert(acknowledged,'native steering was not acknowledged');assert(requests.some(r=>JSON.stringify(r.input).includes('native checkpoint revision')),'native revision never reached Responses input');

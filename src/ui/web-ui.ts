@@ -825,11 +825,11 @@ ${dashboardFontLink}<script>try{document.documentElement.dataset.sidebarCollapse
 
     // Format a context-window token count compactly: 1234 -> "1.2k", 45000 -> "45k".
     // Full value is kept in the tooltip. 0/unknown renders as a dash.
-    function toolInventory(loaded, used, contextTools) {
+    function toolInventory(loaded, used, contextTools, harness) {
       function list(label, names) {
         return '<div title="'+(Array.isArray(names)?escHtml(names.join(', ')||'None'):'Not recorded')+'">'+label+': '+(Array.isArray(names)?compactNumber(names.length):'—')+'</div>';
       }
-      return list('Loaded', contextTools)+list('Used', used);
+      return list('Loaded', contextTools)+list('Used', Array.isArray(used)?used.map(name=>harness==='codex'&&name==='Bash'?'Shell':name):used);
     }
 
     function fmtRecordedTokens(n) {

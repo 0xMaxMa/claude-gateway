@@ -83,8 +83,10 @@ export class TurnUsageCollector {
       for (const key of fields) if (usage[key] !== undefined || this.aggregate[key] !== undefined) usage[key] = Math.max(usage[key] ?? 0, this.aggregate[key] ?? 0);
       usage.totalTokens = usage.inputTokens + usage.cacheCreationTokens + usage.cacheReadTokens + usage.outputTokens;
     }
-    const measured=requests.filter(r=>r.toolSchemas);
-    const contextTools=measured.length?[...new Set(measured.flatMap(r=>r.toolSchemas!.loaded))].sort():null;
-    return {usage, requests, contextTools, schemaCoverage:{measured:measured.length,total:requests.length}, loadedTools: this.loadedTools, usedTools: [...this.usedTools].sort(), model: this.model};
+    // Claude's long-lived capture can emit metadata for other turns; only Codex
+    // has a private per-attempt trace that includes in-flight requests here.
+    const captures=[...this.schemas.values()].filter(s=>s.source==='codex-request-body'||this.messages.has(s.messageId));
+    const contextTools=captures.length?[...new Set(captures.flatMap(s=>s.loaded))].sort():null;
+    return {usage, requests, contextTools, schemaCoverage:{measured:captures.length,total:new Set([...this.messages.keys(),...captures.map(s=>s.messageId)]).size}, loadedTools: this.loadedTools, usedTools: [...this.usedTools].sort(), model: this.model};
   }
 }
