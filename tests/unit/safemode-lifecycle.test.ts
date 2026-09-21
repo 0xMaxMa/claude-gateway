@@ -57,6 +57,24 @@ describe('safemode ownership and native lifecycle', () => {
     expect(store.owner(session.id)).toBeUndefined();
     expect(getRequest(store,session.id,'request-1')?.status).toBe('completed');
   });
+  test.each(['claude', 'codex'] as const)('%s interactive resume can omit bootstrap while refreshing diagnostics', async cli => {
+    const session = store.create('quiet', cli, 'inherit', undefined, '11111111-2222-4333-8444-555555555555');
+    (buildNativeInvocation as jest.Mock).mockImplementation(o => ({command:process.execPath,args:['-e','process.exit(0)'],cwd:o.cwd,env:process.env,nativeSessionId:o.nativeSessionId}));
+    for (const prompt of [undefined, 'Inspect this new symptom']) {
+      expect(await runSession(store,session,{mode:'interactive',noBootstrap:true,prompt})).toBe(0);
+      expect(buildNativeInvocation).toHaveBeenLastCalledWith(expect.objectContaining({resume:true,context:undefined,prompt}));
+      expect(require('../../src/safemode/context').prepareContext).toHaveBeenLastCalledWith(path.join(store.dir(session.id),'workspace'),undefined,prompt);
+    }
+    expect(await runSession(store,session,{mode:'interactive'})).toBe(0);
+    expect(buildNativeInvocation).toHaveBeenLastCalledWith(expect.objectContaining({context:'Test context'}));
+  });
+  test('no-bootstrap cannot bypass new/headless investigation instructions', async () => {
+    const session=store.create('fresh','claude','inherit');
+    await expect(runSession(store,session,{mode:'interactive',noBootstrap:true})).rejects.toThrow('interactive native resume');
+    session.nativeStarted=true;
+    await expect(runSession(store,session,{mode:'headless',noBootstrap:true})).rejects.toThrow('interactive native resume');
+    expect(store.owner(session.id)).toBeUndefined();
+  });
   test('stop acknowledges only after native process exits and ownership releases', async () => {
     const session = store.create('test', 'claude', 'inherit');
     (buildNativeInvocation as jest.Mock).mockImplementation((o) => ({command: process.execPath, args: ['-e', "setInterval(()=>{},1000)"], env: process.env, cwd: o.cwd, nativeSessionId:o.nativeSessionId}));

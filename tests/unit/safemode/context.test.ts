@@ -155,7 +155,9 @@ test('targeted evidence includes agents beyond the first eight without unrelated
   expect(artifact('coverage.json').omittedAgents).toHaveLength(9);
   const resumed = await prepareContext(workspace, config);
   expect(Object.keys(artifact('databases.json'))).toEqual(['agent-09/orchestration.db']);
-  expect(resumed.prompt).toContain(path.join(workspace, 'diagnostics', 'provenance.json'));
+  expect(resumed.prompt).toContain('\"diagnostics/provenance.json\"');
+  expect(resumed.prompt).not.toContain(workspace);
+  expect(resumed.prompt).toContain('current working directory');
 });
 
 test('unmatched target IDs are reported instead of substituting unrelated rows', async () => {

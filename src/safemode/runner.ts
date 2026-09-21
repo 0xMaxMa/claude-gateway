@@ -9,7 +9,7 @@ import { buildNativeInvocation, discoverCodexSession, extractNativeSessionId } f
 import { prepareContext } from './context';
 import { assertNoExternalNativeOwner, ExternalOwnerFound } from './external-owners';
 
-export interface RunOptions { nativeArgs?: string[]; nativeResumeIndex?: number; mode: 'interactive' | 'headless'; prompt?: string; requestId?: string; configPath?: string }
+export interface RunOptions { noBootstrap?: boolean; nativeArgs?: string[]; nativeResumeIndex?: number; mode: 'interactive' | 'headless'; prompt?: string; requestId?: string; configPath?: string }
 const STOP_TIMEOUT = 15000;
 export function controlPath(store: SafemodeStore, id: string): string {
   // A bounded socket path also supports long HOME paths on macOS/Linux.
@@ -54,6 +54,7 @@ export function getRequest(store: SafemodeStore, id: string, requestId: string):
 }
 export async function runSession(store: SafemodeStore, session: SafemodeSession, options: RunOptions): Promise<number> {
   if (options.nativeArgs !== undefined && options.mode !== 'interactive') throw new Error('Native params are interactive-only');
+  if (options.noBootstrap && (options.mode !== 'interactive' || !session.nativeSessionId || session.nativeStarted === false)) throw new Error('--no-bootstrap requires an interactive native resume');
   const owner = store.acquire(session.id, options.mode);
   const workspace = path.join(store.dir(session.id), 'workspace');
   let server: net.Server | undefined;
@@ -119,7 +120,7 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
     const { prompt: context } = await prepareContext(workspace, session.configPath, options.prompt);
     if (stopping) throw new Error('Stopped before native CLI launch');
     const invocation = await buildNativeInvocation({ cli: session.cli, mode: options.mode, cwd: workspace,
-      nativeArgs: options.nativeArgs, nativeResumeIndex: options.nativeResumeIndex, prompt: options.prompt, context, model: session.model, nativeSessionId: session.nativeSessionId, resume: !!session.nativeSessionId && session.nativeStarted !== false });
+      nativeArgs: options.nativeArgs, nativeResumeIndex: options.nativeResumeIndex, prompt: options.prompt, context: options.noBootstrap ? undefined : context, model: session.model, nativeSessionId: session.nativeSessionId, resume: !!session.nativeSessionId && session.nativeStarted !== false });
     if (session.cli === 'codex') invocation.env = await codexSafemodeEnvironment(invocation.command, invocation.env, { nativeArgs: options.nativeArgs });
     if (stopping) throw new Error('Stopped during native CLI readiness check');
     if (invocation.nativeSessionId) session.nativeSessionId = invocation.nativeSessionId;
@@ -240,7 +241,15 @@ export async function runSession(store: SafemodeStore, session: SafemodeSession,
     }
     server?.close();
     fs.rmSync(controlPath(store, session.id), { force: true });
-    if (canRelease) store.release(session.id, owner);
+    if (canRelease) {
+      try {
+        if (session.nativeSessionId && childClosed && path.basename(store.dir(session.id)) !== session.nativeSessionId) {
+          assertNoExternalNativeOwner({ cli: session.cli, nativeSessionId: session.nativeSessionId, cwd: workspace });
+          store.alignStorage(session.id, owner);
+        }
+      } catch (error) { process.stderr.write(`Safemode workspace alignment deferred: ${(error as Error).message}\n`); }
+      finally { store.release(session.id, owner); }
+    }
     for (const socket of stopClients) socket.end(canRelease ? 'stopped\n' : 'still-running\n');
   }
 }

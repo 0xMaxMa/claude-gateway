@@ -13,7 +13,7 @@ test('quoted --params starting with flags is one CLI value', () => {
   const parsed = inspectNativeParams('codex', splitNativeParams(raw));
   expect(parsed).toEqual({ args: ['--dangerously-bypass-approvals-and-sandbox'], resumeId: id, resumeIndex: 1 });
   const invocation = buildNativeInvocation({ cli: 'codex', mode: 'interactive', cwd: '/tmp', nativeArgs: parsed.args, nativeResumeIndex: parsed.resumeIndex, resume: true, nativeSessionId: parsed.resumeId });
-  expect(invocation.args).toEqual(['--dangerously-bypass-approvals-and-sandbox', 'resume', id]);
+  expect(invocation.args).toEqual(['--dangerously-bypass-approvals-and-sandbox', 'resume', id, '--cd', '/tmp']);
 });
 test('quotes preserve spaces and shell syntax stays literal', () => {
   expect(splitNativeParams("--model 'name with spaces' --config x=\"a b\" '' '$HOME; $(touch /tmp/not-run)'")).toEqual(['--model', 'name with spaces', '--config', 'x=a b', '', '$HOME; $(touch /tmp/not-run)']);
@@ -57,5 +57,5 @@ test('Codex resume-specific options remain after the resume subcommand', () => {
   const native = inspectNativeParams('codex', ['--no-alt-screen', 'resume', id, '--all']);
   const inv = buildNativeInvocation({cli:'codex', mode:'interactive', cwd:'/tmp', nativeArgs:native.args,
     nativeResumeIndex: native.resumeIndex, nativeSessionId:native.resumeId, resume:true});
-  expect(inv.args).toEqual(['--no-alt-screen', 'resume', id, '--all']);
+  expect(inv.args).toEqual(['--no-alt-screen', 'resume', id, '--all', '--cd', '/tmp']);
 });

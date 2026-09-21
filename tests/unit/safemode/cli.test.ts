@@ -38,6 +38,11 @@ describe('safemode CLI boundaries', () => {
   test('headless CLI rejects params before any launch', async () => {
     await expect(runSafemode(['send', 'anything'], {params: '--dangerously-skip-permissions', prompt: 'inspect'})).rejects.toThrow('Unknown safemode flag');
   });
+  test('no-bootstrap is resume-only and cannot be used by headless send', async () => {
+    await expect(runSafemode([], {'no-bootstrap':true})).rejects.toThrow('requires safemode --resume');
+    await expect(runSafemode(['send','x'], {'no-bootstrap':true,prompt:'inspect'})).rejects.toThrow('Unknown safemode flag');
+    await expect(runSafemode([], {'no-bootstrap':'yes'})).rejects.toThrow('boolean flag');
+  });
   test('rename CLI accepts current name or native ID and validates arity', async () => {
     const store = new SafemodeStore();
     const session = store.create('before', 'claude', 'inherit');

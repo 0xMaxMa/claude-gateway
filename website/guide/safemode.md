@@ -10,6 +10,21 @@ claude-gateway safemode --resume voice-debug
 
 `--resume` selects a **native Claude Code/Codex session ID or saved name**, not a gateway chat session. Put gateway chat session IDs in the initial prompt, or tell the interactive CLI after it opens. Initial prompts collect matching bounded database evidence; for later chat session IDs, send a fresh prompt through safemode to refresh the snapshot.
 
+To resume interactively without sending the investigation introduction again:
+
+```sh
+claude-gateway safemode --resume voice-debug --no-bootstrap
+claude-gateway safemode --resume voice-debug --no-bootstrap --prompt "Inspect the latest error"
+```
+
+`--no-bootstrap` sends no automatic user message and starts no model turn by
+itself. An explicit `--prompt` is still sent. Diagnostics and `INVESTIGATION.md`
+refresh normally, but the model is not automatically asked to read them. Existing
+conversation instructions remain in native history. The flag is per invocation,
+requires an existing conversation selected with `--resume`, and is unavailable
+for new sessions, headless `send` and MCP calls. Omit it to restore the usual
+investigation introduction.
+
 ## Models and config
 
 Add an optional top-level `safemode` section to the gateway config:
@@ -78,7 +93,7 @@ Create an investigation interactively first. Then an authorized operator agent c
 
 ## Evidence and permissions
 
-Each run refreshes bounded redacted config/log/SQLite snapshots, health evidence and startup/build provenance. When a prompt contains session or task IDs, database collection searches agent directories for matching evidence before applying the eight-agent snapshot limit. Unrelated databases are omitted; coverage lists selected and omitted agents with reasons, as well as IDs beyond the ten-target limit. Targets persist when resuming without a new target; supply a new ID in `--prompt` to switch investigations. Without a target, coverage explicitly identifies the general snapshot. Diagnostic paths are absolute so native resume cannot resolve them against an old working directory. Source snapshots come from `0xMaxMa/claude-gateway` at the recorded build revision. Build commit and startup checkout state are separate evidence: moving a checkout after launch does not change the recorded build. Dirty builds, legacy builds, stale startup records and unavailable evidence are explicitly marked uncertain. A release tag is only an inferred reference unless exact build evidence exists. Main is never substituted as the running source.
+Each run refreshes bounded redacted config/log/SQLite snapshots, health evidence and startup/build provenance. When a prompt contains session or task IDs, database collection searches agent directories for matching evidence before applying the eight-agent snapshot limit. Unrelated databases are omitted; coverage lists selected and omitted agents with reasons, as well as IDs beyond the ten-target limit. Targets persist when resuming without a new target; supply a new ID in `--prompt` to switch investigations. Without a target, coverage explicitly identifies the general snapshot. The bootstrap uses workspace-relative paths such as `diagnostics/provenance.json`, without embedding a session ID. Claude launches with that workspace as its process cwd; Codex also receives an explicit `--cd` on fresh and resumed launches so a remembered conversation directory cannot redirect evidence reads. Source snapshots come from `0xMaxMa/claude-gateway` at the recorded build revision. Build commit and startup checkout state are separate evidence: moving a checkout after launch does not change the recorded build. Dirty builds, legacy builds, stale startup records and unavailable evidence are explicitly marked uncertain. A release tag is only an inferred reference unless exact build evidence exists. Main is never substituted as the running source.
 
 Safemode never resets the running checkout, executes fetched source, takes its process lease, or writes the live database. Claude headless has read-only file tools confined to the investigation workspace. Codex headless uses its native read-only sandbox and no approvals; external MCP servers, hooks, legacy notification programs (`notify`), plugins and app/browser tools are disabled. Native image generation and automatic skill/dependency installation are also disabled. Native CLI platform sandbox requirements still apply. Interactive changes require native approval. Headless cannot silently escalate to an unrestricted host shell.
 
@@ -124,14 +139,17 @@ and `delete`. Names are optional aliases, not separate session identities.
 Claude Code receives the UUID on its first launch. Codex assigns its own UUID:
 until its authoritative session metadata is available, `list` shows
 `id: null`, `status: "starting"` and a temporary name you can use to stop it.
-Once discovered, safemode publishes the native UUID and keeps the same workspace,
-owner lock and control socket. It never guesses the latest global Codex session.
+Once discovered, safemode publishes the native UUID. While the process is running,
+the workspace, owner lock and control socket stay in place. After it exits, the
+workspace directory is aligned with the native UUID. It never guesses the latest global Codex session.
 
 Older investigations are exposed by their native UUID. Idle metadata migrates
 automatically; live legacy supervisors keep their files and ownership unchanged
-until they exit. Existing workspace directories, diagnostic logs and request
-receipts remain in place. Their storage directory names are private implementation
-details, not another session ID. Native conversation history is never rewritten.
+until they exit. After a managed native process exits, legacy and temporary workspace directories
+are moved to the native UUID under the ownership lock. Logs and request receipts
+are preserved. The old directory becomes a compatibility symlink so historical
+working-directory and file references still resolve; it is not a second session.
+Native conversation history is never rewritten. Active workspaces are never moved.
 
 `make stop` uses the gateway CLI's manager-aware stop operation and no longer
 kills processes by command-line pattern. Safemode opened independently in another

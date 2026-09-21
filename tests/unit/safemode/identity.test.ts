@@ -124,3 +124,40 @@ test('explicit recovery repairs interrupted rename after its owner exits', () =>
   expect(fs.existsSync(path.join(root,'names','reserved'))).toBe(false);
   expect(store.rename(s.id,'reserved').name).toBe('reserved');
 });
+
+test('idle workspace aligns to native ID while old cwd remains a compatibility link', () => {
+  const original=legacy(), store=new SafemodeStore(root);
+  store.rename(native,'named');
+  const owner=store.acquire(native,'interactive');
+  store.alignStorage(native,owner);
+  expect(store.dir(native)).toBe(path.join(root,native));
+  expect(fs.lstatSync(original).isSymbolicLink()).toBe(true);
+  expect(fs.realpathSync(original)).toBe(store.dir(native));
+  expect(fs.readFileSync(path.join(original,'output.log'),'utf8')).toBe('keep this');
+  expect(store.list()).toHaveLength(1);
+  expect(store.owner(native)).toEqual(owner);
+  store.save(store.read(native));
+  expect(store.find('named').id).toBe(native);
+  expect(fs.readFileSync(path.join(root,'names','named'),'utf8')).toBe(native);
+  expect(fs.readFileSync(path.join(root,'native-bindings','codex-'+native),'utf8')).toBe(native);
+  store.release(native,owner);
+});
+test('alignment refuses active native processes, foreign owners and occupied destinations', () => {
+  const original=legacy(),store=new SafemodeStore(root),owner=store.acquire(native,'interactive');
+  expect(()=>store.alignStorage(native,{...owner,token:'wrong'})).toThrow('exclusive ownership');
+  store.updateOwner(native,{...owner,childPid:process.pid});
+  expect(()=>store.alignStorage(native,owner)).toThrow('exited native');
+  store.updateOwner(native,owner);
+  fs.mkdirSync(path.join(root,native));
+  expect(()=>store.alignStorage(native,owner)).toThrow('destination already exists');
+  expect(fs.lstatSync(original).isDirectory()).toBe(true);
+});
+test('alignment failure rolls the directory back without losing ownership or reservations', () => {
+  const original=legacy(),store=new SafemodeStore(root),owner=store.acquire(native,'interactive');
+  const spy=jest.spyOn(fs,'symlinkSync').mockImplementation(()=>{throw Error('disk failure');});
+  try { expect(()=>store.alignStorage(native,owner)).toThrow('disk failure'); } finally { spy.mockRestore(); }
+  expect(store.dir(native)).toBe(original);
+  expect(store.owner(native)).toEqual(owner);
+  expect(fs.existsSync(path.join(original,'renaming'))).toBe(false);
+  store.save(store.read(native));
+});

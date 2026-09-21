@@ -61,6 +61,25 @@ describe('safemode detached CLI worker', () => {
     expect((await command('status', importedId)).id).toBe(importedId);
     await expect(exec('script', ['-q', '-e', '-c', cmd.replace("'imported'", "'duplicate'"), '/dev/null'], {env, timeout: 15000})).rejects.toThrow();
   });
+  test.each(['claude','codex'])('%s no-bootstrap resume starts without an automatic prompt and retains explicit prompts', async cli => {
+    const file=path.join(home,'.claude-gateway','safemode',id,'session.json');
+    const record=JSON.parse(fs.readFileSync(file,'utf8'));record.cli=cli;fs.writeFileSync(file,JSON.stringify(record));
+    const fake=path.join(home,'native-cli');env.CODEX_BIN=fake;
+    fs.writeFileSync(fake,'#!/usr/bin/env node\n'+nativeProbe+'{require("fs").writeFileSync(process.env.HOME+"/captured.json",JSON.stringify(process.argv.slice(2)));}\n',{mode:0o700});
+    const quote=(v:string)=>"'"+v.replace(/'/g,"'\\''")+"'";
+    for(const prompt of [undefined,'Inspect latest state']) {
+      const args=[process.execPath,entry,'safemode','--resume',nativeId,'--no-bootstrap','--params=--no-test-hook'];
+      if(prompt)args.push('--prompt',prompt);
+      await exec('script',['-q','-e','-c',args.map(quote).join(' '),'/dev/null'],{env,timeout:15000});
+      const captured=JSON.parse(fs.readFileSync(path.join(home,'captured.json'),'utf8'));
+      expect(captured).toContain(nativeId);
+      if(cli==='codex')expect(captured[captured.indexOf('--cd')+1]).toBe(path.join(home,'.claude-gateway','safemode',prompt ? nativeId : id,'workspace'));
+      expect(captured.join(' ')).not.toContain('You are investigating');
+      expect(captured.includes('--')).toBe(!!prompt);
+      if(prompt)expect(captured.at(-1)).toBe(prompt);
+      expect(fs.existsSync(path.join(home,'.claude-gateway','safemode',nativeId,'workspace','diagnostics','provenance.json'))).toBe(true);
+    }
+  });
   test('fresh interactive Codex publishes its native ID while retaining the launch workspace', async () => {
     const native = '33333333-3333-4333-8333-333333333333';
     const fake = path.join(home, 'codex-fixture');
@@ -83,6 +102,8 @@ setTimeout(()=>process.exit(0),1600);
     const root = path.join(home, '.claude-gateway', 'safemode');
     const dirs = fs.readdirSync(root).filter(n => n.startsWith('starting-'));
     expect(dirs).toHaveLength(1);
+    expect(fs.lstatSync(path.join(root,dirs[0])).isSymbolicLink()).toBe(true);
+    expect(fs.realpathSync(path.join(root,dirs[0]))).toBe(path.join(root,native));
     expect(fs.existsSync(path.join(root, dirs[0], 'workspace', 'diagnostics'))).toBe(true);
   });
   test('make stop terminates the gateway only, and rejects a pidfile naming safemode', async () => {

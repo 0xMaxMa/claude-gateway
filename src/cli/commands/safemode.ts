@@ -12,7 +12,7 @@ import { inspectNativeParams, splitNativeParams } from '../../safemode/params';
 import { redactLine } from '../redact';
 
 const HELP = `Usage: claude-gateway safemode [--name NAME] [--cli claude|codex] [--model MODEL] [--prompt TEXT] [--params NATIVE_ARGS]
-       claude-gateway safemode --resume NAME_OR_ID [--takeover] [--prompt TEXT]
+       claude-gateway safemode --resume NAME_OR_ID [--takeover] [--prompt TEXT] [--no-bootstrap]
        claude-gateway safemode rename NAME_OR_ID NEW_NAME
        claude-gateway safemode list
        claude-gateway safemode status NAME_OR_ID [--request-id ID]
@@ -21,6 +21,7 @@ const HELP = `Usage: claude-gateway safemode [--name NAME] [--cli claude|codex] 
 
 --params is interactive-only, parsed as argv without shell evaluation. Native resume requires a UUID.
 Do not combine native resume in --params with safemode --resume.
+--no-bootstrap resumes interactively without sending the investigation introduction; diagnostics still refresh.
 Default: native interactive Claude Code, inheriting its configured model.
 --resume accepts the native Claude Code/Codex session ID or a saved name. Put gateway chat IDs in --prompt.
 Headless send runs in the background; --wait waits for its result. There is no job queue.
@@ -46,7 +47,7 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
   const verb = positionals[0] || 'open';
   const common = ['help', 'json', 'config'];
   const allowed: Record<string, string[]> = {
-    open: ['name', 'cli', 'model', 'prompt', 'resume', 'takeover', 'params'], list: [],
+    open: ['name', 'cli', 'model', 'prompt', 'resume', 'takeover', 'params', 'no-bootstrap'], list: [],
     rename: [], status: ['request-id'], logs: [], stop: [], delete: [], recover: [],
     send: ['prompt', 'request-id', 'takeover', 'wait', 'model'],
   };
@@ -56,6 +57,8 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
   for (const key of ['name', 'cli', 'model', 'prompt', 'resume', 'request-id', 'config', 'params']) {
     if (flags[key] !== undefined && (typeof flags[key] !== 'string' || !(flags[key] as string).trim())) throw new Error(`--${key} requires a value`);
   }
+  if (flags['no-bootstrap'] !== undefined && typeof flags['no-bootstrap'] !== 'boolean') throw new Error('--no-bootstrap is a boolean flag');
+  if (flags['no-bootstrap'] && typeof flags.resume !== 'string') throw new Error('--no-bootstrap requires safemode --resume');
   if (typeof flags.prompt === 'string' && flags.prompt.length > 100000) throw new Error('Prompt exceeds 100000 characters');
   const store = new SafemodeStore();
   if (verb === 'rename') {
@@ -71,6 +74,7 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
     if (positionals.length > (positionals[0] === 'open' ? 1 : 0)) throw new Error('Unexpected safemode argument');
     if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Interactive safemode requires a terminal; use safemode send for headless execution');
     const previous = typeof flags.resume === 'string' ? store.find(flags.resume) : undefined;
+    if (flags['no-bootstrap'] && (!previous?.nativeSessionId || previous.nativeStarted === false)) throw new Error('--no-bootstrap requires an existing native conversation');
     if (previous && flags.name) throw new Error('--name cannot rename a resumed investigation');
     const settings = resolveSafemodeSettings(flags, previous);
     const native = typeof flags.params === 'string' ? inspectNativeParams(settings.cli, splitNativeParams(flags.params)) : undefined;
@@ -92,7 +96,7 @@ export async function runSafemode(positionals: string[], flags: Record<string, s
       if (!refreshed.nativeSessionId) throw new Error('Native conversation ID is not available; refusing to start a different conversation');
       session.nativeSessionId = refreshed.nativeSessionId;
     }
-    return runSession(store, session, { mode: 'interactive', nativeArgs: native?.args, nativeResumeIndex: native?.resumeIndex, prompt: flags.prompt as string | undefined, configPath: session.configPath });
+    return runSession(store, session, { mode: 'interactive', noBootstrap: flags['no-bootstrap'] === true, nativeArgs: native?.args, nativeResumeIndex: native?.resumeIndex, prompt: flags.prompt as string | undefined, configPath: session.configPath });
   }
   if (positionals.length !== 2) throw new Error(`safemode ${verb} requires one session name or ID`);
   const session = store.find(positionals[1]);

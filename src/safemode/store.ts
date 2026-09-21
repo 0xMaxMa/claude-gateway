@@ -43,7 +43,8 @@ export class SafemodeStore {
   private records(): Array<{ directory: string; session: SafemodeSession }> {
     return fs.readdirSync(this.root).filter(n => /^(starting-)?[a-f0-9-]{36}$/.test(n)).flatMap(key => {
       const directory = path.join(this.root, key);
-      try { return [{ directory, session: JSON.parse(fs.readFileSync(path.join(directory, 'session.json'), 'utf8')) }]; }
+      // Compatibility links preserve historical native cwd references, not records.
+      try { if (fs.lstatSync(directory).isSymbolicLink()) return []; return [{ directory, session: JSON.parse(fs.readFileSync(path.join(directory, 'session.json'), 'utf8')) }]; }
       catch { return []; }
     });
   }
@@ -199,6 +200,47 @@ export class SafemodeStore {
     }
     const file = path.join(this.root, 'names', session.name);
     if (fs.existsSync(file) && fs.readFileSync(file, 'utf8') === path.basename(this.dir(session.id))) fs.unlinkSync(file);
+  }
+  /** Call only after native ownership checks and while holding this session's lock. */
+  alignStorage(id: string, owner: Owner): void {
+    const session = this.read(id), directory = this.dir(id);
+    if (!session.nativeSessionId || path.basename(directory) === session.nativeSessionId) return;
+    const current = this.owner(id);
+    if (current?.token !== owner.token || current.pid !== process.pid || alive(current.childPid)) throw new Error('Workspace alignment requires exclusive ownership and an exited native process');
+    if (fs.existsSync(path.join(directory, 'recovering'))) throw new Error('Busy: recovery in progress');
+    const destination = path.join(this.root, session.nativeSessionId);
+    if (fs.lstatSync(destination, { throwIfNoEntry: false })) throw new Error('Native workspace destination already exists');
+    // Renaming an alias is allowed during execution, so serialize it separately.
+    const lock = path.join(directory, 'renaming');
+    const claim = lock + '.' + randomUUID() + '.tmp';
+    try {
+      fs.writeFileSync(claim, JSON.stringify({ pid: process.pid }), { flag: 'wx', mode: 0o600 });
+      fs.linkSync(claim, lock);
+    } finally { fs.rmSync(claim, { force: true }); }
+    let moved = false;
+    const reservations: string[] = [];
+    const storageKey = path.basename(directory);
+    try {
+      for (const subdir of ['names', 'native-bindings']) {
+        const root = path.join(this.root, subdir);
+        if (!fs.existsSync(root)) continue;
+        for (const name of fs.readdirSync(root)) {
+          const file = path.join(root, name);
+          if (fs.readFileSync(file, 'utf8') === storageKey) reservations.push(file);
+        }
+      }
+      fs.renameSync(directory, destination); moved = true;
+      // Native rollout history may still refer to the original cwd. Do not edit it.
+      fs.symlinkSync(session.nativeSessionId, directory, 'dir');
+      for (const file of reservations) fs.writeFileSync(file, session.nativeSessionId, { mode: 0o600 });
+    } catch (error) {
+      if (moved) {
+        if (fs.lstatSync(directory, { throwIfNoEntry: false })?.isSymbolicLink()) fs.unlinkSync(directory);
+        fs.renameSync(destination, directory);
+        for (const file of reservations) fs.writeFileSync(file, storageKey, { mode: 0o600 });
+      }
+      throw error;
+    } finally { fs.unlinkSync(path.join(moved && fs.existsSync(destination) ? destination : directory, 'renaming')); }
   }
   owner(id: string): Owner | undefined {
     try { return JSON.parse(fs.readFileSync(path.join(this.dir(id), 'owner.json'), 'utf8')); }

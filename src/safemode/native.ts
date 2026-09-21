@@ -95,6 +95,7 @@ export function buildNativeInvocation(options: NativeOptions): NativeInvocation 
     const nativeSessionId = options.nativeSessionId || (options.cli === 'claude' ? randomUUID() : undefined);
     if (options.cli === 'claude') args.push(options.resume ? '--resume' : '--session-id', nativeSessionId!);
     else if (options.resume) args.splice(prefix + (options.nativeResumeIndex ?? 0), 0, 'resume', nativeSessionId!);
+    if (options.cli === 'codex') args.push('--cd', options.cwd);
     if (prompt) args.push('--', prompt);
     const command = options.cli === 'claude' ? options.env?.CLAUDE_BIN || process.env.CLAUDE_BIN || resolveClaudeBin(env).bin : options.env?.CODEX_BIN || process.env.CODEX_BIN || 'codex';
     return { command, args, env, cwd: options.cwd, nativeSessionId };
@@ -120,10 +121,11 @@ export function buildNativeInvocation(options: NativeOptions): NativeInvocation 
   ];
   if (model) args.push('--model', model);
   if (options.mode === 'headless') {
-    args.push('exec', '--json', '--ignore-rules', '--skip-git-repo-check');
+    args.push('exec', '--cd', options.cwd, '--json', '--ignore-rules', '--skip-git-repo-check');
     if (options.resume) args.push('resume', options.nativeSessionId!);
-  } else if (options.resume) {
-    args.push('resume', options.nativeSessionId!);
+  } else {
+    if (options.resume) args.push('resume', options.nativeSessionId!);
+    args.push('--cd', options.cwd);
   }
   if (prompt) args.push('--', prompt);
   return { command, args, env, cwd: options.cwd, nativeSessionId: options.nativeSessionId };

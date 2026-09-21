@@ -105,3 +105,14 @@ it.each(['claude', 'codex'] as const)('preserves caller terminal/color preferenc
   const terminal = { TERM: 'tmux-256color', COLORTERM: 'truecolor', TERM_PROGRAM: 'tmux', TERM_PROGRAM_VERSION: '3.4', COLORFGBG: '15;0', NO_COLOR: '', FORCE_COLOR: '0', CLICOLOR: '1', CLICOLOR_FORCE: '0', TMUX: '/tmp/tmux-1000/default,123,0', TMUX_PANE: '%1' };
   expect(nativeEnvironment(cli, { ...terminal, NODE_OPTIONS: '--require injected', GATEWAY_API_KEY: 'secret' })).toEqual(terminal);
 });
+
+it.each(['interactive','headless'] as const)('Codex %s resume binds relative evidence to the current workspace', mode => {
+  const inv=buildNativeInvocation({cli:'codex',mode,cwd:root,nativeSessionId:id,resume:true,context:'Read diagnostics/provenance.json'});
+  expect(inv.cwd).toBe(root);
+  const index=inv.args.indexOf('--cd');
+  expect(index).toBeGreaterThan(-1);
+  expect(inv.args[index+1]).toBe(root);
+  if(mode==='headless') expect(index).toBeLessThan(inv.args.indexOf('resume'));
+  const explicit=buildNativeInvocation({cli:'codex',mode:'interactive',cwd:root,nativeSessionId:id,resume:true,nativeArgs:['--no-alt-screen']});
+  expect(explicit.args).toEqual(expect.arrayContaining(['--cd',root]));
+});
