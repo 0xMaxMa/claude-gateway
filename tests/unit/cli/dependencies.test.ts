@@ -170,3 +170,15 @@ describe('doctor dependencies', () => {
     expect(run).toHaveBeenCalledTimes(2);
   });
 });
+
+it('coalesces identical inherited Codex checks across different agent workspaces',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'codex-doctor-group-'));
+ try {
+  const configPath=path.join(dir,'config.json');
+  fs.writeFileSync(configPath,JSON.stringify({gateway:{},agents:Array.from({length:20},(_,i)=>({workspace:'/agent/'+i}))}));
+  const before=(resolveCodexRuntime as jest.Mock).mock.calls.length;
+  const checks=await checkDependencies({configPath,run:async()=> 'codex-cli 0.155.1'});
+  expect((resolveCodexRuntime as jest.Mock).mock.calls.length-before).toBe(1);
+  expect(checks.find(c=>c.name==='codex')?.detail).toContain('20 agents (shared configuration)');
+ } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+});

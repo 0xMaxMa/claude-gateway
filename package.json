@@ -28,7 +28,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/write-build-provenance.cjs",
     "start": "node --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/entry.js gateway start",
     "postinstall": "if command -v bun >/dev/null 2>&1; then bun install --cwd mcp; else echo 'Warning: bun not found. Run `cd mcp && bun install` manually to enable MCP tools.'; fi",
     "pretest": "npm run build",
@@ -61,6 +61,7 @@
     "pino": "^10.3.1",
     "qrcode": "^1.5.4",
     "sharp": "^0.35.4",
+    "smol-toml": "^1.8.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {

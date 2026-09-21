@@ -26,7 +26,7 @@ import { runTasks } from './commands/tasks';
  *  <source> --wait` (flag after every positional, but before nothing) never
  *  risks swallowing a token that happens to come after it in some other
  *  invocation order. */
-const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print', 'follow', 'force', 'wait', 'all']);
+const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print', 'follow', 'force', 'wait', 'all', 'takeover', 'no-bootstrap']);
 /** Flags every command accepts, on top of whatever the generated manifest
  *  declares for that command. Anything outside this set and the command's own
  *  flags is a typo, and is reported rather than dropped: a resource command
@@ -83,6 +83,10 @@ export async function runCli(argv: string[]): Promise<number> {
 
   try {
     switch (command) {
+      case 'safemode': {
+        const { runSafemode } = await import('./commands/safemode');
+        return await runSafemode(positionals, flags);
+      }
       case 'api':
         return await runApiPassthrough(positionals, flags, config);
       case 'gateway':
@@ -115,6 +119,11 @@ export async function runCli(argv: string[]): Promise<number> {
     }
     return await runResourceCommand(command, rest, wantHelp, config);
   } catch (err) {
+    if (command === 'safemode' && flags.json) {
+      const message = (err as Error).message;
+      process.stdout.write(JSON.stringify({ error: { code: /^Busy:/.test(message) ? 'BUSY' : 'SAFEMODE_ERROR', message } }) + '\n');
+      return 1;
+    }
     process.stderr.write(`Error: ${(err as Error).message}\n`);
     return 1;
   }
@@ -320,6 +329,7 @@ export const CORE_HELP: ReadonlyArray<readonly [string, string]> = [
   ['app install', 'Install an app from the registry, GitHub, or a local path'],
   ['update [check]', 'Check for / install a newer claude-gateway'],
   ['claude version|update [check]', 'Inspect / update the Claude Code binary'],
+  ['safemode', 'Investigate with native Claude Code or Codex'],
   ['doctor', 'Check startup/dependencies; fix local setup'],
   ['debug-bundle', 'Write a small redacted diagnostics bundle'],
   ['agents list|create|update', 'Create/manage agents (interactive wizard)'],

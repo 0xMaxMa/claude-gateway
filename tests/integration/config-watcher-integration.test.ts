@@ -130,7 +130,7 @@ describe('config-watcher integration', () => {
 
     // Logger should have logged hot-reload info
     const infoCall = logger.calls.info.find(
-      (args) => typeof args[0] === 'string' && args[0].includes('hot-reloaded'),
+      (args) => typeof args[0] === 'string' && args[0].includes('ready to apply'),
     );
     expect(infoCall).toBeDefined();
   });
@@ -154,8 +154,8 @@ describe('config-watcher integration', () => {
     expect(alfredAgent.telegram!.botToken).toBe(NEW_TOKEN);
 
     // Check that the change was flagged as not hot-reloadable
-    const warnCall = logger.calls.warn.find(
-      (args) => typeof args[0] === 'string' && args[0].includes('restart'),
+    const warnCall = logger.calls.info.find(
+      (args) => typeof args[0] === 'string' && args[0].includes('ready to apply'),
     );
     expect(warnCall).toBeDefined();
     expect(warnCall![1]).toEqual(
@@ -250,7 +250,7 @@ describe('config-watcher integration', () => {
 
     // Logger info should mention hot-reload
     const infoCall = logger.calls.info.find(
-      (args) => typeof args[0] === 'string' && args[0].includes('hot-reloaded'),
+      (args) => typeof args[0] === 'string' && args[0].includes('ready to apply'),
     );
     expect(infoCall).toBeDefined();
   });

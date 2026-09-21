@@ -1,3 +1,12 @@
+import { discoverCliSkills } from '../../../src/orchestration/cli-skills';
+jest.mock('../../../src/session/worker-extensions', () => ({ discoverWorkerExtensions: jest.fn().mockResolvedValue({ skills: [], servers: {}, notices: [] }) }));
+jest.mock('../../../src/orchestration/cli-skills',()=>({discoverCliSkills:jest.fn().mockResolvedValue([{name:'native-only'}])}));
+import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
+jest.mock('../../../src/orchestration/container', () => ({ ...jest.requireActual('../../../src/orchestration/container'), validateContainer: jest.fn().mockResolvedValue(undefined) }));
+jest.mock('../../../src/session/codex-container-runtime', () => ({ inspectSelectedCodexRuntime: jest.fn().mockResolvedValue('fixture-container') }));
+jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn().mockReturnValue({executable:'codex'}) }));
+import { resolveCodexCredentials, CodexReadinessError } from '../../../src/session/codex-auth';
+jest.mock('../../../src/session/codex-auth', () => ({ ...jest.requireActual('../../../src/session/codex-auth'), resolveCodexCredentials: jest.fn().mockResolvedValue({baseUrl:'https://fixture.invalid/v1',key:'fixture-key',fingerprint:'fixture'}) }));
 import { EventEmitter } from 'events';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -14,6 +23,8 @@ import { startProcessTurn } from '../../../src/orchestration/process-turn';
 import type { AgentConfig, GatewayConfig } from '../../../src/types';
 import type { CommandContext } from '../../../src/orchestration/types';
 
+let mockFinalText = 'Verified fixture';
+let mockBeforeResult: ((worker: MockWorker) => void) | undefined;
 class MockWorker extends EventEmitter {
   managedGroupStopped = true;
   managedProcessId = undefined;
@@ -23,8 +34,9 @@ class MockWorker extends EventEmitter {
   stop = jest.fn(async () => {});
   interrupt = jest.fn(async () => {});
   sendMessage = jest.fn(() => {
-    this.emit('output', JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'Verified fixture'}]}}));
-    this.emit('output', JSON.stringify({type:'result',result:'Verified fixture'}));
+    this.emit('output', JSON.stringify({type:'assistant',message:{content:[{type:'text',text:mockFinalText}]}}));
+    mockBeforeResult?.(this);
+    this.emit('output', JSON.stringify({type:'result',result:mockFinalText}));
   });
 }
 jest.mock('../../../src/session/process', () => ({ SessionProcess: jest.fn().mockImplementation((...args: any[]) => new MockWorker(args[6])) }));
@@ -33,7 +45,10 @@ jest.mock('../../../src/session/codex-process', () => ({ cleanupCodexSessions: j
 let root: string, store: OrchestrationStore, tasks: TaskService, bridge: TaskBridge;
 let agent: AgentConfig, gateway: GatewayConfig, driver: ClaudeWorkerDriver, context: CommandContext, sequence: number;
 beforeEach(async () => {
+  mockFinalText = 'Verified fixture';
+  mockBeforeResult = undefined;
   jest.clearAllMocks(); sequence = 0;
+  jest.mocked(resolveCodexCredentials).mockResolvedValue({baseUrl:'https://fixture.invalid/v1',key:'fixture-key',fingerprint:'fixture'});
   root = mkdtempSync(join(tmpdir(),'codex-driver-'));
   writeFileSync(join(root,'CLAUDE.md'),'Agent persona stays Claude.');
   store = new OrchestrationStore(':memory:','a');
@@ -71,12 +86,12 @@ test('auto routes GPT workers to Codex and persists native identity without chan
   expect(agent.claude.model).toBe('claude-sonnet-4-6');
 });
 
-test('Claude remains the default harness even for a GPT selection unless routing is enabled', async () => {
+test('defaults to Codex for GPT when no worker routing is configured', async () => {
   delete gateway.gateway.workers;
   const {attempt} = await run('gpt-5.6-luna[1m]');
-  expect(SessionProcess).toHaveBeenCalledTimes(1);
-  expect(CodexProcess).not.toHaveBeenCalled();
-  expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'claude',harnessModel:'gpt-5.6-luna[1m]'});
+  expect(CodexProcess).toHaveBeenCalledTimes(1);
+  expect(SessionProcess).not.toHaveBeenCalled();
+  expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'codex',harnessModel:'gpt-5.6-luna'});
 });
 
 test('explicit model metadata resolves non-GPT aliases to the native provider model', async () => {
@@ -123,11 +138,23 @@ test('file skill material is pinned and its resources are supplied to the native
   expect(process.sendMessage).not.toHaveBeenCalledWith(expect.stringContaining('invoke that exact name via Skill'), []);
 });
 
-test('CLI-only skills fail explicitly without starting Claude as fallback', async () => {
+test('explicit Codex CLI-only skills fail without starting Claude as fallback', async () => {
+  gateway.gateway.workers!.harness='codex';
   const task = spawn('gpt-5.6-luna',{targetProfile:'skill-worker',skill:{invocation:'cli',name:'native-only',args:'',content:'',filePath:''}});
   const attempt = tasks.claim(task.taskId)!;
   await expect(driver.start(task,attempt)).rejects.toMatchObject({code:'CODEX_SKILL_UNAVAILABLE'});
   expect(CodexProcess).not.toHaveBeenCalled(); expect(SessionProcess).not.toHaveBeenCalled();
+});
+
+test('a Claude plugin file runs through Codex with pinned instructions and plugin-root resources', async () => {
+  const source = join(root, 'plugin'); mkdirSync(join(source, 'skills', 'review'), { recursive: true }); mkdirSync(join(source, 'shared'));
+  const filePath = join(source, 'skills', 'review', 'SKILL.md'); writeFileSync(filePath, 'changed after admission'); writeFileSync(join(source, 'shared', 'foundation.md'), 'foundation');
+  await run('gpt-5.6-luna', { targetProfile: 'skill-worker', skill: { invocation: 'cli', name: 'workflow:review', args: '123', filePath, resourceRoot: source, content: 'Read shared/foundation.md from the plugin root.' } });
+  expect(SessionProcess).not.toHaveBeenCalled();
+  const copied = join(jest.mocked(CodexProcess).mock.calls[0][0].profile.skillPluginDir!, 'skills', 'workflow:review');
+  expect(readFileSync(join(copied, 'shared', 'foundation.md'), 'utf8')).toBe('foundation');
+  expect(readFileSync(join(copied, 'skills', 'review', 'SKILL.md'), 'utf8')).toContain('Read shared/foundation.md');
+  expect(readFileSync(join(copied, 'SKILL.md'), 'utf8')).toContain('skills/review/SKILL.md');
 });
 
 test('native startup failure is a task failure and never retries through Claude', async () => {
@@ -183,4 +210,129 @@ test('transcript cleanup retains the newly bound slot and cannot reject an admit
   expect(tasks.pool.retainedSessionIds()).toEqual([attempt.sessionId]);
   tasks.pool.prune(0, Date.now() + 1);
   expect(tasks.pool.retainedSessionIds()).toEqual([]);
+});
+
+test.each([undefined, 'auto'] as const)('falls back before dispatch without auth (selector=%s)', async selector => {
+  gateway.gateway.workers = selector ? {harness:selector} : undefined;
+  jest.mocked(resolveCodexCredentials).mockRejectedValueOnce(new CodexReadinessError('CODEX_AUTH_REQUIRED','missing'));
+  const {attempt} = await run('gpt-fixture');
+  expect(attempt.harness).toBe('claude');
+  expect(CodexProcess).not.toHaveBeenCalled();
+  expect(SessionProcess).toHaveBeenCalledTimes(1);
+});
+test('explicit Codex never silently changes the selected harness', async () => {
+  gateway.gateway.workers = {harness:'codex'};
+  jest.mocked(resolveCodexCredentials).mockRejectedValueOnce(new CodexReadinessError('CODEX_AUTH_REQUIRED','missing'));
+  const task=spawn('gpt-fixture'),attempt=tasks.claim(task.taskId)!;
+  await expect(driver.start(task,attempt)).rejects.toMatchObject({code:'CODEX_AUTH_REQUIRED'});
+  expect(CodexProcess).not.toHaveBeenCalled(); expect(SessionProcess).not.toHaveBeenCalled();
+});
+
+
+test('cancellation during native readiness cannot launch either worker harness', async () => {
+  const task = spawn('gpt-fixture'), attempt = tasks.claim(task.taskId)!;
+  jest.mocked(resolveCodexCredentials).mockImplementationOnce(async () => {
+    tasks.cancel({...context, actionId:'cancel-during-readiness'}, task.taskId);
+    return {baseUrl:'https://fixture.invalid/v1',key:'fixture-key',fingerprint:'fixture'};
+  });
+  await expect(driver.start(task,attempt)).rejects.toMatchObject({code:'ATTEMPT_CANCELLED_BEFORE_START'});
+  expect(CodexProcess).not.toHaveBeenCalled(); expect(SessionProcess).not.toHaveBeenCalled();
+});
+
+
+test.each([false, true])('Docker host HTTP auth policy matches worker placement (container=%s)', async container => {
+  agent.type = container ? 'app-agent' : 'user' as any;
+  gateway.gateway.workers = { harness: 'codex' };
+  const task = spawn('gpt-fixture'), attempt = tasks.claim(task.taskId)!;
+  if (container) task.resourceProfile = { mode: 'container' } as any;
+  const actual = jest.requireActual('../../../src/session/codex-auth').resolveCodexCredentials;
+  jest.mocked(resolveCodexCredentials).mockImplementationOnce(async options => {
+    // Exercise the real URL policy with a provider discovered from native config.
+    const credentials = await actual({ ...options, baseUrl: 'http://host.docker.internal:8090/v1', apiKeyEnv: 'FIXTURE_KEY', env: { FIXTURE_KEY: 'test-only' } });
+    // Stop before workspace/container execution: this test exercises admission.
+    tasks.cancel({ ...context, actionId: 'cancel-after-provider-check' }, task.taskId);
+    return credentials;
+  });
+  if (container) await expect(driver.start(task, attempt)).rejects.toMatchObject({ code: 'ATTEMPT_CANCELLED_BEFORE_START' });
+  else await expect(driver.start(task, attempt)).rejects.toMatchObject({ code: 'CODEX_PROVIDER_INVALID' });
+  expect(CodexProcess).not.toHaveBeenCalled();
+  expect(SessionProcess).not.toHaveBeenCalled();
+});
+
+
+test('default auto falls back to Claude when Codex is not installed', async () => {
+  delete gateway.gateway.workers;
+  jest.mocked(resolveCodexRuntime).mockImplementationOnce(() => { throw new Error('Codex executable missing'); });
+  const {attempt} = await run('gpt-fixture');
+  expect(attempt.harness).toBe('claude');
+  expect(CodexProcess).not.toHaveBeenCalled();
+  expect(SessionProcess).toHaveBeenCalledTimes(1);
+  expect(resolveCodexCredentials).not.toHaveBeenCalled();
+});
+
+test('auto keeps native Claude skills on Claude before dispatch and records why',async()=>{
+ await run('gpt-5.6-luna',{targetProfile:'skill-worker',skill:{invocation:'cli',name:'native-only',args:'',content:'',filePath:''}});
+ expect(discoverCliSkills).toHaveBeenCalled();
+ expect(CodexProcess).not.toHaveBeenCalled();expect(SessionProcess).toHaveBeenCalled();
+ expect(store.get("SELECT payload_json FROM task_attempts ORDER BY rowid DESC LIMIT 1")?.payload_json).toContain('"harness":"claude"');
+ expect(store.get("SELECT payload_json FROM conversation_events WHERE type='worker.harness_fallback'")?.payload_json).toContain('CODEX_SKILL_UNAVAILABLE');
+});
+
+test.each(['claude-sonnet-4-6','gpt-5.6-luna'])('empty %s worker fails and never admits its after_success continuation',async model=>{
+  mockFinalText = '';
+  const task = spawn(model), next = spawn(model,{continueTaskId:task.taskId});
+  const attempt = tasks.claim(task.taskId)!;
+  const handle = await driver.start(task,attempt);
+  const outcome = await handle.result;
+  expect(outcome).toMatchObject({type:'failed',failure:{code:'WORKER_RESULT_MISSING'}});
+  tasks.finish(attempt.attemptId,attempt.generation,outcome);
+  expect(store.task(task.taskId)?.state).toBe('failed');
+  expect(tasks.claim(next.taskId)).toBeUndefined();
+  expect(store.task(next.taskId)?.activeAttemptId).toBeUndefined();
+});
+
+test.each(['claude-sonnet-4-6','gpt-5.6-luna'])('%s question pauses background work, releases capacity and resumes only after an answer',async model=>{
+  tasks.configure({tasks:{workspaceMode:'host',maxConcurrentPerAgent:1,maxConcurrentPerConversation:1}});
+  const task=spawn(model), dependent=spawn(model,{continueTaskId:task.taskId});
+  const attempt=tasks.claim(task.taskId)!;
+  let worker!:MockWorker;
+  mockFinalText='';
+  mockBeforeResult=w=>{
+    worker=w;tasks.started(attempt.attemptId,attempt.generation);
+    w.emit('output',JSON.stringify({type:'system',subtype:'task_started',task_id:'monitor',tool_use_id:'monitor-call',is_backgrounded:true}));
+    tasks.requestInput(attempt.attemptId,attempt.generation,'Which branch?');
+  };
+  const handle=await driver.start(task,attempt),outcome=await handle.result;
+  expect(outcome).toEqual({type:'paused'});expect(worker.stop).toHaveBeenCalled();
+  const paused=tasks.finish(attempt.attemptId,attempt.generation,outcome);
+  expect(paused.state).toBe('waiting_input');expect(paused.activeAttemptId).toBeUndefined();expect(paused.failure).toBeUndefined();
+  expect(tasks.claim(dependent.taskId)).toBeUndefined();
+  const unrelated=spawn(model),other=tasks.claim(unrelated.taskId)!;expect(other).toBeDefined();
+  tasks.finish(other.attemptId,other.generation,{type:'completed',result:{summary:'Independent work done',artifactIds:[]}});
+  tasks.answerByUser(task.conversationId,'u',task.taskId,paused.pendingQuestion!.questionId,'staging');
+  const next=tasks.claim(task.taskId)!;expect(next).toBeDefined();
+  expect(tasks.revision(task.taskId,next.revision).answers).toEqual(expect.arrayContaining([expect.objectContaining({text:'staging'})]));
+  mockBeforeResult=undefined;mockFinalText='Verified staging';
+  const resumed=await driver.start(store.task(task.taskId)!,next);
+  const finished=tasks.finish(next.attemptId,next.generation,await resumed.result);
+  expect(finished.state).toBe('completed');expect(finished.result?.summary).toBe('Verified staging');
+  expect(tasks.claim(dependent.taskId)).toBeDefined();
+});
+
+test.each(['answer','cancel'] as const)('%s during question cleanup fences the old attempt before further admission',async action=>{
+  const task=spawn('claude-sonnet-4-6'),attempt=tasks.claim(task.taskId)!;
+  mockFinalText='';
+  mockBeforeResult=w=>{
+    tasks.started(attempt.attemptId,attempt.generation);
+    w.emit('output',JSON.stringify({type:'system',subtype:'task_started',task_id:'monitor',is_backgrounded:true}));
+    const paused=tasks.requestInput(attempt.attemptId,attempt.generation,'Proceed?');
+    w.stop.mockImplementation(async()=>{
+      if(action==='answer' && store.task(task.taskId)?.pendingQuestion) tasks.answerByUser(task.conversationId,'u',task.taskId,paused.pendingQuestion!.questionId,'yes');
+      if(action==='cancel')tasks.cancelByUser(task.conversationId,'u',task.taskId);
+      expect(tasks.claim(task.taskId)).toBeUndefined();
+    });
+  };
+  const handle=await driver.start(task,attempt),outcome=await handle.result;
+  expect(outcome.type).toBe('paused');
+  expect(tasks.finish(attempt.attemptId,attempt.generation,outcome).state).toBe(action==='answer'?'queued':'cancelled');
 });

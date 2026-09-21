@@ -142,13 +142,28 @@ export function agentJitterMs(agentId: string, windowMinutes: number): number {
 }
 
 export class DreamingManager {
-  readonly cfg: ResolvedDreamingCfg;
-  private readonly deps: DreamingManagerDeps;
+  cfg: ResolvedDreamingCfg;
+  private deps: DreamingManagerDeps;
   private timer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(deps: DreamingManagerDeps) {
     this.deps = deps;
     this.cfg = resolveDreamingConfig(deps.agentCfg, deps.globalCfg, deps.gatewayTimezone);
+  }
+
+  reconfigure(deps: DreamingManagerDeps): void {
+    this.stop();
+    this.deps = deps;
+    this.cfg = resolveDreamingConfig(deps.agentCfg, deps.globalCfg, deps.gatewayTimezone);
+    this.startDreaming();
+  }
+  private running?: Promise<DreamRunResult>;
+  async dreamOnce(now: number = Date.now()): Promise<DreamRunResult> {
+    if(this.running)return this.running;
+    // Jobs retain their own settings while future timers use the new policy.
+    const snapshot = new DreamingManager({...this.deps});
+    this.running = snapshot.runDreamOnce(now);
+    try{return await this.running;}finally{this.running=undefined;}
   }
 
   private log(msg: string, data?: Record<string, unknown>): void {
@@ -159,7 +174,7 @@ export class DreamingManager {
    * Run one dream cycle. Never throws. In propose mode it writes only the diary
    * + audit and mutates no memory file.
    */
-  async dreamOnce(now: number = Date.now()): Promise<DreamRunResult> {
+  private async runDreamOnce(now: number): Promise<DreamRunResult> {
     const cfg = this.cfg;
     const base = { proposalCount: 0, tokensSpent: 0, mode: cfg.mode };
 
@@ -395,6 +410,7 @@ export class DreamingManager {
    * boot (invalid tz already normalized to UTC in resolveDreamingConfig).
    */
   startDreaming(): void {
+    this.stop();
     if (!this.cfg.enabled || this.cfg.maxChangesPerRun <= 0) return;
     const tz = isValidTimezone(this.cfg.dreamTimezone) ? this.cfg.dreamTimezone : 'UTC';
     const schedule = (): void => {

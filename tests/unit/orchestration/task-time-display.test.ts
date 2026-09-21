@@ -28,3 +28,7 @@ test('Telegram task detail separates progress from process counters and generic 
   expect(idle).not.toContain('Active tools:');
  } finally {clock.mockRestore();}
 });
+
+test.each(['claude','codex'] as const)('task detail displays actual %s harness', harness=>{
+ expect(formatTaskDetail({title:'Work',state:'running',harness},'Running')).toContain('Harness: '+(harness==='codex'?'Codex':'Claude Code'));
+});

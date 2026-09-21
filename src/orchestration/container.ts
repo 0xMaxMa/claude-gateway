@@ -117,6 +117,9 @@ export async function prepareContainerProfile(agent: AgentConfig, profile: Runti
     await visit(profile.skillPluginDir);
     await containerNode(agent.container!, `const fs=require('fs'),path=require('path');let s='';process.stdin.on('data',b=>s+=b);process.stdin.on('end',()=>{for(const [name,data] of Object.entries(JSON.parse(s))){const p=path.join(process.argv[1],name);fs.mkdirSync(path.dirname(p),{recursive:true,mode:448});fs.writeFileSync(p,Buffer.from(data,'base64'),{mode:384});}});`, [dir + '/skill-plugin'], JSON.stringify(files));
   }
+  if (profile.containerSkill) {
+    await containerNode(agent.container!, `const fs=require('fs'),path=require('path');let s='';process.stdin.on('data',b=>s+=b);process.stdin.on('end',()=>{const p=JSON.parse(s),root=fs.realpathSync(p.skill.resourceRoot),file=fs.realpathSync(p.skill.filePath),rel=path.relative(root,file);if(rel==='..'||rel.startsWith('../')||path.isAbsolute(rel))throw Error('SKILL_RESOURCE_PATH_INVALID');let size=0;fs.cpSync(root,p.destination,{recursive:true,dereference:false,filter:src=>{const t=fs.lstatSync(src);if(t.isSymbolicLink()||!t.isFile()&&!t.isDirectory())return false;if(t.isFile()&&(size+=t.size)>10485760)throw Error('SKILL_RESOURCES_TOO_LARGE');return true;}});fs.writeFileSync(path.join(p.destination,rel),p.skill.content,{mode:384});fs.writeFileSync(path.join(p.destination,'RESOURCE_ROOT.txt'),'Plugin root: '+p.destination+'\\nAssigned entry: '+path.join(p.destination,rel),{mode:384});});`, [], JSON.stringify({ skill: profile.containerSkill, destination: dir + '/skill-plugin' }));
+  }
   return { config: dir + '/mcp.json', directory: dir };
 }
 

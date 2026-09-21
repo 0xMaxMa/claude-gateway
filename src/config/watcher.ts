@@ -1,3 +1,4 @@
+import { reloadMode, changedConfigPaths, configValue } from './reload-policy';
 import { EventEmitter } from 'events';
 import { loadConfig, logSkippedAgents, SkippedAgent } from './loader';
 import { agentsDirForConfig, loadAgentEnvFiles } from './agent-env';
@@ -5,58 +6,13 @@ import { AgentConfig, GatewayConfig, Logger } from '../types';
 import { createWatcher, WatchHandle } from '../watch/factory';
 import { expandHome } from '../utils/paths';
 
-// Fields that can be hot-reloaded without restarting the gateway
-const HOT_RELOADABLE_AGENT_FIELDS: string[] = [
-  'orchestration',
-  'voice',
-  'claude.model',
-  'claude.extraFlags',
-  'session.idleTimeoutMinutes',
-  'session.maxConcurrent',
-  'heartbeat.rateLimitMinutes',
-  // Per-agent connector enablement ({connectorId: {enabled}}) — only affects
-  // NEW session spawns (SessionProcess reads it fresh via AgentRunner's own
-  // live object reference, see index.ts's 'changes' handler); an
-  // already-running session's subprocess still needs an explicit restart
-  // (restartSessionsUsingConnector) to pick it up mid-conversation.
-  'connectors',
-];
-
-// Gateway-level (non-agent) fields that can be hot-reloaded; agentId will be '' in ConfigChange
-const HOT_RELOADABLE_GATEWAY_FIELDS: string[] = [
-  'gateway.orchestration',
-  'gateway.headless',
-  // Logging policy is process-wide module state, so re-installing it is just a
-  // call — and turning the level up to chase a live problem is precisely when a
-  // restart is unaffordable, since it kills the sessions being investigated.
-  'gateway.logs',
-  // Same "new spawns only" caveat as 'connectors' above — customConnectors is
-  // where every connector definition lives regardless of who owns its
-  // credential (see connectors/types.ts's CustomConnectorEntry).
-  'gateway.customConnectors',
-  // The default the per-agent `connectors` map is read against
-  // (resolveEnabledConnectors' third argument). Hot-reloadable for the same
-  // reason and with the same scope as the two above: both readers —
-  // SessionProcess.writeMcpConfig and AgentRunner.restartSessionsUsingConnector
-  // — take it off the live config object at call time, so replacing it here is
-  // enough for every subsequent spawn. Flipping it to `false` is how an operator
-  // shuts every not-explicitly-enabled connector off on a shared box; making
-  // that wait for a gateway restart would mean killing the sessions in order to
-  // narrow what they can reach.
-  //
-  // gateway.oauthReturnUrl is deliberately NOT here: createOauthCallbackRouter
-  // captures it as a plain argument at mount time (gateway-router.ts), so a live
-  // edit cannot reach the mounted router. It is listed in gatewayFieldPairs
-  // below so the change is still reported — as restart-required, like publicUrl.
-  'gateway.connectorsDefaultEnabled',
-];
-
 export interface ConfigChange {
   agentId: string;
   field: string;
   oldValue: unknown;
   newValue: unknown;
   hotReloadable: boolean;
+  reloadMode?: import('./reload-policy').ReloadMode;
 }
 
 interface DiffResult {
@@ -66,6 +22,7 @@ interface DiffResult {
 
 export class ConfigWatcher extends EventEmitter {
   on(event: 'changes', listener: (changes: ConfigChange[], newCfg: GatewayConfig, oldCfg: GatewayConfig) => void): this;
+  on(event: 'agent.removed', listener: (agentId: string) => void): this;
   on(event: 'agent.added', listener: (agent: AgentConfig) => void): this;
   on(event: 'channel.added', listener: (agentId: string, channel: string) => void): this;
   on(event: 'channel.removed', listener: (agentId: string, channel: string) => void): this;
@@ -147,9 +104,12 @@ export class ConfigWatcher extends EventEmitter {
       this.logger.warn('gateway.publicUrl became unset on reload — public share links are now disabled');
     }
 
+    const removedAgents = this.currentConfig.agents.filter(a=>!newConfig.agents.some(n=>n.id===a.id)&&!skipped.some(s=>s.id===a.id)).map(a=>a.id);
+    // Preserve a previously running agent when its new entry failed validation.
+    for(const old of this.currentConfig.agents)if(!newConfig.agents.some(a=>a.id===old.id)&&skipped.some(s=>s.id===old.id))newConfig.agents.push(old);
     const { fieldChanges, addedAgents } = this.diffConfig(this.currentConfig, newConfig);
 
-    if (fieldChanges.length === 0 && addedAgents.length === 0) {
+    if (fieldChanges.length === 0 && addedAgents.length === 0 && removedAgents.length === 0) {
       this.logger.info('Config file changed but no effective differences detected');
       return;
     }
@@ -161,10 +121,10 @@ export class ConfigWatcher extends EventEmitter {
     // Emit field changes for existing agents
     if (fieldChanges.length > 0) {
       const hotChanges = fieldChanges.filter(c => c.hotReloadable);
-      const coldChanges = fieldChanges.filter(c => !c.hotReloadable);
+      const coldChanges = fieldChanges.filter(c => !c.hotReloadable && c.reloadMode!=='ignored');
 
       if (hotChanges.length > 0) {
-        this.logger.info('Config hot-reloaded', {
+        this.logger.info('Config changes ready to apply', {
           fields: hotChanges.map(c => c.agentId ? `${c.agentId}.${c.field}` : c.field),
         });
       }
@@ -207,6 +167,8 @@ export class ConfigWatcher extends EventEmitter {
         }
       }
     }
+
+    for(const id of removedAgents)this.emit('agent.removed',id);
 
     // Emit agent.added for each new agent
     for (const agent of addedAgents) {
@@ -262,7 +224,8 @@ export class ConfigWatcher extends EventEmitter {
             field,
             oldValue: oldVal,
             newValue: newVal,
-            hotReloadable: HOT_RELOADABLE_AGENT_FIELDS.includes(field),
+            hotReloadable: !['restart','ignored'].includes(reloadMode(id,field)),
+            reloadMode: reloadMode(id,field),
           });
         }
       }
@@ -270,6 +233,8 @@ export class ConfigWatcher extends EventEmitter {
 
     // Gateway-level fields (emitted with agentId: '')
     const gatewayFieldPairs: Array<{ field: string; oldVal: unknown; newVal: unknown }> = [
+      // Authorization is read on each privileged operation.
+      { field: 'safemode.allowedAgentIds', oldVal: oldCfg.safemode?.allowedAgentIds, newVal: newCfg.safemode?.allowedAgentIds },
       {field:'gateway.orchestration',oldVal:oldCfg.gateway.orchestration,newVal:newCfg.gateway.orchestration},
       {field:'gateway.workers',oldVal:oldCfg.gateway.workers,newVal:newCfg.gateway.workers},
       { field: 'gateway.headless', oldVal: oldCfg.gateway.headless, newVal: newCfg.gateway.headless },
@@ -286,11 +251,22 @@ export class ConfigWatcher extends EventEmitter {
           field,
           oldValue: oldVal,
           newValue: newVal,
-          hotReloadable: HOT_RELOADABLE_GATEWAY_FIELDS.includes(field),
+          hotReloadable: !['restart','ignored'].includes(reloadMode('',field)),
+          reloadMode: reloadMode('',field),
         });
       }
     }
 
+    const append = (agentId:string,before:unknown,after:unknown) => {
+      for(const field of changedConfigPaths(before,after)) {
+        if(!agentId && (field==='agents'||field.startsWith('agents.')))continue;
+        if(fieldChanges.some(c=>c.agentId===agentId&&(c.field===field||field.startsWith(c.field+'.'))))continue;
+        const mode=reloadMode(agentId,field);
+        fieldChanges.push({agentId,field,oldValue:configValue(before,field),newValue:configValue(after,field),hotReloadable:!['restart','ignored'].includes(mode),reloadMode:mode});
+      }
+    };
+    for(const [id,next] of newAgents)if(oldAgents.has(id))append(id,oldAgents.get(id),next);
+    append('',oldCfg,newCfg);
     return { fieldChanges, addedAgents };
   }
 }
@@ -319,4 +295,4 @@ function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 // Export for testing
-export { deepEqual as _deepEqual, HOT_RELOADABLE_AGENT_FIELDS };
+export { deepEqual as _deepEqual };

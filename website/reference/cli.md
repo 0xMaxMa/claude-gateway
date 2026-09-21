@@ -255,6 +255,12 @@ claude-gateway doctor fix
 claude-gateway doctor fix --yes --config /path/to/config.json --json
 ```
 
+Without `--json`, doctor prints only the readable check list; it does not append a
+JSON dump. Use `doctor --json` to write a compact JSON report to stdout without the
+readable report. Scripts that previously parsed plain `doctor` output must add
+`--json`. Exit codes are unchanged. For scripted repairs, use `doctor fix --yes --json`;
+interactive confirmation and command errors are separate from the check report.
+
 `doctor` is read-only. It checks Node.js 22+, Claude Code, Bun, ffmpeg, ffprobe and optional Codex;
 configuration readability, basic structure and owner permissions; runtime/log paths;
 failed Linux user-service state; known startup log signatures; and the existing
@@ -297,6 +303,6 @@ service. It is local-only, keeps backups, and never installs Codex or stops acti
 workers. Drain new work and stop only the agent first; see the
 [maintenance workflow](../guide/worker-harnesses.md#install-upgrade-or-refresh-a-runtime).
 
-Doctor reports effective Codex executable selections, resolved paths, versions
+Doctor reports native worker auth portability (local configuration, not network or quota verification), effective Codex executable selections, resolved paths, versions
 and container layout compatibility as optional checks. `doctor fix` does not
 install Codex. Service PATH may differ from the interactive doctor environment.

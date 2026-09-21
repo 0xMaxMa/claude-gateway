@@ -105,3 +105,23 @@ test('default mode starts every worker profile in the Agent non-Git workspace an
     expect(store.all("SELECT * FROM task_resources WHERE mode='host' AND lifecycle_state='active'")).toHaveLength(3);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test('explicit host task directory and continuation use the project rather than identity workspace', async () => {
+  const root=mkdtempSync(join(tmpdir(),'worker-cwd-')),project=join(root,'canonical');
+  mkdirSync(project);
+  const store=new OrchestrationStore(join(root,'a.db'),'a');
+  try {
+    const input=store.acceptInput({scope:{agentId:'a',agentSessionId:'s',source:'api',accountId:'key',chatId:'chat',threadKey:'',principalId:'owner'},text:'review'});
+    const decision=new DecisionService(store).begin(input.conversationId,'owner',[input.inputId]);
+    const tasks=new TaskService(store);
+    const context={...input,...decision,principalId:'owner',actionId:'one',execute:true,writeMemory:false};
+    const task=tasks.spawn(context,{title:'review',instructions:'review',targetProfile:'skill-worker',workingDirectory:project});
+    const resources=new TaskWorkspaces(store,root,join(root,'resources'));
+    expect((await resources.prepare(task.taskId)).path).toBe(project);
+    const next=tasks.spawn({...context,actionId:'two'},{title:'follow up',instructions:'review',targetProfile:'default-worker',continueTaskId:task.taskId});
+    expect(next.resourceProfile?.projectRoot).toBe(project);
+    expect(()=>tasks.spawn({...context,actionId:'three'},{title:'bad',instructions:'bad',targetProfile:'default-worker',workingDirectory:'relative'})).toThrow();
+    const isolated=new TaskService(store,{tasks:{workspaceMode:'isolated-worktree'}});
+    expect(()=>isolated.spawn({...context,actionId:'four'},{title:'bad',instructions:'bad',targetProfile:'default-worker',workingDirectory:project})).toThrow('WORKING_DIRECTORY_HOST_ONLY');
+  } finally {store.close();rmSync(root,{recursive:true,force:true});}
+});

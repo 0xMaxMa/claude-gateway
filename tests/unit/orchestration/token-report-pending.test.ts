@@ -205,7 +205,7 @@ test('a queued row is visibly waiting and its untrusted text is escaped', () => 
       inputModalities:['text'],usage:null,loadedTools:null,usedTools:[]}],
   });
   expect(html).toContain('turn-row turn-pending');
-  expect(html).toContain('Waiting 2m 21s');
+  expect(html).toContain('Queued · 2m 21s');
   expect(html).toContain('Input #483');
   expect(html).toContain('is not counted in any total');
   expect(html).not.toContain('<script>alert(1)</script>');
@@ -219,6 +219,22 @@ test('a queued row is visibly waiting and its untrusted text is escaped', () => 
     turns:[{id:'d',role:'agent',category:'input',startedAt:Date.now(),queuedMs:141300,inputSequences:[483],
       usage:usage(30),loadedTools:null,usedTools:[]}],
   });
-  expect(measured).toContain('Queued 2m 21s');
+  expect(measured).toContain('Waited 2m 21s before starting');
+  expect(measured).not.toContain('<small class="turn-wait"');
   expect(measured).not.toMatch(/<tr[^>]*class="[^"]*turn-pending/);
+});
+
+test.each([undefined, 0, -1, NaN])('does not invent historical wait for %s', queuedMs => {
+  const html = render({sessionId:'s',coverage:'recorded-turns-only',
+    totals:{agentTokens:null,workerTokens:null,totalTokens:null},
+    turns:[{id:'d',role:'agent',category:'input',startedAt:Date.now(),queuedMs,
+      usage:null,loadedTools:null,usedTools:[]}]});
+  expect(html).not.toContain('Waited ');
+});
+test.each([[12,'12ms'],[499,'499ms'],[1000,'1s'],[12000,'12s']])('preserves measured wait %s', (queuedMs, label) => {
+  const html = render({sessionId:'s',coverage:'recorded-turns-only',
+    totals:{agentTokens:null,workerTokens:null,totalTokens:null},
+    turns:[{id:'d',role:'agent',category:'input',startedAt:Date.now(),queuedMs,
+      usage:null,loadedTools:null,usedTools:[]}]});
+  expect(html).toContain('Waited '+label+' before starting');
 });

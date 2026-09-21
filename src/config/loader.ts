@@ -427,5 +427,6 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
   return {
     agents: interpolatedAgents,
     gateway: interpolatedGateway,
+    safemode: config.safemode,
   } as GatewayConfig;
 }

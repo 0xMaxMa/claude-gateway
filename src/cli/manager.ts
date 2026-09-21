@@ -75,7 +75,10 @@ export function pidLooksLikeGateway(pid: number, deps: Pick<DetectDeps, 'readCmd
   // Either the installed binary/package path, or a checkout started straight
   // from its entry point (`node /opt/gw/dist/index.js gateway start`), whose
   // directory need not be named after the project.
-  return /claude-gateway/.test(cmdline) || /(^|[\\/])(dist|src)[\\/]index\.(js|ts)\b/.test(cmdline);
+  // Match an entrypoint immediately followed by the server subcommand.
+  // A safemode/CLI process can live in the same checkout and mention gateway
+  // paths in its prompt; repository-name matching must never authorize a kill.
+  return /^(?:(?:[^\s]*[\/])?(?:node|nodejs|bun|ts-node|tsx)(?:\s+--[^\s]+)*\s+)?(?:[^\s]*[\/])?(?:claude-gateway|(?:dist|src)[\/](?:index|entry)\.(?:js|ts))\s+gateway\s+start(?:\s|$)/.test(cmdline);
 }
 
 function realReadPidfile(p: string): string | null {

@@ -77,7 +77,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
       if(operation==='session') {
         const session = get('SELECT * FROM conversations WHERE agent_session_id=?',options.sessionId)!;
         const offset=Math.max(0,Number(options.offset)||0);
-        const tasks=all('SELECT id,state,snapshot_json,updated_at FROM tasks WHERE conversation_id=? AND updated_at>=? ORDER BY updated_at DESC,id LIMIT 50 OFFSET ?',session.id,since,offset).map(t=>({taskId:t.id,state:t.state,title:JSON.parse(t.snapshot_json).title,updatedAt:t.updated_at}));
+        const tasks=all('SELECT id,state,snapshot_json,updated_at FROM tasks WHERE conversation_id=? AND updated_at>=? ORDER BY updated_at DESC,id LIMIT 50 OFFSET ?',session.id,since,offset).map(t=>({taskId:t.id,state:t.state,title:JSON.parse(t.snapshot_json).title,gatewayTarget:JSON.parse(t.snapshot_json).gatewayTarget,updatedAt:t.updated_at}));
         // Same activity status the Conversations column shows, so the session drawer's
         // Context window box can use the same idle-vs-stopped disambiguation as the report page.
         const activityStatus=conversationActivityStatus(get,all,session.id).status;
@@ -101,13 +101,13 @@ function read(filename: string, operation: string, options: Record<string, any>)
         .map(r => JSON.parse(String(r.payload_json)) as TaskRevision);
       const instructions = revisions.length ? normalizeTaskRevisions(revisions).instructions : undefined;
       const offset = Math.max(0, Number(options.offset) || 0);
-      const attempts = all(`SELECT payload_json FROM task_attempts WHERE task_id=? AND COALESCE(json_extract(payload_json,'$.startedAt'),0)>=? ORDER BY generation DESC LIMIT 25 OFFSET ?`, options.taskId, since, offset).map(r => {
+      const attempts = all(`SELECT payload_json FROM task_attempts WHERE task_id=? AND COALESCE(json_extract(payload_json,'$.startedAt'),json_extract(payload_json,'$.createdAt'),0)>=? ORDER BY generation DESC LIMIT 25 OFFSET ?`, options.taskId, since, offset).map(r => {
         const attempt = JSON.parse(r.payload_json);
         const metrics = exists('token_turns') ? get('SELECT payload_json FROM token_turns WHERE id=? AND session_id=?', attempt.attemptId, options.sessionId) : undefined;
         const events = all('SELECT type,payload_json,occurred_at FROM worker_events WHERE attempt_id=? ORDER BY local_seq DESC LIMIT 30', attempt.attemptId).map(e=>({type:e.type,at:e.occurred_at,payload:JSON.parse(e.payload_json)}));
         return {...attempt, metrics: metrics ? JSON.parse(metrics.payload_json) : null, events};
       });
-      return {snapshot, instructions, attempts, totalAttempts:Number(get("SELECT COUNT(*) n FROM task_attempts WHERE task_id=? AND COALESCE(json_extract(payload_json,'$.startedAt'),0)>=?", options.taskId,since)!.n), offset};
+      return {snapshot, instructions, attempts, totalAttempts:Number(get("SELECT COUNT(*) n FROM task_attempts WHERE task_id=? AND COALESCE(json_extract(payload_json,'$.startedAt'),json_extract(payload_json,'$.createdAt'),0)>=?", options.taskId,since)!.n), offset};
     }
     const offset = Math.max(0, Number(options.offset) || 0), limit = 25;
     const conversations = all('SELECT c.* FROM conversations c WHERE c.updated_at>=? ORDER BY c.updated_at DESC,c.id DESC LIMIT ? OFFSET ?', since, limit, offset);
@@ -127,8 +127,8 @@ function read(filename: string, operation: string, options: Record<string, any>)
         const lastTool = get("SELECT payload_json,occurred_at FROM conversation_events WHERE json_extract(payload_json,'$.task_id')=? AND type='tool.activity' ORDER BY seq DESC LIMIT 1",t.id);
         const tool = lastTool ? JSON.parse(lastTool.payload_json).payload : undefined;
         return {taskId:t.id,sessionId:c.agent_session_id,title:snapshot.title,state:t.state,updatedAt:t.updated_at,
-          createdAt:t.created_at, execution:snapshot.execution, workerId:attempt?.workerId, attemptId:attempt?.attemptId,
-          workerSessionId:attempt?.sessionId, resumed:attempt?.resumeSession, workstreamId:snapshot.workstreamId,
+          createdAt:t.created_at, executionType:snapshot.gatewayTarget?'gateway-managed':'worker',gatewayTarget:snapshot.gatewayTarget,execution:snapshot.execution, workerId:attempt?.workerId, attemptId:attempt?.attemptId,
+          workerSessionId:snapshot.gatewayTarget?undefined:attempt?.sessionId,targetSessionId:snapshot.gatewayTarget?.sessionId, resumed:attempt?.resumeSession, workstreamId:snapshot.workstreamId,
           continueTaskId:snapshot.continueTaskId,hostProcessId:t.active_attempt_id?attempt?.processIdentity?.pid:undefined,
           tokenSummary:{totalTokens:metrics.totalTokens,allAttemptsTokens:total.totalTokens},contextTools:metrics.contextTools,loadedTools:metrics.loadedTools,usedTools:metrics.usedTools,
           lastTool:tool?{name:tool.name,type:tool.type,is_error:tool.is_error,at:lastTool!.occurred_at}:undefined};
@@ -142,8 +142,8 @@ function read(filename: string, operation: string, options: Record<string, any>)
         workerIds:all('SELECT id FROM worker_pool WHERE conversation_id=?',c.id).map(w=>w.id),spawnedAt:0,uptimeSec:0,tokens:0};
     });
     const today=dashboardSince('24h',Date.now(),options.timezone || 'UTC');
-    const attention=all(`SELECT t.id taskId,t.state,t.snapshot_json,c.agent_session_id sessionId FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.updated_at>=? AND t.state IN ('waiting_input','needs_reconciliation') ORDER BY t.updated_at DESC LIMIT 8`,since).map(t=>({taskId:t.taskId,state:t.state,sessionId:t.sessionId,title:JSON.parse(t.snapshot_json).title}));
-    const recentWork=all(`SELECT t.id taskId,t.state,t.snapshot_json,t.updated_at updatedAt,c.agent_session_id sessionId FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.updated_at>=? ORDER BY t.updated_at DESC,t.id DESC LIMIT 6`,today).map(t=>({taskId:t.taskId,state:t.state,sessionId:t.sessionId,updatedAt:t.updatedAt,title:JSON.parse(t.snapshot_json).title}));
+    const attention=all(`SELECT t.id taskId,t.state,t.snapshot_json,c.agent_session_id sessionId FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.updated_at>=? AND t.state IN ('waiting_input','needs_reconciliation') ORDER BY t.updated_at DESC LIMIT 8`,since).map(t=>({taskId:t.taskId,state:t.state,sessionId:t.sessionId,title:JSON.parse(t.snapshot_json).title,gatewayTarget:JSON.parse(t.snapshot_json).gatewayTarget}));
+    const recentWork=all(`SELECT t.id taskId,t.state,t.snapshot_json,t.updated_at updatedAt,c.agent_session_id sessionId FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.updated_at>=? ORDER BY t.updated_at DESC,t.id DESC LIMIT 6`,today).map(t=>({taskId:t.taskId,state:t.state,sessionId:t.sessionId,updatedAt:t.updatedAt,title:JSON.parse(t.snapshot_json).title,gatewayTarget:JSON.parse(t.snapshot_json).gatewayTarget}));
     const pool = exists('worker_pool') ? all('SELECT * FROM worker_pool') : [];
     return {attention,recentWork,managedLegacyIds:all('SELECT agent_session_id FROM conversations WHERE agent_session_id IN (SELECT value FROM json_each(?))',JSON.stringify(options.legacyIds??[])).map(c=>c.agent_session_id),enabled:true,backend:'headless',workspaceMode:options.workspaceMode,sessions,tasks:sessions.flatMap(s=>s.tasks),
       pagination:{offset,limit,total:Number(get('SELECT COUNT(*) n FROM conversations WHERE updated_at>=?',since)!.n)},

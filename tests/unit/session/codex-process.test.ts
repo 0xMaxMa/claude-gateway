@@ -1,3 +1,7 @@
+import { codexContextPolicy } from '../../../src/session/codex-context';
+import { workerEnvironment } from '../../../src/session/worker-environment';
+import * as codexAuth from '../../../src/session/codex-auth';
+jest.mock('../../../src/session/worker-extensions', () => ({ discoverWorkerExtensions: jest.fn().mockResolvedValue({ skills: [], servers: {}, notices: [] }) }));
 import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
 import { inspectSelectedCodexRuntime } from '../../../src/session/codex-container-runtime';
 jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn() }));
@@ -24,6 +28,7 @@ let adapter: CodexProcess;
 let events: any[];
 let rpc: any[];
 let turnNumber: number;
+let chatgptMode = false;
 function emit(event: any) { child.stdout.write(JSON.stringify(event) + '\n'); }
 function notify(method: string, params: any) { emit({ method, params: { threadId: thread, ...params } }); }
 function item(value: any, completed = true) { notify(completed ? 'item/completed' : 'item/started', { turnId: 'turn-1', item: value }); }
@@ -32,6 +37,7 @@ async function waitUntil(predicate: () => boolean) { const deadline = Date.now()
 async function launch() { await adapter.start(); adapter.sendMessage('do the task'); await waitUntil(() => rpc.some(r => r.method === 'turn/start')); }
 beforeEach(async () => {
   jest.clearAllMocks();
+  chatgptMode = false;
   (resolveCodexRuntime as jest.Mock).mockReset().mockImplementation(bin => ({ executable: bin ?? 'codex', containerExecutable: '/opt/gateway-codex/bin/codex', nativeSha256: 'fixture-sha' }));
   (inspectSelectedCodexRuntime as jest.Mock).mockReset().mockResolvedValue('container-one');
   directory = await mkdtemp(join(tmpdir(), 'codex-adapter-'));
@@ -44,22 +50,23 @@ beforeEach(async () => {
     for (const line of chunk.toString().trim().split('\n')) {
       const request = JSON.parse(line); rpc.push(request);
       if (request.id === undefined) continue;
-      const result = request.method === 'config/read' ? { layers: [], config: { model_provider: 'gateway', model_providers: { gateway: { base_url: options.config.baseUrl, env_key: options.config.apiKeyEnv, wire_api: 'responses' } }, mcp_servers: options.agent.type === 'app-agent' ? { gateway: { command: 'node', args: ['container-bridge.js'] } } : { gateway: { command: 'node', args: ['bridge.js'], env: { TICKET: 'secret-ticket' } } } } } : request.method === 'thread/start' || request.method === 'thread/resume' ? { thread: { id: thread } } : request.method === 'turn/start' ? { turn: { id: 'turn-' + (++turnNumber) } } : {};
+      const result = request.method === 'config/read' ? { layers: [], config: { shell_environment_policy:{set:workerEnvironment(options.agent, options.gateway)}, model_context_window:codexContextPolicy(options.config.model,options.config.contextWindow).configured, model_provider: chatgptMode ? 'openai' : 'gateway', cli_auth_credentials_store: chatgptMode ? 'ephemeral' : 'file', model_providers: { gateway: { base_url: options.config.baseUrl, env_key: "GATEWAY_CODEX_API_KEY", wire_api: 'responses' } }, mcp_servers: options.agent.type === 'app-agent' ? { gateway: { command: 'node', args: ['container-bridge.js'] } } : { gateway: { command: 'node', args: ['bridge.js'], env: { TICKET: 'secret-ticket' } } } } } : request.method === 'thread/start' || request.method === 'thread/resume' ? { thread: { id: thread } } : request.method === 'turn/start' ? { turn: { id: 'turn-' + (++turnNumber) } } : {};
       setImmediate(() => { emit({ id: request.id, result }); if (request.method === 'turn/start') notify('turn/started', result); });
     }
   });
   (spawn as jest.Mock).mockReturnValue(child);
   adapter = new CodexProcess(options); events = []; adapter.on('output', line => events.push(JSON.parse(line)));
 });
-afterEach(async () => { await adapter.stop(); await rm(directory, { recursive: true, force: true }); delete process.env.TEST_CODEX_KEY; });
+afterEach(async () => { await adapter.stop(); jest.restoreAllMocks(); await rm(directory, { recursive: true, force: true }); delete process.env.TEST_CODEX_KEY; });
 test('uses private Responses configuration, MCP ticket env and sandbox without credential argv', async () => {
   await launch();
   const [bin, args, settings] = (spawn as jest.Mock).mock.calls[0];
-  expect(bin).toBe('codex'); expect(args).toEqual(['app-server', '--listen', 'stdio://']);
+  expect(bin).toBe('codex'); expect(args.slice(-3)).toEqual(['app-server', '--listen', 'stdio://']);
+  expect(args).toEqual(expect.arrayContaining(['notify=[]', 'features.hooks=false', 'features.plugins=false', 'features.apps=false', 'features.multi_agent=false']));
   expect(JSON.stringify(args)).not.toMatch(/secret/);
   const config = await readFile(join(settings.env.CODEX_HOME, 'config.toml'), 'utf8');
   expect(config).toContain('sandbox_mode = "workspace-write"');
-  expect(config).toContain('env_key = "TEST_CODEX_KEY"'); expect(config).not.toContain('api-secret');
+  expect(config).toContain('env_key = "GATEWAY_CODEX_API_KEY"'); expect(config).not.toContain('api-secret');
   expect(config).toContain('"TICKET" = "secret-ticket"');
   expect(config).toContain('developer_instructions = "agent context\\n\\nworker rules"');
   expect(settings.env.ANTHROPIC_API_KEY).toBeUndefined();
@@ -80,6 +87,15 @@ test('maps tools and failures, returns only canonical final and counts cached in
   expect(events.filter(e => e.type === 'result')).toEqual([expect.objectContaining({ result: 'Finished.' })]);
   const usage = new TurnUsageCollector(); events.forEach(e => usage.observe(e));
   expect(usage.snapshot()).toMatchObject({ loadedTools: null, contextTools: null, requests: [], usage: { inputTokens: 30, cacheReadTokens: 70, outputTokens: 20, totalTokens: 120 } });
+});
+
+test('native user questions enter the existing task question flow without inventing an answer', async () => {
+  options.requestInput = jest.fn();
+  await launch();
+  emit({ id: 'question-1', method: 'item/tool/requestUserInput', params: { threadId: thread, questions: [{ id: 'target', question: 'Which target should I use?', options: [{ label: 'Development', description: 'Use the development environment' }] }] } });
+  expect(options.requestInput).toHaveBeenCalledWith('Which target should I use?\nDevelopment: Use the development environment');
+  expect(events).toContainEqual({ type: 'result', is_error: false, result: 'Waiting for user input.' });
+  expect(rpc).toContainEqual({ id: 'question-1', result: { answers: {} } });
 });
 test('resumes the bound thread explicitly with fresh configuration', async () => {
   await launch();
@@ -103,7 +119,7 @@ test('cancellation while preparing prevents spawn and confirms no process remain
 });
 test('fails closed on invalid container binding and missing independent credential', async () => {
   options.agent.type = 'app-agent'; await expect(adapter.start()).rejects.toThrow(); expect(spawn).not.toHaveBeenCalled();
-  options.agent.type = undefined as any; delete process.env.TEST_CODEX_KEY; adapter = new CodexProcess(options); await expect(adapter.start()).rejects.toThrow(/credential/);
+  options.agent.type = undefined as any; delete process.env.TEST_CODEX_KEY; adapter = new CodexProcess(options); await expect(adapter.start()).rejects.toThrow(/native API key/);
 });
 test('bounded stdout fails and stops process group', async () => {
   await launch(); child.stdout.write('x'.repeat(4 * 1024 * 1024 + 1)); await tick();
@@ -387,4 +403,152 @@ test.each(['same', 'recreated', 'legacy-present', 'legacy-missing'])('container 
   expect(events.some(e => e.subtype === 'native_session_reset')).toBe(!resumed);
   const saved = JSON.parse(await readFile(mapping, 'utf8'));
   expect(saved.containerId).toBe(kind === 'recreated' ? 'container-two' : 'container-one');
+});
+
+
+test('native credential probe uses the resolved executable for a relative worker bin', async () => {
+  const absoluteBin = join(directory, 'bin', 'codex');
+  (resolveCodexRuntime as jest.Mock).mockReturnValue({ executable: absoluteBin });
+  options.config = { model: 'gpt-test', bin: './bin/codex' };
+  const probe: any = new EventEmitter();
+  probe.stdin = new PassThrough(); probe.stdout = new PassThrough(); probe.stderr = new PassThrough();
+  probe.kill = jest.fn(); probe.unref = jest.fn();
+  probe.stdin.on('data', (chunk: Buffer) => {
+    const request = JSON.parse(chunk.toString());
+    if (request.id === undefined) return;
+    const result = request.method === 'config/read' ? { config: { model_provider: 'fixture', model_providers: { fixture: { base_url: 'https://responses.example/v1', env_key: 'TEST_CODEX_KEY' } } } } : { account: null };
+    setImmediate(() => probe.stdout.write(JSON.stringify({ id: request.id, result }) + '\n'));
+  });
+  (spawn as jest.Mock).mockReturnValueOnce(probe);
+  await adapter.start();
+  expect(resolveCodexRuntime).toHaveBeenCalledWith('./bin/codex', directory);
+  expect((spawn as jest.Mock).mock.calls[0][0]).toBe(absoluteBin);
+  adapter.sendMessage('run fixture');
+  await waitUntil(() => (spawn as jest.Mock).mock.calls.length === 2);
+  expect((spawn as jest.Mock).mock.calls[1][0]).toBe(absoluteBin);
+});
+
+
+test.each(['notify', 'hooks', 'apps', 'plugins', 'browser_use', 'computer_use', 'multi_agent', 'image_generation', 'skill_mcp_dependency_install', 'workspace_dependencies', 'web_search'])('rejects unexpected native capability %s before starting a thread', async capability => {
+  const autoReply = child.stdin.listeners('data')[0]; child.stdin.removeAllListeners('data');
+  child.stdin.on('data', (chunk: Buffer) => {
+    const request = JSON.parse(chunk.toString());
+    if (request.method !== 'config/read') return autoReply(chunk);
+    const config: any = { model_provider: 'gateway', model_providers: { gateway: { base_url: options.config.baseUrl, env_key: 'GATEWAY_CODEX_API_KEY', wire_api: 'responses' } }, mcp_servers: { gateway: { command: 'node', args: ['bridge.js'], env: { TICKET: 'secret-ticket' } } } };
+    if (capability === 'notify') config.notify = ['unexpected-program'];
+    else if (capability === 'hooks') config.hooks = { SessionStart: [{}] };
+    else if (capability === 'web_search') config.web_search = 'live';
+    else config.features = { [capability]: true };
+    setImmediate(() => emit({ id: request.id, result: { config, layers: [] } }));
+  });
+  const errors: Error[] = []; adapter.on('startup-error', error => errors.push(error));
+  await adapter.start(); adapter.sendMessage('never execute');
+  await waitUntil(() => errors.length > 0);
+  expect(errors[0].message).toMatch(/not permitted|exceed/);
+  expect(rpc.some(r => r.method === 'thread/start')).toBe(false);
+});
+
+test.each(['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval', 'item/tool/call'])('never grants unexpected native request %s', async method => {
+  await launch();
+  emit({ id: 'unapproved-request', method, params: { threadId: thread } });
+  await waitUntil(() => events.some(event => event.type === 'result'));
+  expect(rpc).toContainEqual({ id: 'unapproved-request', error: { code: -32601, message: 'Interactive requests are not supported by gateway workers' } });
+  expect(events).toContainEqual(expect.objectContaining({ type: 'result', is_error: true, result: expect.stringContaining('unsupported interaction') }));
+  await waitUntil(() => (stopProcessGroup as jest.Mock).mock.calls.length > 0);
+  expect(stopProcessGroup).toHaveBeenCalledWith(54321);
+});
+
+test.each(['host','container'])('native ChatGPT %s uses access-only RPC and refreshes without mounting auth', async kind => {
+  chatgptMode = true;
+  const current = {baseUrl:'https://chatgpt.com/backend-api/codex',key:'',fingerprint:'account-one',chatgpt:{accessToken:'access-one',chatgptAccountId:'account-one'}};
+  const resolve=jest.spyOn(codexAuth,'resolveCodexCredentials').mockResolvedValue(current);
+  if(kind==='container') {
+    options.agent={...options.agent,type:'app-agent',container:'fixture'};
+    options.profile={...options.profile,containerExecution:true};
+    (prepareContainerProfile as jest.Mock).mockResolvedValue({directory:'/tmp/gateway-orch-fixture',config:'/tmp/mcp.json'});
+    (containerNode as jest.Mock).mockImplementation(async (_container,script)=>script.includes('createHash')?'fixture-sha':script.includes('process.stdout.write(require')?JSON.stringify({mcpServers:{gateway:{command:'node',args:['container-bridge.js']}}}):'');
+    adapter=new CodexProcess(options);adapter.on('output',line=>events.push(JSON.parse(line)));
+  }
+  await launch();
+  const [_,argv,settings]=(spawn as jest.Mock).mock.calls[0];
+  expect(JSON.stringify(argv)).not.toContain('access-one');
+  expect(settings.env.GATEWAY_CODEX_API_KEY).toBeUndefined();
+  expect(rpc.find(r=>r.method==='account/login/start').params).toEqual({type:'chatgptAuthTokens',...current.chatgpt});
+  expect(rpc.findIndex(r=>r.method==='account/login/start')).toBeLessThan(rpc.findIndex(r=>r.method==='thread/start'));
+  resolve.mockResolvedValue({...current,chatgpt:{...current.chatgpt,accessToken:'access-two'}});
+  emit({id:'refresh-1',method:'account/chatgptAuthTokens/refresh',params:{previousAccountId:'account-one'}});
+  await waitUntil(()=>rpc.some(r=>r.id==='refresh-1'));
+  expect(rpc.find(r=>r.id==='refresh-1').result.accessToken).toBe('access-two');
+  expect(resolve).toHaveBeenLastCalledWith(expect.objectContaining({refreshToken:true}));
+  expect(JSON.stringify(events)).not.toContain('access-');
+});
+test('refresh cannot move an existing worker into another native account', async () => {
+  chatgptMode=true;
+  const resolve=jest.spyOn(codexAuth,'resolveCodexCredentials').mockResolvedValue({baseUrl:'https://chatgpt.com/backend-api/codex',key:'',fingerprint:'one',chatgpt:{accessToken:'one',chatgptAccountId:'one'}});
+  await launch();
+  resolve.mockResolvedValue({baseUrl:'https://chatgpt.com/backend-api/codex',key:'',fingerprint:'two',chatgpt:{accessToken:'two',chatgptAccountId:'two'}});
+  emit({id:'refresh-2',method:'account/chatgptAuthTokens/refresh',params:{previousAccountId:'one'}});
+  await waitUntil(()=>events.some(e=>e.type==='result'));
+  expect(rpc.find(r=>r.id==='refresh-2').error.code).toBe(-32001);
+  expect(events.find(e=>e.type==='result').result).toContain('CODEX_AUTH_REFRESH_FAILED');
+});
+
+it('configures the selected 1M window in the actual worker config and validates native readback', async () => {
+  options.config.contextWindow = 1000000;
+  adapter = new CodexProcess(options);
+  await adapter.start(); adapter.sendMessage('test');
+  await waitUntil(() => rpc.some(r => r.method === 'turn/start'));
+  const settings = jest.mocked(spawn).mock.calls[0][2] as any;
+  const config = await readFile(join(settings.env.CODEX_HOME,'config.toml'),'utf8');
+  expect(config).toContain('model_context_window = 1000000');
+  expect(config).not.toContain('model_auto_compact_token_limit');
+  expect(rpc.some(r => r.method === 'config/read')).toBe(true);
+});
+
+test('passes explicit command environment to native config and process without putting values in argv', async () => {
+  options.profile.hostExecution=true;
+  options.gateway={gateway:{workers:{environment:{BASH_ENV:'/explicit/hook',ZDOTDIR:'/explicit/zsh'}}}} as any;
+  await launch();
+  const [,args,settings]=(spawn as jest.Mock).mock.calls[0];
+  expect(settings.env.BASH_ENV).toBe('/explicit/hook');
+  expect(settings.env.ZDOTDIR).toBe('/explicit/zsh');
+  expect(JSON.stringify(args)).not.toContain('/explicit/hook');
+  const config=await readFile(join(settings.env.CODEX_HOME,'config.toml'),'utf8');
+  expect(config).toContain('[shell_environment_policy.set]');
+  expect(config).toContain('"BASH_ENV" = "/explicit/hook"');
+});
+
+ test.each([false, true])('caps Mini and records native usable context separately on container=%s', async container => {
+  if (container) {
+    options.agent.type = 'app-agent'; options.agent.container = 'fixture';
+    (prepareContainerProfile as jest.Mock).mockResolvedValue({ directory:'/tmp/profile',config:'/tmp/profile/mcp.json' });
+    (containerNode as jest.Mock).mockImplementation(async (_container: string, code: string) => code.includes('createHash') ? 'fixture-sha' : code.includes('readFileSync') ? JSON.stringify({mcpServers:{gateway:{command:'node',args:['container-bridge.js']}}}) : '');
+    options.profile.connectorsAllowed = false;
+  }
+  options.config.model = 'gpt-5.4-mini'; options.config.contextWindow = 1000000;
+  await launch();
+  const initial=events.find(e=>e.subtype==='native_init');
+  expect(initial.contextWindow).toMatchObject({requested:1000000,configured:400000,observed:null});
+  notify('thread/tokenUsage/updated', { tokenUsage: { modelContextWindow:380000, last:{totalTokens:12000}, total:{inputTokens:3000000,cachedInputTokens:1000000,outputTokens:5000} } });
+  const collector=new TurnUsageCollector();events.forEach(e=>collector.observe(e));
+  expect(collector.snapshot().contextWindow).toMatchObject({observed:380000,used:12000,status:'observed'});
+ });
+
+test('does not silently accept a native window exceeding the configured ceiling', async () => {
+ options.config.contextWindow=200000;
+ await launch();
+ notify('thread/tokenUsage/updated',{tokenUsage:{modelContextWindow:950000,last:{totalTokens:100}}});
+ expect(events.find(e=>e.type==='result')).toMatchObject({is_error:true,result:expect.stringContaining('CODEX_CONTEXT_WINDOW_MISMATCH')});
+});
+test('rejects incorrect config readback before any model request', async () => {
+ options.config.contextWindow=1000000;
+ const autoReply=child.stdin.listeners('data')[0];child.stdin.removeAllListeners('data');
+ child.stdin.on('data',(chunk:Buffer)=>{
+  const q=JSON.parse(chunk.toString());if(q.method!=='config/read')return autoReply(chunk);
+  rpc.push(q);setImmediate(()=>emit({id:q.id,result:{layers:[],config:{model_context_window:200000}}}));
+ });
+ const errors:Error[]=[];adapter.on('startup-error',e=>errors.push(e));
+ await adapter.start();adapter.sendMessage('never execute');await waitUntil(()=>errors.length>0);
+ expect(errors[0].message).toContain('context window configuration mismatch');
+ expect(rpc.some(r=>r.method==='thread/start')).toBe(false);
 });

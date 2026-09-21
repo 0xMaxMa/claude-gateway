@@ -165,6 +165,26 @@ describe('SessionProcess', () => {
   // --------------------------------------------------------------------------
   // U-SP-01: start() spawns a subprocess
   // --------------------------------------------------------------------------
+  it.each([false, true])('correlates CLI warnings with actual custom-model outcome (error=%s)', async isError => {
+    const sp = makeSp('chat:111', 'api', agentConfig, gatewayConfig, sessionStore, undefined, {role:'agent', context:'fixture', overlay:'', mcpConfigPath:'', responseId:'response-test'});
+    const log = jest.spyOn((sp as any).logger, 'info').mockImplementation(() => {});
+    const warn = jest.spyOn((sp as any).logger, 'warn').mockImplementation(() => {});
+    await sp.start();
+    lastProcess!.stderr!.emit('data', Buffer.from('unrecognized_model: gpt-custom\n'));
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({type:'assistant',message:{id:'native-response',model:'gpt-custom',content:[]}})+'\n'));
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({type:'result',is_error:isError,result:isError?'Provider rejected model':'ok'})+'\n'));
+    lastProcess!.emit('exit', 143, 'SIGTERM');
+    expect(log).toHaveBeenCalledWith('session subprocess exited', expect.objectContaining({responseId:'response-test',nativeMessageId:'native-response',model:'gpt-custom',code:143,stderrObserved:true,turnOutcome:isError?'failed':'completed',inferenceOutcome:isError?'failed':'succeeded',exitReason:isError?'failed':'completed'}));
+    expect(warn).toHaveBeenCalledWith('session stderr', expect.objectContaining({stderr:'unrecognized_model: gpt-custom\n',responseId:'response-test'}));
+  });
+
+  it('records an unexplained exit without a terminal result as unexpected', async () => {
+    const sp = makeSp('chat:111', 'api', agentConfig, gatewayConfig, sessionStore, undefined, {role:'agent',context:'fixture',overlay:'',mcpConfigPath:''});
+    const log = jest.spyOn((sp as any).logger, 'info').mockImplementation(() => {});
+    await sp.start(); lastProcess!.emit('exit',143,'SIGTERM');
+    expect(log).toHaveBeenCalledWith('session subprocess exited', expect.objectContaining({exitReason:'unexpected_exit',turnOutcome:'pending'}));
+  });
+
   it('U-SP-01: start() spawns a subprocess', async () => {
     const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
@@ -199,6 +219,21 @@ describe('SessionProcess', () => {
     expect(lastProcess!.stdin!.write).toHaveBeenCalledWith(
       expect.stringMatching(/"type":"user".*"text":"hello world"/s),
     );
+  });
+
+  it('applies worker environment to Claude workers but not conversational agents', async () => {
+    const mcp=path.join(tmpDir,'env-mcp.json');fs.writeFileSync(mcp,'{"mcpServers":{}}');
+    gatewayConfig.gateway.workers={environment:{BASH_ENV:'/configured/hook'}};
+    const worker=makeSp('env-worker','api',agentConfig,gatewayConfig,sessionStore,undefined,{
+      role:'worker',hostExecution:true,mcpConfigPath:mcp,overlay:'',context:'fixture'
+    });
+    await worker.start();
+    expect(spawnMock.mock.calls.at(-1)[2].env.BASH_ENV).toBe('/configured/hook');
+    const agent=makeSp('env-agent','api',agentConfig,gatewayConfig,sessionStore,undefined,{
+      role:'agent',mcpConfigPath:mcp,overlay:'',context:'fixture'
+    });
+    await agent.start();
+    expect(spawnMock.mock.calls.at(-1)[2].env.BASH_ENV).not.toBe('/configured/hook');
   });
 
   it.each(['telegram', 'discord', 'line', 'slack', 'api'] as const)('managed %s turns never create or renew legacy typing signals', async source => {

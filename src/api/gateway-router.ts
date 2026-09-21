@@ -1,10 +1,10 @@
+import { collectDashboardProcesses, ProcessOwner } from './dashboard-processes';
 import { DashboardSessions } from './dashboard-sessions';
 import { readMemoryActivity, activitySummary, MaintenanceReader } from './memory-activity';
 import { dashboardRange, dashboardSince } from '../ui/dashboard-range';
 import { DashboardReader } from '../orchestration/dashboard-reader';
 import express, { Request, Response } from 'express';
 import * as http from 'node:http';
-import { exec } from 'child_process';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -242,7 +242,8 @@ export class GatewayRouter {
   private voiceApi?: VoiceApi;
 
   /** Cached /processes result (3s TTL, avoids blocking execSync on every poll). */
-  private processesCache: { data: unknown[]; ts: number } | null = null;
+  private processesCache: { data: Awaited<ReturnType<typeof collectDashboardProcesses>>; ts: number } | null = null;
+  private processesPending?: Promise<Awaited<ReturnType<typeof collectDashboardProcesses>>>;
   private static readonly PROCESSES_CACHE_TTL_MS = 3_000;
 
   /** Core count is constant for the process lifetime — read once instead of
@@ -312,6 +313,7 @@ export class GatewayRouter {
     this.agents = agents;
     this.configs = configs;
     this.gatewayConfig = gatewayConfig;
+    if(gatewayConfig){gatewayConfig.gateway.api ??= {keys:[]};gatewayConfig.gateway.api.keys ??= [];}
     this.cronManager = cronManager;
     this.configPath = configPath;
     this.dashboardSessions = new DashboardSessions(configPath ? path.join(path.dirname(configPath), 'dashboard-sessions.db') : undefined);
@@ -659,8 +661,8 @@ export class GatewayRouter {
         path.join(os.homedir(), '.claude-gateway', 'shares.db');
       const store = new ShareStore(dbPath);
       this.app.use(createSharesPublicRouter(store, this.agentsRoot()));
-      if (this.gatewayConfig?.gateway?.api?.keys?.length) {
-        const publicUrl = normalizePublicUrl(this.gatewayConfig?.gateway?.publicUrl) ?? undefined;
+      if (this.gatewayConfig?.gateway?.api?.keys) {
+        const publicUrl = () => normalizePublicUrl(this.gatewayConfig?.gateway?.publicUrl) ?? undefined;
         this.app.use(
           '/api',
           createSharesPrivateRouter(
@@ -708,13 +710,13 @@ export class GatewayRouter {
     });
 
     // Mount API router after body parser so req.body is populated
-    if (this.gatewayConfig?.gateway?.api?.keys?.length) {
+    if (this.gatewayConfig?.gateway?.api?.keys) {
       const apiRouter = createApiRouter(
         this.agents,
         this.configs,
         this.gatewayConfig.gateway.api.keys,
         this.configPath,
-        this.gatewayConfig.gateway.models,
+        () => this.gatewayConfig?.gateway.models,
       );
       this.app.use('/api', apiRouter);
       this.voiceApi = new VoiceApi(this.agents, this.configs, this.gatewayConfig.gateway.api.keys);
@@ -722,7 +724,7 @@ export class GatewayRouter {
     }
 
     // Mount workspace file routes
-    if (this.gatewayConfig?.gateway?.api?.keys?.length) {
+    if (this.gatewayConfig?.gateway?.api?.keys) {
       const workspaceRouter = createWorkspaceRouter(
         this.configs,
         this.gatewayConfig.gateway.api.keys,
@@ -731,7 +733,7 @@ export class GatewayRouter {
     }
 
     // Mount skills routes
-    if (this.gatewayConfig?.gateway?.api?.keys?.length) {
+    if (this.gatewayConfig?.gateway?.api?.keys) {
       const skillsRouter = createSkillsRouter(
         this.configs,
         this.gatewayConfig.gateway.api.keys,
@@ -742,13 +744,13 @@ export class GatewayRouter {
     }
 
     // Mount package update routes (admin-only)
-    if (this.gatewayConfig?.gateway?.api?.keys?.length) {
+    if (this.gatewayConfig?.gateway?.api?.keys) {
       const packagesRouter = createPackagesRouter(this.gatewayConfig.gateway.api.keys);
       this.app.use('/api', packagesRouter);
     }
 
     // Mount connector management routes (connector definitions + secret store + config wiring)
-    if (this.gatewayConfig?.gateway?.api?.keys?.length) {
+    if (this.gatewayConfig?.gateway?.api?.keys) {
       const connectorsRouter = createConnectorsRouter(
         this.gatewayConfig.gateway.api.keys,
         this.configPath,
@@ -775,9 +777,7 @@ export class GatewayRouter {
       createOauthCallbackRouter(
         this.customConnectorsStore,
         undefined,
-        typeof this.gatewayConfig?.gateway?.oauthReturnUrl === 'string'
-          ? this.gatewayConfig.gateway.oauthReturnUrl
-          : undefined,
+        () => this.gatewayConfig?.gateway.oauthReturnUrl,
         this.agents,
       ),
     );
@@ -787,14 +787,14 @@ export class GatewayRouter {
       const cronRouter = createCronRouter(
         this.cronManager,
         this.gatewayConfig?.gateway?.api?.keys,
-        new Set(this.configs.keys()),
+        () => new Set(this.configs.keys()),
       );
       this.app.use('/api', cronRouter);
     }
 
     // Mount the route manifest endpoint (GET /api/v1/_meta/routes) — serves the
     // registry populated by the converted routers above, for CLI cross-checking.
-    if (this.gatewayConfig?.gateway?.api?.keys?.length) {
+    if (this.gatewayConfig?.gateway?.api?.keys) {
       const metaRouter = createMetaRouter(this.gatewayConfig.gateway.api.keys);
       this.app.use('/api', metaRouter);
     }
@@ -804,7 +804,7 @@ export class GatewayRouter {
       this.appsRegistry &&
       this.appInstaller &&
       this.appRegistryClient &&
-      this.gatewayConfig?.gateway?.api?.keys?.length
+      this.gatewayConfig?.gateway?.api?.keys
     ) {
       const appsRouter = createAppsRouter(
         this.appsRegistry,
@@ -1032,37 +1032,26 @@ export class GatewayRouter {
       res.json({ ok: true });
     });
 
-    // Process tree endpoint — returns raw ps data for dashboard.
-    // Async exec + 3s cache: avoids blocking the event loop on every dashboard poll.
-    this.app.get('/processes', (req: Request, res: Response) => {
+    // Authenticated, cached, single-flight process inventory. No raw command lines.
+    this.app.get('/processes', async (req: Request, res: Response) => {
       if (!this.requireDashOrApiKey(req, res)) return;
-      const now = Date.now();
-      if (this.processesCache && now - this.processesCache.ts < GatewayRouter.PROCESSES_CACHE_TTL_MS) {
-        res.json({ processes: this.processesCache.data, numCpus: GatewayRouter.NUM_CPUS });
-        return;
-      }
-      exec(
-        "ps -eo pid,ppid,stat,%cpu,%mem,rss,args --no-headers 2>/dev/null | grep -E 'claude|bun.*gateway|bun.*mcp|bun.*receiver|node.*dist/' | grep -v grep | grep -v vscode",
-        { encoding: 'utf8', timeout: 5000 },
-        (err, stdout) => {
-          if (err) process.stderr.write(`[processes] ps error: ${err.message}\n`);
-          const processes = (stdout ?? '').trim().split('\n').filter(Boolean).map((line) => {
-            const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)\s+(.+)$/);
-            if (!m) return null;
-            return {
-              pid: parseInt(m[1]),
-              ppid: parseInt(m[2]),
-              stat: m[3],
-              cpu: parseFloat(m[4]),
-              mem: parseFloat(m[5]),
-              rssKb: parseInt(m[6]),
-              args: m[7].trim(),
-            };
-          }).filter(Boolean);
-          this.processesCache = { data: processes, ts: Date.now() };
-          res.json({ processes, numCpus: GatewayRouter.NUM_CPUS });
-        },
-      );
+      try {
+        if (!this.processesCache || Date.now()-this.processesCache.ts >= GatewayRouter.PROCESSES_CACHE_TTL_MS) {
+          if (!this.processesPending) {
+            const owners: ProcessOwner[] = [{pid:process.pid,group:'gateway'}];
+            for (const runner of this.agents.values()) owners.push(...(runner.getProcessOwners?.() ?? []));
+            const apps = new Map<string,string[]>();
+            for (const [id,config] of this.configs) if (config.type === 'app-agent' && config.container) {
+              apps.set(config.container,[...(apps.get(config.container) ?? []),id]);
+            }
+            this.processesPending = collectDashboardProcesses(owners,[...apps].map(([name,agentIds])=>({name,agentIds})))
+              .then(data => { this.processesCache = {data,ts:Date.now()}; return data; })
+              .finally(()=>{this.processesPending=undefined;});
+          }
+          await this.processesPending;
+        }
+        res.json({...this.processesCache!.data,numCpus:GatewayRouter.NUM_CPUS});
+      } catch { res.status(503).json({error:'Process inspection unavailable'}); }
     });
 
     // Knowledge Base graph — a memory-wiki as a {nodes, edges} model for the
@@ -1819,7 +1808,12 @@ export class GatewayRouter {
   updateApiKeys(newKeys: ApiKey[]): void {
     if (!this.gatewayConfig?.gateway?.api?.keys) return;
     const keys = this.gatewayConfig.gateway.api.keys;
-    keys.splice(0, keys.length, ...newKeys);
+    const next=structuredClone(newKeys);
+    if(JSON.stringify(keys)===JSON.stringify(next))return;
+    keys.splice(0, keys.length, ...next);
+    this.ptyStreamTickets.clear();
+    for(const client of this.wss?.clients ?? [])client.close(1008,'Authorization changed');
+    this.voiceApi?.invalidateAuthorization();
   }
 
   /**

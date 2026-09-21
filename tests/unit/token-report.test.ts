@@ -177,3 +177,36 @@ test('live refresh updates status without replacing the scope toggle or its hand
  expect(nodes['report-scope']).toBe(scope);
  expect(typeof scope.onclick).toBe('function');
 });
+
+test.each(['codex','claude',undefined] as const)('worker details show recorded harness %s without guessing from model', harness => {
+  const html=generateTokenReportHtml('agent',{...report,turns:[{...report.turns[1],role:'worker',harness,model:'gpt-test'}]});
+  expect(html).toContain(harness ? 'class="harness-badge harness-'+harness+'">'+(harness==='codex'?'Codex':'Claude Code')+'</span>' : 'Harness: —');
+  expect(html).toContain('<div>Model: gpt-test</div>');
+});
+
+test('elapsed uses turn execution boundaries and keeps missing or queued timing unknown', () => {
+  const now = jest.spyOn(Date, 'now').mockReturnValue(1000000);
+  try {
+    const detail = (fields: Partial<TokenReportView['turns'][number]>) => generateTokenReportHtml('agent', {...report, turns:[{...report.turns[1], startedAt: 100000, ...fields}]});
+    expect(detail({endedAt:225000,state:'completed'})).toContain('<div>Elapsed: 2m 05s</div>');
+    expect(detail({state:'running'})).toContain('<div>Elapsed: 15m 00s</div>');
+    expect(detail({pending:true})).toContain('<div>Elapsed: —</div>');
+    expect(detail({state:'failed'})).toContain('<div>Elapsed: —</div>');
+    expect(detail({endedAt:90000})).toContain('<div>Elapsed: —</div>');
+    expect(detail({startedAt:'invalid'})).toContain('<div>Elapsed: —</div>');
+  } finally { now.mockRestore(); }
+});
+
+test('Codex used shell commands display as Shell while Claude retains Bash', () => {
+ for(const harness of ['codex','claude'] as const){
+  const html=generateTokenReportHtml('agent',{...report,turns:[{...report.turns[1],harness,usedTools:['Bash']}]});
+  expect(html).toContain('<code>'+(harness==='codex'?'Shell':'Bash')+'</code>');
+ }
+});
+
+test('renders measured Codex context separately from requested size and agent header',()=>{
+ const html=generateTokenReportHtml('agent',{...report,turns:[{...report.turns[1],harness:'codex',contextWindow:{requested:1000000,configured:400000,providerLimit:400000,limitSource:'documented-model',observed:380000,used:12000,status:'observed'}}]});
+ expect(html).toContain('Native context: 12.00K / 380.00K · 3.2%');
+ expect(html).toContain('Requested: 1.00M · Configured: 400.00K');
+ expect(html).toContain('Native usable context is below the request');
+});

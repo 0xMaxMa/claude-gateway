@@ -15,7 +15,7 @@ Claude Gateway keeps conversations responsive while Claude Code workers execute 
 - 🪄 **Agent Orchestration Engine** — responsive conversations while workers execute durable tasks. The dashboard separates Agent/worker token usage and offers per-session reports with cache and tool details. Existing configurations without the switch are upgraded automatically; explicit `false` remains an opt-out. See [orchestration settings](https://0xmaxma.github.io/claude-gateway/reference/orchestration-settings.html).
 
 - 🔥 **Agent orchestration** — keep conversations responsive while reusable workers execute durable tasks, report progress, accept follow-up instructions, and support cancellation. See [orchestration and tasks](https://0xmaxma.github.io/claude-gateway/guide/orchestration.html).
-- ⚙️ **Worker harnesses** — optionally run GPT workers through native Codex on the host or inside app containers while conversational agents remain on Claude Code. See [worker harnesses](https://0xmaxma.github.io/claude-gateway/guide/worker-harnesses.html).
+- ⚙️ **Worker harnesses** — automatically route GPT workers to native Codex when ready, with Claude Code fallback before dispatch on the host or inside app containers. Conversational agents remain on Claude Code. See [worker harnesses](https://0xmaxma.github.io/claude-gateway/guide/worker-harnesses.html).
 - 🎙️ **Voice conversations** — speech recognition and spoken replies with per-agent models and voices, direct or upstream providers, live or recorded speech input, and audio replay. See [voice setup](https://0xmaxma.github.io/claude-gateway/guide/voice.html).
 - 🧠 **Skill self-improvement** — agents learn reusable skills from their own work: after a substantive turn a background reviewer creates or updates a skill, hot-reloaded for the next turn. Provenance-guarded (never overwrites human-written skills), capped per day, and audited to `SKILLS_LEARNED.md`. See [`gateway.skillLearning`](https://0xmaxma.github.io/claude-gateway/reference/memory-settings.html#gateway-skilllearning)
 - 📚 **Knowledge base (two-lane memory)** — per-agent SQLite/FTS5 searchable archive exposed through `memory_search` / `memory_get` MCP tools, so agents recall notes that don't fit the always-injected core; chunks carry fail-closed provenance and the index is refreshed off the gateway event loop. See [`gateway.knowledge`](https://0xmaxma.github.io/claude-gateway/reference/memory-settings.html#gateway-knowledge)
@@ -87,3 +87,15 @@ Browser replay is available for approved spoken replies before their original
 recording completes, including interrupted playback. Explicit replay can generate
 missing audio with the configured TTS provider (normal provider charges apply).
 See the [replay and playback controls](website/api/voice.md#retained-speech-replay).
+
+### Safemode investigations
+
+Run `claude-gateway safemode --name investigation --prompt "Inspect this gateway problem"`
+for a native interactive Claude Code investigation without stopping the gateway.
+Use `--cli codex` to select Codex, `--model` to override the native model, and
+`--resume investigation` to return to the same investigation. Safemode preserves
+build/startup evidence and uses a separate source snapshot. Session IDs are the
+native Claude Code/Codex IDs; `safemode rename ID NEW_NAME` changes the alias
+without interrupting the conversation. Headless takeover,
+request IDs and trusted operator agent controls are described in the
+[safemode guide](website/guide/safemode.md). Trusted agents can discover explicitly assigned investigations and track them as Gateway-managed tasks, with automatic completion reports and conversation-scoped controls.

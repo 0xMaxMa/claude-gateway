@@ -178,3 +178,17 @@ test.each(['failed','completed','cancelled'] as const)('worker report preserves 
   if(state==='cancelled')expect(turn.failureCode).toBeUndefined();
  }finally{store.close();}
 });
+
+test('persists worker native context without replacing the conversational agent window', () => {
+ const store=new OrchestrationStore(':memory:','agent');
+ try {
+  const collector=new TurnUsageCollector();
+  const context={requested:1000000,configured:1000000,providerLimit:null,limitSource:'unknown' as const,observed:828400,used:45000,status:'observed' as const};
+  collector.observe({type:'system',subtype:'native_init',model:'gpt-test',contextWindow:{...context,observed:null,used:null,status:'unverified'}});
+  collector.observe({type:'system',subtype:'native_usage',usage:{input_tokens:123,output_tokens:12},contextWindow:context});
+  recordTokenTurn(store,{id:'worker',sessionId:'session',role:'worker',category:'worker',harness:'codex',toolIds:[],inputTokens:123,totalTokens:135,startedAt:1,...collector.snapshot()});
+  const report=tokenReport(store,'session');
+  expect(report.turns[0].contextWindow).toEqual(context);
+  expect(report.contextWindow).toBeNull();
+ } finally {store.close();}
+});

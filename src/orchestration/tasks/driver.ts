@@ -1,3 +1,6 @@
+import { resolveCodexCredentials, CodexReadinessError } from '../../session/codex-auth';
+import { resolveCodexRuntime } from '../../session/codex-runtime';
+import { inspectSelectedCodexRuntime } from '../../session/codex-container-runtime';
 import { recordTokenTurn } from '../token-ledger';
 import { storedReplyContext, resolveStoredReply } from '../reply-context';
 import { observeToolRepetition } from './tool-repetition';
@@ -5,6 +8,7 @@ import { taskDirective } from './task-directive';
 import { personaWorkspaceRules } from '../source-policy';
 import { browserRouting } from '../browser-routing';
 import { discoverCliSkills } from '../cli-skills';
+import { discoverWorkerExtensions } from '../../session/worker-extensions';
 import { ProcessActivitySampler } from '../process-activity';
 import { cleanupPersistedProcess, processFingerprint } from '../process-supervisor';
 import { resolveOrchestrationConfig } from '../config';
@@ -13,7 +17,7 @@ import { payloadHash } from '../store';
 import { containerNode, validateContainer } from '../container';
 import { toolActivity } from '../tool-activity';
 import { extractFrontmatter } from '../../skills/parser';
-import { dirname, join } from 'path';
+import { dirname, join, relative, isAbsolute } from 'path';
 import { readFile, writeFile, realpath, mkdir, cp, lstat } from 'fs/promises';
 import type { AgentConfig, GatewayConfig } from '../../types';
 import { SessionStore } from '../../session/store';
@@ -63,29 +67,62 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const current = this.tasks.store.task(task.taskId)!;
     if (current.state !== 'starting' || current.activeAttemptId !== attempt.attemptId) throw new OrchestrationError('ATTEMPT_CANCELLED_BEFORE_START');
     const directory = join(this.privateRoot, attempt.attemptId);
-    const harness = resolveWorkerHarness(this.agent, this.gateway, task.model ?? this.agent.claude.model);
+    let harness = resolveWorkerHarness(this.agent, this.gateway, task.model ?? this.agent.claude.model);
+    let authFingerprint: string | undefined;
+    if (harness.harness === 'codex') {
+      try {
+        if (task.skill?.invocation === 'cli' && !task.skill.filePath) {
+          const inventory = await discoverWorkerExtensions(this.agent, this.gateway, workspace.path);
+          const installed = inventory.skills.find(skill => skill.name === task.skill!.name || skill.aliases?.includes(task.skill!.name));
+          if (installed) task.skill = { ...task.skill, filePath: installed.filePath, resourceRoot: installed.resourceRoot, fileScope: installed.fileScope, content: installed.fileScope === 'container' ? installed.content ?? '' : await readFile(installed.filePath, 'utf8') };
+        }
+        if (task.skill?.invocation === 'cli' && !task.skill.filePath) throw new CodexReadinessError('CODEX_SKILL_UNAVAILABLE', 'The native command has no installed skill file to transfer to Codex.');
+        const runtime = resolveCodexRuntime(harness.config.bin, this.agent.workspace);
+        authFingerprint = (await resolveCodexCredentials({ ...harness.config, bin: runtime.executable, allowDockerHost: this.agent.type === 'app-agent' })).fingerprint;
+        if (this.agent.type === 'app-agent') await inspectSelectedCodexRuntime(this.agent, runtime);
+      } catch (error) {
+        const selector = this.agent.workers?.harness ?? this.gateway.gateway.workers?.harness ?? 'auto';
+        if (selector !== 'auto' || attempt.harness) throw error;
+        harness = { ...harness, harness: 'claude' };
+        this.tasks.store.transaction(() => this.tasks.store.appendEvent(task.conversationId, 'worker.harness_fallback',
+          { taskId: task.taskId, from: 'codex', to: 'claude', reason: error instanceof CodexReadinessError ? error.code : 'CODEX_RUNTIME_UNAVAILABLE' }, task.taskId));
+      }
+    }
+    const afterReadiness = this.tasks.store.task(task.taskId);
+    if (afterReadiness?.state !== 'starting' || afterReadiness.activeAttemptId !== attempt.attemptId) throw new OrchestrationError('ATTEMPT_CANCELLED_BEFORE_START');
     // Persist the actual execution choice; pool fingerprints prevent cross-harness resume.
     if (attempt.harness && attempt.harness !== harness.harness) throw new OrchestrationError('WORKER_HARNESS_CHANGED');
     attempt.harness = harness.harness;
     attempt.harnessModel = harness.harness === 'codex' ? harness.config.model : task.model ?? this.agent.claude.model;
     this.tasks.store.transaction(() => this.tasks.store.saveAttempt(attempt));
-    const cliSkill = task.skill?.invocation === 'cli';
-    if (cliSkill && harness.harness === 'codex') throw new OrchestrationError('CODEX_SKILL_UNAVAILABLE', 'This skill exists only in the Claude Code harness. Install a file-based skill or select the Claude worker harness.');
+    const cliSkill = task.skill?.invocation === 'cli' && harness.harness !== 'codex';
     const invokedSkill = task.skill ? (cliSkill ? task.skill.name : `orchestration-task:${task.skill.name}`) : undefined;
     if (cliSkill) {
       const installed = await discoverCliSkills(this.agent, workspace.path);
       if (!installed.some(skill => skill.name === task.skill!.name)) throw new OrchestrationError('CLI_SKILL_UNAVAILABLE', 'The selected skill is unavailable in this worker harness; no host/container fallback was attempted.');
     }
-    const skillPluginDir = task.skill && !cliSkill ? join(directory, 'skill-plugin') : undefined;
-    if (task.skill && !cliSkill) {
+    const containerSkill = task.skill?.fileScope === 'container' && !cliSkill ? { name: task.skill.name, filePath: task.skill.filePath, resourceRoot: task.skill.resourceRoot ?? dirname(task.skill.filePath), content: task.skill.content } : undefined;
+    if (containerSkill && this.agent.type !== 'app-agent') throw new OrchestrationError('CONTAINER_SKILL_REQUIRES_CONTAINER');
+    const skillPluginDir = task.skill && !cliSkill && !containerSkill ? join(directory, 'skill-plugin') : undefined;
+    if (task.skill && !cliSkill && !containerSkill) {
       if (task.skill.requires?.plugins?.length) throw new OrchestrationError('SKILL_PLUGIN_UNAVAILABLE');
       const destination = join(skillPluginDir!, 'skills', task.skill.name);
       await mkdir(join(skillPluginDir!, '.claude-plugin'), { recursive: true, mode: 0o700 });
       await writeFile(join(skillPluginDir!, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'orchestration-task', description: 'Assigned task skill only', version: '1.0.0' }), { mode: 0o600 });
       await mkdir(destination, { recursive: true, mode: 0o700 });
       // Keep relative references/scripts available; the invoked body is pinned at admission.
-      await cp(dirname(task.skill.filePath), destination, { recursive: true, dereference: false, filter: async source => !(await lstat(source)).isSymbolicLink() });
-      await writeFile(join(destination, 'SKILL.md'), `---\nname: ${task.skill.name}\ndescription: Assigned installed skill\n---\n${extractFrontmatter(task.skill.content)?.body ?? task.skill.content}`, { mode: 0o600 });
+      const resourceRoot = task.skill.resourceRoot ?? dirname(task.skill.filePath);
+      const entry = relative(resourceRoot, task.skill.filePath);
+      if (entry === '..' || entry.startsWith('../') || isAbsolute(entry)) throw new OrchestrationError('SKILL_RESOURCE_PATH_INVALID');
+      let resourceBytes = 0;
+      await cp(resourceRoot, destination, { recursive: true, dereference: false, filter: async source => {
+        const stat = await lstat(source);
+        if (stat.isSymbolicLink() || !stat.isFile() && !stat.isDirectory()) return false;
+        if (stat.isFile() && (resourceBytes += stat.size) > 10 * 1024 * 1024) throw new OrchestrationError('SKILL_RESOURCES_TOO_LARGE');
+        return true;
+      } });
+      await writeFile(join(destination, entry), task.skill.content, { mode: 0o600 });
+      await writeFile(join(destination, 'SKILL.md'), `---\nname: ${task.skill.name}\ndescription: Assigned installed skill\n---\n${entry === 'SKILL.md' ? extractFrontmatter(task.skill.content)?.body ?? task.skill.content : `Read and follow ${entry}. Resolve file-relative references from that file's directory and plugin-relative references from this directory. The assigned instructions are pinned in that file.`}`, { mode: 0o600 });
     }
     const revision = this.tasks.revision(task.taskId, attempt.revision);
     const directive = taskDirective(this.tasks.store, task.conversationId, revision);
@@ -94,19 +131,20 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const context = this.agent.type === 'app-agent'
       ? await containerNode(this.agent.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))")
       : await readFile(join(this.agent.workspace, 'CLAUDE.md'), 'utf8');
-    this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway, harness, toolExposure: 'lazy-connectors-v1' }));
+    this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway, harness, authFingerprint, toolExposure: 'lazy-connectors-v1' }));
     // Pool expiration/rebinding makes old native transcripts disposable. This
     // bounded maintenance is best effort and never changes task admission.
     void cleanupCodexSessions({ agent: this.agent, stateDirectory: join(this.privateRoot, 'codex-sessions'), retainedSessionIds: this.tasks.pool.retainedSessionIds() }).catch(() => {});
     const shared = resolveSharedConfig(this.agent.knowledge?.shared, this.gateway.gateway.knowledge?.shared);
     const ticket = this.bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation }, directory, this.agent.workspace, shared.enabled ? sharedVaultDir(shared) : '');
     try {
-      const profile = { ...ticket.profile, hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir };
+      const profile = { ...ticket.profile, hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
       const workerConfig: AgentConfig = { ...this.agent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
         claude: { ...this.agent.claude, model: task.model ?? this.agent.claude.model, extraFlags: [] } };
       const process = harness.harness === 'codex'
         ? new CodexProcess({ agent: workerConfig, gateway: this.gateway, profile, sessionId: attempt.sessionId,
           stateDirectory: join(this.privateRoot, 'codex-sessions'), config: harness.config,
+          requestInput: question => { this.tasks.requestInput(attempt.attemptId, attempt.generation, question); },
           checkpoint: async () => {
             const next = this.tasks.checkpoint(attempt.attemptId, attempt.generation, { sessionId: attempt.sessionId });
             const text = [next.directive ? `Task revision ${next.revision}: ${next.directive}` : '', next.feedback?.message].filter(Boolean).join('\n\n');
@@ -169,12 +207,16 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       const limits = resolveOrchestrationConfig(this.agent.orchestration);
       const turn = startProcessTurn(process, prompt, limits.tasks.maxDurationMs || undefined, undefined,
         metrics => {
-          recordTokenTurn(this.tasks.store, { id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics });
+          recordTokenTurn(this.tasks.store, { id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics, harness: attempt.harness });
           this.onManagedTurn?.(task.agentSessionId, revision.instructions, metrics, task.skill ? [task.skill.name] : []);
         }, [],
         {startupTimeoutMs: limits.conversation.startupTimeoutMs, firstResponseTimeoutMs: limits.conversation.firstResponseTimeoutMs, compactionTimeoutMs: limits.conversation.compactionTimeoutMs,
+          pauseRequested: () => {
+            const current = this.tasks.store.task(task.taskId);
+            return current?.activeAttemptId === attempt.attemptId && current.state === 'waiting_input' && Boolean(current.pendingQuestion);
+          },
           idleTimeoutMs: limits.tasks.idleTimeoutMs, acceptToolProgress: true, idleAction: 'observe',
-          onUsage: metrics => recordTokenTurn(this.tasks.store, {id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics}),
+          onUsage: metrics => recordTokenTurn(this.tasks.store, {id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics, harness: attempt.harness}),
           onObservation: observation => {
             if (observing || observationClosed) return;
             observing = true;
@@ -192,6 +234,11 @@ export class ClaudeWorkerDriver implements WorkerDriver {
           await process.stop();
           return { type: process.managedGroupStopped ? 'stopped' as const : 'unknown' as const };
         }
+        if (answer.paused) {
+          await process.stop();
+          return {type: process.managedGroupStopped ? 'paused' as const : 'unknown' as const};
+        }
+        if (!answer.text.trim()) throw new OrchestrationError('WORKER_RESULT_MISSING', 'The worker ended without a final response. Inspect existing changes before retrying.');
         if (Buffer.byteLength(answer.text) > 262144) throw new OrchestrationError('RESPONSE_TOO_LARGE');
         const artifact = await this.workspaces.artifact(task.taskId);
         await writeFile(join(directory, 'diff.patch'), artifact.diff, { mode: 0o600 });
@@ -200,7 +247,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         if (!process.managedGroupStopped) return { type: 'unknown' as const };
         const diff = boundedDiffText(artifact.diff);
         const fileIds = this.tasks.store.all('SELECT id FROM task_files WHERE attempt_id=? ORDER BY created_at,id', attempt.attemptId).map(row => String(row.id));
-        return { type: 'completed' as const, result: { summary: answer.text || 'Worker turn ended without a text summary.', artifactIds: [artifact.resourceId, ...fileIds],
+        return { type: 'completed' as const, result: { summary: answer.text, artifactIds: [artifact.resourceId, ...fileIds],
           diff: { text: diff, truncated: diff.length < artifact.diff.length } } };
       }).catch(async error => {
         await process.stop();

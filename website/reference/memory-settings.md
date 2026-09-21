@@ -2,6 +2,8 @@
 
 These settings are read from `config.json`. Examples are partial objects to merge into an existing configuration. Defaults in the tables refer to runtime fallback values; the installed template may explicitly choose a different value.
 
+Memory manager settings and timers refresh through the [configuration change lifecycle](./configuration-changes.md). In-flight dreaming/reflection jobs retain their resolved settings; skill-learning reconfiguration waits for active reviews. A schedule change applies to future runs rather than triggering a job immediately.
+
 ## `gateway.skillLearning`
 
 Controls [skill learning](../guide/tools.md) — agents learning reusable skills from their own work. Telemetry capture is always on; the reviewer/writer/curator honor `enabled`.

@@ -1,3 +1,4 @@
+import request from 'supertest';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -166,6 +167,22 @@ describe('config-watcher', () => {
   // ---------------------------------------------------------------------------
   // U-CW-01: config.json changes claude.model — emit changes with hotReloadable=true
   // ---------------------------------------------------------------------------
+  it('reports safemode allowlist additions and revocations as live', () => {
+    const configPath=path.join(tmpDir,'config.json');
+    writeConfigFile(configPath,rawConfig());
+    const watcher=new ConfigWatcher(configPath,loadConfig(configPath),logger);
+    const changes=jest.fn();watcher.on('changes',changes);
+    for(const allowedAgentIds of [['alfred'], [], ['baerbel'], undefined]) {
+      changes.mockClear();logger.warn.mockClear();logger.info.mockClear();
+      writeConfigFile(configPath,{...rawConfig(),...(allowedAgentIds ? {safemode:{allowedAgentIds}} : {})});
+      watcher.reload();
+      expect(changes).toHaveBeenCalledTimes(1);
+      expect(changes.mock.calls[0][0]).toEqual([expect.objectContaining({field:'safemode.allowedAgentIds',newValue:allowedAgentIds,hotReloadable:true})]);
+      expect(logger.info).toHaveBeenCalledWith('Config changes ready to apply',{fields:['safemode.allowedAgentIds']});
+      expect(logger.info).not.toHaveBeenCalledWith('Config hot-reloaded',expect.anything());
+    }
+    changes.mockClear();watcher.reload();expect(changes).not.toHaveBeenCalled();
+  });
   it('U-CW-01: emits changes with hotReloadable=true when claude.model changes', () => {
     const configPath = path.join(tmpDir, 'config.json');
     writeConfigFile(configPath, rawConfig());
@@ -309,7 +326,7 @@ describe('config-watcher', () => {
   //     box, which is the worst possible thing to make wait for a restart.
   //   - oauthReturnUrl is captured as a plain argument when the callback router is
   //     mounted (gateway-router.ts), so nothing can reach it afterwards →
-  //     reported as restart-required, exactly like gateway.publicUrl.
+  //     reported as live, exactly like gateway.publicUrl.
   it('reports gateway.connectorsDefaultEnabled as a hot-reloadable change', () => {
     const configPath = path.join(tmpDir, 'config.json');
     writeConfigFile(configPath, rawConfig());
@@ -408,7 +425,7 @@ describe('config-watcher', () => {
     watcher.stop();
   });
 
-  it('reports gateway.oauthReturnUrl as restart-required', () => {
+  it('reports gateway.oauthReturnUrl as live', () => {
     const configPath = path.join(tmpDir, 'config.json');
     writeConfigFile(configPath, rawConfig());
 
@@ -423,7 +440,7 @@ describe('config-watcher', () => {
     expect(changes.find((c) => c.field === 'gateway.oauthReturnUrl')).toMatchObject({
       agentId: '',
       newValue: 'https://panel.example.com/connectors',
-      hotReloadable: false,
+      hotReloadable: true,
     });
 
     watcher.stop();
@@ -453,7 +470,7 @@ describe('config-watcher', () => {
   // ---------------------------------------------------------------------------
   // U-CW-02: config.json changes telegram.botToken — emit changes with hotReloadable=false
   // ---------------------------------------------------------------------------
-  it('U-CW-02: emits changes with hotReloadable=false when telegram.botToken changes', () => {
+  it('U-CW-02: emits changes with hotReloadable=true when telegram.botToken changes', () => {
     const configPath = path.join(tmpDir, 'config.json');
     writeConfigFile(configPath, rawConfig());
 
@@ -471,7 +488,7 @@ describe('config-watcher', () => {
     const changes: ConfigChange[] = changeSpy.mock.calls[0][0];
     const tokenChange = changes.find(c => c.field === 'telegram.botToken');
     expect(tokenChange).toBeDefined();
-    expect(tokenChange!.hotReloadable).toBe(false);
+    expect(tokenChange!.hotReloadable).toBe(true);
     expect(tokenChange!.agentId).toBe('alfred');
     expect(tokenChange!.newValue).toBe('new-alfred-token');
 
@@ -579,7 +596,7 @@ describe('config-watcher', () => {
     watcher.stop();
   });
 
-  it('reports gateway.publicUrl changes as restart-required', () => {
+  it('reports gateway.publicUrl changes as live', () => {
     const configPath = path.join(tmpDir, 'config-public-url.json');
     writeConfigFile(configPath, rawConfig());
     const watcher = new ConfigWatcher(configPath, loadConfig(configPath), logger);
@@ -598,10 +615,10 @@ describe('config-watcher', () => {
       field: 'gateway.publicUrl',
       oldValue: undefined,
       newValue: 'https://vm.example.com/gateway',
-      hotReloadable: false,
+      hotReloadable: true,
     }));
-    expect(logger.warn).toHaveBeenCalledWith(
-      'Config changes require restart to take effect',
+    expect(logger.info).toHaveBeenCalledWith(
+      'Config changes ready to apply',
       expect.objectContaining({ fields: expect.arrayContaining(['gateway.publicUrl']) }),
     );
     watcher.stop();
@@ -796,18 +813,17 @@ describe('config-watcher', () => {
     expect(gatewayConfig.gateway.api!.keys[1].key).toBe('key-3');
   });
 
-  it('U-CW-09b: GatewayRouter.updateApiKeys does nothing when no api config exists', () => {
-    const gatewayConfig: GatewayConfig = {
-      gateway: { logDir: '/tmp', timezone: 'UTC' },
-      agents: [],
-    };
-
-    const router = new GatewayRouter(new Map(), new Map(), undefined, gatewayConfig);
-
-    // Should not throw
-    expect(() => {
-      router.updateApiKeys([{ key: 'k', agents: '*' }]);
-    }).not.toThrow();
+  it('mounts authenticated routes before the first API key is added', async () => {
+    const gatewayConfig: GatewayConfig = {gateway:{logDir:'/tmp',timezone:'UTC'},agents:[]};
+    const router=new GatewayRouter(new Map(),new Map(),undefined,gatewayConfig,undefined,path.join(tmpDir,'config.json'));
+    const app=(router as any).app;
+    try{
+      expect((await request(app).get('/api/v1/agents')).status).toBe(401);
+      router.updateApiKeys([{key:'new-key',agents:'*',admin:true}]);
+      expect((await request(app).get('/api/v1/agents').set('x-api-key','new-key')).status).toBe(200);
+      router.updateApiKeys([]);
+      expect((await request(app).get('/api/v1/agents').set('x-api-key','new-key')).status).toBe(403);
+    }finally{await router.stop();}
   });
 
   // ---------------------------------------------------------------------------

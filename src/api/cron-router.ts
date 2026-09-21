@@ -27,17 +27,17 @@ type AuthedRequest = Request & { apiKey: ApiKey };
  *   POST   /v1/crons/:id/run   — crons run       — Trigger a job manually
  *   GET    /v1/crons/:id/runs  — crons runs      — Get run history
  */
-export function createCronRouter(manager: CronManager, apiKeys?: ApiKey[], knownAgentIds?: Set<string>): Router {
+export function createCronRouter(manager: CronManager, apiKeys?: ApiKey[], knownAgentIds?: Set<string> | (() => Set<string>)): Router {
   const router = Router();
 
   // Apply auth middleware if apiKeys are provided
-  if (apiKeys?.length) {
+  if (apiKeys) {
     router.use(createApiAuthMiddleware(apiKeys));
   }
 
   // Helper: check agent access for jobs retrieved by id
   function checkJobAccess(req: Request, res: Response, agentId: string): boolean {
-    if (!apiKeys?.length) return true; // no auth configured — allow all
+    if (!apiKeys) return true; // no auth configured — allow all
     const apiKey = (req as AuthedRequest).apiKey;
     if (!canAccessAgent(apiKey, agentId)) {
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
@@ -61,7 +61,7 @@ export function createCronRouter(manager: CronManager, apiKeys?: ApiKey[], known
       let jobs = manager.list(agentId);
 
       // Filter by key's agent scope
-      if (apiKeys?.length) {
+      if (apiKeys) {
         const apiKey = (_req as AuthedRequest).apiKey;
         if (apiKey.agents !== '*') {
           const allowed = apiKey.agents as string[];
@@ -115,7 +115,7 @@ export function createCronRouter(manager: CronManager, apiKeys?: ApiKey[], known
 
       if (!checkJobAccess(req, res, body.agentId)) return;
 
-      if (knownAgentIds && !knownAgentIds.has(body.agentId)) {
+      if (knownAgentIds && !(typeof knownAgentIds==='function'?knownAgentIds():knownAgentIds).has(body.agentId)) {
         res.status(404).json({ error: `Agent '${body.agentId}' not found` });
         return;
       }

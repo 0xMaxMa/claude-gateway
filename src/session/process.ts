@@ -1,3 +1,5 @@
+import { workerEnvironment } from './worker-environment';
+import { ProcessDiagnostics, TurnOutcome } from './process-diagnostics';
 import { prepareManagedConnectors } from './managed-connectors';
 import { RequestToolCapture, RequestToolSchemas } from './request-tool-capture';
 import type { InputImage } from './input-image';
@@ -270,6 +272,9 @@ export class SessionProcess extends EventEmitter {
   spawnContext: { loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number } | null = null;
   private process: ChildProcess | null = null;
   private stopping = false;
+  private readonly diagnostics = new ProcessDiagnostics();
+  recordTurnOutcome(outcome: TurnOutcome, errorCode?: string): void { this.diagnostics.finish(outcome, errorCode); }
+  private diagnosticContext(): object { return { sessionId: this.sessionId, responseId: this.runtimeProfile?.responseId, taskId: this.runtimeProfile?.taskId, attemptId: this.runtimeProfile?.attemptId, model: this._lastModel || this.agentConfig.claude.model }; }
   private restartCount = 0;
   // Wall-clock time the current (or most recent) child was spawned. Used by the
   // exit handler to measure how long that child survived, so a death after
@@ -1119,6 +1124,7 @@ export class SessionProcess extends EventEmitter {
     let containerUid = 1000;
     try { containerUid = os.userInfo().uid; } catch { /* use 1000 */ }
 
+    const configuredWorkerEnvironment = this.runtimeProfile?.role === 'worker' ? workerEnvironment(this.agentConfig, this.gatewayConfig) : {};
     const containerEnv: Record<string, string> = {
       HOME: os.homedir(),
       CLAUDE_WORKSPACE: '/workspace',
@@ -1136,7 +1142,7 @@ export class SessionProcess extends EventEmitter {
     // Claude credentials — it is a bearer token for the agent's whole bot
     // account. It is already placed in the spawn env below, unconditionally.
     const containerAuthEnv = isAppAgent || (this.runtimeProfile?.checkpointCommand && !this.runtimeProfile.hostExecution) ? this.resolveContainerAuthEnv() : {};
-    const byNameKeys = [...(this.runtimeProfile ? [] : ['TELEGRAM_BOT_TOKEN']), ...Object.keys(containerAuthEnv)];
+    const byNameKeys = [...(this.runtimeProfile ? [] : ['TELEGRAM_BOT_TOKEN']), ...Object.keys(containerAuthEnv), ...Object.keys(configuredWorkerEnvironment)];
     const dockerEnvFlags = [
       ...Object.entries(containerEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
       ...byNameKeys.flatMap((k) => ['-e', k]),
@@ -1182,6 +1188,7 @@ export class SessionProcess extends EventEmitter {
         ...containerAuthEnv,
         ...(toolCapture ? {OTEL_LOG_RAW_API_BODIES:'file:'+toolCapture.directory} : {}),
         ...(hardenedPath ? { PATH: hardenedPath } : {}),
+        ...configuredWorkerEnvironment,
         GATEWAY_ORIGIN_SESSION_ID: this.runtimeProfile?.originSessionId ?? this.sessionId,
         GATEWAY_TASK_ID: this.runtimeProfile?.taskId ?? '',
         GATEWAY_TASK_ATTEMPT_ID: this.runtimeProfile?.attemptId ?? '',
@@ -1289,6 +1296,7 @@ export class SessionProcess extends EventEmitter {
         // Try to capture assistant text for SessionStore + update status file
         try {
           const obj = JSON.parse(line);
+          this.diagnostics.observe(obj);
           // stream-json assistant message (partial or final)
           if (obj.type === 'assistant' && Array.isArray(obj.message?.content)) {
             // Capture the real model from the stream
@@ -1457,6 +1465,7 @@ export class SessionProcess extends EventEmitter {
           }
           // result = end of turn
           if (obj.type === 'result') {
+            this.logger.info('session turn finished', { ...this.diagnosticContext(), ...this.diagnostics.snapshot() });
             if (!obj.is_error && this.contextResetId) {
               try {
                 this.sessionStore.completeContextReset(this.agentConfig.id, this.sessionId, this.contextResetId);
@@ -1542,7 +1551,8 @@ export class SessionProcess extends EventEmitter {
       this.stderrBuffer = lines.pop() ?? '';
       const lastLine = lines.map(l => l.trim()).filter(Boolean).pop();
       if (lastLine) this.lastStderrLine = lastLine;
-      this.logger.warn('session stderr', { stderr: text });
+      this.diagnostics.stderrObserved = true;
+      this.logger.warn('session stderr', { stderr: text, ...this.diagnosticContext(), requestOutcome: this.diagnostics.outcome, outcomeRequiresTerminalEvent: true });
     });
 
     proc.on('exit', (code, signal) => {
@@ -1552,6 +1562,7 @@ export class SessionProcess extends EventEmitter {
       if (trailing) this.lastStderrLine = trailing;
       this.stderrBuffer = '';
       this.logger.info('session subprocess exited', {
+        ...this.diagnosticContext(), ...this.diagnostics.snapshot(),
         code,
         signal,
         sessionId: this.sessionId,
@@ -1698,6 +1709,7 @@ export class SessionProcess extends EventEmitter {
   }
 
   sendMessage(text: string, images: readonly InputImage[] = []): void {
+    this.diagnostics.reset();
     if (!this.process?.stdin?.writable) {
       this.logger.warn('Cannot send message: subprocess not running', {
         sessionId: this.sessionId,
@@ -1922,6 +1934,7 @@ export class SessionProcess extends EventEmitter {
     if (!this.process || this._exited) return false;
     if (!this._processing) return false;
     this.interruptRequested = true;
+    if (this.diagnostics.outcome === 'pending') this.diagnostics.finish('cancelled');
     this.process.kill('SIGINT');
     return true;
   }
@@ -2005,6 +2018,7 @@ export class SessionProcess extends EventEmitter {
   async flushToolSchemas(expectedIds?: string[]): Promise<RequestToolSchemas[]> { return this.toolCapture?.flush(expectedIds) ?? []; }
 
   async stop(): Promise<void> {
+    if (this.diagnostics.outcome === 'pending' && !this.diagnostics.stopReason) this.diagnostics.stopReason = 'shutdown';
     this.stopping = true;
     if (this.containerAttempt && this.agentConfig.container) {
       this.managedGroupStopped = await stopContainerProfile(this.agentConfig.container, this.containerAttempt.directory);

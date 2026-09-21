@@ -1,3 +1,4 @@
+import type { GatewayTaskAdapter } from './gateway-tasks/controller';
 import { CRON_TOOLS } from '../cron/tool-schemas';
 import { containerTaskTools } from './container-tool-schemas';
 import { retryableMutation } from './mutation-recovery';
@@ -29,7 +30,7 @@ export class TaskBridge {
   private readonly scopes = new Map<string, Scope>();
   private readonly cancellations = new Map<string, AbortController>();
   constructor(private readonly tasks: TaskService, private readonly files?: TaskFiles,
-    private readonly shareCall?: (attemptId: string, generation: number, args: Record<string, unknown>) => Promise<unknown>, private readonly skills?: () => SkillRegistry, private readonly container?: { agent: AgentConfig; spool: string }, private readonly cronCall?: (attemptId: string, generation: number, tool: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>) {}
+    private readonly shareCall?: (attemptId: string, generation: number, args: Record<string, unknown>) => Promise<unknown>, private readonly skills?: () => SkillRegistry, private readonly container?: { agent: AgentConfig; spool: string }, private readonly cronCall?: (attemptId: string, generation: number, tool: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>, private readonly gatewayAdapters = new Map<string, GatewayTaskAdapter>()) {}
   captureWorkerOutput(attemptId: string, generation: number, line: string): void {
     try { this.files?.captureOutput(attemptId, generation, line); }
     catch { /* A failed image capture must not break worker execution. Staging reports missing capture. */ }
@@ -38,11 +39,14 @@ export class TaskBridge {
     const server = createServer(async (request, response) => {
       response.setHeader('Content-Type', 'application/json');
       let retryOf: string | undefined;
+      let denialReason: string | undefined;
+      function deny(reason: string): never { denialReason = reason; throw new OrchestrationError('ACCESS_DENIED'); }
       try {
-        if (request.method !== 'POST' || request.url !== '/call' || request.headers.origin) throw new OrchestrationError('ACCESS_DENIED');
+        if (request.method !== 'POST' || request.url !== '/call' || request.headers.origin) deny('INVALID_BRIDGE_REQUEST');
         const token = request.headers.authorization?.replace(/^Bearer /, '');
         const scope = token && this.scopes.get(token);
-        if (!scope || (scope.role === 'agent' && scope.compactOnly)) throw new OrchestrationError('ACCESS_DENIED');
+        if (!scope) deny('TICKET_INVALID_OR_REVOKED');
+        if (scope.role === 'agent' && scope.compactOnly) deny('COMPACTION_SCOPE');
         let bytes = 0;
         const chunks: Buffer[] = [];
         for await (const chunk of request) {
@@ -62,6 +66,14 @@ export class TaskBridge {
             switch (command.tool) {
               case 'capabilities_list': {
                 this.tasks.store.assertMember(context.conversationId, context.principalId);
+                if (a.scope === 'safemode') {
+                  if (this.container) deny('SAFEMODE_HOST_ONLY');
+                  const adapter = this.gatewayAdapters.get('safemode');
+                  if (!adapter) throw new OrchestrationError('SAFEMODE_AGENT_NOT_ALLOWED');
+                  if (a.query !== undefined && typeof a.query !== 'string') throw new OrchestrationError('INVALID_INPUT');
+                  result = adapter.discover(a.query, a.offset); break;
+                }
+                if (a.scope !== undefined && a.scope !== 'capabilities') throw new OrchestrationError('INVALID_INPUT');
                 if (!scope.capabilities) throw new OrchestrationError('CAPABILITY_DISCOVERY_UNAVAILABLE');
                 result = { ...(await scope.capabilities(a) as Record<string, unknown>), executionAllowedForThisTurn: context.execute, memoryWriteAllowedForThisTurn: context.writeMemory }; break;
               }
@@ -81,6 +93,14 @@ export class TaskBridge {
                 result = await scope.onIntake(a); break;
               }
               case 'task_spawn': {
+                let gatewayTarget;
+                if (a.target_profile === 'gateway-managed' || a.gateway_target !== undefined) {
+                  if (this.container) deny('SAFEMODE_HOST_ONLY');
+                  if (a.target_profile !== 'gateway-managed' || !a.gateway_target || typeof a.gateway_target !== 'object' || Array.isArray(a.gateway_target)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
+                  const adapter = this.gatewayAdapters.get(a.gateway_target.adapter);
+                  if (!adapter) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
+                  gatewayTarget = adapter.resolve(a.gateway_target);
+                }
                 const skill = resolveNamedSkill(a.skill_name, a.skill_args, this.skills?.());
                 if (a.target_profile === 'skill-worker' && !skill) throw new OrchestrationError('UNKNOWN_SKILL');
                 if (a.target_profile !== 'skill-worker' && (a.skill_name !== undefined || a.skill_args !== undefined)) throw new OrchestrationError('INVALID_INPUT');
@@ -90,7 +110,7 @@ export class TaskBridge {
                 // Profile resolution may yield while another input arrives. Recheck
                 // readiness immediately before the synchronous task transaction.
                 await scope.beforeMutation?.(command.tool, a, context.actionId);
-                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, targetProfile: a.target_profile, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
+                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, targetProfile: a.target_profile, gatewayTarget, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
                 scope.onTaskQueued?.(spoken);
                 const { skill: _workerOnly, ...receipt } = task;
                 result = receipt;
@@ -147,8 +167,9 @@ export class TaskBridge {
         response.end(JSON.stringify(result));
       } catch (error) {
         const code = error instanceof OrchestrationError ? error.code : 'INVALID_REQUEST';
+        if (code === 'ACCESS_DENIED' && denialReason) console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', message: 'Task bridge authorization denied', data: { agentId: this.tasks.store.agentId, reason: denialReason } }));
         response.statusCode = code === 'ACCESS_DENIED' ? 403 : 400;
-        response.end(JSON.stringify({ error: code, ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        response.end(JSON.stringify({ error: code, ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;

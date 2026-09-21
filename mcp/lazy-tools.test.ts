@@ -174,7 +174,7 @@ test('cron tools survive module registration and lazy discovery, while privilege
 
 test('all registered worker modules follow the scoped execution policy',async()=>{
  const {gatewayModules}=await import('./modules');
- expect(gatewayModules('agent').map(m=>m.id)).toEqual(['memory']);
+ expect(gatewayModules('agent').map(m=>m.id)).toEqual(['memory','safemode']);
  expect(gatewayModules('worker',true).map(m=>m.id)).toEqual(['memory','cron','image','video','share-file','browser']);
  const standalone=gatewayModules().map(m=>m.id);
  for(const id of ['cron','image','video','share-file','browser','skills','apps','agent','api','telegram','discord','line','slack','whatsapp','whatsapp_cloud','wechat'])expect(standalone).toContain(id);

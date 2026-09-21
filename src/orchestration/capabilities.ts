@@ -231,11 +231,12 @@ export function readCapabilityPage(
       skills.push({
         name: skill.name,
         description: skill.description,
-        server: 'skill:claude-code',
+        server: skill.source === 'codex' ? 'skill:codex' : 'skill:claude-code',
         status: 'available',
         via: 'skill-worker',
       });
-  const all = [...snapshot.entries, ...skills].filter(
+  const extensionServers: CapabilityEntry[] = (registry?.extensionServers ?? []).map(name => ({ name, description: 'Installed native CLI MCP server. A worker discovers its tool schemas on demand; availability still depends on its native credentials and dependencies.', server: name, status: 'available', via: 'worker' }));
+  const all = [...snapshot.entries, ...skills, ...extensionServers].filter(
     (e) =>
       !query ||
       `${e.name} ${e.description} ${e.server}`.toLowerCase().includes(query)

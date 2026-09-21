@@ -7,7 +7,7 @@ export interface RequestToolSchemas {
   requestId: string;
   loaded: string[];
   deferred: string[];
-  source: 'cli-request-body';
+  source: 'cli-request-body' | 'codex-request-body';
 }
 /** Keep only tool names from the CLI's outbound request capture. Raw bodies are
  * temporary, private, never logged, and removed as soon as metadata is extracted. */

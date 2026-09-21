@@ -235,7 +235,7 @@ const CALLBACK_PATHS = ['/oauth/mcp/callback', '/gateway/oauth/mcp/callback'];
 export function createOauthCallbackRouter(
   store: CustomConnectorsStore,
   pendingStore: PendingOAuthStore = pendingOAuthStore,
-  returnUrl?: string,
+  returnUrl?: string | (() => string | undefined),
   agents?: Map<string, AgentRunner>,
 ): Router {
   const router = Router();
@@ -246,29 +246,11 @@ export function createOauthCallbackRouter(
   // tab" message below is the safe default. Validated once, at router
   // construction — a malformed value degrades to "not configured" rather
   // than injecting a broken redirect into every future callback response.
-  let validReturnUrl: string | undefined;
-  if (returnUrl) {
-    try {
-      const parsed = new URL(returnUrl);
-      // Scheme-gated, not merely parseable. `new URL()` accepts every scheme
-      // there is — `javascript:`, `data:`, `file:`, `intent:` — and this value's
-      // whole purpose is to become the `Location` of a 302 sent to the end
-      // user's own browser, on a route that is PUBLIC and reachable by anyone
-      // who can hit the gateway. A `javascript:` return URL is a stored XSS
-      // primitive aimed at every user who ever finishes (or abandons) a sign-in,
-      // and `file:` points the browser at the operator's own disk. Nothing an
-      // OAuth flow needs to return to is anything but http(s), so requiring it
-      // costs no real deployment anything.
-      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-        console.error(
-          `oauth-connectors-router: gateway.oauthReturnUrl "${returnUrl}" is not an http(s) URL — ignoring it`,
-        );
-      } else {
-        validReturnUrl = parsed.toString();
-      }
-    } catch {
-      console.error(`oauth-connectors-router: gateway.oauthReturnUrl "${returnUrl}" is not a valid URL — ignoring it`);
-    }
+  function currentReturnUrl(): string | undefined {
+    const value=typeof returnUrl==='function'?returnUrl():returnUrl;
+    if(!value)return undefined;
+    try{const parsed=new URL(value);if(['https:','http:'].includes(parsed.protocol))return parsed.toString();}catch{}
+    return undefined;
   }
 
   // No interstitial "Connected!" page + timed meta-refresh here on purpose —
@@ -284,6 +266,7 @@ export function createOauthCallbackRouter(
   /** Terminal-failure response: redirect back with the reason as a query
    *  param when the app knows where "back" is, else render it in place. */
   function fail(res: Response, status: number, message: string, errorCode: string): void {
+    const validReturnUrl=currentReturnUrl();
     if (validReturnUrl) {
       const url = new URL(validReturnUrl);
       url.searchParams.set('connector_oauth_error', errorCode);
@@ -435,7 +418,8 @@ export function createOauthCallbackRouter(
         );
       }
 
-      if (validReturnUrl) {
+      const validReturnUrl=currentReturnUrl();
+    if (validReturnUrl) {
         res.redirect(302, validReturnUrl);
         return;
       }

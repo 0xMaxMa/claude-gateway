@@ -1,6 +1,6 @@
 # Orchestration and tasks
 
-For opt-in GPT worker routing and app-container deployment, see [Worker harnesses](./worker-harnesses.md).
+For automatic GPT worker routing, explicit overrides and app-container deployment, see [Worker harnesses](./worker-harnesses.md).
 
 ## What changes
 
@@ -19,6 +19,12 @@ Executable work receives a contextual acknowledgement before task creation. Chan
 When new user input arrives before dispatch, `NEW_INPUT_PENDING` defers the old command so the agent can reconcile the latest instructions first. The pending dispatch survives casual replies and gateway restarts; replying alone does not clear it. A task receipt alone does not clear it: the agent must explicitly resolve the pending request, linking the corresponding task receipt, or explain that the user cancelled/replaced it or no work remains. Unrelated task successes leave the pending request intact. The tool uses `conversation_intake` with `mode: "resolve"` and a non-empty `resolution` for this case. When linking newly dispatched work, `task_id` must identify a task command committed in the same decision. This does not cancel an already-running task; use task cancellation for that.
 
 If an ordinary reply leaves a deferred dispatch unresolved, the gateway queues one reconciliation turn with the same conversation identity and execution permissions. It references the latest persisted input by ID and reads that input within the same conversation, principal and binding, so long messages are not copied into a larger synthetic input. It does not replay the old command automatically or grant reporting-only turns execution access. A reconciliation turn cannot schedule another copy of itself; unresolved work remains available for the next user turn rather than creating an endless retry loop.
+
+## Worker tasks and Gateway-managed tasks
+
+A **Worker task** runs an independent Claude Code or Codex worker. A **Gateway-managed task** sends a request to an existing external target, initially a safemode investigation, and lets the gateway track its durable result. Both use the same task list, status, cancellation, dependencies and completion notifications. No polling model worker is created for Gateway-managed tasks.
+
+Discovery does not create work: `capabilities_list(scope="safemode")` lists only the host agent's explicitly assigned sessions. Being allowlisted alone does not expose every safemode session. See [safemode setup and examples](./safemode.md#agent-control) for local assignment, `gateway_target`, takeover and bootstrap options.
 
 ## Inspect actual work
 

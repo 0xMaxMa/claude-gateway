@@ -63,14 +63,14 @@ describe('cli doctor', () => {
   });
 
   it('rejects unknown actions instead of silently diagnosing', async () => {
-    expect(await runDoctor({}, {}, ['fixx'])).toBe(1);
+    expect(await runDoctor({ json: true }, {}, ['fixx'])).toBe(1);
     expect(repairStartup).not.toHaveBeenCalled();
   });
 
   it('plain doctor does not mutate, even when dependencies are missing', async () => {
     global.fetch = jest.fn().mockRejectedValue(new Error('offline'));
     (checkDependencies as jest.Mock).mockResolvedValueOnce([{ name: 'ffmpeg', ok: false, required: false, detail: 'missing' }]);
-    await runDoctor({}, {});
+    await runDoctor({ json: true }, {});
     expect(report().checks).toContainEqual(expect.objectContaining({ name: 'ffmpeg', warn: true }));
     expect(repairStartup).not.toHaveBeenCalled();
     expect(repairVoiceDependencies).not.toHaveBeenCalled();
@@ -79,7 +79,7 @@ describe('cli doctor', () => {
   it('passes local config to dependency inspection and keeps missing Codex advisory', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
     (checkDependencies as jest.Mock).mockResolvedValueOnce([{ name: 'codex', ok: false, required: false, detail: 'missing optional Codex' }]);
-    expect(await runDoctor({}, { keys: [{ key: 'test', agents: '*', admin: true }] })).toBe(0);
+    expect(await runDoctor({ json: true }, { keys: [{ key: 'test', agents: '*', admin: true }] })).toBe(0);
     expect(checkDependencies).toHaveBeenCalledWith({ configPath: '/tmp/doctor-config' });
     expect(report().checks).toContainEqual(expect.objectContaining({ name: 'codex', ok: false, warn: true }));
     expect(repairVoiceDependencies).not.toHaveBeenCalled();
@@ -87,7 +87,7 @@ describe('cli doctor', () => {
 
   it('explicit fix repairs without a live API and still reports health failure', async () => {
     global.fetch = jest.fn().mockRejectedValue(new Error('offline'));
-    const result = await runDoctor({ yes: true }, {}, ['fix']);
+    const result = await runDoctor({ yes: true, json: true }, {}, ['fix']);
     expect(repairStartup).toHaveBeenCalled();
     expect(repairVoiceDependencies).toHaveBeenCalled();
     expect(result).toBe(1);
@@ -100,7 +100,7 @@ describe('cli doctor', () => {
   it('every check passes → ok:true, exit 0', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
-    const code = await runDoctor({}, configWithKey);
+    const code = await runDoctor({ json: true }, configWithKey);
 
     expect(code).toBe(0);
     const body = report();
@@ -112,7 +112,7 @@ describe('cli doctor', () => {
   it('an unreachable gateway fails only the health check and exits 1', async () => {
     global.fetch = jest.fn().mockRejectedValue(new Error('ECONNREFUSED'));
 
-    const code = await runDoctor({}, configWithKey);
+    const code = await runDoctor({ json: true }, configWithKey);
 
     expect(code).toBe(1);
     const body = report();
@@ -125,7 +125,7 @@ describe('cli doctor', () => {
     const abort = Object.assign(new Error('aborted'), { name: 'AbortError' });
     global.fetch = jest.fn().mockRejectedValue(abort);
 
-    const code = await runDoctor({}, configWithKey);
+    const code = await runDoctor({ json: true }, configWithKey);
 
     expect(code).toBe(1);
     expect(report().checks.find((c) => c.name === 'health')?.detail).toMatch(/timed out/);
@@ -134,7 +134,7 @@ describe('cli doctor', () => {
   it('no config/keys at all fails config + apiKey checks and exits 1', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
-    const code = await runDoctor({}, {});
+    const code = await runDoctor({ json: true }, {});
 
     expect(code).toBe(1);
     const body = report();
@@ -145,7 +145,7 @@ describe('cli doctor', () => {
   it('a --key flag resolves apiKey even with no config keys', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
-    const code = await runDoctor({ key: 'sk-from-flag' }, {});
+    const code = await runDoctor({ key: 'sk-from-flag', json: true }, {});
 
     const body = report();
     expect(body.checks.find((c) => c.name === 'apiKey')).toEqual(expect.objectContaining({ ok: true }));
@@ -156,7 +156,7 @@ describe('cli doctor', () => {
     (detectManager as jest.Mock).mockReturnValue('unknown');
     global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
-    const code = await runDoctor({}, configWithKey);
+    const code = await runDoctor({ json: true }, configWithKey);
 
     expect(code).toBe(1);
     expect(report().checks.find((c) => c.name === 'manager')).toEqual(expect.objectContaining({ ok: false, detail: 'unknown' }));
@@ -174,7 +174,7 @@ describe('cli doctor', () => {
     it('uses the local address and reports the public one as informational', async () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
-      const code = await runDoctor({}, proxied);
+      const code = await runDoctor({ json: true }, proxied);
 
       const body = report();
       expect(body.checks.map((c) => c.name)).toEqual(['config', 'apiKey', 'url', 'manager', 'health', 'gatewayPublicUrl', 'publicUrl', 'publicHealth']);
@@ -196,7 +196,7 @@ describe('cli doctor', () => {
           : Promise.resolve({ ok: false, status: 401 } as Response),
       );
 
-      const code = await runDoctor({}, proxied);
+      const code = await runDoctor({ json: true }, proxied);
 
       const body = report();
       expect(body.ok).toBe(true);
@@ -206,6 +206,8 @@ describe('cli doctor', () => {
       expect(pub.info).toBe(true);
       expect(pub.detail).toContain('HTTP 401');
       expect(pub.detail).not.toContain('no response');
+      expect(stderr.join('')).toBe('');
+      await runDoctor({}, proxied);
       expect(stderr.join('')).toMatch(/the public URL answered HTTP 401/);
     });
 
@@ -218,7 +220,7 @@ describe('cli doctor', () => {
       const fetchMock = jest.fn().mockResolvedValue({ ok: true } as Response);
       global.fetch = fetchMock;
 
-      const code = await runDoctor({}, proxied);
+      const code = await runDoctor({ json: true }, proxied);
 
       const body = report();
       const gw = body.checks.find((c) => c.name === 'gatewayPublicUrl')!;
@@ -234,7 +236,7 @@ describe('cli doctor', () => {
       (readLocalGateway as jest.Mock).mockReturnValue(null);
       global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
-      await runDoctor({}, proxied);
+      await runDoctor({ json: true }, proxied);
 
       expect(report().checks.find((c) => c.name === 'url')?.detail).toBe('https://proxy.example.com/gateway');
     });
@@ -250,12 +252,14 @@ describe('cli doctor', () => {
           String(url).startsWith('http://127.0.0.1') ? Promise.resolve({ ok: true } as Response) : Promise.reject(new Error('ECONNREFUSED')),
         );
 
-        const code = await runDoctor({}, proxied);
+        const code = await runDoctor({ json: true }, proxied);
 
         const body = report();
         expect(body.checks.map((c) => c.name)).toEqual(['config', 'apiKey', 'url', 'manager', 'health', 'localUrl', 'localHealth']);
         expect(body.checks.find((c) => c.name === 'health')?.ok).toBe(false);
         expect(body.checks.find((c) => c.name === 'localHealth')?.ok).toBe(true);
+        expect(stderr.join('')).toBe('');
+        await runDoctor({}, proxied);
         expect(stderr.join('')).toMatch(/Drop --url \/ \$CLAUDE_GATEWAY_URL/);
         expect(code).toBe(1);
       } finally {
@@ -270,7 +274,7 @@ describe('cli doctor', () => {
     it('never offers this host\'s publicUrl as context for a --url pointing elsewhere', async () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
-      await runDoctor({ url: 'http://other-host:8080' }, proxied);
+      await runDoctor({ url: 'http://other-host:8080', json: true }, proxied);
 
       const body = report();
       expect(body.checks.find((c) => c.name === 'url')?.detail).toBe('http://other-host:8080');
@@ -284,7 +288,7 @@ describe('cli doctor', () => {
     it('skips the second probe when there is only one address', async () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
-      await runDoctor({}, configWithKey);
+      await runDoctor({ json: true }, configWithKey);
 
       const names = report().checks.map((c) => c.name);
       expect(names).not.toContain('publicHealth');
@@ -302,7 +306,7 @@ describe('cli doctor', () => {
     it('unset → warn, lists the disabled features, does not fail doctor', async () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
-      const code = await runDoctor({}, configWithKey);
+      const code = await runDoctor({ json: true }, configWithKey);
 
       const body = report();
       const check = body.checks.find((c) => c.name === 'gatewayPublicUrl')!;
@@ -318,7 +322,7 @@ describe('cli doctor', () => {
       const proxied: CliConfigView = { ...configWithKey, publicUrl: 'https://proxy.example.com/gateway', bind: '0.0.0.0' };
       global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
-      const code = await runDoctor({}, proxied);
+      const code = await runDoctor({ json: true }, proxied);
 
       const check = report().checks.find((c) => c.name === 'gatewayPublicUrl')!;
       expect(check.ok).toBe(true);
@@ -333,7 +337,7 @@ describe('cli doctor', () => {
         String(url).startsWith('http://127.0.0.1') ? Promise.resolve({ ok: true } as Response) : Promise.reject(new Error('ECONNREFUSED')),
       );
 
-      const code = await runDoctor({}, proxied);
+      const code = await runDoctor({ json: true }, proxied);
 
       const body = report();
       const check = body.checks.find((c) => c.name === 'gatewayPublicUrl')!;
@@ -352,7 +356,7 @@ describe('cli doctor', () => {
           : Promise.resolve({ ok: false, status: 401 } as Response),
       );
 
-      const code = await runDoctor({}, proxied);
+      const code = await runDoctor({ json: true }, proxied);
 
       const check = report().checks.find((c) => c.name === 'gatewayPublicUrl')!;
       expect(check.ok).toBe(true);
@@ -369,7 +373,7 @@ describe('cli doctor', () => {
       const proxied: CliConfigView = { ...configWithKey, publicUrl: 'https://${PUBLIC_HOST}/gateway', bind: '0.0.0.0' };
       global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
-      const code = await runDoctor({}, proxied);
+      const code = await runDoctor({ json: true }, proxied);
 
       const body = report();
       const check = body.checks.find((c) => c.name === 'gatewayPublicUrl')!;
@@ -385,7 +389,7 @@ describe('cli doctor', () => {
       const proxied: CliConfigView = { ...configWithKey, publicUrl: 'https://proxy.example.com/gateway', bind: '0.0.0.0' };
       global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
-      await runDoctor({ url: 'http://other-host:8080' }, proxied);
+      await runDoctor({ url: 'http://other-host:8080', json: true }, proxied);
 
       const names = report().checks.map((c) => c.name);
       expect(names).not.toContain('gatewayPublicUrl');
@@ -400,7 +404,7 @@ describe('cli doctor', () => {
       const fetchMock = jest.fn().mockResolvedValue({ ok: true } as Response);
       global.fetch = fetchMock;
 
-      const code = await runDoctor({}, samePlace);
+      const code = await runDoctor({ json: true }, samePlace);
 
       const body = report();
       expect(body.checks.find((c) => c.name === 'gatewayPublicUrl')).toEqual(
@@ -451,6 +455,18 @@ describe('cli doctor', () => {
     });
   });
 
+  it.each([true, false])('plain doctor prints readable checks only (healthy=%s)', async healthy => {
+    global.fetch = healthy
+      ? jest.fn().mockResolvedValue({ ok: true } as Response)
+      : jest.fn().mockRejectedValue(new Error('offline'));
+
+    expect(await runDoctor({}, configWithKey)).toBe(healthy ? 0 : 1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join('')).toContain('claude-gateway doctor');
+    expect(stderr.join('')).toContain(healthy ? '[ok]' : '[!!]');
+    expect(stderr.join('')).not.toContain('"checks":');
+  });
+
   it('honours the global --json flag like every other command', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
@@ -458,6 +474,7 @@ describe('cli doctor', () => {
 
     expect(stdout.join('').trim().split('\n')).toHaveLength(1);
     expect(report().ok).toBe(true);
+    expect(stderr).toEqual([]);
   });
 
   /**
@@ -475,6 +492,7 @@ describe('cli doctor', () => {
 
     await runDoctor({}, proxied);
 
+    expect(stdout).toEqual([]);
     const lines = stderr.join('').split('\n');
     const markOf = (name: string): string => lines.find((l) => l.includes(name))?.trim().slice(0, 4) ?? '';
     // publicUrl passes, publicHealth fails — both are context, both are [--].
@@ -486,7 +504,7 @@ describe('cli doctor', () => {
   it('never prints the resolved API key itself, on stdout or stderr', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
-    await runDoctor({}, configWithKey);
+    await runDoctor({ json: true }, configWithKey);
 
     expect(stdout.join('')).not.toContain('sk-admin-doctor-test');
     expect(stderr.join('')).not.toContain('sk-admin-doctor-test');

@@ -13,7 +13,8 @@ test('task browser paginates active work, reads progress and cancels only the sc
   const spawned=Array.from({length:12},(_,i)=>tasks.spawn({...input,...decision,principalId:'owner',actionId:'task-'+i,execute:true,writeMemory:false},{title:'Task '+i,instructions:'Secret worker instructions',targetProfile:'default-worker'}));
   const task=spawned[0],attempt=tasks.claim(task.taskId)!;tasks.started(attempt.attemptId,attempt.generation);tasks.progress(attempt.attemptId,attempt.generation,'Checking tests');
   expect(controls.list('s','owner')).toMatchObject({total:12,pages:2});expect(controls.list('s','owner',1).tasks).toHaveLength(2);
-  expect(controls.detail('s','owner',task.taskId)).toMatchObject({state:'running',progress:'Checking tests',canStop:true});
+  store.transaction(()=>store.saveAttempt({...store.attempt(attempt.attemptId)!,harness:'codex'}));
+  expect(controls.detail('s','owner',task.taskId)).toMatchObject({state:'running',progress:'Checking tests',canStop:true,harness:'codex'});
   expect(JSON.stringify(controls.detail('s','owner',task.taskId))).not.toContain('Secret');
   expect(store.task(task.taskId)!.state).toBe('running');
   expect(()=>controls.list('s','intruder')).toThrow('ACCESS_DENIED');

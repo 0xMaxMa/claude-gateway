@@ -391,7 +391,7 @@ export class AppInstaller {
   private readonly jobs = new Map<string, JobState>();
   private readonly appsDir: string;
   private readonly backupsDir: string;
-  private readonly appBackupConfig: Required<AppBackupConfig>;
+  private appBackupConfig!: Required<AppBackupConfig>;
   /** Tracks app names currently being installed to prevent concurrent installs of the same name. */
   private readonly installingNames = new Set<string>();
   /**
@@ -406,7 +406,7 @@ export class AppInstaller {
    * (which retries the restore) correctly starts from a clean slate.
    */
   private readonly restoreFailures = new Map<string, RestoreFailure>();
-  private readonly restoreConfig: Required<AppRestoreConfig>;
+  private restoreConfig!: Required<AppRestoreConfig>;
 
   constructor(
     private readonly registry: AppsRegistry,
@@ -416,7 +416,7 @@ export class AppInstaller {
     appsDir?: string,
     private readonly agentManager?: AgentManager,
     private readonly spawnAsync: AsyncSpawnFn = defaultAsyncSpawn,
-    private readonly housekeepingConfig: AppHousekeepingConfig = {},
+    private housekeepingConfig: AppHousekeepingConfig = {},
     appBackupConfig?: AppBackupConfig,
     backupsDir?: string,
     appRestoreConfig?: AppRestoreConfig,
@@ -425,6 +425,11 @@ export class AppInstaller {
   ) {
     this.appsDir = appsDir ?? DEFAULT_APPS_DIR;
     this.backupsDir = backupsDir ?? path.join(this.appsDir, APP_BACKUPS_DIRNAME);
+    this.configurePolicies(housekeepingConfig,appBackupConfig,appRestoreConfig,gatewayTimezone);
+  }
+
+  configurePolicies(housekeepingConfig: AppHousekeepingConfig = {}, appBackupConfig?: AppBackupConfig, appRestoreConfig?: AppRestoreConfig, gatewayTimezone?: string): void {
+    this.housekeepingConfig=housekeepingConfig;
     this.restoreConfig = {
       buildTimeoutMs: msOr(appRestoreConfig?.buildTimeoutMs, RESTORE_BUILD_TIMEOUT_MS),
       waitTimeoutMs: msOr(appRestoreConfig?.waitTimeoutMs, RESTORE_COMPOSE_TIMEOUT_MS),

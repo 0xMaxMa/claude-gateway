@@ -9,7 +9,7 @@ const COMMITTED_RECEIPT_WINDOW = 10;
  * to be opted in here instead of silently enlarging the context of every later turn. The
  * pending question stays because the docstring below promises the question/answer data; the
  * rest of the task's current state is a task_status call away. */
-const RECEIPT_FIELDS = ['taskId', 'title', 'state', 'targetProfile', 'stateVersion', 'revision',
+const RECEIPT_FIELDS = ['taskId', 'title', 'state', 'targetProfile', 'gatewayTarget', 'stateVersion', 'revision',
   'appliedRevision', 'workstreamId', 'continueTaskId', 'continuationPolicy', 'replacedByTaskId',
   'pendingQuestion'] as const;
 

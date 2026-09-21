@@ -1,6 +1,14 @@
+import { codexContextPolicy, observeCodexContext, CodexContextMeasurement } from './codex-context';
+import { workerEnvironment } from './worker-environment';
+import { scanCodexTrace, CodexTraceState } from './codex-tool-capture';
+import type { RequestToolSchemas } from './request-tool-capture';
+import { resolveCodexCredentials, CodexCredentials } from './codex-auth';
+import { codexPolicyArgs, DISABLED_CODEX_FEATURES } from './codex-policy';
 import { resolveCodexRuntime } from './codex-runtime';
 import { inspectSelectedCodexRuntime, CODEX_RUNTIME_MAINTENANCE } from './codex-container-runtime';
 import { prepareManagedConnectors } from './managed-connectors';
+import { discoverWorkerExtensions } from './worker-extensions';
+import { prepareContainerConnectors } from './container-connectors';
 import { EventEmitter } from 'events';
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import { createHash, randomUUID } from 'crypto';
@@ -20,7 +28,8 @@ export interface CodexProcessOptions {
   sessionId: string;
   stateDirectory: string;
   checkpoint?: () => Promise<{ text: string; kind?: 'assignment' | 'advice'; acknowledge: () => void | Promise<void> } | undefined>;
-  config: { model: string; baseUrl?: string; apiKeyEnv?: string; reasoningEffort?: string; bin?: string };
+  requestInput?: (question: string) => void;
+  config: { model: string; contextWindow?: number; baseUrl?: string; apiKeyEnv?: string; reasoningEffort?: string; bin?: string };
 }
 const quote = (value: string): string => JSON.stringify(value);
 const MAX_LINE = 4 * 1024 * 1024;
@@ -81,11 +90,12 @@ export function cleanupCodexSessions(options: { agent: AgentConfig; stateDirecto
   return run;
 }
 
-/** A bounded native Codex app-server session. No Claude auth or user Codex configuration is inherited. */
+/** A bounded native Codex app-server session. Only native Codex provider/auth is selected; user executable configuration is not inherited. */
 export class CodexProcess extends EventEmitter {
   readonly spawnedAt = Date.now();
   readonly runtimeProfile: RuntimeProfile;
   managedGroupStopped = false;
+  private contextMeasurement?: CodexContextMeasurement;
   private child?: ChildProcessWithoutNullStreams;
   private executable = '';
   private nativeSha256?: string;
@@ -105,6 +115,10 @@ export class CodexProcess extends EventEmitter {
   private threadId?: string;
   private buffer = '';
   private stderr = '';
+  private traceState: CodexTraceState = { files: {}, pending: [], calls: {} };
+  private traceSchemas = new Map<string, RequestToolSchemas>();
+  private traceTimer?: ReturnType<typeof setInterval>;
+  private traceScan?: Promise<void>;
   private lastError = '';
   private finalText = '';
   private readonly tools = new Set<string>();
@@ -118,6 +132,9 @@ export class CodexProcess extends EventEmitter {
   private amendment?: { text: string; kind?: 'assignment' | 'advice'; acknowledge: () => void | Promise<void> };
   private nativeUsage?: NativeUsage;
   private identity = '';
+  private credentials?: CodexCredentials;
+  private authExecutable?: string;
+  private refreshingAuth = false;
   private homePersisted = false;
   private leaseOwned = false;
   private readonly connectorPaths = new Set<string>();
@@ -150,11 +167,10 @@ export class CodexProcess extends EventEmitter {
       this.containerId = await inspectSelectedCodexRuntime(agent, runtime);
       this.nativeSha256 = runtime.nativeSha256;
     }
-    const key = config.apiKeyEnv ?? 'OPENAI_API_KEY';
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /^ANTHROPIC_|^CLAUDE_/.test(key)) throw new Error('Codex requires an independent API key environment variable');
-    if (!process.env[key]) throw new Error(`Codex API credential environment variable ${key} is not set`);
-    if (config.baseUrl) { const url = new URL(config.baseUrl); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid Codex Responses base URL'); }
-    this.identity = createHash('sha256').update(JSON.stringify([config.baseUrl ?? 'https://api.openai.com/v1', key, process.env[key]])).digest('hex');
+    this.authExecutable = runtime.executable;
+    this.credentials = await resolveCodexCredentials({ ...config, bin: runtime.executable, allowDockerHost: agent.type === 'app-agent' });
+    const key = 'GATEWAY_CODEX_API_KEY';
+    this.identity = this.credentials.fingerprint;
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     await mkdir(join(this.root, '.active'), { mode: 0o700 });
     this.leaseOwned = true;
@@ -164,6 +180,7 @@ export class CodexProcess extends EventEmitter {
       !ownedHome(this.root, this.saved.home, agent.container))) throw new Error('Invalid persisted Codex thread binding');
     await this.recordHomes();
     let mcp: any;
+    let extensionInstructions = '';
     if (agent.type === 'app-agent') {
       this.containerAttempt = await prepareContainerProfile(agent, profile);
       const mountedHash = await containerNode(agent.container!, "const fs=require('fs'),crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'));", [this.executable]);
@@ -185,29 +202,60 @@ export class CodexProcess extends EventEmitter {
       this.home = containerHome + '/.gateway-codex-' + randomUUID();
       await this.recordHomes();
       mcp = JSON.parse(await containerNode(agent.container!, "process.stdout.write(require('fs').readFileSync(process.argv[1],'utf8'))", [this.containerAttempt.config]));
+      if (profile.connectorsAllowed !== false) {
+        const extensions = await discoverWorkerExtensions(agent, this.options.gateway);
+        mcp.mcpServers = { ...await prepareContainerConnectors(agent, this.containerAttempt.directory, extensions.servers), ...mcp.mcpServers };
+        extensionInstructions = [
+          'Installed container extension skills: read the selected file and follow relative resources. Nested slash skill names mean read that skill, not invoke a host CLI. All commands and MCP servers execute inside this container. Use task_request_input for user questions.',
+          ...extensions.skills.map(skill => JSON.stringify({ name: skill.name, aliases: skill.aliases, description: skill.description, path: skill.filePath, pluginRoot: skill.resourceRoot })),
+          ...extensions.notices,
+        ].join('\n');
+      }
     } else {
       this.home = join(this.root, 'attempt-' + randomUUID());
       await this.recordHomes();
       await mkdir(this.home, { mode: 0o700 });
       mcp = JSON.parse(await readFile(profile.mcpConfigPath, 'utf8'));
-      const { servers } = prepareManagedConnectors(agent, this.options.gateway, profile, this.connectorPaths);
+      const extensions = profile.hostExecution && profile.connectorsAllowed !== false ? await discoverWorkerExtensions(agent, this.options.gateway) : { skills: [], servers: {}, notices: [] };
+      extensionInstructions = extensions.skills.length || extensions.notices.length ? [
+        'Installed extension skills: read the selected SKILL.md, then follow its instructions and relative references. A slash skill invocation means read and execute that workflow; do not try to call Claude Code or its Skill tool. For nested skill invocations, resolve the name in this catalog and read that file. Plugin-relative paths resolve from the listed plugin root. Use native shell/file tools for equivalent operations; use task_request_input for questions requiring the user. A skill never grants extra permissions.',
+        ...extensions.skills.map(skill => JSON.stringify({ name: skill.name, aliases: skill.aliases, description: skill.description, path: skill.filePath, pluginRoot: skill.resourceRoot, source: skill.source })),
+        ...extensions.notices,
+      ].join('\n') : '';
+      const { servers } = prepareManagedConnectors(agent, this.options.gateway, profile, this.connectorPaths, extensions.servers);
       mcp.mcpServers = { ...servers, ...mcp.mcpServers };
     }
     this.approvedMcp = mcp.mcpServers ?? {};
+    this.contextMeasurement = codexContextPolicy(config.model, config.contextWindow);
+    const commandEnvironment = workerEnvironment(agent, this.options.gateway);
     const lines = [
-      `model = ${quote(config.model)}`, 'model_provider = "gateway"', 'approval_policy = "never"',
+      `model = ${quote(config.model)}`, `model_provider = ${quote(this.credentials.chatgpt ? 'openai' : 'gateway')}`, 'approval_policy = "never"',
       `sandbox_mode = ${quote(profile.hostExecution || agent.type === 'app-agent' ? 'danger-full-access' : 'workspace-write')}`,
       'web_search = "disabled"', 'project_doc_fallback_filenames = ["CLAUDE.md"]',
-      `developer_instructions = ${quote([profile.context, profile.overlay, profile.skillPluginDir ? `Task skill resources: ${this.containerAttempt ? this.containerAttempt.directory + '/skill-plugin' : profile.skillPluginDir}` : undefined].filter(Boolean).join('\n\n'))}`,
+      ...(this.contextMeasurement.configured !== null ? [`model_context_window = ${this.contextMeasurement.configured}`] : []),
+      `developer_instructions = ${quote([profile.context, profile.overlay, extensionInstructions, profile.skillPluginDir || profile.containerSkill ? `Task skill resources: ${this.containerAttempt ? this.containerAttempt.directory + '/skill-plugin' : profile.skillPluginDir}. Read the assigned SKILL.md (or RESOURCE_ROOT.txt) and resolve its plugin-relative references from its resource root.` : undefined].filter(Boolean).join('\n\n'))}`,
       ...(config.reasoningEffort ? [`model_reasoning_effort = ${quote(config.reasoningEffort)}`] : []),
-      '[model_providers.gateway]', 'name = "Gateway Responses"', 'wire_api = "responses"',
-      `base_url = ${quote(config.baseUrl ?? 'https://api.openai.com/v1')}`, `env_key = ${quote(key)}`,
+      ...(this.credentials.chatgpt ? ['cli_auth_credentials_store = "ephemeral"'] : ['[model_providers.gateway]', 'name = "Gateway Responses"', 'wire_api = "responses"', `base_url = ${quote(this.credentials.baseUrl)}`, `env_key = ${quote(key)}`]),
       '[features]', 'multi_agent = false',
       `[projects.${quote(agent.type === 'app-agent' ? '/workspace' : agent.workspace)}]`, 'trust_level = "untrusted"',
     ];
+    if (Object.keys(commandEnvironment).length) {
+      lines.push('[shell_environment_policy.set]', ...Object.entries(commandEnvironment).map(([name, value]) => quote(name) + ' = ' + quote(value)));
+    }
     for (const [name, server] of Object.entries(mcp.mcpServers ?? {}) as [string, any][]) {
-      if (typeof server.command !== 'string' || !Array.isArray(server.args) || server.args.some((v: unknown) => typeof v !== 'string')) throw new Error('Codex MCP requires a stdio command and string arguments');
-      lines.push(`[mcp_servers.${quote(name)}]`, `command = ${quote(server.command)}`, `args = ${JSON.stringify(server.args)}`, 'required = true');
+      lines.push(`[mcp_servers.${quote(name)}]`, `required = ${name === 'gateway'}`);
+      if (typeof server.command === 'string') {
+        if (!Array.isArray(server.args) || server.args.some((v: unknown) => typeof v !== 'string')) throw new Error('Codex MCP requires string arguments');
+        lines.push(`command = ${quote(server.command)}`, `args = ${JSON.stringify(server.args)}`);
+        if (server.cwd) lines.push(`cwd = ${quote(server.cwd)}`);
+      } else if (typeof server.url === 'string' && server.type !== 'sse') {
+        lines.push(`url = ${quote(server.url)}`);
+      } else throw new Error('CODEX_MCP_TRANSPORT_UNAVAILABLE: this container MCP transport requires a compatible local adapter.');
+      for (const field of ['enabled_tools', 'disabled_tools']) if (Array.isArray(server[field])) lines.push(`${field} = ${JSON.stringify(server[field])}`);
+      if (server.headers) {
+        lines.push(`[mcp_servers.${quote(name)}.http_headers]`);
+        for (const [key, value] of Object.entries(server.headers)) { if (typeof value !== 'string') throw new Error('Invalid MCP header'); lines.push(`${quote(key)} = ${quote(value)}`); }
+      }
       if (server.env) {
         lines.push(`[mcp_servers.${quote(name)}.env]`);
         for (const [k, v] of Object.entries(server.env)) { if (typeof v !== 'string') throw new Error('Invalid MCP environment'); lines.push(`${quote(k)} = ${quote(v)}`); }
@@ -241,16 +289,23 @@ export class CodexProcess extends EventEmitter {
       input.push({ type: 'localImage', path: filename });
     }
     if (this.cancelled) return;
-    const args = ['app-server', '--listen', 'stdio://'];
-    const key = config.apiKeyEnv ?? 'OPENAI_API_KEY';
+    const args = [...codexPolicyArgs(), 'app-server', '--listen', 'stdio://'];
+    const key = 'GATEWAY_CODEX_API_KEY';
     const env: NodeJS.ProcessEnv = profile.hostExecution ? { ...process.env } : Object.fromEntries(['PATH', 'HOME', 'LANG', 'TMPDIR', 'SSL_CERT_FILE', 'SSL_CERT_DIR'].flatMap(k => process.env[k] === undefined ? [] : [[k, process.env[k]]]));
     for (const k of Object.keys(env)) if (/^(ANTHROPIC_|CLAUDE_|CODEX_|OPENAI_)/.test(k)) delete env[k];
-    env.CODEX_HOME = this.home; env[key] = process.env[key];
+    Object.assign(env, workerEnvironment(agent, this.options.gateway));
+    env.CODEX_HOME = this.home;
+    env.CODEX_ROLLOUT_TRACE_ROOT = this.home + '/gateway-trace';
+    if (agent.type === 'app-agent') await containerNode(agent.container!, "require('fs').mkdirSync(process.argv[1],{recursive:true,mode:448})", [env.CODEX_ROLLOUT_TRACE_ROOT]);
+    else await mkdir(env.CODEX_ROLLOUT_TRACE_ROOT, { recursive: true, mode: 0o700 });
+    if (this.credentials!.chatgpt) delete env[key]; else env[key] = this.credentials!.key;
     const bin = this.executable;
     const child = this.child = agent.type === 'app-agent'
-      ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', `HOME=${homedir()}`, '-e', key, agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
+      ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', 'CODEX_ROLLOUT_TRACE_ROOT', '-e', `HOME=${homedir()}`, '-e', key, ...Object.keys(workerEnvironment(agent, this.options.gateway)).flatMap(name => ['-e', name]), agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
       : spawn(bin, args, { cwd: agent.workspace, env, stdio: 'pipe', detached: true });
     this.group = child.pid;
+    this.traceTimer = setInterval(() => { void this.captureTrace(); }, agent.type === 'app-agent' ? 2000 : 500);
+    this.traceTimer.unref();
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => this.consume(chunk));
     child.stderr.on('data', (chunk: string) => { this.stderr = (this.stderr + chunk).slice(-16384); });
@@ -264,15 +319,19 @@ export class CodexProcess extends EventEmitter {
       if (!this.terminal && !this.cancelled) this.fail(this.lastError || this.stderr.trim() || `Codex exited without a completed turn (${code ?? signal})`);
       this.emit('exit', code, signal);
     });
-    await this.request('initialize', { clientInfo: { name: 'claude_gateway', version: '1.0.0' } });
+    await this.request('initialize', { clientInfo: { name: 'claude_gateway', version: '1.0.0' }, capabilities: { experimentalApi: true } });
     this.write({ method: 'initialized', params: {} });
     await this.validateConfiguration();
-    const parameters = { model: config.model, modelProvider: 'gateway', cwd: agent.type === 'app-agent' ? '/workspace' : agent.workspace, approvalPolicy: 'never', sandbox: profile.hostExecution || agent.type === 'app-agent' ? 'danger-full-access' : 'workspace-write' };
+    if (this.credentials!.chatgpt) {
+      try { await this.request('account/login/start', { type: 'chatgptAuthTokens', ...this.credentials!.chatgpt }); }
+      catch { throw new Error('CODEX_AUTH_REQUIRED: Codex rejected the native ChatGPT access credential. Check codex login status or update Codex.'); }
+    }
+    const parameters = { model: config.model, modelProvider: this.credentials!.chatgpt ? 'openai' : 'gateway', cwd: agent.type === 'app-agent' ? '/workspace' : agent.workspace, approvalPolicy: 'never', sandbox: profile.hostExecution || agent.type === 'app-agent' ? 'danger-full-access' : 'workspace-write' };
     const response = await this.request(this.saved ? 'thread/resume' : 'thread/start', { ...parameters, ...(this.saved ? { threadId: this.saved.threadId } : {}) });
     if (!threadPattern.test(response.thread?.id) || (this.saved && response.thread.id !== this.saved.threadId)) throw new Error('Codex thread identity mismatch');
     this.threadId = response.thread.id;
     await this.persist();
-    this.output({ type: 'system', subtype: 'native_init', model: config.model });
+    this.output({ type: 'system', subtype: 'native_init', model: config.model, contextWindow: this.contextMeasurement });
     await this.beginTurn(input);
 
   }
@@ -293,15 +352,25 @@ export class CodexProcess extends EventEmitter {
     const effective = reply.config;
     if (!effective || !Array.isArray(reply.layers)) throw new Error('Codex did not provide effective configuration');
     if (reply.layers.some((layer: any) => layer.name?.type === 'project' && !layer.disabledReason)) throw new Error('Codex project executable configuration is not permitted');
+    const requestedWindow = this.contextMeasurement?.configured;
+    if (requestedWindow != null && effective.model_context_window !== requestedWindow) throw new Error('Codex context window configuration mismatch');
+    const requestedEnvironment = workerEnvironment(this.options.agent, this.options.gateway);
+    if (Object.entries(requestedEnvironment).some(([key, value]) => effective.shell_environment_policy?.set?.[key] !== value)) throw new Error('Codex worker environment configuration mismatch');
     const actual = effective.mcp_servers ?? {};
     if (JSON.stringify(Object.keys(actual).sort()) !== JSON.stringify(Object.keys(this.approvedMcp).sort())) throw new Error('Codex MCP server inventory mismatch');
     for (const [name, expected] of Object.entries(this.approvedMcp)) {
       const server = actual[name];
-      if (server.command !== expected.command || JSON.stringify(server.args) !== JSON.stringify(expected.args) || Object.keys(server.env ?? {}).length !== Object.keys(expected.env ?? {}).length || Object.entries(expected.env ?? {}).some(([key, value]) => server.env?.[key] !== value)) throw new Error('Codex MCP server configuration mismatch');
+      if (server.command !== expected.command || server.url !== expected.url || server.cwd !== expected.cwd || JSON.stringify(server.args) !== JSON.stringify(expected.args) || Object.keys(server.env ?? {}).length !== Object.keys(expected.env ?? {}).length || Object.entries(expected.env ?? {}).some(([key, value]) => server.env?.[key] !== value) || Object.entries(expected.headers ?? {}).some(([key,value]) => server.http_headers?.[key] !== value) || ['enabled_tools','disabled_tools'].some(key=>JSON.stringify(server[key])!==JSON.stringify(expected[key]))) throw new Error('Codex MCP server configuration mismatch');
     }
     if (effective.notify?.length || (effective.hooks && Object.keys(effective.hooks).length)) throw new Error('Codex executable hooks are not permitted');
+    if (DISABLED_CODEX_FEATURES.some(name => effective.features?.[name] === true) ||
+        (effective.web_search !== undefined && effective.web_search !== 'disabled')) throw new Error('Codex native capabilities exceed the gateway worker policy');
     const provider = effective.model_providers?.gateway;
-    if (effective.model_provider !== 'gateway' || provider?.base_url !== (this.options.config.baseUrl ?? 'https://api.openai.com/v1') || provider?.env_key !== (this.options.config.apiKeyEnv ?? 'OPENAI_API_KEY') || provider?.wire_api !== 'responses') throw new Error('Codex provider configuration mismatch');
+    if (this.credentials!.chatgpt) {
+      if (effective.model_provider !== 'openai' || effective.cli_auth_credentials_store !== 'ephemeral' || effective.model_providers?.openai?.base_url) throw new Error('Codex native account configuration mismatch');
+      return;
+    }
+    if (effective.model_provider !== 'gateway' || provider?.base_url !== this.credentials!.baseUrl || provider?.env_key !== 'GATEWAY_CODEX_API_KEY' || provider?.wire_api !== 'responses') throw new Error('Codex provider configuration mismatch');
   }
   private write(message: unknown): void {
     if (!this.child || this.exited) throw new Error('Codex app-server is unavailable');
@@ -327,6 +396,22 @@ export class CodexProcess extends EventEmitter {
     if (typeof response.turn?.id !== 'string') throw new Error('Codex omitted turn identity');
     this.turnId = response.turn.id;
   }
+  private async refreshAuthentication(id: string | number, previousAccountId?: string): Promise<void> {
+    try {
+      if (this.refreshingAuth || (previousAccountId && previousAccountId !== this.credentials?.chatgpt?.chatgptAccountId)) throw new Error('Invalid authentication refresh');
+      this.refreshingAuth = true;
+      const next = await resolveCodexCredentials({ ...this.options.config, bin: this.authExecutable!, refreshToken: true });
+      if (!next.chatgpt || next.fingerprint !== this.identity) throw new Error('Native Codex account changed');
+      if (!this.cancelled && !this.exited) this.write({ id, result: next.chatgpt });
+      this.credentials = next;
+    } catch {
+      if (!this.cancelled && !this.exited) {
+        this.write({ id, error: { code: -32001, message: 'Native Codex authentication refresh failed. Check codex login status under the gateway service user.' } });
+        this.fail('CODEX_AUTH_REFRESH_FAILED: Native Codex authentication could not be refreshed.');
+        void this.stop();
+      }
+    } finally { this.refreshingAuth = false; }
+  }
   private event(event: any): void {
     if (typeof event.id === 'number' && !event.method) {
       const pending = this.requests.get(event.id);
@@ -334,6 +419,21 @@ export class CodexProcess extends EventEmitter {
       return;
     }
     if (event.id !== undefined && event.method) {
+      if (event.method === 'account/chatgptAuthTokens/refresh' && this.credentials?.chatgpt) {
+        void this.refreshAuthentication(event.id, event.params?.previousAccountId); return;
+      }
+      if (event.method === 'item/tool/requestUserInput' && this.options.requestInput) {
+        const questions = event.params?.questions;
+        if (!Array.isArray(questions) || !questions.length || questions.some((q: any) => !q || typeof q.question !== 'string' || q.options !== undefined && (!Array.isArray(q.options) || q.options.some((o: any) => !o || typeof o.label !== 'string' || o.description !== undefined && typeof o.description !== 'string')))) throw new Error('Invalid Codex user-input request');
+        const text = questions.map((q: any) => [q.question, ...(q.options ?? []).map((option: any) => `${option.label}: ${option.description ?? ''}`)].join('\n')).join('\n\n');
+        // The existing task question flow owns delivery and resume. End this
+        // attempt without inventing an answer or holding a worker slot open.
+        this.options.requestInput(text);
+        this.write({ id: event.id, result: { answers: {} } });
+        this.terminal = true;
+        this.output({ type: 'result', is_error: false, result: 'Waiting for user input.' });
+        void this.stop(); return;
+      }
       // This worker is noninteractive. Unexpected approval/tool requests fail closed.
       this.write({ id: event.id, error: { code: -32601, message: 'Interactive requests are not supported by gateway workers' } });
       this.fail(`Codex requested unsupported interaction: ${event.method}`); void this.stop(); return;
@@ -350,8 +450,13 @@ export class CodexProcess extends EventEmitter {
     } else if (event.method === 'error') {
       this.lastError = p.error?.message || JSON.stringify(p.error);
     } else if (event.method === 'thread/tokenUsage/updated') {
+      this.contextMeasurement = observeCodexContext(this.contextMeasurement ?? codexContextPolicy(this.options.config.model, this.options.config.contextWindow), p.tokenUsage);
       this.nativeUsage = p.tokenUsage?.total;
-      if (this.nativeUsage) this.output({ type: 'system', subtype: 'native_usage', usage: this.normalizedUsage() });
+      this.output({ type: 'system', subtype: 'native_usage', ...(this.nativeUsage ? { usage: this.normalizedUsage() } : {}), contextWindow: this.contextMeasurement });
+      if (this.contextMeasurement.configured !== null && this.contextMeasurement.observed !== null && this.contextMeasurement.observed > this.contextMeasurement.configured) {
+        this.fail('CODEX_CONTEXT_WINDOW_MISMATCH: native usable context exceeds the configured ceiling. Check the selected model and update Codex.');
+        void this.stop(); return;
+      }
     } else if (event.method === 'turn/completed') {
       if (this.turnId && p.turn.id !== this.turnId) return;
       this.turnEnded = true;
@@ -435,6 +540,30 @@ export class CodexProcess extends EventEmitter {
     this.cancelled = true; this.rejectRequests(new Error('Codex process cancelled'));
     return !!this.child && !this.exited;
   }
+  private captureTrace(): Promise<void> {
+    if (this.traceScan) return this.traceScan;
+    this.traceScan = (async () => {
+      if (!this.home) return;
+      const root = this.home + '/gateway-trace';
+      const captured = this.options.agent.type === 'app-agent'
+        ? JSON.parse(await containerNode(this.options.agent.container!, `let s='';process.stdin.on('data',b=>s+=b);process.stdin.on('end',()=>process.stdout.write(JSON.stringify((${scanCodexTrace.toString()})(process.argv[1],JSON.parse(s)))));`, [root], JSON.stringify(this.traceState)))
+        : scanCodexTrace(root, this.traceState);
+      this.traceState = captured.state;
+      for (const value of captured.measurements) {
+        if (value.schemas) {
+          this.traceSchemas.set(value.schemas.messageId, value.schemas);
+          this.emit('request-tools', value.schemas);
+        }
+        if (value.request) this.output({ type: 'assistant', message: { ...value.request, content: [] } });
+      }
+    })().catch(() => { /* Missing/unsupported trace means unknown, never invented schemas. */ }).finally(() => { this.traceScan = undefined; });
+    return this.traceScan;
+  }
+  async flushToolSchemas(): Promise<RequestToolSchemas[]> {
+    // Native trace writes can trail the terminal app-server notification.
+    for (let i = 0; i < 3; i++) { await new Promise(resolve => setTimeout(resolve, 50)); await this.captureTrace(); }
+    return [...this.traceSchemas.values()];
+  }
   stop(): Promise<void> {
     this.interrupt();
     return this.stopping ??= this.shutdown();
@@ -443,6 +572,8 @@ export class CodexProcess extends EventEmitter {
     await this.preparing?.catch(() => {});
     await this.launching?.catch(() => {});
     await this.completion;
+    if (this.traceTimer) clearInterval(this.traceTimer);
+    await this.traceScan;
     let stopped = true;
     if (this.containerAttempt && this.child) stopped = await stopContainerProfile(this.options.agent.container!, this.containerAttempt.directory);
     if (this.group) stopped = await stopProcessGroup(this.group) && stopped;
@@ -451,7 +582,7 @@ export class CodexProcess extends EventEmitter {
     // Failed/interrupted turns also advance the durable token baseline.
     if (stopped && this.threadId && this.nativeUsage) await this.persist();
     if (!this.child) this.emit('exit', null, 'SIGINT');
-    if (stopped) await this.cleanupHomes();
+    if (stopped) { await this.captureTrace(); await this.cleanupHomes(); }
   }
   private async cleanupHomes(): Promise<void> {
     for (const filename of this.connectorPaths) await rm(filename, { force: true });
@@ -465,6 +596,8 @@ export class CodexProcess extends EventEmitter {
     // Transcripts remain for explicit resume; short-lived MCP ticket configuration does not.
     if (this.containerAttempt) await containerNode(this.options.agent.container!, "require('fs').rmSync(process.argv[1],{recursive:true,force:true})", [this.containerAttempt.directory]);
     if (this.home) {
+      if (this.options.agent.type === 'app-agent') await containerNode(this.options.agent.container!, "require('fs').rmSync(process.argv[1],{recursive:true,force:true})", [this.home + '/gateway-trace']).catch(() => {});
+      else await rm(this.home + '/gateway-trace', { recursive: true, force: true });
       if (this.options.agent.type === 'app-agent') await containerNode(this.options.agent.container!, "require('fs').rmSync(process.argv[1],{force:true})", [this.home + '/config.toml']).catch(() => {});
       else await rm(join(this.home, 'config.toml'), { force: true });
       if (!this.homePersisted) {

@@ -46,7 +46,7 @@ for (const mod of modules) {
   if (!visible) continue;
 
   for (const tool of mod.getTools()) {
-    if (ORCHESTRATION_ROLE && !['memory_search', 'memory_get'].includes(tool.name) && !(ORCHESTRATION_ROLE === 'worker' &&
+    if (ORCHESTRATION_ROLE && !(ORCHESTRATION_ROLE === 'agent' && mod.id === 'safemode') && !['memory_search', 'memory_get'].includes(tool.name) && !(ORCHESTRATION_ROLE === 'worker' &&
       ((mod.id === 'cron' || mod.id === 'image' || mod.id === 'video' || mod.id === 'share-file' || mod.id === 'browser') || (mod.id === 'memory' && process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true')))) continue;
     toolMap.set(tool.name, mod);
     visibleTools.push(tool);

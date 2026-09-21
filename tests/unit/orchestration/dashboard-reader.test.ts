@@ -113,3 +113,22 @@ test('compaction reader is read-only and separates bounded summaries from detail
   expect(await reader.read('compaction',file,{agentId:'a',runId:'missing'})).toBeUndefined();
  }finally{await reader.close();store.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('Gateway-managed tasks retain target type across summary, session and request details without invented worker usage',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'dashboard-gateway-task-')),file=join(root,'db');
+ const store=new OrchestrationStore(file,'operator'),reader=new DashboardReader(join(process.cwd(),'dist/orchestration/dashboard-reader-worker.js'));
+ try{
+  const input=store.acceptInput({scope:{agentId:'operator',agentSessionId:'session',source:'api',accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'},text:'inspect'});
+  const d=new DecisionService(store).begin(input.conversationId,'owner',[input.inputId]);const service=new TaskService(store);
+  const gatewayTarget={adapter:'safemode',sessionId:'11111111-1111-4111-8111-111111111111',name:'diagnostic'};
+  const task=service.spawn({...input,...d,principalId:'owner',execute:true,writeMemory:false,actionId:'spawn'}, {title:'Inspect',instructions:'Inspect only',targetProfile:'gateway-managed',gatewayTarget});
+  const attempt=service.claim(task.taskId)!;
+  const summary=await reader.read('summary',file,{});
+  expect(summary.sessions[0].tasks[0]).toMatchObject({executionType:'gateway-managed',gatewayTarget,tokenSummary:{totalTokens:null}});
+  expect(summary.recentWork[0].gatewayTarget).toEqual(gatewayTarget);
+  expect((await reader.read('session',file,{sessionId:'session'})).tasks[0].gatewayTarget).toEqual(gatewayTarget);
+  const detail=await reader.read('task',file,{sessionId:'session',taskId:task.taskId,since:Date.now()-60000});
+  expect(detail.attempts[0]).toMatchObject({attemptId:attempt.attemptId,executionType:'gateway-managed',sessionId:gatewayTarget.sessionId,metrics:null});
+  expect((await reader.read('report',file,{sessionId:'session'})).turns.filter((t:any)=>t.role==='worker')).toEqual([]);
+ }finally{await reader.close();store.close();rmSync(root,{recursive:true,force:true});}
+});

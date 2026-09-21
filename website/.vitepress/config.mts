@@ -45,12 +45,14 @@ export default defineConfig({
       ] },
       { text: 'Configuration & operation', collapsed: true, items: [
         { text: 'Configuration overview', link: '/reference/configuration' },
+        { text: 'Applying configuration changes', link: '/reference/configuration-changes' },
         { text: 'Gateway settings', link: '/reference/gateway-settings' },
         { text: 'Orchestration settings', link: '/reference/orchestration-settings' },
         { text: 'Memory & learning settings', link: '/reference/memory-settings' },
         { text: 'CLI & API overview', link: '/reference/cli-api' },
         { text: 'CLI command reference', link: '/reference/cli' },
         { text: 'Operations & upgrades', link: '/guide/operations' },
+        { text: 'Safemode', link: '/guide/safemode' },
         { text: 'Troubleshooting', link: '/guide/troubleshooting' },
         { text: 'Development & docs deployment', link: '/reference/development' }
       ] },

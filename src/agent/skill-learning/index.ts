@@ -72,7 +72,7 @@ export interface SkillLearningManagerOpts {
 }
 
 export class SkillLearningManager {
-  readonly cfg: ResolvedSkillLearningCfg;
+  cfg: ResolvedSkillLearningCfg;
   private readonly db: HistoryDB;
   private readonly agentId: string;
   private readonly workspaceDir: string;
@@ -105,6 +105,21 @@ export class SkillLearningManager {
         send: opts.sendNotification,
         logger: opts.logger,
       });
+  }
+
+  private cancelCurator?: () => void;
+  private pendingConfig?: Pick<SkillLearningManagerOpts,'agentCfg'|'globalCfg'|'gatewayTimezone'>;
+  reconfigure(opts: Pick<SkillLearningManagerOpts,'agentCfg'|'globalCfg'|'gatewayTimezone'>): void {
+    if(this.reviewInFlight.size){this.pendingConfig=opts;return;}
+    this.pendingConfig=undefined;
+    this.cfg=resolveSkillLearningConfig(opts.agentCfg,opts.globalCfg,opts.gatewayTimezone);
+    this.notifier.setEnabled(this.cfg.notify);
+    this.startCurator();
+  }
+  stop(): void {
+    this.cancelCurator?.();this.cancelCurator=undefined;
+    for(const timer of this.idleTimers.values())clearTimeout(timer);
+    this.idleTimers.clear();this.pendingConfig=undefined;
   }
 
   isEnabled(): boolean {
@@ -302,6 +317,7 @@ export class SkillLearningManager {
       this.logger?.warn?.(`[skill-learning:${this.agentId}] review failed: ${(err as Error).message}`);
     } finally {
       this.reviewInFlight.delete(sessionId);
+      if(this.pendingConfig&&!this.reviewInFlight.size)this.reconfigure(this.pendingConfig);
       // The newer batch's timer may have fired while this review was in flight.
       if (!a.active && (a.sigMaxToolCalls > 0 || a.sigRecovery || a.sigCorrection) &&
           this.accum.get(mapKey) === a && !this.idleTimers.has(mapKey)) {
@@ -314,7 +330,8 @@ export class SkillLearningManager {
 
   /** Start the daily curator scheduler. Returns a canceller. */
   startCurator(): () => void {
-    return startCurator(
+    this.cancelCurator?.();
+    this.cancelCurator = startCurator(
       () => ({
         db: this.db,
         workspaceDir: this.workspaceDir,
@@ -324,6 +341,7 @@ export class SkillLearningManager {
       }),
       this.cfg,
     );
+    return this.cancelCurator;
   }
 
   /** Run one curation sweep immediately (test/ops seam). */
