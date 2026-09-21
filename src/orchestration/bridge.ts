@@ -38,11 +38,14 @@ export class TaskBridge {
     const server = createServer(async (request, response) => {
       response.setHeader('Content-Type', 'application/json');
       let retryOf: string | undefined;
+      let denialReason: string | undefined;
+      function deny(reason: string): never { denialReason = reason; throw new OrchestrationError('ACCESS_DENIED'); }
       try {
-        if (request.method !== 'POST' || request.url !== '/call' || request.headers.origin) throw new OrchestrationError('ACCESS_DENIED');
+        if (request.method !== 'POST' || request.url !== '/call' || request.headers.origin) deny('INVALID_BRIDGE_REQUEST');
         const token = request.headers.authorization?.replace(/^Bearer /, '');
         const scope = token && this.scopes.get(token);
-        if (!scope || (scope.role === 'agent' && scope.compactOnly)) throw new OrchestrationError('ACCESS_DENIED');
+        if (!scope) deny('TICKET_INVALID_OR_REVOKED');
+        if (scope.role === 'agent' && scope.compactOnly) deny('COMPACTION_SCOPE');
         let bytes = 0;
         const chunks: Buffer[] = [];
         for await (const chunk of request) {
@@ -61,12 +64,21 @@ export class TaskBridge {
             if (mutation) await scope.beforeMutation?.(command.tool, a, context.actionId);
             switch (command.tool) {
               case 'safemode_validate': {
-                this.tasks.store.assertMember(context.conversationId, context.principalId);
-                if (!this.safemodeAccess || this.container) throw new OrchestrationError('ACCESS_DENIED');
+                try { this.tasks.store.assertMember(context.conversationId, context.principalId); }
+                catch (error) {
+                  if (error instanceof OrchestrationError && error.code === 'ACCESS_DENIED') deny('CONVERSATION_ACCESS_DENIED');
+                  throw error;
+                }
+                if (this.container) deny('SAFEMODE_HOST_ONLY');
+                if (!this.safemodeAccess) deny('SAFEMODE_AGENT_NOT_ALLOWED');
                 if (!['list', 'status', 'logs', 'send', 'stop'].includes(a.operation)) throw new OrchestrationError('INVALID_INPUT');
                 if (a.operation === 'send' || a.operation === 'stop') {
-                  if (!context.execute) throw new OrchestrationError('ACCESS_DENIED');
-                  await scope.beforeMutation?.(command.tool, a, context.actionId);
+                  if (!context.execute) deny('EXECUTION_NOT_AUTHORIZED');
+                  try { await scope.beforeMutation?.(command.tool, a, context.actionId); }
+                  catch (error) {
+                    if (error instanceof OrchestrationError && error.code === 'ACCESS_DENIED') deny('ADMISSION_DENIED');
+                    throw error;
+                  }
                 }
                 result = { allowed: true }; break;
               }
@@ -157,8 +169,9 @@ export class TaskBridge {
         response.end(JSON.stringify(result));
       } catch (error) {
         const code = error instanceof OrchestrationError ? error.code : 'INVALID_REQUEST';
+        if (code === 'ACCESS_DENIED' && denialReason) console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', message: 'Task bridge authorization denied', data: { agentId: this.tasks.store.agentId, reason: denialReason } }));
         response.statusCode = code === 'ACCESS_DENIED' ? 403 : 400;
-        response.end(JSON.stringify({ error: code, ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        response.end(JSON.stringify({ error: code, ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;

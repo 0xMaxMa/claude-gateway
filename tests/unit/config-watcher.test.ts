@@ -166,6 +166,22 @@ describe('config-watcher', () => {
   // ---------------------------------------------------------------------------
   // U-CW-01: config.json changes claude.model — emit changes with hotReloadable=true
   // ---------------------------------------------------------------------------
+  it('reports safemode allowlist additions and revocations as restart-required', () => {
+    const configPath=path.join(tmpDir,'config.json');
+    writeConfigFile(configPath,rawConfig());
+    const watcher=new ConfigWatcher(configPath,loadConfig(configPath),logger);
+    const changes=jest.fn();watcher.on('changes',changes);
+    for(const allowedAgentIds of [['alfred'], [], ['baerbel'], undefined]) {
+      changes.mockClear();logger.warn.mockClear();logger.info.mockClear();
+      writeConfigFile(configPath,{...rawConfig(),...(allowedAgentIds ? {safemode:{allowedAgentIds}} : {})});
+      watcher.reload();
+      expect(changes).toHaveBeenCalledTimes(1);
+      expect(changes.mock.calls[0][0]).toEqual([expect.objectContaining({field:'safemode.allowedAgentIds',newValue:allowedAgentIds,hotReloadable:false})]);
+      expect(logger.warn).toHaveBeenCalledWith('Config changes require restart to take effect',{fields:['safemode.allowedAgentIds']});
+      expect(logger.info).not.toHaveBeenCalledWith('Config hot-reloaded',expect.anything());
+    }
+    changes.mockClear();watcher.reload();expect(changes).not.toHaveBeenCalled();
+  });
   it('U-CW-01: emits changes with hotReloadable=true when claude.model changes', () => {
     const configPath = path.join(tmpDir, 'config.json');
     writeConfigFile(configPath, rawConfig());

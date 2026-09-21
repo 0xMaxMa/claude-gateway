@@ -270,6 +270,9 @@ export class ConfigWatcher extends EventEmitter {
 
     // Gateway-level fields (emitted with agentId: '')
     const gatewayFieldPairs: Array<{ field: string; oldVal: unknown; newVal: unknown }> = [
+      // Runtime captures this authorization at creation; additions and revocations
+      // must both be reported as restart-required, never as hot-reloaded.
+      { field: 'safemode.allowedAgentIds', oldVal: oldCfg.safemode?.allowedAgentIds, newVal: newCfg.safemode?.allowedAgentIds },
       {field:'gateway.orchestration',oldVal:oldCfg.gateway.orchestration,newVal:newCfg.gateway.orchestration},
       {field:'gateway.workers',oldVal:oldCfg.gateway.workers,newVal:newCfg.gateway.workers},
       { field: 'gateway.headless', oldVal: oldCfg.gateway.headless, newVal: newCfg.gateway.headless },

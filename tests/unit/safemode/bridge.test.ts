@@ -43,7 +43,7 @@ describe('scoped safemode operator authorization', () => {
       const f = await fixture(access);
       try {
         const ticket = f.issue();
-        for (const operation of ['list', 'status', 'logs', 'send', 'stop']) expect(await ticket.call(operation)).toEqual({ status: 403, body: { error: 'ACCESS_DENIED' } });
+        for (const operation of ['list', 'status', 'logs', 'send', 'stop']) expect(await ticket.call(operation)).toEqual({ status: 403, body: { error: 'ACCESS_DENIED', reason: 'SAFEMODE_AGENT_NOT_ALLOWED' } });
       } finally { await f.close(); }
     }
   });
@@ -52,7 +52,7 @@ describe('scoped safemode operator authorization', () => {
     try {
       const ticket = f.issue({ context: { ...f.context, execute: false } });
       for (const operation of ['list', 'status', 'logs']) expect(await ticket.call(operation)).toEqual({ status: 200, body: { allowed: true } });
-      for (const operation of ['send', 'stop']) expect((await ticket.call(operation)).status).toBe(403);
+      for (const operation of ['send', 'stop']) expect((await ticket.call(operation)).body).toEqual({error:'ACCESS_DENIED',reason:'EXECUTION_NOT_AUTHORIZED'});
     } finally { await f.close(); }
   });
   test('mutation admission must pass before send or stop is authorized', async () => {
@@ -60,7 +60,7 @@ describe('scoped safemode operator authorization', () => {
     try {
       const admission = jest.fn(async () => { throw new OrchestrationError('ACCESS_DENIED'); });
       const ticket = f.issue({ beforeMutation: admission });
-      for (const operation of ['send', 'stop']) expect((await ticket.call(operation)).status).toBe(403);
+      for (const operation of ['send', 'stop']) expect((await ticket.call(operation)).body).toEqual({error:'ACCESS_DENIED',reason:'ADMISSION_DENIED'});
       expect(admission).toHaveBeenCalledTimes(2);
       const accepted = f.issue({ beforeMutation: async () => {} });
       expect((await accepted.call('send')).body).toEqual({ allowed: true });
@@ -70,9 +70,9 @@ describe('scoped safemode operator authorization', () => {
     const f = await fixture(true);
     try {
       const outsider = f.issue({ context: { ...f.context, principalId: 'another-user' } });
-      expect((await outsider.call('list')).body.error).toBeDefined();
-      const compact = f.issue({ compactOnly: true }); expect((await compact.call('list')).status).toBe(403);
-      const revoked = f.issue(); revoked.revoke(); expect((await revoked.call('list')).status).toBe(403);
+      expect((await outsider.call('list')).body).toEqual({error:'ACCESS_DENIED',reason:'CONVERSATION_ACCESS_DENIED'});
+      const compact = f.issue({ compactOnly: true }); expect((await compact.call('list')).body).toEqual({error:'ACCESS_DENIED',reason:'COMPACTION_SCOPE'});
+      const revoked = f.issue(); revoked.revoke(); expect((await revoked.call('list')).body).toEqual({error:'ACCESS_DENIED',reason:'TICKET_INVALID_OR_REVOKED'});
       const valid = f.issue(); expect((await valid.call('delete')).body).toEqual({ error: 'INVALID_INPUT' });
     } finally { await f.close(); }
   });
@@ -80,7 +80,7 @@ describe('scoped safemode operator authorization', () => {
     const f = await fixture(true, true);
     try {
       const ticket = f.issue();
-      for (const operation of ['list', 'send', 'stop']) expect((await ticket.call(operation)).status).toBe(403);
+      for (const operation of ['list', 'send', 'stop']) expect((await ticket.call(operation)).body).toEqual({error:'ACCESS_DENIED',reason:'SAFEMODE_HOST_ONLY'});
     } finally { await f.close(); }
   });
 });

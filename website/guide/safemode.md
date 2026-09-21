@@ -87,7 +87,7 @@ For example, to allow only your host operator agent `claude-founder`, merge this
 }
 ```
 
-Keep any other existing `safemode` settings. Use the exact agent ID, not its display name or chat session ID. Restart the gateway when it is idle for this change to take effect. An empty or omitted list produces `ACCESS_DENIED` for agent safemode requests, even though the local operator CLI remains available. This permission grants access to investigation contents and controls, not just the list of names.
+Keep any other existing `safemode` settings. Use the exact agent ID, not its display name or chat session ID. Restart the gateway when it is idle for this change to take effect. Changes to `safemode.allowedAgentIds`, including removing permissions, are reported by the config watcher as restart-required; existing runtimes retain their prior policy until restart. An empty or omitted list produces `ACCESS_DENIED` with reason `SAFEMODE_AGENT_NOT_ALLOWED` for agent safemode requests, even though the local operator CLI remains available. This permission grants access to investigation contents and controls, not just the list of names.
 
 Create an investigation interactively first. Then an authorized operator agent can send prompts, including through its Telegram channel. Sending/stopping requires an execution-authorized turn; takeover must be explicitly requested. Scoped admission is checked before invoking the local command. Local controls work while the gateway is down; communication through Telegram requires the gateway/channel to be available. Inspect status and logs to retrieve the result; acceptance alone is not completion.
 
@@ -199,13 +199,13 @@ If you identify a stale client you no longer need, detach only that client with 
 
 | Symptom | Meaning and next step |
 | --- | --- |
-| Agent receives `ACCESS_DENIED` | Check the exact agent ID in top-level `safemode.allowedAgentIds`, then restart the gateway when idle. App/container agents and ordinary workers remain denied. Sending or stopping also needs an execution-authorized turn. |
+| Agent receives `ACCESS_DENIED` | Inspect the structured `reason` below. This code alone does not prove an allowlist problem. Recheck the tool after changing configuration and restarting; a previous rejection is historical evidence. |
 | `BUSY` | An investigation already has an owner. Inspect `status`; use explicit `--takeover` only when you intend to stop its current interactive owner. Stop an active headless request first. |
 | Native session already belongs to an investigation | Use `safemode --resume NATIVE_ID`; do not attach it again through native `resume` parameters. |
 | Native ownership cannot be verified before launch | Inspect the reported PID and OS process visibility. Safemode refuses a new launch without sufficient evidence. `recover` does not bypass a live owner. |
 | Ownership inspection warning during an active session | The session stays running and checks continue. This warning alone does not mean another owner exists. |
 | Gateway logs mention a session but its database is absent | Reopen with `--prompt "Inspect gateway session UUID"` or send a new safemode prompt containing that ID. Read `diagnostics/coverage.json` for selected/omitted agents and limits. Typing an ID inside the native UI alone does not refresh gateway snapshots. |
-| `diagnostics/...` is missing after native resume | Use the absolute diagnostic paths in the latest safemode prompt. Native history may contain paths from an earlier working directory or snapshot. |
+| `diagnostics/...` is missing after native resume | Use `diagnostics/` relative to the active safemode workspace; current Codex launches explicitly set that directory. Native history may contain paths from an earlier working directory or snapshot. |
 | CLI reports an unfamiliar model name | Check the correlated terminal request outcome and provider error. A warning accompanied by a successful result is different from a rejected request. |
 | Colors differ from the normal terminal | Close and reopen safemode after upgrading so it inherits current terminal/color settings. Gateway restart alone does not update an existing native CLI. Compare in the same terminal and tmux pane; safemode does not override a native theme or repair terminal palette settings. |
 | `delete` refuses an investigation | Stop its owner first. Deletion removes safemode state and snapshots, not native CLI conversation history. There is no `clear all` command. |
@@ -221,3 +221,20 @@ Snapshots are evidence collected at launch or `send` time, not a live mirror. Re
 - A session ID supplied in a new safemode prompt replaces the saved target selection. A resume without new IDs retains it. An untargeted first launch is explicitly marked as a general snapshot.
 
 Replace the example UUIDs with your gateway chat session ID when selecting evidence, and with your **native CLI session ID** when resuming a safemode conversation. They identify different things.
+
+### Authorization denial reasons
+
+The private task bridge retains HTTP 403 and `error: "ACCESS_DENIED"`, adding a
+safe `reason` field. MCP forwards this field unchanged, and gateway logs record
+the agent ID and reason without credentials or prompt text.
+
+| Reason | Meaning |
+| --- | --- |
+| `SAFEMODE_AGENT_NOT_ALLOWED` | The runtime's allowlist does not include this agent. Update the list and restart when idle. |
+| `SAFEMODE_HOST_ONLY` | An app/container agent cannot control host safemode. |
+| `CONVERSATION_ACCESS_DENIED` | The principal is not a member of the conversation. |
+| `EXECUTION_NOT_AUTHORIZED` | This turn may inspect but cannot send or stop. |
+| `ADMISSION_DENIED` | Execution admission rejected the requested mutation. |
+| `TICKET_INVALID_OR_REVOKED` | The bridge ticket is missing, invalid or revoked. This is not an allowlist verdict. |
+| `COMPACTION_SCOPE` | A compaction-only scope cannot call operational tools. |
+| `INVALID_BRIDGE_REQUEST` | The request method, path or origin is not permitted. |

@@ -37,7 +37,7 @@ test('container bridge rejects host tools and revoked tickets; artifacts require
     for(const tool of ['Bash','task_share_call','task_memory_append','generate_image','generate_video','browser_navigate','task_spawn']) expect(await call(tool)).toEqual({error:'TOOL_DENIED'});
     const hostFile=join(workspace,'host-file');writeFileSync(hostFile,'test');expect(()=>files.allowedPath(attempt.attemptId,attempt.generation,hostFile)).toThrow();
     mkdirSync(join(spool,attempt.attemptId),{recursive:true});const imported=join(spool,attempt.attemptId,'result');writeFileSync(imported,'bytes');expect(files.allowedPath(attempt.attemptId,attempt.generation,imported)).toBe(imported);
-    ticket.revoke();expect(await call('task_validate')).toEqual({error:'ACCESS_DENIED'});
+    ticket.revoke();expect(await call('task_validate')).toEqual({error:'ACCESS_DENIED',reason:'TICKET_INVALID_OR_REVOKED'});
     tasks.started(attempt.attemptId,attempt.generation,{pid:123,startedAt:Date.now(),instanceId:'test'});
     store.transaction(()=>store.appendEvent(input.conversationId,'tool.activity',{type:'tool_use',name:'Bash',taskId:task.taskId},task.taskId));
     const runtime=Object.assign(Object.create(AgentOrchestrationRuntime.prototype),{store,agent:{type:'app-agent',container:'app-agent'},config:{enabled:true,tasks:{workspaceMode:'container'}},active:new Map(),seenSessions:new Set(),scheduler:{startedSessions:new Set()}}) as AgentOrchestrationRuntime;
