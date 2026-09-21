@@ -12,6 +12,7 @@ const assert = require('assert/strict');
 const {once} = require('events');
 const {randomUUID} = require('crypto');
 const {execFileSync} = require('child_process');
+const shellEnvironmentMode = process.argv.includes('--shell-environment');
 const containerMode = process.argv.includes('--container');
 const nativeAuthMode = process.argv.includes('--native-auth');
 const originalCodexHome = process.env.CODEX_HOME;
@@ -40,10 +41,10 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
     if(hanging)return;
     if(sequence>0)await new Promise(resolve=>setTimeout(resolve,75));
     const id='resp_'+(++sequence), messageId='msg_'+sequence;
-    const namespace=body.tools?.find(t=>t.type==='namespace'&&t.name===(connectorMode?'mcp__'+connectorNamespace:'mcp__gateway'));
-    const toolName=connectorMode?'tool_call':'fixture_echo';
-    const tool=namespace?.tools.find(t=>t.name===toolName) ?? body.tools?.find(t=>t.name===(connectorMode?'mcp__'+connectorNamespace+'__tool_call':'mcp__gateway__fixture_echo'));
-    const toolArgs=connectorMode?{name:nativeMcpMode?'fixture__fixture_echo':'fixture_echo',arguments:{value:'hello'}}:{value:'hello'};
+    const namespace=shellEnvironmentMode?undefined:body.tools?.find(t=>t.type==='namespace'&&t.name===(connectorMode?'mcp__'+connectorNamespace:'mcp__gateway'));
+    const toolName=shellEnvironmentMode?'exec_command':connectorMode?'tool_call':'fixture_echo';
+    const tool=shellEnvironmentMode?body.tools?.find(t=>t.name==='exec_command'):namespace?.tools.find(t=>t.name===toolName) ?? body.tools?.find(t=>t.name===(connectorMode?'mcp__'+connectorNamespace+'__tool_call':'mcp__gateway__fixture_echo'));
+    const toolArgs=shellEnvironmentMode?{cmd:"worker_fixture_account; printf '%s\\n' \"$WORKER_ENV_TEST\"; pwd",workdir:containerMode?'/workspace/project':join(directory,'project'),max_output_tokens:1000}:connectorMode?{name:nativeMcpMode?'fixture__fixture_echo':'fixture_echo',arguments:{value:'hello'}}:{value:'hello'};
     const output=sequence===1&&tool?[{type:'function_call',id:'fc_1',call_id:'call_fixture_1',name:tool.name,...(namespace?{namespace:namespace.name}:{}),arguments:JSON.stringify(toolArgs)}]:[{type:'message',id:messageId,role:'assistant',phase:'final_answer',status:'completed',content:[{type:'output_text',text:'Canonical fixture result '+sequence,annotations:[]}]}];
     const response={id,object:'response',created_at:Math.floor(Date.now()/1000),status:'completed',model:'gpt-test',output,usage:{input_tokens:100,input_tokens_details:{cached_tokens:40,cache_write_tokens:20},output_tokens:20,output_tokens_details:{reasoning_tokens:5},total_tokens:120}};
     res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache'});
@@ -102,7 +103,18 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
     if(containerMode)await writeFile(join(home,'config.toml'),'model="gpt-test"\nmodel_provider="fixture"\n[model_providers.fixture]\nname="Fixture"\nwire_api="responses"\nbase_url="http://127.0.0.1:1/v1"\nenv_key="FIXTURE_CODEX_KEY"\n'+spec);
     else await require('fs/promises').appendFile(join(home,'config.toml'),spec);
   }
-  options.checkpoint=async()=>{if(amended)return;amended=true;return {text:'Apply the native checkpoint revision before finishing.',kind:'assignment',acknowledge:()=>{acknowledged=true;}};};
+  if(shellEnvironmentMode){
+    await mkdir(join(directory,'project'));
+    await mkdir(join(directory,'zsh'));
+    await writeFile(join(directory,'hook.sh'),"worker_fixture_account() { case \"$PWD\" in */project) printf 'project-account\\n';; *) printf 'wrong-account\\n';; esac; }\n");
+    const location=containerMode?'/workspace':directory;
+    await writeFile(join(directory,'zsh','.zshenv'),'. '+JSON.stringify(location+'/hook.sh')+'\n');
+    options.gateway.gateway.workers={
+      environment:containerMode?{WORKER_ENV_TEST:'must-not-leak'}:{WORKER_ENV_TEST:'host-setting',BASH_ENV:location+'/hook.sh',ZDOTDIR:location+'/zsh'},
+      ...(containerMode?{containerEnvironment:{WORKER_ENV_TEST:'container-setting',BASH_ENV:location+'/hook.sh',ZDOTDIR:location+'/zsh'}}:{})
+    };
+  }
+  if(!shellEnvironmentMode) options.checkpoint=async()=>{if(amended)return;amended=true;return {text:'Apply the native checkpoint revision before finishing.',kind:'assignment',acknowledge:()=>{acknowledged=true;}};};
   async function run(){
     const adapter=new CodexProcess(options);adapters.push(adapter);const events=[];
     const result=new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error('Smoke turn timed out')),45000);adapter.on('startup-error',e=>{clearTimeout(timeout);reject(e);});adapter.on('output',line=>{const e=JSON.parse(line);events.push(e);if(e.type==='result'){clearTimeout(timeout);e.is_error?reject(new Error(e.result)):resolve(e);}});});
@@ -113,6 +125,14 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\n');});
     assert(first.schemas.length>0,'actual request tool schemas were not captured');
     assert(first.schemas.some(s=>s.loaded.some(name=>name.includes('fixture_echo')||name.includes('tool_call'))),'MCP schema absent from actual request capture');
     assert(first.events.some(e=>e.type==='assistant'&&e.message.usage?.input_tokens===40&&e.message.usage.cache_read_input_tokens===40&&e.message.usage.cache_creation_input_tokens===20),'per-request trace usage was not normalized');
+    if(shellEnvironmentMode){
+      const outputs=requests.flatMap(r=>r.input).filter(i=>i.type==='function_call_output').map(i=>typeof i.output==='string'?i.output:JSON.stringify(i.output)).join('\n');
+      assert(outputs.includes('project-account'),outputs);
+      assert(outputs.includes(containerMode?'container-setting':'host-setting'),outputs);
+      assert(!outputs.includes('must-not-leak'),outputs);
+      console.log('PASS native Codex '+(containerMode?'container':'host')+': actual default-shell command, explicit startup hook, project cwd and isolated environment');
+      return;
+    }
     const {readFile}=require('fs/promises');assert.match(await readFile(calls,'utf8'),/hello/);
     assert(first.events.some(e=>e.type==='assistant'&&e.message.content.some(b=>b.name===(connectorMode?'mcp__'+connectorNamespace+'__tool_call':'mcp__gateway__fixture_echo'))),'native MCP tool was not observed');
     assert(acknowledged,'native steering was not acknowledged');assert(requests.some(r=>JSON.stringify(r.input).includes('native checkpoint revision')),'native revision never reached Responses input');

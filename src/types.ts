@@ -404,6 +404,10 @@ export interface ModelConfig {
 }
 
 export interface WorkerHarnessConfig {
+  /** Explicit command environment for host workers; merged by key with agent overrides. */
+  environment?: Record<string, string>;
+  /** Separate environment for app-container workers. No host settings or files are copied. */
+  containerEnvironment?: Record<string, string>;
   /** Defaults to auto routing; conversational agent decisions always remain on Claude Code. */
   harness?: 'claude' | 'auto' | 'codex';
   codex?: {

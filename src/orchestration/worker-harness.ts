@@ -1,3 +1,4 @@
+import { validateWorkerEnvironment } from '../session/worker-environment';
 import type { AgentConfig, GatewayConfig, ModelConfig, WorkerHarnessConfig } from '../types';
 import { OrchestrationError } from './types';
 
@@ -5,8 +6,10 @@ export function validateWorkerHarness(value: unknown): void {
   if (value === undefined) return;
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('workers must be an object');
   const c = value as WorkerHarnessConfig;
-  for (const key of Object.keys(c)) if (!['harness', 'codex'].includes(key)) throw new Error(`Unknown workers field: ${key}`);
+  for (const key of Object.keys(c)) if (!['harness', 'codex', 'environment', 'containerEnvironment'].includes(key)) throw new Error(`Unknown workers field: ${key}`);
   if (c.harness !== undefined && !['claude', 'auto', 'codex'].includes(c.harness)) throw new Error('Invalid workers.harness');
+  validateWorkerEnvironment(c.environment, 'workers.environment');
+  validateWorkerEnvironment(c.containerEnvironment, 'workers.containerEnvironment');
   if (c.codex === undefined) return;
   if (!c.codex || typeof c.codex !== 'object' || Array.isArray(c.codex)) throw new Error('workers.codex must be an object');
   for (const key of Object.keys(c.codex)) if (!['baseUrl','apiKeyEnv','reasoningEffort','bin'].includes(key)) throw new Error(`Unknown workers.codex field: ${key}`);
@@ -38,5 +41,11 @@ export function resolveWorkerHarness(agent: AgentConfig, gateway: GatewayConfig,
   // A direct endpoint can declare workerModel when its native name differs.
   const nativeModel = metadata?.workerModel ?? canonical.replace(/\[(?:1m|200k)\]$/i, '');
   if (harness === 'codex' && (!nativeModel || /[\r\n\0]/.test(nativeModel))) throw new OrchestrationError('WORKER_MODEL_INVALID');
-  return { harness, config: { ...gateway.gateway.workers?.codex, ...agent.workers?.codex, model: nativeModel } } as const;
+  // Claude's context suffix is not part of a Responses model ID. Carry its
+  // meaning into native Codex configuration instead of silently dropping it.
+  const suffix = /\[(1m|200k)\]$/i.exec(canonical)?.[1].toLowerCase();
+  const contextWindow = suffix === '1m' ? 1_000_000 : suffix === '200k' ? 200_000 : metadata?.contextWindow;
+  if (harness === 'codex' && contextWindow !== undefined && (!Number.isSafeInteger(contextWindow) || contextWindow <= 0)) throw new OrchestrationError('WORKER_MODEL_INVALID');
+  return { harness, config: { ...gateway.gateway.workers?.codex, ...agent.workers?.codex, model: nativeModel,
+    ...(harness === 'codex' && contextWindow !== undefined ? { contextWindow } : {}) } } as const;
 }

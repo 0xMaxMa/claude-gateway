@@ -53,9 +53,140 @@ Existing model entries in `gateway.models` can declare worker routing and provid
 
 `workerHarness` affects automatic routing. `workerModel` maps a gateway selection to the native provider model. Without an explicit mapping, native model names drop only Claude context suffixes such as `[1m]`; provider namespaces such as `chatgpt/` are preserved so BYOK routing cannot silently switch to a managed pool. Available reasoning settings are `low`, `medium`, `high`, and `xhigh`; support depends on the chosen model/provider. `codex.bin` may specify an executable path, not a shell command with arguments.
 
+Context suffixes also carry a requested native context size: `[1m]` requests
+1,000,000 tokens and `[200k]` requests 200,000. Without a suffix, configured
+model metadata can supply `contextWindow`; otherwise native defaults apply.
+The request is written to `model_context_window` and checked through
+`config/read`. Native Codex model-catalog caps and reserved headroom can still
+make the usable window smaller. A requested 1M setting is not proof that the
+native runtime or provider accepts 1M; inspect the native
+`thread/tokenUsage/updated` event's `modelContextWindow` for the usable window.
+For example, the installed 0.155.1 catalog caps `gpt-5.6-luna` at 872,000
+raw tokens (828,400 usable with 5% headroom), even with a 1M request.
+
 Runtime/auth preflight can fall back only in auto mode. Endpoint/model/quota failures after dispatch fail the task explicitly. App tasks never fall back to host execution.
 
 Relative `codex.bin` paths resolve against the agent workspace; the credential probe and worker use that same resolved executable. A native provider using HTTP at `host.docker.internal` is accepted only for app-container workers, not host workers. The container must have that hostname mapped to the gateway host.
+
+## Worker command environment
+
+Configure explicit worker environment values through `gateway.workers.environment`.
+An agent's `workers.environment` overrides matching keys and inherits the remaining
+gateway values. These settings apply to **workers of both harnesses**, not to the
+conversational Agent, interactive safemode, or separately launched terminal CLIs.
+With no settings, native shell behavior is preserved.
+
+This partial configuration enables a Bash startup hook on host workers:
+
+```json
+{
+  "gateway": {
+    "workers": {
+      "environment": {
+        "BASH_ENV": "/home/example/.config/worker/bash-env.sh"
+      }
+    }
+  }
+}
+```
+
+Use absolute paths appropriate to the gateway service user. Values are literal
+strings: the gateway does not expand `~`, `$HOME`, shell expressions, or variables
+inside them. Hooks must already exist and be readable by that user. Keep credentials
+in the CLI's existing credential store rather than placing them in this map.
+
+The gateway passes these values to the worker process. For Codex it also writes
+them into the private attempt's `shell_environment_policy.set` and checks the
+effective `config/read` response before starting the native thread. Worker-pool
+bindings include configuration and workspace, preventing reuse of a worker
+transcript across incompatible execution settings.
+
+### Bash and zsh startup differ
+
+`BASH_ENV` is read by noninteractive Bash; it does not configure zsh.
+Noninteractive `zsh -lc` does not read `.zshrc`. The installed native Codex
+may select its default shell from the OS account, so setting `SHELL=/bin/bash`
+alone is not a reliable shell override. The gateway does not force a shell,
+source the user's entire interactive startup file, or modify the OS login shell.
+
+If both shells must load the same compatible hook, explicitly configure
+`BASH_ENV` and a dedicated `ZDOTDIR` containing a small `.zshenv`:
+
+```json
+{
+  "gateway": {
+    "workers": {
+      "environment": {
+        "BASH_ENV": "/home/example/.config/worker/account-routing.sh",
+        "ZDOTDIR": "/home/example/.config/worker/zsh"
+      }
+    }
+  }
+}
+```
+
+Create `/home/example/.config/worker/zsh/.zshenv`:
+
+```sh
+. /home/example/.config/worker/account-routing.sh
+```
+
+The hook must be compatible with each shell that loads it. An explicit `ZDOTDIR`
+also changes where zsh looks for its other user startup files; use this dedicated
+directory deliberately rather than copying terminal themes or interactive plugins.
+
+A path-based `gh` function needs **both** the startup hook and the intended
+current directory. `git -C /project` and `gh --repo owner/repository` do not change
+the shell's current directory, and Git commit identity does not select a GitHub
+CLI account. Verify the effective shell with `type gh`, then perform a read-only
+`gh api user --jq .login` in the intended project directory. Avoid global
+`gh auth switch` when concurrent workers use different accounts.
+
+### Container environment
+
+App workers use `gateway.workers.containerEnvironment`, with matching
+`agents[].workers.containerEnvironment` keys taking precedence. They never inherit
+the host `workers.environment` map. Container paths, executables, hooks, and CLI
+credentials must already be available through the app's authorized setup; these
+settings do not copy or mount host files. Container environment values are passed
+to Docker by variable name, not embedded in process arguments.
+
+Environment maps accept at most 64 variables with string values. Runtime-owned
+variables such as `HOME`, `PWD`, `CODEX_HOME`, and gateway/CLI authentication
+variables are reserved. Changing worker environment does not replace native
+Codex authentication.
+
+## Project working directory
+
+Set an agent's default project directory without changing its identity workspace:
+
+```json
+{
+  "orchestration": {
+    "tasks": {
+      "workspaceMode": "host",
+      "projectRoot": "/home/example/projects/application"
+    }
+  }
+}
+```
+
+Merge this partial object into the relevant `agents[]` entry. The Agent's
+`workspace` still holds its identity and memory; its workers start in the configured
+project. Claude Code and Codex use the same resolved task workspace.
+
+For an individual host task, the Agent can supply `working_directory` to
+`task_spawn`. It must be an absolute, user-authorized directory. Precedence is:
+explicit task directory, prior host task directory for a continuation, configured
+project root, then the Agent workspace. Native thread startup uses that resolved
+directory; this does not create a new Git worktree. A missing directory fails
+startup instead of silently choosing another checkout.
+
+`working_directory` is unavailable for container or isolated/shared workspace
+modes; it cannot switch those workers to host execution. App workers remain in
+`/workspace`. Existing queued tasks keep their recorded resource profile;
+changing defaults affects newly created tasks. Restart the gateway while idle
+after updating these settings, then verify a newly dispatched task.
 
 ## Deploy app containers
 
@@ -221,3 +352,19 @@ ordinary user questions use the task question flow. Explicit shell commands and
 coding tools remain available within the authorized worker profile.
 
 For app workers, Docker is the filesystem and process boundary (`externalSandbox`). Workers can edit the app workspace and writable container layer and use network access. Tasks sharing the same app container are not separate security identities. Host-execution workers remain trusted with the host user's authority; a worktree is not an OS sandbox. These controls prevent unintended native integrations, not arbitrary actions by a trusted worker with shell access.
+
+## Verify the native shell integration
+
+With an installed Codex binary, the repository includes a local Responses fixture
+that makes the real CLI execute a command, load an explicit startup hook, and
+check the selected project directory. No model billing or real provider credential
+is needed:
+
+```sh
+node scripts/orchestration/smoke-codex-worker.cjs --shell-environment
+node scripts/orchestration/smoke-codex-worker.cjs --shell-environment --container
+```
+
+The second command requires local Docker and a compatible native runtime. It
+creates and removes its own test container and checks that host worker environment
+settings are not inherited.

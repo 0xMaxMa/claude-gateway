@@ -10,8 +10,8 @@ describe('worker harness selection', () => {
   });
   it('routes known GPT identities and honors explicit metadata for opaque aliases', () => {
     const g: GatewayConfig = {...gateway, gateway: {...gateway.gateway,workers: {harness:'auto'}, models:[{id:'opaque-alias',alias:'fast',label:'Example',contextWindow:1000,workerHarness:'codex',workerModel:'gpt-native'}]}};
-    expect(resolveWorkerHarness(agent,g,'openai/gpt-example[1m]')).toEqual({harness:'codex',config:{model:'openai/gpt-example'}});
-    expect(resolveWorkerHarness(agent,g,'fast')).toEqual({harness:'codex',config:{model:'gpt-native'}});
+    expect(resolveWorkerHarness(agent,g,'openai/gpt-example[1m]')).toEqual({harness:'codex',config:{model:'openai/gpt-example',contextWindow:1000000}});
+    expect(resolveWorkerHarness(agent,g,'fast')).toEqual({harness:'codex',config:{model:'gpt-native',contextWindow:1000}});
     expect(resolveWorkerHarness(agent,g,'claude-example').harness).toBe('claude');
     expect(resolveWorkerHarness(agent,g,'unknown/gpt-example').harness).toBe('claude');
   });
@@ -27,4 +27,9 @@ describe('worker harness selection', () => {
     expect(()=>validateWorkerHarness({codex:{baseUrl:'http://127.0.0.1:1234/v1',apiKeyEnv:'OPENAI_API_KEY'}})).not.toThrow();
     expect(()=>validateWorkerModel({workerHarness:'bogus'} as any)).toThrow();
   });
+});
+
+it('preserves explicit context selection and leaves unspecified native defaults alone', () => {
+  expect(resolveWorkerHarness(agent,gateway,'gpt-example[200k]').config).toMatchObject({model:'gpt-example',contextWindow:200000});
+  expect(resolveWorkerHarness(agent,gateway,'gpt-example').config).not.toHaveProperty('contextWindow');
 });

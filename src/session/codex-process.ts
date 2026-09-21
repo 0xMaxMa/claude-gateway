@@ -1,3 +1,4 @@
+import { workerEnvironment } from './worker-environment';
 import { scanCodexTrace, CodexTraceState } from './codex-tool-capture';
 import type { RequestToolSchemas } from './request-tool-capture';
 import { resolveCodexCredentials, CodexCredentials } from './codex-auth';
@@ -27,7 +28,7 @@ export interface CodexProcessOptions {
   stateDirectory: string;
   checkpoint?: () => Promise<{ text: string; kind?: 'assignment' | 'advice'; acknowledge: () => void | Promise<void> } | undefined>;
   requestInput?: (question: string) => void;
-  config: { model: string; baseUrl?: string; apiKeyEnv?: string; reasoningEffort?: string; bin?: string };
+  config: { model: string; contextWindow?: number; baseUrl?: string; apiKeyEnv?: string; reasoningEffort?: string; bin?: string };
 }
 const quote = (value: string): string => JSON.stringify(value);
 const MAX_LINE = 4 * 1024 * 1024;
@@ -223,16 +224,21 @@ export class CodexProcess extends EventEmitter {
       mcp.mcpServers = { ...servers, ...mcp.mcpServers };
     }
     this.approvedMcp = mcp.mcpServers ?? {};
+    const commandEnvironment = workerEnvironment(agent, this.options.gateway);
     const lines = [
       `model = ${quote(config.model)}`, `model_provider = ${quote(this.credentials.chatgpt ? 'openai' : 'gateway')}`, 'approval_policy = "never"',
       `sandbox_mode = ${quote(profile.hostExecution || agent.type === 'app-agent' ? 'danger-full-access' : 'workspace-write')}`,
       'web_search = "disabled"', 'project_doc_fallback_filenames = ["CLAUDE.md"]',
+      ...(config.contextWindow !== undefined ? [`model_context_window = ${config.contextWindow}`, `model_auto_compact_token_limit = ${Math.floor(config.contextWindow * 0.95)}`] : []),
       `developer_instructions = ${quote([profile.context, profile.overlay, extensionInstructions, profile.skillPluginDir || profile.containerSkill ? `Task skill resources: ${this.containerAttempt ? this.containerAttempt.directory + '/skill-plugin' : profile.skillPluginDir}. Read the assigned SKILL.md (or RESOURCE_ROOT.txt) and resolve its plugin-relative references from its resource root.` : undefined].filter(Boolean).join('\n\n'))}`,
       ...(config.reasoningEffort ? [`model_reasoning_effort = ${quote(config.reasoningEffort)}`] : []),
       ...(this.credentials.chatgpt ? ['cli_auth_credentials_store = "ephemeral"'] : ['[model_providers.gateway]', 'name = "Gateway Responses"', 'wire_api = "responses"', `base_url = ${quote(this.credentials.baseUrl)}`, `env_key = ${quote(key)}`]),
       '[features]', 'multi_agent = false',
       `[projects.${quote(agent.type === 'app-agent' ? '/workspace' : agent.workspace)}]`, 'trust_level = "untrusted"',
     ];
+    if (Object.keys(commandEnvironment).length) {
+      lines.push('[shell_environment_policy.set]', ...Object.entries(commandEnvironment).map(([name, value]) => quote(name) + ' = ' + quote(value)));
+    }
     for (const [name, server] of Object.entries(mcp.mcpServers ?? {}) as [string, any][]) {
       lines.push(`[mcp_servers.${quote(name)}]`, `required = ${name === 'gateway'}`);
       if (typeof server.command === 'string') {
@@ -284,6 +290,7 @@ export class CodexProcess extends EventEmitter {
     const key = 'GATEWAY_CODEX_API_KEY';
     const env: NodeJS.ProcessEnv = profile.hostExecution ? { ...process.env } : Object.fromEntries(['PATH', 'HOME', 'LANG', 'TMPDIR', 'SSL_CERT_FILE', 'SSL_CERT_DIR'].flatMap(k => process.env[k] === undefined ? [] : [[k, process.env[k]]]));
     for (const k of Object.keys(env)) if (/^(ANTHROPIC_|CLAUDE_|CODEX_|OPENAI_)/.test(k)) delete env[k];
+    Object.assign(env, workerEnvironment(agent, this.options.gateway));
     env.CODEX_HOME = this.home;
     env.CODEX_ROLLOUT_TRACE_ROOT = this.home + '/gateway-trace';
     if (agent.type === 'app-agent') await containerNode(agent.container!, "require('fs').mkdirSync(process.argv[1],{recursive:true,mode:448})", [env.CODEX_ROLLOUT_TRACE_ROOT]);
@@ -291,7 +298,7 @@ export class CodexProcess extends EventEmitter {
     if (this.credentials!.chatgpt) delete env[key]; else env[key] = this.credentials!.key;
     const bin = this.executable;
     const child = this.child = agent.type === 'app-agent'
-      ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', 'CODEX_ROLLOUT_TRACE_ROOT', '-e', `HOME=${homedir()}`, '-e', key, agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
+      ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', 'CODEX_ROLLOUT_TRACE_ROOT', '-e', `HOME=${homedir()}`, '-e', key, ...Object.keys(workerEnvironment(agent, this.options.gateway)).flatMap(name => ['-e', name]), agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
       : spawn(bin, args, { cwd: agent.workspace, env, stdio: 'pipe', detached: true });
     this.group = child.pid;
     this.traceTimer = setInterval(() => { void this.captureTrace(); }, agent.type === 'app-agent' ? 2000 : 500);
@@ -342,6 +349,10 @@ export class CodexProcess extends EventEmitter {
     const effective = reply.config;
     if (!effective || !Array.isArray(reply.layers)) throw new Error('Codex did not provide effective configuration');
     if (reply.layers.some((layer: any) => layer.name?.type === 'project' && !layer.disabledReason)) throw new Error('Codex project executable configuration is not permitted');
+    const requestedWindow = this.options.config.contextWindow;
+    if (requestedWindow !== undefined && (effective.model_context_window !== requestedWindow || effective.model_auto_compact_token_limit !== Math.floor(requestedWindow * 0.95))) throw new Error('Codex context window configuration mismatch');
+    const requestedEnvironment = workerEnvironment(this.options.agent, this.options.gateway);
+    if (Object.entries(requestedEnvironment).some(([key, value]) => effective.shell_environment_policy?.set?.[key] !== value)) throw new Error('Codex worker environment configuration mismatch');
     const actual = effective.mcp_servers ?? {};
     if (JSON.stringify(Object.keys(actual).sort()) !== JSON.stringify(Object.keys(this.approvedMcp).sort())) throw new Error('Codex MCP server inventory mismatch');
     for (const [name, expected] of Object.entries(this.approvedMcp)) {

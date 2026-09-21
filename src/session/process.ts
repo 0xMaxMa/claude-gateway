@@ -1,3 +1,4 @@
+import { workerEnvironment } from './worker-environment';
 import { ProcessDiagnostics, TurnOutcome } from './process-diagnostics';
 import { prepareManagedConnectors } from './managed-connectors';
 import { RequestToolCapture, RequestToolSchemas } from './request-tool-capture';
@@ -1123,6 +1124,7 @@ export class SessionProcess extends EventEmitter {
     let containerUid = 1000;
     try { containerUid = os.userInfo().uid; } catch { /* use 1000 */ }
 
+    const configuredWorkerEnvironment = this.runtimeProfile?.role === 'worker' ? workerEnvironment(this.agentConfig, this.gatewayConfig) : {};
     const containerEnv: Record<string, string> = {
       HOME: os.homedir(),
       CLAUDE_WORKSPACE: '/workspace',
@@ -1140,7 +1142,7 @@ export class SessionProcess extends EventEmitter {
     // Claude credentials — it is a bearer token for the agent's whole bot
     // account. It is already placed in the spawn env below, unconditionally.
     const containerAuthEnv = isAppAgent || (this.runtimeProfile?.checkpointCommand && !this.runtimeProfile.hostExecution) ? this.resolveContainerAuthEnv() : {};
-    const byNameKeys = [...(this.runtimeProfile ? [] : ['TELEGRAM_BOT_TOKEN']), ...Object.keys(containerAuthEnv)];
+    const byNameKeys = [...(this.runtimeProfile ? [] : ['TELEGRAM_BOT_TOKEN']), ...Object.keys(containerAuthEnv), ...Object.keys(configuredWorkerEnvironment)];
     const dockerEnvFlags = [
       ...Object.entries(containerEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
       ...byNameKeys.flatMap((k) => ['-e', k]),
@@ -1186,6 +1188,7 @@ export class SessionProcess extends EventEmitter {
         ...containerAuthEnv,
         ...(toolCapture ? {OTEL_LOG_RAW_API_BODIES:'file:'+toolCapture.directory} : {}),
         ...(hardenedPath ? { PATH: hardenedPath } : {}),
+        ...configuredWorkerEnvironment,
         GATEWAY_ORIGIN_SESSION_ID: this.runtimeProfile?.originSessionId ?? this.sessionId,
         GATEWAY_TASK_ID: this.runtimeProfile?.taskId ?? '',
         GATEWAY_TASK_ATTEMPT_ID: this.runtimeProfile?.attemptId ?? '',

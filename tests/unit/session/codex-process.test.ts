@@ -1,3 +1,4 @@
+import { workerEnvironment } from '../../../src/session/worker-environment';
 import * as codexAuth from '../../../src/session/codex-auth';
 jest.mock('../../../src/session/worker-extensions', () => ({ discoverWorkerExtensions: jest.fn().mockResolvedValue({ skills: [], servers: {}, notices: [] }) }));
 import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
@@ -48,7 +49,7 @@ beforeEach(async () => {
     for (const line of chunk.toString().trim().split('\n')) {
       const request = JSON.parse(line); rpc.push(request);
       if (request.id === undefined) continue;
-      const result = request.method === 'config/read' ? { layers: [], config: { model_provider: chatgptMode ? 'openai' : 'gateway', cli_auth_credentials_store: chatgptMode ? 'ephemeral' : 'file', model_providers: { gateway: { base_url: options.config.baseUrl, env_key: "GATEWAY_CODEX_API_KEY", wire_api: 'responses' } }, mcp_servers: options.agent.type === 'app-agent' ? { gateway: { command: 'node', args: ['container-bridge.js'] } } : { gateway: { command: 'node', args: ['bridge.js'], env: { TICKET: 'secret-ticket' } } } } } : request.method === 'thread/start' || request.method === 'thread/resume' ? { thread: { id: thread } } : request.method === 'turn/start' ? { turn: { id: 'turn-' + (++turnNumber) } } : {};
+      const result = request.method === 'config/read' ? { layers: [], config: { shell_environment_policy:{set:workerEnvironment(options.agent, options.gateway)}, ...(options.config.contextWindow !== undefined ? {model_context_window:options.config.contextWindow,model_auto_compact_token_limit:Math.floor(options.config.contextWindow * 0.95)} : {}), model_provider: chatgptMode ? 'openai' : 'gateway', cli_auth_credentials_store: chatgptMode ? 'ephemeral' : 'file', model_providers: { gateway: { base_url: options.config.baseUrl, env_key: "GATEWAY_CODEX_API_KEY", wire_api: 'responses' } }, mcp_servers: options.agent.type === 'app-agent' ? { gateway: { command: 'node', args: ['container-bridge.js'] } } : { gateway: { command: 'node', args: ['bridge.js'], env: { TICKET: 'secret-ticket' } } } } } : request.method === 'thread/start' || request.method === 'thread/resume' ? { thread: { id: thread } } : request.method === 'turn/start' ? { turn: { id: 'turn-' + (++turnNumber) } } : {};
       setImmediate(() => { emit({ id: request.id, result }); if (request.method === 'turn/start') notify('turn/started', result); });
     }
   });
@@ -489,4 +490,29 @@ test('refresh cannot move an existing worker into another native account', async
   await waitUntil(()=>events.some(e=>e.type==='result'));
   expect(rpc.find(r=>r.id==='refresh-2').error.code).toBe(-32001);
   expect(events.find(e=>e.type==='result').result).toContain('CODEX_AUTH_REFRESH_FAILED');
+});
+
+it('configures the selected 1M window in the actual worker config and validates native readback', async () => {
+  options.config.contextWindow = 1000000;
+  adapter = new CodexProcess(options);
+  await adapter.start(); adapter.sendMessage('test');
+  await waitUntil(() => rpc.some(r => r.method === 'turn/start'));
+  const settings = jest.mocked(spawn).mock.calls[0][2] as any;
+  const config = await readFile(join(settings.env.CODEX_HOME,'config.toml'),'utf8');
+  expect(config).toContain('model_context_window = 1000000');
+  expect(config).toContain('model_auto_compact_token_limit = 950000');
+  expect(rpc.some(r => r.method === 'config/read')).toBe(true);
+});
+
+test('passes explicit command environment to native config and process without putting values in argv', async () => {
+  options.profile.hostExecution=true;
+  options.gateway={gateway:{workers:{environment:{BASH_ENV:'/explicit/hook',ZDOTDIR:'/explicit/zsh'}}}} as any;
+  await launch();
+  const [,args,settings]=(spawn as jest.Mock).mock.calls[0];
+  expect(settings.env.BASH_ENV).toBe('/explicit/hook');
+  expect(settings.env.ZDOTDIR).toBe('/explicit/zsh');
+  expect(JSON.stringify(args)).not.toContain('/explicit/hook');
+  const config=await readFile(join(settings.env.CODEX_HOME,'config.toml'),'utf8');
+  expect(config).toContain('[shell_environment_policy.set]');
+  expect(config).toContain('"BASH_ENV" = "/explicit/hook"');
 });

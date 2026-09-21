@@ -35,6 +35,9 @@ Website checks validate JSON syntax only; they do not compare fields or types ag
 | `gateway.api.keys` | API credentials and agent/write/admin scope |
 | `gateway.models` | Fallback model catalog |
 | `agents[].workspace` | Agent source workspace |
+| `gateway.workers.environment` / `agents[].workers.environment` | Explicit host worker environment; agent values override by key |
+| `gateway.workers.containerEnvironment` / `agents[].workers.containerEnvironment` | Separate app-worker environment; does not inherit host settings |
+| `agents[].orchestration.tasks.projectRoot` | Default worker project directory; preserves the Agent identity workspace |
 | `agents[].session` | Legacy idle timeout and concurrency |
 | `gateway.history` / `agents[].history` | Chat/media retention |
 | `gateway.memory`, `gateway.knowledge`, `gateway.dreaming` | Memory budget, indexing, consolidation |
@@ -71,3 +74,5 @@ For a new deployment, create the agent first using the wizard, then merge this b
 - Code updates require a matching gateway/MCP deployment and restart; reloading JSON does not load new JavaScript.
 
 Do not copy an entire example over an existing config: this can discard agent entries, credentials, and unrelated settings. The API offers scoped updates to individual resources.
+
+See [worker command environment](../guide/worker-harnesses.md#worker-command-environment) for startup-hook examples, native shell differences, reserved variables, and container behavior.

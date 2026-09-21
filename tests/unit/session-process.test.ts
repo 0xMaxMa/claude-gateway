@@ -221,6 +221,21 @@ describe('SessionProcess', () => {
     );
   });
 
+  it('applies worker environment to Claude workers but not conversational agents', async () => {
+    const mcp=path.join(tmpDir,'env-mcp.json');fs.writeFileSync(mcp,'{"mcpServers":{}}');
+    gatewayConfig.gateway.workers={environment:{BASH_ENV:'/configured/hook'}};
+    const worker=makeSp('env-worker','api',agentConfig,gatewayConfig,sessionStore,undefined,{
+      role:'worker',hostExecution:true,mcpConfigPath:mcp,overlay:'',context:'fixture'
+    });
+    await worker.start();
+    expect(spawnMock.mock.calls.at(-1)[2].env.BASH_ENV).toBe('/configured/hook');
+    const agent=makeSp('env-agent','api',agentConfig,gatewayConfig,sessionStore,undefined,{
+      role:'agent',mcpConfigPath:mcp,overlay:'',context:'fixture'
+    });
+    await agent.start();
+    expect(spawnMock.mock.calls.at(-1)[2].env.BASH_ENV).not.toBe('/configured/hook');
+  });
+
   it.each(['telegram', 'discord', 'line', 'slack', 'api'] as const)('managed %s turns never create or renew legacy typing signals', async source => {
     const mcp = path.join(tmpDir, 'managed-mcp.json');
     fs.writeFileSync(mcp, '{"mcpServers":{}}');
