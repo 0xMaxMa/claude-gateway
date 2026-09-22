@@ -50,3 +50,26 @@ test('revoked execution fence rejects evaluation waiting for credentials before 
  try{await adapter.submit(task,'r','goal');await new Promise(setImmediate);allowed=false;release();for(let i=0;i<10;i++)await new Promise(setImmediate);expect(fetcher).not.toHaveBeenCalled();expect(await adapter.inspect(task,'r')).toMatchObject({type:'unknown'});}
  finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
+test('parent can confirm only a fresh scoped completion candidate with durable idempotence',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'browser-verify-')),store=new OrchestrationStore(join(root,'db'),'a'),tasks=new TaskService(store);
+ const accepted=store.acceptInput({scope:{agentId:'a',agentSessionId:'s',source:'api',accountId:'u',chatId:'c',threadKey:'',principalId:'u'},text:'Fill form',capabilities:{execute:true,writeMemory:false}});
+ const decision=new DecisionService(store).begin(accepted.conversationId,'u',[accepted.inputId]);
+ const context={...accepted,...decision,principalId:'u',execute:true,writeMemory:false,actionId:'spawn'};
+ const binding={version:1 as const,id:'target',name:'Browser',principalId:'u',conversationId:accepted.conversationId,
+  run:async()=>({status:'needs_verification' as const,reason:'COMPLETION_CANDIDATE',steps:1,evaluations:2}),
+  inspect:async()=>({observedAt:Date.now(),observation:{generation:'g',elements:[{label:'Name',value:'ส้ม'}]}})};
+ const adapter=new BrowserTaskAdapter({agentId:'a',root:join(root,'receipts'),allowed:()=>true,bindings:()=>[binding],evaluate:jest.fn()});
+ const controller=new GatewayTaskController(tasks,new Map([['browser',adapter]]));
+ try{
+  const task=tasks.spawn(context,{title:'Fill name',instructions:'Fill name',targetProfile:'gateway-managed',gatewayTarget:adapter.resolve({adapter:'browser',session_id:'target'},context)});
+  for(let i=0;i<10;i++){await controller.tick();await new Promise(setImmediate);}
+  const waiting=store.task(task.taskId)!;expect(waiting.state).toBe('needs_reconciliation');
+  const proof=await adapter.evidence(waiting,true),check=()=>adapter.verifyEvidence(waiting,proof.requestId,proof.evidenceId!);
+  const confirm={...context,actionId:'verify'};
+  expect(()=>tasks.verifyBrowser({...confirm,principalId:'other'},task.taskId,waiting.revision,proof.requestId,proof.evidenceId!,'Name matches',check)).toThrow();
+  expect(()=>tasks.verifyBrowser(confirm,task.taskId,waiting.revision+1,proof.requestId,proof.evidenceId!,'Name matches',check)).toThrow();
+  const done=tasks.verifyBrowser(confirm,task.taskId,waiting.revision,proof.requestId,proof.evidenceId!,'Name field shows ส้ม',check);
+  expect(done.state).toBe('completed');expect(done.activeAttemptId).toBeUndefined();expect(done.browserReport?.verification?.source).toBe('parent');
+  expect(tasks.verifyBrowser(confirm,task.taskId,waiting.revision,proof.requestId,proof.evidenceId!,'Name field shows ส้ม',()=>{throw Error('must not reverify');})).toEqual(done);
+ }finally{await controller.close();store.close();rmSync(root,{recursive:true,force:true});}
+});

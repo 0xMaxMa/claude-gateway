@@ -1,3 +1,4 @@
+import { createBrowserBindingsRouter } from './browser-bindings-router';
 import { gatewayJev, jevAllowed } from '../orchestration/jev-gateway';
 import { createJevRouter } from './jev-router';
 import { collectDashboardProcesses, ProcessOwner } from './dashboard-processes';
@@ -720,6 +721,7 @@ export class GatewayRouter {
         this.configPath,
         () => this.gatewayConfig?.gateway.models,
       );
+      this.app.use('/api', createBrowserBindingsRouter(this.gatewayConfig,this.agents,this.configPath));
       this.app.use('/api', createJevRouter(this.gatewayConfig, this.configs));
       this.app.use('/api', apiRouter);
       this.voiceApi = new VoiceApi(this.agents, this.configs, this.gatewayConfig.gateway.api.keys);

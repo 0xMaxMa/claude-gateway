@@ -648,6 +648,24 @@ export class TaskService {
       notificationId, task.conversationId, task.taskId, task.stateVersion, input.binding_id);
     this.store.enqueue('notification', `notification:${task.taskId}:${task.stateVersion}`, { conversationId: task.conversationId, taskId: task.taskId, notificationId });
   }
+  /** Parent independently checks a fresh, scoped browser observation. Never clears an uncertain mutation. */
+  verifyBrowser(context:CommandContext,taskId:string,revision:number,requestId:string,evidenceId:string,evidence:string,check:()=>void):TaskSnapshot {
+    boundedText(evidence,4096);boundedText(requestId,256);boundedText(evidenceId,128);
+    return this.command(context,'verify_browser',{taskId,revision,requestId,evidenceId,evidence},true,()=>{
+      const task=this.owned(taskId,context.conversationId);
+      if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || task.state!=='needs_reconciliation' || task.revision!==revision || task.gatewayDispatch?.requestId!==requestId || !task.activeAttemptId || !task.browserReport || task.browserReport.status!=='needs_verification' || task.browserReport.lastAction?.outcome==='unknown')throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
+      check();
+      const attempt=this.store.attempt(task.activeAttemptId)!;
+      attempt.state='ended';task.activeAttemptId=undefined;task.state='completed';delete task.failure;delete attempt.failure;
+      task.browserReport.status='succeeded';task.browserReport.reason='PARENT_VERIFIED';
+      task.browserReport.verification={source:'parent',evidence,at:Date.now()};
+      task.result={summary:'Parent verified browser result: '+evidence,artifactIds:[]};attempt.result=task.result;
+      this.pool.release(task.taskId,true);
+      this.store.saveAttempt(attempt);this.store.saveTask(task,task.stateVersion);
+      this.store.appendEvent(task.conversationId,'browser.parent_verified',{requestId,evidenceId,evidence},taskId);this.notify(task);
+      return task;
+    },taskId);
+  }
   /** Offline operator workflow only; not exposed through conversation tools.
    * Caller holds the instance lock and has checked liveness/side effects. */
   reconcile(taskId: string, state: 'queued' | 'failed' | 'cancelled', evidence: string): TaskSnapshot {

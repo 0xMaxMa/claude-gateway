@@ -62,3 +62,46 @@ test('missing field can enter existing input-question lifecycle',async()=>{
 test('invalid external result never becomes successful completion',async()=>{
  const f=fixture();f.run.mockResolvedValue({...complete,steps:-1});await f.a.submit(task(),'r','goal');expect((await settle(f.a)).type).toBe('unknown');
 });
+test('evidence is scoped, fresh proof expires, and unknown mutations cannot be verified',async()=>{
+ const result:BrowserExecutionResult={status:'needs_verification',reason:'COMPLETION_CANDIDATE',steps:1,evaluations:2,lastAction:{operationId:'op',operation:'TYPE_TEXT',outcome:'confirmed'}};
+ const inspect=jest.fn(async()=>({observedAt:Date.now(),observation:{generation:'g',elements:[]}}));
+ const binding:BrowserTaskBinding={version:1,id:'target',name:'Browser',principalId:'owner',conversationId:'chat',run:async()=>result,inspect};
+ let allowed=true;
+ const a=new BrowserTaskAdapter({agentId:'alpha',root:dir,allowed:()=>allowed,bindings:()=>[binding],evaluate:jest.fn()});adapters.push(a);
+ const t=task({gatewayDispatch:{requestId:'r',submittedAt:Date.now()}});
+ await a.submit(t,'r','goal');await settle(a,t);
+ expect((await a.evidence(t)).evidenceId).toBeUndefined();
+ await expect(a.evidence({...t,ownerPrincipalId:'other'},true)).rejects.toThrow();expect(inspect).not.toHaveBeenCalled();
+ const proof=await a.evidence(t,true);expect(proof.evidenceId).toBeTruthy();
+ expect(()=>a.verifyEvidence(t,'r',proof.evidenceId!)).not.toThrow();
+ expect(()=>a.verifyEvidence(t,'other',proof.evidenceId!)).toThrow();
+ const now=Date.now();jest.spyOn(Date,'now').mockReturnValue(now+300001);
+ expect(()=>a.verifyEvidence(t,'r',proof.evidenceId!)).toThrow();jest.restoreAllMocks();
+ allowed=false;await expect(a.evidence(t,true)).rejects.toThrow();
+ allowed=true;
+ const file=join(dir,readdirSync(dir)[0]);const receipt=JSON.parse(readFileSync(file,'utf8'));
+ receipt.browserResult.lastAction.outcome='unknown';require('fs').writeFileSync(file,JSON.stringify(receipt));
+ expect(()=>a.verifyEvidence(t,'r',proof.evidenceId!)).toThrow();
+});
+test('provider reset metadata survives runner handoff without raw provider prose',async()=>{
+ const binding:BrowserTaskBinding={version:1,id:'target',name:'Browser',principalId:'owner',conversationId:'chat',run:async(c)=>{
+  try{await c.evaluate({state:'page',questions:{}},c.signal);}catch{}
+  return {status:'failed',reason:'QUOTA_EXCEEDED',steps:0,evaluations:1};
+ }};
+ const {JevError}=require('../../../src/jev/types');
+ const a=new BrowserTaskAdapter({agentId:'alpha',root:dir,allowed:()=>true,bindings:()=>[binding],evaluate:async()=>{throw new JevError('QUOTA_EXCEEDED','private provider prose',{status:402,resetAt:'2030-01-01T00:00:00Z',retryAfter:'30'});}});adapters.push(a);
+ await a.submit(task(),'r','goal');const outcome=await settle(a);
+ expect(outcome.browserReport?.providerFailure).toEqual({code:'QUOTA_EXCEEDED',status:402,resetAt:'2030-01-01T00:00:00Z',retryAfter:'30'});
+ expect(JSON.stringify(outcome)).not.toContain('private provider prose');
+});
+test('interrupted receipts allow read-only inspection but cannot authorize verification',async()=>{
+ const f=fixture();f.run.mockImplementation(untilAbort);const t=task({gatewayDispatch:{requestId:'r',submittedAt:Date.now()}});
+ await f.a.submit(t,'r','goal');await new Promise(setImmediate);
+ const inspector=jest.fn(async()=>({observedAt:Date.now(),observation:{generation:'g',elements:[]}}));
+ const binding:BrowserTaskBinding={version:1,id:'target',name:'Browser',principalId:'owner',conversationId:'chat',run:jest.fn(),inspect:inspector};
+ const afterRestart=new BrowserTaskAdapter({agentId:'alpha',root:dir,allowed:()=>true,bindings:()=>[binding],evaluate:jest.fn()});adapters.push(afterRestart);
+ const proof=await afterRestart.evidence(t,true);
+ expect(proof.executionState).toBe('interrupted');expect(proof.result).toBeUndefined();expect(proof.fresh).toBeDefined();
+ expect(()=>afterRestart.verifyEvidence(t,'r',proof.evidenceId!)).toThrow('BROWSER_VERIFICATION_UNAVAILABLE');expect(binding.run).not.toHaveBeenCalled();
+ await f.a.cancel(t,'r');await settle(f.a,t);
+});

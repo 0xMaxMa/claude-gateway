@@ -117,10 +117,10 @@ test('container schemas expose Jev only when explicitly enabled, without host to
   }
 });
 
-test('enabled app browser schemas discover and submit only scoped browser managed work', async () => {
+test('enabled app browser schemas discover, inspect and verify only scoped browser managed work', async () => {
   const adapters = new Map<string, GatewayTaskAdapter>(); const f = fixture(true, adapters);
-  const run=jest.fn(async()=>({status:'succeeded' as const,reason:'VERIFIED',steps:0,evaluations:1}));
-  const binding = { version: 1 as const, id: 'browser-a', name: 'Private browser', principalId: 'u', conversationId: f.context.conversationId, run };
+  const run=jest.fn(async()=>({status:'needs_verification' as const,reason:'COMPLETION_CANDIDATE',steps:0,evaluations:1}));
+  const binding = { version: 1 as const, id: 'browser-a', name: 'Private browser', principalId: 'u', conversationId: f.context.conversationId, run,inspect:async()=>({observedAt:Date.now(),observation:{generation:'g',elements:[{ref:'x',label:'Name',value:'Expected'}]}}) };
   const browser = new BrowserTaskAdapter({ agentId: 'a', root: join(f.root, 'receipts'), allowed: () => true, bindings: () => [binding], evaluate: async () => ({
     requestId:'r',requestedModel:'jev',model:'jev',usage:{input_tokens:1,output_tokens:1},answers:{
       operation:{type:'choice',choice:'DONE',confidence:1,probabilities:{DONE:1}},target:{type:'choice',choice:'NONE',confidence:1,probabilities:{NONE:1}},
@@ -138,9 +138,25 @@ test('enabled app browser schemas discover and submit only scoped browser manage
     const spawned = await agent.call({title:'Verify result',instructions:'Verify expected result',target_profile:'gateway-managed',gateway_target:{adapter:'browser',session_id:'browser-a'}},'task_spawn');
     expect(spawned).not.toHaveProperty('error');
     for(let i=0;i<20;i++){await controller.tick();await new Promise(resolve=>setImmediate(resolve));}
-    const rows=f.store.all('SELECT id,state FROM tasks'); expect(rows).toHaveLength(1);expect(rows[0].state).toBe('completed');
+    const rows=f.store.all('SELECT id,state FROM tasks'); expect(rows).toHaveLength(1);expect(rows[0].state).toBe('needs_reconciliation');
+    const taskId=String(rows[0].id);
+    const proof=await agent.call({task_id:taskId,browser_evidence:'fresh'},'task_status');
+    expect(proof.browserEvidence.fresh.observation.elements[0].value).toBe('Expected');
+    const foreign=f.issue({role:'agent',context:{...f.context,principalId:'foreign'}});
+    expect(await foreign.call({task_id:taskId,browser_evidence:'fresh'},'task_status')).toHaveProperty('error');
+    let hookStarted!:()=>void,releaseHook!:()=>void;const hookEntered=new Promise<void>(resolve=>{hookStarted=resolve;});
+    const revocable=f.issue({role:'agent',context:f.context,beforeMutation:async()=>{hookStarted();await new Promise<void>(resolve=>{releaseHook=resolve;});}});
+    const rejected=revocable.call({task_id:taskId,expected_revision:f.store.task(taskId)!.revision,mode:'verify_browser',expected_request_id:proof.browserEvidence.requestId,evidence_id:proof.browserEvidence.evidenceId,instruction:'Name matches'},'task_update');
+    await hookEntered;revocable.revoke();releaseHook();expect(await rejected).toHaveProperty('error');
+    expect(f.store.task(taskId)!.state).toBe('needs_reconciliation');
+    const confirmed=await agent.call({task_id:taskId,expected_revision:f.store.task(taskId)!.revision,mode:'verify_browser',expected_request_id:proof.browserEvidence.requestId,evidence_id:proof.browserEvidence.evidenceId,instruction:'Fresh Name field matches Expected'},'task_update');
+    expect(confirmed).not.toHaveProperty('error');expect(f.store.task(taskId)!.state).toBe('completed');
     expect(f.store.task(String(rows[0].id))?.gatewayTarget).toMatchObject({adapter:'browser',sessionId:'browser-a'});
     expect(f.store.all('SELECT * FROM worker_pool')).toHaveLength(0);
     expect(run).toHaveBeenCalledTimes(1);
+    let started!:()=>void,finish!:()=>void;const startedRead=new Promise<void>(resolve=>{started=resolve;});
+    jest.spyOn(binding,'inspect').mockImplementation(async()=>{started();await new Promise<void>(resolve=>{finish=resolve;});return {observedAt:Date.now(),observation:{generation:'g',elements:[{ref:'x',label:'Name',value:'Expected'}]}};});
+    const pending=agent.call({task_id:taskId,browser_evidence:'fresh'},'task_status');await startedRead;agent.revoke();finish();
+    expect(await pending).toHaveProperty('error');
   } finally {await controller.close();await browser.close();await f.close();}
 });

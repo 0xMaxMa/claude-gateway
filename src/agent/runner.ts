@@ -612,6 +612,14 @@ export class AgentRunner extends EventEmitter {
     await orchestration.flushHistory();
     return { ...accepted, responseId: () => orchestration.responseIdForInput(accepted.inputId) };
   }
+  async browserSessionScope(sessionId:string,principalId:string) {
+    if(!this.agentConfig.orchestration?.enabled)throw new Error('ORCHESTRATION_DISABLED');
+    return (await this.getOrchestration()).browserSessionScope(sessionId,principalId);
+  }
+  async browserEvidence(sessionId:string,principalId:string,taskId:string,refresh=false) {
+    if(!this.agentConfig.orchestration?.enabled)throw new Error('ORCHESTRATION_DISABLED');
+    return (await this.getOrchestration()).browserEvidence(sessionId,principalId,taskId,refresh);
+  }
   async listApiTasks(sessionId: string, principalId: string, page = 0, pageSize = 10, includeFinished = false) {
     if (!this.agentConfig.orchestration?.enabled) throw new Error('ORCHESTRATION_DISABLED');
     const runtime = await this.getOrchestration();
