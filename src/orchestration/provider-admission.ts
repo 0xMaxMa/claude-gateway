@@ -123,6 +123,13 @@ export class ProviderAdmissionStore {
       // probe cannot overwrite its replacement after a crash/restart.
       if (!row || row.generation !== permit.generation || (row.reason && (row.probe ?? undefined) !== permit.probe)) return false;
       if (result === 'success') {
+        if (!row.reason) {
+          // Healthy responses reset consecutive failures, but do not invalidate
+          // other admitted requests whose failures can still arrive afterward.
+          // Opening an outage below advances the fence against old successes.
+          this.db.prepare('UPDATE provider_circuits SET failures=0,updated_at=? WHERE scope=?').run(now, permit.scope);
+          return true;
+        }
         if (permit.probe && row.recovery < 2) {
           this.db.prepare('UPDATE provider_circuits SET generation=generation+1,failures=0,recovery=recovery+1,probe=NULL,lease_until=0,retry_at=?,updated_at=? WHERE scope=?').run(now + policy.recoverySpacingMs, now, permit.scope);
         } else {

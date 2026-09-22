@@ -77,6 +77,19 @@ test('authentication and unknown quota stop automatic retries until identity cha
   } finally { store.close(); }
 });
 
+test('healthy success does not discard subsequent failures from concurrent admissions', () => {
+  const store = new ProviderAdmissionStore(':memory:');
+  try {
+    const concurrent = Array.from({length: 4}, () => permit(store));
+    store.settle(concurrent[0], 'success', policy);
+    for (const request of concurrent.slice(1)) store.settle(request, failure, policy);
+    expect(store.acquire('route', policy).waiting).toMatchObject({reason: 'server'});
+    // Success from that old admission batch still cannot close the new outage.
+    store.settle(concurrent[0], 'success', policy);
+    expect(store.inspect('route', policy)).toBeDefined();
+  } finally { store.close(); }
+});
+
 test('release of a local failure does not count it as a provider failure', () => {
   let now = 0;
   const store = new ProviderAdmissionStore(':memory:', () => now);
