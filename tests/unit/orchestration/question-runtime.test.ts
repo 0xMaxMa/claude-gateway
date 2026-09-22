@@ -331,3 +331,38 @@ test.each(['Flights to Osaka','Shopee iPhone18ProMax case','ChatGPT crypto news'
   expect(ask).not.toHaveBeenCalled();
  }finally{await f.close();}
 });
+
+test('browser failure mailbox asks for inspection and permits same-task recovery before reporting',async()=>{
+ const f=await fixture();
+ try{
+  f.runtime.tasks.cancelByUser(f.task.conversationId,'owner',f.task.taskId);
+  f.runtime.store.run("UPDATE notifications SET status='handled'");
+  const input=f.runtime.store.acceptInput({scope:f.scope,text:'Search the browser',capabilities:{execute:true,writeMemory:false}});
+  const decision=f.runtime.decisions.begin(input.conversationId,'owner',[input.inputId]);
+  const task=f.runtime.tasks.spawn({...input,...decision,principalId:'owner',execute:true,writeMemory:false,actionId:'browser-spawn'},{title:'Search',instructions:'Find the requested information',targetProfile:'gateway-managed',gatewayTarget:{adapter:'browser',sessionId:'fixture',name:'Browser'}});
+  f.runtime.decisions.finish(decision,'Working');
+  const attempt=f.runtime.tasks.claim(task.taskId)!;f.runtime.tasks.started(attempt.attemptId,attempt.generation);
+  f.runtime.tasks.finish(attempt.attemptId,attempt.generation,{type:'failed',failure:{code:'BROWSER_LOW_TARGET_CONFIDENCE',message:'Stopped',observedAt:Date.now()},browserReport:{contractVersion:1,status:'blocked',reason:'LOW_TARGET_CONFIDENCE',steps:1,evaluations:1}});
+  let ticketScope:any;const errors:unknown[]=[];let observed=false;
+  const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((scope,...args)=>{ticketScope=scope;return issue(scope,...args);});
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter,prompt:string){
+   if(observed){this.emit('output',JSON.stringify({type:'result',result:''}));return;}
+   try{
+    expect(prompt).toContain('Browser exception: before reporting');
+    expect(prompt).toContain('task_status(browser_evidence=fresh)');
+    expect(prompt).not.toContain('Only a progress-alert turn may');
+    expect(ticketScope.context.execute).toBe(false);
+    f.runtime.tasks.status(ticketScope.context.conversationId,ticketScope.context.principalId,task.taskId);
+    f.runtime.tasks.update({...ticketScope.context,actionId:'recover-browser'},task.taskId,1,'Inspect the destination field and retain original requirements','when_ready');
+    observed=true;
+   }catch(e){errors.push(e);}
+   this.emit('output',JSON.stringify({type:'result',result:''}));
+  }}) as unknown as SessionProcess);
+  (f.runtime as any).config.conversation.notificationPolicy='existing_receive_path';
+  (f.runtime as any).pumpMailbox();
+  const until=Date.now()+5000;while(!observed&&!errors.length&&Date.now()<until)await new Promise(r=>setTimeout(r,10));
+  expect(errors).toEqual([]);expect(observed).toBe(true);
+  expect(f.runtime.store.task(task.taskId)!.revision).toBe(2);
+ }finally{await f.close();}
+});
