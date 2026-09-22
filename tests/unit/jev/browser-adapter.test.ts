@@ -1,4 +1,4 @@
-import {mkdtempSync,rmSync,readFileSync,readdirSync} from 'node:fs';
+import {mkdtempSync,rmSync,readFileSync,readdirSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {BrowserTaskAdapter,BrowserTaskBinding} from '../../../src/orchestration/gateway-tasks/browser';
@@ -141,4 +141,15 @@ test('browser start URL is explicit, validated and passed to the runner',async()
  for(const start_url of ['javascript:alert(1)','file:///etc/passwd','https://user:secret@example.com'])expect(()=>f.a.resolve({adapter:'browser',session_id:'target',start_url},context())).toThrow('INVALID_BROWSER_START_URL');
  f.run.mockImplementation(async(c:BrowserExecutionContext)=>{c.beforeMutation!('11111111-1111-4111-8111-111111111111','tab_navigate');expect(JSON.parse(readFileSync(join(dir,readdirSync(dir)[0]),'utf8')).lastDispatchedMutation.operation).toBe('tab_navigate');return complete;});await f.a.submit(task({gatewayTarget:target}),'start-url','goal');await settle(f.a,task({gatewayTarget:target}),'start-url');
  expect(f.run.mock.calls[0][0].startUrl).toBe('https://www.google.com/');
+});
+
+test('missing start URL ends cleanly and legacy uncertain receipts can be cleaned up',async()=>{
+ const f=fixture();f.run.mockResolvedValue({status:'blocked',reason:'START_URL_REQUIRED',steps:0,evaluations:0});
+ await f.a.submit(task(),'r','goal');expect(await settle(f.a)).toMatchObject({type:'failed',failure:{code:'BROWSER_START_URL_REQUIRED'}});
+ const file=join(dir,readdirSync(dir)[0]);const receipt=JSON.parse(readFileSync(file,'utf8'));
+ receipt.outcome.type='unknown';writeFileSync(file,JSON.stringify(receipt));
+ expect(await f.make().inspect(task(),'r')).toMatchObject({type:'failed'});
+ receipt.lastDispatchedMutation={operationId:'550e8400-e29b-41d4-a716-446655440000',operation:'tab_navigate'};writeFileSync(file,JSON.stringify(receipt));
+ expect(await f.make().inspect(task(),'r')).toMatchObject({type:'unknown'});
+ expect(f.run).toHaveBeenCalledTimes(1);
 });
