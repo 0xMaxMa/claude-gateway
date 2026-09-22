@@ -1,3 +1,4 @@
+import { AgentRunner } from '../../../src/agent/runner';
 import { DecisionService } from '../../../src/orchestration/decisions';
 import { EventEmitter } from 'events';
 import { mkdtempSync,mkdirSync,writeFileSync,rmSync } from 'fs';
@@ -14,7 +15,7 @@ test.each([false,true])('real runtime publishes incremental response text before
  const root=mkdtempSync(join(tmpdir(),'response-stream-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Fixture');
  const a={id:'a',description:'fixture',env:'',workspace,claude:{model:'fixture',extraFlags:[]}} as AgentConfig;
  const config={gateway:{orchestration:true,headless:true},agents:[a]} as GatewayConfig,sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a');
- const sid=randomUUID();await sessions.ensureApiSession('a','getpod',sid);
+ const sid=randomUUID();await sessions.ensureApiSession('a','web-client',sid);
  let process:EventEmitter;let ready!:()=>void;const started=new Promise<void>(resolve=>{ready=resolve;});
  const runtime=await AgentOrchestrationRuntime.open(a,config,dir,sessions,history,{
   createAgentSession:async(id,profile)=>{
@@ -25,9 +26,32 @@ test.each([false,true])('real runtime publishes incremental response text before
  const outsider=jest.fn();const stopOutsider=runtime.subscribeText(sid,'intruder',outsider);
  const unsub=runtime.subscribeText(sid,'owner',updates);
  if(voice) runtime.subscribeVoiceResults(sid,'owner',()=>{});
- const result=runtime.send({scope:{agentId:'a',agentSessionId:sid,source:'api',accountId:'owner',chatId:'getpod',threadKey:'',principalId:'owner'},text:'Explain'}, {execute:false,writeMemory:false},{timeoutMs:5000,onText:foreground}).finally(()=>{settled=true;});
+ const result=runtime.send({scope:{agentId:'a',agentSessionId:sid,source:'api',accountId:'owner',chatId:'web-client',threadKey:'',principalId:'owner'},text:'Explain'}, {execute:false,writeMemory:false},{timeoutMs:5000,onText:foreground}).finally(()=>{settled=true;});
+ void result.catch(() => {});
  try{
   await started;
+  const facade = Object.assign(Object.create(AgentRunner.prototype), {
+    agentConfig: { ...a, orchestration: { enabled: true } },
+    sessionStore: sessions, agentsBaseDir: root, apiChatIds: new Map(),
+    pendingApiSessions: new Set([sid]), logger: { warn: jest.fn() },
+    getOrchestration: async () => runtime,
+  }) as AgentRunner;
+  await expect(facade.acceptApiMessage(sid, 'web-client', 'Forbidden', {
+    timeoutMs: 5000, principalId: 'intruder', clientMessageId: randomUUID(),
+  })).rejects.toThrow();
+  const clientMessageId = randomUUID();
+  const inputId = await facade.acceptApiMessage(sid, 'web-client', 'A follow-up while speaking', {
+    timeoutMs: 5000, principalId: 'owner', clientMessageId,
+  });
+  expect(settled).toBe(false);
+  expect(history.getUserMessagesAfter(sid, 0)).toEqual(expect.arrayContaining([
+    expect.objectContaining({ inputId, clientMessageId, content: 'A follow-up while speaking' }),
+  ]));
+  // Same client admission is not executed/persisted twice.
+  expect(await facade.acceptApiMessage(sid, 'web-client', 'A follow-up while speaking', {
+    timeoutMs: 5000, principalId: 'owner', clientMessageId,
+  })).toBe(inputId);
+  expect(history.getUserMessagesAfter(sid, 0).filter(row => row.inputId === inputId)).toHaveLength(1);
   const emit=(event:unknown)=>process.emit('output',JSON.stringify(event));
   // Cache-lineage fix: no native schema/tool is ever attached (responseSchema stays
   // undefined for every agent turn), so a voice turn streams plain text_delta events too —
@@ -54,7 +78,7 @@ test('stop during agent startup completes the interrupted response without a sec
  const root=mkdtempSync(join(tmpdir(),'response-stop-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Fixture');
  const a={id:'a',description:'fixture',env:'',workspace,claude:{model:'fixture',extraFlags:[]}} as AgentConfig;
  const config={gateway:{orchestration:true,headless:true},agents:[a]} as GatewayConfig,sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a');
- const sid=randomUUID();await sessions.ensureApiSession('a','getpod',sid);
+ const sid=randomUUID();await sessions.ensureApiSession('a','web-client',sid);
  let ready!:()=>void,release!:()=>void;
  const started=new Promise<void>(r=>{ready=r;}),gate=new Promise<void>(r=>{release=r;});
  const finish=jest.spyOn(DecisionService.prototype,'finish');
@@ -62,7 +86,7 @@ test('stop during agent startup completes the interrupted response without a sec
   createAgentSession:async(_id,profile)=>{ready();await gate;return Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},interrupt:()=>{},stop:async()=>{},sendMessage:()=>{}}) as unknown as SessionProcess;},releaseAgentSession:async()=>{},
  });
  try {
-  const result=runtime.send({scope:{agentId:'a',agentSessionId:sid,source:'api',accountId:'owner',chatId:'getpod',threadKey:'',principalId:'owner'},text:'Work'}, {execute:false,writeMemory:false},{timeoutMs:5000});
+  const result=runtime.send({scope:{agentId:'a',agentSessionId:sid,source:'api',accountId:'owner',chatId:'web-client',threadKey:'',principalId:'owner'},text:'Work'}, {execute:false,writeMemory:false},{timeoutMs:5000});
   await started;expect(runtime.stopResponse(sid)).toBe(true);release();
   await expect(result).resolves.toBe('Response stopped.');
   expect(finish).toHaveBeenCalledWith(expect.anything(),'Response stopped.','interrupted',undefined,false);

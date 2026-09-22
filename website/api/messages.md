@@ -143,3 +143,7 @@ New orchestration errors retain their diagnostic code even before a dedicated ex
 Worker failures remain task failures with bounded, scrubbed evidence, visible to the agent and task inspection. Tool errors remain tool results so the agent can recover. Delivery failures remain outbox/delivery state: if the channel transport is down, an error notice through that same transport cannot be guaranteed. These mechanisms are distinct from a failed conversational response; not every background error should become a new chat message.
 
 Managed streaming errors are normalized before entering legacy stream callbacks, so uncoded internal exceptions stay private on both live and replayed connections. A typed provider error is superseded when the model resumes producing normal output; a later process crash is reported as a process failure, not as an already-recovered provider error.
+
+## Incoming messages and follow-ups
+
+For committed incoming user-message events and immediate admission while a response is active, see [Committed input stream and immediate admission](./chat-input-stream).

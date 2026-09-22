@@ -714,6 +714,7 @@ export class AgentOrchestrationRuntime {
       }
       return receipt;
     });
+    void this.flushHistory().catch(() => {});
     if (this.config.conversation.semanticIntake) this.intake.touch(receipt.inputId);
     const previous = this.inputResponses.get(receipt.inputId);
     if (previous) return { inputId: receipt.inputId, response: previous };
@@ -828,6 +829,7 @@ export class AgentOrchestrationRuntime {
     let providerRenewal: ReturnType<typeof setInterval> | undefined;
     try {
       const receipt = this.store.acceptInput(input, this.config.conversation.maxPendingInputs);
+      await this.flushHistory();
       if (this.config.conversation.semanticIntake) this.intake.touch(receipt.inputId);
       const admitted = this.store.get('SELECT ingress_json,binding_id FROM conversation_inputs WHERE id=?', receipt.inputId);
       const admittedModel = admitted ? JSON.parse(String(admitted.ingress_json)).model : undefined;

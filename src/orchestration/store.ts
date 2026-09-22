@@ -18,13 +18,15 @@ export interface AcceptInput {
   modality?: InputModality;
   attachmentIds?: string[];
   requestId?: string;
+  /** Trusted API ingress fingerprint, before file preparation or saved defaults. */
+  requestFingerprint?: string;
   storeUserMessage?: boolean;
   /** Stable provider/client identifier, scoped by trusted ingress before use. */
   ingressKey?: string;
   /** Only ingress supplies these; they survive a crash before agent admission. */
   capabilities?: ExecutionCapabilities;
   model?: string;
-  metadata?: { channelIngressFingerprint?: string; recoveryBatch?: string; recoveredChannelInput?: {content:string;meta:Record<string,string>};
+  metadata?: { clientMessageId?: string; channelIngressFingerprint?: string; recoveryBatch?: string; recoveredChannelInput?: {content:string;meta:Record<string,string>};
     unavailableAttachments?: Array<{code:string;name?:string;quoted:boolean}>; senderName?: string; senderId?: string; platformMessageId?: string; platformMessageIds?: string[]; mediaGroupId?: string; promptContext?: string; imageRefs?: string[];
     attachmentName?: string; mediaType?: string; repliedText?: string; repliedMessageId?: string; repliedSender?: string; repliedAttachmentIds?: string[]; attachmentDetails?: Array<{ref:string;name?:string;quoted:boolean}>; attachmentError?: string };
   /** Internal mailbox replay identifier; never accepted from HTTP/model arguments. */
@@ -195,15 +197,29 @@ export class OrchestrationStore {
     if (!row) throw new OrchestrationError('ACCESS_DENIED');
     return row;
   }
-  /** A lost receiver ACK must not re-fetch an expired file or re-admit work. */
-  channelReceipt(scope: ConversationScope, ingressKey: string | undefined, fingerprint: string, platformMessageIds?: string[]): (InputReceipt & {envelopeConflict:boolean}) | undefined {
+  private ingressReceipt(scope: ConversationScope, ingressKey: string | undefined): Row | undefined {
     if (!ingressKey) return undefined;
     if (scope.agentId !== this.agentId) throw new OrchestrationError('ACCESS_DENIED');
     const key = payloadHash([this.agentId, scope.source, scope.accountId, scope.chatId, scope.threadKey, scope.principalId, boundedText(ingressKey, 2048)]);
     const prior = this.get(`SELECT r.input_id,r.conversation_id,i.binding_id,i.ingress_json FROM ingress_receipts r
       JOIN conversation_inputs i ON i.id=r.input_id WHERE r.ingress_key=?`, key);
+    if (prior) this.assertMember(String(prior.conversation_id), scope.principalId);
+    return prior;
+  }
+  /** Resolve an API retry before touching uploads or mutable session defaults. */
+  apiReceipt(scope: ConversationScope, ingressKey: string | undefined, fingerprint: string): InputReceipt | undefined {
+    if (scope.source !== 'api') throw new OrchestrationError('ACCESS_DENIED');
+    const prior = this.ingressReceipt(scope, ingressKey);
     if (!prior) return undefined;
-    this.assertMember(String(prior.conversation_id), scope.principalId);
+    const input = JSON.parse(String(prior.ingress_json)) as AcceptInput;
+    if (input.scope.agentSessionId !== scope.agentSessionId) throw new OrchestrationError('ACCESS_DENIED');
+    if (input.requestFingerprint !== fingerprint) throw new OrchestrationError('IDEMPOTENCY_CONFLICT');
+    return { inputId: String(prior.input_id), conversationId: String(prior.conversation_id), bindingId: String(prior.binding_id) };
+  }
+  /** A lost receiver ACK must not re-fetch an expired file or re-admit work. */
+  channelReceipt(scope: ConversationScope, ingressKey: string | undefined, fingerprint: string, platformMessageIds?: string[]): (InputReceipt & {envelopeConflict:boolean}) | undefined {
+    const prior = this.ingressReceipt(scope, ingressKey);
+    if (!prior) return undefined;
     const metadata = JSON.parse(String(prior.ingress_json)).metadata;
     const original = metadata?.channelIngressFingerprint;
     const originalIds = Array.isArray(metadata?.platformMessageIds) ? metadata.platformMessageIds : [ingressKey];
@@ -237,7 +253,9 @@ export class OrchestrationStore {
     if (!Number.isSafeInteger(maxPending) || maxPending <= 0) throw new OrchestrationError('INVALID_CONFIG');
     // Agent session intentionally excluded: a provider retry after a session
     // switch must retain the original agent binding. Ingress authorizes route.
-    const hash = payloadHash({ text: input.text, attachments: input.attachmentIds ?? [], modality: input.modality ?? 'text',
+    const hash = scope.source === 'api' && input.requestFingerprint
+      ? boundedText(input.requestFingerprint, 64)
+      : payloadHash({ text: input.text, attachments: input.attachmentIds ?? [], modality: input.modality ?? 'text',
       principal: scope.principalId, source: scope.source, account: scope.accountId, chat: scope.chatId, thread: scope.threadKey,
       storeUserMessage: input.storeUserMessage !== false, metadata: input.metadata, model: input.model });
     const ingressKey = input.ingressKey ? payloadHash([this.agentId, scope.source, scope.accountId, scope.chatId, scope.threadKey, scope.principalId, boundedText(input.ingressKey, 2048)]) : undefined;
@@ -288,9 +306,9 @@ export class OrchestrationStore {
       if (ingressKey) this.run('INSERT INTO ingress_receipts VALUES(?,?,?,?,?)', ingressKey, hash, inputId, id, now);
       this.appendEvent(id, 'input.accepted', { inputId });
       this.enqueue('input', `input:${inputId}`, { conversationId: id, inputId });
-      // Live voice arrives as finalized text. Uploaded voice notes still need STT
-      // before their canonical history operation can be written.
-      if (input.modality === 'live_voice') {
+      // Text is already canonical at admission, even while another response runs.
+      // Uploaded voice notes still need STT before projecting their transcript.
+      if (input.modality !== 'voice_note') {
         this.run('INSERT INTO history_operations VALUES(?,?,?,?,?,?,?,?)', `input:${inputId}`, id, inputId, null, 'append', null, 'pending', now);
         this.enqueue('history', `input:${inputId}`, { operationId: `input:${inputId}` });
       }

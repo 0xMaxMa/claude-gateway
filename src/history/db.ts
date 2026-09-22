@@ -66,6 +66,24 @@ export interface ReviewRunRow {
 }
 
 export class HistoryDB {
+  private readonly messageListeners = new Set<(sessionId: string) => void>();
+
+  subscribeMessages(listener: (sessionId: string) => void): () => void {
+    this.messageListeners.add(listener);
+    return () => { this.messageListeners.delete(listener); };
+  }
+
+  private publishMessage(sessionId: string): void {
+    for (const listener of this.messageListeners) {
+      try { listener(sessionId); } catch { /* A disconnected reader cannot fail a committed write. */ }
+    }
+  }
+
+  getUserMessagesAfter(sessionId: string, afterId: number, limit = 100): HistoryMessage[] {
+    return this.db.prepare("SELECT * FROM messages WHERE session_id=? AND role='user' AND id>? ORDER BY id LIMIT ?")
+      .all(sessionId, afterId, Math.min(100, Math.max(1, limit))).map(row => this._rowToMessage(row));
+  }
+
   private readonly db: DatabaseSync;
   private readonly insertStmt: StatementSync;
   private readonly agentId: string;
@@ -79,8 +97,8 @@ export class HistoryDB {
     this.db.exec('PRAGMA foreign_keys=ON');
     this._initSchema();
     this.insertStmt = this.db.prepare(
-      `INSERT INTO messages (chat_id, session_id, source, role, content, sender_name, sender_id, platform_message_id, media_files, image_refs, replied_to_message_id, replied_to_text, replied_to_user, ts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (chat_id, session_id, source, role, content, sender_name, sender_id, platform_message_id, media_files, image_refs, replied_to_message_id, replied_to_text, replied_to_user, ts, client_message_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
   }
 
@@ -227,6 +245,10 @@ export class HistoryDB {
     if (!messageCols.some((c) => c.name === 'operation_id')) {
       this.db.exec('ALTER TABLE messages ADD COLUMN operation_id TEXT');
     }
+    try { this.db.exec('ALTER TABLE messages ADD COLUMN client_message_id TEXT'); } catch (error) {
+      if (!String(error).includes('duplicate column name')) throw error;
+    }
+    this.db.exec('CREATE INDEX IF NOT EXISTS messages_session_role_id ON messages(session_id,role,id)');
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS messages_operation_id ON messages(operation_id) WHERE operation_id IS NOT NULL');
   }
 
@@ -239,10 +261,11 @@ export class HistoryDB {
       if (prior.chat_id !== msg.chatId || prior.session_id !== msg.sessionId || prior.source !== msg.source || prior.role !== msg.role || prior.content !== msg.content) throw new Error('history operation payload conflict');
       return Number(prior.id);
     }
-    const result = this.db.prepare(`INSERT INTO messages(chat_id,session_id,source,role,content,sender_name,sender_id,platform_message_id,media_files,image_refs,ts,operation_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    const result = this.db.prepare(`INSERT INTO messages(chat_id,session_id,source,role,content,sender_name,sender_id,platform_message_id,media_files,image_refs,ts,operation_id,client_message_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       msg.chatId, msg.sessionId, msg.source, msg.role, msg.content, msg.senderName ?? null, msg.senderId ?? null,
       msg.platformMessageId ?? null, msg.mediaFiles ? JSON.stringify(msg.mediaFiles) : null,
-      msg.imageRefs?.length ? JSON.stringify(msg.imageRefs) : null, msg.ts, operationId);
+      msg.imageRefs?.length ? JSON.stringify(msg.imageRefs) : null, msg.ts, operationId, msg.clientMessageId ?? null);
+    this.publishMessage(msg.sessionId);
     return Number(result.lastInsertRowid);
   }
 
@@ -263,7 +286,9 @@ export class HistoryDB {
         msg.repliedToText ?? null,
         msg.repliedToUser ?? null,
         msg.ts,
+        msg.clientMessageId ?? null,
       );
+      this.publishMessage(msg.sessionId);
     } catch (err) {
       // Non-fatal — history is best-effort
       console.error(`[HistoryDB:${this.agentId}] insertMessage failed:`, err);
@@ -581,7 +606,7 @@ export class HistoryDB {
     const sql = `
       SELECT id, chat_id, session_id, source, role, content, sender_name, sender_id,
              platform_message_id, media_files, image_refs,
-             replied_to_message_id, replied_to_text, replied_to_user, ts, operation_id
+             replied_to_message_id, replied_to_text, replied_to_user, ts, operation_id, client_message_id
       FROM messages
       WHERE ${conditions.join(' AND ')}
       ORDER BY ts ${order}, id ${order}
@@ -822,6 +847,7 @@ export class HistoryDB {
     }
     return {
       id: r['id'] as number,
+      ...(typeof r.client_message_id === 'string' ? { clientMessageId: r.client_message_id } : {}),
       ...(typeof r.operation_id === 'string' && r.operation_id.startsWith('input:') ? { inputId: r.operation_id.slice(6) } : {}),
       ...(typeof r.operation_id === 'string' && r.operation_id.startsWith('response:') ? { responseId: r.operation_id.slice(9) } : {}),
       chatId: r['chat_id'] as string,

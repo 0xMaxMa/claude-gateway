@@ -1,0 +1,13 @@
+# Committed input stream and immediate admission
+
+The agents listing advertises `chat_input_stream: true` for orchestration agents. Clients must gate the new composer admission flow on this capability; older gateways retain normal foreground sending and history polling.
+
+`GET /v1/agents/:agentId/sessions/:sessionId/messages/stream?after_id=N` is an authenticated, session-authorized SSE stream of committed **user** history rows. Frames contain the canonical history message as JSON and its numeric row ID as the SSE `id`. Replay uses row ID, not timestamps. Supply the largest history row ID already loaded on first connection; reconnect using the last received row ID. Delivery is at least once: deduplicate by canonical identity. Assistant responses continue using the existing activity/foreground streams. A connection is closed on authorization failure or excessive backpressure. Text inputs project at admission; uploaded voice notes project after transcription. Internal non-user inputs are not exposed.
+
+`POST /v1/agents/:agentId/messages` accepts optional UUID `client_message_id` for stable optimistic display. Orchestration persists it beside canonical `inputId`; it is not authorization. Use a fresh UUID for each intended input, including identical repeated text. Repeating the same ID within the same session uses existing ingress deduplication; changed payloads conflict.
+
+For a follow-up while a response is active, use `POST /v1/agents/:agentId/messages/accept` with `accept_only: true`, `stream: false`, and supply the existing session/chat and normal message/media/model parameters. HTTP 202 includes `status`, `input_id`, `session_id`, and `client_message_id`. This receipt means the durable mailbox accepted the input, not that inference completed. It neither interrupts nor replaces the current foreground response stream. Commands and hidden-message submissions cannot use this mode. Older gateways return 404 for this dedicated endpoint rather than accidentally interpreting the request as a normal blocking send. Legacy agents do not advertise support. Do not automatically retry ambiguous transport failures as new input IDs.
+
+Deploy the Gateway capability before enabling the new behavior in API clients.
+
+Queued admission fingerprints the original authenticated request before resolving saved defaults or preparing uploads. A matching retry returns its original receipt even after staging cleanup; changing the message, attachment references, model or media options conflicts. Concurrent retries share one durable input. A rejected admission preserves staged uploads for retry and removes its unused prepared copies. Accepted copies live in session storage; staging retains its existing cleanup TTL.
