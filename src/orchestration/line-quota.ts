@@ -107,3 +107,14 @@ export function logLowLineQuota(agentId: string | undefined, remaining: number):
 export function logLineQuotaRecovered(agentId: string | undefined, remaining: number): void {
   logLine('LINE quota recovered', { agentId, remaining });
 }
+
+/** Known remaining allowance cannot cover the pushes still queued for this agent right
+ * now — distinct from the flat low-quota threshold, which fires even with plenty of
+ * pending sends left to go. Unknown quota or an empty queue never triggers this. */
+export function insufficientForGroup(quota: LineQuotaState, groupSize: number): boolean {
+  return quota.status === 'ok' && groupSize > 0 && quota.remaining < groupSize;
+}
+
+export function logInsufficientLineQuotaForGroup(agentId: string | undefined, remaining: number, groupSize: number): void {
+  logLine('LINE quota insufficient for pending group delivery', { agentId, remaining, groupSize });
+}

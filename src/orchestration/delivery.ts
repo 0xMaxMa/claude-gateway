@@ -9,7 +9,7 @@ import { randomUUID } from 'crypto';
 import type { AgentConfig } from '../types';
 import { OrchestrationStore, Row } from './store';
 import { sendChannelFile, ChannelFile } from './file-delivery';
-import { classifyLineRejection, lineQuotaState, lineRetryBackoffMs, logLineDeliveryFailure, logLowLineQuota, logLineQuotaRecovered, lowQuotaTransition, LINE_RATE_LIMIT_MAX_ATTEMPTS } from './line-quota';
+import { classifyLineRejection, insufficientForGroup, lineQuotaState, lineRetryBackoffMs, logLineDeliveryFailure, logInsufficientLineQuotaForGroup, logLowLineQuota, logLineQuotaRecovered, lowQuotaTransition, LINE_RATE_LIMIT_MAX_ATTEMPTS } from './line-quota';
 
 export type DeliveryOutcome = { state: 'delivered'; providerId?: string } | { state: 'failed' | 'unknown'; code: string; speechSynthesisFailed?: boolean };
 export type DeliveryControl = { label: string; data: string };
@@ -17,7 +17,7 @@ export type ChannelSender = (binding: Row, text: string, deliveryId: string, fil
 
 /** A transport receipt means provider acceptance, never that a human read it.
  * Ambiguous network failures are retained for reconciliation, not blind retry. */
-export function channelSender(config: AgentConfig | (() => AgentConfig), request: typeof fetch = fetch, speechEnabled: (binding: Row, speech: SpeechDelivery) => boolean = () => true, linkedSender?: ChannelSender): ChannelSender {
+export function channelSender(config: AgentConfig | (() => AgentConfig), request: typeof fetch = fetch, speechEnabled: (binding: Row, speech: SpeechDelivery) => boolean = () => true, linkedSender?: ChannelSender, pendingLineGroupSize: () => number = () => 0): ChannelSender {
   return async (binding, text, id, file, speech, textFormat, controls) => {
     const agent = typeof config === 'function' ? config() : config;
     if (speech) return sendChannelSpeech(agent, binding, speech, id, request, undefined, () => speechEnabled(binding, speech));
@@ -77,6 +77,8 @@ export function channelSender(config: AgentConfig | (() => AgentConfig), request
         const transition = lowQuotaTransition(agent.id, quota);
         if (transition === 'warn') logLowLineQuota(agent.id, quota.status === 'ok' ? quota.remaining : 0);
         if (transition === 'recovered') logLineQuotaRecovered(agent.id, quota.status === 'ok' ? quota.remaining : 0);
+        const groupSize = pendingLineGroupSize();
+        if (insufficientForGroup(quota, groupSize)) logInsufficientLineQuotaForGroup(agent.id, quota.status === 'ok' ? quota.remaining : 0, groupSize);
         // Quota exhaustion and unclassified rejections stay terminal; only a confirmed
         // rate limit is worth a bounded, backed-off retry (see DeliveryOutbox.run).
         return { state: 'failed', code: classification === 'quota_exhausted' ? 'LINE_QUOTA_EXHAUSTED' : classification === 'rate_limited' ? 'LINE_RATE_LIMITED' : 'PROVIDER_HTTP_429' };

@@ -105,3 +105,52 @@ test('quota exhaustion is terminal, is never retried, and blocks dependent speec
     expect(events).toContainEqual(expect.objectContaining({ event: 'Speech blocked by failed text delivery', referenceId: speechRow.id }));
   } finally { log.mockRestore(); store.close(); }
 });
+
+test('a nonzero remaining quota that cannot cover the currently pending LINE group logs an explicit warning', async () => {
+  const store = new OrchestrationStore(':memory:', 'a');
+  const request = jest.fn(async (url: string | URL | Request) => {
+    const href = String(url);
+    if (href.includes('/message/push')) return rateLimited();
+    if (href.includes('/quota/consumption')) return new Response(JSON.stringify({ totalUsage: 997 }));
+    if (href.includes('/quota')) return new Response(JSON.stringify({ type: 'limited', value: 1000 }));
+    throw new Error(`unexpected url ${href}`);
+  });
+  // 3 remaining cannot cover the 10 sends this agent still has queued right now.
+  const outbox = new DeliveryOutbox(store, channelSender(agent, request, undefined, undefined, () => 10));
+  const decisions = new DecisionService(store, (r, b, text) => outbox.enqueue(r, b, text));
+  const log = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const input = store.acceptInput({ scope, text: 'hi' });
+    const receipt = decisions.begin(input.conversationId, 'owner', [input.inputId]);
+    decisions.finish(receipt, 'reply');
+
+    await outbox.tick();
+
+    const events = log.mock.calls.map(call => JSON.parse(String(call[0])));
+    expect(events).toContainEqual(expect.objectContaining({ event: 'LINE quota insufficient for pending group delivery', remaining: 3, groupSize: 10 }));
+  } finally { log.mockRestore(); store.close(); }
+});
+
+test('a pending group the remaining quota can still cover never logs the insufficient-group warning', async () => {
+  const store = new OrchestrationStore(':memory:', 'a');
+  const request = jest.fn(async (url: string | URL | Request) => {
+    const href = String(url);
+    if (href.includes('/message/push')) return rateLimited();
+    if (href.includes('/quota/consumption')) return new Response(JSON.stringify({ totalUsage: 0 }));
+    if (href.includes('/quota')) return new Response(JSON.stringify({ type: 'limited', value: 1000 }));
+    throw new Error(`unexpected url ${href}`);
+  });
+  const outbox = new DeliveryOutbox(store, channelSender(agent, request, undefined, undefined, () => 10));
+  const decisions = new DecisionService(store, (r, b, text) => outbox.enqueue(r, b, text));
+  const log = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const input = store.acceptInput({ scope, text: 'hi' });
+    const receipt = decisions.begin(input.conversationId, 'owner', [input.inputId]);
+    decisions.finish(receipt, 'reply');
+
+    await outbox.tick();
+
+    const events = log.mock.calls.map(call => JSON.parse(String(call[0])));
+    expect(events.some(event => event.event === 'LINE quota insufficient for pending group delivery')).toBe(false);
+  } finally { log.mockRestore(); store.close(); }
+});

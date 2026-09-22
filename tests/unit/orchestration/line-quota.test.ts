@@ -1,4 +1,4 @@
-import { classifyLineRejection, lineQuotaState, lineRetryBackoffMs, lowQuotaTransition, resetLineQuotaCache, resetLowQuotaWarnings, LINE_RATE_LIMIT_MAX_ATTEMPTS } from '../../../src/orchestration/line-quota';
+import { classifyLineRejection, insufficientForGroup, lineQuotaState, lineRetryBackoffMs, lowQuotaTransition, resetLineQuotaCache, resetLowQuotaWarnings, LINE_RATE_LIMIT_MAX_ATTEMPTS } from '../../../src/orchestration/line-quota';
 
 beforeEach(() => { resetLineQuotaCache(); resetLowQuotaWarnings(); });
 
@@ -62,6 +62,22 @@ describe('lowQuotaTransition', () => {
   test('agents are tracked independently', () => {
     expect(lowQuotaTransition('agent-a', { status: 'ok', remaining: 5 })).toBe('warn');
     expect(lowQuotaTransition('agent-b', { status: 'ok', remaining: 5 })).toBe('warn');
+  });
+});
+
+describe('insufficientForGroup', () => {
+  test('a nonzero remaining quota that cannot cover the pending group is insufficient', () => {
+    expect(insufficientForGroup({ status: 'ok', remaining: 3 }, 5)).toBe(true);
+  });
+  test('a remaining quota that covers the pending group is not insufficient', () => {
+    expect(insufficientForGroup({ status: 'ok', remaining: 5 }, 5)).toBe(false);
+    expect(insufficientForGroup({ status: 'ok', remaining: 10 }, 5)).toBe(false);
+  });
+  test('an empty pending group is never insufficient, however low the quota', () => {
+    expect(insufficientForGroup({ status: 'ok', remaining: 0 }, 0)).toBe(false);
+  });
+  test('unavailable quota data never claims insufficiency', () => {
+    expect(insufficientForGroup({ status: 'unavailable' }, 5)).toBe(false);
   });
 });
 
