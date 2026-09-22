@@ -2,7 +2,7 @@
 /** Isolated automation scenarios: real gateway task lifecycle + installed runner.
  * No browser/network calls by default. Optional trusted adapters enable live
  * parent/Jev inference against ONLY the synthetic pages below, never real sites.
- * node scripts/jev-automation-fixtures.cjs /absolute/path/browser-runner.js
+ * node scripts/jev-automation-fixtures.cjs /absolute/path/browser-adapter.js
  * JEV_FIXTURE_INFERENCE=/absolute/path/adapter.mjs enables {evaluate,parent}.
  */
 const assert=require('node:assert/strict');

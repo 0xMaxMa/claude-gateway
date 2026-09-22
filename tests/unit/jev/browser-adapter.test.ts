@@ -203,3 +203,15 @@ test.each(['BROWSER_INSPECTION_DENIED','private arbitrary upstream text'])('insp
  await expect(a.evidence(t,true)).rejects.toMatchObject({code:message.startsWith('BROWSER_')?message:'BROWSER_INSPECTION_UNAVAILABLE'});
  await expect(a.evidence(t,true)).rejects.not.toThrow('private arbitrary');
 });
+
+test('superseding revision proceeds after a known-ended missing field stop',async()=>{
+ const f=fixture();f.run.mockResolvedValue({...complete,status:'blocked',reason:'FIELD_TEXT_REQUIRED',steps:0});
+ const t=task({revision:2,appliedRevision:1});await f.a.submit(task({revision:1}),'r','goal');
+ expect((await settle(f.a,t)).type).toBe('paused');expect(f.onNeedsInput).not.toHaveBeenCalled();
+});
+
+test('initial field handoff does not masquerade as a superseding revision',async()=>{
+ const f=fixture();f.run.mockResolvedValue({...complete,status:'blocked',reason:'FIELD_TEXT_REQUIRED',steps:0});
+ const t=task({revision:1,appliedRevision:0});await f.a.submit(t,'r','goal');
+ expect((await settle(f.a,t)).type).toBe('unknown');expect(f.onNeedsInput).toHaveBeenCalled();
+});

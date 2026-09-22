@@ -26,7 +26,7 @@ export function validateJevConfig(config: JevConfig | undefined): void {
     if (value !== undefined && (!Number.isSafeInteger(value) || value < min || value > max)) throw new JevError('INVALID_CONFIG', `Invalid Jev ${key}.`);
   }
   validateBrowserIntegration(config.browser);
-  if(config.thinking!==undefined)validateBrowserIntegration({runnerModule:'validation',bindings:[],textHelper:config.thinking});
+  if(config.thinking!==undefined)validateBrowserIntegration({adapterModule:'validation',bindings:[],textHelper:config.thinking});
   jevCredentialEnvNames(config);
 }
 export function validateJevRequest(value: unknown, config: JevConfig): JevRequest {

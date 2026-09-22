@@ -1,11 +1,11 @@
 import {BrowserConnectorRegistry,validateBrowserIntegration} from '../../../src/jev/browser-connector';
 import {BrowserIntegrationConfig} from '../../../src/jev/browser-contract';
 import {sanitizeJevChildEnv} from '../../../src/jev/child-env';
-const config=():BrowserIntegrationConfig=>({runnerModule:'@example/browser-runner',bindings:[{id:'tab',name:'Private browser',agentId:'alpha',principalId:'owner',conversationId:'chat',endpoint:'https://browser.example/mcp',apiKeyEnv:'PRIVATE_BROWSER_TOKEN',scope:{device_id:'device',grant_id:'grant',tab_id:'tab'}}]});
+const config=():BrowserIntegrationConfig=>({adapterModule:'@example/browser-adapter',bindings:[{id:'tab',name:'Private browser',agentId:'alpha',principalId:'owner',conversationId:'chat',endpoint:'https://browser.example/mcp',apiKeyEnv:'PRIVATE_BROWSER_TOKEN',scope:{device_id:'device',grant_id:'grant',tab_id:'tab'}}]});
 test('supports installed package exports or absolute module paths, not remote code',()=>{
  expect(()=>validateBrowserIntegration(config())).not.toThrow();
- for(const runnerModule of ['https://bad.example/code.js','../untrusted.js','a/b','@example/pkg/subpath'])expect(()=>validateBrowserIntegration({...config(),runnerModule})).toThrow();
- expect(()=>validateBrowserIntegration({...config(),runnerModule:'/opt/runner/index.mjs'})).not.toThrow();
+ for(const adapterModule of ['https://bad.example/code.js','../untrusted.js','a/b','@example/pkg/subpath'])expect(()=>validateBrowserIntegration({...config(),adapterModule})).toThrow();
+ expect(()=>validateBrowserIntegration({...config(),adapterModule:'/opt/runner/index.mjs'})).not.toThrow();
 });
 test('rejects insecure destinations, ambiguous credentials, wildcard scopes and unbounded input',()=>{
  for(const endpoint of ['http://public.example/mcp','https://user:key@browser.example/mcp','https://browser.example/mcp?token=secret']){const c=config();c.bindings[0].endpoint=endpoint;expect(()=>validateBrowserIntegration(c)).toThrow();}

@@ -25,7 +25,7 @@ async function runGatewayBrowserFixture(options){
  const context={...accepted,...decision,principalId:'fixture-user',execute:true,writeMemory:false,actionId:'spawn-browser'};
  const connector={id:'fixture-browser',name:'Fixture',agentId:'fixture-agent',principalId:'fixture-user',conversationId:accepted.conversationId,endpoint:options.endpoint,apiKeyFile:options.credentialFile,scope:options.scope,fields:options.fields,budget:{timeoutMs:60000,maxSteps:10,maxEvaluations:12}};
  const binding={version:1,id:'fixture-browser',name:'Isolated fixture',principalId:'fixture-user',conversationId:accepted.conversationId,
-  run:c=>executeBrowserModule(options.runnerModule,connector,c),inspect:(result,signal,authorized)=>inspectBrowser(connector,result,signal,authorized)};
+  run:c=>executeBrowserModule(options.adapterModule,connector,c),inspect:(result,signal,authorized)=>inspectBrowser(connector,result,signal,authorized)};
  const adapter=new BrowserTaskAdapter({agentId:'fixture-agent',root:join(root,'receipts'),allowed:()=>true,bindings:()=>[binding],evaluate:(_task,request,signal)=>options.evaluate(request,signal)});
  const adapters=new Map([['browser',adapter]]),controller=new GatewayTaskController(tasks,adapters);
  let bridge,callAgent;
