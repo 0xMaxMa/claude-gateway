@@ -1,3 +1,4 @@
+import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
 import { isAbsolute } from 'path';
 import { parseWorkflow, advanceWorkflow } from '../workflow';
 import { advanceTiming } from './timing';
@@ -223,13 +224,18 @@ export class TaskService {
     if (!['when_ready', 'interrupt_and_resume'].includes(mode)) throw new OrchestrationError('INVALID_INPUT');
     return this.command(context, 'update', { taskId, expectedRevision, instruction, mode }, context.execute, () => {
       const task = this.owned(taskId, context.conversationId), version = task.stateVersion;
-      const browserRecovery = !context.execute && task.gatewayTarget?.adapter === 'browser' && task.state === 'failed' &&
-        !task.activeAttemptId && task.capabilities.execute && task.ownerPrincipalId === context.principalId &&
+      const completionReview = task.gatewayTarget?.adapter === 'browser' && task.state === 'needs_reconciliation' &&
+        Boolean(task.activeAttemptId) && task.browserReport?.status === 'needs_verification' &&
+        ['COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(task.browserReport.reason) &&
+        !task.browserReport.providerFailure && task.browserReport.lastAction?.outcome !== 'unknown';
+      const browserRecovery = !context.execute && task.gatewayTarget?.adapter === 'browser' &&
+        task.capabilities.execute && task.ownerPrincipalId === context.principalId &&
         !task.browserReport?.providerFailure && task.browserReport?.lastAction?.outcome !== 'unknown' &&
-        ['LOW_OPERATION_CONFIDENCE','LOW_TARGET_CONFIDENCE','STALE_RETRY_BUDGET','PAGE_CONTENT_UNAVAILABLE','MODEL_BLOCKED'].includes(task.browserReport?.reason ?? '') &&
+        (completionReview || (task.state === 'failed' && !task.activeAttemptId &&
+        ['LOW_OPERATION_CONFIDENCE','LOW_TARGET_CONFIDENCE','STALE_RETRY_BUDGET','PAGE_CONTENT_UNAVAILABLE','MODEL_BLOCKED'].includes(task.browserReport?.reason ?? ''))) &&
         Boolean(this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion));
       if (TERMINAL_TASK_STATES.has(task.state) && !(task.gatewayTarget && (context.execute || browserRecovery) && ['completed','failed'].includes(task.state) && !task.activeAttemptId)) throw new OrchestrationError('TASK_TERMINAL');
-      if (['cancel_requested', 'recovering', 'needs_reconciliation', 'interrupting'].includes(task.state)) throw new OrchestrationError('STATE_CONFLICT');
+      if (['cancel_requested', 'recovering', 'needs_reconciliation', 'interrupting'].includes(task.state) && !(completionReview && (context.execute || browserRecovery))) throw new OrchestrationError('STATE_CONFLICT');
       if (task.revision !== expectedRevision) throw new OrchestrationError('REVISION_CONFLICT');
       if (task.gatewayTarget && (task.ownerPrincipalId !== context.principalId || (!context.execute && !browserRecovery))) throw new OrchestrationError('EXECUTION_DENIED');
       if (task.gatewayTarget && mode !== 'when_ready') throw new OrchestrationError('INVALID_INPUT', 'Use when_ready for Gateway-managed tasks; the current request must settle before revised instructions run.');
@@ -249,6 +255,11 @@ export class TaskService {
           taskId, context.decisionId, task.supervision?.id ?? '', task.activeAttemptId ?? '');
         const alreadyAdvised = this.store.get("SELECT action_id FROM task_commands WHERE task_id=? AND decision_id=? AND command_type='update' LIMIT 1", taskId, context.decisionId);
         if (!assigned || alreadyAdvised || !task.supervision || task.state !== 'running' || !task.capabilities.execute || mode !== 'when_ready') throw new OrchestrationError('EXECUTION_DENIED');
+      }
+      if(completionReview) {
+        const attempt=this.store.attempt(task.activeAttemptId!)!;
+        attempt.state='ended';this.store.saveAttempt(attempt);this.pool.release(task.taskId,false);
+        task.activeAttemptId=undefined;task.state='failed';
       }
       task.revision++;
       const revision: TaskRevision = { taskId, revision: task.revision, instructions: instruction,
@@ -683,10 +694,12 @@ export class TaskService {
     boundedText(evidence,4096);boundedText(requestId,256);boundedText(evidenceId,128);
     return this.command(context,'verify_browser',{taskId,revision,requestId,evidenceId,evidence},context.execute,()=>{
       const task=this.owned(taskId,context.conversationId);
-      if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || task.state!=='needs_reconciliation' || task.revision!==revision || task.gatewayDispatch?.requestId!==requestId || !task.activeAttemptId || !task.browserReport || task.browserReport.status!=='needs_verification' || task.browserReport.lastAction?.outcome==='unknown')throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
+      if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || !['needs_reconciliation','failed'].includes(task.state) || task.revision!==revision || task.gatewayDispatch?.requestId!==requestId || !task.browserReport || !parentVerifiableBrowserResult(task.browserReport))throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
       if(!task.capabilities.execute || (!context.execute && !this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion)))throw new OrchestrationError('EXECUTION_DENIED');
       check();
-      const attempt=this.store.attempt(task.activeAttemptId)!;
+      const attemptId=task.activeAttemptId ?? this.store.get("SELECT id FROM task_attempts WHERE task_id=? AND revision=? AND state='ended' ORDER BY generation DESC LIMIT 1",taskId,revision)?.id;
+      const attempt=attemptId ? this.store.attempt(String(attemptId)) : undefined;
+      if(!attempt)throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
       attempt.state='ended';task.activeAttemptId=undefined;task.state=task.revision>attempt.revision?'queued':'completed';delete task.failure;delete attempt.failure;
       task.browserReport.status='succeeded';task.browserReport.reason='PARENT_VERIFIED';
       task.browserReport.verification={source:'parent',evidence,at:Date.now()};

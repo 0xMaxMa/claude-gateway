@@ -282,3 +282,20 @@ test('browser controller dispatches parent guidance with the original goal',asyn
  await controller.tick();
  expect(adapter.submit).toHaveBeenCalledWith(expect.objectContaining({taskId:id}),expect.any(String),expect.stringMatching(/Find authorized flights to Osaka[\s\S]*Fill destination first/),undefined);
 });
+
+test.each(['valid','unassigned','other-owner','unknown','provider','cancelled','revoked'])('parent verification after a confidence stop: %s',reason=>{
+ const id=stoppedBrowser(),task=store.task(id)!;
+ task.gatewayDispatch={requestId:'request',submittedAt:Date.now()};
+ if(reason==='other-owner')task.ownerPrincipalId='other';
+ if(reason==='unknown')task.browserReport!.lastAction={operation:'CLICK',operationId:'unknown',outcome:'unknown'};
+ if(reason==='provider')task.browserReport!.providerFailure={code:'OUTCOME_UNKNOWN'};
+ if(reason==='cancelled')task.state='cancelled';
+ if(reason==='revoked')task.capabilities.execute=false;
+ store.transaction(()=>store.saveTask(task,task.stateVersion));
+ store.run('UPDATE notifications SET task_state_version=? WHERE task_id=?',task.stateVersion,id);
+ if(reason==='unassigned')store.run("UPDATE notifications SET status='pending' WHERE task_id=?",id);
+ const check=jest.fn();
+ const verify=()=>tasks.verifyBrowser({...context,execute:false,actionId:'verify-stop'},id,1,'request','evidence','Fresh evidence proves the authorized goal',check);
+ if(reason==='valid'){expect(verify().state).toBe('completed');expect(check).toHaveBeenCalledTimes(1);}
+ else{expect(verify).toThrow();expect(check).not.toHaveBeenCalled();}
+});

@@ -66,3 +66,10 @@ export interface BrowserEvidence {
 export interface BrowserProviderFailure { code: string; validationReason?: string; status?: number; retryAfter?: string; resetAt?: string }
 
 export type BrowserTaskReport = Omit<BrowserExecutionResult, 'observation'>;
+
+/** Independent parent verification is valid only after a known non-ambiguous stop. */
+export function parentVerifiableBrowserResult(result: BrowserExecutionResult | undefined): boolean {
+  return Boolean(result && !result.providerFailure && result.lastAction?.outcome !== 'unknown' &&
+    ((result.status === 'needs_verification' && ['COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(result.reason)) ||
+     (result.status === 'blocked' && ['LOW_OPERATION_CONFIDENCE','LOW_TARGET_CONFIDENCE'].includes(result.reason))));
+}

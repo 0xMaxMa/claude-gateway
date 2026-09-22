@@ -427,7 +427,11 @@ Three distinct replans are allowed per user-directed revision chain; repeated
 identical guidance is rejected. A new user update starts a new chain.
 
 The assigned parent can also independently verify a completion candidate using
-fresh evidence. Unknown mutations, cancelled work, provider failures and revoked
+fresh evidence, including after a low-confidence stop when the requested result
+is already visible. If a completion candidate is premature, the parent can
+replan within the same task and the same bounded recovery budget. These rules
+use task state and evidence, never domain-specific selectors or website names.
+Unknown mutations, cancelled work, provider failures and revoked
 authority do not qualify for autonomous replanning. Ask for genuinely missing
 information or a required decision; do not use raw error codes as the final
 response when the parent can still resolve the task.
@@ -440,7 +444,8 @@ This uses the installed remote-browser runner with real Gateway task persistence
 question suppression/review, replanning and verification, while replacing the
 browser with synthetic pages. It covers flight search (including passenger
 constraints), matching phone-case search, and asking ChatGPT for attributed news.
-Each runs normally and with low confidence, stale observations and unknown
+Each runs normally and with low confidence, stale observations, premature
+completion candidates and unknown
 mutation outcomes. Known facts must not cause user questions; unknown mutations
 must not be replayed; all continuations retain one task.
 

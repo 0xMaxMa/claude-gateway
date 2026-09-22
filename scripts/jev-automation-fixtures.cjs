@@ -15,7 +15,7 @@ const {BrowserTaskAdapter}=require('../dist/orchestration/gateway-tasks/browser'
 const {GatewayTaskController}=require('../dist/orchestration/gateway-tasks/controller');
 const {validateJevResponse}=require('../dist/jev/validation');
 const scenarios=[
- {name:'flights',goal:'Search Google for the cheapest one-way Chiang Mai to Osaka flights this week for 2 adults and 3 children. User follow-up: ages 10, 8, 6. Fixture date is 2026-09-22; week ends 2026-09-27. Do not book.',field:'Flight search query',value:'Chiang Mai Osaka one way 2 adults 3 children ages 10 8 6 2026-09-22 2026-09-27 cheapest',required:['Osaka','Chiang Mai','2','3','10','8','6'],result:'Fixture verified search: Chiang Mai to Osaka, one way, 2 adults, 3 children ages 10/8/6, 22–27 September 2026. Cheapest matching fixture fare: THB 25000 total; next matching fare THB 31000. No booking.'},
+ {name:'flights',goal:'Search Google for the cheapest one-way Chiang Mai to Osaka flights this week for 2 adults and 3 children. User follow-up: ages 10, 8, 6. Fixture date is 2026-09-22; week ends 2026-09-27. Do not book.',field:'Flight search query',value:'Chiang Mai Osaka one way 2 adults 3 children ages 10 8 6 2026-09-22 2026-09-27 cheapest',required:['Osaka','Chiang Mai','2','3','10','8','6'],result:'Fixture verified search: Chiang Mai to Osaka, one way, 2 adults, 3 children ages 10/8/6, 22–27 September 2026. Google Flights results by departure date: Sep 22 THB 31000; Sep 23 THB 28000; Sep 24 THB 25000; Sep 25 THB 29000; Sep 26 THB 30000; Sep 27 THB 32000. Each fare is total for all five passengers, taxes included, CNX to KIX, one-way, same passenger criteria. Lowest fare Sep 24 THB 25000. No booking.'},
  {name:'shopping',goal:'Open Shopee and search for an iPhone 18 Pro Max phone case. Do not buy or add to cart.',field:'Product search',value:'iPhone 18 Pro Max case',required:['18','Pro','Max'],result:'Fixture search results: iPhone 18 Pro Max compatible case THB 199. Excluded iPhone 18 Pro case (different size). No purchase or cart change.'},
  {name:'chatgpt',goal:'Open ChatGPT and ask it to find recent crypto news with dates and source links. Report its answer as attributed information, not independently verified news.',field:'Message ChatGPT',value:'Find recent crypto news with dates and source links.',required:['crypto','news'],result:'Fixture ChatGPT response: sample crypto news, dated 2026-09-22 with source https://news.example.test/crypto. Attributed to ChatGPT; not independently verified.'}
 ];
@@ -25,13 +25,13 @@ async function runScenario(runner,scenario,fault,inference){
  const accepted=store.acceptInput({scope,text:scenario.goal,capabilities:{execute:true,writeMemory:false}});let decision=decisions.begin(accepted.conversationId,'owner',[accepted.inputId]);
  const context={...accepted,...decision,principalId:'owner',execute:true,writeMemory:false,actionId:'spawn'};
  const delivered=[];const questions=new TaskQuestions(store,tasks,decisions,(_id,_binding,text)=>delivered.push(text),()=>{},()=>60000);
- const page={protocol_version:1,generation:'g0',url:'https://fixture.example.test/'+scenario.name,title:scenario.name,text:'Search form. No results yet.',viewport_text:'Search form. No results yet.',elements:[{ref:'query',label:scenario.field,tag:'input',value:'',operations:['TYPE_TEXT']},{ref:'submit',label:'Submit search',tag:'button',operations:['CLICK']}],scroll:{up:false,down:false},truncated:{text:false,elements:false}};
+ const page={protocol_version:1,generation:'g0',url:scenario.name==='flights'?'https://www.google.com/travel/flights':scenario.name==='shopping'?'https://shopee.co.th/search':'https://chatgpt.com/c/fixture',title:scenario.name,text:'Search form. No results yet.',viewport_text:'Search form. No results yet.',elements:[{ref:'query',label:scenario.field,tag:'input',value:'',operations:['TYPE_TEXT']},{ref:'submit',label:'Submit search',tag:'button',operations:['CLICK']}],scroll:{up:false,down:false},truncated:{text:false,elements:false}};
  let sequence=0,evals=0,mutations=0,submitted=false,usedFault=false,answers=0,replans=0;const operations=new Set();
  const clone=()=>structuredClone(page);
  const evaluate=async request=>{
   evals++;assert(evals<=30,'inference budget');
   if(inference?.evaluate)return inference.evaluate(request,new AbortController().signal);
-  const op=submitted?'DONE':page.elements[0].value?'CLICK':'TYPE_TEXT';
+  let op=submitted?'DONE':page.elements[0].value?'CLICK':'TYPE_TEXT';if(fault==='premature-done'&&!usedFault){op='DONE';usedFault=true;}
   const low=fault==='low-confidence'&&!usedFault;if(low)usedFault=true;
   const result={model:'fixture-jev',usage:{input_tokens:1,output_tokens:1},answers:Object.fromEntries(Object.entries(request.questions).map(([id,q])=>{
    const keys=Object.keys(q.criteria),choice=id==='operation'?op:keys[0];return [id,{type:'choice',choice,confidence:low?.2:.95,probabilities:Object.fromEntries(keys.map(k=>[k,k===choice?1:0]))}];
@@ -77,10 +77,13 @@ async function runScenario(runner,scenario,fault,inference){
     tasks.answer(ctx,task.taskId,task.pendingQuestion.questionId,reply.answer);answers++;
    }else if(task.state==='failed'){
     assert(['LOW_OPERATION_CONFIDENCE','LOW_TARGET_CONFIDENCE'].includes(task.browserReport.reason),task.failure?.code);
-    const proof=await adapter.evidence(task,true);const reply=await parent({kind:'replan',page:proof.fresh.observation});assert.equal(typeof reply.guidance,'string');tasks.update(ctx,task.taskId,task.revision,reply.guidance,'when_ready');replans++;
+    const proof=await adapter.evidence(task,true);const verification=await parent({kind:'verify',page:proof.fresh.observation});
+    if(verification.verified)tasks.verifyBrowser(ctx,task.taskId,task.revision,proof.requestId,proof.evidenceId,verification.evidence,()=>adapter.verifyEvidence(task,proof.requestId,proof.evidenceId));
+    else {const reply=await parent({kind:'replan',page:proof.fresh.observation,verification:verification.evidence});assert.equal(typeof reply.guidance,'string');tasks.update(ctx,task.taskId,task.revision,reply.guidance,'when_ready');replans++;}
    }else{
-    const proof=await adapter.evidence(task,true);const reply=await parent({kind:'verify',page:proof.fresh.observation});assert.equal(reply.verified,true,'parent must verify fixture results');assert.equal(typeof reply.evidence,'string');
-    tasks.verifyBrowser(ctx,task.taskId,task.revision,proof.requestId,proof.evidenceId,reply.evidence,()=>adapter.verifyEvidence(task,proof.requestId,proof.evidenceId));
+    const proof=await adapter.evidence(task,true);const reply=await parent({kind:'verify',page:proof.fresh.observation});assert.equal(typeof reply.verified,'boolean');assert.equal(typeof reply.evidence,'string');
+    if(reply.verified)tasks.verifyBrowser(ctx,task.taskId,task.revision,proof.requestId,proof.evidenceId,reply.evidence,()=>adapter.verifyEvidence(task,proof.requestId,proof.evidenceId));
+    else {const plan=await parent({kind:'replan',page:proof.fresh.observation,verification:reply.evidence});tasks.update(ctx,task.taskId,task.revision,plan.guidance,'when_ready');replans++;}
    }
    decisions.finish(decision,'');
   }
@@ -91,5 +94,5 @@ async function runScenario(runner,scenario,fault,inference){
 (async()=>{
  assert(process.argv[2],'Pass installed runner entrypoint');const runner=await import(pathToFileURL(process.argv[2]).href);
  const inference=process.env.JEV_FIXTURE_INFERENCE?await import(pathToFileURL(process.env.JEV_FIXTURE_INFERENCE).href):undefined;
- for(const scenario of scenarios)for(const fault of inference?['none']:['none','low-confidence','stale','unknown'])console.log(JSON.stringify(await runScenario(runner,scenario,fault,inference)));
+ for(const scenario of scenarios)for(const fault of inference?['none']:['none','low-confidence','stale','premature-done','unknown'])console.log(JSON.stringify(await runScenario(runner,scenario,fault,inference)));
 })().catch(e=>{console.error(e.stack);process.exitCode=1;});
