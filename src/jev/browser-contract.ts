@@ -6,6 +6,8 @@ export interface BrowserProgress { contractVersion?: 1; phase?: 'evaluating'|'de
 export interface BrowserExecutionResult {
   status: 'succeeded' | 'blocked' | 'cancelled' | 'failed' | 'needs_verification';
   reason: string;
+  providerFailure?: BrowserProviderFailure;
+  verification?: { source: 'parent'; evidence: string; at: number };
   steps: number; evaluations: number; staleRetries?: number; textCalls?: number;
   lastAction?: { operationId: string; operation: string; outcome: 'confirmed' | 'unknown' | 'not_executed' };
   observation?: unknown;
@@ -24,7 +26,7 @@ export interface BrowserExecutionContext {
 }
 export interface BrowserConnectorConfig {
   id: string; name: string; agentId: string; principalId: string; conversationId: string;
-  endpoint: string; apiKeyEnv?: string; apiKeyFile?: string;
+  endpoint?: string; apiKeyEnv?: string; apiKeyFile?: string; connectorId?: string;
   scope: BrowserScope;
   fields?: Array<{label: string; text: string}>;
   budget?: { maxSteps?: number; maxEvaluations?: number; timeoutMs?: number; maxTextCalls?: number; maxStaleRetries?: number; operationConfidence?: number; targetConfidence?: number };
@@ -45,5 +47,15 @@ export interface BrowserRunnerModule {
   verifyBrowserTask?: (goal: string, observation: unknown, signal: AbortSignal) => Promise<boolean>;
   resolveFieldText?: (request: unknown, signal: AbortSignal) => Promise<{text: string | null}>;
 }
+
+export interface BrowserEvidence {
+  requestId: string;
+  recordedAt: number;
+  evidenceId?: string;
+  result?: BrowserExecutionResult;
+  executionState: 'ended' | 'interrupted';
+  fresh?: { observedAt: number; observation: unknown; operationStatus?: unknown };
+}
+export interface BrowserProviderFailure { code: string; status?: number; retryAfter?: string; resetAt?: string }
 
 export type BrowserTaskReport = Omit<BrowserExecutionResult, 'observation'>;

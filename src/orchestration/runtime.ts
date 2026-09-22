@@ -1,4 +1,4 @@
-import { BrowserConnectorRegistry } from '../jev/browser-connector';
+import { BrowserConnectorRegistry, resolveBrowserConnection } from '../jev/browser-connector';
 import { BrowserTaskAdapter, BrowserTaskBinding } from './gateway-tasks/browser';
 import { createHash } from 'crypto';
 import { gatewayJev, jevAllowed } from './jev-gateway';
@@ -121,6 +121,7 @@ export class AgentOrchestrationRuntime {
   private readonly delivery: DeliveryOutbox;
   private readonly scheduler: WorkerScheduler;
   private gatewayTasks?: GatewayTaskController;
+  private browserAdapter?: BrowserTaskAdapter;
   private nextQuestionCheck = 0;
   private readonly scheduledReports = new Set<string>();
   private readonly seenSessions = new Set<string>();
@@ -219,11 +220,12 @@ export class AgentOrchestrationRuntime {
     const files = new TaskFiles(store, join(agent.workspace, '../..'), agent.type === 'app-agent' ? join(root, 'container-files') : undefined, agent.workspace);
     const safemodeAllowed = () => agent.type !== 'app-agent' && Boolean(gateway.safemode?.allowedAgentIds?.includes(agent.id));
     const gatewayAdapters = new Map<string, GatewayTaskAdapter>(agent.type === 'app-agent' ? [] : [['safemode',new SafemodeTaskAdapter(agent.id, safemodeAllowed)]]);
-    const browserRegistry = new BrowserConnectorRegistry(()=>gateway.gateway.jev?.browser,agent.id);
+    const browserRegistry = new BrowserConnectorRegistry(()=>gateway.gateway.jev?.browser,agent.id,id=>resolveBrowserConnection(gateway,agent,id));
     const browserBindings = () => [...browserRegistry.bindings(),...(host.browserBindings?.() ?? [])];
     gatewayAdapters.set('browser', new BrowserTaskAdapter({agentId:agent.id,root:join(root,'browser-requests'),
       allowed:()=>jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true,
       bindings:browserBindings,
+      allowedEvidence:task=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return Boolean(store.task(task.taskId));}catch{return false;}},
       allowedTask:(task)=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);const current=store.task(task.taskId);return Boolean(current && current.activeAttemptId===task.activeAttemptId && ['starting','running'].includes(current.state));}catch{return false;}},
       onNeedsInput:(task,question)=>{
         const current=store.task(task.taskId),attempt=task.activeAttemptId?store.attempt(task.activeAttemptId):undefined;
@@ -326,6 +328,7 @@ export class AgentOrchestrationRuntime {
       const runtime = new AgentOrchestrationRuntime(agent, root, host, store, new OrchestrationHistoryWriter(store, sessions, historyDb), scheduler, bridge, tasks);
       runtime.gateway = gateway;
       runtime.providerAdmission = providerAdmission;
+      runtime.browserAdapter=gatewayAdapters.get('browser') as BrowserTaskAdapter;
       runtime.releaseLock = releaseLock;
       runtime.settleResources = async () => { cleanup.stop(); await workspaces.settle(); await cleanup.settle(); };
       const shared = resolveSharedConfig(agent.knowledge?.shared, gateway.gateway.knowledge?.shared);
@@ -634,6 +637,20 @@ export class AgentOrchestrationRuntime {
   voiceReplaySpeech(sessionId: string, principalId: string, responseId: string): string | undefined {
     this.authorizeSession(sessionId, principalId);
     return this.store.replaySpeech(sessionId, responseId);
+  }
+  browserSessionScope(sessionId:string,principalId:string):{conversationId:string;principalId:string} {
+    const rows=this.store.all('SELECT id FROM conversations WHERE agent_session_id=? AND status=?',sessionId,'active');
+    if(rows.length!==1)throw new Error('BROWSER_SESSION_UNAVAILABLE');
+    this.store.assertMember(String(rows[0].id),principalId);
+    return {conversationId:String(rows[0].id),principalId};
+  }
+  async browserEvidence(sessionId:string,principalId:string,taskId:string,refresh=false) {
+    this.taskControls.detail(sessionId,principalId,taskId);
+    const task=this.store.task(taskId)!;
+    if(task.ownerPrincipalId!==principalId || !this.browserAdapter)throw new Error('ACCESS_DENIED');
+    const result=await this.browserAdapter.evidence(task,refresh);
+    this.store.assertMember(task.conversationId,principalId);
+    return result;
   }
   authorizeSession(sessionId: string, principalId: string): void {
     for (const row of this.store.all('SELECT id FROM conversations WHERE agent_session_id=?', sessionId)) this.store.assertMember(String(row.id), principalId);

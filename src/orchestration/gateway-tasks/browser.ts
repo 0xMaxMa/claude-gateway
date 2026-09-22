@@ -1,8 +1,8 @@
-import type { BrowserExecutionContext, BrowserExecutionResult, BrowserProgress } from '../../jev/browser-contract';
+import type { BrowserExecutionContext, BrowserExecutionResult, BrowserProgress, BrowserEvidence } from '../../jev/browser-contract';
 import { createHash, randomUUID } from 'crypto';
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs';
 import { join } from 'path';
-import { JevRequest, JevResult } from '../../jev/types';
+import { JevError, JevRequest, JevResult } from '../../jev/types';
 import { CommandContext, GatewayTaskTarget, OrchestrationError, TaskSnapshot, TaskRevision, WorkerOutcome } from '../types';
 import { GatewayTaskAdapter } from './controller';
 
@@ -15,9 +15,10 @@ export interface BrowserTaskBinding {
   name: string;
   principalId: string;
   conversationId: string;
+  inspect?: (result:BrowserExecutionResult|undefined,signal:AbortSignal,authorized:()=>boolean)=>Promise<NonNullable<BrowserEvidence['fresh']>>;
   run: (context: BrowserExecutionContext) => Promise<BrowserExecutionResult>;
 }
-interface Receipt {taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
+interface Receipt {taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';recordedAt?:number;inspection?:{id:string;at:number};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
 export class BrowserTaskAdapter implements GatewayTaskAdapter {
   readonly name='browser';
   private readonly running=new Map<string,{controller:AbortController;done:Promise<void>}>();
@@ -25,6 +26,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     evaluate:(task:TaskSnapshot,request:JevRequest,signal:AbortSignal,authorized:()=>boolean)=>Promise<JevResult>;
     onProgress?:(task:TaskSnapshot,progress:BrowserProgress)=>void;
     allowedTask?:(task:TaskSnapshot)=>boolean;
+    allowedEvidence?:(task:TaskSnapshot)=>boolean;
     onNeedsInput?:(task:TaskSnapshot,question:string)=>boolean}){}
   private binding(id:string,principalId:string,conversationId:string,requireEnabled=true):BrowserTaskBinding {
     if(requireEnabled&&!this.options.allowed())throw new OrchestrationError('BROWSER_NOT_ALLOWED');
@@ -73,26 +75,29 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     for(const answer of answers??[])if(answer.browserFieldLabel){if(answer.text.length>2000)throw new OrchestrationError('BROWSER_FIELD_VALUE_TOO_LONG');values.set(answer.browserFieldLabel,answer.text);}
     const fields=[...values].map(([label,text])=>({label,text}));
     // Durable receipt precedes any side effect; restart never replays this request.
-    this.write(task,requestId,{taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'running'});
+    this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'running'});
     const controller=new AbortController();
     const authorized=()=>{try{return this.options.allowedTask?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
     // The installed browser package owns execution; gateway owns the request lifetime.
+    let providerFailure:BrowserExecutionResult['providerFailure'];
     const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({goal:instructions,fields,signal:controller.signal,authorized,
-      evaluate:(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');return this.options.evaluate(task,request,signal,authorized);},
+      evaluate:async(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');try{return await this.options.evaluate(task,request,signal,authorized);}catch(e){if(e instanceof JevError)providerFailure={code:e.code,...e.metadata};throw e;}},
       progress:event=>this.options.onProgress?.(task,event),
     })));
     const done=execution.then(result=>{
       validateBrowserResult(result);
+      if(providerFailure)result={...result,providerFailure};
       let outcome:WorkerOutcome;
       const uncertain = result.lastAction?.outcome === 'unknown';
       if(result.status==='succeeded' && !authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');
       if(result.status==='succeeded' && !uncertain)outcome={type:'completed',result:{summary:`Browser goal independently verified. ${result.steps} actions, ${result.evaluations} evaluations.`,artifactIds:[]}};
       else outcome={type:uncertain?'unknown':result.status==='cancelled'?'stopped':result.status==='failed'?'failed':'unknown',failure:{code:'BROWSER_'+result.reason.toUpperCase(),message:'Browser work stopped: '+result.reason+'. '+result.steps+' actions, '+result.evaluations+' evaluations. '+(result.reason==='FIELD_TEXT_REQUIRED'?'Ask the user for the missing field value; no value was invented.':'Verify the browser state before continuing.'),observedAt:Date.now()}};
+      if(outcome.type!=='completed' && outcome.failure && providerFailure)outcome.failure.message+=`${providerFailure.resetAt?' Resets at '+providerFailure.resetAt+'.':''}${providerFailure.retryAfter?' Retry after '+providerFailure.retryAfter+'.':''}`;
       const {observation:_,...browserReport}=result;
       outcome.browserReport=browserReport;
-      this.write(task,requestId,{taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',outcome,browserResult:result});
+      this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',outcome,browserResult:result});
     }).catch(()=>{
-      this.write(task,requestId,{taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',outcome:{type:'unknown',failure:{code:'BROWSER_OUTCOME_UNKNOWN',message:'Browser request outcome could not be recorded. Inspect before retrying.',observedAt:Date.now()}}});
+      this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',outcome:{type:'unknown',failure:{code:'BROWSER_OUTCOME_UNKNOWN',message:'Browser request outcome could not be recorded. Inspect before retrying.',observedAt:Date.now()}}});
     }).finally(()=>this.running.delete(this.key(task,requestId)));
     this.running.set(this.key(task,requestId),{controller,done});
     // A filesystem failure cannot become an unhandled rejection; receipt stays uncertain.
@@ -109,6 +114,33 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     }
     if(this.running.has(this.key(task,requestId)))return 'running';
     return {type:'unknown',failure:{code:'BROWSER_EXECUTION_INTERRUPTED',message:'Browser execution was interrupted. Its actions were not replayed. Verify current browser state before continuing.',observedAt:Date.now()}};
+  }
+  async evidence(task:TaskSnapshot,refresh=false,signal?:AbortSignal):Promise<BrowserEvidence> {
+    this.assertTask(task);
+    if(this.options.allowedEvidence?.(task)===false)throw new OrchestrationError('ACCESS_DENIED');
+    const binding=this.binding(task.gatewayTarget!.sessionId,task.ownerPrincipalId,task.conversationId);
+    const requestId=task.gatewayDispatch?.requestId;
+    if(!requestId)throw new OrchestrationError('BROWSER_EVIDENCE_UNAVAILABLE');
+    const receipt=this.read(task,requestId);
+    if(!receipt || receipt.taskId!==task.taskId || receipt.requestId!==requestId || this.running.has(this.key(task,requestId)))throw new OrchestrationError('BROWSER_EVIDENCE_UNAVAILABLE');
+    const evidence:BrowserEvidence={requestId,recordedAt:receipt.recordedAt??0,result:receipt.browserResult,executionState:receipt.status==='ended'?'ended':'interrupted'};
+    if(refresh){
+      if(!binding.inspect)throw new OrchestrationError('BROWSER_INSPECTION_UNAVAILABLE');
+      const authorized=()=>{try{return this.options.allowedEvidence?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
+      evidence.fresh=await binding.inspect(receipt.browserResult,signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000),authorized);
+      signal?.throwIfAborted();
+      if(!authorized())throw new OrchestrationError('ACCESS_DENIED');
+      evidence.evidenceId=randomUUID();
+      // Store only proof of a fresh scoped read, not another copy of the page.
+      receipt.inspection={id:evidence.evidenceId,at:Date.now()};this.write(task,requestId,receipt);
+    }
+    return evidence;
+  }
+  verifyEvidence(task:TaskSnapshot,requestId:string,evidenceId:string):void {
+    this.assertTask(task);if(this.options.allowedEvidence?.(task)===false)throw new OrchestrationError('ACCESS_DENIED');this.binding(task.gatewayTarget!.sessionId,task.ownerPrincipalId,task.conversationId);
+    if(task.gatewayDispatch?.requestId!==requestId || this.running.has(this.key(task,requestId)))throw new OrchestrationError('STALE_BROWSER_EVIDENCE');
+    const receipt=this.read(task,requestId), result=receipt?.browserResult;
+    if(receipt?.status!=='ended' || !receipt.inspection || receipt.inspection.id!==evidenceId || Date.now()-receipt.inspection.at>300000 || !result || result.status!=='needs_verification' || !['COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(result.reason) || result.lastAction?.outcome==='unknown')throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
   }
   async cancel(task:TaskSnapshot,requestId:string):Promise<void>{this.assertTask(task);this.running.get(this.key(task,requestId))?.controller.abort();}
   async close():Promise<void>{const runs=[...this.running.values()];runs.forEach(r=>r.controller.abort());await Promise.allSettled(runs.map(r=>r.done));}

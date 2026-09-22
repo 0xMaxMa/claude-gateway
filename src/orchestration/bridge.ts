@@ -60,6 +60,7 @@ export class TaskBridge {
         }
         const command = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         if (!command || typeof command.tool !== 'string' || !command.args || typeof command.args !== 'object' || Array.isArray(command.args) || typeof command.action_id !== 'string' || command.action_id.length > 256) throw new OrchestrationError('INVALID_INPUT');
+        if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
         const a = command.args;
         let result: unknown;
         if (command.tool === 'jev_evaluate') {
@@ -83,6 +84,7 @@ export class TaskBridge {
           const mutation = ['task_spawn','task_update','task_answer'].includes(command.tool);
           try {
             if (mutation) await scope.beforeMutation?.(command.tool, a, context.actionId);
+            if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
             switch (command.tool) {
               case 'capabilities_list': {
                 this.tasks.store.assertMember(context.conversationId, context.principalId);
@@ -130,17 +132,37 @@ export class TaskBridge {
                 // Profile resolution may yield while another input arrives. Recheck
                 // readiness immediately before the synchronous task transaction.
                 await scope.beforeMutation?.(command.tool, a, context.actionId);
+                if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
                 const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, targetProfile: a.target_profile, gatewayTarget, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
                 scope.onTaskQueued?.(spoken);
                 const { skill: _workerOnly, ...receipt } = task;
                 result = receipt;
                 break;
               }
-              case 'task_status': result = a.task_id
-                ? this.tasks.status(context.conversationId, context.principalId, a.task_id)
-                : this.tasks.context(context.conversationId, context.principalId, context.decisionId); break;
+              case 'task_status': {
+                const rows=a.task_id ? this.tasks.status(context.conversationId,context.principalId,a.task_id) : this.tasks.context(context.conversationId,context.principalId,context.decisionId);
+                if(a.browser_evidence!==undefined){
+                  if(!a.task_id || !['recorded','fresh'].includes(a.browser_evidence))throw new OrchestrationError('INVALID_INPUT');
+                  const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
+                  const adapter=this.gatewayAdapters.get('browser');
+                  if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || !adapter?.evidence)throw new OrchestrationError('ACCESS_DENIED');
+                  const evidence=await adapter.evidence(task,a.browser_evidence==='fresh',this.cancellations.get(token!)?.signal);
+                  if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
+                  this.tasks.store.assertMember(context.conversationId,context.principalId);
+                  result={tasks:rows,browserEvidence:evidence,untrustedPageContent:true};
+                }else result=rows;
+                break;
+              }
               case 'task_cancel': result = this.tasks.cancel(context, a.task_id, a.replaced_by_task_id); break;
-              case 'task_update': result = this.tasks.update(context, a.task_id, a.expected_revision, a.instruction, a.mode as ChangeMode); break;
+              case 'task_update': {
+                if(a.mode==='verify_browser'){
+                  const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
+                  const adapter=this.gatewayAdapters.get('browser');
+                  if(!adapter?.verifyEvidence)throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
+                  result=this.tasks.verifyBrowser(context,a.task_id,a.expected_revision,a.expected_request_id,a.evidence_id,a.instruction,()=>adapter.verifyEvidence!(task,a.expected_request_id,a.evidence_id));
+                }else result=this.tasks.update(context,a.task_id,a.expected_revision,a.instruction,a.mode as ChangeMode);
+                break;
+              }
               case 'task_question': {
                 if (!scope.onQuestion) throw new OrchestrationError('QUESTION_CONTROLS_UNAVAILABLE');
                 result = scope.onQuestion(context, a); break;

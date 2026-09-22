@@ -22,3 +22,13 @@ test('browser credentials are removed from child environments, including after c
  expect(sanitizeJevChildEnv(env,{browser:c})).toEqual({OPENAI_API_KEY:'native'});
  expect(sanitizeJevChildEnv(env)).toEqual({OPENAI_API_KEY:'native'});
 });
+test('connector references cannot override endpoints or credentials and rotation fences bindings',()=>{
+ const c=config();const b=c.bindings[0];delete b.endpoint;delete b.apiKeyEnv;b.connectorId='paired';
+ expect(()=>validateBrowserIntegration(c)).not.toThrow();
+ expect(()=>validateBrowserIntegration({...c,bindings:[{...b,endpoint:'https://other.example/mcp'}]})).toThrow();
+ let key='one',enabled=true;
+ const registry=new BrowserConnectorRegistry(()=>c,'alpha',()=>{if(!enabled)throw Error('disconnected');return {endpoint:'https://browser.example/mcp',headers:{Authorization:key}};});
+ const initial=registry.bindings()[0];expect(registry.bindings()[0]).toBe(initial);
+ key='two';expect(registry.bindings()[0]).not.toBe(initial);
+ enabled=false;expect(registry.bindings()).toEqual([]);
+});
