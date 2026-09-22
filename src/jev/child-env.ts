@@ -9,10 +9,12 @@ export function isReservedJevCredentialEnv(name: string): boolean {
 }
 // Retain observed references for the process lifetime so hot reload cannot turn an
 // old credential into an ordinary inherited child variable. Values are never stored.
-const privateNames = new Set(['TYPESAFE_API_KEY', 'JEV_API_KEY']);
+const privateNames = new Set(['TYPESAFE_API_KEY', 'JEV_API_KEY', 'JEV_TEXT_API_KEY']);
 export function jevCredentialEnvNames(config?: JevConfig): string[] {
   if (config?.apiKeyEnv && isReservedJevCredentialEnv(config.apiKeyEnv)) throw new JevError('INVALID_CONFIG', 'Jev apiKeyEnv must use a dedicated credential variable, not native CLI authentication or process controls.');
   if (config?.apiKeyEnv) privateNames.add(config.apiKeyEnv);
+  const textKey = config?.browser?.textHelper?.apiKeyEnv;
+  if(textKey){if(isReservedJevCredentialEnv(textKey))throw new JevError('INVALID_CONFIG','Browser text helper requires a dedicated credential variable.');privateNames.add(textKey);}
   for (const binding of config?.browser?.bindings ?? []) {
     if (binding.apiKeyEnv && isReservedJevCredentialEnv(binding.apiKeyEnv)) throw new JevError('INVALID_CONFIG', 'Browser credentials require a dedicated environment variable.');
     if (binding.apiKeyEnv) privateNames.add(binding.apiKeyEnv);

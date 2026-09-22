@@ -1,3 +1,4 @@
+import { browserFieldText } from './browser-text-helper';
 import { createHash, randomUUID } from 'node:crypto';
 import { resolveEnabledConnectors } from '../connectors/resolve';
 import type { AgentConfig, GatewayConfig } from '../types';
@@ -17,7 +18,15 @@ const object = (v: unknown): v is Record<string, any> => Boolean(v) && typeof v 
 const string = (v: unknown, max = 256): v is string => typeof v === 'string' && v.length > 0 && v.length <= max && !/[\x00-\x1f\x7f]/.test(v);
 export function validateBrowserIntegration(value: BrowserIntegrationConfig | undefined): void {
   if (value === undefined) return;
-  if (!object(value) || Object.keys(value).some(k => !['runnerModule','bindings'].includes(k)) || !string(value.runnerModule,4096) || !(isAbsolute(value.runnerModule) || /^(@[a-z0-9-]+\/)?[a-z0-9][a-z0-9._-]*$/.test(value.runnerModule)) || !Array.isArray(value.bindings) || value.bindings.length > 100) invalid();
+  if (!object(value) || Object.keys(value).some(k => !['runnerModule','bindings','textHelper'].includes(k)) || !string(value.runnerModule,4096) || !(isAbsolute(value.runnerModule) || /^(@[a-z0-9-]+\/)?[a-z0-9][a-z0-9._-]*$/.test(value.runnerModule)) || !Array.isArray(value.bindings) || value.bindings.length > 100) invalid();
+  if(value.textHelper!==undefined){
+    const h=value.textHelper;
+    if(!object(h)||Object.keys(h).some(k=>!['api','baseUrl','model','apiKeyEnv','apiKeyFile'].includes(k))||!string(h.model)||Boolean(h.apiKeyEnv)===Boolean(h.apiKeyFile))invalid();
+    if(h.api!==undefined&&!['openai-chat','anthropic-messages'].includes(h.api))invalid();
+    validateEndpoint(h.baseUrl);
+    if(h.apiKeyEnv!==undefined&&(!string(h.apiKeyEnv)||!/^[A-Za-z_][A-Za-z0-9_]*$/.test(h.apiKeyEnv)||isReservedJevCredentialEnv(h.apiKeyEnv)))invalid();
+    if(h.apiKeyFile!==undefined&&(!string(h.apiKeyFile,4096)||!isAbsolute(h.apiKeyFile)))invalid();
+  }
   const ids = new Set<string>();
   for (const b of value.bindings) {
     if (!object(b) || Object.keys(b).some(k => !['id','name','agentId','principalId','conversationId','endpoint','apiKeyEnv','apiKeyFile','connectorId','scope','fields','budget'].includes(k)) || ![b.id,b.name,b.agentId,b.principalId,b.conversationId].every(v => string(v)) || ids.has(b.id)) invalid();
@@ -71,7 +80,7 @@ async function credential(binding: BrowserConnectorConfig): Promise<string> {
   if (!key || key.length > 16384 || /[\x00-\x20\x7f]/.test(key)) throw Error('BROWSER_CREDENTIAL_UNAVAILABLE');
   return key;
 }
-export async function executeBrowserModule(modulePath: string, binding: BrowserConnectorConfig, context: BrowserExecutionContext, connection?: BrowserConnection): Promise<BrowserExecutionResult> {
+export async function executeBrowserModule(modulePath: string, binding: BrowserConnectorConfig, context: BrowserExecutionContext, connection?: BrowserConnection, textHelper?: BrowserIntegrationConfig['textHelper']): Promise<BrowserExecutionResult> {
   const assertAccess = () => { if (!context.authorized()) throw Error('ACCESS_DENIED'); };
   assertAccess(); context.signal.throwIfAborted();
   const resolved = isAbsolute(modulePath) ? modulePath : createRequire(__filename).resolve(modulePath);
@@ -102,7 +111,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       evaluate: async(request,signal) => { assertAccess(); const response = await context.evaluate(request,signal); assertAccess(); return {model:response.model,answers:response.answers}; },
       progress: event => { assertAccess(); context.progress(event); },
       ...(module.verifyBrowserTask ? {verify:async(observation:unknown,signal:AbortSignal) => {assertAccess();const verified = await module.verifyBrowserTask!(context.goal,observation,signal);assertAccess();signal.throwIfAborted();independentlyVerified=validateBrowserVerification(verified);return independentlyVerified;}} : {}),
-      ...(module.resolveFieldText ? {resolveFieldText:async(request:unknown,signal:AbortSignal) => {assertAccess();const text = await module.resolveFieldText!(request,signal);assertAccess();return text;}} : {}),
+      ...((textHelper || module.resolveFieldText) ? {resolveFieldText:async(request:unknown,signal:AbortSignal) => {assertAccess();const text = textHelper ? await browserFieldText(textHelper,request,signal) : await module.resolveFieldText!(request,signal);assertAccess();return text;}} : {}),
     }, context.signal);
     if (result.status === 'succeeded') {
       assertAccess();
@@ -172,12 +181,12 @@ export class BrowserConnectorRegistry {
       if (b.agentId !== this.agentId) continue;
       let resolved: BrowserConnection | undefined;
       try { if(b.connectorId) {if(!this.connection)continue;resolved=this.connection(b.connectorId);} } catch { continue; }
-      const signature = createHash('sha256').update(JSON.stringify([config!.runnerModule,b,resolved])).digest('hex');
+      const signature = createHash('sha256').update(JSON.stringify([config!.runnerModule,config!.textHelper,b,resolved])).digest('hex');
       let item = this.cache.get(b.id);
       if (item?.signature !== signature) {
-        const snapshot = structuredClone(b), modulePath = config!.runnerModule;
+        const snapshot = structuredClone(b), modulePath = config!.runnerModule, textHelper = config!.textHelper ? structuredClone(config!.textHelper) : undefined;
         item = {signature,binding:{version:1,id:b.id,name:b.name,principalId:b.principalId,conversationId:b.conversationId,
-          run:context => executeBrowserModule(modulePath,snapshot,context,resolved),
+          run:context => executeBrowserModule(modulePath,snapshot,context,resolved,textHelper),
           inspect:(result,signal,authorized)=>inspectBrowser(snapshot,result,signal,authorized,resolved)}};
       }
       current.set(b.id,item);

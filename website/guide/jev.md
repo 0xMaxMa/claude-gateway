@@ -403,7 +403,7 @@ the existing task; do not spawn a continuation task.
 `LOW_TARGET_CONFIDENCE` means the runner declined to act on its chosen page
 target. It is not a provider outage or proof that the requested result exists.
 Inspect fresh page evidence before revising the same task with `task_update`.
-Do not blindly retry or lower the confidence threshold. Gateway records bounded
+The runner now defaults to validated argmax choices, as in jev-ultrafast. Confidence is telemetry; operators may explicitly configure stricter operation/target gates. Do not lower an explicitly configured gate to work around a failed task. Gateway records bounded
 `browser.decision` events with the measured operation and target confidence for
 future diagnosis; these events do not contain page text or field values.
 
@@ -456,3 +456,16 @@ on those same synthetic pages. Reports label live versus scripted decisions.
 These simplified pages do not establish compatibility with the actual Google,
 Shopee or ChatGPT UI, authentication, anti-bot challenges, or real result quality.
 No real purchases, bookings or ChatGPT submissions are made by this harness.
+
+
+### Continuous execution and text helper
+
+The runner observes and acts inside one task, without waking the conversational agent for each action. Configure `gateway.jev.browser.textHelper` for tool-free, OpenAI-compatible field generation:
+
+```json
+{"baseUrl":"https://models.example/v1","model":"your-small-text-model","apiKeyEnv":"JEV_TEXT_API_KEY"}
+```
+
+The default API is `openai-chat` (`/chat/completions`); set `api: "anthropic-messages"` for `/messages`. `baseUrl` includes the API version path, e.g. `/v1`. An absolute `apiKeyFile` may replace `apiKeyEnv`. Credentials remain in Gateway and are excluded from CLI children. The helper receives goal, selected field, page context and recent actions and returns only `{text:string|null}`. Null means missing information; the parent can answer from conversation or ask the user. Provider/parse failures never become invented text. Without this config or a trusted installed hook, missing fields still go to the parent. Config reload replaces and fences affected bindings.
+
+Runner confidence gates default to zero (validated argmax); explicitly configured positive gates remain supported. Consent, sensitive-field restrictions, observed target validation, stale checks, durable mutation receipts, budgets and independent final verification remain enforced. The parent reviews completion and real blockers rather than each ordinary action.
