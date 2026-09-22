@@ -182,11 +182,11 @@ The compatible upstream returns native `model`, `answers`, and `usage` in the Ty
 
 The gateway distinguishes native version from requested catalog ID. A prefixed catalog identifier must never be replaced with an unprefixed native model before upstream routing.
 
-## Browser tasks with an installed runner
+## Browser tasks with an installed adapter
 
-Gateway owns authorization, task scheduling, cancellation, durable receipts and Jev evaluation. An optional installed **browser runner contract v1** package owns browser observations, decisions, lease acquisition/renewal/release, stale recovery and actions. Gateway does not bundle a second browser decision loop or install a browser product.
+Gateway owns authorization, task scheduling, cancellation, durable receipts and Jev evaluation. An optional installed **browser adapter contract v1** package owns browser observations, decisions, lease acquisition/renewal/release, stale recovery and actions. Gateway does not bundle a second browser decision loop or install a browser product.
 
-Install a reviewed, version-pinned runner package into the gateway installation, retaining its lockfile/tarball integrity. Configure its public package entrypoint (or an absolute ESM integration-module path). Never configure a URL, moving Git branch, or module chosen by an agent. This is trusted executable code with the gateway process's privileges. A package upgrade at the same path requires a gateway restart because Node caches modules.
+Install a reviewed, version-pinned adapter package into the gateway installation, retaining its lockfile/tarball integrity. Configure its public package entrypoint (or an absolute ESM integration-module path). Never configure a URL, moving Git branch, or module chosen by an agent. This is trusted executable code with the gateway process's privileges. A package upgrade at the same path requires a gateway restart because Node caches modules.
 
 Merge the following into an enabled Jev configuration:
 
@@ -200,7 +200,7 @@ Merge the following into an enabled Jev configuration:
       "apiKeyEnv": "PRIVATE_JEV_TOKEN",
       "features": { "browserTasks": { "enabled": true } },
       "browser": {
-        "runnerModule": "@example/browser-runner",
+        "adapterModule": "@example/browser-adapter",
         "bindings": [{
           "id": "approved-browser",
           "name": "Approved browser tab",
@@ -219,11 +219,11 @@ Merge the following into an enabled Jev configuration:
 }
 ```
 
-`@example/browser-runner` is a placeholder for the reviewed package you install. Its public exports must include `BROWSER_RUNNER_CONTRACT_VERSION: 1`, `runBrowserTask(input, dependencies, signal)` and `mcpBrowserTransport(invoke)`. The runner receives `contractVersion: 1`, `goal`, exact browser `scope`, explicit `fields` and optional budgets. Dependencies are `call`, `evaluate`, `progress`, and optional trusted `verify` / `resolveFieldText` callbacks. `evaluate` returns `{model, answers}`; billing and usage stay with the gateway service.
+`@example/browser-adapter` is a placeholder for the reviewed package you install. Its public exports must include `BROWSER_ADAPTER_CONTRACT_VERSION: 1`, `runBrowserTask(input, dependencies, signal)` and `mcpBrowserTransport(invoke)`. The adapter receives `contractVersion: 1`, `goal`, exact browser `scope`, explicit `fields` and optional budgets. Dependencies are `call`, `evaluate`, `progress`, and optional trusted `verify` / `resolveFieldText` callbacks. `evaluate` returns `{model, answers}`; billing and usage stay with the gateway service.
 
-A trusted ESM integration module can re-export the runner and optionally export `verifyBrowserTask(goal, observation, signal)` and/or `resolveFieldText(request, signal)`. A verifier checks the actual requested goal against independently observed evidence. No verifier means `needs_verification`, never success. No text helper or explicit field value means a field-input handoff. These hooks are administrator-installed code, never page/model-generated functions. Text helpers must use an authorized, accounted inference path if they call a model; the gateway does not silently add another provider or generate missing personal information.
+A trusted ESM integration module can re-export the adapter and optionally export `verifyBrowserTask(goal, observation, signal)` and/or `resolveFieldText(request, signal)`. A verifier checks the actual requested goal against independently observed evidence. No verifier means `needs_verification`, never success. No text helper or explicit field value means a field-input handoff. These hooks are administrator-installed code, never page/model-generated functions. Text helpers must use an authorized, accounted inference path if they call a model; the gateway does not silently add another provider or generate missing personal information.
 
-Each binding belongs to one agent, principal **and orchestration conversation**. A conversation ID is not the native CLI/session ID; obtain it from the authenticated orchestration task/conversation data. Browser device/grant/tab values must come from an already approved browser session. Setting a binding does not grant consent. Shared MCP controller credentials do not permit cross-principal discovery. The gateway checks exact binding ownership before dispatch and callbacks; the extension/relay must independently enforce actual-tab ownership, grant, lease and observation freshness at execution.
+Each binding belongs to one agent, principal **and orchestration conversation**. A conversation ID is not the native CLI/session ID; obtain it from the authenticated orchestration task/conversation data. Browser device/grant/tab values must come from an already approved browser session. Setting a binding does not grant consent. Manual bindings and task receipts remain private to their configured principal/conversation. Automatic discovery follows the existing connector-sharing policy: every user of an enabled shared agent/connector can discover its relay-approved tabs and receives a separate binding. These bindings do not make the underlying shared browser private; use separately scoped connectors or manual bindings for isolation. The gateway checks exact binding ownership before dispatch and callbacks; the extension/relay must independently enforce actual-tab ownership, grant, lease and observation freshness at execution.
 
 The connector uses authenticated Streamable HTTP MCP, accepts HTTPS or loopback HTTP only, refuses redirects and does not expose credentials to agents or app containers. Choose one `apiKeyFile` or dedicated `apiKeyEnv`; browser credential environment variables are stripped from managed children just like Jev credentials. Removing/changing a binding or disabling permissions fences active work; a bounded best-effort lease release may still occur. Credential changes take effect on the next connection. Runtime code/module updates require restart.
 
@@ -231,17 +231,17 @@ Agents discover their targets with `capabilities_list(scope="browser")` and subm
 
 ### Results, recovery and reporting
 
-- `succeeded / VERIFIED` becomes completed only when the runner's trusted independent verifier passed and permission remains valid.
+- `succeeded / VERIFIED` becomes completed only when the adapter's trusted independent verifier passed and permission remains valid.
 - `blocked / FIELD_TEXT_REQUIRED` uses the existing task question flow. The parent receives the missing field label when available. Answering is a new authorized bounded attempt; old element refs are not replayed. For an unambiguous missing field, the gateway binds the authenticated task answer to that field label and supplies its exact text to the fresh run. Previously answered fields remain available. Ambiguous labels require parent inspection; no stale element reference is reused. Answers longer than 2,000 characters are rejected before browser dispatch.
 - `needs_verification` and other bounded handoffs require parent reconciliation. Keep the exact reason rather than pretending that DONE proved completion.
 - Any unknown mutation outcome takes precedence, including after cancellation. Preserve operation IDs; do not replay automatically.
-- Confirmed cancellation stops the request. A runner ignoring cancellation is bounded by a watchdog and remains uncertain, not confirmed stopped.
+- Confirmed cancellation stops the request. A adapter ignoring cancellation is bounded by a watchdog and remains uncertain, not confirmed stopped.
 
 A durable running receipt is written **before** dispatch. A running receipt found after restart becomes `BROWSER_EXECUTION_INTERRUPTED`; no second action is sent. Each private receipt retains the bounded observation and full result for authorized local investigation. Raw page observations are not copied to default logs or conversational token usage. Task status, dashboard detail and channel task detail expose outcome/reason, action/evaluation counts and safe correlation metadata. Jev records link evaluations to agent, session and task independently of conversational model usage.
 
 ### Integration validation
 
-`scripts/jev-browser-smoke.cjs` exports `runGatewayBrowserFixture(options)` for a browser project's isolated fixture. It executes the **actual gateway task controller, durable adapter, packaged runner and authenticated MCP connector**. The caller supplies an installed public entrypoint, approved fixture scope, controller credential file, goal/fields and evaluator callback. Use real relay/extension/browser fixtures; fake MCP tests alone do not prove end-to-end integration. No paid inference is performed without an explicitly injected live evaluator.
+`scripts/jev-browser-smoke.cjs` exports `runGatewayBrowserFixture(options)` for a browser project's isolated fixture. It executes the **actual gateway task controller, durable adapter, packaged adapter and authenticated MCP connector**. The caller supplies an installed public entrypoint, approved fixture scope, controller credential file, goal/fields and evaluator callback. Use real relay/extension/browser fixtures; fake MCP tests alone do not prove end-to-end integration. No paid inference is performed without an explicitly injected live evaluator.
 
 Test verified effects, missing field input, absent/false verification, stale rejection, uncertain mutations, cancellation/revocation/disconnection, gateway restart, cross-agent/principal/conversation denial and app-agent isolation. Test direct/upstream managed/BYOK accounting separately with live credentials. Do not claim comparative token savings or production browser reliability from a small synthetic sample.
 
@@ -299,7 +299,7 @@ Run `claude-gateway doctor` after editing configuration. When Jev is enabled, it
 
 Browser bindings can reference an already connected HTTP MCP connector using `connectorId`, instead of `endpoint` plus `apiKeyEnv`/`apiKeyFile`. These forms are mutually exclusive. Gateway uses its existing connector secret store and per-agent enablement; it never copies the resolved credential into the binding, task arguments or API response. The HTTP connector must use an Authorization header and a secure endpoint (HTTPS, or loopback HTTP for local fixtures). Other header-based authentication schemes are currently rejected explicitly.
 
-An administrator first installs the compatible runner and configures `gateway.jev.browser.runnerModule` with `bindings: []`, enables `features.browserTasks.enabled`, and grants the agent Jev access. Installing code or selecting executable modules is not exposed to conversational tools or these APIs.
+An administrator first installs the compatible adapter and configures `gateway.jev.browser.adapterModule` with `bindings: []`, enables `features.browserTasks.enabled`, and grants the agent Jev access. Installing code or selecting executable modules is not exposed to conversational tools or these APIs.
 
 All routes below are under `/api/v1/agents/:agentId/sessions/:sessionId`:
 
@@ -333,9 +333,9 @@ For a finished `COMPLETION_CANDIDATE` or `VERIFICATION_FAILED` request, the pare
 
 - `mode: "verify_browser"`, `task_id` and the current `expected_revision`;
 - `expected_request_id` and `evidence_id` from the fresh evidence response;
-- `instruction`: concrete evidence establishing the goal, not merely the runner's DONE decision.
+- `instruction`: concrete evidence establishing the goal, not merely the adapter's DONE decision.
 
-Proof expires after five minutes and is tied to the task/request. Current permissions, decision epoch, execution authorization and revision are checked. Confirmation is idempotent and releases the task slot, records parent verification separately from the runner verdict, and delivers normal completion. Unknown mutations, interrupted executions, unsupported goals and missing/expired evidence are rejected. If the parent cannot verify the goal, it must report the limitation and reconcile; this command cannot trigger new browser actions. This is parent-assessed verification, not a universal deterministic website verifier. Administrators may still install deterministic verification/text-helper hooks for supported workflows.
+Proof expires after five minutes and is tied to the task/request. Current permissions, decision epoch, execution authorization and revision are checked. Confirmation is idempotent and releases the task slot, records parent verification separately from the adapter verdict, and delivers normal completion. Unknown mutations, interrupted executions, unsupported goals and missing/expired evidence are rejected. If the parent cannot verify the goal, it must report the limitation and reconcile; this command cannot trigger new browser actions. This is parent-assessed verification, not a universal deterministic website verifier. Administrators may still install deterministic verification/text-helper hooks for supported workflows.
 
 App agents use the same scoped task bridge and verification flow when browser capability is enabled. Workers gain no binding administration, host shell or controller secret from it. Direct HTTP evidence reads enforce agent/session/principal ownership; revocation during a read prevents returning its result.
 
@@ -343,19 +343,19 @@ Structured Jev failure codes, HTTP status, reset time and retry-after metadata a
 
 ### Mutation checkpoints and crash inspection
 
-Before sending a page mutation over MCP, Gateway synchronously persists its operation ID, tool name and timestamp in that task request's receipt and flushes the file and directory. A failed checkpoint prevents dispatch. This fence runs in the transport, not the runner's best-effort progress callback; it stores no page arguments, field values, credential or lease token.
+Before sending a page mutation over MCP, Gateway synchronously persists its operation ID, tool name and timestamp in that task request's receipt and flushes the file and directory. A failed checkpoint prevents dispatch. This fence runs in the transport, not the adapter's best-effort progress callback; it stores no page arguments, field values, credential or lease token.
 
-`browser-evidence` and `task_status` evidence include `lastDispatchedMutation` when available. It means **dispatch was prepared**, not that the browser completed the action. After abrupt process termination, fresh inspection uses this retained operation ID even when no terminal runner result exists. Inspection may need to wait for the dead process's tab lease to expire. A missing or expired browser operation record remains unknown; neither a checkpoint nor a completed single operation establishes that the entire user goal succeeded. Interrupted requests cannot use `verify_browser` and are never automatically replayed. A terminal runner result that omits or contradicts the latest dispatched operation is also retained as unknown.
+`browser-evidence` and `task_status` evidence include `lastDispatchedMutation` when available. It means **dispatch was prepared**, not that the browser completed the action. After abrupt process termination, fresh inspection uses this retained operation ID even when no terminal adapter result exists. Inspection may need to wait for the dead process's tab lease to expire. A missing or expired browser operation record remains unknown; neither a checkpoint nor a completed single operation establishes that the entire user goal succeeded. Interrupted requests cannot use `verify_browser` and are never automatically replayed. A terminal adapter result that omits or contradicts the latest dispatched operation is also retained as unknown.
 
-For isolated integration fixtures, `scripts/jev-browser-crash-smoke.cjs` exports `runGatewayBrowserCrashFixture`: inject a trusted installed runner, approved fixture scope, deterministic evaluator and an assertion on the browser's observable effect. It kills a child running the production task adapter and MCP transport after the real browser response exists but before the adapter receives it, then reconstructs the adapter, inspects the durable receipt, waits for lease expiry and checks the exact operation without replay. This does not kill a production gateway daemon or simulate power loss.
+For isolated integration fixtures, `scripts/jev-browser-crash-smoke.cjs` exports `runGatewayBrowserCrashFixture`: inject a trusted installed adapter, approved fixture scope, deterministic evaluator and an assertion on the browser's observable effect. It kills a child running the production task adapter and MCP transport after the real browser response exists but before the adapter receives it, then reconstructs the adapter, inspects the durable receipt, waits for lease expiry and checks the exact operation without replay. This does not kill a production gateway daemon or simulate power loss.
 
 `runGatewayBrowserFixture` in `scripts/jev-browser-smoke.cjs` also accepts an optional trusted local `containerImage`. It exercises the app-agent Unix-socket bridge from actual isolated Docker processes: discovery, task submission, fresh evidence and parent verification, plus foreign-principal and host-only capability denial. The fixture container receives only its temporary workspace/ticket/socket, with no network or provider credential mount. Inference and parent assessment remain deterministic test callbacks; this is not a live-model app deployment benchmark.
 
-Installed `verifyBrowserTask` hooks must return a boolean. `false` means the goal was not verified; strings, objects, null or undefined are contract errors (`INVALID_CONTRACT`), never converted into a normal negative result. The same rule applies when Gateway wraps an optional verifier for the packaged runner.
+Installed `verifyBrowserTask` hooks must return a boolean. `false` means the goal was not verified; strings, objects, null or undefined are contract errors (`INVALID_CONTRACT`), never converted into a normal negative result. The same rule applies when Gateway wraps an optional verifier for the packaged adapter.
 
 ### Default Remote Browser routing
 
-When Jev and `features.browserTasks.enabled` are enabled and `browser.runnerModule`
+When Jev and `features.browserTasks.enabled` are enabled and `browser.adapterModule`
 is installed, conversational agents route Remote Browser work to Gateway-managed
 browser tasks by default. They discover targets with `capabilities_list` using
 `scope: "browser"`, then use `target_profile: "gateway-managed"` and the returned
@@ -378,13 +378,13 @@ completion requires fresh browser evidence and parent verification.
 
 To open a specific website (including from Chrome New Tab), include
 `gateway_target.start_url` with the user-requested HTTP(S) URL. Gateway passes it
-as the runner's `startUrl`. Navigation acquires the approved-tab lease and records
+as the adapter's `startUrl`. Navigation acquires the approved-tab lease and records
 a durable operation ID before dispatch. A lost navigation response is unknown and
 is never automatically replayed. Supplying field answers resumes the current page
 without repeating initial navigation. Without a URL, an internal New Tab reports
 `START_URL_REQUIRED` instead of an observation-schema error.
 
-Browser tasks that stop at a known decision boundary (for example low confidence or incomplete observations) fail without retaining a target lock when all dispatched mutations are confirmed. Unknown mutation or provider outcomes still require reconciliation. No automatic mutation replay occurs. The browser runner briefly refreshes empty SPA observations before making an evaluation; a persistently empty page stops without a paid decision.
+Browser tasks that stop at a known decision boundary (for example low confidence or incomplete observations) fail without retaining a target lock when all dispatched mutations are confirmed. Unknown mutation or provider outcomes still require reconciliation. No automatic mutation replay occurs. The browser adapter briefly refreshes empty SPA observations before making an evaluation; a persistently empty page stops without a paid decision.
 
 ### Continuing a browser task
 
@@ -400,10 +400,10 @@ consent, unrelated task answers, or ambiguous field values. Ask the user only
 when information is missing or a new decision is required. The answer resumes
 the existing task; do not spawn a continuation task.
 
-`LOW_TARGET_CONFIDENCE` means the runner declined to act on its chosen page
+`LOW_TARGET_CONFIDENCE` means the adapter declined to act on its chosen page
 target. It is not a provider outage or proof that the requested result exists.
 Inspect fresh page evidence before revising the same task with `task_update`.
-The runner now defaults to validated argmax choices, as in jev-ultrafast. Confidence is telemetry; operators may explicitly configure stricter operation/target gates. Do not lower an explicitly configured gate to work around a failed task. Gateway records bounded
+The adapter now defaults to validated argmax choices, as in jev-ultrafast. Confidence is telemetry; operators may explicitly configure stricter operation/target gates. Do not lower an explicitly configured gate to work around a failed task. Gateway records bounded
 `browser.decision` events with the measured operation and target confidence for
 future diagnosis; these events do not contain page text or field values.
 
@@ -439,8 +439,8 @@ response when the parent can still resolve the task.
 ### Isolated automation regression scenarios
 
 Run `npm run build`, then
-`node scripts/jev-automation-fixtures.cjs /absolute/path/to/browser-runner.js`.
-This uses the installed remote-browser runner with real Gateway task persistence,
+`node scripts/jev-automation-fixtures.cjs /absolute/path/to/browser-adapter.js`.
+This uses the installed remote-browser adapter with real Gateway task persistence,
 question suppression/review, replanning and verification, while replacing the
 browser with synthetic pages. It covers flight search (including passenger
 constraints), matching phone-case search, and asking ChatGPT for attributed news.
@@ -460,7 +460,7 @@ No real purchases, bookings or ChatGPT submissions are made by this harness.
 
 ### Continuous execution and text helper
 
-The runner observes and acts inside one task, without waking the conversational agent for each action. Configure the shared `gateway.jev.thinking` connection for tool-free field generation (and future Thinking consumers):
+The adapter observes and acts inside one task, without waking the conversational agent for each action. Configure the shared `gateway.jev.thinking` connection for tool-free field generation (and future Thinking consumers):
 
 ```json
 {"baseUrl":"https://models.example/v1","model":"your-small-text-model","apiKeyEnv":"JEV_TEXT_API_KEY"}
@@ -473,7 +473,7 @@ Runner confidence gates default to zero (validated argmax); explicitly configure
 
 ### Reusable Jev Loop stack
 
-Gateway imports `@0xmaxma/jev-loop` for the shared Thinking module. The installed `@getpod/remote-browser-runner` package is now a **Remote Browser adapter** and imports the same core for observe → decide → execute iteration. The package name and contract v1 remain compatible; it does not implement a second standalone loop. Neither component runs in the Chrome extension.
+Gateway imports `@0xmaxma/jev-loop` for the shared Thinking module. The installed `@getpod/remote-browser-adapter` package is now a **Remote Browser adapter** and imports the same core for observe → decide → execute iteration. Install the renamed package and update `browser.adapterModule` together; the domain contract remains v1; it does not implement a second standalone loop. Neither component runs in the Chrome extension.
 
 Gateway remains the owner of conversations, authorization, durable task receipts, Jev billing and runtime configuration. It injects the Jev client and field-generation callback; the adapter owns DOM interpretation, supported targets, consent/lease checks, browser dispatch and observation freshness. The Core contains no browser, MCP endpoint, product secret or conversational orchestration policy. Other products can host it with their own adapters. No separate Jev Loop service or MCP endpoint is required by this integration.
 
@@ -493,4 +493,8 @@ flowchart LR
   Adapter -->|MCP| Browser[Remote Browser tools / extension]
 ```
 
-The installed adapter retains the `@getpod/remote-browser-runner` name for compatibility, but delegates iteration to Core. The MCP call is bounded and cancellable; Gateway retains its durable task lifecycle and reconciles receipts after interruption. This version does not provide standalone durable background MCP jobs or automatic arbitrary-MCP adaptation. No extension update is required for this host-side refactor.
+The installed adapter uses the `@getpod/remote-browser-adapter` name, but delegates iteration to Core. The MCP call is bounded and cancellable; Gateway retains its durable task lifecycle and reconciles receipts after interruption. This version does not provide standalone durable background MCP jobs or automatic arbitrary-MCP adaptation. No extension update is required for this host-side refactor.
+
+### Pre-release adapter package rename
+
+Update the installed package to `@getpod/remote-browser-adapter` and set `gateway.jev.browser.adapterModule` to that package name. Remove the previous module-selection field from older test configurations before starting the new Gateway build: unknown configuration keys are rejected. Update custom integration modules to export `BROWSER_ADAPTER_CONTRACT_VERSION`. Install Gateway and adapter together; the extension and relay protocol do not change. Existing task receipts and approved browser scopes are retained.

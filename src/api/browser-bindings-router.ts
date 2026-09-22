@@ -31,7 +31,7 @@ export function createBrowserBindingsRouter(config:GatewayConfig,runners:Map<str
   const matches=(b:BrowserConnectorConfig,agentId:string,identity:{principalId:string;conversationId:string})=>b.agentId===agentId&&b.principalId===identity.principalId&&b.conversationId===identity.conversationId;
   const error=(res:import('express').Response,e:unknown)=>{
     const code=e instanceof Error?e.message:'';
-    const publicCodes:Record<string,number>={BROWSER_RUNNER_NOT_CONFIGURED:409,CONFIG_PERSISTENCE_UNAVAILABLE:503,BROWSER_BINDING_EXISTS:409,BROWSER_EVIDENCE_INVALID:502,BROWSER_INSPECTION_DENIED:403,BROWSER_CONNECTOR_UNAVAILABLE:409,BROWSER_CONNECTOR_AUTH_UNSUPPORTED:409};
+    const publicCodes:Record<string,number>={BROWSER_ADAPTER_NOT_CONFIGURED:409,CONFIG_PERSISTENCE_UNAVAILABLE:503,BROWSER_BINDING_EXISTS:409,BROWSER_EVIDENCE_INVALID:502,BROWSER_INSPECTION_DENIED:403,BROWSER_CONNECTOR_UNAVAILABLE:409,BROWSER_CONNECTOR_AUTH_UNSUPPORTED:409};
     return res.status(e instanceof JevError?400:publicCodes[code]??403).json({error:e instanceof JevError?'INVALID_BROWSER_BINDING':publicCodes[code]?code:'BROWSER_BINDING_UNAVAILABLE'});
   };
   const mutate=async(req:Request,fn:(b:BrowserIntegrationConfig,identity:{principalId:string;conversationId:string},disk:GatewayConfig)=>void)=>{
@@ -40,7 +40,7 @@ export function createBrowserBindingsRouter(config:GatewayConfig,runners:Map<str
       const {identity}=await scope(req,true);
       const disk=JSON.parse(await readFile(configPath,'utf8')) as GatewayConfig;
       const browser=disk.gateway.jev?.browser;
-      if(!browser)throw Error('BROWSER_RUNNER_NOT_CONFIGURED');
+      if(!browser)throw Error('BROWSER_ADAPTER_NOT_CONFIGURED');
       fn(browser,identity,disk);validateBrowserIntegration(browser);
       // Recheck the active API key after async disk reads. No model/provider work occurs here.
       if(!isAdmin(currentKey(req)))throw Error('ACCESS_DENIED');
@@ -57,7 +57,7 @@ export function createBrowserBindingsRouter(config:GatewayConfig,runners:Map<str
       if(!body || typeof body!=='object' || Array.isArray(body) || Object.keys(body).some(k=>!['connectorId','name','scope'].includes(k)))throw new JevError('INVALID_CONFIG','Invalid binding.');
       if(!jevAllowed(config,runner.getAgentConfig()) || config.gateway.jev?.features?.browserTasks?.enabled!==true)throw Error('BROWSER_NOT_ALLOWED');
       const binding:BrowserConnectorConfig={id:randomUUID(),name:body.name,connectorId:body.connectorId,scope:body.scope,agentId:req.params.agentId,...identity};
-      validateBrowserIntegration({runnerModule:config.gateway.jev?.browser?.runnerModule??'',bindings:[binding]});
+      validateBrowserIntegration({adapterModule:config.gateway.jev?.browser?.adapterModule??'',bindings:[binding]});
       if(!binding.connectorId)throw new JevError('INVALID_CONFIG','Connector required.');
       const connection=resolveBrowserConnection(config,runner.getAgentConfig(),binding.connectorId);
       const fingerprint=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');

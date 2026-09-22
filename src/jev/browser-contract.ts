@@ -35,10 +35,10 @@ export interface BrowserConnectorConfig {
   budget?: { maxSteps?: number; maxEvaluations?: number; timeoutMs?: number; maxTextCalls?: number; maxStaleRetries?: number; operationConfidence?: number; targetConfidence?: number };
 }
 export interface BrowserTextHelperConfig { api?:'openai-chat'|'anthropic-messages'; baseUrl:string; model:string; apiKeyEnv?:string; apiKeyFile?:string }
-export interface BrowserIntegrationConfig { runnerModule: string; bindings: BrowserConnectorConfig[]; textHelper?: BrowserTextHelperConfig }
+export interface BrowserIntegrationConfig { adapterModule: string; bindings: BrowserConnectorConfig[]; textHelper?: BrowserTextHelperConfig }
 export type BrowserToolCall = (name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
-export interface BrowserRunnerModule {
-  BROWSER_RUNNER_CONTRACT_VERSION: 1;
+export interface BrowserAdapterModule {
+  BROWSER_ADAPTER_CONTRACT_VERSION: 1;
   runBrowserTask(input: { contractVersion: 1; goal: string; startUrl?: string; scope: BrowserScope; fields?: BrowserConnectorConfig['fields'] } & BrowserConnectorConfig['budget'], dependencies: {
     call: BrowserToolCall;
     evaluate(request: JevRequest, signal: AbortSignal): Promise<{model: string; answers: JevResult['answers']}>;

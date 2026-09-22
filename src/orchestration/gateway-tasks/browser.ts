@@ -19,7 +19,7 @@ export interface BrowserTaskBinding {
   inspect?: (result:Partial<BrowserExecutionResult>|undefined,signal:AbortSignal,authorized:()=>boolean)=>Promise<NonNullable<BrowserEvidence['fresh']>>;
   run: (context: BrowserExecutionContext) => Promise<BrowserExecutionResult>;
 }
-interface Receipt {taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';lastDispatchedMutation?:BrowserMutationCheckpoint;recordedAt?:number;inspection?:{id:string;at:number};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
+interface Receipt {revision?:number;taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';lastDispatchedMutation?:BrowserMutationCheckpoint;recordedAt?:number;inspection?:{id:string;at:number};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
 export class BrowserTaskAdapter implements GatewayTaskAdapter {
   readonly name='browser';
   private readonly running=new Map<string,{controller:AbortController;done:Promise<void>}>();
@@ -68,7 +68,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const file=this.file(task,requestId),temp=file+'.'+randomUUID();
     try {
       const fd=openSync(temp,'wx',0o600);
-      try { writeFileSync(fd,JSON.stringify(receipt));fsyncSync(fd); } finally { closeSync(fd); }
+      try { writeFileSync(fd,JSON.stringify({revision:task.revision,...receipt}));fsyncSync(fd); } finally { closeSync(fd); }
       renameSync(temp,file);const directory=openSync(this.options.root,'r');try{fsyncSync(directory);}finally{closeSync(directory);}
     }
     finally { try{unlinkSync(temp);}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;} }
@@ -138,7 +138,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       // Unknown actions and provider outcomes still require reconciliation.
       if(receipt.outcome.type==='unknown' && knownBrowserStop(receipt.browserResult,receipt.lastDispatchedMutation)) return {...receipt.outcome,type:'failed'};
       if(receipt.browserResult?.reason==='FIELD_TEXT_REQUIRED' && receipt.browserResult.lastAction?.outcome!=='unknown' &&
-        this.options.allowed() && this.options.onNeedsInput?.(task,'Browser work needs a field value'+(receipt.browserResult.fieldRequest ? ' for '+JSON.stringify(receipt.browserResult.fieldRequest.label) : '')+'. The parent agent should answer from established user instructions when possible; ask the user only if the value is unknown or requires a new decision.')) return {type:'paused',browserReport:receipt.outcome.browserReport};
+        this.options.allowed() && ((receipt.revision!==undefined && task.revision>receipt.revision && knownBrowserStop({...receipt.browserResult,reason:'FIELD_HANDOFF'},receipt.lastDispatchedMutation)) || this.options.onNeedsInput?.(task,'Browser work needs a field value'+(receipt.browserResult.fieldRequest ? ' for '+JSON.stringify(receipt.browserResult.fieldRequest.label) : '')+'. The parent agent should answer from established user instructions when possible; ask the user only if the value is unknown or requires a new decision.'))) return {type:'paused',browserReport:receipt.outcome.browserReport};
       return receipt.outcome;
     }
     if(this.running.has(this.key(task,requestId)))return 'running';
