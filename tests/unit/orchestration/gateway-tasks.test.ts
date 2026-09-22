@@ -224,3 +224,61 @@ test('an early managed field answer waits for its existing attempt to settle',()
  tasks.finish(attempt.attemptId,attempt.generation,{type:'paused'});
  expect(store.task(q.taskId)!.state).toBe('queued');expect(store.task(q.taskId)!.activeAttemptId).toBeUndefined();
 });
+
+function stoppedBrowser(reason='LOW_TARGET_CONFIDENCE') {
+ const task=tasks.spawn({...context,actionId:`recover-${++sequence}`},{title:'Flight search',instructions:'Find authorized flights to Osaka',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'browser'}});
+ stopBrowser(task.taskId,reason);return task.taskId;
+}
+function stopBrowser(taskId:string,reason:string) {
+ const attempt=tasks.claim(taskId)!;tasks.started(attempt.attemptId,attempt.generation);
+ tasks.finish(attempt.attemptId,attempt.generation,{type:'failed',failure:{code:'BROWSER_'+reason,message:'Stopped',observedAt:Date.now()},browserReport:{contractVersion:1,status:'blocked',reason,steps:0,evaluations:1}});
+ store.run("UPDATE notifications SET status='assigned',decision_id=? WHERE task_id=?",context.decisionId,taskId);
+}
+test('assigned browser notification replans in the same task without replacing authorization',()=>{
+ const id=stoppedBrowser();
+ const updated=tasks.update({...context,execute:false,actionId:'recover'},id,1,'Fill destination first; retain passenger requirements','when_ready');
+ expect(updated.state).toBe('queued');expect(updated.initiatingInputId).toBe(context.inputId);
+ const revision=tasks.revision(id,2);expect(revision.instructions).toBe('Find authorized flights to Osaka');
+ expect(revision.guidance).toContain('Fill destination');expect(revision.browserRecoveryCount).toBe(1);
+ expect(revision.originatingInputId).toBe(context.inputId);
+});
+test.each(['unassigned','other-owner','unknown','provider','cancelled','revoked'])(
+ 'browser recovery rejects %s',reason=>{
+ const id=stoppedBrowser(),task=store.task(id)!;
+ if(reason==='unassigned')store.run("UPDATE notifications SET status='pending' WHERE task_id=?",id);
+ if(reason==='other-owner')task.ownerPrincipalId='other';
+ if(reason==='unknown')task.browserReport!.lastAction={operation:'CLICK',operationId:'unknown',outcome:'unknown'};
+ if(reason==='provider')task.browserReport!.providerFailure={code:'OUTCOME_UNKNOWN'};
+ if(reason==='cancelled')task.state='cancelled';
+ if(reason==='revoked')task.capabilities.execute=false;
+ store.transaction(()=>store.saveTask(task,task.stateVersion));
+ // Keep the notification current so the test exercises the specific guard.
+ store.run('UPDATE notifications SET task_state_version=? WHERE task_id=?',task.stateVersion,id);
+ expect(()=>tasks.update({...context,execute:false,actionId:'no-recovery'},id,1,'Try again','when_ready')).toThrow();
+ expect(store.task(id)!.revision).toBe(1);
+});
+test('browser recovery is bounded across repeated notification decisions',()=>{
+ const id=stoppedBrowser();
+ for(let i=0;i<3;i++){
+  tasks.update({...context,execute:false,actionId:`recover-${i}`},id,i+1,`Different plan ${i}`,'when_ready');
+  stopBrowser(id,'LOW_TARGET_CONFIDENCE');
+ }
+ expect(()=>tasks.update({...context,execute:false,actionId:'over-budget'},id,4,'Another plan','when_ready')).toThrow('Inspect the evidence');
+});
+test.each([false,true])('notification verifies only known completion evidence (unknown=%s)',unknown=>{
+ const task=tasks.spawn({...context,actionId:'verify-spawn'},{title:'Search',instructions:'Find flights',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'browser'}});
+ const attempt=tasks.claim(task.taskId)!;tasks.started(attempt.attemptId,attempt.generation);
+ const current=store.task(task.taskId)!;current.gatewayDispatch={requestId:'request',submittedAt:Date.now()};
+ store.transaction(()=>store.saveTask(current,current.stateVersion));
+ tasks.finish(attempt.attemptId,attempt.generation,{type:'unknown',browserReport:{contractVersion:1,status:'needs_verification',reason:unknown?'OUTCOME_UNKNOWN':'COMPLETION_CANDIDATE',steps:1,evaluations:1,...(unknown?{lastAction:{operation:'CLICK',operationId:'click',outcome:'unknown' as const}}:{})}});
+ store.run("UPDATE notifications SET status='assigned',decision_id=? WHERE task_id=?",context.decisionId,task.taskId);
+ const check=jest.fn();const verify=()=>tasks.verifyBrowser({...context,execute:false,actionId:'verify'},task.taskId,1,'request','fresh-evidence','Observed the requested results',check);
+ if(unknown){expect(verify).toThrow('BROWSER_VERIFICATION_UNAVAILABLE');expect(check).not.toHaveBeenCalled();}
+ else{expect(verify().state).toBe('completed');expect(check).toHaveBeenCalledTimes(1);}
+});
+test('browser controller dispatches parent guidance with the original goal',async()=>{
+ const id=stoppedBrowser();tasks.update({...context,execute:false,actionId:'guided'},id,1,'Fill destination first','when_ready');
+ await controller.close();controller=new GatewayTaskController(tasks,new Map([['browser',{...adapter,name:'browser'}]]));
+ await controller.tick();
+ expect(adapter.submit).toHaveBeenCalledWith(expect.objectContaining({taskId:id}),expect.any(String),expect.stringMatching(/Find authorized flights to Osaka[\s\S]*Fill destination first/),undefined);
+});

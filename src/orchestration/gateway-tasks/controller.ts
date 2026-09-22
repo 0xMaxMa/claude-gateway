@@ -77,12 +77,13 @@ export class GatewayTaskController {
           // CLI publishes its owner file. This fence survives gateway restart.
           if (this.targetBusy(task) || (adapter.ready && !adapter.ready(task))) continue;
           const revision=this.tasks.revision(task.taskId,attempt.revision);
-          adapter.validateInput?.(revision.instructions,revision.answers);
+          const instructions=task.gatewayTarget?.adapter==='browser' && revision.guidance ? revision.instructions+'\n\nParent guidance for the next step (keep all original requirements):\n'+revision.guidance : revision.instructions;
+          adapter.validateInput?.(instructions,revision.answers);
           // Commit the dispatch fence BEFORE touching the target. A crash after
           // this point is inspected, never replayed on the assumption of failure.
           task.gatewayDispatch = {requestId, submittedAt:Date.now()};
           this.tasks.store.transaction(() => this.tasks.store.saveTask(task, task.stateVersion));
-          await adapter.submit(task, requestId, revision.instructions, revision.answers);
+          await adapter.submit(task, requestId, instructions, revision.answers);
         }
         task = this.tasks.store.task(task.taskId)!;
         if (task.state === 'cancel_requested') await adapter.cancel(task, requestId);
