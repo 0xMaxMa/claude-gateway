@@ -1,3 +1,4 @@
+import type {ExperienceHooks} from '@0xmaxma/jev-loop/experience';
 import type { JevRequest, JevResult } from './types';
 
 /** Consumer protocol v1. No provider keys, executable code or URLs in task arguments. */
@@ -17,6 +18,7 @@ export interface BrowserExecutionResult {
   lastConfirmedAction?: {operationId:string;operation:string;outcome:'confirmed'};
 }
 export interface BrowserExecutionContext {
+  experience?: ExperienceHooks;
   startUrl?: string;
   goal: string;
   fields?: Array<{label:string;text:string}>;
@@ -40,6 +42,7 @@ export type BrowserToolCall = (name: string, args: Record<string, unknown>, sign
 export interface BrowserLogicModule {
   BROWSER_USE_CONTRACT_VERSION: 1;
   runBrowserUse(input: { contractVersion: 1; goal: string; startUrl?: string; scope: BrowserScope; fields?: BrowserConnectorConfig['fields'] } & BrowserConnectorConfig['budget'], dependencies: {
+    experience?: ExperienceHooks;
     call: BrowserToolCall;
     evaluate(request: JevRequest, signal: AbortSignal): Promise<{model: string; answers: JevResult['answers']}>;
     progress(event: BrowserProgress): void;

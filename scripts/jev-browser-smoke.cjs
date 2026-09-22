@@ -16,6 +16,7 @@ const {DecisionService}=require('../dist/orchestration/decisions');
 const {TaskService}=require('../dist/orchestration/tasks/service');
 const {GatewayTaskController}=require('../dist/orchestration/gateway-tasks/controller');
 const {BrowserTaskAdapter}=require('../dist/orchestration/gateway-tasks/browser');
+const {ExperienceLibrary}=require('@0xmaxma/jev-loop/experience');
 const {executeBrowserModule,inspectBrowser}=require('../dist/jev/browser-connector');
 async function runGatewayBrowserFixture(options){
  const root=mkdtempSync(join(tmpdir(),'gateway-browser-e2e-'));
@@ -26,7 +27,8 @@ async function runGatewayBrowserFixture(options){
  const connector={id:'fixture-browser',name:'Fixture',agentId:'fixture-agent',principalId:'fixture-user',conversationId:accepted.conversationId,endpoint:options.endpoint,apiKeyFile:options.credentialFile,scope:options.scope,fields:options.fields,budget:{timeoutMs:60000,maxSteps:10,maxEvaluations:12}};
  const binding={version:1,id:'fixture-browser',name:'Isolated fixture',principalId:'fixture-user',conversationId:accepted.conversationId,
   run:c=>executeBrowserModule(options.logicModule,connector,c),inspect:(result,signal,authorized)=>inspectBrowser(connector,result,signal,authorized)};
- const adapter=new BrowserTaskAdapter({agentId:'fixture-agent',root:join(root,'receipts'),allowed:()=>true,bindings:()=>[binding],evaluate:(_task,request,signal)=>options.evaluate(request,signal)});
+ const experience=(runId)=>new ExperienceLibrary({directory:join(root,'experience'),scope:'fixture-user:'+accepted.conversationId,autoDownload:false,runId});
+ const adapter=new BrowserTaskAdapter({experience:(_task,requestId)=>experience(requestId),onVerified:(_task,requestId)=>experience().verifyRun(requestId),agentId:'fixture-agent',root:join(root,'receipts'),allowed:()=>true,bindings:()=>[binding],evaluate:(_task,request,signal)=>options.evaluate(request,signal)});
  const adapters=new Map([['browser',adapter]]),controller=new GatewayTaskController(tasks,adapters);
  let bridge,callAgent;
  try{
@@ -56,8 +58,9 @@ async function runGatewayBrowserFixture(options){
     const proof=callAgent ? (await callAgent('task_status',{task_id:current.taskId,browser_evidence:'fresh'})).browserEvidence : await adapter.evidence(current,true);
     const evidence=await options.parentVerify(proof);
     if(typeof evidence==='string' && evidence.trim())current=callAgent ? await callAgent('task_update',{task_id:current.taskId,expected_revision:current.revision,mode:'verify_browser',expected_request_id:proof.requestId,evidence_id:proof.evidenceId,instruction:evidence}) : tasks.verifyBrowser({...context,actionId:'verify-browser'},current.taskId,current.revision,proof.requestId,proof.evidenceId,evidence,()=>adapter.verifyEvidence(current,proof.requestId,proof.evidenceId));
+    if(!callAgent && current.state==='completed')await adapter.recordVerified(current,proof.requestId);
    }
-   if(['completed','failed','needs_reconciliation','waiting_input','cancelled'].includes(current.state))return {containerBridge:Boolean(callAgent),state:current.state,result:current.result,failure:current.failure,browserReport:current.browserReport};
+   if(['completed','failed','needs_reconciliation','waiting_input','cancelled'].includes(current.state))return {experience:await experience().stats(),containerBridge:Boolean(callAgent),state:current.state,result:current.result,failure:current.failure,browserReport:current.browserReport};
    await new Promise(r=>setTimeout(r,20));
   }
   throw Error('Gateway browser task did not settle');
