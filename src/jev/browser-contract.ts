@@ -17,6 +17,7 @@ export interface BrowserExecutionResult {
   lastConfirmedAction?: {operationId:string;operation:string;outcome:'confirmed'};
 }
 export interface BrowserExecutionContext {
+  startUrl?: string;
   goal: string;
   fields?: Array<{label:string;text:string}>;
   signal: AbortSignal;
@@ -37,7 +38,7 @@ export interface BrowserIntegrationConfig { runnerModule: string; bindings: Brow
 export type BrowserToolCall = (name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
 export interface BrowserRunnerModule {
   BROWSER_RUNNER_CONTRACT_VERSION: 1;
-  runBrowserTask(input: { contractVersion: 1; goal: string; scope: BrowserScope; fields?: BrowserConnectorConfig['fields'] } & BrowserConnectorConfig['budget'], dependencies: {
+  runBrowserTask(input: { contractVersion: 1; goal: string; startUrl?: string; scope: BrowserScope; fields?: BrowserConnectorConfig['fields'] } & BrowserConnectorConfig['budget'], dependencies: {
     call: BrowserToolCall;
     evaluate(request: JevRequest, signal: AbortSignal): Promise<{model: string; answers: JevResult['answers']}>;
     progress(event: BrowserProgress): void;

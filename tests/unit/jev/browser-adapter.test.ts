@@ -134,3 +134,11 @@ test('checkpoint persistence failure aborts the dispatch boundary',async()=>{
  expect(dispatched).toBe(false);expect(aborted).toBe(true);
  expect(readdirSync(dir)).toHaveLength(1);
 });
+test('browser start URL is explicit, validated and passed to the runner',async()=>{
+ const f=fixture();
+ const target=f.a.resolve({adapter:'browser',session_id:'target',start_url:'https://www.google.com/'},context());
+ expect(target.startUrl).toBe('https://www.google.com/');
+ for(const start_url of ['javascript:alert(1)','file:///etc/passwd','https://user:secret@example.com'])expect(()=>f.a.resolve({adapter:'browser',session_id:'target',start_url},context())).toThrow('INVALID_BROWSER_START_URL');
+ f.run.mockImplementation(async(c:BrowserExecutionContext)=>{c.beforeMutation!('11111111-1111-4111-8111-111111111111','tab_navigate');expect(JSON.parse(readFileSync(join(dir,readdirSync(dir)[0]),'utf8')).lastDispatchedMutation.operation).toBe('tab_navigate');return complete;});await f.a.submit(task({gatewayTarget:target}),'start-url','goal');await settle(f.a,task({gatewayTarget:target}),'start-url');
+ expect(f.run.mock.calls[0][0].startUrl).toBe('https://www.google.com/');
+});

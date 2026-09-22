@@ -41,12 +41,14 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     await this.options.refreshBindings?.(context);
     if(!this.options.allowed())throw new OrchestrationError('BROWSER_NOT_ALLOWED');
     const bindings=this.options.bindings().filter(b=>b.version===1&&b.principalId===context.principalId&&b.conversationId===context.conversationId&&`${b.id} ${b.name}`.toLowerCase().includes(query.toLowerCase()));
-    return {scope:'browser',instruction:'Use task_spawn with target_profile=gateway-managed and gateway_target={adapter:browser,session_id:<target ID>}. Browser targets are supported; do not use safemode or a direct MCP worker.',hint:bindings.length ? undefined : 'No approved browser tab is ready. Approve the access request in the browser extension, then discover again. Do not fall back to direct browser tools.',targets:bindings.slice(offset,offset+25).map(b=>({adapter:'browser',session_id:b.id,name:b.name,version:1})),next_offset:offset+25<bindings.length?offset+25:null};
+    return {scope:'browser',instruction:'Use task_spawn with target_profile=gateway-managed and gateway_target={adapter:browser,session_id:<target ID>}. For opening a website, include start_url with the user-requested HTTP(S) URL. Browser targets are supported; do not use safemode or a direct MCP worker.',hint:bindings.length ? undefined : 'No approved browser tab is ready. Approve the access request in the browser extension, then discover again. Do not fall back to direct browser tools.',targets:bindings.slice(offset,offset+25).map(b=>({adapter:'browser',session_id:b.id,name:b.name,version:1})),next_offset:offset+25<bindings.length?offset+25:null};
   }
   resolve(input:Record<string,unknown>,context?:CommandContext):GatewayTaskTarget {
-    if(!context||Object.keys(input).some(k=>!['adapter','session_id'].includes(k))||typeof input.session_id!=='string')throw new OrchestrationError('INVALID_GATEWAY_TARGET');
+    if(!context||Object.keys(input).some(k=>!['adapter','session_id','start_url'].includes(k))||typeof input.session_id!=='string')throw new OrchestrationError('INVALID_GATEWAY_TARGET');
     const binding=this.binding(input.session_id,context.principalId,context.conversationId);
-    return {adapter:'browser',sessionId:binding.id,name:binding.name};
+    let startUrl:string|undefined;
+    if(input.start_url!==undefined){try{if(typeof input.start_url!=='string'||input.start_url.length>8192)throw Error();const u=new URL(input.start_url);if(!['http:','https:'].includes(u.protocol)||u.username||u.password)throw Error();startUrl=u.href;}catch{throw new OrchestrationError('INVALID_BROWSER_START_URL');}}
+    return {adapter:'browser',sessionId:binding.id,name:binding.name,...(startUrl?{startUrl}:{})};
   }
   private assertTask(task:TaskSnapshot):void {
     if(task.agentId!==this.options.agentId||task.gatewayTarget?.adapter!=='browser')throw new OrchestrationError('BROWSER_TARGET_NOT_AVAILABLE');
@@ -88,12 +90,12 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const authorized=()=>{try{return this.options.allowedTask?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
     // The installed browser package owns execution; gateway owns the request lifetime.
     let providerFailure:BrowserExecutionResult['providerFailure'];
-    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({goal:instructions,fields,signal:controller.signal,authorized,
+    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({goal:instructions,startUrl:answers?.length?undefined:task.gatewayTarget?.startUrl,fields,signal:controller.signal,authorized,
       evaluate:async(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');try{return await this.options.evaluate(task,request,signal,authorized);}catch(e){if(e instanceof JevError)providerFailure={code:e.code,...e.metadata};throw e;}},
       beforeMutation:(operationId,operation)=>{
         controller.signal.throwIfAborted();
         if(!authorized())throw new OrchestrationError('ACCESS_DENIED');
-        if(!/^[0-9a-f-]{36}$/i.test(operationId) || !['page_click','page_type','page_select','page_scroll'].includes(operation))throw new OrchestrationError('INVALID_BROWSER_OPERATION');
+        if(!/^[0-9a-f-]{36}$/i.test(operationId) || !['page_click','page_type','page_select','page_scroll','tab_navigate'].includes(operation))throw new OrchestrationError('INVALID_BROWSER_OPERATION');
         const receipt=this.read(task,requestId);
         if(!receipt || receipt.status!=='running')throw new OrchestrationError('BROWSER_REQUEST_ENDED');
         receipt.lastDispatchedMutation={operationId,operation,recordedAt:Date.now()};

@@ -61,7 +61,7 @@ export function resolveBrowserConnection(config: GatewayConfig, agent: AgentConf
 
 // Preserve native import for optional ESM packages when gateway is compiled as CJS.
 const importModule = new Function('url', 'return import(url)') as (url: string) => Promise<BrowserRunnerModule>;
-const tools = new Set(['browser_task_acquire','browser_task_renew','browser_task_release','page_observe','page_click','page_type','page_select','page_scroll']);
+const tools = new Set(['browser_task_acquire','browser_task_renew','browser_task_release','page_observe','page_click','page_type','page_select','page_scroll','tab_navigate']);
 async function credential(binding: BrowserConnectorConfig): Promise<string> {
   let key: string;
   if (binding.apiKeyFile) {
@@ -87,7 +87,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       // Release only the already-held lease even after config revocation; no other late call is allowed.
       if (name !== 'browser_task_release') assertAccess();
       if (!tools.has(name) || ['device_id','grant_id','tab_id'].some(k => args[k] !== binding.scope[k as keyof typeof binding.scope])) throw Error('BROWSER_SCOPE_DENIED');
-      if (name.startsWith('page_') && name !== 'page_observe') {
+      if (name === 'tab_navigate' || (name.startsWith('page_') && name !== 'page_observe')) {
         if (!context.beforeMutation || typeof args.operation_id !== 'string') throw Error('BROWSER_CHECKPOINT_UNAVAILABLE');
         context.signal.throwIfAborted();
         context.beforeMutation(args.operation_id, name);
@@ -97,7 +97,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       return {content:result.content as unknown[],isError:result.isError as boolean | undefined};
     });
     let independentlyVerified = false;
-    const result = await module.runBrowserTask({contractVersion:1,goal:context.goal,scope:binding.scope,fields:[...(binding.fields??[]),...(context.fields??[]).filter(f=>!(binding.fields??[]).some(b=>b.label===f.label))],...binding.budget}, {
+    const result = await module.runBrowserTask({contractVersion:1,goal:context.goal,...(context.startUrl?{startUrl:context.startUrl}:{}),scope:binding.scope,fields:[...(binding.fields??[]),...(context.fields??[]).filter(f=>!(binding.fields??[]).some(b=>b.label===f.label))],...binding.budget}, {
       call,
       evaluate: async(request,signal) => { assertAccess(); const response = await context.evaluate(request,signal); assertAccess(); return {model:response.model,answers:response.answers}; },
       progress: event => { assertAccess(); context.progress(event); },
