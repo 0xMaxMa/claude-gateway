@@ -1,3 +1,4 @@
+import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
 import type { BrowserExecutionContext, BrowserExecutionResult, BrowserProgress, BrowserEvidence, BrowserMutationCheckpoint } from '../../jev/browser-contract';
 import { createHash, randomUUID } from 'crypto';
 import { mkdirSync, readFileSync, writeFileSync, renameSync, openSync, closeSync, fsyncSync, unlinkSync } from 'fs';
@@ -180,7 +181,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     this.assertTask(task);if(this.options.allowedEvidence?.(task)===false)throw new OrchestrationError('ACCESS_DENIED');this.binding(task.gatewayTarget!.sessionId,task.ownerPrincipalId,task.conversationId);
     if(task.gatewayDispatch?.requestId!==requestId || this.running.has(this.key(task,requestId)))throw new OrchestrationError('STALE_BROWSER_EVIDENCE');
     const receipt=this.read(task,requestId), result=receipt?.browserResult;
-    if(receipt?.status!=='ended' || !receipt.inspection || receipt.inspection.id!==evidenceId || Date.now()-receipt.inspection.at>300000 || !result || result.status!=='needs_verification' || !['COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(result.reason) || result.lastAction?.outcome==='unknown')throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
+    if(receipt?.status!=='ended' || !receipt.inspection || receipt.inspection.id!==evidenceId || Date.now()-receipt.inspection.at>300000 || !parentVerifiableBrowserResult(result))throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
   }
   async cancel(task:TaskSnapshot,requestId:string):Promise<void>{
     this.assertTask(task);
