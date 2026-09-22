@@ -184,6 +184,32 @@ test('a LINE image push classifies and reports a retryable 429 the same way a te
   } finally { if (previous === undefined) delete process.env.SHARE_DB_PATH; else process.env.SHARE_DB_PATH = previous; f.close(); }
 });
 
+test('the pending-group-size check reaches a LINE image push too, not just text (channelSender wires it through to sendChannelFile)', async () => {
+  const f = await fixture(); const previous = process.env.SHARE_DB_PATH;
+  try {
+    const { resetLineQuotaCache } = await import('../../../src/orchestration/line-quota');
+    resetLineQuotaCache();
+    const a = f.attempt, path = join(f.path, '..', 'image.png'); writeFileSync(path, PNG);
+    const staged = f.files.stage(a.attemptId, a.generation, 'send', { path });
+    writeFileSync(join(f.workspace, '../.public-base'), 'https://fixture.example');
+    process.env.SHARE_DB_PATH = join(f.root, 'shares.db');
+    const request = jest.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.includes('/message/push')) return new Response(JSON.stringify({ message: 'Too Many Requests' }), { status: 429, headers: { 'retry-after': '2' } });
+      if (href.includes('/quota/consumption')) return new Response(JSON.stringify({ totalUsage: 997 }));
+      if (href.includes('/quota')) return new Response(JSON.stringify({ type: 'limited', value: 1000 }));
+      throw new Error(`unexpected url ${href}`);
+    });
+    const agent = { id: 'agent', workspace: f.workspace, line: { channelAccessToken: 'fixture' } } as AgentConfig;
+    const log = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await channelSender(agent, request, undefined, undefined, () => 10)({ channel: 'line', chat_id: '123', thread_key: '456', conversation_id: 'agent' }, '', 'delivery-id', { path: String(staged.path), name: 'image.png', kind: 'image', caption: '' });
+      const events = log.mock.calls.map(call => JSON.parse(String(call[0])));
+      expect(events).toContainEqual(expect.objectContaining({ event: 'LINE quota insufficient for pending group delivery', remaining: 3, groupSize: 10 }));
+    } finally { log.mockRestore(); }
+  } finally { if (previous === undefined) delete process.env.SHARE_DB_PATH; else process.env.SHARE_DB_PATH = previous; f.close(); }
+});
+
 test('MCP screenshot bytes stage without invented paths and deliver to the original conversation', async () => {
   const f = await fixture();
   try {

@@ -9,7 +9,7 @@ import { randomUUID } from 'crypto';
 import type { AgentConfig } from '../types';
 import { OrchestrationStore, Row } from './store';
 import { sendChannelFile, ChannelFile } from './file-delivery';
-import { classifyLineRejection, insufficientForGroup, lineQuotaState, lineRetryBackoffMs, logLineDeliveryFailure, logInsufficientLineQuotaForGroup, logLowLineQuota, logLineQuotaRecovered, lowQuotaTransition, parseLineRetryAfterMs, LINE_RATE_LIMIT_MAX_ATTEMPTS } from './line-quota';
+import { handleLineRejection, lineRetryBackoffMs, LINE_RATE_LIMIT_MAX_ATTEMPTS } from './line-quota';
 
 export type DeliveryOutcome = { state: 'delivered'; providerId?: string } | { state: 'failed' | 'unknown'; code: string; speechSynthesisFailed?: boolean; retryAfterMs?: number };
 export type DeliveryControl = { label: string; data: string };
@@ -26,7 +26,7 @@ export function channelSender(config: AgentConfig | (() => AgentConfig), request
       // Question callers include plain commands for transports without native controls.
       return linkedSender(binding, text, id, file, speech, textFormat);
     }
-    if (file) return sendChannelFile(agent, binding, file, id, request);
+    if (file) return sendChannelFile(agent, binding, file, id, request, undefined, pendingLineGroupSize);
     const source = String(binding.channel), chat = String(binding.chat_id), thread = String(binding.thread_key);
     let url: string, body: object;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -70,24 +70,10 @@ export function channelSender(config: AgentConfig | (() => AgentConfig), request
       }
       if (source === 'line' && response.status === 409 && response.headers.get('x-line-accepted-request-id')) return { state: 'delivered', providerId: response.headers.get('x-line-accepted-request-id')! };
       if (source === 'line' && response.status === 429) {
-        const rejection = await response.json().catch(() => ({})) as { message?: unknown };
-        const quota = await lineQuotaState(agent.id, agent.line!.channelAccessToken, request);
-        const remaining = quota.status === 'ok' ? quota.remaining : 0;
-        const classification = classifyLineRejection(429, quota, response.headers.get('retry-after'), rejection.message);
-        logLineDeliveryFailure(agent.id, classification, quota);
-        const transition = lowQuotaTransition(agent.id, quota);
-        if (transition === 'warn') logLowLineQuota(agent.id, remaining);
-        if (transition === 'recovered') logLineQuotaRecovered(agent.id, remaining);
-        // The group-size check needs a real quota number to compare against; skip the
-        // pending-count query entirely when there's nothing to compare it to.
-        if (quota.status === 'ok') {
-          const groupSize = pendingLineGroupSize();
-          if (insufficientForGroup(quota, groupSize)) logInsufficientLineQuotaForGroup(agent.id, remaining, groupSize);
-        }
+        const { code, retryAfterMs } = await handleLineRejection(agent.id, agent.line!.channelAccessToken, request, response, pendingLineGroupSize);
         // Quota exhaustion and unclassified rejections stay terminal; only a confirmed
         // rate limit is worth a bounded, backed-off retry (see DeliveryOutbox.run).
-        return { state: 'failed', code: classification === 'quota_exhausted' ? 'LINE_QUOTA_EXHAUSTED' : classification === 'rate_limited' ? 'LINE_RATE_LIMITED' : 'PROVIDER_HTTP_429',
-          retryAfterMs: classification === 'rate_limited' ? parseLineRetryAfterMs(response.headers.get('retry-after')) : undefined };
+        return { state: 'failed', code, retryAfterMs };
       }
       if (!response.ok) return { state: response.status >= 500 ? 'unknown' : 'failed', code: `PROVIDER_HTTP_${response.status}` };
       const result = await response.json() as { ok?: boolean; error?: unknown; messages?: Array<{id: string}>; id?: string; ts?: string; result?: { message_id?: number }; sentMessages?: Array<{ id: string }> };
@@ -226,12 +212,16 @@ export class DeliveryOutbox {
           : this.send(binding, delivery.modality === 'text' ? String(delivery.delivered_text) : '', id,
             delivery.modality === 'text' ? undefined : JSON.parse(String(delivery.delivered_text)), undefined, payload.textFormat, payload.controls)).catch(() => ({ state: 'unknown' as const, code: 'PROVIDER_RECEIPT_UNKNOWN' }));
         this.store.transaction(() => {
-          // A rate limit (never quota exhaustion) gets a bounded, backed-off retry.
-          // The same deliveryId is reused as LINE's retry key, so this is never a
-          // blind replay of a stale response — it is the identical send, retried.
+          // A rate limit (never quota exhaustion) gets a bounded, backed-off retry —
+          // but only for text. Retrying a speech/file delivery re-runs TTS synthesis
+          // or mints a fresh share URL from scratch (see sendChannelSpeech/
+          // sendChannelFile), which is neither the "identical send" this retry
+          // assumes nor free; only text's retry is a genuine resend of the same body.
+          // The same deliveryId is reused as LINE's retry key either way, so a text
+          // retry is never a blind replay of a stale response.
           // LINE's own Retry-After (when present) wins over the fixed schedule so a
           // longer cooldown isn't retried into early and burned for nothing.
-          if (result.state !== 'delivered' && result.code === 'LINE_RATE_LIMITED' && attemptNumber < LINE_RATE_LIMIT_MAX_ATTEMPTS) {
+          if (delivery.modality === 'text' && result.state !== 'delivered' && result.code === 'LINE_RATE_LIMITED' && attemptNumber < LINE_RATE_LIMIT_MAX_ATTEMPTS) {
             this.store.run("UPDATE outbox SET state='pending',available_at=?,last_error=? WHERE id=?", Date.now() + (result.retryAfterMs ?? lineRetryBackoffMs(attemptNumber)), result.code, row.id);
             this.store.run("UPDATE deliveries SET state='pending',updated_at=? WHERE id=?", Date.now(), id);
             return;

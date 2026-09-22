@@ -99,6 +99,32 @@ test("a retry is scheduled from LINE's own Retry-After value, not the fixed back
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('a rate-limited LINE speech delivery is classified but never retried — resending would re-run TTS synthesis from scratch, not resend the same audio', async () => {
+  const store = new OrchestrationStore(':memory:', 'a');
+  const sendCalls: string[] = [];
+  const sender = jest.fn(async (_binding: unknown, _text: string, _id: string, _file: unknown, audio: unknown) => {
+    sendCalls.push(audio ? 'speech' : 'text');
+    return audio ? { state: 'failed' as const, code: 'LINE_RATE_LIMITED', retryAfterMs: 2000 } : { state: 'delivered' as const };
+  });
+  const outbox = new DeliveryOutbox(store, sender);
+  const decisions = new DecisionService(store, (r, b, text) => outbox.enqueue(r, b, text));
+  try {
+    const input = store.acceptInput({ scope, text: 'hi' });
+    const receipt = decisions.begin(input.conversationId, 'owner', [input.inputId]);
+    store.transaction(() => outbox.enqueueSpeech(receipt.responseId!, input.bindingId, speech));
+    decisions.finish(receipt, 'reply');
+
+    await outbox.tick();
+
+    expect(sendCalls.filter(call => call === 'speech')).toHaveLength(1); // exactly one attempt, unlike text's bounded retry
+    const speechRow = store.get("SELECT * FROM deliveries WHERE modality='speech'")!;
+    expect(speechRow.state).toBe('failed'); // terminal immediately, never requeued to 'pending'
+    const speechOutbox = store.get("SELECT * FROM outbox WHERE dedup_key LIKE 'speech:%'")!;
+    expect(speechOutbox.state).toBe('failed');
+    expect(speechOutbox.last_error).toBe('LINE_RATE_LIMITED'); // still classified correctly — just never retried
+  } finally { store.close(); }
+});
+
 test('quota exhaustion is terminal, is never retried, and blocks dependent speech visibly instead of waiting forever', async () => {
   const store = new OrchestrationStore(':memory:', 'a');
   const request = lineRequestMock([quotaExhausted()]);

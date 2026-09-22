@@ -91,7 +91,7 @@ export async function lineQuotaState(agentId: string, token: string, request: ty
   const cached = quotaCache.get(agentId);
   if (cached && cached.expiresAt > now) return cached.state;
   const state = await fetchLineQuotaState(token, request);
-  evictOldest(quotaCache);
+  if (!quotaCache.has(agentId)) evictOldest(quotaCache);
   quotaCache.set(agentId, { state, expiresAt: now + QUOTA_CACHE_TTL_MS });
   return state;
 }
@@ -143,4 +143,32 @@ export function insufficientForGroup(quota: LineQuotaState, groupSize: number): 
 
 export function logInsufficientLineQuotaForGroup(agentId: string | undefined, remaining: number, groupSize: number): void {
   logLine('LINE quota insufficient for pending group delivery', { agentId, remaining, groupSize });
+}
+
+/** The single place that turns a LINE 429 response into a DeliveryOutcome-shaped
+ * {code, retryAfterMs} — classification, every log line, and the group-quota check,
+ * shared by every LINE push path (text, image/file, and audio, which routes through
+ * the same image/file push) so they can never drift out of sync with each other. */
+export async function handleLineRejection(agentId: string, token: string, request: typeof fetch, response: Response, pendingLineGroupSize: () => number = () => 0): Promise<{ code: string; retryAfterMs?: number }> {
+  const retryAfter = response.headers.get('retry-after');
+  const [rejection, quota] = await Promise.all([
+    response.json().catch(() => ({})) as Promise<{ message?: unknown }>,
+    lineQuotaState(agentId, token, request),
+  ]);
+  const remaining = quota.status === 'ok' ? quota.remaining : 0;
+  const classification = classifyLineRejection(429, quota, retryAfter, rejection.message);
+  logLineDeliveryFailure(agentId, classification, quota);
+  const transition = lowQuotaTransition(agentId, quota);
+  if (transition === 'warn') logLowLineQuota(agentId, remaining);
+  if (transition === 'recovered') logLineQuotaRecovered(agentId, remaining);
+  // The group-size check needs a real quota number to compare against; skip the
+  // pending-count query entirely when there's nothing to compare it to.
+  if (quota.status === 'ok') {
+    const groupSize = pendingLineGroupSize();
+    if (insufficientForGroup(quota, groupSize)) logInsufficientLineQuotaForGroup(agentId, remaining, groupSize);
+  }
+  return {
+    code: classification === 'quota_exhausted' ? 'LINE_QUOTA_EXHAUSTED' : classification === 'rate_limited' ? 'LINE_RATE_LIMITED' : 'PROVIDER_HTTP_429',
+    retryAfterMs: classification === 'rate_limited' ? parseLineRetryAfterMs(retryAfter) : undefined,
+  };
 }
