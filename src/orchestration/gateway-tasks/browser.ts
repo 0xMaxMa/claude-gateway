@@ -115,7 +115,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       const uncertain = result.lastAction?.outcome === 'unknown';
       if(result.status==='succeeded' && !authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');
       if(result.status==='succeeded' && !uncertain)outcome={type:'completed',result:{summary:`Browser goal independently verified. ${result.steps} actions, ${result.evaluations} evaluations.`,artifactIds:[]}};
-      else outcome={type:uncertain?'unknown':result.status==='cancelled'?'stopped':result.status==='failed'?'failed':'unknown',failure:{code:'BROWSER_'+result.reason.toUpperCase(),message:'Browser work stopped: '+result.reason+'. '+result.steps+' actions, '+result.evaluations+' evaluations. '+(result.reason==='FIELD_TEXT_REQUIRED'?'Ask the user for the missing field value; no value was invented.':'Verify the browser state before continuing.'),observedAt:Date.now()}};
+      else outcome={type:uncertain?'unknown':result.status==='cancelled'?'stopped':result.status==='failed'||missingStartWithoutMutation(result,dispatched)?'failed':'unknown',failure:{code:'BROWSER_'+result.reason.toUpperCase(),message:'Browser work stopped: '+result.reason+'. '+result.steps+' actions, '+result.evaluations+' evaluations. '+(result.reason==='FIELD_TEXT_REQUIRED'?'Ask the user for the missing field value; no value was invented.':'Verify the browser state before continuing.'),observedAt:Date.now()}};
       if(outcome.type!=='completed' && outcome.failure && providerFailure)outcome.failure.message+=`${providerFailure.resetAt?' Resets at '+providerFailure.resetAt+'.':''}${providerFailure.retryAfter?' Retry after '+providerFailure.retryAfter+'.':''}`;
       const {observation:_,...browserReport}=result;
       outcome.browserReport=browserReport;
@@ -132,6 +132,10 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     if(!receipt)return 'pending';
     if(receipt.taskId!==task.taskId||receipt.requestId!==requestId)throw new OrchestrationError('BROWSER_RECEIPT_MISMATCH');
     if(receipt.status==='ended'&&receipt.outcome) {
+      // Older receipts classified this pre-navigation validation as uncertain.
+      // Normalize only with durable proof that nothing was dispatched, so cleanup
+      // can release the target without replaying a browser operation.
+      if(receipt.outcome.type==='unknown' && missingStartWithoutMutation(receipt.browserResult,receipt.lastDispatchedMutation)) return {...receipt.outcome,type:'failed'};
       if(receipt.browserResult?.reason==='FIELD_TEXT_REQUIRED' && receipt.browserResult.lastAction?.outcome!=='unknown' &&
         this.options.allowed() && this.options.onNeedsInput?.(task,'Browser work needs a field value'+(receipt.browserResult.fieldRequest ? ' for '+JSON.stringify(receipt.browserResult.fieldRequest.label) : '')+'. Please provide the exact text to enter, or ask the parent agent to inspect the page.')) return {type:'paused',browserReport:receipt.outcome.browserReport};
       return receipt.outcome;
@@ -170,6 +174,10 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
   }
   async cancel(task:TaskSnapshot,requestId:string):Promise<void>{this.assertTask(task);this.running.get(this.key(task,requestId))?.controller.abort();}
   async close():Promise<void>{const runs=[...this.running.values()];runs.forEach(r=>r.controller.abort());await Promise.allSettled(runs.map(r=>r.done));}
+}
+
+function missingStartWithoutMutation(result:BrowserExecutionResult|undefined,dispatched:BrowserMutationCheckpoint|undefined):boolean {
+  return result?.status==='blocked' && result.reason==='START_URL_REQUIRED' && result.steps===0 && result.evaluations===0 && !result.lastAction && !result.lastConfirmedAction && !dispatched;
 }
 
 function validateBrowserResult(result: BrowserExecutionResult): void {
