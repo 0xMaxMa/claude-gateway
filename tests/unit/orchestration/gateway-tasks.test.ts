@@ -182,3 +182,45 @@ test('managed follow-up rejects another principal, notifications, and cancelled 
  tasks.cancelByUser(t.conversationId,'owner',t.taskId);
  expect(()=>tasks.update({...context,actionId:'after-cancel'},t.taskId,1,'Changed','when_ready')).toThrow('TASK_TERMINAL');
 });
+
+function missingBrowserField() {
+ const task=tasks.spawn({...context,actionId:`field-${++sequence}`},{title:'Flight search',instructions:'Find flights to Osaka',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'browser'}});
+ const attempt=tasks.claim(task.taskId)!; tasks.started(attempt.attemptId,attempt.generation);
+ const waiting=tasks.requestInput(attempt.attemptId,attempt.generation,'Where to?');
+ tasks.finish(attempt.attemptId,attempt.generation,{type:'paused',browserReport:{contractVersion:1,status:'blocked',reason:'FIELD_TEXT_REQUIRED',steps:0,evaluations:1,fieldRequest:{ref:'e1',label:'Where to?',reason:'missing'}}});
+ store.run("UPDATE notifications SET status='assigned',decision_id=? WHERE task_id=?",context.decisionId,task.taskId);
+ return {taskId:task.taskId,questionId:waiting.pendingQuestion!.questionId};
+}
+test('assigned browser notification answers a missing field in the same authorized task',()=>{
+ const q=missingBrowserField(); const ctx={...context,execute:false,actionId:'field-answer'};
+ const answered=tasks.answer(ctx,q.taskId,q.questionId,'Osaka, Japan');
+ expect(answered.state).toBe('queued');expect(answered.revision).toBe(2);
+ expect(tasks.revision(q.taskId,2).answers).toEqual(expect.arrayContaining([expect.objectContaining({text:'Osaka, Japan',browserFieldLabel:'Where to?'})]));
+ expect(tasks.answer(ctx,q.taskId,q.questionId,'Osaka, Japan').revision).toBe(2);
+});
+test.each(['unassigned','other-owner','non-browser','non-field','ambiguous','revoked','old-question'])(
+ 'notification cannot answer browser field with %s authority', reason=>{
+ const q=missingBrowserField(); const task=store.task(q.taskId)!;
+ if(reason==='unassigned')store.run("UPDATE notifications SET status='pending' WHERE task_id=?",q.taskId);
+ if(reason==='other-owner')task.ownerPrincipalId='another-user';
+ if(reason==='non-browser')task.gatewayTarget!.adapter='safemode';
+ if(reason==='non-field')task.browserReport!.reason='CONSENT_REQUIRED';
+ if(reason==='ambiguous')task.browserReport!.fieldRequest!.reason='ambiguous';
+ if(reason==='revoked')task.capabilities.execute=false;
+ if(reason==='old-question'){task.pendingQuestion!.questionId='new-question';q.questionId='new-question';}
+ store.transaction(()=>store.saveTask(task,task.stateVersion));
+ expect(()=>tasks.answer({...context,execute:false,actionId:'denied-field'},q.taskId,q.questionId,'Osaka')).toThrow('EXECUTION_DENIED');
+ expect(store.task(q.taskId)!.revision).toBe(1);
+});
+
+test('an early managed field answer waits for its existing attempt to settle',()=>{
+ const q=missingBrowserField(); const task=store.task(q.taskId)!;
+ // Restore the still-settling attempt to reproduce answer/finish ordering.
+ const attempt=JSON.parse(String(store.get('SELECT payload_json FROM task_attempts WHERE task_id=?',q.taskId)!.payload_json));
+ attempt.state='running';task.activeAttemptId=attempt.attemptId;
+ store.transaction(()=>{store.saveAttempt(attempt);store.saveTask(task,task.stateVersion);});
+ const answered=tasks.answer({...context,execute:false,actionId:'early-field'},q.taskId,q.questionId,'Osaka');
+ expect(answered.state).toBe('running');expect(tasks.claim(q.taskId)).toBeUndefined();
+ tasks.finish(attempt.attemptId,attempt.generation,{type:'paused'});
+ expect(store.task(q.taskId)!.state).toBe('queued');expect(store.task(q.taskId)!.activeAttemptId).toBeUndefined();
+});

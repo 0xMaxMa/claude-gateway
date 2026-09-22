@@ -389,3 +389,20 @@ Browser tasks that stop at a known decision boundary (for example low confidence
 ### Continuing a browser task
 
 Use `task_update` with the existing task ID, `expected_revision`, `mode: when_ready`, and the complete revised goal for related follow-up instructions. Do not spawn another task that waits on the same tab. The gateway persists the revision across restarts and lets the active request settle before starting a new attempt. A completed or failed Gateway-managed task can be reopened by its owner in the same conversation. Cancelled tasks and uncertain mutations remain fenced. Browser continuations start with a fresh observation of the current tab; the original `start_url` is not replayed. A revision accepted before the first dispatch still uses that initial URL. `/tasks`, API task details, and the dashboard expose pending revisions separately from the currently applied revision.
+
+### Missing field values and confidence stops
+
+For a browser task paused with `FIELD_TEXT_REQUIRED` (`reason: missing`), the parent
+agent should use `task_answer` with facts already supplied by the user. This is
+also permitted in the notification assigned to that exact pending question, for
+the owning principal and conversation only. It does not authorize new work,
+consent, unrelated task answers, or ambiguous field values. Ask the user only
+when information is missing or a new decision is required. The answer resumes
+the existing task; do not spawn a continuation task.
+
+`LOW_TARGET_CONFIDENCE` means the runner declined to act on its chosen page
+target. It is not a provider outage or proof that the requested result exists.
+Inspect fresh page evidence before revising the same task with `task_update`.
+Do not blindly retry or lower the confidence threshold. Gateway records bounded
+`browser.decision` events with the measured operation and target confidence for
+future diagnosis; these events do not contain page text or field values.
