@@ -1,4 +1,4 @@
-import { classifyLineRejection, insufficientForGroup, lineQuotaState, lineRetryBackoffMs, lowQuotaTransition, resetLineQuotaCache, resetLowQuotaWarnings, LINE_RATE_LIMIT_MAX_ATTEMPTS } from '../../../src/orchestration/line-quota';
+import { classifyLineRejection, insufficientForGroup, lineQuotaState, lineRetryBackoffMs, lowQuotaTransition, parseLineRetryAfterMs, resetLineQuotaCache, resetLowQuotaWarnings, LINE_RATE_LIMIT_MAX_ATTEMPTS } from '../../../src/orchestration/line-quota';
 
 beforeEach(() => { resetLineQuotaCache(); resetLowQuotaWarnings(); });
 
@@ -37,6 +37,25 @@ describe('lineRetryBackoffMs', () => {
   });
   test('LINE_RATE_LIMIT_MAX_ATTEMPTS is a small bounded number', () => {
     expect(LINE_RATE_LIMIT_MAX_ATTEMPTS).toBe(3);
+  });
+});
+
+describe('parseLineRetryAfterMs', () => {
+  test('a numeric Retry-After in seconds converts to milliseconds', () => {
+    expect(parseLineRetryAfterMs('30')).toBe(30000);
+  });
+  test('no header at all yields no override, so the caller falls back to the fixed schedule', () => {
+    expect(parseLineRetryAfterMs(null)).toBeUndefined();
+  });
+  test('a zero or negative Retry-After yields no override rather than an immediate retry', () => {
+    expect(parseLineRetryAfterMs('0')).toBeUndefined();
+    expect(parseLineRetryAfterMs('-5')).toBeUndefined();
+  });
+  test('a garbage Retry-After yields no override rather than NaN scheduling', () => {
+    expect(parseLineRetryAfterMs('not-a-number')).toBeUndefined();
+  });
+  test('an excessive Retry-After is capped rather than scheduling an effectively-dropped message', () => {
+    expect(parseLineRetryAfterMs('3600')).toBe(5 * 60 * 1000);
   });
 });
 
@@ -117,5 +136,14 @@ describe('lineQuotaState', () => {
   test('a network failure is unavailable, never a thrown error', async () => {
     const request = jest.fn(async () => { throw new Error('network down'); });
     expect(await lineQuotaState('a', 'token', request as unknown as typeof fetch)).toEqual({ status: 'unavailable' });
+  });
+  test('the cache is bounded — an agent evicted after enough distinct agents cycle through is refetched, not leaked forever', async () => {
+    const request = okResponses(1000, 0);
+    const now = Date.now();
+    await lineQuotaState('first-agent', 'token', request as unknown as typeof fetch, now);
+    for (let i = 0; i < 64; i++) await lineQuotaState(`agent-${i}`, 'token', request as unknown as typeof fetch, now);
+    request.mockClear();
+    await lineQuotaState('first-agent', 'token', request as unknown as typeof fetch, now);
+    expect(request).toHaveBeenCalledTimes(2); // evicted, so this is a real refetch, not a cache hit
   });
 });

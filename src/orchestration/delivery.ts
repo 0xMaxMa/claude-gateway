@@ -9,9 +9,9 @@ import { randomUUID } from 'crypto';
 import type { AgentConfig } from '../types';
 import { OrchestrationStore, Row } from './store';
 import { sendChannelFile, ChannelFile } from './file-delivery';
-import { classifyLineRejection, insufficientForGroup, lineQuotaState, lineRetryBackoffMs, logLineDeliveryFailure, logInsufficientLineQuotaForGroup, logLowLineQuota, logLineQuotaRecovered, lowQuotaTransition, LINE_RATE_LIMIT_MAX_ATTEMPTS } from './line-quota';
+import { classifyLineRejection, insufficientForGroup, lineQuotaState, lineRetryBackoffMs, logLineDeliveryFailure, logInsufficientLineQuotaForGroup, logLowLineQuota, logLineQuotaRecovered, lowQuotaTransition, parseLineRetryAfterMs, LINE_RATE_LIMIT_MAX_ATTEMPTS } from './line-quota';
 
-export type DeliveryOutcome = { state: 'delivered'; providerId?: string } | { state: 'failed' | 'unknown'; code: string; speechSynthesisFailed?: boolean };
+export type DeliveryOutcome = { state: 'delivered'; providerId?: string } | { state: 'failed' | 'unknown'; code: string; speechSynthesisFailed?: boolean; retryAfterMs?: number };
 export type DeliveryControl = { label: string; data: string };
 export type ChannelSender = (binding: Row, text: string, deliveryId: string, file?: ChannelFile, speech?: SpeechDelivery, textFormat?: 'HTML' | 'text', controls?: DeliveryControl[]) => Promise<DeliveryOutcome>;
 
@@ -70,18 +70,24 @@ export function channelSender(config: AgentConfig | (() => AgentConfig), request
       }
       if (source === 'line' && response.status === 409 && response.headers.get('x-line-accepted-request-id')) return { state: 'delivered', providerId: response.headers.get('x-line-accepted-request-id')! };
       if (source === 'line' && response.status === 429) {
-        const rejection = await response.clone().json().catch(() => ({})) as { message?: unknown };
-        const quota = agent.line?.channelAccessToken ? await lineQuotaState(agent.id, agent.line.channelAccessToken, request).catch((): {status: 'unavailable'} => ({ status: 'unavailable' })) : { status: 'unavailable' as const };
+        const rejection = await response.json().catch(() => ({})) as { message?: unknown };
+        const quota = await lineQuotaState(agent.id, agent.line!.channelAccessToken, request);
+        const remaining = quota.status === 'ok' ? quota.remaining : 0;
         const classification = classifyLineRejection(429, quota, response.headers.get('retry-after'), rejection.message);
         logLineDeliveryFailure(agent.id, classification, quota);
         const transition = lowQuotaTransition(agent.id, quota);
-        if (transition === 'warn') logLowLineQuota(agent.id, quota.status === 'ok' ? quota.remaining : 0);
-        if (transition === 'recovered') logLineQuotaRecovered(agent.id, quota.status === 'ok' ? quota.remaining : 0);
-        const groupSize = pendingLineGroupSize();
-        if (insufficientForGroup(quota, groupSize)) logInsufficientLineQuotaForGroup(agent.id, quota.status === 'ok' ? quota.remaining : 0, groupSize);
+        if (transition === 'warn') logLowLineQuota(agent.id, remaining);
+        if (transition === 'recovered') logLineQuotaRecovered(agent.id, remaining);
+        // The group-size check needs a real quota number to compare against; skip the
+        // pending-count query entirely when there's nothing to compare it to.
+        if (quota.status === 'ok') {
+          const groupSize = pendingLineGroupSize();
+          if (insufficientForGroup(quota, groupSize)) logInsufficientLineQuotaForGroup(agent.id, remaining, groupSize);
+        }
         // Quota exhaustion and unclassified rejections stay terminal; only a confirmed
         // rate limit is worth a bounded, backed-off retry (see DeliveryOutbox.run).
-        return { state: 'failed', code: classification === 'quota_exhausted' ? 'LINE_QUOTA_EXHAUSTED' : classification === 'rate_limited' ? 'LINE_RATE_LIMITED' : 'PROVIDER_HTTP_429' };
+        return { state: 'failed', code: classification === 'quota_exhausted' ? 'LINE_QUOTA_EXHAUSTED' : classification === 'rate_limited' ? 'LINE_RATE_LIMITED' : 'PROVIDER_HTTP_429',
+          retryAfterMs: classification === 'rate_limited' ? parseLineRetryAfterMs(response.headers.get('retry-after')) : undefined };
       }
       if (!response.ok) return { state: response.status >= 500 ? 'unknown' : 'failed', code: `PROVIDER_HTTP_${response.status}` };
       const result = await response.json() as { ok?: boolean; error?: unknown; messages?: Array<{id: string}>; id?: string; ts?: string; result?: { message_id?: number }; sentMessages?: Array<{ id: string }> };
@@ -215,7 +221,7 @@ export class DeliveryOutbox {
         if (!claimed) continue;
         sent++;
         const attemptNumber = Number(row.attempt_count) + 1;
-        const result = await (delivery.modality === 'speech'
+        const result: DeliveryOutcome = await (delivery.modality === 'speech'
           ? this.send(binding, '', id, undefined, JSON.parse(String(delivery.delivered_text)))
           : this.send(binding, delivery.modality === 'text' ? String(delivery.delivered_text) : '', id,
             delivery.modality === 'text' ? undefined : JSON.parse(String(delivery.delivered_text)), undefined, payload.textFormat, payload.controls)).catch(() => ({ state: 'unknown' as const, code: 'PROVIDER_RECEIPT_UNKNOWN' }));
@@ -223,8 +229,10 @@ export class DeliveryOutbox {
           // A rate limit (never quota exhaustion) gets a bounded, backed-off retry.
           // The same deliveryId is reused as LINE's retry key, so this is never a
           // blind replay of a stale response — it is the identical send, retried.
+          // LINE's own Retry-After (when present) wins over the fixed schedule so a
+          // longer cooldown isn't retried into early and burned for nothing.
           if (result.state !== 'delivered' && result.code === 'LINE_RATE_LIMITED' && attemptNumber < LINE_RATE_LIMIT_MAX_ATTEMPTS) {
-            this.store.run("UPDATE outbox SET state='pending',available_at=?,last_error=? WHERE id=?", Date.now() + lineRetryBackoffMs(attemptNumber), result.code, row.id);
+            this.store.run("UPDATE outbox SET state='pending',available_at=?,last_error=? WHERE id=?", Date.now() + (result.retryAfterMs ?? lineRetryBackoffMs(attemptNumber)), result.code, row.id);
             this.store.run("UPDATE deliveries SET state='pending',updated_at=? WHERE id=?", Date.now(), id);
             return;
           }

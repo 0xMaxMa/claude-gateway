@@ -167,6 +167,23 @@ test.each((['telegram','discord','slack','line'] as const).flatMap(source => (['
   } finally { if (previous === undefined) delete process.env.SHARE_DB_PATH; else process.env.SHARE_DB_PATH = previous; f.close(); }
 });
 
+test('a LINE image push classifies and reports a retryable 429 the same way a text push does (issue #524)', async () => {
+  const f = await fixture(); const previous = process.env.SHARE_DB_PATH;
+  try {
+    const a = f.attempt, path = join(f.path, '..', 'image.png'); writeFileSync(path, PNG);
+    const staged = f.files.stage(a.attemptId, a.generation, 'send', { path });
+    writeFileSync(join(f.workspace, '../.public-base'), 'https://fixture.example');
+    process.env.SHARE_DB_PATH = join(f.root, 'shares.db');
+    const request = jest.fn(async (url: string | URL | Request) => String(url).includes('/message/push')
+      ? new Response(JSON.stringify({ message: 'Too Many Requests' }), { status: 429, headers: { 'retry-after': '2' } })
+      : new Response('', { status: 500 }));
+    const agent = { id: 'agent', workspace: f.workspace, line: { channelAccessToken: 'fixture' } } as AgentConfig;
+    const outcome = await channelSender(agent, request)({ channel: 'line', chat_id: '123', thread_key: '456', conversation_id: 'agent' }, '', 'delivery-id', { path: String(staged.path), name: 'image.png', kind: 'image', caption: '' });
+    // Not the generic PROVIDER_HTTP_429 catch-all — the same classified, retryable code text pushes get.
+    expect(outcome).toMatchObject({ state: 'failed', code: 'LINE_RATE_LIMITED', retryAfterMs: 2000 });
+  } finally { if (previous === undefined) delete process.env.SHARE_DB_PATH; else process.env.SHARE_DB_PATH = previous; f.close(); }
+});
+
 test('MCP screenshot bytes stage without invented paths and deliver to the original conversation', async () => {
   const f = await fixture();
   try {

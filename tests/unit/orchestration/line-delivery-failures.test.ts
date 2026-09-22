@@ -76,6 +76,29 @@ test('a rate-limited LINE push retries with bounded backoff, reuses the same ret
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a retry is scheduled from LINE's own Retry-After value, not the fixed backoff, when the header gives a longer wait", async () => {
+  const root = mkdtempSync(join(tmpdir(), 'line-retry-after-')), database = join(root, 'state.db');
+  const store = new OrchestrationStore(database, 'a');
+  const longRetryAfter = () => new Response(JSON.stringify({ message: 'Too Many Requests' }), { status: 429, headers: { 'retry-after': '10' } });
+  const request = lineRequestMock([longRetryAfter()]);
+  const outbox = new DeliveryOutbox(store, channelSender(agent, request));
+  const decisions = new DecisionService(store, (r, b, text) => outbox.enqueue(r, b, text));
+  try {
+    const input = store.acceptInput({ scope, text: 'hi' });
+    const receipt = decisions.begin(input.conversationId, 'owner', [input.inputId]);
+    decisions.finish(receipt, 'reply');
+
+    const before = Date.now();
+    await outbox.tick();
+
+    const row = store.get("SELECT * FROM outbox WHERE dedup_key LIKE 'delivery:%'")!;
+    expect(row.state).toBe('pending');
+    // 10s from Retry-After, not the fixed schedule's 2s first step — the fixed step
+    // alone would put available_at just ~2s out, well under this 9s floor.
+    expect(Number(row.available_at)).toBeGreaterThanOrEqual(before + 9000);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('quota exhaustion is terminal, is never retried, and blocks dependent speech visibly instead of waiting forever', async () => {
   const store = new OrchestrationStore(':memory:', 'a');
   const request = lineRequestMock([quotaExhausted()]);

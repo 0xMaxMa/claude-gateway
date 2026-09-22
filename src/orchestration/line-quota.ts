@@ -43,15 +43,40 @@ export function lineRetryBackoffMs(attempt: number): number {
   return Math.min(LINE_RETRY_BASE_MS * 2 ** exponent, LINE_RETRY_CAP_MS);
 }
 
+const LINE_RETRY_AFTER_CAP_MS = 5 * 60 * 1000;
+
+/** LINE's own Retry-After, when present, says exactly how long the block lasts — a
+ * better signal than the fixed backoff schedule, which can retry well before a
+ * longer cooldown actually clears and burn the whole bounded attempt budget for
+ * nothing. Falls back to the exponential schedule when absent or unparseable. */
+export function parseLineRetryAfterMs(retryAfter: string | null): number | undefined {
+  if (!retryAfter) return undefined;
+  const seconds = Number(retryAfter);
+  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfter) - Date.now();
+  return Number.isFinite(ms) && ms > 0 ? Math.min(ms, LINE_RETRY_AFTER_CAP_MS) : undefined;
+}
+
+// Bounds how many distinct agents' state these module-level caches hold at once —
+// without this, an agent deleted or reconfigured (no eviction hook exists for that)
+// would leave a permanent entry for the life of the process. Mirrors the same
+// cap-and-evict-oldest convention already used by context-footprint.ts and
+// dashboard-reader.ts's caches in this same directory.
+const MAX_CACHED_AGENTS = 64;
+function evictOldest<K, V>(cache: Map<K, V>): void {
+  if (cache.size >= MAX_CACHED_AGENTS) cache.delete(cache.keys().next().value!);
+}
+
 const quotaCache = new Map<string, { state: LineQuotaState; expiresAt: number }>();
 const QUOTA_CACHE_TTL_MS = 60000;
 
 async function fetchLineQuotaState(token: string, request: typeof fetch): Promise<LineQuotaState> {
   try {
     const headers = { Authorization: `Bearer ${token}` };
+    // Kept short: this can run inline in DeliveryOutbox's single shared per-agent send
+    // loop, so a slow quota probe would otherwise delay unrelated channels' deliveries.
     const [quotaRes, consumptionRes] = await Promise.all([
-      request('https://api.line.me/v2/bot/message/quota', { headers, signal: AbortSignal.timeout(5000) }),
-      request('https://api.line.me/v2/bot/message/quota/consumption', { headers, signal: AbortSignal.timeout(5000) }),
+      request('https://api.line.me/v2/bot/message/quota', { headers, signal: AbortSignal.timeout(1500) }),
+      request('https://api.line.me/v2/bot/message/quota/consumption', { headers, signal: AbortSignal.timeout(1500) }),
     ]);
     if (!quotaRes.ok || !consumptionRes.ok) return { status: 'unavailable' };
     const quota = await quotaRes.json() as { type?: string; value?: number };
@@ -66,6 +91,7 @@ export async function lineQuotaState(agentId: string, token: string, request: ty
   const cached = quotaCache.get(agentId);
   if (cached && cached.expiresAt > now) return cached.state;
   const state = await fetchLineQuotaState(token, request);
+  evictOldest(quotaCache);
   quotaCache.set(agentId, { state, expiresAt: now + QUOTA_CACHE_TTL_MS });
   return state;
 }
@@ -84,7 +110,7 @@ export function lowQuotaTransition(agentId: string, quota: LineQuotaState, thres
   if (quota.status !== 'ok') return 'none';
   const isLow = quota.remaining < threshold;
   const wasWarned = warnedLow.get(agentId) ?? false;
-  if (isLow && !wasWarned) { warnedLow.set(agentId, true); return 'warn'; }
+  if (isLow && !wasWarned) { if (!warnedLow.has(agentId)) evictOldest(warnedLow); warnedLow.set(agentId, true); return 'warn'; }
   if (!isLow && wasWarned) { warnedLow.set(agentId, false); return 'recovered'; }
   return 'none';
 }

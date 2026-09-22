@@ -7,6 +7,7 @@ import type { Row } from './store';
 import type { DeliveryOutcome } from './delivery';
 import { MediaStore } from '../history/media-store';
 import { ShareStore, shareEnv, validateShareFile, detectShareMime, detectAudioMime } from '../share/share-store';
+import { classifyLineRejection, lineQuotaState, logLineDeliveryFailure, logLowLineQuota, logLineQuotaRecovered, lowQuotaTransition, parseLineRetryAfterMs } from './line-quota';
 
 export interface ChannelFile { path: string; name: string; kind: 'image' | 'file' | 'audio'; caption: string; durationMs?: number; }
 export function resolveChannelFile(agent: AgentConfig, file: ChannelFile): {path: string; bytes: Buffer} {
@@ -89,6 +90,20 @@ export async function sendChannelFile(agent: AgentConfig, binding: Row, file: Ch
       if(!enabled())return {state:'failed',code:'VOICE_REPLY_DISABLED'};
       response = await call('https://api.line.me/v2/bot/message/push', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agent.line.channelAccessToken}`, 'X-Line-Retry-Key': id }, body: JSON.stringify({ to: chat, messages: [message] }) });
       if (response.status === 409 && response.headers.get('x-line-accepted-request-id')) return { state: 'delivered', providerId: response.headers.get('x-line-accepted-request-id')! };
+      // Same classification/backoff as a text push (issue #524) — this endpoint shares
+      // the identical per-channel LINE push quota, so image/audio pushes need it too.
+      if (response.status === 429) {
+        const rejection = await response.json().catch(() => ({})) as { message?: unknown };
+        const quota = await lineQuotaState(agent.id, agent.line.channelAccessToken, request);
+        const remaining = quota.status === 'ok' ? quota.remaining : 0;
+        const classification = classifyLineRejection(429, quota, response.headers.get('retry-after'), rejection.message);
+        logLineDeliveryFailure(agent.id, classification, quota);
+        const transition = lowQuotaTransition(agent.id, quota);
+        if (transition === 'warn') logLowLineQuota(agent.id, remaining);
+        if (transition === 'recovered') logLineQuotaRecovered(agent.id, remaining);
+        return { state: 'failed', code: classification === 'quota_exhausted' ? 'LINE_QUOTA_EXHAUSTED' : classification === 'rate_limited' ? 'LINE_RATE_LIMITED' : 'PROVIDER_HTTP_429',
+          retryAfterMs: classification === 'rate_limited' ? parseLineRetryAfterMs(response.headers.get('retry-after')) : undefined };
+      }
     } else return { state: 'failed', code: 'DELIVERY_NOT_CONFIGURED' };
     if (!response.ok) return { state: response.status >= 500 ? 'unknown' : 'failed', code: `PROVIDER_HTTP_${response.status}` };
     const result = await response.json() as { ok?: boolean; error?: unknown; messages?: Array<{id: string}>; id?: string; result?: { message_id?: number }; files?: Array<{ id: string }>; sentMessages?: Array<{ id: string }> };

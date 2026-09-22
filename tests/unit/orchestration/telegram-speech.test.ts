@@ -119,5 +119,9 @@ test.each(['delivered','unknown'] as const)('early Telegram audio waits for text
   outbox=new DeliveryOutbox(store,sender);
   await outbox.tick();await outbox.tick();
   expect(sent).toEqual(textState==='delivered'?['text','speech']:['text']);
+  // An unresolved text receipt no longer strands speech pending forever (issue #524):
+  // 'delivered' lets speech send normally, 'unknown' fails speech fast instead of hanging.
+  const speechRow=store.get("SELECT state FROM deliveries WHERE modality='speech'")!;
+  expect(speechRow.state).toBe(textState==='delivered'?'delivered':'failed');
  }finally{store.close();}
 });
