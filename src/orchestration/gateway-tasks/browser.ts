@@ -172,7 +172,20 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const receipt=this.read(task,requestId), result=receipt?.browserResult;
     if(receipt?.status!=='ended' || !receipt.inspection || receipt.inspection.id!==evidenceId || Date.now()-receipt.inspection.at>300000 || !result || result.status!=='needs_verification' || !['COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(result.reason) || result.lastAction?.outcome==='unknown')throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
   }
-  async cancel(task:TaskSnapshot,requestId:string):Promise<void>{this.assertTask(task);this.running.get(this.key(task,requestId))?.controller.abort();}
+  async cancel(task:TaskSnapshot,requestId:string):Promise<void>{
+    this.assertTask(task);
+    const running=this.running.get(this.key(task,requestId));
+    if(running){running.controller.abort();return;}
+    const receipt=this.read(task,requestId), result=receipt?.browserResult;
+    // Explicit cancellation may release a finished, blocked request whose last
+    // mutation is durably confirmed. Never infer safety from an action count.
+    if(receipt?.status==='ended' && result?.status==='blocked' && result.reason==='OBSERVATION_TRUNCATED' && !result.providerFailure &&
+      result.lastAction?.outcome!=='unknown' &&
+      (!receipt.lastDispatchedMutation || (result.lastAction?.operationId===receipt.lastDispatchedMutation.operationId && result.lastAction.outcome==='confirmed'))) {
+      receipt.outcome={type:'stopped',browserReport:receipt.outcome?.browserReport};
+      this.write(task,requestId,receipt);
+    }
+  }
   async close():Promise<void>{const runs=[...this.running.values()];runs.forEach(r=>r.controller.abort());await Promise.allSettled(runs.map(r=>r.done));}
 }
 
