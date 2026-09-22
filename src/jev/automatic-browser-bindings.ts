@@ -15,7 +15,7 @@ export class AutomaticBrowserBindings {
   constructor(private gateway:GatewayConfig,private agent:AgentConfig,private path:string,private request:typeof fetch=fetch) {
     try {
       const rows=JSON.parse(readFileSync(path,'utf8'));
-      validateBrowserIntegration({adapterModule:'browser-adapter',bindings:rows});
+      validateBrowserIntegration({bindings:rows});
       this.rows=rows.filter((b:BrowserConnectorConfig)=>b.agentId===agent.id && b.connectorId);
     } catch { /* Missing/invalid local cache is rediscovered, never trusted. */ }
   }
@@ -68,7 +68,7 @@ export class AutomaticBrowserBindings {
         for(const tab of grant.policy.tabs) {
           const scope={device_id:grant.deviceId,grant_id:grant.id,tab_id:tab.id};
           const binding:BrowserConnectorConfig={id:'auto-'+createHash('sha256').update(JSON.stringify([this.agent.id,principalId,conversationId,id,scope])).digest('hex'),name:`Remote Browser · ${String(grant.label??'Browser').slice(0,80)} · ${String(tab.title??'Tab').slice(0,80)}`,agentId:this.agent.id,principalId,conversationId,connectorId:id,scope};
-          validateBrowserIntegration({adapterModule:'browser-adapter',bindings:[binding]});
+          validateBrowserIntegration({bindings:[binding]});
           discovered.push(binding);
         }
       }

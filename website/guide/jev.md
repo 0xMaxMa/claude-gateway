@@ -184,9 +184,7 @@ The gateway distinguishes native version from requested catalog ID. A prefixed c
 
 ## Browser tasks with an installed adapter
 
-Gateway owns authorization, task scheduling, cancellation, durable receipts and Jev evaluation. An optional installed **browser adapter contract v1** package owns browser observations, decisions, lease acquisition/renewal/release, stale recovery and actions. Gateway does not bundle a second browser decision loop or install a browser product.
-
-Install a reviewed, version-pinned adapter package into the gateway installation, retaining its lockfile/tarball integrity. Configure its public package entrypoint (or an absolute ESM integration-module path). Never configure a URL, moving Git branch, or module chosen by an agent. This is trusted executable code with the gateway process's privileges. A package upgrade at the same path requires a gateway restart because Node caches modules.
+Gateway owns authorization, task scheduling, cancellation, durable receipts and Jev evaluation. Browser Logic is included in `@0xmaxma/jev-loop/browser`; it owns observation interpretation, decisions, lease handling, stale recovery and action selection. Remote Browser provides the MCP tools. No separately installed adapter or module path is configured.
 
 Merge the following into an enabled Jev configuration:
 
@@ -200,7 +198,6 @@ Merge the following into an enabled Jev configuration:
       "apiKeyEnv": "PRIVATE_JEV_TOKEN",
       "features": { "browserTasks": { "enabled": true } },
       "browser": {
-        "adapterModule": "@example/browser-adapter",
         "bindings": [{
           "id": "approved-browser",
           "name": "Approved browser tab",
@@ -219,9 +216,7 @@ Merge the following into an enabled Jev configuration:
 }
 ```
 
-`@example/browser-adapter` is a placeholder for the reviewed package you install. Its public exports must include `BROWSER_ADAPTER_CONTRACT_VERSION: 1`, `runBrowserTask(input, dependencies, signal)` and `mcpBrowserTransport(invoke)`. The adapter receives `contractVersion: 1`, `goal`, exact browser `scope`, explicit `fields` and optional budgets. Dependencies are `call`, `evaluate`, `progress`, and optional trusted `verify` / `resolveFieldText` callbacks. `evaluate` returns `{model, answers}`; billing and usage stay with the gateway service.
-
-A trusted ESM integration module can re-export the adapter and optionally export `verifyBrowserTask(goal, observation, signal)` and/or `resolveFieldText(request, signal)`. A verifier checks the actual requested goal against independently observed evidence. No verifier means `needs_verification`, never success. No text helper or explicit field value means a field-input handoff. These hooks are administrator-installed code, never page/model-generated functions. Text helpers must use an authorized, accounted inference path if they call a model; the gateway does not silently add another provider or generate missing personal information.
+The built-in Logic receives goal, exact scope, explicit fields and budgets. Gateway injects MCP calls, Jev evaluation, Thinking and progress. Without independent verification, completion remains a candidate for parent verification; missing field values are handed back to the parent. Provider credentials remain host-owned.
 
 Each binding belongs to one agent, principal **and orchestration conversation**. A conversation ID is not the native CLI/session ID; obtain it from the authenticated orchestration task/conversation data. Browser device/grant/tab values must come from an already approved browser session. Setting a binding does not grant consent. Manual bindings and task receipts remain private to their configured principal/conversation. Automatic discovery follows the existing connector-sharing policy: every user of an enabled shared agent/connector can discover its relay-approved tabs and receives a separate binding. These bindings do not make the underlying shared browser private; use separately scoped connectors or manual bindings for isolation. The gateway checks exact binding ownership before dispatch and callbacks; the extension/relay must independently enforce actual-tab ownership, grant, lease and observation freshness at execution.
 
@@ -241,7 +236,7 @@ A durable running receipt is written **before** dispatch. A running receipt foun
 
 ### Integration validation
 
-`scripts/jev-browser-smoke.cjs` exports `runGatewayBrowserFixture(options)` for a browser project's isolated fixture. It executes the **actual gateway task controller, durable adapter, packaged adapter and authenticated MCP connector**. The caller supplies an installed public entrypoint, approved fixture scope, controller credential file, goal/fields and evaluator callback. Use real relay/extension/browser fixtures; fake MCP tests alone do not prove end-to-end integration. No paid inference is performed without an explicitly injected live evaluator.
+`scripts/jev-browser-smoke.cjs` exports `runGatewayBrowserFixture(options)` for a browser project's isolated fixture. It executes the **actual gateway task controller, durable adapter, built-in Browser Logic and authenticated MCP connector**. The caller supplies an installed public entrypoint, approved fixture scope, controller credential file, goal/fields and evaluator callback. Use real relay/extension/browser fixtures; fake MCP tests alone do not prove end-to-end integration. No paid inference is performed without an explicitly injected live evaluator.
 
 Test verified effects, missing field input, absent/false verification, stale rejection, uncertain mutations, cancellation/revocation/disconnection, gateway restart, cross-agent/principal/conversation denial and app-agent isolation. Test direct/upstream managed/BYOK accounting separately with live credentials. Do not claim comparative token savings or production browser reliability from a small synthetic sample.
 
@@ -299,7 +294,7 @@ Run `claude-gateway doctor` after editing configuration. When Jev is enabled, it
 
 Browser bindings can reference an already connected HTTP MCP connector using `connectorId`, instead of `endpoint` plus `apiKeyEnv`/`apiKeyFile`. These forms are mutually exclusive. Gateway uses its existing connector secret store and per-agent enablement; it never copies the resolved credential into the binding, task arguments or API response. The HTTP connector must use an Authorization header and a secure endpoint (HTTPS, or loopback HTTP for local fixtures). Other header-based authentication schemes are currently rejected explicitly.
 
-An administrator first installs the compatible adapter and configures `gateway.jev.browser.adapterModule` with `bindings: []`, enables `features.browserTasks.enabled`, and grants the agent Jev access. Installing code or selecting executable modules is not exposed to conversational tools or these APIs.
+An administrator configures `gateway.jev.browser` with `bindings: []`, enables `features.browserTasks.enabled`, and grants the agent Jev access. Installing code or selecting executable modules is not exposed to conversational tools or these APIs.
 
 All routes below are under `/api/v1/agents/:agentId/sessions/:sessionId`:
 
@@ -351,12 +346,12 @@ For isolated integration fixtures, `scripts/jev-browser-crash-smoke.cjs` exports
 
 `runGatewayBrowserFixture` in `scripts/jev-browser-smoke.cjs` also accepts an optional trusted local `containerImage`. It exercises the app-agent Unix-socket bridge from actual isolated Docker processes: discovery, task submission, fresh evidence and parent verification, plus foreign-principal and host-only capability denial. The fixture container receives only its temporary workspace/ticket/socket, with no network or provider credential mount. Inference and parent assessment remain deterministic test callbacks; this is not a live-model app deployment benchmark.
 
-Installed `verifyBrowserTask` hooks must return a boolean. `false` means the goal was not verified; strings, objects, null or undefined are contract errors (`INVALID_CONTRACT`), never converted into a normal negative result. The same rule applies when Gateway wraps an optional verifier for the packaged adapter.
+Independent verification must return a boolean. `false` means the goal was not verified; strings, objects, null or undefined are contract errors (`INVALID_CONTRACT`), never converted into a normal negative result. The same rule applies when Gateway wraps an optional verifier for the built-in Browser Logic.
 
 ### Default Remote Browser routing
 
-When Jev and `features.browserTasks.enabled` are enabled and `browser.adapterModule`
-is installed, conversational agents route Remote Browser work to Gateway-managed
+When Jev and `features.browserTasks.enabled` are enabled and `browser`
+is configured, conversational agents route Remote Browser work to Gateway-managed
 browser tasks by default. They discover targets with `capabilities_list` using
 `scope: "browser"`, then use `target_profile: "gateway-managed"` and the returned
 `gateway_target` (`adapter: "browser"`, `session_id`). Direct MCP workers are not
@@ -440,7 +435,7 @@ response when the parent can still resolve the task.
 
 Run `npm run build`, then
 `node scripts/jev-automation-fixtures.cjs /absolute/path/to/browser-adapter.js`.
-This uses the installed remote-browser adapter with real Gateway task persistence,
+This uses the built-in Jev Loop Browser Logic with real Gateway task persistence,
 question suppression/review, replanning and verification, while replacing the
 browser with synthetic pages. It covers flight search (including passenger
 constraints), matching phone-case search, and asking ChatGPT for attributed news.
@@ -473,28 +468,19 @@ Runner confidence gates default to zero (validated argmax); explicitly configure
 
 ### Reusable Jev Loop stack
 
-Gateway imports `@0xmaxma/jev-loop` for the shared Thinking module. The installed `@getpod/remote-browser-adapter` package is now a **Remote Browser adapter** and imports the same core for observe → decide → execute iteration. Install the renamed package and update `browser.adapterModule` together; the domain contract remains v1; it does not implement a second standalone loop. Neither component runs in the Chrome extension.
-
-Gateway remains the owner of conversations, authorization, durable task receipts, Jev billing and runtime configuration. It injects the Jev client and field-generation callback; the adapter owns DOM interpretation, supported targets, consent/lease checks, browser dispatch and observation freshness. The Core contains no browser, MCP endpoint, product secret or conversational orchestration policy. Other products can host it with their own adapters. No separate Jev Loop service or MCP endpoint is required by this integration.
-
-`gateway.jev.thinking` takes precedence over legacy `gateway.jev.browser.textHelper`, which remains accepted for existing installations. Credentials use references, never literal keys in task inputs. Reloading Thinking configuration replaces affected browser bindings and fences old requests. Jev and Thinking credentials are never passed into the extension or the remote MCP server.
-
-The core dependency is pinned to an immutable commit archive. No npm publication, Git binary, SSH key or GitHub login is required; install environments need HTTPS access to GitHub archives. Cancellation and unknown browser mutations remain guarded by the adapter and Gateway receipts; Core does not replay uncertain mutations or provide persistence on its own.
-
-### Agent-facing MCP boundary
-
-Gateway invokes `jev_run` on a scoped Jev Loop MCP server through the SDK in-memory transport. This is a real MCP request/response boundary in the host process: provider callbacks, authorization and synchronous durable mutation checkpoints remain host-owned. The same Jev Loop server supports stdio for independent agent clients with operator-installed adapters. There is no extra network service or extension-side model credential.
+Gateway depends on `@0xmaxma/jev-loop` and uses its built-in `/browser` Logic. No remote-browser runner/adapter package or module-selection setting is needed. Configure `browser: {bindings: []}` for automatic discovery, or explicit bindings as described above.
 
 ```mermaid
 flowchart LR
-  Agent[Agent / Gateway] -->|MCP| Loop[Jev Loop MCP server]
+  Agent[Claude Code / Codex / Agent] -->|MCP| Loop[Jev Loop MCP]
   Loop --> Core[Jev Loop Core]
-  Core --> Adapter[Remote Browser adapter]
-  Adapter -->|MCP| Browser[Remote Browser tools / extension]
+  Core --> Logic[Browser Logic]
+  Logic -->|MCP| Browser[Remote Browser tools]
+  Core --> Thinking[Thinking Module]
+  classDef core fill:#f97316,stroke:#9a3412,stroke-width:4px,color:#111827,font-weight:bold;
+  class Core core;
 ```
 
-The installed adapter uses the `@getpod/remote-browser-adapter` name, but delegates iteration to Core. The MCP call is bounded and cancellable; Gateway retains its durable task lifecycle and reconciles receipts after interruption. This version does not provide standalone durable background MCP jobs or automatic arbitrary-MCP adaptation. No extension update is required for this host-side refactor.
+Browser Logic owns candidate generation, Jev decisions, field assistance and bounded recovery. Core owns Thinking timeout/cancellation/budgets through `LoopContext.think()`. Gateway injects scoped model/tool connections and checkpoints. The extension/relay remain tool providers with no provider credentials or decision loop.
 
-### Pre-release adapter package rename
-
-Update the installed package to `@getpod/remote-browser-adapter` and set `gateway.jev.browser.adapterModule` to that package name. Remove the previous module-selection field from older test configurations before starting the new Gateway build: unknown configuration keys are rejected. Update custom integration modules to export `BROWSER_ADAPTER_CONTRACT_VERSION`. Install Gateway and adapter together; the extension and relay protocol do not change. Existing task receipts and approved browser scopes are retained.
+Upgrade pre-release installations by removing the old module-selection property and uninstalling the old runner/adapter package. Unknown configuration keys are rejected. Existing bindings, scopes and durable task receipts are preserved. The agent-facing MCP call is bounded request/response; Gateway owns persistence/reconciliation. Arbitrary MCP tool discovery and standalone durable background jobs are not implied.

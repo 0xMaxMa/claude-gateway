@@ -12,7 +12,7 @@ const {BrowserTaskAdapter}=require('../dist/orchestration/gateway-tasks/browser'
 const {executeBrowserModule,inspectBrowser}=require('../dist/jev/browser-connector');
 function adapter(options,root,evaluate){
  const connector={id:'fixture',name:'Crash fixture',agentId:'fixture-agent',principalId:'fixture-user',conversationId:'fixture-chat',endpoint:options.endpoint,apiKeyFile:options.credentialFile,scope:options.scope,budget:{timeoutMs:90000,maxSteps:2,maxEvaluations:3}};
- const binding={version:1,id:'fixture',name:'Crash fixture',principalId:'fixture-user',conversationId:'fixture-chat',run:c=>executeBrowserModule(options.adapterModule,connector,c),inspect:(result,signal,authorized)=>inspectBrowser(connector,result,signal,authorized)};
+ const binding={version:1,id:'fixture',name:'Crash fixture',principalId:'fixture-user',conversationId:'fixture-chat',run:c=>executeBrowserModule(options.logicModule,connector,c),inspect:(result,signal,authorized)=>inspectBrowser(connector,result,signal,authorized)};
  return new BrowserTaskAdapter({agentId:'fixture-agent',root,allowed:()=>true,bindings:()=>[binding],evaluate:(_task,request,signal)=>evaluate(request,signal)});
 }
 const task={agentId:'fixture-agent',taskId:'crash-fixture',ownerPrincipalId:'fixture-user',conversationId:'fixture-chat',gatewayTarget:{adapter:'browser',sessionId:'fixture'},gatewayDispatch:{requestId:'crash-request',submittedAt:0}};
@@ -31,7 +31,7 @@ async function runGatewayBrowserCrashFixture(options){
     else if(message.type==='error'){clearTimeout(timeout);reject(Error(message.message));}
    });
   });
-  child.send({type:'start',options:{endpoint:options.endpoint,credentialFile:options.credentialFile,scope:options.scope,adapterModule:options.adapterModule,goal:options.goal},root});
+  child.send({type:'start',options:{endpoint:options.endpoint,credentialFile:options.credentialFile,scope:options.scope,logicModule:options.logicModule,goal:options.goal},root});
   const operationId=await effect;
   await options.assertEffect();
   const exited=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGKILL');await exited;

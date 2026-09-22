@@ -10,7 +10,7 @@ import { isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type { BrowserConnectorConfig, BrowserExecutionContext, BrowserExecutionResult, BrowserIntegrationConfig, BrowserAdapterModule } from './browser-contract';
+import type { BrowserConnectorConfig, BrowserExecutionContext, BrowserExecutionResult, BrowserIntegrationConfig, BrowserLogicModule } from './browser-contract';
 import type { BrowserTaskBinding } from '../orchestration/gateway-tasks/browser';
 import { JevError } from './types';
 import { isReservedJevCredentialEnv } from './child-env';
@@ -20,7 +20,7 @@ const object = (v: unknown): v is Record<string, any> => Boolean(v) && typeof v 
 const string = (v: unknown, max = 256): v is string => typeof v === 'string' && v.length > 0 && v.length <= max && !/[\x00-\x1f\x7f]/.test(v);
 export function validateBrowserIntegration(value: BrowserIntegrationConfig | undefined): void {
   if (value === undefined) return;
-  if (!object(value) || Object.keys(value).some(k => !['adapterModule','bindings','textHelper'].includes(k)) || !string(value.adapterModule,4096) || !(isAbsolute(value.adapterModule) || /^(@[a-z0-9-]+\/)?[a-z0-9][a-z0-9._-]*$/.test(value.adapterModule)) || !Array.isArray(value.bindings) || value.bindings.length > 100) invalid();
+  if (!object(value) || Object.keys(value).some(k => !['bindings','textHelper'].includes(k)) || !Array.isArray(value.bindings) || value.bindings.length > 100) invalid();
   if(value.textHelper!==undefined){
     const h=value.textHelper;
     if(!object(h)||Object.keys(h).some(k=>!['api','baseUrl','model','apiKeyEnv','apiKeyFile'].includes(k))||!string(h.model)||Boolean(h.apiKeyEnv)===Boolean(h.apiKeyFile))invalid();
@@ -71,7 +71,7 @@ export function resolveBrowserConnection(config: GatewayConfig, agent: AgentConf
 }
 
 // Preserve native import for optional ESM packages when gateway is compiled as CJS.
-const importModule = new Function('url', 'return import(url)') as (url: string) => Promise<BrowserAdapterModule>;
+const importModule = new Function('url', 'return import(url)') as (url: string) => Promise<BrowserLogicModule>;
 const tools = new Set(['browser_task_acquire','browser_task_renew','browser_task_release','page_observe','page_click','page_type','page_select','page_scroll','tab_navigate']);
 async function credential(binding: BrowserConnectorConfig): Promise<string> {
   let key: string;
@@ -87,7 +87,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
   assertAccess(); context.signal.throwIfAborted();
   const resolved = isAbsolute(modulePath) ? modulePath : createRequire(__filename).resolve(modulePath);
   const module = await importModule(pathToFileURL(resolved).href);
-  if (module.BROWSER_ADAPTER_CONTRACT_VERSION !== 1 || typeof module.runBrowserTask !== 'function' || typeof module.mcpBrowserTransport !== 'function') throw Error('BROWSER_ADAPTER_INCOMPATIBLE');
+  if (module.BROWSER_LOGIC_CONTRACT_VERSION !== 1 || typeof module.runBrowserTask !== 'function' || typeof module.mcpBrowserTransport !== 'function') throw Error('BROWSER_ADAPTER_INCOMPATIBLE');
   const key = connection ? undefined : await credential(binding);
   assertAccess(); context.signal.throwIfAborted();
   const client = new Client({name:'gateway-browser-task',version:'1.0.0'});
@@ -183,10 +183,10 @@ export class BrowserConnectorRegistry {
       if (b.agentId !== this.agentId) continue;
       let resolved: BrowserConnection | undefined;
       try { if(b.connectorId) {if(!this.connection)continue;resolved=this.connection(b.connectorId);} } catch { continue; }
-      const signature = createHash('sha256').update(JSON.stringify([config!.adapterModule,config!.textHelper,b,resolved])).digest('hex');
+      const signature = createHash('sha256').update(JSON.stringify([config!.textHelper,b,resolved])).digest('hex');
       let item = this.cache.get(b.id);
       if (item?.signature !== signature) {
-        const snapshot = structuredClone(b), modulePath = config!.adapterModule, textHelper = config!.textHelper ? structuredClone(config!.textHelper) : undefined;
+        const snapshot = structuredClone(b), modulePath = '@0xmaxma/jev-loop/browser', textHelper = config!.textHelper ? structuredClone(config!.textHelper) : undefined;
         item = {signature,binding:{version:1,id:b.id,name:b.name,principalId:b.principalId,conversationId:b.conversationId,
           run:context => executeBrowserModule(modulePath,snapshot,context,resolved,textHelper),
           inspect:(result,signal,authorized)=>inspectBrowser(snapshot,result,signal,authorized,resolved)}};
@@ -203,7 +203,7 @@ async function runThroughLoopMcp(context: BrowserExecutionContext, run: (signal:
   const server = createLoopServer({
     signal: context.signal,
     authorize: () => context.authorized(),
-    adapters: [{id: 'browser', inputSchema: {type:'object',properties:{goal:{type:'string'}},required:['goal'],additionalProperties:false}, parse: input => {
+    logics: [{id: 'browser', inputSchema: {type:'object',properties:{goal:{type:'string'}},required:['goal'],additionalProperties:false}, parse: input => {
       // This server belongs to exactly one already-authorized task, not a general browser endpoint.
       if (Object.keys(input).length !== 1 || input.goal !== context.goal) throw Error('BROWSER_SCOPE_DENIED');
       return input;
@@ -214,7 +214,7 @@ async function runThroughLoopMcp(context: BrowserExecutionContext, run: (signal:
   try {
     await server.connect(serverTransport);
     await client.connect(clientTransport, {signal:context.signal,timeout:10000});
-    const response = await client.callTool({name:'jev_run',arguments:{adapter:'browser',input:{goal:context.goal}}}, undefined, {signal:context.signal,timeout:610000});
+    const response = await client.callTool({name:'jev_run',arguments:{logic:'browser',input:{goal:context.goal}}}, undefined, {signal:context.signal,timeout:610000});
     if (response.isError) throw Error('BROWSER_LOOP_INTERRUPTED_RECONCILE_REQUIRED');
     const content = response.content as Array<{type:string;text?:string}>;
     if (content.length !== 1 || content[0].type !== 'text' || !content[0].text) throw Error('BROWSER_LOOP_INVALID_RESULT');

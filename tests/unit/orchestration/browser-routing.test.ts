@@ -15,7 +15,7 @@ test('container/isolated workers do not inherit host remote connector availabili
  expect(browserRouting({id:'a'} as AgentConfig,gateway,false)).toContain('With no enabled Remote Browser');
 });
 test('enabled Jev defaults to scoped managed discovery and never direct-worker fallback',()=>{
- const gateway={gateway:{customConnectors:{},jev:{enabled:true,features:{browserTasks:{enabled:true}},browser:{adapterModule:'runner',bindings:[]}}}} as unknown as GatewayConfig;
+ const gateway={gateway:{customConnectors:{},jev:{enabled:true,features:{browserTasks:{enabled:true}},browser:{bindings:[]}}}} as unknown as GatewayConfig;
  const text=browserRouting({id:'a'} as AgentConfig,gateway);
  expect(text).toContain('scope="browser"');expect(text).toContain('target_profile="gateway-managed"');expect(text).toContain('do not silently fall back');
  gateway.gateway.jev!.enabled=false;expect(browserRouting({id:'a'} as AgentConfig,gateway)).not.toContain('Remote Browser execution default');

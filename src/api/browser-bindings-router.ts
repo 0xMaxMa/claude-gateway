@@ -57,7 +57,7 @@ export function createBrowserBindingsRouter(config:GatewayConfig,runners:Map<str
       if(!body || typeof body!=='object' || Array.isArray(body) || Object.keys(body).some(k=>!['connectorId','name','scope'].includes(k)))throw new JevError('INVALID_CONFIG','Invalid binding.');
       if(!jevAllowed(config,runner.getAgentConfig()) || config.gateway.jev?.features?.browserTasks?.enabled!==true)throw Error('BROWSER_NOT_ALLOWED');
       const binding:BrowserConnectorConfig={id:randomUUID(),name:body.name,connectorId:body.connectorId,scope:body.scope,agentId:req.params.agentId,...identity};
-      validateBrowserIntegration({adapterModule:config.gateway.jev?.browser?.adapterModule??'',bindings:[binding]});
+      validateBrowserIntegration({bindings:[binding]});
       if(!binding.connectorId)throw new JevError('INVALID_CONFIG','Connector required.');
       const connection=resolveBrowserConnection(config,runner.getAgentConfig(),binding.connectorId);
       const fingerprint=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
