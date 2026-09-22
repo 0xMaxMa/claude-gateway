@@ -223,13 +223,20 @@ export class TaskService {
     if (!['when_ready', 'interrupt_and_resume'].includes(mode)) throw new OrchestrationError('INVALID_INPUT');
     return this.command(context, 'update', { taskId, expectedRevision, instruction, mode }, context.execute, () => {
       const task = this.owned(taskId, context.conversationId), version = task.stateVersion;
-      if (TERMINAL_TASK_STATES.has(task.state) && !(task.gatewayTarget && context.execute && ['completed','failed'].includes(task.state) && !task.activeAttemptId)) throw new OrchestrationError('TASK_TERMINAL');
+      const browserRecovery = !context.execute && task.gatewayTarget?.adapter === 'browser' && task.state === 'failed' &&
+        !task.activeAttemptId && task.capabilities.execute && task.ownerPrincipalId === context.principalId &&
+        !task.browserReport?.providerFailure && task.browserReport?.lastAction?.outcome !== 'unknown' &&
+        ['LOW_OPERATION_CONFIDENCE','LOW_TARGET_CONFIDENCE','STALE_RETRY_BUDGET','PAGE_CONTENT_UNAVAILABLE','MODEL_BLOCKED'].includes(task.browserReport?.reason ?? '') &&
+        Boolean(this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion));
+      if (TERMINAL_TASK_STATES.has(task.state) && !(task.gatewayTarget && (context.execute || browserRecovery) && ['completed','failed'].includes(task.state) && !task.activeAttemptId)) throw new OrchestrationError('TASK_TERMINAL');
       if (['cancel_requested', 'recovering', 'needs_reconciliation', 'interrupting'].includes(task.state)) throw new OrchestrationError('STATE_CONFLICT');
       if (task.revision !== expectedRevision) throw new OrchestrationError('REVISION_CONFLICT');
-      if (task.gatewayTarget && (task.ownerPrincipalId !== context.principalId || !context.execute)) throw new OrchestrationError('EXECUTION_DENIED');
+      if (task.gatewayTarget && (task.ownerPrincipalId !== context.principalId || (!context.execute && !browserRecovery))) throw new OrchestrationError('EXECUTION_DENIED');
       if (task.gatewayTarget && mode !== 'when_ready') throw new OrchestrationError('INVALID_INPUT', 'Use when_ready for Gateway-managed tasks; the current request must settle before revised instructions run.');
       const priorRevision = this.revision(taskId, expectedRevision);
-      if (!context.execute) {
+      if (browserRecovery && ((priorRevision.browserRecoveryCount ?? 0) >= 3 || priorRevision.guidance === instruction))
+        throw new OrchestrationError('BROWSER_RECOVERY_EXHAUSTED', 'Inspect the evidence and explain the unresolved blocker; do not repeat the same plan.');
+      if (!context.execute && !browserRecovery) {
         // A worker progress report increments stateVersion without revoking this
         // alert. Bind advice to the immutable alert and attempt, not that counter.
         const assigned = this.store.get(`SELECT n.id FROM notifications n JOIN conversation_events e
@@ -246,9 +253,10 @@ export class TaskService {
       task.revision++;
       const revision: TaskRevision = { taskId, revision: task.revision, instructions: instruction,
         contextRefs: priorRevision.contextRefs, mode, originatingInputId: context.inputId,
-        ...(!context.execute ? { instructions: priorRevision.instructions, answers: priorRevision.answers, originatingInputId: priorRevision.originatingInputId, guidance: instruction, guidanceBasis: {attemptId: task.activeAttemptId, workflowVersion: task.workflow?.version??0, progressAt: task.latestProgress?.observedAt??0} } : {}) };
+        ...(!context.execute ? { instructions: priorRevision.instructions, answers: priorRevision.answers, originatingInputId: priorRevision.originatingInputId, guidance: instruction, guidanceBasis: {attemptId: task.activeAttemptId, workflowVersion: task.workflow?.version??0, progressAt: task.latestProgress?.observedAt??0} } : {}),
+        ...(browserRecovery ? {browserRecoveryCount:(priorRevision.browserRecoveryCount ?? 0)+1,guidanceBasis:undefined} : {}) };
       this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify(revision));
-      if (task.gatewayTarget && ['completed','failed'].includes(task.state)) { task.state='queued'; delete task.failure; delete task.result; delete task.browserReport; delete task.latestProgress; task.initiatingInputId=context.inputId; }
+      if (task.gatewayTarget && ['completed','failed'].includes(task.state)) { task.state='queued'; delete task.failure; delete task.result; delete task.browserReport; delete task.latestProgress; if(context.execute)task.initiatingInputId=context.inputId; }
       if (task.state === 'waiting_input') { task.pendingQuestion = undefined; task.state = task.activeAttemptId ? (task.gatewayTarget ? 'running' : 'interrupting') : 'queued'; }
       else if (mode === 'interrupt_and_resume' && task.activeAttemptId) task.state = 'interrupting';
       this.store.saveTask(task, version);
@@ -671,9 +679,10 @@ export class TaskService {
   /** Parent independently checks a fresh, scoped browser observation. Never clears an uncertain mutation. */
   verifyBrowser(context:CommandContext,taskId:string,revision:number,requestId:string,evidenceId:string,evidence:string,check:()=>void):TaskSnapshot {
     boundedText(evidence,4096);boundedText(requestId,256);boundedText(evidenceId,128);
-    return this.command(context,'verify_browser',{taskId,revision,requestId,evidenceId,evidence},true,()=>{
+    return this.command(context,'verify_browser',{taskId,revision,requestId,evidenceId,evidence},context.execute,()=>{
       const task=this.owned(taskId,context.conversationId);
       if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || task.state!=='needs_reconciliation' || task.revision!==revision || task.gatewayDispatch?.requestId!==requestId || !task.activeAttemptId || !task.browserReport || task.browserReport.status!=='needs_verification' || task.browserReport.lastAction?.outcome==='unknown')throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
+      if(!task.capabilities.execute || (!context.execute && !this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion)))throw new OrchestrationError('EXECUTION_DENIED');
       check();
       const attempt=this.store.attempt(task.activeAttemptId)!;
       attempt.state='ended';task.activeAttemptId=undefined;task.state=task.revision>attempt.revision?'queued':'completed';delete task.failure;delete attempt.failure;

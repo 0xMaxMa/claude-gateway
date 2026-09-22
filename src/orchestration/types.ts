@@ -92,6 +92,8 @@ export interface TaskSnapshot {
   updatedAt: number;
 }
 export interface TaskRevision {
+  /** Bounded autonomous browser replans since the latest user update. */
+  browserRecoveryCount?: number;
   /** Bounded supervision advice; never replaces user authorization or the assigned goal. */
   guidance?: string;
   guidanceBasis?: { attemptId?: string; workflowVersion: number; progressAt: number };

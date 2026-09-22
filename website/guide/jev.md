@@ -414,3 +414,20 @@ provider probabilities and confidence unchanged and still rejects missing
 options, invalid values and a selected option that is not a maximum. Invalid
 responses record a fixed `validationReason` code in evaluation/task diagnostics,
 without recording request text, credentials or provider prose.
+
+### Parent recovery instead of error-only replies
+
+An assigned browser task notification can replan a known, non-mutating stop
+(low operation/target confidence, stale-page budget, unavailable page content,
+or model blocked) through `task_update` with `mode=when_ready`. The parent should
+inspect fresh browser evidence first and supply concrete next-step guidance.
+The original goal, field answers, owner, target and authorization are retained;
+notification guidance cannot create another task or replace the original goal.
+Three distinct replans are allowed per user-directed revision chain; repeated
+identical guidance is rejected. A new user update starts a new chain.
+
+The assigned parent can also independently verify a completion candidate using
+fresh evidence. Unknown mutations, cancelled work, provider failures and revoked
+authority do not qualify for autonomous replanning. Ask for genuinely missing
+information or a required decision; do not use raw error codes as the final
+response when the parent can still resolve the task.
