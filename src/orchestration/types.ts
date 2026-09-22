@@ -23,6 +23,8 @@ export interface ExecutionCapabilities {
   writeMemory: boolean;
 }
 export interface CommandContext extends ExecutionCapabilities {
+  /** Server-selected pending questions for an internal review; never tool arguments. */
+  questionReviewIds?: string[];
   model?: string;
   conversationId: string;
   principalId: string;
