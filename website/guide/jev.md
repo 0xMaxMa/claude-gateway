@@ -460,7 +460,7 @@ No real purchases, bookings or ChatGPT submissions are made by this harness.
 
 ### Continuous execution and text helper
 
-The runner observes and acts inside one task, without waking the conversational agent for each action. Configure `gateway.jev.browser.textHelper` for tool-free, OpenAI-compatible field generation:
+The runner observes and acts inside one task, without waking the conversational agent for each action. Configure the shared `gateway.jev.thinking` connection for tool-free field generation (and future Thinking consumers):
 
 ```json
 {"baseUrl":"https://models.example/v1","model":"your-small-text-model","apiKeyEnv":"JEV_TEXT_API_KEY"}
@@ -469,3 +469,28 @@ The runner observes and acts inside one task, without waking the conversational 
 The default API is `openai-chat` (`/chat/completions`); set `api: "anthropic-messages"` for `/messages`. `baseUrl` includes the API version path, e.g. `/v1`. An absolute `apiKeyFile` may replace `apiKeyEnv`. Credentials remain in Gateway and are excluded from CLI children. The helper receives goal, selected field, page context and recent actions and returns only `{text:string|null}`. Null means missing information; the parent can answer from conversation or ask the user. Provider/parse failures never become invented text. Without this config or a trusted installed hook, missing fields still go to the parent. Config reload replaces and fences affected bindings.
 
 Runner confidence gates default to zero (validated argmax); explicitly configured positive gates remain supported. Consent, sensitive-field restrictions, observed target validation, stale checks, durable mutation receipts, budgets and independent final verification remain enforced. The parent reviews completion and real blockers rather than each ordinary action.
+
+
+### Reusable Jev Loop stack
+
+Gateway imports `@0xmaxma/jev-loop` for the shared Thinking module. The installed `@getpod/remote-browser-runner` package is now a **Remote Browser adapter** and imports the same core for observe → decide → execute iteration. The package name and contract v1 remain compatible; it does not implement a second standalone loop. Neither component runs in the Chrome extension.
+
+Gateway remains the owner of conversations, authorization, durable task receipts, Jev billing and runtime configuration. It injects the Jev client and field-generation callback; the adapter owns DOM interpretation, supported targets, consent/lease checks, browser dispatch and observation freshness. The Core contains no browser, MCP endpoint, product secret or conversational orchestration policy. Other products can host it with their own adapters. No separate Jev Loop service or MCP endpoint is required by this integration.
+
+`gateway.jev.thinking` takes precedence over legacy `gateway.jev.browser.textHelper`, which remains accepted for existing installations. Credentials use references, never literal keys in task inputs. Reloading Thinking configuration replaces affected browser bindings and fences old requests. Jev and Thinking credentials are never passed into the extension or the remote MCP server.
+
+The core dependency is pinned to an immutable commit archive. No npm publication, Git binary, SSH key or GitHub login is required; install environments need HTTPS access to GitHub archives. Cancellation and unknown browser mutations remain guarded by the adapter and Gateway receipts; Core does not replay uncertain mutations or provide persistence on its own.
+
+### Agent-facing MCP boundary
+
+Gateway invokes `jev_run` on a scoped Jev Loop MCP server through the SDK in-memory transport. This is a real MCP request/response boundary in the host process: provider callbacks, authorization and synchronous durable mutation checkpoints remain host-owned. The same Jev Loop server supports stdio for independent agent clients with operator-installed adapters. There is no extra network service or extension-side model credential.
+
+```mermaid
+flowchart LR
+  Agent[Agent / Gateway] -->|MCP| Loop[Jev Loop MCP server]
+  Loop --> Core[Jev Loop Core]
+  Core --> Adapter[Remote Browser adapter]
+  Adapter -->|MCP| Browser[Remote Browser tools / extension]
+```
+
+The installed adapter retains the `@getpod/remote-browser-runner` name for compatibility, but delegates iteration to Core. The MCP call is bounded and cancellable; Gateway retains its durable task lifecycle and reconciles receipts after interruption. This version does not provide standalone durable background MCP jobs or automatic arbitrary-MCP adaptation. No extension update is required for this host-side refactor.

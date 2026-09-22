@@ -1,3 +1,5 @@
+import { createLoopServer } from '@0xmaxma/jev-loop/mcp';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { browserFieldText } from './browser-text-helper';
 import { createHash, randomUUID } from 'node:crypto';
 import { resolveEnabledConnectors } from '../connectors/resolve';
@@ -106,13 +108,13 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       return {content:result.content as unknown[],isError:result.isError as boolean | undefined};
     });
     let independentlyVerified = false;
-    const result = await module.runBrowserTask({contractVersion:1,goal:context.goal,...(context.startUrl?{startUrl:context.startUrl}:{}),scope:binding.scope,fields:[...(binding.fields??[]),...(context.fields??[]).filter(f=>!(binding.fields??[]).some(b=>b.label===f.label))],...binding.budget}, {
+    const result = await runThroughLoopMcp(context, loopSignal => module.runBrowserTask({contractVersion:1,goal:context.goal,...(context.startUrl?{startUrl:context.startUrl}:{}),scope:binding.scope,fields:[...(binding.fields??[]),...(context.fields??[]).filter(f=>!(binding.fields??[]).some(b=>b.label===f.label))],...binding.budget}, {
       call,
       evaluate: async(request,signal) => { assertAccess(); const response = await context.evaluate(request,signal); assertAccess(); return {model:response.model,answers:response.answers}; },
       progress: event => { assertAccess(); context.progress(event); },
       ...(module.verifyBrowserTask ? {verify:async(observation:unknown,signal:AbortSignal) => {assertAccess();const verified = await module.verifyBrowserTask!(context.goal,observation,signal);assertAccess();signal.throwIfAborted();independentlyVerified=validateBrowserVerification(verified);return independentlyVerified;}} : {}),
       ...((textHelper || module.resolveFieldText) ? {resolveFieldText:async(request:unknown,signal:AbortSignal) => {assertAccess();const text = textHelper ? await browserFieldText(textHelper,request,signal) : await module.resolveFieldText!(request,signal);assertAccess();return text;}} : {}),
-    }, context.signal);
+    }, loopSignal));
     if (result.status === 'succeeded') {
       assertAccess();
       if (!independentlyVerified || context.signal.aborted) return {...result,status:'needs_verification',reason:'VERIFICATION_FAILED'};
@@ -194,4 +196,28 @@ export class BrowserConnectorRegistry {
     this.cache = current;
     return [...current.values()].map(x=>x.binding);
   }
+}
+
+/** Host-local MCP keeps credential/checkpoint callbacks private while using the agent-facing protocol. */
+async function runThroughLoopMcp(context: BrowserExecutionContext, run: (signal: AbortSignal) => Promise<BrowserExecutionResult>): Promise<BrowserExecutionResult> {
+  const server = createLoopServer({
+    signal: context.signal,
+    authorize: () => context.authorized(),
+    adapters: [{id: 'browser', inputSchema: {type:'object',properties:{goal:{type:'string'}},required:['goal'],additionalProperties:false}, parse: input => {
+      // This server belongs to exactly one already-authorized task, not a general browser endpoint.
+      if (Object.keys(input).length !== 1 || input.goal !== context.goal) throw Error('BROWSER_SCOPE_DENIED');
+      return input;
+    }, run: async (_input, control) => { control.check(); return run(control.signal); }}],
+  });
+  const client = new Client({name:'gateway-jev-loop',version:'1.0.0'});
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport, {signal:context.signal,timeout:10000});
+    const response = await client.callTool({name:'jev_run',arguments:{adapter:'browser',input:{goal:context.goal}}}, undefined, {signal:context.signal,timeout:610000});
+    if (response.isError) throw Error('BROWSER_LOOP_INTERRUPTED_RECONCILE_REQUIRED');
+    const content = response.content as Array<{type:string;text?:string}>;
+    if (content.length !== 1 || content[0].type !== 'text' || !content[0].text) throw Error('BROWSER_LOOP_INVALID_RESULT');
+    return JSON.parse(content[0].text) as BrowserExecutionResult;
+  } finally { await client.close().catch(()=>{}); await server.close().catch(()=>{}); }
 }

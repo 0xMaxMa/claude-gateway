@@ -29,3 +29,9 @@ test('Anthropic messages protocol produces the same bounded field contract',asyn
  expect(args[0][0]).toBe('https://models.example/v1/messages');
  expect(JSON.parse(String(args[0][1].body)).tools).toBeUndefined();
 });
+test('central Thinking credentials are excluded independently of legacy browser settings',()=>{
+ const {validateJevConfig}=require('../../../src/jev/validation');
+ validateJevConfig({thinking:config});
+ expect(sanitizeJevChildEnv({TEST_BROWSER_TEXT_SECRET:'test-key'},{thinking:config})).toEqual({});
+ expect(()=>validateJevConfig({thinking:{...config,api:'unknown'}})).toThrow();
+});
