@@ -1314,16 +1314,16 @@ describe('immediate input admission', () => {
     const id = '11111111-1111-4111-8111-111111111111';
     const result = await supertest.default(app).post(`/api/v1/agents/${AGENT_ID}/messages/accept`)
       .set('Authorization', 'Bearer sk-test-tools')
-      .send({ message: 'Continue after this', chat_id: 'getpod', session_id: id, accept_only: true, client_message_id: id });
+      .send({ message: 'Continue after this', chat_id: 'web-client', session_id: id, accept_only: true, client_message_id: id });
     expect(result.status).toBe(202);
     expect(result.body.input_id).toBe('accepted-input');
-    expect(accept).toHaveBeenCalledWith(id, 'getpod', 'Continue after this', expect.objectContaining({ clientMessageId: id, allowTools: true }));
+    expect(accept).toHaveBeenCalledWith(id, 'web-client', 'Continue after this', expect.objectContaining({ clientMessageId: id, allowTools: true }));
     expect(foreground).not.toHaveBeenCalled();
   });
   it.each([{ accept_only: 'true' }, { accept_only: true, stream: true }, { client_message_id: 'unsafe' }, { accept_only: true, message: '/stop' }])('rejects ambiguous admission mode %j', async extra => {
     const app = buildApp(async () => ({text:'unexpected',attachments:[]}));
     const result = await supertest.default(app).post(`/api/v1/agents/${AGENT_ID}/messages`)
-      .set('Authorization', 'Bearer sk-test-app').send({ message: 'Hello', chat_id: 'getpod', ...extra });
+      .set('Authorization', 'Bearer sk-test-app').send({ message: 'Hello', chat_id: 'web-client', ...extra });
     expect(result.status).toBe(400);
   });
 });

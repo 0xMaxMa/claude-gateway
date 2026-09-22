@@ -8,4 +8,4 @@ The agents listing advertises `chat_input_stream: true` for orchestration agents
 
 For a follow-up while a response is active, use `POST /v1/agents/:agentId/messages/accept` with `accept_only: true`, `stream: false`, and supply the existing session/chat and normal message/media/model parameters. HTTP 202 includes `status`, `input_id`, `session_id`, and `client_message_id`. This receipt means the durable mailbox accepted the input, not that inference completed. It neither interrupts nor replaces the current foreground response stream. Commands and hidden-message submissions cannot use this mode. Older gateways return 404 for this dedicated endpoint rather than accidentally interpreting the request as a normal blocking send. Legacy agents do not advertise support. Do not automatically retry ambiguous transport failures as new input IDs.
 
-Integration partner: Crown-Labs/getpod#2900. Deploy the Gateway capability before enabling the new frontend behavior.
+Deploy the Gateway capability before enabling the new behavior in API clients.
