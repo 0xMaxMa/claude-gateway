@@ -87,6 +87,12 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       // Release only the already-held lease even after config revocation; no other late call is allowed.
       if (name !== 'browser_task_release') assertAccess();
       if (!tools.has(name) || ['device_id','grant_id','tab_id'].some(k => args[k] !== binding.scope[k as keyof typeof binding.scope])) throw Error('BROWSER_SCOPE_DENIED');
+      if (name.startsWith('page_') && name !== 'page_observe') {
+        if (!context.beforeMutation || typeof args.operation_id !== 'string') throw Error('BROWSER_CHECKPOINT_UNAVAILABLE');
+        context.signal.throwIfAborted();
+        context.beforeMutation(args.operation_id, name);
+        assertAccess(); context.signal.throwIfAborted();
+      }
       const result = await client.callTool({name,arguments:args}, undefined, {signal,timeout:35000});
       return {content:result.content as unknown[],isError:result.isError as boolean | undefined};
     });
@@ -118,7 +124,7 @@ function browserTransport(connection: BrowserConnection): StreamableHTTPClientTr
   });
 }
 /** Read-only reconciliation. Operation IDs come from this task's durable receipt, never caller input. */
-export async function inspectBrowser(binding: BrowserConnectorConfig, result: BrowserExecutionResult | undefined, signal: AbortSignal, authorized:()=>boolean, connection?:BrowserConnection): Promise<{observedAt:number;observation:unknown;operationStatus?:unknown}> {
+export async function inspectBrowser(binding: BrowserConnectorConfig, result: Partial<BrowserExecutionResult> | undefined, signal: AbortSignal, authorized:()=>boolean, connection?:BrowserConnection): Promise<{observedAt:number;observation:unknown;operationStatus?:unknown}> {
   const check=()=>{signal.throwIfAborted();if(!authorized())throw Error('ACCESS_DENIED');};
   check();
   const resolved=connection??{endpoint:binding.endpoint!,headers:{Authorization:`Bearer ${await credential(binding)}`}};

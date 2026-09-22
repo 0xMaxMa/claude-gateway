@@ -23,6 +23,8 @@ export interface BrowserExecutionContext {
   authorized(): boolean;
   evaluate(request: JevRequest, signal: AbortSignal): Promise<JevResult>;
   progress(event: BrowserProgress): void;
+  /** Synchronous durable fence in the MCP transport, before any page mutation. */
+  beforeMutation?(operationId: string, operation: string): void;
 }
 export interface BrowserConnectorConfig {
   id: string; name: string; agentId: string; principalId: string; conversationId: string;
@@ -39,6 +41,8 @@ export interface BrowserRunnerModule {
     call: BrowserToolCall;
     evaluate(request: JevRequest, signal: AbortSignal): Promise<{model: string; answers: JevResult['answers']}>;
     progress(event: BrowserProgress): void;
+  /** Synchronous durable fence in the MCP transport, before any page mutation. */
+  beforeMutation?(operationId: string, operation: string): void;
     verify?: (observation: unknown, signal: AbortSignal) => Promise<boolean>;
     resolveFieldText?: (request: unknown, signal: AbortSignal) => Promise<{text: string | null}>;
   }, signal: AbortSignal): Promise<BrowserExecutionResult>;
@@ -48,7 +52,9 @@ export interface BrowserRunnerModule {
   resolveFieldText?: (request: unknown, signal: AbortSignal) => Promise<{text: string | null}>;
 }
 
+export interface BrowserMutationCheckpoint { operationId: string; operation: string; recordedAt: number }
 export interface BrowserEvidence {
+  lastDispatchedMutation?: BrowserMutationCheckpoint;
   requestId: string;
   recordedAt: number;
   evidenceId?: string;
