@@ -232,7 +232,7 @@ export class TaskService {
         task.capabilities.execute && task.ownerPrincipalId === context.principalId &&
         !task.browserReport?.providerFailure && task.browserReport?.lastAction?.outcome !== 'unknown' &&
         (completionReview || (task.state === 'failed' && !task.activeAttemptId &&
-        ['LOW_OPERATION_CONFIDENCE','LOW_TARGET_CONFIDENCE','STALE_RETRY_BUDGET','PAGE_CONTENT_UNAVAILABLE','MODEL_BLOCKED'].includes(task.browserReport?.reason ?? ''))) &&
+        ['LOW_OPERATION_CONFIDENCE','LOW_TARGET_CONFIDENCE','STALE_RETRY_BUDGET','PAGE_CONTENT_UNAVAILABLE','MODEL_BLOCKED','OBSERVATION_TRUNCATED','NO_PROGRESS'].includes(task.browserReport?.reason ?? ''))) &&
         Boolean(this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion));
       if (TERMINAL_TASK_STATES.has(task.state) && !(task.gatewayTarget && (context.execute || browserRecovery) && ['completed','failed'].includes(task.state) && !task.activeAttemptId)) throw new OrchestrationError('TASK_TERMINAL');
       if (['cancel_requested', 'recovering', 'needs_reconciliation', 'interrupting'].includes(task.state) && !(completionReview && (context.execute || browserRecovery))) throw new OrchestrationError('STATE_CONFLICT');

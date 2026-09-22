@@ -234,8 +234,8 @@ function stopBrowser(taskId:string,reason:string) {
  tasks.finish(attempt.attemptId,attempt.generation,{type:'failed',failure:{code:'BROWSER_'+reason,message:'Stopped',observedAt:Date.now()},browserReport:{contractVersion:1,status:'blocked',reason,steps:0,evaluations:1}});
  store.run("UPDATE notifications SET status='assigned',decision_id=? WHERE task_id=?",context.decisionId,taskId);
 }
-test('assigned browser notification replans in the same task without replacing authorization',()=>{
- const id=stoppedBrowser();
+test.each(['LOW_TARGET_CONFIDENCE','OBSERVATION_TRUNCATED','NO_PROGRESS'])('assigned browser notification replans %s in the same task without replacing authorization',reason=>{
+ const id=stoppedBrowser(reason);
  const updated=tasks.update({...context,execute:false,actionId:'recover'},id,1,'Fill destination first; retain passenger requirements','when_ready');
  expect(updated.state).toBe('queued');expect(updated.initiatingInputId).toBe(context.inputId);
  const revision=tasks.revision(id,2);expect(revision.instructions).toBe('Find authorized flights to Osaka');
