@@ -38,8 +38,8 @@ export interface BrowserTextHelperConfig { api?:'openai-chat'|'anthropic-message
 export interface BrowserIntegrationConfig { bindings: BrowserConnectorConfig[]; textHelper?: BrowserTextHelperConfig }
 export type BrowserToolCall = (name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
 export interface BrowserLogicModule {
-  BROWSER_LOGIC_CONTRACT_VERSION: 1;
-  runBrowserTask(input: { contractVersion: 1; goal: string; startUrl?: string; scope: BrowserScope; fields?: BrowserConnectorConfig['fields'] } & BrowserConnectorConfig['budget'], dependencies: {
+  BROWSER_USE_CONTRACT_VERSION: 1;
+  runBrowserUse(input: { contractVersion: 1; goal: string; startUrl?: string; scope: BrowserScope; fields?: BrowserConnectorConfig['fields'] } & BrowserConnectorConfig['budget'], dependencies: {
     call: BrowserToolCall;
     evaluate(request: JevRequest, signal: AbortSignal): Promise<{model: string; answers: JevResult['answers']}>;
     progress(event: BrowserProgress): void;

@@ -56,7 +56,7 @@ async function runScenario(runner,scenario,fault,inference){
  };
  const binding={version:1,id:'fixture-tab',name:'Mock browser',principalId:'owner',conversationId:accepted.conversationId,
   inspect:async()=>({observedAt:Date.now(),observation:clone()}),
-  run:c=>runner.runBrowserTask({operationConfidence:0.8,targetConfidence:0.8,goal:c.goal,scope:{device_id:'fixture-device',grant_id:'fixture-grant',tab_id:'fixture-tab'},fields:c.fields??[],maxSteps:10,maxEvaluations:15,timeoutMs:30000},{call,evaluate:r=>c.evaluate(r,c.signal)},c.signal)};
+  run:c=>runner.runBrowserUse({operationConfidence:0.8,targetConfidence:0.8,goal:c.goal,scope:{device_id:'fixture-device',grant_id:'fixture-grant',tab_id:'fixture-tab'},fields:c.fields??[],maxSteps:10,maxEvaluations:15,timeoutMs:30000},{call,evaluate:r=>c.evaluate(r,c.signal)},c.signal)};
  const adapter=new BrowserTaskAdapter({agentId:'fixture',root:join(root,'receipts'),allowed:()=>true,bindings:()=>[binding],evaluate:(_task,r)=>evaluate(r),onNeedsInput:(t,q)=>{const a=store.attempt(t.activeAttemptId);if(store.task(t.taskId).state==='starting')tasks.started(a.attemptId,a.generation);tasks.requestInput(a.attemptId,a.generation,q);return true;}});
  const controller=new GatewayTaskController(tasks,new Map([['browser',adapter]]));let task;
  const parent=async(input)=>inference?.parent ? inference.parent({goal:scenario.goal,...input}) : input.kind==='field'?{answer:scenario.value}:input.kind==='replan'?{guidance:'Fill the search query first, submit once, then inspect matching results; preserve all original requirements.'}:{verified:submitted,evidence:scenario.result};

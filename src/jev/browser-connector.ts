@@ -87,7 +87,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
   assertAccess(); context.signal.throwIfAborted();
   const resolved = isAbsolute(modulePath) ? modulePath : createRequire(__filename).resolve(modulePath);
   const module = await importModule(pathToFileURL(resolved).href);
-  if (module.BROWSER_LOGIC_CONTRACT_VERSION !== 1 || typeof module.runBrowserTask !== 'function' || typeof module.mcpBrowserTransport !== 'function') throw Error('BROWSER_ADAPTER_INCOMPATIBLE');
+  if (module.BROWSER_USE_CONTRACT_VERSION !== 1 || typeof module.runBrowserUse !== 'function' || typeof module.mcpBrowserTransport !== 'function') throw Error('BROWSER_ADAPTER_INCOMPATIBLE');
   const key = connection ? undefined : await credential(binding);
   assertAccess(); context.signal.throwIfAborted();
   const client = new Client({name:'gateway-browser-task',version:'1.0.0'});
@@ -108,7 +108,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       return {content:result.content as unknown[],isError:result.isError as boolean | undefined};
     });
     let independentlyVerified = false;
-    const result = await runThroughLoopMcp(context, loopSignal => module.runBrowserTask({contractVersion:1,goal:context.goal,...(context.startUrl?{startUrl:context.startUrl}:{}),scope:binding.scope,fields:[...(binding.fields??[]),...(context.fields??[]).filter(f=>!(binding.fields??[]).some(b=>b.label===f.label))],...binding.budget}, {
+    const result = await runThroughLoopMcp(context, loopSignal => module.runBrowserUse({contractVersion:1,goal:context.goal,...(context.startUrl?{startUrl:context.startUrl}:{}),scope:binding.scope,fields:[...(binding.fields??[]),...(context.fields??[]).filter(f=>!(binding.fields??[]).some(b=>b.label===f.label))],...binding.budget}, {
       call,
       evaluate: async(request,signal) => { assertAccess(); const response = await context.evaluate(request,signal); assertAccess(); return {model:response.model,answers:response.answers}; },
       progress: event => { assertAccess(); context.progress(event); },
@@ -186,7 +186,7 @@ export class BrowserConnectorRegistry {
       const signature = createHash('sha256').update(JSON.stringify([config!.textHelper,b,resolved])).digest('hex');
       let item = this.cache.get(b.id);
       if (item?.signature !== signature) {
-        const snapshot = structuredClone(b), modulePath = '@0xmaxma/jev-loop/browser', textHelper = config!.textHelper ? structuredClone(config!.textHelper) : undefined;
+        const snapshot = structuredClone(b), modulePath = '@0xmaxma/jev-loop/browser-use', textHelper = config!.textHelper ? structuredClone(config!.textHelper) : undefined;
         item = {signature,binding:{version:1,id:b.id,name:b.name,principalId:b.principalId,conversationId:b.conversationId,
           run:context => executeBrowserModule(modulePath,snapshot,context,resolved,textHelper),
           inspect:(result,signal,authorized)=>inspectBrowser(snapshot,result,signal,authorized,resolved)}};

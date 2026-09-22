@@ -184,7 +184,7 @@ The gateway distinguishes native version from requested catalog ID. A prefixed c
 
 ## Browser tasks with an installed adapter
 
-Gateway owns authorization, task scheduling, cancellation, durable receipts and Jev evaluation. Browser Logic is included in `@0xmaxma/jev-loop/browser`; it owns observation interpretation, decisions, lease handling, stale recovery and action selection. Remote Browser provides the MCP tools. No separately installed adapter or module path is configured.
+Gateway owns authorization, task scheduling, cancellation, durable receipts and Jev evaluation. Browser Use is included in `@0xmaxma/jev-loop/browser-use`; it owns observation interpretation, decisions, lease handling, stale recovery and action selection. Remote Browser provides the MCP tools. No separately installed adapter or module path is configured.
 
 Merge the following into an enabled Jev configuration:
 
@@ -236,7 +236,7 @@ A durable running receipt is written **before** dispatch. A running receipt foun
 
 ### Integration validation
 
-`scripts/jev-browser-smoke.cjs` exports `runGatewayBrowserFixture(options)` for a browser project's isolated fixture. It executes the **actual gateway task controller, durable adapter, built-in Browser Logic and authenticated MCP connector**. The caller supplies an installed public entrypoint, approved fixture scope, controller credential file, goal/fields and evaluator callback. Use real relay/extension/browser fixtures; fake MCP tests alone do not prove end-to-end integration. No paid inference is performed without an explicitly injected live evaluator.
+`scripts/jev-browser-smoke.cjs` exports `runGatewayBrowserFixture(options)` for a browser project's isolated fixture. It executes the **actual gateway task controller, durable adapter, built-in Browser Use and authenticated MCP connector**. The caller supplies an installed public entrypoint, approved fixture scope, controller credential file, goal/fields and evaluator callback. Use real relay/extension/browser fixtures; fake MCP tests alone do not prove end-to-end integration. No paid inference is performed without an explicitly injected live evaluator.
 
 Test verified effects, missing field input, absent/false verification, stale rejection, uncertain mutations, cancellation/revocation/disconnection, gateway restart, cross-agent/principal/conversation denial and app-agent isolation. Test direct/upstream managed/BYOK accounting separately with live credentials. Do not claim comparative token savings or production browser reliability from a small synthetic sample.
 
@@ -346,7 +346,7 @@ For isolated integration fixtures, `scripts/jev-browser-crash-smoke.cjs` exports
 
 `runGatewayBrowserFixture` in `scripts/jev-browser-smoke.cjs` also accepts an optional trusted local `containerImage`. It exercises the app-agent Unix-socket bridge from actual isolated Docker processes: discovery, task submission, fresh evidence and parent verification, plus foreign-principal and host-only capability denial. The fixture container receives only its temporary workspace/ticket/socket, with no network or provider credential mount. Inference and parent assessment remain deterministic test callbacks; this is not a live-model app deployment benchmark.
 
-Independent verification must return a boolean. `false` means the goal was not verified; strings, objects, null or undefined are contract errors (`INVALID_CONTRACT`), never converted into a normal negative result. The same rule applies when Gateway wraps an optional verifier for the built-in Browser Logic.
+Independent verification must return a boolean. `false` means the goal was not verified; strings, objects, null or undefined are contract errors (`INVALID_CONTRACT`), never converted into a normal negative result. The same rule applies when Gateway wraps an optional verifier for the built-in Browser Use.
 
 ### Default Remote Browser routing
 
@@ -435,7 +435,7 @@ response when the parent can still resolve the task.
 
 Run `npm run build`, then
 `node scripts/jev-automation-fixtures.cjs /absolute/path/to/browser-adapter.js`.
-This uses the built-in Jev Loop Browser Logic with real Gateway task persistence,
+This uses the built-in Jev Loop Browser Use with real Gateway task persistence,
 question suppression/review, replanning and verification, while replacing the
 browser with synthetic pages. It covers flight search (including passenger
 constraints), matching phone-case search, and asking ChatGPT for attributed news.
@@ -474,20 +474,20 @@ Gateway depends on `@0xmaxma/jev-loop` and uses its built-in `/browser` Logic. N
 flowchart LR
   Agent[Claude Code / Codex / Agent] -->|MCP| Loop[Jev Loop MCP]
   Loop --> Core[Jev Loop Core]
-  Core --> Logic[Browser Logic]
+  Core --> Logic[Browser Use]
   Logic -->|MCP| Browser[Remote Browser tools]
   Core --> Thinking[Thinking Module]
   classDef core fill:#f97316,stroke:#9a3412,stroke-width:4px,color:#111827,font-weight:bold;
   class Core core;
 ```
 
-Browser Logic owns candidate generation, Jev decisions, field assistance and bounded recovery. Core owns Thinking timeout/cancellation/budgets through `LoopContext.think()`. Gateway injects scoped model/tool connections and checkpoints. The extension/relay remain tool providers with no provider credentials or decision loop.
+Browser Use owns candidate generation, Jev decisions, field assistance and bounded recovery. Core owns Thinking timeout/cancellation/budgets through `LoopContext.think()`. Gateway injects scoped model/tool connections and checkpoints. The extension/relay remain tool providers with no provider credentials or decision loop.
 
 Upgrade pre-release installations by removing the old module-selection property and uninstalling the old runner/adapter package. Unknown configuration keys are rejected. Existing bindings, scopes and durable task receipts are preserved. The agent-facing MCP call is bounded request/response; Gateway owns persistence/reconciliation. Arbitrary MCP tool discovery and standalone durable background jobs are not implied.
 
 ### Partial observations and browser recovery
 
-Dense pages may return a partial control list. Browser Logic can operate on known,
+Dense pages may return a partial control list. Browser Use can operate on known,
 guarded targets to narrow the page, while completion still requires fresh evidence.
 Task notification turns explicitly include `OBSERVATION_TRUNCATED` and `NO_PROGRESS`
 in the existing bounded, same-task recovery flow. The agent must commit the update
