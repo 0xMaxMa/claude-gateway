@@ -105,3 +105,32 @@ test('interrupted receipts allow read-only inspection but cannot authorize verif
  expect(()=>afterRestart.verifyEvidence(t,'r',proof.evidenceId!)).toThrow('BROWSER_VERIFICATION_UNAVAILABLE');expect(binding.run).not.toHaveBeenCalled();
  await f.a.cancel(t,'r');await settle(f.a,t);
 });
+test('mutation checkpoint survives thrown runner errors and directs fresh inspection after recovery',async()=>{
+ const f=fixture(),id='22222222-2222-4222-8222-222222222222';
+ f.run.mockImplementation(async c=>{c.beforeMutation!(id,'page_click');const receipt=JSON.parse(readFileSync(join(dir,readdirSync(dir)[0]),'utf8'));expect(receipt.lastDispatchedMutation.operationId).toBe(id);throw Error('connection lost');});
+ const t=task({gatewayDispatch:{requestId:'r',submittedAt:Date.now()}});
+ await f.a.submit(t,'r','goal');expect((await settle(f.a,t)).type).toBe('unknown');
+ const inspect=jest.fn(async(_result:Partial<BrowserExecutionResult>|undefined)=>({observedAt:Date.now(),observation:{}}));
+ const binding:BrowserTaskBinding={version:1,id:'target',name:'Browser',principalId:'owner',conversationId:'chat',run:f.run,inspect};
+ const a=new BrowserTaskAdapter({agentId:'alpha',root:dir,allowed:()=>true,bindings:()=>[binding],evaluate:jest.fn()});adapters.push(a);
+ const evidence=await a.evidence(t,true);
+ expect(evidence.lastDispatchedMutation?.operationId).toBe(id);
+ expect(inspect.mock.calls[0][0]).toMatchObject({lastAction:{operationId:id,outcome:'unknown'}});
+ await expect(a.submit(t,'r','goal')).rejects.toThrow('BROWSER_REQUEST_ALREADY_SUBMITTED');
+ expect(f.run).toHaveBeenCalledTimes(1);
+});
+test('a runner cannot hide the latest dispatched mutation with an older successful result',async()=>{
+ const f=fixture();f.run.mockImplementation(async c=>{c.beforeMutation!('22222222-2222-4222-8222-222222222222','page_click');return complete;});
+ await f.a.submit(task(),'r','goal');expect(await settle(f.a)).toMatchObject({type:'unknown',browserReport:{reason:'OUTCOME_UNKNOWN',lastAction:{outcome:'unknown'}}});
+});
+test('checkpoint persistence failure aborts the dispatch boundary',async()=>{
+ const f=fixture();let dispatched=false,aborted=false;
+ f.run.mockImplementation(async c=>{
+  const fail=jest.spyOn(require('node:fs'),'fsyncSync').mockImplementationOnce(()=>{throw Error('disk error');});
+  try{c.beforeMutation!('22222222-2222-4222-8222-222222222222','page_click');dispatched=true;return complete;}
+  finally{aborted=c.signal.aborted;fail.mockRestore();}
+ });
+ await f.a.submit(task(),'r','goal');expect((await settle(f.a)).type).toBe('unknown');
+ expect(dispatched).toBe(false);expect(aborted).toBe(true);
+ expect(readdirSync(dir)).toHaveLength(1);
+});

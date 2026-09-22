@@ -1,6 +1,6 @@
-import type { BrowserExecutionContext, BrowserExecutionResult, BrowserProgress, BrowserEvidence } from '../../jev/browser-contract';
+import type { BrowserExecutionContext, BrowserExecutionResult, BrowserProgress, BrowserEvidence, BrowserMutationCheckpoint } from '../../jev/browser-contract';
 import { createHash, randomUUID } from 'crypto';
-import { mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, openSync, closeSync, fsyncSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { JevError, JevRequest, JevResult } from '../../jev/types';
 import { CommandContext, GatewayTaskTarget, OrchestrationError, TaskSnapshot, TaskRevision, WorkerOutcome } from '../types';
@@ -15,10 +15,10 @@ export interface BrowserTaskBinding {
   name: string;
   principalId: string;
   conversationId: string;
-  inspect?: (result:BrowserExecutionResult|undefined,signal:AbortSignal,authorized:()=>boolean)=>Promise<NonNullable<BrowserEvidence['fresh']>>;
+  inspect?: (result:Partial<BrowserExecutionResult>|undefined,signal:AbortSignal,authorized:()=>boolean)=>Promise<NonNullable<BrowserEvidence['fresh']>>;
   run: (context: BrowserExecutionContext) => Promise<BrowserExecutionResult>;
 }
-interface Receipt {taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';recordedAt?:number;inspection?:{id:string;at:number};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
+interface Receipt {taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';lastDispatchedMutation?:BrowserMutationCheckpoint;recordedAt?:number;inspection?:{id:string;at:number};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
 export class BrowserTaskAdapter implements GatewayTaskAdapter {
   readonly name='browser';
   private readonly running=new Map<string,{controller:AbortController;done:Promise<void>}>();
@@ -60,7 +60,12 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
   private write(task:TaskSnapshot,requestId:string,receipt:Receipt):void {
     mkdirSync(this.options.root,{recursive:true,mode:0o700});
     const file=this.file(task,requestId),temp=file+'.'+randomUUID();
-    writeFileSync(temp,JSON.stringify(receipt),{mode:0o600,flag:'wx'});renameSync(temp,file);
+    try {
+      const fd=openSync(temp,'wx',0o600);
+      try { writeFileSync(fd,JSON.stringify(receipt));fsyncSync(fd); } finally { closeSync(fd); }
+      renameSync(temp,file);const directory=openSync(this.options.root,'r');try{fsyncSync(directory);}finally{closeSync(directory);}
+    }
+    finally { try{unlinkSync(temp);}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;} }
   }
   validateInput(instructions:string,answers:TaskRevision['answers']=[]):void {
     if(typeof instructions!=='string'||!instructions.trim()||instructions.length>8000)throw new OrchestrationError('INVALID_BROWSER_GOAL');
@@ -82,12 +87,26 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     let providerFailure:BrowserExecutionResult['providerFailure'];
     const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({goal:instructions,fields,signal:controller.signal,authorized,
       evaluate:async(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');try{return await this.options.evaluate(task,request,signal,authorized);}catch(e){if(e instanceof JevError)providerFailure={code:e.code,...e.metadata};throw e;}},
+      beforeMutation:(operationId,operation)=>{
+        controller.signal.throwIfAborted();
+        if(!authorized())throw new OrchestrationError('ACCESS_DENIED');
+        if(!/^[0-9a-f-]{36}$/i.test(operationId) || !['page_click','page_type','page_select','page_scroll'].includes(operation))throw new OrchestrationError('INVALID_BROWSER_OPERATION');
+        const receipt=this.read(task,requestId);
+        if(!receipt || receipt.status!=='running')throw new OrchestrationError('BROWSER_REQUEST_ENDED');
+        receipt.lastDispatchedMutation={operationId,operation,recordedAt:Date.now()};
+        // Persist before handing the command to MCP. A failed write prevents dispatch.
+        try{this.write(task,requestId,receipt);}catch(e){controller.abort();throw e;}
+      },
       progress:event=>this.options.onProgress?.(task,event),
     })));
     const done=execution.then(result=>{
       validateBrowserResult(result);
       if(providerFailure)result={...result,providerFailure};
       let outcome:WorkerOutcome;
+      const dispatched=this.read(task,requestId)?.lastDispatchedMutation;
+      if(dispatched && result.lastAction?.operationId!==dispatched.operationId) {
+        result={...result,status:'needs_verification',reason:'OUTCOME_UNKNOWN',lastAction:{operationId:dispatched.operationId,operation:dispatched.operation,outcome:'unknown'}};
+      }
       const uncertain = result.lastAction?.outcome === 'unknown';
       if(result.status==='succeeded' && !authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');
       if(result.status==='succeeded' && !uncertain)outcome={type:'completed',result:{summary:`Browser goal independently verified. ${result.steps} actions, ${result.evaluations} evaluations.`,artifactIds:[]}};
@@ -95,9 +114,9 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       if(outcome.type!=='completed' && outcome.failure && providerFailure)outcome.failure.message+=`${providerFailure.resetAt?' Resets at '+providerFailure.resetAt+'.':''}${providerFailure.retryAfter?' Retry after '+providerFailure.retryAfter+'.':''}`;
       const {observation:_,...browserReport}=result;
       outcome.browserReport=browserReport;
-      this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',outcome,browserResult:result});
+      this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',lastDispatchedMutation:this.read(task,requestId)?.lastDispatchedMutation,outcome,browserResult:result});
     }).catch(()=>{
-      this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',outcome:{type:'unknown',failure:{code:'BROWSER_OUTCOME_UNKNOWN',message:'Browser request outcome could not be recorded. Inspect before retrying.',observedAt:Date.now()}}});
+      this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',lastDispatchedMutation:this.read(task,requestId)?.lastDispatchedMutation,outcome:{type:'unknown',failure:{code:'BROWSER_OUTCOME_UNKNOWN',message:'Browser request outcome could not be recorded. Inspect before retrying.',observedAt:Date.now()}}});
     }).finally(()=>this.running.delete(this.key(task,requestId)));
     this.running.set(this.key(task,requestId),{controller,done});
     // A filesystem failure cannot become an unhandled rejection; receipt stays uncertain.
@@ -123,11 +142,13 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     if(!requestId)throw new OrchestrationError('BROWSER_EVIDENCE_UNAVAILABLE');
     const receipt=this.read(task,requestId);
     if(!receipt || receipt.taskId!==task.taskId || receipt.requestId!==requestId || this.running.has(this.key(task,requestId)))throw new OrchestrationError('BROWSER_EVIDENCE_UNAVAILABLE');
-    const evidence:BrowserEvidence={requestId,recordedAt:receipt.recordedAt??0,result:receipt.browserResult,executionState:receipt.status==='ended'?'ended':'interrupted'};
+    const evidence:BrowserEvidence={requestId,recordedAt:receipt.recordedAt??0,result:receipt.browserResult,lastDispatchedMutation:receipt.lastDispatchedMutation,executionState:receipt.status==='ended'?'ended':'interrupted'};
     if(refresh){
       if(!binding.inspect)throw new OrchestrationError('BROWSER_INSPECTION_UNAVAILABLE');
       const authorized=()=>{try{return this.options.allowedEvidence?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
-      evidence.fresh=await binding.inspect(receipt.browserResult,signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000),authorized);
+      const inspectionResult=receipt.lastDispatchedMutation && (!receipt.browserResult?.lastAction || receipt.browserResult.lastAction.operationId!==receipt.lastDispatchedMutation.operationId)
+        ? {lastAction:{...receipt.lastDispatchedMutation,outcome:'unknown' as const}} : receipt.browserResult;
+      evidence.fresh=await binding.inspect(inspectionResult,signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000),authorized);
       signal?.throwIfAborted();
       if(!authorized())throw new OrchestrationError('ACCESS_DENIED');
       evidence.evidenceId=randomUUID();
