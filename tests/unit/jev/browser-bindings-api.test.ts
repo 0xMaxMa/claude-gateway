@@ -8,7 +8,7 @@ import * as connector from '../../../src/jev/browser-connector';
 let root:string,config:any,runner:any,app:express.Express,path:string;
 beforeEach(()=>{
  root=mkdtempSync(join(tmpdir(),'browser-api-'));path=join(root,'config.json');
- config={gateway:{api:{keys:[{id:'owner',key:'admin-fixture',admin:true,agents:'*'},{id:'other',key:'other-fixture',admin:true,agents:'*'},{id:'readonly',key:'reader-fixture',agents:'*'}]},jev:{enabled:true,provider:'typesafe',model:'jev',features:{browserTasks:{enabled:true}},browser:{adapterModule:'@example/runner',bindings:[]}}},agents:[{id:'a'}]};
+ config={gateway:{api:{keys:[{id:'owner',key:'admin-fixture',admin:true,agents:'*'},{id:'other',key:'other-fixture',admin:true,agents:'*'},{id:'readonly',key:'reader-fixture',agents:'*'}]},jev:{enabled:true,provider:'typesafe',model:'jev',features:{browserTasks:{enabled:true}},browser:{bindings:[]}}},agents:[{id:'a'}]};
  runner={getAgentConfig:()=>config.agents[0],browserSessionScope:async(s:string,p:string)=>{if(s!=='session'||p!=='api:owner')throw Error('ACCESS_DENIED');return {principalId:p,conversationId:'conversation'};}};
  writeFileSync(path,JSON.stringify(config));
  jest.spyOn(connector,'resolveBrowserConnection').mockReturnValue({endpoint:'https://browser.example/mcp',headers:{Authorization:'Bearer PRIVATE-TEST-SECRET'}});

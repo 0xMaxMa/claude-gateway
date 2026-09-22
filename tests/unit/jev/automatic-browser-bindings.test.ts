@@ -8,7 +8,7 @@ jest.mock('../../../src/jev/browser-connector',()=>({...jest.requireActual('../.
 let dir:string;
 beforeEach(()=>{dir=mkdtempSync(join(tmpdir(),'auto-browser-'));jest.mocked(resolveBrowserConnection).mockClear();});
 afterEach(()=>rmSync(dir,{recursive:true,force:true}));
-const config=()=>({gateway:{customConnectors:{},jev:{browser:{adapterModule:'runner',bindings:[]}}}} as any);
+const config=()=>({gateway:{customConnectors:{},jev:{browser:{bindings:[]}}}} as any);
 const grant={id:'g',deviceId:'d',online:true,ready:true,policy:{control:true,tabs:[{id:'t',title:'Test'}]}};
 const reply=(grants:unknown[])=>new Response(JSON.stringify({grants}));
 test('approved tabs are scoped to identity, stable after restart and contain no secrets',async()=>{

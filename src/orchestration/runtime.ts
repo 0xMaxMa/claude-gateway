@@ -252,7 +252,7 @@ export class AgentOrchestrationRuntime {
       })}));
     const bridge = new TaskBridge(tasks, files, workerShares(files, agent, gateway), host.skills ? () => host.skills!() : undefined, agent.type === 'app-agent' ? { agent, spool: join(root, 'container-files') } : undefined, workerCrons(files, agent, gateway), gatewayAdapters);
     bridge.jevEnabled = () => jevAllowed(gateway, agent);
-    bridge.browserEnabled = () => Boolean(gateway.gateway.jev?.browser?.adapterModule) && jevAllowed(gateway, agent) && gateway.gateway.jev?.features?.browserTasks?.enabled === true;
+    bridge.browserEnabled = () => Boolean(gateway.gateway.jev?.browser) && jevAllowed(gateway, agent) && gateway.gateway.jev?.features?.browserTasks?.enabled === true;
     bridge.jevCall = async (scope, args, actionId, signal) => {
       const current = scope.role === 'worker' ? files.scope(scope.attemptId, scope.generation) : undefined;
       const conversation = scope.role === 'agent' ? store.assertMember(scope.context.conversationId, scope.context.principalId) : current!.conversation;

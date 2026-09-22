@@ -18,9 +18,9 @@ test('provider errors do not leak response bodies',async()=>{
  await expect(browserFieldText(config,{},new AbortController().signal,async()=>new Response('private provider body',{status:401}))).rejects.toThrow('BROWSER_TEXT_HTTP_401');
 });
 test('helper config and credential isolation',()=>{
- validateBrowserIntegration({adapterModule:'runner',bindings:[],textHelper:config});
- expect(()=>validateBrowserIntegration({adapterModule:'runner',bindings:[],textHelper:{...config,apiKeyEnv:'ANTHROPIC_API_KEY'}})).toThrow();
- expect(sanitizeJevChildEnv({TEST_BROWSER_TEXT_SECRET:'test-key'},{browser:{adapterModule:'runner',bindings:[],textHelper:config}})).toEqual({});
+ validateBrowserIntegration({bindings:[],textHelper:config});
+ expect(()=>validateBrowserIntegration({bindings:[],textHelper:{...config,apiKeyEnv:'ANTHROPIC_API_KEY'}})).toThrow();
+ expect(sanitizeJevChildEnv({TEST_BROWSER_TEXT_SECRET:'test-key'},{browser:{bindings:[],textHelper:config}})).toEqual({});
 });
 test('Anthropic messages protocol produces the same bounded field contract',async()=>{
  const fetcher=jest.fn(async()=>new Response(JSON.stringify({stop_reason:'end_turn',content:[{type:'text',text:'{"text":"London"}'}]})));
