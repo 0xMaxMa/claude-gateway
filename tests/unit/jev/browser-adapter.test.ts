@@ -172,3 +172,9 @@ test('low confidence ends as failed after confirmed navigation, not a target loc
  receipt.browserResult.lastAction.operationId='different';writeFileSync(file,JSON.stringify(receipt));
  expect(await f.make().inspect(task(),'r')).toMatchObject({type:'unknown'});
 });
+
+test('known stop after rejected stale input is terminal without replay',async()=>{
+ const f=fixture(),op='550e8400-e29b-41d4-a716-446655440000';
+ f.run.mockImplementation(async c=>{c.beforeMutation!(op,'page_click');return {status:'blocked',reason:'LOW_OPERATION_CONFIDENCE',steps:0,evaluations:2,lastAction:{operationId:op,operation:'CLICK',outcome:'not_executed'}};});
+ await f.a.submit(task(),'r','goal');expect((await settle(f.a)).type).toBe('failed');expect(f.run).toHaveBeenCalledTimes(1);
+});
