@@ -60,7 +60,7 @@ function dashboardRows() {
   (dashboardData?.agents||[]).forEach(a=>(a.sessions||[]).forEach(s=>rows.push({a,s})));
   return rows.filter(({a,s})=>(!dashboardAgent||a.id===dashboardAgent)&&(!dashboardSearch||[a.id,s.sessionId,s.chatId,s.source,s.model].join(' ').toLowerCase().includes(dashboardSearch.toLowerCase()))).sort((x,y)=>(Number(y.s.updatedAt||y.s.spawnedAt)||0)-(Number(x.s.updatedAt||x.s.spawnedAt)||0)||String(x.s.sessionId).localeCompare(String(y.s.sessionId)));
 }
-function gatewayTaskLabel(t){return t.gatewayTarget?'<small class="ts">Gateway-managed · '+dashText(t.gatewayTarget.adapter==='safemode'?'Safemode':t.gatewayTarget.adapter)+' · '+dashText(t.gatewayTarget.name)+'</small>':'<small class="ts">Worker task</small>';}
+function gatewayTaskLabel(t){return t.gatewayTarget?'<small class="ts">Gateway-managed · '+dashText(t.gatewayTarget.adapter==='safemode'?'Safemode':t.gatewayTarget.adapter)+' · '+dashText(t.gatewayTarget.name)+'</small>'+(t.pendingRevision?'<small class="ts">Updated instructions accepted · revision '+dashText(t.pendingRevision)+' pending</small>':''):'<small class="ts">Worker task</small>';}
 function dashboardTaskRows(){return dashboardRows().flatMap(({a,s})=>(s.tasks||[]).map(t=>({a,s,t}))).sort((x,y)=>Number(y.t.updatedAt)-Number(x.t.updatedAt)||x.t.taskId.localeCompare(y.t.taskId));}
 function dashText(value){return escHtml(value==null?'—':String(value));}
 function dashCount(value){return compactNumber(value);}

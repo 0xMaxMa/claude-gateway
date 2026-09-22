@@ -188,3 +188,11 @@ test('explicit unknown outcome remains fenced even without a recorded action',as
  const f=fixture();f.run.mockResolvedValue({status:'blocked',reason:'OUTCOME_UNKNOWN',steps:0,evaluations:0});
  await f.a.submit(task(),'r','goal');expect((await settle(f.a)).type).toBe('unknown');
 });
+
+test('browser continuation omits initial navigation, but pre-dispatch revisions retain it',async()=>{
+ for(const appliedRevision of [0,1]){
+  const f=fixture(),t=task({taskId:'revision-'+appliedRevision,revision:2,appliedRevision,gatewayTarget:{adapter:'browser',sessionId:'target',name:'Browser',startUrl:'https://example.com/'}});
+  await f.a.submit(t,'r','Updated goal');await settle(f.a,t);
+  expect(f.run.mock.calls[0][0].startUrl).toBe(appliedRevision===0?'https://example.com/':undefined);
+ }
+});
