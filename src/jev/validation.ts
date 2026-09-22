@@ -64,33 +64,39 @@ export function validateJevRequest(value: unknown, config: JevConfig): JevReques
   return JSON.parse(encoded!) as JevRequest;
 }
 export function validateJevResponse(value: unknown, request: JevRequest, requestedModel: string, requestId: string): JevResult {
-  const fail = (): never => { throw new JevError('INVALID_RESPONSE', 'Jev returned an incomplete or invalid evaluation.'); };
-  if (!object(value) || !text(value.model) || !object(value.answers) || !object(value.usage)) fail();
+  const fail = (validationReason: string): never => { throw new JevError('INVALID_RESPONSE', `Jev returned an invalid evaluation (${validationReason}).`, { validationReason }); };
+  if (!object(value) || !text(value.model) || !object(value.answers) || !object(value.usage)) fail('ENVELOPE');
   const v = value as Record<string, any>;
   const sameKeys = (a: object, keys: string[]) => Object.keys(a).length === keys.length && keys.every(k => Object.prototype.hasOwnProperty.call(a, k));
-  if (!sameKeys(v.answers, Object.keys(request.questions))) fail();
+  if (!sameKeys(v.answers, Object.keys(request.questions))) fail('ANSWER_KEYS');
   const answers: JevResult['answers'] = {};
   for (const [id, q] of Object.entries(request.questions)) {
     const a = v.answers[id];
-    if (!object(a) || a.type !== q.type) fail();
-    if (q.type === 'noul') { if (!probability(a.noul)) fail(); answers[id] = { type: 'noul', noul: a.noul }; continue; }
+    if (!object(a) || a.type !== q.type) fail('ANSWER_TYPE');
+    if (q.type === 'noul') { if (!probability(a.noul)) fail('NOUL_RANGE'); answers[id] = { type: 'noul', noul: a.noul }; continue; }
     const keys = q.type === 'choice' ? Object.keys(q.criteria) : q.criteria.map((_, i) => String(i));
-    if (!probability(a.confidence) || !object(a.probabilities) || !sameKeys(a.probabilities, keys) || !Object.values(a.probabilities).every(probability)) fail();
+    if (!probability(a.confidence) || !object(a.probabilities) || !sameKeys(a.probabilities, keys) || !Object.values(a.probabilities).every(probability)) fail('DISTRIBUTION_SHAPE');
     const p = a.probabilities as Record<string, number>;
-    if (Math.abs(Object.values(p).reduce((sum, n) => sum + n, 0) - 1) > 0.001 + ROUNDING_EPSILON) fail();
+    // Live Jev responses round probabilities to hundredths (observed sum 0.99).
+    // Permit their rounding envelope, capped at two percentage points. Keep
+    // full-precision responses strict; never renormalize or raise confidence.
+    const values = Object.values(p);
+    const roundedHundredths = values.every(n => Math.abs(n * 100 - Math.round(n * 100)) <= ROUNDING_EPSILON);
+    const tolerance = roundedHundredths ? Math.min(0.02, values.length * 0.005) : 0.001;
+    if (Math.abs(values.reduce((sum, n) => sum + n, 0) - 1) > tolerance + ROUNDING_EPSILON) fail('DISTRIBUTION_SUM');
     if (q.type === 'choice') {
-      if (typeof a.choice !== 'string' || !keys.includes(a.choice) || keys.some(k => p[k] > p[a.choice] + 0.00001 + ROUNDING_EPSILON)) fail();
+      if (typeof a.choice !== 'string' || !keys.includes(a.choice) || keys.some(k => p[k] > p[a.choice] + 0.00001 + ROUNDING_EPSILON)) fail('CHOICE_MISMATCH');
       answers[id] = { type: 'choice', choice: a.choice, confidence: a.confidence, probabilities: p };
     } else {
       const expected = keys.reduce((sum, k) => sum + Number(k) * p[k], 0);
-      if (typeof a.score !== 'number' || !Number.isFinite(a.score) || a.score < 0 || a.score > keys.length - 1 || Math.abs(a.score - expected) > 0.01 + ROUNDING_EPSILON || !object(a.legend) || !sameKeys(a.legend, keys) || !Object.values(a.legend).every(x => typeof x === 'string')) fail();
+      if (typeof a.score !== 'number' || !Number.isFinite(a.score) || a.score < 0 || a.score > keys.length - 1 || Math.abs(a.score - expected) > 0.01 + ROUNDING_EPSILON || !object(a.legend) || !sameKeys(a.legend, keys) || !Object.values(a.legend).every(x => typeof x === 'string')) fail('SCORE_MISMATCH');
       answers[id] = { type: 'score', score: a.score, confidence: a.confidence, probabilities: p, legend: a.legend };
     }
   }
-  if (!['input_tokens', 'output_tokens'].every(k => Number.isSafeInteger(v.usage[k]) && v.usage[k] >= 0)) fail();
-  if (v.requested_model !== undefined && v.requested_model !== requestedModel) fail();
-  if (v.request_id !== undefined && v.request_id !== requestId) fail();
-  if (v.billing !== undefined && (!object(v.billing) || typeof v.billing.charged_credits !== 'number' || !Number.isFinite(v.billing.charged_credits) || v.billing.charged_credits < 0 || (v.billing.rate_version !== undefined && !text(v.billing.rate_version)))) fail();
+  if (!['input_tokens', 'output_tokens'].every(k => Number.isSafeInteger(v.usage[k]) && v.usage[k] >= 0)) fail('USAGE');
+  if (v.requested_model !== undefined && v.requested_model !== requestedModel) fail('MODEL_IDENTITY');
+  if (v.request_id !== undefined && v.request_id !== requestId) fail('REQUEST_IDENTITY');
+  if (v.billing !== undefined && (!object(v.billing) || typeof v.billing.charged_credits !== 'number' || !Number.isFinite(v.billing.charged_credits) || v.billing.charged_credits < 0 || (v.billing.rate_version !== undefined && !text(v.billing.rate_version)))) fail('BILLING');
   return { requestId, requestedModel, model: v.model, answers, usage: { input_tokens: v.usage.input_tokens, output_tokens: v.usage.output_tokens }, ...(v.billing ? { billing: { charged_credits: v.billing.charged_credits, ...(v.billing.rate_version ? { rate_version: v.billing.rate_version } : {}) } } : {}) };
 }
 export const JEV_TOOL_SCHEMA = {

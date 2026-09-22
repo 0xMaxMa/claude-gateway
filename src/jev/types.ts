@@ -29,10 +29,10 @@ export interface JevContext {
 export interface JevConnection { baseUrl: string; apiKey: string }
 export type JevErrorCode = 'DISABLED' | 'ACCESS_DENIED' | 'INVALID_CONFIG' | 'INVALID_REQUEST' | 'QUEUE_FULL' | 'CANCELLED' | 'DEADLINE_EXCEEDED' | 'AUTHENTICATION_FAILED' | 'MODEL_UNAVAILABLE' | 'QUOTA_EXCEEDED' | 'RATE_LIMITED' | 'PROVIDER_UNAVAILABLE' | 'INVALID_RESPONSE' | 'REQUEST_CONFLICT' | 'OUTCOME_UNKNOWN';
 export class JevError extends Error {
-  constructor(public readonly code: JevErrorCode, message: string, public readonly metadata: { status?: number; retryAfter?: string; resetAt?: string } = {}) { super(message); this.name = 'JevError'; }
+  constructor(public readonly code: JevErrorCode, message: string, public readonly metadata: { status?: number; retryAfter?: string; resetAt?: string; validationReason?: string } = {}) { super(message); this.name = 'JevError'; }
 }
 export interface JevEvaluationEvent {
   requestId: string; principalId: string; consumer: string; agentId?: string; sessionId?: string; taskId?: string;
   requestedModel: string; model?: string; startedAt: number; elapsedMs: number; outcome: 'completed' | 'failed';
-  errorCode?: JevErrorCode; usage?: JevResult['usage']; billing?: JevResult['billing'];
+  errorCode?: JevErrorCode; validationReason?: string; usage?: JevResult['usage']; billing?: JevResult['billing'];
 }
