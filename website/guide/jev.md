@@ -375,3 +375,11 @@ Discovered targets are stored in the agent's orchestration directory as
 supported. Connector enablement/credentials and relay permissions remain authoritative
 at execution time. Discovery alone does not run Jev or prove task completion;
 completion requires fresh browser evidence and parent verification.
+
+To open a specific website (including from Chrome New Tab), include
+`gateway_target.start_url` with the user-requested HTTP(S) URL. Gateway passes it
+as the runner's `startUrl`. Navigation acquires the approved-tab lease and records
+a durable operation ID before dispatch. A lost navigation response is unknown and
+is never automatically replayed. Supplying field answers resumes the current page
+without repeating initial navigation. Without a URL, an internal New Tab reports
+`START_URL_REQUIRED` instead of an observation-schema error.

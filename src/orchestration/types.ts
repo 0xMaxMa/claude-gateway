@@ -40,6 +40,7 @@ export interface TaskResult {
 }
 /** A fixed gateway adapter, never an arbitrary command or another model worker. */
 export interface GatewayTaskTarget {
+  startUrl?: string;
   adapter: string;
   sessionId: string;
   name: string;

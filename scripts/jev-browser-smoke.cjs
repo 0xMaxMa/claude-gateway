@@ -45,12 +45,14 @@ async function runGatewayBrowserFixture(options){
   assert((await callAgent('capabilities_list',{scope:'browser'},foreign)).error);
   assert((await callAgent('capabilities_list',{scope:'safemode'})).error);
  }
-  const task=callAgent ? await callAgent('task_spawn',{title:'Browser integration fixture',instructions:options.goal,target_profile:'gateway-managed',gateway_target:{adapter:'browser',session_id:binding.id}}) : tasks.spawn(context,{title:'Browser integration fixture',instructions:options.goal,targetProfile:'gateway-managed',gatewayTarget:adapter.resolve({adapter:'browser',session_id:binding.id},context)});
+  const task=callAgent ? await callAgent('task_spawn',{title:'Browser integration fixture',instructions:options.goal,target_profile:'gateway-managed',gateway_target:{adapter:'browser',session_id:binding.id,...(options.startUrl?{start_url:options.startUrl}:{})}}) : tasks.spawn(context,{title:'Browser integration fixture',instructions:options.goal,targetProfile:'gateway-managed',gatewayTarget:adapter.resolve({adapter:'browser',session_id:binding.id,...(options.startUrl?{start_url:options.startUrl}:{})},context)});
   assert(task.taskId,'Container must create a real gateway-managed task');
   const until=Date.now()+75000;
   while(Date.now()<until){
    await controller.tick();let current=store.task(task.taskId);
    if(current.state==='needs_reconciliation' && options.parentVerify){
+    assert.equal(current.browserReport?.status,'needs_verification',JSON.stringify({failure:current.failure,browserReport:current.browserReport}));
+    assert.notEqual(current.browserReport?.lastAction?.outcome,'unknown',JSON.stringify(current.browserReport));
     const proof=callAgent ? (await callAgent('task_status',{task_id:current.taskId,browser_evidence:'fresh'})).browserEvidence : await adapter.evidence(current,true);
     const evidence=await options.parentVerify(proof);
     if(typeof evidence==='string' && evidence.trim())current=callAgent ? await callAgent('task_update',{task_id:current.taskId,expected_revision:current.revision,mode:'verify_browser',expected_request_id:proof.requestId,evidence_id:proof.evidenceId,instruction:evidence}) : tasks.verifyBrowser({...context,actionId:'verify-browser'},current.taskId,current.revision,proof.requestId,proof.evidenceId,evidence,()=>adapter.verifyEvidence(current,proof.requestId,proof.evidenceId));
