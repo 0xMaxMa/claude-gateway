@@ -10,6 +10,7 @@ import { toolOutcome, TurnObservation, ToolOutcome } from './execution-observati
 import type { InputImage } from '../session/input-image';
 import type { SessionProcess } from '../session/process';
 import { OrchestrationError } from './types';
+import { providerErrorMetadata, ProviderErrorMetadata } from './provider-error-metadata';
 
 export interface TurnTimeoutPolicy { pauseRequested?: () => boolean; onUsage?: (metrics: ManagedTurnMetrics) => void; startupTimeoutMs: number; firstResponseTimeoutMs: number; compactionTimeoutMs?: number; idleTimeoutMs: number; acceptToolProgress?: boolean; idleAction?: 'observe'; onObservation?: (value: TurnObservation) => void; }
 export interface TurnTimeoutDetails { phase: 'startup' | 'first_response' | 'compaction' | 'idle' | 'total'; elapsedMs: number; idleMs: number; }
@@ -18,6 +19,7 @@ export interface ProcessResult { text: string; interrupted: boolean; paused?: bo
 export type WorkerProcess = { on(event: string, listener: (...args: any[]) => void): unknown; off(event: string, listener: (...args: any[]) => void): unknown } & Pick<SessionProcess, 'start' | 'sendMessage' | 'interrupt' | 'stop' | 'runtimeProfile' | 'managedProcessId' | 'spawnedAt' | 'managedGroupStopped'> &
   Partial<Pick<SessionProcess, 'isSpawnedConnectorTool' | 'flushToolSchemas' | 'recordTurnOutcome'>>;
 export interface ProcessTurn {
+  providerReady: Promise<void>;
   accepted: Promise<void>;
   result: Promise<ProcessResult>;
   stop(): Promise<void>;
@@ -43,6 +45,9 @@ function providerErrorText(value: unknown, codes: string[], depth = 0, budget = 
 export function startProcessTurn(process: WorkerProcess, prompt: string, timeoutMs: number | undefined, onText: (text: string) => void = () => {}, onMetrics?: (metrics: ManagedTurnMetrics) => void, images: readonly InputImage[] = [], policy?: TurnTimeoutPolicy, onStructured?: (chunk: string) => void, alreadyStarted = false): ProcessTurn {
   let resolveAccepted!: () => void, rejectAccepted!: (error: Error) => void;
   let resolveResult!: (result: ProcessResult) => void, rejectResult!: (error: Error) => void;
+  let resolveProvider!: () => void, rejectProvider!: (error: Error) => void;
+  const providerReady = new Promise<void>((resolve, reject) => { resolveProvider = resolve; rejectProvider = reject; });
+  void providerReady.catch(() => {});
   const accepted = new Promise<void>((resolve, reject) => { resolveAccepted = resolve; rejectAccepted = reject; });
   const result = new Promise<ProcessResult>((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
   // Both promises are observed immediately, including startup errors.
@@ -51,6 +56,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
   let finalCapturePending=false;
   let settled = false, stopped = false, text = '', streamed = false, apiErrorText = '';
   let apiErrorCodes: string[] = [];
+  let apiErrorMetadata: ProviderErrorMetadata = {};
   let providerMessage: string | undefined;
   const usageCollector = new TurnUsageCollector();
   const background = new BackgroundWork();
@@ -70,7 +76,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     if (settled) return;
     if (reason === 'idle' && policy?.idleAction === 'observe') { observe(); return; }
     const details: TurnTimeoutDetails = {phase: reason, elapsedMs: Date.now()-startedAt, idleMs: Date.now()-lastProgressAt};
-    fail(Object.assign(new OrchestrationError('TIMEOUT'), {timeout: details}));
+    fail(Object.assign(new OrchestrationError('TIMEOUT'), {timeout: details, ...(apiErrorCodes.length || apiErrorMetadata.status ? { providerOrigin: true, providerCodes: apiErrorCodes, ...apiErrorMetadata } : {})}));
     void stop();
   };
   const arm = (next: TurnTimeoutDetails['phase'], budget: number) => {
@@ -85,7 +91,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     phaseTimer = setTimeout(check, budget);
   };
   const cleanup = () => { if (!recorded) { recorded = true; try { const measured = usageCollector.snapshot(); onMetrics?.({ toolIds: [...tools], inputTokens: measured.usage ? measured.usage.inputTokens + measured.usage.cacheCreationTokens + measured.usage.cacheReadTokens : inputTokens, totalTokens: measured.usage?.totalTokens ?? totalTokens, startedAt, endedAt: Date.now(), ...measured }); } catch { /* telemetry must not break delivery */ } } clearTimeout(timer); clearTimeout(phaseTimer); clearInterval(observationTimer); process.off('output', output); process.off('request-tools', schemaOutput); process.off('exit', exit); process.off('startup-error', startupError); };
-  const fail = (error: Error) => { if (settled) return; process.recordTurnOutcome?.((error as OrchestrationError).code === 'TIMEOUT' ? 'timeout' : (error as OrchestrationError).code === 'INTERRUPTED' ? 'cancelled' : 'failed', (error as OrchestrationError).code); settled = true; cleanup(); rejectAccepted(error); rejectResult(error); };
+  const fail = (error: Error) => { if (settled) return; process.recordTurnOutcome?.((error as OrchestrationError).code === 'TIMEOUT' ? 'timeout' : (error as OrchestrationError).code === 'INTERRUPTED' ? 'cancelled' : 'failed', (error as OrchestrationError).code); settled = true; cleanup(); rejectProvider(error); rejectAccepted(error); rejectResult(error); };
   const publish = (chunk: string): boolean => {
     try { onText(chunk); return true; }
     catch { fail(new OrchestrationError('RESPONSE_PERSISTENCE_FAILED')); void process.stop(); return false; }
@@ -94,7 +100,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
   const exit = () => {
     if (settled || finalCapturePending) return;
     if (stopped) { settled = true; cleanup(); rejectAccepted(new OrchestrationError('INTERRUPTED')); resolveResult({ text, interrupted: true }); }
-    else if (apiErrorText) fail(Object.assign(new OrchestrationError('INFERENCE_FAILED', apiErrorText), { providerCodes: apiErrorCodes, providerMessage }));
+    else if (apiErrorText) fail(Object.assign(new OrchestrationError('INFERENCE_FAILED', apiErrorText), { providerOrigin: true, ...apiErrorMetadata, providerCodes: apiErrorCodes, providerMessage }));
     else fail(new OrchestrationError('PROCESS_EXITED'));
   };
   const schemaOutput = (value: RequestToolSchemas) => {
@@ -133,8 +139,12 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     }
     const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
     const isProviderError = event.type === 'assistant' && (event.isApiErrorMessage || event.error);
+    if (!isProviderError && ((event.type === 'assistant' && blocks.some((b: any) => ['text','thinking','tool_use'].includes(b.type)))
+        || (event.type === 'stream_event' && ['text_delta','thinking_delta','input_json_delta'].includes(event.event?.delta?.type))
+        || (event.type === 'result' && !event.is_error))) resolveProvider();
     if (isProviderError) {
       apiErrorCodes = [];
+      apiErrorMetadata = providerErrorMetadata(event.error);
       providerMessage = blocks.filter((block: any) => block.type === 'text' && typeof block.text === 'string').map((block: any) => block.text).join('\n') || structuredProviderMessage(event.error);
       apiErrorText = providerErrorText({ error: event.error, message: blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text) }, apiErrorCodes);
     }
@@ -144,7 +154,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     if (!isProviderError && ((event.type === 'assistant' && blocks.length > 0)
         || (resumedDelta && ['text_delta', 'thinking_delta', 'input_json_delta'].includes(resumedDelta.type)
           && (resumedDelta.text || resumedDelta.thinking || resumedDelta.partial_json)))) {
-      apiErrorText = ''; apiErrorCodes = []; providerMessage = undefined;
+      apiErrorText = ''; apiErrorCodes = []; apiErrorMetadata = {}; providerMessage = undefined;
     }
     for (const block of blocks) {
       if (block.type === 'tool_use' && typeof block.id === 'string' && !activeTools.has(block.id) && activeTools.size < 2000) activeTools.set(block.id, -1);
@@ -187,7 +197,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       // message_start contains headers/usage, not a token. It must not replace
       // the first-response budget with a shorter idle budget.
       const delta = event.type === 'stream_event' ? event.event?.delta : undefined;
-      const progress = (event.type === 'assistant' && Array.isArray(event.message?.content) && event.message.content.length > 0)
+      const progress = (event.type === 'assistant' && !isProviderError && Array.isArray(event.message?.content) && event.message.content.length > 0)
         || (delta && ['text_delta','thinking_delta','input_json_delta'].includes(delta.type) && Boolean(delta.text || delta.thinking || delta.partial_json))
         || (event.type === 'user' && Array.isArray(event.message?.content) && event.message.content.some((b: any) => b.type === 'tool_result'));
       if (progress || toolProgress) arm('idle', policy.idleTimeoutMs);
@@ -227,6 +237,12 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     if (Buffer.byteLength(text) > 262144) { fail(new OrchestrationError('RESPONSE_TOO_LARGE')); void process.stop(); return; }
     if (event.type === 'result') {
       if (event.is_error) {
+        // Native adapters can explicitly replace retry evidence, including with
+        // no provider error. Claude's unmarked result events keep their existing
+        // cached error behavior for native retries followed by process failure.
+        if (event.gatewayProviderErrorAuthoritative === true) {
+          apiErrorCodes = []; apiErrorMetadata = {}; apiErrorText = ''; providerMessage = undefined;
+        }
         const providerCodes = [...apiErrorCodes];
         const detail = [apiErrorText, providerErrorText([event.result, event.errors], providerCodes)].filter(Boolean).join(' ').slice(0, 4096) || 'Inference failed';
         const terminalCode = event.subtype === 'error_max_turns' ? 'MODEL_MAX_TURNS'
@@ -234,7 +250,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
           : event.subtype === 'error_max_structured_output_retries' ? 'MODEL_OUTPUT_INVALID' : undefined;
         const code = terminalCode ?? (/provider capacity is fully in use|overloaded_error/i.test(detail) ? 'PROVIDER_CAPACITY'
           : /\b(?:API Error:|HTTP)\s*503\b/i.test(detail) ? 'PROVIDER_UNAVAILABLE' : 'INFERENCE_FAILED');
-        fail(Object.assign(new OrchestrationError(code, detail), { providerCodes, providerMessage: providerMessage || structuredProviderMessage(event.result) || structuredProviderMessage(event.errors) })); return;
+        fail(Object.assign(new OrchestrationError(code, detail), { providerOrigin: !terminalCode, ...apiErrorMetadata, ...providerErrorMetadata(event.errors), providerCodes, providerMessage: providerMessage || structuredProviderMessage(event.result) || structuredProviderMessage(event.errors) })); return;
       }
       if (process.runtimeProfile?.responseSchema && event.structured_output && typeof event.structured_output === 'object') {
         text = JSON.stringify(event.structured_output);
@@ -270,5 +286,5 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     if (stopped || settled) return process.stop();
     process.sendMessage(prompt, images);
   }).catch(error => { fail(error); void process.stop(); });
-  return { accepted, result, stop };
+  return { accepted, providerReady, result, stop };
 }

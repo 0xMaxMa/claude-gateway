@@ -10,6 +10,7 @@ function fixture() {
   });
   const runtime = Object.create(AgentOrchestrationRuntime.prototype);
   runtime.active = new Map();
+  runtime.store = { get: jest.fn(() => undefined) };
   runtime.decisions = { interrupt: jest.fn() };
   const runner = Object.create(AgentRunner.prototype);
   runner.sessions = new Map([['chat', process]]);

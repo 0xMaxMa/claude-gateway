@@ -14,6 +14,8 @@ import { join } from 'path';
 import { spawn } from 'child_process';
 import { CodexProcess, CodexProcessOptions, cleanupCodexSessions } from '../../../src/session/codex-process';
 import { TurnUsageCollector } from '../../../src/orchestration/token-usage';
+import { providerFailure } from '../../../src/orchestration/provider-admission';
+import { startProcessTurn } from '../../../src/orchestration/process-turn';
 import { prepareContainerProfile, containerNode, stopContainerProfile } from '../../../src/orchestration/container';
 import { stopProcessGroup } from '../../../src/orchestration/process-supervisor';
 jest.mock('../../../src/orchestration/container', () => ({ ...jest.requireActual('../../../src/orchestration/container'), prepareContainerProfile: jest.fn(), containerNode: jest.fn(), stopContainerProfile: jest.fn().mockResolvedValue(true) }));
@@ -70,6 +72,76 @@ test('uses private Responses configuration, MCP ticket env and sandbox without c
   expect(config).toContain('"TICKET" = "secret-ticket"');
   expect(config).toContain('developer_instructions = "agent context\\n\\nworker rules"');
   expect(settings.env.ANTHROPIC_API_KEY).toBeUndefined();
+});
+test('launch uses the readiness credential snapshot without resolving a different account', async () => {
+  const snapshot = Object.freeze({baseUrl:options.config.baseUrl!,key:'readiness-key',fingerprint:'readiness-account'});
+  options.resolvedCredentials = snapshot;
+  const resolve = jest.spyOn(codexAuth, 'resolveCodexCredentials').mockRejectedValue(new Error('must not resolve again'));
+  process.env.TEST_CODEX_KEY = 'rotated-after-readiness';
+  await launch();
+  expect(resolve).not.toHaveBeenCalled();
+  const [, args, settings] = (spawn as jest.Mock).mock.calls[0];
+  expect(settings.env.GATEWAY_CODEX_API_KEY).toBe('readiness-key');
+  expect(JSON.stringify(args)).not.toContain('readiness-key');
+  expect(await readFile(join(settings.env.CODEX_HOME, 'config.toml'), 'utf8')).not.toContain('readiness-key');
+});
+test.each([
+  ['unauthorized', 'authentication'], ['usageLimitExceeded', 'quota'],
+  ['rateLimitExceeded', 'rate_limit'], ['serverOverloaded', 'server'], ['internalServerError', 'server'],
+  [{httpConnectionFailed:{httpStatusCode:503}}, 'server'],
+  [{responseStreamConnectionFailed:{httpStatusCode:429}}, 'rate_limit'],
+  [{responseStreamDisconnected:{httpStatusCode:null}}, 'transport'],
+  [{responseTooManyFailedAttempts:{httpStatusCode:503}}, 'server'],
+])('normalizes native TurnError provider metadata %j', async (codexErrorInfo, reason) => {
+  await launch();
+  notify('turn/completed', {turn:{id:'turn-1',status:'failed',error:{message:'Opaque diagnostic',codexErrorInfo,additionalDetails:'private-detail',misalignment:null}}});
+  await tick();
+  const result = events.find(e=>e.type==='result');
+  expect(result.errors).toHaveLength(1);
+  expect(providerFailure({providerOrigin:true,...result.errors[0],providerCodes:[result.errors[0].code].filter(Boolean)})?.reason).toBe(reason);
+  expect(JSON.stringify(result.errors)).not.toMatch(/Opaque diagnostic|private-detail/);
+});
+test.each(['badRequest','contextWindowExceeded','sessionBudgetExceeded','sandboxError','threadRollbackFailed','other','cancelled',{activeTurnNotSteerable:{turnKind:'review'}},{responseTooManyFailedAttempts:{httpStatusCode:null}}])('does not classify local/request/unknown native errors %j as outages', async codexErrorInfo => {
+  await launch();
+  notify('turn/completed', {turn:{id:'turn-1',status:'failed',error:{message:'HTTP 503 unauthorized ECONNRESET',codexErrorInfo,additionalDetails:null,misalignment:null}}});
+  await tick();
+  expect(events.find(e=>e.type==='result')).not.toHaveProperty('errors');
+});
+test('retains native provider error metadata when the process exits before a terminal turn', async () => {
+  await launch();
+  notify('error', {error:{message:'Unavailable',codexErrorInfo:{httpConnectionFailed:{httpStatusCode:503}},additionalDetails:null,misalignment:null}});
+  await tick(); child.emit('close', 1, null); await tick();
+  expect(events.find(e=>e.type==='result')).toMatchObject({errors:[{status:503}]});
+});
+test.each(['badRequest', 'interrupted'])('does not reuse retry failure metadata after terminal %s', async kind => {
+  await launch();
+  notify('error', {error:{message:'Unavailable',codexErrorInfo:{httpConnectionFailed:{httpStatusCode:503}}}});
+  await tick();
+  notify('turn/completed', {turn:{id:'turn-1',status:kind==='interrupted'?'interrupted':'failed',error:kind==='interrupted'?null:{message:'Invalid request',codexErrorInfo:kind}}});
+  await tick();
+  expect(events.find(e=>e.type==='result')).not.toHaveProperty('errors');
+});
+test.each(['badRequest', 'interrupted', 'unauthorized'])('shared turn collector respects authoritative native terminal %s after a provider retry', async kind => {
+  const turn = startProcessTurn(adapter, 'do the task', 10000);
+  await waitUntil(() => rpc.some(r => r.method === 'turn/start'));
+  notify('error', {error:{message:'Retry unavailable',codexErrorInfo:{httpConnectionFailed:{httpStatusCode:503}},retryAfterMs:600000}});
+  await tick();
+  expect(events).toContainEqual(expect.objectContaining({type:'assistant',isApiErrorMessage:true,error:expect.objectContaining({status:503})}));
+  notify('turn/completed', {turn:{id:'turn-1',status:kind==='interrupted'?'interrupted':'failed',error:kind==='interrupted'?null:{message:'Terminal diagnostic',codexErrorInfo:kind}}});
+  const failure = await turn.result.then(() => { throw new Error('Expected failure'); }, error => error);
+  expect(failure).not.toHaveProperty('status');
+  expect(failure).not.toHaveProperty('retryAfterMs');
+  if (kind === 'unauthorized') expect(providerFailure(failure)).toMatchObject({reason:'authentication',blocked:true});
+  else expect(providerFailure(failure)).toBeUndefined();
+});
+test('shared turn collector retains native retry evidence when the process exits without a terminal turn', async () => {
+  const turn = startProcessTurn(adapter, 'do the task', 10000);
+  await waitUntil(() => rpc.some(r => r.method === 'turn/start'));
+  notify('error', {error:{message:'Unavailable',codexErrorInfo:{httpConnectionFailed:{httpStatusCode:503}}}});
+  await tick(); child.emit('close', 1, null);
+  const failure = await turn.result.then(() => { throw new Error('Expected failure'); }, error => error);
+  expect(providerFailure(failure)).toMatchObject({reason:'server'});
+  expect(failure.status).toBe(503);
 });
 test('maps tools and failures, returns only canonical final and counts cached input once', async () => {
   await launch();

@@ -23,6 +23,7 @@ Claude Gateway keeps conversations responsive while Claude Code workers execute 
 - 🤖 **Multi-agent** — run multiple bots from a single gateway, each with isolated sessions
 - 🔌 **Multi-channel MCP** — modular tool system per channel (Telegram, Discord, LINE, Slack, WhatsApp, Cron, Skills, extensible to more)
 - 📥 **Channel ingress recovery** — unavailable attachments preserve the message and readable files; Telegram/Discord receiver retries isolate conversations and archive stale startup queues without executing old requests. See [ingress recovery](https://0xmaxma.github.io/claude-gateway/api/orchestration.html#channel-ingress-recovery).
+- ⏳ **Provider outage admission** — durable cooldowns bound repeated report/inference failures, preserve queued input and task results, and expose waiting status without restarting running workers. See [provider admission settings](https://0xmaxma.github.io/claude-gateway/reference/orchestration-settings.html#provider-admission).
 - 🧩 **Agent skills** — extensible skill system via SKILL.md files; agents can create, delete, and install skills from URLs at runtime with hot-reload
 - 🎭 **Agent identity** — define personality, tone, and rules via workspace markdown files
 - 📡 **Live status messages** — real-time status updates showing tool usage, thinking, and progress

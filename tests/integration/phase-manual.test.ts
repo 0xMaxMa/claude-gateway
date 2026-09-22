@@ -52,7 +52,10 @@ function makeTempWorkspace(
   prefix: string,
   opts: { oversizeFile?: string } = {},
 ): string {
-  const dir = makeTempDir(prefix);
+  // AgentRunner derives the shared agents directory from workspace/../...
+  // Mirror the production layout so persistence remains inside this fixture.
+  const dir = path.join(makeTempDir(prefix), 'agent', 'workspace');
+  fs.mkdirSync(dir, { recursive: true });
   const files: Record<string, string> = {
     'AGENTS.md': '# Agent\nYou are a test assistant.',
     'SOUL.md': '# Soul\nBe helpful.',

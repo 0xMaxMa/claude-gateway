@@ -65,7 +65,7 @@ export function migrateAgentVoiceConfig(document: { gateway?: any; agents?: any[
 
     const settings = JSON.parse(JSON.stringify(effective));
     if (legacyGlobal) {
-      for (const field of ['conversation', 'tasks', 'events']) {
+      for (const field of ['conversation', 'tasks', 'events', 'providerAdmission']) {
         if (legacyGlobal[field] || legacy?.[field]) settings[field] = merge(legacyGlobal[field], legacy?.[field]);
       }
     }

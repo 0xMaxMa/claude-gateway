@@ -1,4 +1,5 @@
 import { codexContextPolicy, observeCodexContext, CodexContextMeasurement } from './codex-context';
+import { providerErrorMetadata } from '../orchestration/provider-error-metadata';
 import { workerEnvironment } from './worker-environment';
 import { scanCodexTrace, CodexTraceState } from './codex-tool-capture';
 import type { RequestToolSchemas } from './request-tool-capture';
@@ -27,6 +28,9 @@ export interface CodexProcessOptions {
   profile: RuntimeProfile;
   sessionId: string;
   stateDirectory: string;
+  /** In-memory readiness snapshot only; never serialize options or credentials.
+   * Native refresh below remains fenced by its stable account fingerprint. */
+  resolvedCredentials?: Readonly<CodexCredentials>;
   checkpoint?: () => Promise<{ text: string; kind?: 'assignment' | 'advice'; acknowledge: () => void | Promise<void> } | undefined>;
   requestInput?: (question: string) => void;
   config: { model: string; contextWindow?: number; baseUrl?: string; apiKeyEnv?: string; reasoningEffort?: string; bin?: string };
@@ -120,6 +124,7 @@ export class CodexProcess extends EventEmitter {
   private traceTimer?: ReturnType<typeof setInterval>;
   private traceScan?: Promise<void>;
   private lastError = '';
+  private lastProviderError?: Record<string, unknown>;
   private finalText = '';
   private readonly tools = new Set<string>();
   private readonly completedTools = new Set<string>();
@@ -168,7 +173,7 @@ export class CodexProcess extends EventEmitter {
       this.nativeSha256 = runtime.nativeSha256;
     }
     this.authExecutable = runtime.executable;
-    this.credentials = await resolveCodexCredentials({ ...config, bin: runtime.executable, allowDockerHost: agent.type === 'app-agent' });
+    this.credentials = this.options.resolvedCredentials ?? await resolveCodexCredentials({ ...config, bin: runtime.executable, allowDockerHost: agent.type === 'app-agent' });
     const key = 'GATEWAY_CODEX_API_KEY';
     this.identity = this.credentials.fingerprint;
     await mkdir(this.root, { recursive: true, mode: 0o700 });
@@ -316,7 +321,7 @@ export class CodexProcess extends EventEmitter {
       this.rejectRequests(new Error(this.stderr.trim() || 'Codex app-server exited'));
       if (this.buffer.trim()) this.consume('\n');
       await this.completion;
-      if (!this.terminal && !this.cancelled) this.fail(this.lastError || this.stderr.trim() || `Codex exited without a completed turn (${code ?? signal})`);
+      if (!this.terminal && !this.cancelled) this.fail(this.lastError || this.stderr.trim() || `Codex exited without a completed turn (${code ?? signal})`, this.lastProviderError);
       this.emit('exit', code, signal);
     });
     await this.request('initialize', { clientInfo: { name: 'claude_gateway', version: '1.0.0' }, capabilities: { experimentalApi: true } });
@@ -336,7 +341,46 @@ export class CodexProcess extends EventEmitter {
 
   }
   private output(event: unknown): void { this.emit('output', JSON.stringify(event)); }
-  private fail(message: string): void { if (this.terminal) return; this.terminal = true; this.output({ type: 'result', is_error: true, result: message }); }
+  private fail(message: string, error?: Record<string, unknown>): void {
+    if (this.terminal) return;
+    this.terminal = true;
+    // The adapter already chose between terminal and cached retry evidence.
+    // An omitted error is authoritative too: the shared turn collector must
+    // not resurrect a previous retry's provider status for a local failure.
+    this.output({ type: 'result', is_error: true, result: message, gatewayProviderErrorAuthoritative: true, ...(error ? {errors:[error]} : {}) });
+  }
+  private providerError(error: unknown): Record<string, unknown> | undefined {
+    if (!error || typeof error !== 'object') return;
+    const native = error as {code?: unknown; codexErrorInfo?: unknown};
+    // Native app-server v2 TurnError/CodexErrorInfo schema:
+    // https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/schema/typescript/v2/CodexErrorInfo.ts
+    // Request validation, sandbox/policy errors and cancellations are not a
+    // provider outage. Never extract a cause from message/additionalDetails.
+    const categories: Record<string, string> = {
+      unauthorized: 'authentication_error', usageLimitExceeded: 'insufficient_quota',
+      rateLimitExceeded: 'rate_limit_error', serverOverloaded: 'overloaded_error', internalServerError: 'server_error',
+    };
+    const info = native.codexErrorInfo;
+    let code: unknown = native.code;
+    let status: number | undefined;
+    if (info != null) {
+      code = undefined;
+      if (typeof info === 'string' && Object.prototype.hasOwnProperty.call(categories, info)) code = categories[info];
+      else if (typeof info === 'object' && !Array.isArray(info)) {
+        const entries = Object.entries(info);
+        if (entries.length !== 1) return;
+        const [kind, detail] = entries[0];
+        if (!['httpConnectionFailed','responseStreamConnectionFailed','responseStreamDisconnected','responseTooManyFailedAttempts'].includes(kind) || !detail || typeof detail !== 'object') return;
+        const httpStatus = (detail as {httpStatusCode?: unknown}).httpStatusCode;
+        if (typeof httpStatus === 'number' && Number.isInteger(httpStatus) && httpStatus >= 400 && httpStatus <= 599) status = httpStatus;
+        else if (httpStatus == null && kind !== 'responseTooManyFailedAttempts') code = 'provider_transport_error';
+        else return;
+      } else return;
+    }
+    const metadata = providerErrorMetadata(error);
+    const result = { ...metadata, ...(status === undefined ? {} : {status}), ...(typeof code === 'string' && /^[a-z][a-z0-9_]{0,79}$/i.test(code) ? {code} : {}) };
+    return Object.keys(result).length ? result : undefined;
+  }
   private consume(chunk: string): void {
     this.buffer += chunk;
     if (Buffer.byteLength(this.buffer) > MAX_LINE) { this.fail('Codex output exceeded the bounded JSON buffer'); void this.stop(); return; }
@@ -446,9 +490,13 @@ export class CodexProcess extends EventEmitter {
       this.output({ type: 'stream_event', event: { type: 'message_start', message: { id: p.turn.id, model: this.options.config.model, content: [] } } });
     } else if (['item/agentMessage/delta', 'item/reasoning/summaryTextDelta', 'item/reasoning/textDelta'].includes(event.method) && typeof p.delta === 'string' && p.delta) {
       // Activity is observable, but only the canonical completed answer is published.
+      this.lastProviderError = undefined;
+      this.lastError = '';
       this.output({ type: 'assistant', message: { model: this.options.config.model, content: [{ type: event.method === 'item/agentMessage/delta' ? 'text' : 'thinking', text: p.delta, thinking: p.delta }] } });
     } else if (event.method === 'error') {
       this.lastError = p.error?.message || JSON.stringify(p.error);
+      this.lastProviderError = this.providerError(p.error);
+      if (this.lastProviderError && Object.keys(this.lastProviderError).length) this.output({type:'assistant',isApiErrorMessage:true,error:this.lastProviderError,message:{content:[]}});
     } else if (event.method === 'thread/tokenUsage/updated') {
       this.contextMeasurement = observeCodexContext(this.contextMeasurement ?? codexContextPolicy(this.options.config.model, this.options.config.contextWindow), p.tokenUsage);
       this.nativeUsage = p.tokenUsage?.total;
@@ -460,7 +508,13 @@ export class CodexProcess extends EventEmitter {
     } else if (event.method === 'turn/completed') {
       if (this.turnId && p.turn.id !== this.turnId) return;
       this.turnEnded = true;
-      if (p.turn.status !== 'completed') { this.fail(p.turn.error?.message || this.lastError || `Codex turn ${p.turn.status}`); return; }
+      if (p.turn.status !== 'completed') {
+        // An explicit terminal error supersedes retry diagnostics, including an
+        // unclassified local/request error. Interruptions never open a circuit.
+        const failure = p.turn.status === 'failed'
+          ? p.turn.error != null ? this.providerError(p.turn.error) : this.lastProviderError : undefined;
+        this.fail(p.turn.error?.message || this.lastError || `Codex turn ${p.turn.status}`, failure); return;
+      }
       this.completion = this.completeTurn().catch(error => this.fail(error.message));
     } else if (event.method === 'item/started' || event.method === 'item/completed') {
       const item = p.item;

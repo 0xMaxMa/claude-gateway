@@ -118,6 +118,9 @@ export class TaskService {
       (SELECT id FROM tasks WHERE conversation_id=? AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT 100))
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`, conversationId, conversationId).map(row => {
       const task = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
+      const waiting = task.state === 'queued' && this.store.get('SELECT waiting_json FROM provider_waits WHERE entity_id=?', task.taskId);
+      if (waiting) task.providerWaiting = JSON.parse(String(waiting.waiting_json));
+      else delete task.providerWaiting;
       delete task.skill; // Installed skill bodies are worker-only execution context.
       return this.withRecentTools(task);
     });
@@ -391,6 +394,9 @@ export class TaskService {
     return this.store.transaction(() => {
       const task = this.store.task(taskId);
       if (!task || task.state !== 'queued' || task.activeAttemptId) return undefined;
+      // Cooldown can outlive membership changes. A durable task receipt is not
+      // permission to start execution for a principal who has lost access.
+      if (!this.store.get('SELECT principal_id FROM conversation_members WHERE conversation_id=? AND principal_id=?', task.conversationId, task.ownerPrincipalId)) return undefined;
       if (task.continueTaskId) {
         const prior = this.store.task(task.continueTaskId);
         // Old snapshots retain their terminal-only behavior. New continuations
@@ -659,13 +665,13 @@ export class TaskService {
       return task;
     });
   }
-  deferUnstarted(attemptId: string, generation: number): void {
+  deferUnstarted(attemptId: string, generation: number, reason: 'workspace' | 'provider' = 'workspace'): void {
     this.store.transaction(() => {
       const { task, attempt } = this.active(attemptId, generation);
       if (attempt.state !== 'starting' || task.state !== 'starting') throw new OrchestrationError('STATE_CONFLICT');
       attempt.state = 'ended'; task.activeAttemptId = undefined; task.state = 'queued';
       this.pool.release(task.taskId, false);
-      task.latestProgress = { source: 'runtime', text: 'Waiting for the shared workspace owner to release its lock.', observedAt: Date.now() };
+      task.latestProgress = { source: 'runtime', text: reason === 'provider' ? 'Waiting for provider before starting inference.' : 'Waiting for the shared workspace owner to release its lock.', observedAt: Date.now() };
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
     });
   }

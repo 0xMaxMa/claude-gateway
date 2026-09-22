@@ -574,7 +574,7 @@ describe('Agent HTTP API integration (planning-05)', () => {
   });
 
   // ─── I-API-13: API disabled when no keys configured ───────────────────────
-  it('I-API-13: /api routes return 404 when no API keys are configured', async () => {
+  it('I-API-13: /api routes deny access when no API keys are configured', async () => {
     const ws = createTempWorkspace('api-13-');
     const logDir = createTempDir('api-13-log-');
     const cfg = makeAgentConfig('alfred', ws);
@@ -596,7 +596,10 @@ describe('Agent HTTP API integration (planning-05)', () => {
       .get('/api/v1/agents')
       .set('Authorization', `Bearer ${API_KEY_ADMIN}`);
 
-    expect(res.status).toBe(404);
+    // The router initializes an empty mutable key list for key hot-reload.
+    // Routes remain mounted, but no supplied credential can authenticate.
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Invalid API key' });
 
     await router.stop();
     await runner.stop();

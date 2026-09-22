@@ -34,9 +34,20 @@ export function taskStatusBadge(value: string): string {
  const color=colors[state]||'#737373';
  return '<span class="badge status-badge" style="--status-color:'+color+'">'+dashboardEscape(state.replace(/_/g,' ').replace(/^./,c=>c.toUpperCase()))+'</span>';
 }
+/** Display annotation only: task and session lifecycle badges stay unchanged. */
+export function providerWaitingHtml(value: unknown): string {
+ if (!value || typeof value !== 'object') return '';
+ const wait = value as { state?: string; reason?: string; nextRetryAt?: number; requiresConfigurationChange?: boolean };
+ if (wait.state !== 'waiting_for_provider') return '';
+ const reasons: Record<string,string> = {first_response_timeout:'Response start timed out',transport:'Provider connection unavailable',server:'Provider temporarily unavailable',rate_limit:'Provider rate limit',quota:'Provider quota exhausted',authentication:'Provider authentication needs attention',configuration:'Provider configuration needs attention'};
+ const retry = Number.isSafeInteger(wait.nextRetryAt) && wait.nextRetryAt! > 0 && wait.nextRetryAt! <= 8640000000000000
+  ? ' · Next retry '+new Date(wait.nextRetryAt!).toISOString() : '';
+ const reason = Object.prototype.hasOwnProperty.call(reasons, wait.reason || '') ? reasons[wait.reason!] : 'Provider request paused';
+ return '<span class="provider-wait-note" style="display:block"><strong>Waiting for provider</strong><br><small class="ts">'+dashboardEscape(reason)+dashboardEscape(wait.requiresConfigurationChange === true ? ' · Configuration change required' : retry)+'</small></span>';
+}
 export function toolNameList(names: string[] | null | undefined, harness?: string): string {
  if (!Array.isArray(names)) return '<p class="muted">—</p>';
  if (!names.length) return '<p class="muted">None</p>';
  return '<ul class="tool-name-list">'+[...new Set(names)].sort().map(name=>'<li><code>'+dashboardEscape(harness==='codex'&&name==='Bash'?'Shell':name)+'</code></li>').join('')+'</ul>';
 }
-export const dashboardPresentationClient = 'const dashboardChartPalette='+JSON.stringify(dashboardChartPalette)+';'+compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentHue.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';'+taskStatusBadge.toString()+';'+toolNameList.toString()+';';
+export const dashboardPresentationClient = 'const dashboardChartPalette='+JSON.stringify(dashboardChartPalette)+';'+compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentHue.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';'+taskStatusBadge.toString()+';'+providerWaitingHtml.toString()+';'+toolNameList.toString()+';';

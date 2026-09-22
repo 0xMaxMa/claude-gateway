@@ -8,6 +8,7 @@ import { existsSync } from 'fs';
 import { readTokenReport, summarizeTokenTurns, pendingInputTurns, TokenTurn } from './token-ledger';
 import { normalizeTaskRevisions } from './tasks/task-directive';
 import type { TaskAttempt, TaskRevision } from './types';
+import { readDashboardProviderWait } from './dashboard-provider-wait';
 
 /**
  * Conversation activity status — the single source shared by the dashboard
@@ -53,6 +54,8 @@ function read(filename: string, operation: string, options: Record<string, any>)
   // A read transaction makes the session/task/attempt relationships consistent.
   db.exec('BEGIN');
   try {
+    const hasProviderWaits = exists('provider_waits');
+    const providerWaiting = (entityId: string, state?: string) => readDashboardProviderWait(get, hasProviderWaits, entityId, state);
     const adapter = { all, get, attempt: (id: string) => { const row = get('SELECT payload_json FROM task_attempts WHERE id=?', id); return row ? JSON.parse(row.payload_json) as TaskAttempt : undefined; } };
     if (operation === 'charts') return readDashboardCharts(db, options.scope, options.timezone || 'UTC', options.now);
     if (operation === 'compaction') {
@@ -77,21 +80,24 @@ function read(filename: string, operation: string, options: Record<string, any>)
       if(operation==='session') {
         const session = get('SELECT * FROM conversations WHERE agent_session_id=?',options.sessionId)!;
         const offset=Math.max(0,Number(options.offset)||0);
-        const tasks=all('SELECT id,state,snapshot_json,updated_at FROM tasks WHERE conversation_id=? AND updated_at>=? ORDER BY updated_at DESC,id LIMIT 50 OFFSET ?',session.id,since,offset).map(t=>({taskId:t.id,state:t.state,title:JSON.parse(t.snapshot_json).title,gatewayTarget:JSON.parse(t.snapshot_json).gatewayTarget,updatedAt:t.updated_at}));
+        const tasks=all('SELECT id,state,snapshot_json,updated_at FROM tasks WHERE conversation_id=? AND updated_at>=? ORDER BY updated_at DESC,id LIMIT 50 OFFSET ?',session.id,since,offset).map(t=>({taskId:t.id,state:t.state,providerWaiting:providerWaiting(String(t.id),String(t.state)),title:JSON.parse(t.snapshot_json).title,gatewayTarget:JSON.parse(t.snapshot_json).gatewayTarget,updatedAt:t.updated_at}));
         // Same activity status the Conversations column shows, so the session drawer's
         // Context window box can use the same idle-vs-stopped disambiguation as the report page.
         const activityStatus=conversationActivityStatus(get,all,session.id).status;
-        return {...report,session:{sessionId:session.agent_session_id,source:session.source,chatId:session.chat_id,createdAt:session.created_at,updatedAt:session.updated_at},tasks,totalTasks:Number(get('SELECT COUNT(*) n FROM tasks WHERE conversation_id=? AND updated_at>=?',session.id,since)!.n),offset,activityStatus};
+        return {...report,providerWaiting:providerWaiting('session:'+options.sessionId),session:{sessionId:session.agent_session_id,source:session.source,chatId:session.chat_id,createdAt:session.created_at,updatedAt:session.updated_at},tasks,totalTasks:Number(get('SELECT COUNT(*) n FROM tasks WHERE conversation_id=? AND updated_at>=?',session.id,since)!.n),offset,activityStatus};
       }
       const session=get('SELECT id,source,chat_id FROM conversations WHERE agent_session_id=?',options.sessionId)!;
       // Same activity status the Conversations column shows, so the report header mirrors it.
       const activityStatus=conversationActivityStatus(get,all,session.id).status;
-      return {...report, source:session.source, chatId:session.chat_id, activityStatus, since, contextFootprint:contextFootprint(options.workspace)};
+      return {...report, providerWaiting:providerWaiting('session:'+options.sessionId), source:session.source, chatId:session.chat_id, activityStatus, since, contextFootprint:contextFootprint(options.workspace)};
     }
     if (operation === 'task') {
       const row = get('SELECT t.*,c.agent_session_id FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.id=? AND c.agent_session_id=?', options.taskId, options.sessionId);
       if (!row) return undefined;
       const snapshot = JSON.parse(row.snapshot_json);
+      delete snapshot.providerWaiting;
+      const taskWaiting = providerWaiting(String(row.id), String(row.state));
+      if (taskWaiting) snapshot.providerWaiting = taskWaiting;
       // The assignment text is never stored on the task snapshot — it lives in task_revisions.
       // Read the revisions the worker actually received (appliedRevision, or the newest authored
       // one before the first claim) and normalize them exactly like TaskService.revision() does,
@@ -126,7 +132,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
         const total = summarizeTokenTurns(turns.filter(turn=>turn.taskId===t.id));
         const lastTool = get("SELECT payload_json,occurred_at FROM conversation_events WHERE json_extract(payload_json,'$.task_id')=? AND type='tool.activity' ORDER BY seq DESC LIMIT 1",t.id);
         const tool = lastTool ? JSON.parse(lastTool.payload_json).payload : undefined;
-        return {taskId:t.id,sessionId:c.agent_session_id,title:snapshot.title,state:t.state,updatedAt:t.updated_at,
+        return {taskId:t.id,sessionId:c.agent_session_id,title:snapshot.title,state:t.state,updatedAt:t.updated_at,providerWaiting:providerWaiting(String(t.id),String(t.state)),
           createdAt:t.created_at, executionType:snapshot.gatewayTarget?'gateway-managed':'worker',gatewayTarget:snapshot.gatewayTarget,execution:snapshot.execution, workerId:attempt?.workerId, attemptId:attempt?.attemptId,
           workerSessionId:snapshot.gatewayTarget?undefined:attempt?.sessionId,targetSessionId:snapshot.gatewayTarget?.sessionId, resumed:attempt?.resumeSession, workstreamId:snapshot.workstreamId,
           continueTaskId:snapshot.continueTaskId,hostProcessId:t.active_attempt_id?attempt?.processIdentity?.pid:undefined,
@@ -135,7 +141,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
       });
       const {status:state, thinking} = conversationActivityStatus(get, all, c.id);
       const totalTokens = agent.totalTokens===null&&workers.totalTokens===null ? null : (agent.totalTokens??0)+(workers.totalTokens??0);
-      return {sessionId:c.agent_session_id,chatId:c.chat_id,source:c.source,orchestration:true,mode:'headless',status:state,isRunning:thinking,
+      return {sessionId:c.agent_session_id,chatId:c.chat_id,source:c.source,orchestration:true,mode:'headless',status:state,isRunning:thinking,providerWaiting:providerWaiting('session:'+c.agent_session_id),
         model:turns.filter(t=>t.role==='agent'&&t.model).at(-1)?.model??'',updatedAt:c.updated_at,createdAt:c.created_at,
         tokenSummary:{agentTokens:agent.totalTokens,workerTokens:workers.totalTokens,totalTokens},contextTools:agent.contextTools,loadedTools:agent.loadedTools,usedTools:agent.usedTools,
         tasks,totalTasks:Number(get('SELECT COUNT(*) n FROM tasks WHERE conversation_id=? AND updated_at>=?',c.id,since)!.n),
@@ -143,7 +149,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
     });
     const today=dashboardSince('24h',Date.now(),options.timezone || 'UTC');
     const attention=all(`SELECT t.id taskId,t.state,t.snapshot_json,c.agent_session_id sessionId FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.updated_at>=? AND t.state IN ('waiting_input','needs_reconciliation') ORDER BY t.updated_at DESC LIMIT 8`,since).map(t=>({taskId:t.taskId,state:t.state,sessionId:t.sessionId,title:JSON.parse(t.snapshot_json).title,gatewayTarget:JSON.parse(t.snapshot_json).gatewayTarget}));
-    const recentWork=all(`SELECT t.id taskId,t.state,t.snapshot_json,t.updated_at updatedAt,c.agent_session_id sessionId FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.updated_at>=? ORDER BY t.updated_at DESC,t.id DESC LIMIT 6`,today).map(t=>({taskId:t.taskId,state:t.state,sessionId:t.sessionId,updatedAt:t.updatedAt,title:JSON.parse(t.snapshot_json).title,gatewayTarget:JSON.parse(t.snapshot_json).gatewayTarget}));
+    const recentWork=all(`SELECT t.id taskId,t.state,t.snapshot_json,t.updated_at updatedAt,c.agent_session_id sessionId FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.updated_at>=? ORDER BY t.updated_at DESC,t.id DESC LIMIT 6`,today).map(t=>({taskId:t.taskId,state:t.state,providerWaiting:providerWaiting(String(t.taskId),String(t.state)),sessionId:t.sessionId,updatedAt:t.updatedAt,title:JSON.parse(t.snapshot_json).title,gatewayTarget:JSON.parse(t.snapshot_json).gatewayTarget}));
     const pool = exists('worker_pool') ? all('SELECT * FROM worker_pool') : [];
     return {attention,recentWork,managedLegacyIds:all('SELECT agent_session_id FROM conversations WHERE agent_session_id IN (SELECT value FROM json_each(?))',JSON.stringify(options.legacyIds??[])).map(c=>c.agent_session_id),enabled:true,backend:'headless',workspaceMode:options.workspaceMode,sessions,tasks:sessions.flatMap(s=>s.tasks),
       pagination:{offset,limit,total:Number(get('SELECT COUNT(*) n FROM conversations WHERE updated_at>=?',since)!.n)},

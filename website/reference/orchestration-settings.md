@@ -29,6 +29,62 @@ This is an agent-entry fragment. Keep the agent's existing workspace, Claude mod
 
 ## Conversation processing
 
+### Provider admission
+
+`providerAdmission` is a sibling of `conversation` and `tasks`. It shares a durable
+cooldown across conversations, task reports and queued workers using the same
+resolved provider scope. A new notification ID or user message does not bypass
+the cooldown. Existing workers continue running; reporting failures never retry
+their task revisions or replay committed tool effects.
+
+| Field under `providerAdmission` | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | Apply provider admission before inference and worker claim |
+| `failureThreshold` | `3` | Consecutive qualifying failures before opening a transient circuit (maximum 100) |
+| `initialCooldownMs` | `120000` | Initial transient cooldown |
+| `secondCooldownMs` | `300000` | Cooldown after a failed recovery probe |
+| `maxCooldownMs` | `900000` | Cooldown for subsequent failed recovery probes |
+| `probeLeaseMs` | `120000` | Renewable single-probe lease; a crashed owner expires (minimum 1000) |
+| `recoverySpacingMs` | `1000` | Spacing between three successful real inference probes before unrestricted admission |
+| `recoveryGeneration` | `1` | Operator-controlled identity generation; increment after fixing a blocked route to permit recovery |
+
+Cooldowns must be positive bounded integers in ascending order. Settings follow
+the normal configuration reload path. Restarting does not erase an outage:
+`provider-admission.db` is stored under the gateway's agents directory. Configure
+the same policy for agents intentionally sharing a route/account. The component
+stores opaque scope hashes, categories, timestamps, counters and leases, not
+credentials, provider response bodies or prompts.
+
+Scope includes endpoint path, authentication identity and model/context tier.
+Explicit unambiguous container credentials and explicit Codex endpoints can share
+across agents. Unknown native CLI/keyring/project settings are conservatively
+isolated by agent and execution context; the gateway does not assume all Claude
+or Codex processes use one account. Credential or route changes select a new
+scope. No synthetic paid inference or unauthenticated health request is used.
+
+Only structured provider errors drive authentication, quota, rate-limit, server
+and transport categories. Provider `Retry-After`/reset metadata, when available,
+extends the cooldown. First-response timeouts use the conservative scope and do
+not prove a provider-wide outage. Local startup errors, cancellation, idle tool
+waits and display prose do not open a provider circuit. Native provider error
+messages do not renew the first-response deadline.
+
+Authentication/model configuration errors and quota failures without a known
+reset time remain blocked. After repairing credentials, model configuration or
+billing, increment `recoveryGeneration` through normal configuration management.
+Disabling `enabled` bypasses admission; use it only as an explicit operator
+override. Neither action authorizes replay of failed/ambiguous task effects.
+
+Pending inputs retain their original attachments, order, principal and execution
+permissions in the existing bounded mailbox. `/stop` can cancel a waiting reply;
+task controls remain local and usable. Task results and questions remain pending
+until their normal reporting path succeeds. A conversation receives one text-only
+waiting notice per scope/outage, and a recovery notice after successful recovery.
+These notices use the existing channel delivery outbox and do not invoke model
+inference or TTS. The dashboard and activity API expose `providerWaiting` with a
+safe category and next retry time while keeping the task's lifecycle state intact.
+Withheld inputs do not create failed token turns or fabricated zero-usage rows.
+
 | Field under `conversation` | Runtime default | Meaning |
 | --- | --- | --- |
 | `backend` | `inherit` | Use the configured Claude Code backend/model; no alternative backend name is supported |

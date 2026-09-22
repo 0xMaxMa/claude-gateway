@@ -1,4 +1,4 @@
-import { resolveCodexCredentials, CodexReadinessError } from '../../session/codex-auth';
+import { resolveCodexCredentials, CodexReadinessError, CodexCredentials } from '../../session/codex-auth';
 import { resolveCodexRuntime } from '../../session/codex-runtime';
 import { inspectSelectedCodexRuntime } from '../../session/codex-container-runtime';
 import { recordTokenTurn } from '../token-ledger';
@@ -34,6 +34,8 @@ import { randomUUID } from 'crypto';
 import { gatewayCapacity } from '../capacity';
 import { resolveSharedConfig, sharedVaultDir } from '../../agent/knowledge';
 import { MediaStore } from '../../history/media-store';
+import { providerFailure, ProviderPermit } from '../provider-admission';
+import type { ResolvedCodexProviderIdentity } from '../provider-scope';
 
 function boundedDiffText(text: string): string {
   let result = text.slice(0, 8192);
@@ -44,7 +46,8 @@ function boundedDiffText(text: string): string {
 export class ClaudeWorkerDriver implements WorkerDriver {
   private readonly instanceId = randomUUID();
   constructor(private readonly agent: AgentConfig, private readonly gateway: GatewayConfig, private readonly tasks: TaskService,
-    private readonly bridge: TaskBridge, private readonly workspaces: TaskWorkspaces, private readonly privateRoot: string, private readonly onManagedTurn?: (sessionId: string, text: string, metrics: import('../process-turn').ManagedTurnMetrics, skills?: string[]) => void) {}
+    private readonly bridge: TaskBridge, private readonly workspaces: TaskWorkspaces, private readonly privateRoot: string, private readonly onManagedTurn?: (sessionId: string, text: string, metrics: import('../process-turn').ManagedTurnMetrics, skills?: string[]) => void,
+    private readonly revalidateProvider?: (task: TaskSnapshot, permit: ProviderPermit, harness: 'claude' | 'codex', model?: string, resolvedIdentity?: ResolvedCodexProviderIdentity) => void) {}
   async cleanup(attempt: TaskAttempt): Promise<boolean> {
     // Stopping a docker client does not prove its container execution stopped.
     if (this.agent.type === 'app-agent') return false;
@@ -53,7 +56,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
   reserve(taskId: string): (() => void) | undefined { return gatewayCapacity(this.gateway).acquireWorker(this.agent.id, taskId); }
   available(taskId: string): boolean { return this.workspaces.available(taskId); }
   release(taskId: string): Promise<void> { return this.workspaces.release(taskId); }
-  async start(task: TaskSnapshot, attempt: TaskAttempt, capacityReserved = false): Promise<WorkerHandle> {
+  async start(task: TaskSnapshot, attempt: TaskAttempt, capacityReserved = false, providerPermit?: ProviderPermit): Promise<WorkerHandle> {
     if (!['default-worker', 'media-worker', 'skill-worker'].includes(task.targetProfile) || !task.capabilities.execute) throw new OrchestrationError('EXECUTION_DENIED');
     if (task.targetProfile === 'default-worker' && task.resourceProfile?.mode === 'shared-lock') {
       const [project, identity] = await Promise.all([realpath(task.resourceProfile.projectRoot), realpath(this.agent.workspace)]);
@@ -69,6 +72,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const directory = join(this.privateRoot, attempt.attemptId);
     let harness = resolveWorkerHarness(this.agent, this.gateway, task.model ?? this.agent.claude.model);
     let authFingerprint: string | undefined;
+    let resolvedCredentials: Readonly<CodexCredentials> | undefined;
     if (harness.harness === 'codex') {
       try {
         if (task.skill?.invocation === 'cli' && !task.skill.filePath) {
@@ -78,12 +82,16 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         }
         if (task.skill?.invocation === 'cli' && !task.skill.filePath) throw new CodexReadinessError('CODEX_SKILL_UNAVAILABLE', 'The native command has no installed skill file to transfer to Codex.');
         const runtime = resolveCodexRuntime(harness.config.bin, this.agent.workspace);
-        authFingerprint = (await resolveCodexCredentials({ ...harness.config, bin: runtime.executable, allowDockerHost: this.agent.type === 'app-agent' })).fingerprint;
+        const credentials = await resolveCodexCredentials({ ...harness.config, bin: runtime.executable, allowDockerHost: this.agent.type === 'app-agent' });
+        resolvedCredentials = Object.freeze({ ...credentials, ...(credentials.chatgpt ? { chatgpt: Object.freeze({ ...credentials.chatgpt }) } : {}) });
+        authFingerprint = resolvedCredentials.fingerprint;
         if (this.agent.type === 'app-agent') await inspectSelectedCodexRuntime(this.agent, runtime);
       } catch (error) {
         const selector = this.agent.workers?.harness ?? this.gateway.gateway.workers?.harness ?? 'auto';
         if (selector !== 'auto' || attempt.harness) throw error;
         harness = { ...harness, harness: 'claude' };
+        resolvedCredentials = undefined;
+        authFingerprint = undefined;
         this.tasks.store.transaction(() => this.tasks.store.appendEvent(task.conversationId, 'worker.harness_fallback',
           { taskId: task.taskId, from: 'codex', to: 'claude', reason: error instanceof CodexReadinessError ? error.code : 'CODEX_RUNTIME_UNAVAILABLE' }, task.taskId));
       }
@@ -143,7 +151,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         claude: { ...this.agent.claude, model: task.model ?? this.agent.claude.model, extraFlags: [] } };
       const process = harness.harness === 'codex'
         ? new CodexProcess({ agent: workerConfig, gateway: this.gateway, profile, sessionId: attempt.sessionId,
-          stateDirectory: join(this.privateRoot, 'codex-sessions'), config: harness.config,
+          stateDirectory: join(this.privateRoot, 'codex-sessions'), config: harness.config, resolvedCredentials,
           requestInput: question => { this.tasks.requestInput(attempt.attemptId, attempt.generation, question); },
           checkpoint: async () => {
             const next = this.tasks.checkpoint(attempt.attemptId, attempt.generation, { sessionId: attempt.sessionId });
@@ -205,6 +213,11 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       const sampler = new ProcessActivitySampler(() => process.managedProcessId, this.agent.type !== 'app-agent');
       let observing = false, observationClosed = false, lastActivityAt = Date.now();
       const limits = resolveOrchestrationConfig(this.agent.orchestration);
+      // Pin the model that admission considered; do not re-read a different
+      // agent default from disk between claim and actual inference.
+      if (process instanceof SessionProcess) process.modelOverride = workerConfig.claude.model;
+      if (providerPermit) this.revalidateProvider?.(task, providerPermit, harness.harness, task.model ?? workerConfig.claude.model,
+        harness.harness === 'codex' && resolvedCredentials ? { fingerprint: resolvedCredentials.fingerprint, model: harness.config.model, contextWindow: harness.config.contextWindow } : undefined);
       const turn = startProcessTurn(process, prompt, limits.tasks.maxDurationMs || undefined, undefined,
         metrics => {
           recordTokenTurn(this.tasks.store, { id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics, harness: attempt.harness });
@@ -252,10 +265,11 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       }).catch(async error => {
         await process.stop();
         const failure = taskFailure(error);
+        failure.provider = providerFailure(error);
         if (error?.timeout) failure.message = `Worker timeout: phase=${error.timeout.phase}, elapsed=${Math.round(error.timeout.elapsedMs / 1000)}s, idle=${Math.round(error.timeout.idleMs / 1000)}s. Inspect existing changes before continuing.`;
         return {type: process.managedGroupStopped ? 'failed' as const : 'unknown' as const, failure};
       }).finally(async () => { observationClosed = true; ticket.revoke(); await process.stop(); });
-      return { accepted: turn.accepted, result,
+      return { accepted: turn.accepted, providerReady: turn.providerReady, result,
         identity: () => process.managedProcessId ? { pid: process.managedProcessId, startedAt: process.spawnedAt, instanceId: this.instanceId, ...processFingerprint(process.managedProcessId) } : undefined,
         stop: async () => { stopping = true; await turn.stop(); } };
     } catch (error) { ticket.revoke(); throw error; }
