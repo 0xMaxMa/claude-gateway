@@ -1,4 +1,4 @@
-## Committed input stream and immediate admission
+# Committed input stream and immediate admission
 
 The agents listing advertises `chat_input_stream: true` for orchestration agents. Clients must gate the new composer admission flow on this capability; older gateways retain normal foreground sending and history polling.
 

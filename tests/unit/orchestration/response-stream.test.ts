@@ -36,6 +36,9 @@ test.each([false,true])('real runtime publishes incremental response text before
     pendingApiSessions: new Set([sid]), logger: { warn: jest.fn() },
     getOrchestration: async () => runtime,
   }) as AgentRunner;
+  await expect(facade.acceptApiMessage(sid, 'getpod', 'Forbidden', {
+    timeoutMs: 5000, principalId: 'intruder', clientMessageId: randomUUID(),
+  })).rejects.toThrow();
   const clientMessageId = randomUUID();
   const inputId = await facade.acceptApiMessage(sid, 'getpod', 'A follow-up while speaking', {
     timeoutMs: 5000, principalId: 'owner', clientMessageId,
