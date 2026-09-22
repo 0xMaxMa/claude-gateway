@@ -196,3 +196,10 @@ test('browser continuation omits initial navigation, but pre-dispatch revisions 
   expect(f.run.mock.calls[0][0].startUrl).toBe(appliedRevision===0?'https://example.com/':undefined);
  }
 });
+test.each(['BROWSER_INSPECTION_DENIED','private arbitrary upstream text'])('inspection failures stay typed and redact untrusted prose: %s',async message=>{
+ const binding:BrowserTaskBinding={version:1,id:'target',name:'Browser',principalId:'owner',conversationId:'chat',run:async()=>complete,inspect:async()=>{throw Error(message);}};
+ const a=new BrowserTaskAdapter({agentId:'alpha',root:dir,allowed:()=>true,bindings:()=>[binding],evaluate:jest.fn()});adapters.push(a);
+ const t=task({gatewayDispatch:{requestId:'r',submittedAt:Date.now()}});await a.submit(t,'r','goal');await settle(a,t);
+ await expect(a.evidence(t,true)).rejects.toMatchObject({code:message.startsWith('BROWSER_')?message:'BROWSER_INSPECTION_UNAVAILABLE'});
+ await expect(a.evidence(t,true)).rejects.not.toThrow('private arbitrary');
+});

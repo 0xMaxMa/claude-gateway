@@ -157,7 +157,17 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       const authorized=()=>{try{return this.options.allowedEvidence?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
       const inspectionResult=receipt.lastDispatchedMutation && (!receipt.browserResult?.lastAction || receipt.browserResult.lastAction.operationId!==receipt.lastDispatchedMutation.operationId)
         ? {lastAction:{...receipt.lastDispatchedMutation,outcome:'unknown' as const}} : receipt.browserResult;
-      evidence.fresh=await binding.inspect(inspectionResult,signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000),authorized);
+      try {
+        evidence.fresh=await binding.inspect(inspectionResult,signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000),authorized);
+      } catch(error) {
+        if(error instanceof OrchestrationError)throw error;
+        // Do not collapse an unavailable browser into a malformed agent request,
+        // and never forward arbitrary MCP/provider text into the conversation.
+        const code=error instanceof Error ? error.message : '';
+        const known=['BROWSER_INSPECTION_FAILED','BROWSER_INSPECTION_DENIED','BROWSER_EVIDENCE_INVALID','BROWSER_EVIDENCE_TOO_LARGE','ACCESS_DENIED'];
+        throw new OrchestrationError(known.includes(code)?code:'BROWSER_INSPECTION_UNAVAILABLE',
+          'Fresh browser inspection could not complete. Check the connector, extension readiness and granted tab before continuing; no browser action was dispatched by this inspection.');
+      }
       signal?.throwIfAborted();
       if(!authorized())throw new OrchestrationError('ACCESS_DENIED');
       evidence.evidenceId=randomUUID();
