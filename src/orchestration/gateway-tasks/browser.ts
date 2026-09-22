@@ -41,7 +41,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     await this.options.refreshBindings?.(context);
     if(!this.options.allowed())throw new OrchestrationError('BROWSER_NOT_ALLOWED');
     const bindings=this.options.bindings().filter(b=>b.version===1&&b.principalId===context.principalId&&b.conversationId===context.conversationId&&`${b.id} ${b.name}`.toLowerCase().includes(query.toLowerCase()));
-    return {hint:bindings.length ? undefined : 'No approved browser tab is ready. Approve the access request in the browser extension, then discover again. Do not fall back to direct browser tools.',targets:bindings.slice(offset,offset+25).map(b=>({adapter:'browser',session_id:b.id,name:b.name,version:1})),next_offset:offset+25<bindings.length?offset+25:null};
+    return {scope:'browser',instruction:'Use task_spawn with target_profile=gateway-managed and gateway_target={adapter:browser,session_id:<target ID>}. Browser targets are supported; do not use safemode or a direct MCP worker.',hint:bindings.length ? undefined : 'No approved browser tab is ready. Approve the access request in the browser extension, then discover again. Do not fall back to direct browser tools.',targets:bindings.slice(offset,offset+25).map(b=>({adapter:'browser',session_id:b.id,name:b.name,version:1})),next_offset:offset+25<bindings.length?offset+25:null};
   }
   resolve(input:Record<string,unknown>,context?:CommandContext):GatewayTaskTarget {
     if(!context||Object.keys(input).some(k=>!['adapter','session_id'].includes(k))||typeof input.session_id!=='string')throw new OrchestrationError('INVALID_GATEWAY_TARGET');
