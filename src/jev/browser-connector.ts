@@ -101,7 +101,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       call,
       evaluate: async(request,signal) => { assertAccess(); const response = await context.evaluate(request,signal); assertAccess(); return {model:response.model,answers:response.answers}; },
       progress: event => { assertAccess(); context.progress(event); },
-      ...(module.verifyBrowserTask ? {verify:async(observation:unknown,signal:AbortSignal) => {assertAccess();const verified = await module.verifyBrowserTask!(context.goal,observation,signal);assertAccess();signal.throwIfAborted();independentlyVerified=verified===true;return independentlyVerified;}} : {}),
+      ...(module.verifyBrowserTask ? {verify:async(observation:unknown,signal:AbortSignal) => {assertAccess();const verified = await module.verifyBrowserTask!(context.goal,observation,signal);assertAccess();signal.throwIfAborted();independentlyVerified=validateBrowserVerification(verified);return independentlyVerified;}} : {}),
       ...(module.resolveFieldText ? {resolveFieldText:async(request:unknown,signal:AbortSignal) => {assertAccess();const text = await module.resolveFieldText!(request,signal);assertAccess();return text;}} : {}),
     }, context.signal);
     if (result.status === 'succeeded') {
@@ -110,6 +110,12 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
     }
     return result;
   } finally { await client.close().catch(() => {}); }
+}
+
+/** Optional installed hooks are runtime values, even when their declarations promise boolean. */
+export function validateBrowserVerification(value: unknown): boolean {
+  if (typeof value !== 'boolean') throw Object.assign(new Error('Invalid browser verifier result.'), {code:'INVALID_CONTRACT'});
+  return value;
 }
 
 function browserTransport(connection: BrowserConnection): StreamableHTTPClientTransport {

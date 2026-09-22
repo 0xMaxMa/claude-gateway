@@ -1,4 +1,4 @@
-import {inspectBrowser,resolveBrowserConnection} from '../../../src/jev/browser-connector';
+import {inspectBrowser,resolveBrowserConnection,validateBrowserVerification} from '../../../src/jev/browser-connector';
 import {customSecretKey} from '../../../src/connectors/custom';
 const mockCall=jest.fn(),mockClose=jest.fn(async()=>{}),mockTokens:Record<string,string>={};
 jest.mock('@modelcontextprotocol/sdk/client/index.js',()=>({Client:jest.fn().mockImplementation(()=>({connect:async()=>{},callTool:mockCall,close:mockClose}))}));
@@ -37,4 +37,11 @@ test('revocation during observation rejects evidence while still releasing owned
  let allowed=true;mockCall.mockImplementation(async({name})=>{if(name==='page_observe')allowed=false;return reply(name==='browser_task_acquire'?{state:'completed',result:{protocol_version:1,lease_token:lease}}:observation);});
  await expect(inspectBrowser(binding,undefined,new AbortController().signal,()=>allowed,connection)).rejects.toThrow('ACCESS_DENIED');
  expect(mockCall.mock.calls.at(-1)?.[0].name).toBe('browser_task_release');
+});
+
+test('malformed installed verifier results retain INVALID_CONTRACT rather than becoming false',()=>{
+ for(const value of ['false',{verified:false},0,null,undefined]){
+  try{validateBrowserVerification(value);throw Error('accepted');}catch(e){expect(e).toMatchObject({code:'INVALID_CONTRACT'});}
+ }
+ expect(validateBrowserVerification(false)).toBe(false);expect(validateBrowserVerification(true)).toBe(true);
 });
