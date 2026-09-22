@@ -9,23 +9,24 @@ import { randomUUID } from 'crypto';
 import type { AgentConfig } from '../types';
 import { OrchestrationStore, Row } from './store';
 import { sendChannelFile, ChannelFile } from './file-delivery';
+import { handleLineRejection, lineRetryBackoffMs, LINE_RATE_LIMIT_MAX_ATTEMPTS } from './line-quota';
 
-export type DeliveryOutcome = { state: 'delivered'; providerId?: string } | { state: 'failed' | 'unknown'; code: string; speechSynthesisFailed?: boolean };
+export type DeliveryOutcome = { state: 'delivered'; providerId?: string } | { state: 'failed' | 'unknown'; code: string; speechSynthesisFailed?: boolean; retryAfterMs?: number };
 export type DeliveryControl = { label: string; data: string };
 export type ChannelSender = (binding: Row, text: string, deliveryId: string, file?: ChannelFile, speech?: SpeechDelivery, textFormat?: 'HTML' | 'text', controls?: DeliveryControl[]) => Promise<DeliveryOutcome>;
 
 /** A transport receipt means provider acceptance, never that a human read it.
  * Ambiguous network failures are retained for reconciliation, not blind retry. */
-export function channelSender(config: AgentConfig | (() => AgentConfig), request: typeof fetch = fetch, speechEnabled: (binding: Row, speech: SpeechDelivery) => boolean = () => true, linkedSender?: ChannelSender): ChannelSender {
+export function channelSender(config: AgentConfig | (() => AgentConfig), request: typeof fetch = fetch, speechEnabled: (binding: Row, speech: SpeechDelivery) => boolean = () => true, linkedSender?: ChannelSender, pendingLineGroupSize: () => number = () => 0): ChannelSender {
   return async (binding, text, id, file, speech, textFormat, controls) => {
     const agent = typeof config === 'function' ? config() : config;
-    if (speech) return sendChannelSpeech(agent, binding, speech, id, request, undefined, () => speechEnabled(binding, speech));
+    if (speech) return sendChannelSpeech(agent, binding, speech, id, request, undefined, () => speechEnabled(binding, speech), pendingLineGroupSize);
     if (['whatsapp', 'wechat'].includes(String(binding.channel))) {
       if (!linkedSender) return {state: 'failed', code: 'DELIVERY_NOT_CONFIGURED'};
       // Question callers include plain commands for transports without native controls.
       return linkedSender(binding, text, id, file, speech, textFormat);
     }
-    if (file) return sendChannelFile(agent, binding, file, id, request);
+    if (file) return sendChannelFile(agent, binding, file, id, request, undefined, pendingLineGroupSize);
     const source = String(binding.channel), chat = String(binding.chat_id), thread = String(binding.thread_key);
     let url: string, body: object;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -68,6 +69,12 @@ export function channelSender(config: AgentConfig | (() => AgentConfig), request
         }
       }
       if (source === 'line' && response.status === 409 && response.headers.get('x-line-accepted-request-id')) return { state: 'delivered', providerId: response.headers.get('x-line-accepted-request-id')! };
+      if (source === 'line' && response.status === 429) {
+        const { code, retryAfterMs } = await handleLineRejection(agent.id, agent.line!.channelAccessToken, request, response, pendingLineGroupSize);
+        // Quota exhaustion and unclassified rejections stay terminal; only a confirmed
+        // rate limit is worth a bounded, backed-off retry (see DeliveryOutbox.run).
+        return { state: 'failed', code, retryAfterMs };
+      }
       if (!response.ok) return { state: response.status >= 500 ? 'unknown' : 'failed', code: `PROVIDER_HTTP_${response.status}` };
       const result = await response.json() as { ok?: boolean; error?: unknown; messages?: Array<{id: string}>; id?: string; ts?: string; result?: { message_id?: number }; sentMessages?: Array<{ id: string }> };
       if (result.ok === false || result.error) return { state: 'failed', code: 'PROVIDER_REJECTED' };
@@ -160,7 +167,7 @@ export class DeliveryOutbox {
     const ceiling = Number(this.store.get('SELECT COALESCE(MAX(rowid),0) n FROM outbox')!.n);
     let cursor = 0, sent = 0;
     while (sent < 20) {
-      const rows = this.store.all("SELECT rowid AS sequence,* FROM outbox WHERE kind='delivery' AND state='pending' AND rowid>? AND rowid<=? ORDER BY rowid LIMIT 20", cursor, ceiling);
+      const rows = this.store.all("SELECT rowid AS sequence,* FROM outbox WHERE kind='delivery' AND state='pending' AND available_at<=? AND rowid>? AND rowid<=? ORDER BY rowid LIMIT 20", Date.now(), cursor, ceiling);
       if (!rows.length) break;
       for (const row of rows) {
         cursor = Number(row.sequence);
@@ -171,7 +178,18 @@ export class DeliveryOutbox {
         const binding = this.store.get('SELECT * FROM conversation_bindings WHERE id=?', delivery.binding_id)!;
         if (delivery.modality === 'speech') {
           const textRows = this.store.all("SELECT state FROM deliveries WHERE response_id=? AND modality='text'", delivery.response_id);
-          if (!textRows.length || textRows.some(text => text.state !== 'delivered')) continue;
+          if (!textRows.length || textRows.some(text => text.state === 'pending' || text.state === 'sending')) continue;
+          // A permanently failed text leaves nothing for speech to follow — stop it
+          // from waiting on 'delivered' forever and surface why (issue #524).
+          if (textRows.some(text => text.state === 'failed' || text.state === 'unknown')) {
+            this.store.transaction(() => {
+              if (!this.store.get("SELECT id FROM outbox WHERE id=? AND state='pending'", row.id) || !this.store.get("SELECT id FROM deliveries WHERE id=? AND state='pending'", id)) return;
+              this.store.run("UPDATE deliveries SET state='failed',updated_at=? WHERE id=?", Date.now(), id);
+              this.store.run("UPDATE outbox SET state='failed',last_error=? WHERE id=?", 'TEXT_DELIVERY_FAILED', row.id);
+              console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Speech blocked by failed text delivery', agentId: this.store.agentId, channel: binding.channel, referenceId: id }));
+            });
+            continue;
+          }
         }
         // Text must never wait behind an early speech row (including rows from older runtimes).
         const earlier = payload.speechFailureFor ? undefined : this.store.get(`SELECT id FROM deliveries WHERE response_id=? AND rowid < (SELECT rowid FROM deliveries WHERE id=?)
@@ -188,11 +206,26 @@ export class DeliveryOutbox {
         });
         if (!claimed) continue;
         sent++;
-        const result = await (delivery.modality === 'speech'
+        const attemptNumber = Number(row.attempt_count) + 1;
+        const result: DeliveryOutcome = await (delivery.modality === 'speech'
           ? this.send(binding, '', id, undefined, JSON.parse(String(delivery.delivered_text)))
           : this.send(binding, delivery.modality === 'text' ? String(delivery.delivered_text) : '', id,
             delivery.modality === 'text' ? undefined : JSON.parse(String(delivery.delivered_text)), undefined, payload.textFormat, payload.controls)).catch(() => ({ state: 'unknown' as const, code: 'PROVIDER_RECEIPT_UNKNOWN' }));
         this.store.transaction(() => {
+          // A rate limit (never quota exhaustion) gets a bounded, backed-off retry —
+          // but only for text. Retrying a speech/file delivery re-runs TTS synthesis
+          // or mints a fresh share URL from scratch (see sendChannelSpeech/
+          // sendChannelFile), which is neither the "identical send" this retry
+          // assumes nor free; only text's retry is a genuine resend of the same body.
+          // The same deliveryId is reused as LINE's retry key either way, so a text
+          // retry is never a blind replay of a stale response.
+          // LINE's own Retry-After (when present) wins over the fixed schedule so a
+          // longer cooldown isn't retried into early and burned for nothing.
+          if (delivery.modality === 'text' && result.state !== 'delivered' && result.code === 'LINE_RATE_LIMITED' && attemptNumber < LINE_RATE_LIMIT_MAX_ATTEMPTS) {
+            this.store.run("UPDATE outbox SET state='pending',available_at=?,last_error=? WHERE id=?", Date.now() + (result.retryAfterMs ?? lineRetryBackoffMs(attemptNumber)), result.code, row.id);
+            this.store.run("UPDATE deliveries SET state='pending',updated_at=? WHERE id=?", Date.now(), id);
+            return;
+          }
           this.store.run('UPDATE deliveries SET state=?,provider_message_id=?,updated_at=? WHERE id=?', result.state, result.state === 'delivered' ? result.providerId ?? null : null, Date.now(), id);
           this.store.run('UPDATE outbox SET state=?,last_error=? WHERE id=?', result.state === 'delivered' ? 'completed' : result.state, result.state === 'delivered' ? null : result.code, row.id);
           if (delivery.modality === 'speech' && result.state === 'failed' && result.speechSynthesisFailed) {

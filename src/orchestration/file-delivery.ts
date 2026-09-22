@@ -7,6 +7,7 @@ import type { Row } from './store';
 import type { DeliveryOutcome } from './delivery';
 import { MediaStore } from '../history/media-store';
 import { ShareStore, shareEnv, validateShareFile, detectShareMime, detectAudioMime } from '../share/share-store';
+import { handleLineRejection } from './line-quota';
 
 export interface ChannelFile { path: string; name: string; kind: 'image' | 'file' | 'audio'; caption: string; durationMs?: number; }
 export function resolveChannelFile(agent: AgentConfig, file: ChannelFile): {path: string; bytes: Buffer} {
@@ -21,7 +22,7 @@ export function resolveChannelFile(agent: AgentConfig, file: ChannelFile): {path
   } catch { throw new Error('ATTACHMENT_UNAVAILABLE'); }
   return {path, bytes};
 }
-export async function sendChannelFile(agent: AgentConfig, binding: Row, file: ChannelFile, id: string, request: typeof fetch, enabled: () => boolean = () => true): Promise<DeliveryOutcome> {
+export async function sendChannelFile(agent: AgentConfig, binding: Row, file: ChannelFile, id: string, request: typeof fetch, enabled: () => boolean = () => true, pendingLineGroupSize: () => number = () => 0): Promise<DeliveryOutcome> {
   if(!enabled())return {state:'failed',code:'VOICE_REPLY_DISABLED'};
   const agentsRoot = join(agent.workspace, '../..');
   const source = String(binding.channel), chat = String(binding.chat_id), thread = String(binding.thread_key);
@@ -89,6 +90,12 @@ export async function sendChannelFile(agent: AgentConfig, binding: Row, file: Ch
       if(!enabled())return {state:'failed',code:'VOICE_REPLY_DISABLED'};
       response = await call('https://api.line.me/v2/bot/message/push', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agent.line.channelAccessToken}`, 'X-Line-Retry-Key': id }, body: JSON.stringify({ to: chat, messages: [message] }) });
       if (response.status === 409 && response.headers.get('x-line-accepted-request-id')) return { state: 'delivered', providerId: response.headers.get('x-line-accepted-request-id')! };
+      // Same classification/backoff as a text push (issue #524) — this endpoint shares
+      // the identical per-channel LINE push quota, so image/audio pushes need it too.
+      if (response.status === 429) {
+        const { code, retryAfterMs } = await handleLineRejection(agent.id, agent.line.channelAccessToken, request, response, pendingLineGroupSize);
+        return { state: 'failed', code, retryAfterMs };
+      }
     } else return { state: 'failed', code: 'DELIVERY_NOT_CONFIGURED' };
     if (!response.ok) return { state: response.status >= 500 ? 'unknown' : 'failed', code: `PROVIDER_HTTP_${response.status}` };
     const result = await response.json() as { ok?: boolean; error?: unknown; messages?: Array<{id: string}>; id?: string; result?: { message_id?: number }; files?: Array<{ id: string }>; sentMessages?: Array<{ id: string }> };

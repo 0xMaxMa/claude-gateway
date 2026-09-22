@@ -159,7 +159,10 @@ export class AgentOrchestrationRuntime {
     this.taskControls = new TaskControls(store, tasks);
     this.stopControls = new StopControls(store, tasks, id => this.stopResponse(id));
     this.channelControls = new ChannelControls(store,this.taskControls,this.stopControls,new TelegramVoices(store,()=>this.config.voice.tts,voiceChoices,8),()=>(this.config.voice.enabled && this.config.voice.notes.replyWithVoice));
-    this.delivery = new DeliveryOutbox(store, channelSender(() => this.agent, fetch, (binding, speech) => Boolean(this.config.enabled && this.config.channels.includes(String(binding.channel) as any) && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && voiceReplyAllowed(store.channelVoiceMode(String(binding.channel),String(binding.chat_id),String(binding.thread_key??'')), speech.voiceOrigin === true) && canonicalVoiceProvider(this.config.voice.tts.provider) === canonicalVoiceProvider(speech.provider)), host.sendLinkedChannel));
+    this.delivery = new DeliveryOutbox(store, channelSender(() => this.agent, fetch, (binding, speech) => Boolean(this.config.enabled && this.config.channels.includes(String(binding.channel) as any) && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && voiceReplyAllowed(store.channelVoiceMode(String(binding.channel),String(binding.chat_id),String(binding.thread_key??'')), speech.voiceOrigin === true) && canonicalVoiceProvider(this.config.voice.tts.provider) === canonicalVoiceProvider(speech.provider)), host.sendLinkedChannel,
+      // Includes 'processing' so the delivery that just 429'd (already claimed,
+      // no longer 'pending') still counts itself as part of the group needing quota.
+      () => Number(store.get(`SELECT COUNT(*) n FROM outbox o JOIN deliveries d ON d.id=json_extract(o.payload_json,'$.deliveryId') JOIN conversation_bindings b ON b.id=d.binding_id WHERE o.kind='delivery' AND o.state IN ('pending','processing') AND b.channel='line'`)!.n)));
     this.decisions = new DecisionService(store, (response, binding, text) => {
       this.delivery.enqueue(response, binding, text);
       const spoken = store.get('SELECT text FROM response_speech WHERE response_id=?', response);

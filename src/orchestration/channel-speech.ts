@@ -12,7 +12,7 @@ import { mp3DurationMs } from '../voice/mp3';
 import { ingestOrchestrationMedia } from './media';
 import { sendChannelFile } from './file-delivery';
 
-export async function sendChannelSpeech(agent:AgentConfig,binding:Row,speech:SpeechDelivery,id:string,request:typeof fetch=fetch,provider:typeof ttsProvider=ttsProvider,enabled:()=>boolean=()=>true):Promise<DeliveryOutcome>{
+export async function sendChannelSpeech(agent:AgentConfig,binding:Row,speech:SpeechDelivery,id:string,request:typeof fetch=fetch,provider:typeof ttsProvider=ttsProvider,enabled:()=>boolean=()=>true,pendingLineGroupSize:()=>number=()=>0):Promise<DeliveryOutcome>{
   if(binding.channel==='telegram')return sendTelegramSpeech(agent,binding,speech,request,provider,enabled);
   if(!enabled())return {state:'failed',code:'VOICE_REPLY_DISABLED'};
   if(!['discord','line','slack'].includes(String(binding.channel)))return {state:'failed',code:'VOICE_DELIVERY_NOT_CONFIGURED'};
@@ -35,7 +35,7 @@ export async function sendChannelSpeech(agent:AgentConfig,binding:Row,speech:Spe
     }
     if(!enabled())return {state:'failed',code:'VOICE_REPLY_DISABLED'};
     const path=ingestOrchestrationMedia(join(agent.workspace,'../..'),agent.id,`speech-${binding.channel}`,file);
-    return await sendChannelFile(agent,binding,{path,name,kind:'audio',caption:'',durationMs:duration},id,request,enabled);
+    return await sendChannelFile(agent,binding,{path,name,kind:'audio',caption:'',durationMs:duration},id,request,enabled,pendingLineGroupSize);
   }catch{return {state:'failed',code:'VOICE_MEDIA_UNAVAILABLE'};}
   finally{rmSync(temporary,{recursive:true,force:true});}
 }
