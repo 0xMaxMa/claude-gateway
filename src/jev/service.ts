@@ -114,7 +114,7 @@ export class JevService {
     } finally {
       clearTimeout(timer); context.signal?.removeEventListener('abort', abort);
       if (acquired) { this.active--; this.drain(); }
-      try { this.options.onEvaluation?.({ requestId, principalId: context.principalId, consumer: context.consumer, agentId: context.agentId, sessionId: context.sessionId, taskId: context.taskId, requestedModel: config.model!, model: result?.model, startedAt, elapsedMs: Date.now() - startedAt, outcome: failure ? 'failed' : 'completed', errorCode: failure?.code, usage: result?.usage, billing: result?.billing }); } catch { /* Accounting observers cannot change an already-issued inference outcome. */ }
+      try { this.options.onEvaluation?.({ requestId, principalId: context.principalId, consumer: context.consumer, agentId: context.agentId, sessionId: context.sessionId, taskId: context.taskId, requestedModel: config.model!, model: result?.model, startedAt, elapsedMs: Date.now() - startedAt, outcome: failure ? 'failed' : 'completed', errorCode: failure?.code, validationReason: failure?.metadata.validationReason, usage: result?.usage, billing: result?.billing }); } catch { /* Accounting observers cannot change an already-issued inference outcome. */ }
     }
   }
   private authorized(context: JevContext): void {

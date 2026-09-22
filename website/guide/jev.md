@@ -406,3 +406,11 @@ Inspect fresh page evidence before revising the same task with `task_update`.
 Do not blindly retry or lower the confidence threshold. Gateway records bounded
 `browser.decision` events with the measured operation and target confidence for
 future diagnosis; these events do not contain page text or field values.
+
+Jev may return probabilities rounded to hundredths whose sum is 0.99 or 1.01.
+The response validator accepts this rounding envelope (0.005 per option, capped
+at 0.02 total); full-precision distributions retain the 0.001 tolerance. It keeps
+provider probabilities and confidence unchanged and still rejects missing
+options, invalid values and a selected option that is not a maximum. Invalid
+responses record a fixed `validationReason` code in evaluation/task diagnostics,
+without recording request text, credentials or provider prose.

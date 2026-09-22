@@ -63,6 +63,6 @@ export interface BrowserEvidence {
   executionState: 'ended' | 'interrupted';
   fresh?: { observedAt: number; observation: unknown; operationStatus?: unknown };
 }
-export interface BrowserProviderFailure { code: string; status?: number; retryAfter?: string; resetAt?: string }
+export interface BrowserProviderFailure { code: string; validationReason?: string; status?: number; retryAfter?: string; resetAt?: string }
 
 export type BrowserTaskReport = Omit<BrowserExecutionResult, 'observation'>;

@@ -128,3 +128,18 @@ describe('upstream structured failures',()=>{
   await expect(service.evaluate({state:'hello',questions:{q:{type:'noul',instructions:'Greeting?'}}},{principalId:'p',consumer:'test'})).rejects.toMatchObject({code:'OUTCOME_UNKNOWN'});
  });
 });
+
+describe('rounded Jev probability distributions',()=>{
+ const req: JevRequest={state:'fixture',questions:{q:{type:'choice',instructions:'Choose',criteria:{a:null,b:null,c:null}}}};
+ const payload=(p:Record<string,number>)=>({model:'jev',answers:{q:{type:'choice',choice:'a',confidence:.66,probabilities:p}},usage:{input_tokens:1,output_tokens:1}});
+ it.each([{a:.67,b:.21,c:.11},{a:.67,b:.22,c:.12}])('preserves rounded probabilities and confidence',p=>{
+  const result=validateJevResponse(payload(p),req,'jev','id');
+  expect(result.answers.q).toEqual(payload(p).answers.q);
+ });
+ it.each([{a:.67,b:.21,c:.08},{a:.671,b:.21,c:.11},{a:.67,b:.4,c:.1}])('rejects invalid distribution without logging content',p=>{
+  try{validateJevResponse(payload(p),req,'jev','id');throw Error('accepted');}catch(e){expect(e).toMatchObject({code:'INVALID_RESPONSE',metadata:{validationReason:'DISTRIBUTION_SUM'}});}
+ });
+ it('does not accept the wrong winner despite rounding tolerance',()=>{
+  expect(()=>validateJevResponse(payload({a:.2,b:.69,c:.1}),req,'jev','id')).toThrow('CHOICE_MISMATCH');
+ });
+});
