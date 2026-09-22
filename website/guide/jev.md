@@ -484,3 +484,13 @@ flowchart LR
 Browser Logic owns candidate generation, Jev decisions, field assistance and bounded recovery. Core owns Thinking timeout/cancellation/budgets through `LoopContext.think()`. Gateway injects scoped model/tool connections and checkpoints. The extension/relay remain tool providers with no provider credentials or decision loop.
 
 Upgrade pre-release installations by removing the old module-selection property and uninstalling the old runner/adapter package. Unknown configuration keys are rejected. Existing bindings, scopes and durable task receipts are preserved. The agent-facing MCP call is bounded request/response; Gateway owns persistence/reconciliation. Arbitrary MCP tool discovery and standalone durable background jobs are not implied.
+
+### Partial observations and browser recovery
+
+Dense pages may return a partial control list. Browser Logic can operate on known,
+guarded targets to narrow the page, while completion still requires fresh evidence.
+Task notification turns explicitly include `OBSERVATION_TRUNCATED` and `NO_PROGRESS`
+in the existing bounded, same-task recovery flow. The agent must commit the update
+before claiming a retry is queued; provider failures, cancellation and unknown
+mutations remain excluded from automatic recovery. An unchanged page alone does
+not prove a website is blocking automation.
