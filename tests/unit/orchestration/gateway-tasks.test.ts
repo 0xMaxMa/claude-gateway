@@ -58,8 +58,21 @@ test('cancellation uses the recorded request and is not handled by worker cleanu
  await controller.tick();expect(adapter.cancel).toHaveBeenCalledWith(expect.objectContaining({taskId:task.taskId}),store.task(task.taskId)?.gatewayDispatch?.requestId);
  expect(store.task(task.taskId)?.state).toBe('cancelled');await scheduler.close();
 });
-test('already sent requests reject amendments instead of silently discarding them',async()=>{
- const task=spawn();await controller.tick();expect(()=>tasks.update({...context,actionId:'amend'},task.taskId,1,'different work','when_ready')).toThrow('already sent');
+test('active managed requests accept a durable revision and dispatch it in the same task only after settling',async()=>{
+ const task=spawn();await controller.tick();
+ const updated=tasks.update({...context,actionId:'amend'},task.taskId,1,'Continue the same goal with new instructions','when_ready');
+ expect(updated.revision).toBe(2);expect(updated.state).toBe('running');await controller.tick();expect(adapter.submit).toHaveBeenCalledTimes(1);
+ outcome={type:'completed',result:{summary:'First request done',artifactIds:[]}};
+ await controller.tick();expect(store.task(task.taskId)?.state).toBe('queued');await controller.tick();
+ expect(adapter.submit).toHaveBeenCalledTimes(2);expect(adapter.submit).toHaveBeenLastCalledWith(expect.objectContaining({taskId:task.taskId,revision:2}),expect.any(String),'Continue the same goal with new instructions',undefined);
+ expect(store.all('SELECT id FROM tasks')).toHaveLength(1);
+});
+test('finished managed tasks reopen by revision, while cancellation and uncertainty stay fenced',async()=>{
+ const task=spawn();await controller.tick();outcome={type:'failed',failure:{code:'TEST_STOP',message:'Stopped',observedAt:Date.now()}};await controller.tick();
+ const next=tasks.update({...context,actionId:'continue'},task.taskId,1,'Continue from the current state','when_ready');expect(next.state).toBe('queued');expect(next.failure).toBeUndefined();
+ expect(()=>tasks.update({...context,actionId:'stale'},task.taskId,1,'stale','when_ready')).toThrow('REVISION_CONFLICT');
+ outcome={type:'unknown',failure:{code:'UNKNOWN',message:'unknown',observedAt:Date.now()}};await controller.tick();
+ expect(()=>tasks.update({...context,actionId:'unsafe'},task.taskId,store.task(task.taskId)!.revision,'Continue','when_ready')).toThrow('STATE_CONFLICT');
 });
 test('readiness does not dispatch busy targets; revocation before dispatch fails without side effects',async()=>{
  adapter.ready=()=>false;const task=spawn();await controller.tick();expect(adapter.submit).not.toHaveBeenCalled();
@@ -153,4 +166,19 @@ test('browser stale-budget rejection releases the tab for the next queued task',
  for(let i=0;i<8;i++){await controller.tick();await new Promise(setImmediate);}
  expect(store.task(first.taskId)?.state).toBe('failed');expect(store.task(first.taskId)?.activeAttemptId).toBeUndefined();
  expect(store.task(second.taskId)?.state).toBe('failed');expect(run).toHaveBeenCalledTimes(2);
+});
+
+test('managed revisions survive restart without replaying the current request',async()=>{
+ const t=spawn();await controller.tick();tasks.update({...context,actionId:'revise-before-restart'},t.taskId,1,'Revised goal','when_ready');
+ await controller.close();store.close();open();recoverOrchestration(store);controller=new GatewayTaskController(tasks,new Map([['safemode',adapter]]));
+ await controller.tick();expect(adapter.submit).toHaveBeenCalledTimes(1);
+ outcome={type:'completed',result:{summary:'Old request finished',artifactIds:[]}};
+ await controller.tick();await controller.tick();expect(adapter.submit).toHaveBeenCalledTimes(2);expect(store.task(t.taskId)?.revision).toBe(2);
+});
+test('managed follow-up rejects another principal, notifications, and cancelled work',async()=>{
+ const t=spawn();
+ expect(()=>tasks.update({...context,principalId:'other',actionId:'cross-owner'},t.taskId,1,'Changed','when_ready')).toThrow();
+ expect(()=>tasks.update({...context,execute:false,actionId:'notification'},t.taskId,1,'Changed','when_ready')).toThrow();
+ tasks.cancelByUser(t.conversationId,'owner',t.taskId);
+ expect(()=>tasks.update({...context,actionId:'after-cancel'},t.taskId,1,'Changed','when_ready')).toThrow('TASK_TERMINAL');
 });

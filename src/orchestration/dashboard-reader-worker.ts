@@ -133,7 +133,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
         const lastTool = get("SELECT payload_json,occurred_at FROM conversation_events WHERE json_extract(payload_json,'$.task_id')=? AND type='tool.activity' ORDER BY seq DESC LIMIT 1",t.id);
         const tool = lastTool ? JSON.parse(lastTool.payload_json).payload : undefined;
         return {taskId:t.id,sessionId:c.agent_session_id,title:snapshot.title,state:t.state,updatedAt:t.updated_at,providerWaiting:providerWaiting(String(t.id),String(t.state)),
-          createdAt:t.created_at, executionType:snapshot.gatewayTarget?'gateway-managed':'worker',gatewayTarget:snapshot.gatewayTarget,execution:snapshot.execution, workerId:attempt?.workerId, attemptId:attempt?.attemptId,
+          createdAt:t.created_at, revision:snapshot.revision, appliedRevision:snapshot.appliedRevision, pendingRevision:snapshot.gatewayTarget && t.active_attempt_id && snapshot.revision>1 && snapshot.revision>snapshot.appliedRevision?snapshot.revision:undefined, executionType:snapshot.gatewayTarget?'gateway-managed':'worker',gatewayTarget:snapshot.gatewayTarget,execution:snapshot.execution, workerId:attempt?.workerId, attemptId:attempt?.attemptId,
           workerSessionId:snapshot.gatewayTarget?undefined:attempt?.sessionId,targetSessionId:snapshot.gatewayTarget?.sessionId, resumed:attempt?.resumeSession, workstreamId:snapshot.workstreamId,
           continueTaskId:snapshot.continueTaskId,hostProcessId:t.active_attempt_id?attempt?.processIdentity?.pid:undefined,
           tokenSummary:{totalTokens:metrics.totalTokens,allAttemptsTokens:total.totalTokens},contextTools:metrics.contextTools,loadedTools:metrics.loadedTools,usedTools:metrics.usedTools,

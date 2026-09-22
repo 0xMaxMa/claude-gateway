@@ -282,6 +282,6 @@ the agent ID and reason without credentials or prompt text.
 
 ### Tasks waiting for a busy investigation
 
-A Gateway-managed task waiting for its safemode target stays queued and does not consume an execution slot. Its instructions can still be updated, and cancellation does not send anything to the target. Once dispatched, use a follow-up task for additional instructions.
+A Gateway-managed task waiting for its safemode target stays queued and does not consume an execution slot. Its instructions can still be updated, and cancellation does not send anything to the target. For additional instructions on the same goal, use `task_update` with `mode: when_ready` and the complete revised brief. The current request settles before the next revision runs under the same task ID. Completed or failed tasks can continue this way; cancelled tasks and requests with unknown outcomes cannot be restarted implicitly.
 
 If both recorded owner processes have exited but their lock remains, the task fails with `SAFEMODE_RECOVERY_REQUIRED` instead of waiting indefinitely. The operator must inspect the investigation and run `safemode recover ID` before retrying. The task never removes ownership locks automatically.

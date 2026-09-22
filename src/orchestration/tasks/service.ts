@@ -223,10 +223,11 @@ export class TaskService {
     if (!['when_ready', 'interrupt_and_resume'].includes(mode)) throw new OrchestrationError('INVALID_INPUT');
     return this.command(context, 'update', { taskId, expectedRevision, instruction, mode }, context.execute, () => {
       const task = this.owned(taskId, context.conversationId), version = task.stateVersion;
-      if (TERMINAL_TASK_STATES.has(task.state)) throw new OrchestrationError('TASK_TERMINAL');
+      if (TERMINAL_TASK_STATES.has(task.state) && !(task.gatewayTarget && context.execute && ['completed','failed'].includes(task.state) && !task.activeAttemptId)) throw new OrchestrationError('TASK_TERMINAL');
       if (['cancel_requested', 'recovering', 'needs_reconciliation', 'interrupting'].includes(task.state)) throw new OrchestrationError('STATE_CONFLICT');
       if (task.revision !== expectedRevision) throw new OrchestrationError('REVISION_CONFLICT');
-      if (task.gatewayTarget && task.state !== 'queued') throw new OrchestrationError('GATEWAY_TASK_ALREADY_SENT', 'This request was already sent. Queue a follow-up task with continue_task_id instead.');
+      if (task.gatewayTarget && (task.ownerPrincipalId !== context.principalId || !context.execute)) throw new OrchestrationError('EXECUTION_DENIED');
+      if (task.gatewayTarget && mode !== 'when_ready') throw new OrchestrationError('INVALID_INPUT', 'Use when_ready for Gateway-managed tasks; the current request must settle before revised instructions run.');
       const priorRevision = this.revision(taskId, expectedRevision);
       if (!context.execute) {
         // A worker progress report increments stateVersion without revoking this
@@ -247,7 +248,8 @@ export class TaskService {
         contextRefs: priorRevision.contextRefs, mode, originatingInputId: context.inputId,
         ...(!context.execute ? { instructions: priorRevision.instructions, answers: priorRevision.answers, originatingInputId: priorRevision.originatingInputId, guidance: instruction, guidanceBasis: {attemptId: task.activeAttemptId, workflowVersion: task.workflow?.version??0, progressAt: task.latestProgress?.observedAt??0} } : {}) };
       this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify(revision));
-      if (task.state === 'waiting_input') { task.pendingQuestion = undefined; task.state = task.activeAttemptId ? 'interrupting' : 'queued'; }
+      if (task.gatewayTarget && ['completed','failed'].includes(task.state)) { task.state='queued'; delete task.failure; delete task.result; delete task.browserReport; delete task.latestProgress; task.initiatingInputId=context.inputId; }
+      if (task.state === 'waiting_input') { task.pendingQuestion = undefined; task.state = task.activeAttemptId ? (task.gatewayTarget ? 'running' : 'interrupting') : 'queued'; }
       else if (mode === 'interrupt_and_resume' && task.activeAttemptId) task.state = 'interrupting';
       this.store.saveTask(task, version);
       this.store.appendEvent(task.conversationId, 'task.revision_accepted', { taskId, revision: task.revision }, taskId);
@@ -607,7 +609,7 @@ export class TaskService {
       if (task.gatewayTarget?.adapter === 'browser' && outcome.browserReport) task.browserReport=outcome.browserReport;
       // A structured unresolved blocker is not successful task completion.
       if (outcome.type === 'paused' && !(task.state === 'waiting_input' && task.pendingQuestion) &&
-        task.state !== 'interrupting' && task.state !== 'cancel_requested') throw new OrchestrationError('STATE_CONFLICT');
+        task.state !== 'interrupting' && task.state !== 'cancel_requested' && !(task.gatewayTarget && task.revision > attempt.revision)) throw new OrchestrationError('STATE_CONFLICT');
       // Keep the full final report, and preserve cancellation / new revisions / questions.
       const blocked = outcome.type === 'completed' && task.workflow?.attemptId === attemptId &&
         task.workflow.checkpoint.phase === 'blocked' && task.workflow.checkpoint.findings.some(f => f.status === 'open');
@@ -656,13 +658,14 @@ export class TaskService {
       if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || task.state!=='needs_reconciliation' || task.revision!==revision || task.gatewayDispatch?.requestId!==requestId || !task.activeAttemptId || !task.browserReport || task.browserReport.status!=='needs_verification' || task.browserReport.lastAction?.outcome==='unknown')throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
       check();
       const attempt=this.store.attempt(task.activeAttemptId)!;
-      attempt.state='ended';task.activeAttemptId=undefined;task.state='completed';delete task.failure;delete attempt.failure;
+      attempt.state='ended';task.activeAttemptId=undefined;task.state=task.revision>attempt.revision?'queued':'completed';delete task.failure;delete attempt.failure;
       task.browserReport.status='succeeded';task.browserReport.reason='PARENT_VERIFIED';
       task.browserReport.verification={source:'parent',evidence,at:Date.now()};
       task.result={summary:'Parent verified browser result: '+evidence,artifactIds:[]};attempt.result=task.result;
       this.pool.release(task.taskId,true);
       this.store.saveAttempt(attempt);this.store.saveTask(task,task.stateVersion);
-      this.store.appendEvent(task.conversationId,'browser.parent_verified',{requestId,evidenceId,evidence},taskId);this.notify(task);
+      this.store.appendEvent(task.conversationId,'browser.parent_verified',{requestId,evidenceId,evidence},taskId);
+      if(task.state==='queued')this.store.enqueue('schedule',`schedule:${task.taskId}:${task.stateVersion}`,{taskId:task.taskId});else this.notify(task);
       return task;
     },taskId);
   }
