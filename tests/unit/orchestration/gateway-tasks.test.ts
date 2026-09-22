@@ -1,3 +1,4 @@
+import { BrowserTaskAdapter } from '../../../src/orchestration/gateway-tasks/browser';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -139,4 +140,17 @@ test('a live native child still keeps the safemode target busy when its supervis
   atomicJson(join(dir, 'owner.json'), { pid: 2147483647, childPid: process.pid, token: 'live-child', mode: 'headless' });
   const safe = new SafemodeTaskAdapter('operator', () => true, () => new SafemodeStore(root));
   expect(safe.ready(store.task(spawn().taskId)!)).toBe(false);
+});
+
+test('browser stale-budget rejection releases the tab for the next queued task',async()=>{
+ await controller.close();
+ const run=jest.fn(async(c:any)=>{const op='550e8400-e29b-41d4-a716-446655440000';c.beforeMutation(op,'page_click');return {status:'blocked' as const,reason:'STALE_RETRY_BUDGET',steps:2,evaluations:4,lastAction:{operationId:op,operation:'CLICK',outcome:'not_executed' as const}};});
+ const browser=new BrowserTaskAdapter({agentId:'operator',root:join(directory,'browser'),allowed:()=>true,bindings:()=>[binding],evaluate:jest.fn()});
+ const binding={version:1 as const,id:'tab',name:'Tab',principalId:'owner',conversationId:context.conversationId,run};
+ controller=new GatewayTaskController(tasks,new Map([['browser',browser]]));
+ const command={title:'Inspect browser',instructions:'Read authorized page',targetProfile:'gateway-managed',gatewayTarget:{adapter:'browser',sessionId:'tab',name:'Tab'}};
+ const first=tasks.spawn({...context,actionId:'browser-first'},command),second=tasks.spawn({...context,actionId:'browser-second'},command);
+ for(let i=0;i<8;i++){await controller.tick();await new Promise(setImmediate);}
+ expect(store.task(first.taskId)?.state).toBe('failed');expect(store.task(first.taskId)?.activeAttemptId).toBeUndefined();
+ expect(store.task(second.taskId)?.state).toBe('failed');expect(run).toHaveBeenCalledTimes(2);
 });

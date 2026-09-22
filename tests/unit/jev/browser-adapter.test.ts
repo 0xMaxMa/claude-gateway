@@ -178,3 +178,13 @@ test('known stop after rejected stale input is terminal without replay',async()=
  f.run.mockImplementation(async c=>{c.beforeMutation!(op,'page_click');return {status:'blocked',reason:'LOW_OPERATION_CONFIDENCE',steps:0,evaluations:2,lastAction:{operationId:op,operation:'CLICK',outcome:'not_executed'}};});
  await f.a.submit(task(),'r','goal');expect((await settle(f.a)).type).toBe('failed');expect(f.run).toHaveBeenCalledTimes(1);
 });
+
+test.each(['STALE_RETRY_BUDGET','TEXT_BUDGET','WAIT_BUDGET','NO_PROGRESS','FUTURE_SAFE_STOP'])('ended %s releases the target when the last operation was explicitly rejected',async reason=>{
+ const f=fixture(),op='550e8400-e29b-41d4-a716-446655440000';
+ f.run.mockImplementation(async c=>{c.beforeMutation!(op,'page_click');return {status:'blocked',reason,steps:2,evaluations:4,lastAction:{operationId:op,operation:'CLICK',outcome:'not_executed'}};});
+ await f.a.submit(task(),'r','goal');expect((await settle(f.a)).type).toBe('failed');
+});
+test('explicit unknown outcome remains fenced even without a recorded action',async()=>{
+ const f=fixture();f.run.mockResolvedValue({status:'blocked',reason:'OUTCOME_UNKNOWN',steps:0,evaluations:0});
+ await f.a.submit(task(),'r','goal');expect((await settle(f.a)).type).toBe('unknown');
+});
