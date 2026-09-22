@@ -193,7 +193,7 @@ function knownBrowserStop(result:BrowserExecutionResult|undefined,dispatched:Bro
   const known=new Set(['START_URL_REQUIRED','OBSERVATION_TRUNCATED','LOW_OPERATION_CONFIDENCE','LOW_TARGET_CONFIDENCE','PAGE_CONTENT_UNAVAILABLE','MODEL_BLOCKED','ACTION_SPACE_TOO_LARGE','EVALUATION_INPUT_TOO_LARGE','EVALUATION_BUDGET','ACTION_BUDGET']);
   if(result?.status!=='blocked' || !known.has(result.reason) || result.providerFailure || result.lastAction?.outcome==='unknown')return false;
   if(result.reason==='START_URL_REQUIRED')return result.steps===0 && result.evaluations===0 && !result.lastAction && !result.lastConfirmedAction && !dispatched;
-  return !dispatched || (result.lastAction?.operationId===dispatched.operationId && result.lastAction.outcome==='confirmed');
+  return !dispatched || (result.lastAction?.operationId===dispatched.operationId && ['confirmed','not_executed'].includes(result.lastAction.outcome));
 }
 
 function validateBrowserResult(result: BrowserExecutionResult): void {
