@@ -121,7 +121,10 @@ test('enabled app browser schemas discover, inspect and verify only scoped brows
   const adapters = new Map<string, GatewayTaskAdapter>(); const f = fixture(true, adapters);
   const run=jest.fn(async()=>({status:'needs_verification' as const,reason:'COMPLETION_CANDIDATE',steps:0,evaluations:1}));
   const binding = { version: 1 as const, id: 'browser-a', name: 'Private browser', principalId: 'u', conversationId: f.context.conversationId, run,inspect:async()=>({observedAt:Date.now(),observation:{generation:'g',elements:[{ref:'x',label:'Name',value:'Expected'}]}}) };
-  const browser = new BrowserTaskAdapter({ agentId: 'a', root: join(f.root, 'receipts'), allowed: () => true, bindings: () => [binding], evaluate: async () => ({
+  const experience={select:jest.fn(async()=>[]),record:jest.fn(async()=>{})};
+  const onVerified=jest.fn(async(task:any)=>{expect(f.store.task(task.taskId)!.state).toBe('completed');throw Error('learning storage unavailable');});
+  const experienceFactory=jest.fn(()=>experience);
+  const browser = new BrowserTaskAdapter({ experience:experienceFactory,onVerified,agentId: 'a', root: join(f.root, 'receipts'), allowed: () => true, bindings: () => [binding], evaluate: async () => ({
     requestId:'r',requestedModel:'jev',model:'jev',usage:{input_tokens:1,output_tokens:1},answers:{
       operation:{type:'choice',choice:'DONE',confidence:1,probabilities:{DONE:1}},target:{type:'choice',choice:'NONE',confidence:1,probabilities:{NONE:1}},
     },
@@ -148,12 +151,14 @@ test('enabled app browser schemas discover, inspect and verify only scoped brows
     const revocable=f.issue({role:'agent',context:f.context,beforeMutation:async()=>{hookStarted();await new Promise<void>(resolve=>{releaseHook=resolve;});}});
     const rejected=revocable.call({task_id:taskId,expected_revision:f.store.task(taskId)!.revision,mode:'verify_browser',expected_request_id:proof.browserEvidence.requestId,evidence_id:proof.browserEvidence.evidenceId,instruction:'Name matches'},'task_update');
     await hookEntered;revocable.revoke();releaseHook();expect(await rejected).toHaveProperty('error');
-    expect(f.store.task(taskId)!.state).toBe('needs_reconciliation');
+    expect(f.store.task(taskId)!.state).toBe('needs_reconciliation');expect(onVerified).not.toHaveBeenCalled();
     const confirmed=await agent.call({task_id:taskId,expected_revision:f.store.task(taskId)!.revision,mode:'verify_browser',expected_request_id:proof.browserEvidence.requestId,evidence_id:proof.browserEvidence.evidenceId,instruction:'Fresh Name field matches Expected'},'task_update');
     expect(confirmed).not.toHaveProperty('error');expect(f.store.task(taskId)!.state).toBe('completed');
     expect(f.store.task(String(rows[0].id))?.gatewayTarget).toMatchObject({adapter:'browser',sessionId:'browser-a'});
     expect(f.store.all('SELECT * FROM worker_pool')).toHaveLength(0);
-    expect(run).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(1);expect(experienceFactory).toHaveBeenCalledTimes(1);
+    expect((run.mock.calls as any)[0][0].experience).toBe(experience);expect(onVerified).toHaveBeenCalledTimes(1);
+    expect(onVerified.mock.calls[0][0].ownerPrincipalId).toBe('u');
     let started!:()=>void,finish!:()=>void;const startedRead=new Promise<void>(resolve=>{started=resolve;});
     jest.spyOn(binding,'inspect').mockImplementation(async()=>{started();await new Promise<void>(resolve=>{finish=resolve;});return {observedAt:Date.now(),observation:{generation:'g',elements:[{ref:'x',label:'Name',value:'Expected'}]}};});
     const pending=agent.call({task_id:taskId,browser_evidence:'fresh'},'task_status');await startedRead;agent.revoke();finish();

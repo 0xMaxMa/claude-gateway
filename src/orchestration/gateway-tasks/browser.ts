@@ -24,6 +24,8 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
   readonly name='browser';
   private readonly running=new Map<string,{controller:AbortController;done:Promise<void>}>();
   constructor(private readonly options:{agentId:string;root:string;allowed:()=>boolean;bindings:()=>BrowserTaskBinding[];
+    experience?:(task:TaskSnapshot,requestId:string)=>BrowserExecutionContext['experience'];
+    onVerified?:(task:TaskSnapshot,requestId:string)=>Promise<void>;
     refreshBindings?:(context:CommandContext)=>Promise<void>;
     evaluate:(task:TaskSnapshot,request:JevRequest,signal:AbortSignal,authorized:()=>boolean)=>Promise<JevResult>;
     onProgress?:(task:TaskSnapshot,progress:BrowserProgress)=>void;
@@ -91,7 +93,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const authorized=()=>{try{return this.options.allowedTask?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
     // The installed browser package owns execution; gateway owns the request lifetime.
     let providerFailure:BrowserExecutionResult['providerFailure'];
-    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({goal:instructions,startUrl:answers?.length || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl,fields,signal:controller.signal,authorized,
+    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({experience:this.options.experience?.(task,requestId),goal:instructions,startUrl:answers?.length || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl,fields,signal:controller.signal,authorized,
       evaluate:async(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');try{return await this.options.evaluate(task,request,signal,authorized);}catch(e){if(e instanceof JevError)providerFailure={code:e.code,...e.metadata};throw e;}},
       beforeMutation:(operationId,operation)=>{
         controller.signal.throwIfAborted();
@@ -176,6 +178,12 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       receipt.inspection={id:evidence.evidenceId,at:Date.now()};this.write(task,requestId,receipt);
     }
     return evidence;
+  }
+  async recordVerified(task:TaskSnapshot,requestId:string):Promise<void>{
+    if(this.options.allowedEvidence?.(task)===false)return;
+    const receipt=this.read(task,requestId);
+    if(!receipt || receipt.status!=='ended')return;
+    await this.options.onVerified?.(task,requestId);
   }
   verifyEvidence(task:TaskSnapshot,requestId:string,evidenceId:string):void {
     this.assertTask(task);if(this.options.allowedEvidence?.(task)===false)throw new OrchestrationError('ACCESS_DENIED');this.binding(task.gatewayTarget!.sessionId,task.ownerPrincipalId,task.conversationId);

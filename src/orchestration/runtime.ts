@@ -1,3 +1,4 @@
+import {ExperienceLibrary} from '@0xmaxma/jev-loop/experience';
 import { AutomaticBrowserBindings } from '../jev/automatic-browser-bindings';
 import { BrowserConnectorRegistry, resolveBrowserConnection } from '../jev/browser-connector';
 import { BrowserTaskAdapter, BrowserTaskBinding } from './gateway-tasks/browser';
@@ -227,6 +228,8 @@ export class AgentOrchestrationRuntime {
     gatewayAdapters.set('browser', new BrowserTaskAdapter({agentId:agent.id,root:join(root,'browser-requests'),
       allowed:()=>jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true,
       bindings:browserBindings,
+      experience:(task,requestId)=>new ExperienceLibrary({...gateway.gateway.jev?.experience,directory:join(root,'experience'),scope:JSON.stringify([agent.id,task.ownerPrincipalId,task.conversationId]),runId:requestId}),
+      onVerified:(task,requestId)=>new ExperienceLibrary({...gateway.gateway.jev?.experience,directory:join(root,'experience'),scope:JSON.stringify([agent.id,task.ownerPrincipalId,task.conversationId])}).verifyRun(requestId),
       refreshBindings:async context=>{store.assertMember(context.conversationId,context.principalId);await automaticBrowsers.refresh(context.principalId,context.conversationId,context.execute,()=>{try{store.assertMember(context.conversationId,context.principalId);return jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true;}catch{return false;}});store.assertMember(context.conversationId,context.principalId);},
       allowedEvidence:task=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return Boolean(store.task(task.taskId));}catch{return false;}},
       allowedTask:(task)=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);const current=store.task(task.taskId);return Boolean(current && current.activeAttemptId===task.activeAttemptId && ['starting','running'].includes(current.state));}catch{return false;}},

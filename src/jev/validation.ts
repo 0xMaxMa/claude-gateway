@@ -1,3 +1,4 @@
+import {ExperienceConfig,ExperienceLibrary} from '@0xmaxma/jev-loop/experience';
 import { validateBrowserIntegration } from './browser-connector';
 import { isReservedJevCredentialEnv, jevCredentialEnvNames } from './child-env';
 import { JevConfig, JevError, JevRequest, JevResult } from './types';
@@ -11,7 +12,7 @@ const bad = (message: string): never => { throw new JevError('INVALID_REQUEST', 
 export function validateJevConfig(config: JevConfig | undefined): void {
   if (config === undefined) return;
   if (!object(config)) throw new JevError('INVALID_CONFIG', 'Jev configuration must be an object.');
-  if (Object.keys(config).some(key => !['enabled','provider','model','baseUrl','apiKeyFile','apiKeyEnv','timeoutMs','maxConcurrentRequests','maxQueueSize','maxInputBytes','maxQuestions','allowedAgentIds','features','browser','thinking'].includes(key))) throw new JevError('INVALID_CONFIG','Unknown Jev configuration field.');
+  if (Object.keys(config).some(key => !['enabled','provider','model','baseUrl','apiKeyFile','apiKeyEnv','timeoutMs','maxConcurrentRequests','maxQueueSize','maxInputBytes','maxQuestions','allowedAgentIds','features','browser','thinking','experience'].includes(key))) throw new JevError('INVALID_CONFIG','Unknown Jev configuration field.');
   if (config.enabled !== undefined && typeof config.enabled !== 'boolean') throw new JevError('INVALID_CONFIG', 'Jev enabled must be a boolean.');
   if ((config.enabled || config.provider !== undefined) && config.provider !== 'typesafe' && config.provider !== 'upstream') throw new JevError('INVALID_CONFIG', 'Select a Jev provider.');
   if ((config.enabled || config.model !== undefined) && !text(config.model)) throw new JevError('INVALID_CONFIG', 'A Jev model ID is required.');
@@ -25,6 +26,7 @@ export function validateJevConfig(config: JevConfig | undefined): void {
     const value = config[key];
     if (value !== undefined && (!Number.isSafeInteger(value) || value < min || value > max)) throw new JevError('INVALID_CONFIG', `Invalid Jev ${key}.`);
   }
+  if(config.experience!==undefined){try{const value=ExperienceConfig.parse(config.experience);new ExperienceLibrary({...value,directory:'/unused-validation',scope:'validation'});}catch{throw new JevError('INVALID_CONFIG','Invalid Experience Library configuration.');}}
   validateBrowserIntegration(config.browser);
   if(config.thinking!==undefined)validateBrowserIntegration({bindings:[],textHelper:config.thinking});
   jevCredentialEnvNames(config);
