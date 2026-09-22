@@ -153,3 +153,12 @@ test('missing start URL ends cleanly and legacy uncertain receipts can be cleane
  expect(await f.make().inspect(task(),'r')).toMatchObject({type:'unknown'});
  expect(f.run).toHaveBeenCalledTimes(1);
 });
+
+test('explicit cancellation releases ended blocked work only with confirmed mutation evidence',async()=>{
+ for(const outcome of ['confirmed','unknown'] as const){
+  const f=fixture();const op='550e8400-e29b-41d4-a716-446655440000';
+  f.run.mockImplementation(async c=>{c.beforeMutation!(op,'tab_navigate');return {status:'blocked',reason:'OBSERVATION_TRUNCATED',steps:1,evaluations:0,lastAction:{operationId:op,operation:'NAVIGATE',outcome}};});
+  const t=task({taskId:outcome});await f.a.submit(t,'r','goal');await settle(f.a,t);await new Promise(setImmediate);
+  await f.a.cancel(t,'r');expect((await settle(f.a,t)).type).toBe(outcome==='confirmed'?'stopped':'unknown');
+ }
+});
