@@ -313,8 +313,26 @@ export class TaskService {
   }
   answer(context: CommandContext, taskId: string, questionId: string, answer: string): TaskSnapshot {
     boundedText(answer);
-    return this.command(context, 'answer', { taskId, questionId, answer }, true,
-      () => this.answerOwned(context.conversationId, taskId, questionId, answer, context.inputId), taskId);
+    return this.command(context, 'answer', { taskId, questionId, answer }, context.execute, () => {
+      if (!context.execute) {
+        const task = this.owned(taskId, context.conversationId);
+        this.assertQuestion(task, questionId);
+        // A notification can fill missing browser text in its own authorized task,
+        // never approve a new operation, answer an unrelated task, or grant consent.
+        const assigned = this.store.get(`SELECT n.id FROM notifications n JOIN conversation_events e
+          ON e.conversation_id=n.conversation_id AND e.type='task.state_changed'
+          AND json_extract(e.payload_json,'$.payload.taskId')=n.task_id
+          AND json_extract(e.payload_json,'$.payload.stateVersion')=n.task_state_version
+          WHERE n.task_id=? AND n.conversation_id=? AND n.decision_id=? AND n.status='assigned'
+          AND json_extract(e.payload_json,'$.payload.pendingQuestion.questionId')=? LIMIT 1`,
+          taskId, context.conversationId, context.decisionId, questionId);
+        if (!assigned || task.ownerPrincipalId !== context.principalId || !task.capabilities.execute ||
+          task.gatewayTarget?.adapter !== 'browser' || task.browserReport?.reason !== 'FIELD_TEXT_REQUIRED' ||
+          task.browserReport.fieldRequest?.reason !== 'missing' || !task.browserReport.fieldRequest.label)
+          throw new OrchestrationError('EXECUTION_DENIED');
+      }
+      return this.answerOwned(context.conversationId, taskId, questionId, answer, context.inputId);
+    }, taskId);
   }
   /** A scoped authenticated reply is user authorization, without a fabricated model decision. */
   answerByUser(conversationId: string, principalId: string, taskId: string, questionId: string, answer: string, acceptedInputId?: string): TaskSnapshot {
@@ -377,9 +395,9 @@ export class TaskService {
     this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify({ ...previous, revision: task.revision,
       answers: [...(previous.answers ?? []), { questionId, text: answer, inputId, ...(browserFieldLabel ? {browserFieldLabel} : {}) }], originatingInputId: inputId }));
     task.pendingQuestion = undefined;
-    task.state = task.activeAttemptId ? 'interrupting' : 'queued';
+    task.state = task.activeAttemptId ? (task.gatewayTarget ? 'running' : 'interrupting') : 'queued';
     this.store.saveTask(task, version);
-    this.store.enqueue(task.activeAttemptId ? 'interrupt' : 'schedule', `answer:${questionId}`, { taskId });
+    this.store.enqueue(task.activeAttemptId && !task.gatewayTarget ? 'interrupt' : 'schedule', `answer:${questionId}`, { taskId });
     if (this.store.get("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_intake'")) {
       const input = this.store.get('SELECT principal_id,binding_id,input_seq FROM conversation_inputs WHERE id=? AND conversation_id=?', inputId, conversationId)!;
       this.store.run(`DELETE FROM conversation_intake WHERE conversation_id=? AND principal_id=? AND binding_id=?

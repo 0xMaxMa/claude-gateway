@@ -115,7 +115,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       const uncertain = result.lastAction?.outcome === 'unknown';
       if(result.status==='succeeded' && !authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');
       if(result.status==='succeeded' && !uncertain)outcome={type:'completed',result:{summary:`Browser goal independently verified. ${result.steps} actions, ${result.evaluations} evaluations.`,artifactIds:[]}};
-      else outcome={type:uncertain?'unknown':result.status==='cancelled'?'stopped':result.status==='failed'||knownBrowserStop(result,dispatched)?'failed':'unknown',failure:{code:'BROWSER_'+result.reason.toUpperCase(),message:'Browser work stopped: '+result.reason+'. '+result.steps+' actions, '+result.evaluations+' evaluations. '+(result.reason==='FIELD_TEXT_REQUIRED'?'Ask the user for the missing field value; no value was invented.':'Verify the browser state before continuing.'),observedAt:Date.now()}};
+      else outcome={type:uncertain?'unknown':result.status==='cancelled'?'stopped':result.status==='failed'||knownBrowserStop(result,dispatched)?'failed':'unknown',failure:{code:'BROWSER_'+result.reason.toUpperCase(),message:'Browser work stopped: '+result.reason+'. '+result.steps+' actions, '+result.evaluations+' evaluations. '+(result.reason==='FIELD_TEXT_REQUIRED'?'Use established user facts to answer the missing field; ask the user only if the value is unknown.':'Verify the browser state before continuing.'),observedAt:Date.now()}};
       if(outcome.type!=='completed' && outcome.failure && providerFailure)outcome.failure.message+=`${providerFailure.resetAt?' Resets at '+providerFailure.resetAt+'.':''}${providerFailure.retryAfter?' Retry after '+providerFailure.retryAfter+'.':''}`;
       const {observation:_,...browserReport}=result;
       outcome.browserReport=browserReport;
@@ -137,7 +137,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       // Unknown actions and provider outcomes still require reconciliation.
       if(receipt.outcome.type==='unknown' && knownBrowserStop(receipt.browserResult,receipt.lastDispatchedMutation)) return {...receipt.outcome,type:'failed'};
       if(receipt.browserResult?.reason==='FIELD_TEXT_REQUIRED' && receipt.browserResult.lastAction?.outcome!=='unknown' &&
-        this.options.allowed() && this.options.onNeedsInput?.(task,'Browser work needs a field value'+(receipt.browserResult.fieldRequest ? ' for '+JSON.stringify(receipt.browserResult.fieldRequest.label) : '')+'. Please provide the exact text to enter, or ask the parent agent to inspect the page.')) return {type:'paused',browserReport:receipt.outcome.browserReport};
+        this.options.allowed() && this.options.onNeedsInput?.(task,'Browser work needs a field value'+(receipt.browserResult.fieldRequest ? ' for '+JSON.stringify(receipt.browserResult.fieldRequest.label) : '')+'. The parent agent should answer from established user instructions when possible; ask the user only if the value is unknown or requires a new decision.')) return {type:'paused',browserReport:receipt.outcome.browserReport};
       return receipt.outcome;
     }
     if(this.running.has(this.key(task,requestId)))return 'running';
