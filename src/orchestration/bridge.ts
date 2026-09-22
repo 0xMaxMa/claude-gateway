@@ -93,7 +93,9 @@ export class TaskBridge {
                   const adapter = this.gatewayAdapters.get(a.scope);
                   if (!adapter) throw new OrchestrationError('SAFEMODE_AGENT_NOT_ALLOWED');
                   if (a.query !== undefined && typeof a.query !== 'string') throw new OrchestrationError('INVALID_INPUT');
-                  result = adapter.discover(a.query, a.offset, context); break;
+                  result = await adapter.discover(a.query, a.offset, context);
+                  if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
+                  this.tasks.store.assertMember(context.conversationId, context.principalId); break;
                 }
                 if (a.scope !== undefined && a.scope !== 'capabilities') throw new OrchestrationError('INVALID_INPUT');
                 if (!scope.capabilities) throw new OrchestrationError('CAPABILITY_DISCOVERY_UNAVAILABLE');
