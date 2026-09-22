@@ -627,14 +627,23 @@ export class AgentRunner extends EventEmitter {
   }
   stopVoiceResponse(sessionId: string): void { this.orchestration?.stopResponse(sessionId, 'barge-in'); }
 
+  async acceptApiMessage(sessionId: string, chatId: string, message: string,
+    opts: Parameters<AgentRunner['sendApiMessage']>[3]): Promise<string> {
+    if (!this.orchestrationForApi(sessionId)) throw Object.assign(new Error('Queued admission requires orchestration'), { code: 'NOT_SUPPORTED' });
+    if (!opts.principalId) throw new Error('Authenticated principal required');
+    await this.authorizeVoiceSession(sessionId, opts.principalId);
+    const result = await this.sendOrchestratedApi(sessionId, chatId, message, { ...opts, acceptOnly: true });
+    return result.inputId!;
+  }
+
   private async sendOrchestratedApi(sessionId: string, chatId: string, message: string,
-    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string },
-    onText?: (text: string) => void, onTool?: (event: import('../orchestration/tool-activity').ToolActivity) => void): Promise<{ text: string; attachments: ApiAttachment[] }> {
+    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string; clientMessageId?: string; acceptOnly?: boolean },
+    onText?: (text: string) => void, onTool?: (event: import('../orchestration/tool-activity').ToolActivity) => void): Promise<{ text: string; attachments: ApiAttachment[]; inputId?: string }> {
     const semantic = this.agentConfig.orchestration?.conversation?.semanticIntake === true;
-    if (!semantic && this.pendingApiSessions.has(sessionId)) throw Object.assign(new Error('Session already has a pending request'), { code: 'CONFLICT' });
+    if (!semantic && !opts.acceptOnly && this.pendingApiSessions.has(sessionId)) throw Object.assign(new Error('Session already has a pending request'), { code: 'CONFLICT' });
     if (!opts.principalId) throw new Error('Authenticated principal required for conversation orchestration');
     const deadline = Date.now() + opts.timeoutMs;
-    if (!semantic) this.pendingApiSessions.add(sessionId); // reserve before the first await
+    if (!semantic && !opts.acceptOnly) this.pendingApiSessions.add(sessionId); // reserve before the first await
     try {
       const orchestration = await this.getOrchestration();
       await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId);
@@ -651,8 +660,13 @@ export class AgentRunner extends EventEmitter {
       const requestId = opts.requestId ?? randomUUID();
       const scopedInput: import('../orchestration/store').AcceptInput = { scope: { agentId: this.agentConfig.id, agentSessionId: sessionId, source: 'api', accountId: opts.principalId,
         chatId, threadKey: '', principalId: opts.principalId }, text: message || '[Attachment inspection requested]', attachmentIds: media,
-        requestId, storeUserMessage: !opts.skipUserMessage,
-        metadata: imageParams || videoParams ? { promptContext: (imageParams ? AgentRunner.buildImageParamsNote(imageParams) : '') + (videoParams ? AgentRunner.buildVideoParamsNote(videoParams) : ''), imageRefs: imageParams?.image_refs } : undefined };
+        requestId, ingressKey: opts.clientMessageId ? `web:${sessionId}:${opts.clientMessageId}` : undefined, storeUserMessage: !opts.skipUserMessage,
+        metadata: { clientMessageId: opts.clientMessageId, promptContext: (imageParams ? AgentRunner.buildImageParamsNote(imageParams) : '') + (videoParams ? AgentRunner.buildVideoParamsNote(videoParams) : ''), imageRefs: imageParams?.image_refs } };
+      if (opts.acceptOnly) {
+        const accepted = orchestration.submitInput({ ...scopedInput, model: opts.model }, { execute: opts.allowTools ?? false, writeMemory: false });
+        await orchestration.flushHistory().catch(error => this.logger.warn("Accepted input history projection pending", { inputId: accepted.inputId, error: String(error) }));
+        return { text: '', attachments: [], inputId: accepted.inputId };
+      }
       let text: string;
       if (semantic) {
         const accepted = orchestration.submitInput({...scopedInput,model:opts.model},{execute:opts.allowTools ?? false,writeMemory:false},onTool);
@@ -668,7 +682,7 @@ export class AgentRunner extends EventEmitter {
       if (opts.waitForTasks) text = await orchestration.waitForTaskReport(sessionId, opts.principalId, requestId, text, deadline);
       this.addApiAttachments(sessionId, orchestration.responseFiles(sessionId, requestId).map(ref => MediaStore.resolvePath(this.agentsBaseDir, this.agentConfig.id, ref)));
       return { text, attachments: this.popApiAttachments(sessionId) };
-    } finally { if (!semantic) this.pendingApiSessions.delete(sessionId); }
+    } finally { if (!semantic && !opts.acceptOnly) this.pendingApiSessions.delete(sessionId); }
   }
 
   constructor(agentConfig: AgentConfig, gatewayConfig: GatewayConfig, logger?: Logger) {
@@ -4505,7 +4519,7 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     chatId: string,
     message: string,
-    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string },
+    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string; clientMessageId?: string },
   ): Promise<{ text: string; attachments: ApiAttachment[] }> {
     if (this.orchestrationForApi(sessionId)) return this.sendOrchestratedApi(sessionId, chatId, message, opts);
     if (this.pendingApiSessions.has(sessionId)) {
@@ -4813,7 +4827,7 @@ export class AgentRunner extends EventEmitter {
     chatId: string,
     message: string,
     callbacks: ApiStreamCallbacks,
-    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string },
+    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string; clientMessageId?: string },
   ): Promise<() => void> {
     if (this.orchestrationForApi(sessionId)) {
       if (this.pendingApiSessions.has(sessionId)) throw Object.assign(new Error('Session already has a pending request'), { code: 'CONFLICT' });
@@ -5324,7 +5338,7 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     chatId: string,
     command: string,
-    opts?: { skipPersist?: boolean; model?: string; principalId?: string; displayCommand?: string },
+    opts?: { skipPersist?: boolean; model?: string; principalId?: string; displayCommand?: string; clientMessageId?: string },
   ): Promise<{ result: Record<string, unknown>; responseText: string }> {
     const agentId = this.agentConfig.id;
     const storeChatId = chatId;           // sessionStore adds channel prefix internally
@@ -5363,7 +5377,7 @@ export class AgentRunner extends EventEmitter {
     // `force` overrides that for notes that must stay visible regardless (see /stop below).
     const persist = (role: 'user' | 'assistant', content: string, force = false) => {
       if ((skipPersist && !force) || !content) return;
-      this.historyDb.insertMessage({ chatId: dbChatId, sessionId, source: 'api', role, content, ts: Date.now() });
+      this.historyDb.insertMessage({ chatId: dbChatId, sessionId, source: 'api', role, content, ts: Date.now(), ...(role === 'user' && opts?.clientMessageId ? { clientMessageId: opts.clientMessageId } : {}) });
     };
 
     // Persist the full user command before executing so it appears in history.

@@ -791,3 +791,46 @@ it('returns the input identity needed to replace optimistic voice messages', () 
   db.insertMessageOnce('input:voice-123', makeMsg());
   expect(db.getMessages('telegram-12345', {}).messages[0].inputId).toBe('voice-123');
 });
+
+
+describe('committed input stream', () => {
+  it('notifies once after persistence and replays by ID despite timestamp ties and clock reversal', () => {
+    const db = makeDb();
+    const updates: string[] = [];
+    const stop = db.subscribeMessages(sessionId => {
+      updates.push(sessionId);
+      expect(db.getUserMessagesAfter(sessionId, 0).length).toBeGreaterThan(0);
+    });
+    const one = makeMsg({ sessionId: 'one', ts: 200, clientMessageId: 'client-one' });
+    const first = db.insertMessageOnce('input:first', one);
+    expect(db.insertMessageOnce('input:first', one)).toBe(first);
+    db.insertMessageOnce('input:second', makeMsg({ sessionId: 'one', ts: 100 }));
+    db.insertMessageOnce('input:other', makeMsg({ sessionId: 'other', ts: 100 }));
+    expect(updates).toEqual(['one', 'one', 'other']);
+    expect(db.getUserMessagesAfter('one', 0)).toEqual([
+      expect.objectContaining({ id: first, inputId: 'first', clientMessageId: 'client-one' }),
+      expect.objectContaining({ inputId: 'second' }),
+    ]);
+    expect(db.getUserMessagesAfter('one', first).map(row => row.inputId)).toEqual(['second']);
+    stop();
+    db.insertMessageOnce('input:third', makeMsg({ sessionId: 'one' }));
+    expect(updates).toHaveLength(3);
+  });
+  it('isolates a broken subscriber and never publishes a failed insert', () => {
+    const db = makeDb();
+    db.subscribeMessages(() => { throw Error('disconnected'); });
+    const receive = jest.fn();
+    db.subscribeMessages(receive);
+    db.insertMessageOnce('input:a', makeMsg());
+    expect(receive).toHaveBeenCalledTimes(1);
+    expect(() => db.insertMessageOnce('input:a', makeMsg({content:'conflict'}))).toThrow();
+    expect(receive).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+test('legacy command inserts preserve the same client identity as streamed input rows', () => {
+  const db = makeDb();
+  db.insertMessage(makeMsg({content:'/help', clientMessageId:'command-id'}));
+  expect(db.getMessages('telegram-12345').messages[0]).toMatchObject({clientMessageId:'command-id'});
+});

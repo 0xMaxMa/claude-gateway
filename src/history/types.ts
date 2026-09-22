@@ -47,6 +47,7 @@ export type MessageRole = 'user' | 'assistant' | 'system';
 export interface HistoryMessage {
   id?: number;
   inputId?: string;
+  clientMessageId?: string;
   responseId?: string;
   chatId: string;
   sessionId: string;

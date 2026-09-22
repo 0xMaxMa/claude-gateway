@@ -24,7 +24,7 @@ export interface AcceptInput {
   /** Only ingress supplies these; they survive a crash before agent admission. */
   capabilities?: ExecutionCapabilities;
   model?: string;
-  metadata?: { channelIngressFingerprint?: string; recoveryBatch?: string; recoveredChannelInput?: {content:string;meta:Record<string,string>};
+  metadata?: { clientMessageId?: string; channelIngressFingerprint?: string; recoveryBatch?: string; recoveredChannelInput?: {content:string;meta:Record<string,string>};
     unavailableAttachments?: Array<{code:string;name?:string;quoted:boolean}>; senderName?: string; senderId?: string; platformMessageId?: string; platformMessageIds?: string[]; mediaGroupId?: string; promptContext?: string; imageRefs?: string[];
     attachmentName?: string; mediaType?: string; repliedText?: string; repliedMessageId?: string; repliedSender?: string; repliedAttachmentIds?: string[]; attachmentDetails?: Array<{ref:string;name?:string;quoted:boolean}>; attachmentError?: string };
   /** Internal mailbox replay identifier; never accepted from HTTP/model arguments. */
@@ -288,9 +288,9 @@ export class OrchestrationStore {
       if (ingressKey) this.run('INSERT INTO ingress_receipts VALUES(?,?,?,?,?)', ingressKey, hash, inputId, id, now);
       this.appendEvent(id, 'input.accepted', { inputId });
       this.enqueue('input', `input:${inputId}`, { conversationId: id, inputId });
-      // Live voice arrives as finalized text. Uploaded voice notes still need STT
-      // before their canonical history operation can be written.
-      if (input.modality === 'live_voice') {
+      // Text is already canonical at admission, even while another response runs.
+      // Uploaded voice notes still need STT before projecting their transcript.
+      if (input.modality !== 'voice_note') {
         this.run('INSERT INTO history_operations VALUES(?,?,?,?,?,?,?,?)', `input:${inputId}`, id, inputId, null, 'append', null, 'pending', now);
         this.enqueue('history', `input:${inputId}`, { operationId: `input:${inputId}` });
       }

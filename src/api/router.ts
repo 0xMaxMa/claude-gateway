@@ -603,7 +603,7 @@ export function createApiRouter(
    * Send a message to an agent and receive its response synchronously.
    * Body: { message: string, chat_id: string, session_id?: string }
    */
-  router.post('/v1/agents/:agentId/messages', auth, async (req: Request, res: Response) => {
+  router.post(['/v1/agents/:agentId/messages', '/v1/agents/:agentId/messages/accept'], auth, async (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
 
@@ -623,6 +623,8 @@ export function createApiRouter(
       chat_id?: unknown;
       session_id?: unknown;
       stream?: unknown;
+      accept_only?: unknown;
+      client_message_id?: unknown;
       timeout_ms?: unknown;
       media_files?: unknown;
       model?: unknown;
@@ -630,8 +632,14 @@ export function createApiRouter(
       image_params?: unknown;
       video_params?: unknown;
     };
-    const { message, chat_id, session_id, stream, timeout_ms, media_files, model: requestModel, store_user_message, image_params, video_params } = body;
+    const { message, chat_id, session_id, stream, timeout_ms, media_files, model: requestModel, store_user_message, image_params, video_params, client_message_id } = body;
+    const accept_only = req.path.endsWith('/messages/accept') ? true : body.accept_only;
 
+    if ((accept_only !== undefined && typeof accept_only !== 'boolean') ||
+        (client_message_id !== undefined && (typeof client_message_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(client_message_id)))) {
+      res.status(400).json({ error: 'Invalid accept_only or client_message_id' }); return;
+    }
+    const clientMessageId = client_message_id as string | undefined;
     if (message !== undefined && typeof message !== 'string') {
       res.status(400).json({ error: 'message must be a string if provided' });
       return;
@@ -814,6 +822,24 @@ export function createApiRouter(
     const commandMessage = stopReply ?? trimmedMessage;
     const isBuiltinCommand = !!commandMessage && AgentRunner.isApiBuiltinCommand(commandMessage);
 
+    if (accept_only === true) {
+      if (stream || isBuiltinCommand || skipUserMessage) {
+        res.status(400).json({ error: 'Queued admission requires a stored message and cannot stream or execute a command' }); return;
+      }
+      try {
+        const inputId = await runner.acceptApiMessage(sessionId, chatIdStr, trimmedMessage, {
+          timeoutMs, allowTools: agentConfigs.get(agentId)?.allow_tools ?? !!apiKey.allow_tools, mediaFiles: validatedMediaFiles, model: modelStr,
+          imageParams: validatedImageParams, videoParams: validatedVideoParams,
+          requestId, principalId: apiPrincipal(apiKey), clientMessageId,
+        });
+        res.status(202).json({ status: 'accepted', input_id: inputId, session_id: sessionId, client_message_id: clientMessageId });
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        res.status(code === 'NOT_SUPPORTED' || code === 'IDEMPOTENCY_CONFLICT' ? 409 : code === 'QUEUE_FULL' ? 429 : code === 'ACCESS_DENIED' ? 403 : 503).json({ error: (error as Error).message, code });
+      }
+      return;
+    }
+
     if (stream) {
       // SSE streaming mode
       let onClientDisconnect: (() => void) | undefined;
@@ -827,7 +853,7 @@ export function createApiRouter(
           openSseStream(res);
           try {
             const { responseText } = await runner.executeApiCommand(
-              sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, model: modelStr, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage },
+              sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, model: modelStr, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId },
             );
             sseCallbacks.onChunk({ type: 'text_delta', text: responseText } as import('../types').StreamEvent);
             sseCallbacks.onDone(responseText, []);
@@ -852,7 +878,7 @@ export function createApiRouter(
           chatIdStr,
           trimmedMessage,
           sseCallbacks,
-          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage, imageParams: validatedImageParams, videoParams: validatedVideoParams, requestId, principalId: apiPrincipal(apiKey) },
+          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage, imageParams: validatedImageParams, videoParams: validatedVideoParams, requestId, principalId: apiPrincipal(apiKey), clientMessageId },
         );
 
         // Client disconnect — detaches this connection's sink. The turn keeps
@@ -882,7 +908,7 @@ export function createApiRouter(
         if (isBuiltinCommand) {
           // Built-in command — answer locally, return the same JSON shape as a normal reply.
           ({ responseText } = await runner.executeApiCommand(
-            sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage },
+            sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId },
           ));
         } else {
           const agentCfgSync = agentConfigs.get(agentId)!;
@@ -897,6 +923,7 @@ export function createApiRouter(
             videoParams: validatedVideoParams,
             requestId,
             principalId: apiPrincipal(apiKey),
+            clientMessageId,
           }));
         }
         const syncResult: Record<string, unknown> = {
@@ -965,6 +992,7 @@ export function createApiRouter(
         model: cfg.claude?.model ?? null,
         allow_tools: cfg.allow_tools ?? false,
         orchestration_enabled: cfg.orchestration?.enabled === true,
+        chat_input_stream: cfg.orchestration?.enabled === true && (cfg.orchestration.channels ?? ['api']).includes('api'),
         connectors: cfg.connectors ?? {},
         avatarUrl: cfg.avatar ? `/api/v1/agents/${id}/avatar` : null,
         telegram_connected: !!cfg.telegram?.botToken,
@@ -4649,6 +4677,58 @@ export function createApiRouter(
    * is keyed by session id, and a client resuming after a reload may well have
    * nothing but the session id left.
    */
+  router.get('/v1/agents/:agentId/sessions/:sessionId/messages/stream', auth, async (req: Request, res: Response) => {
+    const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
+    const key = (req as AuthedRequest).apiKey, runner = agentRunners.get(agentId);
+    if (!canAccessAgent(key, agentId) || !runner || !isValidSessionId(sessionId)) { res.status(403).end(); return; }
+    const after = req.query.after_id;
+    let cursor = after === undefined ? 0 : Number(after);
+    if ((after !== undefined && (typeof after !== 'string' || !/^\d+$/.test(after))) || !Number.isSafeInteger(cursor) || cursor < 0) {
+      res.status(400).json({ error: 'Invalid message cursor' }); return;
+    }
+    let unsubscribe: (() => void) | undefined, heartbeat: ReturnType<typeof setInterval> | undefined;
+    let closed = false, pumping = false, dirty = false;
+    const close = () => { closed = true; unsubscribe?.(); clearInterval(heartbeat); };
+    res.on('close', close);
+    try {
+      await runner.authorizeVoiceSession(sessionId, apiPrincipal(key));
+      if (closed) return;
+      const history = runner.getHistoryDb();
+      res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
+      res.flushHeaders();
+      const pump = async () => {
+        dirty = true;
+        if (pumping || closed) return;
+        pumping = true;
+        try {
+          while (dirty && !closed) {
+            dirty = false;
+            await runner.authorizeVoiceSession(sessionId, apiPrincipal(key));
+            if (closed) break;
+            const rows = history.getUserMessagesAfter(sessionId, cursor);
+            for (const message of rows) {
+              if (res.writableLength > 1024 * 1024) { close(); res.end(); break; }
+              res.write(`id: ${message.id}\ndata: ${JSON.stringify(message)}\n\n`);
+              cursor = message.id!;
+            }
+            if (rows.length === 100) { dirty = true; await new Promise<void>(resolve => setImmediate(resolve)); }
+          }
+        } catch { close(); res.end(); }
+        finally { pumping = false; }
+      };
+      // Subscribe before replay: commits made while authorization awaits are
+      // covered by the replay cursor, including notifications during a drain.
+      unsubscribe = history.subscribeMessages(changedSession => { if (changedSession === sessionId) void pump(); });
+      heartbeat = setInterval(() => {
+        if (closed) return;
+        if (res.writableLength > 1024 * 1024) { close(); res.end(); return; }
+        res.write(': heartbeat\n\n');
+        void pump(); // Also covers a writer in another process.
+      }, 15000);
+      await pump();
+    } catch { close(); if (!res.headersSent) res.status(403); res.end(); }
+  });
+
   router.get('/v1/agents/:agentId/sessions/:sessionId/activity/stream', auth, async (req: Request, res: Response) => {
     const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
     const key = (req as AuthedRequest).apiKey, runner = agentRunners.get(agentId);
