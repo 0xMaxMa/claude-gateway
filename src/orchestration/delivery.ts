@@ -20,7 +20,7 @@ export type ChannelSender = (binding: Row, text: string, deliveryId: string, fil
 export function channelSender(config: AgentConfig | (() => AgentConfig), request: typeof fetch = fetch, speechEnabled: (binding: Row, speech: SpeechDelivery) => boolean = () => true, linkedSender?: ChannelSender, pendingLineGroupSize: () => number = () => 0): ChannelSender {
   return async (binding, text, id, file, speech, textFormat, controls) => {
     const agent = typeof config === 'function' ? config() : config;
-    if (speech) return sendChannelSpeech(agent, binding, speech, id, request, undefined, () => speechEnabled(binding, speech));
+    if (speech) return sendChannelSpeech(agent, binding, speech, id, request, undefined, () => speechEnabled(binding, speech), pendingLineGroupSize);
     if (['whatsapp', 'wechat'].includes(String(binding.channel))) {
       if (!linkedSender) return {state: 'failed', code: 'DELIVERY_NOT_CONFIGURED'};
       // Question callers include plain commands for transports without native controls.

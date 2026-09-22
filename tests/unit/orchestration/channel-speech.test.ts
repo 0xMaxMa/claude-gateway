@@ -34,3 +34,26 @@ test.each(['discord','line','slack'])('%s sends pinned-voice MP3 to original con
   }
  }finally{convert.mockRestore();if(prior===undefined)delete process.env.SHARE_DB_PATH;else process.env.SHARE_DB_PATH=prior;rmSync(root,{recursive:true,force:true});}
 });
+
+test('a LINE voice reply classifies a 429 and reaches the pending-group-size check the same way a file push does (issue #524)',async()=>{
+ const convert=jest.spyOn(lineAudio,'convertLineAudio').mockImplementation(async(_input,output)=>{writeFileSync(output,Buffer.from('00000020667479704d344120000000006d6f6f7600000000','hex'));return 1045;});
+ const root=mkdtempSync(join(tmpdir(),'channel-tts-429-')),workspace=join(root,'a','workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(root,'a','.public-base'),'https://fixture.invalid/gateway');
+ const prior=process.env.SHARE_DB_PATH;process.env.SHARE_DB_PATH=join(root,'shares.db');
+ const synth=jest.fn(async()=>({bytes:audio,mime:'audio/mpeg',name:'reply.mp3'}));const provider=jest.fn(()=>({synthesizeFile:synth}));
+ const request=jest.fn(async(url:string)=>{
+  if(url.includes('/message/push'))return new Response(JSON.stringify({message:'Too Many Requests'}),{status:429,headers:{'retry-after':'2'}});
+  if(url.includes('/quota/consumption'))return new Response(JSON.stringify({totalUsage:997}));
+  if(url.includes('/quota'))return new Response(JSON.stringify({type:'limited',value:1000}));
+  throw new Error(`unexpected url ${url}`);
+ });
+ const agent={id:'a',workspace,line:{channelAccessToken:'l'}} as AgentConfig;
+ const binding={channel:'line',chat_id:'original',thread_key:'topic',conversation_id:'c'},speech={text:'こんにちは',provider:'elevenlabs',model:'m',voiceId:'voice'};
+ const {resetLineQuotaCache}=await import('../../../src/orchestration/line-quota');resetLineQuotaCache();
+ const log=jest.spyOn(console,'warn').mockImplementation(()=>{});
+ try{
+  const outcome=await sendChannelSpeech(agent,binding,speech,'00000000-0000-4000-8000-000000000002',request as unknown as typeof fetch,provider as any,undefined,()=>10);
+  expect(outcome).toMatchObject({state:'failed',code:'LINE_RATE_LIMITED'});
+  const events=log.mock.calls.map(call=>JSON.parse(String(call[0])));
+  expect(events).toContainEqual(expect.objectContaining({event:'LINE quota insufficient for pending group delivery',remaining:3,groupSize:10}));
+ }finally{log.mockRestore();convert.mockRestore();if(prior===undefined)delete process.env.SHARE_DB_PATH;else process.env.SHARE_DB_PATH=prior;rmSync(root,{recursive:true,force:true});}
+});
