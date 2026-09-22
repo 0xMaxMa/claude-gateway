@@ -10,6 +10,7 @@ export type JevAnswer =
   | { type: 'score'; score: number; confidence: number; probabilities: Record<string, number>; legend: Record<string, string> };
 export interface JevRequest { state: JevContent; questions: Record<string, JevQuestion>; requestId?: string }
 export interface JevConfig {
+  thinking?: import('./browser-contract').BrowserTextHelperConfig;
   browser?: import('./browser-contract').BrowserIntegrationConfig;
   enabled?: boolean; provider?: 'typesafe' | 'upstream'; model?: string; baseUrl?: string;
   apiKeyFile?: string; apiKeyEnv?: string; timeoutMs?: number; maxConcurrentRequests?: number;

@@ -23,7 +23,7 @@ export class AutomaticBrowserBindings {
     const config=this.gateway.gateway.jev?.browser;
     if(!config)return undefined;
     const manual=new Set(config.bindings.map(b=>b.id));
-    return {...config,bindings:[...config.bindings,...this.rows.filter(b=>!manual.has(b.id))].slice(0,100)};
+    return {...config,textHelper:this.gateway.gateway.jev?.thinking??config.textHelper,bindings:[...config.bindings,...this.rows.filter(b=>!manual.has(b.id))].slice(0,100)};
   }
   async refresh(principalId:string,conversationId:string,allowConsent=false,authorized:()=>boolean=()=>true):Promise<void> {
     const check=()=>{if(!authorized())throw Error('ACCESS_DENIED');};check();
