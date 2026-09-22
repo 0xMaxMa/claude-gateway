@@ -190,8 +190,10 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
 }
 
 function knownBrowserStop(result:BrowserExecutionResult|undefined,dispatched:BrowserMutationCheckpoint|undefined):boolean {
-  const known=new Set(['START_URL_REQUIRED','OBSERVATION_TRUNCATED','LOW_OPERATION_CONFIDENCE','LOW_TARGET_CONFIDENCE','PAGE_CONTENT_UNAVAILABLE','MODEL_BLOCKED','ACTION_SPACE_TOO_LARGE','EVALUATION_INPUT_TOO_LARGE','EVALUATION_BUDGET','ACTION_BUDGET']);
-  if(result?.status!=='blocked' || !known.has(result.reason) || result.providerFailure || result.lastAction?.outcome==='unknown')return false;
+  // A blocked runner has ended. A budget/confidence reason does not imply an
+  // in-flight browser action. Keep only genuinely unknown actions or provider
+  // outcomes fenced; field requests retain their existing input lifecycle.
+  if(result?.status!=='blocked' || result.reason==='OUTCOME_UNKNOWN' || result.reason==='FIELD_TEXT_REQUIRED' || result.providerFailure || result.lastAction?.outcome==='unknown')return false;
   if(result.reason==='START_URL_REQUIRED')return result.steps===0 && result.evaluations===0 && !result.lastAction && !result.lastConfirmedAction && !dispatched;
   return !dispatched || (result.lastAction?.operationId===dispatched.operationId && ['confirmed','not_executed'].includes(result.lastAction.outcome));
 }
