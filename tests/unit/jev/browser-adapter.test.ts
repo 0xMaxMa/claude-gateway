@@ -162,3 +162,13 @@ test('explicit cancellation releases ended blocked work only with confirmed muta
   await f.a.cancel(t,'r');expect((await settle(f.a,t)).type).toBe(outcome==='confirmed'?'stopped':'unknown');
  }
 });
+
+test('low confidence ends as failed after confirmed navigation, not a target lock',async()=>{
+ const f=fixture();const op='550e8400-e29b-41d4-a716-446655440000';
+ f.run.mockImplementation(async c=>{c.beforeMutation!(op,'tab_navigate');return {status:'blocked',reason:'LOW_OPERATION_CONFIDENCE',steps:1,evaluations:1,lastAction:{operationId:op,operation:'NAVIGATE',outcome:'confirmed'}};});
+ await f.a.submit(task(),'r','goal');expect(await settle(f.a)).toMatchObject({type:'failed',failure:{code:'BROWSER_LOW_OPERATION_CONFIDENCE'}});
+ const file=join(dir,readdirSync(dir)[0]),receipt=JSON.parse(readFileSync(file,'utf8'));receipt.outcome.type='unknown';writeFileSync(file,JSON.stringify(receipt));
+ expect(await f.make().inspect(task(),'r')).toMatchObject({type:'failed'});
+ receipt.browserResult.lastAction.operationId='different';writeFileSync(file,JSON.stringify(receipt));
+ expect(await f.make().inspect(task(),'r')).toMatchObject({type:'unknown'});
+});

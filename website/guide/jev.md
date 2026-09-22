@@ -383,3 +383,5 @@ a durable operation ID before dispatch. A lost navigation response is unknown an
 is never automatically replayed. Supplying field answers resumes the current page
 without repeating initial navigation. Without a URL, an internal New Tab reports
 `START_URL_REQUIRED` instead of an observation-schema error.
+
+Browser tasks that stop at a known decision boundary (for example low confidence or incomplete observations) fail without retaining a target lock when all dispatched mutations are confirmed. Unknown mutation or provider outcomes still require reconciliation. No automatic mutation replay occurs. The browser runner briefly refreshes empty SPA observations before making an evaluation; a persistently empty page stops without a paid decision.
