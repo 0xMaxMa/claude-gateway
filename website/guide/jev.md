@@ -431,3 +431,23 @@ fresh evidence. Unknown mutations, cancelled work, provider failures and revoked
 authority do not qualify for autonomous replanning. Ask for genuinely missing
 information or a required decision; do not use raw error codes as the final
 response when the parent can still resolve the task.
+
+### Isolated automation regression scenarios
+
+Run `npm run build`, then
+`node scripts/jev-automation-fixtures.cjs /absolute/path/to/browser-runner.js`.
+This uses the installed remote-browser runner with real Gateway task persistence,
+question suppression/review, replanning and verification, while replacing the
+browser with synthetic pages. It covers flight search (including passenger
+constraints), matching phone-case search, and asking ChatGPT for attributed news.
+Each runs normally and with low confidence, stale observations and unknown
+mutation outcomes. Known facts must not cause user questions; unknown mutations
+must not be replayed; all continuations retain one task.
+
+Default parent and Jev decisions are scripted regression fixtures, not evidence
+of model intelligence. Set `JEV_FIXTURE_INFERENCE` to a trusted local module
+exporting `evaluate(request,signal)` and `parent(input)` to run paid live inference
+on those same synthetic pages. Reports label live versus scripted decisions.
+These simplified pages do not establish compatibility with the actual Google,
+Shopee or ChatGPT UI, authentication, anti-bot challenges, or real result quality.
+No real purchases, bookings or ChatGPT submissions are made by this harness.

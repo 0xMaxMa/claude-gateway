@@ -334,7 +334,9 @@ export class TaskService {
           WHERE n.task_id=? AND n.conversation_id=? AND n.decision_id=? AND n.status='assigned'
           AND json_extract(e.payload_json,'$.payload.pendingQuestion.questionId')=? LIMIT 1`,
           taskId, context.conversationId, context.decisionId, questionId);
-        if (!assigned || task.ownerPrincipalId !== context.principalId || !task.capabilities.execute ||
+        const reviewed = context.questionReviewIds?.includes(questionId) && this.store.get(
+          'SELECT question_id FROM task_questions WHERE question_id=? AND task_id=? AND closed=0 AND revision=?',questionId,taskId,task.revision);
+        if ((!assigned && !reviewed) || task.ownerPrincipalId !== context.principalId || !task.capabilities.execute ||
           task.gatewayTarget?.adapter !== 'browser' || task.browserReport?.reason !== 'FIELD_TEXT_REQUIRED' ||
           task.browserReport.fieldRequest?.reason !== 'missing' || !task.browserReport.fieldRequest.label)
           throw new OrchestrationError('EXECUTION_DENIED');

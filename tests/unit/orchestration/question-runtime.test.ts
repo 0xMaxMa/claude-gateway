@@ -304,3 +304,30 @@ test('failed optional speech notice does not block an already delivered acknowle
   expect(f.runtime.store.get("SELECT state FROM deliveries WHERE delivered_text LIKE 'Voice rate limit%'")!.state).toBe('failed');
  }finally{await f.close();}
 });
+
+test.each(['Flights to Osaka','Shopee iPhone18ProMax case','ChatGPT crypto news'])('browser field review answers known facts without asking the user: %s',async goal=>{
+ const f=await fixture();
+ try{
+  const task=f.runtime.store.task(f.task.taskId)!;
+  task.gatewayTarget={adapter:'browser',sessionId:'fixture',name:'Fixture'};
+  task.browserReport={status:'blocked',reason:'FIELD_TEXT_REQUIRED',steps:0,evaluations:1,fieldRequest:{ref:'input',label:'Query',reason:'missing'}};
+  f.runtime.store.transaction(()=>f.runtime.store.saveTask(task,task.stateVersion));
+  f.runtime.questionControls.tick();
+  let ticketScope:any;const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((scope,...args)=>{ticketScope=scope;return issue(scope,...args);});
+  const ask=jest.spyOn(f.runtime.questionControls,'manage');
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+   try{
+    expect(ticketScope.context.execute).toBe(false);
+    expect(ticketScope.context.questionReviewIds).toContain(f.question.questionId);
+    f.runtime.tasks.answer({...ticketScope.context,actionId:'review-answer'},task.taskId,f.question.questionId,goal);
+    this.emit('output',JSON.stringify({type:'result',result:''}));
+   }catch(e){this.emit('error',e);}
+  }}) as unknown as SessionProcess);
+  (f.runtime as any).pumpMailbox();
+  const until=Date.now()+5000;while(f.runtime.store.task(task.taskId)!.revision===1&&Date.now()<until)await new Promise(r=>setTimeout(r,10));
+  expect(f.runtime.store.task(task.taskId)!.revision).toBe(2);
+  expect(f.runtime.tasks.revision(task.taskId,2).answers?.at(-1)?.text).toBe(goal);
+  expect(ask).not.toHaveBeenCalled();
+ }finally{await f.close();}
+});
