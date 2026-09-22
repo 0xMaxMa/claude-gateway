@@ -1,8 +1,18 @@
 import { taskFailure, shutdownFailure } from './failure';
 import { TaskService } from './service';
 import { TaskAttempt, TaskSnapshot, WorkerOutcome } from '../types';
+import { ProviderAdmission, ProviderPermit, ProviderFailure } from '../provider-admission';
+
+export interface WorkerAdmission {
+  acquire(task: TaskSnapshot): ProviderAdmission;
+  renew(permit: ProviderPermit): void;
+  settle(permit: ProviderPermit, result: 'success' | ProviderFailure): void;
+  release(permit: ProviderPermit): void;
+}
 
 export interface WorkerHandle {
+  /** First actual model output, independent of long tool/task completion. */
+  providerReady?: Promise<void>;
   identity?(): TaskAttempt['processIdentity'];
   /** Resolves only after turn admission is observed, never just stdin.write. */
   accepted: Promise<void>;
@@ -14,7 +24,7 @@ export interface WorkerDriver {
   available?(taskId: string): boolean;
   release?(taskId: string): Promise<void>;
   reserve?(taskId: string): (() => void) | undefined;
-  start(task: TaskSnapshot, attempt: TaskAttempt, capacityReserved?: boolean): Promise<WorkerHandle>;
+  start(task: TaskSnapshot, attempt: TaskAttempt, capacityReserved?: boolean, providerPermit?: ProviderPermit): Promise<WorkerHandle>;
 }
 
 /** Workers run outside the scheduler's claim transaction and outside agent
@@ -29,7 +39,7 @@ export class WorkerScheduler {
   private closed = false;
   private readonly pending = new Set<Promise<void>>();
   private timer?: ReturnType<typeof setInterval>;
-  constructor(private readonly tasks: TaskService, private readonly driver: WorkerDriver, private readonly reportError: (error: unknown) => void = () => {}, recoveredReservations = new Map<string, () => void>()) {
+  constructor(private readonly tasks: TaskService, private readonly driver: WorkerDriver, private readonly reportError: (error: unknown) => void = () => {}, recoveredReservations = new Map<string, () => void>(), private readonly admission?: WorkerAdmission) {
     this.uncertainReservations = recoveredReservations;
   }
   start(): void {
@@ -80,24 +90,41 @@ export class WorkerScheduler {
           if (this.driver.available && !this.driver.available(taskId)) continue;
           const release = this.driver.reserve?.(taskId);
           if (this.driver.reserve && !release) break admission;
-          const attempt = this.tasks.claim(taskId);
-          if (!attempt) { release?.(); continue; }
+          let provider: ProviderAdmission | undefined;
+          let attempt: TaskAttempt | undefined;
+          try {
+            provider = this.admission?.acquire(this.tasks.store.task(taskId)!);
+            if (provider?.waiting) { release?.(); continue; }
+            attempt = this.tasks.claim(taskId);
+          } catch (error) {
+            release?.();
+            if (provider?.permit) { try { this.admission?.release(provider.permit); } catch (cleanupError) { this.reportError(cleanupError); } }
+            throw error;
+          }
+          if (!attempt) { release?.(); if (provider?.permit) { try { this.admission?.release(provider.permit); } catch (error) { this.reportError(error); } } continue; }
           this.startedSessions.add(this.tasks.store.task(taskId)!.agentSessionId);
           this.starting.add(taskId);
           // Do not await startup here: one slow spawn cannot serialize every task
           // or control operation behind it.
-          const run = this.run(taskId, attempt, release);
+          const run = this.run(taskId, attempt, release, provider?.permit);
           this.pending.add(run);
           void run.finally(() => this.pending.delete(run)).catch(this.reportError);
         }
       }
     } finally { this.ticking = false; }
   }
-  private async run(taskId: string, attempt: TaskAttempt, release?: () => void): Promise<void> {
+  private async run(taskId: string, attempt: TaskAttempt, release?: () => void, permit?: ProviderPermit): Promise<void> {
     let handle: WorkerHandle | undefined;
+    const renewal = permit ? setInterval(() => { try { this.admission?.renew(permit); } catch (error) { this.reportError(error); } }, 250) : undefined;
+    renewal?.unref();
     try {
-      handle = await this.driver.start(this.tasks.store.task(taskId)!, attempt, Boolean(release));
+      handle = await this.driver.start(this.tasks.store.task(taskId)!, attempt, Boolean(release), permit);
       this.active.set(taskId, handle);
+      let providerResponded = false;
+      void handle.providerReady?.then(() => {
+        providerResponded = true;
+        if (permit && !this.closed) { try { this.admission?.settle(permit, 'success'); } catch (error) { this.reportError(error); } }
+      }).catch(() => {});
       if (this.closed) await handle.stop();
       // Attach rejection handlers before waiting on either branch.
       const outcome = handle.result.catch(error => ({ type: 'unknown' as const, failure: taskFailure(error) }));
@@ -108,14 +135,22 @@ export class WorkerScheduler {
         else await handle.stop();
       } catch { await handle.stop(); }
       let result = await outcome;
+      if (permit && !this.closed) {
+        try {
+          if (result.type === 'completed' && !providerResponded) this.admission?.settle(permit, 'success');
+          else if (result.type !== 'completed' && result.failure?.provider) this.admission?.settle(permit, result.failure.provider);
+        } catch (error) { this.reportError(error); }
+      }
       if (this.closed && result.type !== 'completed' && !['cancel_requested','interrupting'].includes(this.tasks.store.task(taskId)?.state ?? '')) result = {...result, failure: shutdownFailure()};
       this.tasks.finish(attempt.attemptId, attempt.generation, result);
     } catch (error) {
       const task = this.tasks.store.task(taskId);
-      if (!handle && (error as { code?: string }).code === 'RESOURCE_BUSY' && task?.state === 'starting') this.tasks.deferUnstarted(attempt.attemptId, attempt.generation);
+      if (!handle && ['RESOURCE_BUSY','PROVIDER_WAITING'].includes((error as { code?: string }).code ?? '') && task?.state === 'starting') this.tasks.deferUnstarted(attempt.attemptId, attempt.generation, (error as {code?:string}).code === 'PROVIDER_WAITING' ? 'provider' : 'workspace');
       else if (task?.activeAttemptId === attempt.attemptId && task.state !== 'needs_reconciliation') this.tasks.finish(attempt.attemptId, attempt.generation, { type: handle ? 'unknown' : 'failed', failure: this.closed ? shutdownFailure() : taskFailure(error, 'WORKER_START_FAILED') });
       this.reportError(error);
     } finally {
+      if (renewal) clearInterval(renewal);
+      if (permit) { try { this.admission?.release(permit); } catch (error) { this.reportError(error); } }
       await this.driver.release?.(taskId).catch(this.reportError);
       if (this.tasks.store.task(taskId)?.state !== 'needs_reconciliation') release?.();
       else if (release) this.uncertainReservations.set(taskId, release);

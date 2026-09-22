@@ -58,6 +58,14 @@ export class OrchestrationStore {
       this.db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
       this.transaction(() => {
         this.db.exec('CREATE TABLE IF NOT EXISTS orchestration_schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)');
+        this.db.exec(`CREATE TABLE IF NOT EXISTS provider_waits (
+          entity_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, scope TEXT NOT NULL,
+          waiting_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS provider_notices (
+          conversation_id TEXT NOT NULL, scope TEXT NOT NULL, episode TEXT NOT NULL, recovered INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY(conversation_id,scope));`);
+        this.db.exec(`CREATE TABLE IF NOT EXISTS provider_task_routes (
+          task_id TEXT PRIMARY KEY, configured_scope TEXT NOT NULL, actual_scope TEXT NOT NULL);`);
         const version = this.get('SELECT MAX(version) AS version FROM orchestration_schema_migrations')?.version ?? 0;
         if (Number(version) > 1) throw new OrchestrationError('UNSUPPORTED_SCHEMA');
         if (!version) {
@@ -307,7 +315,14 @@ export class OrchestrationStore {
   }
   task(id: string): TaskSnapshot | undefined {
     const row = this.get('SELECT snapshot_json FROM tasks WHERE id=?', id);
-    return row ? JSON.parse(String(row.snapshot_json)) : undefined;
+    if (!row) return;
+    const task: TaskSnapshot = JSON.parse(String(row.snapshot_json));
+    delete task.providerWaiting;
+    if (task.state === 'queued') {
+      const waiting = this.get('SELECT waiting_json FROM provider_waits WHERE entity_id=?', id);
+      if (waiting) task.providerWaiting = JSON.parse(String(waiting.waiting_json));
+    }
+    return task;
   }
   attempt(id: string): TaskAttempt | undefined {
     const row = this.get('SELECT payload_json FROM task_attempts WHERE id=?', id);
@@ -335,6 +350,8 @@ export class OrchestrationStore {
   }
   saveTask(task: TaskSnapshot, expectedVersion: number): void {
     if (!this.inTransaction) throw new OrchestrationError('TRANSACTION_REQUIRED');
+    delete task.providerWaiting;
+    if (task.state !== 'queued') this.run('DELETE FROM provider_waits WHERE entity_id=?', task.taskId);
     advanceTiming(task);
     task.stateVersion = expectedVersion + 1; task.updatedAt = Date.now();
     const changed = this.run(`UPDATE tasks SET state=?,state_version=?,revision=?,active_attempt_id=?,snapshot_json=?,updated_at=? WHERE id=? AND state_version=?`,

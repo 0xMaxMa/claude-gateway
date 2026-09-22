@@ -87,8 +87,9 @@ test('runner hot reload updates the actual orchestration sender and worker confi
   const runtime=await AgentOrchestrationRuntime.open(agent,gateway,root,sessions,history,{createAgentSession:jest.fn(),releaseAgentSession:async()=>{}});
   try {
     const runner=Object.create(AgentRunner.prototype) as any;
-    Object.assign(runner,{agentConfig:agent,gatewayConfig:gateway,orchestration:runtime,whatsappAccounts:new Map(),whatsappAccountForChat:new Map()});
-    for(const method of ['syncWhatsAppAccounts','stopWhatsAppCloudOutbound','startWhatsAppCloudOutbound','refreshTelegramCommands','stopLineReply','startLineReply','stopSlackOutbound','startSlackOutbound'])runner[method]=()=>{};
+    Object.assign(runner,{agentConfig:agent,gatewayConfig:gateway,orchestration:runtime,whatsappAccounts:new Map(),whatsappAccountForChat:new Map(),
+      channelReloadSnapshot:new Map([['telegram',JSON.stringify(agent.telegram)],['discord','null']]),receiverReload:Promise.resolve(),configReloadHandlers:new Set()});
+    for(const method of ['startTelegramReceiver','startDiscordReceiver','syncWhatsAppAccounts','stopWhatsAppCloudOutbound','startWhatsAppCloudOutbound','refreshTelegramCommands','stopLineReply','startLineReply','stopSlackOutbound','startSlackOutbound'])runner[method]=()=>{};
     const send=(runtime as any).delivery.send;
     const binding={channel:'telegram',chat_id:'fixture',thread_key:''};
     await expect(send(binding,'old','id')).resolves.toMatchObject({state:'delivered'});

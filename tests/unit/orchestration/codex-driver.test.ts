@@ -94,6 +94,21 @@ test('defaults to Codex for GPT when no worker routing is configured', async () 
   expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'codex',harnessModel:'gpt-5.6-luna'});
 });
 
+test('fallback revalidates the actual Claude route before any inference',async()=>{
+  jest.mocked(resolveCodexCredentials).mockRejectedValue(new CodexReadinessError('CODEX_UNAVAILABLE','fixture unavailable'));
+  const admission=jest.fn((_task,_permit,harness)=>{expect(harness).toBe('claude');throw Object.assign(new Error('Waiting for provider'),{code:'PROVIDER_WAITING'});});
+  driver=new ClaudeWorkerDriver(agent,gateway,tasks,bridge,new TaskWorkspaces(store,root,join(root,'resources'),'host'),join(root,'attempts'),undefined,admission);
+  const task=spawn('gpt-fixture'),attempt=tasks.claim(task.taskId)!;
+  try {
+    await expect(driver.start(task,attempt,false,{scope:'codex',generation:0})).rejects.toMatchObject({code:'PROVIDER_WAITING'});
+    expect(admission).toHaveBeenCalledTimes(1);expect(CodexProcess).not.toHaveBeenCalled();
+    const worker=jest.mocked(SessionProcess).mock.results[0].value as MockWorker;
+    expect(worker.start).not.toHaveBeenCalled();expect(worker.sendMessage).not.toHaveBeenCalled();
+    tasks.deferUnstarted(attempt.attemptId,attempt.generation,'provider');
+    expect(store.task(task.taskId)).toMatchObject({state:'queued',latestProgress:{text:'Waiting for provider before starting inference.'}});
+  } finally {await driver.release(task.taskId);}
+});
+
 test('explicit model metadata resolves non-GPT aliases to the native provider model', async () => {
   gateway.gateway.models = [{id:'provider-fast',alias:'fast-worker',workerHarness:'codex',workerModel:'gpt-5.6-luna'}] as any;
   const {attempt} = await run('fast-worker');

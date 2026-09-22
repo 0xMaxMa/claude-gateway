@@ -1,5 +1,22 @@
 # Orchestration and live voice {#orchestration-and-live-voice}
 
+## Provider waiting annotations
+
+When inference admission is withheld, activity responses and dashboard projections
+may include `providerWaiting`: `{ state: "waiting_for_provider", reason,
+nextRetryAt?, requiresConfigurationChange }`. Queued task snapshots expose the
+same additive annotation without changing their task lifecycle state. The safe
+reason is one of `transport`, `server`, `rate_limit`, `quota`, `authentication`,
+`configuration`, or `first_response_timeout`. A missing retry time means operator
+action is required, not an imminent automatic retry.
+
+Conversation events include `provider.waiting` and `provider.recovered`. Clients
+should keep pending input visible and continue accepting local controls. Waiting
+does not create a failed token turn or synthetic token usage. Scope hashes and
+credential material are not part of the dashboard projection. Existing channel
+delivery limits (for example, LINE messaging credits) remain separate from
+inference-provider availability. See [provider admission settings](../reference/orchestration-settings.md#provider-admission).
+
 Orchestration is enabled gateway-wide with `gateway.orchestration` and automatically sets and saves `gateway.headless: true`. See [configuration, worker pooling and compatibility limits](/guide/orchestration). Existing message/session endpoints retain their authentication and session ownership rules. An initial message response may acknowledge a queued task; it is not proof of task completion. Worker results arrive later in the original conversation.
 
 Telegram orchestration publishes an editable tool-activity message in the originating chat/topic. It uses the legacy Telegram layout: up to four previous details prefixed with `☑️ :`, the current detail prefixed with `🕐 :` when history exists, and `(elapsed: …)`. Agent and Worker tools share readable legacy labels; task IDs, raw MCP names and historical task lists are omitted. Details remain bounded and redacted. Updates are coalesced (at least four seconds apart per message) and respect Telegram retry-after responses. The message is deleted when all managed work in that conversation is idle. Elapsed-only updates run every ten seconds; tool detail changes can update sooner. This best-effort status is separate from durable task/result delivery and never controls worker execution; it does not replay inactive history at startup. Restarting during active work may create a new status message.

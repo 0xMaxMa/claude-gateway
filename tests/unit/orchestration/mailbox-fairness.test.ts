@@ -17,6 +17,7 @@ test('a busy session spanning topics cannot hide another session behind the mail
     const runtime = Object.assign(Object.create(AgentOrchestrationRuntime.prototype), {
       store, closing: false, config: {conversation: {notificationPolicy: 'next_user_turn', maxActiveSessions: 2, maxDecisionDurationMs: 600000}},
       questionControls: { initialReviews: () => [] }, scheduledReports: new Set(), active: new Map([['busy', {}]]), send, deferred: new Map(),
+      agent: {id:'a',workspace:'/fixture',claude:{}}, gateway: {gateway:{}}, providerAdmission: {inspect:()=>undefined},
     });
     runtime.pumpMailbox();
     await Promise.resolve();

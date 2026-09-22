@@ -76,6 +76,8 @@ import { gatewayCapacity } from './capacity';
 import { ResourceCleanup } from './tasks/cleanup';
 import { TaskFiles } from './task-files';
 import { workerShares } from './worker-shares';
+import { ProviderAdmissionStore, ProviderPermit, ProviderWaiting, providerFailure } from './provider-admission';
+import { resolveProviderScope, resolvedCodexProviderScope } from './provider-scope';
 
 
 /** Stable instructions are carried in the system prefix, not appended to every
@@ -93,6 +95,7 @@ export interface AgentOrchestrationHost {
   releaseAgentSession(sessionId: string, process: SessionProcess): Promise<void>;
 }
 export class AgentOrchestrationRuntime {
+  private providerAdmission!: ProviderAdmissionStore;
   readonly store: OrchestrationStore;
   readonly tasks: TaskService;
   readonly intake: ConversationIntake;
@@ -213,6 +216,7 @@ export class AgentOrchestrationRuntime {
     const personalRetention = resolveDreamingConfig(agent.dreaming, gateway.gateway.dreaming, gateway.gateway.timezone).staleness;
     const sharedRetention = resolveSharedConfig(agent.knowledge?.shared, gateway.gateway.knowledge?.shared).staleness;
     bridge.recordRetrievals = (personalRetention.enabled && personalRetention.recordRetrievals) || (sharedRetention.enabled && sharedRetention.recordRetrievals);
+    let admissionStore: ProviderAdmissionStore | undefined;
     try {
       recoverOrchestration(store);
       recoverSessionCompaction(store);
@@ -232,11 +236,46 @@ export class AgentOrchestrationRuntime {
       }
       const workspaces = new TaskWorkspaces(store, project, join(root, 'task-worktrees'), agent.orchestration?.tasks?.workspaceMode);
       for (const row of store.all("SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled')")) await workspaces.release(String(row.id));
-      const driver = workerDriver ?? new ClaudeWorkerDriver(agent, gateway, tasks, bridge, workspaces, join(root, 'task-attempts'), host.onManagedTurn);
-      const scheduler = new WorkerScheduler(tasks, driver, undefined, recoveredReservations);
+      const providerAdmission = admissionStore = new ProviderAdmissionStore(join(sessions.getAgentsBaseDir(), 'provider-admission.db'));
+      const providerPolicy = () => runtime.config.providerAdmission;
+      const driver = workerDriver ?? new ClaudeWorkerDriver(agent, gateway, tasks, bridge, workspaces, join(root, 'task-attempts'), host.onManagedTurn,
+        (task, permit, harness, model, resolvedIdentity) => {
+          const actualAgent = { ...agent, workers: { ...agent.workers, harness } };
+          const scope = resolvedIdentity
+            ? resolvedCodexProviderScope(resolvedIdentity, providerPolicy().recoveryGeneration)
+            : resolveProviderScope(actualAgent, gateway, model, 'worker', task.resourceProfile?.projectRoot);
+          const configured = resolveProviderScope(agent, gateway, task.model, 'worker', task.resourceProfile?.projectRoot);
+          store.run('INSERT INTO provider_task_routes VALUES(?,?,?) ON CONFLICT(task_id) DO UPDATE SET configured_scope=excluded.configured_scope,actual_scope=excluded.actual_scope', task.taskId, configured, scope);
+          if (scope === permit.scope) return;
+          providerAdmission.release(permit);
+          const next = providerAdmission.acquire(scope, providerPolicy());
+          if (next.waiting) {
+            runtime.waitForProvider(task.taskId, task.conversationId, scope, next.waiting);
+            throw new OrchestrationError('PROVIDER_WAITING');
+          }
+          delete permit.probe;
+          Object.assign(permit, next.permit);
+        });
+      const scheduler = new WorkerScheduler(tasks, driver, undefined, recoveredReservations, {
+        acquire: task => {
+          const configured = resolveProviderScope(agent, gateway, task.model, 'worker', task.resourceProfile?.projectRoot);
+          const previous = store.get('SELECT configured_scope,actual_scope FROM provider_task_routes WHERE task_id=?', task.taskId);
+          const scope = previous?.configured_scope === configured ? String(previous.actual_scope) : configured;
+          const result = providerAdmission.acquire(scope, providerPolicy());
+          if (result.waiting) runtime.waitForProvider(task.taskId, task.conversationId, scope, result.waiting);
+          else store.run('DELETE FROM provider_waits WHERE entity_id=?', task.taskId);
+          return result;
+        },
+        renew: permit => providerAdmission.renew(permit, providerPolicy()),
+        settle: (permit, result) => {
+          if (providerAdmission.settle(permit, result, providerPolicy())) runtime.providerRecovered(permit.scope);
+        },
+        release: permit => providerAdmission.release(permit),
+      });
       const cleanup = new ResourceCleanup(store, join(root, 'task-worktrees'), join(root, 'task-artifacts'), resolveOrchestrationConfig(agent.orchestration).tasks.resourceRetentionDays);
       const runtime = new AgentOrchestrationRuntime(agent, root, host, store, new OrchestrationHistoryWriter(store, sessions, historyDb), scheduler, bridge, tasks);
       runtime.gateway = gateway;
+      runtime.providerAdmission = providerAdmission;
       runtime.releaseLock = releaseLock;
       runtime.settleResources = async () => { cleanup.stop(); await workspaces.settle(); await cleanup.settle(); };
       const shared = resolveSharedConfig(agent.knowledge?.shared, gateway.gateway.knowledge?.shared);
@@ -267,7 +306,7 @@ export class AgentOrchestrationRuntime {
       }, 1000);
       runtime.resourceTimer.unref();
       return runtime;
-    } catch (error) { await bridge.close(); store.close(); releaseLock(); throw error; }
+    } catch (error) { admissionStore?.close(); await bridge.close(); store.close(); releaseLock(); throw error; }
   }
   activity(sessionId: string, principalId: string, after = 0) {
     const conversation = this.store.get('SELECT * FROM conversations WHERE agent_session_id=?', sessionId);
@@ -276,14 +315,59 @@ export class AgentOrchestrationRuntime {
     const id = String(conversation.id);
     if (!Number.isSafeInteger(after) || after < 0 || after > Number(conversation.last_event_seq)) throw new OrchestrationError('INVALID_CURSOR');
     const tasks = this.tasks.status(id, principalId).map(t => {
-      return { taskId: t.taskId, title: t.title, state: t.state, stateVersion: t.stateVersion, progress: t.latestProgress, execution: t.execution, result: t.result?.summary, updatedAt: Math.max(t.updatedAt, t.execution?.lastActivityAt ?? 0) };
+      return { taskId: t.taskId, title: t.title, state: t.state, stateVersion: t.stateVersion, providerWaiting: t.providerWaiting, progress: t.latestProgress, execution: t.execution, result: t.result?.summary, updatedAt: Math.max(t.updatedAt, t.execution?.lastActivityAt ?? 0) };
     });
     const responses = this.store.all('SELECT id,request_id,state,generated_text,COALESCE(completed_at,created_at) AS message_at FROM assistant_responses WHERE conversation_id=? ORDER BY message_at DESC,rowid DESC LIMIT 100', id).reverse().map(r => ({
       id: r.id, requestId: r.request_id, state: r.state, text: r.generated_text, createdAt: r.message_at,
       files: this.store.all('SELECT path FROM task_files WHERE response_id=? ORDER BY created_at,id', r.id).map(f => f.path),
     }));
     const tools = this.store.all("SELECT seq,payload_json FROM conversation_events WHERE conversation_id=? AND seq>? AND type='tool.activity' ORDER BY seq LIMIT 500", id, after).map(r => ({ seq: r.seq, ...JSON.parse(String(r.payload_json)).payload }));
-    return { cursor: tools.length === 500 ? tools[tools.length - 1].seq : Number(conversation.last_event_seq), tasks, responses, tools, busy: this.isBusy(sessionId) };
+    const waiting = this.store.get('SELECT waiting_json FROM provider_waits WHERE entity_id=?', `session:${sessionId}`);
+    return { cursor: tools.length === 500 ? tools[tools.length - 1].seq : Number(conversation.last_event_seq), tasks, responses, tools, busy: this.isBusy(sessionId), providerWaiting: waiting ? JSON.parse(String(waiting.waiting_json)) : undefined };
+  }
+  private waitForProvider(entity: string, conversationId: string, scope: string, waiting: ProviderWaiting): string {
+    const previous = this.store.get('SELECT waiting_json FROM provider_waits WHERE entity_id=?', entity);
+    const data = JSON.stringify(waiting);
+    let text = '';
+    let changed = false;
+    this.store.compose(() => {
+      if (previous?.waiting_json !== data) {
+        changed = true;
+        this.store.run('INSERT INTO provider_waits VALUES(?,?,?,?,?) ON CONFLICT(entity_id) DO UPDATE SET scope=excluded.scope,waiting_json=excluded.waiting_json,updated_at=excluded.updated_at', entity, conversationId, scope, data, Date.now());
+        this.store.appendEvent(conversationId, 'provider.waiting', { entity, ...waiting });
+      }
+      const notice = this.store.get('SELECT episode FROM provider_notices WHERE conversation_id=? AND scope=?', conversationId, scope);
+      if (notice?.episode !== waiting.episode) {
+        text = waiting.requiresConfigurationChange
+          ? 'Waiting for provider. Check the provider credentials, model or quota. Your pending messages and task results are saved.'
+          : 'Waiting for provider. Your pending messages and task results are saved. I will retry automatically after the cooldown.';
+        const response = this.decisions.notice(conversationId, text, true);
+        this.store.run('INSERT INTO provider_notices VALUES(?,?,?,0) ON CONFLICT(conversation_id,scope) DO UPDATE SET episode=excluded.episode,recovered=0', conversationId, scope, waiting.episode);
+        const session = this.store.get('SELECT agent_session_id FROM conversations WHERE id=?', conversationId);
+        if (session) this.publishText(String(session.agent_session_id), response, text, true);
+      }
+    });
+    if (changed || text) {
+      void this.flushHistory().catch(() => {});
+      void this.delivery.tick().catch(() => {});
+    }
+    return text;
+  }
+  private providerRecovered(scope: string): void {
+    this.store.compose(() => {
+      this.store.run('DELETE FROM provider_waits WHERE scope=?', scope);
+      for (const conversation of this.store.all(`SELECT n.conversation_id,c.agent_session_id FROM provider_notices n
+        JOIN conversations c ON c.id=n.conversation_id WHERE n.scope=? AND n.recovered=0 AND c.status='active'`, scope)) {
+      const conversationId = String(conversation.conversation_id), sessionId = String(conversation.agent_session_id);
+      this.store.run('UPDATE provider_notices SET recovered=1 WHERE conversation_id=? AND scope=?', conversationId, scope);
+      this.store.appendEvent(conversationId, 'provider.recovered', {});
+      const text = 'The provider is responding again. Pending messages and task reports can continue.';
+      const response = this.decisions.notice(conversationId, text, true);
+      this.publishText(sessionId, response, text, true);
+      }
+    });
+    void this.flushHistory().catch(() => {});
+    void this.delivery.tick().catch(() => {});
   }
   isBusy(sessionId: string): boolean { return this.active.has(sessionId); }
   isCompacting(sessionId: string): boolean { return this.active.get(sessionId)?.maintenance === 'compact'; }
@@ -329,6 +413,7 @@ export class AgentOrchestrationRuntime {
     }
     if (this.agent.type !== 'app-agent' && config?.tasks?.workspaceMode === 'container') throw new OrchestrationError('CONTAINER_REQUIRED');
     this.config = resolveOrchestrationConfig(config, backendAgent.voice ?? { enabled: false });
+    this.agent.orchestration = config;
     this.tasks.configure(config);
     if (!this.config.enabled) this.drain();
     else { this.draining = false; this.store.run("UPDATE conversations SET status='active' WHERE status='draining'"); }
@@ -665,6 +750,11 @@ export class AgentOrchestrationRuntime {
     if (Date.now() >= this.nextQuestionCheck) {
       this.questionControls.tick();
       this.nextQuestionCheck = Date.now() + 1000;
+      // A sibling agent or a worker can recover the shared circuit without a
+      // conversation turn here. Deliver its notices through the same outbox.
+      for (const row of this.store.all('SELECT DISTINCT scope FROM provider_notices WHERE recovered=0 LIMIT 100')) {
+        if (this.providerAdmission.recovered(String(row.scope))) this.providerRecovered(String(row.scope));
+      }
     }
     for (const conversation of this.questionControls.initialReviews([...this.active.keys()])) {
       this.store.compose(() => {
@@ -687,10 +777,25 @@ export class AgentOrchestrationRuntime {
           ingressKey: `notification:${row.notification_id}${row.previous_input_id ? `:retry:${row.previous_seq}` : ''}`, capabilities: { execute: false, writeMemory: false } }, this.config.conversation.maxPendingInputs);
       }
     }
-    for (const row of this.store.all("SELECT i.* FROM conversation_inputs i JOIN conversations c ON c.id=i.conversation_id WHERE i.status='accepted' AND c.agent_session_id NOT IN (SELECT value FROM json_each(?)) ORDER BY i.created_at,i.input_seq LIMIT 100", JSON.stringify([...this.active.keys()]))) {
+    let mailboxCursor = 0;
+    const visitedSessions = new Set<string>();
+    mailbox: while (this.active.size < this.config.conversation.maxActiveSessions) {
+    const rows = this.store.all("SELECT i.*,i.rowid AS mailbox_row FROM conversation_inputs i JOIN conversations c ON c.id=i.conversation_id WHERE i.status='accepted' AND i.rowid>? AND c.agent_session_id NOT IN (SELECT value FROM json_each(?)) ORDER BY i.rowid LIMIT 100", mailboxCursor, JSON.stringify([...this.active.keys()]));
+    if (!rows.length) break;
+    for (const row of rows) {
+      mailboxCursor = Number(row.mailbox_row);
       if (this.active.size >= this.config.conversation.maxActiveSessions) break;
       const input: AcceptInput = JSON.parse(String(row.ingress_json));
       if (!input.scope || !input.capabilities || this.active.has(input.scope.agentSessionId)) continue;
+      if (visitedSessions.has(input.scope.agentSessionId)) continue;
+      visitedSessions.add(input.scope.agentSessionId);
+      const scope = resolveProviderScope(this.agent, this.gateway, input.model, 'agent');
+      const waiting = this.providerAdmission.inspect(scope, this.config.providerAdmission);
+      if (waiting) {
+        const text = this.waitForProvider(`session:${input.scope.agentSessionId}`, String(row.conversation_id), scope, waiting);
+        if (text) this.deferred.get(String(row.id))?.resolve(text);
+        continue;
+      }
       // A persisted input retains the authenticated scope and model from ingress.
       // Recovery can repeat inference, but committed tool receipts remain fenced.
       const result = this.send({ ...input, acceptedInputId: String(row.id) }, input.capabilities,
@@ -700,6 +805,8 @@ export class AgentOrchestrationRuntime {
         } });
       void result.then(text => this.deferred.get(String(row.id))?.resolve(text), error => this.deferred.get(String(row.id))?.reject(error))
         .finally(() => this.deferred.delete(String(row.id)));
+    }
+    if (this.active.size >= this.config.conversation.maxActiveSessions) break mailbox;
     }
   }
   private async run(input: AcceptInput, capabilities: ExecutionCapabilities, options: { timeoutMs: number; model?: string; onText?: (text: string) => void; onTool?: (event: ToolActivity) => void }): Promise<string> {
@@ -717,12 +824,23 @@ export class AgentOrchestrationRuntime {
     const questionReview = Boolean(input.ingressKey?.startsWith('question-review:'));
     let internalReview = false;
     let streamedDisplay = '';
+    let providerPermit: ProviderPermit | undefined;
+    let providerRenewal: ReturnType<typeof setInterval> | undefined;
     try {
       const receipt = this.store.acceptInput(input, this.config.conversation.maxPendingInputs);
       if (this.config.conversation.semanticIntake) this.intake.touch(receipt.inputId);
       const admitted = this.store.get('SELECT ingress_json,binding_id FROM conversation_inputs WHERE id=?', receipt.inputId);
       const admittedModel = admitted ? JSON.parse(String(admitted.ingress_json)).model : undefined;
-      options = { ...options, model: options.model ?? admittedModel ?? input.model };
+      options = { ...options, model: options.model ?? admittedModel ?? input.model ?? this.agent.claude.model };
+      const providerScope = resolveProviderScope(this.agent, this.gateway, options.model, 'agent');
+      const provider = this.providerAdmission.acquire(providerScope, this.config.providerAdmission);
+      if (provider.waiting) return this.waitForProvider(`session:${sessionId}`, receipt.conversationId, providerScope, provider.waiting);
+      providerPermit = provider.permit;
+      this.store.run('DELETE FROM provider_waits WHERE entity_id=?', `session:${sessionId}`);
+      if (providerPermit.probe) {
+        providerRenewal = setInterval(() => { try { this.providerAdmission.renew(providerPermit!, this.config.providerAdmission); } catch { /* durable lease expires conservatively */ } }, Math.max(250, Math.floor(this.config.providerAdmission.probeLeaseMs / 3)));
+        providerRenewal.unref();
+      }
       if (this.draining) this.store.run("UPDATE conversations SET status='draining' WHERE id=?", receipt.conversationId);
       this.seenSessions.add(sessionId);
       this.questionControls.tick();
@@ -1094,7 +1212,19 @@ export class AgentOrchestrationRuntime {
         displayChunk(chunk);
       });
       active.turn = turn;
+      let providerResponded = false;
+      void turn.providerReady.then(() => {
+        providerResponded = true;
+        try {
+          if (!active.stopping && this.providerAdmission.settle(providerPermit!, 'success', this.config.providerAdmission)) this.providerRecovered(providerPermit!.scope);
+        } catch { /* Never turn a successful inference into a failed task receipt. */ }
+      }).catch(() => {});
       const response = await turn.result;
+      if (!response.interrupted && !providerResponded) {
+        try {
+          if (this.providerAdmission.settle(providerPermit, 'success', this.config.providerAdmission)) this.providerRecovered(providerPermit.scope);
+        } catch { /* Provider bookkeeping cannot invalidate a completed inference. */ }
+      }
       if (!response.interrupted) {
         // A completed CLI turn has consumed its tool results. Failed/interrupted
         // turns never advance this checkpoint, so committed receipts can recover.
@@ -1167,6 +1297,10 @@ export class AgentOrchestrationRuntime {
         ? (speechEnabled || active.stopReason === 'barge-in' || parsed.outcome !== 'structured' ? stoppedDisplay : surfaces.display || 'Response stopped.')
         : surfaces.display || '';
       this.decisions.finish(decision, display, response.interrupted ? 'interrupted' : 'completed', channelSpeech && !silent ? taskSpeech || surfaces.spoken : undefined, !active.stopping && !silent);
+      if (active.notification && !response.interrupted) {
+        const batch = this.store.get('SELECT COUNT(*)-COUNT(DISTINCT task_id) n FROM notifications WHERE decision_id=?', decision.decisionId);
+        try { this.providerAdmission.coalesced(Number(batch?.n ?? 0)); } catch { /* telemetry cannot invalidate a report */ }
+      }
       if (!silent && speechEnabled && !response.interrupted && !taskSpeech) {
         if (!channelSpeech) this.store.run('INSERT INTO response_speech VALUES(?,?)', decision.responseId!, surfaces.spoken);
         if (surfaces.spoken) this.inputStreams.get(receipt.inputId)?.push({ responseId: decision.responseId!, text: surfaces.spoken });
@@ -1199,6 +1333,10 @@ export class AgentOrchestrationRuntime {
       }
       return silent ? acknowledgement : display || acknowledgement;
     } catch (error) {
+      if (providerPermit && active.turn && !active.stopping) {
+        const failure = providerFailure(error);
+        if (failure) { try { this.providerAdmission.settle(providerPermit, failure, this.config.providerAdmission); } catch { /* Preserve original error and cleanup even when shared storage is busy. */ } }
+      }
       // Retain a safe diagnostic code; never log prompts, credentials or provider bodies.
       failedTurn = true;
       const failure = error as { code?: string; name?: string; stack?: string; rejectedTools?: string[] };
@@ -1245,6 +1383,8 @@ export class AgentOrchestrationRuntime {
       }
       throw error;
     } finally {
+      if (providerRenewal) clearInterval(providerRenewal);
+      if (providerPermit) { try { this.providerAdmission.release(providerPermit); } catch { /* lease expires; process cleanup must still run */ } }
       removeContextObserver?.();
       revoke?.();
       if (agentSession) await this.host.releaseAgentSession(sessionId, agentSession);
@@ -1259,7 +1399,22 @@ export class AgentOrchestrationRuntime {
   }
   stopResponse(sessionId: string, reason: 'user' | 'barge-in' = 'user'): boolean {
     const active = this.active.get(sessionId);
-    if (!active || active.stopping) return false;
+    if (!active) {
+      if (reason !== 'user' || !this.store.get('SELECT entity_id FROM provider_waits WHERE entity_id=?', `session:${sessionId}`)) return false;
+      let stopped = false;
+      for (const row of this.store.all("SELECT i.* FROM conversation_inputs i JOIN conversations c ON c.id=i.conversation_id WHERE c.agent_session_id=? AND i.status='accepted' ORDER BY i.input_seq", sessionId)) {
+        const decision = this.decisions.begin(String(row.conversation_id), String(row.principal_id), [String(row.id)], row.request_id ? String(row.request_id) : undefined);
+        this.decisions.interrupt(decision);
+        this.decisions.finish(decision, '', 'interrupted', undefined, false);
+        this.deferred.get(String(row.id))?.resolve('Response stopped.');
+        this.deferred.delete(String(row.id));
+        stopped = true;
+      }
+      this.store.run('DELETE FROM provider_waits WHERE entity_id=?', `session:${sessionId}`);
+      void this.flushHistory().catch(() => {});
+      return stopped;
+    }
+    if (active.stopping) return false;
     active.stopping = true;
     active.stopReason = reason;
     if (active.decision && active.turn) this.decisions.interrupt(active.decision);
@@ -1302,6 +1457,7 @@ export class AgentOrchestrationRuntime {
     await this.bridge.close();
     // Caller waits for pending conversational responses before releasing store.
     if (this.active.size) throw new OrchestrationError('ACTIVE_DECISIONS_DURING_SHUTDOWN');
+    this.providerAdmission.close();
     this.store.close();
     this.releaseLock();
   }

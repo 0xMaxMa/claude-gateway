@@ -4,6 +4,12 @@ import * as path from 'path';
 import { createHash } from 'crypto';
 import { resolveCodexRuntime, CODEX_CONTAINER_EXECUTABLE } from '../../../src/session/codex-runtime';
 
+let mockHomeDir: string | undefined;
+jest.mock('os', () => {
+  const actual = jest.requireActual('os');
+  return { ...actual, homedir: () => mockHomeDir ?? actual.homedir() };
+});
+
 describe('optional host Codex runtime', () => {
   let root: string;
   let previousPath: string | undefined;
@@ -18,8 +24,35 @@ describe('optional host Codex runtime', () => {
     bytes.set([127, 69, 76, 70, 2, 1]); bytes.writeUInt16LE(machine, 18);
     return file(relative, bytes);
   }
-  beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex runtime ')); previousPath = process.env.PATH; process.env.PATH = path.join(root, 'empty'); });
-  afterEach(() => { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; fs.rmSync(root, { recursive: true, force: true }); });
+  beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex runtime ')); previousPath = process.env.PATH; process.env.PATH = path.join(root, 'empty'); mockHomeDir = path.join(root, 'home'); });
+  afterEach(() => { mockHomeDir = undefined; if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; fs.rmSync(root, { recursive: true, force: true }); });
+  test('restricted service PATH discovers the standalone user install without executing it', () => {
+    const chosen = native('release/bin/codex');
+    const link = path.join(root, 'home/.local/bin/codex');
+    fs.mkdirSync(path.dirname(link), { recursive: true }); fs.symlinkSync(chosen, link);
+    const runtime = resolveCodexRuntime();
+    expect(runtime.executable).toBe(chosen);
+    expect(runtime.nativeExecutable).toBe(chosen);
+    expect(runtime.containerError).toBeUndefined();
+    expect(runtime.mounts).toEqual([{ source: chosen, target: CODEX_CONTAINER_EXECUTABLE, readOnly: true }]);
+  });
+  test('PATH and explicit selections take precedence over the user install', () => {
+    native('home/.local/bin/codex');
+    const chosen = native('path/bin/codex'); process.env.PATH = path.dirname(chosen);
+    expect(resolveCodexRuntime().executable).toBe(chosen);
+    const explicit = native('explicit/bin/codex');
+    expect(resolveCodexRuntime(explicit).executable).toBe(explicit);
+    process.env.PATH = path.join(root, 'empty');
+    expect(() => resolveCodexRuntime('codex')).toThrow(/missing/);
+    expect(() => resolveCodexRuntime('custom-codex')).toThrow(/missing/);
+    expect(() => resolveCodexRuntime(path.join(root, 'missing'))).toThrow(/missing/);
+  });
+  test('nonexecutable and dangling user installs do not resolve', () => {
+    const candidate = native('home/.local/bin/codex'); fs.chmodSync(candidate, 0o644);
+    expect(() => resolveCodexRuntime()).toThrow(/not executable/);
+    fs.unlinkSync(candidate); fs.symlinkSync(path.join(root, 'missing'), candidate);
+    expect(() => resolveCodexRuntime()).toThrow(/missing/);
+  });
   test('missing Codex fails with operator instructions without installing anything', () => {
     expect(() => resolveCodexRuntime()).toThrow(/Install Codex.*workers.codex.bin/);
   });

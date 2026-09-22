@@ -2,8 +2,10 @@ import { canonicalVoiceProvider } from '../voice/providers/model-ref';
 import { CHAT_CHANNELS } from '../history/types';
 import { OrchestrationError } from './types';
 import { isAbsolute } from 'path';
+import { PROVIDER_ADMISSION_DEFAULTS, ProviderAdmissionPolicy } from './provider-admission';
 
 export interface OrchestrationConfig {
+  providerAdmission?: Partial<ProviderAdmissionPolicy>;
   /** Derived runtime fields. Configure the mode only at gateway.orchestration. */
   enabled?: boolean;
   channels?: string[];
@@ -69,6 +71,7 @@ export interface OrchestrationConfig {
 export type AgentVoiceConfig = NonNullable<OrchestrationConfig['voice']>;
 
 export const ORCHESTRATION_DEFAULTS = {
+  providerAdmission: PROVIDER_ADMISSION_DEFAULTS,
   enabled: false,
   channels: ['api'],
   conversation: { backend: 'inherit' as const, semanticIntake: false, intakeWaitMs: 2000, maxActiveSessions: 2, notificationPolicy: 'existing_receive_path' as const,
@@ -113,6 +116,7 @@ export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVo
   if (config !== undefined) validateTree(config, ORCHESTRATION_DEFAULTS, 'orchestration');
   const d = { ...ORCHESTRATION_DEFAULTS, voice: agentVoice === undefined ? ORCHESTRATION_DEFAULTS.voice : AGENT_VOICE_DEFAULTS };
   const result = {
+    providerAdmission: { ...d.providerAdmission, ...config?.providerAdmission },
     enabled: config?.enabled ?? d.enabled,
     channels: [...(config?.channels ?? d.channels)],
     conversation: { ...d.conversation, ...config?.conversation,
@@ -125,6 +129,9 @@ export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVo
       turns: { ...d.voice.turns, ...voice?.turns }, playback: { ...d.voice.playback, ...voice?.playback } },
   };
   for (const role of ['tts', 'stt', 'notes'] as const) result.voice[role].provider = canonicalVoiceProvider(result.voice[role].provider);
+  const admission = result.providerAdmission;
+  if (admission.failureThreshold > 100 || admission.initialCooldownMs > admission.secondCooldownMs || admission.secondCooldownMs > admission.maxCooldownMs || admission.probeLeaseMs < 1000)
+    throw new OrchestrationError('INVALID_CONFIG', 'Invalid provider admission thresholds, cooldown order or probe lease');
   if (result.channels.some(c => !['api', ...CHAT_CHANNELS].includes(c)) || new Set(result.channels).size !== result.channels.length) throw new OrchestrationError('INVALID_CONFIG', 'Invalid orchestration.channels');
   if (result.conversation.backend !== 'inherit' || !['isolated-worktree', 'shared-lock', 'host', 'container'].includes(result.tasks.workspaceMode) || result.voice.transport !== 'websocket') throw new OrchestrationError('INVALID_CONFIG', 'Unsupported orchestration backend, workspace mode or transport');
   if (result.tasks.repeatedToolThreshold > 64) throw new OrchestrationError('INVALID_CONFIG', 'tasks.repeatedToolThreshold must be between 1 and 64');

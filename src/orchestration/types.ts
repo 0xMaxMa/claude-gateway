@@ -31,7 +31,7 @@ export interface CommandContext extends ExecutionCapabilities {
   epoch: number;
   actionId: string;
 }
-export interface TaskFailure { code: string; message: string; observedAt: number; }
+export interface TaskFailure { code: string; message: string; observedAt: number; provider?: import('./provider-admission').ProviderFailure; }
 export type WorkerOutcome = {type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure};
 export interface TaskResult {
   summary: string;
@@ -67,6 +67,8 @@ export interface TaskSnapshot {
   targetProfile: string;
   state: TaskState;
   stateVersion: number;
+  /** Admission annotation, never a task lifecycle transition. */
+  providerWaiting?: import('./provider-admission').ProviderWaiting;
   revision: number;
   appliedRevision: number;
   activeAttemptId?: string;

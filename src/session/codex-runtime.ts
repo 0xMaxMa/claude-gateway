@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createHash } from 'crypto';
 import { createRequire } from 'module';
+import { homedir } from 'os';
 
 export interface CodexRuntimeMount { source: string; target: string; readOnly: true }
 export interface CodexRuntime {
@@ -57,10 +58,16 @@ function linuxExecutable(filename: string): boolean {
 /** Optional host runtime discovery. Never installs or executes software or reads Codex state. */
 export function resolveCodexRuntime(bin?: string, cwd: string = process.cwd()): CodexRuntime {
   const command = bin ?? 'codex';
-  const executable = command.includes('/') || command.includes('\\')
+  let executable = command.includes('/') || command.includes('\\')
     ? executableFile(path.resolve(cwd, command))
     : (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)
       .map(dir => executableFile(path.resolve(cwd, dir, command))).find(Boolean);
+  // Services often omit the standalone install directory from PATH. Only the
+  // default selection may fall back; an explicit bin must keep its meaning.
+  if (!executable && bin === undefined) {
+    const home = homedir();
+    if (path.isAbsolute(home)) executable = executableFile(path.join(home, '.local', 'bin', 'codex'));
+  }
   if (!executable) throw new Error(`Codex executable ${JSON.stringify(command)} is missing or not executable. Install Codex on the gateway host or set workers.codex.bin to an executable path visible to the gateway service.`);
   const runtime: CodexRuntime = { executable, mounts: [], containerExecutable: `${containerRoot}/bin/codex`, fingerprint: '' };
   const digest = createHash('sha256');
