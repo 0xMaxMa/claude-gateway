@@ -23,6 +23,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
   readonly name='browser';
   private readonly running=new Map<string,{controller:AbortController;done:Promise<void>}>();
   constructor(private readonly options:{agentId:string;root:string;allowed:()=>boolean;bindings:()=>BrowserTaskBinding[];
+    refreshBindings?:(context:CommandContext)=>Promise<void>;
     evaluate:(task:TaskSnapshot,request:JevRequest,signal:AbortSignal,authorized:()=>boolean)=>Promise<JevResult>;
     onProgress?:(task:TaskSnapshot,progress:BrowserProgress)=>void;
     allowedTask?:(task:TaskSnapshot)=>boolean;
@@ -34,11 +35,13 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     if(!binding)throw new OrchestrationError('BROWSER_TARGET_NOT_AVAILABLE');
     return binding;
   }
-  discover(query='',offset=0,context?:CommandContext):unknown {
+  async discover(query='',offset=0,context?:CommandContext):Promise<unknown> {
     if(!this.options.allowed()||!context)throw new OrchestrationError('BROWSER_NOT_ALLOWED');
     if(!Number.isSafeInteger(offset)||offset<0||typeof query!=='string')throw new OrchestrationError('INVALID_INPUT');
+    await this.options.refreshBindings?.(context);
+    if(!this.options.allowed())throw new OrchestrationError('BROWSER_NOT_ALLOWED');
     const bindings=this.options.bindings().filter(b=>b.version===1&&b.principalId===context.principalId&&b.conversationId===context.conversationId&&`${b.id} ${b.name}`.toLowerCase().includes(query.toLowerCase()));
-    return {targets:bindings.slice(offset,offset+25).map(b=>({adapter:'browser',session_id:b.id,name:b.name,version:1})),next_offset:offset+25<bindings.length?offset+25:null};
+    return {hint:bindings.length ? undefined : 'No approved browser tab is ready. Approve the access request in the browser extension, then discover again. Do not fall back to direct browser tools.',targets:bindings.slice(offset,offset+25).map(b=>({adapter:'browser',session_id:b.id,name:b.name,version:1})),next_offset:offset+25<bindings.length?offset+25:null};
   }
   resolve(input:Record<string,unknown>,context?:CommandContext):GatewayTaskTarget {
     if(!context||Object.keys(input).some(k=>!['adapter','session_id'].includes(k))||typeof input.session_id!=='string')throw new OrchestrationError('INVALID_GATEWAY_TARGET');

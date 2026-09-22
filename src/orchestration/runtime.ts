@@ -1,3 +1,4 @@
+import { AutomaticBrowserBindings } from '../jev/automatic-browser-bindings';
 import { BrowserConnectorRegistry, resolveBrowserConnection } from '../jev/browser-connector';
 import { BrowserTaskAdapter, BrowserTaskBinding } from './gateway-tasks/browser';
 import { createHash } from 'crypto';
@@ -220,11 +221,13 @@ export class AgentOrchestrationRuntime {
     const files = new TaskFiles(store, join(agent.workspace, '../..'), agent.type === 'app-agent' ? join(root, 'container-files') : undefined, agent.workspace);
     const safemodeAllowed = () => agent.type !== 'app-agent' && Boolean(gateway.safemode?.allowedAgentIds?.includes(agent.id));
     const gatewayAdapters = new Map<string, GatewayTaskAdapter>(agent.type === 'app-agent' ? [] : [['safemode',new SafemodeTaskAdapter(agent.id, safemodeAllowed)]]);
-    const browserRegistry = new BrowserConnectorRegistry(()=>gateway.gateway.jev?.browser,agent.id,id=>resolveBrowserConnection(gateway,agent,id));
+    const automaticBrowsers = new AutomaticBrowserBindings(gateway,agent,join(root,'browser-bindings.json'));
+    const browserRegistry = new BrowserConnectorRegistry(()=>automaticBrowsers.config(),agent.id,id=>resolveBrowserConnection(gateway,agent,id));
     const browserBindings = () => [...browserRegistry.bindings(),...(host.browserBindings?.() ?? [])];
     gatewayAdapters.set('browser', new BrowserTaskAdapter({agentId:agent.id,root:join(root,'browser-requests'),
       allowed:()=>jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true,
       bindings:browserBindings,
+      refreshBindings:async context=>{store.assertMember(context.conversationId,context.principalId);await automaticBrowsers.refresh(context.principalId,context.conversationId,context.execute,()=>{try{store.assertMember(context.conversationId,context.principalId);return jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true;}catch{return false;}});store.assertMember(context.conversationId,context.principalId);},
       allowedEvidence:task=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return Boolean(store.task(task.taskId));}catch{return false;}},
       allowedTask:(task)=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);const current=store.task(task.taskId);return Boolean(current && current.activeAttemptId===task.activeAttemptId && ['starting','running'].includes(current.state));}catch{return false;}},
       onNeedsInput:(task,question)=>{
@@ -248,7 +251,7 @@ export class AgentOrchestrationRuntime {
       })}));
     const bridge = new TaskBridge(tasks, files, workerShares(files, agent, gateway), host.skills ? () => host.skills!() : undefined, agent.type === 'app-agent' ? { agent, spool: join(root, 'container-files') } : undefined, workerCrons(files, agent, gateway), gatewayAdapters);
     bridge.jevEnabled = () => jevAllowed(gateway, agent);
-    bridge.browserEnabled = () => browserBindings().length > 0 && jevAllowed(gateway, agent) && gateway.gateway.jev?.features?.browserTasks?.enabled === true;
+    bridge.browserEnabled = () => Boolean(gateway.gateway.jev?.browser?.runnerModule) && jevAllowed(gateway, agent) && gateway.gateway.jev?.features?.browserTasks?.enabled === true;
     bridge.jevCall = async (scope, args, actionId, signal) => {
       const current = scope.role === 'worker' ? files.scope(scope.attemptId, scope.generation) : undefined;
       const conversation = scope.role === 'agent' ? store.assertMember(scope.context.conversationId, scope.context.principalId) : current!.conversation;

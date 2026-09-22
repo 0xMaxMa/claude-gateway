@@ -352,3 +352,26 @@ For isolated integration fixtures, `scripts/jev-browser-crash-smoke.cjs` exports
 `runGatewayBrowserFixture` in `scripts/jev-browser-smoke.cjs` also accepts an optional trusted local `containerImage`. It exercises the app-agent Unix-socket bridge from actual isolated Docker processes: discovery, task submission, fresh evidence and parent verification, plus foreign-principal and host-only capability denial. The fixture container receives only its temporary workspace/ticket/socket, with no network or provider credential mount. Inference and parent assessment remain deterministic test callbacks; this is not a live-model app deployment benchmark.
 
 Installed `verifyBrowserTask` hooks must return a boolean. `false` means the goal was not verified; strings, objects, null or undefined are contract errors (`INVALID_CONTRACT`), never converted into a normal negative result. The same rule applies when Gateway wraps an optional verifier for the packaged runner.
+
+### Default Remote Browser routing
+
+When Jev and `features.browserTasks.enabled` are enabled and `browser.runnerModule`
+is installed, conversational agents route Remote Browser work to Gateway-managed
+browser tasks by default. They discover targets with `capabilities_list` using
+`scope: "browser"`, then use `target_profile: "gateway-managed"` and the returned
+`gateway_target` (`adapter: "browser"`, `session_id`). Direct MCP workers are not
+an automatic fallback when Jev or browser access is unavailable.
+
+For enabled Remote Browser connectors, discovery reads the authenticated relay's
+approved grants and creates stable targets scoped to the agent, principal and
+conversation. No manual per-session config entry is required. A writable turn may
+request extension approval for a single online unapproved device; approval remains
+with the browser owner. If approval is pending, approve it and discover again.
+Multiple browser targets must be selected explicitly. Offline, expired, unapproved
+and read-only grants are not offered as executable targets.
+
+Discovered targets are stored in the agent's orchestration directory as
+`browser-bindings.json`, without connector credentials. Manual bindings remain
+supported. Connector enablement/credentials and relay permissions remain authoritative
+at execution time. Discovery alone does not run Jev or prove task completion;
+completion requires fresh browser evidence and parent verification.

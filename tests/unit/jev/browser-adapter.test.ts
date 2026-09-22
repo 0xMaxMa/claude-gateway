@@ -26,8 +26,8 @@ async function settle(a:BrowserTaskAdapter,t=task(),r='r'):Promise<WorkerOutcome
 }
 function untilAbort(c:BrowserExecutionContext):Promise<BrowserExecutionResult>{return new Promise(resolve=>c.signal.addEventListener('abort',()=>resolve({status:'cancelled',reason:'TASK_CANCELLED',steps:0,evaluations:0}),{once:true}));}
 test('discovery and submission require agent, principal AND conversation ownership',async()=>{
- const f=fixture();expect(f.a.discover('',0,context())).toMatchObject({targets:[{session_id:'target'}]});
- for(const ctx of [context('other'),context('owner','other')]){expect(f.a.discover('',0,ctx)).toMatchObject({targets:[]});expect(()=>f.a.resolve({adapter:'browser',session_id:'target'},ctx)).toThrow();}
+ const f=fixture();expect(await f.a.discover('',0,context())).toMatchObject({targets:[{session_id:'target'}]});
+ for(const ctx of [context('other'),context('owner','other')]){expect(await f.a.discover('',0,ctx)).toMatchObject({targets:[]});expect(()=>f.a.resolve({adapter:'browser',session_id:'target'},ctx)).toThrow();}
  for(const patch of [{agentId:'beta'},{ownerPrincipalId:'other'},{conversationId:'other'}])await expect(f.a.submit(task(patch),'r','goal')).rejects.toThrow();
  expect(f.run).not.toHaveBeenCalled();
 });
