@@ -280,7 +280,7 @@ export class VoiceApi {
               playbackReady = true;
               void catchUp(); break;
             case 'voice.configure': {
-              if (control.voice_id === undefined && control.model !== undefined) break;
+              if (control.voice_id === undefined && (control.model !== undefined || control.execution_task_id !== undefined)) break;
               if (typeof control.voice_id !== 'string') throw new Error('INVALID_CONTROL');
               const choices = await voiceChoices(voice.tts);
               if (!choices.some(choice => choice.id === control.voice_id)) throw new Error('INVALID_CONTROL');
@@ -296,7 +296,7 @@ export class VoiceApi {
             case 'playback.pause': session.pausePlayback(control.epoch, control.paused); break;
             case 'playback.progress': session.progress(control.epoch, control.sample_offset); break;
             case 'playback.clear.ack': break;
-            case 'voice.mute': if (typeof control.muted !== 'boolean' || !['discard', 'commit'].includes(control.policy)) throw new Error('INVALID_CONTROL'); await session.mute(control.muted, control.policy, control.last_audio_seq); break;
+            case 'voice.mute': if (typeof control.muted !== 'boolean' || !['discard', 'commit'].includes(control.policy)) throw new Error('INVALID_CONTROL'); await session.mute(control.muted, control.policy, control.last_audio_seq); if(control.muted&&control.policy==='discard')speechTarget=undefined; break;
             case 'voice.stop': await session.close(); ws.close(); break;
             default: throw new Error('INVALID_CONTROL');
           }

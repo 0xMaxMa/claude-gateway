@@ -220,5 +220,20 @@ test('confirmed voice words pause the selected task once, retain its target acro
     expect((submit.mock.calls[0] as unknown[])[7]).toBe(first);
     expect((pause.mock.calls[0] as unknown[])[2]).toBe(first);expect(pause).toHaveBeenCalledTimes(1);
     expect(events.some(e=>e.type==='utterance.accepted')).toBe(true);
+    // A discarded partial belongs to neither the next task nor the next utterance.
+    stt.sessions[0].emit({type:'partial',segmentId:'discarded',text:'Discard this'});
+    await until(()=>pause.mock.calls.length===2);
+    ws.send(JSON.stringify({type:'voice.mute',muted:true,policy:'discard',last_audio_seq:0}));
+    await until(()=>events.some(e=>e.state==='muted'));
+    const third='33333333-3333-4333-8333-333333333333';
+    ws.send(JSON.stringify({type:'voice.configure',execution_task_id:third}));
+    const listeningCount=events.filter(e=>e.state==='listening').length;
+    ws.send(JSON.stringify({type:'voice.mute',muted:false,policy:'discard',last_audio_seq:0}));
+    await until(()=>events.filter(e=>e.state==='listening').length>listeningCount);
+    stt.sessions.at(-1)!.emit({type:'partial',segmentId:'new-speech',text:'New correction'});
+    await until(()=>pause.mock.calls.length===3);
+    expect((pause.mock.calls[2] as unknown[])[2]).toBe(third);
+    expect(events.filter(e=>e.type==='voice.error')).toEqual([]);
+
   }finally{ws?.terminate();await api.close();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
