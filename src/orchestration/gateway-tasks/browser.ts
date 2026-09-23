@@ -196,11 +196,14 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const running=this.running.get(this.key(task,requestId));
     if(running){running.controller.abort();return;}
     const receipt=this.read(task,requestId), result=receipt?.browserResult;
-    // Explicit cancellation may release a finished, blocked request whose last
-    // mutation is durably confirmed. Never infer safety from an action count.
-    if(receipt?.status==='ended' && result?.status==='blocked' && result.reason==='OBSERVATION_TRUNCATED' && !result.providerFailure &&
-      result.lastAction?.outcome!=='unknown' &&
-      (!receipt.lastDispatchedMutation || (result.lastAction?.operationId===receipt.lastDispatchedMutation.operationId && result.lastAction.outcome==='confirmed'))) {
+    // Cancellation is about execution lifetime, not whether the user's goal
+    // was verified. A completed candidate can stop without claiming success.
+    // Require durable settlement of every last dispatch; never clear ambiguity.
+    if(receipt?.status==='ended' && result && !result.providerFailure &&
+      result.reason!=='OUTCOME_UNKNOWN' && result.lastAction?.outcome!=='unknown' &&
+      (receipt.lastDispatchedMutation
+        ? result.lastAction?.operationId===receipt.lastDispatchedMutation.operationId && ['confirmed','not_executed'].includes(result.lastAction.outcome)
+        : result.lastAction ? ['confirmed','not_executed'].includes(result.lastAction.outcome) : result.steps===0)) {
       receipt.outcome={type:'stopped',browserReport:receipt.outcome?.browserReport};
       this.write(task,requestId,receipt);
     }

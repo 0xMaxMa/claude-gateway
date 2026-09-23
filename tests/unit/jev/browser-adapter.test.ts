@@ -215,3 +215,22 @@ test('initial field handoff does not masquerade as a superseding revision',async
  const t=task({revision:1,appliedRevision:0});await f.a.submit(t,'r','goal');
  expect((await settle(f.a,t)).type).toBe('unknown');expect(f.onNeedsInput).toHaveBeenCalled();
 });
+
+
+test('cancel after completion candidate settles across restart without executing again',async()=>{
+ const f=fixture();f.run.mockResolvedValue({status:'needs_verification',reason:'COMPLETION_CANDIDATE',steps:0,evaluations:1});
+ const t=task({state:'cancel_requested'});
+ await f.a.submit(t,'r','read the page');expect((await settle(f.a,t)).type).toBe('unknown');
+ const restarted=f.make();await restarted.cancel(t,'r');
+ expect(await restarted.inspect(t,'r')).toMatchObject({type:'stopped',browserReport:{reason:'COMPLETION_CANDIDATE'}});
+ expect(f.run).toHaveBeenCalledTimes(1);
+});
+
+test.each(['confirmed','not_executed','unknown'] as const)('cancellation respects final dispatch receipt: %s',async outcome=>{
+ const f=fixture();f.run.mockImplementation(async c=>{
+  await c.beforeMutation?.('00000000-0000-4000-8000-000000000001','page_click');
+  return {status:'needs_verification',reason:'COMPLETION_CANDIDATE',steps:1,evaluations:1,lastAction:{operationId:'00000000-0000-4000-8000-000000000001',operation:'page_click',outcome}};
+ });
+ await f.a.submit(task(),'r','goal');await settle(f.a);await f.a.cancel(task(),'r');
+ expect((await settle(f.a)).type).toBe(outcome==='unknown'?'unknown':'stopped');
+});
