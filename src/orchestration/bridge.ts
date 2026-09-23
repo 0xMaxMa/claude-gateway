@@ -30,6 +30,7 @@ export class TaskBridge {
   recordRetrievals = false;
   jevEnabled?: () => boolean;
   browserEnabled?: () => boolean;
+  computerEnabled?: () => boolean;
   jevCall?: (scope: Scope, args: Record<string, unknown>, actionId: string, signal: AbortSignal) => Promise<unknown>;
   private readonly scopes = new Map<string, Scope>();
   private readonly cancellations = new Map<string, AbortController>();
@@ -88,7 +89,7 @@ export class TaskBridge {
             switch (command.tool) {
               case 'capabilities_list': {
                 this.tasks.store.assertMember(context.conversationId, context.principalId);
-                if (a.scope === 'safemode' || a.scope === 'browser') {
+                if (a.scope === 'safemode' || a.scope === 'browser' || a.scope === 'computer') {
                   if (this.container && a.scope === 'safemode') deny('SAFEMODE_HOST_ONLY');
                   const adapter = this.gatewayAdapters.get(a.scope);
                   if (!adapter) throw new OrchestrationError('SAFEMODE_AGENT_NOT_ALLOWED');
@@ -119,7 +120,7 @@ export class TaskBridge {
               case 'task_spawn': {
                 let gatewayTarget;
                 if (a.target_profile === 'gateway-managed' || a.gateway_target !== undefined) {
-                  if (this.container && a.gateway_target?.adapter !== 'browser') deny('SAFEMODE_HOST_ONLY');
+                  if (this.container && !['browser','computer'].includes(a.gateway_target?.adapter)) deny('SAFEMODE_HOST_ONLY');
                   if (a.target_profile !== 'gateway-managed' || !a.gateway_target || typeof a.gateway_target !== 'object' || Array.isArray(a.gateway_target)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
                   const adapter = this.gatewayAdapters.get(a.gateway_target.adapter);
                   if (!adapter) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
@@ -237,7 +238,7 @@ export class TaskBridge {
     const workerMemory = Boolean(worker?.task.capabilities.writeMemory && worker.conversation.source !== 'api');
     const jevEnabled = Boolean(this.jevEnabled?.());
     const browserEnabled = Boolean(this.browserEnabled?.());
-    writeFileSync(ticketPath, JSON.stringify({ url: this.url, token, ...(this.container ? { socket: this.url, tools: containerTaskTools(scope.role, jevEnabled, browserEnabled) } : {}) }), { mode: 0o600, flag: 'wx' });
+    writeFileSync(ticketPath, JSON.stringify({ url: this.url, token, ...(this.container ? { socket: this.url, tools: containerTaskTools(scope.role, jevEnabled, browserEnabled, Boolean(this.computerEnabled?.())) } : {}) }), { mode: 0o600, flag: 'wx' });
     writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: { gateway: { command: 'bun', args: [resolve(__dirname, '../../mcp/server.ts')], env: {
       GATEWAY_JEV_ENABLED: jevEnabled ? 'true' : '',
       GATEWAY_CAPABILITY_CATALOG: scope.role === 'agent' && scope.capabilities ? 'true' : '',

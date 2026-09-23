@@ -267,7 +267,7 @@ export class TaskService {
         ...(!context.execute ? { instructions: priorRevision.instructions, answers: priorRevision.answers, originatingInputId: priorRevision.originatingInputId, guidance: instruction, guidanceBasis: {attemptId: task.activeAttemptId, workflowVersion: task.workflow?.version??0, progressAt: task.latestProgress?.observedAt??0} } : {}),
         ...(browserRecovery ? {browserRecoveryCount:(priorRevision.browserRecoveryCount ?? 0)+1,guidanceBasis:undefined} : {}) };
       this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify(revision));
-      if (task.gatewayTarget && ['completed','failed'].includes(task.state)) { task.state='queued'; delete task.failure; delete task.result; delete task.browserReport; delete task.latestProgress; if(context.execute)task.initiatingInputId=context.inputId; }
+      if (task.gatewayTarget && ['completed','failed'].includes(task.state)) { task.state='queued'; delete task.failure; delete task.result; delete task.browserReport; delete task.computerReport; delete task.latestProgress; if(context.execute)task.initiatingInputId=context.inputId; }
       if (task.state === 'waiting_input') { task.pendingQuestion = undefined; task.state = task.activeAttemptId ? (task.gatewayTarget ? 'running' : 'interrupting') : 'queued'; }
       else if (mode === 'interrupt_and_resume' && task.activeAttemptId) task.state = 'interrupting';
       this.store.saveTask(task, version);
@@ -645,6 +645,7 @@ export class TaskService {
     }
     return this.store.transaction(() => {
       const { task, attempt } = this.active(attemptId, generation);
+      if (task.gatewayTarget?.adapter === 'computer' && outcome.computerReport) task.computerReport=outcome.computerReport;
       if (task.gatewayTarget?.adapter === 'browser' && outcome.browserReport) task.browserReport=outcome.browserReport;
       // A structured unresolved blocker is not successful task completion.
       if (outcome.type === 'paused' && !(task.state === 'waiting_input' && task.pendingQuestion) &&
