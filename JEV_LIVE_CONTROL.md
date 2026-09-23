@@ -40,22 +40,42 @@ normal execution signal still governs cancellation, timeout and revoked access.
 An obsolete inference result cannot authorize another mutation. Corrections are
 serialized by revision; only one execution attempt is active for a task.
 
-## Client integration boundary
+## Web and voice integration
 
-This is the backend prototype. Ordinary chat messages and voice transcripts are
-not automatically routed here. A client must explicitly target the active task;
-finalized speech can use the same `revise` payload. For voice interruption, send
-`pause` at the chosen speech boundary, then `revise` with confirmed text (or
-`resume` if the speech was discarded). Do not submit interim STT fragments as
-successive corrections. Show pending/paused/applied status from task state.
-Natural-language routing, Web Chat controls and spoken acknowledgements still
-need client integration and live browser/voice E2E validation.
+Chat message admission and streaming accept `execution_task_id`. Only an explicit
+client selection uses this path. The task must belong to the authenticated
+principal and the same conversation/session. The input, correction and response
+receipt commit together; replaying a client message does not append another
+revision or schedule an orchestrator decision. Unsupported states produce a
+visible notice and never fall back to starting unrelated work.
 
-## Tests
+The voice WebSocket accepts `execution_task_id` (or null) in `voice.start` and
+`voice.configure`. Confirmed STT words pause the selected task. Microphone noise
+alone does not pause it. The target stays fixed across the current spoken
+message even if the UI selection changes. Final speech becomes one correction,
+with a canonical response ID and a TTS acknowledgement. Discarded speech leaves
+the task paused for explicit resume.
 
-Jev Loop covers interruption during inference, field resolution, desktop thinking
-and a dispatched mutation (confirmed versus unknown). Gateway lifecycle tests
-cover same-task corrections, retained constraints, no repeated start navigation,
-pause/resume, multiple corrections, duplicate command IDs, stale revisions,
-principal isolation and unknown-outcome fencing. These tests are not evidence of
-live Web Chat or voice integration.
+GetPod Web Chat exposes the selected task, Pause/Resume, pending status and an
+Agent conversation option. A single active Browser/Computer task is selected
+initially; multiple tasks require an explicit choice. Selection is scoped to the
+current gateway/agent/session and does not persist a cross-session global target.
+
+## Validation
+
+- Gateway tests cover input idempotence, ownership, same-session scope, retained
+  requirements, pause/resume and uncertain mutation fencing.
+- A real WebSocket test exercises confirmed partial speech, pause, a mid-speech
+  selection change, final admission and TTS audio frames (fixture STT/TTS).
+- Chromium + the real remote-browser extension + MCP + the live Jev provider
+  passed a correction from London to Manchester. Old inference was deliberately
+  held open to exercise interruption. Pause settled in 61 ms in this fixture;
+  this is not a production latency guarantee. The field was filled once, fresh
+  evidence verified it, and the same task completed at revision 3.
+- The optional `scripts/jev-live-control-browser.cjs` harness receives an isolated
+  browser fixture and reads a credential file without logging its contents.
+  Field text is a controlled fixture value; Jev chooses the browser actions.
+
+Live provider outages or a browser mutation already in progress can delay
+settlement. Controls never promise to undo an action that already reached the
+page, and an uncertain outcome continues to require inspection.

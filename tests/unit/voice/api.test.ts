@@ -182,3 +182,43 @@ test('returning muted plays missed and later speech once, and preference/ticket 
     expect(runner.setBrowserVoice).toHaveBeenLastCalledWith('s','api:owner',false);
   } finally {ws?.terminate();await api.close();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
+
+test('confirmed voice words pause the selected task once, retain its target across a selection change, and speak the correction ACK',async()=>{
+  const {sttProvider}=require('../../../src/voice/providers/registry');
+  const stt=new FakeSttProvider();sttProvider.mockReturnValueOnce(stt);
+  const {encodeVoiceFrame}=require('../../../src/voice/protocol');
+  const agent={id:'a',allow_tools:true,orchestration:{enabled:true},voice:{...ORCHESTRATION_DEFAULTS.voice,enabled:true,tts:{...ORCHESTRATION_DEFAULTS.voice.tts,voiceId:'fixture'}}} as AgentConfig;
+  const responseId='aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
+  const submit=jest.fn(async()=>({inputId:'input',response:Promise.resolve('Correction accepted.'),responseId:()=>responseId,stream:(async function*(){yield {responseId,text:'Correction accepted.'};})()}));
+  const pause=jest.fn(async()=>{});
+  const runner={setBrowserVoice:async()=>{},pendingVoiceSpeech:async()=>[],subscribeVoiceResults:async()=>()=>{},apiSessionExists:async()=>true,authorizeVoiceSession:async()=>{},submitVoiceUtterance:submit,pauseVoiceExecution:pause,stopVoiceResponse:jest.fn(),recordVoicePlayback:jest.fn(),saveVoiceReplay:jest.fn()} as unknown as AgentRunner;
+  const api=new VoiceApi(new Map([['a',runner]]),new Map([['a',agent]]),[{id:'owner',key:'fixture',agents:['a'],allow_tools:true}]);
+  const app=express();app.use(express.json());app.use('/api',api.router);
+  const server=createServer(app);server.on('upgrade',(req,socket,head)=>api.upgrade(req,socket,head));server.listen(0,'127.0.0.1');await once(server,'listening');
+  let ws:WebSocket|undefined;const events:any[]=[],audio:Buffer[]=[];
+  const until=async(fn:()=>boolean)=>{const start=Date.now();while(!fn()){if(Date.now()-start>5000)throw Error('voice fixture timeout');await new Promise(r=>setTimeout(r,5));}};
+  try{
+    const ticket=await request(app).post('/api/v1/agents/a/sessions/p/voice-sessions').set('Authorization','Bearer fixture').send({chat_id:'c'});
+    ws=new WebSocket(`ws://127.0.0.1:${(server.address() as any).port}${ticket.body.stream_path}?ticket=${ticket.body.ticket}`);
+    ws.on('message',(data,binary)=>binary?audio.push(Buffer.from(data as Buffer)):events.push(JSON.parse(String(data))));
+    await until(()=>events.some(e=>e.state==='ready'));
+    const first='11111111-1111-4111-8111-111111111111',second='22222222-2222-4222-8222-222222222222';
+    ws.send(JSON.stringify({type:'voice.start',execution_task_id:first}));
+    await until(()=>events.some(e=>e.state==='listening'));
+    const listening=events.find(e=>e.state==='listening');
+    ws.send(encodeVoiceFrame({generation:listening.generation,epoch:0,sequence:1,segmentId:listening.utterance_id,audio:Buffer.alloc(640)}));
+    await until(()=>stt.sessions[0].frames.length===1);
+    expect(pause).not.toHaveBeenCalled();
+    stt.sessions[0].emit({type:'partial',segmentId:'segment',text:'Manchester'});
+    await until(()=>pause.mock.calls.length===1);
+    ws.send(JSON.stringify({type:'voice.configure',execution_task_id:second}));
+    ws.send(JSON.stringify({type:'utterance.commit',last_audio_seq:1,final:true}));
+    await until(()=>Boolean(stt.sessions[0].commitId));
+    stt.sessions[0].emit({type:'segment_final',segmentId:'segment',text:'Manchester instead'});
+    stt.sessions[0].emit({type:'commit_done',commitId:stt.sessions[0].commitId!});
+    await until(()=>submit.mock.calls.length===1&&audio.length>0);
+    expect((submit.mock.calls[0] as unknown[])[7]).toBe(first);
+    expect((pause.mock.calls[0] as unknown[])[2]).toBe(first);expect(pause).toHaveBeenCalledTimes(1);
+    expect(events.some(e=>e.type==='utterance.accepted')).toBe(true);
+  }finally{ws?.terminate();await api.close();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});

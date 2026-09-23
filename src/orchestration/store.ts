@@ -26,7 +26,7 @@ export interface AcceptInput {
   /** Only ingress supplies these; they survive a crash before agent admission. */
   capabilities?: ExecutionCapabilities;
   model?: string;
-  metadata?: { clientMessageId?: string; channelIngressFingerprint?: string; recoveryBatch?: string; recoveredChannelInput?: {content:string;meta:Record<string,string>};
+  metadata?: { executionTaskId?: string; clientMessageId?: string; channelIngressFingerprint?: string; recoveryBatch?: string; recoveredChannelInput?: {content:string;meta:Record<string,string>};
     unavailableAttachments?: Array<{code:string;name?:string;quoted:boolean}>; senderName?: string; senderId?: string; platformMessageId?: string; platformMessageIds?: string[]; mediaGroupId?: string; promptContext?: string; imageRefs?: string[];
     attachmentName?: string; mediaType?: string; repliedText?: string; repliedMessageId?: string; repliedSender?: string; repliedAttachmentIds?: string[]; attachmentDetails?: Array<{ref:string;name?:string;quoted:boolean}>; attachmentError?: string };
   /** Internal mailbox replay identifier; never accepted from HTTP/model arguments. */

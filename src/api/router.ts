@@ -624,7 +624,7 @@ export function createApiRouter(
       session_id?: unknown;
       stream?: unknown;
       accept_only?: unknown;
-      client_message_id?: unknown;
+      client_message_id?: unknown; execution_task_id?:unknown;
       timeout_ms?: unknown;
       media_files?: unknown;
       model?: unknown;
@@ -640,6 +640,8 @@ export function createApiRouter(
       res.status(400).json({ error: 'Invalid accept_only or client_message_id' }); return;
     }
     const clientMessageId = client_message_id as string | undefined;
+    if(body.execution_task_id!==undefined&&!isValidSessionId(body.execution_task_id)){res.status(400).json({error:'Invalid execution task'});return;}
+    const executionTaskId=body.execution_task_id as string|undefined;
     if (message !== undefined && typeof message !== 'string') {
       res.status(400).json({ error: 'message must be a string if provided' });
       return;
@@ -830,7 +832,7 @@ export function createApiRouter(
         const inputId = await runner.acceptApiMessage(sessionId, chatIdStr, trimmedMessage, {
           timeoutMs, allowTools: agentConfigs.get(agentId)?.allow_tools ?? !!apiKey.allow_tools, mediaFiles: validatedMediaFiles, model: modelStr,
           imageParams: validatedImageParams, videoParams: validatedVideoParams,
-          requestId, principalId: apiPrincipal(apiKey), clientMessageId,
+          requestId, principalId: apiPrincipal(apiKey), clientMessageId, executionTaskId,
         });
         res.status(202).json({ status: 'accepted', input_id: inputId, session_id: sessionId, client_message_id: clientMessageId });
       } catch (error) {
@@ -878,7 +880,7 @@ export function createApiRouter(
           chatIdStr,
           trimmedMessage,
           sseCallbacks,
-          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage, imageParams: validatedImageParams, videoParams: validatedVideoParams, requestId, principalId: apiPrincipal(apiKey), clientMessageId },
+          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage, imageParams: validatedImageParams, videoParams: validatedVideoParams, requestId, principalId: apiPrincipal(apiKey), clientMessageId, executionTaskId },
         );
 
         // Client disconnect — detaches this connection's sink. The turn keeps
@@ -923,7 +925,7 @@ export function createApiRouter(
             videoParams: validatedVideoParams,
             requestId,
             principalId: apiPrincipal(apiKey),
-            clientMessageId,
+            clientMessageId, executionTaskId,
           }));
         }
         const syncResult: Record<string, unknown> = {

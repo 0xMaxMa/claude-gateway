@@ -1,3 +1,4 @@
+import {liveExecutionInput} from './live-execution-input';
 import {ComputerTaskAdapter} from './gateway-tasks/computer';
 import {ComputerConnectors} from '../jev/computer-connector';
 import { AutomaticBrowserBindings } from '../jev/automatic-browser-bindings';
@@ -384,7 +385,7 @@ export class AgentOrchestrationRuntime {
     const id = String(conversation.id);
     if (!Number.isSafeInteger(after) || after < 0 || after > Number(conversation.last_event_seq)) throw new OrchestrationError('INVALID_CURSOR');
     const tasks = this.tasks.status(id, principalId).map(t => {
-      return { taskId: t.taskId, title: t.title, state: t.state, stateVersion: t.stateVersion, providerWaiting: t.providerWaiting, progress: t.latestProgress, execution: t.execution, result: t.result?.summary, updatedAt: Math.max(t.updatedAt, t.execution?.lastActivityAt ?? 0) };
+      return { revision:t.revision, adapter:t.gatewayTarget?.adapter, executionControl:t.executionControl, taskId: t.taskId, title: t.title, state: t.state, stateVersion: t.stateVersion, providerWaiting: t.providerWaiting, progress: t.latestProgress, execution: t.execution, result: t.result?.summary, updatedAt: Math.max(t.updatedAt, t.execution?.lastActivityAt ?? 0) };
     });
     const responses = this.store.all('SELECT id,request_id,state,generated_text,COALESCE(completed_at,created_at) AS message_at FROM assistant_responses WHERE conversation_id=? ORDER BY message_at DESC,rowid DESC LIMIT 100', id).reverse().map(r => ({
       id: r.id, requestId: r.request_id, state: r.state, text: r.generated_text, createdAt: r.message_at,
@@ -727,6 +728,12 @@ export class AgentOrchestrationRuntime {
   }
   /** Exact replies are user controls and must not queue behind model inference. */
   private handleQuestionInput(input: AcceptInput, capabilities: ExecutionCapabilities): { inputId: string; text: string } | undefined {
+    const live=liveExecutionInput(this.store,this.tasks,this.decisions,input,capabilities);
+    if(live){
+      if(live.task)this.gatewayTasks?.signalControl(live.task);
+      if(!live.reused)this.publishText(input.scope.agentSessionId,live.responseId,live.text,true);
+      return live;
+    }
     input = this.questionControls.normalizeReply(input);
     if (!this.questionControls.matches(input)) return undefined;
     const result = this.store.compose(() => {
@@ -792,7 +799,10 @@ export class AgentOrchestrationRuntime {
     if (this.closing) throw new OrchestrationError('ORCHESTRATION_CLOSING');
     input = this.questionControls.normalizeReply(input);
     const direct = this.handleQuestionInput(input, capabilities);
-    if (direct) return { inputId: direct.inputId, response: this.flushHistory().then(() => direct.text) };
+    if (direct) {
+      const responseId=this.responseIdForInput(direct.inputId);
+      return {inputId:direct.inputId,response:this.flushHistory().then(()=>direct.text),...(input.modality==='live_voice'&&responseId?{stream:(async function*(){yield {responseId,text:direct.text};})()}: {})};
+    }
     const receipt = this.store.compose(() => {
       const receipt = this.store.acceptInput({ ...input, skill: input.skill ?? resolveSkill(input.text, input.scope.source, this.host.skills?.()), capabilities }, this.config.conversation.maxPendingInputs);
       if (input.metadata?.unavailableAttachments?.length && !this.store.get(`SELECT id FROM conversation_decisions WHERE kind='notice'
