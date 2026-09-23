@@ -17,10 +17,8 @@ export class ComputerConnectors {
   for(const id of this.ids().slice(0,10)){
    const connection=this.connection(id);const read=async()=>{const r=await fetch(new URL('/v1/computer-grants',connection.endpoint),{redirect:'error',headers:connection.headers,signal:AbortSignal.timeout(10000)});if(!r.ok)throw Error('COMPUTER_DISCOVERY_UNAVAILABLE');const text=await r.text();if(text.length>262144)throw Error('COMPUTER_DISCOVERY_INVALID');const body=JSON.parse(text);if(!Array.isArray(body.grants))throw Error('COMPUTER_DISCOVERY_INVALID');return body.grants;};
    let grants=await read();check();
-   const pending=grants.filter((g:any)=>g.online===true&&g.ready===false);
-   if(context.execute&&pending.length===1){await withComputerConnection(connection,async client=>{check();await client.callTool({name:'computer_request_access',arguments:{device_id:pending[0].deviceId,grant_id:pending[0].id,wait_ms:15000}},undefined,{timeout:20000});});grants=await read();}
    check();if(JSON.stringify(connection)!==JSON.stringify(this.connection(id)))throw Error('COMPUTER_CONNECTOR_CHANGED');
-   for(const g of grants){if((g.expiresAt!==undefined&&g.expiresAt!==0&&(!Number.isFinite(g.expiresAt)||g.expiresAt<=Date.now()))||g.online!==true||g.ready!==true||g.policy?.control!==true||g.policy?.observe!==true||!Array.isArray(g.policy.allowedApps)||!g.policy.allowedApps.length)continue;if(!/^[0-9a-f-]{36}$/i.test(g.id)||!/^[0-9a-f-]{36}$/i.test(g.deviceId))continue;
+   for(const g of grants){if((g.expiresAt!==undefined&&g.expiresAt!==0&&(!Number.isFinite(g.expiresAt)||g.expiresAt<=Date.now()))||g.online!==true)continue;if(!/^[0-9a-f-]{36}$/i.test(g.id)||!/^[0-9a-f-]{36}$/i.test(g.deviceId))continue;
     const scope={device_id:g.deviceId,grant_id:g.id};found.push({id:'computer-'+createHash('sha256').update(JSON.stringify([this.agent.id,context.principalId,context.conversationId,id,scope])).digest('hex'),name:'Computer Use · '+String(g.label??'Computer').slice(0,80),principalId:context.principalId,conversationId:context.conversationId,connectorId:id,scope});
    }
   }
