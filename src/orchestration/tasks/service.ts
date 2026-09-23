@@ -412,9 +412,11 @@ export class TaskService {
     const previous = this.revision(taskId, task.revision);
     const browserFieldLabel=task.gatewayTarget?.adapter==='browser' && task.browserReport?.reason==='FIELD_TEXT_REQUIRED' && task.browserReport.fieldRequest?.reason==='missing' ? task.browserReport.fieldRequest.label : undefined;
     if(browserFieldLabel && answer.length>2000)throw new OrchestrationError('BROWSER_FIELD_VALUE_TOO_LONG');
+    const computerField=task.gatewayTarget?.adapter==='computer'&&task.computerReport?.fieldRequest?.reason==='missing'?task.computerReport.fieldRequest:undefined;
+    if(computerField&&answer.length>2000)throw new OrchestrationError('COMPUTER_FIELD_VALUE_TOO_LONG');
     task.revision++;
     this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify({ ...previous, revision: task.revision,
-      answers: [...(previous.answers ?? []), { questionId, text: answer, inputId, ...(browserFieldLabel ? {browserFieldLabel} : {}) }], originatingInputId: inputId }));
+      answers: [...(previous.answers ?? []), { questionId, text: answer, inputId, ...(browserFieldLabel ? {browserFieldLabel} : {}),...(computerField?{computerFieldLabel:computerField.label,computerApplication:computerField.application,computerWindowTitle:computerField.windowTitle,computerFieldRole:computerField.role}:{}) }], originatingInputId: inputId }));
     task.pendingQuestion = undefined;
     task.state = task.activeAttemptId ? (task.gatewayTarget ? 'running' : 'interrupting') : 'queued';
     this.store.saveTask(task, version);
@@ -619,13 +621,14 @@ export class TaskService {
       return result;
     });
   }
-  requestInput(attemptId: string, generation: number, question: string, actionId?: string): TaskSnapshot {
+  requestInput(attemptId: string, generation: number, question: string, actionId?: string, computerReport?:TaskSnapshot['computerReport']): TaskSnapshot {
     boundedText(question, 4096);
     return this.store.transaction(() => {
       const { task, attempt } = this.active(attemptId, generation);
       const receipt = this.workerReceipt(attemptId, actionId, 'question', question);
       if (receipt.prior) return receipt.prior as TaskSnapshot;
       if (task.state !== 'running' || task.revision !== attempt.revision) throw new OrchestrationError('SUPERSEDED_QUESTION');
+      if(computerReport&&task.gatewayTarget?.adapter==='computer')task.computerReport=computerReport;
       task.state = 'waiting_input';
       task.pendingQuestion = { questionId: randomUUID(), text: question, revision: attempt.revision };
       this.store.saveTask(task, task.stateVersion); this.notify(task);

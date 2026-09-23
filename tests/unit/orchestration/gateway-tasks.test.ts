@@ -6,7 +6,7 @@ import { OrchestrationStore } from '../../../src/orchestration/store';
 import { DecisionService } from '../../../src/orchestration/decisions';
 import { TaskService } from '../../../src/orchestration/tasks/service';
 import { WorkerScheduler } from '../../../src/orchestration/tasks/scheduler';
-import { GatewayTaskController, GatewayTaskAdapter } from '../../../src/orchestration/gateway-tasks/controller';
+import { GatewayRequestNotSentError, GatewayTaskController, GatewayTaskAdapter } from '../../../src/orchestration/gateway-tasks/controller';
 import { SafemodeTaskAdapter } from '../../../src/orchestration/gateway-tasks/safemode';
 import { recoverOrchestration } from '../../../src/orchestration/recovery';
 import { CommandContext, WorkerOutcome } from '../../../src/orchestration/types';
@@ -351,4 +351,21 @@ test('cancel a finished read-only completion candidate after restart releases it
  tasks.cancelByUser(task.conversationId,'owner',task.taskId);await controller.tick();
  expect(store.task(task.taskId)?.state).toBe('cancelled');
  expect(store.task(task.taskId)?.activeAttemptId).toBeUndefined();
+});
+
+test('known pre-dispatch failures release work, while ambiguous dispatch errors remain fenced',async()=>{
+ const first=spawn();jest.mocked(adapter.submit).mockRejectedValueOnce(new GatewayRequestNotSentError('COMPUTER_TARGET_UNAVAILABLE'));
+ await controller.tick();expect(store.task(first.taskId)?.state).toBe('failed');expect(store.task(first.taskId)?.failure?.code).toBe('GATEWAY_REQUEST_DENIED');
+ const second=spawn();jest.mocked(adapter.submit).mockRejectedValueOnce(Error('transport disconnected'));
+ await controller.tick();expect(store.task(second.taskId)?.state).toBe('needs_reconciliation');
+});
+test('computer field metadata exists before its question notification is assigned',()=>{
+ const task=tasks.spawn({...context,actionId:'computer-field'},{title:'Search',instructions:'Find macOS',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'computer'}});
+ const attempt=tasks.claim(task.taskId)!;tasks.started(attempt.attemptId,attempt.generation);
+ const report={status:'needs_input',reason:'FIELD_TEXT_REQUIRED',steps:0,fieldRequest:{label:'Search',application:'com.apple.AppStore',windowTitle:'App Store',role:'AXTextField',reason:'missing' as const}};
+ const waiting=tasks.requestInput(attempt.attemptId,attempt.generation,'Search text?',undefined,report);
+ expect(store.task(task.taskId)?.computerReport).toEqual(report);
+ store.run("UPDATE notifications SET status='assigned',decision_id=? WHERE task_id=?",context.decisionId,task.taskId);
+ tasks.answer({...context,execute:false,actionId:'computer-answer'},task.taskId,waiting.pendingQuestion!.questionId,'macOS');
+ expect(tasks.revision(task.taskId,2).answers).toEqual(expect.arrayContaining([expect.objectContaining({text:'macOS',computerFieldLabel:'Search',computerApplication:'com.apple.AppStore',computerFieldRole:'AXTextField',computerWindowTitle:'App Store'})]));
 });

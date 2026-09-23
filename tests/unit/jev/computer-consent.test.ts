@@ -26,3 +26,12 @@ test('tool failures preserve a known native reason and unsupported decisions are
  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
  try{await adapter.submit(task,'request','Inspect');let outcome:any;for(let i=0;i<50;i++){outcome=await adapter.inspect(task,'request');if(typeof outcome==='object')break;await new Promise(r=>setImmediate(r));}expect(outcome.failure.code).toBe('COMPUTER_NO_SUPPORTED_ACTION');expect(outcome.failure.message).toContain('does not indicate an account restriction');}finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('restart refreshes scoped target discovery before consent, without spawning duplicate actions',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-rediscover-'));let discovered=false;
+ const connectors={get:jest.fn(()=>{if(!discovered)throw Error('COMPUTER_TARGET_UNAVAILABLE');return {connectorId:'c',scope:{}};}),discover:jest.fn(async(context,allowed)=>{expect(context).toEqual({principalId:'p',conversationId:'c'});expect(allowed()).toBe(true);discovered=true;}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})};
+ const callTool=jest.fn(async()=>({content:[{type:'text',text:'{"state":"denied"}'}]}));jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:()=>true,member:()=>true,active:()=>true,thinking:()=>undefined,evaluate:jest.fn(),needsInput:()=>true});
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ try{await adapter.submit(task,'r','Inspect');expect(connectors.discover).toHaveBeenCalledTimes(1);expect(connectors.get).toHaveBeenCalledTimes(2);await adapter.close();expect(callTool).toHaveBeenCalledTimes(1);}finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});

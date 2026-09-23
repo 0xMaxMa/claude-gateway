@@ -12,7 +12,7 @@ export class ComputerConnectors {
  connection(id:string){try{return resolveBrowserConnection(this.config,this.agent,id);}catch{throw Error('COMPUTER_CONNECTOR_UNAVAILABLE');}}
  private ids(){if(this.agent.allow_tools===false)return [];const entries=this.config.gateway.customConnectors??{},enabled=resolveEnabledConnectors(this.agent,entries,this.config.gateway.connectorsDefaultEnabled!==false);return Object.keys(enabled).filter(id=>(entries[id] as any)?.resourcesPath==='/v1/computer-grants');}
  get(id:string,principal:string,conversation:string){const found=this.rows.find(b=>b.id===id&&b.principalId===principal&&b.conversationId===conversation);if(!found||!this.ids().includes(found.connectorId))throw Error('COMPUTER_TARGET_UNAVAILABLE');this.connection(found.connectorId);return found;}
- async discover(context:CommandContext,authorized:()=>boolean){
+ async discover(context:Pick<CommandContext,'principalId'|'conversationId'>,authorized:()=>boolean){
   const found:ComputerBinding[]=[];const check=()=>{if(!authorized())throw Error('ACCESS_DENIED');};check();
   for(const id of this.ids().slice(0,10)){
    const connection=this.connection(id);const read=async()=>{const r=await fetch(new URL('/v1/computer-grants',connection.endpoint),{redirect:'error',headers:connection.headers,signal:AbortSignal.timeout(10000)});if(!r.ok)throw Error('COMPUTER_DISCOVERY_UNAVAILABLE');const text=await r.text();if(text.length>262144)throw Error('COMPUTER_DISCOVERY_INVALID');const body=JSON.parse(text);if(!Array.isArray(body.grants))throw Error('COMPUTER_DISCOVERY_INVALID');return body.grants;};

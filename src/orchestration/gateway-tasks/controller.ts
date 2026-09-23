@@ -2,6 +2,9 @@ import { GatewayTaskTarget, TaskSnapshot, WorkerOutcome, CommandContext } from '
 import { TaskService } from '../tasks/service';
 import { taskFailure } from '../tasks/failure';
 
+/** Thrown only before any external dispatch or durable adapter receipt. */
+export class GatewayRequestNotSentError extends Error {}
+
 export interface GatewayTaskAdapter {
   readonly name: string;
   discover(query?: string, offset?: number, context?: CommandContext): unknown;
@@ -106,7 +109,7 @@ export class GatewayTaskController {
       } catch (error) {
         // Transport/inspection failures cannot prove that the target stopped.
         if (attempt.state === 'unknown') { this.reportError(error); continue; }
-        this.tasks.finish(attempt.attemptId, attempt.generation, {type: task.gatewayDispatch ? 'unknown' : 'failed',failure:taskFailure(error, task.gatewayDispatch ? 'GATEWAY_REQUEST_UNCONFIRMED' : 'GATEWAY_REQUEST_DENIED')});
+        this.tasks.finish(attempt.attemptId, attempt.generation, {type: task.gatewayDispatch && !(error instanceof GatewayRequestNotSentError) ? 'unknown' : 'failed',failure:taskFailure(error, task.gatewayDispatch && !(error instanceof GatewayRequestNotSentError) ? 'GATEWAY_REQUEST_UNCONFIRMED' : 'GATEWAY_REQUEST_DENIED')});
       }
     }
   }

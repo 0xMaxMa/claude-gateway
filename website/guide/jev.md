@@ -495,49 +495,14 @@ before claiming a retry is queued; provider failures, cancellation and unknown
 mutations remain excluded from automatic recovery. An unchanged page alone does
 not prove a website is blocking automation.
 
-## Experience Library
+## Fresh-state decisions
 
-Browser Use enables Jev Loop's Experience Library by default. It selects compatible
-structured packs by the observed origin/path and available tools, downloads from
-the Core registry, and caches them. No extension reinstall is needed for this
-host-side feature. It never downloads or executes scripts from a page.
-
-Optional `gateway.jev.experience` configuration:
-
-```json
-{
-  "enabled": true,
-  "autoDownload": true,
-  "maxPacks": 50,
-  "maxRecords": 500,
-  "maxHints": 5,
-  "maxHintBytes": 2048,
-  "recordTtlDays": 90,
-  "downloadTimeoutMs": 1500
-}
-```
-
-`registryUrl` can select an operator-controlled HTTPS registry. The default is the
-public Jev Loop Experience Pack registry. `autoDownload:false` permits cached/local
-knowledge only; `enabled:false` disables the feature. Downloads have byte/time
-limits, reject redirects and validate checksums/schema. Registry outages do not
-require stopping browser work. Downloading a public pack discloses its pack ID to
-the registry, but sends no provider credentials, browser content or local learning.
-
-Local records live in the agent runtime's `experience` directory, separately hashed
-by agent, principal and conversation. App-container agents use the same host-side
-service and access checks; credentials and library files are not mounted into their
-containers. Changes apply to the next Browser Use request. Verification uses current
-configuration, so disabling learning also stops later promotion.
-
-Dispatch alone earns no success. The loop records demonstrated effects; Gateway
-promotes them only after the parent's scoped `verify_browser` completion is
-committed. Request IDs make promotion idempotent after restart. Three verified runs
-activate a local hint. Unknown outcomes and provider failures remain neutral;
-missing verification does not teach success. Records contain enums, counters,
-timestamps and hashes, with bounded retention, no free-text memory and no automatic
-upload. Initial Gmail/Google Flights packs contain fixture-tested control patterns;
-they are not live-trained full-site workflows or a guarantee of task success.
+Browser Use and Computer Use select actions with Jev using fresh MCP observations.
+Experience Packs and learning have been removed: no registry downloads, stored
+hints or learned rules are used. Remove the former `gateway.jev.experience` setting
+from existing configuration. Existing experience cache directories are unused.
+Thinking remains available for field text and independent completion verification.
+Task ownership, consent and durable mutation receipts are unchanged.
 
 ## Computer Use connectors
 
@@ -575,3 +540,14 @@ was selected; it must not be described as an account or provider rejection.
 Known native tool error codes are preserved in task failures instead of being
 replaced with a generic tool failure. Action counts represent desktop commands,
 not screenshots or proof that the goal was achieved.
+
+Computer field requests include their application, window and field identity before
+question notifications are emitted. The agent can answer an assigned missing-field
+question from existing user instructions; it should ask the user only for an unknown
+required fact. Thinking generates literal field data, validates its meaning and
+retries an invalid candidate before any typing. A capability disclaimer is not a
+field value. Known answers are reused only for a uniquely matching scoped field.
+
+After restart, queued computer work refreshes scoped device discovery before
+requesting consent. Definite failures before dispatch end as failed; transport or
+mutation outcomes that cannot be established remain fenced for reconciliation.

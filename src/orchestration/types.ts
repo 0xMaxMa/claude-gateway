@@ -34,7 +34,7 @@ export interface CommandContext extends ExecutionCapabilities {
   actionId: string;
 }
 export interface TaskFailure { code: string; message: string; observedAt: number; provider?: import('./provider-admission').ProviderFailure; }
-export interface ComputerTaskReport {status:string;reason:string;steps:number;fieldRequest?:{label:string;reason:'missing'}}
+export interface ComputerTaskReport {status:string;reason:string;steps:number;fieldRequest?:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'}}
 export type WorkerOutcome = ({type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure}) & {computerReport?:ComputerTaskReport;browserReport?: import('../jev/browser-contract').BrowserTaskReport};
 export interface TaskResult {
   summary: string;
@@ -101,7 +101,7 @@ export interface TaskRevision {
   /** Bounded supervision advice; never replaces user authorization or the assigned goal. */
   guidance?: string;
   guidanceBasis?: { attemptId?: string; workflowVersion: number; progressAt: number };
-  answers?: Array<{ questionId: string; text: string; inputId: string; browserFieldLabel?: string }>;
+  answers?: Array<{ questionId: string; text: string; inputId: string; browserFieldLabel?: string; computerFieldLabel?:string; computerApplication?:string;computerWindowTitle?:string;computerFieldRole?:string }>;
   taskId: string;
   revision: number;
   instructions: string;
