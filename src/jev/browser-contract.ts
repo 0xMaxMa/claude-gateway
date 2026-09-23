@@ -1,10 +1,11 @@
-import type {ExperienceHooks} from '@0xmaxma/jev-loop/experience';
+import type {BrowserTrace, BrowserTraceEvent} from '@0xmaxma/jev-loop/browser-trace';
 import type { JevRequest, JevResult } from './types';
 
 /** Consumer protocol v1. No provider keys, executable code or URLs in task arguments. */
 export interface BrowserScope { device_id: string; grant_id: string; tab_id: string }
 export interface BrowserProgress { contractVersion?: 1; phase?: 'evaluating'|'decided'|'acting'|'acted'; requestId?: string; operationId?: string; steps: number; evaluations: number; model?: string; decision_ms?: number; operation_confidence?: number; target_confidence?: number }
 export interface BrowserExecutionResult {
+  trace?: BrowserTrace;
   status: 'succeeded' | 'blocked' | 'cancelled' | 'failed' | 'needs_verification';
   reason: string;
   providerFailure?: BrowserProviderFailure;
@@ -18,7 +19,7 @@ export interface BrowserExecutionResult {
   lastConfirmedAction?: {operationId:string;operation:string;outcome:'confirmed'};
 }
 export interface BrowserExecutionContext {
-  experience?: ExperienceHooks;
+  trace?: (event:BrowserTraceEvent)=>void;
   startUrl?: string;
   goal: string;
   fields?: Array<{label:string;text:string}>;
@@ -42,7 +43,7 @@ export type BrowserToolCall = (name: string, args: Record<string, unknown>, sign
 export interface BrowserLogicModule {
   BROWSER_USE_CONTRACT_VERSION: 1;
   runBrowserUse(input: { contractVersion: 1; goal: string; startUrl?: string; scope: BrowserScope; fields?: BrowserConnectorConfig['fields'] } & BrowserConnectorConfig['budget'], dependencies: {
-    experience?: ExperienceHooks;
+    trace?: (event:BrowserTraceEvent)=>void;
     call: BrowserToolCall;
     evaluate(request: JevRequest, signal: AbortSignal): Promise<{model: string; answers: JevResult['answers']}>;
     progress(event: BrowserProgress): void;
@@ -59,6 +60,7 @@ export interface BrowserLogicModule {
 
 export interface BrowserMutationCheckpoint { operationId: string; operation: string; recordedAt: number }
 export interface BrowserEvidence {
+  trace?: BrowserTrace;
   lastDispatchedMutation?: BrowserMutationCheckpoint;
   requestId: string;
   recordedAt: number;
@@ -69,7 +71,7 @@ export interface BrowserEvidence {
 }
 export interface BrowserProviderFailure { code: string; validationReason?: string; status?: number; retryAfter?: string; resetAt?: string }
 
-export type BrowserTaskReport = Omit<BrowserExecutionResult, 'observation'>;
+export type BrowserTaskReport = Omit<BrowserExecutionResult, 'observation' | 'trace'>;
 
 /** Independent parent verification is valid only after a known non-ambiguous stop. */
 export function parentVerifiableBrowserResult(result: BrowserExecutionResult | undefined): boolean {

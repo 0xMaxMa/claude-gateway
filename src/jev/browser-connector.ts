@@ -110,7 +110,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
     let independentlyVerified = false;
     const result = await runThroughLoopMcp(context, loopSignal => module.runBrowserUse({contractVersion:1,goal:context.goal,...(context.startUrl?{startUrl:context.startUrl}:{}),scope:binding.scope,fields:[...(binding.fields??[]),...(context.fields??[]).filter(f=>!(binding.fields??[]).some(b=>b.label===f.label))],...binding.budget}, {
       call,
-      experience:context.experience,
+      trace:context.trace,
       evaluate: async(request,signal) => { assertAccess(); const response = await context.evaluate(request,signal); assertAccess(); return {model:response.model,answers:response.answers}; },
       progress: event => { assertAccess(); context.progress(event); },
       ...(module.verifyBrowserTask ? {verify:async(observation:unknown,signal:AbortSignal) => {assertAccess();const verified = await module.verifyBrowserTask!(context.goal,observation,signal);assertAccess();signal.throwIfAborted();independentlyVerified=validateBrowserVerification(verified);return independentlyVerified;}} : {}),
