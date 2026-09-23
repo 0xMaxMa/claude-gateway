@@ -347,9 +347,9 @@ export class TaskService {
           taskId, context.conversationId, context.decisionId, questionId);
         const reviewed = context.questionReviewIds?.includes(questionId) && this.store.get(
           'SELECT question_id FROM task_questions WHERE question_id=? AND task_id=? AND closed=0 AND revision=?',questionId,taskId,task.revision);
-        if ((!assigned && !reviewed) || task.ownerPrincipalId !== context.principalId || !task.capabilities.execute ||
-          task.gatewayTarget?.adapter !== 'browser' || task.browserReport?.reason !== 'FIELD_TEXT_REQUIRED' ||
-          task.browserReport.fieldRequest?.reason !== 'missing' || !task.browserReport.fieldRequest.label)
+        const missingBrowser=task.gatewayTarget?.adapter==='browser'&&task.browserReport?.reason==='FIELD_TEXT_REQUIRED'&&task.browserReport.fieldRequest?.reason==='missing'&&Boolean(task.browserReport.fieldRequest.label);
+        const missingComputer=task.gatewayTarget?.adapter==='computer'&&task.computerReport?.reason==='FIELD_TEXT_REQUIRED'&&task.computerReport.fieldRequest?.reason==='missing'&&Boolean(task.computerReport.fieldRequest.label);
+        if ((!assigned && !reviewed) || task.ownerPrincipalId !== context.principalId || !task.capabilities.execute || (!missingBrowser&&!missingComputer))
           throw new OrchestrationError('EXECUTION_DENIED');
       }
       return this.answerOwned(context.conversationId, taskId, questionId, answer, context.inputId);

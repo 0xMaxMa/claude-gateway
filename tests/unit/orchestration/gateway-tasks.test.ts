@@ -213,6 +213,32 @@ test.each(['unassigned','other-owner','non-browser','non-field','ambiguous','rev
  expect(store.task(q.taskId)!.revision).toBe(1);
 });
 
+function missingComputerField() {
+ const q=missingBrowserField();const task=store.task(q.taskId)!;
+ task.gatewayTarget!.adapter='computer';delete task.browserReport;
+ task.computerReport={status:'blocked',reason:'FIELD_TEXT_REQUIRED',steps:0,fieldRequest:{label:'Note text',reason:'missing'}};
+ store.transaction(()=>store.saveTask(task,task.stateVersion));
+ return q;
+}
+test('assigned computer notification answers only its authorized missing field',()=>{
+ const q=missingComputerField();
+ const answer=tasks.answer({...context,execute:false,actionId:'computer-field'},q.taskId,q.questionId,'Approved note');
+ expect(answer.state).toBe('queued');expect(answer.revision).toBe(2);
+ expect(tasks.revision(q.taskId,2).answers).toEqual(expect.arrayContaining([expect.objectContaining({text:'Approved note'})]));
+});
+test.each(['unassigned','other-owner','non-field','no-label','revoked'])(
+ 'computer field answer rejects %s',reason=>{
+ const q=missingComputerField(),task=store.task(q.taskId)!;
+ if(reason==='unassigned')store.run("UPDATE notifications SET status='pending' WHERE task_id=?",q.taskId);
+ if(reason==='other-owner')task.ownerPrincipalId='another-user';
+ if(reason==='non-field')task.computerReport!.reason='CONSENT_REQUIRED';
+ if(reason==='no-label')delete task.computerReport!.fieldRequest;
+ if(reason==='revoked')task.capabilities.execute=false;
+ store.transaction(()=>store.saveTask(task,task.stateVersion));
+ expect(()=>tasks.answer({...context,execute:false,actionId:'denied-computer-field'},q.taskId,q.questionId,'Note')).toThrow('EXECUTION_DENIED');
+ expect(store.task(q.taskId)!.revision).toBe(1);
+});
+
 test('an early managed field answer waits for its existing attempt to settle',()=>{
  const q=missingBrowserField(); const task=store.task(q.taskId)!;
  // Restore the still-settling attempt to reproduce answer/finish ordering.
