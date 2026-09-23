@@ -299,3 +299,30 @@ test.each(['valid','unassigned','other-owner','unknown','provider','cancelled','
  if(reason==='valid'){expect(verify().state).toBe('completed');expect(check).toHaveBeenCalledTimes(1);}
  else{expect(verify).toThrow();expect(check).not.toHaveBeenCalled();}
 });
+
+test('cancelling an unknown attempt with an unresolved receipt leaves Stopping for reconciliation',async()=>{
+ const task=spawn();outcome={type:'unknown',failure:{code:'OUTCOME_UNKNOWN',message:'Inspect first',observedAt:Date.now()}};
+ await controller.tick();expect(store.task(task.taskId)?.state).toBe('needs_reconciliation');
+ adapter.cancel=jest.fn(async()=>{});
+ tasks.cancelByUser(task.conversationId,'owner',task.taskId);await controller.tick();
+ expect(store.task(task.taskId)?.state).toBe('needs_reconciliation');
+ expect(store.task(task.taskId)?.failure?.code).toBe('CLEANUP_UNCONFIRMED');
+ expect(store.task(task.taskId)?.activeAttemptId).toBeTruthy();
+ expect(adapter.submit).toHaveBeenCalledTimes(1);
+});
+
+test('cancel a finished read-only completion candidate after restart releases its task',async()=>{
+ await controller.close();
+ const bindings:import('../../../src/orchestration/gateway-tasks/browser').BrowserTaskBinding[]=[{version:1,id:'tab',name:'Tab',principalId:'owner',conversationId:context.conversationId,run:async()=>({status:'needs_verification',reason:'COMPLETION_CANDIDATE',steps:0,evaluations:1})}];
+ const browser=new BrowserTaskAdapter({agentId:'operator',root:join(directory,'browser'),allowed:()=>true,evaluate:jest.fn(),bindings:()=>bindings});
+ controller=new GatewayTaskController(tasks,new Map([['browser',browser]]));
+ const task=tasks.spawn({...context,actionId:'browser-spawn'},{title:'Read results',instructions:'Read the open page',targetProfile:'gateway-managed',gatewayTarget:{adapter:'browser',sessionId:'tab',name:'Tab'}});
+ await controller.tick();await new Promise(setImmediate);await controller.tick();
+ expect(store.task(task.taskId)?.state).toBe('needs_reconciliation');
+ await controller.close();store.close();open();recoverOrchestration(store);
+ const restored=new BrowserTaskAdapter({agentId:'operator',root:join(directory,'browser'),allowed:()=>false,evaluate:jest.fn(),bindings:()=>[]});
+ controller=new GatewayTaskController(tasks,new Map([['browser',restored]]));
+ tasks.cancelByUser(task.conversationId,'owner',task.taskId);await controller.tick();
+ expect(store.task(task.taskId)?.state).toBe('cancelled');
+ expect(store.task(task.taskId)?.activeAttemptId).toBeUndefined();
+});

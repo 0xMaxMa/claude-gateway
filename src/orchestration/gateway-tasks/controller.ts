@@ -92,7 +92,7 @@ export class GatewayTaskController {
         const current = this.tasks.store.task(task.taskId)!;
         if (current.activeAttemptId !== attempt.attemptId) continue;
         if (attempt.state === 'unknown') {
-          if (current.state === 'cancel_requested' && outcome !== 'running' && outcome !== 'pending' && outcome.type !== 'unknown') this.tasks.finishCleanup(attempt.attemptId, attempt.generation, true);
+          if (current.state === 'cancel_requested' && outcome !== 'running' && outcome !== 'pending') this.tasks.finishCleanup(attempt.attemptId, attempt.generation, outcome.type !== 'unknown');
           continue;
         }
         if (outcome === 'running') {
