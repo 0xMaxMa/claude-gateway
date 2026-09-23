@@ -231,19 +231,19 @@ export class AgentOrchestrationRuntime {
       bindings:browserBindings,
       refreshBindings:async context=>{store.assertMember(context.conversationId,context.principalId);await automaticBrowsers.refresh(context.principalId,context.conversationId,context.execute,()=>{try{store.assertMember(context.conversationId,context.principalId);return jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true;}catch{return false;}});store.assertMember(context.conversationId,context.principalId);},
       allowedEvidence:task=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return Boolean(store.task(task.taskId));}catch{return false;}},
-      allowedTask:(task)=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);const current=store.task(task.taskId);return Boolean(current && current.activeAttemptId===task.activeAttemptId && ['starting','running'].includes(current.state));}catch{return false;}},
+      allowedTask:(task)=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);const current=store.task(task.taskId);return Boolean(current && current.activeAttemptId===task.activeAttemptId && ['starting','running','interrupting'].includes(current.state));}catch{return false;}},
       onNeedsInput:(task,question)=>{
         const current=store.task(task.taskId),attempt=task.activeAttemptId?store.attempt(task.activeAttemptId):undefined;
         if(!current||!attempt||current.activeAttemptId!==task.activeAttemptId||current.revision!==attempt.revision)return false;
         if(current.state==='waiting_input')return Boolean(current.pendingQuestion);
-        if(!['starting','running'].includes(current.state))return false;
+        if(!['starting','running','interrupting'].includes(current.state))return false;
         if(current.state==='starting')tasks.started(attempt.attemptId,attempt.generation);
         tasks.requestInput(attempt.attemptId,attempt.generation,question);
         return true;
       },
       onProgress:(task,progress)=>store.transaction(()=>{
         const current=store.task(task.taskId);
-        if(!current||current.activeAttemptId!==task.activeAttemptId||!['starting','running'].includes(current.state))return;
+        if(!current||current.activeAttemptId!==task.activeAttemptId||!['starting','running','interrupting'].includes(current.state))return;
         current.latestProgress={source:'runtime',observedAt:Date.now(),text:`Browser task: ${progress.steps} actions, ${progress.evaluations} evaluations.`};
         if(progress.phase==='decided')store.appendEvent(task.conversationId,'browser.decision',{taskId:task.taskId,requestId:progress.requestId,model:progress.model,operationConfidence:progress.operation_confidence,targetConfidence:progress.target_confidence,steps:progress.steps,evaluations:progress.evaluations},task.taskId);
         store.saveTask(current,current.stateVersion);
@@ -255,11 +255,11 @@ export class AgentOrchestrationRuntime {
     const computerAllowed=()=>jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.computerTasks?.enabled!==false;
     gatewayAdapters.set('computer',new ComputerTaskAdapter({agentId:agent.id,root:join(root,'computer-requests'),connectors:new ComputerConnectors(gateway,agent),allowed:computerAllowed,
       member:(principal,conversation)=>{try{store.assertMember(conversation,principal);return true;}catch{return false;}},
-      active:task=>{const current=store.task(task.taskId);return Boolean(current&&current.activeAttemptId===task.activeAttemptId&&['starting','running'].includes(current.state));},
+      active:task=>{const current=store.task(task.taskId);return Boolean(current&&current.activeAttemptId===task.activeAttemptId&&['starting','running','interrupting'].includes(current.state));},
       thinking:()=>gateway.gateway.jev?.thinking,
       evaluate:(task,request,signal)=>gatewayJev(gateway).service.evaluate(request as JevRequest,{principalId:task.ownerPrincipalId,agentId:agent.id,sessionId:task.agentSessionId,taskId:task.taskId,consumer:'computer',signal,authorize:()=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return computerAllowed();}catch{return false;}}}),
-      needsInput:(task,question)=>{const current=store.task(task.taskId),attempt=task.activeAttemptId?store.attempt(task.activeAttemptId):undefined;if(!current||!attempt||current.activeAttemptId!==task.activeAttemptId||current.revision!==attempt.revision||!['starting','running'].includes(current.state))return false;if(current.state==='starting')tasks.started(attempt.attemptId,attempt.generation);tasks.requestInput(attempt.attemptId,attempt.generation,question,undefined,task.computerReport);return true;},
-      progress:(task,steps)=>store.transaction(()=>{const current=store.task(task.taskId);if(!current||current.activeAttemptId!==task.activeAttemptId||!['starting','running'].includes(current.state))return;current.latestProgress={source:'runtime',observedAt:Date.now(),text:`Computer Use: ${steps} actions.`};store.saveTask(current,current.stateVersion);})
+      needsInput:(task,question)=>{const current=store.task(task.taskId),attempt=task.activeAttemptId?store.attempt(task.activeAttemptId):undefined;if(!current||!attempt||current.activeAttemptId!==task.activeAttemptId||current.revision!==attempt.revision||!['starting','running','interrupting'].includes(current.state))return false;if(current.state==='starting')tasks.started(attempt.attemptId,attempt.generation);tasks.requestInput(attempt.attemptId,attempt.generation,question,undefined,task.computerReport);return true;},
+      progress:(task,steps)=>store.transaction(()=>{const current=store.task(task.taskId);if(!current||current.activeAttemptId!==task.activeAttemptId||!['starting','running','interrupting'].includes(current.state))return;current.latestProgress={source:'runtime',observedAt:Date.now(),text:`Computer Use: ${steps} actions.`};store.saveTask(current,current.stateVersion);})
     }));
     const bridge = new TaskBridge(tasks, files, workerShares(files, agent, gateway), host.skills ? () => host.skills!() : undefined, agent.type === 'app-agent' ? { agent, spool: join(root, 'container-files') } : undefined, workerCrons(files, agent, gateway), gatewayAdapters);
     bridge.computerEnabled = computerAllowed;
@@ -667,6 +667,11 @@ export class AgentOrchestrationRuntime {
     const result=await this.browserAdapter.evidence(task,refresh);
     this.store.assertMember(task.conversationId,principalId);
     return result;
+  }
+  controlTask(sessionId:string,principalId:string,taskId:string,command:Parameters<TaskService['controlByUser']>[3]) {
+    const task=this.taskControls.control(sessionId,principalId,taskId,command);
+    this.gatewayTasks?.signalControl(task);
+    return task;
   }
   authorizeSession(sessionId: string, principalId: string): void {
     for (const row of this.store.all('SELECT id FROM conversations WHERE agent_session_id=?', sessionId)) this.store.assertMember(String(row.id), principalId);

@@ -23,7 +23,7 @@ export interface BrowserTaskBinding {
 interface Receipt {trace?:BrowserTrace;revision?:number;taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';lastDispatchedMutation?:BrowserMutationCheckpoint;recordedAt?:number;inspection?:{id:string;at:number};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
 export class BrowserTaskAdapter implements GatewayTaskAdapter {
   readonly name='browser';
-  private readonly running=new Map<string,{controller:AbortController;done:Promise<void>}>();
+  private readonly running=new Map<string,{controller:AbortController;interrupt:AbortController;done:Promise<void>}>();
   constructor(private readonly options:{agentId:string;root:string;allowed:()=>boolean;bindings:()=>BrowserTaskBinding[];
     refreshBindings?:(context:CommandContext)=>Promise<void>;
     evaluate:(task:TaskSnapshot,request:JevRequest,signal:AbortSignal,authorized:()=>boolean)=>Promise<JevResult>;
@@ -88,11 +88,11 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const fields=[...values].map(([label,text])=>({label,text}));
     // Durable receipt precedes any side effect; restart never replays this request.
     this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'running'});
-    const controller=new AbortController();
+    const controller=new AbortController(),interrupt=new AbortController();
     const authorized=()=>{try{return this.options.allowedTask?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
     // The installed browser package owns execution; gateway owns the request lifetime.
     let providerFailure:BrowserExecutionResult['providerFailure'];
-    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({goal:instructions,startUrl:answers?.length || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl,fields,signal:controller.signal,authorized,
+    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({interruptSignal:interrupt.signal,goal:instructions,startUrl:answers?.length || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl,fields,signal:controller.signal,authorized,
       evaluate:async(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');try{return await this.options.evaluate(task,request,signal,authorized);}catch(e){if(e instanceof JevError)providerFailure={code:e.code,...e.metadata};throw e;}},
       trace:event=>{
         if(!authorized())return;
@@ -135,7 +135,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     }).catch(()=>{
       this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',trace:this.read(task,requestId)?.trace,lastDispatchedMutation:this.read(task,requestId)?.lastDispatchedMutation,outcome:{type:'unknown',failure:{code:'BROWSER_OUTCOME_UNKNOWN',message:'Browser request outcome could not be recorded. Inspect before retrying.',observedAt:Date.now()}}});
     }).finally(()=>this.running.delete(this.key(task,requestId)));
-    this.running.set(this.key(task,requestId),{controller,done});
+    this.running.set(this.key(task,requestId),{controller,interrupt,done});
     // A filesystem failure cannot become an unhandled rejection; receipt stays uncertain.
     void done.catch(()=>{});
   }
@@ -196,6 +196,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const receipt=this.read(task,requestId), result=receipt?.browserResult;
     if(receipt?.status!=='ended' || !receipt.inspection || receipt.inspection.id!==evidenceId || Date.now()-receipt.inspection.at>300000 || !parentVerifiableBrowserResult(result))throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
   }
+  interrupt(task:TaskSnapshot,requestId:string):void {this.running.get(this.key(task,requestId))?.interrupt.abort();}
   async cancel(task:TaskSnapshot,requestId:string):Promise<void>{
     this.assertTask(task);
     const running=this.running.get(this.key(task,requestId));

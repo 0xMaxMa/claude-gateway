@@ -276,6 +276,38 @@ export class TaskService {
       return task;
     }, taskId);
   }
+  /** Direct authenticated user control: no inference turn, no second task. */
+  controlByUser(conversationId:string,principalId:string,taskId:string,command:{id:string;action:'pause'|'revise'|'resume';expectedRevision:number;text?:string}):TaskSnapshot {
+    return this.store.transaction(()=>{
+      this.store.assertMember(conversationId,principalId);
+      const task=this.owned(taskId,conversationId);
+      if(task.ownerPrincipalId!==principalId)throw new OrchestrationError('ACCESS_DENIED');
+      if(!/^[0-9a-f-]{36}$/i.test(command.id)||!['pause','revise','resume'].includes(command.action)||!Number.isSafeInteger(command.expectedRevision))throw new OrchestrationError('INVALID_INPUT');
+      const id='user-control:'+command.id,hash=payloadHash({taskId,...command});
+      const prior=this.store.get('SELECT * FROM task_commands WHERE action_id=?',id);
+      if(prior){if(prior.principal_id!==principalId||prior.conversation_id!==conversationId)throw new OrchestrationError('ACCESS_DENIED');if(prior.payload_hash!==hash)throw new OrchestrationError('IDEMPOTENCY_CONFLICT');return task;}
+      if(!['browser','computer'].includes(task.gatewayTarget?.adapter??'')||!task.capabilities.execute)throw new OrchestrationError('EXECUTION_DENIED');
+      if(task.revision!==command.expectedRevision)throw new OrchestrationError('REVISION_CONFLICT');
+      const paused=task.state==='waiting_input'&&task.executionControl?.phase==='paused'&&!task.activeAttemptId;
+      if(!['queued','starting','running','interrupting'].includes(task.state)&&!paused)throw new OrchestrationError('STATE_CONFLICT');
+      if(command.action==='resume'&&!paused)throw new OrchestrationError('STATE_CONFLICT');
+      if(command.action==='revise')boundedText(command.text??'',4000);
+      else if(command.text!==undefined)throw new OrchestrationError('INVALID_INPUT');
+      const previous=this.revision(taskId,task.revision);
+      const priorAnswers=previous.answers?.map(a=>({field:a.browserFieldLabel??a.computerFieldLabel,text:a.text}));
+      const instructions=command.action==='revise'?previous.instructions+(priorAnswers?.length?'\n\nEarlier user answers (subject to the correction below):\n'+JSON.stringify(priorAnswers):'')+'\n\nUser correction (supersedes conflicting earlier requirements; retain the others):\n'+command.text:previous.instructions;
+      boundedText(instructions,task.gatewayTarget?.adapter==='browser'?8000:16000);
+      task.revision++;
+      this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,revision:task.revision,instructions,mode:'interrupt_and_resume',answers:command.action==='revise'?undefined:previous.answers,browserRecoveryCount:0,guidance:undefined,guidanceBasis:undefined}));
+      task.executionControl={id:command.id,action:command.action,revision:task.revision,phase:task.activeAttemptId?'pending':command.action==='pause'?'paused':'pending',requestedAt:Date.now()};
+      task.state=task.activeAttemptId?'interrupting':command.action==='pause'?'waiting_input':'queued';
+      task.latestProgress={source:'runtime',observedAt:Date.now(),text:task.activeAttemptId?'Control accepted; settling the current action before applying it.':command.action==='pause'?'Automation paused.':'Control accepted; resuming from a fresh observation.'};
+      this.store.saveTask(task,task.stateVersion);
+      this.store.appendEvent(conversationId,'task.control_accepted',{taskId,control:task.executionControl},taskId);
+      this.store.run('INSERT INTO task_commands VALUES(?,?,?,?,?,?,?,?,?)',id,taskId,conversationId,principalId,null,'user_control',hash,JSON.stringify(task),Date.now());
+      return task;
+    });
+  }
   cancel(context: CommandContext, taskId: string, replacedByTaskId?: string): TaskSnapshot {
     return this.command(context, 'cancel', { taskId, ...(replacedByTaskId ? { replacedByTaskId } : {}) }, false, () => this.cancelOwned(context.conversationId, taskId, replacedByTaskId), taskId);
   }
@@ -492,6 +524,7 @@ export class TaskService {
       if (task.state !== 'starting') throw new OrchestrationError('STATE_CONFLICT');
       attempt.state = 'running'; attempt.startedAt = Date.now(); attempt.processIdentity = identity;
       task.state = 'running'; task.appliedRevision = attempt.revision;
+      if(task.executionControl?.revision===attempt.revision)task.executionControl.phase='applied';
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
       this.store.appendEvent(task.conversationId, 'task.revision_applied', { revision: attempt.revision }, task.taskId);
       return task;
@@ -664,13 +697,14 @@ export class TaskService {
         attempt.failure = outcome.failure ?? taskFailure(undefined, outcome.type === 'stopped' ? 'WORKER_STOPPED' : 'WORKER_FAILED');
         task.failure = attempt.failure;
       } else { delete task.failure; }
-      if (outcome.type === 'unknown') { attempt.state = 'unknown'; task.state = 'needs_reconciliation'; }
+      if (outcome.type === 'unknown') { if(task.executionControl?.phase==='pending')task.executionControl.phase='blocked'; attempt.state = 'unknown'; task.state = 'needs_reconciliation'; }
       else {
         attempt.state = 'ended'; task.activeAttemptId = undefined;
         if (outcome.type === 'completed') attempt.result = outcome.result;
         if (task.state === 'cancel_requested') {
           task.state = outcome.type === 'completed' && task.revision === attempt.revision ? 'completed' : 'cancelled';
         } else if (task.state === 'waiting_input' && task.pendingQuestion) { /* retain question; execution slot now free */ }
+        else if(task.executionControl?.phase==='pending'&&task.executionControl.action==='pause'){task.state='waiting_input';task.executionControl.phase='paused';delete task.failure;}
         else if (task.state === 'interrupting' || task.revision > attempt.revision) task.state = 'queued';
         else task.state = outcome.type === 'completed' ? 'completed' : 'failed';
         if (task.state === 'completed' && outcome.type === 'completed') task.result = outcome.result;

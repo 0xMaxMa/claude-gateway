@@ -19,6 +19,7 @@ export interface BrowserExecutionResult {
   lastConfirmedAction?: {operationId:string;operation:string;outcome:'confirmed'};
 }
 export interface BrowserExecutionContext {
+  interruptSignal?:AbortSignal;
   trace?: (event:BrowserTraceEvent)=>void;
   startUrl?: string;
   goal: string;
@@ -43,6 +44,7 @@ export type BrowserToolCall = (name: string, args: Record<string, unknown>, sign
 export interface BrowserLogicModule {
   BROWSER_USE_CONTRACT_VERSION: 1;
   runBrowserUse(input: { contractVersion: 1; goal: string; startUrl?: string; scope: BrowserScope; fields?: BrowserConnectorConfig['fields'] } & BrowserConnectorConfig['budget'], dependencies: {
+    interruptSignal?:AbortSignal;
     trace?: (event:BrowserTraceEvent)=>void;
     call: BrowserToolCall;
     evaluate(request: JevRequest, signal: AbortSignal): Promise<{model: string; answers: JevResult['answers']}>;

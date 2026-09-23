@@ -99,6 +99,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       if (name !== 'browser_task_release') assertAccess();
       if (!tools.has(name) || ['device_id','grant_id','tab_id'].some(k => args[k] !== binding.scope[k as keyof typeof binding.scope])) throw Error('BROWSER_SCOPE_DENIED');
       if (name === 'tab_navigate' || (name.startsWith('page_') && name !== 'page_observe')) {
+        if(context.interruptSignal?.aborted)return {content:[{type:'text',text:JSON.stringify({error:'REVISION_SUPERSEDED',action_executed:false})}],isError:true};
         if (!context.beforeMutation || typeof args.operation_id !== 'string') throw Error('BROWSER_CHECKPOINT_UNAVAILABLE');
         context.signal.throwIfAborted();
         context.beforeMutation(args.operation_id, name);
@@ -111,6 +112,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
     const result = await runThroughLoopMcp(context, loopSignal => module.runBrowserUse({contractVersion:1,goal:context.goal,...(context.startUrl?{startUrl:context.startUrl}:{}),scope:binding.scope,fields:[...(binding.fields??[]),...(context.fields??[]).filter(f=>!(binding.fields??[]).some(b=>b.label===f.label))],...binding.budget}, {
       call,
       trace:context.trace,
+      interruptSignal:context.interruptSignal,
       evaluate: async(request,signal) => { assertAccess(); const response = await context.evaluate(request,signal); assertAccess(); return {model:response.model,answers:response.answers}; },
       progress: event => { assertAccess(); context.progress(event); },
       ...(module.verifyBrowserTask ? {verify:async(observation:unknown,signal:AbortSignal) => {assertAccess();const verified = await module.verifyBrowserTask!(context.goal,observation,signal);assertAccess();signal.throwIfAborted();independentlyVerified=validateBrowserVerification(verified);return independentlyVerified;}} : {}),

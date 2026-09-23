@@ -51,6 +51,7 @@ export interface GatewayTaskTarget {
   noBootstrap?: boolean;
 }
 export interface TaskSnapshot {
+  executionControl?: {id:string;action:'pause'|'revise'|'resume';revision:number;phase:'pending'|'applied'|'paused'|'blocked';requestedAt:number};
   computerReport?:ComputerTaskReport;
   gatewayTarget?: GatewayTaskTarget;
   browserReport?: import('../jev/browser-contract').BrowserTaskReport;

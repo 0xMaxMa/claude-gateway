@@ -16,6 +16,7 @@ export interface GatewayTaskAdapter {
   validateInput?(instructions:string,answers?:import('../types').TaskRevision['answers']):void;
   submit(task: TaskSnapshot, requestId: string, instructions: string, answers?: import('../types').TaskRevision['answers']): Promise<void>;
   inspect(task: TaskSnapshot, requestId: string, attempt?:TaskAttempt): Promise<WorkerOutcome | 'running' | 'pending'>;
+  interrupt?(task:TaskSnapshot,requestId:string):void;
   cancel(task: TaskSnapshot, requestId: string): Promise<void>;
 }
 
@@ -41,7 +42,7 @@ export class GatewayTaskController {
     return run;
   }
   private async run(): Promise<void> {
-    const rows = this.tasks.store.all("SELECT id FROM tasks WHERE json_type(snapshot_json,'$.gatewayTarget')='object' AND state IN ('queued','starting','running','cancel_requested') ORDER BY created_at,id");
+    const rows = this.tasks.store.all("SELECT id FROM tasks WHERE json_type(snapshot_json,'$.gatewayTarget')='object' AND state IN ('queued','starting','running','interrupting','cancel_requested') ORDER BY created_at,id");
     for (const row of rows) {
       if (this.closed) return;
       let task = this.tasks.store.task(String(row.id))!;
@@ -89,6 +90,7 @@ export class GatewayTaskController {
           await adapter.submit(task, requestId, instructions, revision.answers);
         }
         task = this.tasks.store.task(task.taskId)!;
+        if(task.state==='interrupting')adapter.interrupt?.(task,requestId);
         if (task.state === 'cancel_requested') await adapter.cancel(task, requestId);
         const outcome = await adapter.inspect(task, requestId, attempt);
         const current = this.tasks.store.task(task.taskId)!;
@@ -119,6 +121,10 @@ export class GatewayTaskController {
       AND json_extract(snapshot_json,'$.gatewayTarget.adapter')=?
       AND json_extract(snapshot_json,'$.gatewayTarget.sessionId')=? LIMIT 1`,
     task.taskId, task.gatewayTarget!.adapter, task.gatewayTarget!.sessionId));
+  }
+  signalControl(task:TaskSnapshot):void {
+    if(task.gatewayDispatch&&task.state==='interrupting')this.adapters.get(task.gatewayTarget!.adapter)?.interrupt?.(task,task.gatewayDispatch.requestId);
+    void this.tick().catch(this.reportError);
   }
   async close(): Promise<void> {
     this.closed = true;

@@ -634,6 +634,10 @@ export class AgentRunner extends EventEmitter {
     // Full retained result, with worker-only skill context removed by status().
     return { ...runtime.tasks.status(task.conversationId, principalId, taskId)[0], ...detail };
   }
+  async controlApiTask(sessionId:string,principalId:string,taskId:string,command:Parameters<import('../orchestration/tasks/service').TaskService['controlByUser']>[3]) {
+    if(!this.agentConfig.orchestration?.enabled)throw new Error('ORCHESTRATION_DISABLED');
+    return (await this.getOrchestration()).controlTask(sessionId,principalId,taskId,command);
+  }
   async cancelApiTask(sessionId: string, principalId: string, taskId: string) {
     if (!this.agentConfig.orchestration?.enabled) throw new Error('ORCHESTRATION_DISABLED');
     const runtime = await this.getOrchestration();
