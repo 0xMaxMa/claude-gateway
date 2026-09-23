@@ -35,3 +35,11 @@ test('restart refreshes scoped target discovery before consent, without spawning
  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
  try{await adapter.submit(task,'r','Inspect');expect(connectors.discover).toHaveBeenCalledTimes(1);expect(connectors.get).toHaveBeenCalledTimes(2);await adapter.close();expect(callTool).toHaveBeenCalledTimes(1);}finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('historical pre-dispatch evidence survives cancellation, but missing receipts alone stay unknown',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-history-'));
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:{} as any,allowed:()=>true,member:()=>true,active:()=>true,thinking:()=>undefined,evaluate:jest.fn(),needsInput:()=>true});
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,state:'cancel_requested',activeAttemptId:'attempt',gatewayDispatch:{requestId:'r'},gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ const attempt={attemptId:'attempt',taskId:'t',failure:{code:'GATEWAY_REQUEST_UNCONFIRMED',message:'COMPUTER_TARGET_UNAVAILABLE'}} as any;
+ try{expect(await adapter.inspect(task,'r',attempt)).toMatchObject({type:'failed',failure:{code:'GATEWAY_REQUEST_DENIED'}});expect(await adapter.inspect(task,'other',attempt)).toBe('pending');expect(await adapter.inspect(task,'r',{...attempt,taskId:'foreign'})).toBe('pending');expect(await adapter.inspect(task,'r')).toBe('pending');}finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});

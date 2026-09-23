@@ -1,4 +1,4 @@
-import { GatewayTaskTarget, TaskSnapshot, WorkerOutcome, CommandContext } from '../types';
+import { GatewayTaskTarget, TaskSnapshot, WorkerOutcome, CommandContext, TaskAttempt } from '../types';
 import { TaskService } from '../tasks/service';
 import { taskFailure } from '../tasks/failure';
 
@@ -15,7 +15,7 @@ export interface GatewayTaskAdapter {
   ready?(task: TaskSnapshot): boolean;
   validateInput?(instructions:string,answers?:import('../types').TaskRevision['answers']):void;
   submit(task: TaskSnapshot, requestId: string, instructions: string, answers?: import('../types').TaskRevision['answers']): Promise<void>;
-  inspect(task: TaskSnapshot, requestId: string): Promise<WorkerOutcome | 'running' | 'pending'>;
+  inspect(task: TaskSnapshot, requestId: string, attempt?:TaskAttempt): Promise<WorkerOutcome | 'running' | 'pending'>;
   cancel(task: TaskSnapshot, requestId: string): Promise<void>;
 }
 
@@ -90,7 +90,7 @@ export class GatewayTaskController {
         }
         task = this.tasks.store.task(task.taskId)!;
         if (task.state === 'cancel_requested') await adapter.cancel(task, requestId);
-        const outcome = await adapter.inspect(task, requestId);
+        const outcome = await adapter.inspect(task, requestId, attempt);
         const current = this.tasks.store.task(task.taskId)!;
         if (current.activeAttemptId !== attempt.attemptId) continue;
         if (attempt.state === 'unknown') {
