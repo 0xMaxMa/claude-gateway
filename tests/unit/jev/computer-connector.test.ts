@@ -16,9 +16,9 @@ test('discovery supports app agents but targets never cross principals or conver
  expect(()=>connectors.get(target.id,'other','c')).toThrow();expect(()=>connectors.get(target.id,'p','other')).toThrow();
  expect(connectors.get(target.id,'p','c')).toEqual(target);
 });
-test('offline, expired, unapproved and read-only devices are not runnable',async()=>{
+test('offline and expired devices are excluded; paired devices remain discoverable before consent',async()=>{
  global.fetch=jest.fn(async()=>new Response(JSON.stringify({grants:[{...grant,online:false},{...grant,expiresAt:1},{...grant,ready:false},{...grant,policy:{...grant.policy,control:false}}]})));
- expect(await new ComputerConnectors(config(),{id:'a'} as any).discover(context,()=>true)).toEqual([]);
+ const rows=await new ComputerConnectors(config(),{id:'a'} as any).discover({...context,execute:true},()=>true);expect(rows).toHaveLength(2);expect(global.fetch).toHaveBeenCalledTimes(1);
 });
 test('revocation during discovery and credential rotation prevent target publication',async()=>{
  let allowed=true;global.fetch=jest.fn(async()=>{allowed=false;return new Response(JSON.stringify({grants:[grant]}));});

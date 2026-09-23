@@ -106,3 +106,12 @@ request IDs and trusted operator agent controls are described in the
 Paired desktop MCP connectors can also run through Jev as Gateway-managed
 Computer Use tasks, with local application consent and the same shared Thinking
 configuration. See [Computer Use connectors](website/guide/jev.md#computer-use-connectors).
+
+### Computer Use consent
+
+Computer capability discovery lists paired online computers without requesting access.
+A Gateway-managed computer task requests access only when it starts. The desktop
+owner then selects applications (or explicitly selects All applications) and a
+session duration. Denial prevents execution; pairing and discovery alone never
+start desktop actions. The task waits for approval with cancellation and ownership
+checks active, rather than asking the user to pre-enable access in Settings.
