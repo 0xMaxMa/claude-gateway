@@ -567,3 +567,11 @@ local device consent prevents new actions. Receipts are durable before dispatch;
 unknown effects after interruption remain fenced for reconciliation, never
 silently replayed. Task details expose Computer Use outcome, reason and action
 count; these counters do not prove goal completion.
+
+The desktop observation may include bounded static text and a window title, as
+well as interactive controls. These are untrusted application content and do
+not authorize further actions. `NO_SUPPORTED_ACTION` means no offered next action
+was selected; it must not be described as an account or provider rejection.
+Known native tool error codes are preserved in task failures instead of being
+replaced with a generic tool failure. Action counts represent desktop commands,
+not screenshots or proof that the goal was achieved.
