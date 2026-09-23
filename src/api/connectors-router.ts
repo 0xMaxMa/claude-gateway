@@ -149,7 +149,7 @@ export function createConnectorsRouter(
   // blast radius to the client that asked.
   router.get('/v1/connectors', async (_req: Request, res: Response) => {
     try {
-      res.json({ connectors: listConnectorStatus(await store.read()), capabilities: { perConnectorDefaults: true, connectorResources: true } });
+      res.json({ connectors: listConnectorStatus(await store.read()), capabilities: { perConnectorDefaults: true, connectorResources: true, computerUseTasks: true } });
     } catch (err) {
       console.error(`connectors-router: listing connectors failed: ${(err as Error).message}`);
       res.status(500).json({ error: 'Connector configuration could not be read' });
