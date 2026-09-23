@@ -34,7 +34,8 @@ export interface CommandContext extends ExecutionCapabilities {
   actionId: string;
 }
 export interface TaskFailure { code: string; message: string; observedAt: number; provider?: import('./provider-admission').ProviderFailure; }
-export type WorkerOutcome = ({type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure}) & {browserReport?: import('../jev/browser-contract').BrowserTaskReport};
+export interface ComputerTaskReport {status:string;reason:string;steps:number}
+export type WorkerOutcome = ({type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure}) & {computerReport?:ComputerTaskReport;browserReport?: import('../jev/browser-contract').BrowserTaskReport};
 export interface TaskResult {
   summary: string;
   artifactIds: string[];
@@ -50,6 +51,7 @@ export interface GatewayTaskTarget {
   noBootstrap?: boolean;
 }
 export interface TaskSnapshot {
+  computerReport?:ComputerTaskReport;
   gatewayTarget?: GatewayTaskTarget;
   browserReport?: import('../jev/browser-contract').BrowserTaskReport;
   gatewayDispatch?: { requestId: string; submittedAt: number };

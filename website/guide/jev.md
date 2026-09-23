@@ -538,3 +538,32 @@ missing verification does not teach success. Records contain enums, counters,
 timestamps and hashes, with bounded retention, no free-text memory and no automatic
 upload. Initial Gmail/Google Flights packs contain fixture-tested control patterns;
 they are not live-trained full-site workflows or a guarantee of task success.
+
+## Computer Use connectors
+
+Computer Use runs the Jev Loop computer logic as a Gateway-managed task. Add an
+HTTP MCP connector with `resourcesPath: "/v1/computer-grants"` and the paired
+controller credential in the normal connector secret store. The device owner
+must separately approve applications and access duration; pairing alone does
+not authorize actions. Neither Jev nor Thinking credentials are sent to the
+computer or its relay.
+
+With Jev enabled and the agent permitted by `allowedAgentIds`, computer tasks
+are available by default; set `features.computerTasks.enabled: false` to disable.
+The shared `gateway.jev.thinking` supplies field text and independent completion
+verification. Without a Thinking helper, unknown field values require input and
+completion candidates are never reported as verified success.
+
+1. Call `capabilities_list` with `scope: "computer"` to discover ready devices.
+2. Submit `task_spawn` with `target_profile: "gateway-managed"` and
+   `gateway_target: { "adapter": "computer", "session_id": "<discovered ID>" }`.
+3. Use normal task status, updates, answers, and cancellation. Related changes
+   use `when_ready`; an active request settles before the new revision begins.
+
+Targets are bound to the authenticated agent, principal and conversation. App
+container agents use the same host-managed executor without receiving provider
+keys or access to host safemode. A disabled connector, revoked membership or
+local device consent prevents new actions. Receipts are durable before dispatch;
+unknown effects after interruption remain fenced for reconciliation, never
+silently replayed. Task details expose Computer Use outcome, reason and action
+count; these counters do not prove goal completion.
