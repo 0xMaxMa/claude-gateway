@@ -234,3 +234,23 @@ test.each(['confirmed','not_executed','unknown'] as const)('cancellation respect
  await f.a.submit(task(),'r','goal');await settle(f.a);await f.a.cancel(task(),'r');
  expect((await settle(f.a)).type).toBe(outcome==='unknown'?'unknown':'stopped');
 });
+
+test('structural trace is durable before completion and remains scoped after restart',async()=>{
+ const f=fixture();const event={version:1 as const,sequence:1,at:Date.now(),phase:'decision' as const,operation:'CLICK'};
+ f.run.mockImplementation(async c=>{c.trace?.(event);expect(JSON.parse(readFileSync(join(dir,readdirSync(dir)[0]),'utf8')).trace.events).toEqual([event]);return complete;});
+ await f.a.submit(task(),'r','goal');await settle(f.a);
+ const t=task({gatewayDispatch:{requestId:'r'} as any});
+ const evidence=await f.make().evidence(t);
+ expect(evidence.trace?.events).toEqual([event]);
+ await expect(f.make().evidence({...t,ownerPrincipalId:'other'})).rejects.toThrow();
+});
+test('trace rejects unexpected page data and model stop is not reported as site denial',async()=>{
+ const f=fixture();f.run.mockImplementation(async c=>{
+  expect(()=>c.trace?.({version:1,sequence:1,at:Date.now(),phase:'decision',pageText:'private'} as any)).toThrow();
+  return {status:'blocked',reason:'NO_SUPPORTED_ACTION',steps:0,evaluations:1};
+ });
+ await f.a.submit(task(),'r','goal');const outcome=await settle(f.a);
+ expect(outcome.type).toBe('failed');
+ if(outcome.type==='failed')expect(outcome.failure?.message).toContain('not evidence of bot detection');
+ expect(JSON.stringify(await f.a.evidence(task({gatewayDispatch:{requestId:'r'} as any})))).not.toContain('private');
+});

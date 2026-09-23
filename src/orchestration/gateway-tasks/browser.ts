@@ -1,3 +1,4 @@
+import {TraceEvent, type BrowserTrace} from '@0xmaxma/jev-loop/browser-trace';
 import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
 import type { BrowserExecutionContext, BrowserExecutionResult, BrowserProgress, BrowserEvidence, BrowserMutationCheckpoint } from '../../jev/browser-contract';
 import { createHash, randomUUID } from 'crypto';
@@ -19,13 +20,11 @@ export interface BrowserTaskBinding {
   inspect?: (result:Partial<BrowserExecutionResult>|undefined,signal:AbortSignal,authorized:()=>boolean)=>Promise<NonNullable<BrowserEvidence['fresh']>>;
   run: (context: BrowserExecutionContext) => Promise<BrowserExecutionResult>;
 }
-interface Receipt {revision?:number;taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';lastDispatchedMutation?:BrowserMutationCheckpoint;recordedAt?:number;inspection?:{id:string;at:number};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
+interface Receipt {trace?:BrowserTrace;revision?:number;taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';lastDispatchedMutation?:BrowserMutationCheckpoint;recordedAt?:number;inspection?:{id:string;at:number};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
 export class BrowserTaskAdapter implements GatewayTaskAdapter {
   readonly name='browser';
   private readonly running=new Map<string,{controller:AbortController;done:Promise<void>}>();
   constructor(private readonly options:{agentId:string;root:string;allowed:()=>boolean;bindings:()=>BrowserTaskBinding[];
-    experience?:(task:TaskSnapshot,requestId:string)=>BrowserExecutionContext['experience'];
-    onVerified?:(task:TaskSnapshot,requestId:string)=>Promise<void>;
     refreshBindings?:(context:CommandContext)=>Promise<void>;
     evaluate:(task:TaskSnapshot,request:JevRequest,signal:AbortSignal,authorized:()=>boolean)=>Promise<JevResult>;
     onProgress?:(task:TaskSnapshot,progress:BrowserProgress)=>void;
@@ -93,8 +92,18 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const authorized=()=>{try{return this.options.allowedTask?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
     // The installed browser package owns execution; gateway owns the request lifetime.
     let providerFailure:BrowserExecutionResult['providerFailure'];
-    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({experience:this.options.experience?.(task,requestId),goal:instructions,startUrl:answers?.length || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl,fields,signal:controller.signal,authorized,
+    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({goal:instructions,startUrl:answers?.length || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl,fields,signal:controller.signal,authorized,
       evaluate:async(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');try{return await this.options.evaluate(task,request,signal,authorized);}catch(e){if(e instanceof JevError)providerFailure={code:e.code,...e.metadata};throw e;}},
+      trace:event=>{
+        if(!authorized())return;
+        const receipt=this.read(task,requestId);
+        if(!receipt||receipt.status!=='running')return;
+        const entry=TraceEvent.parse(event);
+        receipt.trace??={version:1,events:[],truncated:false,sinkFailed:false};
+        if(receipt.trace.events.length>=1024)receipt.trace.truncated=true;
+        else receipt.trace.events.push(entry);
+        this.write(task,requestId,receipt);
+      },
       beforeMutation:(operationId,operation)=>{
         controller.signal.throwIfAborted();
         if(!authorized())throw new OrchestrationError('ACCESS_DENIED');
@@ -118,13 +127,13 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       const uncertain = result.lastAction?.outcome === 'unknown';
       if(result.status==='succeeded' && !authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');
       if(result.status==='succeeded' && !uncertain)outcome={type:'completed',result:{summary:`Browser goal independently verified. ${result.steps} actions, ${result.evaluations} evaluations.`,artifactIds:[]}};
-      else outcome={type:uncertain?'unknown':result.status==='cancelled'?'stopped':result.status==='failed'||knownBrowserStop(result,dispatched)?'failed':'unknown',failure:{code:'BROWSER_'+result.reason.toUpperCase(),message:'Browser work stopped: '+result.reason+'. '+result.steps+' actions, '+result.evaluations+' evaluations. '+(result.reason==='FIELD_TEXT_REQUIRED'?'Use established user facts to answer the missing field; ask the user only if the value is unknown.':'Verify the browser state before continuing.'),observedAt:Date.now()}};
+      else outcome={type:uncertain?'unknown':result.status==='cancelled'?'stopped':result.status==='failed'||knownBrowserStop(result,dispatched)?'failed':'unknown',failure:{code:'BROWSER_'+result.reason.toUpperCase(),message:'Browser work stopped: '+result.reason+'. '+result.steps+' actions, '+result.evaluations+' evaluations. '+(result.reason==='FIELD_TEXT_REQUIRED'?'Use established user facts to answer the missing field; ask the user only if the value is unknown.':(['MODEL_BLOCKED','NO_SUPPORTED_ACTION'].includes(result.reason)?'The model found no supported next action; this is not evidence of bot detection or site denial. Inspect the browser evidence.':'Verify the browser state before continuing.')),observedAt:Date.now()}};
       if(outcome.type!=='completed' && outcome.failure && providerFailure)outcome.failure.message+=`${providerFailure.validationReason?' Validation: '+providerFailure.validationReason+'.':''}${providerFailure.resetAt?' Resets at '+providerFailure.resetAt+'.':''}${providerFailure.retryAfter?' Retry after '+providerFailure.retryAfter+'.':''}`;
-      const {observation:_,...browserReport}=result;
+      const {observation:_,trace:__,...browserReport}=result;
       outcome.browserReport=browserReport;
-      this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',lastDispatchedMutation:this.read(task,requestId)?.lastDispatchedMutation,outcome,browserResult:result});
+      this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',trace:this.read(task,requestId)?.trace,lastDispatchedMutation:this.read(task,requestId)?.lastDispatchedMutation,outcome,browserResult:result});
     }).catch(()=>{
-      this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',lastDispatchedMutation:this.read(task,requestId)?.lastDispatchedMutation,outcome:{type:'unknown',failure:{code:'BROWSER_OUTCOME_UNKNOWN',message:'Browser request outcome could not be recorded. Inspect before retrying.',observedAt:Date.now()}}});
+      this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',trace:this.read(task,requestId)?.trace,lastDispatchedMutation:this.read(task,requestId)?.lastDispatchedMutation,outcome:{type:'unknown',failure:{code:'BROWSER_OUTCOME_UNKNOWN',message:'Browser request outcome could not be recorded. Inspect before retrying.',observedAt:Date.now()}}});
     }).finally(()=>this.running.delete(this.key(task,requestId)));
     this.running.set(this.key(task,requestId),{controller,done});
     // A filesystem failure cannot become an unhandled rejection; receipt stays uncertain.
@@ -154,7 +163,9 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     if(!requestId)throw new OrchestrationError('BROWSER_EVIDENCE_UNAVAILABLE');
     const receipt=this.read(task,requestId);
     if(!receipt || receipt.taskId!==task.taskId || receipt.requestId!==requestId || this.running.has(this.key(task,requestId)))throw new OrchestrationError('BROWSER_EVIDENCE_UNAVAILABLE');
-    const evidence:BrowserEvidence={requestId,recordedAt:receipt.recordedAt??0,result:receipt.browserResult,lastDispatchedMutation:receipt.lastDispatchedMutation,executionState:receipt.status==='ended'?'ended':'interrupted'};
+    const result=receipt.browserResult?{...receipt.browserResult}:undefined;
+    if(result)delete result.trace;
+    const evidence:BrowserEvidence={trace:receipt.browserResult?.trace??receipt.trace,requestId,recordedAt:receipt.recordedAt??0,result,lastDispatchedMutation:receipt.lastDispatchedMutation,executionState:receipt.status==='ended'?'ended':'interrupted'};
     if(refresh){
       if(!binding.inspect)throw new OrchestrationError('BROWSER_INSPECTION_UNAVAILABLE');
       const authorized=()=>{try{return this.options.allowedEvidence?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
@@ -178,12 +189,6 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       receipt.inspection={id:evidence.evidenceId,at:Date.now()};this.write(task,requestId,receipt);
     }
     return evidence;
-  }
-  async recordVerified(task:TaskSnapshot,requestId:string):Promise<void>{
-    if(this.options.allowedEvidence?.(task)===false)return;
-    const receipt=this.read(task,requestId);
-    if(!receipt || receipt.status!=='ended')return;
-    await this.options.onVerified?.(task,requestId);
   }
   verifyEvidence(task:TaskSnapshot,requestId:string,evidenceId:string):void {
     this.assertTask(task);if(this.options.allowedEvidence?.(task)===false)throw new OrchestrationError('ACCESS_DENIED');this.binding(task.gatewayTarget!.sessionId,task.ownerPrincipalId,task.conversationId);
@@ -221,7 +226,12 @@ function knownBrowserStop(result:BrowserExecutionResult|undefined,dispatched:Bro
 }
 
 function validateBrowserResult(result: BrowserExecutionResult): void {
-  if (!result || Object.keys(result).some(k=>!['status','reason','steps','evaluations','staleRetries','textCalls','lastAction','observation','contractVersion','fieldRequest','lastEvaluation','lastConfirmedAction'].includes(k)) || !['succeeded','blocked','cancelled','failed','needs_verification'].includes(result.status) || (result.status==='succeeded' && result.reason!=='VERIFIED') || typeof result.reason !== 'string' || !/^[A-Z][A-Z0-9_]{0,100}$/.test(result.reason) || ![result.steps,result.evaluations].every(n=>Number.isSafeInteger(n)&&n>=0) ||
+  if(result?.trace){
+    const t=result.trace;
+    if(t.version!==1||!Array.isArray(t.events)||t.events.length>1024||typeof t.truncated!=='boolean'||typeof t.sinkFailed!=='boolean')throw Error('INVALID_BROWSER_TRACE');
+    for(const e of t.events)TraceEvent.parse(e);
+  }
+  if (!result || Object.keys(result).some(k=>!['trace','status','reason','steps','evaluations','staleRetries','textCalls','lastAction','observation','contractVersion','fieldRequest','lastEvaluation','lastConfirmedAction'].includes(k)) || !['succeeded','blocked','cancelled','failed','needs_verification'].includes(result.status) || (result.status==='succeeded' && result.reason!=='VERIFIED') || typeof result.reason !== 'string' || !/^[A-Z][A-Z0-9_]{0,100}$/.test(result.reason) || ![result.steps,result.evaluations].every(n=>Number.isSafeInteger(n)&&n>=0) ||
     (result.lastAction && (!['confirmed','unknown','not_executed'].includes(result.lastAction.outcome) || typeof result.lastAction.operationId !== 'string' || typeof result.lastAction.operation !== 'string')) ||
     (result.fieldRequest && (typeof result.fieldRequest.label!=='string' || result.fieldRequest.label.length>250 || typeof result.fieldRequest.ref!=='string' || result.fieldRequest.ref.length>100 || !['missing','ambiguous'].includes(result.fieldRequest.reason))) || Buffer.byteLength(JSON.stringify(result))>1048576) throw Error('INVALID_BROWSER_RESULT');
 }

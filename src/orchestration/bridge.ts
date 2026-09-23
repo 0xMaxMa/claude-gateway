@@ -163,8 +163,6 @@ export class TaskBridge {
                   const adapter=this.gatewayAdapters.get('browser');
                   if(!adapter?.verifyEvidence)throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
                   result=this.tasks.verifyBrowser(context,a.task_id,a.expected_revision,a.expected_request_id,a.evidence_id,a.instruction,()=>adapter.verifyEvidence!(task,a.expected_request_id,a.evidence_id));
-                  // Learning follows committed, scoped verification; it cannot change task success.
-                  try{await adapter.recordVerified?.(task,a.expected_request_id);}catch{/* optional local learning */}
                 }else result=this.tasks.update(context,a.task_id,a.expected_revision,a.instruction,a.mode as ChangeMode);
                 break;
               }
