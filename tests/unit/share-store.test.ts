@@ -137,7 +137,6 @@ describe('file share store', () => {
     test('token is 32 chars over the safe alphabet and lookup round-trips', () => {
       const m = mint();
       expect(m.token).toMatch(SHARE_TOKEN_RE);
-      expect(m.token).toMatch(/^[A-Za-z0-9-]{32}$/);
       const row = store.lookupByToken(m.token);
       expect(row).not.toBeNull();
       expect(row!.shareId).toBe(m.shareId);
