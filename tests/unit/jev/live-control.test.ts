@@ -43,6 +43,7 @@ test('direct correction interrupts reasoning, preserves task identity and resume
   expect(()=>f.tasks.controlByUser(f.accepted.conversationId,'u',f.task.taskId,{...command,text:'different'})).toThrow('IDEMPOTENCY_CONFLICT');
   await f.pump();expect(f.calls).toHaveLength(2);
   expect(f.calls[1].goal).toContain('Two adults and three children');expect(f.calls[1].goal).toContain('Use Manchester instead');
+  expect(f.calls[1].goal.indexOf('Use Manchester instead')).toBeLessThan(f.calls[1].goal.indexOf('Two adults and three children'));
   expect(f.calls[1].startUrl).toBeUndefined();
   expect(f.store.task(f.task.taskId)).toMatchObject({state:'completed',revision:2,executionControl:{phase:'applied'}});
  }finally{await f.close();}
@@ -80,6 +81,7 @@ test('newer correction replaces a pending pause without losing prior corrections
   await f.pump();f.control('pause');f.control('revise','Destination Manchester');f.control('revise','Keep all three children');await f.pump();
   expect(f.calls).toHaveLength(2);
   expect(f.calls[1].goal).toContain('Destination Manchester');expect(f.calls[1].goal).toContain('Keep all three children');
+  expect(f.calls[1].goal.indexOf('Keep all three children')).toBeLessThan(f.calls[1].goal.indexOf('Destination Manchester'));
   expect(f.store.task(f.task.taskId)).toMatchObject({state:'completed',revision:4});
  }finally{await f.close();}
 });

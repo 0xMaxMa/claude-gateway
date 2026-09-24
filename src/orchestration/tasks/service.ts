@@ -295,7 +295,7 @@ export class TaskService {
       else if(command.text!==undefined)throw new OrchestrationError('INVALID_INPUT');
       const previous=this.revision(taskId,task.revision);
       const priorAnswers=previous.answers?.map(a=>({field:a.browserFieldLabel??a.computerFieldLabel,text:a.text}));
-      const instructions=command.action==='revise'?previous.instructions+(priorAnswers?.length?'\n\nEarlier user answers (subject to the correction below):\n'+JSON.stringify(priorAnswers):'')+'\n\nUser correction (supersedes conflicting earlier requirements; retain the others):\n'+command.text:previous.instructions;
+      const instructions=command.action==='revise'?'Latest user correction (apply first; supersedes conflicting earlier requirements):\n'+command.text+'\n\nEarlier requirements and corrections, newest first. Keep only requirements compatible with the latest correction; do not perform superseded actions:\n'+previous.instructions+(priorAnswers?.length?'\n\nEarlier user answers (subject to the latest correction):\n'+JSON.stringify(priorAnswers):''):previous.instructions;
       boundedText(instructions,task.gatewayTarget?.adapter==='browser'?8000:16000);
       task.revision++;
       this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,revision:task.revision,instructions,mode:'interrupt_and_resume',answers:command.action==='revise'?undefined:previous.answers,browserRecoveryCount:0,guidance:undefined,guidanceBasis:undefined}));
