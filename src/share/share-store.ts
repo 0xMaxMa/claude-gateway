@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, randomInt } from 'crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { MediaStore } from '../history/media-store';
 
@@ -27,25 +27,17 @@ import { MediaStore } from '../history/media-store';
 const SAFE_ID_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-';
 
 /**
- * Uniform random string over `SAFE_ID_ALPHABET` via rejection sampling.
- * `byte % alphabet.length` would bias low symbols since 256 is not a multiple
- * of 63 (the alphabet size); rejecting bytes >= the largest multiple of 63
- * that fits a byte keeps every symbol equally likely. 32 chars over a
- * 63-symbol alphabet is ~5.977 bits/char (~191 bits), matching the entropy of
- * the base64url token this replaces (24 random bytes = 192 bits).
+ * Uniform random string over `SAFE_ID_ALPHABET`, built from `crypto.randomInt`
+ * (Node's own unbiased-integer generator — already used elsewhere in this
+ * codebase, e.g. `cli-viewer/pairing-store.ts`) rather than a hand-rolled
+ * byte-rejection loop. 32 chars over a 63-symbol alphabet is ~5.977 bits/char
+ * (~191 bits), matching the entropy of the base64url token this replaces
+ * (24 random bytes = 192 bits).
  */
 function randomSafeId(length: number): string {
-  const n = SAFE_ID_ALPHABET.length;
-  const limit = 256 - (256 % n);
-  const out: string[] = [];
-  while (out.length < length) {
-    const buf = randomBytes(length - out.length);
-    for (let i = 0; i < buf.length && out.length < length; i++) {
-      const byte = buf[i];
-      if (byte < limit) out.push(SAFE_ID_ALPHABET[byte % n]);
-    }
-  }
-  return out.join('');
+  let out = '';
+  for (let i = 0; i < length; i++) out += SAFE_ID_ALPHABET[randomInt(SAFE_ID_ALPHABET.length)];
+  return out;
 }
 
 /** Accepts both the new `_`-free alphabet and the legacy base64url alphabet
