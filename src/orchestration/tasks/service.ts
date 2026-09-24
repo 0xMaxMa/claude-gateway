@@ -804,6 +804,7 @@ export class TaskService {
     return this.store.transaction(() => {
       const task = this.store.task(taskId);
       if (!task || task.state !== 'needs_reconciliation' || !task.activeAttemptId) throw new OrchestrationError('RECONCILIATION_NOT_REQUIRED');
+      if(state==='queued'&&automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
       const attempt = this.store.attempt(task.activeAttemptId)!;
       attempt.state = 'ended'; task.activeAttemptId = undefined; task.state = state;
       if(state==='queued'&&task.gatewayTarget){task.gatewayDispatch=undefined;task.failure=undefined;task.computerReport=undefined;}

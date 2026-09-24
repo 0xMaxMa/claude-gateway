@@ -153,3 +153,14 @@ test('an open automation session rejects a duplicate spawn and names its existin
   expect(f.store.all('SELECT id FROM tasks')).toHaveLength(1);
  }finally{await f.close();}
 });
+
+test('receipt recovery cannot requeue an expired uncertain automation session',async()=>{
+ const f=fixture(true);try{
+  await f.pump();f.control('revise','Use Manchester');await f.pump();
+  const t=f.store.task(f.task.taskId)!;
+  f.store.transaction(()=>{t.automationSession!.idleSince=Date.now()-1800001;f.store.saveTask(t,t.stateVersion);});
+  expect(()=>f.tasks.reconcile(t.taskId,'queued','Late settled receipt')).toThrow('AUTOMATION_SESSION_CLOSED');
+  await f.pump();expect(f.calls).toHaveLength(1);
+  expect(f.store.task(t.taskId)?.state).toBe('needs_reconciliation');
+ }finally{await f.close();}
+});

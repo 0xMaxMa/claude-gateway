@@ -1,3 +1,4 @@
+import {automationSession} from '../tasks/automation-session';
 import { GatewayTaskTarget, TaskSnapshot, WorkerOutcome, CommandContext, TaskAttempt } from '../types';
 import { TaskService } from '../tasks/service';
 import { taskFailure } from '../tasks/failure';
@@ -53,13 +54,14 @@ export class GatewayTaskController {
       let task = this.tasks.store.task(String(row.id))!;
       if (!task.gatewayTarget) continue;
       if(task.state==='needs_reconciliation'){
+        if(automationSession(task)?.status==='closed')continue;
         const adapter=this.adapters.get(task.gatewayTarget.adapter),requestId=task.gatewayDispatch?.requestId;
         if(adapter?.recover&&requestId&&!this.recoveries.has(task.taskId)&&this.recoveries.size<2&&Date.now()>=(this.recoveryAfter.get(task.taskId)??0)){
           if(this.recoveryAfter.size>1000)this.recoveryAfter.clear();this.recoveryAfter.set(task.taskId,Date.now()+15000);
           const recoveryRun=(async()=>{
             try{
               const recovery=await adapter.recover!(task,requestId),current=this.tasks.store.task(task.taskId);
-              if(!this.closed&&recovery&&current?.state==='needs_reconciliation'&&current.activeAttemptId===task.activeAttemptId&&current.revision===task.revision&&current.gatewayDispatch?.requestId===requestId)this.tasks.reconcile(task.taskId,recovery.state,recovery.evidence);
+              if(!this.closed&&recovery&&current&&automationSession(current)?.status!=='closed'&&current.state==='needs_reconciliation'&&current.activeAttemptId===task.activeAttemptId&&current.revision===task.revision&&current.gatewayDispatch?.requestId===requestId)this.tasks.reconcile(task.taskId,recovery.state,recovery.evidence);
             }catch(error){this.reportError(error);}
           })();
           this.recoveries.set(task.taskId,recoveryRun);
