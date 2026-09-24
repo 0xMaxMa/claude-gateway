@@ -94,3 +94,17 @@ test('queued pause never dispatches until resumed',async()=>{
   expect(f.store.task(f.task.taskId)).toMatchObject({state:'waiting_input',executionControl:{phase:'paused'}});
  }finally{await f.close();}
 });
+
+test.each([false,true])('known stopped browser accepts a correction, unknown outcome stays fenced (%s)',async unknown=>{
+ const f=fixture();try{
+  const task=f.store.task(f.task.taskId)!;
+  task.state='failed';task.browserReport={status:'blocked',reason:unknown?'OUTCOME_UNKNOWN':'NO_PROGRESS',steps:1,evaluations:1,lastAction:{operationId:'op',operation:'TYPE_TEXT',outcome:unknown?'unknown':'confirmed'}};
+  f.store.transaction(()=>f.store.saveTask(task,task.stateVersion));
+  if(unknown)expect(()=>f.control('revise','Use the supplied airport code')).toThrow('STATE_CONFLICT');
+  else{
+   f.tasks.controlByUser(f.accepted.conversationId,'u',task.taskId,{id:randomUUID(),action:'revise',expectedRevision:1,text:'Use the supplied airport code'});
+   expect(f.store.task(task.taskId)).toMatchObject({state:'queued',revision:2});
+   expect(f.store.task(task.taskId)?.browserReport).toBeUndefined();
+  }
+ }finally{await f.close();}
+});

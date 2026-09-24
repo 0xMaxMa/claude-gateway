@@ -22,7 +22,7 @@ export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,de
       text='Correction received. I will apply it after the current action settles, then continue from the current screen.';
     }catch(error){
       if(!(error instanceof OrchestrationError))throw error;
-      text=error.code==='STATE_CONFLICT'?'This task cannot accept a correction in its current state. Check its status; no new action was started.':'The correction could not be applied. Check the selected task and send text without attachments. No new action was started.';
+      text=error.code==='STATE_CONFLICT'?'This task is stopped and cannot apply this correction safely. Choose Agent conversation in Text and voice destination to inspect its status and discuss the next step. No browser action or new task was started.':'The correction could not be applied. Check the selected task and send text without attachments. No new action was started.';
     }
     store.completeInputReceipt(receipt);
     const responseId=decisions.notice(receipt.conversationId,text,true,receipt.inputId);
