@@ -390,3 +390,12 @@ test('a slow recovery probe does not block dispatch to another target',async()=>
  const other=tasks.spawn({...context,actionId:'other-target'},{title:'Other target',instructions:'Inspect the other authorized target',targetProfile:'gateway-managed',gatewayTarget:{...target,sessionId:'22222222-2222-4222-8222-222222222222'}});
  await controller.tick();expect(store.task(first.taskId)?.state).toBe('needs_reconciliation');expect(store.task(other.taskId)?.state).toBe('running');resolve();
 });
+
+test('recovery cooldown lets later unknown tasks get inspected instead of starving behind the first two',async()=>{
+ const ids:string[]=[];outcome={type:'unknown',failure:{code:'OUTCOME_UNKNOWN',message:'unknown',observedAt:Date.now()}};
+ for(let i=0;i<3;i++){
+  const task=tasks.spawn({...context,actionId:'recovery-fair-'+i},{title:'Recover '+i,instructions:'Inspect target',targetProfile:'gateway-managed',gatewayTarget:{...target,sessionId:'target-'+i}});await controller.tick();ids.push(task.taskId);
+ }
+ adapter.recover=jest.fn(async()=>undefined);await controller.tick();await new Promise(setImmediate);await controller.tick();
+ expect(new Set(jest.mocked(adapter.recover).mock.calls.map(c=>c[0].taskId))).toEqual(new Set(ids));
+});

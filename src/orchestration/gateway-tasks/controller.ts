@@ -31,6 +31,7 @@ export class GatewayTaskController {
   private closed = false;
   private pending?: Promise<void>;
   private recoveries=new Map<string,Promise<void>>();
+  private recoveryAfter=new Map<string,number>();
   constructor(private readonly tasks: TaskService, private readonly adapters: Map<string, GatewayTaskAdapter>, private readonly reportError: (e: unknown) => void = e => console.warn(JSON.stringify({event:'gateway_task_tracking_error',code:taskFailure(e).code}))) {}
   start(): void {
     this.timer = setInterval(() => { void this.tick().catch(this.reportError); }, 1000);
@@ -53,7 +54,8 @@ export class GatewayTaskController {
       if (!task.gatewayTarget) continue;
       if(task.state==='needs_reconciliation'){
         const adapter=this.adapters.get(task.gatewayTarget.adapter),requestId=task.gatewayDispatch?.requestId;
-        if(adapter?.recover&&requestId&&!this.recoveries.has(task.taskId)&&this.recoveries.size<2){
+        if(adapter?.recover&&requestId&&!this.recoveries.has(task.taskId)&&this.recoveries.size<2&&Date.now()>=(this.recoveryAfter.get(task.taskId)??0)){
+          if(this.recoveryAfter.size>1000)this.recoveryAfter.clear();this.recoveryAfter.set(task.taskId,Date.now()+15000);
           const recoveryRun=(async()=>{
             try{
               const recovery=await adapter.recover!(task,requestId),current=this.tasks.store.task(task.taskId);
