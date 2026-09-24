@@ -144,7 +144,15 @@ export class TaskBridge {
               }
               case 'task_status': {
                 const rows=a.task_id ? this.tasks.status(context.conversationId,context.principalId,a.task_id) : this.tasks.context(context.conversationId,context.principalId,context.decisionId);
-                if(a.browser_evidence!==undefined){
+                if(a.computer_trace_offset!==undefined){
+                  if(!a.task_id||a.browser_evidence!==undefined||!Number.isSafeInteger(a.computer_trace_offset)||a.computer_trace_offset<0)throw new OrchestrationError('INVALID_INPUT');
+                  const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');
+                  if(task.ownerPrincipalId!==context.principalId||task.gatewayTarget?.adapter!=='computer'||!adapter?.diagnostics)throw new OrchestrationError('ACCESS_DENIED');
+                  const computerTrace=await adapter.diagnostics(task,a.computer_trace_offset);
+                  if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
+                  this.tasks.store.assertMember(context.conversationId,context.principalId);
+                  result={tasks:rows,computerTrace};
+                }else if(a.browser_evidence!==undefined){
                   if(!a.task_id || !['recorded','fresh'].includes(a.browser_evidence))throw new OrchestrationError('INVALID_INPUT');
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
                   const adapter=this.gatewayAdapters.get('browser');

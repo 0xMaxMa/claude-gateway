@@ -26,6 +26,7 @@ export function containerTaskTools(role: 'agent' | 'worker', jevEnabled = false,
     const discovery = entries.find(([name]) => name === 'capabilities_list')!;
     discovery[1].scope = { type: 'string', enum: ['capabilities', ...(browserEnabled?['browser']:[]), ...(computerEnabled?['computer']:[])] };
     discovery[3] += ' Use scope=browser to discover installed targets owned by this principal and conversation. No host safemode access is granted.';
+    if(computerEnabled){const status=entries.find(([name])=>name==='task_status')!;status[1].computer_trace_offset={type:'integer',minimum:0};status[3]+=' For computer tasks, computer_trace_offset=0 reads recorded rounds; follow nextOffset. This does not operate or observe the Mac.';}
     if(browserEnabled){
     const status=entries.find(([name])=>name==='task_status')!;
     status[1].browser_evidence={type:'string',enum:['recorded','fresh']};

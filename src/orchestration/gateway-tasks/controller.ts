@@ -10,6 +10,7 @@ export interface GatewayTaskAdapter {
   discover(query?: string, offset?: number, context?: CommandContext): unknown;
   resolve(input: Record<string, unknown>, context?: CommandContext): GatewayTaskTarget;
   close?(): Promise<void>;
+  diagnostics?(task:TaskSnapshot,offset?:number):Promise<unknown>;
   evidence?(task:TaskSnapshot, refresh?:boolean, signal?:AbortSignal):Promise<import('../../jev/browser-contract').BrowserEvidence>;
   reconcileEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):string;
   verifyEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):void;

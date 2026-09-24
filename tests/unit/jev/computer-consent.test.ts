@@ -43,3 +43,22 @@ test('historical pre-dispatch evidence survives cancellation, but missing receip
  const attempt={attemptId:'attempt',taskId:'t',failure:{code:'GATEWAY_REQUEST_UNCONFIRMED',message:'COMPUTER_TARGET_UNAVAILABLE'}} as any;
  try{expect(await adapter.inspect(task,'r',attempt)).toMatchObject({type:'failed',failure:{code:'GATEWAY_REQUEST_DENIED'}});expect(await adapter.inspect(task,'other',attempt)).toBe('pending');expect(await adapter.inspect(task,'r',{...attempt,taskId:'foreign'})).toBe('pending');expect(await adapter.inspect(task,'r')).toBe('pending');}finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('speech pause interrupts pending consent without starting the loop or denying desktop access',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-pause-'));runComputerUse.mockClear();let started=false;
+ const callTool=jest.fn(async(_args:any,_schema:any,{signal}:any)=>{started=true;return await new Promise((_r,reject)=>{signal.addEventListener('abort',()=>reject(Error('REQUEST_CANCELLED')),{once:true});});});
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:{get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})} as any,allowed:()=>true,member:()=>true,active:()=>true,thinking:()=>undefined,evaluate:jest.fn(),needsInput:()=>true});
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ try{await adapter.submit(task,'r','Open Notes');expect(started).toBe(true);adapter.interrupt(task,'r');let outcome:any;for(let i=0;i<20;i++){outcome=await adapter.inspect(task,'r');if(typeof outcome==='object')break;await new Promise(setImmediate);}expect(outcome.type).toBe('stopped');expect(runComputerUse).not.toHaveBeenCalled();expect(callTool).toHaveBeenCalledTimes(1);}finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});
+
+test('computer round traces survive restart, page by owner and do not clear an unknown mutation fence',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-trace-'));let enabled=true;
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool:async()=>({content:[{type:'text',text:'{"state":"approved"}'}]})} as any));
+ runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{await deps.beforeMutation('operation',{});for(let i=1;i<=45;i++)deps.progress({sequence:i,round:i,at:Date.now(),revision:1,steps:0,evaluations:i,phase:'acting',operationId:'operation'});return {status:'succeeded',reason:'VERIFIED',steps:0};});
+ const options={agentId:'a',root,connectors:{get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})} as any,allowed:()=>enabled,member:(p:string,c:string)=>p==='p'&&c==='c',active:()=>true,thinking:()=>undefined,evaluate:jest.fn(),needsInput:()=>true};
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayDispatch:{requestId:'r'},gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ const adapter=new ComputerTaskAdapter(options);
+ try{await adapter.submit(task,'r','Inspect');let outcome:any;for(let i=0;i<30;i++){outcome=await adapter.inspect(task,'r');if(typeof outcome==='object')break;await new Promise(setImmediate);}expect(outcome.type).toBe('unknown');await adapter.close();const restarted=new ComputerTaskAdapter(options);expect(await restarted.diagnostics(task,0)).toMatchObject({total:45,nextOffset:40,recordedOnly:true});expect((await restarted.diagnostics(task,40)).events).toHaveLength(5);await expect(restarted.diagnostics({...task,ownerPrincipalId:'other'})).rejects.toThrow('ACCESS_DENIED');enabled=false;await expect(restarted.diagnostics(task)).rejects.toThrow('ACCESS_DENIED');await restarted.close();}finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});

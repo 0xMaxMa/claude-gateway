@@ -160,3 +160,17 @@ test('enabled app browser schemas discover, inspect and verify only scoped brows
     expect(await pending).toHaveProperty('error');
   } finally {await controller.close();await browser.close();await f.close();}
 });
+
+for(const container of [false,true])test(`computer trace pages remain scoped and revocable (${container?'container':'host'})`,async()=>{
+ const adapters=new Map<string,GatewayTaskAdapter>(),f=fixture(container,adapters);
+ const diagnostics=jest.fn(async()=>({recordedOnly:true,events:[],nextOffset:null}));
+ adapters.set('computer',{name:'computer',diagnostics} as unknown as GatewayTaskAdapter);f.bridge.computerEnabled=()=>true;
+ try{await f.bridge.start();const task=f.tasks.spawn({...f.context,actionId:'computer-fixture'},{title:'Inspect Mac',instructions:'Inspect',targetProfile:'gateway-managed',gatewayTarget:{adapter:'computer',sessionId:'mac',name:'Mac'}});
+  const agent=f.issue({role:'agent',context:f.context});
+  expect(await agent.call({task_id:task.taskId,computer_trace_offset:0},'task_status')).toMatchObject({computerTrace:{recordedOnly:true}});
+  const foreign=f.issue({role:'agent',context:{...f.context,principalId:'foreign'}});expect(await foreign.call({task_id:task.taskId,computer_trace_offset:0},'task_status')).toHaveProperty('error');
+  expect(await agent.call({task_id:task.taskId,computer_trace_offset:-1},'task_status')).toHaveProperty('error');
+  let started!:()=>void,finish!:()=>void;const entered=new Promise<void>(r=>{started=r;});diagnostics.mockImplementationOnce(async()=>{started();await new Promise<void>(r=>{finish=r;});return {recordedOnly:true,events:[],nextOffset:null};});
+  const pending=agent.call({task_id:task.taskId,computer_trace_offset:0},'task_status');await entered;agent.revoke();finish();expect(await pending).toHaveProperty('error');
+ }finally{await f.close();}
+});

@@ -34,7 +34,7 @@ export interface CommandContext extends ExecutionCapabilities {
   actionId: string;
 }
 export interface TaskFailure { code: string; message: string; observedAt: number; provider?: import('./provider-admission').ProviderFailure; }
-export interface ComputerTaskReport {status:string;reason:string;steps:number;fieldRequest?:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'}}
+export interface ComputerTaskReport {status:string;reason:string;steps:number;evaluations?:number;phase?:string;trace?:import('@0xmaxma/jev-loop/dist/computer-use').ComputerProgress[];fieldRequest?:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'}}
 export type WorkerOutcome = ({type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure}) & {computerReport?:ComputerTaskReport;browserReport?: import('../jev/browser-contract').BrowserTaskReport};
 export interface TaskResult {
   summary: string;

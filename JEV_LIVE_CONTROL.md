@@ -90,3 +90,33 @@ uses the corrected goal instead of the original conversation or task title.
 Live provider outages or a browser mutation already in progress can delay
 settlement. Controls never promise to undo an action that already reached the
 page, and an uncertain outcome continues to require inspection.
+
+## Computer Use integration
+
+Voice is transcribed by Gateway, not by the Mac app or relay. The same selected
+`execution_task_id` routes confirmed speech to a Computer Use task. No microphone
+permission or speech provider credential is needed in the desktop app.
+
+Computer controls interrupt pending owner-approval waits and model verification,
+as well as decisions and Thinking. An already dispatched desktop action still
+settles before the corrected revision starts; unknown results block continuation.
+A correction may recover a stopped computer task only for confirmed
+`NO_SUPPORTED_ACTION` or `ACTION_BUDGET` results. Permission failures, unknown
+mutations and interrupted executions do not use this shortcut.
+
+The Mac reader reports focused controls. Computer Logic uses focus, fresh state
+and recent observed action effects to choose the next action, including Enter when
+the goal actually requires submission. Two ineffective repetitions on an identical
+observed state remove that candidate until the state changes. This is ephemeral
+within-run feedback, not an experience pack or a claim that a dispatched action
+achieved the goal.
+
+Computer rounds are persisted to scoped request receipts (up to 2,000 structural
+events). Task status, dashboard details and channel task details show current
+phase/evaluation counts; the snapshot includes only the latest 12 events.
+`task_status({task_id, computer_trace_offset:0})` returns recorded pages of 40 events
+in `computerTrace`. Follow `nextOffset`. It never makes a fresh observation,
+invalidates a generation, or dispatches actions. Ownership and conversation
+membership apply to host and container agents, including after ticket revocation.
+Typed text and page/window contents are not included in this trace. Old requests
+without recorded events report `available:false`; their history is not reconstructed.

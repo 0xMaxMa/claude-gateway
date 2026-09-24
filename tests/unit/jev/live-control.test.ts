@@ -108,3 +108,12 @@ test.each([false,true])('known stopped browser accepts a correction, unknown out
   }
  }finally{await f.close();}
 });
+
+test('direct correction can recover a known stopped computer task but cannot recover uncertain effects',async()=>{
+ for(const reason of ['NO_SUPPORTED_ACTION','ACTION_BUDGET','OUTCOME_UNKNOWN','COMPUTER_EXECUTION_INTERRUPTED']){
+  const f=fixture();try{const task=f.store.task(f.task.taskId)!;task.gatewayTarget={...task.gatewayTarget!,adapter:'computer'};task.state='failed';task.computerReport={status:'blocked',reason,steps:1};f.store.transaction(()=>f.store.saveTask(task,task.stateVersion));
+   const apply=()=>f.tasks.controlByUser(f.accepted.conversationId,'u',task.taskId,{id:randomUUID(),action:'revise',expectedRevision:task.revision,text:'Use the search field instead'});
+   if(['NO_SUPPORTED_ACTION','ACTION_BUDGET'].includes(reason)){expect(apply()).toMatchObject({taskId:task.taskId,state:'queued',revision:2});}else expect(apply).toThrow('STATE_CONFLICT');
+  }finally{await f.close();}
+ }
+});

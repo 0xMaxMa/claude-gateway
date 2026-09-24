@@ -297,7 +297,9 @@ export class TaskService {
         task.gatewayTarget?.adapter==='browser' && task.browserReport?.status==='blocked' &&
         task.browserReport.reason!=='OUTCOME_UNKNOWN' && !task.browserReport.providerFailure &&
         task.browserReport.lastAction?.outcome!=='unknown';
-      if(!['queued','starting','running','interrupting'].includes(task.state)&&!paused&&!stoppedBrowser)throw new OrchestrationError('STATE_CONFLICT');
+      const stoppedComputer=command.action==='revise'&&task.state==='failed'&&!task.activeAttemptId&&task.gatewayTarget?.adapter==='computer'&&task.computerReport?.status==='blocked'&&['NO_SUPPORTED_ACTION','ACTION_BUDGET'].includes(task.computerReport.reason);
+      const recoverable=stoppedBrowser||stoppedComputer;
+      if(!['queued','starting','running','interrupting'].includes(task.state)&&!paused&&!recoverable)throw new OrchestrationError('STATE_CONFLICT');
       if(command.action==='resume'&&!paused)throw new OrchestrationError('STATE_CONFLICT');
       if(command.action==='revise')boundedText(command.text??'',4000);
       else if(command.text!==undefined)throw new OrchestrationError('INVALID_INPUT');
@@ -306,7 +308,7 @@ export class TaskService {
       const instructions=command.action==='revise'?'Latest user correction (apply first; supersedes conflicting earlier requirements):\n'+command.text+'\n\nEarlier requirements and corrections, newest first. Keep only requirements compatible with the latest correction; do not perform superseded actions:\n'+previous.instructions+(priorAnswers?.length?'\n\nEarlier user answers (subject to the latest correction):\n'+JSON.stringify(priorAnswers):''):previous.instructions;
       boundedText(instructions,task.gatewayTarget?.adapter==='browser'?8000:16000);
       task.revision++;
-      if(stoppedBrowser){delete task.failure;delete task.browserReport;delete task.gatewayDispatch;}
+      if(recoverable){delete task.computerReport;delete task.failure;delete task.browserReport;delete task.gatewayDispatch;}
       this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,revision:task.revision,instructions,mode:'interrupt_and_resume',answers:command.action==='revise'?undefined:previous.answers,browserRecoveryCount:0,guidance:undefined,guidanceBasis:undefined}));
       task.executionControl={id:command.id,action:command.action,revision:task.revision,phase:task.activeAttemptId?'pending':command.action==='pause'?'paused':'pending',requestedAt:Date.now()};
       task.state=task.activeAttemptId?'interrupting':command.action==='pause'?'waiting_input':'queued';
