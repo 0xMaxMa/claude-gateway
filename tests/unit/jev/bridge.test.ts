@@ -202,3 +202,27 @@ test.each([false,true])('pending field status attaches a scoped snapshot; captur
   expect(await foreign.call({task_id:task.taskId},'task_status')).toHaveProperty('error');
  }finally{await f.close();}
 });
+
+for(const container of [false,true])test(`computer snapshots and prepared inputs are scoped on host/container ${container}`,async()=>{
+ const computerEvidence=jest.fn(async()=>({recordedOnly:true,snapshot:{state:{application:'com.apple.Maps'}},screenshot:{type:'image',mimeType:'image/jpeg',data:'/9j/AA=='}}));
+ const adapters=new Map<string,GatewayTaskAdapter>([['computer',{name:'computer',computerEvidence} as any]]),f=fixture(container,adapters);f.bridge.computerEnabled=()=>true;
+ try{await f.bridge.start();const plan=[{application:'com.apple.Maps',label:'Search',text:'Bangkok'}];const task=f.tasks.spawn({...f.context,actionId:'snapshot-fixture'},{title:'Maps',instructions:'Search Bangkok',computerInputs:plan,targetProfile:'gateway-managed',gatewayTarget:{adapter:'computer',sessionId:'mac',name:'Mac'}});
+ expect(f.tasks.revision(task.taskId,1).computerInputs).toEqual(plan);
+ const agent=f.issue({role:'agent',context:f.context});expect(await agent.call({task_id:task.taskId,computer_evidence:'recorded'},'task_status')).toMatchObject({computerEvidence:{recordedOnly:true}});
+ const foreign=f.issue({role:'agent',context:{...f.context,principalId:'foreign'}});expect(await foreign.call({task_id:task.taskId,computer_evidence:'screenshot'},'task_status')).toHaveProperty('error');
+ expect(await agent.call({task_id:task.taskId,computer_evidence:'fresh',browser_evidence:'fresh'},'task_status')).toHaveProperty('error');
+ f.tasks.update({...f.context,actionId:'new-goal'},task.taskId,1,'Search Tokyo','when_ready');expect(f.tasks.revision(task.taskId,2).computerInputs).toBeUndefined();
+ }finally{await f.close();}
+});
+
+test('parent verifies a computer completion candidate and rejects duplicate verification',async()=>{
+ const f=fixture(false);
+ try{
+  const spawn=(id:string)=>f.tasks.spawn({...f.context,actionId:id},{title:'Maps',instructions:'Open Maps',targetProfile:'gateway-managed',gatewayTarget:{adapter:'computer',sessionId:id,name:'Mac'}});
+  const task=spawn('verify-computer-fixture'),attempt=f.tasks.claim(task.taskId)!;f.tasks.started(attempt.attemptId,attempt.generation);
+  let current=f.store.task(task.taskId)!;current.gatewayDispatch={requestId:'r',submittedAt:Date.now()};f.store.transaction(()=>f.store.saveTask(current,current.stateVersion));
+  f.tasks.finish(attempt.attemptId,attempt.generation,{type:'failed',computerReport:{status:'needs_verification',reason:'COMPLETION_CANDIDATE',steps:1,evaluations:2}});
+  const check=jest.fn();const verified=f.tasks.verifyComputer({...f.context,actionId:'verify'},task.taskId,1,'r','e','Fresh Maps window is visible',check);expect(verified.state).toBe('completed');expect(check).toHaveBeenCalledTimes(1);
+  expect(()=>f.tasks.verifyComputer({...f.context,actionId:'verify-again'},task.taskId,1,'r','e','Visible',check)).toThrow();
+ }finally{await f.close();}
+});

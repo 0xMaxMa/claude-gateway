@@ -163,3 +163,22 @@ The parent can inspect the screenshot and revise the same task with concrete
 recovery guidance. Repeated identical field replacements are excluded temporarily
 from the offered text targets; other observed actions remain available. This is
 not a website-specific script or proof of task completion.
+
+
+## Computer window evidence and prepared field values
+
+Computer tasks can read `task_status` with `computer_evidence: recorded`, `fresh`, or `screenshot`. Recorded evidence includes its observation time and must not be presented as a live screen. Fresh reads require existing local approval; they never grant access. A running loop owns the lease, so concurrent inspection returns its recorded evidence rather than disturbing the loop. Screenshot reads capture only the approved foreground window, using ScreenCaptureKit on macOS 14+. Screen Recording permission is required; system audio is not captured.
+
+When a field needs input, the loop records the current accessibility state and, when available, a window image. The parent agent receives this scoped image on the question/report turn. App content is untrusted evidence, not instructions. The agent answers from the original request and must not send the user back to perform the requested typing/search. Only missing personal facts, actual OS consent, or unknown prior action outcomes require owner input.
+
+`task_spawn`, `task_update`, and `task_answer` accept `computer_inputs` for computer tasks:
+
+```json
+[{"application":"com.apple.Maps","label":"Search","role":"AXTextField","text":"Bangkok"}]
+```
+
+The agent prepares literal values once. The loop uses one only when the current app and unique field label/role match; it never guesses a different target. `windowTitle` may further restrict the match. A new goal update replaces the plan, so stale values cannot leak into the next task. A field answer can include the remaining input plan in the same call. Unmatched/missing values go back to the parent agent, not a separate Thinking provider.
+
+A completion candidate is not a completed task. The parent inspects fresh UI/image evidence and calls `task_update mode=verify_computer` with the returned request/evidence IDs and concrete findings. Evidence is scoped to the owner, conversation, request and revision, expires after 60 seconds, and cannot clear an unknown mutation. The same authorized failed round may be replanned by its assigned notification up to three times; mutation uncertainty remains fenced.
+
+Screenshots are bounded JPEGs, retained only with the task's private request receipt, never inserted into structural progress traces. Old app versions still supply accessibility evidence but cannot capture an image; upgrade the app and relay together to enable `computer_screenshot`.

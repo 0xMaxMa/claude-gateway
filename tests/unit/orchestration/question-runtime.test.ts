@@ -393,3 +393,15 @@ test.each(['text','live_voice'] as const)('live %s control applies before a busy
   expect(f.runtime.store.task(t.taskId)?.revision).toBe(2);
  }finally{(f.runtime as any).active.clear();await f.close();}
 });
+
+test('a computer field question attaches scoped window pixels and context to its parent agent',async()=>{
+ const f=await fixture();
+ try{
+  f.runtime.store.transaction(()=>{const task=f.runtime.store.task(f.task.taskId)!;task.gatewayTarget={adapter:'computer',sessionId:'mac',name:'Mac'};f.runtime.store.saveTask(task,task.stateVersion);});
+  (f.runtime as any).computerAdapter={promptEvidence:jest.fn(()=>({observedAt:123,state:{generation:'window-g',application:'com.apple.Maps',controls:[{label:'Search',role:'AXTextField'}]},screenshot:{type:'image',mimeType:'image/jpeg',data:'/9j/AA=='}}))};
+  let receivedImages:any,promptText='';
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter,prompt:string,images:any){promptText=prompt;receivedImages=images;this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));this.emit('output',JSON.stringify({type:'result',result:'I can answer the pending field from your instruction.'}));}}) as unknown as SessionProcess);
+  await f.runtime.send({scope:f.scope,text:'Use the known destination Bangkok',modality:'text'},{execute:true,writeMemory:false},{timeoutMs:5000});
+  expect(receivedImages).toContainEqual({type:'image',source:{type:'base64',media_type:'image/jpeg',data:'/9j/AA=='}});expect(promptText).toContain('computer-snapshot:');expect(promptText).toContain('com.apple.Maps');expect(promptText).not.toContain('/9j/AA==');
+ }finally{await f.close();}
+});

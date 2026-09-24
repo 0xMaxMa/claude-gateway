@@ -11,6 +11,7 @@ export interface GatewayTaskAdapter {
   discover(query?: string, offset?: number, context?: CommandContext): unknown;
   resolve(input: Record<string, unknown>, context?: CommandContext): GatewayTaskTarget;
   close?(): Promise<void>;
+  computerEvidence?(task:TaskSnapshot,mode:'recorded'|'fresh'|'screenshot',signal?:AbortSignal):Promise<any>;
   diagnostics?(task:TaskSnapshot,offset?:number):Promise<unknown>;
   evidence?(task:TaskSnapshot, refresh?:boolean, signal?:AbortSignal, screenshot?:boolean):Promise<import('../../jev/browser-contract').BrowserEvidence>;
   recover?(task:TaskSnapshot,requestId:string):Promise<{state:'queued'|'cancelled';evidence:string}|undefined>;
@@ -18,7 +19,7 @@ export interface GatewayTaskAdapter {
   verifyEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):void;
   ready?(task: TaskSnapshot): boolean;
   validateInput?(instructions:string,answers?:import('../types').TaskRevision['answers']):void;
-  submit(task: TaskSnapshot, requestId: string, instructions: string, answers?: import('../types').TaskRevision['answers'], requestConsent?:boolean): Promise<void>;
+  submit(task: TaskSnapshot, requestId: string, instructions: string, answers?: import('../types').TaskRevision['answers'], requestConsent?:boolean,computerInputs?:import('../types').TaskRevision['computerInputs']): Promise<void>;
   inspect(task: TaskSnapshot, requestId: string, attempt?:TaskAttempt): Promise<WorkerOutcome | 'running' | 'pending'>;
   interrupt?(task:TaskSnapshot,requestId:string):void;
   cancel(task: TaskSnapshot, requestId: string): Promise<void>;
@@ -54,14 +55,14 @@ export class GatewayTaskController {
       let task = this.tasks.store.task(String(row.id))!;
       if (!task.gatewayTarget) continue;
       if(task.state==='needs_reconciliation'){
-        if(automationSession(task)?.status==='closed')continue;
+        if(automationSession(task)?.closedReason==='idle_timeout')continue;
         const adapter=this.adapters.get(task.gatewayTarget.adapter),requestId=task.gatewayDispatch?.requestId;
         if(adapter?.recover&&requestId&&!this.recoveries.has(task.taskId)&&this.recoveries.size<2&&Date.now()>=(this.recoveryAfter.get(task.taskId)??0)){
           if(this.recoveryAfter.size>1000)this.recoveryAfter.clear();this.recoveryAfter.set(task.taskId,Date.now()+15000);
           const recoveryRun=(async()=>{
             try{
               const recovery=await adapter.recover!(task,requestId),current=this.tasks.store.task(task.taskId);
-              if(!this.closed&&recovery&&current&&automationSession(current)?.status!=='closed'&&current.state==='needs_reconciliation'&&current.activeAttemptId===task.activeAttemptId&&current.revision===task.revision&&current.gatewayDispatch?.requestId===requestId)this.tasks.reconcile(task.taskId,recovery.state,recovery.evidence);
+              if(!this.closed&&recovery&&current&&(automationSession(current)?.status!=='closed'||recovery.state==='cancelled')&&current.state==='needs_reconciliation'&&current.activeAttemptId===task.activeAttemptId&&current.revision===task.revision&&current.gatewayDispatch?.requestId===requestId)this.tasks.reconcile(task.taskId,recovery.state,recovery.evidence);
             }catch(error){this.reportError(error);}
           })();
           this.recoveries.set(task.taskId,recoveryRun);
@@ -109,7 +110,7 @@ export class GatewayTaskController {
           // this point is inspected, never replayed on the assumption of failure.
           task.gatewayDispatch = {requestId, submittedAt:Date.now()};
           this.tasks.store.transaction(() => this.tasks.store.saveTask(task, task.stateVersion));
-          await adapter.submit(task, requestId, instructions, revision.answers, revision.requestBrowserConsent===true);
+          await adapter.submit(task, requestId, instructions, revision.answers, revision.requestBrowserConsent===true,revision.computerInputs);
         }
         task = this.tasks.store.task(task.taskId)!;
         if(task.state==='interrupting')adapter.interrupt?.(task,requestId);

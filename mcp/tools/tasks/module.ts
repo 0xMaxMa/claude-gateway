@@ -25,7 +25,7 @@ export async function callTaskBridge(tool: string, args: Record<string, unknown>
   const body = await response.text();
   if(response.ok && tool==='task_status') {
     const value=JSON.parse(body),image=value.screenshot;
-    if(image?.type==='image' && image.mimeType==='image/png' && typeof image.data==='string') {
+    if(image?.type==='image' && ['image/png','image/jpeg'].includes(image.mimeType) && typeof image.data==='string') {
       delete value.screenshot;
       return {content:[{type:'text',text:JSON.stringify(value)},image]};
     }

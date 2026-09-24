@@ -138,7 +138,7 @@ export class TaskBridge {
                 // readiness immediately before the synchronous task transaction.
                 await scope.beforeMutation?.(command.tool, a, context.actionId);
                 if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
-                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, targetProfile: a.target_profile, gatewayTarget, browserFields:a.browser_fields, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
+                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, computerInputs:a.computer_inputs, targetProfile: a.target_profile, gatewayTarget, browserFields:a.browser_fields, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
                 scope.onTaskQueued?.(spoken);
                 const { skill: _workerOnly, ...receipt } = task;
                 result = receipt;
@@ -147,7 +147,14 @@ export class TaskBridge {
               case 'task_status': {
                 const rows=a.task_id ? this.tasks.status(context.conversationId,context.principalId,a.task_id) : this.tasks.context(context.conversationId,context.principalId,context.decisionId);
                 const fieldSnapshot=Boolean(a.task_id && a.browser_evidence===undefined && rows[0]?.state==='waiting_input' && rows[0]?.gatewayTarget?.adapter==='browser' && ('browserReport' in rows[0] ? rows[0].browserReport?.reason : undefined)==='FIELD_TEXT_REQUIRED');
-                if(a.computer_trace_offset!==undefined){
+                if(a.computer_evidence!==undefined){
+                  if(!a.task_id||a.browser_evidence!==undefined||a.computer_trace_offset!==undefined||!['recorded','fresh','screenshot'].includes(a.computer_evidence))throw new OrchestrationError('INVALID_INPUT');
+                  const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');
+                  if(task.ownerPrincipalId!==context.principalId||task.gatewayTarget?.adapter!=='computer'||!adapter?.computerEvidence)throw new OrchestrationError('ACCESS_DENIED');
+                  const evidence=await adapter.computerEvidence(task,a.computer_evidence,this.cancellations.get(token!)?.signal);
+                  if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');this.tasks.store.assertMember(context.conversationId,context.principalId);
+                  const {screenshot,...computerEvidence}=evidence;result={tasks:rows,computerEvidence,...(evidence.evidenceId&&task.computerReport?.status==='needs_verification'?{verification:{tool:'task_update',arguments:{task_id:task.taskId,expected_revision:task.revision,mode:'verify_computer',expected_request_id:evidence.requestId,evidence_id:evidence.evidenceId},instruction:'If this fresh evidence proves the complete goal, supply the concrete visible facts in instruction. Otherwise continue the SAME task with an updated plan; never ask the user to do the work themselves.'}}:{}),...(screenshot?{screenshot}:{})};
+                }else if(a.computer_trace_offset!==undefined){
                   if(!a.task_id||a.browser_evidence!==undefined||!Number.isSafeInteger(a.computer_trace_offset)||a.computer_trace_offset<0)throw new OrchestrationError('INVALID_INPUT');
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');
                   if(task.ownerPrincipalId!==context.principalId||task.gatewayTarget?.adapter!=='computer'||!adapter?.diagnostics)throw new OrchestrationError('ACCESS_DENIED');
@@ -183,7 +190,10 @@ export class TaskBridge {
               case 'task_cancel': result = this.tasks.cancel(context, a.task_id, a.replaced_by_task_id); break;
               case 'task_update': {
                 if(['verify_browser','reconcile_browser'].includes(a.mode) && (typeof a.evidence_id!=='string'||!a.evidence_id||typeof a.expected_request_id!=='string'||!a.expected_request_id))throw new OrchestrationError('BROWSER_EVIDENCE_REQUIRED','Copy browserEvidence.evidenceId into evidence_id and browserEvidence.requestId into expected_request_id from task_status(browser_evidence=fresh). Retry the same verification/reconciliation with both IDs, expected_revision and instruction. Missing IDs do not mean the browser failed: do not requeue or replay the task.');
-                if(a.mode==='reconcile_browser'){
+                if(a.mode==='verify_computer'){
+                  const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');if(!adapter?.verifyEvidence)throw new OrchestrationError('COMPUTER_VERIFICATION_UNAVAILABLE');
+                  result=this.tasks.verifyComputer(context,a.task_id,a.expected_revision,a.expected_request_id,a.evidence_id,a.instruction,()=>adapter.verifyEvidence!(task,a.expected_request_id,a.evidence_id));
+                }else if(a.mode==='reconcile_browser'){
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
                   const adapter=this.gatewayAdapters.get('browser');
                   if(!adapter?.reconcileEvidence)throw new OrchestrationError('BROWSER_INSPECTION_UNAVAILABLE');
@@ -193,14 +203,14 @@ export class TaskBridge {
                   const adapter=this.gatewayAdapters.get('browser');
                   if(!adapter?.verifyEvidence)throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
                   result=this.tasks.verifyBrowser(context,a.task_id,a.expected_revision,a.expected_request_id,a.evidence_id,a.instruction,()=>adapter.verifyEvidence!(task,a.expected_request_id,a.evidence_id));
-                }else result=this.tasks.update(context,a.task_id,a.expected_revision,a.instruction,a.mode as ChangeMode,a.browser_fields);
+                }else result=this.tasks.update(context,a.task_id,a.expected_revision,a.instruction,a.mode as ChangeMode,a.browser_fields,a.computer_inputs);
                 break;
               }
               case 'task_question': {
                 if (!scope.onQuestion) throw new OrchestrationError('QUESTION_CONTROLS_UNAVAILABLE');
                 result = scope.onQuestion(context, a); break;
               }
-              case 'task_answer': result = this.tasks.answer(context, a.task_id, a.question_id, a.answer,a.browser_fields); break;
+              case 'task_answer': result = this.tasks.answer(context, a.task_id, a.question_id, a.answer,a.browser_fields,a.computer_inputs); break;
               default: throw new OrchestrationError('TOOL_DENIED');
             }
             if (mutation) scope.onMutationResult?.(context.actionId, true);

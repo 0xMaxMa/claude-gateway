@@ -98,6 +98,7 @@ export interface TaskSnapshot {
   updatedAt: number;
 }
 export interface TaskRevision {
+  computerInputs?: Array<{application:string;label:string;text:string;role?:string;windowTitle?:string}>;
   /** A new explicit user instruction can request browser consent before dispatch. */
   requestBrowserConsent?: boolean;
   /** Bounded autonomous browser replans since the latest user update. */

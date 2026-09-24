@@ -96,3 +96,16 @@ test('computer field callback uses scoped agent answers only and leaves verifica
  try{await adapter.submit(task,'request','Find notes',[{questionId:'q',inputId:'i',text:'flight notes',computerFieldLabel:'Search',computerFieldRole:'text',computerApplication:'Notes',computerWindowTitle:'Search'}]);for(let i=0;i<30;i++){await new Promise(setImmediate);const outcome=await adapter.inspect(task,'request');if(typeof outcome==='object'){expect(outcome.type).toBe('paused');return;}}throw Error('did not settle');}
  finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test.each([false,true])('prepared values and parent questions survive screenshot failure=%s without helper inference',async(screenshotFails)=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-image-'));let allowed=true;
+ const state={generation:'g',application:'com.apple.Maps',controls:[{ref:'c0',label:'Search',role:'AXTextField',actions:['type']}],apps:[],truncated:false,screenshotAvailable:true};
+ const image={generation:'g',mimeType:'image/jpeg',data:'/9j/AA==',capturedAt:Date.now()};
+ const callTool=jest.fn(async(args:any)=>{if(screenshotFails&&args.name==='computer_screenshot')throw Error('capture unavailable');return {content:[{type:'text',text:JSON.stringify(args.name==='computer_request_access'?{state:'approved'}:args.name==='computer_acquire'?{lease_token:'lease'}:image)}]};});
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ const plan=[{application:'com.apple.Maps',label:'Search',text:'Bangkok'}];
+ runComputerUse.mockImplementationOnce(async(input:any,deps:any)=>{expect(input.preparedInputs).toEqual(plan);await deps.call('computer_acquire',{},new AbortController().signal);deps.observation(state);await deps.snapshot(state,new AbortController().signal);expect(await deps.thinking({application:state.application,control:state.controls[0],controls:state.controls},new AbortController().signal)).toEqual({text:null});return {status:'needs_input',reason:'FIELD_TEXT_REQUIRED',steps:0};});
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayDispatch:{requestId:'r'},gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:{get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})} as any,allowed:()=>allowed,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true});
+ try{await adapter.submit(task,'r','Search Bangkok',[],false,plan);for(let i=0;i<20;i++){if(typeof await adapter.inspect(task,'r')==='object')break;await new Promise(setImmediate);}expect(adapter.promptEvidence(task)?.screenshot?.data).toBe(screenshotFails?undefined:image.data);expect(adapter.promptEvidence(task)?.screenshotError).toBe(screenshotFails?'COMPUTER_SCREENSHOT_UNAVAILABLE':undefined);expect(adapter.promptEvidence({...task,revision:2})).toBeUndefined();allowed=false;expect(()=>adapter.promptEvidence(task)).toThrow('ACCESS_DENIED');}finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});
