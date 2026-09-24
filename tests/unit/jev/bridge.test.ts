@@ -191,7 +191,7 @@ test.each([false,true])('pending field status attaches a scoped snapshot; captur
  adapters.set('browser',{name:'browser',evidence} as unknown as GatewayTaskAdapter);
  try{
   await f.bridge.start();const task=f.tasks.spawn({...f.context,actionId:'pending-field'},{title:'Flights',instructions:'CNX to Osaka',targetProfile:'gateway-managed',gatewayTarget:{adapter:'browser',sessionId:'tab',name:'Browser'}});
-  task.state='waiting_input';task.pendingQuestion={questionId:'q',text:'Destination?'} as any;task.browserReport={status:'blocked',reason:'FIELD_TEXT_REQUIRED',steps:0,evaluations:1,fieldRequest:{ref:'to',label:'To',reason:'missing'}};
+  task.state='waiting_input';task.pendingQuestion={questionId:'q',text:'Destination?',revision:task.revision} as any;task.browserReport={status:'blocked',reason:'FIELD_TEXT_REQUIRED',steps:0,evaluations:1,fieldRequest:{ref:'to',label:'To',reason:'missing'}};
   f.store.transaction(()=>f.store.saveTask(task,task.stateVersion));
   const agent=f.issue({role:'agent',context:f.context});
   expect(await agent.call({task_id:task.taskId},'task_status')).toMatchObject({screenshot,fieldContext:{snapshot:'fresh'},tasks:[{pendingQuestion:{questionId:'q'}}]});
@@ -200,6 +200,12 @@ test.each([false,true])('pending field status attaches a scoped snapshot; captur
   expect(await agent.call({task_id:task.taskId},'task_status')).toMatchObject({fieldContext:{snapshot:'unavailable'},tasks:[{pendingQuestion:{questionId:'q'}}]});
   const foreign=f.issue({role:'agent',context:{...f.context,principalId:'foreign'}});
   expect(await foreign.call({task_id:task.taskId},'task_status')).toHaveProperty('error');
+  const explanation='Osaka. The destination is Osaka, Japan. Select KIX, then fill the dates.';
+  expect(await agent.call({task_id:task.taskId,question_id:'q',answer:explanation},'task_answer')).toMatchObject({error:'FIELD_TEXT_REQUIRED'});
+  expect(f.store.task(task.taskId)?.state).toBe('waiting_input');
+  expect(await agent.call({task_id:task.taskId,question_id:'q',answer:explanation,field_text:'Osaka'},'task_answer')).toMatchObject({state:'queued'});
+  expect(f.tasks.revision(task.taskId,2).answers?.at(-1)).toMatchObject({text:'Osaka',browserFieldLabel:'To'});
+
  }finally{await f.close();}
 });
 

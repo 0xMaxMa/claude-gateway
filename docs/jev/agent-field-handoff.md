@@ -13,7 +13,9 @@ retain existing answers. Task values override matching static binding defaults.
 
 When a field is missing, the runner stops safely and the existing question flow
 wakes the owning agent. It does not hold a synchronous agent/model request open.
-`task_answer` answers that question and may include additional `browser_fields`
+`task_answer` requires `field_text` containing only the exact literal value for a
+missing-field question. Explanations belong in `answer` and are never typed. A
+missing `field_text` is rejected before resuming browser work. It may also include `browser_fields`
 for other unambiguous visible fields in the same goal. The pending answer takes
 precedence if a batch repeats that label. The next run observes the page again;
 old element references are never replayed.

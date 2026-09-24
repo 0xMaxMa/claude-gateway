@@ -210,7 +210,14 @@ export class TaskBridge {
                 if (!scope.onQuestion) throw new OrchestrationError('QUESTION_CONTROLS_UNAVAILABLE');
                 result = scope.onQuestion(context, a); break;
               }
-              case 'task_answer': result = this.tasks.answer(context, a.task_id, a.question_id, a.answer,a.browser_fields,a.computer_inputs); break;
+              case 'task_answer': {
+                const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
+                const field=task.gatewayTarget?.adapter==='browser'&&task.browserReport?.reason==='FIELD_TEXT_REQUIRED'&&task.browserReport.fieldRequest?.reason==='missing'
+                  ||task.gatewayTarget?.adapter==='computer'&&task.computerReport?.reason==='FIELD_TEXT_REQUIRED'&&task.computerReport.fieldRequest?.reason==='missing';
+                if(field&&(typeof a.field_text!=='string'||!a.field_text.trim()||a.field_text.length>2000))throw new OrchestrationError('FIELD_TEXT_REQUIRED','Supply field_text containing ONLY the exact literal text to type into the pending field (for example Osaka). Put explanations in answer, never field_text. Inspect the pending question and screenshot first. No browser action was started.');
+                if(!field&&a.field_text!==undefined)throw new OrchestrationError('INVALID_INPUT','field_text is only for a pending missing-field question.');
+                result=this.tasks.answer(context,a.task_id,a.question_id,field?a.field_text:a.answer,a.browser_fields,a.computer_inputs);break;
+              }
               default: throw new OrchestrationError('TOOL_DENIED');
             }
             if (mutation) scope.onMutationResult?.(context.actionId, true);
