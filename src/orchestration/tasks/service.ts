@@ -790,6 +790,7 @@ export class TaskService {
       if (!task || task.state !== 'needs_reconciliation' || !task.activeAttemptId) throw new OrchestrationError('RECONCILIATION_NOT_REQUIRED');
       const attempt = this.store.attempt(task.activeAttemptId)!;
       attempt.state = 'ended'; task.activeAttemptId = undefined; task.state = state;
+      if(state==='queued'&&task.gatewayTarget){task.gatewayDispatch=undefined;task.failure=undefined;task.computerReport=undefined;}
       this.pool.release(taskId, false);
       task.pendingQuestion = undefined;
       task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: `Operator reconciliation: ${evidence}` };

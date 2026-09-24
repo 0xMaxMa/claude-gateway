@@ -12,6 +12,7 @@ export interface GatewayTaskAdapter {
   close?(): Promise<void>;
   diagnostics?(task:TaskSnapshot,offset?:number):Promise<unknown>;
   evidence?(task:TaskSnapshot, refresh?:boolean, signal?:AbortSignal):Promise<import('../../jev/browser-contract').BrowserEvidence>;
+  recover?(task:TaskSnapshot,requestId:string):Promise<{state:'queued'|'cancelled';evidence:string}|undefined>;
   reconcileEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):string;
   verifyEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):void;
   ready?(task: TaskSnapshot): boolean;
@@ -29,6 +30,7 @@ export class GatewayTaskController {
   private timer?: ReturnType<typeof setInterval>;
   private closed = false;
   private pending?: Promise<void>;
+  private recoveries=new Map<string,Promise<void>>();
   constructor(private readonly tasks: TaskService, private readonly adapters: Map<string, GatewayTaskAdapter>, private readonly reportError: (e: unknown) => void = e => console.warn(JSON.stringify({event:'gateway_task_tracking_error',code:taskFailure(e).code}))) {}
   start(): void {
     this.timer = setInterval(() => { void this.tick().catch(this.reportError); }, 1000);
@@ -44,11 +46,25 @@ export class GatewayTaskController {
     return run;
   }
   private async run(): Promise<void> {
-    const rows = this.tasks.store.all("SELECT id FROM tasks WHERE json_type(snapshot_json,'$.gatewayTarget')='object' AND state IN ('queued','starting','running','interrupting','cancel_requested') ORDER BY created_at,id");
+    const rows = this.tasks.store.all("SELECT id FROM tasks WHERE json_type(snapshot_json,'$.gatewayTarget')='object' AND state IN ('queued','starting','running','interrupting','cancel_requested','needs_reconciliation') ORDER BY created_at,id");
     for (const row of rows) {
       if (this.closed) return;
       let task = this.tasks.store.task(String(row.id))!;
       if (!task.gatewayTarget) continue;
+      if(task.state==='needs_reconciliation'){
+        const adapter=this.adapters.get(task.gatewayTarget.adapter),requestId=task.gatewayDispatch?.requestId;
+        if(adapter?.recover&&requestId&&!this.recoveries.has(task.taskId)&&this.recoveries.size<2){
+          const recoveryRun=(async()=>{
+            try{
+              const recovery=await adapter.recover!(task,requestId),current=this.tasks.store.task(task.taskId);
+              if(!this.closed&&recovery&&current?.state==='needs_reconciliation'&&current.activeAttemptId===task.activeAttemptId&&current.revision===task.revision&&current.gatewayDispatch?.requestId===requestId)this.tasks.reconcile(task.taskId,recovery.state,recovery.evidence);
+            }catch(error){this.reportError(error);}
+          })();
+          this.recoveries.set(task.taskId,recoveryRun);
+          void recoveryRun.finally(()=>this.recoveries.delete(task.taskId)).catch(this.reportError);
+        }
+        continue;
+      }
       // Waiting for a target is queueing, not execution. Check before claim so
       // busy safemode sessions do not consume slots or freeze task revisions.
       let admissionError: unknown;
@@ -132,6 +148,7 @@ export class GatewayTaskController {
     this.closed = true;
     if (this.timer) clearInterval(this.timer);
     await this.pending;
+    await Promise.allSettled(this.recoveries.values());
     await Promise.allSettled([...this.adapters.values()].map(adapter => adapter.close?.()));
     // External sessions are intentionally left alive. Persisted receipts are
     // reconciled by the next gateway instance, without another dispatch.

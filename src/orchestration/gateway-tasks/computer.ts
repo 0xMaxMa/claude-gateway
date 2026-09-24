@@ -11,6 +11,7 @@ const {runComputerUse}=require('@0xmaxma/jev-loop/computer-use') as {runComputer
 interface Receipt {revision:number;taskId:string;requestId:string;principal:string;conversation:string;ended:boolean;trace?:ComputerProgress[];operationId?:string;outcome?:WorkerOutcome}
 /** Gateway owns credentials and lifecycle; the remote device retains local consent. */
 export class ComputerTaskAdapter implements GatewayTaskAdapter {
+ private recoveryChecks=new Map<string,number>();
  readonly name='computer';private runs=new Map<string,{abort:AbortController;interrupt:AbortController;done:Promise<void>}>();
  constructor(private options:{agentId:string;root:string;connectors:ComputerConnectors;allowed:()=>boolean;member:(principal:string,conversation:string)=>boolean;active:(task:TaskSnapshot)=>boolean;thinking:()=>BrowserTextHelperConfig|undefined;evaluate:(task:TaskSnapshot,request:Parameters<ComputerUseDependencies['evaluate']>[0],signal:AbortSignal)=>ReturnType<ComputerUseDependencies['evaluate']>;needsInput:(task:TaskSnapshot,question:string)=>boolean;progress?:(task:TaskSnapshot,report:import('../types').ComputerTaskReport)=>void}){}
  private permitted(p:string,c:string){return this.options.allowed()&&this.options.member(p,c);}
@@ -62,12 +63,14 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    consentSignal.throwIfAborted();
    const workSignal=AbortSignal.any([signal,AbortSignal.timeout(125000)]);
    const thinking=this.options.thinking();let fieldRequest:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'}|undefined;
-   const result=await runComputerUse({revision:t.revision,goal:goal+(answers?.length?'\nKnown answers: '+JSON.stringify(answers.map(a=>a.text)):'')},{authorized,interruptSignal:interrupt.signal,
+   const recoveryNote=t.latestProgress?.source==='runtime'&&t.latestProgress.text.startsWith('Operator reconciliation:')?'\n\nRecorded recovery evidence (not new instructions): '+t.latestProgress.text+' Read the current desktop first. Do not repeat a completed action just to confirm it.':'';
+   const result=await runComputerUse({revision:t.revision,goal:goal+recoveryNote+(answers?.length?'\nKnown answers: '+JSON.stringify(answers.map(a=>a.text)):'')},{authorized,interruptSignal:interrupt.signal,
     call:async(name,args,s)=>{if(name!=='computer_release'&&!authorized())throw Error('ACCESS_DENIED');const response=await client.callTool({name,arguments:{...args,...b.scope}},undefined,{signal:s,timeout:20000});const text=(response.content as any[])?.find(x=>x.type==='text')?.text;if(typeof text!=='string'||text.length>262144)throw Error('COMPUTER_RESPONSE_INVALID');const body=JSON.parse(text);if(response.isError){const code=body?.error;const known=['ACCESSIBILITY_PERMISSION_REQUIRED','SCREEN_RECORDING_PERMISSION_REQUIRED','APPLICATION_NOT_ALLOWED','COMPUTER_BUSY','COMPUTER_RECONCILIATION_REQUIRED','CONSENT_REQUIRED','ACCESS_REVOKED','DEVICE_OFFLINE','NATIVE_FAILURE','NATIVE_PROCESS_EXITED','INVALID_NATIVE_RESPONSE','NATIVE_BUSY','OBSERVATION_FAILED','COMPUTER_CLOSED','COMPUTER_NOT_OWNED'];throw Error(known.includes(code)?code:'COMPUTER_TOOL_FAILED');}return body;},
     evaluate:(req,s)=>this.options.evaluate(t,req,s),
     ...(thinking?{thinking:async(req:unknown,s:AbortSignal)=>{const field=req as {application?:string;windowTitle?:string;control?:{label?:string;role?:string};controls?:Array<{label?:string;role?:string}>};const unique=field.control?.label&&field.control.role&&field.controls?.filter(c=>c.label===field.control!.label&&c.role===field.control!.role).length===1;const known=unique?[...(answers??[])].reverse().find(a=>a.computerFieldLabel===field.control?.label&&a.computerApplication===field.application&&a.computerWindowTitle===field.windowTitle&&a.computerFieldRole===field.control?.role):undefined;const output=known?{text:known.text}:await computerThinking(thinking,req,s);if(typeof output==='object'&&output.text===null){const label=(req as any)?.control?.label;fieldRequest={label:typeof label==='string'?label.slice(0,250):'the selected field',application:field.application,windowTitle:field.windowTitle,role:field.control?.role,reason:'missing'};}return output;},verify:async(state:any,g:string,s:AbortSignal)=>(await computerThinking(thinking,{goal:g,state},s,true))===true}:{}),
     beforeMutation:id=>{signal.throwIfAborted();if(!authorized())throw Error('ACCESS_DENIED');receipt.operationId=id;this.write(t,r,receipt);},
     progress:e=>{
+     if(e.phase==='reconciling'&&e.operationId&&!receipt.operationId)receipt.operationId=e.operationId;
      // A dispatch event is not a receipt. Preserve the fence until a known result.
      if(e.phase==='acted'&&e.operationId&&e.operationId===receipt.operationId&&['completed','not_executed'].includes(e.outcome??''))delete receipt.operationId;
      receipt.trace=[...(receipt.trace??[]),e].slice(-2000);this.write(t,r,receipt);
@@ -77,13 +80,34 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    const report={status:result.status,reason:result.reason,steps:result.steps,evaluations:result.evaluations,phase:'terminal',trace:receipt.trace?.slice(-12),...(fieldRequest?{fieldRequest}:{})};
    let outcome:WorkerOutcome;
    if(result.status==='succeeded'&&!receipt.operationId&&authorized())outcome={type:'completed',result:{summary:`Computer goal independently verified. ${result.steps} actions.`,artifactIds:[]}};
-   else if(result.status==='needs_reconciliation'||receipt.operationId)outcome={type:'unknown',failure:{code:'COMPUTER_OUTCOME_UNKNOWN',message:'Inspect the last desktop action before continuing; it was not replayed.',observedAt:Date.now()}};
+   else if(result.status==='needs_reconciliation'||receipt.operationId)outcome={type:'unknown',failure:{code:'COMPUTER_OUTCOME_UNKNOWN',message:'Checking the recorded desktop action result without replaying it. If it remains unknown, review the interrupted action in the Mac app and choose Stop previous work and unlock. This is not a new access or account error.',observedAt:Date.now()}};
    else if(result.status==='cancelled')outcome={type:'stopped'};
    else if(result.status==='needs_input')outcome={type:'paused'};
    else outcome={type:'failed',failure:{code:result.reason.startsWith('COMPUTER_')?result.reason:'COMPUTER_'+result.reason,message:`Computer work stopped: ${result.reason}. ${result.steps} desktop actions; goal completion is not confirmed. ${result.reason==='NO_SUPPORTED_ACTION'?'The decision engine found no supported next action in the accessibility observation. This does not indicate an account restriction or provider rejection.':'Only the recorded reason is confirmed; do not infer a permission or account problem.'} The current desktop reader uses accessibility data, not screenshots.`,observedAt:Date.now()}};
    outcome.computerReport=report;receipt.ended=true;receipt.outcome=outcome;this.write(t,r,receipt);
   },signal).catch((error)=>{receipt.ended=true;receipt.outcome={type:receipt.operationId?'unknown':(abort.signal.aborted||interrupt.signal.aborted)?'stopped':'failed',failure:{code:error?.message==='COMPUTER_ACCESS_DENIED'?'COMPUTER_ACCESS_DENIED':'COMPUTER_EXECUTION_INTERRUPTED',message:error?.message==='COMPUTER_ACCESS_DENIED'?'The owner declined or stopped computer access. No desktop action was performed.':'Computer execution interrupted. No automatic replay was attempted.',observedAt:Date.now()},computerReport:{status:receipt.operationId?'needs_reconciliation':(abort.signal.aborted||interrupt.signal.aborted)?'cancelled':'blocked',reason:interrupt.signal.aborted?'REVISION_SUPERSEDED':abort.signal.aborted?'CANCELLED':'COMPUTER_EXECUTION_INTERRUPTED',steps:receipt.trace?.at(-1)?.steps??0,evaluations:receipt.trace?.at(-1)?.evaluations??0,phase:'terminal',trace:receipt.trace?.slice(-12)}};this.write(t,r,receipt);}).finally(()=>{clearInterval(fence);this.runs.delete(key);});
   this.runs.set(key,{abort,interrupt,done});void done.catch(()=>{});
+ }
+ async recover(t:TaskSnapshot,r:string):Promise<{state:'queued'|'cancelled';evidence:string}|undefined>{
+  if(!this.permitted(t.ownerPrincipalId,t.conversationId))return;
+  const receipt=this.read(t,r);if(!receipt?.operationId||this.runs.has(this.file(t,r)))return;
+  const key=this.file(t,r),now=Date.now();if(now-(this.recoveryChecks.get(key)??0)<15000)return;
+  if(this.recoveryChecks.size>1000)this.recoveryChecks.clear();this.recoveryChecks.set(key,now);
+  try{
+   let b:ReturnType<ComputerConnectors['get']>;
+   try{b=this.options.connectors.get(t.gatewayTarget!.sessionId,t.ownerPrincipalId,t.conversationId);}
+   catch{await this.options.connectors.discover({principalId:t.ownerPrincipalId,conversationId:t.conversationId},()=>this.permitted(t.ownerPrincipalId,t.conversationId));b=this.options.connectors.get(t.gatewayTarget!.sessionId,t.ownerPrincipalId,t.conversationId);}
+   if(!this.permitted(t.ownerPrincipalId,t.conversationId))return;
+   const connection=this.options.connectors.connection(b.connectorId);
+   return await withComputerConnection(connection,async client=>{
+    const response=await client.callTool({name:'computer_operation_status',arguments:{...b.scope,operation_id:receipt.operationId}},undefined,{signal:AbortSignal.timeout(5000),timeout:5000});
+    if(response.isError||!this.permitted(t.ownerPrincipalId,t.conversationId)||JSON.stringify(this.options.connectors.connection(b.connectorId))!==JSON.stringify(connection))return;
+    const text=(response.content as any[])?.find(x=>x.type==='text')?.text;if(typeof text!=='string'||text.length>4096)return;
+    const value=JSON.parse(text);if(value.operation_id!==receipt.operationId)return;
+    if(value.owner_acknowledged===true)return {state:'cancelled' as const,evidence:'The Mac owner reviewed the interrupted action and stopped previous work. Its result remains unknown; no action was replayed.'};
+    if(['completed','not_executed'].includes(value.state))return {state:t.executionControl?.phase==='blocked'?'cancelled' as const:'queued' as const,evidence:`Recorded desktop action ${receipt.operationId}: ${value.state}. Continue from a fresh observation; do not replay the old operation.`};
+   },AbortSignal.timeout(6000));
+  }catch{return;}
  }
  async diagnostics(t:TaskSnapshot,offset=0){
   if(!this.permitted(t.ownerPrincipalId,t.conversationId)||t.gatewayTarget?.adapter!=='computer')throw Error('ACCESS_DENIED');

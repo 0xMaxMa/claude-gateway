@@ -369,3 +369,24 @@ test('computer field metadata exists before its question notification is assigne
  tasks.answer({...context,execute:false,actionId:'computer-answer'},task.taskId,waiting.pendingQuestion!.questionId,'macOS');
  expect(tasks.revision(task.taskId,2).answers).toEqual(expect.arrayContaining([expect.objectContaining({text:'macOS',computerFieldLabel:'Search',computerApplication:'com.apple.AppStore',computerFieldRole:'AXTextField',computerWindowTitle:'App Store'})]));
 });
+
+test('recorded recovery queues a new inspection without replaying the old dispatch and survives a controller restart',async()=>{
+ const task=spawn();outcome={type:'unknown',failure:{code:'OUTCOME_UNKNOWN',message:'unknown',observedAt:Date.now()}};await controller.tick();
+ const old=store.task(task.taskId)!.gatewayDispatch!.requestId;
+ await controller.close();controller=new GatewayTaskController(tasks,new Map([['safemode',adapter]]));
+ adapter.recover=jest.fn(async()=>({state:'queued' as const,evidence:'Recorded operation completed; observe again'}));
+ await controller.tick();expect(store.task(task.taskId)?.state).toBe('queued');expect(store.task(task.taskId)?.gatewayDispatch).toBeUndefined();
+ outcome='running';await controller.tick();expect(store.task(task.taskId)?.gatewayDispatch?.requestId).not.toBe(old);expect(adapter.submit).toHaveBeenCalledTimes(2);
+});
+test('owner review closes an unknown task without dispatching another operation',async()=>{
+ const task=spawn();outcome={type:'unknown',failure:{code:'OUTCOME_UNKNOWN',message:'unknown',observedAt:Date.now()}};await controller.tick();
+ adapter.recover=jest.fn(async()=>({state:'cancelled' as const,evidence:'Owner reviewed and stopped old work'}));
+ await controller.tick();await controller.tick();expect(store.task(task.taskId)?.state).toBe('cancelled');expect(adapter.submit).toHaveBeenCalledTimes(1);
+});
+
+test('a slow recovery probe does not block dispatch to another target',async()=>{
+ const first=spawn();outcome={type:'unknown',failure:{code:'OUTCOME_UNKNOWN',message:'unknown',observedAt:Date.now()}};await controller.tick();
+ let resolve!:()=>void;adapter.recover=()=>new Promise(r=>{resolve=()=>r(undefined);});outcome='running';
+ const other=tasks.spawn({...context,actionId:'other-target'},{title:'Other target',instructions:'Inspect the other authorized target',targetProfile:'gateway-managed',gatewayTarget:{...target,sessionId:'22222222-2222-4222-8222-222222222222'}});
+ await controller.tick();expect(store.task(first.taskId)?.state).toBe('needs_reconciliation');expect(store.task(other.taskId)?.state).toBe('running');resolve();
+});

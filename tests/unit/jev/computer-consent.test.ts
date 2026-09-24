@@ -62,3 +62,20 @@ test('computer round traces survive restart, page by owner and do not clear an u
  const adapter=new ComputerTaskAdapter(options);
  try{await adapter.submit(task,'r','Inspect');let outcome:any;for(let i=0;i<30;i++){outcome=await adapter.inspect(task,'r');if(typeof outcome==='object')break;await new Promise(setImmediate);}expect(outcome.type).toBe('unknown');await adapter.close();const restarted=new ComputerTaskAdapter(options);expect(await restarted.diagnostics(task,0)).toMatchObject({total:45,nextOffset:40,recordedOnly:true});expect((await restarted.diagnostics(task,40)).events).toHaveLength(5);await expect(restarted.diagnostics({...task,ownerPrincipalId:'other'})).rejects.toThrow('ACCESS_DENIED');enabled=false;await expect(restarted.diagnostics(task)).rejects.toThrow('ACCESS_DENIED');await restarted.close();}finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test.each(['completed','not_executed','unknown','acknowledged','foreign'])('restart recovery accepts only a scoped known receipt: %s',async state=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-recover-'));let member=true;
+ const callTool=jest.fn(async(args:any)=>({content:[{type:'text',text:JSON.stringify(args.name==='computer_request_access'?{state:'approved'}:{operation_id:state==='foreign'?'other':'operation',state:state==='acknowledged'?'unknown':state,owner_acknowledged:state==='acknowledged'})}]}));
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{await deps.beforeMutation('operation',{});return {status:'needs_reconciliation',reason:'OUTCOME_UNKNOWN',steps:1};});
+ const options={agentId:'a',root,connectors:{discover:async()=>[],get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})} as any,allowed:()=>true,member:()=>member,active:()=>true,thinking:()=>undefined,evaluate:jest.fn(),needsInput:()=>true};
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ let adapter=new ComputerTaskAdapter(options);
+ try{
+  await adapter.submit(task,'r','Open Notes');for(let i=0;i<20;i++){if(typeof await adapter.inspect(task,'r')==='object')break;await new Promise(setImmediate);}await adapter.close();adapter=new ComputerTaskAdapter(options);
+  member=false;expect(await adapter.recover(task,'r')).toBeUndefined();member=true;
+  const recovery=await adapter.recover(task,'r');
+  if(['completed','not_executed'].includes(state))expect(recovery?.state).toBe('queued');else if(state==='acknowledged')expect(recovery?.state).toBe('cancelled');else expect(recovery).toBeUndefined();
+  expect(callTool.mock.calls.filter(c=>c[0].name==='computer_action')).toHaveLength(0);
+ }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});
