@@ -312,20 +312,22 @@ export class TaskService {
       if(!['browser','computer'].includes(task.gatewayTarget?.adapter??'')||!task.capabilities.execute)throw new OrchestrationError('EXECUTION_DENIED');
       if(automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
       if(task.revision!==command.expectedRevision)throw new OrchestrationError('REVISION_CONFLICT');
-      const paused=task.state==='waiting_input'&&task.executionControl?.phase==='paused'&&!task.activeAttemptId;
+      const paused=task.state==='waiting_input'&&!task.activeAttemptId&&(task.executionControl?.phase==='paused'||['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT'].includes(task.computerReport?.reason??task.browserReport?.reason??''));
+      const completedRound=command.action==='revise'&&task.state==='completed'&&!task.activeAttemptId;
       const stoppedBrowser=command.action==='revise' && task.state==='failed' && !task.activeAttemptId &&
         task.gatewayTarget?.adapter==='browser' && task.browserReport?.status==='blocked' &&
         task.browserReport.reason!=='OUTCOME_UNKNOWN' && !task.browserReport.providerFailure &&
         task.browserReport.lastAction?.outcome!=='unknown';
-      const stoppedComputer=command.action==='revise'&&task.state==='failed'&&!task.activeAttemptId&&task.gatewayTarget?.adapter==='computer'&&task.computerReport?.status==='blocked'&&['NO_SUPPORTED_ACTION','ACTION_BUDGET'].includes(task.computerReport.reason);
-      const recoverable=stoppedBrowser||stoppedComputer;
+      const stoppedComputer=command.action==='revise'&&task.state==='failed'&&!task.activeAttemptId&&task.gatewayTarget?.adapter==='computer'&&task.computerReport?.status==='blocked'&&['NO_SUPPORTED_ACTION','ACTION_BUDGET','THINKING_WAITING_INPUT','THINKING_SCREENSHOT_REQUIRED'].includes(task.computerReport.reason);
+      const recoverable=stoppedBrowser||stoppedComputer||completedRound;
       if(!['queued','starting','running','interrupting'].includes(task.state)&&!paused&&!recoverable)throw new OrchestrationError('STATE_CONFLICT');
       if(command.action==='resume'&&!paused)throw new OrchestrationError('STATE_CONFLICT');
       if(command.action==='revise')boundedText(command.text??'',4000);
       else if(command.text!==undefined)throw new OrchestrationError('INVALID_INPUT');
       const previous=this.revision(taskId,task.revision);
       const priorAnswers=previous.answers?.map(a=>({field:a.browserFieldLabel??a.computerFieldLabel,text:a.text}));
-      const instructions=command.action==='revise'?'Latest user correction (apply first; supersedes conflicting earlier requirements):\n'+command.text+'\n\nEarlier requirements and corrections, newest first. Keep only requirements compatible with the latest correction; do not perform superseded actions:\n'+previous.instructions+(priorAnswers?.length?'\n\nEarlier user answers (subject to the latest correction):\n'+JSON.stringify(priorAnswers):''):previous.instructions;
+      const nextCommand=command.action==='revise'&&(paused||recoverable);
+      const instructions=nextCommand?'Current user command (use the fresh screen; do not replay previous commands):\n'+command.text:command.action==='revise'?'Latest user correction (apply first; supersedes conflicting earlier requirements):\n'+command.text+'\n\nEarlier requirements and corrections, newest first. Keep only requirements compatible with the latest correction; do not perform superseded actions:\n'+previous.instructions+(priorAnswers?.length?'\n\nEarlier user answers (subject to the latest correction):\n'+JSON.stringify(priorAnswers):''):previous.instructions;
       boundedText(instructions,task.gatewayTarget?.adapter==='browser'?8000:16000);
       task.revision++;
       if(recoverable){delete task.computerReport;delete task.failure;delete task.browserReport;delete task.gatewayDispatch;}
@@ -722,7 +724,8 @@ export class TaskService {
       if (task.gatewayTarget?.adapter === 'computer' && outcome.computerReport) task.computerReport=outcome.computerReport;
       if (task.gatewayTarget?.adapter === 'browser' && outcome.browserReport) task.browserReport=outcome.browserReport;
       // A structured unresolved blocker is not successful task completion.
-      if (outcome.type === 'paused' && !(task.state === 'waiting_input' && task.pendingQuestion) &&
+      const waitingForCommand=outcome.type==='paused'&&['browser','computer'].includes(task.gatewayTarget?.adapter??'')&&['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT'].includes(outcome.computerReport?.reason??outcome.browserReport?.reason??'');
+      if (outcome.type === 'paused' && !waitingForCommand && !(task.state === 'waiting_input' && task.pendingQuestion) &&
         task.state !== 'interrupting' && task.state !== 'cancel_requested' && !(task.gatewayTarget && task.revision > attempt.revision)) throw new OrchestrationError('STATE_CONFLICT');
       // Keep the full final report, and preserve cancellation / new revisions / questions.
       const blocked = outcome.type === 'completed' && task.workflow?.attemptId === attemptId &&
@@ -744,6 +747,7 @@ export class TaskService {
         } else if (task.state === 'waiting_input' && task.pendingQuestion) { /* retain question; execution slot now free */ }
         else if(task.executionControl?.phase==='pending'&&task.executionControl.action==='pause'){task.state='waiting_input';task.executionControl.phase='paused';delete task.failure;}
         else if (task.state === 'interrupting' || task.revision > attempt.revision) task.state = 'queued';
+        else if(waitingForCommand){task.state='waiting_input';task.latestProgress={source:'runtime',observedAt:Date.now(),text:'Waiting for your next command.'};}
         else task.state = outcome.type === 'completed' ? 'completed' : 'failed';
         if (task.state === 'completed' && outcome.type === 'completed') task.result = outcome.result;
       }

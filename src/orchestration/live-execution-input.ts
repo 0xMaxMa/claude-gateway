@@ -8,7 +8,7 @@ export function liveControlReceipt(store:OrchestrationStore,inputId:string):Live
   const row=store.get("SELECT payload_json FROM conversation_events WHERE type='input.execution_control' AND json_extract(payload_json,'$.payload.inputId')=? ORDER BY seq DESC LIMIT 1",inputId);
   return row?JSON.parse(String(row.payload_json)).payload:undefined;
 }
-/** Apply the direct control immediately; leave its canonical input for the agent to answer. */
+/** Apply explicitly targeted control without conversational inference. */
 export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,input:AcceptInput,capabilities:ExecutionCapabilities,maxPending=100):(LiveControlReceipt & {task?:TaskSnapshot;reused:boolean})|undefined {
   const target=input.metadata?.executionTaskId;
   if(!target)return undefined;
@@ -25,9 +25,8 @@ export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,in
       control.taskId=target;
       const session=automationSession(current);
       if(session?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
-      // Idle input may be a question or a new goal. Let the agent interpret it and
-      // update this task; never append a completed goal as instructions to replay.
-      if(session?.status==='idle' && ['completed','failed'].includes(current.state))throw new OrchestrationError('AUTOMATION_IDLE');
+      // Explicit task destination resumes the same session with a fresh command.
+      // Unknown mutations remain fenced by controlByUser.
       if(input.attachmentIds?.length)throw new OrchestrationError('INVALID_INPUT');
       task=tasks.controlByUser(receipt.conversationId,input.scope.principalId,target,{id:receipt.inputId,action:'revise',expectedRevision:current.revision,text:input.text});
       control={...control,status:'applied',revision:task.revision};
@@ -36,6 +35,7 @@ export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,in
       control.code=error.code;
     }
     store.appendEvent(receipt.conversationId,'input.execution_control',control,control.taskId);
+    store.completeInputReceipt(receipt);
     return {...control,task,reused:false};
   });
 }

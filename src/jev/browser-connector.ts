@@ -1,3 +1,4 @@
+import {thinkAction} from '@0xmaxma/jev-loop/action-thinking';
 import {thinkingProvider} from './thinking-provider';
 import {thinkBrowserField,thinkBrowserRecovery} from '@0xmaxma/jev-loop/browser-thinking';
 import {requestBrowserConsent} from './browser-consent';
@@ -132,6 +133,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       ...(module.verifyBrowserTask ? {verify:async(observation:unknown,signal:AbortSignal) => {assertAccess();const verified = await module.verifyBrowserTask!(context.goal,observation,signal);assertAccess();signal.throwIfAborted();independentlyVerified=validateBrowserVerification(verified);return independentlyVerified;}} : {}),
       ...(helper?{
         resolveFieldText:async(request:unknown,signal:AbortSignal)=>{assertAccess();const result=await thinkBrowserField(await thinkingProvider(helper),{...(request as object),referenceTime:new Date().toISOString(),timezone},signal);assertAccess();return result;},
+        decideAction:async(request:import('@0xmaxma/jev-loop/action-thinking').ActionThinkingRequest,signal:AbortSignal)=>{assertAccess();try{const result=await thinkAction(await thinkingProvider(helper),{...request,referenceTime:new Date().toISOString(),timezone},signal);assertAccess();signal.throwIfAborted();return result;}catch{assertAccess();signal.throwIfAborted();return {action:null,text:null};}},
         recover:async(request:Record<string,unknown>,signal:AbortSignal)=>{assertAccess();const result=await thinkBrowserRecovery(await thinkingProvider(helper),{...request,referenceTime:new Date().toISOString(),timezone},signal);assertAccess();return result;},
         snapshot:async(leaseToken:string,signal:AbortSignal)=>{assertAccess();const reply=await client.callTool({name:'page_screenshot',arguments:{...binding.scope,lease_token:leaseToken}},undefined,{signal,timeout:5000});assertAccess();const image=(reply.content as any[]).find(c=>c.type==='image'&&c.mimeType==='image/png');if(reply.isError||!image||typeof image.data!=='string'||image.data.length>8*1024*1024||!/^iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$/.test(image.data))throw Error('BROWSER_EVIDENCE_INVALID');return {mimeType:'image/png' as const,data:image.data};}
       }:{}),

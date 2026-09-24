@@ -367,30 +367,21 @@ test('browser failure mailbox asks for inspection and permits same-task recovery
  }finally{await f.close();}
 });
 
-test.each(['text','live_voice'] as const)('live %s control applies before a busy agent, then receives an agent-authored reply',async modality=>{
+test.each(['text','live_voice'] as const)('live %s control bypasses a busy agent and is idempotent',async modality=>{
  const f=await fixture();try{
   const t=f.runtime.store.task(f.task.taskId)!;
-  f.runtime.store.transaction(()=>{t.gatewayTarget={adapter:'browser',sessionId:'fixture',name:'Browser'};t.state='queued';t.activeAttemptId=undefined;t.pendingQuestion=undefined;f.runtime.store.saveTask(t,t.stateVersion);});
+  f.runtime.store.transaction(()=>{f.runtime.store.run("UPDATE task_attempts SET state='ended' WHERE task_id=?",t.taskId);t.gatewayTarget={adapter:'browser',sessionId:'fixture',name:'Browser'};t.state='queued';t.activeAttemptId=undefined;t.pendingQuestion=undefined;f.runtime.store.saveTask(t,t.stateVersion);});
+  const controller=(f.runtime as any).gatewayTasks;const signal=jest.spyOn(controller,'signalControl').mockImplementation(()=>{});
   const active=(f.runtime as any).active as Map<string,unknown>;active.set(f.scope.agentSessionId,{stopping:false});
-  let ticket:any;const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
-  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((scope,...args)=>{ticket=scope;return issue(scope,...args);});
-  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter,prompt:string){
-    expect(profile.overlay).not.toContain('durable control receipt');
-    expect(prompt).toContain('durable control receipt');
-    expect(prompt).toContain('task_update mode=reconcile_browser');
-    expect(ticket.context.execute).toBe(false);
-    this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));
-    this.emit('output',JSON.stringify({type:'result',result:'รับคำแก้ไขแล้วครับ กำลังทำงานเดิมต่อ'}));
-  }}) as unknown as SessionProcess);
   const input={scope:f.scope,text:'เปลี่ยนปลายทางครับ',modality,ingressKey:randomUUID(),metadata:{executionTaskId:t.taskId}};
   const submitted=f.runtime.submitInput(input,{execute:true,writeMemory:false});
+  expect(f.runtime.store.task(t.taskId)?.revision).toBe(2);expect(signal).toHaveBeenCalled();
+  expect(f.createAgentSession).not.toHaveBeenCalled();
+  const retry=f.runtime.submitInput(input,{execute:true,writeMemory:false});expect(retry.inputId).toBe(submitted.inputId);
+  expect(await submitted.response).toBe('Command sent to the active control session.');
+  expect(f.runtime.store.get('SELECT status FROM conversation_inputs WHERE id=?',submitted.inputId)!.status).toBe('handled');
   expect(f.runtime.store.task(t.taskId)?.revision).toBe(2);
   expect(f.createAgentSession).not.toHaveBeenCalled();
-  expect(f.runtime.store.get("SELECT COUNT(*) n FROM assistant_responses WHERE generated_text LIKE 'Correction received%'")!.n).toBe(0);
-  const retry=f.runtime.submitInput(input,{execute:true,writeMemory:false});expect(retry.inputId).toBe(submitted.inputId);
-  active.delete(f.scope.agentSessionId);(f.runtime as any).pumpMailbox();
-  expect(await submitted.response).toBe('รับคำแก้ไขแล้วครับ กำลังทำงานเดิมต่อ');
-  expect(f.runtime.store.task(t.taskId)?.revision).toBe(2);
  }finally{(f.runtime as any).active.clear();await f.close();}
 });
 

@@ -734,7 +734,11 @@ export class AgentOrchestrationRuntime {
     if(live){
       if(live.task)this.gatewayTasks?.signalControl(live.task);
       input.acceptedInputId=live.inputId;
-      return undefined;
+      const text=live.status==='applied'?'Command sent to the active control session.':live.code==='AUTOMATION_SESSION_CLOSED'?'This control session has ended. Start a new session to continue.':'The command was not applied ('+(live.code??'CONTROL_UNAVAILABLE')+'). The previous action may need review before continuing.';
+      const receipt=this.store.acceptInput({...input,capabilities},this.config.conversation.maxPendingInputs);
+      const existing=this.responseIdForInput(live.inputId);
+      if(!existing){const responseId=this.store.compose(()=>this.decisions.notice(receipt.conversationId,text,true,receipt.inputId));this.publishText(input.scope.agentSessionId,responseId,text,true);}
+      return {inputId:live.inputId,text};
     }
     input = this.questionControls.normalizeReply(input);
     if (!this.questionControls.matches(input)) return undefined;

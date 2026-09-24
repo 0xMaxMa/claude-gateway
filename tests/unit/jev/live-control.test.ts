@@ -164,3 +164,15 @@ test('receipt recovery cannot requeue an expired uncertain automation session',a
   expect(f.store.task(t.taskId)?.state).toBe('needs_reconciliation');
  }finally{await f.close();}
 });
+
+test.each(['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT'])('%s is idle and accepts a new command without replaying earlier requirements',async reason=>{
+ const f=fixture();try{
+  const attempt=f.tasks.claim(f.task.taskId)!;f.tasks.started(attempt.attemptId,attempt.generation);
+  const settled=f.tasks.finish(attempt.attemptId,attempt.generation,{type:'paused',browserReport:{status:'blocked',reason,steps:1,evaluations:3}});
+  expect(settled.state).toBe('waiting_input');expect(settled.failure).toBeUndefined();expect(settled.automationSession?.status).toBe('idle');
+  expect(()=>f.tasks.controlByUser(f.accepted.conversationId,'intruder',f.task.taskId,{id:randomUUID(),action:'revise',expectedRevision:1,text:'Type secrets'})).toThrow();
+  const next=f.tasks.controlByUser(f.accepted.conversationId,'u',f.task.taskId,{id:randomUUID(),action:'revise',expectedRevision:1,text:'Scroll down'});
+  expect(next.state).toBe('queued');expect(next.taskId).toBe(f.task.taskId);
+  const instructions=f.tasks.revision(next.taskId,next.revision).instructions;expect(instructions).toContain('Scroll down');expect(instructions).not.toContain('London');
+ }finally{await f.close();}
+});

@@ -7,7 +7,7 @@ import {TaskService} from '../../../src/orchestration/tasks/service';
 import {DecisionService} from '../../../src/orchestration/decisions';
 import {liveExecutionInput} from '../../../src/orchestration/live-execution-input';
 
-for(const modality of ['text','live_voice'] as const)test(`${modality} correction applies once and leaves one canonical input for an agent response`,()=>{
+for(const modality of ['text','live_voice'] as const)test(`${modality} correction applies once and records one canonical input and resumes idle rounds without an agent`,()=>{
  const root=mkdtempSync(join(tmpdir(),'live-input-')),store=new OrchestrationStore(join(root,'db'),'a'),tasks=new TaskService(store),decisions=new DecisionService(store);
  try{
   const scope={agentId:'a',agentSessionId:'s',source:'api' as const,accountId:'u',chatId:'c',threadKey:'',principalId:'u'},capabilities={execute:true,writeMemory:false};
@@ -19,18 +19,20 @@ for(const modality of ['text','live_voice'] as const)test(`${modality} correctio
   const retry=liveExecutionInput(store,tasks,input,capabilities)!;
   expect(retry.inputId).toBe(first.inputId);expect(retry.reused).toBe(true);
   expect(store.task(task.taskId)!.revision).toBe(2);
-  expect(store.get('SELECT status FROM conversation_inputs WHERE id=?',first.inputId)!.status).toBe('accepted');
+  expect(store.get('SELECT status FROM conversation_inputs WHERE id=?',first.inputId)!.status).toBe('handled');
   expect(tasks.revision(task.taskId,2).instructions).toContain('Two adults, three children');
   expect(store.get("SELECT COUNT(*) AS n FROM assistant_responses WHERE state='completed'")!.n).toBe(0);
   const settled=store.task(task.taskId)!;
   store.transaction(()=>{settled.state='completed';settled.executionControl=undefined;store.saveTask(settled,settled.stateVersion);});
   const nextGoal=liveExecutionInput(store,tasks,{...input,text:'Now inspect the results',ingressKey:randomUUID()},capabilities)!;
-  expect(nextGoal).toMatchObject({status:'needs_agent',code:'AUTOMATION_IDLE',taskId:task.taskId});
-  expect(store.task(task.taskId)!.revision).toBe(2);
-  expect(store.get('SELECT status FROM conversation_inputs WHERE id=?',nextGoal.inputId)!.status).toBe('accepted');
+  expect(nextGoal).toMatchObject({status:'applied',revision:3,taskId:task.taskId});
+  expect(store.task(task.taskId)!.revision).toBe(3);
+  expect(tasks.revision(task.taskId,3).instructions).not.toContain('Book flights');
+  expect(tasks.revision(task.taskId,3).instructions).not.toContain('Two adults');
+  expect(store.get('SELECT status FROM conversation_inputs WHERE id=?',nextGoal.inputId)!.status).toBe('handled');
   const other=liveExecutionInput(store,tasks,{...input,scope:{...scope,agentSessionId:'other',chatId:'other'},ingressKey:randomUUID()},capabilities)!;
-  expect(other.task).toBeUndefined();expect(store.task(task.taskId)!.revision).toBe(2);
+  expect(other.task).toBeUndefined();expect(store.task(task.taskId)!.revision).toBe(3);
   const denied=liveExecutionInput(store,tasks,{...input,ingressKey:randomUUID()},{execute:false,writeMemory:false})!;
-  expect(denied.task).toBeUndefined();expect(store.task(task.taskId)!.revision).toBe(2);
+  expect(denied.task).toBeUndefined();expect(store.task(task.taskId)!.revision).toBe(3);
  }finally{store.close();rmSync(root,{recursive:true,force:true});}
 });

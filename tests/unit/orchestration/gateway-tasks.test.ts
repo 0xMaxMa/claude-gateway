@@ -1,3 +1,4 @@
+import {randomUUID} from 'node:crypto';
 import { BrowserTaskAdapter } from '../../../src/orchestration/gateway-tasks/browser';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -64,7 +65,7 @@ test('active managed requests accept a durable revision and dispatch it in the s
  expect(updated.revision).toBe(2);expect(updated.state).toBe('running');await controller.tick();expect(adapter.submit).toHaveBeenCalledTimes(1);
  outcome={type:'completed',result:{summary:'First request done',artifactIds:[]}};
  await controller.tick();expect(store.task(task.taskId)?.state).toBe('queued');await controller.tick();
- expect(adapter.submit).toHaveBeenCalledTimes(2);expect(adapter.submit).toHaveBeenLastCalledWith(expect.objectContaining({taskId:task.taskId,revision:2}),expect.any(String),'Continue the same goal with new instructions',undefined);
+ expect(adapter.submit).toHaveBeenCalledTimes(2);expect(adapter.submit).toHaveBeenLastCalledWith(expect.objectContaining({taskId:task.taskId,revision:2}),expect.any(String),'Continue the same goal with new instructions',undefined,false,undefined);
  expect(store.all('SELECT id FROM tasks')).toHaveLength(1);
 });
 test('finished managed tasks reopen by revision, while cancellation and uncertainty stay fenced',async()=>{
@@ -115,7 +116,7 @@ test('busy targets stay amendable in the queue and leave capacity for an unrelat
  const attempt=tasks.claim(other.taskId);expect(attempt).toBeDefined();
  tasks.finish(attempt!.attemptId,attempt!.generation,{type:'completed',result:{summary:'Done',artifactIds:[]}});
  adapter.ready=()=>true;await controller.tick();
- expect(adapter.submit).toHaveBeenCalledWith(expect.objectContaining({taskId:waiting.taskId}),expect.any(String),'Latest authorized instructions',undefined);
+ expect(adapter.submit).toHaveBeenCalledWith(expect.objectContaining({taskId:waiting.taskId}),expect.any(String),'Latest authorized instructions',undefined,false,undefined);
 });
 
 test('a queued busy target can be cancelled without dispatch or an execution attempt',async()=>{
@@ -155,17 +156,20 @@ test('a live native child still keeps the safemode target busy when its supervis
   expect(safe.ready(store.task(spawn().taskId)!)).toBe(false);
 });
 
-test('browser stale-budget rejection releases the tab for the next queued task',async()=>{
+test('browser stale-budget rejection releases capacity and accepts the next command on the same task',async()=>{
  await controller.close();
  const run=jest.fn(async(c:any)=>{const op='550e8400-e29b-41d4-a716-446655440000';c.beforeMutation(op,'page_click');return {status:'blocked' as const,reason:'STALE_RETRY_BUDGET',steps:2,evaluations:4,lastAction:{operationId:op,operation:'CLICK',outcome:'not_executed' as const}};});
  const browser=new BrowserTaskAdapter({agentId:'operator',root:join(directory,'browser'),allowed:()=>true,bindings:()=>[binding],evaluate:jest.fn()});
  const binding={version:1 as const,id:'tab',name:'Tab',principalId:'owner',conversationId:context.conversationId,run};
  controller=new GatewayTaskController(tasks,new Map([['browser',browser]]));
  const command={title:'Inspect browser',instructions:'Read authorized page',targetProfile:'gateway-managed',gatewayTarget:{adapter:'browser',sessionId:'tab',name:'Tab'}};
- const first=tasks.spawn({...context,actionId:'browser-first'},command),second=tasks.spawn({...context,actionId:'browser-second'},command);
+ const first=tasks.spawn({...context,actionId:'browser-first'},command);
+ expect(()=>tasks.spawn({...context,actionId:'browser-second'},command)).toThrow('This device session already has task');
  for(let i=0;i<8;i++){await controller.tick();await new Promise(setImmediate);}
  expect(store.task(first.taskId)?.state).toBe('failed');expect(store.task(first.taskId)?.activeAttemptId).toBeUndefined();
- expect(store.task(second.taskId)?.state).toBe('failed');expect(run).toHaveBeenCalledTimes(2);
+ tasks.controlByUser(context.conversationId,'owner',first.taskId,{id:randomUUID(),action:'revise',expectedRevision:1,text:'Inspect the next result'});
+ for(let i=0;i<8;i++){await controller.tick();await new Promise(setImmediate);}
+ expect(store.task(first.taskId)?.state).toBe('failed');expect(run).toHaveBeenCalledTimes(2);
 });
 
 test('managed revisions survive restart without replaying the current request',async()=>{
@@ -306,7 +310,7 @@ test('browser controller dispatches parent guidance with the original goal',asyn
  const id=stoppedBrowser();tasks.update({...context,execute:false,actionId:'guided'},id,1,'Fill destination first','when_ready');
  await controller.close();controller=new GatewayTaskController(tasks,new Map([['browser',{...adapter,name:'browser'}]]));
  await controller.tick();
- expect(adapter.submit).toHaveBeenCalledWith(expect.objectContaining({taskId:id}),expect.any(String),expect.stringMatching(/Find authorized flights to Osaka[\s\S]*Fill destination first/),undefined);
+ expect(adapter.submit).toHaveBeenCalledWith(expect.objectContaining({taskId:id}),expect.any(String),expect.stringMatching(/Find authorized flights to Osaka[\s\S]*Fill destination first/),undefined,false,undefined);
 });
 
 test.each(['valid','unassigned','other-owner','unknown','provider','cancelled','revoked'])('parent verification after a confidence stop: %s',reason=>{
