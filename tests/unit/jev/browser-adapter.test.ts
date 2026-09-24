@@ -154,12 +154,13 @@ test('missing start URL ends cleanly and legacy uncertain receipts can be cleane
  expect(f.run).toHaveBeenCalledTimes(1);
 });
 
-test('explicit cancellation releases ended blocked work only with confirmed mutation evidence',async()=>{
+test('explicit cancellation releases ended execution while retaining uncertain mutation evidence',async()=>{
  for(const outcome of ['confirmed','unknown'] as const){
   const f=fixture();const op='550e8400-e29b-41d4-a716-446655440000';
   f.run.mockImplementation(async c=>{c.beforeMutation!(op,'tab_navigate');return {status:'blocked',reason:'OBSERVATION_TRUNCATED',steps:1,evaluations:0,lastAction:{operationId:op,operation:'NAVIGATE',outcome}};});
   const t=task({taskId:outcome});await f.a.submit(t,'r','goal');await settle(f.a,t);await new Promise(setImmediate);
-  await f.a.cancel(t,'r');expect((await settle(f.a,t)).type).toBe(outcome==='confirmed'?'stopped':'unknown');
+  await f.a.cancel(t,'r');expect((await settle(f.a,t)).type).toBe('stopped');
+  const retained=JSON.parse(readFileSync(join(dir,readdirSync(dir).find(n=>n.endsWith('.json') && JSON.parse(readFileSync(join(dir,n),'utf8')).taskId===t.taskId)!),'utf8'));expect(retained.browserResult.lastAction.outcome).toBe(outcome);
  }
 });
 
@@ -232,7 +233,7 @@ test.each(['confirmed','not_executed','unknown'] as const)('cancellation respect
   return {status:'needs_verification',reason:'COMPLETION_CANDIDATE',steps:1,evaluations:1,lastAction:{operationId:'00000000-0000-4000-8000-000000000001',operation:'page_click',outcome}};
  });
  await f.a.submit(task(),'r','goal');await settle(f.a);await f.a.cancel(task(),'r');
- expect((await settle(f.a)).type).toBe(outcome==='unknown'?'unknown':'stopped');
+ expect(await settle(f.a)).toMatchObject({type:'stopped',browserReport:{lastAction:{outcome}}});
 });
 
 test('structural trace is durable before completion and remains scoped after restart',async()=>{
@@ -271,4 +272,10 @@ test.each(['legacy_focus','timeout','click','wrong_operation','completed','not_e
   expect(()=>a.reconcileEvidence(t,'other',proof.evidenceId!)).toThrow('STALE_BROWSER_EVIDENCE');
   expect(()=>a.reconcileEvidence(t,'r','other')).toThrow('BROWSER_OUTCOME_UNRESOLVED');
  }else expect(()=>a.reconcileEvidence(t,'r',proof.evidenceId!)).toThrow('BROWSER_OUTCOME_UNRESOLVED');
+});
+
+test('cancel cannot claim stopped for an interrupted running receipt after restart',async()=>{
+ const f=fixture();f.run.mockImplementation(untilAbort);await f.a.submit(task(),'r','goal');await new Promise(setImmediate);
+ const restarted=f.make();await restarted.cancel(task(),'r');expect(await restarted.inspect(task(),'r')).toMatchObject({type:'unknown',failure:{code:'BROWSER_EXECUTION_INTERRUPTED'}});
+ await f.a.cancel(task(),'r');await settle(f.a);
 });

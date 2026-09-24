@@ -221,15 +221,11 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     this.assertTask(task);
     const running=this.running.get(this.key(task,requestId));
     if(running){running.controller.abort();return;}
-    const receipt=this.read(task,requestId), result=receipt?.browserResult;
-    // Cancellation is about execution lifetime, not whether the user's goal
-    // was verified. A completed candidate can stop without claiming success.
-    // Require durable settlement of every last dispatch; never clear ambiguity.
-    if(receipt?.status==='ended' && result && !result.providerFailure &&
-      result.reason!=='OUTCOME_UNKNOWN' && result.lastAction?.outcome!=='unknown' &&
-      (receipt.lastDispatchedMutation
-        ? result.lastAction?.operationId===receipt.lastDispatchedMutation.operationId && ['confirmed','not_executed'].includes(result.lastAction.outcome)
-        : result.lastAction ? ['confirmed','not_executed'].includes(result.lastAction.outcome) : result.steps===0)) {
+    const receipt=this.read(task,requestId);
+    // An ended local runner cannot issue more actions. Cancelling its lifetime
+    // does not resolve a past remote mutation: retain that report and checkpoint.
+    // A running/missing receipt after a crash still cannot prove shutdown.
+    if(receipt?.status==='ended' && receipt.taskId===task.taskId && receipt.requestId===requestId) {
       receipt.outcome={type:'stopped',browserReport:receipt.outcome?.browserReport};
       this.write(task,requestId,receipt);
     }
