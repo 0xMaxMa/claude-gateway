@@ -83,16 +83,16 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     this.validateInput(instructions,answers);
     const binding=this.binding(task.gatewayTarget!.sessionId,task.ownerPrincipalId,task.conversationId);
     if(this.read(task,requestId))throw new OrchestrationError('BROWSER_REQUEST_ALREADY_SUBMITTED');
-    const values=new Map<string,string>();
-    for(const answer of answers??[])if(answer.browserFieldLabel){if(answer.text.length>2000)throw new OrchestrationError('BROWSER_FIELD_VALUE_TOO_LONG');values.set(answer.browserFieldLabel,answer.text);}
-    const fields=[...values].map(([label,text])=>({label,text}));
+    const values=new Map<string,{label:string;text:string}>();
+    for(const answer of answers??[])if(answer.browserFieldLabel){if(answer.text.length>2000)throw new OrchestrationError('BROWSER_FIELD_VALUE_TOO_LONG');values.set(answer.browserFieldLabel.normalize("NFKC").trim().replace(/\s+/g," "),{label:answer.browserFieldLabel,text:answer.text});}
+    const fields=[...values.values()];
     // Durable receipt precedes any side effect; restart never replays this request.
     this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'running'});
     const controller=new AbortController(),interrupt=new AbortController();
     const authorized=()=>{try{return this.options.allowedTask?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
     // The installed browser package owns execution; gateway owns the request lifetime.
     let providerFailure:BrowserExecutionResult['providerFailure'];
-    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({requestConsent,interruptSignal:interrupt.signal,goal:instructions,startUrl:answers?.length || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl,fields,signal:controller.signal,authorized,
+    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({requestConsent,interruptSignal:interrupt.signal,goal:instructions,startUrl:answers?.some(a=>!a.questionId.startsWith('prepared:')) || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl,fields,signal:controller.signal,authorized,
       evaluate:async(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');try{return await this.options.evaluate(task,request,signal,authorized);}catch(e){if(e instanceof JevError)providerFailure={code:e.code,...e.metadata};throw e;}},
       trace:event=>{
         if(!authorized())return;

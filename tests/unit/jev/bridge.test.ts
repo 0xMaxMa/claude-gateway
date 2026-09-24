@@ -183,3 +183,22 @@ for(const container of [false,true])test(`computer trace pages remain scoped and
   const pending=agent.call({task_id:task.taskId,computer_trace_offset:0},'task_status');await entered;agent.revoke();finish();expect(await pending).toHaveProperty('error');
  }finally{await f.close();}
 });
+
+test.each([false,true])('pending field status attaches a scoped snapshot; capture failure keeps the question (container=%s)',async container=>{
+ const adapters=new Map<string,GatewayTaskAdapter>(),f=fixture(container,adapters);
+ const screenshot={type:'image',mimeType:'image/png',data:'fixture-image'};
+ const evidence=jest.fn(async()=>({requestId:'request',recorded:{},fresh:{observedAt:100,observation:{elements:[{label:'From',value:'CNX'}]},screenshot}}));
+ adapters.set('browser',{name:'browser',evidence} as unknown as GatewayTaskAdapter);
+ try{
+  await f.bridge.start();const task=f.tasks.spawn({...f.context,actionId:'pending-field'},{title:'Flights',instructions:'CNX to Osaka',targetProfile:'gateway-managed',gatewayTarget:{adapter:'browser',sessionId:'tab',name:'Browser'}});
+  task.state='waiting_input';task.pendingQuestion={questionId:'q',text:'Destination?'} as any;task.browserReport={status:'blocked',reason:'FIELD_TEXT_REQUIRED',steps:0,evaluations:1,fieldRequest:{ref:'to',label:'To',reason:'missing'}};
+  f.store.transaction(()=>f.store.saveTask(task,task.stateVersion));
+  const agent=f.issue({role:'agent',context:f.context});
+  expect(await agent.call({task_id:task.taskId},'task_status')).toMatchObject({screenshot,fieldContext:{snapshot:'fresh'},tasks:[{pendingQuestion:{questionId:'q'}}]});
+  expect(evidence.mock.calls[0]).toMatchObject([expect.anything(),true,expect.anything(),true]);
+  evidence.mockRejectedValueOnce(Error('capture unavailable')).mockResolvedValueOnce({requestId:'request',recorded:{}} as any);
+  expect(await agent.call({task_id:task.taskId},'task_status')).toMatchObject({fieldContext:{snapshot:'unavailable'},tasks:[{pendingQuestion:{questionId:'q'}}]});
+  const foreign=f.issue({role:'agent',context:{...f.context,principalId:'foreign'}});
+  expect(await foreign.call({task_id:task.taskId},'task_status')).toHaveProperty('error');
+ }finally{await f.close();}
+});

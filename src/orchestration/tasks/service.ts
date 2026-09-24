@@ -1,3 +1,4 @@
+import {preparedBrowserAnswers} from '../browser-fields';
 import {automationSession} from './automation-session';
 import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
 import { isAbsolute } from 'path';
@@ -14,7 +15,7 @@ import { OrchestrationStore, boundedText, payloadHash } from '../store';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../config';
 import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode } from '../types';
 
-export interface SpawnTask { gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal'; }
+export interface SpawnTask { browserFields?: unknown; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal'; }
 
 /** How many finished tasks the per-turn index page keeps. Unfinished tasks are never dropped;
  * older finished ones stay reachable through task_status with an explicit task_id. */
@@ -179,6 +180,8 @@ export class TaskService {
     }
     if (command.continueTaskId !== undefined) boundedText(command.continueTaskId, 128);
     if (command.continuationPolicy !== undefined && (!command.continueTaskId || !['after_success', 'after_terminal'].includes(command.continuationPolicy))) throw new OrchestrationError('INVALID_INPUT');
+    const prepared=preparedBrowserAnswers(command.browserFields,context.inputId);
+    if(command.browserFields!==undefined&&command.gatewayTarget?.adapter!=='browser')throw new OrchestrationError('INVALID_BROWSER_FIELDS');
     boundedText(command.title, 512); boundedText(command.instructions); boundedText(command.targetProfile, 128);
     if ((command.contextRefs?.length ?? 0) > 64 || command.contextRefs?.some(ref => typeof ref !== 'string' || ref.length > 1024)) throw new OrchestrationError('INVALID_INPUT');
     if (!['default-worker', 'media-worker', 'skill-worker', 'gateway-managed'].includes(command.targetProfile)) throw new OrchestrationError('UNKNOWN_WORKER_PROFILE');
@@ -225,17 +228,18 @@ export class TaskService {
       if (projectRoot && !command.gatewayTarget) task.resourceProfile = { projectRoot, mode: this.config.tasks.workspaceMode };
       this.store.run('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)', task.taskId, task.conversationId, task.state, 1, 1, null, JSON.stringify(task), now, now);
       const revision: TaskRevision = { requestBrowserConsent:command.gatewayTarget?.adapter==='browser', taskId: task.taskId, revision: 1, instructions: command.instructions,
-        contextRefs: command.contextRefs ?? [], mode: 'when_ready', originatingInputId: context.inputId };
+        answers:prepared, contextRefs: command.contextRefs ?? [], mode: 'when_ready', originatingInputId: context.inputId };
       this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', task.taskId, 1, JSON.stringify(revision));
       this.store.appendEvent(task.conversationId, 'task.created', task, task.taskId);
       this.store.enqueue('schedule', `schedule:${task.taskId}:1`, { taskId: task.taskId });
       return task;
     });
   }
-  update(context: CommandContext, taskId: string, expectedRevision: number, instruction: string, mode: ChangeMode): TaskSnapshot {
+  update(context: CommandContext, taskId: string, expectedRevision: number, instruction: string, mode: ChangeMode, browserFields?:unknown): TaskSnapshot {
     boundedText(instruction);
     if (!['when_ready', 'interrupt_and_resume'].includes(mode)) throw new OrchestrationError('INVALID_INPUT');
-    return this.command(context, 'update', { taskId, expectedRevision, instruction, mode }, context.execute, () => {
+    const prepared=preparedBrowserAnswers(browserFields,context.inputId);
+    return this.command(context, 'update', { taskId, expectedRevision, instruction, mode, browserFields }, context.execute, () => {
       const task = this.owned(taskId, context.conversationId), version = task.stateVersion;
       if(automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED','This automation session was ended or expired. Ask for a new authorized session; never replay its previous action.');
       const completionReview = task.gatewayTarget?.adapter === 'browser' && task.state === 'needs_reconciliation' &&
@@ -253,6 +257,7 @@ export class TaskService {
       if (task.revision !== expectedRevision) throw new OrchestrationError('REVISION_CONFLICT');
       if (task.gatewayTarget && (task.ownerPrincipalId !== context.principalId || (!context.execute && !browserRecovery))) throw new OrchestrationError('EXECUTION_DENIED');
       if (task.gatewayTarget && mode !== 'when_ready') throw new OrchestrationError('INVALID_INPUT', 'Use when_ready for Gateway-managed tasks; the current request must settle before revised instructions run.');
+      if(browserFields!==undefined&&task.gatewayTarget?.adapter!=='browser')throw new OrchestrationError('INVALID_BROWSER_FIELDS');
       const priorRevision = this.revision(taskId, expectedRevision);
       if (browserRecovery && ((priorRevision.browserRecoveryCount ?? 0) >= 3 || priorRevision.guidance === instruction))
         throw new OrchestrationError('BROWSER_RECOVERY_EXHAUSTED', 'Inspect the evidence and explain the unresolved blocker; do not repeat the same plan.');
@@ -277,8 +282,8 @@ export class TaskService {
       }
       task.revision++;
       const revision: TaskRevision = { requestBrowserConsent:context.execute && task.gatewayTarget?.adapter==='browser', taskId, revision: task.revision, instructions: instruction,
-        contextRefs: priorRevision.contextRefs, mode, originatingInputId: context.inputId,
-        ...(!context.execute ? { instructions: priorRevision.instructions, answers: priorRevision.answers, originatingInputId: priorRevision.originatingInputId, guidance: instruction, guidanceBasis: {attemptId: task.activeAttemptId, workflowVersion: task.workflow?.version??0, progressAt: task.latestProgress?.observedAt??0} } : {}),
+        answers:prepared, contextRefs: priorRevision.contextRefs, mode, originatingInputId: context.inputId,
+        ...(!context.execute ? { instructions: priorRevision.instructions, answers: prepared??priorRevision.answers, originatingInputId: priorRevision.originatingInputId, guidance: instruction, guidanceBasis: {attemptId: task.activeAttemptId, workflowVersion: task.workflow?.version??0, progressAt: task.latestProgress?.observedAt??0} } : {}),
         ...(browserRecovery ? {browserRecoveryCount:(priorRevision.browserRecoveryCount ?? 0)+1,guidanceBasis:undefined} : {}) };
       this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify(revision));
       if (task.gatewayTarget && ['completed','failed'].includes(task.state)) { task.state='queued'; delete task.gatewayDispatch; delete task.executionControl; delete task.failure; delete task.result; delete task.browserReport; delete task.computerReport; delete task.latestProgress; if(context.execute)task.initiatingInputId=context.inputId; }
@@ -388,9 +393,10 @@ export class TaskService {
       this.notify(task);
     });
   }
-  answer(context: CommandContext, taskId: string, questionId: string, answer: string): TaskSnapshot {
+  answer(context: CommandContext, taskId: string, questionId: string, answer: string, browserFields?:unknown): TaskSnapshot {
     boundedText(answer);
-    return this.command(context, 'answer', { taskId, questionId, answer }, context.execute, () => {
+    const prepared=preparedBrowserAnswers(browserFields,context.inputId);
+    return this.command(context, 'answer', { taskId, questionId, answer, browserFields }, context.execute, () => {
       if (!context.execute) {
         const task = this.owned(taskId, context.conversationId);
         this.assertQuestion(task, questionId);
@@ -410,7 +416,8 @@ export class TaskService {
         if ((!assigned && !reviewed) || task.ownerPrincipalId !== context.principalId || !task.capabilities.execute || (!missingBrowser&&!missingComputer))
           throw new OrchestrationError('EXECUTION_DENIED');
       }
-      return this.answerOwned(context.conversationId, taskId, questionId, answer, context.inputId);
+      if(browserFields!==undefined&&this.owned(taskId,context.conversationId).gatewayTarget?.adapter!=='browser')throw new OrchestrationError('INVALID_BROWSER_FIELDS');
+      return this.answerOwned(context.conversationId, taskId, questionId, answer, context.inputId,prepared);
     }, taskId);
   }
   /** A scoped authenticated reply is user authorization, without a fabricated model decision. */
@@ -463,7 +470,7 @@ export class TaskService {
   private assertQuestion(task: TaskSnapshot, questionId: string): void {
     if (task.state !== 'waiting_input' || task.pendingQuestion?.questionId !== questionId || task.pendingQuestion.revision !== task.revision) throw new OrchestrationError('STALE_QUESTION');
   }
-  private answerOwned(conversationId: string, taskId: string, questionId: string, answer: string, inputId: string): TaskSnapshot {
+  private answerOwned(conversationId: string, taskId: string, questionId: string, answer: string, inputId: string, prepared?:TaskRevision['answers']): TaskSnapshot {
     const task = this.owned(taskId, conversationId), version = task.stateVersion;
     this.assertQuestion(task, questionId);
     // Persist early answers, while fencing scheduling until the old attempt really ends.
@@ -474,7 +481,7 @@ export class TaskService {
     if(computerField&&answer.length>2000)throw new OrchestrationError('COMPUTER_FIELD_VALUE_TOO_LONG');
     task.revision++;
     this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify({ ...previous, revision: task.revision,
-      answers: [...(previous.answers ?? []), { questionId, text: answer, inputId, ...(browserFieldLabel ? {browserFieldLabel} : {}),...(computerField?{computerFieldLabel:computerField.label,computerApplication:computerField.application,computerWindowTitle:computerField.windowTitle,computerFieldRole:computerField.role}:{}) }], originatingInputId: inputId }));
+      answers: [...(previous.answers ?? []), ...(prepared??[]), { questionId, text: answer, inputId, ...(browserFieldLabel ? {browserFieldLabel} : {}),...(computerField?{computerFieldLabel:computerField.label,computerApplication:computerField.application,computerWindowTitle:computerField.windowTitle,computerFieldRole:computerField.role}:{}) }], originatingInputId: inputId }));
     task.pendingQuestion = undefined;
     task.state = task.activeAttemptId ? (task.gatewayTarget ? 'running' : 'interrupting') : 'queued';
     this.store.saveTask(task, version);

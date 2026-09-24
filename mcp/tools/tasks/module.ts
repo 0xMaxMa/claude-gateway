@@ -23,7 +23,7 @@ export async function callTaskBridge(tool: string, args: Record<string, unknown>
   const response = await fetch(scope.url, { method: 'POST', signal, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${scope.token}` },
     body: JSON.stringify({ tool, args, action_id: requestId }) });
   const body = await response.text();
-  if(response.ok && tool==='task_status' && args.browser_evidence==='screenshot') {
+  if(response.ok && tool==='task_status') {
     const value=JSON.parse(body),image=value.screenshot;
     if(image?.type==='image' && image.mimeType==='image/png' && typeof image.data==='string') {
       delete value.screenshot;

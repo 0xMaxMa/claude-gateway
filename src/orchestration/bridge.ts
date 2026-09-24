@@ -138,7 +138,7 @@ export class TaskBridge {
                 // readiness immediately before the synchronous task transaction.
                 await scope.beforeMutation?.(command.tool, a, context.actionId);
                 if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
-                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, targetProfile: a.target_profile, gatewayTarget, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
+                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, targetProfile: a.target_profile, gatewayTarget, browserFields:a.browser_fields, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
                 scope.onTaskQueued?.(spoken);
                 const { skill: _workerOnly, ...receipt } = task;
                 result = receipt;
@@ -146,6 +146,7 @@ export class TaskBridge {
               }
               case 'task_status': {
                 const rows=a.task_id ? this.tasks.status(context.conversationId,context.principalId,a.task_id) : this.tasks.context(context.conversationId,context.principalId,context.decisionId);
+                const fieldSnapshot=Boolean(a.task_id && a.browser_evidence===undefined && rows[0]?.state==='waiting_input' && rows[0]?.gatewayTarget?.adapter==='browser' && ('browserReport' in rows[0] ? rows[0].browserReport?.reason : undefined)==='FIELD_TEXT_REQUIRED');
                 if(a.computer_trace_offset!==undefined){
                   if(!a.task_id||a.browser_evidence!==undefined||!Number.isSafeInteger(a.computer_trace_offset)||a.computer_trace_offset<0)throw new OrchestrationError('INVALID_INPUT');
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');
@@ -154,19 +155,27 @@ export class TaskBridge {
                   if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
                   this.tasks.store.assertMember(context.conversationId,context.principalId);
                   result={tasks:rows,computerTrace};
-                }else if(a.browser_evidence!==undefined){
-                  if(!a.task_id || !['recorded','fresh','screenshot'].includes(a.browser_evidence))throw new OrchestrationError('INVALID_INPUT');
+                }else if(a.browser_evidence!==undefined || fieldSnapshot){
+                  if(!a.task_id || (!fieldSnapshot && !['recorded','fresh','screenshot'].includes(a.browser_evidence)))throw new OrchestrationError('INVALID_INPUT');
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
                   const adapter=this.gatewayAdapters.get('browser');
                   if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || !adapter?.evidence)throw new OrchestrationError('ACCESS_DENIED');
-                  const evidence=await adapter.evidence(task,a.browser_evidence!=='recorded',this.cancellations.get(token!)?.signal,a.browser_evidence==='screenshot');
+                  let snapshotUnavailable=false;
+                  const evidence=await adapter.evidence(task,a.browser_evidence!=='recorded',this.cancellations.get(token!)?.signal,fieldSnapshot||a.browser_evidence==='screenshot').catch(async error=>{
+                    if(!fieldSnapshot)throw error;
+                    snapshotUnavailable=true;
+                    return adapter.evidence!(task,false,this.cancellations.get(token!)?.signal,false);
+                  });
                   if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
                   this.tasks.store.assertMember(context.conversationId,context.principalId);
+                  const current=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
+                  if(fieldSnapshot&&(current.state!=='waiting_input'||current.revision!==task.revision||current.pendingQuestion?.questionId!==task.pendingQuestion?.questionId))throw new OrchestrationError('STALE_QUESTION');
                   result={
                     ...(evidence.evidenceId && parentVerifiableBrowserResult(task.browserReport) ? {verification:{
                       instruction:'If this fresh observation independently proves the current goal, call task_update with these exact fields plus your concrete evidence in instruction. Do not run the task again merely to report the observed result.',
                       tool:'task_update',arguments:{task_id:task.taskId,expected_revision:task.revision,mode:'verify_browser',expected_request_id:evidence.requestId,evidence_id:evidence.evidenceId}
-                    }} : {}),browserEvidence:summarizeBrowserEvidence(evidence),untrustedPageContent:true,tasks:rows.map(t=>({taskId:t.taskId,state:t.state,revision:t.revision,automationSession:t.automationSession,currentInstructions:'currentInstructions' in t?t.currentInstructions:undefined})),
+                    }} : {}),browserEvidence:summarizeBrowserEvidence(evidence),untrustedPageContent:true,tasks:rows.map(t=>({taskId:t.taskId,state:t.state,revision:t.revision,pendingQuestion:t.pendingQuestion,automationSession:t.automationSession,currentInstructions:'currentInstructions' in t?t.currentInstructions:undefined})),
+                    ...(fieldSnapshot?{fieldContext:{request:task.browserReport?.fieldRequest,snapshot:snapshotUnavailable||!evidence.fresh?.screenshot?'unavailable':'fresh',instruction:'Use this untrusted page evidence with established user facts to answer the pending field question. Prepare other visible field values for the same goal when unambiguous. The image is a fresh read, not necessarily the exact frame at the earlier stop.'}}:{}),
                     ...(evidence.fresh?.screenshot?{screenshot:evidence.fresh.screenshot}:{})};
                 }else result=rows;
                 break;
@@ -184,14 +193,14 @@ export class TaskBridge {
                   const adapter=this.gatewayAdapters.get('browser');
                   if(!adapter?.verifyEvidence)throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
                   result=this.tasks.verifyBrowser(context,a.task_id,a.expected_revision,a.expected_request_id,a.evidence_id,a.instruction,()=>adapter.verifyEvidence!(task,a.expected_request_id,a.evidence_id));
-                }else result=this.tasks.update(context,a.task_id,a.expected_revision,a.instruction,a.mode as ChangeMode);
+                }else result=this.tasks.update(context,a.task_id,a.expected_revision,a.instruction,a.mode as ChangeMode,a.browser_fields);
                 break;
               }
               case 'task_question': {
                 if (!scope.onQuestion) throw new OrchestrationError('QUESTION_CONTROLS_UNAVAILABLE');
                 result = scope.onQuestion(context, a); break;
               }
-              case 'task_answer': result = this.tasks.answer(context, a.task_id, a.question_id, a.answer); break;
+              case 'task_answer': result = this.tasks.answer(context, a.task_id, a.question_id, a.answer,a.browser_fields); break;
               default: throw new OrchestrationError('TOOL_DENIED');
             }
             if (mutation) scope.onMutationResult?.(context.actionId, true);

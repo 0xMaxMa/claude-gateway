@@ -103,3 +103,24 @@ test('explicit continuation settles a legacy pre-input rejection and makes one f
   await pump();expect(runs).toBe(2);expect(store.task(t.taskId)?.state).toBe('completed');
  }finally{await controller.close();store.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('prepared fields persist through dispatch and a batched agent answer, then a new goal replaces them',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'prepared-fields-')),store=new OrchestrationStore(join(root,'db'),'a'),tasks=new TaskService(store);
+ const accepted=store.acceptInput({scope:{agentId:'a',agentSessionId:'s',source:'api',accountId:'u',chatId:'c',threadKey:'',principalId:'u'},text:'Find flights',capabilities:{execute:true,writeMemory:false}});
+ const decision=new DecisionService(store).begin(accepted.conversationId,'u',[accepted.inputId]);
+ const context={...accepted,...decision,principalId:'u',execute:true,writeMemory:false,actionId:'spawn'};
+ const run=jest.fn(async(c:BrowserExecutionContext):Promise<BrowserExecutionResult>=>run.mock.calls.length===1?{status:'blocked',reason:'FIELD_TEXT_REQUIRED',steps:0,evaluations:1,fieldRequest:{ref:'destination',label:'To',reason:'missing'}}:{status:'succeeded',reason:'VERIFIED',steps:1,evaluations:1});
+ const binding={version:1 as const,id:'target',name:'Browser',principalId:'u',conversationId:accepted.conversationId,run};
+ const adapter=new BrowserTaskAdapter({agentId:'a',root:join(root,'receipts'),allowed:()=>true,bindings:()=>[binding],evaluate:jest.fn(),onNeedsInput:(t,q)=>{const a=store.attempt(t.activeAttemptId!)!;if(store.task(t.taskId)!.state==='starting')tasks.started(a.attemptId,a.generation);tasks.requestInput(a.attemptId,a.generation,q);return true;}});
+ const controller=new GatewayTaskController(tasks,new Map([['browser',adapter]]));
+ const pump=async()=>{for(let i=0;i<10;i++){await controller.tick();await new Promise(setImmediate);}};
+ try{
+  const task=tasks.spawn(context,{title:'Flights',instructions:'CNX to Osaka',targetProfile:'gateway-managed',gatewayTarget:{adapter:'browser',sessionId:'target',name:'Browser',startUrl:'https://fixture.example'},browserFields:[{label:'From',text:'CNX'}]});
+  await pump();expect(run.mock.calls[0][0].startUrl).toBe('https://fixture.example');expect(run.mock.calls[0][0].fields).toEqual([{label:'From',text:'CNX'}]);
+  const waiting=store.task(task.taskId)!;expect(waiting.state).toBe('waiting_input');
+  tasks.answer({...context,actionId:'answer'},task.taskId,waiting.pendingQuestion!.questionId,'Osaka',[{label:'Adults',text:'2'},{label:'Children',text:'3'}]);
+  await pump();expect(run.mock.calls[1][0].fields).toEqual([{label:'From',text:'CNX'},{label:'Adults',text:'2'},{label:'Children',text:'3'},{label:'To',text:'Osaka'}]);
+  const done=store.task(task.taskId)!;tasks.update({...context,actionId:'correct'},task.taskId,done.revision,'CNX to Tokyo','when_ready',[{label:'From',text:'CNX'},{label:'To',text:'Tokyo'}]);
+  await pump();expect(run.mock.calls[2][0].fields).toEqual([{label:'From',text:'CNX'},{label:'To',text:'Tokyo'}]);
+ }finally{await controller.close();store.close();rmSync(root,{recursive:true,force:true});}
+});

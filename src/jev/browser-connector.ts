@@ -1,7 +1,6 @@
 import {requestBrowserConsent} from './browser-consent';
 import { createLoopServer } from '@0xmaxma/jev-loop/mcp';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { browserFieldText } from './browser-text-helper';
 import { createHash, randomUUID } from 'node:crypto';
 import { resolveEnabledConnectors } from '../connectors/resolve';
 import type { AgentConfig, GatewayConfig } from '../types';
@@ -83,7 +82,7 @@ async function credential(binding: BrowserConnectorConfig): Promise<string> {
   if (!key || key.length > 16384 || /[\x00-\x20\x7f]/.test(key)) throw Error('BROWSER_CREDENTIAL_UNAVAILABLE');
   return key;
 }
-export async function executeBrowserModule(modulePath: string, binding: BrowserConnectorConfig, context: BrowserExecutionContext, connection?: BrowserConnection, textHelper?: BrowserIntegrationConfig['textHelper']): Promise<BrowserExecutionResult> {
+export async function executeBrowserModule(modulePath: string, binding: BrowserConnectorConfig, context: BrowserExecutionContext, connection?: BrowserConnection): Promise<BrowserExecutionResult> {
   const assertAccess = () => { if (!context.authorized()) throw Error('ACCESS_DENIED'); };
   assertAccess(); context.signal.throwIfAborted();
   const resolved = isAbsolute(modulePath) ? modulePath : createRequire(__filename).resolve(modulePath);
@@ -122,14 +121,15 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       return {content:result.content as unknown[],isError:result.isError as boolean | undefined};
     });
     let independentlyVerified = false;
-    const result = await runThroughLoopMcp(context, loopSignal => module.runBrowserUse({contractVersion:1,goal:context.goal,...(context.startUrl?{startUrl:context.startUrl}:{}),scope:binding.scope,fields:[...(binding.fields??[]),...(context.fields??[]).filter(f=>!(binding.fields??[]).some(b=>b.label===f.label))],...binding.budget}, {
+    const result = await runThroughLoopMcp(context, loopSignal => module.runBrowserUse({contractVersion:1,goal:context.goal,...(context.startUrl?{startUrl:context.startUrl}:{}),scope:binding.scope,fields:[...(binding.fields??[]).filter(b=>!(context.fields??[]).some(f=>f.label.normalize("NFKC").trim().replace(/\s+/g," ")===b.label.normalize("NFKC").trim().replace(/\s+/g," "))),...(context.fields??[])],...binding.budget}, {
       call,
       trace:context.trace,
       interruptSignal:context.interruptSignal,
       evaluate: async(request,signal) => { assertAccess(); const response = await context.evaluate(request,signal); assertAccess(); return {model:response.model,answers:response.answers}; },
       progress: event => { assertAccess(); context.progress(event); },
       ...(module.verifyBrowserTask ? {verify:async(observation:unknown,signal:AbortSignal) => {assertAccess();const verified = await module.verifyBrowserTask!(context.goal,observation,signal);assertAccess();signal.throwIfAborted();independentlyVerified=validateBrowserVerification(verified);return independentlyVerified;}} : {}),
-      ...((textHelper || module.resolveFieldText) ? {resolveFieldText:async(request:unknown,signal:AbortSignal) => {assertAccess();const text = textHelper ? await browserFieldText(textHelper,request,signal) : await module.resolveFieldText!(request,signal);assertAccess();return text;}} : {}),
+      // Missing field values return FIELD_TEXT_REQUIRED to the owning agent.
+      // Do not inject an independent text model or a package-provided fallback.
     }, loopSignal));
     if (result.status === 'succeeded') {
       assertAccess();
@@ -206,12 +206,12 @@ export class BrowserConnectorRegistry {
       if (b.agentId !== this.agentId) continue;
       let resolved: BrowserConnection | undefined;
       try { if(b.connectorId) {if(!this.connection)continue;resolved=this.connection(b.connectorId);} } catch { continue; }
-      const signature = createHash('sha256').update(JSON.stringify([config!.textHelper,b,resolved])).digest('hex');
+      const signature = createHash('sha256').update(JSON.stringify([b,resolved])).digest('hex');
       let item = this.cache.get(b.id);
       if (item?.signature !== signature) {
-        const snapshot = structuredClone(b), modulePath = '@0xmaxma/jev-loop/browser-use', textHelper = config!.textHelper ? structuredClone(config!.textHelper) : undefined;
+        const snapshot = structuredClone(b), modulePath = '@0xmaxma/jev-loop/browser-use';
         item = {signature,binding:{version:1,id:b.id,name:b.name,principalId:b.principalId,conversationId:b.conversationId,
-          run:context => executeBrowserModule(modulePath,snapshot,context,resolved,textHelper),
+          run:context => executeBrowserModule(modulePath,snapshot,context,resolved),
           inspect:(result,signal,authorized,screenshot)=>inspectBrowser(snapshot,result,signal,authorized,resolved,screenshot)}};
       }
       current.set(b.id,item);
