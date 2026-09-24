@@ -374,8 +374,10 @@ test.each(['text','live_voice'] as const)('live %s control applies before a busy
   const active=(f.runtime as any).active as Map<string,unknown>;active.set(f.scope.agentSessionId,{stopping:false});
   let ticket:any;const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
   jest.spyOn(f.runtime.bridge,'issue').mockImplementation((scope,...args)=>{ticket=scope;return issue(scope,...args);});
-  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
-    expect(profile.overlay).toContain('durable control receipt');
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter,prompt:string){
+    expect(profile.overlay).not.toContain('durable control receipt');
+    expect(prompt).toContain('durable control receipt');
+    expect(prompt).toContain('task_update mode=reconcile_browser');
     expect(ticket.context.execute).toBe(false);
     this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));
     this.emit('output',JSON.stringify({type:'result',result:'รับคำแก้ไขแล้วครับ กำลังทำงานเดิมต่อ'}));
