@@ -78,7 +78,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     if(typeof instructions!=='string'||!instructions.trim()||instructions.length>8000)throw new OrchestrationError('INVALID_BROWSER_GOAL');
     if((answers??[]).some(a=>a.browserFieldLabel&&a.text.length>2000))throw new OrchestrationError('BROWSER_FIELD_VALUE_TOO_LONG');
   }
-  async submit(task:TaskSnapshot,requestId:string,instructions:string,answers:TaskRevision['answers']=[],requestConsent=false):Promise<void> {
+  async submit(task:TaskSnapshot,requestId:string,instructions:string,answers:TaskRevision['answers']=[],requestConsent=false,_computerInputs?:TaskRevision['computerInputs'],startUrl?:string):Promise<void> {
     this.assertTask(task);
     this.validateInput(instructions,answers);
     const binding=this.binding(task.gatewayTarget!.sessionId,task.ownerPrincipalId,task.conversationId);
@@ -92,7 +92,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const authorized=()=>{try{return this.options.allowedTask?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
     // The installed browser package owns execution; gateway owns the request lifetime.
     let providerFailure:BrowserExecutionResult['providerFailure'];
-    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({requestConsent,interruptSignal:interrupt.signal,goal:instructions,startUrl:answers?.some(a=>!a.questionId.startsWith('prepared:')) || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl,fields,signal:controller.signal,authorized,
+    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({requestConsent,interruptSignal:interrupt.signal,goal:instructions,startUrl:startUrl ?? (answers?.some(a=>!a.questionId.startsWith('prepared:')) || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl),fields,signal:controller.signal,authorized,
       evaluate:async(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');try{return await this.options.evaluate(task,request,signal,authorized);}catch(e){if(e instanceof JevError)providerFailure={code:e.code,...e.metadata};throw e;}},
       trace:event=>{
         if(!authorized())return;

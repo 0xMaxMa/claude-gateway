@@ -4803,7 +4803,7 @@ export function createApiRouter(
     if(!canAccessAgent(key,agentId)||!runner||!isValidSessionId(sessionId)||!isValidSessionId(taskId)){res.status(403).json({error:'ACCESS_DENIED'});return;}
     if(!(runner.getAgentConfig().allow_tools??Boolean(key.allow_tools))){res.status(403).json({error:'EXECUTION_DENIED'});return;}
     const b=req.body;
-    if(!b||Object.keys(b).some(k=>!['id','action','expectedRevision','text'].includes(k))||!isValidSessionId(b.id)||!['pause','revise','resume'].includes(b.action)||!Number.isSafeInteger(b.expectedRevision)||b.expectedRevision<1||(b.action==='revise'?(typeof b.text!=='string'||!b.text.trim()||b.text.length>4000):b.text!==undefined)){res.status(400).json({error:'INVALID_INPUT'});return;}
+    if(!b||Object.keys(b).some(k=>!['id','action','expectedRevision','text'].includes(k))||!isValidSessionId(b.id)||!['pause','revise','resume','agent','user'].includes(b.action)||!Number.isSafeInteger(b.expectedRevision)||b.expectedRevision<1||(b.action==='revise'?(typeof b.text!=='string'||!b.text.trim()||b.text.length>4000):b.text!==undefined)){res.status(400).json({error:'INVALID_INPUT'});return;}
     try{res.status(202).json({task:await runner.controlApiTask(sessionId,apiPrincipal(key),taskId,b)});}
     catch(e){const code=e instanceof Error?e.message:'';res.status(['REVISION_CONFLICT','STATE_CONFLICT','IDEMPOTENCY_CONFLICT'].includes(code)?409:403).json({error:['REVISION_CONFLICT','STATE_CONFLICT','IDEMPOTENCY_CONFLICT','EXECUTION_DENIED','ORCHESTRATION_DISABLED'].includes(code)?code:'ACCESS_DENIED'});}
   });

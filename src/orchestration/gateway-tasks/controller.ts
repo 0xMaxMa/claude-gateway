@@ -19,7 +19,7 @@ export interface GatewayTaskAdapter {
   verifyEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):void;
   ready?(task: TaskSnapshot): boolean;
   validateInput?(instructions:string,answers?:import('../types').TaskRevision['answers']):void;
-  submit(task: TaskSnapshot, requestId: string, instructions: string, answers?: import('../types').TaskRevision['answers'], requestConsent?:boolean,computerInputs?:import('../types').TaskRevision['computerInputs']): Promise<void>;
+  submit(task: TaskSnapshot, requestId: string, instructions: string, answers?: import('../types').TaskRevision['answers'], requestConsent?:boolean,computerInputs?:import('../types').TaskRevision['computerInputs'],startUrl?:string): Promise<void>;
   inspect(task: TaskSnapshot, requestId: string, attempt?:TaskAttempt): Promise<WorkerOutcome | 'running' | 'pending'>;
   interrupt?(task:TaskSnapshot,requestId:string):void;
   cancel(task: TaskSnapshot, requestId: string): Promise<void>;
@@ -110,7 +110,7 @@ export class GatewayTaskController {
           // this point is inspected, never replayed on the assumption of failure.
           task.gatewayDispatch = {requestId, submittedAt:Date.now()};
           this.tasks.store.transaction(() => this.tasks.store.saveTask(task, task.stateVersion));
-          await adapter.submit(task, requestId, instructions, revision.answers, revision.requestBrowserConsent===true,revision.computerInputs);
+          await adapter.submit(task, requestId, instructions, revision.answers, revision.requestBrowserConsent===true,revision.computerInputs,...(revision.browserNavigation?.revision===revision.revision?[revision.browserNavigation.url]:[]));
         }
         task = this.tasks.store.task(task.taskId)!;
         if(task.state==='interrupting')adapter.interrupt?.(task,requestId);

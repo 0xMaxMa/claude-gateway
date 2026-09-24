@@ -45,7 +45,7 @@ export interface BrowserIntegrationConfig { bindings: BrowserConnectorConfig[]; 
 export type BrowserToolCall = (name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
 export interface BrowserLogicModule {
   BROWSER_USE_CONTRACT_VERSION: 1;
-  runBrowserUse(input: { contractVersion: 1; goal: string; startUrl?: string; scope: BrowserScope; fields?: BrowserConnectorConfig['fields'] } & BrowserConnectorConfig['budget'], dependencies: {
+  runBrowserUse(input: { yieldAfterAction?: boolean; contractVersion: 1; goal: string; startUrl?: string; scope: BrowserScope; fields?: BrowserConnectorConfig['fields'] } & BrowserConnectorConfig['budget'], dependencies: {
     interruptSignal?:AbortSignal;
     trace?: (event:BrowserTraceEvent)=>void;
     call: BrowserToolCall;

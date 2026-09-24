@@ -19,7 +19,7 @@ export function pendingReports(store: OrchestrationStore, activeSessions: string
       ORDER BY d2.epoch DESC LIMIT 1)
     WHERE n.status='pending'
       AND c.agent_session_id NOT IN (SELECT value FROM json_each(?))
-      AND (? OR c.id IN (SELECT value FROM json_each(?)) OR EXISTS (SELECT 1 FROM tasks monitored WHERE monitored.id=n.task_id AND monitored.state='running' AND json_extract(monitored.snapshot_json,'$.supervision.id') IS NOT NULL AND monitored.state_version=n.task_state_version))
+      AND (? OR c.id IN (SELECT value FROM json_each(?)) OR EXISTS (SELECT 1 FROM tasks monitored WHERE monitored.id=n.task_id AND ((monitored.state='running' AND json_extract(monitored.snapshot_json,'$.supervision.id') IS NOT NULL) OR (monitored.state='waiting_input' AND COALESCE(json_extract(monitored.snapshot_json,'$.automationController'),'agent')='agent' AND COALESCE(json_extract(monitored.snapshot_json,'$.browserReport.reason'),json_extract(monitored.snapshot_json,'$.computerReport.reason')) IN ('COMMAND_WAITING_INPUT','THINKING_WAITING_INPUT'))) AND monitored.state_version=n.task_state_version))
       AND NOT EXISTS(SELECT 1 FROM conversation_inputs queued WHERE queued.conversation_id=c.id AND queued.status IN ('accepted','assigned'))
   ), eligible AS (
     SELECT *,ROW_NUMBER() OVER (PARTITION BY id ORDER BY notification_id) position FROM candidates

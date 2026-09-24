@@ -124,7 +124,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       return {content:result.content as unknown[],isError:result.isError as boolean | undefined};
     });
     let independentlyVerified = false;
-    const result = await runThroughLoopMcp(context, loopSignal => module.runBrowserUse({contractVersion:1,goal:context.goal,...(context.startUrl?{startUrl:context.startUrl}:{}),scope:binding.scope,fields:[...(binding.fields??[]).filter(b=>!(context.fields??[]).some(f=>f.label.normalize("NFKC").trim().replace(/\s+/g," ")===b.label.normalize("NFKC").trim().replace(/\s+/g," "))),...(context.fields??[])],...binding.budget}, {
+    const result = await runThroughLoopMcp(context, loopSignal => module.runBrowserUse({contractVersion:1,yieldAfterAction:true,goal:context.goal,...(context.startUrl?{startUrl:context.startUrl}:{}),scope:binding.scope,fields:[...(binding.fields??[]).filter(b=>!(context.fields??[]).some(f=>f.label.normalize("NFKC").trim().replace(/\s+/g," ")===b.label.normalize("NFKC").trim().replace(/\s+/g," "))),...(context.fields??[])],...binding.budget}, {
       call,
       trace:context.trace,
       interruptSignal:context.interruptSignal,

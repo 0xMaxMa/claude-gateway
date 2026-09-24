@@ -125,6 +125,7 @@ test('completed rounds remain idle, continue on the same task without navigating
   const completed=f.store.task(f.task.taskId)!;
   expect(completed.automationSession).toMatchObject({status:'idle',idleTimeoutMs:1800000});
   expect(completed.activeAttemptId).toBeUndefined();
+  f.tasks.controlByUser(f.accepted.conversationId,'u',completed.taskId,{id:randomUUID(),action:'agent',expectedRevision:completed.revision});
   const next=f.tasks.update({...f.context,actionId:'next-goal'},completed.taskId,completed.revision,'Read the visible flight results, without repeating the search','when_ready');
   expect(next).toMatchObject({taskId:completed.taskId,state:'queued',automationSession:{status:'active'}});
   await f.pump();expect(f.calls).toHaveLength(3);expect(f.calls[2].startUrl).toBeUndefined();

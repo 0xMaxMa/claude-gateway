@@ -46,7 +46,7 @@
     "gen-cli:check": "ts-node scripts/gen-cli.ts --check"
   },
   "dependencies": {
-    "@0xmaxma/jev-loop": "https://codeload.github.com/0xMaxMa/jev-loop/tar.gz/6b57b948e98fed34f73aa45cd6e70549eb328a90",
+    "@0xmaxma/jev-loop": "https://codeload.github.com/0xMaxMa/jev-loop/tar.gz/80a3436da08018876ee4130b1a4a883e489221ae",
     "@line/bot-sdk": "^11.0.2",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@whiskeysockets/baileys": "^6.7.24",

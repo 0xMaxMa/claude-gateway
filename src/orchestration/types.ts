@@ -51,6 +51,7 @@ export interface GatewayTaskTarget {
   noBootstrap?: boolean;
 }
 export interface TaskSnapshot {
+  automationController?: "agent" | "user";
   automationSession?: import("./tasks/automation-session").AutomationSession;
   executionControl?: {id:string;action:'pause'|'revise'|'resume';revision:number;phase:'pending'|'applied'|'paused'|'blocked';requestedAt:number};
   computerReport?:ComputerTaskReport;
@@ -98,6 +99,8 @@ export interface TaskSnapshot {
   updatedAt: number;
 }
 export interface TaskRevision {
+  /** Explicit navigation belongs to one revision; never replay it on an answer/recovery. */
+  browserNavigation?: {url:string;revision:number};
   computerInputs?: Array<{application:string;label:string;text:string;role?:string;windowTitle?:string}>;
   /** A new explicit user instruction can request browser consent before dispatch. */
   requestBrowserConsent?: boolean;

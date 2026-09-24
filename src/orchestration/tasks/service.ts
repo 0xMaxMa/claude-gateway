@@ -40,7 +40,7 @@ export function taskIndexEntry(task: TaskSnapshot) {
     cancellation: task.cancellation, replacedByTaskId: task.replacedByTaskId,
     workstreamId: task.workstreamId, continueTaskId: task.continueTaskId, continuationPolicy: task.continuationPolicy,
     resultAvailable: Boolean(task.result),
-    gatewayTarget: task.gatewayTarget, automationSession: automationSession(task),
+    automationController:task.automationController??"agent", gatewayTarget: task.gatewayTarget, automationSession: automationSession(task),
     details: { tool: 'task_status', task_id: task.taskId },
   };
 }
@@ -237,20 +237,33 @@ export class TaskService {
       return task;
     });
   }
-  update(context: CommandContext, taskId: string, expectedRevision: number, instruction: string, mode: ChangeMode, browserFields?:unknown, computerInputs?:TaskRevision["computerInputs"]): TaskSnapshot {
+  update(context: CommandContext, taskId: string, expectedRevision: number, instruction: string, mode: ChangeMode, browserFields?:unknown, computerInputs?:TaskRevision["computerInputs"], startUrl?:unknown): TaskSnapshot {
+    let browserUrl:string|undefined;
+    if(startUrl!==undefined){
+      if(!context.execute)throw new OrchestrationError('EXECUTION_DENIED');
+      try{if(typeof startUrl!=='string'||startUrl.length>8192)throw Error();const u=new URL(startUrl);if(!['http:','https:'].includes(u.protocol)||u.username||u.password)throw Error();browserUrl=u.href;}catch{throw new OrchestrationError('INVALID_BROWSER_START_URL');}
+    }
     boundedText(instruction);if(computerInputs!==undefined)computerInputs=ComputerInputs.parse(computerInputs);
     if (!['when_ready', 'interrupt_and_resume'].includes(mode)) throw new OrchestrationError('INVALID_INPUT');
     const prepared=preparedBrowserAnswers(browserFields,context.inputId);
-    return this.command(context, 'update', { taskId, expectedRevision, instruction, mode, browserFields, computerInputs }, context.execute, () => {
+    return this.command(context, 'update', { taskId, expectedRevision, instruction, mode, browserFields, computerInputs, startUrl }, context.execute, () => {
       const task = this.owned(taskId, context.conversationId), version = task.stateVersion;
+      if(browserUrl!==undefined&&task.gatewayTarget?.adapter!=='browser')throw new OrchestrationError('INVALID_BROWSER_START_URL');
       if(computerInputs!==undefined&&task.gatewayTarget?.adapter!=='computer')throw new OrchestrationError('INVALID_INPUT');
       if(automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED','This automation session was ended or expired. Ask for a new authorized session; never replay its previous action.');
       const completionReview = task.gatewayTarget?.adapter === 'browser' && task.state === 'needs_reconciliation' &&
         Boolean(task.activeAttemptId) && task.browserReport?.status === 'needs_verification' &&
         ['COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(task.browserReport.reason) &&
         !task.browserReport.providerFailure && task.browserReport.lastAction?.outcome !== 'unknown';
+      if(task.automationController==='user')throw new OrchestrationError('USER_CONTROLS_AUTOMATION');
+      const agentControl = !context.execute &&
+        ['browser','computer'].includes(task.gatewayTarget?.adapter??'') && task.capabilities.execute && task.ownerPrincipalId===context.principalId &&
+        task.state==='waiting_input'&&!task.activeAttemptId&&!task.pendingQuestion&&task.executionControl?.phase!=='paused'&&
+        ['COMMAND_WAITING_INPUT','THINKING_WAITING_INPUT'].includes(task.browserReport?.reason??task.computerReport?.reason??'')&&
+        !task.browserReport?.providerFailure&&task.browserReport?.lastAction?.outcome!=='unknown'&&
+        Boolean(this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion));
       const computerRecovery=!context.execute&&task.gatewayTarget?.adapter==='computer'&&task.capabilities.execute&&task.ownerPrincipalId===context.principalId&&task.state==='failed'&&!task.activeAttemptId&&['COMPLETION_CANDIDATE','VERIFICATION_FAILED','NO_SUPPORTED_ACTION','COMPUTER_TEXT_UNGROUNDED'].includes(task.computerReport?.reason??'')&&Boolean(this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion));
-      const browserRecovery = computerRecovery || !context.execute && task.gatewayTarget?.adapter === 'browser' &&
+      const browserRecovery = agentControl || computerRecovery || !context.execute && task.gatewayTarget?.adapter === 'browser' &&
         task.capabilities.execute && task.ownerPrincipalId === context.principalId &&
         !task.browserReport?.providerFailure && task.browserReport?.lastAction?.outcome !== 'unknown' &&
         (completionReview || (task.state === 'failed' && !task.activeAttemptId &&
@@ -263,7 +276,7 @@ export class TaskService {
       if (task.gatewayTarget && mode !== 'when_ready') throw new OrchestrationError('INVALID_INPUT', 'Use when_ready for Gateway-managed tasks; the current request must settle before revised instructions run.');
       if(browserFields!==undefined&&task.gatewayTarget?.adapter!=='browser')throw new OrchestrationError('INVALID_BROWSER_FIELDS');
       const priorRevision = this.revision(taskId, expectedRevision);
-      if (browserRecovery && ((priorRevision.browserRecoveryCount ?? 0) >= 3 || priorRevision.guidance === instruction))
+      if (browserRecovery && !agentControl && ((priorRevision.browserRecoveryCount ?? 0) >= 3 || priorRevision.guidance === instruction))
         throw new OrchestrationError('BROWSER_RECOVERY_EXHAUSTED', 'Inspect the evidence and explain the unresolved blocker; do not repeat the same plan.');
       if (!context.execute && !browserRecovery) {
         // A worker progress report increments stateVersion without revoking this
@@ -285,10 +298,10 @@ export class TaskService {
         task.activeAttemptId=undefined;task.state='failed';
       }
       task.revision++;
-      const revision: TaskRevision = { requestBrowserConsent:context.execute && task.gatewayTarget?.adapter==='browser', taskId, revision: task.revision, instructions: instruction, computerInputs:context.execute||computerRecovery?computerInputs:priorRevision.computerInputs,
+      const revision: TaskRevision = { ...(browserUrl?{browserNavigation:{url:browserUrl,revision:task.revision}}:{}), requestBrowserConsent:context.execute && task.gatewayTarget?.adapter==='browser', taskId, revision: task.revision, instructions: instruction, computerInputs:context.execute||computerRecovery||agentControl?computerInputs:priorRevision.computerInputs,
         answers:prepared, contextRefs: priorRevision.contextRefs, mode, originatingInputId: context.inputId,
-        ...(!context.execute&&!computerRecovery ? { instructions: priorRevision.instructions, answers: prepared??priorRevision.answers, originatingInputId: priorRevision.originatingInputId, guidance: instruction, guidanceBasis: {attemptId: task.activeAttemptId, workflowVersion: task.workflow?.version??0, progressAt: task.latestProgress?.observedAt??0} } : {}),
-        ...(browserRecovery ? {browserRecoveryCount:(priorRevision.browserRecoveryCount ?? 0)+1,guidanceBasis:undefined} : {}) };
+        ...(!context.execute&&!computerRecovery&&!agentControl ? { instructions: priorRevision.instructions, answers: prepared??priorRevision.answers, originatingInputId: priorRevision.originatingInputId, guidance: instruction, guidanceBasis: {attemptId: task.activeAttemptId, workflowVersion: task.workflow?.version??0, progressAt: task.latestProgress?.observedAt??0} } : {}),
+        ...(browserRecovery&&!agentControl ? {browserRecoveryCount:(priorRevision.browserRecoveryCount ?? 0)+1,guidanceBasis:undefined} : {}) };
       this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify(revision));
       if (task.gatewayTarget && ['completed','failed'].includes(task.state)) { task.state='queued'; delete task.gatewayDispatch; delete task.executionControl; delete task.failure; delete task.result; delete task.browserReport; delete task.computerReport; delete task.latestProgress; if(context.execute)task.initiatingInputId=context.inputId; }
       if (task.state === 'waiting_input') { task.pendingQuestion = undefined; task.state = task.activeAttemptId ? (task.gatewayTarget ? 'running' : 'interrupting') : 'queued'; }
@@ -300,18 +313,27 @@ export class TaskService {
     }, taskId);
   }
   /** Direct authenticated user control: no inference turn, no second task. */
-  controlByUser(conversationId:string,principalId:string,taskId:string,command:{id:string;action:'pause'|'revise'|'resume';expectedRevision:number;text?:string}):TaskSnapshot {
+  controlByUser(conversationId:string,principalId:string,taskId:string,command:{id:string;action:'pause'|'revise'|'resume'|'agent'|'user';expectedRevision:number;text?:string}):TaskSnapshot {
     return this.store.transaction(()=>{
       this.store.assertMember(conversationId,principalId);
       const task=this.owned(taskId,conversationId);
       if(task.ownerPrincipalId!==principalId)throw new OrchestrationError('ACCESS_DENIED');
-      if(!/^[0-9a-f-]{36}$/i.test(command.id)||!['pause','revise','resume'].includes(command.action)||!Number.isSafeInteger(command.expectedRevision))throw new OrchestrationError('INVALID_INPUT');
+      if(!/^[0-9a-f-]{36}$/i.test(command.id)||!['pause','revise','resume','agent','user'].includes(command.action)||!Number.isSafeInteger(command.expectedRevision))throw new OrchestrationError('INVALID_INPUT');
       const id='user-control:'+command.id,hash=payloadHash({taskId,...command});
       const prior=this.store.get('SELECT * FROM task_commands WHERE action_id=?',id);
       if(prior){if(prior.principal_id!==principalId||prior.conversation_id!==conversationId)throw new OrchestrationError('ACCESS_DENIED');if(prior.payload_hash!==hash)throw new OrchestrationError('IDEMPOTENCY_CONFLICT');return task;}
       if(!['browser','computer'].includes(task.gatewayTarget?.adapter??'')||!task.capabilities.execute)throw new OrchestrationError('EXECUTION_DENIED');
       if(automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
       if(task.revision!==command.expectedRevision)throw new OrchestrationError('REVISION_CONFLICT');
+      if(command.action==='agent'||command.action==='user'){
+        if(command.text!==undefined)throw new OrchestrationError('INVALID_INPUT');
+        task.automationController=command.action;
+        this.store.saveTask(task,task.stateVersion);
+        this.store.run('INSERT INTO task_commands VALUES(?,?,?,?,?,?,?,?,?)',id,taskId,conversationId,principalId,null,'user_control',hash,JSON.stringify(task),Date.now());
+        if(command.action==='agent'&&task.state==='waiting_input'&&!task.activeAttemptId&&!task.pendingQuestion&&task.executionControl?.phase!=='paused')this.notify(task);
+        return task;
+      }
+      task.automationController='user';
       const paused=task.state==='waiting_input'&&!task.activeAttemptId&&(task.executionControl?.phase==='paused'||['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT'].includes(task.computerReport?.reason??task.browserReport?.reason??''));
       const completedRound=command.action==='revise'&&task.state==='completed'&&!task.activeAttemptId;
       const stoppedBrowser=command.action==='revise' && task.state==='failed' && !task.activeAttemptId &&
@@ -758,7 +780,7 @@ export class TaskService {
       if (outcome.type !== 'unknown') this.pool.release(task.taskId, outcome.type === 'completed' || outcome.type === 'paused');
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
       if (task.state === 'queued') this.store.enqueue('schedule', `schedule:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
-      else if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation') this.notify(task);
+      else if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation' || (waitingForCommand&&task.state==='waiting_input'&&task.automationController!=='user'&&task.executionControl?.phase!=='paused')) this.notify(task);
       return task;
     });
   }

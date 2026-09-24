@@ -403,3 +403,53 @@ test('recovery cooldown lets later unknown tasks get inspected instead of starvi
  adapter.recover=jest.fn(async()=>undefined);await controller.tick();await new Promise(setImmediate);await controller.tick();
  expect(new Set(jest.mocked(adapter.recover).mock.calls.map(c=>c[0].taskId))).toEqual(new Set(ids));
 });
+
+test('same approved browser task navigates only on the explicitly revised website',async()=>{
+ const browserTarget={adapter:'browser',sessionId:'approved-tab',name:'Same tab',startUrl:'https://old.example/'};
+ const browserAdapter={...adapter,name:'browser',resolve:()=>browserTarget};
+ controller=new GatewayTaskController(tasks,new Map([['browser',browserAdapter]]));
+ const first=tasks.spawn({...context,actionId:'browser-nav-spawn'},{title:'Browser',instructions:'Read old site',targetProfile:'gateway-managed',gatewayTarget:browserTarget});
+ outcome={type:'completed',result:{summary:'Read',artifactIds:[]}};
+ await controller.tick();
+ const second=tasks.update({...context,actionId:'browser-nav-update'},first.taskId,1,'Read new site','when_ready',undefined,undefined,'https://new.example/');
+ expect(second.taskId).toBe(first.taskId);expect(second.gatewayTarget?.sessionId).toBe('approved-tab');
+ await controller.tick();
+ expect(browserAdapter.submit).toHaveBeenLastCalledWith(expect.objectContaining({taskId:first.taskId}),expect.any(String),'Read new site',undefined,true,undefined,'https://new.example/');
+ tasks.update({...context,actionId:'browser-nav-followup'},first.taskId,2,'Read next section','when_ready');
+ await controller.tick();
+ expect((browserAdapter.submit as jest.Mock).mock.calls.at(-1)).toHaveLength(6);
+});
+test('browser navigation requires explicit authority, valid URL and a browser task',()=>{
+ const task=tasks.spawn({...context,actionId:'browser-nav-validation'},{title:'Browser',instructions:'Read',targetProfile:'gateway-managed',gatewayTarget:{adapter:'browser',sessionId:'approved-tab',name:'Browser'}});
+ for(const url of ['file:///etc/passwd','javascript:alert(1)','https://user:password@example.com',123]){
+  expect(()=>tasks.update({...context,actionId:'bad-nav-'+String(url)},task.taskId,1,'Read','when_ready',undefined,undefined,url)).toThrow('INVALID_BROWSER_START_URL');
+ }
+ expect(()=>tasks.update({...context,execute:false,actionId:'unapproved-nav'},task.taskId,1,'Read','when_ready',undefined,undefined,'https://example.com')).toThrow('EXECUTION_DENIED');
+ const other=spawn();expect(()=>tasks.update({...context,actionId:'nonbrowser-nav'},other.taskId,1,'Read','when_ready',undefined,undefined,'https://example.com')).toThrow('INVALID_BROWSER_START_URL');
+});
+
+function waitingControlStep(){
+ const task=tasks.spawn({...context,actionId:`step-${++sequence}`},{title:'Flight',instructions:'Open destinations',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'browser'}});
+ const attempt=tasks.claim(task.taskId)!;tasks.started(attempt.attemptId,attempt.generation);
+ tasks.finish(attempt.attemptId,attempt.generation,{type:'paused',browserReport:{contractVersion:1,status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1}});
+ return store.task(task.taskId)!;
+}
+test('agent control notifies after an action and accepts a scoped next step without old goal replay',()=>{
+ const task=waitingControlStep();expect(task.state).toBe('waiting_input');
+ expect(store.all('SELECT * FROM notifications WHERE task_id=?',task.taskId)).toHaveLength(1);
+ store.run("UPDATE notifications SET status='assigned',decision_id=? WHERE task_id=?",context.decisionId,task.taskId);
+ const next=tasks.update({...context,execute:false,actionId:'next-control-step'},task.taskId,task.revision,'Type Tokyo','when_ready');
+ expect(next.state).toBe('queued');expect(next.taskId).toBe(task.taskId);
+ expect(tasks.revision(task.taskId,next.revision).instructions).toBe('Type Tokyo');
+});
+test('user control invalidates agent continuation and switching back does not replay work',()=>{
+ const task=waitingControlStep();store.run("UPDATE notifications SET status='assigned',decision_id=? WHERE task_id=?",context.decisionId,task.taskId);
+ const command={id:randomUUID(),action:'user' as const,expectedRevision:task.revision};
+ const switched=tasks.controlByUser(context.conversationId,context.principalId,task.taskId,command);
+ expect(switched.automationController).toBe('user');expect(switched.state).toBe('waiting_input');
+ expect(tasks.controlByUser(context.conversationId,context.principalId,task.taskId,command).revision).toBe(task.revision);
+ expect(()=>tasks.update({...context,execute:false,actionId:'stale-controller'},task.taskId,task.revision,'Click','when_ready')).toThrow('USER_CONTROLS_AUTOMATION');
+ expect(()=>tasks.controlByUser(context.conversationId,'foreign',task.taskId,{...command,id:randomUUID()})).toThrow();
+ const resumed=tasks.controlByUser(context.conversationId,context.principalId,task.taskId,{id:randomUUID(),action:'agent',expectedRevision:task.revision});
+ expect(resumed.state).toBe('waiting_input');expect(resumed.revision).toBe(task.revision);expect(resumed.activeAttemptId).toBeUndefined();
+});

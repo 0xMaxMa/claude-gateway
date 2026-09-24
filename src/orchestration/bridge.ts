@@ -189,6 +189,7 @@ export class TaskBridge {
               }
               case 'task_cancel': result = this.tasks.cancel(context, a.task_id, a.replaced_by_task_id); break;
               case 'task_update': {
+                if(a.start_url!==undefined&&a.mode!=='when_ready')throw new OrchestrationError('INVALID_BROWSER_START_URL');
                 if(['verify_browser','reconcile_browser'].includes(a.mode) && (typeof a.evidence_id!=='string'||!a.evidence_id||typeof a.expected_request_id!=='string'||!a.expected_request_id))throw new OrchestrationError('BROWSER_EVIDENCE_REQUIRED','Copy browserEvidence.evidenceId into evidence_id and browserEvidence.requestId into expected_request_id from task_status(browser_evidence=fresh). Retry the same verification/reconciliation with both IDs, expected_revision and instruction. Missing IDs do not mean the browser failed: do not requeue or replay the task.');
                 if(a.mode==='verify_computer'){
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');if(!adapter?.verifyEvidence)throw new OrchestrationError('COMPUTER_VERIFICATION_UNAVAILABLE');
@@ -203,7 +204,7 @@ export class TaskBridge {
                   const adapter=this.gatewayAdapters.get('browser');
                   if(!adapter?.verifyEvidence)throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
                   result=this.tasks.verifyBrowser(context,a.task_id,a.expected_revision,a.expected_request_id,a.evidence_id,a.instruction,()=>adapter.verifyEvidence!(task,a.expected_request_id,a.evidence_id));
-                }else result=this.tasks.update(context,a.task_id,a.expected_revision,a.instruction,a.mode as ChangeMode,a.browser_fields,a.computer_inputs);
+                }else result=this.tasks.update(context,a.task_id,a.expected_revision,a.instruction,a.mode as ChangeMode,a.browser_fields,a.computer_inputs,a.start_url);
                 break;
               }
               case 'task_question': {
