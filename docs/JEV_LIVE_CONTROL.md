@@ -40,3 +40,23 @@ the controller without executing/replaying an action. User control disables
 automatic agent continuation and uses the same text/voice execution destination.
 An in-flight operation still settles before further work; switching controllers
 never removes unknown-operation fences. Idle is not a success claim.
+
+## Validation checkpoint — 2026-09-24
+
+- Loop: 128 tests pass, including a single Thinking fallback, one-action slices,
+  post-action evidence, waiting after repeated blocking, and mutation fences.
+- Gateway: 82 task/control tests plus 7 mailbox tests pass. The mailbox regression
+  checks that agent control can wake without another user message and user control
+  disables that automatic wake path.
+- Web: Agent is the default; switching controller is acknowledged by the gateway
+  before changing text/voice destination. Rejected switches retain the old mode.
+- Live flight test was accepted and the parent created a scoped step to navigate
+  to the initial flights page and inspect it. Execution has not begun: the browser
+  device was offline (online=false, ready=false); permanent consent still exists.
+  This is NOT a completed browser E2E test or proof of autonomous completion.
+- Required live sequence remains: fresh Bangkok–Tokyo round trip, 3 adults and
+  2 children, 25–26 Sep 2026; product search/category/price/cart (no checkout);
+  school search and map zoom both ways; private synthetic spreadsheet with SUM,
+  edits and AVERAGE. Run sequentially after the browser reconnects.
+- Every live case must record the observed result, task/revision and intervention
+  count. Agent continuation alone is not independent proof of task success.
