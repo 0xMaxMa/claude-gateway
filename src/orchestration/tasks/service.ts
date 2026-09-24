@@ -112,7 +112,7 @@ export class TaskService {
     if (!task || task.conversationId !== conversationId) throw new OrchestrationError('ACCESS_DENIED');
     return task;
   }
-  status(conversationId: string, principalId: string, taskId?: string): TaskSnapshot[] {
+  status(conversationId: string, principalId: string, taskId?: string): Array<TaskSnapshot & { currentInstructions?: string }> {
     this.store.assertMember(conversationId, principalId);
     if (taskId) { const task = this.owned(taskId, conversationId); delete task.skill; return [this.withRecentTools(task)]; }
     return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR id IN
@@ -152,7 +152,7 @@ export class TaskService {
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`,
       conversationId, conversationId).map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot);
   }
-  private withRecentTools(task: TaskSnapshot): TaskSnapshot {
+  private withRecentTools(task: TaskSnapshot): TaskSnapshot & { currentInstructions?: string } {
     task.recentTools = this.store.all("SELECT payload_json,occurred_at FROM conversation_events WHERE conversation_id=? AND type='tool.activity' AND json_extract(payload_json,'$.task_id')=? ORDER BY seq DESC LIMIT 8", task.conversationId, task.taskId).map(row => {
       const event = JSON.parse(String(row.payload_json)).payload;
       return {name: String(event.name ?? 'unknown'), description: typeof event.input?.description === 'string' ? taskFailure(new Error(event.input.description)).message.slice(0,512) : undefined, type: String(event.type), isError: event.is_error, occurredAt: Number(row.occurred_at)};
@@ -164,7 +164,11 @@ export class TaskService {
         .map(row => String(row.path).slice(0,2048)),
       currentFilesystemVerified: false,
     };
-    return task;
+    // Direct corrections bypass the parent inference turn. Hydrated status and
+    // notifications must carry the current goal so verification cannot use stale memory.
+    return ['browser','computer'].includes(task.gatewayTarget?.adapter ?? '')
+      ? {...task,currentInstructions:this.revision(task.taskId,task.revision).instructions}
+      : task;
   }
   spawn(context: CommandContext, command: SpawnTask): TaskSnapshot {
     if (command.workingDirectory !== undefined) {

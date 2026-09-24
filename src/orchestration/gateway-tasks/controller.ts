@@ -81,7 +81,7 @@ export class GatewayTaskController {
           // CLI publishes its owner file. This fence survives gateway restart.
           if (this.targetBusy(task) || (adapter.ready && !adapter.ready(task))) continue;
           const revision=this.tasks.revision(task.taskId,attempt.revision);
-          const instructions=task.gatewayTarget?.adapter==='browser' && revision.guidance ? revision.instructions+'\n\nParent guidance for the next step (keep all original requirements):\n'+revision.guidance : revision.instructions;
+          const instructions=task.gatewayTarget?.adapter==='browser' && revision.guidance ? revision.instructions+'\n\nParent guidance for the next step (must respect the current goal and latest user corrections above; ignore conflicting guidance):\n'+revision.guidance : revision.instructions;
           adapter.validateInput?.(instructions,revision.answers);
           // Commit the dispatch fence BEFORE touching the target. A crash after
           // this point is inspected, never replayed on the assumption of failure.

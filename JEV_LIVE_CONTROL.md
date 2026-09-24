@@ -1,4 +1,4 @@
-# Live execution control prototype
+# Live execution control
 
 Browser and Computer Use tasks accept authenticated controls without an inference
 turn or another task. The existing Gateway task remains the durable owner.
@@ -23,7 +23,7 @@ permission. Model-provided task IDs never grant access.
 
 - Pause stops new decisions and mutations, then waits for an already dispatched
   operation to settle. It does not undo that operation.
-- Revise appends a correction that supersedes conflicting requirements, retains
+- Revise prepends the latest correction that supersedes conflicting requirements, retains
   the remaining goal, and starts a fresh observation on the same task after the
   previous attempt settles. Earlier field answers become context rather than
   unconditional text overrides.
@@ -60,6 +60,10 @@ GetPod Web Chat exposes the selected task, Pause/Resume, pending status and an
 Agent conversation option. A single active Browser/Computer task is selected
 initially; multiple tasks require an explicit choice. Selection is scoped to the
 current gateway/agent/session and does not persist a cross-session global target.
+A selected task that ends remains selected until explicitly changed, preventing
+a drafted correction from silently becoming a new agent request. Hydrated task
+status and notifications include `currentInstructions` so parent verification
+uses the corrected goal instead of the original conversation or task title.
 
 ## Validation
 

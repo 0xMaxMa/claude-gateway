@@ -44,6 +44,8 @@ test('direct correction interrupts reasoning, preserves task identity and resume
   await f.pump();expect(f.calls).toHaveLength(2);
   expect(f.calls[1].goal).toContain('Two adults and three children');expect(f.calls[1].goal).toContain('Use Manchester instead');
   expect(f.calls[1].goal.indexOf('Use Manchester instead')).toBeLessThan(f.calls[1].goal.indexOf('Two adults and three children'));
+  expect(f.tasks.status(f.accepted.conversationId,'u',f.task.taskId)[0].currentInstructions).toBe(f.calls[1].goal);
+  expect(f.tasks.status(f.accepted.conversationId,'u')[0].currentInstructions).toBe(f.calls[1].goal);
   expect(f.calls[1].startUrl).toBeUndefined();
   expect(f.store.task(f.task.taskId)).toMatchObject({state:'completed',revision:2,executionControl:{phase:'applied'}});
  }finally{await f.close();}
