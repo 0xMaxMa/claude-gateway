@@ -32,6 +32,8 @@ export interface OrchestrationConfig {
   tasks?: {
     maxConcurrentPerAgent?: number;
     workerIdleTtlMs?: number;
+    /** Idle lifetime of a continuing browser/computer conversation, without holding a lease. */
+    automationIdleTimeoutMs?: number;
     maxConcurrentPerConversation?: number;
     maxQueuedPerConversation?: number;
     maxQueuedPerAgent?: number;
@@ -76,7 +78,7 @@ export const ORCHESTRATION_DEFAULTS = {
   channels: ['api'],
   conversation: { backend: 'inherit' as const, semanticIntake: false, intakeWaitMs: 2000, maxActiveSessions: 2, notificationPolicy: 'existing_receive_path' as const,
     decisionTimeoutMs: 120000, idleTimeoutMs: 120000, startupTimeoutMs: 120000, firstResponseTimeoutMs: 120000, compactionTimeoutMs: 300000, maxDecisionDurationMs: 600000, preemptionGraceMs: 250, maxPendingInputs: 100 },
-  tasks: { maxConcurrentPerAgent: 10, maxConcurrentPerConversation: 10, workerIdleTtlMs: 600000, maxQueuedPerConversation: 20,
+  tasks: { automationIdleTimeoutMs: 1800000, maxConcurrentPerAgent: 10, maxConcurrentPerConversation: 10, workerIdleTtlMs: 600000, maxQueuedPerConversation: 20,
     maxQueuedPerAgent: 100, defaultTimeoutMs: 1800000, idleTimeoutMs: 300000, maxDurationMs: 0, questionReminderMs: 600000, progressStaleMs: 180000, progressNotifyCooldownMs: 300000, repeatedToolThreshold: 6, interruptAckTimeoutMs: 5000, workspaceMode: 'host' as const, projectRoot: '', resourceRetentionDays: 7 },
   events: { retentionDays: 7, maxSubscriberBufferBytes: 1048576 },
   voice: { enabled: false, notes: { enabled: true, provider: 'elevenlabs', model: 'scribe_v2', replyWithVoice: true }, transport: 'websocket' as const, maxActiveSessionsPerConversation: 1, allowedOrigins: [] as string[], language: '',

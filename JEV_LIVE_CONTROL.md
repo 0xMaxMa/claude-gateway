@@ -132,3 +132,14 @@ previous work as cancelled and preserves unknown rather than claiming completion
 Connector removal, grant revocation and conversation membership checks also apply
 to receipt reads. The activity API includes `computerRecovery` guidance for this
 state; clients should show where the owner can review it instead of a bare error.
+## Continuing automation sessions
+
+Browser and computer tasks now have `automationSession` alongside the existing per-round `state` and attempt history. Successful and settled failed rounds become `idle`; their success/failure evidence remains available. Uncertain effects remain `blocked` and require fresh scoped reconciliation. No inference loop or lease is held while idle.
+
+An input targeting idle automation is interpreted by the parent agent. Questions get an agent response; a next goal uses `task_update` with the same task ID, current revision and the complete next goal. Completed instructions are not concatenated or replayed. A new dispatch acquires fresh authorization/ownership and observation; the original start URL is not replayed. Duplicate `task_spawn` for an open binding returns the existing task ID with continuation guidance.
+
+`task_cancel`/the authenticated cancel API explicitly ends the automation session, including while the last round is already completed or failed. Closing a session does not change a stored successful round into a failed round. Active cancellation still waits for stop confirmation; a closed conversation is not evidence that an uncertain mutation was rolled back.
+
+`orchestration.tasks.automationIdleTimeoutMs` defaults to 30 minutes. Idle/blocked/waiting periods carry a persisted timestamp. Expiry is evaluated on reads and before new commands, including after restart, without a polling agent or extending expiry on page refresh. Closed sessions require renewed user authorization for new work; they do not replay old operations. Existing browser/computer tasks are projected using their last recorded update, so upgrades do not silently grant another full idle interval.
+
+Web clients should retain open automation entries and selection after a round ends, show `idle` without a typing indicator, and offer explicit End automation. A selected closed task remains visible as closed until the user changes destination, so drafted input is never silently redirected.

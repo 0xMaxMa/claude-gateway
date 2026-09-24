@@ -1,3 +1,4 @@
+import {syncAutomationSession} from './tasks/automation-session';
 import { advanceTiming } from './tasks/timing';
 import { VoiceReplyMode, VOICE_REPLY_MODES } from './voice-reply-policy';
 import { DatabaseSync, SQLInputValue } from 'node:sqlite';
@@ -370,6 +371,7 @@ export class OrchestrationStore {
     if (!this.inTransaction) throw new OrchestrationError('TRANSACTION_REQUIRED');
     delete task.providerWaiting;
     if (task.state !== 'queued') this.run('DELETE FROM provider_waits WHERE entity_id=?', task.taskId);
+    syncAutomationSession(task);
     advanceTiming(task);
     task.stateVersion = expectedVersion + 1; task.updatedAt = Date.now();
     const changed = this.run(`UPDATE tasks SET state=?,state_version=?,revision=?,active_attempt_id=?,snapshot_json=?,updated_at=? WHERE id=? AND state_version=?`,

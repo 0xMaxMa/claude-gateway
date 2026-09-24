@@ -22,6 +22,12 @@ for(const modality of ['text','live_voice'] as const)test(`${modality} correctio
   expect(store.get('SELECT status FROM conversation_inputs WHERE id=?',first.inputId)!.status).toBe('accepted');
   expect(tasks.revision(task.taskId,2).instructions).toContain('Two adults, three children');
   expect(store.get("SELECT COUNT(*) AS n FROM assistant_responses WHERE state='completed'")!.n).toBe(0);
+  const settled=store.task(task.taskId)!;
+  store.transaction(()=>{settled.state='completed';settled.executionControl=undefined;store.saveTask(settled,settled.stateVersion);});
+  const nextGoal=liveExecutionInput(store,tasks,{...input,text:'Now inspect the results',ingressKey:randomUUID()},capabilities)!;
+  expect(nextGoal).toMatchObject({status:'needs_agent',code:'AUTOMATION_IDLE',taskId:task.taskId});
+  expect(store.task(task.taskId)!.revision).toBe(2);
+  expect(store.get('SELECT status FROM conversation_inputs WHERE id=?',nextGoal.inputId)!.status).toBe('accepted');
   const other=liveExecutionInput(store,tasks,{...input,scope:{...scope,agentSessionId:'other',chatId:'other'},ingressKey:randomUUID()},capabilities)!;
   expect(other.task).toBeUndefined();expect(store.task(task.taskId)!.revision).toBe(2);
   const denied=liveExecutionInput(store,tasks,{...input,ingressKey:randomUUID()},{execute:false,writeMemory:false})!;

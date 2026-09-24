@@ -1,3 +1,4 @@
+import {automationSession} from './automation-session';
 import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
 import { isAbsolute } from 'path';
 import { parseWorkflow, advanceWorkflow } from '../workflow';
@@ -37,7 +38,7 @@ export function taskIndexEntry(task: TaskSnapshot) {
     cancellation: task.cancellation, replacedByTaskId: task.replacedByTaskId,
     workstreamId: task.workstreamId, continueTaskId: task.continueTaskId, continuationPolicy: task.continuationPolicy,
     resultAvailable: Boolean(task.result),
-    gatewayTarget: task.gatewayTarget,
+    gatewayTarget: task.gatewayTarget, automationSession: automationSession(task),
     details: { tool: 'task_status', task_id: task.taskId },
   };
 }
@@ -115,7 +116,7 @@ export class TaskService {
   status(conversationId: string, principalId: string, taskId?: string): Array<TaskSnapshot & { currentInstructions?: string }> {
     this.store.assertMember(conversationId, principalId);
     if (taskId) { const task = this.owned(taskId, conversationId); delete task.skill; return [this.withRecentTools(task)]; }
-    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR id IN
+    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
       (SELECT id FROM tasks WHERE conversation_id=? AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT 100))
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`, conversationId, conversationId).map(row => {
       const task = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
@@ -147,12 +148,13 @@ export class TaskService {
   }
   /** Bounded recent-task page: every unfinished task, plus only the newest finished ones. */
   private indexPage(conversationId: string): TaskSnapshot[] {
-    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR id IN
+    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
       (SELECT id FROM tasks WHERE conversation_id=? AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT ${INDEXED_FINISHED_TASKS}))
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`,
       conversationId, conversationId).map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot);
   }
   private withRecentTools(task: TaskSnapshot): TaskSnapshot & { currentInstructions?: string } {
+    task.automationSession = automationSession(task);
     task.recentTools = this.store.all("SELECT payload_json,occurred_at FROM conversation_events WHERE conversation_id=? AND type='tool.activity' AND json_extract(payload_json,'$.task_id')=? ORDER BY seq DESC LIMIT 8", task.conversationId, task.taskId).map(row => {
       const event = JSON.parse(String(row.payload_json)).payload;
       return {name: String(event.name ?? 'unknown'), description: typeof event.input?.description === 'string' ? taskFailure(new Error(event.input.description)).message.slice(0,512) : undefined, type: String(event.type), isError: event.is_error, occurredAt: Number(row.occurred_at)};
@@ -184,6 +186,11 @@ export class TaskService {
     if (command.gatewayTarget && (command.workingDirectory || command.skill || command.contextRefs?.length)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
     return this.command(context, 'spawn', command, true, () => {
       const conversation = this.store.get('SELECT * FROM conversations WHERE id=?', context.conversationId)!;
+      if(['browser','computer'].includes(command.gatewayTarget?.adapter ?? '')) {
+        const existing=this.store.all("SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.gatewayTarget.adapter')=? AND json_extract(snapshot_json,'$.gatewayTarget.sessionId')=?",context.conversationId,command.gatewayTarget!.adapter,command.gatewayTarget!.sessionId).map(row=>JSON.parse(String(row.snapshot_json)) as TaskSnapshot).find(task=>task.ownerPrincipalId===context.principalId && automationSession(task)?.status!=='closed');
+        if(existing)throw new OrchestrationError('AUTOMATION_SESSION_EXISTS',`This device session already has task ${existing.taskId} at revision ${existing.revision}. Inspect it and use task_update when_ready for the next goal on the same task. Do not open another tab or replay completed work.`);
+      }
+
       const available = new Set<string>();
       for (const input of this.store.all('SELECT id,attachment_refs_json FROM conversation_inputs WHERE conversation_id=?', context.conversationId)) {
         available.add(String(input.id)); available.add(`input:${input.id}`);
@@ -209,7 +216,9 @@ export class TaskService {
         task.continuationPolicy = command.continuationPolicy ?? 'after_success';
         task.latestProgress = { source: 'runtime', observedAt: now, text: `Queued after task ${prior.taskId} (${task.continuationPolicy}).` };
       }
-      if (command.gatewayTarget) task.gatewayTarget = command.gatewayTarget;
+      if (command.gatewayTarget) { task.gatewayTarget = command.gatewayTarget;
+        if (["browser","computer"].includes(command.gatewayTarget.adapter)) task.automationSession={status:"active",idleTimeoutMs:this.config.tasks.automationIdleTimeoutMs};
+      }
       if (command.skill) task.skill = command.skill;
       if (context.model && !command.gatewayTarget) task.model = context.model;
       const projectRoot = command.workingDirectory || (this.config.tasks.workspaceMode === 'host' && prior?.resourceProfile?.mode === 'host' ? prior.resourceProfile.projectRoot : undefined) || this.config.tasks.projectRoot || this.defaultProjectRoot;
@@ -228,6 +237,7 @@ export class TaskService {
     if (!['when_ready', 'interrupt_and_resume'].includes(mode)) throw new OrchestrationError('INVALID_INPUT');
     return this.command(context, 'update', { taskId, expectedRevision, instruction, mode }, context.execute, () => {
       const task = this.owned(taskId, context.conversationId), version = task.stateVersion;
+      if(automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED','This automation session was ended or expired. Ask for a new authorized session; never replay its previous action.');
       const completionReview = task.gatewayTarget?.adapter === 'browser' && task.state === 'needs_reconciliation' &&
         Boolean(task.activeAttemptId) && task.browserReport?.status === 'needs_verification' &&
         ['COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(task.browserReport.reason) &&
@@ -271,7 +281,7 @@ export class TaskService {
         ...(!context.execute ? { instructions: priorRevision.instructions, answers: priorRevision.answers, originatingInputId: priorRevision.originatingInputId, guidance: instruction, guidanceBasis: {attemptId: task.activeAttemptId, workflowVersion: task.workflow?.version??0, progressAt: task.latestProgress?.observedAt??0} } : {}),
         ...(browserRecovery ? {browserRecoveryCount:(priorRevision.browserRecoveryCount ?? 0)+1,guidanceBasis:undefined} : {}) };
       this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify(revision));
-      if (task.gatewayTarget && ['completed','failed'].includes(task.state)) { task.state='queued'; delete task.failure; delete task.result; delete task.browserReport; delete task.computerReport; delete task.latestProgress; if(context.execute)task.initiatingInputId=context.inputId; }
+      if (task.gatewayTarget && ['completed','failed'].includes(task.state)) { task.state='queued'; delete task.gatewayDispatch; delete task.executionControl; delete task.failure; delete task.result; delete task.browserReport; delete task.computerReport; delete task.latestProgress; if(context.execute)task.initiatingInputId=context.inputId; }
       if (task.state === 'waiting_input') { task.pendingQuestion = undefined; task.state = task.activeAttemptId ? (task.gatewayTarget ? 'running' : 'interrupting') : 'queued'; }
       else if (mode === 'interrupt_and_resume' && task.activeAttemptId) task.state = 'interrupting';
       this.store.saveTask(task, version);
@@ -291,6 +301,7 @@ export class TaskService {
       const prior=this.store.get('SELECT * FROM task_commands WHERE action_id=?',id);
       if(prior){if(prior.principal_id!==principalId||prior.conversation_id!==conversationId)throw new OrchestrationError('ACCESS_DENIED');if(prior.payload_hash!==hash)throw new OrchestrationError('IDEMPOTENCY_CONFLICT');return task;}
       if(!['browser','computer'].includes(task.gatewayTarget?.adapter??'')||!task.capabilities.execute)throw new OrchestrationError('EXECUTION_DENIED');
+      if(automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
       if(task.revision!==command.expectedRevision)throw new OrchestrationError('REVISION_CONFLICT');
       const paused=task.state==='waiting_input'&&task.executionControl?.phase==='paused'&&!task.activeAttemptId;
       const stoppedBrowser=command.action==='revise' && task.state==='failed' && !task.activeAttemptId &&
@@ -337,7 +348,11 @@ export class TaskService {
       if (replacedByTaskId === taskId) throw new OrchestrationError('INVALID_REPLACEMENT');
       this.owned(replacedByTaskId, conversationId);
     }
-    if (TERMINAL_TASK_STATES.has(task.state)) return task;
+    if (TERMINAL_TASK_STATES.has(task.state)) {
+      const session=automationSession(task);
+      if(session && session.status!=='closed'){task.automationSession={...session,status:'closed',closedAt:Date.now(),closedReason:requestedBy};this.store.saveTask(task,task.stateVersion);}
+      return task;
+    }
     if (task.state === 'cancel_requested') {
       if (replacedByTaskId) { task.replacedByTaskId = replacedByTaskId; this.store.saveTask(task, task.stateVersion); }
       return task;
@@ -765,6 +780,7 @@ export class TaskService {
     boundedText(instructions,8000);boundedText(requestId,256);boundedText(evidenceId,128);
     return this.command(context,'reconcile_browser',{taskId,revision,requestId,evidenceId,instructions},true,()=>{
       const task=this.owned(taskId,context.conversationId);
+      if(automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
       if(!context.execute||!task.capabilities.execute||task.ownerPrincipalId!==context.principalId)throw new OrchestrationError('EXECUTION_DENIED');
       if(task.gatewayTarget?.adapter!=='browser'||task.state!=='needs_reconciliation'||!task.activeAttemptId||task.revision!==revision||task.gatewayDispatch?.requestId!==requestId)throw new OrchestrationError('STATE_CONFLICT');
       const resolution=check(),attempt=this.store.attempt(task.activeAttemptId)!;

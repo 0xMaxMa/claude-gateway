@@ -30,7 +30,7 @@ function fixture(unknown=false){
   const command={id:randomUUID(),action,expectedRevision:store.task(task.taskId)!.revision,...(text?{text}:{})};
   const updated=tasks.controlByUser(accepted.conversationId,'u',task.taskId,command);controller.signalControl(updated);return command;
  };
- return {store,tasks,task,accepted,calls,pump,control,close:async()=>{await controller.close();store.close();rmSync(root,{recursive:true,force:true});}};
+ return {store,tasks,task,accepted,context,calls,pump,control,close:async()=>{await controller.close();store.close();rmSync(root,{recursive:true,force:true});}};
 }
 
 test('direct correction interrupts reasoning, preserves task identity and resumes without navigating again',async()=>{
@@ -116,4 +116,40 @@ test('direct correction can recover a known stopped computer task but cannot rec
    if(['NO_SUPPORTED_ACTION','ACTION_BUDGET'].includes(reason)){expect(apply()).toMatchObject({taskId:task.taskId,state:'queued',revision:2});}else expect(apply).toThrow('STATE_CONFLICT');
   }finally{await f.close();}
  }
+});
+
+
+test('completed rounds remain idle, continue on the same task without navigating, and explicit end fences further work',async()=>{
+ const f=fixture();try{
+  await f.pump();f.control('revise','Use Manchester');await f.pump();
+  const completed=f.store.task(f.task.taskId)!;
+  expect(completed.automationSession).toMatchObject({status:'idle',idleTimeoutMs:1800000});
+  expect(completed.activeAttemptId).toBeUndefined();
+  const next=f.tasks.update({...f.context,actionId:'next-goal'},completed.taskId,completed.revision,'Read the visible flight results, without repeating the search','when_ready');
+  expect(next).toMatchObject({taskId:completed.taskId,state:'queued',automationSession:{status:'active'}});
+  await f.pump();expect(f.calls).toHaveLength(3);expect(f.calls[2].startUrl).toBeUndefined();
+  expect(f.calls[2].goal).toBe('Read the visible flight results, without repeating the search');
+  expect(f.store.task(completed.taskId)?.automationSession?.status).toBe('idle');
+  expect(f.store.all('SELECT id FROM tasks')).toHaveLength(1);
+  const ended=f.tasks.cancelByUser(f.accepted.conversationId,'u',completed.taskId);
+  expect(ended).toMatchObject({state:'completed',automationSession:{status:'closed',closedReason:'user'}});
+  expect(()=>f.tasks.update({...f.context,actionId:'after-end'},ended.taskId,ended.revision,'Continue','when_ready')).toThrow('This automation session was ended or expired');
+  await f.pump();expect(f.calls).toHaveLength(3);
+ }finally{await f.close();}
+});
+test('idle timeout survives reads and blocks resuming without running inference',async()=>{
+ const f=fixture();try{
+  await f.pump();f.control('revise','Use Manchester');await f.pump();
+  const t=f.store.task(f.task.taskId)!;
+  f.store.transaction(()=>{t.automationSession!.idleSince=Date.now()-1800001;f.store.saveTask(t,t.stateVersion);});
+  expect(f.tasks.status(f.accepted.conversationId,'u',t.taskId)[0].automationSession).toMatchObject({status:'closed',closedReason:'idle_timeout'});
+  expect(()=>f.tasks.update({...f.context,actionId:'expired'},t.taskId,t.revision,'Continue','when_ready')).toThrow('This automation session was ended or expired');
+  await f.pump();expect(f.calls).toHaveLength(2);
+ }finally{await f.close();}
+});
+test('an open automation session rejects a duplicate spawn and names its existing task',async()=>{
+ const f=fixture();try{
+  expect(()=>f.tasks.spawn({...f.context,actionId:'duplicate'},{title:'Another goal',instructions:'Read current page',targetProfile:'gateway-managed',gatewayTarget:f.task.gatewayTarget})).toThrow(f.task.taskId);
+  expect(f.store.all('SELECT id FROM tasks')).toHaveLength(1);
+ }finally{await f.close();}
 });

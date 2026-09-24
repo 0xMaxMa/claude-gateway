@@ -51,6 +51,7 @@ export interface GatewayTaskTarget {
   noBootstrap?: boolean;
 }
 export interface TaskSnapshot {
+  automationSession?: import("./tasks/automation-session").AutomationSession;
   executionControl?: {id:string;action:'pause'|'revise'|'resume';revision:number;phase:'pending'|'applied'|'paused'|'blocked';requestedAt:number};
   computerReport?:ComputerTaskReport;
   gatewayTarget?: GatewayTaskTarget;

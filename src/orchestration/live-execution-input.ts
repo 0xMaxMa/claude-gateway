@@ -1,3 +1,4 @@
+import {automationSession} from './tasks/automation-session';
 import {AcceptInput, OrchestrationStore} from './store';
 import {TaskService} from './tasks/service';
 import {ExecutionCapabilities, OrchestrationError, TaskSnapshot} from './types';
@@ -22,6 +23,11 @@ export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,in
       const current=store.task(target);
       if(!current||current.agentSessionId!==input.scope.agentSessionId||current.conversationId!==receipt.conversationId||current.ownerPrincipalId!==input.scope.principalId)throw new OrchestrationError('ACCESS_DENIED');
       control.taskId=target;
+      const session=automationSession(current);
+      if(session?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
+      // Idle input may be a question or a new goal. Let the agent interpret it and
+      // update this task; never append a completed goal as instructions to replay.
+      if(session?.status==='idle' && ['completed','failed'].includes(current.state))throw new OrchestrationError('AUTOMATION_IDLE');
       if(input.attachmentIds?.length)throw new OrchestrationError('INVALID_INPUT');
       task=tasks.controlByUser(receipt.conversationId,input.scope.principalId,target,{id:receipt.inputId,action:'revise',expectedRevision:current.revision,text:input.text});
       control={...control,status:'applied',revision:task.revision};
