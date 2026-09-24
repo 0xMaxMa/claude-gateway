@@ -142,6 +142,11 @@ test('enabled app browser schemas discover, inspect and verify only scoped brows
     const taskId=String(rows[0].id);
     const proof=await agent.call({task_id:taskId,browser_evidence:'fresh'},'task_status');
     expect(proof.browserEvidence.fresh.observation.elements[0].value).toBe('Expected');
+    expect(proof.verification.arguments).toMatchObject({task_id:taskId,mode:'verify_browser',evidence_id:proof.browserEvidence.evidenceId});
+    const incomplete=await agent.call({task_id:taskId,expected_revision:f.store.task(taskId)!.revision,mode:'verify_browser',expected_request_id:proof.browserEvidence.requestId,instruction:'Name matches'},'task_update');
+    expect(incomplete).toMatchObject({error:'BROWSER_EVIDENCE_REQUIRED',message:expect.stringContaining('evidence_id')});
+    expect(f.store.task(taskId)!.revision).toBe(1);
+
     const foreign=f.issue({role:'agent',context:{...f.context,principalId:'foreign'}});
     expect(await foreign.call({task_id:taskId,browser_evidence:'fresh'},'task_status')).toHaveProperty('error');
     let hookStarted!:()=>void,releaseHook!:()=>void;const hookEntered=new Promise<void>(resolve=>{hookStarted=resolve;});

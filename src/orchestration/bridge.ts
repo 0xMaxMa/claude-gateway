@@ -1,3 +1,4 @@
+import {parentVerifiableBrowserResult} from '../jev/browser-contract';
 import { JevError } from '../jev/types';
 import type { GatewayTaskAdapter } from './gateway-tasks/controller';
 import { CRON_TOOLS } from '../cron/tool-schemas';
@@ -160,12 +161,17 @@ export class TaskBridge {
                   const evidence=await adapter.evidence(task,a.browser_evidence==='fresh',this.cancellations.get(token!)?.signal);
                   if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
                   this.tasks.store.assertMember(context.conversationId,context.principalId);
-                  result={tasks:rows,browserEvidence:evidence,untrustedPageContent:true};
+                  result={tasks:rows,browserEvidence:evidence,untrustedPageContent:true,
+                    ...(evidence.evidenceId && parentVerifiableBrowserResult(task.browserReport) ? {verification:{
+                      instruction:'If this fresh observation independently proves the current goal, call task_update with these exact fields plus your concrete evidence in instruction. Do not run the task again merely to report the observed result.',
+                      tool:'task_update',arguments:{task_id:task.taskId,expected_revision:task.revision,mode:'verify_browser',expected_request_id:evidence.requestId,evidence_id:evidence.evidenceId}
+                    }} : {})};
                 }else result=rows;
                 break;
               }
               case 'task_cancel': result = this.tasks.cancel(context, a.task_id, a.replaced_by_task_id); break;
               case 'task_update': {
+                if(['verify_browser','reconcile_browser'].includes(a.mode) && (typeof a.evidence_id!=='string'||!a.evidence_id||typeof a.expected_request_id!=='string'||!a.expected_request_id))throw new OrchestrationError('BROWSER_EVIDENCE_REQUIRED','Copy browserEvidence.evidenceId into evidence_id and browserEvidence.requestId into expected_request_id from task_status(browser_evidence=fresh). Retry the same verification/reconciliation with both IDs, expected_revision and instruction. Missing IDs do not mean the browser failed: do not requeue or replay the task.');
                 if(a.mode==='reconcile_browser'){
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
                   const adapter=this.gatewayAdapters.get('browser');
@@ -227,7 +233,7 @@ export class TaskBridge {
         const code = error instanceof JevError ? `JEV_${error.code}` : error instanceof OrchestrationError ? error.code : 'INVALID_REQUEST';
         if (code === 'ACCESS_DENIED' && denialReason) console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', message: 'Task bridge authorization denied', data: { agentId: this.tasks.store.agentId, reason: denialReason } }));
         response.statusCode = code === 'ACCESS_DENIED' ? 403 : 400;
-        response.end(JSON.stringify({ error: code, ...(error instanceof JevError ? {message:error.message,...error.metadata} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        response.end(JSON.stringify({ error: code, ...(error instanceof JevError ? {message:error.message,...error.metadata} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED', 'BROWSER_EVIDENCE_REQUIRED', 'LIVE_CONTROL_TARGET_ONLY', 'AUTOMATION_SESSION_EXISTS', 'AUTOMATION_SESSION_CLOSED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;
