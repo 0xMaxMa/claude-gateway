@@ -134,14 +134,31 @@ describe('file share store', () => {
     });
 
   describe('token + persistence (§9)', () => {
-    test('token is 32-char base64url and lookup round-trips', () => {
+    test('token is 32 chars over the safe alphabet and lookup round-trips', () => {
       const m = mint();
       expect(m.token).toMatch(SHARE_TOKEN_RE);
+      expect(m.token).toMatch(/^[A-Za-z0-9-]{32}$/);
       const row = store.lookupByToken(m.token);
       expect(row).not.toBeNull();
       expect(row!.shareId).toBe(m.shareId);
       expect(row!.agentId).toBe(AGENT);
       expect(row!.relativePath).toBe(`${SESSION}/ok.png`);
+    });
+
+    // #532: a `_` in the token gets silently eaten by Telegram's (and other
+    // chat clients') `_..._`-as-italic auto-Markdown before the link ever
+    // reaches the user, corrupting the URL into a 404. Newly minted tokens
+    // must never contain `_` — sampled broadly since this is a probabilistic
+    // property of the generator, not a single-call assertion.
+    test('generated tokens never contain `_` (#532, many-sample check)', () => {
+      const seen = new Set<string>();
+      for (let i = 0; i < 500; i++) {
+        const m = mint({ dedupeRef: `path:${SESSION}/sample-${i}.png` });
+        expect(m.token).not.toContain('_');
+        expect(m.token).toMatch(/^[A-Za-z0-9-]{32}$/);
+        seen.add(m.token);
+      }
+      expect(seen.size).toBe(500); // uniqueness sanity check on top of the format check
     });
 
     test('only the SHA-256 hash is persisted — plaintext token never touches the DB', () => {
@@ -164,6 +181,30 @@ describe('file share store', () => {
       expect(store.lookupByToken('short')).toBeNull();
       expect(store.lookupByToken('../../../etc/passwd')).toBeNull();
       expect(store.lookupByToken('x'.repeat(64))).toBeNull();
+    });
+
+    // AC #7 (#532): a token minted by the pre-fix base64url generator (which
+    // could contain `_`) must keep resolving via lookupByToken until its own
+    // TTL expires — SHARE_TOKEN_RE is an unchanged superset of the new
+    // alphabet, so this is a pure persistence-row test, not a mock of the
+    // old generator.
+    test('a legacy token containing `_` still resolves (backward compat, AC #7)', () => {
+      const legacyToken = 'aB3_dE5-gH7_jK9mN1pQ3rS5tU7vW9xY';
+      expect(legacyToken).toMatch(SHARE_TOKEN_RE);
+      const tokenHash = createHash('sha256').update(legacyToken).digest();
+      const raw = new DatabaseSync(dbPath);
+      raw
+        .prepare(
+          `INSERT INTO file_shares (id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at, allow_kind)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run('shr_legacy', tokenHash, AGENT, SESSION, `${SESSION}/ok.png`, 'codex_ref', Date.now(), Date.now() + 600_000, 'image');
+      raw.close();
+
+      const row = store.lookupByToken(legacyToken);
+      expect(row).not.toBeNull();
+      expect(row!.shareId).toBe('shr_legacy');
+      expect(row!.relativePath).toBe(`${SESSION}/ok.png`);
     });
   });
 

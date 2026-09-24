@@ -10,12 +10,49 @@ import { MediaStore } from '../history/media-store';
  *
  * The gateway MAIN process is the only owner of this DB: MCP subprocesses go
  * through the authenticated HTTP API (share-router.ts) and never open
- * SQLite themselves. Tokens are bearer capabilities: 24 random bytes,
- * base64url, and ONLY the SHA-256 hash is persisted — the plaintext token
- * exists in the mint response (and a short-lived in-memory dedupe cache) only.
+ * SQLite themselves. Tokens are bearer capabilities: 32 chars over
+ * SAFE_ID_ALPHABET (~191 bits), and ONLY the SHA-256 hash is persisted — the
+ * plaintext token exists in the mint response (and a short-lived in-memory
+ * dedupe cache) only.
  */
 
-/** randomBytes(24) → base64url without padding = 32 chars. */
+/**
+ * Alphabet with no `_` for newly minted share tokens (#532): a `_..._` run
+ * embedded in a URL gets silently corrupted by `_..._`-as-italic
+ * auto-Markdown formatters (Telegram's `toTelegramHtml`, and potentially
+ * Discord/Slack `mrkdwn` or a chat client's own auto-format on paste) before
+ * the link ever reaches the user. Excluding `_` from generation is the only
+ * fix that protects every such surface, not just Telegram's.
+ */
+const SAFE_ID_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-';
+
+/**
+ * Uniform random string over `SAFE_ID_ALPHABET` via rejection sampling.
+ * `byte % alphabet.length` would bias low symbols since 256 is not a multiple
+ * of 63 (the alphabet size); rejecting bytes >= the largest multiple of 63
+ * that fits a byte keeps every symbol equally likely. 32 chars over a
+ * 63-symbol alphabet is ~5.977 bits/char (~191 bits), matching the entropy of
+ * the base64url token this replaces (24 random bytes = 192 bits).
+ */
+function randomSafeId(length: number): string {
+  const n = SAFE_ID_ALPHABET.length;
+  const limit = 256 - (256 % n);
+  const out: string[] = [];
+  while (out.length < length) {
+    const buf = randomBytes(length - out.length);
+    for (let i = 0; i < buf.length && out.length < length; i++) {
+      const byte = buf[i];
+      if (byte < limit) out.push(SAFE_ID_ALPHABET[byte % n]);
+    }
+  }
+  return out.join('');
+}
+
+/** Accepts both the new `_`-free alphabet and the legacy base64url alphabet
+ *  (which could contain `_`) so shares minted before #532 keep resolving via
+ *  lookupByToken until their own TTL expires (max 24h, see MAX_TTL_SECONDS
+ *  in share-router.ts) — no early invalidation, no dual-format branch needed
+ *  since this is purely a validation-side superset. */
 export const SHARE_TOKEN_RE = /^[A-Za-z0-9_-]{32}$/;
 
 /** Idempotent-mint window (§17.4): a re-mint for the same (agent, session,
@@ -466,7 +503,7 @@ export class ShareStore {
     if (cached && now - cached.mintedAtMs < MINT_DEDUPE_WINDOW_MS && cached.expiresAtMs > now) {
       return { shareId: cached.shareId, token: cached.token, expiresAtMs: cached.expiresAtMs, deduped: true };
     }
-    const token = randomBytes(24).toString('base64url');
+    const token = randomSafeId(32);
     const tokenHash = createHash('sha256').update(token).digest();
     const shareId = `shr_${randomBytes(9).toString('base64url')}`;
     const expiresAtMs = now + a.ttlSeconds * 1000;
