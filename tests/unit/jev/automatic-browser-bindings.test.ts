@@ -28,11 +28,12 @@ test('credential change during discovery prevents publication',async()=>{
  jest.mocked(resolveBrowserConnection).mockReturnValueOnce({endpoint:'https://browser.example/mcp',headers:{Authorization:'old'}}).mockReturnValueOnce({endpoint:'https://browser.example/mcp',headers:{Authorization:'new'}});
  const a=new AutomaticBrowserBindings(config(),{id:'a'} as any,join(dir,'b'),jest.fn().mockResolvedValue(reply([grant])));await expect(a.refresh('p','c')).rejects.toThrow('BROWSER_CONNECTOR_CHANGED');expect(a.config()!.bindings).toEqual([]);
 });
-test('legacy Thinking configuration no longer changes browser bindings',()=>{
+test('browser-specific reasoning config takes precedence over shared Thinking config',()=>{
  const cfg=config();cfg.gateway.jev.browser.textHelper={baseUrl:'https://legacy.example/v1',model:'old',apiKeyEnv:'OLD_TEXT'};
  const a=new AutomaticBrowserBindings(cfg,{id:'a'} as any,join(dir,'b'));
  expect(a.config()!.textHelper!.model).toBe('old');
  cfg.gateway.jev.thinking={baseUrl:'https://models.example/v1',model:'small',apiKeyEnv:'THINKING_KEY'};
  expect(a.config()!.textHelper!.model).toBe('old');
  cfg.gateway.jev.thinking.model='new';expect(a.config()!.textHelper!.model).toBe('old');
+ delete cfg.gateway.jev.browser.textHelper;expect(a.config()!.textHelper!.model).toBe('new');
 });

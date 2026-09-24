@@ -39,7 +39,7 @@ export interface BrowserConnectorConfig {
   fields?: Array<{label: string; text: string}>;
   budget?: { maxSteps?: number; maxEvaluations?: number; timeoutMs?: number; maxTextCalls?: number; maxStaleRetries?: number; operationConfidence?: number; targetConfidence?: number };
 }
-/** @deprecated Accepted only for upgrade compatibility; never invokes inference. */
+/** Host-owned connection for Jev Loop tool-free reasoning. */
 export interface BrowserTextHelperConfig { api?:'openai-chat'|'anthropic-messages'; baseUrl:string; model:string; apiKeyEnv?:string; apiKeyFile?:string }
 export interface BrowserIntegrationConfig { bindings: BrowserConnectorConfig[]; textHelper?: BrowserTextHelperConfig }
 export type BrowserToolCall = (name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
@@ -54,6 +54,8 @@ export interface BrowserLogicModule {
   /** Synchronous durable fence in the MCP transport, before any page mutation. */
   beforeMutation?(operationId: string, operation: string): void;
     verify?: (observation: unknown, signal: AbortSignal) => Promise<boolean>;
+    recover?: (request: Record<string,unknown>, signal: AbortSignal) => Promise<{guidance:string|null;fields:Array<{label:string;text:string}>}>;
+    snapshot?: (leaseToken:string,signal:AbortSignal)=>Promise<{mimeType:'image/png';data:string}>;
     resolveFieldText?: (request: unknown, signal: AbortSignal) => Promise<{text: string | null}>;
   }, signal: AbortSignal): Promise<BrowserExecutionResult>;
   mcpBrowserTransport(invoke: (name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<{content: unknown[]; isError?: boolean}>): BrowserToolCall;

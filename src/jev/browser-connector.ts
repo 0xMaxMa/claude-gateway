@@ -1,3 +1,5 @@
+import {thinkingProvider} from './thinking-provider';
+import {thinkBrowserField,thinkBrowserRecovery} from '@0xmaxma/jev-loop/browser-thinking';
 import {requestBrowserConsent} from './browser-consent';
 import { createLoopServer } from '@0xmaxma/jev-loop/mcp';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -82,7 +84,7 @@ async function credential(binding: BrowserConnectorConfig): Promise<string> {
   if (!key || key.length > 16384 || /[\x00-\x20\x7f]/.test(key)) throw Error('BROWSER_CREDENTIAL_UNAVAILABLE');
   return key;
 }
-export async function executeBrowserModule(modulePath: string, binding: BrowserConnectorConfig, context: BrowserExecutionContext, connection?: BrowserConnection): Promise<BrowserExecutionResult> {
+export async function executeBrowserModule(modulePath: string, binding: BrowserConnectorConfig, context: BrowserExecutionContext, connection?: BrowserConnection, helper?:import('./browser-contract').BrowserTextHelperConfig, timezone='UTC'): Promise<BrowserExecutionResult> {
   const assertAccess = () => { if (!context.authorized()) throw Error('ACCESS_DENIED'); };
   assertAccess(); context.signal.throwIfAborted();
   const resolved = isAbsolute(modulePath) ? modulePath : createRequire(__filename).resolve(modulePath);
@@ -128,8 +130,11 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       evaluate: async(request,signal) => { assertAccess(); const response = await context.evaluate(request,signal); assertAccess(); return {model:response.model,answers:response.answers}; },
       progress: event => { assertAccess(); context.progress(event); },
       ...(module.verifyBrowserTask ? {verify:async(observation:unknown,signal:AbortSignal) => {assertAccess();const verified = await module.verifyBrowserTask!(context.goal,observation,signal);assertAccess();signal.throwIfAborted();independentlyVerified=validateBrowserVerification(verified);return independentlyVerified;}} : {}),
-      // Missing field values return FIELD_TEXT_REQUIRED to the owning agent.
-      // Do not inject an independent text model or a package-provided fallback.
+      ...(helper?{
+        resolveFieldText:async(request:unknown,signal:AbortSignal)=>{assertAccess();const result=await thinkBrowserField(await thinkingProvider(helper),{...(request as object),referenceTime:new Date().toISOString(),timezone},signal);assertAccess();return result;},
+        recover:async(request:Record<string,unknown>,signal:AbortSignal)=>{assertAccess();const result=await thinkBrowserRecovery(await thinkingProvider(helper),{...request,referenceTime:new Date().toISOString(),timezone},signal);assertAccess();return result;},
+        snapshot:async(leaseToken:string,signal:AbortSignal)=>{assertAccess();const reply=await client.callTool({name:'page_screenshot',arguments:{...binding.scope,lease_token:leaseToken}},undefined,{signal,timeout:5000});assertAccess();const image=(reply.content as any[]).find(c=>c.type==='image'&&c.mimeType==='image/png');if(reply.isError||!image||typeof image.data!=='string'||image.data.length>8*1024*1024||!/^iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$/.test(image.data))throw Error('BROWSER_EVIDENCE_INVALID');return {mimeType:'image/png' as const,data:image.data};}
+      }:{}),
     }, loopSignal));
     if (result.status === 'succeeded') {
       assertAccess();
@@ -197,7 +202,7 @@ export async function inspectBrowser(binding: BrowserConnectorConfig, result: Pa
 /** Stable binding objects allow live config replacement/revocation to fence active requests. */
 export class BrowserConnectorRegistry {
   private cache = new Map<string,{signature:string;binding:BrowserTaskBinding}>();
-  constructor(private readonly getConfig: () => BrowserIntegrationConfig | undefined, private readonly agentId: string, private readonly connection?: (id:string)=>BrowserConnection) {}
+  constructor(private readonly getConfig: () => BrowserIntegrationConfig | undefined, private readonly agentId: string, private readonly connection?: (id:string)=>BrowserConnection,private readonly timezone:()=>string=()=> 'UTC') {}
   bindings(): BrowserTaskBinding[] {
     const config = this.getConfig();
     validateBrowserIntegration(config);
@@ -206,12 +211,12 @@ export class BrowserConnectorRegistry {
       if (b.agentId !== this.agentId) continue;
       let resolved: BrowserConnection | undefined;
       try { if(b.connectorId) {if(!this.connection)continue;resolved=this.connection(b.connectorId);} } catch { continue; }
-      const signature = createHash('sha256').update(JSON.stringify([b,resolved])).digest('hex');
+      const signature = createHash('sha256').update(JSON.stringify([b,resolved,config?.textHelper,this.timezone()])).digest('hex');
       let item = this.cache.get(b.id);
       if (item?.signature !== signature) {
         const snapshot = structuredClone(b), modulePath = '@0xmaxma/jev-loop/browser-use';
         item = {signature,binding:{version:1,id:b.id,name:b.name,principalId:b.principalId,conversationId:b.conversationId,
-          run:context => executeBrowserModule(modulePath,snapshot,context,resolved),
+          run:context => executeBrowserModule(modulePath,snapshot,context,resolved,config?.textHelper,this.timezone()),
           inspect:(result,signal,authorized,screenshot)=>inspectBrowser(snapshot,result,signal,authorized,resolved,screenshot)}};
       }
       current.set(b.id,item);

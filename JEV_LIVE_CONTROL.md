@@ -177,7 +177,7 @@ When a field needs input, the loop records the current accessibility state and, 
 [{"application":"com.apple.Maps","label":"Search","role":"AXTextField","text":"Bangkok"}]
 ```
 
-The agent prepares literal values once. The loop uses one only when the current app and unique field label/role match; it never guesses a different target. `windowTitle` may further restrict the match. A new goal update replaces the plan, so stale values cannot leak into the next task. A field answer can include the remaining input plan in the same call. Unmatched/missing values go back to the parent agent, not a separate Thinking provider.
+The agent prepares literal values once. The loop uses one only when the current app and unique field label/role match; it never guesses a different target. `windowTitle` may further restrict the match. A new goal update replaces the plan, so stale values cannot leak into the next task. A field answer can include the remaining input plan in the same call. Unmatched values use the configured Jev Loop Thinking Model. Missing user facts, ambiguous decisions, or unavailable reasoning return to the parent agent.
 
 A completion candidate is not a completed task. The parent inspects fresh UI/image evidence and calls `task_update mode=verify_computer` with the returned request/evidence IDs and concrete findings. Evidence is scoped to the owner, conversation, request and revision, expires after 60 seconds, and cannot clear an unknown mutation. The same authorized failed round may be replanned by its assigned notification up to three times; mutation uncertainty remains fenced.
 

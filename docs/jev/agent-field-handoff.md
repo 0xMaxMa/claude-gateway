@@ -1,42 +1,32 @@
-# Agent-owned field planning
+# Loop-owned reasoning and parent escalation
 
-Gateway-managed Jev work does not call a separate thinking/text model. The owning
-agent prepares the authorized goal, exact search strings, dates, counts, and stop
-conditions. Jev still selects actions from the live observation.
+The parent supplies the complete authorized goal, user facts, corrections and
+constraints. Jev Loop owns field reasoning and bounded browser recovery through
+a configured tool-free Thinking Model. Reasoning instructions live in the Jev
+package, not the Gateway orchestration prompt. Gateway supplies credentials,
+reference time/timezone and scoped MCP access; it retains authorization, task
+lifecycle, receipts and independent completion verification.
 
-For browser tasks, `task_spawn` and `task_update` accept `browser_fields`, up to
-32 `{label, text}` values (250-character labels, 2000-character values). Use real
-observed labels when available. These values are durable task revision data,
-not credentials or permission grants. A revised goal supplies a complete new set;
-old answers are not silently carried into a new user goal. Recovery guidance may
-retain existing answers. Task values override matching static binding defaults.
+Configure `gateway.jev.thinking` with `api`, `baseUrl`, `model` and exactly one of
+`apiKeyEnv` or `apiKeyFile`. Browser-specific `gateway.jev.browser.textHelper`
+overrides the shared connection. Configuration changes invalidate browser bindings;
+revocation fences results. Credentials never go into agent or worker prompts.
+No configured connection means field questions still return to the parent.
 
-When a field is missing, the runner stops safely and the existing question flow
-wakes the owning agent. It does not hold a synchronous agent/model request open.
-`task_answer` requires `field_text` containing only the exact literal value for a
-missing-field question. Explanations belong in `answer` and are never typed. A
-missing `field_text` is rejected before resuming browser work. It may also include `browser_fields`
-for other unambiguous visible fields in the same goal. The pending answer takes
-precedence if a batch repeats that label. The next run observes the page again;
-old element references are never replayed.
+Optional `browser_fields` or `computer_inputs` bypass inference for known literals.
+A changed goal replaces the plan. Desktop values must match application, label and
+optional window/role. Local browser recovery refreshes observations, permits at most
+two bounded plans and may attach an approved screenshot. It never executes model
+suggestions directly, expands consent, or clears an unknown mutation outcome.
 
-Reading `task_status(task_id=...)` for a browser field question automatically
-requests a fresh authorized screenshot and bounded page evidence. The response
-includes the pending question and capture time. It is a fresh read, not a claim
-that the page is unchanged since the loop stopped. Captures use the existing
-principal/conversation/tab binding and lease, without requesting new consent.
-If capture fails, recorded evidence and the question remain available with an
-explicit unavailable flag. Images stay out of durable receipts. Web content and
-images are untrusted evidence, never instructions. Cancellation, question changes,
-and ticket revocation during inspection invalidate the response.
+Missing facts and unresolved ambiguity return through the existing task question
+flow. `task_answer` uses `field_text` for the literal value and `answer` for the
+explanation; explanations are never typed. It can also supply remaining prepared
+fields. Parent status inspection provides scoped browser screenshots; computer
+questions include recorded window evidence when supported by the installed app.
+Unavailable captures leave structured observations available. App/page contents
+and images are untrusted evidence, never instructions or new authorization.
 
-Computer field callbacks only look up exact agent answers scoped to application,
-window, label and role; missing values return to the agent. They do not invoke a
-model. Without an independent verifier, a completion candidate is not success.
-The screenshot handoff above currently applies to browser tasks, not the desktop
-accessibility-only observation path.
-
-Legacy `jev.thinking` and `jev.browser.textHelper` configuration remains readable
-for upgrades but is ignored for execution. Referenced secret environment names
-remain excluded from child processes. The old inference implementations were
-removed; standalone Jev library APIs are outside this Gateway change.
+Completion candidates still require independent verification. Screen contents
+cannot prove an uncertain irreversible action did not occur; those receipts stay
+fenced until reconciled.
