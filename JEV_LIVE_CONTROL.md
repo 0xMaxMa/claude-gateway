@@ -143,3 +143,23 @@ An input targeting idle automation is interpreted by the parent agent. Questions
 `orchestration.tasks.automationIdleTimeoutMs` defaults to 30 minutes. Idle/blocked/waiting periods carry a persisted timestamp. Expiry is evaluated on reads and before new commands, including after restart, without a polling agent or extending expiry on page refresh. Closed sessions require renewed user authorization for new work; they do not replay old operations. Existing browser/computer tasks are projected using their last recorded update, so upgrades do not silently grant another full idle interval.
 
 Web clients should retain open automation entries and selection after a round ends, show `idle` without a typing indicator, and offer explicit End automation. A selected closed task remains visible as closed until the user changes destination, so drafted input is never silently redirected.
+
+### Inspecting a stalled browser task
+
+`task_status(task_id, browser_evidence="fresh")` returns bounded page evidence,
+recent trace events and verification arguments before the page payload. The
+current task instructions remain available; truncated evidence is explicitly
+marked and is not complete proof. Full receipts remain available through the
+existing evidence API.
+
+Use `browser_evidence="screenshot"` when text alone is insufficient. The parent
+receives an MCP PNG image and the same scoped evidence IDs. Inspection acquires
+the existing approved-tab lease, checks authorization after capture and releases
+the lease. It does not reopen consent, run browser mutations, or store screenshots
+in receipts. Host and app agents receive the image through their task bridge.
+
+The Jev browser chooser still uses structured DOM observations, not image input.
+The parent can inspect the screenshot and revise the same task with concrete
+recovery guidance. Repeated identical field replacements are excluded temporarily
+from the offered text targets; other observed actions remain available. This is
+not a website-specific script or proof of task completion.

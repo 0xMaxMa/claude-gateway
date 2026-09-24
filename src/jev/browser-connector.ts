@@ -1,3 +1,4 @@
+import {requestBrowserConsent} from './browser-consent';
 import { createLoopServer } from '@0xmaxma/jev-loop/mcp';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { browserFieldText } from './browser-text-helper';
@@ -94,6 +95,18 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
   const transport = browserTransport(connection ?? {endpoint:binding.endpoint!,headers:{Authorization:`Bearer ${key}`}});
   try {
     await client.connect(transport, {signal: context.signal, timeout:10000});
+    if(context.requestConsent){
+      const signal=context.interruptSignal ? AbortSignal.any([context.signal,context.interruptSignal]) : context.signal;
+      const waiting=()=>context.progress({phase:'waiting_consent',steps:0,evaluations:0});
+      waiting();
+      let reason:string|undefined;
+      try{reason=await requestBrowserConsent(client,binding.scope,signal,context.authorized,waiting);}
+      catch(error){
+        if(context.signal.aborted||context.interruptSignal?.aborted)return {status:'cancelled',reason:context.interruptSignal?.aborted?'REVISION_SUPERSEDED':'CANCELLED',steps:0,evaluations:0};
+        throw error;
+      }
+      if(reason)return {status:'blocked',reason,steps:0,evaluations:0};
+    }
     const call = module.mcpBrowserTransport(async (name,args,signal) => {
       // Release only the already-held lease even after config revocation; no other late call is allowed.
       if (name !== 'browser_task_release') assertAccess();
@@ -144,7 +157,7 @@ function browserTransport(connection: BrowserConnection): StreamableHTTPClientTr
   });
 }
 /** Read-only reconciliation. Operation IDs come from this task's durable receipt, never caller input. */
-export async function inspectBrowser(binding: BrowserConnectorConfig, result: Partial<BrowserExecutionResult> | undefined, signal: AbortSignal, authorized:()=>boolean, connection?:BrowserConnection): Promise<{observedAt:number;observation:unknown;operationStatus?:unknown}> {
+export async function inspectBrowser(binding: BrowserConnectorConfig, result: Partial<BrowserExecutionResult> | undefined, signal: AbortSignal, authorized:()=>boolean, connection?:BrowserConnection,screenshot=false): Promise<NonNullable<import('./browser-contract').BrowserEvidence['fresh']>> {
   const check=()=>{signal.throwIfAborted();if(!authorized())throw Error('ACCESS_DENIED');};
   check();
   const resolved=connection??{endpoint:binding.endpoint!,headers:{Authorization:`Bearer ${await credential(binding)}`}};
@@ -167,7 +180,14 @@ export async function inspectBrowser(binding: BrowserConnectorConfig, result: Pa
     const observation=await read('page_observe',{...binding.scope,lease_token:lease,detail:'full'});
     if(!object(observation) || observation.error || observation.access || observation.protocol_version!==1 || !string(observation.generation,100) || typeof observation.url!=='string' || observation.url.length>8192 || typeof observation.text!=='string' || observation.text.length>24000 || !Array.isArray(observation.elements) || observation.elements.length>150 || observation.elements.some((e:unknown)=>!object(e)||typeof e.ref!=='string'||typeof e.label!=='string'))throw Error('BROWSER_EVIDENCE_INVALID');
     const operationStatus=result?.lastAction ? await read('operation_status',{operation_id:result.lastAction.operationId}) : undefined;
-    return {observedAt:Date.now(),observation,...(operationStatus ? {operationStatus}: {})};
+    let image: {type:'image';mimeType:'image/png';data:string}|undefined;
+    if(screenshot){
+      check();const reply=await client.callTool({name:'page_screenshot',arguments:{...binding.scope,lease_token:lease}},undefined,{signal,timeout:10000});check();
+      const content=(reply.content as Array<{type:string;mimeType?:string;data?:string}>).find(c=>c.type==='image');
+      if(reply.isError||!content||content.mimeType!=='image/png'||typeof content.data!=='string'||content.data.length>8*1024*1024||!/^iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$/.test(content.data))throw Error('BROWSER_EVIDENCE_INVALID');
+      image={type:'image',mimeType:'image/png',data:content.data};
+    }
+    return {observedAt:Date.now(),observation,...(operationStatus ? {operationStatus}: {}),...(image?{screenshot:image}:{})};
   } finally {
     if(lease)await client.callTool({name:'browser_task_release',arguments:{...binding.scope,lease_token:lease,operation_id:randomUUID()}},undefined,{signal:AbortSignal.timeout(3000),timeout:3000}).catch(()=>{});
     await client.close().catch(()=>{});
@@ -192,7 +212,7 @@ export class BrowserConnectorRegistry {
         const snapshot = structuredClone(b), modulePath = '@0xmaxma/jev-loop/browser-use', textHelper = config!.textHelper ? structuredClone(config!.textHelper) : undefined;
         item = {signature,binding:{version:1,id:b.id,name:b.name,principalId:b.principalId,conversationId:b.conversationId,
           run:context => executeBrowserModule(modulePath,snapshot,context,resolved,textHelper),
-          inspect:(result,signal,authorized)=>inspectBrowser(snapshot,result,signal,authorized,resolved)}};
+          inspect:(result,signal,authorized,screenshot)=>inspectBrowser(snapshot,result,signal,authorized,resolved,screenshot)}};
       }
       current.set(b.id,item);
     }

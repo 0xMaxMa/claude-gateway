@@ -87,8 +87,8 @@ if(q.method==='ping')return reply(q.id,{});
 if(q.method==='tools/list')return reply(q.id,{tools:c.tools});
 if(q.method!=='tools/call'||!c.tools.some(t=>t.name===q.params.name))return reply(q.id,null,{code:-32601,message:'Tool unavailable'});
 const body=JSON.stringify({tool:q.params.name,args:q.params.arguments||{},action_id:String(q.id)});
-const request=http.request({socketPath:c.socket,path:'/call',method:'POST',headers:{Authorization:'Bearer '+c.token,'Content-Type':'application/json'}},r=>{let body='';r.on('data',b=>body+=b);r.on('end',()=>reply(q.id,{content:[{type:'text',text:body}],isError:r.statusCode!==200}));});
-request.on('error',()=>reply(q.id,{content:[{type:'text',text:'Task bridge unavailable'}],isError:true}));request.setTimeout(20000,()=>request.destroy());request.end(body);
+const request=http.request({socketPath:c.socket,path:'/call',method:'POST',headers:{Authorization:'Bearer '+c.token,'Content-Type':'application/json'}},r=>{let body='';r.on('data',b=>body+=b);r.on('end',()=>{let content=[{type:'text',text:body}];if(r.statusCode===200&&q.params.name==='task_status'&&q.params.arguments?.browser_evidence==='screenshot'){const v=JSON.parse(body),image=v.screenshot;if(image?.type==='image'&&image.mimeType==='image/png'&&typeof image.data==='string'){delete v.screenshot;content=[{type:'text',text:JSON.stringify(v)},image];}}reply(q.id,{content,isError:r.statusCode!==200});});});
+request.on('error',()=>reply(q.id,{content:[{type:'text',text:'Task bridge unavailable'}],isError:true}));request.setTimeout(45000,()=>request.destroy());request.end(body);
 }catch(e){if(q?.id!==undefined)reply(q.id,null,{code:-32603,message:'Invalid MCP request'});}});
 `;
 

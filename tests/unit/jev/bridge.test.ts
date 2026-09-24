@@ -120,7 +120,7 @@ test('container schemas expose Jev only when explicitly enabled, without host to
 test('enabled app browser schemas discover, inspect and verify only scoped browser managed work', async () => {
   const adapters = new Map<string, GatewayTaskAdapter>(); const f = fixture(true, adapters);
   const run=jest.fn(async()=>({status:'needs_verification' as const,reason:'COMPLETION_CANDIDATE',steps:0,evaluations:1}));
-  const binding = { version: 1 as const, id: 'browser-a', name: 'Private browser', principalId: 'u', conversationId: f.context.conversationId, run,inspect:async()=>({observedAt:Date.now(),observation:{generation:'g',elements:[{ref:'x',label:'Name',value:'Expected'}]}}) };
+  const binding = { version: 1 as const, id: 'browser-a', name: 'Private browser', principalId: 'u', conversationId: f.context.conversationId, run,inspect:async(_result:any,_signal:any,_authorized:any,screenshot?:boolean)=>({observedAt:Date.now(),observation:{generation:'g',elements:[{ref:'x',label:'Name',value:'Expected'}]},...(screenshot?{screenshot:{type:'image' as const,mimeType:'image/png' as const,data:'iVBORw0KGgo='}}:{})}) };
   const browser = new BrowserTaskAdapter({ agentId: 'a', root: join(f.root, 'receipts'), allowed: () => true, bindings: () => [binding], evaluate: async () => ({
     requestId:'r',requestedModel:'jev',model:'jev',usage:{input_tokens:1,output_tokens:1},answers:{
       operation:{type:'choice',choice:'DONE',confidence:1,probabilities:{DONE:1}},target:{type:'choice',choice:'NONE',confidence:1,probabilities:{NONE:1}},
@@ -140,8 +140,12 @@ test('enabled app browser schemas discover, inspect and verify only scoped brows
     for(let i=0;i<20;i++){await controller.tick();await new Promise(resolve=>setImmediate(resolve));}
     const rows=f.store.all('SELECT id,state FROM tasks'); expect(rows).toHaveLength(1);expect(rows[0].state).toBe('needs_reconciliation');
     const taskId=String(rows[0].id);
+    const screenshot=await agent.call({task_id:taskId,browser_evidence:'screenshot'},'task_status');
+    expect(screenshot.screenshot).toEqual({type:'image',mimeType:'image/png',data:'iVBORw0KGgo='});
     const proof=await agent.call({task_id:taskId,browser_evidence:'fresh'},'task_status');
-    expect(proof.browserEvidence.fresh.observation.elements[0].value).toBe('Expected');
+    expect(proof.browserEvidence.page.elements[0].value).toBe('Expected');
+    expect(Object.keys(proof)[0]).toBe('verification');
+    expect(proof.tasks[0].currentInstructions).toBe('Verify expected result');
     expect(proof.verification.arguments).toMatchObject({task_id:taskId,mode:'verify_browser',evidence_id:proof.browserEvidence.evidenceId});
     const incomplete=await agent.call({task_id:taskId,expected_revision:f.store.task(taskId)!.revision,mode:'verify_browser',expected_request_id:proof.browserEvidence.requestId,instruction:'Name matches'},'task_update');
     expect(incomplete).toMatchObject({error:'BROWSER_EVIDENCE_REQUIRED',message:expect.stringContaining('evidence_id')});

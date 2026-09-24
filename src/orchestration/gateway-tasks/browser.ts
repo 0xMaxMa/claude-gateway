@@ -17,7 +17,7 @@ export interface BrowserTaskBinding {
   name: string;
   principalId: string;
   conversationId: string;
-  inspect?: (result:Partial<BrowserExecutionResult>|undefined,signal:AbortSignal,authorized:()=>boolean)=>Promise<NonNullable<BrowserEvidence['fresh']>>;
+  inspect?: (result:Partial<BrowserExecutionResult>|undefined,signal:AbortSignal,authorized:()=>boolean,screenshot?:boolean)=>Promise<NonNullable<BrowserEvidence['fresh']>>;
   run: (context: BrowserExecutionContext) => Promise<BrowserExecutionResult>;
 }
 interface Receipt {trace?:BrowserTrace;revision?:number;taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';lastDispatchedMutation?:BrowserMutationCheckpoint;recordedAt?:number;inspection?:{id:string;at:number;continuation?:'completed'|'not_executed'|'legacy_focus_only'};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
@@ -78,7 +78,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     if(typeof instructions!=='string'||!instructions.trim()||instructions.length>8000)throw new OrchestrationError('INVALID_BROWSER_GOAL');
     if((answers??[]).some(a=>a.browserFieldLabel&&a.text.length>2000))throw new OrchestrationError('BROWSER_FIELD_VALUE_TOO_LONG');
   }
-  async submit(task:TaskSnapshot,requestId:string,instructions:string,answers:TaskRevision['answers']=[]):Promise<void> {
+  async submit(task:TaskSnapshot,requestId:string,instructions:string,answers:TaskRevision['answers']=[],requestConsent=false):Promise<void> {
     this.assertTask(task);
     this.validateInput(instructions,answers);
     const binding=this.binding(task.gatewayTarget!.sessionId,task.ownerPrincipalId,task.conversationId);
@@ -92,7 +92,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const authorized=()=>{try{return this.options.allowedTask?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
     // The installed browser package owns execution; gateway owns the request lifetime.
     let providerFailure:BrowserExecutionResult['providerFailure'];
-    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({interruptSignal:interrupt.signal,goal:instructions,startUrl:answers?.length || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl,fields,signal:controller.signal,authorized,
+    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({requestConsent,interruptSignal:interrupt.signal,goal:instructions,startUrl:answers?.length || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl,fields,signal:controller.signal,authorized,
       evaluate:async(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');try{return await this.options.evaluate(task,request,signal,authorized);}catch(e){if(e instanceof JevError)providerFailure={code:e.code,...e.metadata};throw e;}},
       trace:event=>{
         if(!authorized())return;
@@ -155,7 +155,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     if(this.running.has(this.key(task,requestId)))return 'running';
     return {type:'unknown',failure:{code:'BROWSER_EXECUTION_INTERRUPTED',message:'Browser execution was interrupted. Its actions were not replayed. Verify current browser state before continuing.',observedAt:Date.now()}};
   }
-  async evidence(task:TaskSnapshot,refresh=false,signal?:AbortSignal):Promise<BrowserEvidence> {
+  async evidence(task:TaskSnapshot,refresh=false,signal?:AbortSignal,screenshot=false):Promise<BrowserEvidence> {
     this.assertTask(task);
     if(this.options.allowedEvidence?.(task)===false)throw new OrchestrationError('ACCESS_DENIED');
     const binding=this.binding(task.gatewayTarget!.sessionId,task.ownerPrincipalId,task.conversationId);
@@ -172,7 +172,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       const inspectionResult=receipt.lastDispatchedMutation && (!receipt.browserResult?.lastAction || receipt.browserResult.lastAction.operationId!==receipt.lastDispatchedMutation.operationId)
         ? {lastAction:{...receipt.lastDispatchedMutation,outcome:'unknown' as const}} : receipt.browserResult;
       try {
-        evidence.fresh=await binding.inspect(inspectionResult,signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000),authorized);
+        evidence.fresh=await binding.inspect(inspectionResult,signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000),authorized,screenshot);
       } catch(error) {
         if(error instanceof OrchestrationError)throw error;
         // Do not collapse an unavailable browser into a malformed agent request,

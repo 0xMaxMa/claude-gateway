@@ -98,6 +98,8 @@ export interface TaskSnapshot {
   updatedAt: number;
 }
 export interface TaskRevision {
+  /** A new explicit user instruction can request browser consent before dispatch. */
+  requestBrowserConsent?: boolean;
   /** Bounded autonomous browser replans since the latest user update. */
   browserRecoveryCount?: number;
   /** Bounded supervision advice; never replaces user authorization or the assigned goal. */

@@ -12,13 +12,13 @@ export interface GatewayTaskAdapter {
   resolve(input: Record<string, unknown>, context?: CommandContext): GatewayTaskTarget;
   close?(): Promise<void>;
   diagnostics?(task:TaskSnapshot,offset?:number):Promise<unknown>;
-  evidence?(task:TaskSnapshot, refresh?:boolean, signal?:AbortSignal):Promise<import('../../jev/browser-contract').BrowserEvidence>;
+  evidence?(task:TaskSnapshot, refresh?:boolean, signal?:AbortSignal, screenshot?:boolean):Promise<import('../../jev/browser-contract').BrowserEvidence>;
   recover?(task:TaskSnapshot,requestId:string):Promise<{state:'queued'|'cancelled';evidence:string}|undefined>;
   reconcileEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):string;
   verifyEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):void;
   ready?(task: TaskSnapshot): boolean;
   validateInput?(instructions:string,answers?:import('../types').TaskRevision['answers']):void;
-  submit(task: TaskSnapshot, requestId: string, instructions: string, answers?: import('../types').TaskRevision['answers']): Promise<void>;
+  submit(task: TaskSnapshot, requestId: string, instructions: string, answers?: import('../types').TaskRevision['answers'], requestConsent?:boolean): Promise<void>;
   inspect(task: TaskSnapshot, requestId: string, attempt?:TaskAttempt): Promise<WorkerOutcome | 'running' | 'pending'>;
   interrupt?(task:TaskSnapshot,requestId:string):void;
   cancel(task: TaskSnapshot, requestId: string): Promise<void>;
@@ -109,7 +109,7 @@ export class GatewayTaskController {
           // this point is inspected, never replayed on the assumption of failure.
           task.gatewayDispatch = {requestId, submittedAt:Date.now()};
           this.tasks.store.transaction(() => this.tasks.store.saveTask(task, task.stateVersion));
-          await adapter.submit(task, requestId, instructions, revision.answers);
+          await adapter.submit(task, requestId, instructions, revision.answers, revision.requestBrowserConsent===true);
         }
         task = this.tasks.store.task(task.taskId)!;
         if(task.state==='interrupting')adapter.interrupt?.(task,requestId);

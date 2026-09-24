@@ -1,3 +1,4 @@
+import {summarizeBrowserEvidence} from '../jev/browser-evidence-summary';
 import {parentVerifiableBrowserResult} from '../jev/browser-contract';
 import { JevError } from '../jev/types';
 import type { GatewayTaskAdapter } from './gateway-tasks/controller';
@@ -154,18 +155,19 @@ export class TaskBridge {
                   this.tasks.store.assertMember(context.conversationId,context.principalId);
                   result={tasks:rows,computerTrace};
                 }else if(a.browser_evidence!==undefined){
-                  if(!a.task_id || !['recorded','fresh'].includes(a.browser_evidence))throw new OrchestrationError('INVALID_INPUT');
+                  if(!a.task_id || !['recorded','fresh','screenshot'].includes(a.browser_evidence))throw new OrchestrationError('INVALID_INPUT');
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
                   const adapter=this.gatewayAdapters.get('browser');
                   if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || !adapter?.evidence)throw new OrchestrationError('ACCESS_DENIED');
-                  const evidence=await adapter.evidence(task,a.browser_evidence==='fresh',this.cancellations.get(token!)?.signal);
+                  const evidence=await adapter.evidence(task,a.browser_evidence!=='recorded',this.cancellations.get(token!)?.signal,a.browser_evidence==='screenshot');
                   if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
                   this.tasks.store.assertMember(context.conversationId,context.principalId);
-                  result={tasks:rows,browserEvidence:evidence,untrustedPageContent:true,
+                  result={
                     ...(evidence.evidenceId && parentVerifiableBrowserResult(task.browserReport) ? {verification:{
                       instruction:'If this fresh observation independently proves the current goal, call task_update with these exact fields plus your concrete evidence in instruction. Do not run the task again merely to report the observed result.',
                       tool:'task_update',arguments:{task_id:task.taskId,expected_revision:task.revision,mode:'verify_browser',expected_request_id:evidence.requestId,evidence_id:evidence.evidenceId}
-                    }} : {})};
+                    }} : {}),browserEvidence:summarizeBrowserEvidence(evidence),untrustedPageContent:true,tasks:rows.map(t=>({taskId:t.taskId,state:t.state,revision:t.revision,automationSession:t.automationSession,currentInstructions:'currentInstructions' in t?t.currentInstructions:undefined})),
+                    ...(evidence.fresh?.screenshot?{screenshot:evidence.fresh.screenshot}:{})};
                 }else result=rows;
                 break;
               }

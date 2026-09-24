@@ -3,7 +3,7 @@ import type { JevRequest, JevResult } from './types';
 
 /** Consumer protocol v1. No provider keys, executable code or URLs in task arguments. */
 export interface BrowserScope { device_id: string; grant_id: string; tab_id: string }
-export interface BrowserProgress { contractVersion?: 1; phase?: 'evaluating'|'decided'|'acting'|'acted'; requestId?: string; operationId?: string; steps: number; evaluations: number; model?: string; decision_ms?: number; operation_confidence?: number; target_confidence?: number }
+export interface BrowserProgress { contractVersion?: 1; phase?: 'waiting_consent'|'evaluating'|'decided'|'acting'|'acted'; requestId?: string; operationId?: string; steps: number; evaluations: number; model?: string; decision_ms?: number; operation_confidence?: number; target_confidence?: number }
 export interface BrowserExecutionResult {
   trace?: BrowserTrace;
   status: 'succeeded' | 'blocked' | 'cancelled' | 'failed' | 'needs_verification';
@@ -19,6 +19,7 @@ export interface BrowserExecutionResult {
   lastConfirmedAction?: {operationId:string;operation:string;outcome:'confirmed'};
 }
 export interface BrowserExecutionContext {
+  requestConsent?: boolean;
   interruptSignal?:AbortSignal;
   trace?: (event:BrowserTraceEvent)=>void;
   startUrl?: string;
@@ -69,7 +70,7 @@ export interface BrowserEvidence {
   evidenceId?: string;
   result?: BrowserExecutionResult;
   executionState: 'ended' | 'interrupted';
-  fresh?: { observedAt: number; observation: unknown; operationStatus?: unknown };
+  fresh?: { observedAt: number; observation: unknown; operationStatus?: unknown; screenshot?: {type:'image';mimeType:'image/png';data:string} };
 }
 export interface BrowserProviderFailure { code: string; validationReason?: string; status?: number; retryAfter?: string; resetAt?: string }
 
