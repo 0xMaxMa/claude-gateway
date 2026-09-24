@@ -120,3 +120,15 @@ invalidates a generation, or dispatches actions. Ownership and conversation
 membership apply to host and container agents, including after ticket revocation.
 Typed text and page/window contents are not included in this trace. Old requests
 without recorded events report `available:false`; their history is not reconstructed.
+
+### Computer receipt recovery
+
+Unknown desktop outcomes remain fenced. The computer adapter polls scoped recorded
+receipts every 15 seconds while a task needs reconciliation, including after gateway
+restart. A matching completed/not-executed operation permits a fresh observation in
+a new attempt of the same task; the original operation is never resent. Pending
+blocked live controls do not silently resume. Local Mac owner acknowledgement ends
+previous work as cancelled and preserves unknown rather than claiming completion.
+Connector removal, grant revocation and conversation membership checks also apply
+to receipt reads. The activity API includes `computerRecovery` guidance for this
+state; clients should show where the owner can review it instead of a bare error.
