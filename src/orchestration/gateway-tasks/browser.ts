@@ -20,7 +20,7 @@ export interface BrowserTaskBinding {
   inspect?: (result:Partial<BrowserExecutionResult>|undefined,signal:AbortSignal,authorized:()=>boolean)=>Promise<NonNullable<BrowserEvidence['fresh']>>;
   run: (context: BrowserExecutionContext) => Promise<BrowserExecutionResult>;
 }
-interface Receipt {trace?:BrowserTrace;revision?:number;taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';lastDispatchedMutation?:BrowserMutationCheckpoint;recordedAt?:number;inspection?:{id:string;at:number};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
+interface Receipt {trace?:BrowserTrace;revision?:number;taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';lastDispatchedMutation?:BrowserMutationCheckpoint;recordedAt?:number;inspection?:{id:string;at:number;continuation?:'completed'|'not_executed'|'legacy_focus_only'};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
 export class BrowserTaskAdapter implements GatewayTaskAdapter {
   readonly name='browser';
   private readonly running=new Map<string,{controller:AbortController;interrupt:AbortController;done:Promise<void>}>();
@@ -186,7 +186,18 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       if(!authorized())throw new OrchestrationError('ACCESS_DENIED');
       evidence.evidenceId=randomUUID();
       // Store only proof of a fresh scoped read, not another copy of the page.
-      receipt.inspection={id:evidence.evidenceId,at:Date.now()};this.write(task,requestId,receipt);
+      const operation=evidence.fresh.operationStatus as {id?:string;state?:string}|undefined;
+      const last=receipt.lastDispatchedMutation;
+      let continuation:NonNullable<Receipt['inspection']>['continuation'];
+      if(last && operation?.id===last.operationId){
+        if(operation.state==='completed'||operation.state==='not_executed')continuation=operation.state;
+        // Legacy page_type returned STALE_OBSERVATION only while locating/focusing,
+        // before dispatching keys/text. The durable reply distinguishes this from
+        // timeout/disconnect. Require an ended request and a fresh scoped observation.
+        const event=receipt.trace?.events.slice().reverse().find(e=>e.phase==='action'&&e.operationId===last.operationId);
+        if(operation.state==='unknown' && last.operation==='page_type' && event?.operation==='TYPE_TEXT' && event.outcome==='unknown' && event.cause==='STALE_OBSERVATION' && receipt.status==='ended')continuation='legacy_focus_only';
+      }
+      receipt.inspection={id:evidence.evidenceId,at:Date.now(),continuation};this.write(task,requestId,receipt);
     }
     return evidence;
   }
@@ -195,6 +206,15 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     if(task.gatewayDispatch?.requestId!==requestId || this.running.has(this.key(task,requestId)))throw new OrchestrationError('STALE_BROWSER_EVIDENCE');
     const receipt=this.read(task,requestId), result=receipt?.browserResult;
     if(receipt?.status!=='ended' || !receipt.inspection || receipt.inspection.id!==evidenceId || Date.now()-receipt.inspection.at>300000 || !parentVerifiableBrowserResult(result))throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
+  }
+  reconcileEvidence(task:TaskSnapshot,requestId:string,evidenceId:string):string {
+    this.assertTask(task);
+    if(this.options.allowedEvidence?.(task)===false)throw new OrchestrationError('ACCESS_DENIED');
+    this.binding(task.gatewayTarget!.sessionId,task.ownerPrincipalId,task.conversationId);
+    if(task.gatewayDispatch?.requestId!==requestId||this.running.has(this.key(task,requestId)))throw new OrchestrationError('STALE_BROWSER_EVIDENCE');
+    const receipt=this.read(task,requestId),proof=receipt?.inspection;
+    if(!proof||proof.id!==evidenceId||Date.now()-proof.at>300000||!proof.continuation)throw new OrchestrationError('BROWSER_OUTCOME_UNRESOLVED');
+    return proof.continuation;
   }
   interrupt(task:TaskSnapshot,requestId:string):void {this.running.get(this.key(task,requestId))?.interrupt.abort();}
   async cancel(task:TaskSnapshot,requestId:string):Promise<void>{

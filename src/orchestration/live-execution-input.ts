@@ -1,31 +1,35 @@
 import {AcceptInput, OrchestrationStore} from './store';
-import {DecisionService} from './decisions';
 import {TaskService} from './tasks/service';
 import {ExecutionCapabilities, OrchestrationError, TaskSnapshot} from './types';
 
-/** Explicit client routing; never infer a target from model text or another session. */
-export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,decisions:DecisionService,input:AcceptInput,capabilities:ExecutionCapabilities) {
+export interface LiveControlReceipt {inputId:string;taskId?:string;status:'applied'|'needs_agent';code?:string;revision?:number}
+export function liveControlReceipt(store:OrchestrationStore,inputId:string):LiveControlReceipt|undefined {
+  const row=store.get("SELECT payload_json FROM conversation_events WHERE type='input.execution_control' AND json_extract(payload_json,'$.payload.inputId')=? ORDER BY seq DESC LIMIT 1",inputId);
+  return row?JSON.parse(String(row.payload_json)).payload:undefined;
+}
+/** Apply the direct control immediately; leave its canonical input for the agent to answer. */
+export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,input:AcceptInput,capabilities:ExecutionCapabilities,maxPending=100):(LiveControlReceipt & {task?:TaskSnapshot;reused:boolean})|undefined {
   const target=input.metadata?.executionTaskId;
   if(!target)return undefined;
   return store.compose(()=>{
-    const receipt=store.acceptInput({...input,capabilities});
-    const previous=store.get(`SELECT r.id,r.generated_text FROM assistant_responses r JOIN conversation_decisions d ON d.id=r.decision_id WHERE d.kind='notice' AND EXISTS(SELECT 1 FROM json_each(d.input_ids_json) WHERE value=?)`,receipt.inputId);
-    if(previous)return {inputId:receipt.inputId,responseId:String(previous.id),text:String(previous.generated_text),reused:true};
+    const receipt=store.acceptInput({...input,capabilities},maxPending);
+    const previous=liveControlReceipt(store,receipt.inputId);
+    if(previous)return {...previous,reused:true};
     let task:TaskSnapshot|undefined;
-    let text:string;
+    let control:LiveControlReceipt={inputId:receipt.inputId,status:'needs_agent'};
     try{
       if(!capabilities.execute||input.scope.source!=='api')throw new OrchestrationError('ACCESS_DENIED');
-      if(input.attachmentIds?.length)throw new OrchestrationError('INVALID_INPUT');
       const current=store.task(target);
-      if(!current||current.agentSessionId!==input.scope.agentSessionId||current.conversationId!==receipt.conversationId)throw new OrchestrationError('ACCESS_DENIED');
+      if(!current||current.agentSessionId!==input.scope.agentSessionId||current.conversationId!==receipt.conversationId||current.ownerPrincipalId!==input.scope.principalId)throw new OrchestrationError('ACCESS_DENIED');
+      control.taskId=target;
+      if(input.attachmentIds?.length)throw new OrchestrationError('INVALID_INPUT');
       task=tasks.controlByUser(receipt.conversationId,input.scope.principalId,target,{id:receipt.inputId,action:'revise',expectedRevision:current.revision,text:input.text});
-      text='Correction received. I will apply it after the current action settles, then continue from the current screen.';
+      control={...control,status:'applied',revision:task.revision};
     }catch(error){
       if(!(error instanceof OrchestrationError))throw error;
-      text=error.code==='STATE_CONFLICT'?'This task is stopped and cannot apply this correction safely. Choose Agent conversation in Text and voice destination to inspect its status and discuss the next step. No browser action or new task was started.':'The correction could not be applied. Check the selected task and send text without attachments. No new action was started.';
+      control.code=error.code;
     }
-    store.completeInputReceipt(receipt);
-    const responseId=decisions.notice(receipt.conversationId,text,true,receipt.inputId);
-    return {inputId:receipt.inputId,responseId,text,task};
+    store.appendEvent(receipt.conversationId,'input.execution_control',control,control.taskId);
+    return {...control,task,reused:false};
   });
 }

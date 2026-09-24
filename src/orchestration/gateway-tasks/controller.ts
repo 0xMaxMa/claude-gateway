@@ -11,6 +11,7 @@ export interface GatewayTaskAdapter {
   resolve(input: Record<string, unknown>, context?: CommandContext): GatewayTaskTarget;
   close?(): Promise<void>;
   evidence?(task:TaskSnapshot, refresh?:boolean, signal?:AbortSignal):Promise<import('../../jev/browser-contract').BrowserEvidence>;
+  reconcileEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):string;
   verifyEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):void;
   ready?(task: TaskSnapshot): boolean;
   validateInput?(instructions:string,answers?:import('../types').TaskRevision['answers']):void;

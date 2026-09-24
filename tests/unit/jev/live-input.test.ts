@@ -7,7 +7,7 @@ import {TaskService} from '../../../src/orchestration/tasks/service';
 import {DecisionService} from '../../../src/orchestration/decisions';
 import {liveExecutionInput} from '../../../src/orchestration/live-execution-input';
 
-for(const modality of ['text','live_voice'] as const)test(`${modality} correction consumes its input once, persists one response and bypasses inference`,()=>{
+for(const modality of ['text','live_voice'] as const)test(`${modality} correction applies once and leaves one canonical input for an agent response`,()=>{
  const root=mkdtempSync(join(tmpdir(),'live-input-')),store=new OrchestrationStore(join(root,'db'),'a'),tasks=new TaskService(store),decisions=new DecisionService(store);
  try{
   const scope={agentId:'a',agentSessionId:'s',source:'api' as const,accountId:'u',chatId:'c',threadKey:'',principalId:'u'},capabilities={execute:true,writeMemory:false};
@@ -15,16 +15,16 @@ for(const modality of ['text','live_voice'] as const)test(`${modality} correctio
   const decision=decisions.begin(accepted.conversationId,'u',[accepted.inputId]);
   const task=tasks.spawn({...accepted,...decision,principalId:'u',...capabilities,actionId:'spawn'},{title:'Flights',instructions:'Two adults, three children, London',targetProfile:'gateway-managed',gatewayTarget:{adapter:'browser',sessionId:'target',name:'Browser'}});
   const input:AcceptInput={scope,text:'Manchester instead',modality:modality==='live_voice'?modality:undefined,ingressKey:randomUUID(),metadata:{executionTaskId:task.taskId}};
-  const first=liveExecutionInput(store,tasks,decisions,input,capabilities)!;
-  const retry=liveExecutionInput(store,tasks,decisions,input,capabilities)!;
-  expect(retry.responseId).toBe(first.responseId);expect(retry.reused).toBe(true);
+  const first=liveExecutionInput(store,tasks,input,capabilities)!;
+  const retry=liveExecutionInput(store,tasks,input,capabilities)!;
+  expect(retry.inputId).toBe(first.inputId);expect(retry.reused).toBe(true);
   expect(store.task(task.taskId)!.revision).toBe(2);
-  expect(store.get('SELECT status FROM conversation_inputs WHERE id=?',first.inputId)!.status).toBe('handled');
+  expect(store.get('SELECT status FROM conversation_inputs WHERE id=?',first.inputId)!.status).toBe('accepted');
   expect(tasks.revision(task.taskId,2).instructions).toContain('Two adults, three children');
-  expect(store.get("SELECT COUNT(*) AS n FROM assistant_responses WHERE state='completed'")!.n).toBe(1);
-  const other=liveExecutionInput(store,tasks,decisions,{...input,scope:{...scope,agentSessionId:'other',chatId:'other'},ingressKey:randomUUID()},capabilities)!;
+  expect(store.get("SELECT COUNT(*) AS n FROM assistant_responses WHERE state='completed'")!.n).toBe(0);
+  const other=liveExecutionInput(store,tasks,{...input,scope:{...scope,agentSessionId:'other',chatId:'other'},ingressKey:randomUUID()},capabilities)!;
   expect(other.task).toBeUndefined();expect(store.task(task.taskId)!.revision).toBe(2);
-  const denied=liveExecutionInput(store,tasks,decisions,{...input,ingressKey:randomUUID()},{execute:false,writeMemory:false})!;
+  const denied=liveExecutionInput(store,tasks,{...input,ingressKey:randomUUID()},{execute:false,writeMemory:false})!;
   expect(denied.task).toBeUndefined();expect(store.task(task.taskId)!.revision).toBe(2);
  }finally{store.close();rmSync(root,{recursive:true,force:true});}
 });

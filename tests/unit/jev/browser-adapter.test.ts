@@ -254,3 +254,21 @@ test('trace rejects unexpected page data and model stop is not reported as site 
  if(outcome.type==='failed')expect(outcome.failure?.message).toContain('not evidence of bot detection');
  expect(JSON.stringify(await f.a.evidence(task({gatewayDispatch:{requestId:'r'} as any})))).not.toContain('private');
 });
+
+test.each(['legacy_focus','timeout','click','wrong_operation','completed','not_executed'] as const)('fresh reconciliation evidence fences %s',async kind=>{
+ const op='9e5d5617-24e8-416a-90d5-0571de59ddf3';
+ const binding:BrowserTaskBinding={version:1,id:'target',name:'Browser',principalId:'owner',conversationId:'chat',run:async c=>{
+  c.beforeMutation!(op,kind==='click'?'page_click':'page_type');
+  c.trace!({version:1,sequence:1,at:Date.now(),phase:'action',operationId:op,operation:kind==='click'?'CLICK':'TYPE_TEXT',outcome:'unknown',cause:kind==='timeout'?'ADAPTER_TIMEOUT':'STALE_OBSERVATION'});
+  return {status:'blocked',reason:'OUTCOME_UNKNOWN',steps:0,evaluations:1,lastAction:{operationId:op,operation:'TYPE_TEXT',outcome:'unknown'}};
+ },inspect:async()=>({observedAt:Date.now(),observation:{generation:'fresh',elements:[]},operationStatus:{id:kind==='wrong_operation'?'other':op,state:['completed','not_executed'].includes(kind)?kind:'unknown'}})};
+ const a=new BrowserTaskAdapter({agentId:'alpha',root:dir,allowed:()=>true,bindings:()=>[binding],evaluate:jest.fn()});adapters.push(a);
+ const t=task({gatewayDispatch:{requestId:'r',submittedAt:Date.now()}});
+ await a.submit(t,'r','goal');await settle(a,t);
+ const proof=await a.evidence(t,true);
+ if(['legacy_focus','completed','not_executed'].includes(kind)){
+  expect(a.reconcileEvidence(t,'r',proof.evidenceId!)).toBe(kind==='legacy_focus'?'legacy_focus_only':kind);
+  expect(()=>a.reconcileEvidence(t,'other',proof.evidenceId!)).toThrow('STALE_BROWSER_EVIDENCE');
+  expect(()=>a.reconcileEvidence(t,'r','other')).toThrow('BROWSER_OUTCOME_UNRESOLVED');
+ }else expect(()=>a.reconcileEvidence(t,'r',proof.evidenceId!)).toThrow('BROWSER_OUTCOME_UNRESOLVED');
+});

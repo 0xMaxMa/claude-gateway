@@ -158,7 +158,12 @@ export class TaskBridge {
               }
               case 'task_cancel': result = this.tasks.cancel(context, a.task_id, a.replaced_by_task_id); break;
               case 'task_update': {
-                if(a.mode==='verify_browser'){
+                if(a.mode==='reconcile_browser'){
+                  const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
+                  const adapter=this.gatewayAdapters.get('browser');
+                  if(!adapter?.reconcileEvidence)throw new OrchestrationError('BROWSER_INSPECTION_UNAVAILABLE');
+                  result=this.tasks.reconcileBrowser(context,a.task_id,a.expected_revision,a.expected_request_id,a.evidence_id,a.instruction,()=>adapter.reconcileEvidence!(task,a.expected_request_id,a.evidence_id));
+                }else if(a.mode==='verify_browser'){
                   const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
                   const adapter=this.gatewayAdapters.get('browser');
                   if(!adapter?.verifyEvidence)throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');

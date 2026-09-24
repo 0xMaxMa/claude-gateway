@@ -45,8 +45,8 @@ exports.run=async({page,scope,endpoint,token})=>{
   const interruptMs=Date.now()-started;
   assert.equal(await page.locator('input[aria-label="Name"]').inputValue(),'');
   const input={scope:ingress,text:'Set the Name field to Manchester instead of London. Do not submit.',modality:'live_voice',ingressKey:randomUUID(),metadata:{executionTaskId:task.taskId}};
-  const revised=liveExecutionInput(store,tasks,decisions,input,capabilities);assert(revised.task);controller.signalControl(revised.task);
-  const retry=liveExecutionInput(store,tasks,decisions,input,capabilities);assert.equal(retry.responseId,revised.responseId);
+  const revised=liveExecutionInput(store,tasks,input,capabilities);assert(revised.task);controller.signalControl(revised.task);
+  const retry=liveExecutionInput(store,tasks,input,capabilities);assert.equal(retry.inputId,revised.inputId);
   await pump(()=>['completed','failed','needs_reconciliation'].includes(store.task(task.taskId).state));
   const final=store.task(task.taskId);
   assert.equal(await page.locator('input[aria-label="Name"]').inputValue(),'Manchester',JSON.stringify(final.browserReport));

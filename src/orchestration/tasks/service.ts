@@ -758,6 +758,26 @@ export class TaskService {
       return task;
     },taskId);
   }
+  /** User-requested continuation from fresh evidence, never replay the old dispatch. */
+  reconcileBrowser(context:CommandContext,taskId:string,revision:number,requestId:string,evidenceId:string,instructions:string,check:()=>string):TaskSnapshot {
+    boundedText(instructions,8000);boundedText(requestId,256);boundedText(evidenceId,128);
+    return this.command(context,'reconcile_browser',{taskId,revision,requestId,evidenceId,instructions},true,()=>{
+      const task=this.owned(taskId,context.conversationId);
+      if(!context.execute||!task.capabilities.execute||task.ownerPrincipalId!==context.principalId)throw new OrchestrationError('EXECUTION_DENIED');
+      if(task.gatewayTarget?.adapter!=='browser'||task.state!=='needs_reconciliation'||!task.activeAttemptId||task.revision!==revision||task.gatewayDispatch?.requestId!==requestId)throw new OrchestrationError('STATE_CONFLICT');
+      const resolution=check(),attempt=this.store.attempt(task.activeAttemptId)!;
+      attempt.state='ended';this.store.saveAttempt(attempt);this.pool.release(taskId,false);
+      const previous=this.revision(taskId,revision);
+      task.revision++;task.activeAttemptId=undefined;task.state='queued';
+      delete task.failure;delete task.browserReport;delete task.gatewayDispatch;delete task.pendingQuestion;
+      task.executionControl=undefined;
+      this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,revision:task.revision,instructions,mode:'when_ready',originatingInputId:context.inputId,answers:undefined,guidance:undefined,guidanceBasis:undefined,browserRecoveryCount:0}));
+      this.store.saveTask(task,task.stateVersion);
+      this.store.appendEvent(task.conversationId,'browser.continuation_authorized',{requestId,evidenceId,resolution,inputId:context.inputId},taskId);
+      this.store.enqueue('schedule',`schedule:${task.taskId}:${task.stateVersion}`,{taskId});
+      return task;
+    },taskId);
+  }
   /** Offline operator workflow only; not exposed through conversation tools.
    * Caller holds the instance lock and has checked liveness/side effects. */
   reconcile(taskId: string, state: 'queued' | 'failed' | 'cancelled', evidence: string): TaskSnapshot {

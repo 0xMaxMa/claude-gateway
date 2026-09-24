@@ -73,3 +73,33 @@ test('parent can confirm only a fresh scoped completion candidate with durable i
   expect(tasks.verifyBrowser(confirm,task.taskId,waiting.revision,proof.requestId,proof.evidenceId!,'Name field shows ส้ม',()=>{throw Error('must not reverify');})).toEqual(done);
  }finally{await controller.close();store.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('explicit continuation settles a legacy pre-input rejection and makes one fresh attempt on the same task',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'browser-continue-')),store=new OrchestrationStore(join(root,'db'),'a'),tasks=new TaskService(store),decisions=new DecisionService(store);
+ const scope={agentId:'a',agentSessionId:'s',source:'api' as const,accountId:'u',chatId:'c',threadKey:'',principalId:'u'},capabilities={execute:true,writeMemory:false};
+ const accepted=store.acceptInput({scope,text:'Fill outbound and return date',capabilities}),decision=decisions.begin(accepted.conversationId,'u',[accepted.inputId]);
+ const context={...accepted,...decision,principalId:'u',...capabilities,actionId:'spawn'};
+ const operationId='2bc8e680-dae0-45a1-8e2f-e74b680562df';let runs=0;
+ const binding={version:1 as const,id:'target',name:'Browser',principalId:'u',conversationId:accepted.conversationId,run:async(c:BrowserExecutionContext):Promise<BrowserExecutionResult>=>{
+  if(++runs>1){expect(c.startUrl).toBeUndefined();expect(c.goal).toContain('return date');return {status:'succeeded',reason:'VERIFIED',steps:1,evaluations:2};}
+  c.beforeMutation!(operationId,'page_type');
+  c.trace!({version:1,sequence:1,at:Date.now(),phase:'action',operationId,operation:'TYPE_TEXT',outcome:'unknown',cause:'STALE_OBSERVATION'});
+  return {status:'blocked',reason:'OUTCOME_UNKNOWN',steps:0,evaluations:1,lastAction:{operationId,operation:'TYPE_TEXT',outcome:'unknown'}};
+ },inspect:async()=>({observedAt:Date.now(),observation:{generation:'fresh',elements:[]},operationStatus:{id:operationId,state:'unknown'}})};
+ const adapter=new BrowserTaskAdapter({agentId:'a',root:join(root,'receipts'),allowed:()=>true,bindings:()=>[binding],evaluate:jest.fn()});
+ const controller=new GatewayTaskController(tasks,new Map([['browser',adapter]]));
+ const pump=async()=>{for(let i=0;i<10;i++){await controller.tick();await new Promise(setImmediate);}};
+ try{
+  const t=tasks.spawn(context,{title:'Dates',instructions:'Fill outbound and return date',targetProfile:'gateway-managed',gatewayTarget:{adapter:'browser',sessionId:'target',name:'Browser',startUrl:'https://fixture.test'}});
+  decisions.finish(decision,'Started');await pump();
+  const stopped=store.task(t.taskId)!;expect(stopped.state).toBe('needs_reconciliation');
+  const proof=await adapter.evidence(stopped,true);
+  const input=store.acceptInput({scope,text:'Continue from the current page',capabilities}),next=decisions.begin(input.conversationId,'u',[input.inputId]);
+  const command={...input,...next,principalId:'u',...capabilities,actionId:'continue'};
+  expect(()=>tasks.reconcileBrowser({...command,execute:false},t.taskId,1,proof.requestId,proof.evidenceId!,'Fill return date',()=>adapter.reconcileEvidence(stopped,proof.requestId,proof.evidenceId!))).toThrow();
+  const queued=tasks.reconcileBrowser(command,t.taskId,1,proof.requestId,proof.evidenceId!,'Keep outbound date; fill return date',()=>adapter.reconcileEvidence(stopped,proof.requestId,proof.evidenceId!));
+  expect(queued).toMatchObject({taskId:t.taskId,state:'queued',revision:2});
+  expect(tasks.reconcileBrowser(command,t.taskId,1,proof.requestId,proof.evidenceId!,'Keep outbound date; fill return date',()=>{throw Error('rechecked');})).toMatchObject({revision:2});
+  await pump();expect(runs).toBe(2);expect(store.task(t.taskId)?.state).toBe('completed');
+ }finally{await controller.close();store.close();rmSync(root,{recursive:true,force:true});}
+});

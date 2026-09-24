@@ -366,3 +366,28 @@ test('browser failure mailbox asks for inspection and permits same-task recovery
   expect(f.runtime.store.task(task.taskId)!.revision).toBe(2);
  }finally{await f.close();}
 });
+
+test.each(['text','live_voice'] as const)('live %s control applies before a busy agent, then receives an agent-authored reply',async modality=>{
+ const f=await fixture();try{
+  const t=f.runtime.store.task(f.task.taskId)!;
+  f.runtime.store.transaction(()=>{t.gatewayTarget={adapter:'browser',sessionId:'fixture',name:'Browser'};t.state='queued';t.activeAttemptId=undefined;t.pendingQuestion=undefined;f.runtime.store.saveTask(t,t.stateVersion);});
+  const active=(f.runtime as any).active as Map<string,unknown>;active.set(f.scope.agentSessionId,{stopping:false});
+  let ticket:any;const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((scope,...args)=>{ticket=scope;return issue(scope,...args);});
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+    expect(profile.overlay).toContain('durable control receipt');
+    expect(ticket.context.execute).toBe(false);
+    this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));
+    this.emit('output',JSON.stringify({type:'result',result:'รับคำแก้ไขแล้วครับ กำลังทำงานเดิมต่อ'}));
+  }}) as unknown as SessionProcess);
+  const input={scope:f.scope,text:'เปลี่ยนปลายทางครับ',modality,ingressKey:randomUUID(),metadata:{executionTaskId:t.taskId}};
+  const submitted=f.runtime.submitInput(input,{execute:true,writeMemory:false});
+  expect(f.runtime.store.task(t.taskId)?.revision).toBe(2);
+  expect(f.createAgentSession).not.toHaveBeenCalled();
+  expect(f.runtime.store.get("SELECT COUNT(*) n FROM assistant_responses WHERE generated_text LIKE 'Correction received%'")!.n).toBe(0);
+  const retry=f.runtime.submitInput(input,{execute:true,writeMemory:false});expect(retry.inputId).toBe(submitted.inputId);
+  active.delete(f.scope.agentSessionId);(f.runtime as any).pumpMailbox();
+  expect(await submitted.response).toBe('รับคำแก้ไขแล้วครับ กำลังทำงานเดิมต่อ');
+  expect(f.runtime.store.task(t.taskId)?.revision).toBe(2);
+ }finally{(f.runtime as any).active.clear();await f.close();}
+});

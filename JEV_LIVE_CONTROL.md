@@ -29,7 +29,12 @@ permission. Model-provided task IDs never grant access.
   unconditional text overrides.
 - Resume is valid only for a task paused through this interface.
 - Unknown mutation outcomes and interrupted processes require reconciliation;
-  they cannot be resumed through this endpoint. No uncertain action is replayed.
+  they cannot be resumed through this endpoint. After an explicit user request,
+  the agent can inspect fresh scoped evidence and use `reconcile_browser`. This
+  requires settled operation status, or a recorded legacy TYPE_TEXT stale
+  rejection before keys/text were dispatched. Timeout/disconnect and unresolved
+  mutations remain fenced. A new revision observes the current page; the old
+  operation ID is never replayed.
 - `executionControl.phase` distinguishes accepted/pending, applied, paused and
   blocked. A 202 response acknowledges acceptance, not completed interruption.
   Existing task events and receipts continue carrying progress/results.
@@ -46,14 +51,16 @@ Chat message admission and streaming accept `execution_task_id`. Only an explici
 client selection uses this path. The task must belong to the authenticated
 principal and the same conversation/session. The input, correction and response
 receipt commit together; replaying a client message does not append another
-revision or schedule an orchestrator decision. Unsupported states produce a
-visible notice and never fall back to starting unrelated work.
+revision. The canonical input remains pending for one agent-authored response.
+Applied controls give the response turn read-only execution capabilities; the
+agent cannot send the correction twice. Rejected controls go to the agent with
+a durable, scoped reason for inspection and continuation of the same task.
 
 The voice WebSocket accepts `execution_task_id` (or null) in `voice.start` and
 `voice.configure`. Confirmed STT words pause the selected task. Microphone noise
 alone does not pause it. The target stays fixed across the current spoken
 message even if the UI selection changes. Final speech becomes one correction,
-with a canonical response ID and a TTS acknowledgement. Discarded speech leaves
+with a canonical response ID and the agent response streamed into TTS. Discarded speech leaves
 the task paused for explicit resume.
 
 GetPod Web Chat exposes the selected task, Pause/Resume, pending status and an

@@ -724,7 +724,7 @@ export class AgentRunner extends EventEmitter {
         return { text: '', attachments: [], inputId: accepted.inputId };
       }
       let text: string;
-      if (semantic) {
+      if (semantic || opts.executionTaskId) {
         const accepted = orchestration.submitInput({...scopedInput,model:opts.model},{execute:opts.allowTools ?? false,writeMemory:false},onTool);
         const lengths = new Map<string,number>();
         const unsubscribe = orchestration.subscribeText(sessionId,opts.principalId,event=>{
@@ -4893,9 +4893,9 @@ export class AgentRunner extends EventEmitter {
   ): Promise<() => void> {
     if (this.orchestrationForApi(sessionId)) {
       if(opts.executionTaskId){
-        // A deterministic control ACK must not replace an active agent stream.
+        // A task control applies immediately, then its scoped agent reply streams independently.
         let detached=false;
-        void this.sendOrchestratedApi(sessionId,chatId,message,opts)
+        void this.sendOrchestratedApi(sessionId,chatId,message,opts,text=>{if(!detached)callbacks.onChunk({type:'text_delta',text} as StreamEvent);})
           .then(result=>{if(!detached)callbacks.onDone(result.text,result.attachments);})
           .catch(error=>{if(!detached)callbacks.onError(presentedResponseError(error));});
         return ()=>{detached=true;};
