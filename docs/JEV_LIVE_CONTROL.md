@@ -60,3 +60,27 @@ never removes unknown-operation fences. Idle is not a success claim.
   edits and AVERAGE. Run sequentially after the browser reconnects.
 - Every live case must record the observed result, task/revision and intervention
   count. Agent continuation alone is not independent proof of task success.
+
+## Live validation — 2026-09-25
+
+### Flight search: passed through visible results (no booking)
+
+Gateway `85c43db`, loop `b5277c0`, web `71558dea`. Started at the
+Google Flights home page; the parent supplied instructions through 17 revisions
+on one authorized browser task. Recorded observations show Bangkok BKK to Tokyo
+NRT, economy, departure 2026-09-25 and return 2026-09-26. Passenger-dialog
+observations in revisions 13–15 show adults at 3 and children increasing 0→1→2.
+The parent independently requested a fresh screenshot after Search; its tool
+result at 02:24:05 UTC reports 8 results returned. No booking was performed.
+
+Setup required closing an old test that still held the target and rediscovering
+the tab after reapproval changed its ID. There were no operator-supplied form
+steps during the 17-revision run. However, the parent tried to issue an extra
+step under an old notification and received EXECUTION_DENIED. Commit `7193b87`
+adds an explicit end-turn handoff after dispatch; authority remains scoped to
+the next notification. It was deployed after the flight case, before Shopee.
+This run does not prove that the handoff fix itself has passed all live cases.
+
+The web at the test tunnel displayed Agent control (Auto) as the default and
+the existing task as the User control destination, without a page error.
+Shopee, Maps and Sheets remain pending at this checkpoint.
