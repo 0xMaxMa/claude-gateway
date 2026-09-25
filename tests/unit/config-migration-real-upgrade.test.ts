@@ -658,3 +658,89 @@ describe('config migration — Opus 5.5 reaches existing installs', () => {
     });
   });
 });
+
+/**
+ * GPT 6 reaches existing installs.
+ *
+ * Same shape as the Opus 5.5 block above: the three GPT 6 rows only merge into
+ * an install's own gateway.models list when the template's configVersion is
+ * ahead of the user's, so the rows AND the bump are one feature.
+ *
+ * The pre-GPT-6 fixture pins configVersion 1.0.33, the version immediately
+ * before this change, so the first test fails if the bump is reverted.
+ */
+describe('config migration — GPT 6 reaches existing installs', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpt6-upgrade-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** A realistic pre-GPT-6 install: the existing GPT 5.6 row plus a custom BYOK model. */
+  function writePreGpt6Config(): string {
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          configVersion: '1.0.33',
+          gateway: {
+            bind: '0.0.0.0',
+            models: [
+              { id: 'gpt-5.6-sol[1m]', label: 'GPT 5.6 Sol', alias: 'gpt56sol', contextWindow: 1050000 },
+              { id: 'openrouter/custom-model', label: 'My BYOK', alias: 'mine', contextWindow: 128000 },
+            ],
+          },
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+    return configPath;
+  }
+
+  it('uses a template version newer than the pre-GPT-6 registry', () => {
+    expect(compareSemver(templateVersion(), '1.0.33')).toBeGreaterThan(0);
+  });
+
+  it('adds all three GPT 6 models with the right aliases and windows', () => {
+    const configPath = writePreGpt6Config();
+
+    const result = runRealUpgrade(configPath);
+
+    expect(result.needed).toBe(true);
+    const expected = [
+      { id: 'gpt-6-sol[1m]', label: 'GPT 6 Sol', alias: 'gpt6sol', contextWindow: 1050000 },
+      { id: 'gpt-6-astra[1m]', label: 'GPT 6 Astra', alias: 'gpt6astra', contextWindow: 1050000 },
+      { id: 'gpt-6-luna[1m]', label: 'GPT 6 Luna', alias: 'gpt6luna', contextWindow: 1050000 },
+    ];
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.configVersion).toBe(templateVersion());
+    for (const model of expected) {
+      expect(result.addedFields).toContain(`gateway.models[${model.id}]`);
+      expect(migrated.gateway.models).toContainEqual(model);
+    }
+    expect(result.addedFields).not.toContain('gateway.models[gpt-5.6-sol[1m]]');
+
+    const aliases = migrated.gateway.models.map((m: { alias: string }) => m.alias);
+    expect(new Set(aliases).size).toBe(aliases.length);
+  });
+
+  it('preserves a user-owned model that is not in the template', () => {
+    const configPath = writePreGpt6Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'openrouter/custom-model',
+      label: 'My BYOK',
+      alias: 'mine',
+      contextWindow: 128000,
+    });
+  });
+});

@@ -18,12 +18,15 @@ curl -H "X-Api-Key: my-secret-key-123" \
 ```json
 {
   "models": [
-    { "id": "claude-opus-5-5",     "name": "Opus 5.5",      "alias": "opus",     "contextWindow": 200000,  "multiplier": 1 },
-    { "id": "claude-opus-5-5[1m]", "name": "Opus 5.5 (1M)", "alias": "opus[1m]", "contextWindow": 1000000, "multiplier": 1 },
-    { "id": "claude-opus-5",       "name": "Opus 5",        "alias": "opus5",    "contextWindow": 200000,  "multiplier": 1 },
-    { "id": "claude-opus-4-8",     "name": "Opus 4.8",      "alias": "opus48",   "contextWindow": 200000,  "multiplier": 1 },
-    { "id": "claude-sonnet-5",     "name": "Sonnet 5",      "alias": "sonnet",   "contextWindow": 200000,  "multiplier": 1 },
-    { "id": "gpt-5.6-sol[1m]",     "name": "GPT 5.6 Sol",   "alias": "gpt56sol", "contextWindow": 1050000, "multiplier": 1 }
+    { "id": "claude-opus-5-5",     "name": "Opus 5.5",      "alias": "opus",      "contextWindow": 200000,  "multiplier": 1 },
+    { "id": "claude-opus-5-5[1m]", "name": "Opus 5.5 (1M)", "alias": "opus[1m]",  "contextWindow": 1000000, "multiplier": 1 },
+    { "id": "claude-opus-5",       "name": "Opus 5",        "alias": "opus5",     "contextWindow": 200000,  "multiplier": 1 },
+    { "id": "claude-opus-4-8",     "name": "Opus 4.8",      "alias": "opus48",    "contextWindow": 200000,  "multiplier": 1 },
+    { "id": "claude-sonnet-5",     "name": "Sonnet 5",      "alias": "sonnet",    "contextWindow": 200000,  "multiplier": 1 },
+    { "id": "gpt-6-sol[1m]",       "name": "GPT 6 Sol",     "alias": "gpt6sol",   "contextWindow": 1050000, "multiplier": 1 },
+    { "id": "gpt-6-astra[1m]",     "name": "GPT 6 Astra",   "alias": "gpt6astra", "contextWindow": 1050000, "multiplier": 1 },
+    { "id": "gpt-6-luna[1m]",      "name": "GPT 6 Luna",    "alias": "gpt6luna",  "contextWindow": 1050000, "multiplier": 1 },
+    { "id": "gpt-5.6-sol[1m]",     "name": "GPT 5.6 Sol",   "alias": "gpt56sol",  "contextWindow": 1050000, "multiplier": 1 }
   ]
 }
 ```
