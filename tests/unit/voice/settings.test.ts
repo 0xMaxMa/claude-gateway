@@ -219,7 +219,7 @@ test('upstream voice accepts the pod OAuth credential and retains explicit API c
 test('Paxa catalog returns both synthesis and recorded transcription models with separate capabilities', async () => {
   const catalog = await import('../../../src/voice/providers/voice-catalog');
   const choices = jest.spyOn(catalog, 'voiceChoices').mockResolvedValue([{ id: 'voice', name: 'Voice' }]);
-  const fetchModels = jest.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify({models:[{id:'paxa-tts-flash-v1'},{id:'paxa-stt-lite-v1-preview'}]})));
+  const fetchModels = jest.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify({models:[{id:'paxa-tts-flash-v1'},{id:'paxa-stt-lite-v1-preview'},{id:'paxa-stt-lite-realtime-v1-preview'}]})));
   const previous=process.env.PAXALABS_API_KEY; process.env.PAXALABS_API_KEY='fixture';
   const app=express(); app.use(voiceSettingsRouter(new Map([['a',{id:'a'} as AgentConfig]]),new Map(),[{id:'reader',key:'read',agents:['a']}]));
   try {
@@ -228,6 +228,7 @@ test('Paxa catalog returns both synthesis and recorded transcription models with
     expect(response.body.models).toEqual(expect.arrayContaining([
       expect.objectContaining({model_id:'paxa-tts-flash-v1',can_do_text_to_speech:true,can_do_speech_to_text:false}),
       expect.objectContaining({model_id:'paxa-stt-lite-v1-preview',can_do_text_to_speech:false,can_do_speech_to_text:true,realtime:false,voice_messages:true}),
+      expect.objectContaining({model_id:'paxa-stt-lite-realtime-v1-preview',can_do_text_to_speech:false,can_do_speech_to_text:true,realtime:true,voice_messages:false}),
     ]));
   } finally {choices.mockRestore();fetchModels.mockRestore();if(previous===undefined)delete process.env.PAXALABS_API_KEY;else process.env.PAXALABS_API_KEY=previous;}
 });

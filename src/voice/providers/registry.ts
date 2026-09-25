@@ -4,6 +4,7 @@ import { canonicalVoiceProvider, nativeVoiceModel } from './model-ref';
 import { GeminiStt, GeminiTts } from './gemini';
 import { GeminiLiveStt } from './gemini-live-stt';
 import { PaxaLabsStt } from './paxalabs-stt';
+import { PaxaLabsLiveStt, isPaxaRealtimeSttModel } from './paxalabs-live-stt';
 import { PaxaLabsTts, paxaConnection } from './paxalabs-tts';
 import { upstreamVoiceConnection, upstreamVoiceSocket, managedVoiceSocket } from './upstream';
 import { SttProvider, TtsProvider, VoiceError } from '../types';
@@ -19,7 +20,7 @@ function makeSttProvider(config: { provider: string; model: string }): SttProvid
   if (config.provider === 'managed:elevenlabs') return new ElevenLabsStt(upstreamVoiceConnection('elevenlabs', true).key, config.model, managedVoiceSocket, config.provider);
   if (config.provider === 'upstream:elevenlabs') return new ElevenLabsStt(upstreamVoiceConnection().key, config.model, upstreamVoiceSocket, 'upstream:elevenlabs');
   if (config.provider === 'elevenlabs') return new ElevenLabsStt(process.env.ELEVENLABS_API_KEY ?? '', config.model);
-  if (['paxalabs', 'upstream:paxalabs', 'managed:paxalabs'].includes(config.provider)) return new PaxaLabsStt(config.provider, config.model);
+  if (['paxalabs', 'upstream:paxalabs', 'managed:paxalabs'].includes(config.provider)) return isPaxaRealtimeSttModel(config.model) ? new PaxaLabsLiveStt(config.provider, config.model) : new PaxaLabsStt(config.provider, config.model);
   if (config.provider === 'deepgram') return new DeepgramStt(process.env.DEEPGRAM_API_KEY ?? '', config.model);
   throw new VoiceError('UNKNOWN_STT_PROVIDER');
 }
