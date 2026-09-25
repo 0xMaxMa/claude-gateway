@@ -18,6 +18,7 @@ let adapter:GatewayTaskAdapter,controller:GatewayTaskController;
 let outcome:WorkerOutcome|'running'|'pending';
 const target={adapter:'safemode',sessionId:'11111111-1111-4111-8111-111111111111',name:'astra2'};
 let sequence=0;
+function agentControl(id:string){const task=store.task(id)!;task.automationController='agent';store.transaction(()=>store.saveTask(task,task.stateVersion));}
 function spawn(prior?:string) {return tasks.spawn({...context,actionId:`spawn-${++sequence}`},{title:'Inspect astra2',instructions:'Inspect the authorized error',targetProfile:'gateway-managed',gatewayTarget:target,continueTaskId:prior});}
 function open(){store=new OrchestrationStore(join(directory,'db'),'operator');tasks=new TaskService(store,{tasks:{workspaceMode:'host'}});}
 beforeEach(()=>{
@@ -257,7 +258,7 @@ test('an early managed field answer waits for its existing attempt to settle',()
 
 function stoppedBrowser(reason='LOW_TARGET_CONFIDENCE') {
  const task=tasks.spawn({...context,actionId:`recover-${++sequence}`},{title:'Flight search',instructions:'Find authorized flights to Osaka',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'browser'}});
- stopBrowser(task.taskId,reason);return task.taskId;
+ agentControl(task.taskId);stopBrowser(task.taskId,reason);return task.taskId;
 }
 function stopBrowser(taskId:string,reason:string) {
  const attempt=tasks.claim(taskId)!;tasks.started(attempt.attemptId,attempt.generation);
@@ -409,6 +410,7 @@ test('same approved browser task navigates only on the explicitly revised websit
  const browserAdapter={...adapter,name:'browser',resolve:()=>browserTarget};
  controller=new GatewayTaskController(tasks,new Map([['browser',browserAdapter]]));
  const first=tasks.spawn({...context,actionId:'browser-nav-spawn'},{title:'Browser',instructions:'Read old site',targetProfile:'gateway-managed',gatewayTarget:browserTarget});
+ agentControl(first.taskId);
  outcome={type:'completed',result:{summary:'Read',artifactIds:[]}};
  await controller.tick();
  const second=tasks.update({...context,actionId:'browser-nav-update'},first.taskId,1,'Read new site','when_ready',undefined,undefined,'https://new.example/');
@@ -430,6 +432,7 @@ test('browser navigation requires explicit authority, valid URL and a browser ta
 
 function waitingControlStep(){
  const task=tasks.spawn({...context,actionId:`step-${++sequence}`},{title:'Flight',instructions:'Open destinations',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'browser'}});
+ agentControl(task.taskId);
  const attempt=tasks.claim(task.taskId)!;tasks.started(attempt.attemptId,attempt.generation);
  tasks.finish(attempt.attemptId,attempt.generation,{type:'paused',browserReport:{contractVersion:1,status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1}});
  return store.task(task.taskId)!;
@@ -462,4 +465,15 @@ test('a previous step notification cannot authorize the next settled action',()=
  expect(()=>tasks.update({...context,execute:false,actionId:'premature-step-two'},task.taskId,next.revision,'Select airport','when_ready')).toThrow('EXECUTION_DENIED');
  expect(store.task(task.taskId)?.state).toBe('waiting_input');
  expect(store.task(task.taskId)?.revision).toBe(next.revision);
+});
+
+test('an owner stop closes idle computer tasks without dispatching another round',async()=>{
+ const computer={...adapter,name:'computer',ownerStopped:jest.fn(async()=>true)};
+ await controller.close();controller=new GatewayTaskController(tasks,new Map([['computer',computer]]));
+ const task=tasks.spawn({...context,actionId:'computer-stop'},{title:'Desktop',instructions:'Wait',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'computer'}});
+ const saved=store.task(task.taskId)!;saved.state='waiting_input';saved.automationController='user';saved.automationSession={status:'idle',idleTimeoutMs:1800000,idleSince:Date.now()};store.transaction(()=>store.saveTask(saved,saved.stateVersion));
+ await controller.tick();await controller.tick();
+ expect(store.task(task.taskId)?.state).toBe('cancelled');
+ expect(store.task(task.taskId)?.cancellation?.requestedBy).toBe('user');
+ expect(computer.submit).not.toHaveBeenCalled();
 });

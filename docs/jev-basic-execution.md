@@ -37,3 +37,7 @@ date, adult count and cabin in visible results. Use a future date as a separate
 control when reproducing an example with a past date. Cover stale autocomplete,
 calendar repaint, field handoff, cancellation, revoked consent and unknown
 mutation outcome without replay. Unit/adapter fixtures are not real-site proof.
+
+### Desktop owner stops
+
+Computer tasks check the paired relay for owner-stop timestamps, including while waiting for input. A confirmed stop newer than the task closes that task through normal user cancellation; subsequent commands require a new session. Checks are scoped to the same device, grant, principal and conversation and run at most once every five seconds per task. Network failures do not imply an owner stop. Relay implementations expose a durable `stoppedAt` timestamp on `/v1/computer-grants`; older relays without it retain their existing behavior.

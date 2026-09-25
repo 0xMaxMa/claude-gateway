@@ -33,3 +33,14 @@ test('computer-only container inventory grants neither safemode nor browser veri
  const spawn=tools.find(t=>t.name==='task_spawn')!;expect((spawn.inputSchema.properties as any).gateway_target.properties.adapter.enum).toEqual(['computer']);
  expect((tools.find(t=>t.name==='task_status')!.inputSchema.properties as any).browser_evidence).toBeUndefined();
 });
+
+test('owner stop evidence is scoped to the exact paired device and grant',async()=>{
+ global.fetch=jest.fn(async()=>new Response(JSON.stringify({grants:[grant]})));
+ const connectors=new ComputerConnectors(config(),{id:'a'} as any);
+ const [binding]=await connectors.discover(context,()=>true);
+ global.fetch=jest.fn(async()=>new Response(JSON.stringify({grants:[{...grant,ready:false,stoppedAt:1234}]})));
+ expect(await connectors.stoppedAt(binding.id,'p','c')).toBe(1234);
+ await expect(connectors.stoppedAt(binding.id,'other','c')).rejects.toThrow();
+ global.fetch=jest.fn(async()=>new Response(JSON.stringify({grants:[{...grant,deviceId:'other',stoppedAt:1234}]})));
+ expect(await connectors.stoppedAt(binding.id,'p','c')).toBeUndefined();
+});
