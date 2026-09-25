@@ -41,11 +41,14 @@ describe('model registry — Opus 5 is a first-class model', () => {
     expect(byId(models, 'claude-opus-5[1m]')?.contextWindow).toBe(1000000);
   });
 
-  it('the bare `opus` alias resolves to Opus 5 in both registries', () => {
-    expect(byAlias(DEFAULT_MODELS, 'opus')?.id).toBe('claude-opus-5');
-    expect(byAlias(DEFAULT_MODELS, 'opus[1m]')?.id).toBe('claude-opus-5[1m]');
-    expect(byAlias(templateModels(), 'opus')?.id).toBe('claude-opus-5');
-    expect(byAlias(templateModels(), 'opus[1m]')?.id).toBe('claude-opus-5[1m]');
+  // Opus 5 held the bare `opus` alias until Opus 5.5 landed and took it over
+  // (see the "Opus 5.5 is a first-class model" describe block below), the same
+  // demotion Opus 5 itself gave Opus 4.8 in the block below.
+  it('Opus 5 is demoted to the `opus5` alias (kept, not dropped)', () => {
+    expect(byAlias(DEFAULT_MODELS, 'opus5')?.id).toBe('claude-opus-5');
+    expect(byAlias(DEFAULT_MODELS, 'opus5[1m]')?.id).toBe('claude-opus-5[1m]');
+    expect(byAlias(templateModels(), 'opus5')?.id).toBe('claude-opus-5');
+    expect(byAlias(templateModels(), 'opus5[1m]')?.id).toBe('claude-opus-5[1m]');
   });
 
   it('Opus 4.8 is demoted to the `opus48` alias (kept, not dropped)', () => {
@@ -53,6 +56,26 @@ describe('model registry — Opus 5 is a first-class model', () => {
     expect(byAlias(DEFAULT_MODELS, 'opus48[1m]')?.id).toBe('claude-opus-4-8[1m]');
     expect(byAlias(templateModels(), 'opus48')?.id).toBe('claude-opus-4-8');
     expect(byAlias(templateModels(), 'opus48[1m]')?.id).toBe('claude-opus-4-8[1m]');
+  });
+});
+
+describe('model registry — Opus 5.5 is a first-class model', () => {
+  it('DEFAULT_MODELS includes both Opus 5.5 variants with correct context windows', () => {
+    expect(byId(DEFAULT_MODELS, 'claude-opus-5-5')?.contextWindow).toBe(200000);
+    expect(byId(DEFAULT_MODELS, 'claude-opus-5-5[1m]')?.contextWindow).toBe(1000000);
+  });
+
+  it('the template includes both Opus 5.5 variants with correct context windows', () => {
+    const models = templateModels();
+    expect(byId(models, 'claude-opus-5-5')?.contextWindow).toBe(200000);
+    expect(byId(models, 'claude-opus-5-5[1m]')?.contextWindow).toBe(1000000);
+  });
+
+  it('the bare `opus` alias resolves to Opus 5.5 in both registries', () => {
+    expect(byAlias(DEFAULT_MODELS, 'opus')?.id).toBe('claude-opus-5-5');
+    expect(byAlias(DEFAULT_MODELS, 'opus[1m]')?.id).toBe('claude-opus-5-5[1m]');
+    expect(byAlias(templateModels(), 'opus')?.id).toBe('claude-opus-5-5');
+    expect(byAlias(templateModels(), 'opus[1m]')?.id).toBe('claude-opus-5-5[1m]');
   });
 });
 
@@ -171,13 +194,13 @@ describe('model registry — Telegram fallback list stays in sync', () => {
     expect(telegramIds).toEqual(codeIds);
   });
 
-  it('maps each alias identically to DEFAULT_MODELS (incl. opus -> Opus 5)', () => {
+  it('maps each alias identically to DEFAULT_MODELS (incl. opus -> Opus 5.5)', () => {
     const codeMap = new Map(DEFAULT_MODELS.map((m) => [m.id, m.alias]));
     for (const m of telegramFallbackModels()) {
       expect(m.alias).toBe(codeMap.get(m.id));
     }
     // Explicit anchor for the repoint the user asked us to verify everywhere.
     const opus = telegramFallbackModels().find((m) => m.alias === 'opus');
-    expect(opus?.id).toBe('claude-opus-5');
+    expect(opus?.id).toBe('claude-opus-5-5');
   });
 });

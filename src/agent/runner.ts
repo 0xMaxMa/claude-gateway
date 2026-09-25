@@ -118,15 +118,23 @@ export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 // is api.anthropic.com. Behind a proxy the `[1m]` id suffix and the
 // `context-1m-2025-08-07` beta header are what actually buy the larger window,
 // which is exactly what the paired rows below encode.
+//
+// Opus 5.5 (`claude-opus-5-5`) follows the same convention on its own family:
+// it takes the bare `opus` alias and Opus 5 is demoted to `opus5`, mirroring
+// the Opus 5 -> Opus 4.8 demotion above and the Fable 5.1 -> Fable 5 one.
+// Selection still stores the resolved id, so an agent already on Opus 5 stays
+// on claude-opus-5 — only `/model opus` from now on resolves to 5.5.
 export const DEFAULT_MODELS: ModelConfig[] = [
   { id: 'claude-fable-5-1[1m]',      label: 'Fable 5.1 (1M)',   alias: 'fable[1m]',   contextWindow: 1000000 },
   { id: 'claude-fable-5[1m]',        label: 'Fable 5 (1M)',     alias: 'fable5[1m]',  contextWindow: 1000000 },
-  { id: 'claude-opus-5[1m]',         label: 'Opus 5 (1M)',      alias: 'opus[1m]',    contextWindow: 1000000 },
+  { id: 'claude-opus-5-5[1m]',       label: 'Opus 5.5 (1M)',    alias: 'opus[1m]',    contextWindow: 1000000 },
+  { id: 'claude-opus-5[1m]',         label: 'Opus 5 (1M)',      alias: 'opus5[1m]',   contextWindow: 1000000 },
   { id: 'claude-opus-4-8[1m]',       label: 'Opus 4.8 (1M)',    alias: 'opus48[1m]',  contextWindow: 1000000 },
   { id: 'claude-sonnet-5[1m]',       label: 'Sonnet 5 (1M)',    alias: 'sonnet[1m]',  contextWindow: 1000000 },
   { id: 'claude-fable-5-1',          label: 'Fable 5.1',        alias: 'fable',       contextWindow: 200000 },
   { id: 'claude-fable-5',            label: 'Fable 5',          alias: 'fable5',      contextWindow: 200000 },
-  { id: 'claude-opus-5',             label: 'Opus 5',           alias: 'opus',        contextWindow: 200000 },
+  { id: 'claude-opus-5-5',           label: 'Opus 5.5',         alias: 'opus',        contextWindow: 200000 },
+  { id: 'claude-opus-5',             label: 'Opus 5',           alias: 'opus5',       contextWindow: 200000 },
   { id: 'claude-opus-4-8',           label: 'Opus 4.8',         alias: 'opus48',      contextWindow: 200000 },
   { id: 'claude-opus-4-6',           label: 'Opus 4.6',         alias: 'opus46',      contextWindow: 200000 },
   { id: 'claude-sonnet-5',           label: 'Sonnet 5',         alias: 'sonnet',      contextWindow: 200000 },
