@@ -80,7 +80,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
      this.write(t,r,receipt);
     },
     evaluate:(req,s)=>this.options.evaluate(t,req,s),
-    ...(this.options.thinking?.()&&t.automationController!=='user'?{decideAction:async(req:import('@0xmaxma/jev-loop/action-thinking').ActionThinkingRequest,s:AbortSignal)=>{
+    ...(this.options.thinking?.()?{decideAction:async(req:import('@0xmaxma/jev-loop/action-thinking').ActionThinkingRequest,s:AbortSignal)=>{
      if(!authorized())throw Error('ACCESS_DENIED');
      const config=this.options.thinking?.(),image=receipt.snapshot?.screenshot;
      if(!config||!image||image.generation!==(req.state as any)?.generation)return {action:null,text:null};
