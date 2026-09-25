@@ -116,6 +116,7 @@ test('prepared fields persist through dispatch and a batched agent answer, then 
  const pump=async()=>{for(let i=0;i<10;i++){await controller.tick();await new Promise(setImmediate);}};
  try{
   const task=tasks.spawn(context,{title:'Flights',instructions:'CNX to Osaka',targetProfile:'gateway-managed',gatewayTarget:{adapter:'browser',sessionId:'target',name:'Browser',startUrl:'https://fixture.example'},browserFields:[{label:'From',text:'CNX'}]});
+  tasks.controlByUser(task.conversationId,context.principalId,task.taskId,{id:'00000000-0000-4000-8000-000000000001',action:'agent',expectedRevision:1});
   await pump();expect(run.mock.calls[0][0].startUrl).toBe('https://fixture.example');expect(run.mock.calls[0][0].fields).toEqual([{label:'From',text:'CNX'}]);
   const waiting=store.task(task.taskId)!;expect(waiting.state).toBe('waiting_input');
   tasks.answer({...context,actionId:'answer'},task.taskId,waiting.pendingQuestion!.questionId,'Osaka',[{label:'Adults',text:'2'},{label:'Children',text:'3'}]);

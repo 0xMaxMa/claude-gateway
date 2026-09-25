@@ -222,7 +222,10 @@ export class TaskService {
         task.latestProgress = { source: 'runtime', observedAt: now, text: `Queued after task ${prior.taskId} (${task.continuationPolicy}).` };
       }
       if (command.gatewayTarget) { task.gatewayTarget = command.gatewayTarget;
-        if (["browser","computer"].includes(command.gatewayTarget.adapter)) task.automationSession={status:"active",idleTimeoutMs:this.config.tasks.automationIdleTimeoutMs};
+        if (["browser","computer"].includes(command.gatewayTarget.adapter)) {
+          task.automationSession={status:"active",idleTimeoutMs:this.config.tasks.automationIdleTimeoutMs};
+          task.automationController="user";
+        }
       }
       if (command.skill) task.skill = command.skill;
       if (context.model && !command.gatewayTarget) task.model = context.model;

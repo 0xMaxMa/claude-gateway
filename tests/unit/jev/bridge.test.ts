@@ -217,6 +217,7 @@ for(const container of [false,true])test(`computer snapshots and prepared inputs
  const agent=f.issue({role:'agent',context:f.context});expect(await agent.call({task_id:task.taskId,computer_evidence:'recorded'},'task_status')).toMatchObject({computerEvidence:{recordedOnly:true}});
  const foreign=f.issue({role:'agent',context:{...f.context,principalId:'foreign'}});expect(await foreign.call({task_id:task.taskId,computer_evidence:'screenshot'},'task_status')).toHaveProperty('error');
  expect(await agent.call({task_id:task.taskId,computer_evidence:'fresh',browser_evidence:'fresh'},'task_status')).toHaveProperty('error');
+ f.tasks.controlByUser(task.conversationId,f.context.principalId,task.taskId,{id:'00000000-0000-4000-8000-000000000001',action:'agent',expectedRevision:1});
  f.tasks.update({...f.context,actionId:'new-goal'},task.taskId,1,'Search Tokyo','when_ready');expect(f.tasks.revision(task.taskId,2).computerInputs).toBeUndefined();
  }finally{await f.close();}
 });

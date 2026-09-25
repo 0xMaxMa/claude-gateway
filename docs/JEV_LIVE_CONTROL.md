@@ -28,7 +28,7 @@ changes do not grant coordinate, shell, or unapproved-application access.
 
 ## Agent control and user control
 
-Agent control is the default. Each confirmed action yields fresh evidence and a
+User control is the default for new Browser Use and Computer Use sessions. Commands go directly to the task; the conversational agent does not intervene. Users can explicitly switch to Agent control. In Agent control, each confirmed action yields fresh evidence and a
 scoped notification. The conversational agent inspects the screenshot and sends
 one next instruction on the same task; it is the operator, not only a verifier.
 The overall user objective stays in conversation; each loop command is one step.

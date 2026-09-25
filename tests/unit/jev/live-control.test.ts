@@ -35,6 +35,7 @@ function fixture(unknown=false){
 
 test('direct correction interrupts reasoning, preserves task identity and resumes without navigating again',async()=>{
  const f=fixture();try{
+  expect(f.task.automationController).toBe('user');
   await f.pump();expect(f.calls).toHaveLength(1);
   const command=f.control('revise','Use Manchester instead');
   expect(f.calls[0].interruptSignal!.aborted).toBe(true);
