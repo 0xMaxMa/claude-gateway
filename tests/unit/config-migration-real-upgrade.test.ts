@@ -292,7 +292,7 @@ describe('config migration — Opus 5 support reaches existing installs', () => 
     expect(ids).toContain('claude-opus-5[1m]');
   });
 
-  it('repoints the bare `opus` aliases to Opus 5 and demotes 4.8 to `opus48`', () => {
+  it('repoints the bare `opus` alias to the current template head and demotes accordingly', () => {
     const configPath = writePreOpus5Config();
     runRealUpgrade(configPath);
 
@@ -300,8 +300,13 @@ describe('config migration — Opus 5 support reaches existing installs', () => 
     const byAlias = (a: string) =>
       migrated.gateway.models.find((m: { alias: string }) => m.alias === a)?.id;
 
-    expect(byAlias('opus')).toBe('claude-opus-5');
-    expect(byAlias('opus[1m]')).toBe('claude-opus-5[1m]');
+    // The real template has moved on since this fixture's era (pre-Opus-5): the
+    // bare alias now belongs to Opus 5.5, with Opus 5 and Opus 4.8 both carrying
+    // versioned aliases one and two generations back.
+    expect(byAlias('opus')).toBe('claude-opus-5-5');
+    expect(byAlias('opus[1m]')).toBe('claude-opus-5-5[1m]');
+    expect(byAlias('opus5')).toBe('claude-opus-5');
+    expect(byAlias('opus5[1m]')).toBe('claude-opus-5[1m]');
     expect(byAlias('opus48')).toBe('claude-opus-4-8');
     expect(byAlias('opus48[1m]')).toBe('claude-opus-4-8[1m]');
   });
@@ -523,6 +528,125 @@ describe('config migration — Fable 5.1 reaches existing installs', () => {
 
   it('preserves a user-owned model that is not in the template', () => {
     const configPath = writePreFable51Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'openrouter/custom-model',
+      label: 'My BYOK',
+      alias: 'mine',
+      contextWindow: 128000,
+    });
+  });
+});
+
+/**
+ * Opus 5.5 reaches existing installs.
+ *
+ * Same shape as the Fable 5.1 block above: an install that already pins its
+ * own gateway.models list never sees a model added only to DEFAULT_MODELS,
+ * and migrateModels() only merges the template's rows in when its
+ * configVersion is ahead of the user's — so the entry AND the bump are one
+ * feature.
+ *
+ * The pre-Opus-5.5 fixture pins configVersion 1.0.32, the version immediately
+ * before this change: that makes the first test fail if the bump is reverted,
+ * rather than passing on the slack left by some older bump.
+ */
+describe('config migration — Opus 5.5 reaches existing installs', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opus55-upgrade-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** A realistic pre-Opus-5.5 install: bind already set (so bind isn't the
+   *  migration trigger), the previous Opus rows, plus a custom BYOK model. */
+  function writePreOpus55Config(): string {
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          configVersion: '1.0.32',
+          gateway: {
+            bind: '0.0.0.0',
+            models: [
+              { id: 'claude-opus-5[1m]', label: 'Opus 5 (1M)', alias: 'opus[1m]', contextWindow: 1000000 },
+              { id: 'claude-opus-5', label: 'Opus 5', alias: 'opus', contextWindow: 200000 },
+              { id: 'openrouter/custom-model', label: 'My BYOK', alias: 'mine', contextWindow: 128000 },
+            ],
+          },
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+    return configPath;
+  }
+
+  it('uses a template version newer than the pre-Opus-5.5 registry', () => {
+    expect(compareSemver(templateVersion(), '1.0.32')).toBeGreaterThan(0);
+  });
+
+  it('adds both Opus 5.5 variants with the right aliases and windows', () => {
+    const configPath = writePreOpus55Config();
+
+    const result = runRealUpgrade(configPath);
+
+    expect(result.needed).toBe(true);
+    expect(result.addedFields).toContain('gateway.models[claude-opus-5-5]');
+    expect(result.addedFields).toContain('gateway.models[claude-opus-5-5[1m]]');
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.configVersion).toBe(templateVersion());
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'claude-opus-5-5',
+      label: 'Opus 5.5',
+      alias: 'opus',
+      contextWindow: 200000,
+    });
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'claude-opus-5-5[1m]',
+      label: 'Opus 5.5 (1M)',
+      alias: 'opus[1m]',
+      contextWindow: 1000000,
+    });
+  });
+
+  /**
+   * The upgrade repoints `opus` from Opus 5 to Opus 5.5, so an existing
+   * install's own claude-opus-5 row — which stores alias `opus` — has to be
+   * rewritten to `opus5`. If it were merely left alone, the migrated config
+   * would carry two rows both claiming `opus`, and /model opus would resolve
+   * to whichever came first. This is the guard for that.
+   */
+  it('rewrites the existing Opus 5 rows to the demoted `opus5` alias', () => {
+    const configPath = writePreOpus55Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const byAlias = (alias: string) =>
+      migrated.gateway.models.find((m: { alias: string }) => m.alias === alias);
+    const byId = (id: string) =>
+      migrated.gateway.models.find((m: { id: string }) => m.id === id);
+
+    expect(byId('claude-opus-5')?.alias).toBe('opus5');
+    expect(byId('claude-opus-5[1m]')?.alias).toBe('opus5[1m]');
+    expect(byAlias('opus')?.id).toBe('claude-opus-5-5');
+    expect(byAlias('opus[1m]')?.id).toBe('claude-opus-5-5[1m]');
+
+    const aliases = migrated.gateway.models.map((m: { alias: string }) => m.alias);
+    expect(new Set(aliases).size).toBe(aliases.length);
+  });
+
+  it('preserves a user-owned model that is not in the template', () => {
+    const configPath = writePreOpus55Config();
     runRealUpgrade(configPath);
 
     const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));

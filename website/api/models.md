@@ -18,8 +18,9 @@ curl -H "X-Api-Key: my-secret-key-123" \
 ```json
 {
   "models": [
-    { "id": "claude-opus-5",     "name": "Opus 5",     "alias": "opus",     "contextWindow": 200000,  "multiplier": 1 },
-    { "id": "claude-opus-5[1m]", "name": "Opus 5 (1M)", "alias": "opus[1m]", "contextWindow": 1000000, "multiplier": 1 },
+    { "id": "claude-opus-5-5",   "name": "Opus 5.5", "alias": "opus",     "contextWindow": 200000,  "multiplier": 1 },
+    { "id": "claude-opus-5-5[1m]", "name": "Opus 5.5 (1M)", "alias": "opus[1m]", "contextWindow": 1000000, "multiplier": 1 },
+    { "id": "claude-opus-5",     "name": "Opus 5",     "alias": "opus5",    "contextWindow": 200000,  "multiplier": 1 },
     { "id": "claude-opus-4-8",   "name": "Opus 4.8",   "alias": "opus48",   "contextWindow": 200000,  "multiplier": 1 },
     { "id": "claude-sonnet-5",   "name": "Sonnet 5",   "alias": "sonnet",   "contextWindow": 200000,  "multiplier": 1 },
     { "id": "gpt-5.6-sol[1m]",   "name": "GPT 5.6 Sol", "alias": "gpt56sol", "contextWindow": 1050000, "multiplier": 1 }
@@ -27,7 +28,7 @@ curl -H "X-Api-Key: my-secret-key-123" \
 }
 ```
 
-> The bare family alias always points at the newest model of that family (`opus` → Opus 5, `sonnet` → Sonnet 5); older members keep a versioned alias (`opus48`). This is a representative subset — the endpoint returns the full list.
+> The bare family alias always points at the newest model of that family (`opus` → Opus 5.5, `sonnet` → Sonnet 5); older members keep a versioned alias (`opus5`, `opus48`). This is a representative subset — the endpoint returns the full list.
 
 The `get_models` command the chat receivers call for their model picker resolves through the same catalog and the same fallback, so the picker and this endpoint never disagree.
 
