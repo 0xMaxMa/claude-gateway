@@ -4491,6 +4491,11 @@ export class AgentRunner extends EventEmitter {
       ts: uiUserTs,
     });
 
+    // Echo the web UI message to Telegram so channel users see what was typed
+    if (channel === 'telegram') {
+      this.writeAutoForward(rawChatId, '📱 Web: ' + message);
+    }
+
     const buffer: string[] = [];
     let settled = false;
     let lastPartialText = '';
