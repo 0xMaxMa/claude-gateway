@@ -453,3 +453,13 @@ test('user control invalidates agent continuation and switching back does not re
  const resumed=tasks.controlByUser(context.conversationId,context.principalId,task.taskId,{id:randomUUID(),action:'agent',expectedRevision:task.revision});
  expect(resumed.state).toBe('waiting_input');expect(resumed.revision).toBe(task.revision);expect(resumed.activeAttemptId).toBeUndefined();
 });
+
+test('a previous step notification cannot authorize the next settled action',()=>{
+ const task=waitingControlStep();store.run("UPDATE notifications SET status='assigned',decision_id=? WHERE task_id=?",context.decisionId,task.taskId);
+ const next=tasks.update({...context,execute:false,actionId:'step-one'},task.taskId,task.revision,'Type Bangkok','when_ready');
+ const attempt=tasks.claim(task.taskId)!;tasks.started(attempt.attemptId,attempt.generation);
+ tasks.finish(attempt.attemptId,attempt.generation,{type:'paused',browserReport:{contractVersion:1,status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1}});
+ expect(()=>tasks.update({...context,execute:false,actionId:'premature-step-two'},task.taskId,next.revision,'Select airport','when_ready')).toThrow('EXECUTION_DENIED');
+ expect(store.task(task.taskId)?.state).toBe('waiting_input');
+ expect(store.task(task.taskId)?.revision).toBe(next.revision);
+});

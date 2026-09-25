@@ -205,6 +205,9 @@ export class TaskBridge {
                   if(!adapter?.verifyEvidence)throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
                   result=this.tasks.verifyBrowser(context,a.task_id,a.expected_revision,a.expected_request_id,a.evidence_id,a.instruction,()=>adapter.verifyEvidence!(task,a.expected_request_id,a.evidence_id));
                 }else result=this.tasks.update(context,a.task_id,a.expected_revision,a.instruction,a.mode as ChangeMode,a.browser_fields,a.computer_inputs,a.start_url);
+                if(a.mode==='when_ready' && result && typeof result==='object' && 'gatewayTarget' in result && ['browser','computer'].includes((result as any).gatewayTarget?.adapter)) {
+                  result={...result,controlHandoff:{endTurn:true,next:'End this turn now. Do not poll or send another command. The next action result schedules a fresh notification with authority for the next step.'}};
+                }
                 break;
               }
               case 'task_question': {
