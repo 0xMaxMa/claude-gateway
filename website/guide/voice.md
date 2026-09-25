@@ -85,7 +85,7 @@ Voice replies and controls cover Telegram, Discord, LINE, and Slack in orchestra
 
 ## Recorded input and replay
 
-PaxaLabs, OpenRouter, and Gemini batch transcription use completed recorded segments, not realtime partial transcripts. Gemini browser STT instead uses the realtime adapter when the selected model is `gemini-3.5-transcribe-live`; availability depends on provider access. A pause or microphone mute ends a segment before transcription begins. PaxaLabs live TTS requires `ffmpeg` for MP3 decoding.
+OpenRouter and Gemini batch transcription use completed recorded segments, not realtime partial transcripts. Gemini browser STT instead uses the realtime adapter when the selected model is `gemini-3.5-transcribe-live`, and PaxaLabs browser STT uses its realtime adapter when the selected model is `paxa-stt-lite-realtime-v1-preview` (its batch models still use completed recorded segments); availability depends on provider access. A pause or microphone mute ends a segment before transcription begins. PaxaLabs live TTS requires `ffmpeg` for MP3 decoding.
 
 Completed browser TTS recordings can be replayed without another provider request. The speaker button appears only when a recording was retained. Retention is up to 30 days with a 64 MiB budget per agent and a 16 MiB per-recording limit; interrupted synthesis is not offered as a completed recording.
 
@@ -109,7 +109,7 @@ Selecting a batch provider for browser STT is supported, but changes the interac
 | --- | --- | --- | --- | --- |
 | `elevenlabs` | `ELEVENLABS_API_KEY` | Realtime | Recorded file | Streaming audio |
 | `gemini` | `GEMINI_API_KEY` | Realtime with `gemini-3.5-transcribe-live`; otherwise recorded segment | Recorded file | Buffered provider response in the current adapter |
-| `paxalabs` | `PAXALABS_API_KEY` | Recorded segment | Recorded file | Supported; browser decoding needs ffmpeg |
+| `paxalabs` | `PAXALABS_API_KEY` | Realtime with `paxa-stt-lite-realtime-v1-preview`; otherwise recorded segment | Recorded file | Supported; browser decoding needs ffmpeg |
 | `openrouter` | `OPENROUTER_API_KEY` | Recorded segment | Recorded file | Supported speech models; encoded audio decoding needs ffmpeg |
 | `deepgram` | `DEEPGRAM_API_KEY` | Realtime adapter | Not supported by the voice-note upload path | No |
 | `cartesia` | `CARTESIA_API_KEY` | No | No | Supported TTS adapter |
