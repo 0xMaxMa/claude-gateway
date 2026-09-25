@@ -868,6 +868,7 @@ export class TaskService {
       if(['queued','waiting_input'].includes(state)&&automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
       const attempt = this.store.attempt(task.activeAttemptId)!;
       attempt.state = 'ended'; task.activeAttemptId = undefined; task.state = state;
+      if(state==='cancelled')task.failure=undefined;
       if(state==='queued'&&task.gatewayTarget){task.gatewayDispatch=undefined;task.failure=undefined;task.computerReport=undefined;}
       if(state==='waiting_input'){task.failure=undefined;task.computerReport={steps:0,...task.computerReport,status:'needs_input',reason:'COMMAND_WAITING_INPUT'};if(task.automationSession)task.automationSession={...task.automationSession,status:'idle',idleSince:Date.now()};}
       this.pool.release(taskId, false);
