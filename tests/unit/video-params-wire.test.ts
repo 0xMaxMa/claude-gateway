@@ -230,7 +230,7 @@ test('orchestrated API persists composer video options and forwards their author
   const runner = Object.assign(Object.create(AgentRunner.prototype), {
     pendingApiSessions: new Set(), apiChatIds: new Map(), agentConfig: { id: 'a' },
     sessionStore: { ensureApiSession: async () => {}, loadIndex: async () => null, updateSessionMeta: update },
-    getOrchestration: async () => ({ send, responseFiles: () => [] }),
+    getOrchestration: async () => ({ send, responseFiles: () => [], authorizeSession: () => {} }),
     addApiAttachments: () => {}, popApiAttachments: () => [],
   });
   const videoParams = { model: 'video-fixture', duration: 8, aspect_ratio: '9:16', resolution: '720p' };

@@ -1650,7 +1650,7 @@ describe('legacy cron orchestration ownership',()=>{
   runner.orchestrationForApi=()=>true;
   runner.sessionStore={ensureApiSession:jest.fn(async()=>{}),loadIndex:jest.fn(async()=>undefined)};
   const send=jest.fn(async(_input:any,_capabilities:any,_options:any)=> 'Scheduled check complete');
-  runner.getOrchestration=async()=>({send,responseFiles:()=>[],waitForTaskReport:async(_s:string,_p:string,_r:string,text:string)=>text});
+  runner.getOrchestration=async()=>({send,responseFiles:()=>[],authorizeSession:()=>{},waitForTaskReport:async(_s:string,_p:string,_r:string,text:string)=>text});
   runner.addApiAttachments=jest.fn();runner.popApiAttachments=()=>[];
   const first=makeManager({runner});await first.manager.start();
   const job=await first.manager.create({agentId:first.agentId,name:'Old scheduled check',scheduleKind:'cron',schedule:'0 * * * *',type:'agent',prompt:'Check status'});
