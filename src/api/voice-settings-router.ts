@@ -9,6 +9,7 @@ import { resolveVoiceId } from '../voice/providers/voice-catalog';
 import { PCM16 } from '../voice/types';
 import { pcmToWav } from '../voice/wav';
 import { paxaConnection } from '../voice/providers/paxalabs-tts';
+import { isPaxaRealtimeSttModel } from '../voice/providers/paxalabs-live-stt';
 import { Router, Request } from 'express';
 import { readFile } from 'fs/promises';
 import { AgentConfig, ApiKey } from '../types';
@@ -226,7 +227,7 @@ export function voiceSettingsRouter(
           const response = await fetch(new URL('models', base), { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(10000), redirect: 'error' });
           if (!response.ok) throw await providerHttpError('VOICE', response);
           const result = await response.json() as { models?: Array<{ id: string; name?: string }> };
-          models = (result.models ?? []).filter(m => /^paxa-(tts|stt)-/.test(m.id)).map(m => ({ model_id: m.id, name: m.name ?? m.id, can_do_text_to_speech: m.id.startsWith('paxa-tts-'), can_do_speech_to_text: m.id.startsWith('paxa-stt-'), realtime: false, voice_messages: m.id.startsWith('paxa-stt-') }));
+          models = (result.models ?? []).filter(m => /^paxa-(tts|stt)-/.test(m.id)).map(m => { const stt = m.id.startsWith('paxa-stt-'), realtime = stt && isPaxaRealtimeSttModel(m.id); return { model_id: m.id, name: m.name ?? m.id, can_do_text_to_speech: m.id.startsWith('paxa-tts-'), can_do_speech_to_text: stt, realtime, voice_messages: stt && !realtime }; });
         }
         if (provider === 'elevenlabs' || provider === 'upstream:elevenlabs') {
           // /models exposes synthesis capabilities; Scribe transports have documented IDs.
