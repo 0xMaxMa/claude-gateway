@@ -4,7 +4,7 @@ import {withComputerConnection} from '../../../src/jev/computer-connector';
 jest.mock('../../../src/jev/computer-connector',()=>({withComputerConnection:jest.fn()}));
 jest.mock('@0xmaxma/jev-loop/computer-use',()=>({runComputerUse:jest.fn(async()=>({status:'succeeded',steps:0}))}));
 const {runComputerUse}=require('@0xmaxma/jev-loop/computer-use');
-for(const answer of ['approved','denied'])test(`request consent at execution, ${answer} gates the runner`,async()=>{
+for(const answer of ['approved','denied','stopped','expired'])test(`request consent at execution, ${answer} gates the runner`,async()=>{
  const root=mkdtempSync(join(tmpdir(),'computer-consent-'));runComputerUse.mockClear();
  const callTool=jest.fn().mockResolvedValueOnce({content:[{type:'text',text:'{"state":"pending"}'}]}).mockResolvedValueOnce({content:[{type:'text',text:JSON.stringify({state:answer})}]});
  jest.mocked(withComputerConnection).mockImplementation(async(_connection,fn)=>fn({callTool} as any));
@@ -13,7 +13,7 @@ for(const answer of ['approved','denied'])test(`request consent at execution, ${
  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
  try{await adapter.submit(task,'request','Open Notes');let outcome:any;for(let i=0;i<50;i++){outcome=await adapter.inspect(task,'request');if(typeof outcome==='object')break;await new Promise(r=>setImmediate(r));}
  expect(callTool).toHaveBeenCalledTimes(2);expect(callTool.mock.calls[0][0]).toMatchObject({name:'computer_request_access',arguments:{device_id:'device',grant_id:'grant'}});
- expect(runComputerUse).toHaveBeenCalledTimes(answer==='approved'?1:0);expect(outcome.type).toBe(answer==='approved'?'completed':'failed');if(answer==='denied')expect(outcome.failure.code).toBe('COMPUTER_ACCESS_DENIED');
+ expect(runComputerUse).toHaveBeenCalledTimes(answer==='approved'?1:0);expect(outcome.type).toBe(answer==='approved'?'completed':'failed');if(answer!=='approved'){expect(outcome.failure.code).toBe(answer==='denied'?'COMPUTER_ACCESS_DENIED':answer==='stopped'?'COMPUTER_ACCESS_STOPPED':'COMPUTER_ACCESS_UNAVAILABLE');expect(outcome.computerReport.reason).toBe(outcome.failure.code);expect(outcome.failure.message).not.toContain('owner declined');}
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
 

@@ -138,11 +138,11 @@ test('completed rounds remain idle, continue on the same task without navigating
   await f.pump();expect(f.calls).toHaveLength(3);
  }finally{await f.close();}
 });
-test('idle timeout survives reads and blocks resuming without running inference',async()=>{
+test('agent idle timeout survives reads and blocks resuming without running inference',async()=>{
  const f=fixture();try{
   await f.pump();f.control('revise','Use Manchester');await f.pump();
   const t=f.store.task(f.task.taskId)!;
-  f.store.transaction(()=>{t.automationSession!.idleSince=Date.now()-1800001;f.store.saveTask(t,t.stateVersion);});
+  f.store.transaction(()=>{t.automationController='agent';t.automationSession!.idleSince=Date.now()-1800001;f.store.saveTask(t,t.stateVersion);});
   expect(f.tasks.status(f.accepted.conversationId,'u',t.taskId)[0].automationSession).toMatchObject({status:'closed',closedReason:'idle_timeout'});
   expect(()=>f.tasks.update({...f.context,actionId:'expired'},t.taskId,t.revision,'Continue','when_ready')).toThrow('This automation session was ended or expired');
   await f.pump();expect(f.calls).toHaveLength(2);
@@ -159,7 +159,7 @@ test('receipt recovery cannot requeue an expired uncertain automation session',a
  const f=fixture(true);try{
   await f.pump();f.control('revise','Use Manchester');await f.pump();
   const t=f.store.task(f.task.taskId)!;
-  f.store.transaction(()=>{t.automationSession!.idleSince=Date.now()-1800001;f.store.saveTask(t,t.stateVersion);});
+  f.store.transaction(()=>{t.automationController='agent';t.automationSession!.idleSince=Date.now()-1800001;f.store.saveTask(t,t.stateVersion);});
   expect(()=>f.tasks.reconcile(t.taskId,'queued','Late settled receipt')).toThrow('AUTOMATION_SESSION_CLOSED');
   await f.pump();expect(f.calls).toHaveLength(1);
   expect(f.store.task(t.taskId)?.state).toBe('needs_reconciliation');
@@ -175,5 +175,24 @@ test.each(['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT'])('%s is idle and ac
   const next=f.tasks.controlByUser(f.accepted.conversationId,'u',f.task.taskId,{id:randomUUID(),action:'revise',expectedRevision:1,text:'Scroll down'});
   expect(next.state).toBe('queued');expect(next.taskId).toBe(f.task.taskId);
   const instructions=f.tasks.revision(next.taskId,next.revision).instructions;expect(instructions).toContain('Scroll down');expect(instructions).not.toContain('London');
+ }finally{await f.close();}
+});
+
+test('user control remains open after long idle and ends only on explicit stop',async()=>{
+ const f=fixture();try{
+  await f.pump();f.control('revise','Read current page');await f.pump();
+  const t=f.store.task(f.task.taskId)!;
+  f.store.transaction(()=>{t.automationController='user';t.automationSession!.idleSince=Date.now()-86400000;f.store.saveTask(t,t.stateVersion);});
+  expect(f.tasks.status(f.accepted.conversationId,'u',t.taskId)[0].automationSession?.status).toBe('idle');
+  f.control('revise','Read the new page');await f.pump();expect(f.calls).toHaveLength(3);
+ }finally{await f.close();}
+});
+
+test.each(['NATIVE_PROCESS_EXITED','NATIVE_REQUEST_TIMEOUT'])('%s before dispatch permits a fresh command on the same computer task',async reason=>{
+ const f=fixture();try{
+  const t=f.store.task(f.task.taskId)!;
+  f.store.transaction(()=>{t.gatewayTarget={adapter:'computer',sessionId:'mac',name:'Mac'};t.state='failed';delete t.activeAttemptId;t.computerReport={status:'blocked',reason,steps:0,evaluations:0};f.store.saveTask(t,t.stateVersion);});
+  const updated=f.tasks.controlByUser(f.accepted.conversationId,'u',t.taskId,{id:randomUUID(),action:'revise',expectedRevision:t.revision,text:'Read the current screen'});
+  expect(updated.taskId).toBe(t.taskId);expect(updated.state).toBe('queued');expect(updated.failure).toBeUndefined();
  }finally{await f.close();}
 });

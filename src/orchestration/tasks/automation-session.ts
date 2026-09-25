@@ -20,7 +20,7 @@ export function automationSession(task: TaskSnapshot, now = Date.now()): Automat
     ['completed','failed'].includes(task.state) || (task.state === 'waiting_input' && !task.activeAttemptId) ? 'idle' : 'active';
   if (status === 'active') return {status,idleTimeoutMs};
   const idleSince = prior?.idleSince ?? task.updatedAt;
-  if (now - idleSince >= idleTimeoutMs) return {status:'closed',idleTimeoutMs,idleSince,closedAt:idleSince+idleTimeoutMs,closedReason:'idle_timeout'};
+  if (task.automationController !== 'user' && now - idleSince >= idleTimeoutMs) return {status:'closed',idleTimeoutMs,idleSince,closedAt:idleSince+idleTimeoutMs,closedReason:'idle_timeout'};
   return {status,idleTimeoutMs,idleSince};
 }
 export function syncAutomationSession(task: TaskSnapshot, now = Date.now()): void {

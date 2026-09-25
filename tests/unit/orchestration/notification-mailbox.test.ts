@@ -100,5 +100,6 @@ test('agent control wakes for each settled step even with next-user-turn reporti
   expect(pendingReports(store,[],[],false).map(r=>r.notification_id)).toContain(f.notificationId);
   store.transaction(()=>{task.automationController='user';store.saveTask(task,task.stateVersion);store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);});
   expect(pendingReports(store,[],[],false)).toHaveLength(0);
+  expect(pendingReports(store,[],[],true)).toHaveLength(0);
  }finally{store.close();}
 });

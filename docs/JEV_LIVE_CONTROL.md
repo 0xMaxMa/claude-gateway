@@ -84,3 +84,13 @@ This run does not prove that the handoff fix itself has passed all live cases.
 The web at the test tunnel displayed Agent control (Auto) as the default and
 the existing task as the User control destination, without a page error.
 Shopee, Maps and Sheets remain pending at this checkpoint.
+
+### User control recovery
+
+User-controlled sessions do not expire due to Gateway idle time; explicit Stop
+closes them. Device consent can still be revoked or expire independently. Task
+notifications never wake the conversational agent while user control is selected,
+including failure notifications. Known helper exits/timeouts before a mutation
+allow a new command on the same task; unknown operations remain fenced and cannot
+be replayed. Access denial reports describe the relay state without claiming that
+a new popup was declined or that macOS Screen Recording permission is missing.
