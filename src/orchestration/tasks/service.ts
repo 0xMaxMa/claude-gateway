@@ -856,16 +856,17 @@ export class TaskService {
   }
   /** Offline operator workflow only; not exposed through conversation tools.
    * Caller holds the instance lock and has checked liveness/side effects. */
-  reconcile(taskId: string, state: 'queued' | 'failed' | 'cancelled', evidence: string): TaskSnapshot {
+  reconcile(taskId: string, state: 'queued' | 'failed' | 'cancelled' | 'waiting_input', evidence: string): TaskSnapshot {
     boundedText(evidence, 4096);
-    if (!['queued', 'failed', 'cancelled'].includes(state)) throw new OrchestrationError('INVALID_RECONCILIATION');
+    if (!['queued', 'failed', 'cancelled', 'waiting_input'].includes(state)) throw new OrchestrationError('INVALID_RECONCILIATION');
     return this.store.transaction(() => {
       const task = this.store.task(taskId);
       if (!task || task.state !== 'needs_reconciliation' || !task.activeAttemptId) throw new OrchestrationError('RECONCILIATION_NOT_REQUIRED');
-      if(state==='queued'&&automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
+      if(['queued','waiting_input'].includes(state)&&automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
       const attempt = this.store.attempt(task.activeAttemptId)!;
       attempt.state = 'ended'; task.activeAttemptId = undefined; task.state = state;
       if(state==='queued'&&task.gatewayTarget){task.gatewayDispatch=undefined;task.failure=undefined;task.computerReport=undefined;}
+      if(state==='waiting_input'){task.failure=undefined;task.computerReport={steps:0,...task.computerReport,status:'needs_input',reason:'COMMAND_WAITING_INPUT'};if(task.automationSession)task.automationSession={...task.automationSession,status:'idle',idleSince:Date.now()};}
       this.pool.release(taskId, false);
       task.pendingQuestion = undefined;
       task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: `Operator reconciliation: ${evidence}` };

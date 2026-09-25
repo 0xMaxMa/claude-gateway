@@ -14,7 +14,7 @@ export interface GatewayTaskAdapter {
   computerEvidence?(task:TaskSnapshot,mode:'recorded'|'fresh'|'screenshot',signal?:AbortSignal):Promise<any>;
   diagnostics?(task:TaskSnapshot,offset?:number):Promise<unknown>;
   evidence?(task:TaskSnapshot, refresh?:boolean, signal?:AbortSignal, screenshot?:boolean):Promise<import('../../jev/browser-contract').BrowserEvidence>;
-  recover?(task:TaskSnapshot,requestId:string):Promise<{state:'queued'|'cancelled';evidence:string}|undefined>;
+  recover?(task:TaskSnapshot,requestId:string):Promise<{state:'queued'|'cancelled'|'waiting_input';evidence:string}|undefined>;
   reconcileEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):string;
   verifyEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):void;
   ready?(task: TaskSnapshot): boolean;

@@ -206,3 +206,11 @@ test('an idle computer follow-up retains app context without replaying the earli
   expect(instructions).toContain('Search Palm View');expect(instructions).toContain('Open Maps');expect(instructions).toContain('Do not repeat its actions');expect(instructions).toContain('activate that application before selecting a field');
  }finally{await f.close();}
 });
+
+test('quiesced unknown execution returns to idle and accepts the next user command without replay',async()=>{
+ const f=fixture(true);try{await f.pump();f.control('revise','Search next');await f.pump();const current=f.store.task(f.task.taskId)!;expect(current.state).toBe('needs_reconciliation');current.gatewayTarget={...current.gatewayTarget!,adapter:'computer'};f.store.transaction(()=>f.store.saveTask(current,current.stateVersion));
+  const recovered=f.tasks.reconcile(current.taskId,'waiting_input','Previous native helper stopped; old result remains unknown.');
+  expect(recovered.state).toBe('waiting_input');expect(recovered.activeAttemptId).toBeUndefined();expect(recovered.computerReport?.reason).toBe('COMMAND_WAITING_INPUT');
+  f.tasks.controlByUser(current.conversationId,'u',current.taskId,{id:randomUUID(),action:'revise',expectedRevision:recovered.revision,text:'Scroll down'});expect(f.store.task(current.taskId)?.state).toBe('queued');expect(f.calls).toHaveLength(1);
+ }finally{await f.close();}
+});
