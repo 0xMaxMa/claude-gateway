@@ -378,7 +378,9 @@ test.each(['text','live_voice'] as const)('live %s control bypasses a busy agent
   expect(f.runtime.store.task(t.taskId)?.revision).toBe(2);expect(signal).toHaveBeenCalled();
   expect(f.createAgentSession).not.toHaveBeenCalled();
   const retry=f.runtime.submitInput(input,{execute:true,writeMemory:false});expect(retry.inputId).toBe(submitted.inputId);
-  expect(await submitted.response).toBe('Command sent to the active control session.');
+  expect(await submitted.response).toBe('');
+  expect(await retry.response).toBe('');
+  expect(f.runtime.store.get("SELECT COUNT(*) AS count FROM conversation_decisions WHERE kind='notice' AND EXISTS(SELECT 1 FROM json_each(input_ids_json) WHERE value=?)",submitted.inputId)!.count).toBe(0);
   expect(f.runtime.store.get('SELECT status FROM conversation_inputs WHERE id=?',submitted.inputId)!.status).toBe('handled');
   expect(f.runtime.store.task(t.taskId)?.revision).toBe(2);
   expect(f.createAgentSession).not.toHaveBeenCalled();
