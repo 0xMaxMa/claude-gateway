@@ -29,10 +29,14 @@ export class PaxaLabsLiveStt implements SttProvider {
     const signal = AbortSignal.any([options.signal, abort.signal]);
     const events = new BoundedQueue<SttEvent>(131072, e => JSON.stringify(e).length);
     let socket: ProviderSocket | undefined, segment = 0, commitId: string | undefined, closed = false;
+    // Finalized turns of the current, still-uncommitted utterance. Kept at
+    // session scope so a mid-utterance socket change (an unprompted `done`
+    // followed by more audio) still shows earlier turns in later partials;
+    // cleared the moment the utterance commits.
+    const turns: string[] = [];
     // Runs one socket's message loop for a single utterance. A `done` frame ends
     // the cycle gracefully; any other early close mid-utterance fails the session.
     const run = (active: ProviderSocket) => void (async () => {
-      const turns: string[] = [];
       let graceful = false;
       try {
         for await (const message of active.messages) {
@@ -42,7 +46,7 @@ export class PaxaLabsLiveStt implements SttProvider {
             if (message.is_final) { turns.push(text); events.push({ type: 'segment_final', segmentId: String(segment++), text }); }
             else events.push({ type: 'partial', segmentId: String(segment), text: [...turns, text].filter(Boolean).join(' ') });
           } else if (message.type === 'done') {
-            if (commitId) { events.push({ type: 'commit_done', commitId }); commitId = undefined; }
+            if (commitId) { events.push({ type: 'commit_done', commitId }); commitId = undefined; turns.length = 0; }
             graceful = true; break;
           } else if (message.type === 'error') throw providerVoiceError('STT', undefined, message);
           // `started`, `speech_started`, `speech_ended` and `charged` carry
@@ -59,7 +63,17 @@ export class PaxaLabsLiveStt implements SttProvider {
       if (socket) return socket;
       const active = await this.connect(url.toString(), { Authorization: `Bearer ${key}` }, signal);
       socket = active;
-      await active.send({ type: 'start', model: this.model, audio: { encoding: 'pcm_s16le', sample_rate: options.format.sampleRate }, ...(options.language ? { language: options.language } : {}) });
+      // Arm the message loop only once the `start` handshake is sent. If the
+      // send fails (e.g. the server closes right after accepting the socket),
+      // drop the dead socket so the next utterance reconnects instead of
+      // reusing a socket that can only reject.
+      try {
+        await active.send({ type: 'start', model: this.model, audio: { encoding: 'pcm_s16le', sample_rate: options.format.sampleRate }, ...(options.language ? { language: options.language } : {}) });
+      } catch (error) {
+        if (socket === active) socket = undefined;
+        active.close();
+        throw error;
+      }
       run(active);
       return active;
     };
@@ -68,8 +82,9 @@ export class PaxaLabsLiveStt implements SttProvider {
       pushAudio: async frame => { signal.throwIfAborted(); await (await ensureSocket()).audio(frame); },
       commitSegment: async id => {
         if (commitId) throw new VoiceError('COMMIT_IN_PROGRESS');
-        // No audio pushed this utterance: nothing was recorded to finalize.
-        if (!socket) { events.push({ type: 'commit_done', commitId: id }); return; }
+        // No live socket (no audio this utterance, or the server already closed):
+        // nothing to finalize, so complete the commit and reset any carried turns.
+        if (!socket) { turns.length = 0; events.push({ type: 'commit_done', commitId: id }); return; }
         commitId = id;
         await socket.send({ type: 'end' });
       },
