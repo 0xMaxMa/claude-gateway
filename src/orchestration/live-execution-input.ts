@@ -13,7 +13,7 @@ export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,in
   const target=input.metadata?.executionTaskId;
   if(!target)return undefined;
   return store.compose(()=>{
-    const receipt=store.acceptInput({...input,capabilities},maxPending);
+    const receipt=store.acceptInput({...input,storeUserMessage:false,capabilities},maxPending);
     const previous=liveControlReceipt(store,receipt.inputId);
     if(previous)return {...previous,reused:true};
     let task:TaskSnapshot|undefined;

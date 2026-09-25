@@ -196,3 +196,13 @@ test.each(['NATIVE_PROCESS_EXITED','NATIVE_REQUEST_TIMEOUT','COMPUTER_ACCESS_DEN
   expect(updated.taskId).toBe(t.taskId);expect(updated.state).toBe('queued');expect(updated.failure).toBeUndefined();
  }finally{await f.close();}
 });
+
+test('an idle computer follow-up retains app context without replaying the earlier goal',async()=>{
+ const f=fixture();try{
+  const task=f.store.task(f.task.taskId)!;task.gatewayTarget={...task.gatewayTarget!,adapter:'computer'};task.state='waiting_input';task.computerReport={status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1};
+  f.store.transaction(()=>{f.store.saveTask(task,task.stateVersion);const revision=f.tasks.revision(task.taskId,1);f.store.run('UPDATE task_revisions SET payload_json=? WHERE task_id=? AND revision=1',JSON.stringify({...revision,instructions:'Open Maps'}),task.taskId);});
+  f.control('revise','Search Palm View');
+  const instructions=f.tasks.revision(task.taskId,2).instructions;
+  expect(instructions).toContain('Search Palm View');expect(instructions).toContain('Open Maps');expect(instructions).toContain('Do not repeat its actions');expect(instructions).toContain('activate that application before selecting a field');
+ }finally{await f.close();}
+});

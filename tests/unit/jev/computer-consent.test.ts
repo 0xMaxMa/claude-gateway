@@ -119,3 +119,21 @@ test('configured desktop field reasoning uses loop prompts while exact parent an
  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
  try{await adapter.submit(task,'r','Search Bangkok',[{questionId:'q',inputId:'i',text:'saved query',computerApplication:'Notes',computerFieldLabel:'Search',computerFieldRole:'text'}]);for(let i=0;i<40;i++){await new Promise(setImmediate);if(typeof await adapter.inspect(task,'r')==='object')break;}expect(fetcher).toHaveBeenCalledTimes(1);}finally{await adapter.close();global.fetch=originalFetch;delete process.env.DESKTOP_THINKING_TEST_KEY;rmSync(root,{recursive:true,force:true});}
 });
+
+test('a single command can activate the intended app, type and submit before yielding',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-multistep-'));let stage=0;const mutations:any[]=[];
+ runComputerUse.mockImplementationOnce(jest.requireActual('@0xmaxma/jev-loop/computer-use').runComputerUse);
+ const callTool=jest.fn(async({name,arguments:args}:any)=>{
+  let body:any={};
+  if(name==='computer_request_access')body={state:'approved'};
+  if(name==='computer_acquire')body={lease_token:'lease'};
+  if(name==='computer_observe')body={generation:String(stage),application:stage?'maps':'browser',apps:[{id:'maps',name:'Maps'},{id:'browser',name:'Browser'}],truncated:false,controls:[{ref:'search',label:stage?'Search Maps':'Address',role:'AXTextField',actions:['type'],focused:true,value:stage>=2?'Palm View':''}],text:stage===3?['Palm View results']:[]};
+  if(name==='computer_action'){mutations.push(args);stage++;body={state:'completed'};}
+  return {content:[{type:'text',text:JSON.stringify(body)}]};
+ });
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ const evaluate=jest.fn(async(_task:any,req:any)=>{const choice=['open:maps','type:search','key:enter','DONE'][stage];return {answers:{action:{choice,confidence:1,probabilities:Object.fromEntries(Object.keys(req.questions.action.criteria).map(k=>[k,k===choice?1:0]))}}};});
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:{get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})} as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate,needsInput:()=>true});
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ try{await adapter.submit(task,'r','Search Palm View in Maps',undefined,false,[{application:'maps',label:'Search Maps',text:'Palm View'}]);let outcome:any;for(let i=0;i<100;i++){outcome=await adapter.inspect(task,'r');if(typeof outcome==='object')break;await new Promise(setImmediate);}expect({actions:mutations.map(x=>x.kind),reason:outcome.computerReport?.reason}).toEqual({actions:['open','type','key'],reason:'COMPLETION_CANDIDATE'});expect(mutations[1].text).toBe('Palm View');expect(mutations[2].key).toBe('enter');expect(outcome.computerReport.steps).toBe(3);}finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});

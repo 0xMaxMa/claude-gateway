@@ -17,6 +17,7 @@ for(const modality of ['text','live_voice'] as const)test(`${modality} correctio
   const input:AcceptInput={scope,text:'Manchester instead',modality:modality==='live_voice'?modality:undefined,ingressKey:randomUUID(),metadata:{executionTaskId:task.taskId}};
   const first=liveExecutionInput(store,tasks,input,capabilities)!;
   const retry=liveExecutionInput(store,tasks,input,capabilities)!;
+  expect(store.get('SELECT store_user_message FROM conversation_inputs WHERE id=?',first.inputId)!.store_user_message).toBe(0);
   expect(retry.inputId).toBe(first.inputId);expect(retry.reused).toBe(true);
   expect(store.task(task.taskId)!.revision).toBe(2);
   expect(store.get('SELECT status FROM conversation_inputs WHERE id=?',first.inputId)!.status).toBe('handled');
