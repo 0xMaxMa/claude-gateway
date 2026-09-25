@@ -12,7 +12,7 @@ for(const answer of ['approved','denied','stopped','expired'])test(`request cons
  const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true});
  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
  try{await adapter.submit(task,'request','Open Notes');let outcome:any;for(let i=0;i<50;i++){outcome=await adapter.inspect(task,'request');if(typeof outcome==='object')break;await new Promise(r=>setImmediate(r));}
- expect(callTool).toHaveBeenCalledTimes(2);expect(callTool.mock.calls[0][0]).toMatchObject({name:'computer_request_access',arguments:{device_id:'device',grant_id:'grant'}});
+ expect(callTool).toHaveBeenCalledTimes(2);expect(callTool.mock.calls[0][0]).toMatchObject({name:'computer_request_access',arguments:{device_id:'device',grant_id:'grant',request_id:'request'}});
  expect(runComputerUse).toHaveBeenCalledTimes(answer==='approved'?1:0);expect(outcome.type).toBe(answer==='approved'?'completed':'failed');if(answer!=='approved'){expect(outcome.failure.code).toBe(answer==='denied'?'COMPUTER_ACCESS_DENIED':answer==='stopped'?'COMPUTER_ACCESS_STOPPED':'COMPUTER_ACCESS_UNAVAILABLE');expect(outcome.computerReport.reason).toBe(outcome.failure.code);expect(outcome.failure.message).not.toContain('owner declined');}
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });

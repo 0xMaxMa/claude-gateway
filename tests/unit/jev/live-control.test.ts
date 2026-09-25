@@ -188,7 +188,7 @@ test('user control remains open after long idle and ends only on explicit stop',
  }finally{await f.close();}
 });
 
-test.each(['NATIVE_PROCESS_EXITED','NATIVE_REQUEST_TIMEOUT'])('%s before dispatch permits a fresh command on the same computer task',async reason=>{
+test.each(['NATIVE_PROCESS_EXITED','NATIVE_REQUEST_TIMEOUT','COMPUTER_ACCESS_DENIED','COMPUTER_ACCESS_STOPPED'])('%s before dispatch permits a fresh command on the same computer task',async reason=>{
  const f=fixture();try{
   const t=f.store.task(f.task.taskId)!;
   f.store.transaction(()=>{t.gatewayTarget={adapter:'computer',sessionId:'mac',name:'Mac'};t.state='failed';delete t.activeAttemptId;t.computerReport={status:'blocked',reason,steps:0,evaluations:0};f.store.saveTask(t,t.stateVersion);});

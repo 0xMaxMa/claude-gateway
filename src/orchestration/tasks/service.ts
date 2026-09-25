@@ -340,7 +340,7 @@ export class TaskService {
         task.gatewayTarget?.adapter==='browser' && task.browserReport?.status==='blocked' &&
         task.browserReport.reason!=='OUTCOME_UNKNOWN' && !task.browserReport.providerFailure &&
         task.browserReport.lastAction?.outcome!=='unknown';
-      const stoppedComputer=command.action==='revise'&&task.state==='failed'&&!task.activeAttemptId&&task.gatewayTarget?.adapter==='computer'&&task.computerReport?.status==='blocked'&&['NO_SUPPORTED_ACTION','ACTION_BUDGET','THINKING_WAITING_INPUT','THINKING_SCREENSHOT_REQUIRED','NATIVE_PROCESS_EXITED','NATIVE_REQUEST_TIMEOUT','NATIVE_START_FAILED','NATIVE_IO_ERROR','INVALID_NATIVE_RESPONSE'].includes(task.computerReport.reason);
+      const stoppedComputer=command.action==='revise'&&task.state==='failed'&&!task.activeAttemptId&&task.gatewayTarget?.adapter==='computer'&&task.computerReport?.status==='blocked'&&['NO_SUPPORTED_ACTION','ACTION_BUDGET','THINKING_WAITING_INPUT','THINKING_SCREENSHOT_REQUIRED','NATIVE_PROCESS_EXITED','NATIVE_REQUEST_TIMEOUT','NATIVE_START_FAILED','NATIVE_IO_ERROR','INVALID_NATIVE_RESPONSE','COMPUTER_ACCESS_DENIED','COMPUTER_ACCESS_STOPPED','COMPUTER_ACCESS_UNAVAILABLE'].includes(task.computerReport.reason);
       const recoverable=stoppedBrowser||stoppedComputer||completedRound;
       if(!['queued','starting','running','interrupting'].includes(task.state)&&!paused&&!recoverable)throw new OrchestrationError('STATE_CONFLICT');
       if(command.action==='resume'&&!paused)throw new OrchestrationError('STATE_CONFLICT');

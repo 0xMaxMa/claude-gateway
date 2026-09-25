@@ -55,7 +55,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    let access='pending';
    while(access==='pending'){
     consentSignal.throwIfAborted();if(!authorized())throw Error('ACCESS_DENIED');
-    const response=await client.callTool({name:'computer_request_access',arguments:{...b.scope,wait_ms:15000}},undefined,{signal:consentSignal,timeout:20000});
+    const response=await client.callTool({name:'computer_request_access',arguments:{...b.scope,request_id:r,wait_ms:15000}},undefined,{signal:consentSignal,timeout:20000});
     const text=(response.content as any[])?.find(x=>x.type==='text')?.text;
     if(response.isError||typeof text!=='string')throw Error('COMPUTER_ACCESS_UNAVAILABLE');
     access=JSON.parse(text).state;
