@@ -147,3 +147,21 @@ test('unknown desktop result with quiesced continuation becomes quiet idle, neve
  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,automationController:'user',gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
  try{await adapter.submit(task,'r','Search');let outcome:any;for(let i=0;i<30;i++){outcome=await adapter.inspect(task,'r');if(typeof outcome==='object')break;await new Promise(setImmediate);}expect(outcome).toMatchObject({type:'paused',computerReport:{reason:'COMMAND_WAITING_INPUT'}});expect(outcome.result).toBeUndefined();expect(callTool.mock.calls.filter(([a])=>a.name==='computer_action')).toHaveLength(1);}finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
+
+for(const confirmed of [true,false])test(`disconnect settles unknown action only after remote revocation: ${confirmed}`,async()=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-disconnect-'));
+ const callTool=jest.fn(async({name}:any)=>({content:[{type:'text',text:JSON.stringify(name==='computer_request_access'?{state:'approved'}:{state:confirmed?'stopped':'unknown'})}]}));
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{await deps.beforeMutation('old-operation',{});return {status:'needs_reconciliation',reason:'OUTCOME_UNKNOWN',steps:1};});
+ const options={agentId:'a',root,connectors:{get:()=>({connectorId:'c',scope:{device_id:'device',grant_id:'grant'}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})} as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true};
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ const adapter=new ComputerTaskAdapter(options);
+ try{
+  await adapter.submit(task,'r','Search');await adapter.close();
+  task.cancellation={requestedBy:'user',requestedAt:Date.now()};
+  const recovered=await adapter.recover(task,'r');
+  expect(recovered?.state).toBe(confirmed?'cancelled':undefined);
+  expect(callTool).toHaveBeenCalledWith(expect.objectContaining({name:'computer_end_session',arguments:{device_id:'device',grant_id:'grant'}}),undefined,expect.anything());
+  expect(callTool.mock.calls.some(c=>c[0].name==='computer_action')).toBe(false);
+ }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});
