@@ -80,7 +80,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
      this.write(t,r,receipt);
     },
     evaluate:(req,s)=>this.options.evaluate(t,req,s),
-    ...(this.options.thinking?.()?{decideAction:async(req:import('@0xmaxma/jev-loop/action-thinking').ActionThinkingRequest,s:AbortSignal)=>{
+    ...(this.options.thinking?.()&&t.automationController!=='user'?{decideAction:async(req:import('@0xmaxma/jev-loop/action-thinking').ActionThinkingRequest,s:AbortSignal)=>{
      if(!authorized())throw Error('ACCESS_DENIED');
      const config=this.options.thinking?.(),image=receipt.snapshot?.screenshot;
      if(!config||!image||image.generation!==(req.state as any)?.generation)return {action:null,text:null};
@@ -104,7 +104,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    if(result.status==='succeeded'&&!receipt.operationId&&authorized())outcome={type:'completed',result:{summary:`Computer goal independently verified. ${result.steps} actions.`,artifactIds:[]}};
    else if(result.status==='needs_reconciliation'&&continuationReady&&!receipt.operationId){report.status='needs_input';report.reason='COMMAND_WAITING_INPUT';outcome={type:'paused'};}
    else if(result.status==='needs_reconciliation'||receipt.operationId)outcome={type:'unknown',failure:{code:'COMPUTER_OUTCOME_UNKNOWN',message:'Checking the last action and reading the current screen automatically. The old action will not be replayed. Existing access remains in effect until stopped or expired.',observedAt:Date.now()}};
-   else if(t.automationController==='user'&&result.status==='blocked'&&!receipt.operationId){report.status='needs_input';report.reason='COMMAND_WAITING_INPUT';outcome={type:'paused'};}
+   else if(t.automationController==='user'&&['blocked','needs_input','needs_verification'].includes(result.status)&&!receipt.operationId){report.status='needs_input';report.reason='COMMAND_WAITING_INPUT';outcome={type:'paused'};}
    else if(result.status==='cancelled')outcome={type:'stopped'};
    else if(result.status==='needs_input')outcome={type:'paused'};
    else if(result.status==='needs_verification'&&result.reason==='COMMAND_WAITING_INPUT'){outcome={type:'paused'};}
