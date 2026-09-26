@@ -557,3 +557,10 @@ mutation outcomes that cannot be established remain fenced for reconciliation.
 Gateway checks the paired computer’s connection and access state every five seconds, including while an automation session is idle. Task activity exposes `computerConnection`: `connected`, `disconnected`, `waiting_access`, or `unknown` when the relay cannot be checked. A temporary disconnect does not close the automation session or replay an action. Reconnecting without local approval is waiting for access, not ready. An explicit owner Stop still closes the session.
 
 Computer Use closing reports acknowledge the end neutrally, without repeating who cancelled. The last successful approved-window screenshot is retained across command revisions and attached to the closing report through the normal scoped media/history path, with its recorded time. It is historical evidence, never a fresh capture after access ends. Missing images are not fabricated.
+
+Computer Use follow-up commands receive a bounded, task-scoped interaction context:
+last observed application/window, non-sensitive focus label, and recent action outcomes.
+This context survives Gateway restarts and is checked against fresh observations; old
+control references are never reused. Short commands such as “press Enter now” must not
+be interpreted as text to type or as permission to replay the previous command.
+Window titles are hints, not stable browser tab IDs; ambiguous targets should wait.
