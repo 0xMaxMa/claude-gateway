@@ -39,6 +39,8 @@ import { createApiRouter } from './router';
 import { VoiceApi } from './voice-router';
 import { createCronRouter } from './cron-router';
 import { createMetaRouter } from './meta-router';
+import { createCapabilitiesRouter } from './capabilities';
+import { GATEWAY_VERSION } from './gateway-version';
 import { createWorkspaceRouter } from './workspace-router';
 import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
@@ -126,18 +128,6 @@ function timingSafeAdminKeyMatch(apiKeys: ApiKey[], token: string): boolean {
     token,
   );
 }
-
-function getGatewayVersion(): string {
-  try {
-    const pkgPath = path.join(__dirname, '..', '..', 'package.json');
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { version?: string };
-    return pkg.version ?? 'unknown';
-  } catch {
-    return 'unknown';
-  }
-}
-
-const GATEWAY_VERSION = getGatewayVersion();
 
 /**
  * Resolve the network interface the server binds to (Issue #201). Precedence:
@@ -797,6 +787,12 @@ export class GatewayRouter {
     if (this.gatewayConfig?.gateway?.api?.keys) {
       const metaRouter = createMetaRouter(this.gatewayConfig.gateway.api.keys);
       this.app.use('/api', metaRouter);
+    }
+
+    // Mount the capability manifest (GET /api/v1/capabilities) so clients can
+    // feature-detect this build instead of pinning to a version number.
+    if (this.gatewayConfig?.gateway?.api?.keys?.length) {
+      this.app.use('/api', createCapabilitiesRouter(this.gatewayConfig.gateway.api.keys));
     }
 
     // Mount apps router (admin routes for installing/managing apps)

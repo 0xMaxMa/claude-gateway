@@ -18,6 +18,7 @@
 | `POST` | `/dashboard/logout` | Session cookie | Revoke the dashboard session and clear the cookie |
 | `GET` | `/api/v1/commands` | None | List slash commands available in the chat UI |
 | `GET` | `/api/v1/_meta/routes` | API key | Route manifest (every `defineRoute`-registered endpoint, incl. its CLI noun/verb mapping) — source for the `claude-gateway` CLI's codegen and `doctor` cross-check |
+| `GET` | `/api/v1/capabilities` | API key | Capability manifest — `{ version, capabilities }` so clients can feature-detect this build (e.g. which channels support `cross_channel_message`) instead of comparing version strings. See [Capabilities](/api/system#capabilities) |
 
 ¹ **Auth applies when `gateway.api.keys` is configured, and requires an _admin_ key**
 (`admin: true`). The dashboard/monitoring surface grants cross-agent, host-wide power

@@ -141,6 +141,128 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/_meta/routes 
 
 ---
 
+## GET /api/v1/capabilities {#capabilities}
+
+Tells a client which optional features **this** gateway build supports, so the
+client can show or hide functionality based on what the server can actually do —
+instead of parsing version strings or probing endpoints and guessing from the error.
+
+**Auth:** requires a valid API key (`X-Api-Key` / `Authorization: Bearer`) when
+`gateway.api.keys` is configured, exactly like the rest of `/api/v1`. It is *not*
+public like `/health`: the response includes the gateway version, which `/health`
+deliberately withholds from unauthenticated callers. With no keys configured it is
+open, matching the other `/api` routers. Only mounted when `gateway.api.keys` is set
+(again like `/api/v1`).
+
+```bash
+curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/capabilities | jq
+```
+
+```json
+{
+  "version": "2.0.9",
+  "capabilities": {
+    "cross_channel_message": ["telegram"]
+  }
+}
+```
+
+### Response schema
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `version` | `string` | The gateway's `package.json` version. **Informational only** — never gate a feature on it; use the capability keys. |
+| `capabilities` | `object` | One entry per supported feature. A key that is **absent** means the feature is **not** supported. |
+| `capabilities.cross_channel_message` | `string[]` | Channel identifiers for which a client may inject a message into a session that belongs to that channel via `POST /api/v1/agents/:agentId/chats/:chatId/sessions/:sessionId/messages`. The injected message is delivered into the session and echoed to the channel's conversation so its users see what was sent from elsewhere. A channel is listed only once that round-trip actually works for it. |
+
+### Capability keys
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `cross_channel_message` | `string[]` of channel ids | Cross-channel message injection is supported for sessions whose channel is in the array. Currently `["telegram"]`. |
+
+Channel identifiers are the gateway's canonical channel names — the same strings a
+session reports as its `channel` — drawn from `CHAT_CHANNELS` in
+`src/history/types.ts`: `telegram`, `discord`, `line`, `slack`, `whatsapp`,
+`whatsapp_cloud`, `wechat`. Nothing else will ever appear in a channel array; a
+client should compare against these values verbatim.
+
+### Capability value formats
+
+Every capability value has **one of exactly three shapes**. Future capabilities must
+use one of these; there is no fourth.
+
+| Shape | Use it for | Client rule | Illustrative example |
+|-------|-----------|-------------|----------------------|
+| `boolean` | A simple on/off feature | `value === true` | `"session_cancel": true` |
+| `string[]` | A feature supported for an enumerated set (channels, formats, providers) | `value.includes(x)` — an **empty array means supported by nothing** | `"cross_channel_message": ["telegram"]` |
+| `object` | A feature with parameters or limits; the fields inside are themselves additive-only | key present ⇒ supported; read the fields you know, treat a **missing field as unknown** and behave conservatively | `"attachments": { "max_bytes": 20971520, "mime_types": ["image/png"] }` |
+
+The examples other than `cross_channel_message` are **illustrative only** — they are
+not served by the gateway today. The real response currently contains exactly one key.
+
+Rules that hold for every key, now and later:
+
+- **Keys are `snake_case` nouns** naming the feature (`cross_channel_message`), not
+  verbs or version tags.
+- **A key is either absent (unsupported) or present with its declared shape.** The
+  shape of a published key **never changes**. If a feature needs a different shape
+  (say a boolean must become a per-channel list), a **new key** is introduced and the
+  old one is kept or removed — it is never redefined.
+- **Additive-only, never re-meant.** New keys (and, for `object` values, new fields)
+  may be added at any time; an existing key never changes meaning. Removing a feature
+  means removing its key, not flipping it to `false`/`[]`.
+- **Never a bare number or string.** A limit or a mode belongs inside an `object`
+  value (`{ "max_bytes": ... }`), so the key can grow more fields later without
+  changing shape.
+- **`version` is informational.** Clients feature-detect via capability keys and must
+  not compare version strings — a fork, a backport, or a pre-release build can carry
+  any version while supporting any subset of capabilities.
+
+### Client guidance
+
+1. **`404` means "no capabilities".** Gateways older than this endpoint return `404`
+   for it (with Express's default HTML body, not JSON — don't parse it). Treat that as
+   an empty `capabilities` object and hide every feature that depends on one. Do not
+   treat it as an error. Send your API key on the probe: on those older gateways the
+   `/api` auth middleware runs *before* route matching, so an **unauthenticated** probe
+   gets `401`/`403` exactly as any other `/api/v1` route would — that is a credentials
+   problem, not a capability signal.
+2. **A missing key means unsupported.** Never assume a default for a key you don't see.
+3. **Check the array, not the key, for `cross_channel_message`.** Before offering
+   cross-channel injection for a conversation, verify that the conversation's channel
+   identifier is *included* in `capabilities.cross_channel_message`. A gateway may list
+   `telegram` but not `discord`; offering the feature on a Discord session would fail.
+4. **Cache per gateway, refetch on reconnect.** The manifest only changes when the
+   gateway is upgraded, so fetching once per session/connection is enough; refetch
+   after a reconnect or a `version` change seen in `/status`.
+5. **Type every key as optional** on the client. A minimal TypeScript shape:
+
+```ts
+type ChatChannel = 'telegram' | 'discord' | 'line' | 'slack' | 'whatsapp' | 'whatsapp_cloud' | 'wechat';
+
+interface GatewayCapabilities {
+  version: string; // informational — do not gate on it
+  capabilities: {
+    cross_channel_message?: ChatChannel[];
+    // future keys are added here; every one stays optional
+  };
+}
+
+// 404 → the gateway predates capability discovery: no capabilities.
+async function fetchCapabilities(base: string, key: string): Promise<GatewayCapabilities['capabilities']> {
+  const res = await fetch(`${base}/api/v1/capabilities`, { headers: { Authorization: `Bearer ${key}` } });
+  if (res.status === 404) return {}; // older gateway: no capability discovery
+  if (!res.ok) throw new Error(`capabilities: HTTP ${res.status}`); // 401/403 = bad key, not "unsupported"
+  return ((await res.json()) as GatewayCapabilities).capabilities ?? {};
+}
+
+const caps = await fetchCapabilities(gatewayUrl, apiKey);
+const canInject = caps.cross_channel_message?.includes(conversation.channel) === true;
+```
+
+---
+
 ## Local safemode controls
 
 Safemode has no public HTTP endpoint. Its local CLI works independently of the
