@@ -564,3 +564,7 @@ This context survives Gateway restarts and is checked against fresh observations
 control references are never reused. Short commands such as “press Enter now” must not
 be interpreted as text to type or as permission to replay the previous command.
 Window titles are hints, not stable browser tab IDs; ambiguous targets should wait.
+
+Disconnect revokes Computer Use device access even while a task is idle with no
+active attempt. The task remains in its stopping state until the relay confirms
+session termination; an old paused result does not acknowledge revocation.

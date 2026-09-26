@@ -75,6 +75,15 @@ export class GatewayTaskController {
           }
         }catch(error){this.reportError(error);}
       }
+      if(task.state==='cancel_requested'&&!task.activeAttemptId&&task.gatewayTarget?.adapter==='computer'&&task.gatewayDispatch){
+        const adapter=this.adapters.get('computer'),requestId=task.gatewayDispatch.requestId;
+        if(adapter)try{
+          await adapter.cancel(task,requestId);
+          const outcome=await adapter.inspect(task,requestId);
+          if(typeof outcome==='object'&&outcome.type==='stopped')this.tasks.finishIdleComputerCleanup(task.taskId,requestId);
+        }catch(error){this.reportError(error);}
+        continue;
+      }
       if(!task.gatewayTarget||task.state==='waiting_input'||task.state==='cancelled'||task.state==='completed'||task.state==='failed')continue;
       if(task.state==='needs_reconciliation'){
         if(automationSession(task)?.closedReason==='idle_timeout')continue;

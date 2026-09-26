@@ -504,3 +504,15 @@ test('closing screenshot is attached once to its own report and never across use
  attachComputerEndScreenshot(store,directory,input);attachComputerEndScreenshot(store,directory,input);
  const files=store.all('SELECT * FROM task_files WHERE response_id=?',response.id);expect(files).toHaveLength(1);expect(files[0].caption).toContain('not a live view');expect(files[0].path).toContain('computer-end-');
 });
+
+test.each(['waiting_input','completed','failed'] as const)('disconnecting a %s computer revokes access before closing without dispatching work',async(state)=>{
+ let stopped=false;
+ const computer={...adapter,name:'computer',cancel:jest.fn(async()=>{}),inspect:jest.fn(async()=>stopped?{type:'stopped' as const}:'pending' as const)};
+ await controller.close();controller=new GatewayTaskController(tasks,new Map([['computer',computer]]));
+ const task=tasks.spawn({...context,actionId:'idle-disconnect'},{title:'Desktop',instructions:'Wait',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'computer'}});
+ const saved=store.task(task.taskId)!;saved.state=state;saved.gatewayDispatch={requestId:'settled-round',submittedAt:Date.now()};saved.automationController='user';saved.automationSession={status:'idle',idleTimeoutMs:1800000,idleSince:Date.now()};store.transaction(()=>store.saveTask(saved,saved.stateVersion));
+ tasks.cancelByUser(task.conversationId,task.ownerPrincipalId,task.taskId);
+ expect(store.task(task.taskId)?.state).toBe('cancel_requested');
+ await controller.tick();expect(computer.cancel).toHaveBeenCalled();expect(store.task(task.taskId)?.state).toBe('cancel_requested');
+ stopped=true;await controller.tick();expect(store.task(task.taskId)?.state).toBe('cancelled');expect(computer.submit).not.toHaveBeenCalled();
+});

@@ -384,7 +384,7 @@ export class TaskService {
       if (replacedByTaskId === taskId) throw new OrchestrationError('INVALID_REPLACEMENT');
       this.owned(replacedByTaskId, conversationId);
     }
-    if (TERMINAL_TASK_STATES.has(task.state)) {
+    if (TERMINAL_TASK_STATES.has(task.state) && !(task.gatewayTarget?.adapter==='computer' && task.gatewayDispatch && automationSession(task)?.status!=='closed')) {
       const session=automationSession(task);
       if(session && session.status!=='closed'){task.automationSession={...session,status:'closed',closedAt:Date.now(),closedReason:requestedBy};this.store.saveTask(task,task.stateVersion);}
       return task;
@@ -396,14 +396,23 @@ export class TaskService {
     if (replacedByTaskId) task.replacedByTaskId = replacedByTaskId;
     const version = task.stateVersion;
     task.cancellation = { requestedBy, requestedAt: Date.now() };
-    task.state = task.activeAttemptId ? 'cancel_requested' : 'cancelled';
+    task.state = task.activeAttemptId || (task.gatewayTarget?.adapter==='computer' && task.gatewayDispatch) ? 'cancel_requested' : 'cancelled';
     task.pendingQuestion = undefined;
     delete task.failure;
-    task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: task.activeAttemptId ? `Cancellation requested by ${requestedBy}; verifying that task execution has stopped.` : `Cancelled by ${requestedBy}. Existing files and prior effects are retained.` };
+    task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: task.state==='cancel_requested' ? 'Disconnecting; waiting for execution and access to stop.' : 'Session ended. Existing files and prior effects are retained.' };
     this.store.saveTask(task, version);
     if (task.state === 'cancelled') this.notify(task);
     else this.store.enqueue('interrupt', `cancel:${taskId}:${task.stateVersion}`, { taskId });
     return task;
+  }
+  /** A settled computer round still owns device access until explicit revocation. */
+  finishIdleComputerCleanup(taskId:string,requestId:string):void {
+    this.store.transaction(()=>{
+      const task=this.store.task(taskId);
+      if(!task||task.state!=='cancel_requested'||task.activeAttemptId||task.gatewayTarget?.adapter!=='computer'||task.gatewayDispatch?.requestId!==requestId)throw new OrchestrationError('STALE_ATTEMPT');
+      task.state='cancelled';task.latestProgress={source:'runtime',observedAt:Date.now(),text:'Computer Use disconnected.'};
+      this.store.saveTask(task,task.stateVersion);this.notify(task);
+    });
   }
   /** Scheduler-only cleanup acknowledgment; never authorizes new worker writes. */
   finishCleanup(attemptId: string, generation: number, stopped: boolean): void {
