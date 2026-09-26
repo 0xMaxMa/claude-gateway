@@ -39,6 +39,7 @@ export default defineConfig({
       ] },
       { text: 'Build your workflow', collapsed: false, items: [
         { text: 'Tools & skills', link: '/guide/tools' },
+        { text: 'Jev evaluations', link: '/guide/jev' },
         { text: 'Memory & knowledge', link: '/guide/memory' },
         { text: 'Schedules & heartbeats', link: '/guide/schedules' },
         { text: 'Apps', link: '/guide/apps' }

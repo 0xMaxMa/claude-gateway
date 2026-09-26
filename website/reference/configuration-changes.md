@@ -23,6 +23,7 @@ These are lifecycle categories, not a promise that every configuration field sup
 
 | Configuration | Behavior |
 | --- | --- |
+| `gateway.jev`, `agents[].jev` | New evaluations capture current provider/model/limits. Global disablement and access revocation are checked before dispatch and return; key files rotate without restart. Browser binding changes/revocation are checked live; controller credentials rotate on new connections. Installed Logic code updates need restart. Existing process tool inventories may require a new process to expose a newly enabled tool |
 | `gateway.logs` | Logging policy is reapplied without restarting the gateway. Retention and rotation run on their respective sweeps/writes, not all at save time |
 | `gateway.headless` | Applies to later process creation; existing session processes keep their execution mode |
 | `agents[].claude.model`, `agents[].claude.extraFlags` | Updates the agent defaults for subsequent process creation; does not rewrite an already running CLI's arguments |

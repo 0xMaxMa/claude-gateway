@@ -605,15 +605,23 @@ export class AgentRunner extends EventEmitter {
   recordVoicePlayback(responseId: string, principalId: string, progress: { generation: string; epoch: number; generatedSamples: number; playedSamples: number }, state: string): void {
     this.orchestration?.recordPlayback(responseId, principalId, progress, state);
   }
-  async submitVoiceUtterance(sessionId: string, chatId: string, principalId: string, text: string, utteranceId: string, allowTools: boolean, model?: string): Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId(): string | undefined }> {
+  async submitVoiceUtterance(sessionId: string, chatId: string, principalId: string, text: string, utteranceId: string, allowTools: boolean, model?: string, executionTaskId?:string): Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId(): string | undefined }> {
     if (!this.agentConfig.orchestration?.enabled || !this.agentConfig.voice?.enabled) throw new Error('Voice is disabled');
     if (!(await this.apiSessionExists(chatId, sessionId))) throw new Error('Session not found');
     const orchestration = await this.getOrchestration();
     const accepted = orchestration.submitInput({ scope: { agentId: this.agentConfig.id, agentSessionId: sessionId, source: 'api', accountId: principalId,
-      chatId, threadKey: '', principalId }, text, model, modality: 'live_voice', ingressKey: `utterance:${utteranceId}` }, { execute: allowTools, writeMemory: false });
+      chatId, threadKey: '', principalId }, text, model, metadata:{executionTaskId}, modality: 'live_voice', ingressKey: `utterance:${utteranceId}` }, { execute: allowTools, writeMemory: false });
     // The browser refreshes history on utterance.accepted, before inference finishes.
     await orchestration.flushHistory();
     return { ...accepted, responseId: () => orchestration.responseIdForInput(accepted.inputId) };
+  }
+  async browserSessionScope(sessionId:string,principalId:string) {
+    if(!this.agentConfig.orchestration?.enabled)throw new Error('ORCHESTRATION_DISABLED');
+    return (await this.getOrchestration()).browserSessionScope(sessionId,principalId);
+  }
+  async browserEvidence(sessionId:string,principalId:string,taskId:string,refresh=false) {
+    if(!this.agentConfig.orchestration?.enabled)throw new Error('ORCHESTRATION_DISABLED');
+    return (await this.getOrchestration()).browserEvidence(sessionId,principalId,taskId,refresh);
   }
   async listApiTasks(sessionId: string, principalId: string, page = 0, pageSize = 10, includeFinished = false) {
     if (!this.agentConfig.orchestration?.enabled) throw new Error('ORCHESTRATION_DISABLED');
@@ -628,6 +636,18 @@ export class AgentRunner extends EventEmitter {
     const task = runtime.store.task(taskId)!;
     // Full retained result, with worker-only skill context removed by status().
     return { ...runtime.tasks.status(task.conversationId, principalId, taskId)[0], ...detail };
+  }
+  async pauseVoiceExecution(sessionId:string,principalId:string,taskId:string):Promise<void> {
+    const runtime=await this.getOrchestration();
+    const detail=runtime.taskControls.detail(sessionId,principalId,taskId);
+    const task=runtime.store.task(taskId)!;
+    if(task.executionControl?.action==='pause'&&['pending','paused'].includes(task.executionControl.phase))return;
+    if(!['queued','starting','running','interrupting'].includes(task.state))return;
+    runtime.controlTask(sessionId,principalId,detail.taskId,{id:randomUUID(),action:'pause',expectedRevision:task.revision});
+  }
+  async controlApiTask(sessionId:string,principalId:string,taskId:string,command:Parameters<import('../orchestration/tasks/service').TaskService['controlByUser']>[3]) {
+    if(!this.agentConfig.orchestration?.enabled)throw new Error('ORCHESTRATION_DISABLED');
+    return (await this.getOrchestration()).controlTask(sessionId,principalId,taskId,command);
   }
   async cancelApiTask(sessionId: string, principalId: string, taskId: string) {
     if (!this.agentConfig.orchestration?.enabled) throw new Error('ORCHESTRATION_DISABLED');
@@ -654,13 +674,13 @@ export class AgentRunner extends EventEmitter {
   }
 
   private async sendOrchestratedApi(sessionId: string, chatId: string, message: string,
-    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string; clientMessageId?: string; acceptOnly?: boolean },
+    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string; clientMessageId?: string; executionTaskId?:string; acceptOnly?: boolean },
     onText?: (text: string) => void, onTool?: (event: import('../orchestration/tool-activity').ToolActivity) => void): Promise<{ text: string; attachments: ApiAttachment[]; inputId?: string }> {
     const semantic = this.agentConfig.orchestration?.conversation?.semanticIntake === true;
-    if (!semantic && !opts.acceptOnly && this.pendingApiSessions.has(sessionId)) throw Object.assign(new Error('Session already has a pending request'), { code: 'CONFLICT' });
+    if (!opts.executionTaskId && !semantic && !opts.acceptOnly && this.pendingApiSessions.has(sessionId)) throw Object.assign(new Error('Session already has a pending request'), { code: 'CONFLICT' });
     if (!opts.principalId) throw new Error('Authenticated principal required for conversation orchestration');
     const deadline = Date.now() + opts.timeoutMs;
-    if (!semantic && !opts.acceptOnly) this.pendingApiSessions.add(sessionId); // reserve before the first await
+    if (!opts.executionTaskId && !semantic && !opts.acceptOnly) this.pendingApiSessions.add(sessionId); // reserve before the first await
     const preparationDir = opts.acceptOnly ? `api-${sessionId}/admission-${randomUUID()}` : undefined;
     let keepPreparedMedia = false;
     try {
@@ -670,7 +690,7 @@ export class AgentRunner extends EventEmitter {
         source: 'api', accountId: opts.principalId, chatId, threadKey: '', principalId: opts.principalId };
       const ingressKey = opts.clientMessageId ? `web:${sessionId}:${opts.clientMessageId}` : undefined;
       const requestFingerprint = opts.clientMessageId ? payloadHash({ scope, message,
-        mediaFiles: opts.mediaFiles ?? [], model: opts.model, imageParams: opts.imageParams,
+        executionTaskId:opts.executionTaskId, mediaFiles: opts.mediaFiles ?? [], model: opts.model, imageParams: opts.imageParams,
         videoParams: opts.videoParams, storeUserMessage: !opts.skipUserMessage, allowTools: opts.allowTools ?? false }) : undefined;
       if (opts.acceptOnly && requestFingerprint) {
         const prior = orchestration.store.apiReceipt(scope, ingressKey, requestFingerprint);
@@ -693,7 +713,7 @@ export class AgentRunner extends EventEmitter {
       const requestId = opts.requestId ?? randomUUID();
       const scopedInput: AcceptInput = { scope, text: message || '[Attachment inspection requested]', attachmentIds: media,
         requestId, ingressKey, requestFingerprint, storeUserMessage: !opts.skipUserMessage,
-        metadata: { clientMessageId: opts.clientMessageId, promptContext: (imageParams ? AgentRunner.buildImageParamsNote(imageParams) : '') + (videoParams ? AgentRunner.buildVideoParamsNote(videoParams) : ''), imageRefs: imageParams?.image_refs } };
+        metadata: { executionTaskId:opts.executionTaskId, clientMessageId: opts.clientMessageId, promptContext: (imageParams ? AgentRunner.buildImageParamsNote(imageParams) : '') + (videoParams ? AgentRunner.buildVideoParamsNote(videoParams) : ''), imageRefs: imageParams?.image_refs } };
       if (opts.acceptOnly) {
         const accepted = orchestration.submitInput({ ...scopedInput, model: opts.model }, { execute: opts.allowTools ?? false, writeMemory: false });
         // Concurrent retries can prepare separate copies; only the winning
@@ -707,7 +727,7 @@ export class AgentRunner extends EventEmitter {
         return { text: '', attachments: [], inputId: accepted.inputId };
       }
       let text: string;
-      if (semantic) {
+      if (semantic || opts.executionTaskId) {
         const accepted = orchestration.submitInput({...scopedInput,model:opts.model},{execute:opts.allowTools ?? false,writeMemory:false},onTool);
         const lengths = new Map<string,number>();
         const unsubscribe = orchestration.subscribeText(sessionId,opts.principalId,event=>{
@@ -726,7 +746,7 @@ export class AgentRunner extends EventEmitter {
         try { fs.rmSync(MediaStore.mediaDir(this.agentsBaseDir, this.agentConfig.id, preparationDir), { recursive: true, force: true }); }
         catch (error) { this.logger.warn('Unused admission media cleanup failed', { error: String(error) }); }
       }
-      if (!semantic && !opts.acceptOnly) this.pendingApiSessions.delete(sessionId);
+      if (!opts.executionTaskId && !semantic && !opts.acceptOnly) this.pendingApiSessions.delete(sessionId);
     }
   }
 
@@ -4564,7 +4584,7 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     chatId: string,
     message: string,
-    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string; clientMessageId?: string },
+    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string; clientMessageId?: string; executionTaskId?:string },
   ): Promise<{ text: string; attachments: ApiAttachment[] }> {
     if (this.orchestrationForApi(sessionId)) return this.sendOrchestratedApi(sessionId, chatId, message, opts);
     if (this.pendingApiSessions.has(sessionId)) {
@@ -4872,9 +4892,17 @@ export class AgentRunner extends EventEmitter {
     chatId: string,
     message: string,
     callbacks: ApiStreamCallbacks,
-    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string; clientMessageId?: string },
+    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string; clientMessageId?: string; executionTaskId?:string },
   ): Promise<() => void> {
     if (this.orchestrationForApi(sessionId)) {
+      if(opts.executionTaskId){
+        // A task control applies immediately, then its scoped agent reply streams independently.
+        let detached=false;
+        void this.sendOrchestratedApi(sessionId,chatId,message,opts,text=>{if(!detached)callbacks.onChunk({type:'text_delta',text} as StreamEvent);})
+          .then(result=>{if(!detached)callbacks.onDone(result.text,result.attachments);})
+          .catch(error=>{if(!detached)callbacks.onError(presentedResponseError(error));});
+        return ()=>{detached=true;};
+      }
       if (this.pendingApiSessions.has(sessionId)) throw Object.assign(new Error('Session already has a pending request'), { code: 'CONFLICT' });
       const turn = this.turnStreams.start(turnStreamKey('api', sessionId), opts.requestId ?? randomUUID());
       const sink = callbackSink(callbacks); turn.attach(sink, 0);
@@ -5383,7 +5411,7 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     chatId: string,
     command: string,
-    opts?: { skipPersist?: boolean; model?: string; principalId?: string; displayCommand?: string; clientMessageId?: string },
+    opts?: { skipPersist?: boolean; model?: string; principalId?: string; displayCommand?: string; clientMessageId?: string; executionTaskId?:string },
   ): Promise<{ result: Record<string, unknown>; responseText: string }> {
     const agentId = this.agentConfig.id;
     const storeChatId = chatId;           // sessionStore adds channel prefix internally

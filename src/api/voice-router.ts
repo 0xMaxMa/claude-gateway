@@ -175,8 +175,17 @@ export class VoiceApi {
     try { this.wss.handleUpgrade(request, socket, head, ws => {
       const runner = this.agents.get(ticket.agentId)!;
       let reconnecting = false;
+      let executionTaskId:string|undefined;
+      let speechTarget:{taskId?:string; pause?:Promise<void>}|undefined;
       const send = (message: Record<string, unknown>) => {
         if (reconnecting) return;
+        // Confirmed words, not microphone amplitude, pause automation. Keep the
+        // chosen destination stable for all segments of this spoken message.
+        if(['stt.partial','stt.segment','stt.final'].includes(String(message.type))&&typeof message.text==='string'&&message.text.trim()&&!speechTarget){
+          speechTarget={taskId:executionTaskId};
+          if(executionTaskId&&ticket.allowTools)speechTarget.pause=runner.pauseVoiceExecution(ticket.sessionId,ticket.principalId,executionTaskId).catch(()=>{});
+        }
+        if(message.type==='stt.empty')speechTarget=undefined;
         if (message.type === 'voice.error') {
           const referenceId = randomUUID();
           const diagnostic = { ...describeVoiceError(message.code), ...(typeof message.retryable === 'boolean' ? { retryable: message.retryable } : {}) };
@@ -200,7 +209,11 @@ export class VoiceApi {
       try {
         session = new VoiceSession(sttProvider(voice.stt), ttsProvider(voice.tts), voice.tts.voiceId,
           { control: send, audio: data => { if (ws.readyState === WebSocket.OPEN) ws.send(data); }, bufferedBytes: () => ws.bufferedAmount },
-          (text, utteranceId) => runner.submitVoiceUtterance(ticket.sessionId, ticket.chatId, ticket.principalId, text, utteranceId, ticket.allowTools, ticket.model),
+          async (text, utteranceId) => {
+            const target=speechTarget??{taskId:executionTaskId};speechTarget=undefined;
+            await target.pause;
+            return runner.submitVoiceUtterance(ticket.sessionId,ticket.chatId,ticket.principalId,text,utteranceId,ticket.allowTools,ticket.model,target.taskId);
+          },
           () => runner.stopVoiceResponse(ticket.sessionId), { ...voice.turns, maxBufferedAudioMs: voice.playback.maxBufferedAudioMs, language: voice.language, mergeWindowMs: 1200 },
           (responseId, progress, state) => runner.recordVoicePlayback(responseId, ticket.principalId, progress, state),
           (responseId, audio) => runner.saveVoiceReplay(ticket.sessionId, ticket.principalId, responseId, audio),
@@ -239,6 +252,10 @@ export class VoiceApi {
             ticket.model = control.model;
             send({ type: 'voice.configured', model: ticket.model });
           }
+          if((control.type==='voice.start'||control.type==='voice.configure')&&control.execution_task_id!==undefined){
+            if(control.execution_task_id!==null&&(typeof control.execution_task_id!=='string'||! /^[0-9a-f-]{36}$/i.test(control.execution_task_id)))throw Error('INVALID_CONTROL');
+            executionTaskId=control.execution_task_id??undefined;
+          }
           switch (control.type) {
             case 'voice.start': if (control.muted !== undefined && typeof control.muted !== 'boolean') throw new Error('INVALID_CONTROL'); if (started) throw new Error('VOICE_ALREADY_STARTED'); started = true;
               if (control.voice_id !== undefined) {
@@ -263,7 +280,7 @@ export class VoiceApi {
               playbackReady = true;
               void catchUp(); break;
             case 'voice.configure': {
-              if (control.voice_id === undefined && control.model !== undefined) break;
+              if (control.voice_id === undefined && (control.model !== undefined || control.execution_task_id !== undefined)) break;
               if (typeof control.voice_id !== 'string') throw new Error('INVALID_CONTROL');
               const choices = await voiceChoices(voice.tts);
               if (!choices.some(choice => choice.id === control.voice_id)) throw new Error('INVALID_CONTROL');
@@ -279,7 +296,7 @@ export class VoiceApi {
             case 'playback.pause': session.pausePlayback(control.epoch, control.paused); break;
             case 'playback.progress': session.progress(control.epoch, control.sample_offset); break;
             case 'playback.clear.ack': break;
-            case 'voice.mute': if (typeof control.muted !== 'boolean' || !['discard', 'commit'].includes(control.policy)) throw new Error('INVALID_CONTROL'); await session.mute(control.muted, control.policy, control.last_audio_seq); break;
+            case 'voice.mute': if (typeof control.muted !== 'boolean' || !['discard', 'commit'].includes(control.policy)) throw new Error('INVALID_CONTROL'); await session.mute(control.muted, control.policy, control.last_audio_seq); if(control.muted&&control.policy==='discard')speechTarget=undefined; break;
             case 'voice.stop': await session.close(); ws.close(); break;
             default: throw new Error('INVALID_CONTROL');
           }

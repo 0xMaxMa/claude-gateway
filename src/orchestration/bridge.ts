@@ -1,3 +1,6 @@
+import {summarizeBrowserEvidence} from '../jev/browser-evidence-summary';
+import {parentVerifiableBrowserResult} from '../jev/browser-contract';
+import { JevError } from '../jev/types';
 import type { GatewayTaskAdapter } from './gateway-tasks/controller';
 import { CRON_TOOLS } from '../cron/tool-schemas';
 import { containerTaskTools } from './container-tool-schemas';
@@ -27,6 +30,10 @@ export class TaskBridge {
   private server?: Server;
   private url = '';
   recordRetrievals = false;
+  jevEnabled?: () => boolean;
+  browserEnabled?: () => boolean;
+  computerEnabled?: () => boolean;
+  jevCall?: (scope: Scope, args: Record<string, unknown>, actionId: string, signal: AbortSignal) => Promise<unknown>;
   private readonly scopes = new Map<string, Scope>();
   private readonly cancellations = new Map<string, AbortController>();
   constructor(private readonly tasks: TaskService, private readonly files?: TaskFiles,
@@ -56,22 +63,42 @@ export class TaskBridge {
         }
         const command = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         if (!command || typeof command.tool !== 'string' || !command.args || typeof command.args !== 'object' || Array.isArray(command.args) || typeof command.action_id !== 'string' || command.action_id.length > 256) throw new OrchestrationError('INVALID_INPUT');
+        if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
         const a = command.args;
         let result: unknown;
-        if (scope.role === 'agent') {
+        if (command.tool === 'jev_evaluate') {
+          if (!this.jevEnabled?.() || !this.jevCall) deny('JEV_NOT_ALLOWED');
+          if (scope.role === 'agent') {
+            this.tasks.store.assertMember(scope.context.conversationId, scope.context.principalId);
+            if (!scope.context.execute) deny('READ_ONLY_TURN');
+          } else {
+            if (!this.files) deny('WORKER_SCOPE_UNAVAILABLE');
+            this.files.scope(scope.attemptId, scope.generation);
+          }
+          const cancelled = this.cancellations.get(token!);
+          if (!cancelled) deny('TICKET_INVALID_OR_REVOKED');
+          const disconnected = new AbortController();
+          const onClose = () => { if (!response.writableFinished) disconnected.abort(); };
+          response.once('close', onClose);
+          try { result = await this.jevCall(scope, a, command.action_id, AbortSignal.any([cancelled.signal, disconnected.signal])); }
+          finally { response.off('close', onClose); }
+        } else if (scope.role === 'agent') {
           const context: CommandContext = { ...scope.context, actionId: `${scope.context.inputId}:${command.action_id}` };
           const mutation = ['task_spawn','task_update','task_answer'].includes(command.tool);
           try {
             if (mutation) await scope.beforeMutation?.(command.tool, a, context.actionId);
+            if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
             switch (command.tool) {
               case 'capabilities_list': {
                 this.tasks.store.assertMember(context.conversationId, context.principalId);
-                if (a.scope === 'safemode') {
-                  if (this.container) deny('SAFEMODE_HOST_ONLY');
-                  const adapter = this.gatewayAdapters.get('safemode');
+                if (a.scope === 'safemode' || a.scope === 'browser' || a.scope === 'computer') {
+                  if (this.container && a.scope === 'safemode') deny('SAFEMODE_HOST_ONLY');
+                  const adapter = this.gatewayAdapters.get(a.scope);
                   if (!adapter) throw new OrchestrationError('SAFEMODE_AGENT_NOT_ALLOWED');
                   if (a.query !== undefined && typeof a.query !== 'string') throw new OrchestrationError('INVALID_INPUT');
-                  result = adapter.discover(a.query, a.offset); break;
+                  result = await adapter.discover(a.query, a.offset, context);
+                  if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
+                  this.tasks.store.assertMember(context.conversationId, context.principalId); break;
                 }
                 if (a.scope !== undefined && a.scope !== 'capabilities') throw new OrchestrationError('INVALID_INPUT');
                 if (!scope.capabilities) throw new OrchestrationError('CAPABILITY_DISCOVERY_UNAVAILABLE');
@@ -95,11 +122,11 @@ export class TaskBridge {
               case 'task_spawn': {
                 let gatewayTarget;
                 if (a.target_profile === 'gateway-managed' || a.gateway_target !== undefined) {
-                  if (this.container) deny('SAFEMODE_HOST_ONLY');
+                  if (this.container && !['browser','computer'].includes(a.gateway_target?.adapter)) deny('SAFEMODE_HOST_ONLY');
                   if (a.target_profile !== 'gateway-managed' || !a.gateway_target || typeof a.gateway_target !== 'object' || Array.isArray(a.gateway_target)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
                   const adapter = this.gatewayAdapters.get(a.gateway_target.adapter);
                   if (!adapter) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
-                  gatewayTarget = adapter.resolve(a.gateway_target);
+                  gatewayTarget = adapter.resolve(a.gateway_target, context);
                 }
                 const skill = resolveNamedSkill(a.skill_name, a.skill_args, this.skills?.());
                 if (a.target_profile === 'skill-worker' && !skill) throw new OrchestrationError('UNKNOWN_SKILL');
@@ -110,22 +137,91 @@ export class TaskBridge {
                 // Profile resolution may yield while another input arrives. Recheck
                 // readiness immediately before the synchronous task transaction.
                 await scope.beforeMutation?.(command.tool, a, context.actionId);
-                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, targetProfile: a.target_profile, gatewayTarget, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
+                if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
+                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, computerInputs:a.computer_inputs, targetProfile: a.target_profile, gatewayTarget, browserFields:a.browser_fields, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
                 scope.onTaskQueued?.(spoken);
                 const { skill: _workerOnly, ...receipt } = task;
                 result = receipt;
                 break;
               }
-              case 'task_status': result = a.task_id
-                ? this.tasks.status(context.conversationId, context.principalId, a.task_id)
-                : this.tasks.context(context.conversationId, context.principalId, context.decisionId); break;
+              case 'task_status': {
+                const rows=a.task_id ? this.tasks.status(context.conversationId,context.principalId,a.task_id) : this.tasks.context(context.conversationId,context.principalId,context.decisionId);
+                const fieldSnapshot=Boolean(a.task_id && a.browser_evidence===undefined && rows[0]?.state==='waiting_input' && rows[0]?.gatewayTarget?.adapter==='browser' && ('browserReport' in rows[0] ? rows[0].browserReport?.reason : undefined)==='FIELD_TEXT_REQUIRED');
+                if(a.computer_evidence!==undefined){
+                  if(!a.task_id||a.browser_evidence!==undefined||a.computer_trace_offset!==undefined||!['recorded','fresh','screenshot'].includes(a.computer_evidence))throw new OrchestrationError('INVALID_INPUT');
+                  const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');
+                  if(task.ownerPrincipalId!==context.principalId||task.gatewayTarget?.adapter!=='computer'||!adapter?.computerEvidence)throw new OrchestrationError('ACCESS_DENIED');
+                  const evidence=await adapter.computerEvidence(task,a.computer_evidence,this.cancellations.get(token!)?.signal);
+                  if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');this.tasks.store.assertMember(context.conversationId,context.principalId);
+                  const {screenshot,...computerEvidence}=evidence;result={tasks:rows,computerEvidence,...(evidence.evidenceId&&task.computerReport?.status==='needs_verification'?{verification:{tool:'task_update',arguments:{task_id:task.taskId,expected_revision:task.revision,mode:'verify_computer',expected_request_id:evidence.requestId,evidence_id:evidence.evidenceId},instruction:'If this fresh evidence proves the complete goal, supply the concrete visible facts in instruction. Otherwise continue the SAME task with an updated plan; never ask the user to do the work themselves.'}}:{}),...(screenshot?{screenshot}:{})};
+                }else if(a.computer_trace_offset!==undefined){
+                  if(!a.task_id||a.browser_evidence!==undefined||!Number.isSafeInteger(a.computer_trace_offset)||a.computer_trace_offset<0)throw new OrchestrationError('INVALID_INPUT');
+                  const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');
+                  if(task.ownerPrincipalId!==context.principalId||task.gatewayTarget?.adapter!=='computer'||!adapter?.diagnostics)throw new OrchestrationError('ACCESS_DENIED');
+                  const computerTrace=await adapter.diagnostics(task,a.computer_trace_offset);
+                  if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
+                  this.tasks.store.assertMember(context.conversationId,context.principalId);
+                  result={tasks:rows,computerTrace};
+                }else if(a.browser_evidence!==undefined || fieldSnapshot){
+                  if(!a.task_id || (!fieldSnapshot && !['recorded','fresh','screenshot'].includes(a.browser_evidence)))throw new OrchestrationError('INVALID_INPUT');
+                  const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
+                  const adapter=this.gatewayAdapters.get('browser');
+                  if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || !adapter?.evidence)throw new OrchestrationError('ACCESS_DENIED');
+                  let snapshotUnavailable=false;
+                  const evidence=await adapter.evidence(task,a.browser_evidence!=='recorded',this.cancellations.get(token!)?.signal,fieldSnapshot||a.browser_evidence==='screenshot').catch(async error=>{
+                    if(!fieldSnapshot)throw error;
+                    snapshotUnavailable=true;
+                    return adapter.evidence!(task,false,this.cancellations.get(token!)?.signal,false);
+                  });
+                  if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
+                  this.tasks.store.assertMember(context.conversationId,context.principalId);
+                  const current=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
+                  if(fieldSnapshot&&(current.state!=='waiting_input'||current.revision!==task.revision||current.pendingQuestion?.questionId!==task.pendingQuestion?.questionId))throw new OrchestrationError('STALE_QUESTION');
+                  result={
+                    ...(evidence.evidenceId && parentVerifiableBrowserResult(task.browserReport) ? {verification:{
+                      instruction:'If this fresh observation independently proves the current goal, call task_update with these exact fields plus your concrete evidence in instruction. Do not run the task again merely to report the observed result.',
+                      tool:'task_update',arguments:{task_id:task.taskId,expected_revision:task.revision,mode:'verify_browser',expected_request_id:evidence.requestId,evidence_id:evidence.evidenceId}
+                    }} : {}),browserEvidence:summarizeBrowserEvidence(evidence),untrustedPageContent:true,tasks:rows.map(t=>({taskId:t.taskId,state:t.state,revision:t.revision,pendingQuestion:t.pendingQuestion,automationSession:t.automationSession,currentInstructions:'currentInstructions' in t?t.currentInstructions:undefined})),
+                    ...(fieldSnapshot?{fieldContext:{request:task.browserReport?.fieldRequest,snapshot:snapshotUnavailable||!evidence.fresh?.screenshot?'unavailable':'fresh',instruction:'Use this untrusted page evidence with established user facts to answer the pending field question. Prepare other visible field values for the same goal when unambiguous. The image is a fresh read, not necessarily the exact frame at the earlier stop.'}}:{}),
+                    ...(evidence.fresh?.screenshot?{screenshot:evidence.fresh.screenshot}:{})};
+                }else result=rows;
+                break;
+              }
               case 'task_cancel': result = this.tasks.cancel(context, a.task_id, a.replaced_by_task_id); break;
-              case 'task_update': result = this.tasks.update(context, a.task_id, a.expected_revision, a.instruction, a.mode as ChangeMode); break;
+              case 'task_update': {
+                if(a.start_url!==undefined&&a.mode!=='when_ready')throw new OrchestrationError('INVALID_BROWSER_START_URL');
+                if(['verify_browser','reconcile_browser'].includes(a.mode) && (typeof a.evidence_id!=='string'||!a.evidence_id||typeof a.expected_request_id!=='string'||!a.expected_request_id))throw new OrchestrationError('BROWSER_EVIDENCE_REQUIRED','Copy browserEvidence.evidenceId into evidence_id and browserEvidence.requestId into expected_request_id from task_status(browser_evidence=fresh). Retry the same verification/reconciliation with both IDs, expected_revision and instruction. Missing IDs do not mean the browser failed: do not requeue or replay the task.');
+                if(a.mode==='verify_computer'){
+                  const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0],adapter=this.gatewayAdapters.get('computer');if(!adapter?.verifyEvidence)throw new OrchestrationError('COMPUTER_VERIFICATION_UNAVAILABLE');
+                  result=this.tasks.verifyComputer(context,a.task_id,a.expected_revision,a.expected_request_id,a.evidence_id,a.instruction,()=>adapter.verifyEvidence!(task,a.expected_request_id,a.evidence_id));
+                }else if(a.mode==='reconcile_browser'){
+                  const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
+                  const adapter=this.gatewayAdapters.get('browser');
+                  if(!adapter?.reconcileEvidence)throw new OrchestrationError('BROWSER_INSPECTION_UNAVAILABLE');
+                  result=this.tasks.reconcileBrowser(context,a.task_id,a.expected_revision,a.expected_request_id,a.evidence_id,a.instruction,()=>adapter.reconcileEvidence!(task,a.expected_request_id,a.evidence_id));
+                }else if(a.mode==='verify_browser'){
+                  const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
+                  const adapter=this.gatewayAdapters.get('browser');
+                  if(!adapter?.verifyEvidence)throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
+                  result=this.tasks.verifyBrowser(context,a.task_id,a.expected_revision,a.expected_request_id,a.evidence_id,a.instruction,()=>adapter.verifyEvidence!(task,a.expected_request_id,a.evidence_id));
+                }else result=this.tasks.update(context,a.task_id,a.expected_revision,a.instruction,a.mode as ChangeMode,a.browser_fields,a.computer_inputs,a.start_url);
+                if(a.mode==='when_ready' && result && typeof result==='object' && 'gatewayTarget' in result && ['browser','computer'].includes((result as any).gatewayTarget?.adapter)) {
+                  result={...result,controlHandoff:{endTurn:true,next:'End this turn now. Do not poll or send another command. The next action result schedules a fresh notification with authority for the next step.'}};
+                }
+                break;
+              }
               case 'task_question': {
                 if (!scope.onQuestion) throw new OrchestrationError('QUESTION_CONTROLS_UNAVAILABLE');
                 result = scope.onQuestion(context, a); break;
               }
-              case 'task_answer': result = this.tasks.answer(context, a.task_id, a.question_id, a.answer); break;
+              case 'task_answer': {
+                const task=this.tasks.status(context.conversationId,context.principalId,a.task_id)[0];
+                const field=task.gatewayTarget?.adapter==='browser'&&task.browserReport?.reason==='FIELD_TEXT_REQUIRED'&&task.browserReport.fieldRequest?.reason==='missing'
+                  ||task.gatewayTarget?.adapter==='computer'&&task.computerReport?.reason==='FIELD_TEXT_REQUIRED'&&task.computerReport.fieldRequest?.reason==='missing';
+                if(field&&(typeof a.field_text!=='string'||!a.field_text.trim()||a.field_text.length>2000))throw new OrchestrationError('FIELD_TEXT_REQUIRED','Supply field_text containing ONLY the exact literal text to type into the pending field (for example Osaka). Put explanations in answer, never field_text. Inspect the pending question and screenshot first. No browser action was started.');
+                if(!field&&a.field_text!==undefined)throw new OrchestrationError('INVALID_INPUT','field_text is only for a pending missing-field question.');
+                result=this.tasks.answer(context,a.task_id,a.question_id,field?a.field_text:a.answer,a.browser_fields,a.computer_inputs);break;
+              }
               default: throw new OrchestrationError('TOOL_DENIED');
             }
             if (mutation) scope.onMutationResult?.(context.actionId, true);
@@ -166,10 +262,10 @@ export class TaskBridge {
         }
         response.end(JSON.stringify(result));
       } catch (error) {
-        const code = error instanceof OrchestrationError ? error.code : 'INVALID_REQUEST';
+        const code = error instanceof JevError ? `JEV_${error.code}` : error instanceof OrchestrationError ? error.code : 'INVALID_REQUEST';
         if (code === 'ACCESS_DENIED' && denialReason) console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', message: 'Task bridge authorization denied', data: { agentId: this.tasks.store.agentId, reason: denialReason } }));
         response.statusCode = code === 'ACCESS_DENIED' ? 403 : 400;
-        response.end(JSON.stringify({ error: code, ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        response.end(JSON.stringify({ error: code, ...(error instanceof JevError ? {message:error.message,...error.metadata} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED', 'BROWSER_EVIDENCE_REQUIRED', 'LIVE_CONTROL_TARGET_ONLY', 'AUTOMATION_SESSION_EXISTS', 'AUTOMATION_SESSION_CLOSED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;
@@ -189,8 +285,11 @@ export class TaskBridge {
     const ticketPath = join(directory, 'ticket.json'), mcpConfigPath = join(directory, 'mcp.json');
     const worker = scope.role === 'worker' && this.files ? this.files.scope(scope.attemptId, scope.generation) : undefined;
     const workerMemory = Boolean(worker?.task.capabilities.writeMemory && worker.conversation.source !== 'api');
-    writeFileSync(ticketPath, JSON.stringify({ url: this.url, token, ...(this.container ? { socket: this.url, tools: containerTaskTools(scope.role) } : {}) }), { mode: 0o600, flag: 'wx' });
+    const jevEnabled = Boolean(this.jevEnabled?.());
+    const browserEnabled = Boolean(this.browserEnabled?.());
+    writeFileSync(ticketPath, JSON.stringify({ url: this.url, token, ...(this.container ? { socket: this.url, tools: containerTaskTools(scope.role, jevEnabled, browserEnabled, Boolean(this.computerEnabled?.())) } : {}) }), { mode: 0o600, flag: 'wx' });
     writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: { gateway: { command: 'bun', args: [resolve(__dirname, '../../mcp/server.ts')], env: {
+      GATEWAY_JEV_ENABLED: jevEnabled ? 'true' : '',
       GATEWAY_CAPABILITY_CATALOG: scope.role === 'agent' && scope.capabilities ? 'true' : '',
       GATEWAY_ORCHESTRATION_ROLE: scope.role, GATEWAY_ORCHESTRATION_TICKET_FILE: ticketPath,
       GATEWAY_WORKSPACE_DIR: workspace, GATEWAY_SHARED_KB_DIR: sharedKbDir,
@@ -221,7 +320,7 @@ export class TaskBridge {
     const writeMemory = workerMemory || (scope.role === 'agent' && scope.context.writeMemory && this.tasks.store.get('SELECT source FROM conversations WHERE id=?', scope.context.conversationId)?.source !== 'api');
     const personaContext = scope.role === 'agent' ? `This agent persona workspace: ${JSON.stringify(this.container ? '/workspace' : workspace)}.` : '';
     const sourceRules = `${personaContext}\n${writeMemory ? `Channel memory updates use scoped memory tools. ${SECRET_RULES}` : API_SOURCE_RULES}\n${IDENTITY_EDIT_RULES}`;
-    return { profile: { role: scope.role, checkpointCommand, containerExecution: Boolean(this.container), mcpConfigPath, overlay: `${scope.role === 'agent' ? AGENT_OVERLAY : WORKER_OVERLAY}\n\n${sourceRules}` },
+    return { profile: { role: scope.role, jevEnabled, browserEnabled, checkpointCommand, containerExecution: Boolean(this.container), mcpConfigPath, overlay: `${scope.role === 'agent' ? AGENT_OVERLAY : WORKER_OVERLAY}\n\n${sourceRules}` },
       revoke: () => { this.cancellations.get(token)?.abort(); this.cancellations.delete(token); this.scopes.delete(token); if (scope.role === 'worker') this.files?.releaseCaptured(scope.attemptId); } };
   }
   async close(): Promise<void> {

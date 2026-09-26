@@ -19,6 +19,33 @@ document.addEventListener('DOMContentLoaded',()=>{
  const tab=[...document.querySelectorAll('.tab')].find(t=>t.dataset.view===savedDashboardState.view)||document.getElementById('tab-overview');tab.click();
 });
 const dashboardExpanded=new Map();
+let jevUsageOffset=0,jevUsageGeneration=0,jevUsageBusy=false,jevUsageScope='';
+async function refreshJevUsage(){
+ const view=document.getElementById('view-usage');
+ if(document.hidden||view.style.display==='none')return;
+ const scope=dashboardScope+':'+dashboardAgent;
+ if(scope!==jevUsageScope){jevUsageScope=scope;jevUsageOffset=0;jevUsageGeneration++;jevUsageBusy=false;document.getElementById('jev-usage-results').textContent='Loading evaluations…';document.getElementById('jev-usage-page').textContent='';}
+ if(jevUsageBusy)return;
+ const generation=++jevUsageGeneration,offset=jevUsageOffset;jevUsageBusy=true;
+ document.getElementById('jev-usage-prev').disabled=true;document.getElementById('jev-usage-next').disabled=true;
+ try{
+  const response=await fetch(apiUrl('/dashboard/jev')+'?scope='+encodeURIComponent(dashboardScope)+'&agentId='+encodeURIComponent(dashboardAgent)+'&offset='+offset);
+  if(response.status===401){onUnauthorized();return;}
+  if(!response.ok)throw Error('Evaluation history unavailable (HTTP '+response.status+').');
+  const data=await response.json();if(generation!==jevUsageGeneration)return;
+  if(!Number.isSafeInteger(data.total)||data.total<0||!Array.isArray(data.records))throw Error('Invalid evaluation history response.');
+  if(offset>0&&offset>=data.total){jevUsageOffset=data.total?Math.floor((data.total-1)/25)*25:0;jevUsageBusy=false;void refreshJevUsage();return;}
+  const headers=['Time / Agent','Consumer / Request','Model','Input / Output','Credits','Latency','Outcome'];
+  document.getElementById('jev-usage-results').innerHTML='<div class="table-wrap"><table class="data-table"><thead><tr>'+headers.map(h=>'<th>'+h+'</th>').join('')+'</tr></thead><tbody>'+(data.records.length?data.records.map(r=>'<tr><td>'+dashText(new Date(r.startedAt).toLocaleString('en-GB',{timeZone:dashboardTimezone}))+'<br>'+agentBadge(r.agentId)+'</td><td>'+dashText(r.consumer)+'<br><small class="ts">'+dashText(r.requestId)+'</small></td><td>'+dashText(r.model||r.requestedModel)+'</td><td>'+dashCount(r.usage?.input_tokens)+' / '+dashCount(r.usage?.output_tokens)+'</td><td>'+dashCount(r.billing?.charged_credits)+'</td><td>'+dashText(r.elapsedMs)+' ms</td><td>'+dashStatus(r.outcome)+(r.errorCode?'<br><small class="ts">'+dashText(r.errorCode)+'</small>':'')+'</td></tr>').join(''):'<tr><td colspan="7" class="empty">No evaluations recorded in this scope.</td></tr>')+'</tbody></table></div>';
+  document.getElementById('jev-usage-page').textContent=(data.total?offset+1:0)+'–'+Math.min(offset+25,data.total)+' of '+data.total;
+  document.getElementById('jev-usage-prev').disabled=offset===0;document.getElementById('jev-usage-next').disabled=offset+25>=data.total;
+ }catch(e){if(generation===jevUsageGeneration)document.getElementById('jev-usage-results').textContent=e.message;}
+ finally{if(generation===jevUsageGeneration)jevUsageBusy=false;}
+}
+document.getElementById('jev-usage-prev').addEventListener('click',()=>{jevUsageOffset=Math.max(0,jevUsageOffset-25);jevUsageGeneration++;jevUsageBusy=false;void refreshJevUsage();});
+document.getElementById('jev-usage-next').addEventListener('click',()=>{jevUsageOffset+=25;jevUsageGeneration++;jevUsageBusy=false;void refreshJevUsage();});
+document.getElementById('tab-usage').addEventListener('click',()=>setTimeout(refreshJevUsage,0));
+setInterval(refreshJevUsage,15000);
 let dashboardFocus=null;
 const dashboardMobile=window.matchMedia('(max-width:760px)');
 function updateSidebarToggle(){
@@ -33,7 +60,7 @@ function dashboardRows() {
   (dashboardData?.agents||[]).forEach(a=>(a.sessions||[]).forEach(s=>rows.push({a,s})));
   return rows.filter(({a,s})=>(!dashboardAgent||a.id===dashboardAgent)&&(!dashboardSearch||[a.id,s.sessionId,s.chatId,s.source,s.model].join(' ').toLowerCase().includes(dashboardSearch.toLowerCase()))).sort((x,y)=>(Number(y.s.updatedAt||y.s.spawnedAt)||0)-(Number(x.s.updatedAt||x.s.spawnedAt)||0)||String(x.s.sessionId).localeCompare(String(y.s.sessionId)));
 }
-function gatewayTaskLabel(t){return t.gatewayTarget?'<small class="ts">Gateway-managed · '+dashText(t.gatewayTarget.adapter==='safemode'?'Safemode':t.gatewayTarget.adapter)+' · '+dashText(t.gatewayTarget.name)+'</small>':'<small class="ts">Worker task</small>';}
+function gatewayTaskLabel(t){return t.gatewayTarget?'<small class="ts">Gateway-managed · '+dashText(t.gatewayTarget.adapter==='safemode'?'Safemode':t.gatewayTarget.adapter)+' · '+dashText(t.gatewayTarget.name)+'</small>'+(t.pendingRevision?'<small class="ts">Updated instructions accepted · revision '+dashText(t.pendingRevision)+' pending</small>':''):'<small class="ts">Worker task</small>';}
 function dashboardTaskRows(){return dashboardRows().flatMap(({a,s})=>(s.tasks||[]).map(t=>({a,s,t}))).sort((x,y)=>Number(y.t.updatedAt)-Number(x.t.updatedAt)||x.t.taskId.localeCompare(y.t.taskId));}
 function dashText(value){return escHtml(value==null?'—':String(value));}
 function dashCount(value){return compactNumber(value);}
@@ -52,6 +79,7 @@ function dashTable(headers,rows){
 }
 function renderDashboard(data){
   dashboardData=data;
+  void refreshJevUsage();
 
   const rows=dashboardRows(), tasks=dashboardTaskRows();
   const agents=data.agents||[];
@@ -99,8 +127,10 @@ async function dashDetail(agentId,sessionId,taskId,offset=0){
     let body='<h1>'+dashText(taskId?detail.snapshot.title:'Session details')+'</h1><p class="muted">'+agentBadge(agentId)+' · <span class="session-id">'+dashText(sessionId)+'</span></p><p class="live-note">Recorded snapshot · '+new Date().toLocaleTimeString('en-GB',{timeZone:dashboardTimezone})+'</p><a class="btn-stream" href="'+escHtml(dashReportUrl(agentId,sessionId))+'" target="_blank" rel="noopener">Open full token report ↗</a>';
     if(taskId){
       body+='<h2>Task</h2>'+dashStatus(detail.snapshot.state)+providerWaitingHtml(detail.snapshot.providerWaiting)+'<pre>'+dashText(detail.instructions||'No assignment text recorded for this task.')+'</pre>';
-      if(detail.snapshot.gatewayTarget)body+='<dl><dt>Type</dt><dd>Gateway-managed task</dd><dt>Target</dt><dd>'+dashText(detail.snapshot.gatewayTarget.adapter==='safemode'?'Safemode':detail.snapshot.gatewayTarget.adapter)+' · '+dashText(detail.snapshot.gatewayTarget.name)+'</dd><dt>Native session</dt><dd>'+dashText(detail.snapshot.gatewayTarget.sessionId)+'</dd><dt>Request</dt><dd>'+dashText(detail.snapshot.gatewayDispatch?.requestId)+'</dd></dl><p class="muted">Existing external session. No model worker is created; its tokens and tools are not measured as worker usage.</p>';
+      if(detail.snapshot.gatewayTarget)body+='<dl><dt>Type</dt><dd>Gateway-managed task</dd><dt>Target</dt><dd>'+dashText(detail.snapshot.gatewayTarget.adapter==='safemode'?'Safemode':detail.snapshot.gatewayTarget.adapter)+' · '+dashText(detail.snapshot.gatewayTarget.name)+'</dd><dt>Target ID</dt><dd>'+dashText(detail.snapshot.gatewayTarget.sessionId)+'</dd><dt>Request</dt><dd>'+dashText(detail.snapshot.gatewayDispatch?.requestId)+'</dd></dl><p class="muted">Gateway-managed execution. No model worker is created. Browser evaluations are recorded separately under Jev usage.</p>';
       if(detail.snapshot.result)body+='<h2>Latest result</h2><pre>'+dashText(detail.snapshot.result.summary||JSON.stringify(detail.snapshot.result,null,2))+'</pre>';
+      if(detail.snapshot.computerReport){const r=detail.snapshot.computerReport;body+='<section class="detail-block"><h2>Computer Use result</h2><dl><dt>Outcome</dt><dd>'+dashText(r.status)+' · '+dashText(r.reason)+'</dd><dt>Actions</dt><dd>'+dashCount(r.steps)+'</dd><dt>Evaluations</dt><dd>'+dashCount(r.evaluations)+'</dd><dt>Phase</dt><dd>'+dashText(r.phase||r.status)+'</dd></dl>';if(r.trace&&r.trace.length){body+='<h3>Recent recorded rounds</h3><ul>';r.trace.forEach(function(e){body+='<li>Round '+dashCount(e.round)+' · '+dashText(e.phase)+' · '+dashText([e.action,e.key,e.outcome,e.changed===true?'Screen changed':e.changed===false?'No observed change':'',e.reason].filter(Boolean).join(' · '))+'</li>';});body+='</ul>';}body+='</section>';}
+      if(detail.snapshot.browserReport){const r=detail.snapshot.browserReport;body+='<section class="detail-block"><h2>Browser result</h2><dl><dt>Outcome</dt><dd>'+dashText(r.status)+' · '+dashText(r.reason)+'</dd><dt>Actions / evaluations</dt><dd>'+dashCount(r.steps)+' / '+dashCount(r.evaluations)+'</dd>'+(r.providerFailure?'<dt>Provider error</dt><dd>'+dashText(r.providerFailure.code)+(r.providerFailure.resetAt?' · Resets at '+dashText(r.providerFailure.resetAt):'')+(r.providerFailure.retryAfter?' · Retry after '+dashText(r.providerFailure.retryAfter):'')+'</dd>':'')+(r.verification?'<dt>Verified by parent</dt><dd>'+dashText(r.verification.evidence)+'</dd>':'')+'<dt>Last operation</dt><dd>'+dashText(r.lastAction?.operation)+' · '+dashText(r.lastAction?.outcome)+'</dd><dt>Operation ID</dt><dd>'+dashText(r.lastAction?.operationId)+'</dd><dt>Evaluation ID</dt><dd>'+dashText(r.lastEvaluation?.requestId)+'</dd></dl></section>'; }
       body+='<h2>'+(detail.snapshot.gatewayTarget?'Gateway-managed requests':'Worker attempts')+'</h2><p class="muted">'+detail.totalAttempts+(detail.snapshot.gatewayTarget?' requests':' attempts')+' · displaying '+(detail.totalAttempts?offset+1:0)+'–'+Math.min(offset+25,detail.totalAttempts)+'</p>';
       body+=detail.attempts.map(a=>detail.snapshot.gatewayTarget?'<section class="detail-block"><h3>Request '+dashText(a.generation)+' · '+dashText(a.state)+'</h3><dl><dt>Attempt ID</dt><dd>'+dashText(a.attemptId)+'</dd><dt>Native session</dt><dd>'+dashText(a.sessionId)+'</dd></dl>'+(a.failure?'<pre>'+dashText(a.failure.code+': '+a.failure.message)+'</pre>':'')+'</section>':'<section class="detail-block"><h3>Attempt '+dashText(a.generation)+' · '+dashText(a.state)+'</h3><dl><dt>Attempt ID</dt><dd>'+dashText(a.attemptId)+'</dd><dt>Worker ID</dt><dd>'+dashText(a.workerId)+'</dd><dt>Worker session</dt><dd>'+dashText(a.sessionId)+'</dd><dt>Harness</dt><dd>'+dashText(a.harness==='codex'?'Codex':a.harness==='claude'?'Claude Code':null)+'</dd><dt>Model</dt><dd>'+dashText(a.harnessModel||a.metrics?.model)+'</dd><dt>Recorded tokens</dt><dd>'+dashCount(a.metrics?.usage?.totalTokens)+'</dd></dl>'+codexContextHtml(a.metrics?.contextWindow)+toolInventory(a.metrics?.loadedTools,a.metrics?.usedTools,a.metrics?.contextTools,a.harness)+(a.metrics?.contextTools?'<h3>Loaded tools</h3>'+toolNameList(a.metrics.contextTools):'')+'<h3>Used tools</h3>'+toolNameList(a.metrics?.usedTools,a.harness)+'<h3>Latest recorded events</h3>'+a.events.map(e=>'<section class="detail-block"><h3>'+dashText(new Date(e.at).toLocaleString('en-GB',{timeZone:dashboardTimezone}))+' · '+dashText(e.type)+'</h3><pre>'+dashText(JSON.stringify(e.payload,null,2))+'</pre></section>').join('')+'</section>').join('');
       if(offset>0)body+='<button data-attempt-page="'+Math.max(0,offset-25)+'">Newer attempts</button>';
@@ -166,7 +196,7 @@ document.addEventListener('keydown',function(e){
  if(e.key==='Tab'&&document.getElementById('dash-drawer-back').classList.contains('open')){const panel=document.getElementById('dash-drawer'),nodes=[...panel.querySelectorAll('button,a,summary')].filter(n=>n.getClientRects().length);const first=nodes[0],last=nodes[nodes.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===panel)){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}
  if((e.key==='Enter'||e.key===' ')&&e.target.matches('tr[data-dash-agent]')){e.preventDefault();e.target.click();}
 });
-document.getElementById('dash-scope').addEventListener('click',e=>{const button=e.target.closest('[data-range]');if(!button)return;dashboardScope=button.dataset.range;document.querySelectorAll('#dash-scope [data-range]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));dashboardOffset=0;dashClose();refresh();connectDashboardStream();window.__loadDreams?.(true);});
+document.getElementById('dash-scope').addEventListener('click',e=>{const button=e.target.closest('[data-range]');if(!button)return;dashboardScope=button.dataset.range;document.querySelectorAll('#dash-scope [data-range]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));dashboardOffset=0;dashClose();void refreshJevUsage();refresh();connectDashboardStream();window.__loadDreams?.(true);});
 document.getElementById('dash-search').addEventListener('input',e=>{dashboardSearch=e.target.value;if(dashboardData)renderDashboard(dashboardData);});
 document.getElementById('dash-agent-filter').addEventListener('change',e=>{dashboardAgent=e.target.value;if(dashboardData)renderDashboard(dashboardData);});
 
@@ -182,4 +212,3 @@ function connectDashboardStream(){
 }
 
 `;
-

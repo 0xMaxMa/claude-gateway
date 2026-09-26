@@ -12,6 +12,8 @@ Claude Gateway keeps conversations responsive while Claude Code workers execute 
 
 ## Features
 
+- 🔎 **Jev evaluations** — optional typed Choice, Score and Noul evaluations shared by agents, workers and scoped integrations, with direct or compatible upstream credentials. See [Jev setup](https://0xmaxma.github.io/claude-gateway/guide/jev.html).
+
 - 🪄 **Agent Orchestration Engine** — responsive conversations while workers execute durable tasks. The dashboard separates Agent/worker token usage and offers per-session reports with cache and tool details. Existing configurations without the switch are upgraded automatically; explicit `false` remains an opt-out. See [orchestration settings](https://0xmaxma.github.io/claude-gateway/reference/orchestration-settings.html).
 
 - 🔥 **Agent orchestration** — keep conversations responsive while reusable workers execute durable tasks, report progress, accept follow-up instructions, and support cancellation. See [orchestration and tasks](https://0xmaxma.github.io/claude-gateway/guide/orchestration.html).
@@ -100,3 +102,16 @@ native Claude Code/Codex IDs; `safemode rename ID NEW_NAME` changes the alias
 without interrupting the conversation. Headless takeover,
 request IDs and trusted operator agent controls are described in the
 [safemode guide](website/guide/safemode.md). Trusted agents can discover explicitly assigned investigations and track them as Gateway-managed tasks, with automatic completion reports and conversation-scoped controls.
+
+Paired desktop MCP connectors can also run through Jev as Gateway-managed
+Computer Use tasks, with local application consent and the same shared Thinking
+configuration. See [Computer Use connectors](website/guide/jev.md#computer-use-connectors).
+
+### Computer Use consent
+
+Computer capability discovery lists paired online computers without requesting access.
+A Gateway-managed computer task requests access only when it starts. The desktop
+owner then selects applications (or explicitly selects All applications) and a
+session duration. Denial prevents execution; pairing and discovery alone never
+start desktop actions. The task waits for approval with cancellation and ownership
+checks active, rather than asking the user to pre-enable access in Settings.

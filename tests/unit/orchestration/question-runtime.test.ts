@@ -304,3 +304,97 @@ test('failed optional speech notice does not block an already delivered acknowle
   expect(f.runtime.store.get("SELECT state FROM deliveries WHERE delivered_text LIKE 'Voice rate limit%'")!.state).toBe('failed');
  }finally{await f.close();}
 });
+
+test.each(['Flights to Osaka','Shopee iPhone18ProMax case','ChatGPT crypto news'])('browser field review answers known facts without asking the user: %s',async goal=>{
+ const f=await fixture();
+ try{
+  const task=f.runtime.store.task(f.task.taskId)!;
+  task.gatewayTarget={adapter:'browser',sessionId:'fixture',name:'Fixture'};
+  task.browserReport={status:'blocked',reason:'FIELD_TEXT_REQUIRED',steps:0,evaluations:1,fieldRequest:{ref:'input',label:'Query',reason:'missing'}};
+  f.runtime.store.transaction(()=>f.runtime.store.saveTask(task,task.stateVersion));
+  f.runtime.questionControls.tick();
+  let ticketScope:any;const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((scope,...args)=>{ticketScope=scope;return issue(scope,...args);});
+  const ask=jest.spyOn(f.runtime.questionControls,'manage');
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+   try{
+    expect(ticketScope.context.execute).toBe(false);
+    expect(ticketScope.context.questionReviewIds).toContain(f.question.questionId);
+    f.runtime.tasks.answer({...ticketScope.context,actionId:'review-answer'},task.taskId,f.question.questionId,goal);
+    this.emit('output',JSON.stringify({type:'result',result:''}));
+   }catch(e){this.emit('error',e);}
+  }}) as unknown as SessionProcess);
+  (f.runtime as any).pumpMailbox();
+  const until=Date.now()+5000;while(f.runtime.store.task(task.taskId)!.revision===1&&Date.now()<until)await new Promise(r=>setTimeout(r,10));
+  expect(f.runtime.store.task(task.taskId)!.revision).toBe(2);
+  expect(f.runtime.tasks.revision(task.taskId,2).answers?.at(-1)?.text).toBe(goal);
+  expect(ask).not.toHaveBeenCalled();
+ }finally{await f.close();}
+});
+
+test('browser failure mailbox asks for inspection and permits same-task recovery before reporting',async()=>{
+ const f=await fixture();
+ try{
+  f.runtime.tasks.cancelByUser(f.task.conversationId,'owner',f.task.taskId);
+  f.runtime.store.run("UPDATE notifications SET status='handled'");
+  const input=f.runtime.store.acceptInput({scope:f.scope,text:'Search the browser',capabilities:{execute:true,writeMemory:false}});
+  const decision=f.runtime.decisions.begin(input.conversationId,'owner',[input.inputId]);
+  const task=f.runtime.tasks.spawn({...input,...decision,principalId:'owner',execute:true,writeMemory:false,actionId:'browser-spawn'},{title:'Search',instructions:'Find the requested information',targetProfile:'gateway-managed',gatewayTarget:{adapter:'browser',sessionId:'fixture',name:'Browser'}});
+  f.runtime.decisions.finish(decision,'Working');
+  const attempt=f.runtime.tasks.claim(task.taskId)!;f.runtime.tasks.started(attempt.attemptId,attempt.generation);
+  f.runtime.tasks.finish(attempt.attemptId,attempt.generation,{type:'failed',failure:{code:'BROWSER_LOW_TARGET_CONFIDENCE',message:'Stopped',observedAt:Date.now()},browserReport:{contractVersion:1,status:'blocked',reason:'LOW_TARGET_CONFIDENCE',steps:1,evaluations:1}});
+  let ticketScope:any;const errors:unknown[]=[];let observed=false;
+  const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((scope,...args)=>{ticketScope=scope;return issue(scope,...args);});
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter,prompt:string){
+   if(observed){this.emit('output',JSON.stringify({type:'result',result:''}));return;}
+   try{
+    expect(prompt).toContain('Browser exception: before reporting');
+    expect(prompt).toContain('task_status(browser_evidence=fresh)');
+    expect(prompt).not.toContain('Only a progress-alert turn may');
+    expect(ticketScope.context.execute).toBe(false);
+    f.runtime.tasks.status(ticketScope.context.conversationId,ticketScope.context.principalId,task.taskId);
+    f.runtime.tasks.update({...ticketScope.context,actionId:'recover-browser'},task.taskId,1,'Inspect the destination field and retain original requirements','when_ready');
+    observed=true;
+   }catch(e){errors.push(e);}
+   this.emit('output',JSON.stringify({type:'result',result:''}));
+  }}) as unknown as SessionProcess);
+  (f.runtime as any).config.conversation.notificationPolicy='existing_receive_path';
+  (f.runtime as any).pumpMailbox();
+  const until=Date.now()+5000;while(!observed&&!errors.length&&Date.now()<until)await new Promise(r=>setTimeout(r,10));
+  expect(errors).toEqual([]);expect(observed).toBe(true);
+  expect(f.runtime.store.task(task.taskId)!.revision).toBe(2);
+ }finally{await f.close();}
+});
+
+test.each(['text','live_voice'] as const)('live %s control bypasses a busy agent and is idempotent',async modality=>{
+ const f=await fixture();try{
+  const t=f.runtime.store.task(f.task.taskId)!;
+  f.runtime.store.transaction(()=>{f.runtime.store.run("UPDATE task_attempts SET state='ended' WHERE task_id=?",t.taskId);t.gatewayTarget={adapter:'browser',sessionId:'fixture',name:'Browser'};t.state='queued';t.activeAttemptId=undefined;t.pendingQuestion=undefined;f.runtime.store.saveTask(t,t.stateVersion);});
+  const controller=(f.runtime as any).gatewayTasks;const signal=jest.spyOn(controller,'signalControl').mockImplementation(()=>{});
+  const active=(f.runtime as any).active as Map<string,unknown>;active.set(f.scope.agentSessionId,{stopping:false});
+  const input={scope:f.scope,text:'เปลี่ยนปลายทางครับ',modality,ingressKey:randomUUID(),metadata:{executionTaskId:t.taskId}};
+  const submitted=f.runtime.submitInput(input,{execute:true,writeMemory:false});
+  expect(f.runtime.store.task(t.taskId)?.revision).toBe(2);expect(signal).toHaveBeenCalled();
+  expect(f.createAgentSession).not.toHaveBeenCalled();
+  const retry=f.runtime.submitInput(input,{execute:true,writeMemory:false});expect(retry.inputId).toBe(submitted.inputId);
+  expect(await submitted.response).toBe('');
+  expect(await retry.response).toBe('');
+  expect(f.runtime.store.get("SELECT COUNT(*) AS count FROM conversation_decisions WHERE kind='notice' AND EXISTS(SELECT 1 FROM json_each(input_ids_json) WHERE value=?)",submitted.inputId)!.count).toBe(0);
+  expect(f.runtime.store.get('SELECT status FROM conversation_inputs WHERE id=?',submitted.inputId)!.status).toBe('handled');
+  expect(f.runtime.store.task(t.taskId)?.revision).toBe(2);
+  expect(f.createAgentSession).not.toHaveBeenCalled();
+ }finally{(f.runtime as any).active.clear();await f.close();}
+});
+
+test('a computer field question attaches scoped window pixels and context to its parent agent',async()=>{
+ const f=await fixture();
+ try{
+  f.runtime.store.transaction(()=>{const task=f.runtime.store.task(f.task.taskId)!;task.gatewayTarget={adapter:'computer',sessionId:'mac',name:'Mac'};f.runtime.store.saveTask(task,task.stateVersion);});
+  (f.runtime as any).computerAdapter={promptEvidence:jest.fn(()=>({observedAt:123,state:{generation:'window-g',application:'com.apple.Maps',controls:[{label:'Search',role:'AXTextField'}]},screenshot:{type:'image',mimeType:'image/jpeg',data:'/9j/AA=='}}))};
+  let receivedImages:any,promptText='';
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter,prompt:string,images:any){promptText=prompt;receivedImages=images;this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));this.emit('output',JSON.stringify({type:'result',result:'I can answer the pending field from your instruction.'}));}}) as unknown as SessionProcess);
+  await f.runtime.send({scope:f.scope,text:'Use the known destination Bangkok',modality:'text'},{execute:true,writeMemory:false},{timeoutMs:5000});
+  expect(receivedImages).toContainEqual({type:'image',source:{type:'base64',media_type:'image/jpeg',data:'/9j/AA=='}});expect(promptText).toContain('computer-snapshot:');expect(promptText).toContain('com.apple.Maps');expect(promptText).not.toContain('/9j/AA==');
+ }finally{await f.close();}
+});

@@ -171,6 +171,7 @@ describe('connectors-router — custom connectors', () => {
     const app = makeApp(cfgPath);
     const before = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     expect(before.body.capabilities.perConnectorDefaults).toBe(true);
+    expect(before.body.capabilities.computerUseTasks).toBe(true);
     const added = await request(app).post('/api/v1/connectors/custom').set('X-Api-Key', adminKey)
       .send({ label: 'Remote browser', config: { type: 'http', url: 'https://browser.example/mcp' }, defaultEnabled: false });
     expect(added.status).toBe(200);

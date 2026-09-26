@@ -90,3 +90,32 @@ test('a prolonged report outage backs off to one hour across restart without con
   expect(store.get('SELECT status FROM notifications WHERE id=?',f.notificationId)?.status).toBe('handled');
  }finally{store.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('agent control wakes for each settled step even with next-user-turn reporting policy',()=>{
+ const store=new OrchestrationStore(':memory:','a');
+ try {
+  const f=seed(store,'control');const row=store.get('SELECT task_id FROM notifications WHERE id=?',f.notificationId)!;
+  const task=store.task(String(row.task_id))!;
+  store.transaction(()=>{task.state='waiting_input';task.gatewayTarget={adapter:'browser',sessionId:'tab',name:'Browser'};task.browserReport={contractVersion:1,status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1};store.saveTask(task,task.stateVersion);store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);});
+  expect(pendingReports(store,[],[],false).map(r=>r.notification_id)).toContain(f.notificationId);
+  store.transaction(()=>{task.automationController='user';store.saveTask(task,task.stateVersion);store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);});
+  expect(pendingReports(store,[],[],false)).toHaveLength(0);
+  expect(pendingReports(store,[],[],true)).toHaveLength(0);
+ }finally{store.close();}
+});
+
+test('direct control stays silent until a confirmed user disconnect, then reports once',()=>{
+ const store=new OrchestrationStore(':memory:','a');
+ try {
+  const f=seed(store,'disconnect');const row=store.get('SELECT task_id FROM notifications WHERE id=?',f.notificationId)!;
+  const task=store.task(String(row.task_id))!;
+  store.transaction(()=>{task.automationController='user';task.state='cancel_requested';task.cancellation={requestedBy:'user',requestedAt:Date.now()};store.saveTask(task,task.stateVersion);store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);});
+  expect(pendingReports(store,[],[],true)).toHaveLength(0);
+  store.transaction(()=>{task.state='cancelled';store.saveTask(task,task.stateVersion);});
+  expect(pendingReports(store,[],[],true)).toHaveLength(0); // stale progress does not wake the agent
+  store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);
+  expect(pendingReports(store,[],[],false).map(r=>r.notification_id)).toEqual([f.notificationId]);
+  store.run("UPDATE notifications SET status='handled' WHERE id=?",f.notificationId);
+  expect(pendingReports(store,[],[],true)).toHaveLength(0);
+ }finally{store.close();}
+});

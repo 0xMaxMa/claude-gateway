@@ -23,6 +23,8 @@ export interface ExecutionCapabilities {
   writeMemory: boolean;
 }
 export interface CommandContext extends ExecutionCapabilities {
+  /** Server-selected pending questions for an internal review; never tool arguments. */
+  questionReviewIds?: string[];
   model?: string;
   conversationId: string;
   principalId: string;
@@ -32,7 +34,8 @@ export interface CommandContext extends ExecutionCapabilities {
   actionId: string;
 }
 export interface TaskFailure { code: string; message: string; observedAt: number; provider?: import('./provider-admission').ProviderFailure; }
-export type WorkerOutcome = {type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure};
+export interface ComputerTaskReport {status:string;reason:string;steps:number;evaluations?:number;phase?:string;trace?:import('@0xmaxma/jev-loop/dist/computer-use').ComputerProgress[];fieldRequest?:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'}}
+export type WorkerOutcome = ({type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure}) & {computerReport?:ComputerTaskReport;browserReport?: import('../jev/browser-contract').BrowserTaskReport};
 export interface TaskResult {
   summary: string;
   artifactIds: string[];
@@ -40,14 +43,22 @@ export interface TaskResult {
 }
 /** A fixed gateway adapter, never an arbitrary command or another model worker. */
 export interface GatewayTaskTarget {
+  startUrl?: string;
   adapter: string;
   sessionId: string;
   name: string;
   takeover?: boolean;
   noBootstrap?: boolean;
 }
+export type ComputerConnectionStatus = 'connected' | 'disconnected' | 'waiting_access' | 'unknown';
 export interface TaskSnapshot {
+  computerConnection?: ComputerConnectionStatus;
+  automationController?: "agent" | "user";
+  automationSession?: import("./tasks/automation-session").AutomationSession;
+  executionControl?: {id:string;action:'pause'|'revise'|'resume';revision:number;phase:'pending'|'applied'|'paused'|'blocked';requestedAt:number};
+  computerReport?:ComputerTaskReport;
   gatewayTarget?: GatewayTaskTarget;
+  browserReport?: import('../jev/browser-contract').BrowserTaskReport;
   gatewayDispatch?: { requestId: string; submittedAt: number };
 
   continueTaskId?: string;
@@ -90,10 +101,17 @@ export interface TaskSnapshot {
   updatedAt: number;
 }
 export interface TaskRevision {
+  /** Explicit navigation belongs to one revision; never replay it on an answer/recovery. */
+  browserNavigation?: {url:string;revision:number};
+  computerInputs?: Array<{application:string;label:string;text:string;role?:string;windowTitle?:string}>;
+  /** A new explicit user instruction can request browser consent before dispatch. */
+  requestBrowserConsent?: boolean;
+  /** Bounded autonomous browser replans since the latest user update. */
+  browserRecoveryCount?: number;
   /** Bounded supervision advice; never replaces user authorization or the assigned goal. */
   guidance?: string;
   guidanceBasis?: { attemptId?: string; workflowVersion: number; progressAt: number };
-  answers?: Array<{ questionId: string; text: string; inputId: string }>;
+  answers?: Array<{ questionId: string; text: string; inputId: string; browserFieldLabel?: string; computerFieldLabel?:string; computerApplication?:string;computerWindowTitle?:string;computerFieldRole?:string }>;
   taskId: string;
   revision: number;
   instructions: string;

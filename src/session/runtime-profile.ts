@@ -20,6 +20,9 @@ export interface RuntimeProfile {
   workerTools?: string[];
   hostExecution?: boolean;
   containerExecution?: boolean;
+  /** Captured optional evaluation-tool inventory for this process; permissions remain live. */
+  jevEnabled?: boolean;
+  browserEnabled?: boolean;
   /** Optional connector restriction for workers. Agent decisions never receive connectors. */
   connectorsAllowed?: boolean;
   originSessionId?: string;

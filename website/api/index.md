@@ -24,6 +24,8 @@ curl --fail http://127.0.0.1:10850/api/v1/agents \
 | Agents, avatars and creation wizard | [Open reference](/api/agents) |
 | Messages and slash commands | [Open reference](/api/messages) |
 | SSE, tool events and reconnects | [Open reference](/api/streaming) |
+| Browser bindings and task evidence | [Open reference](/guide/jev#bind-an-existing-mcp-connector-to-a-conversation) |
+| Jev evaluations and scoped usage | [Open reference](/guide/jev#http-evaluation-and-usage) |
 | Models | [Open reference](/api/models) |
 | Session management | [Open reference](/api/sessions) |
 | Chat history and search | [Open reference](/api/history) |

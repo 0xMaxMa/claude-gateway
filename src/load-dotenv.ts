@@ -9,6 +9,7 @@
  * Kept dependency-free and side-effect-only-on-call so the CLI path can run it
  * without pulling in anything else.
  */
+import { childEnvExclusions } from './child-env-exclusions';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -42,9 +43,11 @@ export function parseDotenv(text: string): Array<{ key: string; value: string }>
 }
 
 export function loadGatewayDotenv(): void {
+  const excluded = childEnvExclusions(process.env);
+  for (const name of excluded) delete process.env[name];
   const envFile = path.join(os.homedir(), '.claude-gateway', '.env');
   if (!fs.existsSync(envFile)) return;
   for (const { key, value } of parseDotenv(fs.readFileSync(envFile, 'utf8'))) {
-    if (!(key in process.env)) process.env[key] = value;
+    if (!excluded.has(key) && !(key in process.env)) process.env[key] = value;
   }
 }
