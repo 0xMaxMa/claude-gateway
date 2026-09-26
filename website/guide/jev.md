@@ -568,3 +568,9 @@ Window titles are hints, not stable browser tab IDs; ambiguous targets should wa
 Disconnect revokes Computer Use device access even while a task is idle with no
 active attempt. The task remains in its stopping state until the relay confirms
 session termination; an old paused result does not acknowledge revocation.
+
+Computer Use devices can request `decisionMode: "thinking"` in observations.
+Gateway's configured Thinking provider then selects every action and Jev is not
+called. `"jev"` (or omission) uses normal Jev routing. No credentials move to the
+device, and authorization, fresh-observation checks, and receipts are unchanged.
+A missing Thinking provider causes the command to wait instead of using Jev.
