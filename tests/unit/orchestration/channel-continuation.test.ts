@@ -32,9 +32,12 @@ test.each([[1, 0], [125, 0], [3, 150]])('web continuation forwards %i tool calls
       return process;
     }, releaseAgentSession: async () => {},
   });
-  const legacy = jest.fn();
+  const legacy = jest.fn(), echoed = jest.fn();
+  // channelSourceMap + writeAutoForward back the web→Telegram echo that
+  // sendMessageToSession writes before handing the turn to orchestration.
   const runner = Object.assign(Object.create(AgentRunner.prototype), { agentConfig: agent, sessionStore: sessions,
-    orchestration: runtime, turnStreams: new TurnStreamRegistry(), getOrSpawnSession: legacy });
+    orchestration: runtime, turnStreams: new TurnStreamRegistry(), getOrSpawnSession: legacy,
+    channelSourceMap: new Map(), writeAutoForward: echoed });
   try {
     await runtime.send({ scope: { agentId: 'a', agentSessionId: 's', source: 'telegram', accountId: 'bot', chatId: 'chat', threadKey: 'topic', principalId: 'human' }, text: 'First' }, { execute: true, writeMemory: true }, { timeoutMs: 2000 });
     await expect(runner.sendMessageToSession('chat', 'telegram', 's', 'No auth', undefined, {}, { timeoutMs: 2000 })).rejects.toThrow('Authenticated principal');
@@ -48,6 +51,8 @@ test.each([[1, 0], [125, 0], [3, 150]])('web continuation forwards %i tool calls
     await expect(result).resolves.toBe('Continued.');
     expect(chunks.filter(event => event.type === 'tool_use')).toHaveLength(count);
     expect(legacy).not.toHaveBeenCalled();
+    // The web message is echoed to the Telegram chat exactly once on the orchestrated path.
+    expect(echoed.mock.calls.filter(([id, text]) => id === 'chat' && text === '📱 Web: Continue')).toHaveLength(1);
     const inputs = runtime.store.all('SELECT * FROM conversation_inputs ORDER BY input_seq');
     expect(inputs.map(row => row.principal_id)).toEqual(['human', 'api:key']);
     expect(inputs[1].conversation_id).toBe(inputs[0].conversation_id);
