@@ -555,3 +555,5 @@ mutation outcomes that cannot be established remain fenced for reconciliation.
 ### Computer connection status
 
 Gateway checks the paired computer’s connection and access state every five seconds, including while an automation session is idle. Task activity exposes `computerConnection`: `connected`, `disconnected`, `waiting_access`, or `unknown` when the relay cannot be checked. A temporary disconnect does not close the automation session or replay an action. Reconnecting without local approval is waiting for access, not ready. An explicit owner Stop still closes the session.
+
+Computer Use closing reports acknowledge the end neutrally, without repeating who cancelled. The last successful approved-window screenshot is retained across command revisions and attached to the closing report through the normal scoped media/history path, with its recorded time. It is historical evidence, never a fresh capture after access ends. Missing images are not fabricated.

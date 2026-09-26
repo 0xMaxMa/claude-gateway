@@ -78,6 +78,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
       receipt.snapshot={observedAt:Date.now(),state,...(image?{screenshot:image}:{screenshotError:(()=>{try{const code=JSON.parse(text??'{}').error;return typeof code==='string'&&/^[A-Z_]{1,80}$/.test(code)?code:'COMPUTER_SCREENSHOT_UNAVAILABLE';}catch{return 'COMPUTER_SCREENSHOT_UNAVAILABLE';}})()})};
      }catch(error){if(!authorized())throw Error('ACCESS_DENIED');s.throwIfAborted();receipt.snapshot={observedAt:Date.now(),state,screenshotError:'COMPUTER_SCREENSHOT_UNAVAILABLE'};}
      this.write(t,r,receipt);
+     if(receipt.snapshot?.screenshot)this.write(t,'last-screenshot',{...receipt,requestId:'last-screenshot'});
     },
     evaluate:(req,s)=>this.options.evaluate(t,req,s),
     ...(this.options.thinking?.()?{decideAction:async(req:import('@0xmaxma/jev-loop/action-thinking').ActionThinkingRequest,s:AbortSignal)=>{
@@ -139,6 +140,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
  promptEvidence(t:TaskSnapshot){
   if(!this.permitted(t.ownerPrincipalId,t.conversationId)||t.gatewayTarget?.adapter!=='computer')throw Error('ACCESS_DENIED');
   const r=t.gatewayDispatch?.requestId,receipt=r?this.read(t,r):undefined;
+  if(t.state==='cancelled'){const saved=this.read(t,'last-screenshot');return receipt?.snapshot?.screenshot?receipt.snapshot:saved?.snapshot;}
   if(!receipt||receipt.revision!==t.revision)return;
   return receipt.snapshot;
  }

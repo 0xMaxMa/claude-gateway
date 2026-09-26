@@ -1,3 +1,4 @@
+import {attachComputerEndScreenshot} from '../../../src/orchestration/computer-end-screenshot';
 import {randomUUID} from 'node:crypto';
 import { BrowserTaskAdapter } from '../../../src/orchestration/gateway-tasks/browser';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs';
@@ -491,4 +492,15 @@ test('idle computer tracks disconnect and reconnect without ending or replaying 
   expect(store.task(task.taskId)?.automationSession?.status).toBe('idle');
  }
  expect(computer.submit).not.toHaveBeenCalled();expect(computer.cancel).not.toHaveBeenCalled();
+});
+
+test('closing screenshot is attached once to its own report and never across users or conversations',()=>{
+ const task=tasks.spawn({...context,actionId:'computer-picture'},{title:'Desktop',instructions:'Wait',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'computer'}});
+ tasks.cancelByUser(task.conversationId,task.ownerPrincipalId,task.taskId);
+ const response=store.get('SELECT id FROM assistant_responses WHERE decision_id=?',context.decisionId)!;
+ const input={taskId:task.taskId,responseId:String(response.id),principalId:task.ownerPrincipalId,conversationId:task.conversationId,capturedAt:Date.now(),data:'/9j/AA=='};
+ expect(()=>attachComputerEndScreenshot(store,directory,{...input,principalId:'other'})).toThrow('ACCESS_DENIED');
+ expect(()=>attachComputerEndScreenshot(store,directory,{...input,conversationId:'other'})).toThrow('ACCESS_DENIED');
+ attachComputerEndScreenshot(store,directory,input);attachComputerEndScreenshot(store,directory,input);
+ const files=store.all('SELECT * FROM task_files WHERE response_id=?',response.id);expect(files).toHaveLength(1);expect(files[0].caption).toContain('not a live view');expect(files[0].path).toContain('computer-end-');
 });
