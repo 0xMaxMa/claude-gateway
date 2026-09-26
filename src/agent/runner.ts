@@ -5822,6 +5822,15 @@ export class AgentRunner extends EventEmitter {
     callbacks: ApiStreamCallbacks,
     opts: { timeoutMs: number; requestId?: string; principalId?: string; allowTools?: boolean },
   ): Promise<() => void> {
+    // Echo the web UI message to the originating channel so Telegram users see
+    // what was typed from the web. Runs before the `managed` early return so it
+    // fires for orchestrated sessions too (sendOrchestratedChannel never reaches
+    // the code below). channelSourceMap is set first so writeAutoForward resolves
+    // the right channel source for managed-path callers.
+    if (channel === 'telegram') {
+      this.channelSourceMap.set(rawChatId, channel);
+      this.writeAutoForward(rawChatId, '📱 Web: ' + message);
+    }
     const managed = (this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes(channel)) ||
       (this.orchestration?.ownsSession(sessionId) && !this.orchestration.canReturnToLegacy());
     if (managed) return this.sendOrchestratedChannel(rawChatId, channel, sessionId, message, senderName, callbacks, opts);

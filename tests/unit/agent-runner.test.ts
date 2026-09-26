@@ -5554,7 +5554,7 @@ describe('AgentRunner — sendMessageToSession writes one assistant row per laye
   // assistant text for persistence (not for forwarding), so removing the
   // producer's write loses nothing.
   // --------------------------------------------------------------------------
-  it('T-XCHAN-DUP-03: an empty result falls back to the streamed assistant text', async () => {
+  it('T-XCHAN-DUP-03: an empty result falls back to the streamed assistant text without forwarding it', async () => {
     const { chatId, sessionId } = uniqueIds('empty');
     const { dbRows, jsonRows, forwarded } = await driveCrossChannelTurn(chatId, sessionId, [
       JSON.stringify({ type: 'assistant', stop_reason: 'end_turn', message: { content: [{ type: 'text', text: 'streamed answer' }] } }),
@@ -5563,9 +5563,13 @@ describe('AgentRunner — sendMessageToSession writes one assistant row per laye
 
     expect(dbRows.filter(r => r.role === 'assistant')).toEqual([{ role: 'assistant', content: 'streamed answer' }]);
     expect(jsonRows.filter(r => r.role === 'assistant')).toEqual([{ role: 'assistant', content: 'streamed answer' }]);
-    // The fallback is persistence-only: an empty `result` also arrives between
-    // pty-shell sub-turns, so it must not post an extra message to the channel.
-    expect(forwarded).toEqual([]);
+    // The only forward is the web→Telegram echo of the injected user message,
+    // written by sendMessageToSession before the turn starts. The fallback
+    // itself is persistence-only: an empty `result` also arrives between
+    // pty-shell sub-turns, so neither it nor the streamed text may post an
+    // extra message to the channel.
+    expect(forwarded).toEqual(['📱 Web: hello']);
+    expect(forwarded.filter(t => t.includes('streamed answer'))).toEqual([]);
   }, 15000);
 
   // --------------------------------------------------------------------------
