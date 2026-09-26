@@ -50,7 +50,9 @@ export interface GatewayTaskTarget {
   takeover?: boolean;
   noBootstrap?: boolean;
 }
+export type ComputerConnectionStatus = 'connected' | 'disconnected' | 'waiting_access' | 'unknown';
 export interface TaskSnapshot {
+  computerConnection?: ComputerConnectionStatus;
   automationController?: "agent" | "user";
   automationSession?: import("./tasks/automation-session").AutomationSession;
   executionControl?: {id:string;action:'pause'|'revise'|'resume';revision:number;phase:'pending'|'applied'|'paused'|'blocked';requestedAt:number};

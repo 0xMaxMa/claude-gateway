@@ -44,3 +44,16 @@ test('owner stop evidence is scoped to the exact paired device and grant',async(
  global.fetch=jest.fn(async()=>new Response(JSON.stringify({grants:[{...grant,deviceId:'other',stoppedAt:1234}]})));
  expect(await connectors.stoppedAt(binding.id,'p','c')).toBeUndefined();
 });
+
+test('connection status distinguishes offline, missing approval and reconnection',async()=>{
+ global.fetch=jest.fn(async()=>new Response(JSON.stringify({grants:[grant]})));
+ const connectors=new ComputerConnectors(config(),{id:'a'} as any);
+ const [binding]=await connectors.discover(context,()=>true);
+ for(const [online,ready,status] of [[false,false,'disconnected'],[true,false,'waiting_access'],[true,true,'connected']] as const){
+  global.fetch=jest.fn(async()=>new Response(JSON.stringify({grants:[{...grant,online,ready}]})));
+  expect((await connectors.accessState(binding.id,'p','c')).status).toBe(status);
+ }
+ await expect(connectors.accessState(binding.id,'other','c')).rejects.toThrow();
+ global.fetch=jest.fn(async()=>new Response('unavailable',{status:503}));
+ await expect(connectors.accessState(binding.id,'p','c')).rejects.toThrow('COMPUTER_DISCOVERY_UNAVAILABLE');
+});

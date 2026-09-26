@@ -551,3 +551,7 @@ field value. Known answers are reused only for a uniquely matching scoped field.
 After restart, queued computer work refreshes scoped device discovery before
 requesting consent. Definite failures before dispatch end as failed; transport or
 mutation outcomes that cannot be established remain fenced for reconciliation.
+
+### Computer connection status
+
+Gateway checks the paired computer’s connection and access state every five seconds, including while an automation session is idle. Task activity exposes `computerConnection`: `connected`, `disconnected`, `waiting_access`, or `unknown` when the relay cannot be checked. A temporary disconnect does not close the automation session or replay an action. Reconnecting without local approval is waiting for access, not ready. An explicit owner Stop still closes the session.

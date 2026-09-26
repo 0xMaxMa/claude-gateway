@@ -40,7 +40,7 @@ export function taskIndexEntry(task: TaskSnapshot) {
     cancellation: task.cancellation, replacedByTaskId: task.replacedByTaskId,
     workstreamId: task.workstreamId, continueTaskId: task.continueTaskId, continuationPolicy: task.continuationPolicy,
     resultAvailable: Boolean(task.result),
-    automationController:task.automationController??"agent", gatewayTarget: task.gatewayTarget, automationSession: automationSession(task),
+    computerConnection:task.computerConnection, automationController:task.automationController??"agent", gatewayTarget: task.gatewayTarget, automationSession: automationSession(task),
     details: { tool: 'task_status', task_id: task.taskId },
   };
 }

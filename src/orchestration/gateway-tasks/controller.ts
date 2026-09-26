@@ -11,6 +11,7 @@ export interface GatewayTaskAdapter {
   discover(query?: string, offset?: number, context?: CommandContext): unknown;
   resolve(input: Record<string, unknown>, context?: CommandContext): GatewayTaskTarget;
   close?(): Promise<void>;
+  deviceStatus?(task:TaskSnapshot):Promise<{status:import('../types').ComputerConnectionStatus;ownerStopped:boolean}>;
   ownerStopped?(task:TaskSnapshot):Promise<boolean>;
   computerEvidence?(task:TaskSnapshot,mode:'recorded'|'fresh'|'screenshot',signal?:AbortSignal):Promise<any>;
   diagnostics?(task:TaskSnapshot,offset?:number):Promise<unknown>;
@@ -51,24 +52,30 @@ export class GatewayTaskController {
     return run;
   }
   private async run(): Promise<void> {
-    const rows = this.tasks.store.all("SELECT id FROM tasks WHERE json_type(snapshot_json,'$.gatewayTarget')='object' AND state IN ('queued','starting','running','interrupting','cancel_requested','needs_reconciliation','waiting_input') ORDER BY created_at,id");
+    const rows = this.tasks.store.all("SELECT id FROM tasks WHERE json_type(snapshot_json,'$.gatewayTarget')='object' AND (state IN ('queued','starting','running','interrupting','cancel_requested','needs_reconciliation','waiting_input') OR json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked')) ORDER BY created_at,id");
     for (const row of rows) {
       if (this.closed) return;
       let task = this.tasks.store.task(String(row.id))!;
       if (!task.gatewayTarget) continue;
       const stopAdapter=this.adapters.get(task.gatewayTarget.adapter);
-      if(stopAdapter?.ownerStopped&&automationSession(task)?.status!=='closed'&&Date.now()>=(this.stopCheckAfter.get(task.taskId)??0)){
+      if((stopAdapter?.ownerStopped||stopAdapter?.deviceStatus)&&automationSession(task)?.status!=='closed'&&Date.now()>=(this.stopCheckAfter.get(task.taskId)??0)){
         if(this.stopCheckAfter.size>1000)this.stopCheckAfter.clear();
         this.stopCheckAfter.set(task.taskId,Date.now()+5000);
         try {
-          const stopped=await stopAdapter.ownerStopped(task),current=this.tasks.store.task(task.taskId);
+          const device=stopAdapter.deviceStatus?await stopAdapter.deviceStatus(task):undefined;
+          const stopped=device?device.ownerStopped:await stopAdapter.ownerStopped!(task);
+          let current=this.tasks.store.task(task.taskId);
+          if(device&&current&&current.stateVersion===task.stateVersion&&current.computerConnection!==device.status){
+            this.tasks.store.transaction(()=>{current!.computerConnection=device.status;this.tasks.store.saveTask(current!,current!.stateVersion);});
+            task=this.tasks.store.task(task.taskId)!;current=task;
+          }
           if(stopped&&current&&current.stateVersion===task.stateVersion){
             this.tasks.cancelByUser(task.conversationId,task.ownerPrincipalId,task.taskId);
             task=this.tasks.store.task(task.taskId)!;
           }
         }catch(error){this.reportError(error);}
       }
-      if(!task.gatewayTarget||task.state==='waiting_input'||task.state==='cancelled')continue;
+      if(!task.gatewayTarget||task.state==='waiting_input'||task.state==='cancelled'||task.state==='completed'||task.state==='failed')continue;
       if(task.state==='needs_reconciliation'){
         if(automationSession(task)?.closedReason==='idle_timeout')continue;
         const adapter=this.adapters.get(task.gatewayTarget.adapter),requestId=task.gatewayDispatch?.requestId;

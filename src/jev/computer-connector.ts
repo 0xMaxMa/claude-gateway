@@ -12,14 +12,16 @@ export class ComputerConnectors {
  connection(id:string){try{return resolveBrowserConnection(this.config,this.agent,id);}catch{throw Error('COMPUTER_CONNECTOR_UNAVAILABLE');}}
  private ids(){if(this.agent.allow_tools===false)return [];const entries=this.config.gateway.customConnectors??{},enabled=resolveEnabledConnectors(this.agent,entries,this.config.gateway.connectorsDefaultEnabled!==false);return Object.keys(enabled).filter(id=>(entries[id] as any)?.resourcesPath==='/v1/computer-grants');}
  get(id:string,principal:string,conversation:string){const found=this.rows.find(b=>b.id===id&&b.principalId===principal&&b.conversationId===conversation);if(!found||!this.ids().includes(found.connectorId))throw Error('COMPUTER_TARGET_UNAVAILABLE');this.connection(found.connectorId);return found;}
- async stoppedAt(id:string,principal:string,conversation:string):Promise<number|undefined>{
+ async accessState(id:string,principal:string,conversation:string):Promise<{status:import('../orchestration/types').ComputerConnectionStatus;stoppedAt?:number}>{
   const binding=this.get(id,principal,conversation),connection=this.connection(binding.connectorId);
   const response=await fetch(new URL('/v1/computer-grants',connection.endpoint),{redirect:'error',headers:connection.headers,signal:AbortSignal.timeout(4000)});
-  if(!response.ok)return;
-  const text=await response.text();if(text.length>262144)return;
+  if(!response.ok)throw Error('COMPUTER_DISCOVERY_UNAVAILABLE');
+  const text=await response.text();if(text.length>262144)throw Error('COMPUTER_DISCOVERY_INVALID');
+  if(JSON.stringify(connection)!==JSON.stringify(this.connection(binding.connectorId)))throw Error('COMPUTER_CONNECTOR_CHANGED');
   const body=JSON.parse(text),grant=Array.isArray(body.grants)?body.grants.find((g:any)=>g.id===binding.scope.grant_id&&g.deviceId===binding.scope.device_id):undefined;
-  if(Number.isSafeInteger(grant?.stoppedAt)&&grant.stoppedAt>0)return grant.stoppedAt;
+  return {status:!grant?'unknown':grant.online===false?'disconnected':grant.online!==true?'unknown':grant.ready===true?'connected':'waiting_access',...(Number.isSafeInteger(grant?.stoppedAt)&&grant.stoppedAt>0?{stoppedAt:grant.stoppedAt}:{})};
  }
+ async stoppedAt(id:string,principal:string,conversation:string):Promise<number|undefined>{return (await this.accessState(id,principal,conversation)).stoppedAt;}
  async discover(context:Pick<CommandContext,'principalId'|'conversationId'>,authorized:()=>boolean){
   const found:ComputerBinding[]=[];const check=()=>{if(!authorized())throw Error('ACCESS_DENIED');};check();
   for(const id of this.ids().slice(0,10)){

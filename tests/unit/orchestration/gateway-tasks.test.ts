@@ -477,3 +477,18 @@ test('an owner stop closes idle computer tasks without dispatching another round
  expect(store.task(task.taskId)?.cancellation?.requestedBy).toBe('user');
  expect(computer.submit).not.toHaveBeenCalled();
 });
+
+test('idle computer tracks disconnect and reconnect without ending or replaying work',async()=>{
+ let status:'disconnected'|'waiting_access'|'connected'='disconnected';
+ const computer={...adapter,name:'computer',deviceStatus:jest.fn(async()=>({status,ownerStopped:false}))};
+ await controller.close();controller=new GatewayTaskController(tasks,new Map([['computer',computer]]));
+ const task=tasks.spawn({...context,actionId:'computer-online'},{title:'Desktop',instructions:'Wait',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'computer'}});
+ const saved=store.task(task.taskId)!;saved.state='waiting_input';saved.automationController='user';saved.automationSession={status:'idle',idleTimeoutMs:1800000,idleSince:Date.now()};store.transaction(()=>store.saveTask(saved,saved.stateVersion));
+ for(const next of ['disconnected','waiting_access','connected'] as const){
+  status=next;(controller as any).stopCheckAfter.clear();await controller.tick();
+  expect(store.task(task.taskId)?.computerConnection).toBe(status);
+  expect(store.task(task.taskId)?.state).toBe('waiting_input');
+  expect(store.task(task.taskId)?.automationSession?.status).toBe('idle');
+ }
+ expect(computer.submit).not.toHaveBeenCalled();expect(computer.cancel).not.toHaveBeenCalled();
+});
