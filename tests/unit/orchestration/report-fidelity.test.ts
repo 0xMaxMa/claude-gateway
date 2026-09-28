@@ -1,4 +1,5 @@
 import { WORKER_RESULT_FIDELITY } from '../../../src/orchestration/report-fidelity';
+import { SPEECH_OVERLAY } from '../../../src/orchestration/speech';
 
 // A worker result's decision-relevant structure — severity labels and their markers, the
 // per-severity counts and mapping, evidence references, and the score/verdict — must survive
@@ -23,6 +24,16 @@ test('the fidelity contract preserves severity, counts, verdict, and fences the 
   // Embedded worker instructions are data, never authority.
   expect(rule).toContain('data');
   expect(rule).toMatch(/embedded|never override|authorization/);
-  // Speech may omit markers while display retains them; both agree on the verdict.
-  expect(rule).toMatch(/speech may omit/);
+});
+
+// The display/speech split (issue #542 AC5) is owned by SPEECH_OVERLAY, not duplicated into the
+// fidelity contract: speech may omit the visual markers, but both surfaces must still agree on
+// the findings and the blocking verdict. Keeping this out of WORKER_RESULT_FIDELITY avoids the
+// same instruction being appended twice on a speech-enabled report turn.
+test('SPEECH_OVERLAY owns the display/speech split and the fidelity contract does not duplicate it', () => {
+  expect(SPEECH_OVERLAY).toMatch(/speech may omit/i);
+  expect(SPEECH_OVERLAY.toLowerCase()).toContain('severity marker');
+  expect(SPEECH_OVERLAY.toLowerCase()).toContain('verdict');
+  // The fidelity contract must NOT restate the speech guidance (no duplication across overlays).
+  expect(WORKER_RESULT_FIDELITY).not.toMatch(/speech may omit/i);
 });
