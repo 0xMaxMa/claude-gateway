@@ -22,6 +22,33 @@ import type { SkillRegistry } from '../skills';
 type Scope = { role: 'agent'; compactOnly?: boolean; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; onMutationResult?: (actionId: string, committed: boolean, errorCode?: string) => void; beforeMutation?: (tool: string, args: Record<string, unknown>, actionId: string) => Promise<void> } |
   { role: 'worker'; attemptId: string; generation: number };
 
+type InputIssue = { field: string; reason: string; correction: string };
+function taskSpawnInputIssues(args: Record<string, unknown>): InputIssue[] {
+  const issues: InputIssue[] = [];
+  for (const field of ['title', 'instructions', 'target_profile'] as const) {
+    const value = args[field];
+    if (typeof value !== 'string' || !value.trim()) issues.push({field, reason:'required', correction:`Provide a nonempty ${field}.`});
+  }
+  if (typeof args.title === 'string' && Buffer.byteLength(args.title) > 512) issues.push({field:'title',reason:'too_long',correction:'Keep title at or below 512 bytes.'});
+  if (typeof args.instructions === 'string' && Buffer.byteLength(args.instructions) > 65536) issues.push({field:'instructions',reason:'too_long',correction:'Keep instructions at or below 65536 bytes.'});
+  if (typeof args.target_profile === 'string' && args.target_profile.trim() && !['default-worker','media-worker','skill-worker','gateway-managed'].includes(args.target_profile)) {
+    issues.push({field:'target_profile',reason:'unsupported',correction:'Choose default-worker, media-worker, skill-worker, or gateway-managed.'});
+  }
+  if (args.target_profile === 'skill-worker') {
+    if (typeof args.skill_name !== 'string' || !args.skill_name.trim()) issues.push({field:'skill_name',reason:'required_for_skill_worker',correction:'Provide skill_name when target_profile is skill-worker.'});
+    if (typeof args.skill_args !== 'string') issues.push({field:'skill_args',reason:'required_for_skill_worker',correction:'Provide skill_args as a string when target_profile is skill-worker; use an empty string when the skill takes no arguments.'});
+    if (typeof args.skill_name === 'string' && args.skill_name.trim() && !/^[\w:.-]+$/.test(args.skill_name)) {
+      issues.push({field:'skill_name',reason:'invalid_format',correction:'Use an installed skill name containing only letters, numbers, underscore, colon, dot, or hyphen.'});
+    }
+    if (typeof args.skill_args === 'string' && args.skill_args.length > 60000) {
+      issues.push({field:'skill_args',reason:'too_long',correction:'Keep skill_args at or below 60000 characters.'});
+    }
+  } else if (args.target_profile !== undefined && args.target_profile !== 'skill-worker' && (args.skill_name !== undefined || args.skill_args !== undefined)) {
+    issues.push({field:'target_profile',reason:'skill_fields_require_skill_worker',correction:'Set target_profile to skill-worker when supplying skill_name and skill_args.'});
+  }
+  return issues;
+}
+
 /** Private MCP bridge: host loopback or an app-local Unix socket. No public task API. */
 export class TaskBridge {
   private server?: Server;
@@ -39,6 +66,7 @@ export class TaskBridge {
     const server = createServer(async (request, response) => {
       response.setHeader('Content-Type', 'application/json');
       let retryOf: string | undefined;
+      let inputDetails: InputIssue[] | undefined;
       let denialReason: string | undefined;
       function deny(reason: string): never { denialReason = reason; throw new OrchestrationError('ACCESS_DENIED'); }
       try {
@@ -93,6 +121,8 @@ export class TaskBridge {
                 result = await scope.onIntake(a); break;
               }
               case 'task_spawn': {
+                inputDetails = taskSpawnInputIssues(a);
+                if (inputDetails.length) throw new OrchestrationError('INVALID_INPUT');
                 let gatewayTarget;
                 if (a.target_profile === 'gateway-managed' || a.gateway_target !== undefined) {
                   if (this.container) deny('SAFEMODE_HOST_ONLY');
@@ -102,7 +132,10 @@ export class TaskBridge {
                   gatewayTarget = adapter.resolve(a.gateway_target);
                 }
                 const skill = resolveNamedSkill(a.skill_name, a.skill_args, this.skills?.());
-                if (a.target_profile === 'skill-worker' && !skill) throw new OrchestrationError('UNKNOWN_SKILL');
+                if (a.target_profile === 'skill-worker' && !skill) {
+                  inputDetails = [{field:'skill_name',reason:'unknown_or_unavailable',correction:'Use the exact name of an installed, user-invocable skill and provide its arguments in skill_args.'}];
+                  throw new OrchestrationError('UNKNOWN_SKILL');
+                }
                 if (a.target_profile !== 'skill-worker' && (a.skill_name !== undefined || a.skill_args !== undefined)) throw new OrchestrationError('INVALID_INPUT');
                 const spoken = typeof a.spoken_acknowledgement === 'string' ? a.spoken_acknowledgement.trim() : '';
                 if (scope.onTaskQueued && (!spoken || spoken.length > 600 || spoken.includes('```'))) throw new OrchestrationError('VOICE_ACKNOWLEDGEMENT_REQUIRED');
@@ -169,7 +202,7 @@ export class TaskBridge {
         const code = error instanceof OrchestrationError ? error.code : 'INVALID_REQUEST';
         if (code === 'ACCESS_DENIED' && denialReason) console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', message: 'Task bridge authorization denied', data: { agentId: this.tasks.store.agentId, reason: denialReason } }));
         response.statusCode = code === 'ACCESS_DENIED' ? 403 : 400;
-        response.end(JSON.stringify({ error: code, ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        response.end(JSON.stringify({ error: code, ...(inputDetails?.length ? {details:inputDetails} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;
