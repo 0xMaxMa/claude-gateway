@@ -184,3 +184,8 @@ test('missing and malformed inventories keep distinct descriptions (#552)', asyn
   const malformed = await initWith({role:'worker',containerExecution:true}, 'x' as unknown as string[]).catch(e => e);
   expect(malformed.message).toMatch(/malformed tool inventory/);
 });
+
+test('companion lookup ignores inherited object keys in a worker tool selection (#552)', async () => {
+  await expect(initWith({role:'worker',containerExecution:true,workerTools:['Read','constructor','__proto__']}, ['Read','GetTask'])).rejects.toMatchObject(
+    {code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'unexpected',rejectedTools:['GetTask']});
+});
