@@ -19,9 +19,9 @@ const MOCK = resolve(__dirname, '../../helpers/mock-claude-worker.js');
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const until = async (check: () => boolean, ms = 15000) => { const end = Date.now() + ms; while (!check()) { if (Date.now() > end) throw new Error('timed out'); await new Promise(r => setTimeout(r, 50)); } };
 
-async function fixture(mode: 'complete' | 'hang', body: (run: { start: () => Promise<Awaited<ReturnType<ClaudeWorkerDriver['start']>>>; pidfile: string; argsfile: string; store: OrchestrationStore; taskId: string; recover: (identity: TaskAttempt['processIdentity']) => Promise<boolean> }) => Promise<void>) {
+async function fixture(mode: 'complete' | 'hang', body: (run: { start: () => Promise<Awaited<ReturnType<ClaudeWorkerDriver['start']>>>; pidfile: string; argsfile: string; store: OrchestrationStore; taskId: string; recover: (identity: TaskAttempt['processIdentity']) => Promise<boolean>}) => Promise<void>, context = 0) {
   const root = mkdtempSync(join(tmpdir(), 'worker-tree-')), workspace = join(root, 'workspace'), pidfile = join(root, 'grandchild.pid'), argsfile = join(root, 'args.json');
-  mkdirSync(workspace); writeFileSync(join(workspace, 'CLAUDE.md'), 'Fixture');
+  mkdirSync(workspace); writeFileSync(join(workspace, 'CLAUDE.md'), 'Fixture' + ' '.repeat(context));
   const saved = { bin: process.env.CLAUDE_BIN, mode: process.env.MOCK_WORKER_MODE, pidfile: process.env.MOCK_WORKER_PIDFILE, args: process.env.MOCK_WORKER_ARGSFILE };
   Object.assign(process.env, { CLAUDE_BIN: `${process.execPath} ${MOCK}`, MOCK_WORKER_MODE: mode, MOCK_WORKER_PIDFILE: pidfile, MOCK_WORKER_ARGSFILE: argsfile });
   const store = new OrchestrationStore(':memory:', 'a'), tasks = new TaskService(store), bridge = new TaskBridge(tasks);
@@ -58,20 +58,24 @@ test('a supervised worker completes only after its process tree is proven stoppe
   });
 }, 60000);
 
-test('the system prompt reaches the CLI through a file on Windows, which caps a command line at 32767 chars', async () => {
+// getpod-app's seeded agent appends ~48KB; Windows caps a whole command line at
+// 32767 chars, so passing it inline fails the spawn with ENAMETOOLONG there.
+test('a 60KB system prompt spawns on every OS (through a private file on Windows, removed once the session stops)', async () => {
   await fixture('complete', async ({ start, argsfile }) => {
     const handle = await start();
-    await handle.result;
-    const args: string[] = JSON.parse(readFileSync(argsfile, 'utf8'));
+    expect(await handle.result).toMatchObject({ type: 'completed' });
+    const { args, promptFileChars }: { args: string[]; promptFileChars: number } = JSON.parse(readFileSync(argsfile, 'utf8'));
     if (process.platform === 'win32') {
       expect(args).not.toContain('--append-system-prompt');
+      expect(promptFileChars).toBeGreaterThan(60000);
       const file = args[args.indexOf('--append-system-prompt-file') + 1];
-      expect(readFileSync(file, 'utf8')).toContain('Fixture');
+      expect(args.reduce((n, arg) => n + arg.length + 3, 0)).toBeLessThan(32767);
+      expect(existsSync(file)).toBe(false); // the result settles after the session stopped
     } else {
       expect(args).not.toContain('--append-system-prompt-file');
-      expect(args[args.indexOf('--append-system-prompt') + 1]).toContain('Fixture');
+      expect(args[args.indexOf('--append-system-prompt') + 1].length).toBeGreaterThan(60000);
     }
-  });
+  }, 60000 /* CLAUDE.md padding */);
 }, 60000);
 
 test('cancelling a running worker kills the whole tree, grandchild included', async () => {

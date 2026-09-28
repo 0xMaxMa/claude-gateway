@@ -717,6 +717,8 @@ export class SessionProcess extends EventEmitter {
   }
 
   private managedMcpConfigPath?: string;
+  /** Windows only: the appended system prompt, too long for a command line. */
+  private systemPromptPath?: string;
   private managedConnectorPaths = new Set<string>();
 
   private writeMcpConfig(): string | null {
@@ -975,10 +977,12 @@ export class SessionProcess extends EventEmitter {
       const profileArgs = runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: this.containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${this.containerAttempt.directory}/checkpoint.cjs ${this.containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: this.containerAttempt && this.runtimeProfile.skillPluginDir ? this.containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []);
       // Host spawns on Windows only: the file must be readable by the CLI
       // itself, and a container's CLI sees container paths.
-      const profileMcpConfig = this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath;
-      args.push(...(process.platform === 'win32' && this.agentConfig.type !== 'app-agent'
-        ? appendSystemPromptViaFile(profileArgs, path.join(path.dirname(profileMcpConfig), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, "_")}.md`))
-        : profileArgs));
+      // The file sits beside the attempt's MCP config (a 0700 directory).
+      if (process.platform === 'win32' && this.agentConfig.type !== 'app-agent') {
+        const profileMcpConfig = this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath;
+        this.systemPromptPath = path.join(path.dirname(profileMcpConfig), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, '_')}.md`);
+        args.push(...appendSystemPromptViaFile(profileArgs, this.systemPromptPath));
+      } else args.push(...profileArgs);
       if (this.runtimeProfile.cliSession) {
         const session = this.runtimeProfile.cliSession;
         args.push(session.resume ? '--resume' : '--session-id', session.id);
@@ -2057,6 +2061,10 @@ export class SessionProcess extends EventEmitter {
       if (this.managedMcpConfigPath) {
         try { fs.rmSync(this.managedMcpConfigPath, { force: true }); } catch {}
         this.managedMcpConfigPath = undefined;
+      }
+      if (this.systemPromptPath) {
+        try { fs.rmSync(this.systemPromptPath, { force: true }); } catch {}
+        this.systemPromptPath = undefined;
       }
       try {
         fs.rmSync(path.join(this.agentConfig.workspace, '.sessions', this.sessionId), { recursive: true, force: true });

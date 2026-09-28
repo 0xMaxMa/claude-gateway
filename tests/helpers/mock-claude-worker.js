@@ -6,13 +6,17 @@
  * MOCK_WORKER_MODE=hang      start a grandchild process, record its PID in
  *                            MOCK_WORKER_PIDFILE, report a running tool and
  *                            never finish, so only cancellation ends the tree.
- * MOCK_WORKER_ARGSFILE       if set, the CLI arguments are written there as JSON.
+ * MOCK_WORKER_ARGSFILE       if set, receives { args, promptFileChars } as JSON
+ *                            (the prompt file's size as read at startup).
  */
 const { spawn } = require('child_process');
 const fs = require('fs');
 const readline = require('readline');
 
-if (process.env.MOCK_WORKER_ARGSFILE) fs.writeFileSync(process.env.MOCK_WORKER_ARGSFILE, JSON.stringify(process.argv.slice(2)));
+if (process.env.MOCK_WORKER_ARGSFILE) {
+  const args = process.argv.slice(2), file = args[args.indexOf('--append-system-prompt-file') + 1];
+  fs.writeFileSync(process.env.MOCK_WORKER_ARGSFILE, JSON.stringify({ args, promptFileChars: args.includes('--append-system-prompt-file') ? fs.readFileSync(file, 'utf8').length : 0 }));
+}
 const emit = event => process.stdout.write(JSON.stringify(event) + '\n');
 readline.createInterface({ input: process.stdin, terminal: false }).on('line', line => {
   let parsed;
