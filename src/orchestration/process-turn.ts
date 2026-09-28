@@ -1,7 +1,7 @@
 import type { CodexContextMeasurement } from '../session/codex-context';
 import { BackgroundWork } from './background-work';
 import { containerTaskTools } from './container-tool-schemas';
-import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
+import { DEFAULT_WORKER_TOOLS, nativeCompanionTools } from '../session/runtime-profile';
 import type { RequestToolSchemas } from '../session/request-tool-capture';
 import { structuredProviderMessage } from './provider-message';
 import { executionTool } from './tool-name';
@@ -211,17 +211,20 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       const allowed = role === 'agent'
         ? /^(mcp__gateway__(capabilities_list|conversation_intake|memory_(get|search)|task_(spawn|status|cancel|update|answer|question)))$/
         : /^(Read|Glob|Grep|Bash|Edit|Write|Skill|mcp__gateway__(tool_search|tool_call|browser_[a-z_]+|generate_image|generate_video|share_file|share_image|memory_(get|search|shared_(get|create|update|delete))|task_(report_progress|request_input|stage_file|memory_append)))$/;
+      const workerTools = process.runtimeProfile.workerTools ?? DEFAULT_WORKER_TOOLS;
+      const companions = role === 'worker' ? nativeCompanionTools(workerTools) : [];
       const allowedTool = (name: unknown): boolean => {
         if (typeof name !== 'string') return false;
+        const companion = companions.includes(name);
         if (process.runtimeProfile?.containerExecution) {
           // Validate the same scoped inventory that the container MCP client lists.
           return containerTaskTools(role).some(tool => name === `mcp__gateway__${tool.name}`) ||
-            (role === 'worker' && (process.runtimeProfile.workerTools ?? DEFAULT_WORKER_TOOLS).includes(name)) ||
+            (role === 'worker' && workerTools.includes(name)) || companion ||
             (role === 'agent' && Boolean(process.runtimeProfile.responseSchema) && name === 'StructuredOutput');
         }
         return (role === 'worker' && Boolean(process.runtimeProfile?.hostExecution)) ||
           (role === 'agent' && Boolean(process.runtimeProfile?.responseSchema) && name === 'StructuredOutput') ||
-          Boolean(process.isSpawnedConnectorTool?.(name)) || allowed.test(name);
+          Boolean(process.isSpawnedConnectorTool?.(name)) || allowed.test(name) || companion;
       };
       if (!Array.isArray(event.tools) || event.tools.some((name: unknown) => !allowedTool(name))) {
         // Classify the mismatch so the durable failure can explain it instead of collapsing
@@ -244,7 +247,12 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
         const rejectedTools = inventoryKind === 'unexpected' && Array.isArray(event.tools)
           ? event.tools.filter((name: unknown) => !allowedTool(name)).slice(0,100).map((name: unknown) => sanitizeToolName(name, secrets))
           : [];
-        fail(Object.assign(new OrchestrationError('PROFILE_INVENTORY_MISMATCH'), { rejectedTools, inventoryKind }));
+        // Say what was observed: an 'unexpected' tool was advertised, not missing (#552).
+        const startup = role === 'agent' ? 'Agent startup' : 'Worker startup';
+        const message = inventoryKind === 'missing' ? `${startup} did not advertise a tool inventory; stopped before inference.`
+          : inventoryKind === 'malformed' ? `${startup} advertised a malformed tool inventory; stopped before inference.`
+          : `${startup} advertised tools outside the resolved ${role} profile: ${rejectedTools.join(', ')}. Stopped before inference.`;
+        fail(Object.assign(new OrchestrationError('PROFILE_INVENTORY_MISMATCH', message), { rejectedTools, inventoryKind }));
         void process.stop(); return;
       }
     }

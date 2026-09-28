@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import { startProcessTurn } from '../../../src/orchestration/process-turn';
 import type { SessionProcess } from '../../../src/session/process';
+import { taskFailure } from '../../../src/orchestration/tasks/failure';
 
 test('agent can inspect capability metadata without receiving a worker execution tool', async () => {
   const process = new EventEmitter() as SessionProcess;
@@ -130,3 +131,72 @@ test('a rejected tool name embedding a credential is scrubbed at the source, bef
   } finally { if (old === undefined) delete process.env.TEST_INVENTORY_SECRET; else process.env.TEST_INVENTORY_SECRET = old; }
 });
 
+
+// Claude Code 2.1.283 advertises `GetTask` (the reader for Bash background-task output)
+// alongside Bash whenever its rollout flag is on, so the same launch can report the tool on
+// one run and omit it on the next. Captured `system/init.tools` from the app container with
+// the gateway's container-worker args: ["Bash","Edit","GetTask","Glob","Grep","Read","Skill","Write"] (#552).
+const initWith = (runtimeProfile: Record<string, unknown>, tools: string[]) => {
+  const process = new EventEmitter() as SessionProcess;
+  Object.assign(process, {runtimeProfile, start:async()=>{}, stop:jest.fn(async()=>{}),
+    sendMessage:()=>{
+      process.emit('output',JSON.stringify({type:'system',subtype:'init',tools}));
+      process.emit('output',JSON.stringify({type:'result',result:'done'}));
+    }});
+  return startProcessTurn(process,'task',1000).result;
+};
+const OBSERVED_2_1_283 = ['Bash','Edit','GetTask','Glob','Grep','Read','Skill','Write'];
+
+test.each([
+  ['container', {role:'worker',containerExecution:true}],
+  ['isolated', {role:'worker'}],
+])('a %s worker whose default tools include Bash accepts the CLI Bash companion GetTask (#552)', async (_label, profile) => {
+  await expect(initWith(profile, [...OBSERVED_2_1_283, 'mcp__gateway__task_report_progress'])).resolves.toMatchObject({text:'done'});
+  // The flag-off inventory of the same launch still starts too.
+  await expect(initWith(profile, OBSERVED_2_1_283.filter(name => name !== 'GetTask'))).resolves.toMatchObject({text:'done'});
+});
+
+test.each([
+  ['container', {role:'worker',containerExecution:true,workerTools:['Read','Grep']}],
+  ['isolated', {role:'worker',workerTools:['Read','Grep']}],
+])('a %s worker without Bash still rejects an advertised GetTask (#552)', async (_label, profile) => {
+  await expect(initWith(profile, ['Read','Grep','GetTask'])).rejects.toMatchObject(
+    {code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'unexpected',rejectedTools:['GetTask']});
+});
+
+test('the Bash companion does not widen a container worker to other native tools (#552)', async () => {
+  await expect(initWith({role:'worker',containerExecution:true}, [...OBSERVED_2_1_283,'TaskStop','Monitor','WebFetch'])).rejects.toMatchObject(
+    {code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'unexpected',rejectedTools:['TaskStop','Monitor','WebFetch']});
+});
+
+test('an unexpected inventory is described as advertised outside the profile, never as a missing tool (#552)', async () => {
+  const error = await initWith({role:'worker',containerExecution:true,workerTools:['Read']}, ['Read','GetTask']).catch(e => e);
+  expect(error.message).toMatch(/advertised .*outside the resolved worker profile: GetTask/);
+  expect(error.message).not.toMatch(/missing|lacks|unavailable/i);
+  const failure = taskFailure(error);
+  expect(failure).toMatchObject({code:'PROFILE_INVENTORY_MISMATCH',inventory:{kind:'unexpected',rejectedTools:['GetTask']}});
+  expect(failure.message).toBe(error.message);
+});
+
+test('missing and malformed inventories keep distinct descriptions (#552)', async () => {
+  const missing = await initWith({role:'worker',containerExecution:true}, undefined as unknown as string[]).catch(e => e);
+  expect(missing.message).toMatch(/did not advertise a tool inventory/);
+  const malformed = await initWith({role:'worker',containerExecution:true}, 'x' as unknown as string[]).catch(e => e);
+  expect(malformed.message).toMatch(/malformed tool inventory/);
+});
+
+test('companion lookup ignores inherited object keys in a worker tool selection (#552)', async () => {
+  await expect(initWith({role:'worker',containerExecution:true,workerTools:['Read','constructor','__proto__']}, ['Read','GetTask'])).rejects.toMatchObject(
+    {code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'unexpected',rejectedTools:['GetTask']});
+});
+
+test('an agent-role inventory rejection names agent startup, not worker startup (#552)', async () => {
+  const error = await initWith({role:'agent'}, ['mcp__gateway__task_spawn','Bash']).catch(e => e);
+  expect(error).toMatchObject({code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'unexpected',rejectedTools:['Bash']});
+  expect(error.message).toBe('Agent startup advertised tools outside the resolved agent profile: Bash. Stopped before inference.');
+});
+
+test('an agent never inherits the worker Bash companion GetTask (#552)', async () => {
+  await expect(initWith({role:'agent'}, ['mcp__gateway__task_spawn','GetTask'])).rejects.toMatchObject(
+    {code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'unexpected',rejectedTools:['GetTask']});
+});
