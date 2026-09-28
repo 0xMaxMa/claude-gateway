@@ -14,11 +14,14 @@ test('inventory rejection evidence survives error conversion into the durable fa
 });
 
 test('missing and malformed inventories keep distinguishable durable diagnostics (#548)',()=>{
- const missing=taskFailure(Object.assign(new Error('x'),{code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'missing',rejectedTools:['<missing-inventory>']}));
- const malformed=taskFailure(Object.assign(new Error('x'),{code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'malformed',rejectedTools:['<malformed-inventory>']}));
+ const missing=taskFailure(Object.assign(new Error('x'),{code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'missing',rejectedTools:[]}));
+ const malformed=taskFailure(Object.assign(new Error('x'),{code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'malformed',rejectedTools:[]}));
  expect(missing.inventory?.kind).toBe('missing');
  expect(malformed.inventory?.kind).toBe('malformed');
  expect(missing.inventory).not.toEqual(malformed.inventory);
+ // kind is the source of truth; missing/malformed carry no per-tool names (F4).
+ expect(missing.inventory?.rejectedTools).toEqual([]);
+ expect(malformed.inventory?.rejectedTools).toEqual([]);
 });
 
 test('an ordinary failure with no inventory evidence carries no inventory field (#548)',()=>{

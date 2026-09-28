@@ -93,8 +93,24 @@ test('missing and malformed container init inventories carry distinguishable dia
       sendMessage:()=>{ process.emit('output',JSON.stringify(init)); process.emit('output',JSON.stringify({type:'result',result:'done'})); }});
     return startProcessTurn(process,'task',1000).result;
   };
-  await expect(mk(undefined)).rejects.toMatchObject({code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'missing',rejectedTools:['<missing-inventory>']});
-  await expect(mk('not-a-list')).rejects.toMatchObject({code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'malformed',rejectedTools:['<malformed-inventory>']});
+  // The kind is authoritative; missing/malformed carry no concrete rejected names, so rejectedTools
+  // stays empty rather than duplicating the kind as a placeholder string (F4).
+  await expect(mk(undefined)).rejects.toMatchObject({code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'missing',rejectedTools:[]});
+  await expect(mk('not-a-list')).rejects.toMatchObject({code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'malformed',rejectedTools:[]});
+});
+
+test('a container init inventory list carrying a non-string element is classified malformed, not unexpected (#548)', async () => {
+  // A non-string tool entry is a shape the CLI never emits — a protocol/parse fault, not a policy
+  // violation — so it is 'malformed' (structurally invalid), reserving 'unexpected' for a
+  // well-formed string list that names a tool outside the profile.
+  const process = new EventEmitter() as SessionProcess;
+  Object.assign(process, {runtimeProfile:{role:'worker',containerExecution:true},start:async()=>{},stop:jest.fn(async()=>{}),
+    sendMessage:()=>{
+      process.emit('output',JSON.stringify({type:'system',subtype:'init',tools:['Bash',42,'Read']}));
+      process.emit('output',JSON.stringify({type:'result',result:'done'}));
+    }});
+  await expect(startProcessTurn(process,'task',1000).result).rejects.toMatchObject(
+    {code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'malformed',rejectedTools:[]});
 });
 
 test('a rejected tool name embedding a credential is scrubbed at the source, before any consumer logs it (#548)', async () => {

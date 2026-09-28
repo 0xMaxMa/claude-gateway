@@ -224,17 +224,26 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
           Boolean(process.isSpawnedConnectorTool?.(name)) || allowed.test(name);
       };
       if (!Array.isArray(event.tools) || event.tools.some((name: unknown) => !allowedTool(name))) {
-        // Distinguish a missing inventory (no list) from a malformed one (present but not a
-        // list) from an unexpected one (a valid list carrying tools outside the profile), so
-        // the durable failure can explain the mismatch instead of collapsing all three.
-        const inventoryKind = event.tools == null ? 'missing' : !Array.isArray(event.tools) ? 'malformed' : 'unexpected';
-        // Scrub secrets and bound each name here at the source so both consumers of this error
-        // — the durable task failure (failure.ts) and the agent-path conversation event/log
-        // (runtime.ts) — persist sanitized names; a raw tool name is not guaranteed secret-free.
+        // Classify the mismatch so the durable failure can explain it instead of collapsing
+        // three distinct faults into one code:
+        //   missing    — no inventory advertised at all (no `tools` list);
+        //   malformed  — not a well-formed list of tool-name strings (not a list, OR a list
+        //                with a non-string element — shapes the CLI never emits, i.e. a
+        //                protocol/parse fault, not a policy violation);
+        //   unexpected — a well-formed string list that names a tool outside the profile
+        //                (the genuine unauthorized-tool signal this fix exists to surface).
+        const wellFormedList = Array.isArray(event.tools) && event.tools.every((name: unknown) => typeof name === 'string');
+        const inventoryKind = event.tools == null ? 'missing' : !wellFormedList ? 'malformed' : 'unexpected';
+        // Only 'unexpected' has concrete rejected names worth reporting; 'missing'/'malformed'
+        // carry the distinction in inventoryKind itself, so rejectedTools stays empty rather
+        // than duplicating the kind as a placeholder string. Both consumers of this error read
+        // inventoryKind: the durable task failure (failure.ts) and the agent-path event/log
+        // (runtime.ts). Scrub secrets and bound each surviving name here at the source so both
+        // persist sanitized names — a raw tool name is not guaranteed credential-free.
         const secrets = collectEnvSecrets();
-        const rejectedTools = Array.isArray(event.tools) ? event.tools.filter((name: unknown) => !allowedTool(name))
-          .slice(0,100).map((name: unknown) => sanitizeToolName(name, secrets))
-          : [inventoryKind === 'missing' ? '<missing-inventory>' : '<malformed-inventory>'];
+        const rejectedTools = inventoryKind === 'unexpected' && Array.isArray(event.tools)
+          ? event.tools.filter((name: unknown) => !allowedTool(name)).slice(0,100).map((name: unknown) => sanitizeToolName(name, secrets))
+          : [];
         fail(Object.assign(new OrchestrationError('PROFILE_INVENTORY_MISMATCH'), { rejectedTools, inventoryKind }));
         void process.stop(); return;
       }
