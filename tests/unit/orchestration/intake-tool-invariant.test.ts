@@ -121,6 +121,29 @@ test('conversation_intake refuses explicitly instead of failing when the feature
   } finally { await bridge.close(); fixture.close(); }
 });
 
+test('direct task_update remains available when semantic intake is off', async () => {
+  const fixture = hostFixture();
+  const bridge = new TaskBridge(fixture.tasks);
+  try {
+    const task = fixture.tasks.spawn({ ...fixture.context, actionId: `${fixture.context.inputId}:spawn` }, {
+      title: 'Existing task', instructions: 'Original instructions', targetProfile: 'default-worker',
+    });
+    await bridge.start();
+    const directory = join(fixture.root, 'semantic-intake-off');
+    const ticket = bridge.issue({ role: 'agent', context: fixture.context }, directory, fixture.workspace);
+    const auth = JSON.parse(readFileSync(join(directory, 'ticket.json'), 'utf8'));
+    const reply = await fetch(auth.url, { method: 'POST', headers: { Authorization: `Bearer ${auth.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool: 'task_update', action_id: 'direct-update', args: {
+        task_id: task.taskId, expected_revision: 1, instruction: 'Updated instructions', mode: 'when_ready',
+      } }) });
+    const body = await reply.json() as any;
+    expect(reply.status).toBe(200);
+    expect(body.revision).toBe(2);
+    expect(fixture.tasks.revision(task.taskId, 2).instructions).toBe('Updated instructions');
+    ticket.revoke();
+  } finally { await bridge.close(); fixture.close(); }
+});
+
 test('ACKNOWLEDGEMENT_REQUIRED returns the semantic intake recovery path with retry identity', async () => {
   const fixture = hostFixture();
   const bridge = new TaskBridge(fixture.tasks);

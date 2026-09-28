@@ -216,6 +216,34 @@ test('an unacknowledged task update stays unapplied and reports an accurate Thai
  }finally{await f.close();}
 });
 
+test('a task update rejected by a revision conflict reports a localized status',async()=>{
+ const f=await fixture();
+ try{
+  let scope:any;
+  const issue=f.runtime.bridge.issue.bind(f.runtime.bridge);
+  jest.spyOn(f.runtime.bridge,'issue').mockImplementation((value,...args)=>{scope=value;return issue(value,...args);});
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+   const emitter=this;
+   void(async()=>{
+    const actionId=`${scope.context.inputId}:conflicted-update`;
+    await scope.onIntake({mode:'update',task_id:f.task.taskId,acknowledgement:'I will update the existing task.'});
+    try {
+     const args={task_id:f.task.taskId,expected_revision:0,instruction:'แก้รายละเอียดงาน',mode:'when_ready' as const};
+     await scope.beforeMutation('task_update',args,actionId);
+     f.runtime.tasks.update({...scope.context,actionId},args.task_id,args.expected_revision,args.instruction,args.mode);
+    } catch(error) { scope.onMutationResult(actionId,false,(error as OrchestrationError).code); }
+    emitter.emit('output',JSON.stringify({type:'result',result:'แก้ไขงานเรียบร้อยแล้ว'}));
+   })().catch(error=>emitter.emit('error',error));
+  }}) as unknown as SessionProcess);
+  const result=await f.runtime.send({scope:f.scope,text:'ช่วยแก้ไขงานเดิมให้หน่อย'},{execute:true,writeMemory:false},{timeoutMs:5000});
+  expect(result).toContain('ยังไม่ได้บันทึกการแก้ไขงาน');
+  expect(result).toContain('งานเดิมยังคงสถานะเดิม');
+  expect(result).toContain('ตรวจสถานะล่าสุด');
+  expect(f.runtime.tasks.revision(f.task.taskId,1).instructions).toBe('Ask which target');
+  expect(f.runtime.store.get("SELECT action_id FROM task_commands WHERE action_id='conflicted-update'")).toBeUndefined();
+ }finally{await f.close();}
+});
+
 test('intake followed by the linked task_update retry commits exactly one amendment',async()=>{
  const f=await fixture();
  try{
