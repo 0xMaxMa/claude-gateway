@@ -35,9 +35,8 @@ function taskSpawnInputIssues(args: Record<string, unknown>): InputIssue[] {
     issues.push({field:'target_profile',reason:'unsupported',correction:'Choose default-worker, media-worker, skill-worker, or gateway-managed.'});
   }
   if (args.target_profile === 'skill-worker') {
-    for (const field of ['skill_name','skill_args'] as const) {
-      if (typeof args[field] !== 'string' || !args[field].trim()) issues.push({field,reason:'required_for_skill_worker',correction:`Provide ${field} when target_profile is skill-worker.`});
-    }
+    if (typeof args.skill_name !== 'string' || !args.skill_name.trim()) issues.push({field:'skill_name',reason:'required_for_skill_worker',correction:'Provide skill_name when target_profile is skill-worker.'});
+    if (typeof args.skill_args !== 'string') issues.push({field:'skill_args',reason:'required_for_skill_worker',correction:'Provide skill_args as a string when target_profile is skill-worker; use an empty string when the skill takes no arguments.'});
     if (typeof args.skill_name === 'string' && args.skill_name.trim() && !/^[\w:.-]+$/.test(args.skill_name)) {
       issues.push({field:'skill_name',reason:'invalid_format',correction:'Use an installed skill name containing only letters, numbers, underscore, colon, dot, or hyphen.'});
     }

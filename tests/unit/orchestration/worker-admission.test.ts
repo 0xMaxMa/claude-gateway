@@ -43,6 +43,9 @@ test('invalid task_spawn reports missing fields without echoing input and keeps 
     const accepted = await call('corrected',{retry_of:rejected.body.retry_of,title:'Run skill',instructions:'Perform the requested skill task',target_profile:'default-worker'});
     expect(accepted.status).toBe(200);
     expect(store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(1);
+    const noArgSkill = await call('no-arg-skill',{title:'Run skill without arguments',instructions:'Perform the requested skill task',target_profile:'skill-worker',skill_name:'some-skill',skill_args:''});
+    expect(noArgSkill.status).toBe(200);
+    expect(store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(2);
   } finally { await bridge.close(); store.close(); rmSync(root,{recursive:true,force:true}); }
 });
 
