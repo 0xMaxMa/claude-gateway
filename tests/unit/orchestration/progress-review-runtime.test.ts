@@ -4,6 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
+import { WORKER_RESULT_FIDELITY } from '../../../src/orchestration/report-fidelity';
 import { SessionStore } from '../../../src/session/store';
 import { HistoryDB } from '../../../src/history/db';
 import type { SessionProcess } from '../../../src/session/process';
@@ -50,6 +51,11 @@ test.each([false,true])('internal reviews gate all text and voice (%s), consume 
  // normal turn's (see PR #502 cache-lineage fix).
  expect(overlays[0]).not.toContain('This is an internal progress review');
  expect(prompts[0]).toContain('This is an internal progress review');
+ // (F4) The always-on worker-result fidelity contract remains in the invariant system prefix on
+ // the review turn (F1 not regressed), while the per-turn review overlay scopes it out for this
+ // supervision-of-a-running-task turn — the two coexist without diverging the cached prefix.
+ expect(overlays[0]).toContain(WORKER_RESULT_FIDELITY);
+ expect(prompts[0]).toContain('worker-result fidelity contract does not govern this turn');
  expect(seen).not.toHaveBeenCalled();expect(heard).not.toHaveBeenCalled();
  expect(runtime.store.all("SELECT id FROM notifications WHERE status!='handled'")).toHaveLength(0);
  expect(runtime.store.all("SELECT generated_text FROM assistant_responses WHERE generated_text LIKE '%leak%'")).toHaveLength(0);

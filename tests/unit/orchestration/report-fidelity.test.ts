@@ -1,5 +1,6 @@
 import { WORKER_RESULT_FIDELITY } from '../../../src/orchestration/report-fidelity';
 import { SPEECH_OVERLAY } from '../../../src/orchestration/speech';
+import { PROGRESS_REVIEW_OVERLAY } from '../../../src/orchestration/progress-review';
 
 // A worker result's decision-relevant structure — severity labels and their markers, the
 // per-severity counts and mapping, evidence references, and the score/verdict — must survive
@@ -36,4 +37,22 @@ test('SPEECH_OVERLAY owns the display/speech split and the fidelity contract doe
   expect(SPEECH_OVERLAY.toLowerCase()).toContain('verdict');
   // The fidelity contract must NOT restate the speech guidance (no duplication across overlays).
   expect(WORKER_RESULT_FIDELITY).not.toMatch(/speech may omit/i);
+});
+
+// (F4) The always-on fidelity contract governs user-facing reports of a COMPLETED worker/skill
+// result. The internal progress-review turn supervises a still-running task and is not such a
+// report, so it must scope the contract out — cleanly, without gating the always-on contract off
+// the invariant system prefix (which would reintroduce F1's cache-lineage divergence). That
+// scope-out is owned by PROGRESS_REVIEW_OVERLAY, present only on the review turn. Removing the
+// scope-out clause (reverting F4) turns this red; WORKER_RESULT_FIDELITY itself stays untouched.
+test('PROGRESS_REVIEW_OVERLAY scopes the worker-result fidelity contract out of the internal review turn', () => {
+  const overlay = PROGRESS_REVIEW_OVERLAY.toLowerCase();
+  expect(overlay).toContain('worker-result fidelity contract does not govern this turn');
+  // The reason it does not apply: a running task has no final result to preserve.
+  expect(overlay).toMatch(/still-running task|no final findings/);
+  // The scope-out must not weaken the review turn's own "only new progress" discipline.
+  expect(overlay).toContain('only genuinely new progress');
+  // F4's fix must NOT be to move the contract into the per-turn overlay (that reintroduces F1):
+  // the fidelity contract text stays out of the per-turn review overlay entirely.
+  expect(PROGRESS_REVIEW_OVERLAY).not.toContain(WORKER_RESULT_FIDELITY);
 });
