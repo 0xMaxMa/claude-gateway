@@ -99,11 +99,11 @@ describe('darwin (ps + sysctl)', () => {
   });
 });
 
-describe('win32 (CIM process tree + taskkill)', () => {
+describe('win32 (WMI process tree + taskkill)', () => {
   // pid ppid creation(FILETIME) cpu(100ns) read write
   const row = (pid: number, ppid: number, created: number, cpu = 0) => `${pid} ${ppid} ${created} ${cpu} 10 20`;
   const snap = (...rows: string[]) => parseWindowsSnapshot(rows.join('\r\n'));
-  test('CIM rows parse to 10ms cpu ticks with transfer counters', () => {
+  test('WMI rows parse to 10ms cpu ticks with transfer counters', () => {
     expect(snap(row(10, 4, 1000, 2_500_000)).get(10)).toEqual({ pid: 10, parent: 4, group: 0, state: 'R', start: '1000', cpu: 25, read: 10, write: 20 });
   });
   test('tree follows parents created no later than their children', () => {

@@ -142,8 +142,16 @@ export const darwinPlatform: ProcessPlatform = {
 /** Windows has no process groups and no reparenting: a child keeps the PID of
  * its dead parent. A tree edge is trusted only when the child was created no
  * earlier than that parent, which rejects edges to a reused parent PID. */
-const WIN_SNAPSHOT = "$ErrorActionPreference='Stop';Get-CimInstance Win32_Process | ForEach-Object { if ($_.CreationDate) { '{0} {1} {2} {3} {4} {5}' -f $_.ProcessId,$_.ParentProcessId,$_.CreationDate.ToFileTimeUtc(),([uint64]$_.KernelModeTime+[uint64]$_.UserModeTime),$_.ReadTransferCount,$_.WriteTransferCount } }";
-const WIN_BOOT = "$ErrorActionPreference='Stop';(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToFileTimeUtc()";
+// Plain .NET WMI (System.Management), never a cmdlet: resolving a cmdlet such as
+// Get-CimInstance makes PowerShell run module discovery, which without a warm
+// module-analysis cache (e.g. under the minimal env a desktop app gives its
+// sidecar) takes 20-70s and outlives the timeout, so no stop could be proven.
+const WIN_WMI = "$ErrorActionPreference='Stop';$null=[Reflection.Assembly]::Load('System.Management, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a');";
+const winQuery = (wql: string, row: string) => `${WIN_WMI}foreach($p in [Management.ManagementObjectSearcher]::new('${wql}').Get()){${row}}`;
+const winTime = (field: string) => `[Management.ManagementDateTimeConverter]::ToDateTime($p['${field}']).ToFileTimeUtc()`;
+const WIN_SNAPSHOT = winQuery('SELECT ProcessId,ParentProcessId,CreationDate,KernelModeTime,UserModeTime,ReadTransferCount,WriteTransferCount FROM Win32_Process',
+  `if($p['CreationDate']){'{0} {1} {2} {3} {4} {5}' -f $p['ProcessId'],$p['ParentProcessId'],${winTime('CreationDate')},([uint64]$p['KernelModeTime']+[uint64]$p['UserModeTime']),$p['ReadTransferCount'],$p['WriteTransferCount']}`);
+const WIN_BOOT = winQuery('SELECT LastBootUpTime FROM Win32_OperatingSystem', winTime('LastBootUpTime'));
 export function parseWindowsSnapshot(output: string): Map<number, ProcessRecord> {
   const members = new Map<number, ProcessRecord>();
   for (const line of output.split(/\r?\n/)) {
