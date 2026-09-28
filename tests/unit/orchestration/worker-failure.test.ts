@@ -32,6 +32,11 @@ test('an ordinary failure with no inventory evidence carries no inventory field 
 });
 
 test('rejected tool names are sanitized and bounded, leaking no secrets, in the durable failure (#548)',()=>{
+ // Defense-in-depth at the durable gate: a caller may construct the error directly with a
+ // malformed rejectedTools list (a non-string entry, an over-long name, more than 100 names).
+ // process-turn no longer emits such a list — a non-string element there routes to 'malformed'
+ // with an empty rejectedTools — so this exercises taskFailure's own re-sanitization, which
+ // must hold regardless of the kind label the caller supplied.
  const old=process.env.TEST_API_KEY;process.env.TEST_API_KEY='super-secret-token-value';
  try {
   const failure=taskFailure(Object.assign(new Error('x'),{code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'unexpected',
