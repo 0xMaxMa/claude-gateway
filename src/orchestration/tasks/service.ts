@@ -80,7 +80,7 @@ export class TaskService {
       if (!decision) throw new OrchestrationError('STALE_DECISION');
       const input = this.store.get('SELECT id FROM conversation_inputs WHERE id=? AND conversation_id=? AND principal_id=?', context.inputId, context.conversationId, context.principalId);
       if (!input || !(JSON.parse(String(decision.input_ids_json)) as string[]).includes(context.inputId)) throw new OrchestrationError('ACCESS_DENIED');
-      if (execute && !context.execute) throw new OrchestrationError('EXECUTION_DENIED');
+      if (execute && !context.execute) throw new OrchestrationError('EXECUTION_DENIED', `EXECUTION_DENIED: This is an internal report/non-executing turn (execute capability is off for this turn), so it cannot commit a task ${kind === 'answer' ? 'answer' : kind === 'spawn' ? 'creation' : 'change'} here. This is a turn-scoped permission boundary — not a system outage, and not proof that a prior answer was rejected or lost: any task command already committed on an executing turn stays durably saved and reaches the worker when it resumes. Do not retry this mutation on this turn or report the service as unavailable; reconcile the worker's request against the committed answer/receipt, and surface only a genuinely new decision to the user on a normal turn.`);
       // Recovery may re-run inference with new tool-call IDs or rephrased args.
       // Only replay committed receipts for this original input; new mutations
       // require a new user input rather than guessing whether effects happened.
