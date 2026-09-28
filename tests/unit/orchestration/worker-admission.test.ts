@@ -7,6 +7,41 @@ import { DecisionService } from '../../../src/orchestration/decisions';
 import { TaskService } from '../../../src/orchestration/tasks/service';
 import { TaskBridge } from '../../../src/orchestration/bridge';
 
+test('invalid task_spawn reports missing fields without echoing input and keeps retry linkage', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'worker-invalid-input-'));
+  const store = new OrchestrationStore(':memory:', 'a');
+  const tasks = new TaskService(store, undefined, root), bridge = new TaskBridge(tasks, undefined, undefined,
+    () => ({skills:new Map([['some-skill',{userInvocable:true,content:'',filePath:'/fixture/skill.md'}]])} as any));
+  try {
+    const input = store.acceptInput({scope:{agentId:'a',agentSessionId:'s',source:'api',accountId:'u',principalId:'u',chatId:'c',threadKey:''},text:'Run the requested skill'});
+    const decision = new DecisionService(store).begin(input.conversationId, 'u', [input.inputId]);
+    await bridge.start();
+    bridge.issue({role:'agent',context:{...input,...decision,principalId:'u',execute:true,writeMemory:false}},join(root,'ticket'),root);
+    const ticket = JSON.parse(readFileSync(join(root,'ticket/ticket.json'),'utf8'));
+    const call = async (action: string, args: Record<string, unknown>) => {
+      const response = await fetch(ticket.url,{method:'POST',headers:{Authorization:`Bearer ${ticket.token}`,'Content-Type':'application/json'},body:JSON.stringify({tool:'task_spawn',action_id:action,args})});
+      return {status:response.status,body:await response.json() as any};
+    };
+    const missingInstructions = await call('missing-instructions',{title:'Run skill',target_profile:'skill-worker',skill_name:'some-skill',skill_args:'safe arguments'});
+    expect(missingInstructions.status).toBe(400);
+    expect(missingInstructions.body).toMatchObject({error:'INVALID_INPUT',retry_of:`${input.inputId}:missing-instructions`,details:[
+      {field:'instructions',reason:'required'},
+    ]});
+    const rejected = await call('rejected',{title:'SECRET_TITLE',skill_name:'some-skill',skill_args:'SECRET_ARGUMENTS'});
+    expect(rejected.status).toBe(400);
+    expect(rejected.body).toMatchObject({error:'INVALID_INPUT',retry_of:`${input.inputId}:rejected`,details:[
+      {field:'instructions',reason:'required'},
+      {field:'target_profile',reason:'required'},
+    ]});
+    expect(JSON.stringify(rejected.body)).not.toContain('SECRET');
+    expect(store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(0);
+
+    const accepted = await call('corrected',{retry_of:rejected.body.retry_of,title:'Run skill',instructions:'Perform the requested skill task',target_profile:'default-worker'});
+    expect(accepted.status).toBe(200);
+    expect(store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(1);
+  } finally { await bridge.close(); store.close(); rmSync(root,{recursive:true,force:true}); }
+});
+
  test('MCP rejects a non-Git profile before queuing; same turn can correct it and retain its workstream', async () => {
   const root = mkdtempSync(join(tmpdir(), 'worker-admission-'));
   const store = new OrchestrationStore(':memory:', 'a');
