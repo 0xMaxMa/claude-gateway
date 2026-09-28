@@ -6,6 +6,14 @@ import { join } from 'path';
 import { OrchestrationError, SessionRole } from '../orchestration/types';
 
 export const DEFAULT_WORKER_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write', 'Skill'];
+/** Native tools Claude Code advertises on its own once their parent is selected with `--tools`.
+ * `GetTask` reads the output of Bash's own background commands; the CLI enables it through a
+ * rollout flag, so one launch may advertise it and the next may not (#552). */
+const NATIVE_COMPANION_TOOLS: Readonly<Record<string, readonly string[]>> = { Bash: ['GetTask'] };
+/** Companion tools a worker launched with `--tools <selected>` may also advertise. */
+export function nativeCompanionTools(selected: readonly string[]): string[] {
+  return selected.flatMap(tool => NATIVE_COMPANION_TOOLS[tool] ?? []);
+}
 
 export interface RuntimeProfile {
   role: Exclude<SessionRole, 'legacy'>;
