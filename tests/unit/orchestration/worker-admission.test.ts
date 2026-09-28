@@ -27,6 +27,10 @@ test('invalid task_spawn reports missing fields without echoing input and keeps 
     expect(missingInstructions.body).toMatchObject({error:'INVALID_INPUT',retry_of:`${input.inputId}:missing-instructions`,details:[
       {field:'instructions',reason:'required'},
     ]});
+    const oversizedSkillArgs = await call('oversized-skill-args',{title:'Run skill',instructions:'Perform the requested task',target_profile:'skill-worker',skill_name:'some-skill',skill_args:'x'.repeat(60001)});
+    expect(oversizedSkillArgs.body).toMatchObject({error:'INVALID_INPUT',retry_of:`${input.inputId}:oversized-skill-args`,details:[
+      {field:'skill_args',reason:'too_long'},
+    ]});
     const rejected = await call('rejected',{title:'SECRET_TITLE',skill_name:'some-skill',skill_args:'SECRET_ARGUMENTS'});
     expect(rejected.status).toBe(400);
     expect(rejected.body).toMatchObject({error:'INVALID_INPUT',retry_of:`${input.inputId}:rejected`,details:[

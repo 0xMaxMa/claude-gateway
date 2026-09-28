@@ -38,6 +38,12 @@ function taskSpawnInputIssues(args: Record<string, unknown>): InputIssue[] {
     for (const field of ['skill_name','skill_args'] as const) {
       if (typeof args[field] !== 'string' || !args[field].trim()) issues.push({field,reason:'required_for_skill_worker',correction:`Provide ${field} when target_profile is skill-worker.`});
     }
+    if (typeof args.skill_name === 'string' && args.skill_name.trim() && !/^[\w:.-]+$/.test(args.skill_name)) {
+      issues.push({field:'skill_name',reason:'invalid_format',correction:'Use an installed skill name containing only letters, numbers, underscore, colon, dot, or hyphen.'});
+    }
+    if (typeof args.skill_args === 'string' && args.skill_args.length > 60000) {
+      issues.push({field:'skill_args',reason:'too_long',correction:'Keep skill_args at or below 60000 characters.'});
+    }
   } else if (args.target_profile !== undefined && args.target_profile !== 'skill-worker' && (args.skill_name !== undefined || args.skill_args !== undefined)) {
     issues.push({field:'target_profile',reason:'skill_fields_require_skill_worker',correction:'Set target_profile to skill-worker when supplying skill_name and skill_args.'});
   }
