@@ -10,6 +10,7 @@ import { toolOutcome, TurnObservation, ToolOutcome } from './execution-observati
 import type { InputImage } from '../session/input-image';
 import type { SessionProcess } from '../session/process';
 import { OrchestrationError } from './types';
+import { collectEnvSecrets, sanitizeToolName } from './tasks/failure';
 import { providerErrorMetadata, ProviderErrorMetadata } from './provider-error-metadata';
 
 export interface TurnTimeoutPolicy { pauseRequested?: () => boolean; onUsage?: (metrics: ManagedTurnMetrics) => void; startupTimeoutMs: number; firstResponseTimeoutMs: number; compactionTimeoutMs?: number; idleTimeoutMs: number; acceptToolProgress?: boolean; idleAction?: 'observe'; onObservation?: (value: TurnObservation) => void; }
@@ -227,8 +228,12 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
         // list) from an unexpected one (a valid list carrying tools outside the profile), so
         // the durable failure can explain the mismatch instead of collapsing all three.
         const inventoryKind = event.tools == null ? 'missing' : !Array.isArray(event.tools) ? 'malformed' : 'unexpected';
+        // Scrub secrets and bound each name here at the source so both consumers of this error
+        // — the durable task failure (failure.ts) and the agent-path conversation event/log
+        // (runtime.ts) — persist sanitized names; a raw tool name is not guaranteed secret-free.
+        const secrets = collectEnvSecrets();
         const rejectedTools = Array.isArray(event.tools) ? event.tools.filter((name: unknown) => !allowedTool(name))
-          .slice(0,100).map((name: unknown) => typeof name === 'string' ? name.replace(/[^a-zA-Z0-9_.:-]/g,'?').slice(0,160) : '<invalid-name>')
+          .slice(0,100).map((name: unknown) => sanitizeToolName(name, secrets))
           : [inventoryKind === 'missing' ? '<missing-inventory>' : '<malformed-inventory>'];
         fail(Object.assign(new OrchestrationError('PROFILE_INVENTORY_MISMATCH'), { rejectedTools, inventoryKind }));
         void process.stop(); return;

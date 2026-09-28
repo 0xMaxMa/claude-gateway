@@ -97,3 +97,20 @@ test('missing and malformed container init inventories carry distinguishable dia
   await expect(mk('not-a-list')).rejects.toMatchObject({code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'malformed',rejectedTools:['<malformed-inventory>']});
 });
 
+test('a rejected tool name embedding a credential is scrubbed at the source, before any consumer logs it (#548)', async () => {
+  // The agent-path consumer (runtime.ts) persists and console.errors error.rejectedTools directly,
+  // so the names must already be secret-scrubbed when the error is raised, not only in the task path.
+  const old = process.env.TEST_INVENTORY_SECRET; process.env.TEST_INVENTORY_SECRET = 'supersecretcredentialvalue';
+  try {
+    const process_ = new EventEmitter() as SessionProcess;
+    Object.assign(process_, {runtimeProfile:{role:'worker',containerExecution:true},start:async()=>{},stop:jest.fn(async()=>{}),
+      sendMessage:()=>{
+        process_.emit('output',JSON.stringify({type:'system',subtype:'init',tools:['Bash','mcp__leak__supersecretcredentialvalue']}));
+        process_.emit('output',JSON.stringify({type:'result',result:'done'}));
+      }});
+    const error = await startProcessTurn(process_,'task',1000).result.catch((e: any) => e);
+    expect(error.code).toBe('PROFILE_INVENTORY_MISMATCH');
+    expect(JSON.stringify(error.rejectedTools)).not.toContain('supersecretcredentialvalue');
+  } finally { if (old === undefined) delete process.env.TEST_INVENTORY_SECRET; else process.env.TEST_INVENTORY_SECRET = old; }
+});
+
