@@ -123,6 +123,9 @@ test('agent question actions retain ownership, epoch and user-input fences',()=>
   expect(denied!.message).toMatch(/turn-scoped permission boundary/);
   expect(denied!.message).toMatch(/not a system outage/);
   expect(denied!.message).toMatch(/durably saved/);
+  // The mute/defer/resume/discuss throw must not claim to govern re-ask — that has its own throw+message.
+  expect(denied!.message).toMatch(/defer, mute, resume, or discuss/);
+  expect(denied!.message).not.toMatch(/re-ask/);
  }finally{store.close();}
 });
 
