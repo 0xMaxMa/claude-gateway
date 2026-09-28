@@ -189,3 +189,14 @@ test('companion lookup ignores inherited object keys in a worker tool selection 
   await expect(initWith({role:'worker',containerExecution:true,workerTools:['Read','constructor','__proto__']}, ['Read','GetTask'])).rejects.toMatchObject(
     {code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'unexpected',rejectedTools:['GetTask']});
 });
+
+test('an agent-role inventory rejection names agent startup, not worker startup (#552)', async () => {
+  const error = await initWith({role:'agent'}, ['mcp__gateway__task_spawn','Bash']).catch(e => e);
+  expect(error).toMatchObject({code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'unexpected',rejectedTools:['Bash']});
+  expect(error.message).toBe('Agent startup advertised tools outside the resolved agent profile: Bash. Stopped before inference.');
+});
+
+test('an agent never inherits the worker Bash companion GetTask (#552)', async () => {
+  await expect(initWith({role:'agent'}, ['mcp__gateway__task_spawn','GetTask'])).rejects.toMatchObject(
+    {code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'unexpected',rejectedTools:['GetTask']});
+});

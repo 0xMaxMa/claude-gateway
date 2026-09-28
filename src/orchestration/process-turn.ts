@@ -211,10 +211,11 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       const allowed = role === 'agent'
         ? /^(mcp__gateway__(capabilities_list|conversation_intake|memory_(get|search)|task_(spawn|status|cancel|update|answer|question)))$/
         : /^(Read|Glob|Grep|Bash|Edit|Write|Skill|mcp__gateway__(tool_search|tool_call|browser_[a-z_]+|generate_image|generate_video|share_file|share_image|memory_(get|search|shared_(get|create|update|delete))|task_(report_progress|request_input|stage_file|memory_append)))$/;
+      const workerTools = process.runtimeProfile.workerTools ?? DEFAULT_WORKER_TOOLS;
+      const companions = role === 'worker' ? nativeCompanionTools(workerTools) : [];
       const allowedTool = (name: unknown): boolean => {
         if (typeof name !== 'string') return false;
-        const workerTools = process.runtimeProfile?.workerTools ?? DEFAULT_WORKER_TOOLS;
-        const companion = role === 'worker' && nativeCompanionTools(workerTools).includes(name);
+        const companion = companions.includes(name);
         if (process.runtimeProfile?.containerExecution) {
           // Validate the same scoped inventory that the container MCP client lists.
           return containerTaskTools(role).some(tool => name === `mcp__gateway__${tool.name}`) ||
@@ -247,9 +248,10 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
           ? event.tools.filter((name: unknown) => !allowedTool(name)).slice(0,100).map((name: unknown) => sanitizeToolName(name, secrets))
           : [];
         // Say what was observed: an 'unexpected' tool was advertised, not missing (#552).
-        const message = inventoryKind === 'missing' ? 'Worker startup did not advertise a tool inventory; stopped before inference.'
-          : inventoryKind === 'malformed' ? 'Worker startup advertised a malformed tool inventory; stopped before inference.'
-          : `Worker startup advertised tools outside the resolved ${role} profile: ${rejectedTools.join(', ')}. Stopped before inference.`;
+        const startup = role === 'agent' ? 'Agent startup' : 'Worker startup';
+        const message = inventoryKind === 'missing' ? `${startup} did not advertise a tool inventory; stopped before inference.`
+          : inventoryKind === 'malformed' ? `${startup} advertised a malformed tool inventory; stopped before inference.`
+          : `${startup} advertised tools outside the resolved ${role} profile: ${rejectedTools.join(', ')}. Stopped before inference.`;
         fail(Object.assign(new OrchestrationError('PROFILE_INVENTORY_MISMATCH', message), { rejectedTools, inventoryKind }));
         void process.stop(); return;
       }
