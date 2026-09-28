@@ -90,10 +90,10 @@ export class TaskQuestions {
         return question;
       });
       const input = this.store.get('SELECT store_user_message FROM conversation_inputs WHERE id=?', context.inputId)!;
-      if (['defer','mute','resume','discuss'].includes(String(action)) && !input.store_user_message) throw new OrchestrationError('USER_INPUT_REQUIRED');
+      if (['defer','mute','resume','discuss'].includes(String(action)) && !input.store_user_message) throw new OrchestrationError('USER_INPUT_REQUIRED', `USER_INPUT_REQUIRED: The '${String(action)}' question action needs a backing user message on this turn. A report/inference turn without a stored user reply cannot defer, mute, resume, or discuss a pending question. This is a turn-scoped permission boundary, not a system outage: the pending question and any committed answer stay durably saved. Reconcile against the committed answer receipts, and surface a genuinely new decision to the user on a normal turn.`);
       const now = Date.now();
       if (action === 'ask') {
-        if (!input.store_user_message && questions.some(q => q.askedCount > 0)) throw new OrchestrationError('USER_INPUT_REQUIRED');
+        if (!input.store_user_message && questions.some(q => q.askedCount > 0)) throw new OrchestrationError('USER_INPUT_REQUIRED', "USER_INPUT_REQUIRED: Re-asking an already-asked question needs a backing user message on this turn. A report/inference turn cannot re-send a reminder that was already delivered. This is a turn-scoped permission boundary, not a system outage: the pending question stays saved and its reminders remain scheduled. Do not treat this as an error to retry here.");
         if (questions.some(q => !q.eligibleToAsk)) throw new OrchestrationError('QUESTION_REMINDER_NOT_DUE');
         const bindings = ids.map(id => String(this.store.get('SELECT binding_id FROM task_questions WHERE question_id=?', id)!.binding_id));
         if (new Set(bindings).size !== 1) throw new OrchestrationError('QUESTION_BINDING_MISMATCH');

@@ -8,7 +8,7 @@ import { TaskService } from '../../../src/orchestration/tasks/service';
 import { DecisionService } from '../../../src/orchestration/decisions';
 import { DeliveryOutbox } from '../../../src/orchestration/delivery';
 import { TaskQuestions } from '../../../src/orchestration/task-questions';
-import { ConversationScope } from '../../../src/orchestration/types';
+import { ConversationScope, OrchestrationError } from '../../../src/orchestration/types';
 
 function fixture(store: OrchestrationStore, session = 'session', source: ConversationScope['source'] = 'telegram') {
   const tasks = new TaskService(store), decisions = new DecisionService(store);
@@ -115,7 +115,17 @@ test('agent question actions retain ownership, epoch and user-input fences',()=>
   expect(()=>f.controls.manage(c,{action:'ask',question_ids:[foreign.question.questionId],text:'Question'})).toThrow('STALE_QUESTION');
   expect(()=>f.controls.manage({...c,principalId:'other'},{action:'ask',question_ids:[f.question.questionId],text:'Question'})).toThrow();
   f.decisions.finish(c,'Done');expect(()=>f.controls.manage(c,{action:'mute',question_ids:[f.question.questionId]})).toThrow('STALE_DECISION');
-  const review=f.begin('Review',false);expect(()=>f.controls.manage(review,{action:'mute',question_ids:[f.question.questionId]})).toThrow('USER_INPUT_REQUIRED');
+  const review=f.begin('Review',false);
+  let denied:Error|undefined;try{f.controls.manage(review,{action:'mute',question_ids:[f.question.questionId]});}catch(e){denied=e as Error;}
+  // issue #546: a report/inference turn must get an explained turn-scoped boundary, not a bare code.
+  expect(denied).toBeInstanceOf(OrchestrationError);
+  expect((denied as OrchestrationError).code).toBe('USER_INPUT_REQUIRED');
+  expect(denied!.message).toMatch(/turn-scoped permission boundary/);
+  expect(denied!.message).toMatch(/not a system outage/);
+  expect(denied!.message).toMatch(/durably saved/);
+  // The mute/defer/resume/discuss throw must not claim to govern re-ask — that has its own throw+message.
+  expect(denied!.message).toMatch(/defer, mute, resume, or discuss/);
+  expect(denied!.message).not.toMatch(/re-ask/);
  }finally{store.close();}
 });
 
