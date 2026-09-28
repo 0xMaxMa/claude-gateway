@@ -62,3 +62,38 @@ test('an agent still cannot receive a tool outside its declared inventory', asyn
     }});
   await expect(startProcessTurn(process,'task',1000).result).rejects.toMatchObject({code:'PROFILE_INVENTORY_MISMATCH',rejectedTools:['mcp__gateway__task_stage_file']});
 });
+
+test('a container worker advertising an unauthorized tool is rejected before inference with the sanitized name (#548)', async () => {
+  const process = new EventEmitter() as SessionProcess;
+  Object.assign(process, {runtimeProfile:{role:'worker',containerExecution:true},start:async()=>{},stop:jest.fn(async()=>{}),
+    sendMessage:()=>{
+      process.emit('output',JSON.stringify({type:'system',subtype:'init',tools:['Bash','mcp__gateway__task_report_progress','mcp__gateway__task_spawn']}));
+      process.emit('output',JSON.stringify({type:'result',result:'done'}));
+    }});
+  await expect(startProcessTurn(process,'task',1000).result).rejects.toMatchObject(
+    {code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'unexpected',rejectedTools:['mcp__gateway__task_spawn']});
+});
+
+test('a valid container worker profile starts successfully under its declared native and MCP tools (#548)', async () => {
+  const process = new EventEmitter() as SessionProcess;
+  Object.assign(process, {runtimeProfile:{role:'worker',containerExecution:true},start:async()=>{},stop:jest.fn(async()=>{}),
+    sendMessage:()=>{
+      process.emit('output',JSON.stringify({type:'system',subtype:'init',tools:['Bash','Read','mcp__gateway__task_report_progress','mcp__gateway__task_stage_file']}));
+      process.emit('output',JSON.stringify({type:'result',result:'done'}));
+    }});
+  await expect(startProcessTurn(process,'task',1000).result).resolves.toMatchObject({text:'done'});
+});
+
+test('missing and malformed container init inventories carry distinguishable diagnostics (#548)', async () => {
+  const mk = (tools: unknown) => {
+    const process = new EventEmitter() as SessionProcess;
+    const init: any = {type:'system',subtype:'init'};
+    if (tools !== undefined) init.tools = tools;
+    Object.assign(process, {runtimeProfile:{role:'worker',containerExecution:true},start:async()=>{},stop:jest.fn(async()=>{}),
+      sendMessage:()=>{ process.emit('output',JSON.stringify(init)); process.emit('output',JSON.stringify({type:'result',result:'done'})); }});
+    return startProcessTurn(process,'task',1000).result;
+  };
+  await expect(mk(undefined)).rejects.toMatchObject({code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'missing',rejectedTools:['<missing-inventory>']});
+  await expect(mk('not-a-list')).rejects.toMatchObject({code:'PROFILE_INVENTORY_MISMATCH',inventoryKind:'malformed',rejectedTools:['<malformed-inventory>']});
+});
+

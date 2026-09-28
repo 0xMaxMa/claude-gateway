@@ -223,9 +223,14 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
           Boolean(process.isSpawnedConnectorTool?.(name)) || allowed.test(name);
       };
       if (!Array.isArray(event.tools) || event.tools.some((name: unknown) => !allowedTool(name))) {
+        // Distinguish a missing inventory (no list) from a malformed one (present but not a
+        // list) from an unexpected one (a valid list carrying tools outside the profile), so
+        // the durable failure can explain the mismatch instead of collapsing all three.
+        const inventoryKind = event.tools == null ? 'missing' : !Array.isArray(event.tools) ? 'malformed' : 'unexpected';
         const rejectedTools = Array.isArray(event.tools) ? event.tools.filter((name: unknown) => !allowedTool(name))
-          .slice(0,100).map((name: unknown) => typeof name === 'string' ? name.replace(/[^a-zA-Z0-9_.:-]/g,'?').slice(0,160) : '<invalid-name>') : ['<missing-inventory>'];
-        fail(Object.assign(new OrchestrationError('PROFILE_INVENTORY_MISMATCH'), { rejectedTools }));
+          .slice(0,100).map((name: unknown) => typeof name === 'string' ? name.replace(/[^a-zA-Z0-9_.:-]/g,'?').slice(0,160) : '<invalid-name>')
+          : [inventoryKind === 'missing' ? '<missing-inventory>' : '<malformed-inventory>'];
+        fail(Object.assign(new OrchestrationError('PROFILE_INVENTORY_MISMATCH'), { rejectedTools, inventoryKind }));
         void process.stop(); return;
       }
     }
