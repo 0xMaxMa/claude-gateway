@@ -9,7 +9,9 @@ on:
     paths:
       - 'src/orchestration/**'
       - 'src/session/process.ts'
+      - 'src/session/runtime-profile.ts'
       - 'tests/unit/orchestration/**'
+      - 'tests/unit/session/append-system-prompt-file.test.ts'
       - 'tests/helpers/mock-claude-worker.js'
       - '.github/workflows/cross-platform.yml'
       - 'package.json'
@@ -19,7 +21,9 @@ on:
     paths:
       - 'src/orchestration/**'
       - 'src/session/process.ts'
+      - 'src/session/runtime-profile.ts'
       - 'tests/unit/orchestration/**'
+      - 'tests/unit/session/append-system-prompt-file.test.ts'
       - 'tests/helpers/mock-claude-worker.js'
       - '.github/workflows/cross-platform.yml'
   workflow_dispatch:
@@ -65,3 +69,4 @@ jobs:
           tests/unit/orchestration/process-supervisor.test.ts
           tests/unit/orchestration/execution-observation.test.ts
           tests/unit/orchestration/worker-process-tree.test.ts
+          tests/unit/session/append-system-prompt-file.test.ts

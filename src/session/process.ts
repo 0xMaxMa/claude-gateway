@@ -10,7 +10,7 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { RuntimeProfile, runtimeProfileArgs } from './runtime-profile';
+import { appendSystemPromptViaFile, RuntimeProfile, runtimeProfileArgs } from './runtime-profile';
 import { StringDecoder } from 'string_decoder';
 import { processSupervisorSupported, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
 import { gatewayCapacity } from '../orchestration/capacity';
@@ -972,7 +972,13 @@ export class SessionProcess extends EventEmitter {
           throw error;
         }
       }
-      args.push(...runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: this.containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${this.containerAttempt.directory}/checkpoint.cjs ${this.containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: this.containerAttempt && this.runtimeProfile.skillPluginDir ? this.containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []));
+      const profileArgs = runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: this.containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${this.containerAttempt.directory}/checkpoint.cjs ${this.containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: this.containerAttempt && this.runtimeProfile.skillPluginDir ? this.containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []);
+      // Host spawns on Windows only: the file must be readable by the CLI
+      // itself, and a container's CLI sees container paths.
+      const profileMcpConfig = this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath;
+      args.push(...(process.platform === 'win32' && this.agentConfig.type !== 'app-agent'
+        ? appendSystemPromptViaFile(profileArgs, path.join(path.dirname(profileMcpConfig), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, "_")}.md`))
+        : profileArgs));
       if (this.runtimeProfile.cliSession) {
         const session = this.runtimeProfile.cliSession;
         args.push(session.resume ? '--resume' : '--session-id', session.id);

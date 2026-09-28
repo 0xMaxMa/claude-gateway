@@ -19,11 +19,11 @@ const MOCK = resolve(__dirname, '../../helpers/mock-claude-worker.js');
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const until = async (check: () => boolean, ms = 15000) => { const end = Date.now() + ms; while (!check()) { if (Date.now() > end) throw new Error('timed out'); await new Promise(r => setTimeout(r, 50)); } };
 
-async function fixture(mode: 'complete' | 'hang', body: (run: { start: () => Promise<Awaited<ReturnType<ClaudeWorkerDriver['start']>>>; pidfile: string; store: OrchestrationStore; taskId: string; recover: (identity: TaskAttempt['processIdentity']) => Promise<boolean> }) => Promise<void>) {
-  const root = mkdtempSync(join(tmpdir(), 'worker-tree-')), workspace = join(root, 'workspace'), pidfile = join(root, 'grandchild.pid');
+async function fixture(mode: 'complete' | 'hang', body: (run: { start: () => Promise<Awaited<ReturnType<ClaudeWorkerDriver['start']>>>; pidfile: string; argsfile: string; store: OrchestrationStore; taskId: string; recover: (identity: TaskAttempt['processIdentity']) => Promise<boolean> }) => Promise<void>) {
+  const root = mkdtempSync(join(tmpdir(), 'worker-tree-')), workspace = join(root, 'workspace'), pidfile = join(root, 'grandchild.pid'), argsfile = join(root, 'args.json');
   mkdirSync(workspace); writeFileSync(join(workspace, 'CLAUDE.md'), 'Fixture');
-  const saved = { bin: process.env.CLAUDE_BIN, mode: process.env.MOCK_WORKER_MODE, pidfile: process.env.MOCK_WORKER_PIDFILE };
-  Object.assign(process.env, { CLAUDE_BIN: `${process.execPath} ${MOCK}`, MOCK_WORKER_MODE: mode, MOCK_WORKER_PIDFILE: pidfile });
+  const saved = { bin: process.env.CLAUDE_BIN, mode: process.env.MOCK_WORKER_MODE, pidfile: process.env.MOCK_WORKER_PIDFILE, args: process.env.MOCK_WORKER_ARGSFILE };
+  Object.assign(process.env, { CLAUDE_BIN: `${process.execPath} ${MOCK}`, MOCK_WORKER_MODE: mode, MOCK_WORKER_PIDFILE: pidfile, MOCK_WORKER_ARGSFILE: argsfile });
   const store = new OrchestrationStore(':memory:', 'a'), tasks = new TaskService(store), bridge = new TaskBridge(tasks);
   const agent = { id: 'a', workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] }, orchestration: { tasks: { workspaceMode: 'host' } } } as unknown as AgentConfig;
   const gateway = { gateway: { headless: true, timezone: 'UTC', logDir: join(root, 'logs') }, agents: [agent] } as GatewayConfig;
@@ -37,9 +37,9 @@ async function fixture(mode: 'complete' | 'hang', body: (run: { start: () => Pro
     // A restarted gateway has only the persisted identity: a new driver and a
     // fresh platform backend (no in-memory Windows lineage).
     const recover = (identity: TaskAttempt['processIdentity']) => { setProcessPlatform(undefined); return new ClaudeWorkerDriver(agent, gateway, tasks, bridge, new TaskWorkspaces(store, workspace, join(root, 'resources')), join(root, 'private')).cleanup({ ...attempt, processIdentity: identity }); };
-    await body({ start: () => driver.start(store.task(task.taskId)!, attempt, true), pidfile, store, taskId: task.taskId, recover });
+    await body({ start: () => driver.start(store.task(task.taskId)!, attempt, true), pidfile, argsfile, store, taskId: task.taskId, recover });
   } finally {
-    for (const [key, value] of [['CLAUDE_BIN', saved.bin], ['MOCK_WORKER_MODE', saved.mode], ['MOCK_WORKER_PIDFILE', saved.pidfile]] as const) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    for (const [key, value] of [['CLAUDE_BIN', saved.bin], ['MOCK_WORKER_MODE', saved.mode], ['MOCK_WORKER_PIDFILE', saved.pidfile], ['MOCK_WORKER_ARGSFILE', saved.args]] as const) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     await bridge.close(); store.close(); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 }
@@ -55,6 +55,22 @@ test('a supervised worker completes only after its process tree is proven stoppe
     const outcome = await handle.result;
     expect(outcome).toMatchObject({ type: 'completed', result: { summary: 'Worker finished the task.' } });
     expect(await liveGroupMembers(identity!.pid)).toEqual([]);
+  });
+}, 60000);
+
+test('the system prompt reaches the CLI through a file on Windows, which caps a command line at 32767 chars', async () => {
+  await fixture('complete', async ({ start, argsfile }) => {
+    const handle = await start();
+    await handle.result;
+    const args: string[] = JSON.parse(readFileSync(argsfile, 'utf8'));
+    if (process.platform === 'win32') {
+      expect(args).not.toContain('--append-system-prompt');
+      const file = args[args.indexOf('--append-system-prompt-file') + 1];
+      expect(readFileSync(file, 'utf8')).toContain('Fixture');
+    } else {
+      expect(args).not.toContain('--append-system-prompt-file');
+      expect(args[args.indexOf('--append-system-prompt') + 1]).toContain('Fixture');
+    }
   });
 }, 60000);
 
