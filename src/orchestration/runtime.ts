@@ -1,6 +1,7 @@
 import { GatewayTaskController, GatewayTaskAdapter } from './gateway-tasks/controller';
 import { SafemodeTaskAdapter } from './gateway-tasks/safemode';
 import { workerCrons } from './worker-crons';
+import { processSupervisorSupported } from './process-supervisor';
 import { readCompactMeasurements, type CompactMeasurements } from './compact-measurements';
 import { SessionCompaction, recoverSessionCompaction, type ResolvedSessionCompaction } from './session-compaction';
 import { ContextDelivery } from './context-delivery';
@@ -205,7 +206,7 @@ export class AgentOrchestrationRuntime {
       if (needsExecution) {
         if (agent.type === 'app-agent') await validateContainer(agent);
         if (gateway.gateway.headless === false) throw new OrchestrationError('UNSUPPORTED_ORCHESTRATION_BACKEND');
-        if (process.platform !== 'linux') throw new OrchestrationError('UNSUPPORTED_PROCESS_SUPERVISOR');
+        if (!processSupervisorSupported()) throw new OrchestrationError('UNSUPPORTED_PROCESS_SUPERVISOR');
         if (agent.claude.extraFlags?.length) throw new OrchestrationError('PROFILE_FLAGS_CONFLICT');
       }
     } catch (error) { store.close(); releaseLock(); throw error; }
@@ -394,7 +395,7 @@ export class AgentOrchestrationRuntime {
   private gateway!: GatewayConfig;
   private assertBackend(agent = this.agent): void {
     if (this.gateway.gateway.headless === false) throw new OrchestrationError('UNSUPPORTED_ORCHESTRATION_BACKEND');
-    if (process.platform !== 'linux') throw new OrchestrationError('UNSUPPORTED_PROCESS_SUPERVISOR');
+    if (!processSupervisorSupported()) throw new OrchestrationError('UNSUPPORTED_PROCESS_SUPERVISOR');
     if (agent.claude.extraFlags?.length) throw new OrchestrationError('PROFILE_FLAGS_CONFLICT');
   }
   updateAgentConfig(agent: AgentConfig): void {

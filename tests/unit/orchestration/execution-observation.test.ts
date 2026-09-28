@@ -5,7 +5,7 @@ import { createInterface } from 'readline';
 import { startProcessTurn } from '../../../src/orchestration/process-turn';
 import { SessionProcess } from '../../../src/session/process';
 import { ProcessActivitySampler } from '../../../src/orchestration/process-activity';
-import { stopProcessGroup } from '../../../src/orchestration/process-supervisor';
+import { stopProcessGroup, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
 import { toolOutcome, TurnObservation } from '../../../src/orchestration/execution-observation';
 
 function fixture(observe = jest.fn(), total?: number) {
@@ -61,7 +61,7 @@ test('generic outcomes use protocol metadata, not tool output or a test framewor
  expect(toolOutcome('Browser',{exit_code:'0'},1)).not.toHaveProperty('exitCode');
 });
 
-(process.platform==='linux'?test:test.skip)('real silent piped command survives idle threshold; counters detect children and cancellation stops the tree',async()=>{
+(['linux','darwin'].includes(process.platform)?test:test.skip)('real silent piped command survives idle threshold; counters detect children and cancellation stops the tree',async()=>{
  // stdout is buffered behind tail, as in the reported failure. No CLI heartbeat.
  const child=spawn(process.execPath,['-e',`const {spawn}=require('child_process');
  const emit=e=>console.log(JSON.stringify(e));
@@ -87,7 +87,7 @@ test('generic outcomes use protocol metadata, not tool output or a test framewor
   expect((await sampler.sample()).available).toBe(false);
  } finally {lines.close();await stopProcessGroup(child.pid!);}
 },15000);
-(process.platform==='linux'?test:test.skip)('sleeping tree has no manufactured progress and unavailable telemetry stays unavailable',async()=>{
+(['linux','darwin'].includes(process.platform)?test:test.skip)('sleeping tree has no manufactured progress and unavailable telemetry stays unavailable',async()=>{
  const child=spawn('sleep',['30'],{detached:true,stdio:'ignore'});
  try {
   await once(child,'spawn');
@@ -129,3 +129,17 @@ test.each(['Bash','mcp__browser__navigate','mcp__calendar__list','mcp__image__ge
  expect(JSON.stringify(publish.mock.calls)).not.toContain('private output');
  expect(JSON.stringify(publish.mock.calls)).not.toContain('999');
 });
+
+(['linux','darwin','win32'].includes(process.platform)?test:test.skip)('portable sampler sees a busy child of the supervised worker on this OS',async()=>{
+ const child=spawn(process.execPath,['-e',"require('child_process').spawn(process.execPath,['-e','const end=Date.now()+5000;while(Date.now()<end){};setInterval(()=>{},1000)'],{stdio:'ignore'});process.stdout.write('ready');setInterval(()=>{},1000)"],{detached:workerSpawnDetached(),stdio:['ignore','pipe','ignore']});
+ try {
+  await once(child.stdout!,'data');
+  const sampler=new ProcessActivitySampler(()=>child.pid);
+  expect(await sampler.sample()).toMatchObject({available:true});
+  await new Promise(r=>setTimeout(r,700));
+  const measured=await sampler.sample();
+  expect(measured).toMatchObject({available:true});
+  expect(measured.processCount).toBeGreaterThanOrEqual(2);
+  expect(measured.childCpuTicksDelta).toBeGreaterThan(0);
+ } finally {await stopProcessGroup(child.pid!);}
+},30000);

@@ -307,7 +307,7 @@ export class CodexProcess extends EventEmitter {
     const bin = this.executable;
     const child = this.child = agent.type === 'app-agent'
       ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', 'CODEX_ROLLOUT_TRACE_ROOT', '-e', `HOME=${homedir()}`, '-e', key, ...Object.keys(workerEnvironment(agent, this.options.gateway)).flatMap(name => ['-e', name]), agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
-      : spawn(bin, args, { cwd: agent.workspace, env, stdio: 'pipe', detached: true });
+      : spawn(bin, args, { cwd: agent.workspace, env, stdio: 'pipe', detached: process.platform !== 'win32', windowsHide: true });
     this.group = child.pid;
     this.traceTimer = setInterval(() => { void this.captureTrace(); }, agent.type === 'app-agent' ? 2000 : 500);
     this.traceTimer.unref();

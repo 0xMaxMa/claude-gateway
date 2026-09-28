@@ -1,0 +1,67 @@
+name: Orchestration supervisor (Linux, macOS, Windows)
+
+# Orchestration only runs where the gateway can prove a worker's processes
+# stopped. This exercises that proof on every supported OS: the platform
+# backends, the real supervisor, activity sampling, and a real worker spawned
+# through SessionProcess (mock Claude CLI) that completes and is cancelled.
+on:
+  pull_request:
+    paths:
+      - 'src/orchestration/**'
+      - 'src/session/process.ts'
+      - 'tests/unit/orchestration/**'
+      - 'tests/helpers/mock-claude-worker.js'
+      - '.github/workflows/cross-platform.yml'
+      - 'package.json'
+      - 'package-lock.json'
+  push:
+    branches: [main]
+    paths:
+      - 'src/orchestration/**'
+      - 'src/session/process.ts'
+      - 'tests/unit/orchestration/**'
+      - 'tests/helpers/mock-claude-worker.js'
+      - '.github/workflows/cross-platform.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cross-platform-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  supervisor:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+
+      # Install scripts are skipped: the postinstall is POSIX shell (bun MCP
+      # deps) and node-pty is not needed by these suites.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck
+        if: runner.os == 'Linux'
+        run: npm run typecheck
+
+      - name: Supervisor, sampler and worker end-to-end
+        run: >-
+          npx jest --ci --verbose
+          tests/unit/orchestration/process-platform.test.ts
+          tests/unit/orchestration/process-supervisor.test.ts
+          tests/unit/orchestration/execution-observation.test.ts
+          tests/unit/orchestration/worker-process-tree.test.ts

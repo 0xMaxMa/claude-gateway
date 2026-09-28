@@ -270,7 +270,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         return {type: process.managedGroupStopped ? 'failed' as const : 'unknown' as const, failure};
       }).finally(async () => { observationClosed = true; ticket.revoke(); await process.stop(); });
       return { accepted: turn.accepted, providerReady: turn.providerReady, result,
-        identity: () => process.managedProcessId ? { pid: process.managedProcessId, startedAt: process.spawnedAt, instanceId: this.instanceId, ...processFingerprint(process.managedProcessId) } : undefined,
+        identity: async () => process.managedProcessId ? { pid: process.managedProcessId, startedAt: process.spawnedAt, instanceId: this.instanceId, ...await processFingerprint(process.managedProcessId) } : undefined,
         stop: async () => { stopping = true; await turn.stop(); } };
     } catch (error) { ticket.revoke(); throw error; }
   }

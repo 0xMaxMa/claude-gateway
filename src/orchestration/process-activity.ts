@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'fs/promises';
+import { processPlatform, type ProcessRecord } from './process-platform';
 
 export interface ProcessSample {
   observedAt: number;
@@ -11,7 +11,7 @@ export interface ProcessSample {
   membershipChanged?: boolean;
   ioAvailable?: boolean;
 }
-interface Member { pid: number; parent: number; group: number; start: string; state: string; cpu: number; read?: number; write?: number; }
+type Member = ProcessRecord;
 
 /** Read counters only, never argv/env/output. A process identity is PID + start time.
  * Descendants in new process groups are included while still linked to the root.
@@ -23,21 +23,13 @@ export class ProcessActivitySampler {
   async sample(): Promise<ProcessSample> {
     const unavailable: ProcessSample = { observedAt: Date.now(), available: false };
     const pid = this.pid();
-    if (!this.enabled || process.platform !== 'linux' || !pid || pid <= 0) return unavailable;
+    const platform = processPlatform();
+    if (!this.enabled || !platform || !pid || pid <= 0) return unavailable;
     try {
-      const members = new Map<number, Member>();
-      const entries = await readdir('/proc');
-      // Sequential stat reads bound open files and memory on busy shared hosts.
-      for (const entry of entries) {
-        if (!/^\d+$/.test(entry)) continue;
-        try {
-          const stat = await readFile(`/proc/${entry}/stat`, 'utf8');
-          const f = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
-          members.set(Number(entry), { pid: Number(entry), parent: Number(f[1]), group: Number(f[2]), state: f[0], start: f[19], cpu: Number(f[11]) + Number(f[12]) });
-        } catch { /* Processes may exit while being sampled. */ }
-      }
+      const members = await platform.snapshot();
+      if (!members) return unavailable;
       const root = members.get(pid);
-      if (!root || ['Z','X'].includes(root.state) || (this.rootStart && this.rootStart !== root.start)) return unavailable;
+      if (!root || ['Z','X'].includes(root.state[0]) || (this.rootStart && this.rootStart !== root.start)) return unavailable;
       this.rootStart = root.start;
       const owned = new Set([pid]);
       let changed = true;
@@ -48,17 +40,8 @@ export class ProcessActivitySampler {
       const current = new Map<string, Member>();
       for (const id of owned) {
         const m = members.get(id)!;
-        if (['Z','X'].includes(m.state)) continue;
-        try {
-          const io = await readFile(`/proc/${id}/io`, 'utf8');
-          // Logical I/O includes pipes/cache, so piped test output is visible.
-          m.read = Number(/^rchar:\s+(\d+)/m.exec(io)?.[1]);
-          m.write = Number(/^wchar:\s+(\d+)/m.exec(io)?.[1]);
-        } catch { /* CPU/membership remain usable without I/O permission. */ }
-        try {
-          const stat = await readFile(`/proc/${id}/stat`, 'utf8');
-          if (stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19] !== m.start) continue;
-        } catch { continue; }
+        if (['Z','X'].includes(m.state[0])) continue;
+        if (platform.refine && !await platform.refine(m)) continue;
         current.set(`${id}:${m.start}`, m);
       }
       const result: ProcessSample = { observedAt: Date.now(), available: true, processCount: current.size, ioAvailable: [...current.values()].every(m => Number.isFinite(m.read) && Number.isFinite(m.write)) };

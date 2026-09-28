@@ -12,7 +12,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { RuntimeProfile, runtimeProfileArgs } from './runtime-profile';
 import { StringDecoder } from 'string_decoder';
-import { stopProcessGroup } from '../orchestration/process-supervisor';
+import { processSupervisorSupported, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
 import { gatewayCapacity } from '../orchestration/capacity';
 import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
@@ -1200,7 +1200,8 @@ export class SessionProcess extends EventEmitter {
         ...(ptyStreamSocketPath ? { PTY_SHELL_STREAM_SOCKET: ptyStreamSocketPath } : {}),
       },
       cwd: this.agentConfig.workspace,
-      ...(this.runtimeProfile?.role === 'worker' && process.platform === 'linux' ? { detached: true } : {}),
+      ...(this.runtimeProfile?.role === 'worker' && workerSpawnDetached() ? { detached: true } : {}),
+      windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }); } catch (error) { toolCapture?.close(); releaseCapacity(); throw error; }
 
@@ -1209,7 +1210,7 @@ export class SessionProcess extends EventEmitter {
     proc.once('exit', () => { setTimeout(() => toolCapture?.close(), 200).unref(); });
     proc.once('error', () => toolCapture?.close());
     proc.once('error', releaseCapacity);
-    if (this.runtimeProfile?.role === 'worker' && process.platform === 'linux') this.managedProcessGroup = proc.pid;
+    if (this.runtimeProfile?.role === 'worker' && processSupervisorSupported()) this.managedProcessGroup = proc.pid;
     // Fresh child is alive: clear any exit observed for a prior process (e.g.
     // after an auto-restart), so isRunning()/interrupt() see it as live.
     this._exited = false;
