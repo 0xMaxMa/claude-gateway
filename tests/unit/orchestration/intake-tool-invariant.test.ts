@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import { TaskBridge, containerTaskTools } from '../../../src/orchestration/bridge';
 import { OrchestrationStore } from '../../../src/orchestration/store';
 import { TaskService } from '../../../src/orchestration/tasks/service';
+import { OrchestrationError } from '../../../src/orchestration/types';
 import { DecisionService } from '../../../src/orchestration/decisions';
 import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
 import { AGENT_TASK_TOOLS } from '../../../src/orchestration/agent-tool-schemas';
@@ -116,6 +117,47 @@ test('conversation_intake refuses explicitly instead of failing when the feature
     expect(warn).toHaveBeenCalled();
     expect(String(warn.mock.calls[0][0])).toContain('conversation_intake');
     warn.mockRestore();
+    ticket.revoke();
+  } finally { await bridge.close(); fixture.close(); }
+});
+
+test('ACKNOWLEDGEMENT_REQUIRED returns the semantic intake recovery path with retry identity', async () => {
+  const fixture = hostFixture();
+  const bridge = new TaskBridge(fixture.tasks);
+  try {
+    await bridge.start();
+    const ticket = bridge.issue({ role: 'agent', context: fixture.context,
+      beforeMutation: async () => { throw new OrchestrationError('ACKNOWLEDGEMENT_REQUIRED'); } },
+      join(fixture.root, 'recovery'), fixture.workspace);
+    const auth = JSON.parse(readFileSync(join(fixture.root, 'recovery', 'ticket.json'), 'utf8'));
+    const reply = await fetch(auth.url, { method: 'POST', headers: { Authorization: `Bearer ${auth.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool: 'task_update', action_id: 'update-first', args: { task_id: 'task-existing', expected_revision: 1, instruction: 'Revise the existing task', mode: 'when_ready' } }) });
+    const body = await reply.json() as any;
+    expect(reply.status).toBe(400);
+    expect(body.error).toBe('ACKNOWLEDGEMENT_REQUIRED');
+    expect(body.retry_of).toBe(`${fixture.context.inputId}:update-first`);
+    expect(body.recovery).toEqual({ tool: 'conversation_intake', mode: 'update', task_id: 'task-existing', retry_of: `${fixture.context.inputId}:update-first` });
+    expect(body.message).toContain('acknowledgement');
+    ticket.revoke();
+  } finally { await bridge.close(); fixture.close(); }
+});
+
+test('pending acknowledgement delivery returns different guidance and no retry authorization', async () => {
+  const fixture = hostFixture();
+  const bridge = new TaskBridge(fixture.tasks);
+  try {
+    await bridge.start();
+    const ticket = bridge.issue({ role: 'agent', context: fixture.context,
+      beforeMutation: async () => { throw new OrchestrationError('ACKNOWLEDGEMENT_DELIVERY_PENDING'); } },
+      join(fixture.root, 'pending-ack'), fixture.workspace);
+    const auth = JSON.parse(readFileSync(join(fixture.root, 'pending-ack', 'ticket.json'), 'utf8'));
+    const reply = await fetch(auth.url, { method: 'POST', headers: { Authorization: `Bearer ${auth.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool: 'task_update', action_id: 'update-pending', args: { task_id: 'task-existing', expected_revision: 1, instruction: 'Revise the existing task', mode: 'when_ready' } }) });
+    const body = await reply.json() as any;
+    expect(body.error).toBe('ACKNOWLEDGEMENT_DELIVERY_PENDING');
+    expect(body.message).toContain('not been confirmed as delivered');
+    expect(body.retry_of).toBeUndefined();
+    expect(body.recovery).toBeUndefined();
     ticket.revoke();
   } finally { await bridge.close(); fixture.close(); }
 });

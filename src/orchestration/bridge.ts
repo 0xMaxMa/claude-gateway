@@ -68,6 +68,8 @@ export class TaskBridge {
       let retryOf: string | undefined;
       let inputDetails: InputIssue[] | undefined;
       let denialReason: string | undefined;
+      let toolName = '';
+      let commandArgs: Record<string, unknown> = {};
       function deny(reason: string): never { denialReason = reason; throw new OrchestrationError('ACCESS_DENIED'); }
       try {
         if (request.method !== 'POST' || request.url !== '/call' || request.headers.origin) deny('INVALID_BRIDGE_REQUEST');
@@ -85,6 +87,8 @@ export class TaskBridge {
         const command = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         if (!command || typeof command.tool !== 'string' || !command.args || typeof command.args !== 'object' || Array.isArray(command.args) || typeof command.action_id !== 'string' || command.action_id.length > 256) throw new OrchestrationError('INVALID_INPUT');
         const a = command.args;
+        toolName = command.tool;
+        commandArgs = a;
         let result: unknown;
         if (scope.role === 'agent') {
           const context: CommandContext = { ...scope.context, actionId: `${scope.context.inputId}:${command.action_id}` };
@@ -202,7 +206,17 @@ export class TaskBridge {
         const code = error instanceof OrchestrationError ? error.code : 'INVALID_REQUEST';
         if (code === 'ACCESS_DENIED' && denialReason) console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', message: 'Task bridge authorization denied', data: { agentId: this.tasks.store.agentId, reason: denialReason } }));
         response.statusCode = code === 'ACCESS_DENIED' ? 403 : 400;
-        response.end(JSON.stringify({ error: code, ...(inputDetails?.length ? {details:inputDetails} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && ['EXECUTION_DENIED', 'USER_INPUT_REQUIRED'].includes(code) && error.message !== code ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        const taskId = typeof commandArgs.task_id === 'string' && commandArgs.task_id.length <= 256 ? commandArgs.task_id : undefined;
+        const intakeRecovery = code === 'ACKNOWLEDGEMENT_REQUIRED' && (toolName === 'task_update' || toolName === 'task_spawn')
+          ? { message: toolName === 'task_update'
+              ? 'Semantic intake has not acknowledged this request. Call conversation_intake first with mode=update, this task_id, and a contextual acknowledgement. Then retry task_update with retry_of from this error and the current expected_revision. Do not create a duplicate task.'
+              : 'Semantic intake has not acknowledged this request. Call conversation_intake with mode=ready and a contextual acknowledgement, then retry task_spawn with retry_of from this error.',
+            recovery: { tool: 'conversation_intake', mode: toolName === 'task_update' ? 'update' : 'ready', ...(toolName === 'task_update' && taskId ? { task_id: taskId } : {}), retry_of: retryOf } }
+          : undefined;
+        const acknowledgementRecovery = code === 'ACKNOWLEDGEMENT_DELIVERY_PENDING'
+          ? { message: 'The acknowledgement has not been confirmed as delivered. Do not retry the task mutation yet; wait for delivery to settle, then retry only if the request is still current.' }
+          : undefined;
+        response.end(JSON.stringify({ error: code, ...(inputDetails?.length ? {details:inputDetails} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && ['EXECUTION_DENIED', 'USER_INPUT_REQUIRED'].includes(code) && error.message !== code ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...intakeRecovery, ...acknowledgementRecovery, ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;

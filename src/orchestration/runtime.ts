@@ -1276,12 +1276,18 @@ export class AgentOrchestrationRuntime {
         ...attempt, committed: taskActionResults.get(attempt.actionId) ?? Boolean(this.store.get(
           'SELECT action_id FROM task_commands WHERE conversation_id=? AND action_id=?', receipt.conversationId, attempt.actionId)),
       })));
+      const acknowledgementFailure = [...attemptedTaskActions.values()].find(attempt => !attempt.committed && attempt.errorCode === 'ACKNOWLEDGEMENT_REQUIRED');
       const uncommittedDispatch = semantic && taskMutationAttempted && (!committedTaskCommand || failedTaskActions) && !intakeDeferred && !newerInputPending() && !response.interrupted;
       if (uncommittedDispatch) {
         // Never turn a rejected tool call into a false promise of background work.
+        const thai = /[\u0e00-\u0e7f]/.test(input.text);
         surfaces.display = committedTaskCommand
           ? 'Some task commands were rejected. Other commands succeeded; please check /tasks for the current task status.'
-          : 'The requested task was not started or updated. Please try again.';
+          : acknowledgementFailure
+            ? acknowledgementFailure.tool === 'task_update'
+              ? thai ? 'ยังไม่ได้บันทึกการแก้ไขงาน เพราะคำขอนี้ยังไม่ได้รับการยืนยัน งานเดิมยังคงสถานะเดิมอยู่ กรุณายืนยันคำขอผ่านขั้นตอนรับเรื่องก่อน แล้วลองแก้ไขอีกครั้งค่ะ' : 'The task update was not applied because this request has not been acknowledged. The existing task remains unchanged. Complete the intake acknowledgement, then retry the update.'
+              : thai ? 'ยังไม่ได้เริ่มงาน เพราะคำขอนี้ยังไม่ได้รับการยืนยัน กรุณายืนยันคำขอผ่านขั้นตอนรับเรื่องก่อน แล้วลองอีกครั้งค่ะ' : 'The task was not started because this request has not been acknowledged. Complete the intake acknowledgement, then retry.'
+            : 'The requested task was not started or updated. Please try again.';
         surfaces.spoken = '';
       }
       const intakeSilent = semantic && !uncommittedDispatch && (intakeChoice?.mode==='wait' || intakeDeferred || (acknowledgementId && this.store.get("SELECT action_id FROM task_commands WHERE decision_id=? AND command_type IN ('spawn','update','answer') LIMIT 1",decision.decisionId)));
