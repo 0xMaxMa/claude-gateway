@@ -130,8 +130,10 @@ test.each(['Bash','mcp__browser__navigate','mcp__calendar__list','mcp__image__ge
  expect(JSON.stringify(publish.mock.calls)).not.toContain('999');
 });
 
+// The grandchild spins until the tree is stopped: a Windows CIM snapshot takes
+// seconds, so a time-boxed spin could end before the first sample.
 (['linux','darwin','win32'].includes(process.platform)?test:test.skip)('portable sampler sees a busy child of the supervised worker on this OS',async()=>{
- const child=spawn(process.execPath,['-e',"require('child_process').spawn(process.execPath,['-e','const end=Date.now()+5000;while(Date.now()<end){};setInterval(()=>{},1000)'],{stdio:'ignore'});process.stdout.write('ready');setInterval(()=>{},1000)"],{detached:workerSpawnDetached(),stdio:['ignore','pipe','ignore']});
+ const child=spawn(process.execPath,['-e',"require('child_process').spawn(process.execPath,['-e','for(;;){}'],{stdio:'ignore'});process.stdout.write('ready');setInterval(()=>{},1000)"],{detached:workerSpawnDetached(),stdio:['ignore','pipe','ignore']});
  try {
   await once(child.stdout!,'data');
   const sampler=new ProcessActivitySampler(()=>child.pid);
