@@ -53,7 +53,9 @@ export function probeCliSkills(command: string, args: string[], cwd: string, tim
         } catch {stop(new Error('CLI_SKILL_DISCOVERY_INVALID'));return;}
       }
     });
-    child.on('close', () => {clearTimeout(timer);if(killTimer)clearTimeout(killTimer);if(result && !failure)resolve(result);else reject(failure ?? new Error('CLI_SKILL_DISCOVERY_UNAVAILABLE'));});
+    // Windows SIGTERM is a no-op: a root that exits on stdin EOF within the grace
+    // period would otherwise leave its helpers running.
+    child.on('close', () => {clearTimeout(timer);if(killTimer)clearTimeout(killTimer);void terminateProbeTree(child, 'SIGKILL');if(result && !failure)resolve(result);else reject(failure ?? new Error('CLI_SKILL_DISCOVERY_UNAVAILABLE'));});
     child.stdin.write(JSON.stringify({type:'control_request',request_id:id,request:{subtype:'initialize'}})+'\n');
   });
 }

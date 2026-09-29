@@ -117,6 +117,34 @@ describe('terminateProbeTree', () => {
     expect(pids.every(pid => pid > 0)).toBe(true);
   }, 30000);
 
+  test('Windows: a probe that answers and exits on stdin EOF within the grace period still has its helpers killed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'probe-close-'));
+    const pidfile = join(dir, 'helper.pid');
+    let helper = 0;
+    // SIGTERM is a no-op on Windows; only the SIGKILL tree kill reaches the helper.
+    const signalGroup = jest.fn(async (_group: number, signal: string) => {
+      if (signal === 'SIGKILL') { helper = Number(readFileSync(pidfile, 'utf8')); try { process.kill(helper, 'SIGKILL'); } catch { /* already gone */ } }
+      return true;
+    });
+    setProcessPlatform(platform({ signalGroup, adopt: jest.fn(async () => '1000') }));
+    const probe = `const {spawn}=require('child_process');const fs=require('fs');
+      const h=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});h.unref();
+      fs.writeFileSync(${JSON.stringify(pidfile)},String(h.pid));
+      let b='';process.stdin.on('data',d=>{b+=d;const i=b.indexOf('\\n');if(i<0)return;const id=JSON.parse(b.slice(0,i)).request_id;
+        process.stdout.write(JSON.stringify({type:'control_response',response:{subtype:'success',request_id:id,response:{commands:[]}}})+'\\n');});
+      process.stdin.on('end',()=>process.exit(0));`;
+    try {
+      await expect(probeCliSkills(process.execPath, ['-e', probe], dir, 10000)).resolves.toEqual([]);
+      await until(() => signalGroup.mock.calls.some(([, signal]) => signal === 'SIGKILL'), 5000);
+      expect(signalGroup).toHaveBeenCalledTimes(1);
+      expect(signalGroup).toHaveBeenCalledWith(expect.any(Number), 'SIGKILL', '1000');
+      await until(() => !alive(helper));
+    } finally {
+      if (existsSync(pidfile)) { try { process.kill(Number(readFileSync(pidfile, 'utf8')), 'SIGKILL'); } catch { /* stopped */ } }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30000);
+
   test('unsupported hosts kill the root', async () => {
     setProcessPlatform(null);
     const c = child();
