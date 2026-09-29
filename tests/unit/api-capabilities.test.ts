@@ -74,7 +74,12 @@ describe('GET /api/v1/capabilities', () => {
     expect(res.body).toEqual(buildCapabilitiesResponse());
   });
 
-  it('requires an API key when keys are configured', async () => {
+  it('requires an API key when keys are configured — there is no keyless-open path', async () => {
+    // The router applies API-key auth unconditionally, so a request without a
+    // credential is rejected. The gateway mounts this router only when
+    // `gateway.api.keys` is non-empty (GatewayRouter's `api.keys?.length`
+    // guard), so a keyless install never reaches it at all — the endpoint 404s
+    // rather than serving open access. There is thus no open mode to assert.
     const res = await request(buildApp(apiKeys)).get('/api/v1/capabilities');
     expect(res.status).toBe(401);
   });
@@ -85,15 +90,5 @@ describe('GET /api/v1/capabilities', () => {
       .set({ Authorization: 'Bearer sk-wrong' });
     // createApiAuthMiddleware: 401 = no credential, 403 = credential did not match.
     expect(res.status).toBe(403);
-  });
-
-  it('requires an API key — there is no keyless-open path', async () => {
-    // The router applies API-key auth unconditionally. The gateway mounts it
-    // only when `gateway.api.keys` is non-empty (GatewayRouter's
-    // `api.keys?.length` guard), so a keyless install never reaches this router
-    // at all — the endpoint 404s rather than serving open access. There is thus
-    // no open mode to assert; a request without a credential is rejected.
-    const res = await request(buildApp(apiKeys)).get('/api/v1/capabilities');
-    expect(res.status).toBe(401);
   });
 });
