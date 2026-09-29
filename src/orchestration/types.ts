@@ -31,7 +31,11 @@ export interface CommandContext extends ExecutionCapabilities {
   epoch: number;
   actionId: string;
 }
-export interface TaskFailure { code: string; message: string; observedAt: number; provider?: import('./provider-admission').ProviderFailure; }
+/** Bounded, sanitized startup inventory-rejection evidence retained for PROFILE_INVENTORY_MISMATCH.
+ * `kind` distinguishes a missing inventory (no init tool list), a malformed one (present but not a
+ * list), and an unexpected one (a valid list carrying tools outside the resolved profile). */
+export interface InventoryRejection { kind: 'missing' | 'malformed' | 'unexpected'; rejectedTools: string[]; }
+export interface TaskFailure { code: string; message: string; observedAt: number; provider?: import('./provider-admission').ProviderFailure; inventory?: InventoryRejection; }
 export type WorkerOutcome = {type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure};
 export interface TaskResult {
   summary: string;

@@ -1353,13 +1353,15 @@ export class AgentOrchestrationRuntime {
       }
       // Retain a safe diagnostic code; never log prompts, credentials or provider bodies.
       failedTurn = true;
-      const failure = error as { code?: string; name?: string; stack?: string; rejectedTools?: string[] };
+      const failure = error as { code?: string; name?: string; stack?: string; rejectedTools?: string[]; inventoryKind?: string };
       const failureCode = /^[A-Za-z0-9_]{1,80}$/.test(failure?.code ?? '') ? failure.code! : failure?.name ?? 'ERROR';
       console.error('[orchestration] response failed', { sessionId, code: failureCode, origin: failure?.stack?.split('\n').slice(1, 4) });
       if (failureCode === 'PROFILE_INVENTORY_MISMATCH' && failure.rejectedTools && active.decision) {
         const rejected = this.store.get('SELECT conversation_id FROM conversation_decisions WHERE id=?', active.decision.decisionId);
-        if (rejected) this.store.transaction(() => this.store.appendEvent(String(rejected.conversation_id), 'response.inventory_rejected', { rejectedTools: failure.rejectedTools }));
-        console.error('[orchestration] rejected tool inventory', { sessionId, rejectedTools: failure.rejectedTools });
+        // Persist inventoryKind alongside the names so missing/malformed inventories (which carry
+        // no rejected names) are still self-describing without a placeholder string standing in.
+        if (rejected) this.store.transaction(() => this.store.appendEvent(String(rejected.conversation_id), 'response.inventory_rejected', { inventoryKind: failure.inventoryKind, rejectedTools: failure.rejectedTools }));
+        console.error('[orchestration] rejected tool inventory', { sessionId, inventoryKind: failure.inventoryKind, rejectedTools: failure.rejectedTools });
       }
       // The transcript passed the pre-spawn check but the CLI still refused to resume it
       // (deleted between the check and the spawn, or unreadable). Drop the stored id so the

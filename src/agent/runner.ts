@@ -124,20 +124,27 @@ export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 // the Opus 5 -> Opus 4.8 demotion above and the Fable 5.1 -> Fable 5 one.
 // Selection still stores the resolved id, so an agent already on Opus 5 stays
 // on claude-opus-5 — only `/model opus` from now on resolves to 5.5.
+//
+// Sonnet 5.5 (`claude-sonnet-5-5`) does the same on the Sonnet family: it takes
+// `sonnet` / `sonnet[1m]` and Sonnet 5 is demoted to `sonnet5` / `sonnet5[1m]`;
+// Sonnet 4.6 keeps `sonnet46`. An agent already on Sonnet 5 stays on
+// claude-sonnet-5.
 export const DEFAULT_MODELS: ModelConfig[] = [
   { id: 'claude-fable-5-1[1m]',      label: 'Fable 5.1 (1M)',   alias: 'fable[1m]',   contextWindow: 1000000 },
   { id: 'claude-fable-5[1m]',        label: 'Fable 5 (1M)',     alias: 'fable5[1m]',  contextWindow: 1000000 },
   { id: 'claude-opus-5-5[1m]',       label: 'Opus 5.5 (1M)',    alias: 'opus[1m]',    contextWindow: 1000000 },
   { id: 'claude-opus-5[1m]',         label: 'Opus 5 (1M)',      alias: 'opus5[1m]',   contextWindow: 1000000 },
   { id: 'claude-opus-4-8[1m]',       label: 'Opus 4.8 (1M)',    alias: 'opus48[1m]',  contextWindow: 1000000 },
-  { id: 'claude-sonnet-5[1m]',       label: 'Sonnet 5 (1M)',    alias: 'sonnet[1m]',  contextWindow: 1000000 },
+  { id: 'claude-sonnet-5-5[1m]',     label: 'Sonnet 5.5 (1M)',  alias: 'sonnet[1m]',  contextWindow: 1000000 },
+  { id: 'claude-sonnet-5[1m]',       label: 'Sonnet 5 (1M)',    alias: 'sonnet5[1m]', contextWindow: 1000000 },
   { id: 'claude-fable-5-1',          label: 'Fable 5.1',        alias: 'fable',       contextWindow: 200000 },
   { id: 'claude-fable-5',            label: 'Fable 5',          alias: 'fable5',      contextWindow: 200000 },
   { id: 'claude-opus-5-5',           label: 'Opus 5.5',         alias: 'opus',        contextWindow: 200000 },
   { id: 'claude-opus-5',             label: 'Opus 5',           alias: 'opus5',       contextWindow: 200000 },
   { id: 'claude-opus-4-8',           label: 'Opus 4.8',         alias: 'opus48',      contextWindow: 200000 },
   { id: 'claude-opus-4-6',           label: 'Opus 4.6',         alias: 'opus46',      contextWindow: 200000 },
-  { id: 'claude-sonnet-5',           label: 'Sonnet 5',         alias: 'sonnet',      contextWindow: 200000 },
+  { id: 'claude-sonnet-5-5',         label: 'Sonnet 5.5',       alias: 'sonnet',      contextWindow: 200000 },
+  { id: 'claude-sonnet-5',           label: 'Sonnet 5',         alias: 'sonnet5',     contextWindow: 200000 },
   { id: 'claude-sonnet-4-6',         label: 'Sonnet 4.6',       alias: 'sonnet46',    contextWindow: 200000 },
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5',        alias: 'haiku',       contextWindow: 200000 },
   { id: 'gpt-6-sol[1m]',             label: 'GPT 6 Sol',        alias: 'gpt6sol',     contextWindow: 1050000 },
@@ -3655,6 +3662,16 @@ export class AgentRunner extends EventEmitter {
     this.pendingRestarts.add(chatId);
   }
 
+  /**
+   * Format the web→channel echo. Attribute it to the sender when known so
+   * multi-user web messages are distinguishable in the channel; fall back to the
+   * bare prefix when no sender name is available (senderName is persisted to
+   * history on the adjacent line either way).
+   */
+  private webEchoText(message: string, senderName: string | undefined): string {
+    return senderName ? `📱 Web (${senderName}): ${message}` : '📱 Web: ' + message;
+  }
+
   private writeAutoForward(chatId: string, text: string, format: 'text' | 'html' = 'text', forceDeliver = false): void {
     // LINE has no .forward consumer — route through LineReplyManager's push path.
     if (this.channelFor(chatId) === 'line') {
@@ -5748,6 +5765,23 @@ export class AgentRunner extends EventEmitter {
       threadKey: String(rows[0]?.thread_key ?? ''), principalId: opts.principalId },
       text: message, requestId, trustedChannelMember: true, metadata: { senderName, senderId: opts.principalId } },
       { execute: opts.allowTools ?? false, writeMemory: false });
+    // Echo the web-UI message back to the originating channel so its users see
+    // what was typed from the web (fixes the one-sided conversation on every
+    // channel the endpoint serves, not just Telegram). Placed after the
+    // validation above AND after submitInput has accepted the input into the
+    // store, so a rejected request — whether from validation (Authenticated
+    // principal, Ambiguous/mismatched session, Session not found) or from
+    // admission (QUEUE_FULL, ORCHESTRATION_CLOSING thrown by submitInput) —
+    // sends no phantom echo. channelSourceMap is set first so writeAutoForward
+    // routes to the right channel receiver — the orchestrated path never
+    // reaches the legacy set. forceDeliver=true (null turnId) because the echo
+    // is standalone text no `.replied` marker covers: without it the entry
+    // carries readCurrentTurnId(), which a concurrent channel turn's marker (or
+    // a stale one) with the same turn id would dedup-swallow — defeating the
+    // one-sided-conversation fix. Same convention as the socket-drop notice
+    // (2706) and the reply-failure fallback (3738-3742).
+    this.channelSourceMap.set(rawChatId, channel);
+    this.writeAutoForward(rawChatId, this.webEchoText(message, senderName), 'text', true);
     const turn = this.turnStreams.start(turnStreamKey(channel, sessionId), requestId);
     const sink = callbackSink(callbacks); turn.attach(sink, 0);
     const displayed = new Map<string, string>();
@@ -5830,6 +5864,16 @@ export class AgentRunner extends EventEmitter {
 
     // Channel sessions use agent-level model (not per-session)
     const session = await this.getOrSpawnSession(rawChatId, channel, sessionId);
+
+    // Echo the web-UI message back to the originating channel so its users see
+    // what was typed from the web (fixes the one-sided conversation on every
+    // channel the endpoint serves, not just Telegram). Placed after
+    // getOrSpawnSession so a rejected request or a failed spawn sends no phantom
+    // echo. channelSourceMap was set just above, so writeAutoForward routes to
+    // the right channel receiver. forceDeliver=true (null turnId): see the
+    // orchestrated path above — the echo is standalone text no `.replied` marker
+    // covers, so a same-turn-id marker must not dedup it away.
+    this.writeAutoForward(rawChatId, this.webEchoText(message, senderName), 'text', true);
 
     // Persist user message (Layer 1 session JSON + Layer 2 history DB)
     const uiUserTs = Date.now();
