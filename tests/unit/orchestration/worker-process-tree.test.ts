@@ -7,8 +7,8 @@ import { TaskService } from '../../../src/orchestration/tasks/service';
 import { TaskBridge } from '../../../src/orchestration/bridge';
 import { TaskWorkspaces } from '../../../src/orchestration/tasks/workspace';
 import { ClaudeWorkerDriver } from '../../../src/orchestration/tasks/driver';
-import * as supervisor from '../../../src/orchestration/process-supervisor';
 import { liveGroupMembers, processSupervisorSupported } from '../../../src/orchestration/process-supervisor';
+import * as platforms from '../../../src/orchestration/process-platform';
 import { setProcessPlatform } from '../../../src/orchestration/process-platform';
 import type { TaskAttempt } from '../../../src/orchestration/types';
 import { AgentConfig, GatewayConfig } from '../../../src/types';
@@ -80,7 +80,7 @@ test('a 60KB system prompt spawns on every OS (through a private file on Windows
 }, 60000);
 
 test('a command-line-limited host writes the prompt file before spawn and removes it with the session', async () => {
-  const limited = jest.spyOn(supervisor, 'commandLineLimited').mockReturnValue(true);
+  const limited = jest.spyOn(platforms, 'commandLineLimited').mockReturnValue(true);
   try {
     await fixture('complete', async ({ start, argsfile }) => {
       expect(await (await start()).result).toMatchObject({ type: 'completed' });

@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
-import { darwinPlatform, linuxPlatform, parseDarwinPs, parsePsCpuTicks, parseWindowsSnapshot, processPlatform, setProcessPlatform, windowsPlatform, windowsTree, type ProcessPlatform } from '../../../src/orchestration/process-platform';
-import { cleanupPersistedProcess, commandLineLimited, processSupervisorSupported, stopProcessGroup, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
+import { commandLineLimited, darwinPlatform, linuxPlatform, parseDarwinPs, parsePsCpuTicks, parseWindowsSnapshot, processPlatform, setProcessPlatform, windowsPlatform, windowsTree, type ProcessPlatform } from '../../../src/orchestration/process-platform';
+import { cleanupPersistedProcess, processSupervisorSupported, stopProcessGroup, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
+import { ProcessActivitySampler } from '../../../src/orchestration/process-activity';
 
 jest.mock('child_process', () => ({ ...jest.requireActual('child_process'), execFile: jest.fn() }));
 const execFileMock = execFile as unknown as jest.Mock;
@@ -12,28 +13,35 @@ function answer(table: (file: string, args: string[]) => string | undefined) {
   });
 }
 afterEach(() => { execFileMock.mockReset(); setProcessPlatform(undefined); jest.restoreAllMocks(); });
+const ORIGINAL_OS = process.platform;
+const asOs = (os: string) => { Object.defineProperty(process, 'platform', { value: os }); setProcessPlatform(undefined); };
+afterEach(() => { Object.defineProperty(process, 'platform', { value: ORIGINAL_OS }); });
 
 describe('platform selection', () => {
   test('each supported OS gets its own backend; others have none', () => {
-    const original = process.platform;
-    try {
-      for (const [os, name] of [['linux', 'linux'], ['darwin', 'darwin'], ['win32', 'win32'], ['freebsd', undefined]] as const) {
-        Object.defineProperty(process, 'platform', { value: os });
-        setProcessPlatform(undefined);
-        expect(processPlatform()?.name).toBe(name);
-        expect(processSupervisorSupported()).toBe(Boolean(name));
-      }
-    } finally { Object.defineProperty(process, 'platform', { value: original }); }
+    asOs('linux'); expect(processPlatform()).toBe(linuxPlatform);
+    asOs('darwin'); expect(processPlatform()).toBe(darwinPlatform);
+    asOs('win32'); expect(processPlatform()).toMatchObject({ detachWorkers: false, pollMs: 500 });
+    for (const os of ['linux', 'darwin', 'win32']) { asOs(os); expect(processSupervisorSupported()).toBe(true); }
+    asOs('freebsd'); expect(processPlatform()).toBeUndefined(); expect(processSupervisorSupported()).toBe(false);
   });
   test('POSIX workers lead a process group; Windows workers stay attached to the hidden console', () => {
     for (const [platform, detached] of [[linuxPlatform, true], [darwinPlatform, true], [windowsPlatform(), false]] as const) {
       setProcessPlatform(platform);
       expect(workerSpawnDetached()).toBe(detached);
-      expect(commandLineLimited()).toBe(!detached);
     }
-    setProcessPlatform(null);
-    expect(workerSpawnDetached()).toBe(false);
-    expect(commandLineLimited()).toBe(false);
+  });
+  test('without a supervisor, spawns keep the POSIX detached default; only Windows stays attached', () => {
+    asOs('freebsd'); expect(workerSpawnDetached()).toBe(true);
+    asOs('win32'); setProcessPlatform(null); expect(workerSpawnDetached()).toBe(false);
+  });
+  test('command-line length is an OS limit, independent of the selected supervisor', () => {
+    asOs('win32');
+    for (const platform of [null, linuxPlatform, windowsPlatform()]) { setProcessPlatform(platform); expect(commandLineLimited()).toBe(true); }
+    for (const os of ['linux', 'darwin', 'freebsd']) {
+      asOs(os);
+      for (const platform of [null, windowsPlatform()]) { setProcessPlatform(platform); expect(commandLineLimited()).toBe(false); }
+    }
   });
 });
 
@@ -51,8 +59,10 @@ describe('darwin (ps + sysctl)', () => {
     expect(parsePsCpuTicks('2-00:00:01.00')).toBe(2 * 8640000 + 100);
     expect(parsePsCpuTicks('garbage')).toBe(0);
   });
-  test('ps rows keep lstart as the start identity', () => {
+  test('ps rows keep lstart as the start identity, with an optional trailing comm', () => {
     expect(parseDarwinPs(PS).get(101)).toEqual({ pid: 101, parent: 100, group: 100, state: 'S', start: 'Mon Sep 28 10:00:01 2026', cpu: 6225 });
+    expect(parseDarwinPs('  101   100   100 S       1:02.25 Mon Sep  8 10:00:01 2026 /Applications/My App/claude').get(101))
+      .toEqual({ pid: 101, parent: 100, group: 100, state: 'S', start: 'Mon Sep 8 10:00:01 2026', cpu: 6225, command: '/Applications/My App/claude' });
   });
   test('group membership excludes zombies and other groups; ps failure is unprovable', async () => {
     answer((file, args) => file === 'ps' && args.join(' ') === '-A -o pid=,pgid=,stat=' ? '100 100 Ss\n101 100 S\n102 100 Z\n200 200 S\n' : undefined);
@@ -61,32 +71,35 @@ describe('darwin (ps + sysctl)', () => {
     expect(await darwinPlatform.groupMembers(100)).toBeUndefined();
   });
   test('fingerprint needs a live group leader and a boot session', async () => {
-    answer((file, args) => file === 'sysctl' ? 'BOOT-UUID\n' : file === 'ps' && args[0] === '-p' ? PS.split('\n').find(line => line.trim().startsWith(args[1] + ' ')) : undefined);
-    expect(await darwinPlatform.fingerprint(100)).toEqual({ bootId: 'BOOT-UUID', startTicks: 'Mon Sep 28 10:00:00 2026' });
+    answer((file, args) => file === 'sysctl' ? 'BOOT-UUID\n' : file === 'ps' && args[0] === '-p' && args[3].endsWith(',comm=')
+      ? PS.split('\n').filter(line => line.trim().startsWith(args[1] + ' ')).map(line => `${line} /usr/local/bin/claude`)[0] : undefined);
+    expect(await darwinPlatform.fingerprint(100)).toEqual({ bootId: 'BOOT-UUID', startTicks: 'Mon Sep 28 10:00:00 2026|/usr/local/bin/claude' });
     expect(await darwinPlatform.fingerprint(101)).toBeUndefined(); // not a group leader
     expect(await darwinPlatform.fingerprint(102)).toBeUndefined(); // zombie (and not a leader)
     expect(await darwinPlatform.fingerprint(999)).toBeUndefined(); // ps exits 1
   });
   // lstart has 1s resolution. A PID reused inside the same second is still
   // rejected unless it also leads its own group (macOS PIDs wrap at 99999, so
-  // that needs ~100k spawns in one second); boot session and start must match.
-  test('persisted cleanup rejects PID reuse in the same lstart second, another second, or another boot', async () => {
+  // that needs ~100k spawns in one second) and runs the same executable; boot
+  // session and start must match too.
+  test('persisted cleanup rejects PID reuse in the same lstart second, another second, another executable, or another boot', async () => {
     const kill = jest.spyOn(process, 'kill').mockImplementation(() => true);
     setProcessPlatform(darwinPlatform);
-    const identity = { pid: 300, bootId: 'BOOT-A', startTicks: 'Mon Sep 28 10:00:00 2026' };
+    const identity = { pid: 300, bootId: 'BOOT-A', startTicks: 'Mon Sep 28 10:00:00 2026|/usr/local/bin/claude' };
     const host = (row: string, boot = 'BOOT-A') => answer((file, args) => file === 'sysctl' ? boot + '\n'
       : file === 'ps' && args[0] === '-p' ? row : file === 'ps' ? row.replace(/^\s*(\d+)\s+\d+\s+(\d+)\s+(\S+).*$/, '$1 $2 $3') : undefined);
-    host('  300     1   250 S       0:00.01 Mon Sep 28 10:00:00 2026'); // same second, but not our group: ours is gone
+    host('  300     1   250 S       0:00.01 Mon Sep 28 10:00:00 2026 /usr/local/bin/claude'); // same second, but not our group: ours is gone
     expect(await cleanupPersistedProcess(identity)).toBe(true);
-    host('  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:01 2026'); // new leader, next second
+    host('  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:01 2026 /usr/local/bin/claude'); // new leader, next second
     expect(await cleanupPersistedProcess(identity)).toBe(false);
-    host('  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:00 2026', 'BOOT-B'); // same clock, another boot
+    host('  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:00 2026 /bin/sh'); // new leader, same second, other executable
+    expect(await cleanupPersistedProcess(identity)).toBe(false);
+    host('  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:00 2026 /usr/local/bin/claude', 'BOOT-B'); // same clock, another boot
     expect(await cleanupPersistedProcess(identity)).toBe(false);
     expect(kill).not.toHaveBeenCalled();
-    host('  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:00 2026'); // the original worker
     let alive = true;
     kill.mockImplementation(() => { alive = false; return true; });
-    answer((file, args) => file === 'sysctl' ? 'BOOT-A\n' : !alive ? '' : file === 'ps' && args[0] === '-p' ? '  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:00 2026' : '300 300 Ss');
+    answer((file, args) => file === 'sysctl' ? 'BOOT-A\n' : !alive ? '' : file === 'ps' && args[0] === '-p' ? '  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:00 2026 /usr/local/bin/claude' : '300 300 Ss');
     expect(await cleanupPersistedProcess(identity)).toBe(true);
     expect(kill).toHaveBeenCalledWith(-300, 'SIGTERM');
   });
@@ -184,7 +197,7 @@ describe('supervisor over a platform', () => {
   test('escalates to SIGKILL after the grace period and reports the final proof', async () => {
     const live = new Set([5, 6]);
     const signals: string[] = [];
-    const fake: ProcessPlatform = { name: 'darwin', detachWorkers: true, termGraceMs: 30, pollMs: 5, killSettleMs: 1,
+    const fake: ProcessPlatform = { detachWorkers: true, termGraceMs: 30, pollMs: 5, killSettleMs: 1,
       groupMembers: async () => [...live], fingerprint: async () => undefined, snapshot: async () => undefined,
       signalGroup: async (_group, signal) => { signals.push(signal); if (signal === 'SIGKILL') live.clear(); return true; } };
     setProcessPlatform(fake);
@@ -192,5 +205,22 @@ describe('supervisor over a platform', () => {
     expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
     setProcessPlatform(null);
     expect(await stopProcessGroup(5)).toBe(false);
+  });
+});
+
+describe('activity sampler ownership', () => {
+  // pid ppid creation(FILETIME) cpu(100ns) read write
+  const row = (pid: number, ppid: number, created: number, cpu = 0) => `${pid} ${ppid} ${created} ${cpu} 10 20`;
+  test('on Windows it uses the creation-time-checked tree: a reused parent PID is not counted, an orphaned grandchild is', async () => {
+    let rows: string[] = [];
+    answer(() => rows.join('\r\n'));
+    setProcessPlatform(windowsPlatform('pwsh-mock'));
+    const sampler = new ProcessActivitySampler(() => 10);
+    // 13 claims parent 10 but predates the worker: its real parent was an older process with that PID.
+    rows = [row(10, 4, 1000), row(11, 10, 1001), row(12, 11, 1002), row(13, 10, 900, 5_000_000)];
+    expect(await sampler.sample()).toMatchObject({ available: true, processCount: 3 });
+    // 11 exits; 12 keeps its dead parent's PID and must still be counted.
+    rows = [row(10, 4, 1000), row(12, 11, 1002, 3_000_000), row(13, 10, 900, 9_000_000)];
+    expect(await sampler.sample()).toMatchObject({ available: true, processCount: 2, childCpuTicksDelta: 30 });
   });
 });

@@ -12,7 +12,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { appendSystemPromptViaFile, RuntimeProfile, runtimeProfileArgs } from './runtime-profile';
 import { StringDecoder } from 'string_decoder';
-import { commandLineLimited, processSupervisorSupported, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
+import { processSupervisorSupported, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
+import { commandLineLimited } from '../orchestration/process-platform';
 import { gatewayCapacity } from '../orchestration/capacity';
 import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
@@ -1216,7 +1217,7 @@ export class SessionProcess extends EventEmitter {
         ...(ptyStreamSocketPath ? { PTY_SHELL_STREAM_SOCKET: ptyStreamSocketPath } : {}),
       },
       cwd: this.agentConfig.workspace,
-      ...(this.runtimeProfile?.role === 'worker' && workerSpawnDetached() ? { detached: true } : {}),
+      ...(this.runtimeProfile?.role === 'worker' && processSupervisorSupported() && workerSpawnDetached() ? { detached: true } : {}),
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }); } catch (error) { toolCapture?.close(); releaseCapacity(); throw error; }

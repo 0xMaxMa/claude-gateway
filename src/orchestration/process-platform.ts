@@ -5,14 +5,13 @@ import { readdir, readFile } from 'fs/promises';
 /** One process as seen by a platform snapshot. `start` is an opaque per-boot
  * start identity (Linux start ticks, macOS lstart, Windows creation FILETIME);
  * `cpu` is user+system time in 10ms ticks. */
-export interface ProcessRecord { pid: number; parent: number; group: number; state: string; start: string; cpu: number; read?: number; write?: number; }
+export interface ProcessRecord { pid: number; parent: number; group: number; state: string; start: string; cpu: number; read?: number; write?: number; command?: string; }
 export type Fingerprint = { bootId: string; startTicks: string };
 
 /** Everything the orchestration supervisor needs from the OS. A "group" is the
  * set of processes the gateway may prove stopped: the POSIX process group led by
  * a detached worker, or on Windows the process tree rooted at the worker. */
 export interface ProcessPlatform {
-  readonly name: 'linux' | 'darwin' | 'win32';
   /** Spawn the worker with `detached` so it leads its own process group. */
   readonly detachWorkers: boolean;
   readonly termGraceMs: number;
@@ -26,6 +25,10 @@ export interface ProcessPlatform {
   fingerprint(pid: number): Promise<Fingerprint | undefined>;
   /** Counters for every visible process; undefined when unavailable. */
   snapshot(): Promise<Map<number, ProcessRecord> | undefined>;
+  /** Processes owned by the worker rooted at `root`, when ownership is not the
+   * POSIX parent/process-group link. `known` maps pid->start of members owned
+   * at the previous sample, so orphaned descendants stay owned. */
+  tree?(snapshot: Map<number, ProcessRecord>, root: number, known: Map<number, string>): Map<number, string> | undefined;
   /** Linux enriches owned members with I/O counters and re-checks start identity. */
   refine?(member: ProcessRecord): Promise<boolean>;
 }
@@ -43,7 +46,7 @@ function run(file: string, args: string[], timeout = 10_000): Promise<string | u
 }
 
 export const linuxPlatform: ProcessPlatform = {
-  name: 'linux', detachWorkers: true, termGraceMs: 2000, pollMs: 25, killSettleMs: 50,
+  detachWorkers: true, termGraceMs: 2000, pollMs: 25, killSettleMs: 50,
   async groupMembers(group) {
     const members: number[] = [];
     try {
@@ -101,20 +104,22 @@ export function parsePsCpuTicks(value: string): number {
   const seconds = clock.split(':').reduce((total, part) => total * 60 + Number(part), 0) + Number(days) * 86400;
   return Number.isFinite(seconds) ? Math.round(seconds * 100) : 0;
 }
-/** `ps -o pid=,ppid=,pgid=,stat=,time=,lstart=`; lstart has spaces so it is last. */
+/** `ps -o pid=,ppid=,pgid=,stat=,time=,lstart=[,comm=]`. lstart is always five
+ * fields ("Mon Sep 28 10:00:01 2026"); an optional comm (may hold spaces) follows. */
 export function parseDarwinPs(output: string): Map<number, ProcessRecord> {
   const members = new Map<number, ProcessRecord>();
   for (const line of output.split('\n')) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(.+?)\s*$/.exec(line);
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)(?:\s+(.*?))?\s*$/.exec(line);
     if (!match) continue;
     const pid = Number(match[1]);
-    members.set(pid, { pid, parent: Number(match[2]), group: Number(match[3]), state: match[4], start: match[6].replace(/\s+/g, ' '), cpu: parsePsCpuTicks(match[5]) });
+    members.set(pid, { pid, parent: Number(match[2]), group: Number(match[3]), state: match[4], start: match[6].replace(/\s+/g, ' '), cpu: parsePsCpuTicks(match[5]),
+      ...(match[7] ? { command: match[7] } : {}) });
   }
   return members;
 }
 const PS_COLUMNS = 'pid=,ppid=,pgid=,stat=,time=,lstart=';
 export const darwinPlatform: ProcessPlatform = {
-  name: 'darwin', detachWorkers: true, termGraceMs: 2000, pollMs: 50, killSettleMs: 50,
+  detachWorkers: true, termGraceMs: 2000, pollMs: 50, killSettleMs: 50,
   async groupMembers(group) {
     const output = await run('ps', ['-A', '-o', 'pid=,pgid=,stat=']);
     if (output === undefined) return undefined;
@@ -128,10 +133,13 @@ export const darwinPlatform: ProcessPlatform = {
   async signalGroup(group, signal) { return signalPosixGroup(group, signal); },
   async fingerprint(pid) {
     // ps exits 1 for an unknown pid; that is "no identity", not an error.
-    const [output, bootId] = await Promise.all([run('ps', ['-p', String(pid), '-o', PS_COLUMNS]), run('sysctl', ['-n', 'kern.bootsessionuuid'])]);
+    const [output, bootId] = await Promise.all([run('ps', ['-p', String(pid), '-o', `${PS_COLUMNS},comm=`]), run('sysctl', ['-n', 'kern.bootsessionuuid'])]);
     const record = output === undefined ? undefined : parseDarwinPs(output).get(pid);
-    if (!record || record.group !== pid || record.state[0] === 'Z' || !bootId?.trim()) return undefined;
-    return { bootId: bootId.trim(), startTicks: record.start };
+    if (!record?.command || record.group !== pid || record.state[0] === 'Z' || !bootId?.trim()) return undefined;
+    // ps offers no start time finer than lstart's 1s, so a PID reused within the
+    // same second would match on start alone; the executable (and the group-leader
+    // check above) must match too. Only this per-attempt call pays for comm.
+    return { bootId: bootId.trim(), startTicks: `${record.start}|${record.command}` };
   },
   async snapshot() {
     const output = await run('ps', ['-A', '-o', PS_COLUMNS]);
@@ -210,7 +218,7 @@ export function windowsPlatform(powershell = 'powershell.exe'): ProcessPlatform 
   };
   return {
     // Each poll is a PowerShell WMI snapshot (0.4-4s), so poll far less often than POSIX.
-    name: 'win32', detachWorkers: false, termGraceMs: 2000, pollMs: 500, killSettleMs: 500,
+    detachWorkers: false, termGraceMs: 2000, pollMs: 500, killSettleMs: 500,
     async groupMembers(group, rootStart) { const owned = await tree(group, rootStart); return owned && [...owned.keys()]; },
     // Console processes cannot be asked to exit politely, so both signals terminate
     // the whole tree: taskkill walks it while the root lives, then every owned
@@ -233,6 +241,7 @@ export function windowsPlatform(powershell = 'powershell.exe'): ProcessPlatform 
       return { bootId: boot.trim(), startTicks: record.start };
     },
     snapshot,
+    tree: (processes, root, known) => windowsTree(processes, root, known),
   };
 }
 
@@ -242,5 +251,8 @@ export function processPlatform(): ProcessPlatform | undefined {
   if (selected === undefined) selected = process.platform === 'linux' ? linuxPlatform : process.platform === 'darwin' ? darwinPlatform : process.platform === 'win32' ? windowsPlatform() : null;
   return selected ?? undefined;
 }
+/** Windows caps a whole command line at 32767 characters. An OS property, not a
+ * supervisor one, so it holds even where no supervisor is selected. */
+export function commandLineLimited(): boolean { return process.platform === 'win32'; }
 /** Test hook: substitute a platform (e.g. a mocked Windows supervisor on Linux CI). */
 export function setProcessPlatform(platform: ProcessPlatform | null | undefined): void { selected = platform; }

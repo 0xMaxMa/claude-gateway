@@ -14,11 +14,13 @@ export interface ProcessSample {
 type Member = ProcessRecord;
 
 /** Read counters only, never argv/env/output. A process identity is PID + start time.
- * Descendants in new process groups are included while still linked to the root.
- * Detached/reparented children outside the original group cannot be proven here. */
+ * On POSIX, descendants in new process groups are included while still linked to
+ * the root; detached/reparented children outside the original group cannot be
+ * proven here. A platform with its own `tree` (Windows) decides ownership itself. */
 export class ProcessActivitySampler {
   private rootStart?: string;
   private previous?: Map<string, Member>;
+  private known = new Map<number, string>();
   constructor(private readonly pid: () => number | undefined, private readonly enabled = true) {}
   async sample(): Promise<ProcessSample> {
     const unavailable: ProcessSample = { observedAt: Date.now(), available: false };
@@ -31,11 +33,18 @@ export class ProcessActivitySampler {
       const root = members.get(pid);
       if (!root || ['Z','X'].includes(root.state[0]) || (this.rootStart && this.rootStart !== root.start)) return unavailable;
       this.rootStart = root.start;
-      const owned = new Set([pid]);
-      let changed = true;
-      while (changed) {
-        changed = false;
-        for (const m of members.values()) if (!owned.has(m.pid) && (owned.has(m.parent) || (root.group === pid && m.group === pid))) { owned.add(m.pid); changed = true; }
+      let owned = new Set([pid]);
+      if (platform.tree) {
+        const tree = platform.tree(members, pid, this.known);
+        if (!tree) return unavailable;
+        this.known = tree;
+        owned = new Set(tree.keys());
+      } else {
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (const m of members.values()) if (!owned.has(m.pid) && (owned.has(m.parent) || (root.group === pid && m.group === pid))) { owned.add(m.pid); changed = true; }
+        }
       }
       const current = new Map<string, Member>();
       for (const id of owned) {
