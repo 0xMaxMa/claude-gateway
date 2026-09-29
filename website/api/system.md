@@ -162,7 +162,7 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/capabilities 
 {
   "version": "2.0.9",
   "capabilities": {
-    "cross_channel_message": ["telegram"]
+    "cross_channel_message": ["telegram", "discord", "line", "slack", "whatsapp", "whatsapp_cloud", "wechat"]
   }
 }
 ```
@@ -179,7 +179,7 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/capabilities 
 
 | Key | Value | Meaning |
 |-----|-------|---------|
-| `cross_channel_message` | `string[]` of channel ids | Cross-channel message injection is supported for sessions whose channel is in the array. Currently `["telegram"]`. |
+| `cross_channel_message` | `string[]` of channel ids | Cross-channel message injection is supported for sessions whose channel is in the array. Currently every channel the gateway supports: `["telegram", "discord", "line", "slack", "whatsapp", "whatsapp_cloud", "wechat"]` — the web→channel echo fires for all of them. |
 
 Channel identifiers are the gateway's canonical channel names — the same strings a
 session reports as its `channel` — drawn from `CHAT_CHANNELS` in

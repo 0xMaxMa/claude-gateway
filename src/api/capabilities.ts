@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { ApiKey } from '../types';
-import type { ChatChannel } from '../history/types';
+import { CHAT_CHANNELS, type ChatChannel } from '../history/types';
 import { createApiAuthMiddleware } from './auth';
 import { GATEWAY_VERSION } from './gateway-version';
 
@@ -25,9 +25,17 @@ import { GATEWAY_VERSION } from './gateway-version';
  * injected text is delivered into the channel conversation and echoed back to
  * the channel's users. Values are the gateway's own channel identifiers
  * ({@link ChatChannel}), the same strings a session reports as its channel.
- * Only list a channel once the echo path actually works for it.
+ *
+ * The web→channel echo (runner.ts `writeAutoForward`, reached from
+ * `sendMessageToSession`/`sendOrchestratedChannel`) has a delivery branch for
+ * every {@link CHAT_CHANNELS} member and, since the echo's telegram-only guard
+ * was removed (#539, "echo web channel messages back to the originating
+ * channel (all channels)"), fires for every channel — so this manifest lists
+ * all of them. Deriving from CHAT_CHANNELS keeps it in lockstep: a new channel
+ * added there (which must also gain a `writeAutoForward` branch) is advertised
+ * automatically, and nothing here can drift out of the canonical union.
  */
-export const CROSS_CHANNEL_MESSAGE_CHANNELS: readonly ChatChannel[] = ['telegram'];
+export const CROSS_CHANNEL_MESSAGE_CHANNELS: readonly ChatChannel[] = [...CHAT_CHANNELS];
 
 export interface CapabilitiesResponse {
   /** Gateway version from package.json. Informational — clients should key off `capabilities`, not parse this. */
