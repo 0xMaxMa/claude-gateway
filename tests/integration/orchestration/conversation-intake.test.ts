@@ -288,6 +288,7 @@ test('web continuation of a channel chat streams the acknowledgement before the 
   const runner = Object.assign(Object.create(AgentRunner.prototype), {
     agentConfig:{...f.agent,orchestration:{...f.agent.orchestration,enabled:true,channels:['telegram']}},
     sessionStore:f.sessions,orchestration:f.runtime,turnStreams:new TurnStreamRegistry(),
+    channelSourceMap:new Map(),
   });
   try {
     await f.send('Hello');
