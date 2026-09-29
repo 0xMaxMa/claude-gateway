@@ -124,20 +124,27 @@ export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 // the Opus 5 -> Opus 4.8 demotion above and the Fable 5.1 -> Fable 5 one.
 // Selection still stores the resolved id, so an agent already on Opus 5 stays
 // on claude-opus-5 — only `/model opus` from now on resolves to 5.5.
+//
+// Sonnet 5.5 (`claude-sonnet-5-5`) does the same on the Sonnet family: it takes
+// `sonnet` / `sonnet[1m]` and Sonnet 5 is demoted to `sonnet5` / `sonnet5[1m]`;
+// Sonnet 4.6 keeps `sonnet46`. An agent already on Sonnet 5 stays on
+// claude-sonnet-5.
 export const DEFAULT_MODELS: ModelConfig[] = [
   { id: 'claude-fable-5-1[1m]',      label: 'Fable 5.1 (1M)',   alias: 'fable[1m]',   contextWindow: 1000000 },
   { id: 'claude-fable-5[1m]',        label: 'Fable 5 (1M)',     alias: 'fable5[1m]',  contextWindow: 1000000 },
   { id: 'claude-opus-5-5[1m]',       label: 'Opus 5.5 (1M)',    alias: 'opus[1m]',    contextWindow: 1000000 },
   { id: 'claude-opus-5[1m]',         label: 'Opus 5 (1M)',      alias: 'opus5[1m]',   contextWindow: 1000000 },
   { id: 'claude-opus-4-8[1m]',       label: 'Opus 4.8 (1M)',    alias: 'opus48[1m]',  contextWindow: 1000000 },
-  { id: 'claude-sonnet-5[1m]',       label: 'Sonnet 5 (1M)',    alias: 'sonnet[1m]',  contextWindow: 1000000 },
+  { id: 'claude-sonnet-5-5[1m]',     label: 'Sonnet 5.5 (1M)',  alias: 'sonnet[1m]',  contextWindow: 1000000 },
+  { id: 'claude-sonnet-5[1m]',       label: 'Sonnet 5 (1M)',    alias: 'sonnet5[1m]', contextWindow: 1000000 },
   { id: 'claude-fable-5-1',          label: 'Fable 5.1',        alias: 'fable',       contextWindow: 200000 },
   { id: 'claude-fable-5',            label: 'Fable 5',          alias: 'fable5',      contextWindow: 200000 },
   { id: 'claude-opus-5-5',           label: 'Opus 5.5',         alias: 'opus',        contextWindow: 200000 },
   { id: 'claude-opus-5',             label: 'Opus 5',           alias: 'opus5',       contextWindow: 200000 },
   { id: 'claude-opus-4-8',           label: 'Opus 4.8',         alias: 'opus48',      contextWindow: 200000 },
   { id: 'claude-opus-4-6',           label: 'Opus 4.6',         alias: 'opus46',      contextWindow: 200000 },
-  { id: 'claude-sonnet-5',           label: 'Sonnet 5',         alias: 'sonnet',      contextWindow: 200000 },
+  { id: 'claude-sonnet-5-5',         label: 'Sonnet 5.5',       alias: 'sonnet',      contextWindow: 200000 },
+  { id: 'claude-sonnet-5',           label: 'Sonnet 5',         alias: 'sonnet5',     contextWindow: 200000 },
   { id: 'claude-sonnet-4-6',         label: 'Sonnet 4.6',       alias: 'sonnet46',    contextWindow: 200000 },
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5',        alias: 'haiku',       contextWindow: 200000 },
   { id: 'gpt-6-sol[1m]',             label: 'GPT 6 Sol',        alias: 'gpt6sol',     contextWindow: 1050000 },

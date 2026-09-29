@@ -6,14 +6,15 @@ import type { ModelConfig } from '../../src/types';
 /**
  * Model registry invariants.
  *
- * The set of selectable models lives in TWO places that must stay in lockstep:
+ * The set of selectable models lives in THREE places that must stay in lockstep:
  *   1. DEFAULT_MODELS (src/agent/runner.ts) — the fallback used when a config has
  *      no gateway.models key.
  *   2. config.template.json gateway.models — what fresh installs get, and the
  *      source migrateModels() merges into existing installs.
+ *   3. AVAILABLE_MODELS in the Telegram receiver — see the last describe block.
  *
  * If they drift, some install paths see a model the others don't. These tests
- * pin Opus 5 as a first-class model in both, and guard the "bare alias = newest"
+ * pin each current family head as a first-class model, and guard the "bare alias = newest"
  * convention so `opus`/`sonnet`/`fable` always resolve to the latest of each
  * family. They read the REAL template so a hand-edit that updates one file but
  * not the other goes red here.
@@ -79,6 +80,35 @@ describe('model registry — Opus 5.5 is a first-class model', () => {
   });
 });
 
+describe('model registry — Sonnet 5.5 is a first-class model', () => {
+  it('DEFAULT_MODELS includes both Sonnet 5.5 variants with correct context windows', () => {
+    expect(byId(DEFAULT_MODELS, 'claude-sonnet-5-5')?.contextWindow).toBe(200000);
+    expect(byId(DEFAULT_MODELS, 'claude-sonnet-5-5[1m]')?.contextWindow).toBe(1000000);
+  });
+
+  it('the template includes both Sonnet 5.5 variants with correct context windows', () => {
+    const models = templateModels();
+    expect(byId(models, 'claude-sonnet-5-5')?.contextWindow).toBe(200000);
+    expect(byId(models, 'claude-sonnet-5-5[1m]')?.contextWindow).toBe(1000000);
+  });
+
+  it('the bare `sonnet` alias resolves to Sonnet 5.5 in both registries', () => {
+    expect(byAlias(DEFAULT_MODELS, 'sonnet')?.id).toBe('claude-sonnet-5-5');
+    expect(byAlias(DEFAULT_MODELS, 'sonnet[1m]')?.id).toBe('claude-sonnet-5-5[1m]');
+    expect(byAlias(templateModels(), 'sonnet')?.id).toBe('claude-sonnet-5-5');
+    expect(byAlias(templateModels(), 'sonnet[1m]')?.id).toBe('claude-sonnet-5-5[1m]');
+  });
+
+  it('Sonnet 5 is demoted to the `sonnet5` alias and Sonnet 4.6 keeps `sonnet46`', () => {
+    expect(byAlias(DEFAULT_MODELS, 'sonnet5')?.id).toBe('claude-sonnet-5');
+    expect(byAlias(DEFAULT_MODELS, 'sonnet5[1m]')?.id).toBe('claude-sonnet-5[1m]');
+    expect(byAlias(templateModels(), 'sonnet5')?.id).toBe('claude-sonnet-5');
+    expect(byAlias(templateModels(), 'sonnet5[1m]')?.id).toBe('claude-sonnet-5[1m]');
+    expect(byAlias(DEFAULT_MODELS, 'sonnet46')?.id).toBe('claude-sonnet-4-6');
+    expect(byAlias(templateModels(), 'sonnet46')?.id).toBe('claude-sonnet-4-6');
+  });
+});
+
 describe('model registry — Fable 5.1 is a first-class model', () => {
   it('DEFAULT_MODELS includes both Fable 5.1 variants with correct context windows', () => {
     expect(byId(DEFAULT_MODELS, 'claude-fable-5-1')?.contextWindow).toBe(200000);
@@ -100,7 +130,7 @@ describe('model registry — Fable 5.1 is a first-class model', () => {
 
   /**
    * The "bare alias = newest of the family" convention, applied to Fable the
-   * same way `opus` -> Opus 5 and `sonnet` -> Sonnet 5 already are.
+   * same way `opus` -> Opus 5.5 and `sonnet` -> Sonnet 5.5 are.
    *
    * Worth knowing while reading this: `fable` therefore names a model not
    * every provider has entitled yet (ours 400s on it until
@@ -149,8 +179,10 @@ describe('model registry — DEFAULT_MODELS and template stay in sync', () => {
   });
 
   it('no two models share an alias (aliases are unambiguous)', () => {
-    const aliases = DEFAULT_MODELS.map((m) => m.alias);
-    expect(new Set(aliases).size).toBe(aliases.length);
+    for (const models of [DEFAULT_MODELS, templateModels()]) {
+      const aliases = models.map((m) => m.alias);
+      expect(new Set(aliases).size).toBe(aliases.length);
+    }
   });
 });
 
@@ -197,7 +229,7 @@ describe('model registry — Telegram fallback list stays in sync', () => {
     expect(telegramIds).toEqual(codeIds);
   });
 
-  it('maps each alias identically to DEFAULT_MODELS (incl. opus -> Opus 5.5)', () => {
+  it('maps each alias identically to DEFAULT_MODELS (incl. opus -> Opus 5.5, sonnet -> Sonnet 5.5)', () => {
     const codeMap = new Map(DEFAULT_MODELS.map((m) => [m.id, m.alias]));
     for (const m of telegramFallbackModels()) {
       expect(m.alias).toBe(codeMap.get(m.id));
@@ -205,5 +237,7 @@ describe('model registry — Telegram fallback list stays in sync', () => {
     // Explicit anchor for the repoint the user asked us to verify everywhere.
     const opus = telegramFallbackModels().find((m) => m.alias === 'opus');
     expect(opus?.id).toBe('claude-opus-5-5');
+    const sonnet = telegramFallbackModels().find((m) => m.alias === 'sonnet');
+    expect(sonnet?.id).toBe('claude-sonnet-5-5');
   });
 });
