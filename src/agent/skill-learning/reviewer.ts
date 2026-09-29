@@ -13,7 +13,7 @@
  * no real model.
  */
 
-import { resolveClaudeBin, pathWithNativeBin } from '../../session/claude-bin';
+import { claudeCommand, pathWithNativeBin } from '../../session/claude-bin';
 import type { ReviewProposal, ResolvedSkillLearningCfg } from './types';
 
 /** Hard ceiling on a reviewer spawn — it must never wedge. */
@@ -91,8 +91,7 @@ function buildPrompt(input: ReviewerInput): string {
 export function makeClaudeSpawn(reviewModel: string): ClaudeSpawnFn {
   return async (extraArgs: string[], stdin: string) => {
     const { spawn } = await import('child_process');
-    const claudeBinRaw = process.env.CLAUDE_BIN ?? resolveClaudeBin().bin;
-    const [claudeBin, ...binArgs] = claudeBinRaw.split(' ');
+    const { command: claudeBin, args: binArgs } = claudeCommand();
     const args = [...binArgs, '-p', '--output-format', 'json', '--model', reviewModel, ...extraArgs,
       '--tools', '', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: {} }),
       '--settings', JSON.stringify({ disableAllHooks: true })];

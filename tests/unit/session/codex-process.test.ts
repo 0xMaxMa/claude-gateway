@@ -17,10 +17,10 @@ import { TurnUsageCollector } from '../../../src/orchestration/token-usage';
 import { providerFailure } from '../../../src/orchestration/provider-admission';
 import { startProcessTurn } from '../../../src/orchestration/process-turn';
 import { prepareContainerProfile, containerNode, stopContainerProfile } from '../../../src/orchestration/container';
-import { stopProcessGroup } from '../../../src/orchestration/process-supervisor';
+import { stopProcessGroup, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
 jest.mock('../../../src/orchestration/container', () => ({ ...jest.requireActual('../../../src/orchestration/container'), prepareContainerProfile: jest.fn(), containerNode: jest.fn(), stopContainerProfile: jest.fn().mockResolvedValue(true) }));
 jest.mock('child_process', () => ({ spawn: jest.fn() }));
-jest.mock('../../../src/orchestration/process-supervisor', () => ({ stopProcessGroup: jest.fn().mockResolvedValue(true) }));
+jest.mock('../../../src/orchestration/process-supervisor', () => ({ recordProcessRoot: jest.fn(), stopProcessGroup: jest.fn().mockResolvedValue(true), workerSpawnDetached: jest.fn().mockReturnValue(true) }));
 const thread = '12345678-1234-1234-1234-123456789abc';
 const tick = () => new Promise(resolve => setImmediate(resolve));
 let directory: string;
@@ -64,6 +64,8 @@ test('uses private Responses configuration, MCP ticket env and sandbox without c
   await launch();
   const [bin, args, settings] = (spawn as jest.Mock).mock.calls[0];
   expect(bin).toBe('codex'); expect(args.slice(-3)).toEqual(['app-server', '--listen', 'stdio://']);
+  // Host spawns take process-group leadership from the platform supervisor (attached on Windows).
+  expect(workerSpawnDetached).toHaveBeenCalled(); expect(settings.detached).toBe(true);
   expect(args).toEqual(expect.arrayContaining(['notify=[]', 'features.hooks=false', 'features.plugins=false', 'features.apps=false', 'features.multi_agent=false']));
   expect(JSON.stringify(args)).not.toMatch(/secret/);
   const config = await readFile(join(settings.env.CODEX_HOME, 'config.toml'), 'utf8');

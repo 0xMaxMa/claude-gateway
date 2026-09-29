@@ -18,6 +18,7 @@ import { ScreenModel, MenuOption, parseMenuChoice, formatMenuPrompt, formatPermi
 import { PtyHost } from './pty-host';
 import { TranscriptTailer, AssistantRecord, UsageInfo } from './tailer';
 import { ProtocolEmitter } from './emitter';
+import { parseClaudeBin } from '../session/claude-bin';
 import { preTrustWorkspace, checkAuthStatus } from './trust';
 import { decideMenuCancel } from './menu-cancel';
 import { classifyPhantomDraft, unsubmittedDraft as discountPhantom } from './draft-phantom';
@@ -225,11 +226,11 @@ class Driver {
   private readonly emitter = new ProtocolEmitter();
   private readonly args = translateArgs(process.argv.slice(2));
   // CLAUDE_REAL_BIN may be multi-word (e.g. "node /path/cli.js"), same as CLAUDE_BIN.
-  private readonly realBinParts = (process.env.CLAUDE_REAL_BIN ?? 'claude').split(' ');
+  private readonly realBin = parseClaudeBin(process.env.CLAUDE_REAL_BIN ?? 'claude');
 
   start(): void {
     // Fail fast if Claude is not authenticated — avoids getting stuck on a login dialog.
-    const claudeBin = this.realBinParts[0];
+    const claudeBin = this.realBin.command;
     const auth = checkAuthStatus(claudeBin);
     if (!auth.loggedIn) {
       logError('Claude is not authenticated. Run `claude login` on the server before starting the gateway.');
@@ -243,8 +244,8 @@ class Driver {
     // Pre-trust the workspace so the trust-folder dialog never appears.
     preTrustWorkspace(process.cwd());
 
-    const [realBin, ...realBinArgs] = this.realBinParts;
-    logDebug(`session=${this.args.sessionId} bin=${this.realBinParts.join(' ')} args=${this.args.claudeArgs.join(' ')}`);
+    const { command: realBin, args: realBinArgs } = this.realBin;
+    logDebug(`session=${this.args.sessionId} bin=${[realBin, ...realBinArgs].join(' ')} args=${this.args.claudeArgs.join(' ')}`);
 
     const streamSocketPath = process.env.PTY_SHELL_STREAM_SOCKET;
     if (streamSocketPath) {

@@ -5,25 +5,20 @@ import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import { resolveEnabledConnectors } from '../connectors/resolve';
 import { isReservedConnectorId } from '../connectors/custom';
-import { pathWithNativeBin, resolveClaudeBin } from '../session/claude-bin';
+import { claudeCommand, pathWithNativeBin } from '../session/claude-bin';
 import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
 import { resolveOrchestrationConfig } from './config';
 import { containerTaskTools } from './bridge';
 import { OrchestrationError } from './types';
+import { recordProcessRoot, terminateProbeTree, workerSpawnDetached } from './process-supervisor';
 import type { AgentConfig, GatewayConfig } from '../types';
 import type { SkillRegistry } from '../skills';
 
 function terminateCatalogProcess(
   child: ReturnType<typeof spawn>,
-  signal: NodeJS.Signals = 'SIGTERM'
+  signal: 'SIGTERM' | 'SIGKILL' = 'SIGTERM'
 ) {
-  try {
-    if (process.platform === 'linux' && child.pid)
-      process.kill(-child.pid, signal);
-    else child.kill(signal);
-  } catch {
-    /* Already exited. */
-  }
+  void terminateProbeTree(child, signal);
 }
 
 export interface CapabilityEntry {
@@ -50,18 +45,20 @@ export function probeMcpConfiguration(
   command: string,
   args: string[],
   cwd: string,
-  onObserved?: (servers: ObservedMcpServer[]) => void
+  onObserved?: (servers: ObservedMcpServer[]) => void,
+  timeoutMs = 10000
 ): Promise<Record<string, unknown>> {
   return new Promise((resolveResult, reject) => {
     const child = spawn(command, args, {
       cwd,
-      detached: process.platform === 'linux',
+      detached: workerSpawnDetached(),
       env: {
         ...process.env,
         ...(pathWithNativeBin() ? { PATH: pathWithNativeBin() } : {}),
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    recordProcessRoot(child);
     let buffer = '',
       bytes = 0,
       value: Record<string, unknown> | undefined;
@@ -83,7 +80,7 @@ export function probeMcpConfiguration(
     };
     const timer = setTimeout(
       () => stop(Error('CAPABILITY_DISCOVERY_TIMEOUT')),
-      10000
+      timeoutMs
     );
     child.stdin.on('error', () => {});
     child.stderr.on('data', () => {});
@@ -408,8 +405,7 @@ export class CapabilityCatalog {
         await writeFile(file, JSON.stringify({ mcpServers: connectors }), {
           mode: 0o600,
         });
-        const binary = process.env.CLAUDE_BIN || resolveClaudeBin().bin;
-        const [command, ...prefix] = binary.split(' ');
+        const { command, args: prefix } = claudeCommand();
         try {
           servers = {
             ...(await probeMcpConfiguration(
@@ -448,7 +444,7 @@ export class CapabilityCatalog {
             [resolve(__dirname, '../../mcp/capability-catalog.ts')],
             {
               cwd: this.agent.workspace,
-              detached: process.platform === 'linux',
+              detached: workerSpawnDetached(),
               env: {
                 ...process.env,
                 GATEWAY_WORKSPACE_DIR: this.agent.workspace,
@@ -459,6 +455,7 @@ export class CapabilityCatalog {
               stdio: ['pipe', 'pipe', 'pipe'],
             }
           );
+          recordProcessRoot(child);
           const chunks: Buffer[] = [];
           let bytes = 0;
           const timer = setTimeout(() => {

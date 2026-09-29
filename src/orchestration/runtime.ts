@@ -1,6 +1,7 @@
 import { GatewayTaskController, GatewayTaskAdapter } from './gateway-tasks/controller';
 import { SafemodeTaskAdapter } from './gateway-tasks/safemode';
 import { workerCrons } from './worker-crons';
+import { processSupervisorSupported } from './process-supervisor';
 import { readCompactMeasurements, type CompactMeasurements } from './compact-measurements';
 import { SessionCompaction, recoverSessionCompaction, type ResolvedSessionCompaction } from './session-compaction';
 import { ContextDelivery } from './context-delivery';
@@ -48,6 +49,7 @@ import type { SkillRegistry } from '../skills';
 import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
 import { SPEECH_OVERLAY, splitSpeechResponse, speechVoiceStyle } from './speech';
 import { join } from 'path';
+import { pathWithin } from '../utils/paths';
 import { randomUUID } from 'crypto';
 import { mkdirSync } from 'fs';
 import { realpath } from 'fs/promises';
@@ -205,7 +207,7 @@ export class AgentOrchestrationRuntime {
       if (needsExecution) {
         if (agent.type === 'app-agent') await validateContainer(agent);
         if (gateway.gateway.headless === false) throw new OrchestrationError('UNSUPPORTED_ORCHESTRATION_BACKEND');
-        if (process.platform !== 'linux') throw new OrchestrationError('UNSUPPORTED_PROCESS_SUPERVISOR');
+        if (!processSupervisorSupported()) throw new OrchestrationError('UNSUPPORTED_PROCESS_SUPERVISOR');
         if (agent.claude.extraFlags?.length) throw new OrchestrationError('PROFILE_FLAGS_CONFLICT');
       }
     } catch (error) { store.close(); releaseLock(); throw error; }
@@ -233,7 +235,7 @@ export class AgentOrchestrationRuntime {
       const project = agent.orchestration?.tasks?.projectRoot || agent.workspace;
       if (agent.orchestration?.tasks?.workspaceMode === 'shared-lock') {
         const [actualProject, identity] = await Promise.all([realpath(project), realpath(agent.workspace)]);
-        if (actualProject === identity || actualProject.startsWith(identity + '/') || identity.startsWith(actualProject + '/')) throw new OrchestrationError('SHARED_PROJECT_MUST_DIFFER_FROM_IDENTITY_WORKSPACE');
+        if (pathWithin(identity, actualProject) || pathWithin(actualProject, identity)) throw new OrchestrationError('SHARED_PROJECT_MUST_DIFFER_FROM_IDENTITY_WORKSPACE');
       }
       const workspaces = new TaskWorkspaces(store, project, join(root, 'task-worktrees'), agent.orchestration?.tasks?.workspaceMode);
       for (const row of store.all("SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled')")) await workspaces.release(String(row.id));
@@ -394,7 +396,7 @@ export class AgentOrchestrationRuntime {
   private gateway!: GatewayConfig;
   private assertBackend(agent = this.agent): void {
     if (this.gateway.gateway.headless === false) throw new OrchestrationError('UNSUPPORTED_ORCHESTRATION_BACKEND');
-    if (process.platform !== 'linux') throw new OrchestrationError('UNSUPPORTED_PROCESS_SUPERVISOR');
+    if (!processSupervisorSupported()) throw new OrchestrationError('UNSUPPORTED_PROCESS_SUPERVISOR');
     if (agent.claude.extraFlags?.length) throw new OrchestrationError('PROFILE_FLAGS_CONFLICT');
   }
   updateAgentConfig(agent: AgentConfig): void {

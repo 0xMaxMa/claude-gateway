@@ -1,53 +1,97 @@
-import { readdirSync, readFileSync } from 'fs';
+import type { ChildProcess } from 'child_process';
+import { processPlatform, type Fingerprint } from './process-platform';
 
-/** Linux process-group evidence ignores exited zombies. Escaped/detached
- * process groups are outside this proof and must be reconciled separately. */
-export function liveGroupMembers(group: number): number[] | undefined {
-  if (process.platform !== 'linux' || !Number.isSafeInteger(group) || group <= 0) return undefined;
-  const members: number[] = [];
-  try {
-    for (const entry of readdirSync('/proc')) {
-      if (!/^\d+$/.test(entry)) continue;
-      try {
-        const stat = readFileSync(`/proc/${entry}/stat`, 'utf8');
-        const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-        if (Number(fields[2]) === group && fields[0] !== 'Z' && fields[0] !== 'X') members.push(Number(entry));
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as NodeJS.ErrnoException).code !== 'ESRCH') return undefined; }
-    }
-    return members;
-  } catch { return undefined; }
+const valid = (pid: number) => Number.isSafeInteger(pid) && pid > 0;
+/** Hosts where orchestration can prove a worker's processes stopped. */
+export function processSupervisorSupported(): boolean { return Boolean(processPlatform()); }
+/** `detached` for a worker spawn: POSIX workers lead their own process group
+ * (also on hosts without a supervisor); Windows workers stay attached and are
+ * supervised as a tree. */
+export function workerSpawnDetached(): boolean { return processPlatform()?.detachWorkers ?? process.platform !== 'win32'; }
+
+type RootChild = Pick<ChildProcess, 'pid' | 'exitCode' | 'signalCode'>;
+// Start identity recorded for each spawned root (Windows only).
+const recordedRoots = new WeakMap<RootChild, Promise<string | undefined>>();
+
+/** Call right after spawning a supervised worker or probe root. Windows records
+ * the root's start identity while the child handle still pins its PID, so a stop
+ * can anchor orphans after the root exits and a reused PID is never adopted. */
+export function recordProcessRoot(child: RootChild): void {
+  const pid = child.pid;
+  if (pid === undefined || !valid(pid)) return;
+  const recorded = processPlatform()?.adopt?.(pid, () => child.exitCode === null && child.signalCode === null);
+  if (recorded) recordedRoots.set(child, recorded);
+}
+
+/** Process-group evidence ignores exited zombies. On POSIX, escaped/detached
+ * process groups are outside this proof and must be reconciled separately; on
+ * Windows the group is the tree rooted at `group` (see windowsTree). */
+export async function liveGroupMembers(group: number, rootStart?: string): Promise<number[] | undefined> {
+  const platform = processPlatform();
+  if (!platform || !valid(group)) return undefined;
+  return platform.groupMembers(group, rootStart);
 }
 export async function stopProcessGroup(group: number): Promise<boolean> {
-  if (process.platform !== 'linux' || !Number.isSafeInteger(group) || group <= 0) return false;
-  try { process.kill(-group, 'SIGTERM'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return false; }
-  const deadline = Date.now() + 2000;
+  const platform = processPlatform();
+  if (!platform || !valid(group)) return false;
+  if (!await platform.signalGroup(group, 'SIGTERM')) return false;
+  const deadline = Date.now() + platform.termGraceMs;
   while (Date.now() < deadline) {
-    const members = liveGroupMembers(group);
+    const members = await platform.groupMembers(group);
     if (!members) return false;
     if (!members.length) return true;
-    await new Promise(resolve => setTimeout(resolve, 25));
+    await new Promise(resolve => setTimeout(resolve, platform.pollMs));
   }
-  try { process.kill(-group, 'SIGKILL'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return false; }
-  await new Promise(resolve => setTimeout(resolve, 50));
-  return liveGroupMembers(group)?.length === 0;
+  if (!await platform.signalGroup(group, 'SIGKILL')) return false;
+  await new Promise(resolve => setTimeout(resolve, platform.killSettleMs));
+  return (await platform.groupMembers(group))?.length === 0;
 }
 
 /** Kernel identity prevents signalling an unrelated process after PID reuse. */
-export function processFingerprint(pid: number): { bootId: string; startTicks: string } | undefined {
-  if (process.platform !== 'linux' || !Number.isSafeInteger(pid) || pid <= 0) return undefined;
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    if (Number(fields[2]) !== pid) return undefined;
-    return { bootId: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(), startTicks: fields[19] };
-  } catch { return undefined; }
+export async function processFingerprint(pid: number): Promise<Fingerprint | undefined> {
+  const platform = processPlatform();
+  if (!platform || !valid(pid)) return undefined;
+  return platform.fingerprint(pid);
 }
 export async function cleanupPersistedProcess(identity?: { pid: number; bootId?: string; startTicks?: string }): Promise<boolean> {
-  if (!identity || !Number.isSafeInteger(identity.pid) || identity.pid <= 0) return false;
-  const members = liveGroupMembers(identity.pid);
+  if (!identity || !valid(identity.pid)) return false;
+  // Nothing survives a reboot: a process from another boot is gone, whatever
+  // now holds its PID.
+  const boot = identity.bootId ? await processPlatform()?.bootId() : undefined;
+  if (boot && boot !== identity.bootId) return true;
+  const members = await liveGroupMembers(identity.pid, identity.startTicks);
   if (!members) return false;
   if (!members.length) return true;
-  const current = processFingerprint(identity.pid);
+  const current = await processFingerprint(identity.pid);
   if (!current || !identity.bootId || !identity.startTicks || current.bootId !== identity.bootId || current.startTicks !== identity.startTicks) return false;
   return stopProcessGroup(identity.pid);
+}
+
+type ProbeChild = RootChild & Pick<ChildProcess, 'kill'>;
+const probeKilled = new WeakSet<ProbeChild>();
+
+/** Stop a short-lived probe (spawned with `detached: workerSpawnDetached()` and
+ * passed to `recordProcessRoot`) and every process it started. Synchronous
+ * callers may ignore the promise.
+ *
+ * POSIX signals the probe's process group. Windows has no polite console
+ * signal, so SIGTERM only leaves the probe its grace period to exit on stdin
+ * EOF; SIGKILL then terminates the whole tree once, only the creation-time-
+ * verified members of the root identity recorded at spawn, so a reused PID is
+ * refused. A probe whose identity could not be recorded (it exited first) is
+ * not signalled beyond its own handle. */
+export async function terminateProbeTree(child: ProbeChild, signal: 'SIGTERM' | 'SIGKILL'): Promise<void> {
+  const platform = processPlatform();
+  const pid = child.pid;
+  const kill = () => { try { child.kill(signal); } catch { /* Already exited. */ } };
+  if (!platform || pid === undefined || !valid(pid)) return kill();
+  if (platform.detachWorkers) {
+    if (!await platform.signalGroup(pid, signal)) kill();
+    return;
+  }
+  if (signal === 'SIGTERM' || probeKilled.has(child)) return;
+  probeKilled.add(child);
+  const start = await recordedRoots.get(child);
+  if (start !== undefined && await platform.signalGroup(pid, 'SIGKILL', start)) return;
+  if (child.exitCode === null && child.signalCode === null) kill();
 }

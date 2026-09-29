@@ -20,3 +20,14 @@ export function expandHome(p: string): string {
   if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
   return p;
 }
+
+/**
+ * True when `target` is `root` or lies inside it. Uses `path.relative`, so it
+ * follows the host's separators and, on Windows, its case-insensitive
+ * comparison and per-drive roots; a `startsWith(root + '/')` check does
+ * neither. Both paths should already be resolved (e.g. with `realpath`).
+ */
+export function pathWithin(root: string, target: string, api: path.PlatformPath = path): boolean {
+  const rel = api.relative(root, target);
+  return rel !== '..' && !rel.startsWith('..' + api.sep) && !api.isAbsolute(rel);
+}

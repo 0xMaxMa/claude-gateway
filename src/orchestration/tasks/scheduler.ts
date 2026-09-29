@@ -13,7 +13,7 @@ export interface WorkerAdmission {
 export interface WorkerHandle {
   /** First actual model output, independent of long tool/task completion. */
   providerReady?: Promise<void>;
-  identity?(): TaskAttempt['processIdentity'];
+  identity?(): TaskAttempt['processIdentity'] | Promise<TaskAttempt['processIdentity']>;
   /** Resolves only after turn admission is observed, never just stdin.write. */
   accepted: Promise<void>;
   result: Promise<WorkerOutcome>;
@@ -130,8 +130,10 @@ export class WorkerScheduler {
       const outcome = handle.result.catch(error => ({ type: 'unknown' as const, failure: taskFailure(error) }));
       try {
         await handle.accepted;
+        // Resolve identity before the state check so check and transition stay atomic.
+        const identity = await handle.identity?.();
         const task = this.tasks.store.task(taskId)!;
-        if (task.state === 'starting') this.tasks.started(attempt.attemptId, attempt.generation, handle.identity?.());
+        if (task.state === 'starting') this.tasks.started(attempt.attemptId, attempt.generation, identity);
         else await handle.stop();
       } catch { await handle.stop(); }
       let result = await outcome;

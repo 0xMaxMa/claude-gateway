@@ -98,3 +98,16 @@ export function runtimeProfileArgs(profile: RuntimeProfile, extraFlags: string[]
     '--setting-sources', profile.containerExecution || profile.checkpointCommand ? '' : 'user', '--settings', JSON.stringify({ ...(profile.checkpointCommand ? checkpointSettings(profile.checkpointCommand) : { disableAllHooks: true }), enabledPlugins: disabledPlugins }),
     '--append-system-prompt', [profile.context, profile.overlay].filter(Boolean).join('\n\n')];
 }
+
+/**
+ * Windows caps a whole command line at 32767 characters, and an agent's
+ * appended system prompt (workspace context + orchestration overlay) alone is
+ * routinely larger, so spawn fails with ENAMETOOLONG. Rewrites the prompt into
+ * --append-system-prompt-file `file`, keeping other args; the caller writes
+ * `prompt` to `file` (see SessionProcess.writeSystemPromptFile).
+ */
+export function appendSystemPromptViaFile(args: string[], file: string): { args: string[]; prompt?: string } {
+  const at = args.lastIndexOf('--append-system-prompt');
+  if (at < 0 || at === args.length - 1) return { args };
+  return { args: [...args.slice(0, at), '--append-system-prompt-file', file, ...args.slice(at + 2)], prompt: args[at + 1] };
+}

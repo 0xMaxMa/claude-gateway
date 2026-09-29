@@ -10,9 +10,10 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { RuntimeProfile, runtimeProfileArgs } from './runtime-profile';
+import { appendSystemPromptViaFile, RuntimeProfile, runtimeProfileArgs } from './runtime-profile';
 import { StringDecoder } from 'string_decoder';
-import { stopProcessGroup } from '../orchestration/process-supervisor';
+import { processSupervisorSupported, recordProcessRoot, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
+import { commandLineLimited } from '../orchestration/process-platform';
 import { gatewayCapacity } from '../orchestration/capacity';
 import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
@@ -23,7 +24,7 @@ import { SessionStore } from './store';
 import { createLogger } from '../logger';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { neutralizeTuiTriggers } from '../shell/screen';
-import { resolveClaudeBin, pathWithNativeBin } from './claude-bin';
+import { resolveClaudeBin, pathWithNativeBin, parseClaudeBin, type ClaudeCommand } from './claude-bin';
 import { claudeSettingsEnv, readClaudeSettings } from '../config/claude-settings';
 import {
   CODING_TOOLS,
@@ -717,7 +718,22 @@ export class SessionProcess extends EventEmitter {
   }
 
   private managedMcpConfigPath?: string;
+  /** Windows only: the appended system prompt, too long for a command line. */
+  private systemPromptPath?: string;
   private managedConnectorPaths = new Set<string>();
+
+  /** Host spawns where the command line is capped (Windows) move the appended
+   * system prompt into a 0600 file beside the attempt's MCP config (a 0700
+   * directory). Containers are skipped: their CLI sees container paths. */
+  private writeSystemPromptFile(args: string[], mcpConfigPath: string | null): string[] {
+    if (!this.runtimeProfile || !commandLineLimited() || this.agentConfig.type === 'app-agent') return args;
+    const file = path.join(path.dirname(mcpConfigPath ?? this.runtimeProfile.mcpConfigPath), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, '_')}.md`);
+    const moved = appendSystemPromptViaFile(args, file);
+    if (moved.prompt === undefined) return args;
+    fs.writeFileSync(file, moved.prompt, { mode: 0o600 });
+    this.systemPromptPath = file;
+    return moved.args;
+  }
 
   private writeMcpConfig(): string | null {
     if (this.runtimeProfile) {
@@ -972,7 +988,8 @@ export class SessionProcess extends EventEmitter {
           throw error;
         }
       }
-      args.push(...runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: this.containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${this.containerAttempt.directory}/checkpoint.cjs ${this.containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: this.containerAttempt && this.runtimeProfile.skillPluginDir ? this.containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []));
+      const profileArgs = runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: this.containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${this.containerAttempt.directory}/checkpoint.cjs ${this.containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: this.containerAttempt && this.runtimeProfile.skillPluginDir ? this.containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []);
+      args.push(...profileArgs);
       if (this.runtimeProfile.cliSession) {
         const session = this.runtimeProfile.cliSession;
         args.push(session.resume ? '--resume' : '--session-id', session.id);
@@ -1037,23 +1054,28 @@ export class SessionProcess extends EventEmitter {
     const containerRestartPath = isAppAgent ? toContainerPath(this.restartSignalPath) : this.restartSignalPath;
 
     const freshModel = this.readFreshModel();
-    const args = this.buildArgs(effectiveMcpPath, freshModel);
+    const args = this.writeSystemPromptFile(this.buildArgs(effectiveMcpPath, freshModel), effectiveMcpPath);
 
     // Resolve the claude binary. An explicit CLAUDE_BIN (which may carry args) is
-    // trusted verbatim; otherwise probe PATH and the native-installer / legacy
+    // parsed by parseClaudeBin; otherwise probe PATH and the native-installer / legacy
     // install locations so a gateway launched with a minimal PATH still finds it.
     let claudeBinRaw: string;
+    let claudeBinParts: ClaudeCommand;
     if (process.env.CLAUDE_BIN) {
       claudeBinRaw = process.env.CLAUDE_BIN;
+      claudeBinParts = parseClaudeBin(claudeBinRaw);
     } else if (isAppAgent) {
       // App-agents run claude INSIDE the container; host-side resolution would
       // point at a host path that need not exist in the container. Keep bare
       // `claude` so the container's own PATH resolves it (agentConfig.claudeBin
       // overrides below when the image installs claude elsewhere).
       claudeBinRaw = 'claude';
+      claudeBinParts = { command: claudeBinRaw, args: [] };
     } else {
       const resolution = resolveClaudeBin();
       claudeBinRaw = resolution.bin;
+      // A resolved path is one executable, never split: it may sit under a home with spaces.
+      claudeBinParts = { command: claudeBinRaw, args: [] };
       if (resolution.source === 'fallback') {
         this.logger.warn('Could not resolve the claude binary — spawning bare "claude" as a last resort', {
           sessionId: this.sessionId,
@@ -1071,9 +1093,8 @@ export class SessionProcess extends EventEmitter {
         });
       }
     }
-    const claudeBinParts = claudeBinRaw.split(' ');
-    let claudeBin = claudeBinParts[0];
-    let allArgs = [...claudeBinParts.slice(1), ...args];
+    let claudeBin = claudeBinParts.command;
+    let allArgs = [...claudeBinParts.args, ...args];
 
     // gateway.headless: false → run the interactive claude TUI under the
     // claude-pty-shell PTY wrapper (same stream-json protocol on stdio).
@@ -1200,7 +1221,8 @@ export class SessionProcess extends EventEmitter {
         ...(ptyStreamSocketPath ? { PTY_SHELL_STREAM_SOCKET: ptyStreamSocketPath } : {}),
       },
       cwd: this.agentConfig.workspace,
-      ...(this.runtimeProfile?.role === 'worker' && process.platform === 'linux' ? { detached: true } : {}),
+      ...(this.runtimeProfile?.role === 'worker' && processSupervisorSupported() && workerSpawnDetached() ? { detached: true } : {}),
+      windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }); } catch (error) { toolCapture?.close(); releaseCapacity(); throw error; }
 
@@ -1209,7 +1231,7 @@ export class SessionProcess extends EventEmitter {
     proc.once('exit', () => { setTimeout(() => toolCapture?.close(), 200).unref(); });
     proc.once('error', () => toolCapture?.close());
     proc.once('error', releaseCapacity);
-    if (this.runtimeProfile?.role === 'worker' && process.platform === 'linux') this.managedProcessGroup = proc.pid;
+    if (this.runtimeProfile?.role === 'worker' && processSupervisorSupported()) { this.managedProcessGroup = proc.pid; recordProcessRoot(proc); }
     // Fresh child is alive: clear any exit observed for a prior process (e.g.
     // after an auto-restart), so isRunning()/interrupt() see it as live.
     this._exited = false;
@@ -2050,6 +2072,10 @@ export class SessionProcess extends EventEmitter {
       if (this.managedMcpConfigPath) {
         try { fs.rmSync(this.managedMcpConfigPath, { force: true }); } catch {}
         this.managedMcpConfigPath = undefined;
+      }
+      if (this.systemPromptPath) {
+        try { fs.rmSync(this.systemPromptPath, { force: true }); } catch {}
+        this.systemPromptPath = undefined;
       }
       try {
         fs.rmSync(path.join(this.agentConfig.workspace, '.sessions', this.sessionId), { recursive: true, force: true });

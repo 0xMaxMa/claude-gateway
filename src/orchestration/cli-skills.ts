@@ -5,10 +5,11 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { gatewayCapacity } from './capacity';
 import { AgentConfig, GatewayConfig } from '../types';
-import { pathWithNativeBin, resolveClaudeBin } from '../session/claude-bin';
+import { claudeCommand, pathWithNativeBin } from '../session/claude-bin';
 import { resolveOrchestrationConfig } from './config';
 import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
 import { validateContainer } from './container';
+import { recordProcessRoot, terminateProbeTree, workerSpawnDetached } from './process-supervisor';
 
 export interface CliSkill { name: string; description: string; argumentHint?: string; aliases?: string[]; filePath?: string; resourceRoot?: string; source?: 'claude' | 'codex'; fileScope?: 'container'; content?: string; }
 const validName = (value: unknown): value is string => typeof value === 'string' && /^[\w:.-]{1,128}$/.test(value);
@@ -21,18 +22,20 @@ export function parseCliSkills(value: unknown): CliSkill[] {
 }
 
 /** Initialization only: no user prompt, model call, MCP server or hooks. */
-export function probeCliSkills(command: string, args: string[], cwd: string): Promise<CliSkill[]> {
+export function probeCliSkills(command: string, args: string[], cwd: string, timeoutMs = 10000): Promise<CliSkill[]> {
   return new Promise((resolve, reject) => {
     const id = randomUUID();
-    const child = spawn(command, args, {cwd, env: {...process.env, ...(pathWithNativeBin() ? {PATH:pathWithNativeBin()} : {})}, stdio:['pipe','pipe','pipe']});
+    const child = spawn(command, args, {cwd, detached: workerSpawnDetached(), env: {...process.env, ...(pathWithNativeBin() ? {PATH:pathWithNativeBin()} : {})}, stdio:['pipe','pipe','pipe']});
+    recordProcessRoot(child);
     let buffer = '', bytes = 0, result: CliSkill[] | undefined, failure: Error | undefined, finished = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const stop = (error?: Error) => {
       if (finished) return; finished = true; failure = error; clearTimeout(timer);
-      child.stdin.end(); child.kill('SIGTERM');
-      killTimer = setTimeout(() => child.kill('SIGKILL'), 1000); killTimer.unref();
+      // The probe may have started helpers; stop its whole tree, not just the root.
+      child.stdin.end(); void terminateProbeTree(child, 'SIGTERM');
+      killTimer = setTimeout(() => void terminateProbeTree(child, 'SIGKILL'), 1000); killTimer.unref();
     };
-    const timer = setTimeout(() => stop(new Error('CLI_SKILL_DISCOVERY_TIMEOUT')), 10000);
+    const timer = setTimeout(() => stop(new Error('CLI_SKILL_DISCOVERY_TIMEOUT')), timeoutMs);
     child.on('error', () => {clearTimeout(timer);if(killTimer)clearTimeout(killTimer);reject(new Error('CLI_SKILL_DISCOVERY_UNAVAILABLE'));});
     child.stdin.on('error', () => {});
     child.stderr.on('data', () => {}); // Diagnostics may contain account/config information.
@@ -50,7 +53,9 @@ export function probeCliSkills(command: string, args: string[], cwd: string): Pr
         } catch {stop(new Error('CLI_SKILL_DISCOVERY_INVALID'));return;}
       }
     });
-    child.on('close', () => {clearTimeout(timer);if(killTimer)clearTimeout(killTimer);if(result && !failure)resolve(result);else reject(failure ?? new Error('CLI_SKILL_DISCOVERY_UNAVAILABLE'));});
+    // Windows SIGTERM is a no-op: a root that exits on stdin EOF within the grace
+    // period would otherwise leave its helpers running.
+    child.on('close', () => {clearTimeout(timer);if(killTimer)clearTimeout(killTimer);void terminateProbeTree(child, 'SIGKILL');if(result && !failure)resolve(result);else reject(failure ?? new Error('CLI_SKILL_DISCOVERY_UNAVAILABLE'));});
     child.stdin.write(JSON.stringify({type:'control_request',request_id:id,request:{subtype:'initialize'}})+'\n');
   });
 }
@@ -60,7 +65,8 @@ let discoveryTail: Promise<unknown> = Promise.resolve();
 export function discoverCliSkills(agent: AgentConfig, cwd = agent.orchestration?.tasks?.projectRoot || agent.workspace, gateway?: GatewayConfig): Promise<CliSkill[]> {
   const container = agent.type === 'app-agent';
   const host = !container && resolveOrchestrationConfig(agent.orchestration).tasks.workspaceMode === 'host';
-  const binary = container ? agent.claudeBin ?? 'claude' : process.env.CLAUDE_BIN || resolveClaudeBin().bin;
+  const hostCommand = container ? undefined : claudeCommand();
+  const binary = hostCommand ? [hostCommand.command, ...hostCommand.args].join(' ') : agent.claudeBin ?? 'claude';
   const settings: {disableAllHooks:boolean;enabledPlugins?:Record<string,boolean>} = {disableAllHooks:true};
   if(!host && !container) {
     let enabled: Record<string,boolean> = {};
@@ -80,8 +86,7 @@ export function discoverCliSkills(agent: AgentConfig, cwd = agent.orchestration?
       let uid=1000;try{uid=userInfo().uid;}catch{/* match runtime fallback */}
       return await probeCliSkills('docker',['exec','--workdir','/workspace','--user',String(uid),'-e',`HOME=${homedir()}`,'-i',agent.container!,binary,...args],agent.workspace);
     }
-    const [executable,...prefix]=binary.split(' ');
-    return await probeCliSkills(executable,[...prefix,...args],cwd);
+    return await probeCliSkills(hostCommand!.command,[...hostCommand!.args,...args],cwd);
     } finally { release?.(); }
   });
   discoveryTail=value.then(()=>{},()=>{});

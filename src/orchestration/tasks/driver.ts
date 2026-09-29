@@ -17,7 +17,8 @@ import { payloadHash } from '../store';
 import { containerNode, validateContainer } from '../container';
 import { toolActivity } from '../tool-activity';
 import { extractFrontmatter } from '../../skills/parser';
-import { dirname, join, relative, isAbsolute } from 'path';
+import { dirname, join, relative } from 'path';
+import { pathWithin } from '../../utils/paths';
 import { readFile, writeFile, realpath, mkdir, cp, lstat } from 'fs/promises';
 import type { AgentConfig, GatewayConfig } from '../../types';
 import { SessionStore } from '../../session/store';
@@ -60,7 +61,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     if (!['default-worker', 'media-worker', 'skill-worker'].includes(task.targetProfile) || !task.capabilities.execute) throw new OrchestrationError('EXECUTION_DENIED');
     if (task.targetProfile === 'default-worker' && task.resourceProfile?.mode === 'shared-lock') {
       const [project, identity] = await Promise.all([realpath(task.resourceProfile.projectRoot), realpath(this.agent.workspace)]);
-      if (project === identity || project.startsWith(identity + '/') || identity.startsWith(project + '/')) throw new OrchestrationError('SHARED_PROJECT_MUST_DIFFER_FROM_IDENTITY_WORKSPACE');
+      if (pathWithin(identity, project) || pathWithin(project, identity)) throw new OrchestrationError('SHARED_PROJECT_MUST_DIFFER_FROM_IDENTITY_WORKSPACE');
     }
     if (this.agent.type === 'app-agent') {
       if (task.resourceProfile?.mode !== 'container') throw new OrchestrationError('CONTAINER_WORKSPACE_REQUIRED');
@@ -121,7 +122,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       // Keep relative references/scripts available; the invoked body is pinned at admission.
       const resourceRoot = task.skill.resourceRoot ?? dirname(task.skill.filePath);
       const entry = relative(resourceRoot, task.skill.filePath);
-      if (entry === '..' || entry.startsWith('../') || isAbsolute(entry)) throw new OrchestrationError('SKILL_RESOURCE_PATH_INVALID');
+      if (!pathWithin(resourceRoot, task.skill.filePath)) throw new OrchestrationError('SKILL_RESOURCE_PATH_INVALID');
       let resourceBytes = 0;
       await cp(resourceRoot, destination, { recursive: true, dereference: false, filter: async source => {
         const stat = await lstat(source);
@@ -270,7 +271,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         return {type: process.managedGroupStopped ? 'failed' as const : 'unknown' as const, failure};
       }).finally(async () => { observationClosed = true; ticket.revoke(); await process.stop(); });
       return { accepted: turn.accepted, providerReady: turn.providerReady, result,
-        identity: () => process.managedProcessId ? { pid: process.managedProcessId, startedAt: process.spawnedAt, instanceId: this.instanceId, ...processFingerprint(process.managedProcessId) } : undefined,
+        identity: async () => process.managedProcessId ? { pid: process.managedProcessId, startedAt: process.spawnedAt, instanceId: this.instanceId, ...await processFingerprint(process.managedProcessId) } : undefined,
         stop: async () => { stopping = true; await turn.stop(); } };
     } catch (error) { ticket.revoke(); throw error; }
   }

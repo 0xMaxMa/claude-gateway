@@ -20,7 +20,7 @@ import type { AgentConfig, GatewayConfig } from '../types';
 import type { RuntimeProfile } from './runtime-profile';
 import type { InputImage } from './input-image';
 import { assertContainerBinding, prepareContainerProfile, containerNode, CONTAINER_SUPERVISOR, stopContainerProfile } from '../orchestration/container';
-import { stopProcessGroup } from '../orchestration/process-supervisor';
+import { recordProcessRoot, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
 
 export interface CodexProcessOptions {
   agent: AgentConfig;
@@ -45,9 +45,12 @@ interface SessionHomes { sessionId: string; workspace: string; container?: strin
 function sessionRoot(stateDirectory: string, workspace: string, sessionId: string): string {
   return join(stateDirectory, 'codex', createHash('sha256').update(workspace + '\0' + sessionId).digest('hex'));
 }
-function ownedHome(root: string, home: unknown, container?: string): home is string {
+/** A persisted Codex home the gateway created: `<root>/attempt-<uuid>` on the host
+ * (built with the host separator, as the attempt directory is), or
+ * `~/.gateway-codex-<uuid>` inside a POSIX app container. */
+export function ownedHome(root: string, home: unknown, container?: string): home is string {
   if (typeof home !== 'string') return false;
-  const prefix = container ? homedir() + '/.gateway-codex-' : root + '/attempt-';
+  const prefix = container ? homedir() + '/.gateway-codex-' : join(root, 'attempt-');
   return home.startsWith(prefix) && threadPattern.test(home.slice(prefix.length));
 }
 const cleanupRuns = new Map<string, Promise<number>>();
@@ -307,8 +310,9 @@ export class CodexProcess extends EventEmitter {
     const bin = this.executable;
     const child = this.child = agent.type === 'app-agent'
       ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', 'CODEX_ROLLOUT_TRACE_ROOT', '-e', `HOME=${homedir()}`, '-e', key, ...Object.keys(workerEnvironment(agent, this.options.gateway)).flatMap(name => ['-e', name]), agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
-      : spawn(bin, args, { cwd: agent.workspace, env, stdio: 'pipe', detached: true });
+      : spawn(bin, args, { cwd: agent.workspace, env, stdio: 'pipe', detached: workerSpawnDetached(), windowsHide: true });
     this.group = child.pid;
+    recordProcessRoot(child);
     this.traceTimer = setInterval(() => { void this.captureTrace(); }, agent.type === 'app-agent' ? 2000 : 500);
     this.traceTimer.unref();
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');

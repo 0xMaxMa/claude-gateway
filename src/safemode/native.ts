@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { execFileSync } from 'child_process';
-import { resolveClaudeBin } from '../session/claude-bin';
+import { claudeCommand, resolveClaudeBin } from '../session/claude-bin';
 import { codexPolicyArgs } from '../session/codex-policy';
 
 export type SafemodeCli = 'claude' | 'codex';
@@ -97,13 +97,18 @@ export function buildNativeInvocation(options: NativeOptions): NativeInvocation 
     else if (options.resume) args.splice(prefix + (options.nativeResumeIndex ?? 0), 0, 'resume', nativeSessionId!);
     if (options.cli === 'codex') args.push('--cd', options.cwd);
     if (prompt) args.push('--', prompt);
-    const command = options.cli === 'claude' ? options.env?.CLAUDE_BIN || process.env.CLAUDE_BIN || resolveClaudeBin(env).bin : options.env?.CODEX_BIN || process.env.CODEX_BIN || 'codex';
+    if (options.cli === 'claude') {
+      const claude = claudeCommand(options.env?.CLAUDE_BIN || process.env.CLAUDE_BIN, () => resolveClaudeBin(env));
+      return { command: claude.command, args: [...claude.args, ...args], env, cwd: options.cwd, nativeSessionId };
+    }
+    const command = options.env?.CODEX_BIN || process.env.CODEX_BIN || 'codex';
     return { command, args, env, cwd: options.cwd, nativeSessionId };
   }
   if (options.cli === 'claude') {
-    const command = options.env?.CLAUDE_BIN || process.env.CLAUDE_BIN || resolveClaudeBin(env).bin;
+    const claude = claudeCommand(options.env?.CLAUDE_BIN || process.env.CLAUDE_BIN, () => resolveClaudeBin(env));
+    const command = claude.command;
     const nativeSessionId = options.nativeSessionId || randomUUID();
-    const args = ['--safe-mode', '--strict-mcp-config', '--permission-mode', options.mode === 'headless' ? 'dontAsk' : 'manual'];
+    const args = [...claude.args, '--safe-mode', '--strict-mcp-config', '--permission-mode', options.mode === 'headless' ? 'dontAsk' : 'manual'];
     if (options.mode === 'headless') args.push('--restricted', '--print', '--output-format', 'stream-json', '--verbose', '--tools', 'Read,Glob,Grep');
     args.push(options.resume ? '--resume' : '--session-id', nativeSessionId);
     if (model) args.push('--model', model);

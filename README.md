@@ -44,7 +44,7 @@ Claude Gateway keeps conversations responsive while Claude Code workers execute 
 
 ## Get started
 
-Install Node.js 22+, Bun, and an authenticated Claude Code CLI with channels support. Orchestration requires Linux. Docker/Compose is needed for apps; some voice formats require `ffmpeg`.
+Install Node.js 22+, Bun, and an authenticated Claude Code CLI with channels support. Orchestration runs on Linux, macOS, and Windows. Docker/Compose is needed for apps; some voice formats require `ffmpeg`.
 
 ```bash
 npm install -g @0xmaxma/claude-gateway

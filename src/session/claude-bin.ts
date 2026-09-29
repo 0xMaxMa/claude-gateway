@@ -33,13 +33,28 @@ export function isExecutableFile(p: string): boolean {
   }
 }
 
+/**
+ * Spawnable file names for an executable path. Windows binaries
+ * carry an extension; only `.exe`/`.com` are listed because Node refuses to
+ * spawn `.cmd`/`.bat` shims without a shell (EINVAL since 18.20.2).
+ */
+export function executableCandidates(p: string, platform: NodeJS.Platform = process.platform): string[] {
+  if (platform !== 'win32' || /\.(exe|com)$/i.test(p)) return [p];
+  return [`${p}.exe`, `${p}.com`];
+}
+
+/** First existing executable among `executableCandidates(p)`. */
+function findExecutable(p: string): string | null {
+  return executableCandidates(p).find(isExecutableFile) ?? null;
+}
+
 /** Resolve `cmd` against a PATH string, returning the first executable hit. */
 function findOnPath(cmd: string, pathEnv: string | undefined): string | null {
   if (!pathEnv) return null;
   for (const dir of pathEnv.split(path.delimiter)) {
     if (!dir) continue;
-    const candidate = path.join(dir, cmd);
-    if (isExecutableFile(candidate)) return candidate;
+    const candidate = findExecutable(path.join(dir, cmd));
+    if (candidate) return candidate;
   }
   return null;
 }
@@ -60,9 +75,10 @@ function newestNativeVersion(versionsDir: string): string | null {
   const sorted = entries.sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
   for (const name of sorted) {
     const base = path.join(versionsDir, name);
-    if (isExecutableFile(base)) return base;
-    const nested = path.join(base, 'claude');
-    if (isExecutableFile(nested)) return nested;
+    const bare = findExecutable(base);
+    if (bare) return bare;
+    const nested = findExecutable(path.join(base, 'claude'));
+    if (nested) return nested;
   }
   return null;
 }
@@ -105,9 +121,10 @@ export function resolveClaudeBin(
     return { bin: 'claude', source: 'PATH', searched };
   }
 
-  const nativeBin = path.join(nativeClaudeBinDir(homeDir), 'claude');
-  searched.push(nativeBin);
-  if (isExecutableFile(nativeBin)) {
+  const nativeBinBase = path.join(nativeClaudeBinDir(homeDir), 'claude');
+  searched.push(...executableCandidates(nativeBinBase));
+  const nativeBin = findExecutable(nativeBinBase);
+  if (nativeBin) {
     return { bin: nativeBin, source: 'native-bin', searched };
   }
 
@@ -122,8 +139,8 @@ export function resolveClaudeBin(
   searched.push(path.join(nvmDir, '*', 'bin', 'claude'));
   try {
     for (const node of fs.readdirSync(nvmDir).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))) {
-      const candidate = path.join(nvmDir, node, 'bin', 'claude');
-      if (isExecutableFile(candidate)) {
+      const candidate = findExecutable(path.join(nvmDir, node, 'bin', 'claude'));
+      if (candidate) {
         return { bin: candidate, source: 'legacy-npm', searched };
       }
     }
@@ -145,7 +162,47 @@ export function pathWithNativeBin(
   pathEnv: string | undefined = process.env.PATH,
 ): string | undefined {
   const nativeBinDir = nativeClaudeBinDir(homeDir);
-  return isExecutableFile(path.join(nativeBinDir, 'claude'))
+  return findExecutable(path.join(nativeBinDir, 'claude'))
     ? `${nativeBinDir}${path.delimiter}${pathEnv ?? ''}`
     : pathEnv;
+}
+
+/** An executable plus the leading arguments to pass before the caller's own. */
+export interface ClaudeCommand {
+  command: string;
+  args: string[];
+}
+
+/**
+ * Split an explicit `CLAUDE_BIN` / `CLAUDE_REAL_BIN` value. The value may carry
+ * leading arguments (`node /path/to/cli.js`), so it is read as:
+ *   1. the whole value, when it names an existing file — a path with spaces
+ *      such as `C:\Program Files\Claude\claude.exe` or `/Users/John Doe/...`;
+ *   2. otherwise, whitespace-separated words, where a double-quoted word may
+ *      contain spaces (`"C:\Program Files\nodejs\node.exe" "D:\my tools\cli.js"`).
+ * Unquoted values split on whitespace as before.
+ */
+export function parseClaudeBin(value: string): ClaudeCommand {
+  const raw = value.trim();
+  try {
+    if (fs.statSync(raw).isFile()) return { command: raw, args: [] };
+  } catch {
+    /* not a single path */
+  }
+  const [command = '', ...args] = [...raw.matchAll(/"([^"]*)"|(\S+)/g)].map((m) => m[1] ?? m[2]);
+  return { command, args };
+}
+
+/**
+ * The claude command for a host-side spawn: an explicit `CLAUDE_BIN` is parsed
+ * with `parseClaudeBin`; otherwise the resolved binary is used as one path and
+ * is never split (it may live under a home directory containing spaces).
+ */
+export function claudeCommand(
+  explicit: string | undefined = process.env.CLAUDE_BIN,
+  resolve: () => ClaudeBinResolution = resolveClaudeBin,
+): ClaudeCommand & { resolution?: ClaudeBinResolution } {
+  if (explicit) return parseClaudeBin(explicit);
+  const resolution = resolve();
+  return { command: resolution.bin, args: [], resolution };
 }

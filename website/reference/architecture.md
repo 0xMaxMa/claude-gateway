@@ -25,7 +25,7 @@ The conversation agent can explain progress while a worker runs. A worker does n
 | MCP server | Expose gateway tools according to the agent/worker profile | Tied to the Claude Code execution context |
 | External connector | Third-party MCP endpoint selected and authorized by the operator | Managed separately; injected into authorized execution contexts |
 
-`gateway.orchestration: false` selects the legacy conversation path. `gateway.headless: false` is the optional legacy PTY backend. Orchestration requires headless execution and Linux supervision; it is not a PTY session hidden behind the web UI.
+`gateway.orchestration: false` selects the legacy conversation path. `gateway.headless: false` is the optional legacy PTY backend. Orchestration requires headless execution and a supported process supervisor (Linux, macOS, or Windows); it is not a PTY session hidden behind the web UI.
 
 ## What persists
 
