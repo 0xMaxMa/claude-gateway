@@ -1,3 +1,4 @@
+import type { ChildProcess } from 'child_process';
 import { processPlatform, type Fingerprint } from './process-platform';
 
 const valid = (pid: number) => Number.isSafeInteger(pid) && pid > 0;
@@ -46,4 +47,41 @@ export async function cleanupPersistedProcess(identity?: { pid: number; bootId?:
   const current = await processFingerprint(identity.pid);
   if (!current || !identity.bootId || !identity.startTicks || current.bootId !== identity.bootId || current.startTicks !== identity.startTicks) return false;
   return stopProcessGroup(identity.pid);
+}
+
+type ProbeChild = Pick<ChildProcess, 'pid' | 'exitCode' | 'signalCode' | 'kill'>;
+// Windows lineage per probe: true once a snapshot was taken while the child
+// handle was held, so the recorded root start really belongs to our child.
+const probeLineage = new WeakMap<ProbeChild, Promise<boolean>>();
+const probeKilled = new WeakSet<ProbeChild>();
+
+/** Stop a short-lived probe (spawned with `detached: workerSpawnDetached()`)
+ * and every process it started. Synchronous callers may ignore the promise.
+ *
+ * POSIX signals the probe's process group. Windows has no polite console
+ * signal, so SIGTERM only records the tree lineage (one WMI snapshot, while
+ * the child handle is held so its PID cannot be reused) and leaves the probe
+ * its grace period to exit on stdin EOF. SIGKILL then terminates the whole
+ * tree once — taskkill while the root lives, then orphans from the lineage;
+ * the recorded root start time refuses a reused PID. A probe that exited
+ * before any lineage was recorded cannot be proven, so nothing is signalled. */
+export async function terminateProbeTree(child: ProbeChild, signal: 'SIGTERM' | 'SIGKILL'): Promise<void> {
+  const platform = processPlatform();
+  const pid = child.pid;
+  const running = () => child.exitCode === null && child.signalCode === null;
+  const kill = () => { try { child.kill(signal); } catch { /* Already exited. */ } };
+  if (!platform || pid === undefined || !valid(pid)) return kill();
+  if (platform.detachWorkers) {
+    if (!await platform.signalGroup(pid, signal)) kill();
+    return;
+  }
+  let lineage = probeLineage.get(child);
+  if (!lineage && running()) {
+    lineage = platform.groupMembers(pid).then(members => members !== undefined && running(), () => false);
+    probeLineage.set(child, lineage);
+  }
+  if (signal === 'SIGTERM' || probeKilled.has(child)) return;
+  probeKilled.add(child);
+  if (lineage && await lineage && await platform.signalGroup(pid, 'SIGKILL')) return;
+  if (running()) kill();
 }

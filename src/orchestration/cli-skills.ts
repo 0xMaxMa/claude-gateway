@@ -9,6 +9,7 @@ import { claudeCommand, pathWithNativeBin } from '../session/claude-bin';
 import { resolveOrchestrationConfig } from './config';
 import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
 import { validateContainer } from './container';
+import { terminateProbeTree, workerSpawnDetached } from './process-supervisor';
 
 export interface CliSkill { name: string; description: string; argumentHint?: string; aliases?: string[]; filePath?: string; resourceRoot?: string; source?: 'claude' | 'codex'; fileScope?: 'container'; content?: string; }
 const validName = (value: unknown): value is string => typeof value === 'string' && /^[\w:.-]{1,128}$/.test(value);
@@ -21,18 +22,19 @@ export function parseCliSkills(value: unknown): CliSkill[] {
 }
 
 /** Initialization only: no user prompt, model call, MCP server or hooks. */
-export function probeCliSkills(command: string, args: string[], cwd: string): Promise<CliSkill[]> {
+export function probeCliSkills(command: string, args: string[], cwd: string, timeoutMs = 10000): Promise<CliSkill[]> {
   return new Promise((resolve, reject) => {
     const id = randomUUID();
-    const child = spawn(command, args, {cwd, env: {...process.env, ...(pathWithNativeBin() ? {PATH:pathWithNativeBin()} : {})}, stdio:['pipe','pipe','pipe']});
+    const child = spawn(command, args, {cwd, detached: workerSpawnDetached(), env: {...process.env, ...(pathWithNativeBin() ? {PATH:pathWithNativeBin()} : {})}, stdio:['pipe','pipe','pipe']});
     let buffer = '', bytes = 0, result: CliSkill[] | undefined, failure: Error | undefined, finished = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const stop = (error?: Error) => {
       if (finished) return; finished = true; failure = error; clearTimeout(timer);
-      child.stdin.end(); child.kill('SIGTERM');
-      killTimer = setTimeout(() => child.kill('SIGKILL'), 1000); killTimer.unref();
+      // The probe may have started helpers; stop its whole tree, not just the root.
+      child.stdin.end(); void terminateProbeTree(child, 'SIGTERM');
+      killTimer = setTimeout(() => void terminateProbeTree(child, 'SIGKILL'), 1000); killTimer.unref();
     };
-    const timer = setTimeout(() => stop(new Error('CLI_SKILL_DISCOVERY_TIMEOUT')), 10000);
+    const timer = setTimeout(() => stop(new Error('CLI_SKILL_DISCOVERY_TIMEOUT')), timeoutMs);
     child.on('error', () => {clearTimeout(timer);if(killTimer)clearTimeout(killTimer);reject(new Error('CLI_SKILL_DISCOVERY_UNAVAILABLE'));});
     child.stdin.on('error', () => {});
     child.stderr.on('data', () => {}); // Diagnostics may contain account/config information.

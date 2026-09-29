@@ -10,20 +10,15 @@ import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
 import { resolveOrchestrationConfig } from './config';
 import { containerTaskTools } from './bridge';
 import { OrchestrationError } from './types';
+import { terminateProbeTree, workerSpawnDetached } from './process-supervisor';
 import type { AgentConfig, GatewayConfig } from '../types';
 import type { SkillRegistry } from '../skills';
 
 function terminateCatalogProcess(
   child: ReturnType<typeof spawn>,
-  signal: NodeJS.Signals = 'SIGTERM'
+  signal: 'SIGTERM' | 'SIGKILL' = 'SIGTERM'
 ) {
-  try {
-    if (process.platform === 'linux' && child.pid)
-      process.kill(-child.pid, signal);
-    else child.kill(signal);
-  } catch {
-    /* Already exited. */
-  }
+  void terminateProbeTree(child, signal);
 }
 
 export interface CapabilityEntry {
@@ -50,12 +45,13 @@ export function probeMcpConfiguration(
   command: string,
   args: string[],
   cwd: string,
-  onObserved?: (servers: ObservedMcpServer[]) => void
+  onObserved?: (servers: ObservedMcpServer[]) => void,
+  timeoutMs = 10000
 ): Promise<Record<string, unknown>> {
   return new Promise((resolveResult, reject) => {
     const child = spawn(command, args, {
       cwd,
-      detached: process.platform === 'linux',
+      detached: workerSpawnDetached(),
       env: {
         ...process.env,
         ...(pathWithNativeBin() ? { PATH: pathWithNativeBin() } : {}),
@@ -83,7 +79,7 @@ export function probeMcpConfiguration(
     };
     const timer = setTimeout(
       () => stop(Error('CAPABILITY_DISCOVERY_TIMEOUT')),
-      10000
+      timeoutMs
     );
     child.stdin.on('error', () => {});
     child.stderr.on('data', () => {});
@@ -447,7 +443,7 @@ export class CapabilityCatalog {
             [resolve(__dirname, '../../mcp/capability-catalog.ts')],
             {
               cwd: this.agent.workspace,
-              detached: process.platform === 'linux',
+              detached: workerSpawnDetached(),
               env: {
                 ...process.env,
                 GATEWAY_WORKSPACE_DIR: this.agent.workspace,
