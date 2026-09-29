@@ -147,12 +147,13 @@ Tells a client which optional features **this** gateway build supports, so the
 client can show or hide functionality based on what the server can actually do —
 instead of parsing version strings or probing endpoints and guessing from the error.
 
-**Auth:** requires a valid API key (`X-Api-Key` / `Authorization: Bearer`) when
-`gateway.api.keys` is configured, exactly like the rest of `/api/v1`. It is *not*
-public like `/health`: the response includes the gateway version, which `/health`
-deliberately withholds from unauthenticated callers. With no keys configured it is
-open, matching the other `/api` routers. Only mounted when `gateway.api.keys` is set
-(again like `/api/v1`).
+**Auth:** requires a valid API key (`X-Api-Key` / `Authorization: Bearer`), exactly
+like the rest of `/api/v1`. It is *not* public like `/health`: the response includes
+the gateway version, which `/health` deliberately withholds from unauthenticated
+callers. The endpoint is **only mounted when `gateway.api.keys` is non-empty**, so a
+keyless install does not expose it at all — a request there returns `404`, not open
+access. (This is stricter than some other `/api` routers, which mount even with an
+empty key set.)
 
 ```bash
 curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/capabilities | jq

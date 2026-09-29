@@ -22,7 +22,7 @@ import type { ApiKey } from '../../src/types';
 const apiKeys: ApiKey[] = [{ key: 'sk-test-app', agents: ['alfred'] }];
 const AUTH = { Authorization: 'Bearer sk-test-app' };
 
-function buildApp(keys?: ApiKey[]) {
+function buildApp(keys: ApiKey[]) {
   const app = express();
   app.use(express.json());
   app.use('/api', createCapabilitiesRouter(keys));
@@ -87,9 +87,13 @@ describe('GET /api/v1/capabilities', () => {
     expect(res.status).toBe(403);
   });
 
-  it('is open when no API keys are configured (matches the other /api routers)', async () => {
-    const res = await request(buildApp([])).get('/api/v1/capabilities');
-    expect(res.status).toBe(200);
-    expect(res.body.capabilities.cross_channel_message).toContain('telegram');
+  it('requires an API key — there is no keyless-open path', async () => {
+    // The router applies API-key auth unconditionally. The gateway mounts it
+    // only when `gateway.api.keys` is non-empty (GatewayRouter's
+    // `api.keys?.length` guard), so a keyless install never reaches this router
+    // at all — the endpoint 404s rather than serving open access. There is thus
+    // no open mode to assert; a request without a credential is rejected.
+    const res = await request(buildApp(apiKeys)).get('/api/v1/capabilities');
+    expect(res.status).toBe(401);
   });
 });

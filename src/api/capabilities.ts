@@ -55,16 +55,17 @@ export function buildCapabilitiesResponse(version: string = GATEWAY_VERSION): Ca
 }
 
 /**
- * `GET /api/v1/capabilities`. Requires an API key when keys are configured — the
- * response carries the gateway version, which `/health` deliberately withholds
- * from unauthenticated callers, so this route sits behind the same auth as the
- * rest of `/api/v1`.
+ * `GET /api/v1/capabilities`. Always behind API-key auth — the response carries
+ * the gateway version, which `/health` deliberately withholds from
+ * unauthenticated callers, so this route sits behind the same auth as the rest
+ * of `/api/v1`. The gateway only mounts this router when `gateway.api.keys` is
+ * non-empty (see GatewayRouter), so a keyless install never reaches it: the
+ * endpoint 404s rather than serving open access. `apiKeys` is therefore always
+ * the configured, non-empty key set.
  */
-export function createCapabilitiesRouter(apiKeys?: ApiKey[]): Router {
+export function createCapabilitiesRouter(apiKeys: ApiKey[]): Router {
   const router = Router();
-  if (apiKeys?.length) {
-    router.use(createApiAuthMiddleware(apiKeys));
-  }
+  router.use(createApiAuthMiddleware(apiKeys));
   router.get('/v1/capabilities', (_req: Request, res: Response) => {
     res.json(buildCapabilitiesResponse());
   });
