@@ -5742,6 +5742,15 @@ export class AgentRunner extends EventEmitter {
       const index = await this.sessionStore.loadIndex(this.agentConfig.id, rawChatId, channel);
       if (!index?.sessions.some(session => session.id === sessionId)) throw new Error('Session not found');
     }
+    // Echo the web-UI message back to the originating channel so its users see
+    // what was typed from the web (fixes the one-sided conversation on every
+    // channel the endpoint serves, not just Telegram). Placed after the
+    // validation above so a rejected request (Authenticated principal,
+    // Ambiguous/mismatched session, Session not found) sends no phantom echo.
+    // channelSourceMap is set first so writeAutoForward routes to the right
+    // channel receiver — the orchestrated path never reaches the legacy set.
+    this.channelSourceMap.set(rawChatId, channel);
+    this.writeAutoForward(rawChatId, '📱 Web: ' + message);
     const requestId = opts.requestId ?? randomUUID();
     const accepted = runtime.submitInput({ scope: { agentId: this.agentConfig.id, agentSessionId: sessionId,
       source: channel, accountId: String(rows[0]?.account_id ?? this.agentConfig.id), chatId: rawChatId,
@@ -5822,15 +5831,6 @@ export class AgentRunner extends EventEmitter {
     callbacks: ApiStreamCallbacks,
     opts: { timeoutMs: number; requestId?: string; principalId?: string; allowTools?: boolean },
   ): Promise<() => void> {
-    // Echo the web UI message to the originating channel so Telegram users see
-    // what was typed from the web. Runs before the `managed` early return so it
-    // fires for orchestrated sessions too (sendOrchestratedChannel never reaches
-    // the code below). channelSourceMap is set first so writeAutoForward resolves
-    // the right channel source for managed-path callers.
-    if (channel === 'telegram') {
-      this.channelSourceMap.set(rawChatId, channel);
-      this.writeAutoForward(rawChatId, '📱 Web: ' + message);
-    }
     const managed = (this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes(channel)) ||
       (this.orchestration?.ownsSession(sessionId) && !this.orchestration.canReturnToLegacy());
     if (managed) return this.sendOrchestratedChannel(rawChatId, channel, sessionId, message, senderName, callbacks, opts);
@@ -5839,6 +5839,14 @@ export class AgentRunner extends EventEmitter {
 
     // Channel sessions use agent-level model (not per-session)
     const session = await this.getOrSpawnSession(rawChatId, channel, sessionId);
+
+    // Echo the web-UI message back to the originating channel so its users see
+    // what was typed from the web (fixes the one-sided conversation on every
+    // channel the endpoint serves, not just Telegram). Placed after
+    // getOrSpawnSession so a rejected request or a failed spawn sends no phantom
+    // echo. channelSourceMap was set just above, so writeAutoForward routes to
+    // the right channel receiver.
+    this.writeAutoForward(rawChatId, '📱 Web: ' + message);
 
     // Persist user message (Layer 1 session JSON + Layer 2 history DB)
     const uiUserTs = Date.now();
