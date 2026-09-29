@@ -47,10 +47,11 @@ function signalPosixGroup(group: number, signal: 'SIGTERM' | 'SIGKILL'): boolean
 }
 // Absolute paths, so a PATH entry cannot substitute the tool whose output decides what gets killed.
 const PS_BIN = '/bin/ps', SYSCTL_BIN = '/usr/sbin/sysctl';
-/** `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` when SystemRoot is a plain
- * absolute drive path; otherwise the bare name, resolved through PATH as before. */
-export function windowsPowerShell(systemRoot = process.env.SystemRoot): string {
-  return systemRoot && /^[A-Za-z]:\\[^"*?<>|]*$/.test(systemRoot) ? `${systemRoot.replace(/\\+$/, '')}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe` : 'powershell.exe';
+/** `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` from the first of SystemRoot
+ * and windir that is a plain absolute drive path; otherwise the bare name, resolved through PATH. */
+export function windowsPowerShell(systemRoot = process.env.SystemRoot, windir = process.env.windir): string {
+  const root = [systemRoot, windir].find(value => value && /^[A-Za-z]:\\[^"*?<>|]*$/.test(value));
+  return root ? `${root.replace(/\\+$/, '')}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe` : 'powershell.exe';
 }
 function run(file: string, args: string[], timeout = 10_000): Promise<string | undefined> {
   return new Promise(resolve => {
@@ -235,11 +236,23 @@ export function windowsPlatform(powershell = windowsPowerShell()): ProcessPlatfo
   // Latest root identity per PID: its start (`spawned` when recorded while the
   // child handle was held), or null when the root exited before it could be
   // recorded (a live process at that PID is then someone else).
+  // Use refreshes an entry's place in the 256-entry budget, so a long-running
+  // worker is not evicted by later spawns.
   const roots = new Map<number, Promise<WindowsRoot>>();
+  // Roots whose tree was proven empty move here, on their own budget: they no
+  // longer displace live roots, yet a stop retried after the PID is reused is
+  // still refused rather than adopting the new process.
+  const retired = new Map<number, Promise<WindowsRoot>>();
+  const recordedRoot = (pid: number) => {
+    const live = roots.get(pid);
+    if (live) bounded(roots, pid, live);
+    return live ?? retired.get(pid);
+  };
   // Lineage per root identity (pid:start), replaced by every snapshot: a dead
   // member is trusted as a parent only in the first snapshot that misses it, so
   // an entry never outlives its PID into a later reuse. Dropped once the tree is
-  // proven empty; the root entry stays so the PID is never re-adopted blindly.
+  // proven empty; the root entry is retired, never dropped, so the PID is never
+  // re-adopted blindly.
   const lineages = new Map<string, Map<number, string>>();
   const ps = (script: string) => run(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], 30_000);
   const snapshot = async () => { const output = await ps(WIN_SNAPSHOT); return output === undefined ? undefined : parseWindowsSnapshot(output); };
@@ -252,7 +265,8 @@ export function windowsPlatform(powershell = windowsPowerShell()): ProcessPlatfo
     return pending;
   };
   const tree = async (group: number, rootStart?: string) => {
-    const recorded = await roots.get(group);
+    const entry = recordedRoot(group);
+    const recorded = await entry;
     const processes = await snapshot();
     if (!processes || (rootStart === undefined && recorded === null)) return undefined;
     // An unrecorded root is adopted only while it is alive; a dead one proves nothing.
@@ -262,7 +276,11 @@ export function windowsPlatform(powershell = windowsPowerShell()): ProcessPlatfo
     const owned = windowsTree(processes, group, lineages.get(key), start);
     if (!owned) return undefined;
     if (owned.size) bounded(lineages, key, owned); else lineages.delete(key);
-    if (recorded === undefined) bounded(roots, group, Promise.resolve({ start, spawned: false }));
+    // Only for the recorded identity, and unless a new root was recorded at this PID meanwhile.
+    if (roots.get(group) === entry && (recorded === undefined || recorded?.start === start)) {
+      const root = recorded === undefined ? Promise.resolve<WindowsRoot>({ start, spawned: false }) : entry!;
+      if (owned.size) bounded(roots, group, root); else { roots.delete(group); bounded(retired, group, root); }
+    }
     return owned;
   };
   return {
@@ -283,7 +301,7 @@ export function windowsPlatform(powershell = windowsPowerShell()): ProcessPlatfo
       return true;
     },
     async fingerprint(pid) {
-      const recorded = await roots.get(pid);
+      const recorded = await recordedRoot(pid);
       if (recorded === null) return undefined;
       // Recorded at spawn while the handle was held: that start is our worker's,
       // even if the PID has been reused since, and needs no fresh snapshot.
@@ -300,7 +318,7 @@ export function windowsPlatform(powershell = windowsPowerShell()): ProcessPlatfo
       // The activity sampler's fresher view also serves a later stop of an
       // adopted root, without another snapshot.
       const key = `${root}:${owned?.get(root)}`;
-      if (owned && lineages.has(key)) bounded(lineages, key, owned);
+      if (owned && lineages.has(key)) { bounded(lineages, key, owned); recordedRoot(root); }
       return owned;
     },
     adopt(pid, alive) {
@@ -313,6 +331,7 @@ export function windowsPlatform(powershell = windowsPowerShell()): ProcessPlatfo
         return { start, spawned: true };
       });
       bounded(roots, pid, root);
+      retired.delete(pid);
       return root.then(recorded => recorded?.start);
     },
   };

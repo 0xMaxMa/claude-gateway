@@ -291,6 +291,47 @@ describe('win32 lineage, identity and kill scope (mocked WMI)', () => {
     expect(await platform.groupMembers(10, '1000')).toBeUndefined();
   });
 
+  test('a long-running worker stays resolvable while more than 256 later probes spawn alongside it', async () => {
+    const platform = windowsPlatform('pwsh-mock');
+    setProcessPlatform(platform);
+    const worker: Proc = [10, 4, 1000];
+    const probes: Proc[] = [];
+    procs = [worker];
+    await spawned(platform, 10);
+    for (let pid = 100; pid < 400; pid++) {
+      probes.push([pid, 4, 2000 + pid]);
+      procs = [worker, ...probes];
+      await spawned(platform, pid);
+      if (pid % 50 === 0) expect(await platform.groupMembers(10)).toEqual([10]); // the worker is still supervised
+    }
+    // The worker exits and leaves an orphan; its recorded identity still anchors it.
+    procs = [...probes, [12, 10, 1002]];
+    expect(await platform.groupMembers(10)).toEqual([12]);
+    expect(await platform.fingerprint(10)).toEqual({ bootId: '133000000000000000', startTicks: '1000' });
+  });
+
+  test('probes proven stopped retire their roots: they no longer evict a worker, and a reused PID stays refused', async () => {
+    const platform = windowsPlatform('pwsh-mock');
+    setProcessPlatform(platform);
+    const worker: Proc = [10, 4, 1000];
+    procs = [worker];
+    await spawned(platform, 10);
+    for (let pid = 100; pid < 400; pid++) {
+      procs = [worker, [pid, 4, 2000 + pid]];
+      await spawned(platform, pid);
+      procs = [worker];
+      expect(await platform.groupMembers(pid)).toEqual([]);
+    }
+    // An unrelated process reuses a recently stopped probe's PID: never adopted.
+    procs = [worker, [399, 4, 9000]];
+    expect(await platform.groupMembers(399)).toBeUndefined();
+    expect(await platform.signalGroup(399, 'SIGKILL')).toBe(false);
+    // The worker exits and an unrelated process reuses its PID: a stop is refused, nothing is killed.
+    procs = [[10, 4, 9999]];
+    expect(await stopProcessGroup(10)).toBe(false);
+    expect(killed()).toEqual([]);
+  });
+
   test('identity keeps the start recorded at spawn: a PID reused before identity() is never persisted', async () => {
     const platform = windowsPlatform('pwsh-mock');
     procs = [[10, 4, 1000]];
@@ -409,7 +450,13 @@ describe('absolute tool paths', () => {
   test('PowerShell comes from SystemRoot when it is a plain drive path', () => {
     expect(windowsPowerShell('C:\\Windows')).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
     expect(windowsPowerShell('D:\\WINDOWS\\')).toBe('D:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
-    for (const unusable of ['', 'Windows', '\\\\server\\share', 'C:\\Win"dows', '/usr']) expect(windowsPowerShell(unusable)).toBe('powershell.exe');
+    for (const unusable of ['', 'Windows', '\\\\server\\share', 'C:\\Win"dows', '/usr']) expect(windowsPowerShell(unusable, '')).toBe('powershell.exe');
+  });
+  test('without a usable SystemRoot, a plain windir is used before any PATH lookup', () => {
+    expect(windowsPowerShell('', 'C:\\Windows')).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+    expect(windowsPowerShell('\\\\server\\share', 'E:\\WINDOWS\\')).toBe('E:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+    expect(windowsPowerShell('D:\\Windows', 'C:\\Windows')).toBe('D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+    for (const unusable of ['', 'Windows', '\\\\server\\share', 'C:\\Win"dows', '/usr']) expect(windowsPowerShell('', unusable)).toBe('powershell.exe');
   });
   test('macOS runs ps and sysctl by absolute path', async () => {
     answer((file) => file === '/bin/ps' ? '100 100 Ss\n' : file === '/usr/sbin/sysctl' ? 'BOOT\n' : undefined);
