@@ -4,7 +4,7 @@ import { spawn } from 'child_process';
 import { Message } from '../types';
 import type { ChatChannelOrApi } from '../history/types';
 import { SessionStore } from './store';
-import { resolveClaudeBin, pathWithNativeBin } from './claude-bin';
+import { claudeCommand, pathWithNativeBin } from './claude-bin';
 
 export interface CompactionResult {
   beforeMessages: number;
@@ -289,8 +289,7 @@ export class SessionCompactor {
     // locations. This runs in the gateway's own (possibly minimal) PATH, so
     // without resolution `claude --print` would fail identically to a session
     // spawn after the native-installer migration.
-    const claudeBinRaw = process.env.CLAUDE_BIN ?? resolveClaudeBin().bin;
-    const [claudeBin, ...claudeBinArgs] = claudeBinRaw.split(' ');
+    const { command: claudeBin, args: claudeBinArgs } = claudeCommand();
 
     const result = await this.spawnClaude(claudeBin, [...claudeBinArgs, '--print', '--model', model], prompt);
 

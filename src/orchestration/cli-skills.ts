@@ -5,7 +5,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { gatewayCapacity } from './capacity';
 import { AgentConfig, GatewayConfig } from '../types';
-import { pathWithNativeBin, resolveClaudeBin } from '../session/claude-bin';
+import { claudeCommand, pathWithNativeBin } from '../session/claude-bin';
 import { resolveOrchestrationConfig } from './config';
 import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
 import { validateContainer } from './container';
@@ -60,7 +60,8 @@ let discoveryTail: Promise<unknown> = Promise.resolve();
 export function discoverCliSkills(agent: AgentConfig, cwd = agent.orchestration?.tasks?.projectRoot || agent.workspace, gateway?: GatewayConfig): Promise<CliSkill[]> {
   const container = agent.type === 'app-agent';
   const host = !container && resolveOrchestrationConfig(agent.orchestration).tasks.workspaceMode === 'host';
-  const binary = container ? agent.claudeBin ?? 'claude' : process.env.CLAUDE_BIN || resolveClaudeBin().bin;
+  const hostCommand = container ? undefined : claudeCommand();
+  const binary = hostCommand ? [hostCommand.command, ...hostCommand.args].join(' ') : agent.claudeBin ?? 'claude';
   const settings: {disableAllHooks:boolean;enabledPlugins?:Record<string,boolean>} = {disableAllHooks:true};
   if(!host && !container) {
     let enabled: Record<string,boolean> = {};
@@ -80,8 +81,7 @@ export function discoverCliSkills(agent: AgentConfig, cwd = agent.orchestration?
       let uid=1000;try{uid=userInfo().uid;}catch{/* match runtime fallback */}
       return await probeCliSkills('docker',['exec','--workdir','/workspace','--user',String(uid),'-e',`HOME=${homedir()}`,'-i',agent.container!,binary,...args],agent.workspace);
     }
-    const [executable,...prefix]=binary.split(' ');
-    return await probeCliSkills(executable,[...prefix,...args],cwd);
+    return await probeCliSkills(hostCommand!.command,[...hostCommand!.args,...args],cwd);
     } finally { release?.(); }
   });
   discoveryTail=value.then(()=>{},()=>{});

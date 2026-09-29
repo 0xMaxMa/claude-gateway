@@ -24,7 +24,7 @@ import { SessionStore } from './store';
 import { createLogger } from '../logger';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { neutralizeTuiTriggers } from '../shell/screen';
-import { resolveClaudeBin, pathWithNativeBin } from './claude-bin';
+import { resolveClaudeBin, pathWithNativeBin, parseClaudeBin, type ClaudeCommand } from './claude-bin';
 import { claudeSettingsEnv, readClaudeSettings } from '../config/claude-settings';
 import {
   CODING_TOOLS,
@@ -1057,20 +1057,25 @@ export class SessionProcess extends EventEmitter {
     const args = this.writeSystemPromptFile(this.buildArgs(effectiveMcpPath, freshModel), effectiveMcpPath);
 
     // Resolve the claude binary. An explicit CLAUDE_BIN (which may carry args) is
-    // trusted verbatim; otherwise probe PATH and the native-installer / legacy
+    // parsed by parseClaudeBin; otherwise probe PATH and the native-installer / legacy
     // install locations so a gateway launched with a minimal PATH still finds it.
     let claudeBinRaw: string;
+    let claudeBinParts: ClaudeCommand;
     if (process.env.CLAUDE_BIN) {
       claudeBinRaw = process.env.CLAUDE_BIN;
+      claudeBinParts = parseClaudeBin(claudeBinRaw);
     } else if (isAppAgent) {
       // App-agents run claude INSIDE the container; host-side resolution would
       // point at a host path that need not exist in the container. Keep bare
       // `claude` so the container's own PATH resolves it (agentConfig.claudeBin
       // overrides below when the image installs claude elsewhere).
       claudeBinRaw = 'claude';
+      claudeBinParts = { command: claudeBinRaw, args: [] };
     } else {
       const resolution = resolveClaudeBin();
       claudeBinRaw = resolution.bin;
+      // A resolved path is one executable, never split: it may sit under a home with spaces.
+      claudeBinParts = { command: claudeBinRaw, args: [] };
       if (resolution.source === 'fallback') {
         this.logger.warn('Could not resolve the claude binary — spawning bare "claude" as a last resort', {
           sessionId: this.sessionId,
@@ -1088,9 +1093,8 @@ export class SessionProcess extends EventEmitter {
         });
       }
     }
-    const claudeBinParts = claudeBinRaw.split(' ');
-    let claudeBin = claudeBinParts[0];
-    let allArgs = [...claudeBinParts.slice(1), ...args];
+    let claudeBin = claudeBinParts.command;
+    let allArgs = [...claudeBinParts.args, ...args];
 
     // gateway.headless: false → run the interactive claude TUI under the
     // claude-pty-shell PTY wrapper (same stream-json protocol on stdio).

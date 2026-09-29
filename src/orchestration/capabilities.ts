@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import { resolveEnabledConnectors } from '../connectors/resolve';
 import { isReservedConnectorId } from '../connectors/custom';
-import { pathWithNativeBin, resolveClaudeBin } from '../session/claude-bin';
+import { claudeCommand, pathWithNativeBin } from '../session/claude-bin';
 import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
 import { resolveOrchestrationConfig } from './config';
 import { containerTaskTools } from './bridge';
@@ -408,8 +408,7 @@ export class CapabilityCatalog {
         await writeFile(file, JSON.stringify({ mcpServers: connectors }), {
           mode: 0o600,
         });
-        const binary = process.env.CLAUDE_BIN || resolveClaudeBin().bin;
-        const [command, ...prefix] = binary.split(' ');
+        const { command, args: prefix } = claudeCommand();
         try {
           servers = {
             ...(await probeMcpConfiguration(

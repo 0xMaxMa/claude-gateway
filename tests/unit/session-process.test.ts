@@ -3381,6 +3381,34 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
     await sp.stop();
   });
 
+  it('U-SP-BIN3b: a resolved path under a home with spaces is spawned whole', async () => {
+    mockResolvedBin = '/Users/John Doe/.local/bin/claude';
+    const sp = makeSp('chat:bin3b', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const [spawnBin, spawnArgs] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(spawnBin).toBe('/Users/John Doe/.local/bin/claude');
+    expect(spawnArgs[0]).not.toBe('Doe/.local/bin/claude');
+
+    await sp.stop();
+  });
+
+  it('U-SP-BIN3c: CLAUDE_BIN carrying arguments still splits into command and args', async () => {
+    process.env.CLAUDE_BIN = 'node /opt/claude/cli.js';
+    try {
+      const sp = makeSp('chat:bin3c', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const [spawnBin, spawnArgs] = spawnMock.mock.calls[0] as [string, string[]];
+      expect(spawnBin).toBe('node');
+      expect(spawnArgs[0]).toBe('/opt/claude/cli.js');
+
+      await sp.stop();
+    } finally {
+      delete process.env.CLAUDE_BIN;
+    }
+  });
+
   // --------------------------------------------------------------------------
   // U-SP-BIN4: app-agents run claude INSIDE the container, so host-side
   // resolution must NOT leak a host path into the container — the in-container

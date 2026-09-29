@@ -166,3 +166,43 @@ export function pathWithNativeBin(
     ? `${nativeBinDir}${path.delimiter}${pathEnv ?? ''}`
     : pathEnv;
 }
+
+/** An executable plus the leading arguments to pass before the caller's own. */
+export interface ClaudeCommand {
+  command: string;
+  args: string[];
+}
+
+/**
+ * Split an explicit `CLAUDE_BIN` / `CLAUDE_REAL_BIN` value. The value may carry
+ * leading arguments (`node /path/to/cli.js`), so it is read as:
+ *   1. the whole value, when it names an existing file — a path with spaces
+ *      such as `C:\Program Files\Claude\claude.exe` or `/Users/John Doe/...`;
+ *   2. otherwise, whitespace-separated words, where a double-quoted word may
+ *      contain spaces (`"C:\Program Files\nodejs\node.exe" "D:\my tools\cli.js"`).
+ * Unquoted values split on whitespace as before.
+ */
+export function parseClaudeBin(value: string): ClaudeCommand {
+  const raw = value.trim();
+  try {
+    if (fs.statSync(raw).isFile()) return { command: raw, args: [] };
+  } catch {
+    /* not a single path */
+  }
+  const [command = '', ...args] = [...raw.matchAll(/"([^"]*)"|(\S+)/g)].map((m) => m[1] ?? m[2]);
+  return { command, args };
+}
+
+/**
+ * The claude command for a host-side spawn: an explicit `CLAUDE_BIN` is parsed
+ * with `parseClaudeBin`; otherwise the resolved binary is used as one path and
+ * is never split (it may live under a home directory containing spaces).
+ */
+export function claudeCommand(
+  explicit: string | undefined = process.env.CLAUDE_BIN,
+  resolve: () => ClaudeBinResolution = resolveClaudeBin,
+): ClaudeCommand & { resolution?: ClaudeBinResolution } {
+  if (explicit) return parseClaudeBin(explicit);
+  const resolution = resolve();
+  return { command: resolution.bin, args: [], resolution };
+}
