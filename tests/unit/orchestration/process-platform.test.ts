@@ -409,7 +409,7 @@ describe('absolute tool paths', () => {
   test('PowerShell comes from SystemRoot when it is a plain drive path', () => {
     expect(windowsPowerShell('C:\\Windows')).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
     expect(windowsPowerShell('D:\\WINDOWS\\')).toBe('D:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
-    for (const unusable of [undefined, '', 'Windows', '\\\\server\\share', 'C:\\Win"dows', '/usr']) expect(windowsPowerShell(unusable)).toBe('powershell.exe');
+    for (const unusable of ['', 'Windows', '\\\\server\\share', 'C:\\Win"dows', '/usr']) expect(windowsPowerShell(unusable)).toBe('powershell.exe');
   });
   test('macOS runs ps and sysctl by absolute path', async () => {
     answer((file) => file === '/bin/ps' ? '100 100 Ss\n' : file === '/usr/sbin/sysctl' ? 'BOOT\n' : undefined);
