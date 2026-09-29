@@ -744,3 +744,130 @@ describe('config migration — GPT 6 reaches existing installs', () => {
     });
   });
 });
+
+/**
+ * Sonnet 5.5 reaches existing installs.
+ *
+ * Same shape as the Opus 5.5 block above: the Sonnet 5.5 rows only merge into
+ * an install's own gateway.models list when the template's configVersion is
+ * ahead of the user's, and the same pass must rewrite the install's own
+ * claude-sonnet-5 rows from `sonnet` to `sonnet5`.
+ *
+ * The pre-Sonnet-5.5 fixture pins configVersion 1.0.34, the version
+ * immediately before this change, so the first test fails if the bump is
+ * reverted.
+ */
+describe('config migration — Sonnet 5.5 reaches existing installs', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sonnet55-upgrade-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** A realistic pre-Sonnet-5.5 install: the previous Sonnet rows, an agent
+   *  pinned to Sonnet 5, plus a custom BYOK model. */
+  function writePreSonnet55Config(): string {
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          configVersion: '1.0.34',
+          gateway: {
+            bind: '0.0.0.0',
+            models: [
+              { id: 'claude-sonnet-5[1m]', label: 'Sonnet 5 (1M)', alias: 'sonnet[1m]', contextWindow: 1000000 },
+              { id: 'claude-sonnet-5', label: 'Sonnet 5', alias: 'sonnet', contextWindow: 200000 },
+              { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', alias: 'sonnet46', contextWindow: 200000 },
+              { id: 'openrouter/custom-model', label: 'My BYOK', alias: 'mine', contextWindow: 128000 },
+            ],
+          },
+          agents: [{ id: 'alice', claude: { model: 'claude-sonnet-5' } }],
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+    return configPath;
+  }
+
+  it('uses a template version newer than the pre-Sonnet-5.5 registry', () => {
+    expect(compareSemver(templateVersion(), '1.0.34')).toBeGreaterThan(0);
+  });
+
+  it('adds both Sonnet 5.5 variants with the right aliases and windows', () => {
+    const configPath = writePreSonnet55Config();
+
+    const result = runRealUpgrade(configPath);
+
+    expect(result.needed).toBe(true);
+    expect(result.addedFields).toContain('gateway.models[claude-sonnet-5-5]');
+    expect(result.addedFields).toContain('gateway.models[claude-sonnet-5-5[1m]]');
+    expect(result.addedFields).not.toContain('gateway.models[claude-sonnet-5]');
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.configVersion).toBe(templateVersion());
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'claude-sonnet-5-5',
+      label: 'Sonnet 5.5',
+      alias: 'sonnet',
+      contextWindow: 200000,
+    });
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'claude-sonnet-5-5[1m]',
+      label: 'Sonnet 5.5 (1M)',
+      alias: 'sonnet[1m]',
+      contextWindow: 1000000,
+    });
+  });
+
+  /**
+   * Without the alias rewrite the migrated config would carry two rows both
+   * claiming `sonnet`, and /model sonnet would resolve to whichever came first.
+   */
+  it('rewrites the existing Sonnet 5 rows to the demoted `sonnet5` alias', () => {
+    const configPath = writePreSonnet55Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const byAlias = (alias: string) =>
+      migrated.gateway.models.find((m: { alias: string }) => m.alias === alias);
+    const byId = (id: string) =>
+      migrated.gateway.models.find((m: { id: string }) => m.id === id);
+
+    expect(byId('claude-sonnet-5')?.alias).toBe('sonnet5');
+    expect(byId('claude-sonnet-5[1m]')?.alias).toBe('sonnet5[1m]');
+    expect(byId('claude-sonnet-4-6')?.alias).toBe('sonnet46');
+    expect(byAlias('sonnet')?.id).toBe('claude-sonnet-5-5');
+    expect(byAlias('sonnet[1m]')?.id).toBe('claude-sonnet-5-5[1m]');
+
+    const aliases = migrated.gateway.models.map((m: { alias: string }) => m.alias);
+    expect(new Set(aliases).size).toBe(aliases.length);
+  });
+
+  it('does not move an agent already on Sonnet 5', () => {
+    const configPath = writePreSonnet55Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.agents[0].claude.model).toBe('claude-sonnet-5');
+  });
+
+  it('preserves a user-owned model that is not in the template', () => {
+    const configPath = writePreSonnet55Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'openrouter/custom-model',
+      label: 'My BYOK',
+      alias: 'mine',
+      contextWindow: 128000,
+    });
+  });
+});
