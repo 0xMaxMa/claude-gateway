@@ -1,6 +1,6 @@
 import { execFile } from 'child_process';
 import { commandLineLimited, darwinPlatform, linuxPlatform, parseDarwinPs, parsePsCpuTicks, parseWindowsSnapshot, processPlatform, setProcessPlatform, windowsPlatform, windowsTree, type ProcessPlatform } from '../../../src/orchestration/process-platform';
-import { cleanupPersistedProcess, processSupervisorSupported, stopProcessGroup, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
+import { cleanupPersistedProcess, processSupervisorSupported, recordProcessRoot, stopProcessGroup, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
 import { ProcessActivitySampler } from '../../../src/orchestration/process-activity';
 
 jest.mock('child_process', () => ({ ...jest.requireActual('child_process'), execFile: jest.fn() }));
@@ -114,7 +114,7 @@ describe('darwin (ps + sysctl)', () => {
   });
 });
 
-describe('win32 (WMI process tree + taskkill)', () => {
+describe('win32 (WMI process tree)', () => {
   // pid ppid creation(FILETIME) cpu(100ns) read write
   const row = (pid: number, ppid: number, created: number, cpu = 0) => `${pid} ${ppid} ${created} ${cpu} 10 20`;
   const snap = (...rows: string[]) => parseWindowsSnapshot(rows.join('\r\n'));
@@ -137,13 +137,12 @@ describe('win32 (WMI process tree + taskkill)', () => {
     expect(windowsTree(snap(row(10, 4, 9000)), 10, known)).toBeUndefined();
     expect(windowsTree(snap(row(10, 4, 9000)), 10, new Map(), 'not-a-filetime')).toBeUndefined();
   });
-  test('stop kills the tree with taskkill /T /F, then terminates survivors, and proves it empty', async () => {
+  test('stop terminates every owned process individually, including an orphan, and proves it empty', async () => {
     let alive = new Set([10, 11, 12]);
     const created: Record<number, [number, number]> = { 10: [4, 1000], 11: [10, 1001], 12: [11, 1002] };
     const calls: string[] = [];
     answer((file, args) => {
-      calls.push(`${file} ${args.join(' ')}`.slice(0, 40));
-      if (file === 'taskkill') { alive.delete(10); alive.delete(11); return 'SUCCESS'; } // 12 escapes the walk
+      calls.push(file);
       if (args.at(-1)!.includes('Win32_OperatingSystem')) return '133000000000000000';
       return [...alive].map(pid => row(pid, created[pid][0], created[pid][1])).join('\r\n');
     });
@@ -153,8 +152,8 @@ describe('win32 (WMI process tree + taskkill)', () => {
     expect(await platform.fingerprint(10)).toEqual({ bootId: '133000000000000000', startTicks: '1000' });
     expect((await platform.groupMembers(10))!.sort()).toEqual([10, 11, 12]);
     expect(await stopProcessGroup(10)).toBe(true);
-    expect(calls).toContain('taskkill /PID 10 /T /F');
-    expect(kill).toHaveBeenCalledWith(12, 'SIGKILL');
+    expect(calls).not.toContain('taskkill');
+    expect(kill.mock.calls.map(([pid]) => pid)).toEqual([10, 11, 12]);
     expect(await platform.groupMembers(10)).toEqual([]);
     // A new process that reuses the root PID is not adopted afterwards.
     alive = new Set([10]); created[10] = [4, 7777];
@@ -193,6 +192,114 @@ describe('win32 (WMI process tree + taskkill)', () => {
   });
 });
 
+describe('win32 lineage, identity and kill scope (mocked WMI)', () => {
+  // pid ppid creation(FILETIME) cpu(100ns) read write
+  type Proc = [pid: number, ppid: number, created: number];
+  let procs: Proc[] = [];
+  let calls: string[] = [];
+  let kill: jest.SpyInstance;
+  beforeEach(() => {
+    procs = []; calls = [];
+    answer((file, args) => {
+      calls.push(`${file} ${args.join(' ')}`.slice(0, 60));
+      if (file === 'taskkill') { const root = Number(args[1]); procs = procs.filter(([pid, ppid]) => pid !== root && ppid !== root); return 'SUCCESS'; }
+      if (args.at(-1)!.includes('Win32_OperatingSystem')) return '133000000000000000';
+      return procs.map(([pid, ppid, created]) => `${pid} ${ppid} ${created} 0 10 20`).join('\r\n');
+    });
+    kill = jest.spyOn(process, 'kill').mockImplementation(((pid: number) => { procs = procs.filter(([p]) => p !== pid); return true; }) as typeof process.kill);
+  });
+  const spawned = async (platform: ProcessPlatform, pid: number) => { platform.adopt?.(pid, () => true); await platform.groupMembers(pid); };
+  const killed = () => kill.mock.calls.map(([pid]) => pid);
+
+  test('a dead member whose PID an unrelated process reused never adopts that process\'s children', async () => {
+    const platform = windowsPlatform('pwsh-mock');
+    setProcessPlatform(platform);
+    procs = [[10, 4, 1000], [11, 10, 1001]];
+    await spawned(platform, 10);
+    expect((await platform.groupMembers(10))!.sort()).toEqual([10, 11]);
+    // 11 exits; an unrelated app later reuses PID 11, starts 30, and exits.
+    procs = [[10, 4, 1000]];
+    expect(await platform.groupMembers(10)).toEqual([10]);
+    procs = [[10, 4, 1000], [30, 11, 5001]];
+    expect(await platform.groupMembers(10)).toEqual([10]);
+    // Same when the reuse is observed alive first (different creation time).
+    procs = [[10, 4, 1000], [11, 10, 1001]];
+    await platform.groupMembers(10);
+    procs = [[10, 4, 1000], [11, 4, 5000]];
+    await platform.groupMembers(10);
+    procs = [[10, 4, 1000], [31, 11, 5002]];
+    expect(await platform.groupMembers(10)).toEqual([10]);
+    expect(await stopProcessGroup(10)).toBe(true);
+    expect(killed()).toEqual([10]);
+    expect(procs).toEqual([[31, 11, 5002]]);
+  });
+
+  test('a stop reuses the activity sampler\'s lineage for an adopted root', async () => {
+    const platform = windowsPlatform('pwsh-mock');
+    setProcessPlatform(platform);
+    procs = [[10, 4, 1000]];
+    await spawned(platform, 10);
+    const sampler = new ProcessActivitySampler(() => 10);
+    procs = [[10, 4, 1000], [11, 10, 1001], [12, 11, 1002]];
+    expect(await sampler.sample()).toMatchObject({ processCount: 3 });
+    procs = [[10, 4, 1000], [12, 11, 1002]]; // 11 exited between samples and stop
+    expect(await stopProcessGroup(10)).toBe(true);
+    expect(killed()).toEqual([10, 12]);
+  });
+
+  test('a dead root with no recorded identity is unproven, never a successful stop', async () => {
+    const platform = windowsPlatform('pwsh-mock');
+    setProcessPlatform(platform);
+    procs = [[12, 10, 1002]]; // an MCP server orphaned by worker 10
+    expect(await platform.groupMembers(10)).toBeUndefined();
+    expect(await platform.signalGroup(10, 'SIGKILL')).toBe(false);
+    expect(await stopProcessGroup(10)).toBe(false);
+    expect(killed()).toEqual([]);
+  });
+
+  test('a root recorded at spawn anchors its orphans after it exits', async () => {
+    const platform = windowsPlatform('pwsh-mock');
+    setProcessPlatform(platform);
+    procs = [[10, 4, 1000]];
+    platform.adopt?.(10, () => true);
+    procs = [[12, 10, 1002], [13, 10, 900]]; // 13 predates the worker: stale PPID
+    expect(await stopProcessGroup(10)).toBe(true);
+    expect(killed()).toEqual([12]);
+    // A root that exited before its identity was recorded proves nothing later.
+    const late = windowsPlatform('pwsh-mock');
+    setProcessPlatform(late);
+    procs = [[20, 4, 2000]];
+    late.adopt?.(20, () => false);
+    expect(await late.groupMembers(20)).toBeUndefined();
+  });
+
+  test('a new worker that reuses an old worker\'s PID can be stopped; the old identity stays unproven', async () => {
+    const platform = windowsPlatform('pwsh-mock');
+    setProcessPlatform(platform);
+    procs = [[10, 4, 1000]];
+    await spawned(platform, 10);
+    expect(await stopProcessGroup(10)).toBe(true);
+    procs = [[10, 4, 7777], [11, 10, 7778]];
+    await spawned(platform, 10);
+    expect(await stopProcessGroup(10)).toBe(true);
+    expect(killed()).toEqual([10, 10, 11]);
+    procs = [[10, 4, 7777]];
+    expect(await platform.groupMembers(10, '1000')).toBeUndefined();
+  });
+
+  test('stop kills only the creation-time-verified set, never a PPID-only tree walk', async () => {
+    const platform = windowsPlatform('pwsh-mock');
+    setProcessPlatform(platform);
+    // 40 still names 10 as parent but predates it: its parent was an older PID 10.
+    procs = [[10, 4, 1000], [11, 10, 1001], [40, 10, 500]];
+    await spawned(platform, 10);
+    expect(await stopProcessGroup(10)).toBe(true);
+    expect(calls.some(call => call.startsWith('taskkill'))).toBe(false);
+    expect(killed()).toEqual([10, 11]);
+    expect(procs).toEqual([[40, 10, 500]]);
+  });
+});
+
 describe('supervisor over a platform', () => {
   test('escalates to SIGKILL after the grace period and reports the final proof', async () => {
     const live = new Set([5, 6]);
@@ -205,6 +312,22 @@ describe('supervisor over a platform', () => {
     expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
     setProcessPlatform(null);
     expect(await stopProcessGroup(5)).toBe(false);
+  });
+});
+
+describe('worker spawn records the root identity', () => {
+  test('the platform adopts the root with a liveness check tied to the child handle', () => {
+    const adopt = jest.fn();
+    setProcessPlatform({ detachWorkers: false, termGraceMs: 0, pollMs: 0, killSettleMs: 0, groupMembers: async () => [], signalGroup: async () => true,
+      fingerprint: async () => undefined, snapshot: async () => undefined, adopt });
+    const child = { pid: 10, exitCode: null as number | null, signalCode: null };
+    recordProcessRoot(child);
+    expect(adopt).toHaveBeenCalledWith(10, expect.any(Function));
+    expect(adopt.mock.calls[0][1]()).toBe(true);
+    child.exitCode = 0;
+    expect(adopt.mock.calls[0][1]()).toBe(false);
+    recordProcessRoot({ pid: undefined, exitCode: null, signalCode: null });
+    expect(adopt).toHaveBeenCalledTimes(1);
   });
 });
 

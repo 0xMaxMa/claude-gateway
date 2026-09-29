@@ -3,7 +3,7 @@ import { once } from 'events';
 import { cleanupPersistedProcess, liveGroupMembers, processFingerprint, stopProcessGroup, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
 
 // Runs against the real supervisor of this host: /proc on Linux, ps on macOS,
-// WMI + taskkill on Windows. The child is spawned exactly as a worker is.
+// a creation-time-checked WMI tree on Windows. The child is spawned exactly as a worker is.
 const supported = ['linux', 'darwin', 'win32'].includes(process.platform);
 const forceKill = (pid: number) => { try { process.kill(workerSpawnDetached() ? -pid : pid, 'SIGKILL'); } catch { /* already stopped */ } };
 

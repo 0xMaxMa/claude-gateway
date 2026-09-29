@@ -31,6 +31,9 @@ export interface ProcessPlatform {
   tree?(snapshot: Map<number, ProcessRecord>, root: number, known: Map<number, string>): Map<number, string> | undefined;
   /** Linux enriches owned members with I/O counters and re-checks start identity. */
   refine?(member: ProcessRecord): Promise<boolean>;
+  /** Record a just-spawned root's identity while its handle is held (`alive`), so
+   * a later stop can anchor orphans and refuse a reused PID. */
+  adopt?(pid: number, alive: () => boolean): void;
 }
 
 const gone = (error: unknown) => ['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '');
@@ -174,10 +177,11 @@ export function parseWindowsSnapshot(output: string): Map<number, ProcessRecord>
 }
 const filetime = (value: string) => /^\d+$/.test(value) ? BigInt(value) : undefined;
 const notBefore = (child: string, parent: string) => filetime(parent) !== undefined && filetime(child)! >= filetime(parent)!;
-/** Members of the tree rooted at `root`. `known` holds pid->start of members seen
- * earlier, so a grandchild orphaned by an exited intermediate is still owned.
- * Undefined when the root PID now belongs to a different process: its original
- * tree may still have orphans that cannot be told apart, so nothing is proven. */
+/** Members of the tree rooted at `root`. `known` holds pid->start of members owned
+ * at the previous snapshot, so a grandchild orphaned by an exited intermediate is
+ * still owned. Undefined when nothing is proven: the root PID now belongs to a
+ * different process (its original tree may still have orphans that cannot be told
+ * apart), or the root is gone and no start identity anchors its orphans. */
 export function windowsTree(snapshot: Map<number, ProcessRecord>, root: number, known: Map<number, string> = new Map(), rootStart?: string): Map<number, string> | undefined {
   const expected = known.get(root) ?? rootStart;
   const lineage = new Map(known);
@@ -185,6 +189,7 @@ export function windowsTree(snapshot: Map<number, ProcessRecord>, root: number, 
   const owned = new Map<number, string>();
   const current = snapshot.get(root);
   if (current && expected !== undefined && current.start !== expected) return undefined;
+  if (!current && expected === undefined) return undefined;
   if (current) { owned.set(root, current.start); lineage.set(root, current.start); }
   let changed = true;
   while (changed) {
@@ -198,22 +203,31 @@ export function windowsTree(snapshot: Map<number, ProcessRecord>, root: number, 
   }
   return owned;
 }
+const bounded = <K, V>(map: Map<K, V>, key: K, value: V) => {
+  map.delete(key); map.set(key, value);
+  for (const oldest of map.keys()) { if (map.size <= 256) break; map.delete(oldest); }
+};
 export function windowsPlatform(powershell = 'powershell.exe'): ProcessPlatform {
-  // Lineage outlives the root so a reused root PID is never adopted; bounded.
-  const seen = new Map<number, Map<number, string>>();
-  const remember = (group: number, owned: Map<number, string>) => {
-    const lineage = new Map([...(seen.get(group) ?? []), ...owned]);
-    seen.delete(group); seen.set(group, lineage);
-    for (const oldest of seen.keys()) { if (seen.size <= 256) break; seen.delete(oldest); }
-  };
+  // Latest root identity per PID: its start, or null when the root exited before
+  // it could be recorded (a live process at that PID is then someone else).
+  const roots = new Map<number, Promise<string | null | undefined>>();
+  // Lineage per root identity (pid:start), replaced by every snapshot: a dead
+  // member is trusted as a parent only in the first snapshot that misses it, so
+  // an entry never outlives its PID into a later reuse.
+  const lineages = new Map<string, Map<number, string>>();
   const ps = (script: string) => run(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], 30_000);
   const snapshot = async () => { const output = await ps(WIN_SNAPSHOT); return output === undefined ? undefined : parseWindowsSnapshot(output); };
   const tree = async (group: number, rootStart?: string) => {
+    const recorded = await roots.get(group);
     const processes = await snapshot();
-    if (!processes) return undefined;
-    const owned = windowsTree(processes, group, seen.get(group), rootStart);
+    if (!processes || (rootStart === undefined && recorded === null)) return undefined;
+    // An unrecorded root is adopted only while it is alive; a dead one proves nothing.
+    const start = rootStart ?? recorded ?? processes.get(group)?.start;
+    if (start === undefined) return undefined;
+    const owned = windowsTree(processes, group, lineages.get(`${group}:${start}`), start);
     if (!owned) return undefined;
-    remember(group, owned);
+    bounded(lineages, `${group}:${start}`, owned);
+    if (recorded === undefined) bounded(roots, group, Promise.resolve(start));
     return owned;
   };
   return {
@@ -221,27 +235,39 @@ export function windowsPlatform(powershell = 'powershell.exe'): ProcessPlatform 
     detachWorkers: false, termGraceMs: 2000, pollMs: 500, killSettleMs: 500,
     async groupMembers(group, rootStart) { const owned = await tree(group, rootStart); return owned && [...owned.keys()]; },
     // Console processes cannot be asked to exit politely, so both signals terminate
-    // the whole tree: taskkill walks it while the root lives, then every owned
-    // process (including orphans) is terminated individually.
+    // every creation-time-verified member individually. Never taskkill /T: it
+    // follows bare parent PIDs, which Windows keeps after the parent dies.
     async signalGroup(group) {
-      const before = await tree(group);
-      if (!before) return false;
-      // Without a live root taskkill never ran, so the first snapshot still holds.
-      let after: Map<number, string> | undefined = before;
-      if (before.has(group)) { await run('taskkill', ['/PID', String(group), '/T', '/F']); after = await tree(group); }
-      if (!after) return false;
-      for (const pid of after.keys()) { try { process.kill(pid, 'SIGKILL'); } catch (error) { if (!gone(error)) return false; } }
+      const owned = await tree(group);
+      if (!owned) return false;
+      for (const pid of owned.keys()) { try { process.kill(pid, 'SIGKILL'); } catch (error) { if (!gone(error)) return false; } }
       return true;
     },
     async fingerprint(pid) {
       const [processes, boot] = await Promise.all([snapshot(), ps(WIN_BOOT)]);
       const record = processes?.get(pid);
       if (!record || !boot?.trim()) return undefined;
-      remember(pid, new Map([[pid, record.start]]));
       return { bootId: boot.trim(), startTicks: record.start };
     },
     snapshot,
-    tree: (processes, root, known) => windowsTree(processes, root, known),
+    tree(processes, root, known) {
+      const owned = windowsTree(processes, root, known);
+      // The activity sampler's fresher view also serves a later stop of an
+      // adopted root, without another snapshot.
+      const key = `${root}:${owned?.get(root)}`;
+      if (owned && lineages.has(key)) bounded(lineages, key, owned);
+      return owned;
+    },
+    adopt(pid, alive) {
+      bounded(roots, pid, snapshot().then(processes => {
+        if (!processes) return undefined;
+        const start = processes.get(pid)?.start;
+        if (start === undefined || !alive()) return null;
+        // A new root at a reused PID starts a fresh lineage.
+        bounded(lineages, `${pid}:${start}`, new Map([[pid, start]]));
+        return start;
+      }));
+    },
   };
 }
 

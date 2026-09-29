@@ -20,7 +20,7 @@ import type { AgentConfig, GatewayConfig } from '../types';
 import type { RuntimeProfile } from './runtime-profile';
 import type { InputImage } from './input-image';
 import { assertContainerBinding, prepareContainerProfile, containerNode, CONTAINER_SUPERVISOR, stopContainerProfile } from '../orchestration/container';
-import { stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
+import { recordProcessRoot, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
 
 export interface CodexProcessOptions {
   agent: AgentConfig;
@@ -312,6 +312,7 @@ export class CodexProcess extends EventEmitter {
       ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', 'CODEX_HOME', '-e', 'CODEX_ROLLOUT_TRACE_ROOT', '-e', `HOME=${homedir()}`, '-e', key, ...Object.keys(workerEnvironment(agent, this.options.gateway)).flatMap(name => ['-e', name]), agent.container!, 'node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt!.directory, bin, ...args], { env, stdio: 'pipe', detached: true })
       : spawn(bin, args, { cwd: agent.workspace, env, stdio: 'pipe', detached: workerSpawnDetached(), windowsHide: true });
     this.group = child.pid;
+    recordProcessRoot(child);
     this.traceTimer = setInterval(() => { void this.captureTrace(); }, agent.type === 'app-agent' ? 2000 : 500);
     this.traceTimer.unref();
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');

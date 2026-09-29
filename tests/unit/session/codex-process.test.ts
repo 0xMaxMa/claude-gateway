@@ -20,7 +20,7 @@ import { prepareContainerProfile, containerNode, stopContainerProfile } from '..
 import { stopProcessGroup, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
 jest.mock('../../../src/orchestration/container', () => ({ ...jest.requireActual('../../../src/orchestration/container'), prepareContainerProfile: jest.fn(), containerNode: jest.fn(), stopContainerProfile: jest.fn().mockResolvedValue(true) }));
 jest.mock('child_process', () => ({ spawn: jest.fn() }));
-jest.mock('../../../src/orchestration/process-supervisor', () => ({ stopProcessGroup: jest.fn().mockResolvedValue(true), workerSpawnDetached: jest.fn().mockReturnValue(true) }));
+jest.mock('../../../src/orchestration/process-supervisor', () => ({ recordProcessRoot: jest.fn(), stopProcessGroup: jest.fn().mockResolvedValue(true), workerSpawnDetached: jest.fn().mockReturnValue(true) }));
 const thread = '12345678-1234-1234-1234-123456789abc';
 const tick = () => new Promise(resolve => setImmediate(resolve));
 let directory: string;

@@ -9,6 +9,15 @@ export function processSupervisorSupported(): boolean { return Boolean(processPl
  * supervised as a tree. */
 export function workerSpawnDetached(): boolean { return processPlatform()?.detachWorkers ?? process.platform !== 'win32'; }
 
+/** Call right after spawning a supervised worker root. Windows records the
+ * root's start identity while the child handle still pins its PID, so a stop
+ * can anchor orphans after the root exits and a reused PID is never adopted. */
+export function recordProcessRoot(child: Pick<ChildProcess, 'pid' | 'exitCode' | 'signalCode'>): void {
+  const pid = child.pid;
+  if (pid === undefined || !valid(pid)) return;
+  processPlatform()?.adopt?.(pid, () => child.exitCode === null && child.signalCode === null);
+}
+
 /** Process-group evidence ignores exited zombies. On POSIX, escaped/detached
  * process groups are outside this proof and must be reconciled separately; on
  * Windows the group is the tree rooted at `group` (see windowsTree). */
@@ -62,8 +71,8 @@ const probeKilled = new WeakSet<ProbeChild>();
  * signal, so SIGTERM only records the tree lineage (one WMI snapshot, while
  * the child handle is held so its PID cannot be reused) and leaves the probe
  * its grace period to exit on stdin EOF. SIGKILL then terminates the whole
- * tree once — taskkill while the root lives, then orphans from the lineage;
- * the recorded root start time refuses a reused PID. A probe that exited
+ * tree once, only the creation-time-verified members; the recorded root start
+ * time refuses a reused PID. A probe that exited
  * before any lineage was recorded cannot be proven, so nothing is signalled. */
 export async function terminateProbeTree(child: ProbeChild, signal: 'SIGTERM' | 'SIGKILL'): Promise<void> {
   const platform = processPlatform();

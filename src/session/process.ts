@@ -12,7 +12,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { appendSystemPromptViaFile, RuntimeProfile, runtimeProfileArgs } from './runtime-profile';
 import { StringDecoder } from 'string_decoder';
-import { processSupervisorSupported, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
+import { processSupervisorSupported, recordProcessRoot, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
 import { commandLineLimited } from '../orchestration/process-platform';
 import { gatewayCapacity } from '../orchestration/capacity';
 import chokidar from 'chokidar';
@@ -1231,7 +1231,7 @@ export class SessionProcess extends EventEmitter {
     proc.once('exit', () => { setTimeout(() => toolCapture?.close(), 200).unref(); });
     proc.once('error', () => toolCapture?.close());
     proc.once('error', releaseCapacity);
-    if (this.runtimeProfile?.role === 'worker' && processSupervisorSupported()) this.managedProcessGroup = proc.pid;
+    if (this.runtimeProfile?.role === 'worker' && processSupervisorSupported()) { this.managedProcessGroup = proc.pid; recordProcessRoot(proc); }
     // Fresh child is alive: clear any exit observed for a prior process (e.g.
     // after an auto-restart), so isRunning()/interrupt() see it as live.
     this._exited = false;
