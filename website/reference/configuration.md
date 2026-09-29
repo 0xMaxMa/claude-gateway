@@ -56,7 +56,7 @@ Continue with [gateway settings](./gateway-settings.md), [memory and knowledge s
 
 ## Enable orchestration
 
-`gateway.orchestration` is a single boolean, applying to every agent and channel. Per-agent `orchestration` holds tuning, not a second enable switch. Voice settings belong in `agents[].voice`. Enabling orchestration normalizes and persists `gateway.headless: true`. Linux is required for its process supervisor.
+`gateway.orchestration` is a single boolean, applying to every agent and channel. Per-agent `orchestration` holds tuning, not a second enable switch. Voice settings belong in `agents[].voice`. Enabling orchestration normalizes and persists `gateway.headless: true`. Its process supervisor supports Linux, macOS, and Windows.
 
 ```json
 {

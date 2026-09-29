@@ -1,6 +1,6 @@
 import { AGENT_WORKFLOW_RULES, WORKER_WORKFLOW_RULES } from '../orchestration/workflow';
 import { checkpointSettings } from '../orchestration/tasks/checkpoint-hook';
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { OrchestrationError, SessionRole } from '../orchestration/types';
@@ -94,12 +94,12 @@ export function runtimeProfileArgs(profile: RuntimeProfile, extraFlags: string[]
 /**
  * Windows caps a whole command line at 32767 characters, and an agent's
  * appended system prompt (workspace context + orchestration overlay) alone is
- * routinely larger, so spawn fails with ENAMETOOLONG. Moves the prompt into a
- * private file passed with --append-system-prompt-file; other args are kept.
+ * routinely larger, so spawn fails with ENAMETOOLONG. Rewrites the prompt into
+ * --append-system-prompt-file `file`, keeping other args; the caller writes
+ * `prompt` to `file` (see SessionProcess.writeSystemPromptFile).
  */
-export function appendSystemPromptViaFile(args: string[], file: string): string[] {
+export function appendSystemPromptViaFile(args: string[], file: string): { args: string[]; prompt?: string } {
   const at = args.lastIndexOf('--append-system-prompt');
-  if (at < 0 || at === args.length - 1) return args;
-  writeFileSync(file, args[at + 1], { mode: 0o600 });
-  return [...args.slice(0, at), '--append-system-prompt-file', file, ...args.slice(at + 2)];
+  if (at < 0 || at === args.length - 1) return { args };
+  return { args: [...args.slice(0, at), '--append-system-prompt-file', file, ...args.slice(at + 2)], prompt: args[at + 1] };
 }

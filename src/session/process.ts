@@ -12,7 +12,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { appendSystemPromptViaFile, RuntimeProfile, runtimeProfileArgs } from './runtime-profile';
 import { StringDecoder } from 'string_decoder';
-import { processSupervisorSupported, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
+import { commandLineLimited, processSupervisorSupported, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
 import { gatewayCapacity } from '../orchestration/capacity';
 import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
@@ -721,6 +721,19 @@ export class SessionProcess extends EventEmitter {
   private systemPromptPath?: string;
   private managedConnectorPaths = new Set<string>();
 
+  /** Host spawns where the command line is capped (Windows) move the appended
+   * system prompt into a 0600 file beside the attempt's MCP config (a 0700
+   * directory). Containers are skipped: their CLI sees container paths. */
+  private writeSystemPromptFile(args: string[], mcpConfigPath: string | null): string[] {
+    if (!this.runtimeProfile || !commandLineLimited() || this.agentConfig.type === 'app-agent') return args;
+    const file = path.join(path.dirname(mcpConfigPath ?? this.runtimeProfile.mcpConfigPath), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, '_')}.md`);
+    const moved = appendSystemPromptViaFile(args, file);
+    if (moved.prompt === undefined) return args;
+    fs.writeFileSync(file, moved.prompt, { mode: 0o600 });
+    this.systemPromptPath = file;
+    return moved.args;
+  }
+
   private writeMcpConfig(): string | null {
     if (this.runtimeProfile) {
       // Orchestrators dispatch execution; only eligible workers receive connectors.
@@ -975,14 +988,7 @@ export class SessionProcess extends EventEmitter {
         }
       }
       const profileArgs = runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: this.containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${this.containerAttempt.directory}/checkpoint.cjs ${this.containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: this.containerAttempt && this.runtimeProfile.skillPluginDir ? this.containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []);
-      // Host spawns on Windows only: the file must be readable by the CLI
-      // itself, and a container's CLI sees container paths.
-      // The file sits beside the attempt's MCP config (a 0700 directory).
-      if (process.platform === 'win32' && this.agentConfig.type !== 'app-agent') {
-        const profileMcpConfig = this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath;
-        this.systemPromptPath = path.join(path.dirname(profileMcpConfig), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, '_')}.md`);
-        args.push(...appendSystemPromptViaFile(profileArgs, this.systemPromptPath));
-      } else args.push(...profileArgs);
+      args.push(...profileArgs);
       if (this.runtimeProfile.cliSession) {
         const session = this.runtimeProfile.cliSession;
         args.push(session.resume ? '--resume' : '--session-id', session.id);
@@ -1047,7 +1053,7 @@ export class SessionProcess extends EventEmitter {
     const containerRestartPath = isAppAgent ? toContainerPath(this.restartSignalPath) : this.restartSignalPath;
 
     const freshModel = this.readFreshModel();
-    const args = this.buildArgs(effectiveMcpPath, freshModel);
+    const args = this.writeSystemPromptFile(this.buildArgs(effectiveMcpPath, freshModel), effectiveMcpPath);
 
     // Resolve the claude binary. An explicit CLAUDE_BIN (which may carry args) is
     // trusted verbatim; otherwise probe PATH and the native-installer / legacy

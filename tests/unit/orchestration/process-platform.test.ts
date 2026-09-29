@@ -1,6 +1,6 @@
 import { execFile } from 'child_process';
 import { darwinPlatform, linuxPlatform, parseDarwinPs, parsePsCpuTicks, parseWindowsSnapshot, processPlatform, setProcessPlatform, windowsPlatform, windowsTree, type ProcessPlatform } from '../../../src/orchestration/process-platform';
-import { cleanupPersistedProcess, processSupervisorSupported, stopProcessGroup, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
+import { cleanupPersistedProcess, commandLineLimited, processSupervisorSupported, stopProcessGroup, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
 
 jest.mock('child_process', () => ({ ...jest.requireActual('child_process'), execFile: jest.fn() }));
 const execFileMock = execFile as unknown as jest.Mock;
@@ -29,9 +29,11 @@ describe('platform selection', () => {
     for (const [platform, detached] of [[linuxPlatform, true], [darwinPlatform, true], [windowsPlatform(), false]] as const) {
       setProcessPlatform(platform);
       expect(workerSpawnDetached()).toBe(detached);
+      expect(commandLineLimited()).toBe(!detached);
     }
     setProcessPlatform(null);
     expect(workerSpawnDetached()).toBe(false);
+    expect(commandLineLimited()).toBe(false);
   });
 });
 
@@ -151,6 +153,25 @@ describe('win32 (WMI process tree + taskkill)', () => {
     expect(windowsTree(snap(at(10, 4, '133000000000000001')), 10, new Map(), '133000000000000000')).toBeUndefined();
     expect([...windowsTree(snap(at(10, 4, '133000000000000000'), at(11, 10, '133000000000000001')), 10, new Map(), '133000000000000000')!.keys()]).toEqual([10, 11]);
     expect(windowsTree(snap(at(10, 4, '133000000000000000'), at(11, 10, '132999999999999999')), 10, new Map(), '133000000000000000')!.has(11)).toBe(false);
+  });
+  test('stop polls at most every 500ms, and an orphan-only tree is snapshotted once per signal', async () => {
+    expect(windowsPlatform().pollMs).toBeGreaterThanOrEqual(500);
+    expect([linuxPlatform.pollMs, darwinPlatform.pollMs]).toEqual([25, 50]);
+    let alive = new Set([12]);
+    let snapshots = 0;
+    answer((file, args) => {
+      if (file === 'taskkill') throw new Error('taskkill must not run without a live root');
+      if (args.at(-1)!.includes('Win32_Process')) snapshots++;
+      return [...alive].map(pid => row(pid, 10, 1002)).join('\r\n');
+    });
+    jest.spyOn(process, 'kill').mockImplementation(((pid: number) => { alive.delete(pid); return true; }) as typeof process.kill);
+    const platform = windowsPlatform('pwsh-mock');
+    expect(await platform.groupMembers(10, '1000')).toEqual([12]);
+    snapshots = 0;
+    expect(await platform.signalGroup(10, 'SIGTERM')).toBe(true);
+    expect(snapshots).toBe(1);
+    expect(alive.size).toBe(0);
+    alive = new Set();
   });
   test('PowerShell failure is unprovable, never "stopped"', async () => {
     answer(() => undefined);

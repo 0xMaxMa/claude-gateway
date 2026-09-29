@@ -6,6 +6,9 @@ export function processSupervisorSupported(): boolean { return Boolean(processPl
 /** `detached` for a supervised worker spawn: POSIX workers lead their own
  * process group; Windows workers stay attached and are supervised as a tree. */
 export function workerSpawnDetached(): boolean { return processPlatform()?.detachWorkers ?? false; }
+/** Windows caps a whole command line at 32767 characters, so a supervised
+ * spawn must pass its long appended system prompt through a file. */
+export function commandLineLimited(): boolean { return processPlatform()?.name === 'win32'; }
 
 /** Process-group evidence ignores exited zombies. On POSIX, escaped/detached
  * process groups are outside this proof and must be reconciled separately; on

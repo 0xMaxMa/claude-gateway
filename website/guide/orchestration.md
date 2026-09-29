@@ -6,7 +6,7 @@ For automatic GPT worker routing, explicit overrides and app-container deploymen
 
 A managed conversation agent handles the conversation and delegates substantial work to workers. Work has a persistent task record, so you can inspect progress, results, and cancellation independently of a reply.
 
-Orchestration uses one boolean `gateway.orchestration` switch for all agents and connected channels. Per-agent `orchestration` contains conversation/task tuning. Orchestration is enabled by default. On upgrade, a missing `gateway.orchestration` is saved as `true`; an explicit `false` keeps legacy mode. Enabling orchestration sets and saves `gateway.headless: true`; interactive PTY mode is unsupported. The current process supervisor requires Linux; other platforms reject orchestration with `UNSUPPORTED_PROCESS_SUPERVISOR`.
+Orchestration uses one boolean `gateway.orchestration` switch for all agents and connected channels. Per-agent `orchestration` contains conversation/task tuning. Orchestration is enabled by default. On upgrade, a missing `gateway.orchestration` is saved as `true`; an explicit `false` keeps legacy mode. Enabling orchestration sets and saves `gateway.headless: true`; interactive PTY mode is unsupported. The process supervisor supports Linux, macOS, and Windows; other platforms reject orchestration with `UNSUPPORTED_PROCESS_SUPERVISOR`.
 
 Retain all existing required configuration fields. Set `gateway.orchestration` to `false` to opt out, or `true` to re-enable it. See [orchestration settings](../reference/orchestration-settings.md) before tuning worker limits.
 

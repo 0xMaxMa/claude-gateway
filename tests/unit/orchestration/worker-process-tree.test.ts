@@ -7,6 +7,7 @@ import { TaskService } from '../../../src/orchestration/tasks/service';
 import { TaskBridge } from '../../../src/orchestration/bridge';
 import { TaskWorkspaces } from '../../../src/orchestration/tasks/workspace';
 import { ClaudeWorkerDriver } from '../../../src/orchestration/tasks/driver';
+import * as supervisor from '../../../src/orchestration/process-supervisor';
 import { liveGroupMembers, processSupervisorSupported } from '../../../src/orchestration/process-supervisor';
 import { setProcessPlatform } from '../../../src/orchestration/process-platform';
 import type { TaskAttempt } from '../../../src/orchestration/types';
@@ -76,6 +77,19 @@ test('a 60KB system prompt spawns on every OS (through a private file on Windows
       expect(args[args.indexOf('--append-system-prompt') + 1].length).toBeGreaterThan(60000);
     }
   }, 60000 /* CLAUDE.md padding */);
+}, 60000);
+
+test('a command-line-limited host writes the prompt file before spawn and removes it with the session', async () => {
+  const limited = jest.spyOn(supervisor, 'commandLineLimited').mockReturnValue(true);
+  try {
+    await fixture('complete', async ({ start, argsfile }) => {
+      expect(await (await start()).result).toMatchObject({ type: 'completed' });
+      const { args, promptFileChars }: { args: string[]; promptFileChars: number } = JSON.parse(readFileSync(argsfile, 'utf8'));
+      expect(args).not.toContain('--append-system-prompt');
+      expect(promptFileChars).toBeGreaterThan(60000);
+      expect(existsSync(args[args.indexOf('--append-system-prompt-file') + 1])).toBe(false);
+    }, 60000);
+  } finally { limited.mockRestore(); }
 }, 60000);
 
 test('cancelling a running worker kills the whole tree, grandchild included', async () => {

@@ -209,7 +209,8 @@ export function windowsPlatform(powershell = 'powershell.exe'): ProcessPlatform 
     return owned;
   };
   return {
-    name: 'win32', detachWorkers: false, termGraceMs: 2000, pollMs: 100, killSettleMs: 500,
+    // Each poll is a PowerShell WMI snapshot (0.4-4s), so poll far less often than POSIX.
+    name: 'win32', detachWorkers: false, termGraceMs: 2000, pollMs: 500, killSettleMs: 500,
     async groupMembers(group, rootStart) { const owned = await tree(group, rootStart); return owned && [...owned.keys()]; },
     // Console processes cannot be asked to exit politely, so both signals terminate
     // the whole tree: taskkill walks it while the root lives, then every owned
@@ -217,8 +218,9 @@ export function windowsPlatform(powershell = 'powershell.exe'): ProcessPlatform 
     async signalGroup(group) {
       const before = await tree(group);
       if (!before) return false;
-      if (before.has(group)) await run('taskkill', ['/PID', String(group), '/T', '/F']);
-      const after = await tree(group);
+      // Without a live root taskkill never ran, so the first snapshot still holds.
+      let after: Map<number, string> | undefined = before;
+      if (before.has(group)) { await run('taskkill', ['/PID', String(group), '/T', '/F']); after = await tree(group); }
       if (!after) return false;
       for (const pid of after.keys()) { try { process.kill(pid, 'SIGKILL'); } catch (error) { if (!gone(error)) return false; } }
       return true;
