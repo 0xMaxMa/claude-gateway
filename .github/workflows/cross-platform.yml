@@ -3,15 +3,20 @@ name: Orchestration supervisor (Linux, macOS, Windows)
 # Orchestration only runs where the gateway can prove a worker's processes
 # stopped. This exercises that proof on every supported OS: the platform
 # backends, the real supervisor, activity sampling, and a real worker spawned
-# through SessionProcess (mock Claude CLI) that completes and is cancelled.
+# through SessionProcess (mock Claude CLI) that completes and is cancelled,
+# plus probe tree-kill on timeout and claude binary / Codex home path handling.
 on:
   pull_request:
     paths:
       - 'src/orchestration/**'
       - 'src/session/process.ts'
       - 'src/session/runtime-profile.ts'
+      - 'src/session/claude-bin.ts'
+      - 'src/session/codex-process.ts'
       - 'tests/unit/orchestration/**'
       - 'tests/unit/session/append-system-prompt-file.test.ts'
+      - 'tests/unit/session/claude-command.test.ts'
+      - 'tests/unit/session/codex-owned-home.test.ts'
       - 'tests/helpers/mock-claude-worker.js'
       - '.github/workflows/cross-platform.yml'
       - 'package.json'
@@ -22,8 +27,12 @@ on:
       - 'src/orchestration/**'
       - 'src/session/process.ts'
       - 'src/session/runtime-profile.ts'
+      - 'src/session/claude-bin.ts'
+      - 'src/session/codex-process.ts'
       - 'tests/unit/orchestration/**'
       - 'tests/unit/session/append-system-prompt-file.test.ts'
+      - 'tests/unit/session/claude-command.test.ts'
+      - 'tests/unit/session/codex-owned-home.test.ts'
       - 'tests/helpers/mock-claude-worker.js'
       - '.github/workflows/cross-platform.yml'
   workflow_dispatch:
@@ -70,3 +79,6 @@ jobs:
           tests/unit/orchestration/execution-observation.test.ts
           tests/unit/orchestration/worker-process-tree.test.ts
           tests/unit/session/append-system-prompt-file.test.ts
+          tests/unit/orchestration/probe-tree-kill.test.ts
+          tests/unit/session/claude-command.test.ts
+          tests/unit/session/codex-owned-home.test.ts
