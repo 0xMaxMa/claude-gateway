@@ -5742,21 +5742,24 @@ export class AgentRunner extends EventEmitter {
       const index = await this.sessionStore.loadIndex(this.agentConfig.id, rawChatId, channel);
       if (!index?.sessions.some(session => session.id === sessionId)) throw new Error('Session not found');
     }
-    // Echo the web-UI message back to the originating channel so its users see
-    // what was typed from the web (fixes the one-sided conversation on every
-    // channel the endpoint serves, not just Telegram). Placed after the
-    // validation above so a rejected request (Authenticated principal,
-    // Ambiguous/mismatched session, Session not found) sends no phantom echo.
-    // channelSourceMap is set first so writeAutoForward routes to the right
-    // channel receiver — the orchestrated path never reaches the legacy set.
-    this.channelSourceMap.set(rawChatId, channel);
-    this.writeAutoForward(rawChatId, '📱 Web: ' + message);
     const requestId = opts.requestId ?? randomUUID();
     const accepted = runtime.submitInput({ scope: { agentId: this.agentConfig.id, agentSessionId: sessionId,
       source: channel, accountId: String(rows[0]?.account_id ?? this.agentConfig.id), chatId: rawChatId,
       threadKey: String(rows[0]?.thread_key ?? ''), principalId: opts.principalId },
       text: message, requestId, trustedChannelMember: true, metadata: { senderName, senderId: opts.principalId } },
       { execute: opts.allowTools ?? false, writeMemory: false });
+    // Echo the web-UI message back to the originating channel so its users see
+    // what was typed from the web (fixes the one-sided conversation on every
+    // channel the endpoint serves, not just Telegram). Placed after the
+    // validation above AND after submitInput has accepted the input into the
+    // store, so a rejected request — whether from validation (Authenticated
+    // principal, Ambiguous/mismatched session, Session not found) or from
+    // admission (QUEUE_FULL, ORCHESTRATION_CLOSING thrown by submitInput) —
+    // sends no phantom echo. channelSourceMap is set first so writeAutoForward
+    // routes to the right channel receiver — the orchestrated path never
+    // reaches the legacy set.
+    this.channelSourceMap.set(rawChatId, channel);
+    this.writeAutoForward(rawChatId, '📱 Web: ' + message);
     const turn = this.turnStreams.start(turnStreamKey(channel, sessionId), requestId);
     const sink = callbackSink(callbacks); turn.attach(sink, 0);
     const displayed = new Map<string, string>();

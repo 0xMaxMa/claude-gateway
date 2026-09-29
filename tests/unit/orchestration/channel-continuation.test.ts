@@ -5,6 +5,7 @@ import { join } from 'path';
 import { AgentRunner } from '../../../src/agent/runner';
 import { TurnStreamRegistry } from '../../../src/agent/turn-stream';
 import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
+import { OrchestrationError } from '../../../src/orchestration/types';
 import { SessionStore } from '../../../src/session/store';
 import { HistoryDB } from '../../../src/history/db';
 import type { SessionProcess } from '../../../src/session/process';
@@ -119,6 +120,59 @@ test('web continuation echoes the injected message on a non-telegram channel (di
     expect(echoed.mock.calls.some(([, text]) => text === '📱 Web: Wrong chat')).toBe(false);
     expect((runner.channelSourceMap as Map<string, string>).get('chat')).toBe('discord');
     expect(runtime.store.get('SELECT * FROM conversations WHERE agent_session_id=?', 's')).toMatchObject({ source: 'discord' });
+  } finally {
+    await runtime.close(); (history as any).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The orchestrated echo must fire only after submitInput has *accepted* the
+// input into the store — not merely after the session-validation checks.
+// submitInput calls store.acceptInput, which throws QUEUE_FULL (pending inputs
+// at the per-conversation cap) or ORCHESTRATION_CLOSING (gateway shutting down)
+// for a request that reached a valid session but is still refused at admission.
+// Revert gate: move the two echo lines back above `runtime.submitInput(...)` in
+// sendOrchestratedChannel and the QUEUE_FULL assertion below goes RED — the
+// rejected request emits a phantom '📱 Web:' forward before the throw.
+test('web continuation echoes only after submitInput accepts the input (no phantom echo on QUEUE_FULL)', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'channel-continuation-admission-'));
+  const agent = { id: 'a', workspace: join(root, 'a', 'workspace'), description: '', env: '', claude: { model: 'fixture', extraFlags: [] }, orchestration: { enabled: true, channels: ['telegram'] } } as AgentConfig;
+  const gateway = { gateway: { orchestration: true, headless: true, logDir: join(root, 'logs'), timezone: 'UTC' }, agents: [agent] } as GatewayConfig;
+  const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a');
+  const runtime = await AgentOrchestrationRuntime.open(agent, gateway, root, sessions, history, {
+    createAgentSession: async () => {
+      const process = new EventEmitter() as SessionProcess;
+      process.start = async () => {}; process.stop = async () => {};
+      process.sendMessage = () => process.emit('output', JSON.stringify({ type: 'result', result: 'Continued.' }));
+      return process;
+    }, releaseAgentSession: async () => {},
+  });
+  const echoed = jest.fn();
+  const runner = Object.assign(Object.create(AgentRunner.prototype), { agentConfig: agent, sessionStore: sessions,
+    orchestration: runtime, turnStreams: new TurnStreamRegistry(), getOrSpawnSession: jest.fn(),
+    channelSourceMap: new Map(), writeAutoForward: echoed });
+  try {
+    await runtime.send({ scope: { agentId: 'a', agentSessionId: 's', source: 'telegram', accountId: 'bot', chatId: 'chat', threadKey: 'topic', principalId: 'human' }, text: 'First' }, { execute: true, writeMemory: true }, { timeoutMs: 2000 });
+    // Success path: a valid, admitted continuation echoes exactly once.
+    const ok = new Promise<string>((resolve, reject) => {
+      void runner.sendMessageToSession('chat', 'telegram', 's', 'Continue', 'Web user', {
+        onChunk: () => {}, onDone: resolve, onError: reject,
+      }, { timeoutMs: 2000, principalId: 'api:key', allowTools: false }).catch(reject);
+    });
+    await expect(ok).resolves.toBe('Continued.');
+    expect(echoed.mock.calls.filter(([id, text]) => text === '📱 Web: Continue')).toEqual([['chat', '📱 Web: Continue']]);
+    // Rejection at admission: submitInput throws (QUEUE_FULL). The request
+    // reached a valid session, so the pre-echo validation passes — the only
+    // thing standing between it and a phantom echo is that the echo now runs
+    // *after* submitInput. It must send no '📱 Web:' forward.
+    const realSubmit = runtime.submitInput.bind(runtime);
+    (runtime as unknown as { submitInput: () => never }).submitInput = () => { throw new OrchestrationError('QUEUE_FULL'); };
+    await expect(runner.sendMessageToSession('chat', 'telegram', 's', 'Rejected at admission', 'Web user', {
+      onChunk: () => {}, onDone: () => {}, onError: () => {},
+    }, { timeoutMs: 2000, principalId: 'api:key', allowTools: false })).rejects.toThrow('QUEUE_FULL');
+    (runtime as unknown as { submitInput: typeof realSubmit }).submitInput = realSubmit;
+    expect(echoed.mock.calls.some(([, text]) => text === '📱 Web: Rejected at admission')).toBe(false);
+    // The successful continuation is still the only echo emitted.
+    expect(echoed.mock.calls.filter(([, text]) => String(text).startsWith('📱 Web:'))).toEqual([['chat', '📱 Web: Continue']]);
   } finally {
     await runtime.close(); (history as any).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true });
   }
