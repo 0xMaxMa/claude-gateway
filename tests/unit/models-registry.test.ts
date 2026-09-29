@@ -6,14 +6,15 @@ import type { ModelConfig } from '../../src/types';
 /**
  * Model registry invariants.
  *
- * The set of selectable models lives in TWO places that must stay in lockstep:
+ * The set of selectable models lives in THREE places that must stay in lockstep:
  *   1. DEFAULT_MODELS (src/agent/runner.ts) — the fallback used when a config has
  *      no gateway.models key.
  *   2. config.template.json gateway.models — what fresh installs get, and the
  *      source migrateModels() merges into existing installs.
+ *   3. AVAILABLE_MODELS in the Telegram receiver — see the last describe block.
  *
  * If they drift, some install paths see a model the others don't. These tests
- * pin Opus 5 as a first-class model in both, and guard the "bare alias = newest"
+ * pin each current family head as a first-class model, and guard the "bare alias = newest"
  * convention so `opus`/`sonnet`/`fable` always resolve to the latest of each
  * family. They read the REAL template so a hand-edit that updates one file but
  * not the other goes red here.
