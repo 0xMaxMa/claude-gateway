@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, realpathSync, statSync, existsSync } from 'fs';
-import { dirname, join, resolve, relative, isAbsolute } from 'path';
+import { dirname, join, resolve } from 'path';
 import { homedir } from 'os';
+import { pathWithin } from '../utils/paths';
 import type { AgentConfig, GatewayConfig } from '../types';
 import type { CliSkill } from '../orchestration/cli-skills';
 import { extractFrontmatter } from '../skills/parser';
@@ -21,8 +22,7 @@ function directories(dir: string): string[] {
   try { return readdirSync(dir).sort(); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
 }
 function within(root: string, file: string): boolean {
-  const rel = relative(realpathSync(root), realpathSync(file));
-  return rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel);
+  return pathWithin(realpathSync(root), realpathSync(file));
 }
 function addSkill(result: WorkerExtensions, name: string, file: string, root: string, source: 'claude' | 'codex') {
   if (!validName(name) || !existsSync(file) || !within(root, file)) return;

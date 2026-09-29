@@ -49,6 +49,7 @@ import type { SkillRegistry } from '../skills';
 import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
 import { SPEECH_OVERLAY, splitSpeechResponse, speechVoiceStyle } from './speech';
 import { join } from 'path';
+import { pathWithin } from '../utils/paths';
 import { randomUUID } from 'crypto';
 import { mkdirSync } from 'fs';
 import { realpath } from 'fs/promises';
@@ -234,7 +235,7 @@ export class AgentOrchestrationRuntime {
       const project = agent.orchestration?.tasks?.projectRoot || agent.workspace;
       if (agent.orchestration?.tasks?.workspaceMode === 'shared-lock') {
         const [actualProject, identity] = await Promise.all([realpath(project), realpath(agent.workspace)]);
-        if (actualProject === identity || actualProject.startsWith(identity + '/') || identity.startsWith(actualProject + '/')) throw new OrchestrationError('SHARED_PROJECT_MUST_DIFFER_FROM_IDENTITY_WORKSPACE');
+        if (pathWithin(identity, actualProject) || pathWithin(actualProject, identity)) throw new OrchestrationError('SHARED_PROJECT_MUST_DIFFER_FROM_IDENTITY_WORKSPACE');
       }
       const workspaces = new TaskWorkspaces(store, project, join(root, 'task-worktrees'), agent.orchestration?.tasks?.workspaceMode);
       for (const row of store.all("SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled')")) await workspaces.release(String(row.id));

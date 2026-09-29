@@ -4,7 +4,8 @@ name: Orchestration supervisor (Linux, macOS, Windows)
 # stopped. This exercises that proof on every supported OS: the platform
 # backends, the real supervisor, activity sampling, and a real worker spawned
 # through SessionProcess (mock Claude CLI) that completes and is cancelled,
-# plus probe tree-kill on timeout and claude binary / Codex home path handling.
+# plus probe tree-kill on timeout, claude binary / Codex home path handling and
+# separator- and case-aware path containment.
 on:
   pull_request:
     paths:
@@ -13,6 +14,8 @@ on:
       - 'src/session/runtime-profile.ts'
       - 'src/session/claude-bin.ts'
       - 'src/session/codex-process.ts'
+      - 'src/session/worker-extensions.ts'
+      - 'src/utils/paths.ts'
       - 'tests/unit/orchestration/**'
       - 'tests/unit/session/append-system-prompt-file.test.ts'
       - 'tests/unit/session/claude-command.test.ts'
@@ -29,6 +32,8 @@ on:
       - 'src/session/runtime-profile.ts'
       - 'src/session/claude-bin.ts'
       - 'src/session/codex-process.ts'
+      - 'src/session/worker-extensions.ts'
+      - 'src/utils/paths.ts'
       - 'tests/unit/orchestration/**'
       - 'tests/unit/session/append-system-prompt-file.test.ts'
       - 'tests/unit/session/claude-command.test.ts'
@@ -82,3 +87,4 @@ jobs:
           tests/unit/orchestration/probe-tree-kill.test.ts
           tests/unit/session/claude-command.test.ts
           tests/unit/session/codex-owned-home.test.ts
+          tests/unit/orchestration/path-within.test.ts

@@ -19,10 +19,13 @@ export interface ProcessPlatform {
   readonly killSettleMs: number;
   /** Live, non-zombie members; undefined when membership cannot be proven. */
   groupMembers(group: number, rootStart?: string): Promise<number[] | undefined>;
-  /** False only when the signal could not be delivered for a reason other than "already gone". */
-  signalGroup(group: number, signal: 'SIGTERM' | 'SIGKILL'): Promise<boolean>;
+  /** False only when the signal could not be delivered for a reason other than "already gone".
+   * `rootStart` pins the root identity the caller owns (Windows; POSIX ignores it). */
+  signalGroup(group: number, signal: 'SIGTERM' | 'SIGKILL', rootStart?: string): Promise<boolean>;
   /** Kernel identity that rejects PID reuse; the pid must still lead its group. */
   fingerprint(pid: number): Promise<Fingerprint | undefined>;
+  /** This boot's identity, as used in `Fingerprint.bootId`; undefined when unreadable. */
+  bootId(): Promise<string | undefined>;
   /** Counters for every visible process; undefined when unavailable. */
   snapshot(): Promise<Map<number, ProcessRecord> | undefined>;
   /** Processes owned by the worker rooted at `root`, when ownership is not the
@@ -32,14 +35,22 @@ export interface ProcessPlatform {
   /** Linux enriches owned members with I/O counters and re-checks start identity. */
   refine?(member: ProcessRecord): Promise<boolean>;
   /** Record a just-spawned root's identity while its handle is held (`alive`), so
-   * a later stop can anchor orphans and refuse a reused PID. */
-  adopt?(pid: number, alive: () => boolean): void;
+   * a later stop can anchor orphans and refuse a reused PID. Resolves to the
+   * recorded start, or undefined when none could be recorded. */
+  adopt?(pid: number, alive: () => boolean): Promise<string | undefined>;
 }
 
 const gone = (error: unknown) => ['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '');
 function signalPosixGroup(group: number, signal: 'SIGTERM' | 'SIGKILL'): boolean {
   try { process.kill(-group, signal); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return false; }
   return true;
+}
+// Absolute paths, so a PATH entry cannot substitute the tool whose output decides what gets killed.
+const PS_BIN = '/bin/ps', SYSCTL_BIN = '/usr/sbin/sysctl';
+/** `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` when SystemRoot is a plain
+ * absolute drive path; otherwise the bare name, resolved through PATH as before. */
+export function windowsPowerShell(systemRoot = process.env.SystemRoot): string {
+  return systemRoot && /^[A-Za-z]:\\[^"*?<>|]*$/.test(systemRoot) ? `${systemRoot.replace(/\\+$/, '')}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe` : 'powershell.exe';
 }
 function run(file: string, args: string[], timeout = 10_000): Promise<string | undefined> {
   return new Promise(resolve => {
@@ -72,6 +83,9 @@ export const linuxPlatform: ProcessPlatform = {
       if (Number(fields[2]) !== pid) return undefined;
       return { bootId: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(), startTicks: fields[19] };
     } catch { return undefined; }
+  },
+  async bootId() {
+    try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || undefined; } catch { return undefined; }
   },
   async snapshot() {
     const members = new Map<number, ProcessRecord>();
@@ -124,7 +138,7 @@ const PS_COLUMNS = 'pid=,ppid=,pgid=,stat=,time=,lstart=';
 export const darwinPlatform: ProcessPlatform = {
   detachWorkers: true, termGraceMs: 2000, pollMs: 50, killSettleMs: 50,
   async groupMembers(group) {
-    const output = await run('ps', ['-A', '-o', 'pid=,pgid=,stat=']);
+    const output = await run(PS_BIN, ['-A', '-o', 'pid=,pgid=,stat=']);
     if (output === undefined) return undefined;
     const members: number[] = [];
     for (const line of output.split('\n')) {
@@ -136,16 +150,17 @@ export const darwinPlatform: ProcessPlatform = {
   async signalGroup(group, signal) { return signalPosixGroup(group, signal); },
   async fingerprint(pid) {
     // ps exits 1 for an unknown pid; that is "no identity", not an error.
-    const [output, bootId] = await Promise.all([run('ps', ['-p', String(pid), '-o', `${PS_COLUMNS},comm=`]), run('sysctl', ['-n', 'kern.bootsessionuuid'])]);
+    const [output, bootId] = await Promise.all([run(PS_BIN, ['-p', String(pid), '-o', `${PS_COLUMNS},comm=`]), darwinPlatform.bootId()]);
     const record = output === undefined ? undefined : parseDarwinPs(output).get(pid);
-    if (!record?.command || record.group !== pid || record.state[0] === 'Z' || !bootId?.trim()) return undefined;
+    if (!record?.command || record.group !== pid || record.state[0] === 'Z' || !bootId) return undefined;
     // ps offers no start time finer than lstart's 1s, so a PID reused within the
     // same second would match on start alone; the executable (and the group-leader
     // check above) must match too. Only this per-attempt call pays for comm.
-    return { bootId: bootId.trim(), startTicks: `${record.start}|${record.command}` };
+    return { bootId, startTicks: `${record.start}|${record.command}` };
   },
+  async bootId() { return (await run(SYSCTL_BIN, ['-n', 'kern.bootsessionuuid']))?.trim() || undefined; },
   async snapshot() {
-    const output = await run('ps', ['-A', '-o', PS_COLUMNS]);
+    const output = await run(PS_BIN, ['-A', '-o', PS_COLUMNS]);
     return output === undefined ? undefined : parseDarwinPs(output);
   },
 };
@@ -162,6 +177,9 @@ const winQuery = (wql: string, row: string) => `${WIN_WMI}foreach($p in [Managem
 const winTime = (field: string) => `[Management.ManagementDateTimeConverter]::ToDateTime($p['${field}']).ToFileTimeUtc()`;
 const WIN_SNAPSHOT = winQuery('SELECT ProcessId,ParentProcessId,CreationDate,KernelModeTime,UserModeTime,ReadTransferCount,WriteTransferCount FROM Win32_Process',
   `if($p['CreationDate']){'{0} {1} {2} {3} {4} {5}' -f $p['ProcessId'],$p['ParentProcessId'],${winTime('CreationDate')},([uint64]$p['KernelModeTime']+[uint64]$p['UserModeTime']),$p['ReadTransferCount'],$p['WriteTransferCount']}`);
+// LastBootUpTime is the boot identity. It does not follow wall-clock changes
+// (checked on a Windows runner: a +/-3h Set-Date left it identical to the 100ns),
+// so it is compared exactly.
 const WIN_BOOT = winQuery('SELECT LastBootUpTime FROM Win32_OperatingSystem', winTime('LastBootUpTime'));
 export function parseWindowsSnapshot(output: string): Map<number, ProcessRecord> {
   const members = new Map<number, ProcessRecord>();
@@ -197,6 +215,11 @@ export function windowsTree(snapshot: Map<number, ProcessRecord>, root: number, 
     for (const m of snapshot.values()) {
       if (owned.has(m.pid) || m.pid === m.parent) continue;
       // A live parent must itself be owned; a dead one is trusted from lineage.
+      // Residual gap: if a member dies, an unrelated process reuses its PID, starts
+      // a child and dies too, all between two snapshots, that child passes the
+      // creation-time check against the member's recorded start. Closing it needs
+      // each member's exit time, which WMI does not report; the lineage is kept
+      // for one snapshot only, so the window is one poll interval.
       const parentStart = snapshot.has(m.parent) ? owned.get(m.parent) : lineage.get(m.parent);
       if (known.get(m.pid) === m.start || (parentStart !== undefined && notBefore(m.start, parentStart))) { owned.set(m.pid, m.start); changed = true; }
     }
@@ -207,27 +230,39 @@ const bounded = <K, V>(map: Map<K, V>, key: K, value: V) => {
   map.delete(key); map.set(key, value);
   for (const oldest of map.keys()) { if (map.size <= 256) break; map.delete(oldest); }
 };
-export function windowsPlatform(powershell = 'powershell.exe'): ProcessPlatform {
-  // Latest root identity per PID: its start, or null when the root exited before
-  // it could be recorded (a live process at that PID is then someone else).
-  const roots = new Map<number, Promise<string | null | undefined>>();
+type WindowsRoot = { start: string; spawned: boolean } | null | undefined;
+export function windowsPlatform(powershell = windowsPowerShell()): ProcessPlatform {
+  // Latest root identity per PID: its start (`spawned` when recorded while the
+  // child handle was held), or null when the root exited before it could be
+  // recorded (a live process at that PID is then someone else).
+  const roots = new Map<number, Promise<WindowsRoot>>();
   // Lineage per root identity (pid:start), replaced by every snapshot: a dead
   // member is trusted as a parent only in the first snapshot that misses it, so
-  // an entry never outlives its PID into a later reuse.
+  // an entry never outlives its PID into a later reuse. Dropped once the tree is
+  // proven empty; the root entry stays so the PID is never re-adopted blindly.
   const lineages = new Map<string, Map<number, string>>();
   const ps = (script: string) => run(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], 30_000);
   const snapshot = async () => { const output = await ps(WIN_SNAPSHOT); return output === undefined ? undefined : parseWindowsSnapshot(output); };
+  // The boot time cannot change while this process runs, so one query serves
+  // every fingerprint; a failed query is retried on the next call.
+  let bootQuery: Promise<string | undefined> | undefined;
+  const bootTime = () => {
+    const pending = bootQuery ??= ps(WIN_BOOT).then(output => output?.trim() || undefined);
+    void pending.then(value => { if (value === undefined && bootQuery === pending) bootQuery = undefined; });
+    return pending;
+  };
   const tree = async (group: number, rootStart?: string) => {
     const recorded = await roots.get(group);
     const processes = await snapshot();
     if (!processes || (rootStart === undefined && recorded === null)) return undefined;
     // An unrecorded root is adopted only while it is alive; a dead one proves nothing.
-    const start = rootStart ?? recorded ?? processes.get(group)?.start;
+    const start = rootStart ?? recorded?.start ?? processes.get(group)?.start;
     if (start === undefined) return undefined;
-    const owned = windowsTree(processes, group, lineages.get(`${group}:${start}`), start);
+    const key = `${group}:${start}`;
+    const owned = windowsTree(processes, group, lineages.get(key), start);
     if (!owned) return undefined;
-    bounded(lineages, `${group}:${start}`, owned);
-    if (recorded === undefined) bounded(roots, group, Promise.resolve(start));
+    if (owned.size) bounded(lineages, key, owned); else lineages.delete(key);
+    if (recorded === undefined) bounded(roots, group, Promise.resolve({ start, spawned: false }));
     return owned;
   };
   return {
@@ -237,18 +272,28 @@ export function windowsPlatform(powershell = 'powershell.exe'): ProcessPlatform 
     // Console processes cannot be asked to exit politely, so both signals terminate
     // every creation-time-verified member individually. Never taskkill /T: it
     // follows bare parent PIDs, which Windows keeps after the parent dies.
-    async signalGroup(group) {
-      const owned = await tree(group);
+    // Termination is by PID, right after the snapshot that verified each creation
+    // time; a PID that exits and is reused in that gap (milliseconds) cannot be
+    // re-checked without another snapshot. Only a job object, assigned at spawn,
+    // would close that window.
+    async signalGroup(group, _signal, rootStart) {
+      const owned = await tree(group, rootStart);
       if (!owned) return false;
       for (const pid of owned.keys()) { try { process.kill(pid, 'SIGKILL'); } catch (error) { if (!gone(error)) return false; } }
       return true;
     },
     async fingerprint(pid) {
-      const [processes, boot] = await Promise.all([snapshot(), ps(WIN_BOOT)]);
+      const recorded = await roots.get(pid);
+      if (recorded === null) return undefined;
+      // Recorded at spawn while the handle was held: that start is our worker's,
+      // even if the PID has been reused since, and needs no fresh snapshot.
+      if (recorded?.spawned) { const boot = await bootTime(); return boot ? { bootId: boot, startTicks: recorded.start } : undefined; }
+      const [processes, boot] = await Promise.all([snapshot(), bootTime()]);
       const record = processes?.get(pid);
-      if (!record || !boot?.trim()) return undefined;
-      return { bootId: boot.trim(), startTicks: record.start };
+      if (!record || !boot || (recorded && record.start !== recorded.start)) return undefined;
+      return { bootId: boot, startTicks: record.start };
     },
+    bootId: bootTime,
     snapshot,
     tree(processes, root, known) {
       const owned = windowsTree(processes, root, known);
@@ -259,14 +304,16 @@ export function windowsPlatform(powershell = 'powershell.exe'): ProcessPlatform 
       return owned;
     },
     adopt(pid, alive) {
-      bounded(roots, pid, snapshot().then(processes => {
+      const root = snapshot().then((processes): WindowsRoot => {
         if (!processes) return undefined;
         const start = processes.get(pid)?.start;
         if (start === undefined || !alive()) return null;
         // A new root at a reused PID starts a fresh lineage.
         bounded(lineages, `${pid}:${start}`, new Map([[pid, start]]));
-        return start;
-      }));
+        return { start, spawned: true };
+      });
+      bounded(roots, pid, root);
+      return root.then(recorded => recorded?.start);
     },
   };
 }

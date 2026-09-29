@@ -9,7 +9,7 @@ import { claudeCommand, pathWithNativeBin } from '../session/claude-bin';
 import { resolveOrchestrationConfig } from './config';
 import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
 import { validateContainer } from './container';
-import { terminateProbeTree, workerSpawnDetached } from './process-supervisor';
+import { recordProcessRoot, terminateProbeTree, workerSpawnDetached } from './process-supervisor';
 
 export interface CliSkill { name: string; description: string; argumentHint?: string; aliases?: string[]; filePath?: string; resourceRoot?: string; source?: 'claude' | 'codex'; fileScope?: 'container'; content?: string; }
 const validName = (value: unknown): value is string => typeof value === 'string' && /^[\w:.-]{1,128}$/.test(value);
@@ -26,6 +26,7 @@ export function probeCliSkills(command: string, args: string[], cwd: string, tim
   return new Promise((resolve, reject) => {
     const id = randomUUID();
     const child = spawn(command, args, {cwd, detached: workerSpawnDetached(), env: {...process.env, ...(pathWithNativeBin() ? {PATH:pathWithNativeBin()} : {})}, stdio:['pipe','pipe','pipe']});
+    recordProcessRoot(child);
     let buffer = '', bytes = 0, result: CliSkill[] | undefined, failure: Error | undefined, finished = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const stop = (error?: Error) => {

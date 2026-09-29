@@ -10,7 +10,7 @@ import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
 import { resolveOrchestrationConfig } from './config';
 import { containerTaskTools } from './bridge';
 import { OrchestrationError } from './types';
-import { terminateProbeTree, workerSpawnDetached } from './process-supervisor';
+import { recordProcessRoot, terminateProbeTree, workerSpawnDetached } from './process-supervisor';
 import type { AgentConfig, GatewayConfig } from '../types';
 import type { SkillRegistry } from '../skills';
 
@@ -58,6 +58,7 @@ export function probeMcpConfiguration(
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    recordProcessRoot(child);
     let buffer = '',
       bytes = 0,
       value: Record<string, unknown> | undefined;
@@ -454,6 +455,7 @@ export class CapabilityCatalog {
               stdio: ['pipe', 'pipe', 'pipe'],
             }
           );
+          recordProcessRoot(child);
           const chunks: Buffer[] = [];
           let bytes = 0;
           const timer = setTimeout(() => {

@@ -1,6 +1,6 @@
 import { execFile } from 'child_process';
-import { commandLineLimited, darwinPlatform, linuxPlatform, parseDarwinPs, parsePsCpuTicks, parseWindowsSnapshot, processPlatform, setProcessPlatform, windowsPlatform, windowsTree, type ProcessPlatform } from '../../../src/orchestration/process-platform';
-import { cleanupPersistedProcess, processSupervisorSupported, recordProcessRoot, stopProcessGroup, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
+import { commandLineLimited, darwinPlatform, windowsPowerShell, linuxPlatform, parseDarwinPs, parsePsCpuTicks, parseWindowsSnapshot, processPlatform, setProcessPlatform, windowsPlatform, windowsTree, type ProcessPlatform } from '../../../src/orchestration/process-platform';
+import { cleanupPersistedProcess, processSupervisorSupported, recordProcessRoot, stopProcessGroup, terminateProbeTree, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
 import { ProcessActivitySampler } from '../../../src/orchestration/process-activity';
 
 jest.mock('child_process', () => ({ ...jest.requireActual('child_process'), execFile: jest.fn() }));
@@ -65,13 +65,13 @@ describe('darwin (ps + sysctl)', () => {
       .toEqual({ pid: 101, parent: 100, group: 100, state: 'S', start: 'Mon Sep 8 10:00:01 2026', cpu: 6225, command: '/Applications/My App/claude' });
   });
   test('group membership excludes zombies and other groups; ps failure is unprovable', async () => {
-    answer((file, args) => file === 'ps' && args.join(' ') === '-A -o pid=,pgid=,stat=' ? '100 100 Ss\n101 100 S\n102 100 Z\n200 200 S\n' : undefined);
+    answer((file, args) => file === '/bin/ps' && args.join(' ') === '-A -o pid=,pgid=,stat=' ? '100 100 Ss\n101 100 S\n102 100 Z\n200 200 S\n' : undefined);
     expect(await darwinPlatform.groupMembers(100)).toEqual([100, 101]);
     answer(() => undefined);
     expect(await darwinPlatform.groupMembers(100)).toBeUndefined();
   });
   test('fingerprint needs a live group leader and a boot session', async () => {
-    answer((file, args) => file === 'sysctl' ? 'BOOT-UUID\n' : file === 'ps' && args[0] === '-p' && args[3].endsWith(',comm=')
+    answer((file, args) => file === '/usr/sbin/sysctl' ? 'BOOT-UUID\n' : file === '/bin/ps' && args[0] === '-p' && args[3].endsWith(',comm=')
       ? PS.split('\n').filter(line => line.trim().startsWith(args[1] + ' ')).map(line => `${line} /usr/local/bin/claude`)[0] : undefined);
     expect(await darwinPlatform.fingerprint(100)).toEqual({ bootId: 'BOOT-UUID', startTicks: 'Mon Sep 28 10:00:00 2026|/usr/local/bin/claude' });
     expect(await darwinPlatform.fingerprint(101)).toBeUndefined(); // not a group leader
@@ -86,20 +86,23 @@ describe('darwin (ps + sysctl)', () => {
     const kill = jest.spyOn(process, 'kill').mockImplementation(() => true);
     setProcessPlatform(darwinPlatform);
     const identity = { pid: 300, bootId: 'BOOT-A', startTicks: 'Mon Sep 28 10:00:00 2026|/usr/local/bin/claude' };
-    const host = (row: string, boot = 'BOOT-A') => answer((file, args) => file === 'sysctl' ? boot + '\n'
-      : file === 'ps' && args[0] === '-p' ? row : file === 'ps' ? row.replace(/^\s*(\d+)\s+\d+\s+(\d+)\s+(\S+).*$/, '$1 $2 $3') : undefined);
+    const host = (row: string, boot = 'BOOT-A') => answer((file, args) => file === '/usr/sbin/sysctl' ? boot + '\n'
+      : file === '/bin/ps' && args[0] === '-p' ? row : file === '/bin/ps' ? row.replace(/^\s*(\d+)\s+\d+\s+(\d+)\s+(\S+).*$/, '$1 $2 $3') : undefined);
     host('  300     1   250 S       0:00.01 Mon Sep 28 10:00:00 2026 /usr/local/bin/claude'); // same second, but not our group: ours is gone
     expect(await cleanupPersistedProcess(identity)).toBe(true);
     host('  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:01 2026 /usr/local/bin/claude'); // new leader, next second
     expect(await cleanupPersistedProcess(identity)).toBe(false);
     host('  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:00 2026 /bin/sh'); // new leader, same second, other executable
     expect(await cleanupPersistedProcess(identity)).toBe(false);
-    host('  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:00 2026 /usr/local/bin/claude', 'BOOT-B'); // same clock, another boot
-    expect(await cleanupPersistedProcess(identity)).toBe(false);
+    expect(kill).not.toHaveBeenCalled();
+    // Another boot: nothing of ours survived a reboot, so the look-alike group
+    // leader is someone else's. The task is stopped, and nothing is signalled.
+    host('  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:00 2026 /usr/local/bin/claude', 'BOOT-B');
+    expect(await cleanupPersistedProcess(identity)).toBe(true);
     expect(kill).not.toHaveBeenCalled();
     let alive = true;
     kill.mockImplementation(() => { alive = false; return true; });
-    answer((file, args) => file === 'sysctl' ? 'BOOT-A\n' : !alive ? '' : file === 'ps' && args[0] === '-p' ? '  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:00 2026 /usr/local/bin/claude' : '300 300 Ss');
+    answer((file, args) => file === '/usr/sbin/sysctl' ? 'BOOT-A\n' : !alive ? '' : file === '/bin/ps' && args[0] === '-p' ? '  300     1   300 Ss      0:00.01 Mon Sep 28 10:00:00 2026 /usr/local/bin/claude' : '300 300 Ss');
     expect(await cleanupPersistedProcess(identity)).toBe(true);
     expect(kill).toHaveBeenCalledWith(-300, 'SIGTERM');
   });
@@ -208,7 +211,8 @@ describe('win32 lineage, identity and kill scope (mocked WMI)', () => {
     });
     kill = jest.spyOn(process, 'kill').mockImplementation(((pid: number) => { procs = procs.filter(([p]) => p !== pid); return true; }) as typeof process.kill);
   });
-  const spawned = async (platform: ProcessPlatform, pid: number) => { platform.adopt?.(pid, () => true); await platform.groupMembers(pid); };
+  const spawned = async (platform: ProcessPlatform, pid: number) => { await platform.adopt?.(pid, () => true); await platform.groupMembers(pid); };
+  const queries = (wmiClass: string) => execFileMock.mock.calls.filter(([, args]) => (args as string[]).at(-1)!.includes(wmiClass)).length;
   const killed = () => kill.mock.calls.map(([pid]) => pid);
 
   test('a dead member whose PID an unrelated process reused never adopts that process\'s children', async () => {
@@ -287,6 +291,69 @@ describe('win32 lineage, identity and kill scope (mocked WMI)', () => {
     expect(await platform.groupMembers(10, '1000')).toBeUndefined();
   });
 
+  test('identity keeps the start recorded at spawn: a PID reused before identity() is never persisted', async () => {
+    const platform = windowsPlatform('pwsh-mock');
+    procs = [[10, 4, 1000]];
+    const recorded = platform.adopt!(10, () => true);
+    await recorded;
+    procs = [[10, 4, 7777]]; // the worker exited and an unrelated process took its PID
+    expect(await platform.fingerprint(10)).toEqual({ bootId: '133000000000000000', startTicks: '1000' });
+    expect(await recorded).toBe('1000');
+    // A root that exited before it was recorded has no identity at all.
+    const early = windowsPlatform('pwsh-mock');
+    procs = [[20, 4, 2000]];
+    const unrecorded = early.adopt!(20, () => false);
+    await unrecorded;
+    expect(await early.fingerprint(20)).toBeUndefined();
+    expect(await unrecorded).toBeUndefined();
+    // A root known only from a snapshot must still be the process at that PID.
+    const restarted = windowsPlatform('pwsh-mock');
+    procs = [[30, 4, 3000]];
+    await restarted.groupMembers(30, '3000');
+    procs = [[30, 4, 9999]];
+    expect(await restarted.fingerprint(30)).toBeUndefined();
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  test('identity at task start reuses the spawn snapshot and one boot query per gateway process', async () => {
+    const platform = windowsPlatform('pwsh-mock');
+    procs = [[10, 4, 1000]];
+    await platform.adopt!(10, () => true);
+    execFileMock.mockClear();
+    expect(await platform.fingerprint(10)).toMatchObject({ startTicks: '1000' });
+    expect(await platform.fingerprint(10)).toMatchObject({ startTicks: '1000' });
+    expect(queries('Win32_Process')).toBe(0);
+    expect(queries('Win32_OperatingSystem')).toBe(1);
+    expect(await platform.bootId()).toBe('133000000000000000');
+    expect(queries('Win32_OperatingSystem')).toBe(1);
+  });
+
+  test('a failed boot query is retried, not cached', async () => {
+    const platform = windowsPlatform('pwsh-mock');
+    const snapshotRows = execFileMock.getMockImplementation()!;
+    execFileMock.mockImplementation((file: string, args: string[], options: unknown, callback: (error: Error | null, stdout: string) => void) =>
+      args.at(-1)!.includes('Win32_OperatingSystem') ? setImmediate(() => callback(new Error('wmi down'), '')) : snapshotRows(file, args, options, callback));
+    expect(await platform.bootId()).toBeUndefined();
+    execFileMock.mockImplementation(snapshotRows);
+    expect(await platform.bootId()).toBe('133000000000000000');
+  });
+
+  test('a probe recorded at spawn at a PID an earlier worker used has its whole tree killed', async () => {
+    const platform = windowsPlatform('pwsh-mock');
+    setProcessPlatform(platform);
+    procs = [[10, 4, 1000]];
+    await spawned(platform, 10);
+    expect(await stopProcessGroup(10)).toBe(true);
+    procs = [[10, 4, 7777]];
+    const probe = { pid: 10, exitCode: null as number | null, signalCode: null, kill: jest.fn(() => true) };
+    recordProcessRoot(probe);
+    procs = [[10, 4, 7777], [11, 10, 7778]];
+    await terminateProbeTree(probe, 'SIGTERM');
+    await terminateProbeTree(probe, 'SIGKILL');
+    expect(killed()).toEqual([10, 10, 11]);
+    expect(probe.kill).not.toHaveBeenCalled();
+  });
+
   test('stop kills only the creation-time-verified set, never a PPID-only tree walk', async () => {
     const platform = windowsPlatform('pwsh-mock');
     setProcessPlatform(platform);
@@ -305,7 +372,7 @@ describe('supervisor over a platform', () => {
     const live = new Set([5, 6]);
     const signals: string[] = [];
     const fake: ProcessPlatform = { detachWorkers: true, termGraceMs: 30, pollMs: 5, killSettleMs: 1,
-      groupMembers: async () => [...live], fingerprint: async () => undefined, snapshot: async () => undefined,
+      groupMembers: async () => [...live], fingerprint: async () => undefined, bootId: async () => undefined, snapshot: async () => undefined,
       signalGroup: async (_group, signal) => { signals.push(signal); if (signal === 'SIGKILL') live.clear(); return true; } };
     setProcessPlatform(fake);
     expect(await stopProcessGroup(5)).toBe(true);
@@ -315,11 +382,47 @@ describe('supervisor over a platform', () => {
   });
 });
 
+describe('persisted cleanup after a restart', () => {
+  const fake = (boot: string | undefined) => {
+    const platform: ProcessPlatform = { detachWorkers: true, termGraceMs: 0, pollMs: 0, killSettleMs: 0,
+      groupMembers: jest.fn(async () => undefined), signalGroup: jest.fn(async () => true),
+      fingerprint: jest.fn(async () => undefined), bootId: jest.fn(async () => boot), snapshot: async () => undefined };
+    setProcessPlatform(platform);
+    return platform;
+  };
+  test('another boot means the process is gone, before any membership or PID check', async () => {
+    const platform = fake('BOOT-B');
+    expect(await cleanupPersistedProcess({ pid: 300, bootId: 'BOOT-A', startTicks: '1' })).toBe(true);
+    expect(platform.groupMembers).not.toHaveBeenCalled();
+    expect(platform.signalGroup).not.toHaveBeenCalled();
+  });
+  test('the same boot, an unreadable boot, or no persisted boot keeps the membership proof', async () => {
+    for (const [boot, identity] of [['BOOT-A', { pid: 300, bootId: 'BOOT-A', startTicks: '1' }], [undefined, { pid: 300, bootId: 'BOOT-A', startTicks: '1' }], ['BOOT-B', { pid: 300 }]] as const) {
+      const platform = fake(boot);
+      expect(await cleanupPersistedProcess(identity)).toBe(false); // membership unprovable
+      expect(platform.groupMembers).toHaveBeenCalledTimes(1);
+    }
+  });
+});
+
+describe('absolute tool paths', () => {
+  test('PowerShell comes from SystemRoot when it is a plain drive path', () => {
+    expect(windowsPowerShell('C:\\Windows')).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+    expect(windowsPowerShell('D:\\WINDOWS\\')).toBe('D:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+    for (const unusable of [undefined, '', 'Windows', '\\\\server\\share', 'C:\\Win"dows', '/usr']) expect(windowsPowerShell(unusable)).toBe('powershell.exe');
+  });
+  test('macOS runs ps and sysctl by absolute path', async () => {
+    answer((file) => file === '/bin/ps' ? '100 100 Ss\n' : file === '/usr/sbin/sysctl' ? 'BOOT\n' : undefined);
+    expect(await darwinPlatform.groupMembers(100)).toEqual([100]);
+    expect(await darwinPlatform.bootId()).toBe('BOOT');
+  });
+});
+
 describe('worker spawn records the root identity', () => {
   test('the platform adopts the root with a liveness check tied to the child handle', () => {
     const adopt = jest.fn();
     setProcessPlatform({ detachWorkers: false, termGraceMs: 0, pollMs: 0, killSettleMs: 0, groupMembers: async () => [], signalGroup: async () => true,
-      fingerprint: async () => undefined, snapshot: async () => undefined, adopt });
+      fingerprint: async () => undefined, bootId: async () => undefined, snapshot: async () => undefined, adopt });
     const child = { pid: 10, exitCode: null as number | null, signalCode: null };
     recordProcessRoot(child);
     expect(adopt).toHaveBeenCalledWith(10, expect.any(Function));

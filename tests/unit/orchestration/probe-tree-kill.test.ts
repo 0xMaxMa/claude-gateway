@@ -3,7 +3,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { probeCliSkills } from '../../../src/orchestration/cli-skills';
 import { probeMcpConfiguration } from '../../../src/orchestration/capabilities';
-import { terminateProbeTree } from '../../../src/orchestration/process-supervisor';
+import { recordProcessRoot, terminateProbeTree } from '../../../src/orchestration/process-supervisor';
 import { setProcessPlatform, type ProcessPlatform } from '../../../src/orchestration/process-platform';
 
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -46,7 +46,7 @@ describe('terminateProbeTree', () => {
   const platform = (overrides: Partial<ProcessPlatform>): ProcessPlatform => ({
     detachWorkers: false, termGraceMs: 0, pollMs: 0, killSettleMs: 0,
     groupMembers: jest.fn(async () => [10, 11]), signalGroup: jest.fn(async () => true),
-    fingerprint: jest.fn(async () => undefined), snapshot: jest.fn(async () => undefined), ...overrides,
+    fingerprint: jest.fn(async () => undefined), bootId: jest.fn(async () => undefined), snapshot: jest.fn(async () => undefined), ...overrides,
   });
   const child = () => ({ pid: 10, exitCode: null as number | null, signalCode: null, kill: jest.fn(() => true) });
 
@@ -59,44 +59,63 @@ describe('terminateProbeTree', () => {
     expect(c.kill).not.toHaveBeenCalled();
   });
 
-  test('Windows: SIGTERM records lineage only; SIGKILL kills the tree once', async () => {
-    const p = platform({});
-    setProcessPlatform(p);
+  // Windows: the root identity is recorded once at spawn (recordProcessRoot), so
+  // SIGTERM costs no snapshot and SIGKILL kills the tree of exactly that identity.
+
+  test('Windows: SIGTERM takes no snapshot; SIGKILL kills the recorded tree once', async () => {
     const c = child();
+    const p = platform({ adopt: jest.fn(async () => '1000') });
+    setProcessPlatform(p);
+    recordProcessRoot(c);
     await terminateProbeTree(c, 'SIGTERM');
-    expect(p.groupMembers).toHaveBeenCalledTimes(1);
+    expect(p.groupMembers).not.toHaveBeenCalled();
+    expect(p.snapshot).not.toHaveBeenCalled();
     expect(p.signalGroup).not.toHaveBeenCalled();
     await Promise.all([terminateProbeTree(c, 'SIGKILL'), terminateProbeTree(c, 'SIGKILL')]);
-    expect(p.groupMembers).toHaveBeenCalledTimes(1);
+    expect(p.groupMembers).not.toHaveBeenCalled();
     expect(p.signalGroup).toHaveBeenCalledTimes(1);
-    expect(p.signalGroup).toHaveBeenCalledWith(10, 'SIGKILL');
+    expect(p.signalGroup).toHaveBeenCalledWith(10, 'SIGKILL', '1000');
+    expect(c.kill).not.toHaveBeenCalled();
   });
 
-  test('Windows: a probe that exits during the lineage snapshot is never signalled (PID reuse)', async () => {
-    const c = child();
-    const p = platform({ groupMembers: jest.fn(async () => { c.exitCode = 0; return [10]; }) });
+  test('Windows: a probe that exited before its identity was recorded is never signalled (PID reuse)', async () => {
+    const c = { ...child(), exitCode: 0 };
+    const p = platform({ adopt: jest.fn(async () => undefined) });
     setProcessPlatform(p);
+    recordProcessRoot(c);
     await terminateProbeTree(c, 'SIGKILL');
     expect(p.signalGroup).not.toHaveBeenCalled();
     expect(c.kill).not.toHaveBeenCalled();
   });
 
-  test('Windows: an already exited probe without lineage is left alone', async () => {
+  test('Windows: an unrecorded probe is only killed through its own handle', async () => {
     const p = platform({});
-    setProcessPlatform(p);
-    const c = { ...child(), exitCode: 1 };
-    await terminateProbeTree(c, 'SIGKILL');
-    expect(p.groupMembers).not.toHaveBeenCalled();
-    expect(p.signalGroup).not.toHaveBeenCalled();
-  });
-
-  test('Windows: falls back to the root when the tree cannot be proven', async () => {
-    const p = platform({ signalGroup: jest.fn(async () => false) });
     setProcessPlatform(p);
     const c = child();
     await terminateProbeTree(c, 'SIGKILL');
+    expect(p.groupMembers).not.toHaveBeenCalled();
+    expect(p.signalGroup).not.toHaveBeenCalled();
     expect(c.kill).toHaveBeenCalledWith('SIGKILL');
   });
+
+  test('Windows: falls back to the root when the tree cannot be proven', async () => {
+    const p = platform({ signalGroup: jest.fn(async () => false), adopt: jest.fn(async () => '1000') });
+    setProcessPlatform(p);
+    const c = child();
+    recordProcessRoot(c);
+    await terminateProbeTree(c, 'SIGKILL');
+    expect(c.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  test('Windows: both probes record their root at spawn, while the handle is held', async () => {
+    const pids: number[] = [];
+    setProcessPlatform(platform({ adopt: jest.fn(async (pid: number, alive: () => boolean) => { expect(alive()).toBe(true); pids.push(pid); return undefined; }) }));
+    const cwd = tmpdir();
+    await expect(probeCliSkills(process.execPath, ['-e', 'process.exit(0)'], cwd, 4000)).rejects.toThrow('CLI_SKILL_DISCOVERY_UNAVAILABLE');
+    await expect(probeMcpConfiguration(process.execPath, ['-e', 'process.exit(0)'], cwd, undefined, 4000)).rejects.toThrow('CAPABILITY_DISCOVERY_UNAVAILABLE');
+    expect(pids).toHaveLength(2);
+    expect(pids.every(pid => pid > 0)).toBe(true);
+  }, 30000);
 
   test('unsupported hosts kill the root', async () => {
     setProcessPlatform(null);
