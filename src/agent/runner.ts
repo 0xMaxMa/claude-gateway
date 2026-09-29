@@ -3662,6 +3662,16 @@ export class AgentRunner extends EventEmitter {
     this.pendingRestarts.add(chatId);
   }
 
+  /**
+   * Format the web→channel echo. Attribute it to the sender when known so
+   * multi-user web messages are distinguishable in the channel; fall back to the
+   * bare prefix when no sender name is available (senderName is persisted to
+   * history on the adjacent line either way).
+   */
+  private webEchoText(message: string, senderName: string | undefined): string {
+    return senderName ? `📱 Web (${senderName}): ${message}` : '📱 Web: ' + message;
+  }
+
   private writeAutoForward(chatId: string, text: string, format: 'text' | 'html' = 'text', forceDeliver = false): void {
     // LINE has no .forward consumer — route through LineReplyManager's push path.
     if (this.channelFor(chatId) === 'line') {
@@ -5755,6 +5765,23 @@ export class AgentRunner extends EventEmitter {
       threadKey: String(rows[0]?.thread_key ?? ''), principalId: opts.principalId },
       text: message, requestId, trustedChannelMember: true, metadata: { senderName, senderId: opts.principalId } },
       { execute: opts.allowTools ?? false, writeMemory: false });
+    // Echo the web-UI message back to the originating channel so its users see
+    // what was typed from the web (fixes the one-sided conversation on every
+    // channel the endpoint serves, not just Telegram). Placed after the
+    // validation above AND after submitInput has accepted the input into the
+    // store, so a rejected request — whether from validation (Authenticated
+    // principal, Ambiguous/mismatched session, Session not found) or from
+    // admission (QUEUE_FULL, ORCHESTRATION_CLOSING thrown by submitInput) —
+    // sends no phantom echo. channelSourceMap is set first so writeAutoForward
+    // routes to the right channel receiver — the orchestrated path never
+    // reaches the legacy set. forceDeliver=true (null turnId) because the echo
+    // is standalone text no `.replied` marker covers: without it the entry
+    // carries readCurrentTurnId(), which a concurrent channel turn's marker (or
+    // a stale one) with the same turn id would dedup-swallow — defeating the
+    // one-sided-conversation fix. Same convention as the socket-drop notice
+    // (2706) and the reply-failure fallback (3738-3742).
+    this.channelSourceMap.set(rawChatId, channel);
+    this.writeAutoForward(rawChatId, this.webEchoText(message, senderName), 'text', true);
     const turn = this.turnStreams.start(turnStreamKey(channel, sessionId), requestId);
     const sink = callbackSink(callbacks); turn.attach(sink, 0);
     const displayed = new Map<string, string>();
@@ -5837,6 +5864,16 @@ export class AgentRunner extends EventEmitter {
 
     // Channel sessions use agent-level model (not per-session)
     const session = await this.getOrSpawnSession(rawChatId, channel, sessionId);
+
+    // Echo the web-UI message back to the originating channel so its users see
+    // what was typed from the web (fixes the one-sided conversation on every
+    // channel the endpoint serves, not just Telegram). Placed after
+    // getOrSpawnSession so a rejected request or a failed spawn sends no phantom
+    // echo. channelSourceMap was set just above, so writeAutoForward routes to
+    // the right channel receiver. forceDeliver=true (null turnId): see the
+    // orchestrated path above — the echo is standalone text no `.replied` marker
+    // covers, so a same-turn-id marker must not dedup it away.
+    this.writeAutoForward(rawChatId, this.webEchoText(message, senderName), 'text', true);
 
     // Persist user message (Layer 1 session JSON + Layer 2 history DB)
     const uiUserTs = Date.now();
