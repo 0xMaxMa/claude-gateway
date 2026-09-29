@@ -5,7 +5,6 @@ module.exports = {
   roots: ['<rootDir>/tests'],
   testMatch: ['**/*.test.ts'],
   testPathIgnorePatterns: ['/node_modules/', '<rootDir>/tests/e2e/'],
-  forceExit: true,
   testTimeout: 30000,
   // Two workers, each capped below (see the `test` script's --max-old-space-size),
   // keep peak RSS within a ~8GB CI box. workerIdleMemoryLimit recycles a worker

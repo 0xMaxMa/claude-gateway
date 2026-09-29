@@ -152,13 +152,14 @@ describe('cli e2e — friendly resource commands', () => {
     expect(prettyCode).toBe(0);
     const pretty = stdout.join('');
     expect(pretty.split('\n').length).toBeGreaterThan(2); // pretty-printed spans multiple lines
+    const prettyJson = lastJson();
 
     stdout = [];
     const compactCode = await runCli(['crons', 'list', ...base(['--json'])]);
     expect(compactCode).toBe(0);
     const compact = stdout.join('');
     expect(compact.trim().split('\n')).toHaveLength(1); // one line: the minified JSON
-    expect(JSON.parse(compact)).toEqual(JSON.parse(pretty)); // same data either way
+    expect(JSON.parse(compact)).toEqual(prettyJson); // same data either way
   });
 });
 
