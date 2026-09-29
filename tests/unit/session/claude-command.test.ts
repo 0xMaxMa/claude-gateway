@@ -123,3 +123,17 @@ describe('claude command resolution across platforms', () => {
     });
   });
 });
+
+// Issue #556 item 3: a spread of process.env (Windows key `Path`) plus an
+// explicit `PATH` is not ambiguous. Node sorts env keys and keeps the first of
+// each case-insensitive duplicate on win32, so the upper-case `PATH` we set wins.
+(process.platform === 'win32' ? describe : describe.skip)('win32 child env PATH key', () => {
+  it('gives the child exactly one PATH, the one set by the gateway', () => {
+    const marker = path.join(os.tmpdir(), 'gateway-path-marker');
+    const env = { ...process.env, Path: 'C:\\stale', PATH: `${marker};${process.env.PATH ?? ''}` };
+    const result = spawnSync(process.execPath, ['-e', 'const keys=Object.keys(process.env).filter(k=>k.toUpperCase()==="PATH");console.log(JSON.stringify({keys,value:process.env.PATH}))'], { env, encoding: 'utf8' });
+    const { keys, value } = JSON.parse(result.stdout);
+    expect(keys).toHaveLength(1);
+    expect(value.split(';')[0]).toBe(marker);
+  });
+});
