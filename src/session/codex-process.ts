@@ -45,9 +45,12 @@ interface SessionHomes { sessionId: string; workspace: string; container?: strin
 function sessionRoot(stateDirectory: string, workspace: string, sessionId: string): string {
   return join(stateDirectory, 'codex', createHash('sha256').update(workspace + '\0' + sessionId).digest('hex'));
 }
-function ownedHome(root: string, home: unknown, container?: string): home is string {
+/** A persisted Codex home the gateway created: `<root>/attempt-<uuid>` on the host
+ * (built with the host separator, as the attempt directory is), or
+ * `~/.gateway-codex-<uuid>` inside a POSIX app container. */
+export function ownedHome(root: string, home: unknown, container?: string): home is string {
   if (typeof home !== 'string') return false;
-  const prefix = container ? homedir() + '/.gateway-codex-' : root + '/attempt-';
+  const prefix = container ? homedir() + '/.gateway-codex-' : join(root, 'attempt-');
   return home.startsWith(prefix) && threadPattern.test(home.slice(prefix.length));
 }
 const cleanupRuns = new Map<string, Promise<number>>();
