@@ -10,6 +10,7 @@ import { SessionStore } from '../../../src/session/store';
 import { HistoryDB } from '../../../src/history/db';
 import { AgentConfig, GatewayConfig } from '../../../src/types';
 import { SessionProcess } from '../../../src/session/process';
+import { waitForCondition } from '../../helpers/wait-for';
 
 async function fixture() {
  const root=mkdtempSync(join(tmpdir(),'ingress-recovery-')),dir=join(root,'a'),workspace=join(dir,'workspace');
@@ -143,7 +144,7 @@ test('late album member and lost ACK survive receiver restart without conflictin
   spool.enqueue(album('20'));await attempt;
   await new Promise(resolve=>setTimeout(resolve,10));
   spool.close();spool=new ReceiverSpool(journal,'http://callback',request,0);
-  await new Promise(resolve=>setTimeout(resolve,1100));await spool.flush();
+  await waitForCondition(()=>f.runtime.store.all('SELECT * FROM conversation_inputs').length===2);
   const rows=f.runtime.store.all('SELECT * FROM conversation_inputs ORDER BY input_seq');
   expect(rows).toHaveLength(2);
   expect(rows.map(row=>JSON.parse(String(row.ingress_json)).metadata.platformMessageIds)).toEqual([['20'],['21']]);
