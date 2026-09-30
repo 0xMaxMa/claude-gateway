@@ -1,4 +1,4 @@
-import {buildComputerCommand,readComputerCommand,standardComputerCommand} from './computer-command';
+import {buildComputerCommand,readComputerCommand,standardComputerCommand,standardKeyboardCommand} from './computer-command';
 import {decisionInstructions,readChoice,observedEffect,decisionState,literalTextCandidates} from './computer-policy';
 import {checkInterruption,interruptible} from './interrupt';
 import {randomUUID} from 'node:crypto';
@@ -109,6 +109,18 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
    },
    decide:async state=>{
     check();const revision=goal.revision;if(direct&&goal.revision!==input.revision)return {result:result('cancelled','REVISION_SUPERSEDED')};
+    const key=direct?standardKeyboardCommand(goal.goal):undefined;
+    if(key){
+     if(!state.focusedControl||state.focusedControl.sensitive)return {result:waitForCommand('NO_SUPPORTED_ACTION')};
+     const action={kind:'key',key};emit('decided',summary(action,state));
+     return {action:{action:'key',generation:state.generation,revision,targets:new Map([['key',action]]),observedContinuation:true}};
+    }
+    // Older relays may omit the compact-observation hint. An exact scroll
+    // command still needs no inference when there is only one observed pane.
+    if((standard==='scroll:up'||standard==='scroll:down')&&state.standardCommand!==standard&&state.supportedActions?.includes(standard)&&(state.scrollAreas?.length??0)<=1){
+     const action={kind:'scroll',direction:standard.split(':')[1],...(state.scrollAreas?.length?{ref:state.scrollAreas[0].ref}:{})};emit('decided',summary(action,state));
+     return {action:{action:'scroll',generation:state.generation,revision,targets:new Map([['scroll',action]]),observedContinuation:true}};
+    }
     if(standard&&state.standardCommand===standard){
      const action:Record<string,unknown>=standard==='close:window'?{kind:'press',ref:'standard-close'}:{kind:'scroll',direction:standard.split(':')[1]};
      const available=standard==='close:window'?state.controls.some(c=>c.ref==='standard-close'&&c.actions.includes('press')):state.supportedActions?.includes(standard);

@@ -1,3 +1,4 @@
+import {standardKeyboardCommand} from '../../../src/automation/computer-command';
 import {literalTextCandidates} from '../../../src/automation/computer-policy';
 import assert from 'node:assert/strict';
 import {JevError} from '../../../src/jev/types';
@@ -680,7 +681,7 @@ for(const accepted of [true,false])test('direct action uses original generation 
 });
 
 test('user command releases ownership immediately after completed action without waiting for another observation',async()=>{
- const f=fixture(['key:enter']);const call=f.deps.call;let completed=false;
+ const f=fixture(['key:enter']);Object.assign(f.state,{focusedControl:{ref:'c1',role:'AXTextArea',label:'Note'}});const call=f.deps.call;let completed=false;
  f.deps.call=async(name,args,signal)=>{
   if(completed&&name==='computer_observe')throw Error('POST_ACTION_READ_WOULD_DELAY_NEXT_COMMAND');
   if(name==='computer_action')completed=true;
@@ -700,4 +701,32 @@ test('single command can activate the current application without entering a reo
  assert.equal(r.steps,1);assert.equal(evaluations,1);
  assert.equal(f.calls.filter(c=>c.name==='computer_action').length,1);
  assert.equal(f.calls.find(c=>c.name==='computer_action')?.args.app_id,'com.apple.Notes');
+});
+
+for(const command of ['กดลูกศรขึ้น','กดลูกศรลง','press enter'])test('exact key command bypasses inference but preserves native focus guard: '+command,async()=>{
+ const f=fixture([]);Object.assign(f.state,{focusedControl:{ref:'c1',role:'AXTextArea',label:'Note'}});
+ f.deps.evaluate=async()=>{throw Error('UNNECESSARY_INFERENCE');};
+ const r=await runComputerUse({goal:command,yieldAfterInteraction:true},f.deps,new AbortController().signal);
+ assert.equal(r.steps,1);assert.equal(r.evaluations,0);
+ assert.equal(f.calls.filter(c=>c.name==='computer_observe').length,1);
+});
+test('exact key cannot target missing or sensitive focus',async()=>{
+ for(const focus of [undefined,{ref:'c1',role:'AXSecureTextField',label:'Password',sensitive:true}]){
+  const f=fixture([]);Object.assign(f.state,{focusedControl:focus});
+  const r=await runComputerUse({goal:'press enter',yieldAfterInteraction:true},f.deps,new AbortController().signal);
+  assert.equal(r.steps,0);assert.equal(r.evaluations,0);
+ }
+});
+test('legacy single-pane scroll bypasses inference with observed pane ref',async()=>{
+ const f=fixture([]);Object.assign(f.state,{supportedActions:['scroll:down'],scrollAreas:[{ref:'s0',label:'Content',bounds:{x:0,y:0,width:1,height:1}}]});
+ f.deps.evaluate=async()=>{throw Error('UNNECESSARY_INFERENCE');};
+ const r=await runComputerUse({goal:'scroll ลงมา',yieldAfterInteraction:true},f.deps,new AbortController().signal);
+ assert.equal(r.steps,1);assert.equal(r.evaluations,0);
+ assert.equal(f.calls.find(c=>c.name==='computer_action').args.ref,'s0');
+});
+
+test('key fast path excludes negated, compound and targeted instructions',()=>{
+ for(const command of ['do not press enter','press enter twice','กดลูกศรขึ้นแล้วกด enter','press enter in another window','กดลูกศรขึ้นไหม']){
+  assert.equal(standardKeyboardCommand(command),undefined);
+ }
 });

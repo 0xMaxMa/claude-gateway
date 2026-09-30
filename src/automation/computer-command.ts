@@ -105,3 +105,16 @@ export function standardComputerCommand(command:string):'scroll:up'|'scroll:down
  };
  return Object.hasOwn(commands,normalized)?commands[normalized]:undefined;
 }
+
+// Exact key commands follow the existing native key executor contract.
+// This is a finite command grammar, not a site/target inference shortcut.
+export function standardKeyboardCommand(command:string):string|undefined {
+ const normalized=command.trim().toLocaleLowerCase().replace(/\s+/gu,' ');
+ const aliases:Record<string,string>={
+  'กดลูกศรขึ้น':'up','กดลูกศรลง':'down','กดลูกศรซ้าย':'left','กดลูกศรขวา':'right',
+  'กด enter':'enter','กด tab':'tab','กด escape':'escape',
+  'press arrow up':'up','press arrow down':'down','press arrow left':'left','press arrow right':'right',
+  'press enter':'enter','press tab':'tab','press escape':'escape',
+ };
+ return Object.hasOwn(aliases,normalized)?aliases[normalized]:undefined;
+}
