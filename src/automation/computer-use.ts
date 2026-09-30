@@ -219,10 +219,13 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      action.text=text.text;
     }
     check();checkInterruption(deps.interruptSignal);update();if(goal.revision!==d.revision)return direct?result('cancelled','REVISION_SUPERSEDED'):undefined;
-    // A preselected Enter was just validated against the post-type observation;
-    // no inference or text helper ran since it. Reuse that generation and let
-    // the native executor recheck window, focus and signature at dispatch.
-    const fresh=d.observedContinuation?last!:ComputerObservation.parse(await call('computer_observe'));check();checkInterruption(deps.interruptSignal);update();
+    // Direct commands execute against the generation used for their decision.
+    // The native executor validates that generation, front app, window and
+    // target signature immediately before input (ComputerBridge execute).
+    // A second full observation adds a network/tree walk and unnecessarily
+    // replaces the target generation. Rejection remains not_executed; never
+    // retry a mutation whose outcome is unknown.
+    const fresh=(direct||d.observedContinuation)?last!:ComputerObservation.parse(await call('computer_observe'));check();checkInterruption(deps.interruptSignal);update();
     if(goal.revision!==d.revision)return direct?result('cancelled','REVISION_SUPERSEDED'):undefined;
     deps.observation?.(fresh);
     // Opening an explicitly selected application depends on the approved app

@@ -497,7 +497,7 @@ for(const mode of ['valid','uncertain','invalid','wrong-kind','stale','revision'
  f.state.apps=Array.from({length:100},(_,i)=>({id:'app-'+i,name:'App '+i}));
  f.state.controls=Array.from({length:150},(_,i)=>({ref:'field-'+i,label:'Field '+i,role:'AXTextField',actions:['press','type'],value:''})) as any;
  const abort=new AbortController();let observations=0;const call=f.deps.call;
- f.deps.call=async(...args)=>{if(args[0]==='computer_observe'&&++observations>2&&['stale','revision'].includes(mode))abort.abort();return structuredClone(await call(...args));};
+ f.deps.call=async(...args)=>{if(args[0]==='computer_observe'&&++observations>2&&['stale','revision'].includes(mode))abort.abort();const value=await call(...args);return args[0]==='computer_action'&&mode==='stale'?{state:'not_executed',error:'STALE_OBSERVATION'}:structuredClone(value);};
  f.deps.evaluate=async req=>{
   queries++;validateJevRequest(req,{});assert.equal((req.state as any).previousInteraction,'Prior command evidence');
   assert(!req.questions.target_menu);assert.equal(Object.keys(req.questions.target_press.criteria).length,151);
@@ -510,7 +510,8 @@ for(const mode of ['valid','uncertain','invalid','wrong-kind','stale','revision'
   return r;
  };
  const r=await runComputerUse({goal:'Click Field 149',interactionContext:'Prior command evidence',yieldAfterInteraction:true},f.deps,abort.signal);
- assert.equal(f.calls.filter(c=>c.name==='computer_action').length,mode==='valid'?1:0);
+ assert.equal(f.calls.filter(c=>c.name==='computer_action').length,['valid','stale'].includes(mode)?1:0);
+ if(mode==='stale')assert.equal(r.steps,0);
  if(!['stale','revision'].includes(mode))assert.equal(queries,1);
  if(mode==='valid')assert.equal(r.evaluations,1);
 });
@@ -660,20 +661,22 @@ test('standard command rejected by native freshness is never replayed',async()=>
  assert.equal(r.steps,0);assert.equal(f.calls.filter(c=>c.name==='computer_action').length,1);
 });
 
-for(const present of [true,false])test('open validates its application catalog despite unrelated window updates: '+present,async()=>{
+for(const accepted of [true,false])test('direct action uses original generation and honors native rejection: '+accepted,async()=>{
  const f=fixture(['open:com.example.Browser']);f.state.apps.push({id:'com.example.Browser',name:'Browser'});
  const call=f.deps.call;let reads=0;
  f.deps.call=async(name,args,signal)=>{
-  if(name==='computer_observe'){
-   reads++;
-   return {...structuredClone(f.state),generation:'g'+reads,text:[reads===1?'Ready':'Reading target'],...(reads>1?{application:'com.example.Other',windowTitle:'Unrelated status',apps:present?f.state.apps:[]}:{})};
+  if(name==='computer_observe'&&++reads>1)throw Error('REDUNDANT_FULL_OBSERVATION');
+  const value=await call(name,args,signal);
+  if(name==='computer_action'){
+   assert.equal(args.generation,'g');
+   return accepted?{state:'completed'}:{state:'not_executed',error:'APPLICATION_NOT_ALLOWED'};
   }
-  return call(name,args,signal);
+  return structuredClone(value);
  };
  const r=await runComputerUse({goal:'Open Browser',yieldAfterInteraction:true},f.deps,new AbortController().signal);
- const actions=f.calls.filter(c=>c.name==='computer_action');assert.equal(actions.length,present?1:0);
- if(present){assert.equal(actions[0].args.app_id,'com.example.Browser');assert.equal(actions[0].args.generation,'g2');}
- else assert(r.trace.events.some(e=>e.reason==='ACTION_CONTEXT_CHANGED'));
+ assert.equal(f.calls.filter(c=>c.name==='computer_action').length,1);
+ assert.equal(r.steps,accepted?1:0);
+ assert.equal(reads,1);
 });
 
 test('user command releases ownership immediately after completed action without waiting for another observation',async()=>{
