@@ -119,7 +119,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     const criteria:Record<string,string>={WAIT:'Wait briefly for the observed UI to change',DONE:'The CURRENT command is satisfied by visible evidence. Opening or activating an app completes an open-only command. Focusing a search field does NOT complete a search or typing command; independent verification follows',BLOCKED:'No supported step can progress'};
     const targets=new Map<string,Record<string,unknown>>();
     const offer=(id:string,description:string,action:Record<string,unknown>)=>{if((ineffective.get(identity(state,action))??0)>=2)return;criteria[id]=description;targets.set(id,action);};
-    for(const app of state.apps)if(app.id!==state.application||(!state.windowTitle&&state.controls.length===0))offer('open:'+app.id,(app.id===state.application?'Reopen ':'Open ')+app.name+(app.id===state.application?' (already active without an actionable window)':''),{kind:'open',app_id:app.id});
+    for(const app of state.apps)if(direct||app.id!==state.application||(!state.windowTitle&&state.controls.length===0))offer('open:'+app.id,(app.id===state.application?(direct&&(state.windowTitle||state.controls.length>0)?'Activate ':'Reopen '):'Open ')+app.name+(app.id===state.application&&!direct?' (already active without an actionable window)':''),{kind:'open',app_id:app.id});
     for(const c of state.controls){
      if(c.sensitive)continue;
      for(const kind of c.actions){

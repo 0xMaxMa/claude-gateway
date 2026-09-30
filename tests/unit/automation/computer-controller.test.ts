@@ -689,3 +689,12 @@ test('user command releases ownership immediately after completed action without
  assert.equal(r.observation,undefined);assert(r.trace.events.some(e=>e.reason==='ACTION_DISPATCHED'));
  assert.equal(f.calls.at(-1)?.name,'computer_release');
 });
+
+test('single command can activate the current application without entering a reopen loop',async()=>{
+ const f=fixture(['open:com.apple.Notes']);let evaluations=0;
+ f.deps.evaluate=async req=>{evaluations++;return responseFor(req,'open:com.apple.Notes');};
+ const r=await runComputerUse({goal:'Open Notes',yieldAfterInteraction:true},f.deps,new AbortController().signal);
+ assert.equal(r.steps,1);assert.equal(evaluations,1);
+ assert.equal(f.calls.filter(c=>c.name==='computer_action').length,1);
+ assert.equal(f.calls.find(c=>c.name==='computer_action')?.args.app_id,'com.apple.Notes');
+});
