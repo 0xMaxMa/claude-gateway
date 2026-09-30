@@ -1,3 +1,4 @@
+import { sanitizeJevChildEnv, jevCredentialEnvNames } from '../jev/child-env';
 import { workerEnvironment } from './worker-environment';
 import { ProcessDiagnostics, TurnOutcome } from './process-diagnostics';
 import { prepareManagedConnectors } from './managed-connectors';
@@ -757,7 +758,9 @@ export class SessionProcess extends EventEmitter {
       const { servers, connectors } = prepareManagedConnectors(this.agentConfig, this.gatewayConfig, this.runtimeProfile, this.managedConnectorPaths);
       this.spawnedConnectors = new Map(Object.entries(connectors).map(([id, server]) => [id, connectorFingerprint(server)]));
       const configPath = path.join(path.dirname(this.runtimeProfile.mcpConfigPath), 'managed-connectors.json');
-      fs.writeFileSync(configPath, JSON.stringify({ mcpServers: { ...servers, ...ticket.mcpServers } }), { mode: 0o600 });
+      const mcpServers = { ...servers, ...ticket.mcpServers };
+      for (const server of Object.values(mcpServers) as any[]) if (server?.env) server.env = sanitizeJevChildEnv(server.env, this.gatewayConfig.gateway.jev);
+      fs.writeFileSync(configPath, JSON.stringify({ mcpServers }), { mode: 0o600 });
       fs.chmodSync(configPath, 0o600);
       this.managedMcpConfigPath = configPath;
       return configPath;
@@ -930,6 +933,7 @@ export class SessionProcess extends EventEmitter {
     };
 
     const configPath = path.join(sessionDir, 'mcp-config.json');
+    for (const server of Object.values(mcpConfig.mcpServers) as any[]) if (server?.env) server.env = sanitizeJevChildEnv(server.env, this.gatewayConfig.gateway.jev);
     fs.writeFileSync(configPath, JSON.stringify(mcpConfig, null, 2), { mode: 0o600 });
 
     const serverNames = Object.keys(mcpConfig.mcpServers);
@@ -1171,10 +1175,13 @@ export class SessionProcess extends EventEmitter {
     let containerUid = 1000;
     try { containerUid = os.userInfo().uid; } catch { /* use 1000 */ }
 
-    const configuredWorkerEnvironment = this.runtimeProfile?.role === 'worker' ? workerEnvironment(this.agentConfig, this.gatewayConfig) : {};
+    const configuredWorkerEnvironment = sanitizeJevChildEnv(this.runtimeProfile?.role === 'worker' ? workerEnvironment(this.agentConfig, this.gatewayConfig) : {}, this.gatewayConfig.gateway.jev);
+    const turnEnvironment: Record<string,string> = this.runtimeProfile?.role === 'agent' && this.runtimeProfile.claudeEffort
+      ? { CLAUDE_CODE_EFFORT_LEVEL: this.runtimeProfile.claudeEffort } : {};
     const containerEnv: Record<string, string> = {
       HOME: os.homedir(),
       CLAUDE_WORKSPACE: '/workspace',
+      ...turnEnvironment,
       GATEWAY_RESTART_SIGNAL_PATH: containerRestartPath,
     };
     if (!this.runtimeProfile && process.env.GATEWAY_API_URL) containerEnv.GATEWAY_API_URL = process.env.GATEWAY_API_URL;
@@ -1193,6 +1200,8 @@ export class SessionProcess extends EventEmitter {
     const dockerEnvFlags = [
       ...Object.entries(containerEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
       ...byNameKeys.flatMap((k) => ['-e', k]),
+      // Also mask values baked into an existing container's own environment.
+      ...jevCredentialEnvNames(this.gatewayConfig.gateway.jev).flatMap(k => ['-e', `${k}=`]),
     ];
 
     const spawnArgs = isAppAgent
@@ -1229,13 +1238,14 @@ export class SessionProcess extends EventEmitter {
     const toolCapture = this.toolCapture;
     let proc: ReturnType<typeof spawn>;
     try { proc = spawn(spawnBin, spawnArgs, {
-      env: {
+      env: sanitizeJevChildEnv({
         ...process.env,
         ...(!isAppAgent && this.runtimeProfile?.checkpointCommand && !this.runtimeProfile.hostExecution ? Object.fromEntries(CONTAINER_CREDENTIAL_KEYS.map(key=>[key,undefined])) : {}),
         ...containerAuthEnv,
         ...(toolCapture ? {OTEL_LOG_RAW_API_BODIES:'file:'+toolCapture.directory} : {}),
         ...(hardenedPath ? { PATH: hardenedPath } : {}),
         ...configuredWorkerEnvironment,
+        ...turnEnvironment,
         GATEWAY_ORIGIN_SESSION_ID: this.runtimeProfile?.originSessionId ?? this.sessionId,
         GATEWAY_TASK_ID: this.runtimeProfile?.taskId ?? '',
         GATEWAY_TASK_ATTEMPT_ID: this.runtimeProfile?.attemptId ?? '',
@@ -1245,7 +1255,7 @@ export class SessionProcess extends EventEmitter {
         ...(ptyRealBin ? { CLAUDE_REAL_BIN: ptyRealBin } : {}),
         ...(ptyHeartbeatPath ? { PTY_SHELL_HEARTBEAT_PATH: ptyHeartbeatPath } : {}),
         ...(ptyStreamSocketPath ? { PTY_SHELL_STREAM_SOCKET: ptyStreamSocketPath } : {}),
-      },
+      }, this.gatewayConfig.gateway.jev),
       cwd: this.agentConfig.workspace,
       ...(this.runtimeProfile?.role === 'worker' && processSupervisorSupported() && workerSpawnDetached() ? { detached: true } : {}),
       windowsHide: true,

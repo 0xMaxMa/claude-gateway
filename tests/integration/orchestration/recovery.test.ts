@@ -88,18 +88,28 @@ test('runner hot reload updates the actual orchestration sender and worker confi
   try {
     const runner=Object.create(AgentRunner.prototype) as any;
     Object.assign(runner,{agentConfig:agent,gatewayConfig:gateway,orchestration:runtime,whatsappAccounts:new Map(),whatsappAccountForChat:new Map(),
-      channelReloadSnapshot:new Map([['telegram',JSON.stringify(agent.telegram)],['discord','null']]),receiverReload:Promise.resolve(),configReloadHandlers:new Set()});
-    for(const method of ['startTelegramReceiver','startDiscordReceiver','syncWhatsAppAccounts','stopWhatsAppCloudOutbound','startWhatsAppCloudOutbound','refreshTelegramCommands','stopLineReply','startLineReply','stopSlackOutbound','startSlackOutbound'])runner[method]=()=>{};
+      // Object.create bypasses the constructor and field initializers. Preserve the
+      // real receiver reload chain and snapshots while stubbing external receivers.
+      receiverReload:Promise.resolve(),channelReloadSnapshot:new Map(['line','slack','whatsapp_cloud','telegram','discord'].map(channel=>[channel,JSON.stringify((agent as any)[channel]??null)])),
+      configReloadHandlers:new Set(),logger:{error:jest.fn()}});
+    runner.startTelegramReceiver=jest.fn();runner.startDiscordReceiver=jest.fn();
+    for(const method of ['syncWhatsAppAccounts','stopWhatsAppCloudOutbound','startWhatsAppCloudOutbound','refreshTelegramCommands','stopLineReply','startLineReply','stopSlackOutbound','startSlackOutbound'])runner[method]=()=>{};
     const send=(runtime as any).delivery.send;
     const binding={channel:'telegram',chat_id:'fixture',thread_key:''};
     await expect(send(binding,'old','id')).resolves.toMatchObject({state:'delivered'});
     expect(request.mock.calls.slice(-1)[0][0]).toContain('botold-token/');
     runner.updateAgentConfig({...agent,telegram:{botToken:'new-token'},claude:{...agent.claude,model:'new-model'}});
+    await runner.receiverReload;
+    expect(runner.startTelegramReceiver).toHaveBeenCalledTimes(1);
+    expect(runner.startDiscordReceiver).not.toHaveBeenCalled();
     await expect(send(binding,'new','id')).resolves.toMatchObject({state:'delivered'});
     expect(request.mock.calls.slice(-1)[0][0]).toContain('botnew-token/');
     expect((runtime as any).scheduler.driver.agent.claude.model).toBe('new-model');
     expect((runtime as any).scheduler.driver.agent.telegram.botToken).toBe('new-token');
     runner.updateAgentConfig({...agent,telegram:undefined});
+    await runner.receiverReload;
+    expect(runner.startTelegramReceiver).toHaveBeenCalledTimes(2);
+    expect(runner.logger.error).not.toHaveBeenCalled();
     request.mockClear();
     await expect(send(binding,'disabled','id')).resolves.toMatchObject({state:'failed',code:'DELIVERY_NOT_CONFIGURED'});
     expect(request).not.toHaveBeenCalled();

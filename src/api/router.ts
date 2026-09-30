@@ -624,7 +624,7 @@ export function createApiRouter(
       session_id?: unknown;
       stream?: unknown;
       accept_only?: unknown;
-      client_message_id?: unknown;
+      client_message_id?: unknown; execution_task_id?:unknown;
       timeout_ms?: unknown;
       media_files?: unknown;
       model?: unknown;
@@ -640,6 +640,8 @@ export function createApiRouter(
       res.status(400).json({ error: 'Invalid accept_only or client_message_id' }); return;
     }
     const clientMessageId = client_message_id as string | undefined;
+    if(body.execution_task_id!==undefined&&!isValidSessionId(body.execution_task_id)){res.status(400).json({error:'Invalid execution task'});return;}
+    const executionTaskId=body.execution_task_id as string|undefined;
     if (message !== undefined && typeof message !== 'string') {
       res.status(400).json({ error: 'message must be a string if provided' });
       return;
@@ -830,7 +832,7 @@ export function createApiRouter(
         const inputId = await runner.acceptApiMessage(sessionId, chatIdStr, trimmedMessage, {
           timeoutMs, allowTools: agentConfigs.get(agentId)?.allow_tools ?? !!apiKey.allow_tools, mediaFiles: validatedMediaFiles, model: modelStr,
           imageParams: validatedImageParams, videoParams: validatedVideoParams,
-          requestId, principalId: apiPrincipal(apiKey), clientMessageId,
+          requestId, principalId: apiPrincipal(apiKey), clientMessageId, executionTaskId,
         });
         res.status(202).json({ status: 'accepted', input_id: inputId, session_id: sessionId, client_message_id: clientMessageId });
       } catch (error) {
@@ -878,7 +880,7 @@ export function createApiRouter(
           chatIdStr,
           trimmedMessage,
           sseCallbacks,
-          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage, imageParams: validatedImageParams, videoParams: validatedVideoParams, requestId, principalId: apiPrincipal(apiKey), clientMessageId },
+          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage, imageParams: validatedImageParams, videoParams: validatedVideoParams, requestId, principalId: apiPrincipal(apiKey), clientMessageId, executionTaskId },
         );
 
         // Client disconnect — detaches this connection's sink. The turn keeps
@@ -923,7 +925,7 @@ export function createApiRouter(
             videoParams: validatedVideoParams,
             requestId,
             principalId: apiPrincipal(apiKey),
-            clientMessageId,
+            clientMessageId, executionTaskId,
           }));
         }
         const syncResult: Record<string, unknown> = {
@@ -4793,6 +4795,17 @@ export function createApiRouter(
       if ((error as Error).message === 'ORCHESTRATION_DISABLED') { res.status(409).json({ error: 'ORCHESTRATION_DISABLED' }); return; }
       res.status(403).json({ error: 'Question unavailable for this principal or already answered' });
     }
+  });
+
+  router.post('/v1/agents/:agentId/sessions/:sessionId/tasks/:taskId/control',auth,async(req:Request,res:Response)=>{
+    const {agentId,sessionId,taskId}=req.params as {agentId:string;sessionId:string;taskId:string};
+    const key=(req as AuthedRequest).apiKey,runner=agentRunners.get(agentId);
+    if(!canAccessAgent(key,agentId)||!runner||!isValidSessionId(sessionId)||!isValidSessionId(taskId)){res.status(403).json({error:'ACCESS_DENIED'});return;}
+    if(!(runner.getAgentConfig().allow_tools??Boolean(key.allow_tools))){res.status(403).json({error:'EXECUTION_DENIED'});return;}
+    const b=req.body;
+    if(!b||Object.keys(b).some(k=>!['id','action','expectedRevision','text'].includes(k))||!isValidSessionId(b.id)||!['pause','revise','resume','agent','user'].includes(b.action)||!Number.isSafeInteger(b.expectedRevision)||b.expectedRevision<1||(b.action==='revise'?(typeof b.text!=='string'||!b.text.trim()||b.text.length>4000):b.text!==undefined)){res.status(400).json({error:'INVALID_INPUT'});return;}
+    try{res.status(202).json({task:await runner.controlApiTask(sessionId,apiPrincipal(key),taskId,b)});}
+    catch(e){const code=e instanceof Error?e.message:'';res.status(['REVISION_CONFLICT','STATE_CONFLICT','IDEMPOTENCY_CONFLICT'].includes(code)?409:403).json({error:['REVISION_CONFLICT','STATE_CONFLICT','IDEMPOTENCY_CONFLICT','EXECUTION_DENIED','ORCHESTRATION_DISABLED'].includes(code)?code:'ACCESS_DENIED'});}
   });
 
   router.post('/v1/agents/:agentId/sessions/:sessionId/tasks/:taskId/cancel', auth, async (req: Request, res: Response) => {

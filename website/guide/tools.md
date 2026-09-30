@@ -85,3 +85,7 @@ For a gateway Markdown skill task, the driver builds a task-specific Claude plug
 Host workers use Claude's default native tool set and can retain host runtime customization. Restricted non-host profiles explicitly select native tools, require the generated MCP configuration, disable hooks, and suppress unrelated enabled plugins. Consequently a skill working in an interactive host shell is not proof it will work inside a restricted or container task profile. Check the actual discovered inventory and task error before installing or changing anything.
 
 Source: [native skill discovery](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/orchestration/cli-skills.ts), [skill task preparation](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/orchestration/tasks/driver.ts), and [runtime profile arguments](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/session/runtime-profile.ts).
+
+## Typed evaluations
+
+The optional [Jev service](./jev.md) exposes `mcp__gateway__jev_evaluate` to authorized agents and workers. It evaluates typed questions through a direct or compatible upstream connection without giving provider keys to workers or app containers. Evaluations do not grant tool permissions or prove task completion.

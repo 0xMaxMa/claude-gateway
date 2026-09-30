@@ -47,3 +47,16 @@ test('connection exit invalidates catalog and reconnects for discovery without r
   expect(changed).toHaveBeenCalled(); expect(spawn).toHaveBeenCalledTimes(2);
   expect(calls.filter(c => c.method === 'mcpServer/tool/call')).toHaveLength(1);
 });
+test('native MCP adapter strips inherited and explicit Jev env without altering Codex auth', async () => {
+  const original={...process.env};
+  const {validateJevConfig}=await import('../../../src/jev/validation');
+  validateJevConfig({enabled:true,provider:'typesafe',model:'jev',apiKeyEnv:'PRIVATE_NATIVE_JEV_TOKEN'});
+  Object.assign(process.env,{TYPESAFE_API_KEY:'private-a',JEV_API_KEY:'private-b',PRIVATE_NATIVE_JEV_TOKEN:'private-c',OPENAI_API_KEY:'native-auth'});
+  client=new CodexNativeClient({bin:'codex',cwd:'/tmp',home:'/tmp/codex',servers:['allowed'],env:{PRIVATE_NATIVE_JEV_TOKEN:'overlay-secret'}});
+  try {
+    await client.listTools();
+    const env=(spawn as jest.Mock).mock.calls[0][2].env;
+    expect(env.OPENAI_API_KEY).toBe('native-auth');
+    for(const key of ['TYPESAFE_API_KEY','JEV_API_KEY','PRIVATE_NATIVE_JEV_TOKEN'])expect(env).not.toHaveProperty(key);
+  } finally {process.env=original;}
+});

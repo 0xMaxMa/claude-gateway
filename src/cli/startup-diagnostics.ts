@@ -1,3 +1,4 @@
+import { validateJevConfig } from '../jev/validation';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -36,6 +37,14 @@ export function inspectStartup(file: string): StartupCheck[] {
     fs.accessSync(file, fs.constants.R_OK | fs.constants.W_OK);
     checks.push({ name: 'configAccess', ok: true, warn: !privateMode, detail: privateMode ? 'readable/writable; mode 0600' : 'mode is not 0600; doctor fix can restrict permissions on a file owned by this user' });
   } catch (error) { checks.push({ name: 'configAccess', ok: false, detail: `Config cannot be read/written (${errorCode(error)}). doctor fix can repair owner permission bits; foreign ownership requires administrator action.` }); }
+  if(config?.gateway?.jev?.enabled){
+    try {
+      const jev=config.gateway.jev;validateJevConfig(jev);
+      if(jev.apiKeyFile) {const st=fs.statSync(jev.apiKeyFile);if(!st.isFile()||st.size===0||st.size>16384)throw Error('Invalid credential file');fs.accessSync(jev.apiKeyFile,fs.constants.R_OK);}
+      else if((jev.apiKeyEnv||jev.provider==='typesafe')&&!process.env[jev.apiKeyEnv||'TYPESAFE_API_KEY'])throw Error('Missing credential environment');
+      checks.push({name:'jev',ok:true,detail:'Configuration and local credential reference checked; no paid inference performed. Upstream authentication is verified only by an explicit evaluation.'});
+    }catch{checks.push({name:'jev',ok:false,detail:'Invalid Jev configuration or unreadable/missing credential reference. No inference was performed.'});}
+  }
   let logDir: string;
   try { logDir = resolvedLogDirectory(config); } catch (error) { checks.push({ name: 'logDirectory', ok: false, detail: `${errorCode(error)}. Supply the same environment variables used by the gateway.` }); return checks; }
   for (const [name, dir] of [['runtimeDirectory', path.dirname(file)], ['logDirectory', logDir]]) {

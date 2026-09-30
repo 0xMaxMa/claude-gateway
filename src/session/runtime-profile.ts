@@ -20,6 +20,8 @@ export interface RuntimeProfile {
   mcpConfigPath: string;
   overlay: string;
   responseSchema?: Record<string, unknown>;
+  /** Per-process Claude effort for a short control decision; never persisted to settings. */
+  claudeEffort?: 'low';
   /** Existing loadWorkspace/CLAUDE.md composition, supplied without rewriting files. */
   context?: string;
   /** Scheduler already holds a gateway-wide process lease for this worker. */
@@ -28,6 +30,9 @@ export interface RuntimeProfile {
   workerTools?: string[];
   hostExecution?: boolean;
   containerExecution?: boolean;
+  /** Captured optional evaluation-tool inventory for this process; permissions remain live. */
+  jevEnabled?: boolean;
+  browserEnabled?: boolean;
   /** Optional connector restriction for workers. Agent decisions never receive connectors. */
   connectorsAllowed?: boolean;
   originSessionId?: string;

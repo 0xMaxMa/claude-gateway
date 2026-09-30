@@ -1,3 +1,4 @@
+import { sanitizeJevChildEnv } from '../jev/child-env';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { codexPolicyArgs } from './codex-policy';
 
@@ -25,7 +26,7 @@ export class CodexNativeClient {
   private async start(): Promise<void> {
     const policy = codexPolicyArgs();
     for (const setting of ['features.plugins=false', 'features.apps=false']) { const index = policy.indexOf(setting); if (index >= 1) policy.splice(index - 1, 2); }
-    const child = this.child = spawn(this.config.bin, [...policy, 'app-server', '--listen', 'stdio://'], { cwd: this.config.cwd, env: { ...process.env, ...this.config.env, CODEX_HOME: this.config.home }, stdio: 'pipe' });
+    const child = this.child = spawn(this.config.bin, [...policy, 'app-server', '--listen', 'stdio://'], { cwd: this.config.cwd, env: sanitizeJevChildEnv({ ...process.env, ...this.config.env, CODEX_HOME: this.config.home }), stdio: 'pipe' });
     child.stderr.resume();
     const failed = () => { if (this.child !== child) return; this.started = undefined; this.threadId = undefined; this.tools.clear(); this.buffer = ''; void this.changed?.(); for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(new Error('Native MCP connection closed.')); } this.pending.clear(); };
     child.on('error', failed); child.on('close', failed); child.stdin.on('error', failed);
