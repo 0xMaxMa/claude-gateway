@@ -459,14 +459,14 @@ for(const operation of ['press:c2','key:enter','open:com.example.Browser'])test(
  f.deps.snapshot=async()=>{captures++;};
  f.deps.evaluate=async req=>{assert.equal(++queries,1);return responseFor(req,operation);};
  const r=await runComputerUse({goal:'One direct interaction',yieldAfterInteraction:true},f.deps,new AbortController().signal);
- assert.equal(r.reason,'COMMAND_WAITING_INPUT');assert.equal(r.status,'needs_input');assert.equal(r.steps,1);assert.equal(captures,1);
+ assert.equal(r.reason,'COMMAND_WAITING_INPUT');assert.equal(r.status,'needs_input');assert.equal(r.steps,1);assert.equal(captures,0);assert.equal(r.observation,undefined);
  assert.equal(f.calls.filter(c=>c.name==='computer_action').length,1);
 });
 for(const mode of ['settles','continuous','revoked'])test('post-action stale screenshot refreshes evidence without replay: '+mode,async()=>{
  const f=fixture(['key:enter']);let captures=0,authorized=true;
  f.deps.authorized=()=>authorized;
  f.deps.snapshot=async()=>{captures++;if(mode==='revoked')authorized=false;if(mode!=='settles'||captures===1)throw Error('STALE_OBSERVATION');};
- const r=await runComputerUse({goal:'Press Enter once',yieldAfterInteraction:true},f.deps,new AbortController().signal);
+ const r=await runComputerUse({goal:'Press Enter once',yieldAfterAction:true},f.deps,new AbortController().signal);
  assert.equal(f.calls.filter(c=>c.name==='computer_action').length,1);assert.equal(r.steps,1);
  if(mode==='revoked'){assert.equal(r.reason,'ACCESS_DENIED');assert.equal(captures,1);}
  else{assert.equal(r.reason,'COMMAND_WAITING_INPUT');assert.equal(captures,mode==='settles'?2:3);assert.equal(Boolean(r.observation),mode==='settles');assert(r.trace.events.some(e=>e.reason==='POST_ACTION_EVIDENCE_STALE'));}
@@ -674,4 +674,18 @@ for(const present of [true,false])test('open validates its application catalog d
  const actions=f.calls.filter(c=>c.name==='computer_action');assert.equal(actions.length,present?1:0);
  if(present){assert.equal(actions[0].args.app_id,'com.example.Browser');assert.equal(actions[0].args.generation,'g2');}
  else assert(r.trace.events.some(e=>e.reason==='ACTION_CONTEXT_CHANGED'));
+});
+
+test('user command releases ownership immediately after completed action without waiting for another observation',async()=>{
+ const f=fixture(['key:enter']);const call=f.deps.call;let completed=false;
+ f.deps.call=async(name,args,signal)=>{
+  if(completed&&name==='computer_observe')throw Error('POST_ACTION_READ_WOULD_DELAY_NEXT_COMMAND');
+  if(name==='computer_action')completed=true;
+  return call(name,args,signal);
+ };
+ f.deps.snapshot=async()=>{throw Error('POST_ACTION_SCREENSHOT_WOULD_DELAY_NEXT_COMMAND');};
+ const r=await runComputerUse({goal:'Press Enter',yieldAfterInteraction:true},f.deps,new AbortController().signal);
+ assert.equal(r.status,'needs_input');assert.equal(r.reason,'COMMAND_WAITING_INPUT');assert.equal(r.steps,1);
+ assert.equal(r.observation,undefined);assert(r.trace.events.some(e=>e.reason==='ACTION_DISPATCHED'));
+ assert.equal(f.calls.at(-1)?.name,'computer_release');
 });

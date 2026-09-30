@@ -271,6 +271,11 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     // Consume this command once. A preselected type-and-submit interaction has
     // one guarded Enter remaining; it never asks Jev to extend the command.
     // Waiting with fresh evidence does not assert the user goal succeeded.
+    // A user is watching the result directly. Do not hold the next command
+    // behind a document scan/screenshot after a known completed operation.
+    // This acknowledges dispatch, not verified goal completion. Agent control
+    // still gathers fresh evidence; unknown outcomes take reconciliation above.
+    if(input.yieldAfterInteraction&&!submitAfterType){last=undefined;return waitForCommand('ACTION_DISPATCHED');}
     if(standard&&last?.standardCommand===standard)return waitForCommand('ACTION_DISPATCHED');
     if(direct&&!submitAfterType){
      // Navigation can replace the focused window between observing and capture.
