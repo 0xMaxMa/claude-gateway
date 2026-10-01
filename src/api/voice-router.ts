@@ -176,16 +176,23 @@ export class VoiceApi {
       const runner = this.agents.get(ticket.agentId)!;
       let reconnecting = false;
       let executionTaskId:string|undefined;
-      let speechTarget:{taskId?:string; pause?:Promise<void>}|undefined;
+      let speechTarget:{taskId?:string; pause?:Promise<string|undefined>}|undefined;
+      // The pause on first words is provisional: speech that yields no command resumes the task.
+      const release=(target:typeof speechTarget,inputId?:string)=>{
+        if(target?.taskId&&target.pause)void target.pause.then(pauseId=>pauseId?runner.releaseVoicePause(ticket.sessionId,ticket.principalId,target.taskId!,pauseId,inputId):undefined)
+          .catch(error=>console.warn(JSON.stringify({ts:new Date().toISOString(),level:'warn',event:'Voice pause release failed',agentId:ticket.agentId,sessionId:ticket.sessionId,code:error?.code??'ERROR'})));
+      };
+      const discardSpeech=()=>{const target=speechTarget;speechTarget=undefined;release(target);};
       const send = (message: Record<string, unknown>) => {
         if (reconnecting) return;
         // Confirmed words, not microphone amplitude, pause automation. Keep the
         // chosen destination stable for all segments of this spoken message.
         if(['stt.partial','stt.segment','stt.final'].includes(String(message.type))&&typeof message.text==='string'&&message.text.trim()&&!speechTarget){
           speechTarget={taskId:executionTaskId};
-          if(executionTaskId&&ticket.allowTools)speechTarget.pause=runner.pauseVoiceExecution(ticket.sessionId,ticket.principalId,executionTaskId).catch(()=>{});
+          if(executionTaskId&&ticket.allowTools)speechTarget.pause=runner.pauseVoiceExecution(ticket.sessionId,ticket.principalId,executionTaskId).catch(()=>undefined);
         }
-        if(message.type==='stt.empty')speechTarget=undefined;
+        // The utterance was lost before admission (empty transcript, STT failure or recognizer reconnect).
+        if(message.type==='voice.error'&&speechTarget&&(message.reconnect===true||/^(?:STT_|EMPTY_TRANSCRIPT$|TRANSCRIPTION_INCOMPLETE$|AUDIO_BOUNDARY_MISMATCH$|UTTERANCE_TOO_LONG$|TRANSCRIPT_TOO_LARGE$)/.test(String(message.code))))discardSpeech();
         if (message.type === 'voice.error') {
           const referenceId = randomUUID();
           const diagnostic = { ...describeVoiceError(message.code), ...(typeof message.retryable === 'boolean' ? { retryable: message.retryable } : {}) };
@@ -212,7 +219,11 @@ export class VoiceApi {
           async (text, utteranceId) => {
             const target=speechTarget??{taskId:executionTaskId};speechTarget=undefined;
             await target.pause;
-            return runner.submitVoiceUtterance(ticket.sessionId,ticket.chatId,ticket.principalId,text,utteranceId,ticket.allowTools,ticket.model,target.taskId);
+            let accepted;
+            try{accepted=await runner.submitVoiceUtterance(ticket.sessionId,ticket.chatId,ticket.principalId,text,utteranceId,ticket.allowTools,ticket.model,target.taskId);}
+            catch(error){release(target);throw error;}
+            release(target,accepted.inputId);
+            return accepted;
           },
           () => runner.stopVoiceResponse(ticket.sessionId), { ...voice.turns, maxBufferedAudioMs: voice.playback.maxBufferedAudioMs, language: voice.language, mergeWindowMs: 1200 },
           (responseId, progress, state) => runner.recordVoicePlayback(responseId, ticket.principalId, progress, state),
@@ -296,14 +307,14 @@ export class VoiceApi {
             case 'playback.pause': session.pausePlayback(control.epoch, control.paused); break;
             case 'playback.progress': session.progress(control.epoch, control.sample_offset); break;
             case 'playback.clear.ack': break;
-            case 'voice.mute': if (typeof control.muted !== 'boolean' || !['discard', 'commit'].includes(control.policy)) throw new Error('INVALID_CONTROL'); await session.mute(control.muted, control.policy, control.last_audio_seq); if(control.muted&&control.policy==='discard')speechTarget=undefined; break;
+            case 'voice.mute': if (typeof control.muted !== 'boolean' || !['discard', 'commit'].includes(control.policy)) throw new Error('INVALID_CONTROL'); await session.mute(control.muted, control.policy, control.last_audio_seq); if(control.muted)discardSpeech(); break;
             case 'voice.stop': await session.close(); ws.close(); break;
             default: throw new Error('INVALID_CONTROL');
           }
         })().catch(error => send({ type: 'voice.error', code: error.code ?? 'INVALID_CONTROL' }));
       });
       ws.on('error', () => { void session.close(); });
-      ws.on('close', () => { clearInterval(resumeTimer); unsubscribe?.(); clearInterval(heartbeat); void session.close(); this.sessions.delete(ticket.voiceSessionId); this.releaseLease(ticket); });
+      ws.on('close', () => { discardSpeech(); clearInterval(resumeTimer); unsubscribe?.(); clearInterval(heartbeat); void session.close(); this.sessions.delete(ticket.voiceSessionId); this.releaseLease(ticket); });
       send({ type: 'voice.state', state: 'ready', turn_grouping: true, voice_session_id: ticket.voiceSessionId, generation: session.playback.generation });
     }); } catch {
       this.releaseLease(ticket);

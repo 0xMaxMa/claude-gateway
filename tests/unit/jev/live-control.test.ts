@@ -62,6 +62,34 @@ test('pause settles old attempt and stays paused until explicit resume',async()=
  }finally{await f.close();}
 });
 
+test.each(['COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','THINKING_WAITING_INPUT'])('a settled round waiting for the next command cannot be resumed into a replay (%s)',async reason=>{
+ const f=fixture();try{
+  // "Click Send" finished; the task now waits for the next command. Resume must not send it again.
+  f.tasks.controlByUser(f.accepted.conversationId,'u',f.task.taskId,{id:randomUUID(),action:'revise',expectedRevision:1,text:'Click Send'});
+  const task=f.store.task(f.task.taskId)!;
+  task.state='waiting_input';delete task.executionControl;task.browserReport={status:'needs_verification',reason,steps:1,evaluations:1,lastAction:{operationId:'op',operation:'page_click',outcome:'confirmed'}};
+  f.store.transaction(()=>f.store.saveTask(task,task.stateVersion));
+  expect(()=>f.control('resume')).toThrow('Nothing to resume');
+  try{f.control('resume');}catch(e){expect((e as {code?:string}).code).toBe('NOTHING_TO_RESUME');}
+  await f.pump();expect(f.calls).toHaveLength(0);
+  expect(f.store.task(f.task.taskId)).toMatchObject({state:'waiting_input',revision:2});
+  // The next command still runs.
+  f.tasks.controlByUser(f.accepted.conversationId,'u',f.task.taskId,{id:randomUUID(),action:'revise',expectedRevision:2,text:'Open the inbox'});
+  expect(f.store.task(f.task.taskId)).toMatchObject({state:'queued',revision:3});
+ }finally{await f.close();}
+});
+
+test('a pause still settling can be released by resume: the interrupted work continues, not stays paused',async()=>{
+ const f=fixture();try{
+  // Voice paused on a cough; the transcript came back empty before the pause settled.
+  await f.pump();f.control('pause');
+  expect(f.store.task(f.task.taskId)).toMatchObject({state:'interrupting',executionControl:{action:'pause',phase:'pending'}});
+  f.control('resume');await f.pump();
+  expect(f.calls).toHaveLength(2);expect(f.calls[1].goal).toBe('Two adults and three children to London');
+  expect(f.store.task(f.task.taskId)).toMatchObject({state:'completed',executionControl:{action:'resume',phase:'applied'}});
+ }finally{await f.close();}
+});
+
 test('uncertain mutation blocks correction and cannot be resumed or replayed',async()=>{
  const f=fixture(true);try{
   await f.pump();f.control('revise','Use Manchester');await f.pump();

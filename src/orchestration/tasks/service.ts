@@ -407,7 +407,9 @@ export class TaskService {
       const paused=pausedForCommand(task);
       const recoverable=command.action==='revise'&&stoppedForCommand(task);
       if(!['queued','starting','running','interrupting'].includes(task.state)&&!paused&&!recoverable)throw new OrchestrationError('STATE_CONFLICT');
-      if(command.action==='resume'&&!paused)throw new OrchestrationError('STATE_CONFLICT');
+      // Only the owner's own pause (settled or still settling) leaves interrupted work. A settled
+      // round waiting for the next command has nothing to resume: re-running it would replay it.
+      if(command.action==='resume'&&!(task.executionControl?.action==='pause'&&['pending','paused'].includes(task.executionControl.phase)))throw new OrchestrationError('NOTHING_TO_RESUME','Nothing to resume: the last command already finished. Give the next command instead.');
       if(command.action==='revise')boundedText(command.text??'',4000);
       else if(command.text!==undefined)throw new OrchestrationError('INVALID_INPUT');
       const previous=this.revision(taskId,task.revision);

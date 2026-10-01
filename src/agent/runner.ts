@@ -644,14 +644,26 @@ export class AgentRunner extends EventEmitter {
     // Full retained result, with worker-only skill context removed by status().
     return { ...runtime.tasks.status(task.conversationId, principalId, taskId)[0], ...detail };
   }
-  async pauseVoiceExecution(sessionId:string,principalId:string,taskId:string):Promise<void> {
+  /** Provisional: returns the pause id so releaseVoicePause can undo it if the speech yields no command. */
+  async pauseVoiceExecution(sessionId:string,principalId:string,taskId:string):Promise<string|undefined> {
     const runtime=await this.getOrchestration();
     const detail=runtime.taskControls.detail(sessionId,principalId,taskId);
     const task=runtime.store.task(taskId)!;
     if(task.executionControl?.action==='pause'&&['pending','paused'].includes(task.executionControl.phase))return;
     if(!['queued','starting','running','interrupting'].includes(task.state))return;
     if(!runtime.tasks.voicePauseApplies(detail.taskId))return;
-    runtime.controlTask(sessionId,principalId,detail.taskId,{id:randomUUID(),action:'pause',expectedRevision:task.revision});
+    const id=randomUUID();
+    runtime.controlTask(sessionId,principalId,detail.taskId,{id,action:'pause',expectedRevision:task.revision});
+    return id;
+  }
+  /** Speech that produced no command (empty, muted, lost, or a deduplicated echo when inputId is given)
+   * resumes the task, but only if this voice pause is still the latest control. */
+  async releaseVoicePause(sessionId:string,principalId:string,taskId:string,pauseId:string,inputId?:string):Promise<void> {
+    const runtime=await this.getOrchestration();
+    if(inputId&&(await import('../orchestration/live-execution-input')).liveControlReceipt(runtime.store,inputId)?.code!=='DUPLICATE_VOICE_ECHO')return;
+    const task=runtime.store.task(taskId);
+    if(task?.executionControl?.id!==pauseId||task.executionControl.action!=='pause')return;
+    runtime.controlTask(sessionId,principalId,taskId,{id:randomUUID(),action:'resume',expectedRevision:task.revision});
   }
   async controlApiTask(sessionId:string,principalId:string,taskId:string,command:Parameters<import('../orchestration/tasks/service').TaskService['controlByUser']>[3]) {
     if(!this.agentConfig.orchestration?.enabled)throw new Error('ORCHESTRATION_DISABLED');
