@@ -494,8 +494,8 @@ Jev decision over the observed controls and dispatches at most one action.
   `งั้นเปลี่ยนไปเข้า yahoo`) goes to Jev, which may choose `NAVIGATE`. It is
   offered only to a single direct command that has not acted yet, when the host
   has a text helper. The text helper (the same one that fills field values)
-  turns the command into an address from the command and the current URL and
-  title only, never page text. There is no site list. The address must be
+  turns the command into an address from the command and the current site
+  (origin) only, never the page title, path, query or text. There is no site list. The address must be
   `http`/`https` or a bare domain, with no credentials, IP address, `localhost` or
   single-label host; any other scheme (`javascript:`, `data:`, `file:` ...) is
   refused. A refused or unresolved address dispatches nothing
@@ -931,7 +931,9 @@ given a newer command (`REVISION_CONFLICT`). The command runs as the user's next
 direct command; the user keeps control. It never runs as a step list, and it
 gains no extra authority: high-impact controls always return control (Remote
 Browser `strictDestructive`; Computer Use `agentCommand`), whatever the agent's
-words say. It is not offered `READ_REQUEST`, `UNCLEAR` or `NAVIGATE`. If Jev
+words say. That includes a generic `OK`/`Continue`, quitting the app, and Enter
+(or typing that submits) while a high-impact control such as `Send` is shown;
+search and address fields still submit. It is not offered `READ_REQUEST`, `UNCLEAR` or `NAVIGATE`. If Jev
 gives up on it, it never hands off again: the not-done line is spoken against the
 user's original words and the session waits for the next command. If the meaning
 is still unclear or the input is a question, the agent answers or asks instead of

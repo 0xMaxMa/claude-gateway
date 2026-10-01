@@ -269,6 +269,10 @@ const NEXT_ACTION =
 // navigationUrl() checks it. No site list.
 const NAVIGATE_CRITERION = "The command asks to open or go to a website by its name, domain or address in this tab, rather than to use a link or control shown on the page. The address is resolved separately.";
 const ADDRESS_FIELD: Observation["elements"][number] = { ref: "address", label: "Address of the website the command asks to open (an https URL or a domain name, not a search query)", tag: "input", type: "url", operations: ["TYPE_TEXT"] };
+/** Only the current site (origin) of a web page; never its path, query or a non-web URL. */
+function pageOrigin(url: string): string {
+  try { const u = new URL(url); return ["http:", "https:"].includes(u.protocol) ? u.origin + "/" : ""; } catch { return ""; }
+}
 export function decisionQuestions(page: Observation, goal = "", exhaustedTextFields = new Set<string>(), command = false, readRequest = command, navigate = false) {
   const targets = new Map<
     string,
@@ -952,9 +956,9 @@ export async function runBrowserUse(
         if (op.confidence < 0.55 || op.probabilities.NAVIGATE < 0.5) return result("blocked", "LOW_OPERATION_CONFIDENCE");
         if (textCalls >= input.maxTextCalls) return result("blocked", "TEXT_BUDGET");
         textCalls++;
-        // Page text stays out: a page must not be able to choose where the tab goes.
+        // Page-controlled title, path and text stay out: a page must not be able to choose where the tab goes.
         const resolved = z.object({ text: z.string().max(2000).nullable() }).strict()
-          .parse(await loop.think({ goal: input.goal, field: structuredClone(ADDRESS_FIELD), page: { url: page.url, title: page.title, text: "" } } satisfies FieldTextRequest));
+          .parse(await loop.think({ goal: input.goal, field: structuredClone(ADDRESS_FIELD), page: { url: pageOrigin(page.url), title: "", text: "" } } satisfies FieldTextRequest));
         check();
         const url = navigationUrl(resolved.text);
         emit({phase:"field",requestId:request.requestId,reason:url?"NAVIGATION_RESOLVED":"NAVIGATION_UNRESOLVED"});

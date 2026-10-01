@@ -1,5 +1,5 @@
 import {buildComputerCommand,readComputerCommand,labelCommand,labelTarget,standardComputerCommand,standardKeyboardCommand,standardNavigationCommand,shortcutCommand,shortcutTarget,menuRelevant,addressCommand,addressField,quitCommand,quitTarget,bareText,frontIsNamed,frontIsBrowser,helperSupports} from './computer-command';
-import {commandAuthorizes,destructiveLabel,destructiveTarget,DESTRUCTIVE_CONFIDENCE,eraseCommand,focusedTextField,textFocused} from './computer-safety';
+import {agentCommandBlock,commandAuthorizes,destructiveLabel,destructiveTarget,DESTRUCTIVE_CONFIDENCE,eraseCommand,focusedTextField,textFocused} from './computer-safety';
 import {decisionInstructions,readChoice,observedEffect,decisionState,literalTextCandidates} from './computer-policy';
 import {checkInterruption,interruptible} from './interrupt';
 import {randomUUID} from 'node:crypto';
@@ -413,6 +413,9 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
       last=fresh;noProgress++;emit('waiting',{reason:'ACTION_CONTEXT_CHANGED'});if(direct){await capture();return waitForCommand('ACTION_CONTEXT_CHANGED');}return;
     }
     last=fresh;d.generation=fresh.generation;
+    // The agent's command for a handed-off utterance gains no high-impact authority on any path.
+    const agentBlock=input.agentCommand?agentCommandBlock(last,action,Boolean(d.submit)&&d.action!=='address'):undefined;
+    if(agentBlock){lastAction={kind:String(action.kind),label:agentBlock.label.slice(0,200),blocked:true};await capture();return waitForCommand('DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED');}
     const operationId=randomUUID();await deps.beforeMutation(operationId,{...action,generation:d.generation,revision:goal.revision});
     check();if(deps.interruptSignal?.aborted){emit('acted',{operationId,outcome:'not_executed',reason:'REVISION_SUPERSEDED'});checkInterruption(deps.interruptSignal);}update();if(goal.revision!==d.revision){emit('acted',{operationId,outcome:'not_executed',reason:'GOAL_CHANGED'});return;}
     pending=operationId;emit('acting',{...summary(action),operationId});const started=Date.now();

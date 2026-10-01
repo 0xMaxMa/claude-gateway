@@ -57,6 +57,22 @@ export function destructiveLabel(control:{label:string;value?:string;context?:st
  const context=groups(control.context);
  return context.length?{label:control.label,groups:context}:undefined;
 }
+/**
+ * The agent's command for a handed-off utterance (browserSubmitBlock with
+ * strictDestructive in Remote Browser): every generic confirm label counts, and
+ * Enter or a submitting type outside a search/address field is refused while
+ * the window shows a high-impact control (for example a chat's Send button).
+ */
+export function agentCommandBlock(state:ComputerState|undefined,action:Record<string,unknown>,submit:boolean):DestructiveTarget|undefined{
+ const own=destructiveTarget(state,action,true);
+ if(own||!(submit||action.kind==='key'&&action.key==='enter'))return own;
+ const field=state?.controls.find(c=>c.ref===action.ref)??state?.focusedControl;
+ if(field&&(field.role==='AXSearchField'||/search|address|ค้นหา|ที่อยู่|query|คำค้น/iu.test(field.label)))return;
+ for(const control of state?.controls??[]){
+  const risky=!control.sensitive&&destructiveLabel({label:control.label,value:control.value,context:control.context},false);
+  if(risky)return risky;
+ }
+}
 /** The user's command itself names the same high-impact operation as the target. */
 export function commandAuthorizes(command:string,target:DestructiveTarget){
  const own=groups(command);

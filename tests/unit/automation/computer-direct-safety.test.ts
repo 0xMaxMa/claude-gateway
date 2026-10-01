@@ -208,6 +208,35 @@ describe('AGENT_HANDOFF: Jev gives up on a single direct command',()=>{
   expect(Object.keys(handoff.requests[0].questions.action.criteria)).not.toContain('UNCLEAR');
   expect(agentHandoffRequested({computerReport:{...h,trace:h.trace.events} as never})).toBe(false);
  });
+ const agentRun=(f:ReturnType<typeof fixture>,goal:string)=>runComputerUse({goal,yieldAfterInteraction:true,agentCommand:true},f.deps,new AbortController().signal);
+ test('the agent command for a hand-off never answers a generic confirm dialog',async()=>{
+  const info={generation:'g2',application:'com.apple.Notes',windowTitle:'',truncated:false,apps:[],focusedControl:{role:'AXSheet',label:'alert'},
+   text:['Apply these settings?'],controls:[{ref:'c0',role:'AXButton',label:'OK',actions:['press'],context:'Apply these settings?'}]};
+  const user=fixture(info,'press:c0',0.95);await run(user,'ok');expect(user.actions()).toHaveLength(1);
+  const agent=fixture(info,'press:c0',0.95);const r=await agentRun(agent,'press OK');
+  expect(agent.actions()).toEqual([]);
+  expect(r.lastAction).toMatchObject({kind:'press',label:'OK',blocked:true});
+ });
+ const chat=(field:{role:string;label:string})=>({generation:'g1',application:'com.example.Chat',windowTitle:'Chat',truncated:false,apps:[{id:'com.example.Chat',name:'Chat'}],
+  focusedControl:{ref:'c0',...field},text:[],
+  controls:[{ref:'c0',...field,value:'hello',focused:true,actions:['press','type']},{ref:'c1',role:'AXButton',label:'Send',actions:['press']}]});
+ test('the agent command for a hand-off never submits with Enter beside a high-impact control',async()=>{
+  const user=fixture(chat({role:'AXTextArea',label:'Message'}));await run(user,'press enter');
+  expect(user.actions()).toEqual([expect.objectContaining({kind:'key',key:'enter'})]);
+  const agent=fixture(chat({role:'AXTextArea',label:'Message'}));const r=await agentRun(agent,'press enter');
+  expect(agent.actions()).toEqual([]);
+  expect(r.trace.events.some(e=>e.reason==='DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED')).toBe(true);
+  expect(r.lastAction).toMatchObject({kind:'key',label:'Send',blocked:true});
+  // A search field still submits for the agent.
+  const search=fixture(chat({role:'AXSearchField',label:'Search'}));await agentRun(search,'press enter');
+  expect(search.actions()).toEqual([expect.objectContaining({kind:'key',key:'enter'})]);
+ });
+ test('the agent command for a hand-off never quits the app in front',async()=>{
+  const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;
+  const agent=fixture(state);const r=await agentRun(agent,'quit notes');
+  expect(agent.actions()).toEqual([]);
+  expect(r.lastAction).toMatchObject({blocked:true});
+ });
  test('the agent command for a hand-off never presses a high-impact control, even when named',async()=>{
   const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;
   const user=fixture(state,'press:c7',0.95);
