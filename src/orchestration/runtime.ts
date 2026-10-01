@@ -1098,7 +1098,7 @@ export class AgentOrchestrationRuntime {
       if (this.agent.type === 'app-agent') ticket.profile.overlay += '\nContainer execution is mandatory. Workers run only inside this app container. No host tools or host services are available. Use default-worker for app execution. Gateway media/browser/memory tools are unavailable in this container profile.';
       // Stable metadata belongs in the system prefix, not in every resumed user message.
       // A changed catalog intentionally invalidates that prefix so new skills stay visible.
-      ticket.profile.overlay += '\n' + skillCatalog(this.host.skills?.());
+      ticket.profile.overlay += '\n' + skillCatalog(this.host.skills?.(), this.config.conversation.skillCatalogBytes);
       let speechDirective = '';
       if (speechEnabled) {
         const listener = this.voiceListeners.get(sessionId);
