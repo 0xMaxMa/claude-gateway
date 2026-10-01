@@ -284,7 +284,10 @@ export class TaskService {
     }
     if (replacedByTaskId) task.replacedByTaskId = replacedByTaskId;
     const version = task.stateVersion;
-    task.cancellation = { requestedBy, requestedAt: Date.now() };
+    // Retrying an unconfirmed stall stop ("Retry cleanup") finishes the supervisor's
+    // stop; it must not turn that stall into a user/agent cancellation.
+    const retriesStall = task.state === 'needs_reconciliation' && task.cancellation?.requestedBy === 'supervisor';
+    if (!retriesStall) task.cancellation = { requestedBy, requestedAt: Date.now() };
     task.state = task.activeAttemptId ? 'cancel_requested' : 'cancelled';
     task.pendingQuestion = undefined;
     delete task.failure;

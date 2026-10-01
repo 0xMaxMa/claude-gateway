@@ -311,3 +311,15 @@ test('a config created or migrated from config.template.json keeps the implicit 
  const tasks={...template.tasks,progressStaleMs:10800000};
  expect(resolveOrchestrationConfig({...template,tasks}).tasks.progressStaleLimitMs).toBe(10800000+tasks.progressNotifyCooldownMs);
 });
+test('retrying cleanup of an unconfirmed stall stop keeps the stall failure evidence (#557)',()=>{
+ const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
+ clock.mockReturnValue(16000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,16000));
+ x.tasks.finishCleanup(x.attempt.attemptId,1,false);
+ expect(x.store.task(x.task.taskId)).toMatchObject({state:'needs_reconciliation',failure:{code:'CLEANUP_UNCONFIRMED'}});
+ // The task browser's "Retry cleanup" button is a user cancel on this state.
+ x.tasks.cancelByUser(x.input.conversationId,'u',x.task.taskId);
+ expect(x.store.task(x.task.taskId)).toMatchObject({state:'cancel_requested',cancellation:{requestedBy:'supervisor'}});
+ x.tasks.finishCleanup(x.attempt.attemptId,1,true);
+ expect(x.store.task(x.task.taskId)).toMatchObject({state:'failed',failure:{code:'PROGRESS_STALLED',message:expect.stringContaining('No new worker progress report')}});
+ }finally{x.store.close();clock.mockRestore();}
+});
