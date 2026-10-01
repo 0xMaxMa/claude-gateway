@@ -13,6 +13,7 @@ const explanations: Readonly<Record<string, string>> = {
   INFERENCE_FAILED: 'The model request failed without a usable provider diagnostic. Check the gateway logs.',
   PROCESS_EXITED: 'The agent process exited before completing the response. Check the gateway logs before retrying.',
   PROCESS_START_FAILED: 'The agent process could not start. Check the Claude installation and gateway logs.',
+  PROCESS_ARGS_TOO_LARGE: 'The agent process could not start because its startup arguments exceed the operating system limit. Check the gateway logs.',
   WORKSPACE_DIRECTORY_MISSING: 'The agent workspace directory is missing. Restore the workspace before restarting the agent.',
   CONTAINER_RUNTIME_NOT_FOUND: 'The container runtime executable was not found. Check the Docker installation and gateway PATH.',
   CLAUDE_BINARY_NOT_FOUND: 'The Claude executable was not found. Check the Claude installation or CLAUDE_BIN setting.',

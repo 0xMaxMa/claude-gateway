@@ -14,6 +14,7 @@ import { appendSystemPromptViaFile, RuntimeProfile, runtimeProfileArgs } from '.
 import { StringDecoder } from 'string_decoder';
 import { processSupervisorSupported, recordProcessRoot, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
 import { gatewayCapacity } from '../orchestration/capacity';
+import { OrchestrationError } from '../orchestration/types';
 import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
 import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
@@ -1234,7 +1235,17 @@ export class SessionProcess extends EventEmitter {
       ...(this.runtimeProfile?.role === 'worker' && processSupervisorSupported() && workerSpawnDetached() ? { detached: true } : {}),
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
-    }); } catch (error) { toolCapture?.close(); releaseCapacity(); throw error; }
+    }); } catch (error) {
+      toolCapture?.close(); releaseCapacity();
+      // Node throws E2BIG/ENAMETOOLONG (and most other execve failures) from spawn()
+      // itself; they never reach proc.on('error') below, so log them here. Sizes
+      // only: the arguments may carry prompts and settings.
+      const cause = (error as NodeJS.ErrnoException).code;
+      const bytes = [spawnBin, ...spawnArgs].map(arg => Buffer.byteLength(arg));
+      this.logger.error('session subprocess could not be spawned', { sessionId: this.sessionId, code: cause, argCount: bytes.length, largestArgBytes: Math.max(...bytes), totalArgBytes: bytes.reduce((sum, n) => sum + n, 0) });
+      if (cause === 'E2BIG' || cause === 'ENAMETOOLONG') throw new OrchestrationError('PROCESS_ARGS_TOO_LARGE', `spawn ${cause}`);
+      throw error;
+    }
 
     this.process = proc;
     proc.once('exit', releaseCapacity);
@@ -1638,7 +1649,8 @@ export class SessionProcess extends EventEmitter {
         const cause = (err as NodeJS.ErrnoException).code;
         const missingWorkspace = cause === 'ENOENT' && !fs.existsSync(this.agentConfig.workspace);
         const code = missingWorkspace ? 'WORKSPACE_DIRECTORY_MISSING'
-          : cause === 'ENOENT' ? (isAppAgent ? 'CONTAINER_RUNTIME_NOT_FOUND' : 'CLAUDE_BINARY_NOT_FOUND') : cause === 'EACCES' || cause === 'EPERM' ? 'PROCESS_PERMISSION_DENIED' : 'PROCESS_START_FAILED';
+          : cause === 'ENOENT' ? (isAppAgent ? 'CONTAINER_RUNTIME_NOT_FOUND' : 'CLAUDE_BINARY_NOT_FOUND') : cause === 'EACCES' || cause === 'EPERM' ? 'PROCESS_PERMISSION_DENIED'
+          : cause === 'E2BIG' || cause === 'ENAMETOOLONG' ? 'PROCESS_ARGS_TOO_LARGE' : 'PROCESS_START_FAILED';
         this.emit('startup-error', Object.assign(new Error(code), { code }));
       }
     });

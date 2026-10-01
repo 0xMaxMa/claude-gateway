@@ -47,6 +47,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionProcess } from '../../../src/session/process';
+import { OrchestrationError } from '../../../src/orchestration/types';
+import { responseFailureMessage } from '../../../src/orchestration/response-errors';
 import type { AgentConfig, GatewayConfig } from '../../../src/types';
 import type { RuntimeProfile } from '../../../src/session/runtime-profile';
 
@@ -128,5 +130,28 @@ test('the container write script creates a 0600 file with exactly the stdin byte
   expect(readFileSync(local, 'utf8')).toBe(CONTEXT);
   const { statSync } = jest.requireActual('fs');
   if (process.platform !== 'win32') expect(statSync(local).mode & 0o777).toBe(0o600);
+  await sp.stop();
+});
+
+test.each(['E2BIG', 'ENAMETOOLONG'])('a synchronous %s from spawn becomes PROCESS_ARGS_TOO_LARGE with a size-only log line', async code => {
+  spawnError = code;
+  const sp = session();
+  const failure = await sp.start().then(() => undefined, (error: unknown) => error);
+  expect(failure).toBeInstanceOf(OrchestrationError);
+  expect(failure).toMatchObject({ code: 'PROCESS_ARGS_TOO_LARGE' });
+  expect(responseFailureMessage(failure)).toMatch(/PROCESS_ARGS_TOO_LARGE/);
+  expect(responseFailureMessage(failure)).not.toMatch(/GATEWAY_INTERNAL_ERROR/);
+  const line = logged.find(entry => entry.level === 'error' && JSON.stringify(entry.meta ?? {}).includes(code));
+  expect(line?.meta).toMatchObject({ code, argCount: expect.any(Number), largestArgBytes: expect.any(Number), totalArgBytes: expect.any(Number) });
+  for (const entry of logged) expect(JSON.stringify(entry)).not.toContain('บริบทของเอเจนต์');
+  await sp.stop();
+});
+
+test('any other synchronous spawn failure is logged before it propagates', async () => {
+  spawnError = 'EINVAL';
+  const sp = session();
+  await expect(sp.start()).rejects.toMatchObject({ code: 'EINVAL' });
+  expect(logged.some(entry => entry.level === 'error' && JSON.stringify(entry.meta ?? {}).includes('EINVAL'))).toBe(true);
+  for (const entry of logged) expect(JSON.stringify(entry)).not.toContain('บริบทของเอเจนต์');
   await sp.stop();
 });
