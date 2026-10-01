@@ -40,6 +40,11 @@ export interface OrchestrationConfig {
     idleTimeoutMs?: number;
     /** Optional total worker deadline; zero disables it. */
     maxDurationMs?: number;
+    /** How long a successful final result may wait for native background work
+     * that stays silent before it is accepted with that work marked unresolved. */
+    backgroundGraceMs?: number;
+    /** Stop a worker that has sent no new progress report for this long; zero disables it. */
+    progressStaleLimitMs?: number;
     /** Advisory thresholds; these never terminate a worker. */
     /** First unanswered-question reminder; later reminders back off to six times this interval. */
     questionReminderMs?: number;
@@ -77,7 +82,7 @@ export const ORCHESTRATION_DEFAULTS = {
   conversation: { backend: 'inherit' as const, semanticIntake: false, intakeWaitMs: 2000, maxActiveSessions: 2, notificationPolicy: 'existing_receive_path' as const,
     decisionTimeoutMs: 120000, idleTimeoutMs: 120000, startupTimeoutMs: 120000, firstResponseTimeoutMs: 120000, compactionTimeoutMs: 300000, maxDecisionDurationMs: 600000, preemptionGraceMs: 250, maxPendingInputs: 100 },
   tasks: { maxConcurrentPerAgent: 10, maxConcurrentPerConversation: 10, workerIdleTtlMs: 600000, maxQueuedPerConversation: 20,
-    maxQueuedPerAgent: 100, defaultTimeoutMs: 1800000, idleTimeoutMs: 300000, maxDurationMs: 0, questionReminderMs: 600000, progressStaleMs: 180000, progressNotifyCooldownMs: 300000, repeatedToolThreshold: 6, interruptAckTimeoutMs: 5000, workspaceMode: 'host' as const, projectRoot: '', resourceRetentionDays: 7 },
+    maxQueuedPerAgent: 100, defaultTimeoutMs: 1800000, idleTimeoutMs: 300000, maxDurationMs: 0, backgroundGraceMs: 900000, questionReminderMs: 600000, progressStaleMs: 180000, progressNotifyCooldownMs: 300000, progressStaleLimitMs: 7200000, repeatedToolThreshold: 6, interruptAckTimeoutMs: 5000, workspaceMode: 'host' as const, projectRoot: '', resourceRetentionDays: 7 },
   events: { retentionDays: 7, maxSubscriberBufferBytes: 1048576 },
   voice: { enabled: false, notes: { enabled: true, provider: 'elevenlabs', model: 'scribe_v2', replyWithVoice: true }, transport: 'websocket' as const, maxActiveSessionsPerConversation: 1, allowedOrigins: [] as string[], language: '',
     stt: { provider: 'elevenlabs', model: 'scribe_v2_realtime' },
@@ -107,7 +112,7 @@ export function validateTree(value: unknown, template: unknown, prefix: string):
       if (!Array.isArray(item) || (!item.length && key !== 'allowedOrigins') || item.some(v => typeof v !== 'string')) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a string array`);
     } else if (expected && typeof expected === 'object') validateTree(item, expected, where);
     else if (typeof item !== typeof expected) throw new OrchestrationError('INVALID_CONFIG', `Invalid ${where}`);
-    else if (typeof item === 'number' && (!Number.isSafeInteger(item) || item < (key === 'maxDurationMs' ? 0 : 1) || item > 2147483647)) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a positive bounded integer`);
+    else if (typeof item === 'number' && (!Number.isSafeInteger(item) || item < (['maxDurationMs', 'progressStaleLimitMs'].includes(key) ? 0 : 1) || item > 2147483647)) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a positive bounded integer`);
   }
 }
 export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVoice?: AgentVoiceConfig) {
@@ -134,6 +139,9 @@ export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVo
     throw new OrchestrationError('INVALID_CONFIG', 'Invalid provider admission thresholds, cooldown order or probe lease');
   if (result.channels.some(c => !['api', ...CHAT_CHANNELS].includes(c)) || new Set(result.channels).size !== result.channels.length) throw new OrchestrationError('INVALID_CONFIG', 'Invalid orchestration.channels');
   if (result.conversation.backend !== 'inherit' || !['isolated-worktree', 'shared-lock', 'host', 'container'].includes(result.tasks.workspaceMode) || result.voice.transport !== 'websocket') throw new OrchestrationError('INVALID_CONFIG', 'Unsupported orchestration backend, workspace mode or transport');
+  // The default limit must still leave room for one progress review and its cooldown.
+  if (config?.tasks?.progressStaleLimitMs === undefined) result.tasks.progressStaleLimitMs = Math.max(result.tasks.progressStaleLimitMs, result.tasks.progressStaleMs + result.tasks.progressNotifyCooldownMs);
+  if (config?.tasks?.progressStaleLimitMs && result.tasks.progressStaleLimitMs < result.tasks.progressStaleMs) throw new OrchestrationError('INVALID_CONFIG', 'tasks.progressStaleLimitMs must be zero or at least tasks.progressStaleMs');
   if (result.tasks.repeatedToolThreshold > 64) throw new OrchestrationError('INVALID_CONFIG', 'tasks.repeatedToolThreshold must be between 1 and 64');
   if (!['next_user_turn', 'existing_receive_path'].includes(result.conversation.notificationPolicy)) throw new OrchestrationError('INVALID_CONFIG', 'Invalid notification policy');
   if (result.tasks.maxConcurrentPerConversation > result.tasks.maxConcurrentPerAgent || result.tasks.maxQueuedPerConversation > result.tasks.maxQueuedPerAgent) throw new OrchestrationError('INVALID_CONFIG', 'Conversation task limits exceed agent limits');

@@ -13,9 +13,11 @@ import { OrchestrationError } from './types';
 import { collectEnvSecrets, sanitizeToolName } from './tasks/failure';
 import { providerErrorMetadata, ProviderErrorMetadata } from './provider-error-metadata';
 
-export interface TurnTimeoutPolicy { pauseRequested?: () => boolean; onUsage?: (metrics: ManagedTurnMetrics) => void; startupTimeoutMs: number; firstResponseTimeoutMs: number; compactionTimeoutMs?: number; idleTimeoutMs: number; acceptToolProgress?: boolean; idleAction?: 'observe'; onObservation?: (value: TurnObservation) => void; }
+export interface TurnTimeoutPolicy { pauseRequested?: () => boolean; onUsage?: (metrics: ManagedTurnMetrics) => void; startupTimeoutMs: number; firstResponseTimeoutMs: number; compactionTimeoutMs?: number; idleTimeoutMs: number; acceptToolProgress?: boolean; idleAction?: 'observe'; backgroundGraceMs?: number; onObservation?: (value: TurnObservation) => void; }
 export interface TurnTimeoutDetails { phase: 'startup' | 'first_response' | 'compaction' | 'idle' | 'total'; elapsedMs: number; idleMs: number; }
-export interface ProcessResult { text: string; interrupted: boolean; paused?: boolean; }
+/** A final result that background work never released: kept after the grace period, not hidden. */
+export interface UnresolvedBackground { pendingTasks: number; graceMs: number; resultSeenAt: number; }
+export interface ProcessResult { text: string; interrupted: boolean; paused?: boolean; unresolvedBackground?: UnresolvedBackground; }
 /** Shared lifecycle contract; each backend normalizes its own native event protocol. */
 export type WorkerProcess = { on(event: string, listener: (...args: any[]) => void): unknown; off(event: string, listener: (...args: any[]) => void): unknown } & Pick<SessionProcess, 'start' | 'sendMessage' | 'interrupt' | 'stop' | 'runtimeProfile' | 'managedProcessId' | 'spawnedAt' | 'managedGroupStopped'> &
   Partial<Pick<SessionProcess, 'isSpawnedConnectorTool' | 'flushToolSchemas' | 'recordTurnOutcome'>>;
@@ -66,9 +68,14 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
   const activeTools = new Map<string, number>();
   const toolNames = new Map<string, string>();
   let lastTool: ToolOutcome | undefined;
+  // The latest successful result received while native background work was
+  // still pending. It becomes the answer only if that work never reports back.
+  let waitingResult: { text: string; streamed: boolean; seenAt: number; openTools: Set<string> } | undefined;
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
   const observe = () => {
     if (settled) return;
-    try { policy?.onObservation?.({observedAt: Date.now(), lastProgressAt, phase, activeTools: [...activeTools.keys()].slice(0,16).map(id => toolNames.get(id) || 'tool'), quiet: Date.now()-lastProgressAt >= policy.idleTimeoutMs, lastTool}); } catch { /* Telemetry cannot stop execution. */ }
+    const waiting = waitingResult && background.pending ? { resultSeenAt: waitingResult.seenAt, pendingBackground: background.pendingCount } : {};
+    try { policy?.onObservation?.({observedAt: Date.now(), lastProgressAt, phase, activeTools: [...activeTools.keys()].slice(0,16).map(id => toolNames.get(id) || 'tool'), quiet: Date.now()-lastProgressAt >= policy.idleTimeoutMs, lastTool, ...waiting}); } catch { /* Telemetry cannot stop execution. */ }
   };
   let stopPromise: Promise<void> | undefined;
   let phase: TurnTimeoutDetails['phase'] = 'startup', lastProgressAt = startedAt;
@@ -91,7 +98,29 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     };
     phaseTimer = setTimeout(check, budget);
   };
-  const cleanup = () => { if (!recorded) { recorded = true; try { const measured = usageCollector.snapshot(); onMetrics?.({ toolIds: [...tools], inputTokens: measured.usage ? measured.usage.inputTokens + measured.usage.cacheCreationTokens + measured.usage.cacheReadTokens : inputTokens, totalTokens: measured.usage?.totalTokens ?? totalTokens, startedAt, endedAt: Date.now(), ...measured }); } catch { /* telemetry must not break delivery */ } } clearTimeout(timer); clearTimeout(phaseTimer); clearInterval(observationTimer); process.off('output', output); process.off('request-tools', schemaOutput); process.off('exit', exit); process.off('startup-error', startupError); };
+  // A missing task_notification must not hold a finished worker open forever
+  // (#557). Native task events and real progress restart the grace period, so
+  // a long Monitor/CI wait that is still reporting is not cut short.
+  const armGrace = () => {
+    if (!waitingResult || !policy?.backgroundGraceMs || settled) return;
+    clearTimeout(graceTimer);
+    graceTimer = setTimeout(expireGrace, policy.backgroundGraceMs);
+  };
+  const expireGrace = () => {
+    // Once every background task has reported back, the worker owes a fresh
+    // result and may be mid-turn; never replace that with the stale one.
+    if (settled || !waitingResult || !background.pending) return;
+    // A tool opened after that result means the worker is mid-turn, not finished.
+    if ([...activeTools.keys()].some(id => !waitingResult!.openTools.has(id))) { armGrace(); return; }
+    text = waitingResult.text;
+    if (!text.trim()) { fail(new OrchestrationError('WORKER_RESULT_MISSING', 'The worker ended without a final response while background work never reported completion. Inspect its changes before retrying.')); return; }
+    if (Buffer.byteLength(text) > 262144) { fail(new OrchestrationError('RESPONSE_TOO_LARGE')); return; }
+    if (!waitingResult.streamed && !publish(text)) return;
+    const unresolvedBackground = { pendingTasks: background.pendingCount, graceMs: policy!.backgroundGraceMs!, resultSeenAt: waitingResult.seenAt };
+    process.recordTurnOutcome?.('completed');
+    resolveAccepted(); settled = true; cleanup(); resolveResult({ text, interrupted: false, unresolvedBackground });
+  };
+  const cleanup = () => { if (!recorded) { recorded = true; try { const measured = usageCollector.snapshot(); onMetrics?.({ toolIds: [...tools], inputTokens: measured.usage ? measured.usage.inputTokens + measured.usage.cacheCreationTokens + measured.usage.cacheReadTokens : inputTokens, totalTokens: measured.usage?.totalTokens ?? totalTokens, startedAt, endedAt: Date.now(), ...measured }); } catch { /* telemetry must not break delivery */ } } clearTimeout(timer); clearTimeout(phaseTimer); clearTimeout(graceTimer); clearInterval(observationTimer); process.off('output', output); process.off('request-tools', schemaOutput); process.off('exit', exit); process.off('startup-error', startupError); };
   const fail = (error: Error) => { if (settled) return; process.recordTurnOutcome?.((error as OrchestrationError).code === 'TIMEOUT' ? 'timeout' : (error as OrchestrationError).code === 'INTERRUPTED' ? 'cancelled' : 'failed', (error as OrchestrationError).code); settled = true; cleanup(); rejectProvider(error); rejectAccepted(error); rejectResult(error); };
   const publish = (chunk: string): boolean => {
     try { onText(chunk); return true; }
@@ -121,11 +150,16 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       // during capture, but that cannot turn this earlier waiting result into
       // the final answer. Keep accounting for every native turn in the task.
       usageCollector.observe(event);
+      const candidate = process.runtimeProfile?.responseSchema && event.structured_output && typeof event.structured_output === 'object'
+        ? JSON.stringify(event.structured_output) : typeof event.result === 'string' && event.result ? event.result : text;
+      waitingResult = { text: candidate, streamed, seenAt: Date.now(), openTools: new Set(activeTools.keys()) };
       text = ''; streamed = false;
       resolveAccepted();
       if (policy) arm('idle', policy.idleTimeoutMs);
+      armGrace();
       return;
     }
+    if (waitingResult && event.type === 'system' && typeof event.task_id === 'string') armGrace();
     if(event.type==='result'&&!event.gatewaySchemasFlushed&&typeof process.flushToolSchemas==='function'){
       finalCapturePending=true;
       void process.flushToolSchemas(usageCollector.snapshot().requests.map(r=>r.id)).then(values=>{for(const value of values)usageCollector.observeSchemas(value);}).catch(()=>{}).finally(()=>{finalCapturePending=false;output(JSON.stringify({...event,gatewaySchemasFlushed:true}));});
@@ -201,7 +235,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       const progress = (event.type === 'assistant' && !isProviderError && Array.isArray(event.message?.content) && event.message.content.length > 0)
         || (delta && ['text_delta','thinking_delta','input_json_delta'].includes(delta.type) && Boolean(delta.text || delta.thinking || delta.partial_json))
         || (event.type === 'user' && Array.isArray(event.message?.content) && event.message.content.some((b: any) => b.type === 'tool_result'));
-      if (progress || toolProgress) arm('idle', policy.idleTimeoutMs);
+      if (progress || toolProgress) { arm('idle', policy.idleTimeoutMs); armGrace(); }
     }
     for (const block of event.message?.content ?? []) if (block.type === 'tool_use' && typeof block.id === 'string' && tools.size < 2000) tools.add(block.id);
     const usage = event.usage ?? event.message?.usage;

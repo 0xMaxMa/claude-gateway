@@ -229,7 +229,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
             const current = this.tasks.store.task(task.taskId);
             return current?.activeAttemptId === attempt.attemptId && current.state === 'waiting_input' && Boolean(current.pendingQuestion);
           },
-          idleTimeoutMs: limits.tasks.idleTimeoutMs, acceptToolProgress: true, idleAction: 'observe',
+          idleTimeoutMs: limits.tasks.idleTimeoutMs, acceptToolProgress: true, idleAction: 'observe', backgroundGraceMs: limits.tasks.backgroundGraceMs,
           onUsage: metrics => recordTokenTurn(this.tasks.store, {id: attempt.attemptId, sessionId: task.agentSessionId, role: 'worker', category: 'worker', taskId: task.taskId, taskRevision: revision.revision, ...metrics, harness: attempt.harness}),
           onObservation: observation => {
             if (observing || observationClosed) return;
@@ -262,7 +262,8 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         const diff = boundedDiffText(artifact.diff);
         const fileIds = this.tasks.store.all('SELECT id FROM task_files WHERE attempt_id=? ORDER BY created_at,id', attempt.attemptId).map(row => String(row.id));
         return { type: 'completed' as const, result: { summary: answer.text, artifactIds: [artifact.resourceId, ...fileIds],
-          diff: { text: diff, truncated: diff.length < artifact.diff.length } } };
+          diff: { text: diff, truncated: diff.length < artifact.diff.length },
+          ...(answer.unresolvedBackground ? { unresolvedBackground: answer.unresolvedBackground } : {}) } };
       }).catch(async error => {
         await process.stop();
         const failure = taskFailure(error);

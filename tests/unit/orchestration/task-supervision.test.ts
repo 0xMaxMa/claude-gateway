@@ -210,3 +210,116 @@ test.each([true,false])('unresolved structured blocker=%s is reflected in termin
  if(blocked)expect(result.failure?.code).toBe('WORKER_BLOCKED');
  }finally{x.store.close();}
 });
+
+// #557: progress reviews alone never ended a wedged task; it stayed running for ~20h.
+function stalledSetup(config:Record<string,number>={progressStaleMs:1000,progressNotifyCooldownMs:1000,progressStaleLimitMs:5000}) {
+ const store=new OrchestrationStore(':memory:','a'),tasks=new TaskService(store,{tasks:config}),decisions=new DecisionService(store);
+ const scope={agentId:'a',agentSessionId:'s',source:'api' as const,accountId:'u',chatId:'c',threadKey:'',principalId:'u'};
+ const input=store.acceptInput({scope,text:'Run the check.'}),decision=decisions.begin(input.conversationId,'u',[input.inputId]);
+ const ctx={...input,...decision,principalId:'u',execute:true,writeMemory:false,actionId:'spawn'};
+ const task=tasks.spawn(ctx,{title:'Check',instructions:'Run the check.',targetProfile:'default-worker'}),attempt=tasks.claim(task.taskId)!;
+ tasks.started(attempt.attemptId,attempt.generation,{pid:1,startedAt:Date.now(),instanceId:'test'});
+ return {store,tasks,input,ctx,task,attempt};
+}
+test('repeated observations past the stale-progress limit stop the attempt and fail the task with evidence (#557)',()=>{
+ const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
+ for(const now of [12000,14000]){clock.mockReturnValue(now);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,now));}
+ expect(x.store.task(x.task.taskId)!.state).toBe('running');
+ clock.mockReturnValue(15000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,15000));
+ expect(x.store.task(x.task.taskId)).toMatchObject({state:'cancel_requested',cancellation:{requestedBy:'supervisor',reason:expect.stringContaining('progressStaleLimitMs')}});
+ expect(x.store.all("SELECT * FROM conversation_events WHERE type='task.progress_stalled'")).toHaveLength(1);
+ const done=x.tasks.finish(x.attempt.attemptId,1,{type:'stopped'});
+ expect(done).toMatchObject({state:'failed',failure:{code:'PROGRESS_STALLED',message:expect.stringContaining('No new worker progress report')}});
+ }finally{x.store.close();clock.mockRestore();}
+});
+test('a new worker progress report resets the stale-progress limit (#557)',()=>{
+ const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
+ clock.mockReturnValue(14000);x.tasks.progress(x.attempt.attemptId,1,'Built the fixture.');
+ clock.mockReturnValue(18000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,18000));
+ expect(x.store.task(x.task.taskId)!.state).toBe('running');
+ clock.mockReturnValue(19000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,19000));
+ expect(x.store.task(x.task.taskId)!.state).toBe('cancel_requested');
+ }finally{x.store.close();clock.mockRestore();}
+});
+test('progressStaleLimitMs: 0 keeps the advisory-only behavior (#557)',()=>{
+ const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup({progressStaleMs:1000,progressNotifyCooldownMs:1000,progressStaleLimitMs:0});try{
+ clock.mockReturnValue(10_000_000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,10_000_000));
+ expect(x.store.task(x.task.taskId)).toMatchObject({state:'running',supervision:{reason:'stale_progress'}});
+ }finally{x.store.close();clock.mockRestore();}
+});
+test('a stopped stalled task left for scheduler cleanup also ends as failed, not cancelled (#557)',()=>{
+ const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
+ clock.mockReturnValue(16000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,16000));
+ x.tasks.finishCleanup(x.attempt.attemptId,1,true);
+ expect(x.store.task(x.task.taskId)).toMatchObject({state:'failed',failure:{code:'PROGRESS_STALLED'}});
+ }finally{x.store.close();clock.mockRestore();}
+});
+test.each(['finish','cleanup'])('an unconfirmed stall stop (%s) needs reconciliation without claiming the attempt stopped (#557)',path=>{
+ const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
+ clock.mockReturnValue(16000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,16000));
+ if(path==='finish')x.tasks.finish(x.attempt.attemptId,1,{type:'unknown'});else x.tasks.finishCleanup(x.attempt.attemptId,1,false);
+ const task=x.store.task(x.task.taskId)!;
+ expect(task).toMatchObject({state:'needs_reconciliation',failure:{code:'CLEANUP_UNCONFIRMED',message:expect.stringContaining('No new worker progress report')}});
+ expect(task.failure!.message).not.toContain('Stopped the attempt');
+ }finally{x.store.close();clock.mockRestore();}
+});
+test('a user cancel during a supervisor stop ends the task as cancelled (#557)',()=>{
+ const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
+ clock.mockReturnValue(16000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,16000));
+ x.tasks.cancelByUser(x.input.conversationId,'u',x.task.taskId);
+ expect(x.tasks.finish(x.attempt.attemptId,1,{type:'stopped'})).toMatchObject({state:'cancelled',cancellation:{requestedBy:'user'}});
+ }finally{x.store.close();clock.mockRestore();}
+});
+test('an agent cancel during a supervisor stop keeps the stall failure evidence (#557)',()=>{
+ const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
+ clock.mockReturnValue(16000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,16000));
+ x.tasks.cancel({...x.ctx,actionId:'agent-cancel'},x.task.taskId);
+ expect(x.tasks.finish(x.attempt.attemptId,1,{type:'stopped'})).toMatchObject({state:'failed',failure:{code:'PROGRESS_STALLED'},cancellation:{requestedBy:'supervisor'}});
+ }finally{x.store.close();clock.mockRestore();}
+});
+test('a final result still waiting on background work raises a distinct supervision reason (#557)',()=>{
+ const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
+ clock.mockReturnValue(12000);x.tasks.observeExecution(x.attempt.attemptId,1,{...observation(x.attempt.attemptId,12000),resultSeenAt:11000,pendingBackground:1});
+ expect(x.store.task(x.task.taskId)).toMatchObject({state:'running',supervision:{reason:'result_seen_not_terminal',message:expect.stringContaining('1 native background task(s)')}});
+ }finally{x.store.close();clock.mockRestore();}
+});
+test('a completed result accepted with unresolved background work keeps that evidence (#557)',()=>{
+ const x=stalledSetup();try{
+ const unresolvedBackground={pendingTasks:1,graceMs:900000,resultSeenAt:1};
+ const done=x.tasks.finish(x.attempt.attemptId,1,{type:'completed',result:{summary:'Final report',artifactIds:[],unresolvedBackground}});
+ expect(done).toMatchObject({state:'completed',result:{unresolvedBackground}});
+ expect(x.store.all("SELECT * FROM conversation_events WHERE type='task.background_unresolved'")).toHaveLength(1);
+ }finally{x.store.close();}
+});
+test('background grace and stale-progress limit are validated (#557)',()=>{
+ const {resolveOrchestrationConfig}=require('../../../src/orchestration/config');
+ expect(resolveOrchestrationConfig().tasks).toMatchObject({backgroundGraceMs:900000,progressStaleLimitMs:7200000,maxDurationMs:0});
+ expect(resolveOrchestrationConfig({tasks:{progressStaleLimitMs:0}}).tasks.progressStaleLimitMs).toBe(0);
+ expect(()=>resolveOrchestrationConfig({tasks:{backgroundGraceMs:0}})).toThrow('positive bounded integer');
+ expect(()=>resolveOrchestrationConfig({tasks:{backgroundGraceMs:-1}})).toThrow('positive bounded integer');
+ expect(()=>resolveOrchestrationConfig({tasks:{progressStaleLimitMs:-1}})).toThrow('positive bounded integer');
+ expect(()=>resolveOrchestrationConfig({tasks:{progressStaleLimitMs:'2h'}})).toThrow('Invalid orchestration.tasks.progressStaleLimitMs');
+ expect(()=>resolveOrchestrationConfig({tasks:{progressStaleMs:600000,progressStaleLimitMs:60000}})).toThrow('progressStaleLimitMs must be zero or at least');
+ // Existing configs with a long review interval still load; the implicit limit leaves room for a review.
+ expect(resolveOrchestrationConfig({tasks:{progressStaleMs:10800000}}).tasks).toMatchObject({progressStaleMs:10800000,progressStaleLimitMs:10800000+300000});
+});
+test('a config created or migrated from config.template.json keeps the implicit stale-limit floor (#557)',()=>{
+ const {resolveOrchestrationConfig}=require('../../../src/orchestration/config');
+ // Fresh installs copy the template and the migrator adds its missing keys, so a
+ // value written there is explicit in every agent config, not a default.
+ const template=JSON.parse(require('fs').readFileSync(require('path').join(__dirname,'../../../config.template.json'),'utf8')).agents[0].orchestration;
+ const tasks={...template.tasks,progressStaleMs:10800000};
+ expect(resolveOrchestrationConfig({...template,tasks}).tasks.progressStaleLimitMs).toBe(10800000+tasks.progressNotifyCooldownMs);
+});
+test('retrying cleanup of an unconfirmed stall stop keeps the stall failure evidence (#557)',()=>{
+ const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
+ clock.mockReturnValue(16000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,16000));
+ x.tasks.finishCleanup(x.attempt.attemptId,1,false);
+ expect(x.store.task(x.task.taskId)).toMatchObject({state:'needs_reconciliation',failure:{code:'CLEANUP_UNCONFIRMED'}});
+ // The task browser's "Retry cleanup" button is a user cancel on this state.
+ x.tasks.cancelByUser(x.input.conversationId,'u',x.task.taskId);
+ expect(x.store.task(x.task.taskId)).toMatchObject({state:'cancel_requested',cancellation:{requestedBy:'supervisor'}});
+ x.tasks.finishCleanup(x.attempt.attemptId,1,true);
+ expect(x.store.task(x.task.taskId)).toMatchObject({state:'failed',failure:{code:'PROGRESS_STALLED',message:expect.stringContaining('No new worker progress report')}});
+ }finally{x.store.close();clock.mockRestore();}
+});

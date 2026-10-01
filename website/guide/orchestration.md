@@ -82,6 +82,8 @@ Cancellation preserves files and prior side effects. Before retrying interrupted
 
 The `tasks.idleTimeoutMs` defaults to 300000 and marks quiet workers for inspection. It does not terminate them for silence alone. `tasks.maxDurationMs: 0` means no total deadline; a positive value is an explicit hard deadline. Startup and first-response budgets remain bounded.
 
+Two limits keep a worker from staying `running` forever without that deadline. A final result still waiting on native background work that never reports back is accepted after `tasks.backgroundGraceMs` (15 minutes) of silence and marked `unresolvedBackground`. A worker with no new progress report for `tasks.progressStaleLimitMs` (2 hours) is stopped and fails with `PROGRESS_STALLED`. See [orchestration settings](../reference/orchestration-settings.md#worker-pool-and-queue).
+
 `ORCHESTRATION_DISABLED` indicates legacy mode. `PROFILE_INVENTORY_MISMATCH` indicates a subprocess exposed tools outside its profile: restore a consistent gateway/MCP revision and retain the inventory check.
 
 Orchestration covers text orchestration across Telegram, Discord, LINE, Slack, WhatsApp, WeChat, and API conversations. WeChat staged attachments are unsupported. Voice channel support is narrower; see [voice](./voice.md).
