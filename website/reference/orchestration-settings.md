@@ -100,7 +100,7 @@ Withheld inputs do not create failed token turns or fabricated zero-usage rows.
 | `maxDecisionDurationMs` | `600000` | Total decision budget; separate from worker task runtime |
 | `preemptionGraceMs` | `250` | Accepted configuration field; currently not consumed by runtime preemption |
 | `maxPendingInputs` | `100` | Bound queued conversation input |
-| `skillCatalogBytes` | `65536` | UTF-8 byte budget for the installed skill catalog in the agent system prompt. Over the budget, every skill name stays listed and each description, `readWhen` and keyword is shortened to one shared cap; a catalog within the budget is unchanged |
+| `skillCatalogBytes` | `65536` | UTF-8 byte budget for the installed skill catalog in the agent system prompt. Over the budget, every skill name stays listed and each description, `readWhen` and keyword is shortened to one shared cap; a catalog within the budget is unchanged. With hundreds of skills the names alone can fill the budget and descriptions are dropped; raise it if skill selection suffers (`capabilities_list` always has full descriptions) |
 
 `decisionTimeoutMs` is a compatibility alias for `idleTimeoutMs`. Its original template value `15000` is normalized to the modern default. Set `idleTimeoutMs` explicitly for new configurations.
 
