@@ -155,13 +155,12 @@ test('typed text comes only from the current step command, never from other step
  expect(r.stepRun).toMatchObject({stopReason:'STEP_NOT_EXECUTED',stoppedAt:1,detail:'FIELD_TEXT_REQUIRED',completed:0});
 });
 
-test('low Jev confidence returns control with the remaining steps',async()=>{
+// Audit d09d63d0 item 1: an unsure Jev choice for one of the user's steps still runs.
+test('a low-confidence Jev choice for a step still runs, and the list continues',async()=>{
  const f=desktop((command,req)=>command==='เข้า link แรก'?answer(req,'press:link1',{confidence:.3}):browsePlan(command,req));
  const r=await run(['เปิด tab ใหม่','เข้า link แรก','scroll ลงมา'],f.deps);
- expect(r.stepRun).toMatchObject({stopReason:'STEP_NOT_EXECUTED',detail:'LOW_CONFIDENCE',stoppedAt:2,completed:1,remaining:['เข้า link แรก','scroll ลงมา']});
- expect(r.status).toBe('needs_input');expect(r.reason).toBe('COMMAND_WAITING_INPUT');
- expect(f.actions()).toHaveLength(1);
- expect(f.snapshots()).toBe(1);
+ expect(r.stepRun).toMatchObject({stopReason:'ALL_STEPS_DONE',completed:3});
+ expect(f.actions()).toHaveLength(3);
  expect(f.calls.filter(c=>c.name==='computer_release')).toHaveLength(1);
 });
 
@@ -272,10 +271,11 @@ test('E2E-2: a listed step joining two commands runs both; a named shortcut runs
  expect(f.actions().map(a=>[a.kind,a.app_id??a.ref??a.direction])).toEqual([['open','com.google.Chrome'],['press','m1'],['scroll','down']]);
  expect(r.stepRun).toMatchObject({stopReason:'ALL_STEPS_DONE',completed:2});
  // Opening Chrome alone no longer completes the step when the shortcut is unavailable.
- const g=desktop((command,req)=>answer(req,'open:com.google.Chrome'));
+ // Audit d09d63d0 item 5: the missing shortcut goes to Jev, which finds nothing here.
+ const g=desktop((command,req)=>command==='เปิด Chrome'?answer(req,'open:com.google.Chrome'):answer(req,'BLOCKED'));
  g.state.controls=g.state.controls.filter((c:any)=>c.ref!=='newtab');
  const stopped=await run(['เปิด Chrome แล้วกด Cmd+T','scroll ลงมา'],g.deps);
- expect(stopped.stepRun).toMatchObject({stopReason:'STEP_NOT_EXECUTED',stoppedAt:1,completed:0,detail:'SHORTCUT_NOT_OFFERED',doneParts:['เปิด Chrome']});
+ expect(stopped.stepRun).toMatchObject({stopReason:'STEP_NOT_EXECUTED',stoppedAt:1,completed:0,detail:'NO_SUPPORTED_ACTION',doneParts:['เปิด Chrome']});
 });
 
 test('E2E-1: a step whose target is still loading re-observes instead of stopping at once',async()=>{
@@ -295,7 +295,8 @@ test('E2E-1: a step whose target is still loading re-observes instead of stoppin
 });
 
 test('E2E e6149724: the first step re-observes a shortcut target that is not shown yet, like later steps',async()=>{
- const f=desktop(browsePlan);
+ // Jev finds no New Tab on the first frame (BLOCKED); the step re-observes and the shortcut runs.
+ const f=desktop((command,req)=>command==='เปิด tab ใหม่'&&!JSON.stringify(req.questions).includes('newtab')?answer(req,'BLOCKED'):browsePlan(command,req));
  const newtab=f.state.controls.find((c:any)=>c.ref==='newtab');f.state.controls=f.state.controls.filter((c:any)=>c!==newtab);
  const call=f.deps.call;let observes=0;
  f.deps.call=async(name,args,signal)=>{if(name==='computer_observe'&&++observes===2)f.state.controls.unshift(newtab);return call(name,args,signal);};

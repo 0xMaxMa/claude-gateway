@@ -38,7 +38,7 @@ export interface CommandContext extends ExecutionCapabilities {
  * list), and an unexpected one (a valid list carrying tools outside the resolved profile). */
 export interface InventoryRejection { kind: 'missing' | 'malformed' | 'unexpected'; rejectedTools: string[]; }
 export interface TaskFailure { code: string; message: string; observedAt: number; provider?: import('./provider-admission').ProviderFailure; inventory?: InventoryRejection; }
-export interface ComputerTaskReport {status:string;reason:string;steps:number;evaluations?:number;phase?:string;trace?:import('../automation/computer-use').ComputerProgress[];fieldRequest?:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'};stepRun?:import('../automation/computer-steps').ComputerStepRun;lastAction?:import('../automation/computer-use').ComputerLastAction;clarification?:string}
+export interface ComputerTaskReport {status:string;reason:string;steps:number;evaluations?:number;phase?:string;trace?:import('../automation/computer-use').ComputerProgress[];fieldRequest?:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'};stepRun?:import('../automation/computer-steps').ComputerStepRun;lastAction?:import('../automation/computer-use').ComputerLastAction}
 export type WorkerOutcome = ({type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure}) & {computerReport?:ComputerTaskReport;browserReport?: import('../jev/browser-contract').BrowserTaskReport};
 export interface TaskResult {
   summary: string;

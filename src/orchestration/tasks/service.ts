@@ -473,7 +473,9 @@ export class TaskService {
     const instructions=nextCommand?command.text!:command.action==='revise'?CORRECTION_HEAD+command.text+'\n\nEarlier requirements and corrections, newest first. Keep only requirements compatible with the latest correction; do not perform superseded actions:\n'+previous.instructions+(priorAnswers?.length?'\n\nEarlier user answers (subject to the latest correction):\n'+JSON.stringify(priorAnswers):''):previous.instructions;
     boundedText(instructions,task.gatewayTarget?.adapter==='browser'?8000:16000);
     task.revision++;
-    if(recoverable){delete task.computerReport;delete task.failure;delete task.browserReport;delete task.gatewayDispatch;}
+    if(recoverable&&!paused){delete task.computerReport;delete task.failure;delete task.browserReport;delete task.gatewayDispatch;}
+    // The owner's new command supersedes any pending question (saveTask closes its record).
+    if(command.action==='revise')delete task.pendingQuestion;
     this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,requestBrowserConsent:command.action!=='pause',revision:task.revision,instructions,mode:'interrupt_and_resume',computerInputs:command.action==='revise'?undefined:previous.computerInputs,answers:command.action==='revise'?undefined:previous.answers,browserRecoveryCount:0,guidance:undefined,guidanceBasis:undefined,...(command.action==='revise'?{directCommand:true}:{}),agentHandoffInputId}));
     task.executionControl={id:command.id,action:command.action,revision:task.revision,phase:task.activeAttemptId?'pending':command.action==='pause'?'paused':'pending',requestedAt:Date.now(),...(agentHandoffInputId?{agentHandoff:true as const}:{})};
     task.state=task.activeAttemptId?'interrupting':command.action==='pause'?'waiting_input':'queued';

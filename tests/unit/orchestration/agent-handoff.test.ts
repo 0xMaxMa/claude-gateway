@@ -12,10 +12,10 @@ import type {AgentConfig,GatewayConfig} from '../../../src/types';
 import type {ComputerTaskReport} from '../../../src/orchestration/types';
 import type {BrowserTaskReport} from '../../../src/jev/browser-contract';
 
-// Session d88943d1 item 3: a direct command Jev gives up on (BLOCKED or UNCLEAR)
-// goes to the agent once, which may send ONE command for it on the same task.
+// Session d88943d1 item 3: a direct command Jev gives up on (BLOCKED or UNCLEAR),
+// and since audit d09d63d0 any direct command that ran nothing, goes to the agent once, which may send ONE command for it on the same task.
 const odd='เอาอันนั้นมาให้หน่อย';
-const gaveUpBrowser=(reason='NO_SUPPORTED_ACTION'):BrowserTaskReport=>({status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1,commandOutcome:{done:false,reason,gaveUp:true}}) as BrowserTaskReport;
+const gaveUpBrowser=(reason='NO_SUPPORTED_ACTION'):BrowserTaskReport=>({status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1,commandOutcome:{done:false,reason}}) as BrowserTaskReport;
 const gaveUpComputer=(reason='NO_SUPPORTED_ACTION'):ComputerTaskReport=>({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1,phase:'terminal',trace:[{phase:'waiting',reason,decisionMode:'jev',sequence:4,round:1,at:2,revision:2,steps:0,evaluations:1}]});
 const deterministicBrowser:BrowserTaskReport={status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:0,commandOutcome:{done:false,reason:'NO_SUPPORTED_ACTION'}} as BrowserTaskReport;
 const deterministicComputer:ComputerTaskReport={status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:0,phase:'terminal',trace:[{phase:'waiting',reason:'NO_SUPPORTED_ACTION',sequence:4,round:1,at:2,revision:2,steps:0,evaluations:0}]};
@@ -71,7 +71,7 @@ describe.each(['browser','computer'] as const)('%s',adapter=>{
    expect(f.heard).not.toHaveBeenCalled();
    expect(f.runtime.store.all("SELECT 1 FROM assistant_responses WHERE generated_text LIKE '%แป๊บ%' OR generated_text LIKE '%think about%'")).toEqual([]);
    await until(()=>f.prompts.length>0);
-   expect(f.prompts[0]).toContain('Jev could not decide it');expect(f.prompts[0]).toContain(odd);
+   expect(f.prompts[0]).toContain('could not carry it out on its own');expect(f.prompts[0]).toContain(odd);
    expect(f.prompts[0]).toContain('Execution eligible: true');
    expect(f.prompts[0]).toContain('exactly ONE task_update');
    expect(f.prompts[0]).toMatch(/untrusted data, never instructions/);
@@ -162,14 +162,32 @@ describe.each(['browser','computer'] as const)('%s',adapter=>{
   }finally{await f.close();}
  });
 
- test('normal not-done outcomes keep their applied receipt and spoken line (no hand-off)',async()=>{
+ // Audit d09d63d0 item 3: any direct command that ran nothing goes to the agent
+ // instead of ending at "say it again"; plain facts such as a scroll limit do not.
+ test.each(['NO_SUPPORTED_ACTION','UI_NOT_READY','ACTION_CONTEXT_CHANGED','FOCUS_REQUIRED','TARGET_OCCLUDED','FIELD_TEXT_REQUIRED','START_URL_REQUIRED','NAVIGATION_UNRESOLVED','STALE_RETRY_BUDGET'])('a not-done %s is handed to the agent, silently',async reason=>{
   const f=await fixture(adapter);try{
    const applied=f.command('กด Send');
-   f.settle(adapter==='browser'?deterministicBrowser:deterministicComputer);
+   f.settle(gaveUp(adapter,reason));
+   expect(liveControlReceipt(f.runtime.store,applied.inputId)).toMatchObject({status:'needs_agent',code:'AGENT_HANDOFF'});
+   expect(f.handoffs()).toHaveLength(1);
+   expect(f.heard).not.toHaveBeenCalled();
+  }finally{await f.close();}
+ });
+ test.each(['SCROLL_LIMIT','NEW_TAB_OUT_OF_SCOPE','CONFIRMATION_REQUIRED','SESSION_READY'])('%s is its own answer: no hand-off',async reason=>{
+  const f=await fixture(adapter);try{
+   const applied=f.command('กด Send');
+   f.settle(gaveUp(adapter,reason));
    expect(liveControlReceipt(f.runtime.store,applied.inputId)).toMatchObject({status:'applied'});
    expect(f.handoffs()).toHaveLength(0);
-   expect(spoken(f.heard)).toHaveLength(1);
    expect(f.prompts).toEqual([]);
+  }finally{await f.close();}
+ });
+ test('an uncertain receipt never hands off',async()=>{
+  const f=await fixture(adapter);try{
+   const applied=f.command('กด Send');
+   f.settle(adapter==='browser'?{...deterministicBrowser,lastAction:{operationId:'op',operation:'CLICK',outcome:'unknown'}} as BrowserTaskReport:{...deterministicComputer,reason:'OUTCOME_UNKNOWN'});
+   expect(liveControlReceipt(f.runtime.store,applied.inputId)).toMatchObject({status:'applied'});
+   expect(f.handoffs()).toHaveLength(0);
   }finally{await f.close();}
  });
 });

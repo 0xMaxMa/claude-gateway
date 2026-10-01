@@ -257,11 +257,13 @@ test('a screenshot-blocked computer round remains visibly blocked and accepts a 
  }finally{await f.close();}
 });
 
-test.each([{steps:1,evaluations:1},{steps:0,evaluations:1}])('generic computer failures do not permit continuation after an evaluation or action: %j',async details=>{
+// Audit d09d63d0 item 2: the owner's next command restarts any settled round
+// that has no uncertain action, whatever failed.
+test.each([{steps:1,evaluations:1},{steps:0,evaluations:1}])('a generic computer failure takes the owner\'s next command: %j',async details=>{
  const f=fixture();try{
   const t=f.store.task(f.task.taskId)!;
   f.store.transaction(()=>{t.gatewayTarget={adapter:'computer',sessionId:'mac',name:'Mac'};t.state='failed';delete t.activeAttemptId;t.computerReport={status:'blocked',reason:'COMPUTER_USE_FAILED',...details};f.store.saveTask(t,t.stateVersion);});
-  expect(()=>f.tasks.controlByUser(f.accepted.conversationId,'u',t.taskId,{id:randomUUID(),action:'revise',expectedRevision:t.revision,text:'Read the current screen'})).toThrow('STATE_CONFLICT');
+  expect(f.tasks.controlByUser(f.accepted.conversationId,'u',t.taskId,{id:randomUUID(),action:'revise',expectedRevision:t.revision,text:'Read the current screen'})).toMatchObject({state:'queued'});
  }finally{await f.close();}
 });
 
@@ -271,7 +273,6 @@ test.each(['JEV_PROVIDER_UNAVAILABLE','JEV_DEADLINE_EXCEEDED','JEV_RATE_LIMITED'
   const t=f.store.task(f.task.taskId)!;
   f.store.transaction(()=>{t.gatewayTarget={adapter:'computer',sessionId:'mac',name:'Mac'};t.state='failed';delete t.activeAttemptId;t.computerReport={status:'blocked',reason,steps:6,evaluations:10};f.store.saveTask(t,t.stateVersion);});
   const next=()=>f.tasks.controlByUser(f.accepted.conversationId,'u',t.taskId,{id:randomUUID(),action:'revise',expectedRevision:t.revision,text:'Inspect the existing expression before the next action'});
-  if(['JEV_OUTCOME_UNKNOWN','JEV_INVALID_RESPONSE'].includes(reason))expect(next).toThrow('STATE_CONFLICT');
-  else{const updated=next();expect(updated.taskId).toBe(t.taskId);expect(updated.state).toBe('queued');expect(f.tasks.revision(t.taskId,updated.revision).instructions).toBe('Inspect the existing expression before the next action');expect(f.calls).toHaveLength(0);}
+  {const updated=next();expect(updated.taskId).toBe(t.taskId);expect(updated.state).toBe('queued');expect(f.tasks.revision(t.taskId,updated.revision).instructions).toBe('Inspect the existing expression before the next action');expect(f.calls).toHaveLength(0);}
  }finally{await f.close();}
 });

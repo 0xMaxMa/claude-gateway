@@ -6,7 +6,6 @@ import type {ComputerTaskReport} from '../orchestration/types';
  * repeats typed text or window contents beyond the chosen control's label.
  */
 const HINTS:Record<string,string>={
- LOW_CONFIDENCE:'no visible control matched this command confidently{confidence}. Name the button, link or field as it appears on screen.',
  UNCLEAR:'the command was not understood. Say it another way, or name the item as it appears on screen.',
  NO_SUPPORTED_ACTION:'no visible control matches this command. Check that the right window is in front, or name the item as it appears on screen.',
  FIELD_TEXT_REQUIRED:'no text to enter was found in the command. Put the text in quotes, for example: พิมพ์ "hello".',
@@ -17,15 +16,12 @@ const HINTS:Record<string,string>={
  STALE_OBSERVATION:'the screen changed before the action ran. Send the command again.',
  ACTION_CONTEXT_CHANGED:'the screen changed before the action ran. Send the command again.',
  SUBMIT_CONTEXT_CHANGED:'the field changed before Enter was pressed. Check it and press Enter if still wanted.',
- SHORTCUT_UNAVAILABLE:'this shortcut is not available in the front application. Bring the target application (for tabs, the browser) to the front first.',
- SHORTCUT_NOT_OFFERED:'the browser in front did not offer this command as a menu item or shortcut. Name the menu item as it appears on screen.',
  NOTHING_TO_ERASE:'the focused field is already empty.',
  ERASE_UNAVAILABLE:'the focused field is too long to edit safely this way.',
  CONFIRMATION_REQUIRED:'{target} is high-impact, so the user was asked to confirm it; their yes or no answers.',
  CONFIRMATION_DECLINED:'the user said no, so it was not pressed.',
  COMPLETION_NOT_ESTABLISHED:'the result could not be confirmed from the screen.',
  SEQUENCE_TARGET_MISSING:'the next button was not found exactly once on the screen.',
- SEQUENCE_TOO_LONG:'the number is too long to press safely. Say at most 8 digits at a time.',
 };
 /** A round whose last dispatched action has no receipt; it may have run. */
 export const UNKNOWN_PREFIX='Unknown:';
@@ -57,7 +53,6 @@ export function computerOutcomeText(report:ComputerTaskReport):string{
  const waiting=[...trace].reverse().find(e=>e.phase==='waiting'&&e.reason!=='POST_ACTION_EVIDENCE_STALE')?.reason;
  // The device may have acted: never tell the owner it was not done.
  if(report.reason==='OUTCOME_UNKNOWN')return `${UNKNOWN_PREFIX} the last action may have run. Check the screen before sending the command again.`;
- if(report.clarification)return `Not done: ${report.clarification}`;
  if(waiting==='SESSION_READY'&&!report.steps)return 'Ready: the session is open and waits for the next command.';
  if(waiting==='READ_REQUEST'&&!report.steps)return 'Read request: nothing was pressed; the assistant answers from the current screen.';
  // A spoken number stopped part-way: say how far it got, never "Done".
@@ -69,6 +64,5 @@ export function computerOutcomeText(report:ComputerTaskReport):string{
  return `Not done: ${waiting??report.reason}. Send the next command.`;
 }
 function hint(reason:string,report:ComputerTaskReport){
- const confidence=[...(report.trace??[])].reverse().find(e=>e.phase==='decided'&&typeof e.confidence==='number')?.confidence;
- return HINTS[reason].replace('{confidence}',confidence===undefined?'':` (confidence ${confidence.toFixed(2)})`).replace('{target}',quoted(report.lastAction?.label));
+ return HINTS[reason].replace('{target}',quoted(report.lastAction?.label));
 }

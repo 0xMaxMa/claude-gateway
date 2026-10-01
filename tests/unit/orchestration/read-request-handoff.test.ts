@@ -70,13 +70,13 @@ test.each(['browser','computer'] as const)('%s: a READ_REQUEST round gives the a
  }finally{await f.close();}
 });
 
-test('a command that was not a read request keeps its spoken not-done line and its applied receipt',async()=>{
+// Audit d09d63d0 item 3: a not-done command is not a read request, but it is
+// still handed to the agent (AGENT_HANDOFF), read-only rules aside.
+test('a command that was not a read request is handed off as AGENT_HANDOFF, not READ_REQUEST',async()=>{
  const f=await fixture('computer');try{
   const applied=f.command('กด Send');
   f.settle(applied.inputId,lowComputer);
-  expect(liveControlReceipt(f.runtime.store,applied.inputId)).toMatchObject({status:'applied'});
-  expect(f.input(applied.inputId)).toMatchObject({status:'handled',store_user_message:0});
-  expect(f.prompts).toEqual([]);
+  expect(liveControlReceipt(f.runtime.store,applied.inputId)).toMatchObject({status:'needs_agent',code:'AGENT_HANDOFF'});
  }finally{await f.close();}
 });
 

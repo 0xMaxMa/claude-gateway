@@ -78,18 +78,19 @@ export function buildComputerCommand(state:ComputerState,command:string,targets:
 export function readComputerCommand(command:ReturnType<typeof buildComputerCommand>,answers:Record<string,unknown>){
  const questions=command.request.questions;
  const operation=readChoice(answers.action,questions.action.criteria);
- if(!operation.confident||!operations[operation.choice])return {action:operation.choice,confidence:operation.confidence,confident:operation.confident};
+ // Jev's best choice runs, as on Remote Browser: no confidence bar for a direct command.
+ if(!operations[operation.choice])return {action:operation.choice,confidence:operation.confidence};
  const kind=operation.choice==='submit_text'?'type':operation.choice;
  const target=readChoice(answers['target_'+kind],questions['target_'+kind].criteria);
  const action=command.targets.get(target.choice);
- if(!target.confident||target.choice==='BLOCKED')return {action:'BLOCKED',confidence:target.confidence,confident:target.confident};
+ if(target.choice==='BLOCKED')return {action:'BLOCKED',confidence:target.confidence};
  if(!action||decisionKind(target.choice,action)!==kind)throw Error('INVALID_DECISION');
  let literal:string|undefined;const submit=operation.choice==='submit_text';
  if(kind==='type'){
-  if(questions.text){const text=readChoice(answers.text,questions.text.criteria);if(text.confident&&text.choice!=='NONE')literal=command.literals[Number(text.choice.slice(5))];}
+  if(questions.text){const text=readChoice(answers.text,questions.text.criteria);if(text.choice!=='NONE')literal=command.literals[Number(text.choice.slice(5))];}
 
  }
- return {action:target.choice,confidence:Math.min(operation.confidence,target.confidence),confident:true,literal,submit};
+ return {action:target.choice,confidence:Math.min(operation.confidence,target.confidence),literal,submit};
 }
 
 // Adapt the lexical tail candidates in jev-voice-browser src/spans.js at
@@ -213,12 +214,11 @@ function spokenNumber(token:string):{digits:string;shorthand?:string}|undefined{
  const shorthand=pending!==undefined&&last>=100&&words.at(-1)!.word!=='เอ็ด'&&words.at(-2)?.multiplier===last?String(total+pending*last/10):undefined;
  return {digits:String(total+(pending??0)),...(shorthand?{shorthand}:{})};
 }
-export type LabelCommand={presses:string[][];spoken:string}|{clarification:string}|{tooLong:true};
-/** Most presses one spoken number may expand to. */
-export const MAX_LABEL_PRESSES=8;
+export type LabelCommand={presses:string[][];spoken:string};
 /**
  * "ห้า", "กดเลข 5", "เท่ากับ", "ห้า ศูนย์", "ห้าสิบ": the visible labels to press,
- * in order. Two number forms that disagree ("ห้า ห้าสิบ") need a clarification.
+ * in order. A reading that is not one clear number ("ห้า ห้าสิบ", "ร้อยห้า")
+ * is left to Jev.
  */
 export function labelCommand(command:string):LabelCommand|undefined{
  const payload=normalizeCommand(command).replace(/^(?:(?:กด|press|click|คลิก|แตะ|tap)\s*)?(?:(?:ปุ่ม|เลข|ตัวเลข|เครื่องหมาย|button|number)\s*)?/u,'').trim();
@@ -227,15 +227,12 @@ export function labelCommand(command:string):LabelCommand|undefined{
  if(operator)return {presses:[operator.labels],spoken:payload};
  const tokens=payload.split(' '),numbers=tokens.map(spokenNumber);
  if(numbers.some(n=>n===undefined))return;
- // Never guess between the formal and the shorthand reading: ask.
- const shorthand=numbers.find(n=>n!.shorthand);
- if(shorthand)return {clarification:`${shorthand.digits} หรือ ${shorthand.shorthand}?`};
+ // A number with both a formal and a shorthand reading, or a multi-digit form beside another number
+ // (a self-correction or a mishearing), is not one clear number: Jev decides.
+ if(numbers.some(n=>n!.shorthand))return;
  const digits=numbers.map(n=>n!.digits);
- // Each token alone, or single digits one by one; a multi-digit form beside
- // another number is a self-correction or a mishearing, never concatenated.
- if(tokens.length>1&&digits.some(d=>d!.length>1))return {clarification:tokens.join(' หรือ ')+'?'};
+ if(tokens.length>1&&digits.some(d=>d!.length>1))return;
  const sequence=digits.join('');
- if(sequence.length>MAX_LABEL_PRESSES)return {tooLong:true};
  return {presses:[...sequence].map(d=>[d]),spoken:payload};
 }
 /**

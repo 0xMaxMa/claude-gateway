@@ -312,13 +312,14 @@ describe("READ_REQUEST: a direct command that asks about the page", () => {
     // The agent answers; no "not done, say it again" line is spoken.
     expect(directCommandSpeech({ browserReport: result as never }, ask, { thai: true })).toBeUndefined();
   });
-  test("an uncertain READ_REQUEST keeps the existing not-done behaviour", async () => {
+  // Audit d09d63d0 item 8: an unsure read request still goes to the agent.
+  test("an uncertain READ_REQUEST still goes to the agent", async () => {
     const { readRequested } = await import("../../../src/automation/command-speech");
     const b = fixtures();
     const result = await run(ask, b, jev({ operation: () => "READ_REQUEST" }, 0.3));
     expect(b.mutations()).toEqual([]);
-    expect(result.commandOutcome).toEqual({ done: false, reason: "LOW_OPERATION_CONFIDENCE" });
-    expect(readRequested({ browserReport: result as never })).toBe(false);
+    expect(result.commandOutcome).toEqual({ done: false, reason: "READ_REQUEST" });
+    expect(readRequested({ browserReport: result as never })).toBe(true);
   });
   test("only a single user command is offered READ_REQUEST; a READ_REQUEST answer elsewhere is invalid", async () => {
     for (const extra of [{ command: false }, { stepPart: true }]) {
@@ -513,24 +514,24 @@ describe("AGENT_HANDOFF: Jev gives up on a single direct command", () => {
     const b = browser(page());
     const result = await run(odd, b, jev({ operation: () => chosen }));
     expect(b.mutations()).toEqual([]);
-    expect(result).toMatchObject({ status: "needs_verification", reason: "COMMAND_WAITING_INPUT", commandOutcome: { done: false, reason, gaveUp: true } });
+    expect(result).toMatchObject({ status: "needs_verification", reason: "COMMAND_WAITING_INPUT", commandOutcome: { done: false, reason } });
     expect(agentHandoffRequested({ browserReport: result as never })).toBe(true);
     expect(browserOutcomeText(result)).toMatch(/^Not done:/);
     expect(directCommandSpeech({ browserReport: result as never }, odd, { thai: true })?.spoken).toBeTruthy();
   });
-  test("step mode, agent tasks and deterministic or low-confidence not-done never request a hand-off", async () => {
+  // Audit d09d63d0 item 3: any not-done single command qualifies (low confidence too);
+  // step runs, agent tasks and answers of their own (scroll limit) do not.
+  test("step runs, agent tasks and a scroll limit never request a hand-off; low confidence does", async () => {
     const { agentHandoffRequested } = await import("../../../src/automation/command-speech");
     const strict = browser(page()), sj = jev({ operation: () => "BLOCKED" });
-    const s = await run(odd, strict, sj, { stepPart: true });
+    await run(odd, strict, sj, { stepPart: true });
     expect(Object.keys(sj.requests[0].questions.operation.criteria)).not.toContain("UNCLEAR");
-    expect(s.commandOutcome?.gaveUp).toBeUndefined();
-    expect(agentHandoffRequested({ browserReport: s as never })).toBe(false);
     const agent = await run(odd, browser(page()), jev({ operation: () => "BLOCKED" }), { command: false });
     expect(agentHandoffRequested({ browserReport: agent as never })).toBe(false);
     const limit = await run("scroll down", browser(page({ scroll: { up: true, down: false } })));
     expect(agentHandoffRequested({ browserReport: limit as never })).toBe(false);
     const low = await run(odd, browser(page()), jev({ operation: () => "CLICK" }, 0.3), { targetConfidence: 0.5 });
-    expect(agentHandoffRequested({ browserReport: low as never })).toBe(false);
+    expect(agentHandoffRequested({ browserReport: low as never })).toBe(true);
     const stepRun = { ...(await run(odd, browser(page()), jev({ operation: () => "BLOCKED" }))), stepRun: { total: 2, completed: 0 } };
     expect(agentHandoffRequested({ browserReport: stepRun as never })).toBe(false);
   });
@@ -544,5 +545,58 @@ describe("the session-start round", () => {
     expect(b.mutations()).toEqual([]);
     expect(result.commandOutcome).toEqual({ done: false, reason: "SESSION_READY" });
     expect(browserOutcomeText(result)).toMatch(/^Ready:/);
+  });
+});
+
+// Audit d09d63d0 (develop: 484 direct commands over 4 days). The user's own
+// command never ends at "say it again" while something useful can still be done.
+describe("audit d09d63d0: no dead ends for a direct command", () => {
+  const resolving = (text: string | null) => { const requests: any[] = []; return { requests, resolveFieldText: async (request: any) => { requests.push(request); return { text }; } }; };
+  const blank = () => browser(page({ native_new_tab: true, url: "chrome://newtab/", title: "New Tab", text: "", elements: [] } as never), { tab_navigate: (a, p) => ({ ...p, native_new_tab: false, url: String(a.url), title: "Site", text: "Site", elements: [el("e0", "About")] } as never) });
+  // Item 6: a blank tab with a site the fixed forms do not read.
+  test.each([["เข้าเว็บยาฮูญี่ปุ่น", "https://www.yahoo.co.jp"], ["open the Japanese Yahoo site", "https://www.yahoo.co.jp"]])("item 6: %s on a blank tab is resolved and opened", async (command, address) => {
+    const b = blank(), r = resolving(address);
+    const result = await runBrowserUse({ goal: command, scope, command: true, yieldAfterAction: true } as never, { call: b.call, evaluate: jev().evaluate, resolveFieldText: r.resolveFieldText }, new AbortController().signal);
+    expect(r.requests).toHaveLength(1);
+    expect(r.requests[0].page).toEqual({ url: "", title: "", text: "" });
+    expect(b.mutations().map(m => [m.name, m.args.url])).toEqual([["tab_navigate", "https://www.yahoo.co.jp/"]]);
+    expect(result.commandOutcome).toMatchObject({ done: true, action: { kind: "navigate" } });
+  });
+  test("item 6: an unresolvable site on a blank tab sends nothing and is a not-done command (handed to the agent)", async () => {
+    const { agentHandoffRequested } = await import("../../../src/automation/command-speech");
+    const b = blank(), r = resolving(null);
+    const result = await runBrowserUse({ goal: "เข้าเว็บนั้น", scope, command: true, yieldAfterAction: true } as never, { call: b.call, evaluate: jev().evaluate, resolveFieldText: r.resolveFieldText }, new AbortController().signal);
+    expect(b.mutations()).toEqual([]);
+    expect(result.commandOutcome).toMatchObject({ done: false, reason: "START_URL_REQUIRED" });
+    expect(agentHandoffRequested({ browserReport: result as never })).toBe(true);
+  });
+  // Item 4: missing text for a single direct command is no pending question.
+  test.each(["fill it in", "กรอกช่องนี้"])("item 4: %s with no text to enter is a not-done command, not a field question", async command => {
+    const { agentHandoffRequested } = await import("../../../src/automation/command-speech");
+    const b = browser(page({ elements: [el("f", "Destination", { tag: "input", operations: ["TYPE_TEXT"] })] }));
+    const result = await run(command, b, jev({ operation: () => "TYPE_TEXT" }));
+    expect(b.mutations()).toEqual([]);
+    expect(result).toMatchObject({ status: "needs_verification", reason: "COMMAND_WAITING_INPUT", commandOutcome: { done: false, reason: "FIELD_TEXT_REQUIRED" } });
+    expect(result.fieldRequest).toBeUndefined();
+    expect(agentHandoffRequested({ browserReport: result as never })).toBe(true);
+  });
+  test("item 4: a step part keeps its own field request", async () => {
+    const b = browser(page({ elements: [el("f", "Destination", { tag: "input", operations: ["TYPE_TEXT"] })] }));
+    const result = await run("fill it in", b, jev({ operation: () => "TYPE_TEXT" }), { stepPart: true });
+    expect(result).toMatchObject({ status: "blocked", reason: "FIELD_TEXT_REQUIRED" });
+  });
+  // Item 7: a stale page is read again after a second, not at once.
+  test("item 7: a stale observation waits about a second before Jev decides again", async () => {
+    const { STALE_RETRY_DELAY_MS } = await import("../../../src/automation/browser-use");
+    expect(STALE_RETRY_DELAY_MS).toBeGreaterThanOrEqual(1000);
+    let stale = true;
+    const b = browser(page({ elements: [el("l1", "News", { tag: "a", role: "link" })] }), { page_click: (_a, p) => { if (stale) { stale = false; return { error: "STALE_OBSERVATION", action_executed: false }; } return { ...p, text: "news" }; } });
+    const started = Date.now();
+    const j = jev({ operation: () => "CLICK" });
+    const result = await run("click News", b, j);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(j.requests).toHaveLength(2);
+    expect(b.mutations().map(m => m.name)).toEqual(["page_click", "page_click"]);
+    expect(result.commandOutcome).toMatchObject({ done: true });
   });
 });

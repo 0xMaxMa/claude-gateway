@@ -229,7 +229,7 @@ Agents discover their targets with `capabilities_list(scope="browser")` and subm
 ### Results, recovery and reporting
 
 - `succeeded / VERIFIED` becomes completed only when the adapter's trusted independent verifier passed and permission remains valid.
-- `blocked / FIELD_TEXT_REQUIRED` uses the existing task question flow. The parent receives the missing field label when available. Answering is a new authorized bounded attempt; old element refs are not replayed. For an unambiguous missing field, the gateway binds the authenticated task answer to that field label and supplies its exact text to the fresh run. Previously answered fields remain available. Ambiguous labels require parent inspection; no stale element reference is reused. Answers longer than 2,000 characters are rejected before browser dispatch.
+- `blocked / FIELD_TEXT_REQUIRED` uses the existing task question flow (agent tasks and step lists; a single direct command under user control is handed to the agent instead). The parent receives the missing field label when available. Answering is a new authorized bounded attempt; old element refs are not replayed. For an unambiguous missing field, the gateway binds the authenticated task answer to that field label and supplies its exact text to the fresh run. Previously answered fields remain available. Ambiguous labels require parent inspection; no stale element reference is reused. Answers longer than 2,000 characters are rejected before browser dispatch.
 - `needs_verification` and other bounded handoffs require parent reconciliation. Keep the exact reason rather than pretending that DONE proved completion.
 - Any unknown mutation outcome takes precedence, including after cancellation. Preserve operation IDs; do not replay automatically.
 - Confirmed cancellation stops the request. A adapter ignoring cancellation is bounded by a watchdog and remains uncertain, not confirmed stopped.
@@ -527,8 +527,8 @@ Jev decision over the observed controls and dispatches at most one action.
   the step is recorded as a note and the run continues in the same tab.
 - **Covered targets.** When something covers the chosen link or button (the
   extension's `STALE_OBSERVATION` with cause `TARGET_OBSCURED`), the page is not
-  changing, so a direct command is not retried. It reports `TARGET_OBSCURED`
-  (spoken as "something is covering that button or link") instead of using up
+  changing, so a direct command is not retried. It reports `TARGET_OBSCURED` and
+  is handed to the agent (see the agent hand-off), instead of using up
   the stale-read budget as "the screen is changing". An agent task may still
   choose another control, such as closing the overlay. If its stale budget runs
   out on a covered target, it ends as `TARGET_OBSCURED`. A real page change
@@ -537,7 +537,7 @@ Jev decision over the observed controls and dispatches at most one action.
   click or selection Jev chooses for it runs under Jev's normal confidence rules,
   whatever the control is called and whatever words the command uses (`ลบ`,
   `send`, `送信`). There is no word list. The agent's command for a handed-off
-  utterance is the exception; see [Agent hand-off](#agent-hand-off-when-jev-gives-up).
+  utterance is the exception; see [Agent hand-off](#agent-hand-off).
 - **Outcome line.** Each settled command sets the task progress text to `Done:
   …` (for example `Done: searched in "Search"`) or `Not done: …` with a hint.
   A not-done command dispatched nothing; the session keeps waiting for the next
@@ -721,13 +721,12 @@ through direct control or sent by the agent. Step lists apply them to each part.
   press Jev chooses for it runs under Jev's normal confidence rules, whatever the
   control is called (`Delete`, `Send`, a dialog `OK`) and whatever words the
   command uses. There is no word list. The agent's command for a handed-off
-  utterance is the exception; see [Agent hand-off](#agent-hand-off-when-jev-gives-up).
+  utterance is the exception; see [Agent hand-off](#agent-hand-off).
 - **Browser shortcuts.** `Cmd+T`/`⌘T`/`new tab`/`เปิด tab ใหม่`/`เปิดแท็กใหม่`, `Cmd+N`/`new
   window` and `Cmd+W`/`close tab`/`ปิดแท็บ` press the front application's own
-  menu command (or an identically named button) without Jev. If it is not
-  available the command waits rather than doing something else:
-  `SHORTCUT_NOT_OFFERED` when a browser is in front but offers no such command,
-  `SHORTCUT_UNAVAILABLE` when another application is in front.
+  menu command (or an identically named button) without Jev. If no such command
+  or button is on screen, Jev decides the command from the screen instead; the
+  same applies when an address has no address bar to type into.
 - **Opening a site.** `เข้า google`, `เปิด youtube`, `go to example.com` or a
   bare address such as `www.google.com` types the address into the browser's
   address bar and presses Enter, without Jev. A few well-known site names map to
@@ -741,8 +740,7 @@ through direct control or sent by the agent. Step lists apply them to each part.
   (`ปิด chrome`, `quit chrome`, `Chromeを終了して`); a command that only starts
   with `ปิด`/`close`, such as `close notification`, is decided like any other.
   With the helper's `app:quit` the guarded quit shortcut runs; otherwise Jev picks
-  the front application's own Quit menu command. Jev's normal confidence rules
-  apply (below them, `LOW_CONFIDENCE`). For the agent's command for a handed-off
+  the front application's own Quit menu command, whatever Jev's confidence. For the agent's command for a handed-off
   utterance, quitting asks the user first. A command naming an
   application that is not in front is left to Jev, which answers `BLOCKED`.
   `Cmd+Q` uses `app:quit` directly when the helper offers it.
@@ -764,12 +762,11 @@ through direct control or sent by the agent. Step lists apply them to each part.
   `Subtract` only when no visible Delete control could be meant, otherwise Jev
   decides. A number is pressed digit by
   digit: `ห้า ศูนย์`, `ห้าสิบ` and `50` press `5` then `0`, each matched again
-  on a fresh observation after the previous press settles. At most 8 presses
-  (`SEQUENCE_TOO_LONG` otherwise). Two number forms that disagree, such as
-  `ห้า ห้าสิบ`, press nothing and ask back (`ห้า หรือ ห้าสิบ?`). Everyday
-  shorthand that ends in a digit after `ร้อย`, `พัน`, `หมื่น`, `แสน` or `ล้าน`
-  (`ร้อยห้า` is 105 or 150) also asks back (`105 หรือ 150?`); `ร้อยห้าสิบ` and
-  `ร้อยเอ็ด` are unambiguous. These presses need a keypad on screen (each digit
+  on a fresh observation after the previous press settles, with no cap on the
+  number of digits. A reading that is not one clear number, such as `ห้า ห้าสิบ`
+  or shorthand ending in a digit after `ร้อย`, `พัน`, `หมื่น`, `แสน` or `ล้าน`
+  (`ร้อยห้า` is 105 or 150), is not asked back: Jev decides from the screen.
+  `ร้อยห้าสิบ` and `ร้อยเอ็ด` are unambiguous. These presses need a keypad on screen (each digit
   0–9 shown exactly once, as in Calculator); elsewhere words such as `clear`,
   `add` or `one` go to Jev. If a press is refused part-way the rest is not
   pressed and the outcome says how far it got; an uncertain press stops for
@@ -796,7 +793,7 @@ through direct control or sent by the agent. Step lists apply them to each part.
   `Window → Zoom` without any word matching.
 - **Outcome line.** Each settled command sets the task progress text to what was
   done (for example `Done: pressed "New Tab"`) or why nothing was done, with a
-  hint (`LOW_CONFIDENCE` with its score, `FIELD_TEXT_REQUIRED`, `FOCUS_REQUIRED`,
+  hint (`FIELD_TEXT_REQUIRED`, `FOCUS_REQUIRED`,
   `NO_SUPPORTED_ACTION`, a confirmation question, or the step at which a step run
   stopped).
 - **Rapid commands.** While the user controls the task, a command sent while
@@ -913,23 +910,25 @@ Actions are `pause`, `revise`, `resume`, `agent`, and `user`. Only `revise` acce
 
 On the existing voice WebSocket, `voice.start` and `voice.configure` accept `execution_task_id` as a task UUID, or `null` to return to the conversational agent. The target remains fixed across segments of one utterance. Confirmed speech can pause new actions while the correction is transcribed (except while the user's own direct command runs: then the speech is queued as the next command); microphone noise alone does not authorize a new command. Stop cannot undo an OS/browser action already dispatched.
 
-A spoken direct command that does nothing gets one short spoken reply on that voice session, in Thai for a Thai command or a Thai conversation (`voice.language`, else any of the conversation's last five messages in Thai, so `Go.` is answered in Thai) and English otherwise: for example `ไม่แน่ใจว่า ห้า คือปุ่มไหน ลองพูดใหม่อีกครั้ง` (low confidence), `ไม่เจอปุ่ม บัว บนหน้าจอ` (no matching control), or the clarification `ห้า หรือ ห้าสิบ?`. When the receipt for the last action is missing, it says the gateway is not sure the command ran and to check the screen before repeating it (`ไม่แน่ใจว่า ห้า ทำไปแล้วหรือยัง ดูหน้าจอก่อนสั่งใหม่`), never "say it again". It repeats only the user's own words, never screen text. The conversation history records a generic form (`ไม่แน่ใจว่า คำสั่งนี้ คือปุ่มไหน ...`), so the user's words are never stored as assistant text. A command that ran stays silent, since the user can see the result. Other replies include `เปิดแท็บใหม่ไม่ได้ บอกชื่อเว็บแทน` (`NEW_TAB_OUT_OF_SCOPE`) and a request to bring the browser to the front (`SHORTCUT_UNAVAILABLE`). "Say it again" is spoken only while the task still takes commands; if the command ended the task, the reply says the task has stopped and a new one is needed. Typed commands are unchanged: the outcome line stays on the task, with no extra chat notice. Speech recognition quality (for example `บวก` heard as `บัว`) is outside the gateway.
+A spoken direct command that does nothing gets one short spoken reply on that voice session, in Thai for a Thai command or a Thai conversation (`voice.language`, else any of the conversation's last five messages in Thai, so `Go.` is answered in Thai) and English otherwise: for example `หน้าจอกำลังเปลี่ยน ลองพูดใหม่อีกครั้ง` or `ไม่เจอปุ่ม บัว บนหน้าจอ` (no matching control). Most not-done commands are handed to the agent instead (see the agent hand-off below), so these lines remain mainly for the agent's own hand-off command and for outcomes that are their own answer. When the receipt for the last action is missing, it says the gateway is not sure the command ran and to check the screen before repeating it (`ไม่แน่ใจว่า ห้า ทำไปแล้วหรือยัง ดูหน้าจอก่อนสั่งใหม่`), never "say it again". It repeats only the user's own words, never screen text. The conversation history records a generic form (`ยังไม่ได้ทำ คำสั่งนี้ ...`), so the user's words are never stored as assistant text. A command that ran stays silent, since the user can see the result. Other replies include `เปิดแท็บใหม่ไม่ได้ บอกชื่อเว็บแทน` (`NEW_TAB_OUT_OF_SCOPE`) "Say it again" is spoken only while the task still takes commands; if the command ended the task, the reply says the task has stopped and a new one is needed. Typed commands are unchanged: the outcome line stays on the task, with no extra chat notice. Speech recognition quality (for example `บวก` heard as `บัว`) is outside the gateway.
 
-**Read requests.** A direct command that only asks about what is shown (for example `อ่านให้ฟังหน่อย ลิเวอร์พูลจะเตะกับใครในแมตช์ถัดไป` or `what does this page say?`) is not an action. Jev decides this itself, in any language, by choosing `READ_REQUEST` among its offered operations; there is no keyword list. Only a single direct command under user control that has not dispatched an action yet is offered `READ_REQUEST`; agent control and every step of a Remote Browser or Computer Use step list are not, so a step list never stops as a read request. A `READ_REQUEST` below the confident bar (confidence 0.55, probability 0.5), or a malformed decision, keeps the ordinary not-done behaviour. No step is dispatched. The gateway then makes the same input an ordinary user turn: its control receipt becomes `needs_agent` with code `READ_REQUEST`, the message is recorded in history, and the agent answers it, also while the user controls the task. That turn is read-only (`execute` off, task mutations rejected with `READ_REQUEST_ONLY`). The agent reads fresh evidence (`task_status` with `browser_evidence=fresh` or `computer_evidence=fresh`) and answers in 1–3 short sentences (at most about 400 characters). Page and screen text stays untrusted data, and sensitive field values and token-bearing URLs are never read out. No "not done" line is spoken for a read request.
+**Read requests.** A direct command that only asks about what is shown (for example `อ่านให้ฟังหน่อย ลิเวอร์พูลจะเตะกับใครในแมตช์ถัดไป` or `what does this page say?`) is not an action. Jev decides this itself, in any language, by choosing `READ_REQUEST` among its offered operations; there is no keyword list. Only a single direct command under user control that has not dispatched an action yet is offered `READ_REQUEST`; agent control and every step of a Remote Browser or Computer Use step list are not, so a step list never stops as a read request. Jev's `READ_REQUEST` goes to the agent whatever its confidence; a malformed decision keeps the ordinary not-done behaviour. No step is dispatched. The gateway then makes the same input an ordinary user turn: its control receipt becomes `needs_agent` with code `READ_REQUEST`, the message is recorded in history, and the agent answers it, also while the user controls the task. That turn is read-only (`execute` off, task mutations rejected with `READ_REQUEST_ONLY`). The agent reads fresh evidence (`task_status` with `browser_evidence=fresh` or `computer_evidence=fresh`) and answers in 1–3 short sentences (at most about 400 characters). Page and screen text stays untrusted data, and sensitive field values and token-bearing URLs are never read out. No "not done" line is spoken for a read request.
 
-**Agent hand-off when Jev gives up.** Jev's normal path is unchanged: there is no
-confidence threshold, and fast paths, `NAVIGATE`, `READ_REQUEST` and the text-entry
-guard behave as before. Where `READ_REQUEST` is offered (a single direct command
-under user control that has not acted yet), Jev is also offered `UNCLEAR`: "I do
-not understand this command". When Jev itself gives up on such a command, by
-choosing `BLOCKED` or `UNCLEAR` (Computer Use: also a confident `BLOCKED` target), nothing is dispatched. The outcome
-is marked (`commandOutcome.gaveUp` on Remote Browser; a `waiting` trace event with
-`decisionMode: "jev"` on Computer Use), and the gateway hands the same input to
-the agent through the read-request route. The control receipt becomes `needs_agent`
-with code `AGENT_HANDOFF`, the message is recorded in history, and the agent gets
-a turn even under user control. Nothing is spoken at the hand-off; the agent's
-own reply is the only response. Low confidence, deterministic not-done outcomes (scroll limit, no search
-field, and so on), uncertain receipts and step runs never hand off.
+**Agent hand-off when nothing ran.** A direct command never ends at "say it
+again" while the agent could still help. Where `READ_REQUEST` is offered (a single
+direct command under user control that has not acted yet), Jev is also offered
+`UNCLEAR`: "I do not understand this command". When a single direct command ends
+with nothing dispatched, for any reason (Jev chose `BLOCKED` or `UNCLEAR`, the
+screen kept changing, a target was covered or needed focus, the text to enter or
+the site to open could not be found, a Jev decision failed, and so on), the gateway
+hands the same input to the agent through the read-request route. The control
+receipt becomes `needs_agent` with code `AGENT_HANDOFF`, the message is recorded
+in history, and the agent gets a turn even under user control. Nothing is spoken
+at the hand-off; the agent's own reply is the only response. Outcomes that are
+their own answer never hand off: a read request, the session start, a
+confirmation question or the user's "no", `SCROLL_LIMIT`, `NEW_TAB_OUT_OF_SCOPE`,
+`HISTORY_UNAVAILABLE`, `NOTHING_TO_ERASE` and `KEY_UNSUPPORTED`. Step runs, a
+command where any action ran, and uncertain receipts never hand off either.
 
 The agent reads fresh evidence and may send **at most one** command for that
 utterance: a `task_update` with `mode=when_ready` on the same task, at the revision
@@ -964,5 +963,20 @@ finds no action in them (`BLOCKED`, `UNCLEAR`, `READ_REQUEST`; on Computer Use
 also low confidence), the round ends ready (`SESSION_READY`, outcome `Ready: the session
 is open and waits for the next command.`), never `Not done`, and nothing is
 spoken or handed off. A concrete first command still runs.
+
+**The next command always runs.** A Computer Use direct command has no
+confidence bar: Jev's best choice runs, as on Remote Browser (agent-driven runs
+keep their own gate). A new direct command from the owner supersedes a pending
+question such as `FIELD_TEXT_REQUIRED` (the question is closed) and restarts a
+round that failed, timed out or ended with a Jev failure (`JEV_INVALID_RESPONSE`,
+`ADAPTER_TIMEOUT`...). A single direct command missing its text does not become a
+pending question either: it is handed to the agent. A screen that is still
+changing (Jev's `WAIT`, a target that moved, a stale rejection) is looked at again
+after about a second and decided afresh, at most twice, while nothing of the
+command has run; Remote Browser waits about a second between stale reads. On a
+blank Remote Browser tab, a site the fixed address forms do not read is resolved
+by the text helper, as for `NAVIGATE`. A key such as Enter with no reported
+focus goes to the application in front. Only an action whose result is unknown,
+or execution cut off mid-way, still needs reconciliation first.
 
 A safely stopped confidence/provider failure permits a fresh explicit command on the same open task. A closed session or uncertain mutation cannot be resumed this way; inspect and reconcile the retained receipt first.

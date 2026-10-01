@@ -162,17 +162,22 @@ describe('6. a relay that drops standard_command',()=>{
  });
 });
 
-describe('7. shortcut hints name the real obstacle',()=>{
- test('a browser in front without the command is not told to bring the browser forward',async()=>{
-  const state=chrome();state.controls=state.controls.filter((c:any)=>c.ref!=='m1'&&c.ref!=='c5');
-  const r=await run(fixture(state),'เปิด tab ใหม่');
-  expect(r.trace.events.filter(e=>e.phase==='waiting').map(e=>e.reason)).toEqual(['SHORTCUT_NOT_OFFERED']);
+// Audit d09d63d0 item 5: a shortcut whose menu command is not on screen is no
+// refusal ("bring the browser forward"); Jev decides from the screen instead.
+describe('7. a shortcut with no target on screen goes to Jev',()=>{
+ test.each([['a browser in front',{}],['another application in front',{application:'ai.getpod.computer-use',windowTitle:'GetPod Computer Use',apps:[{id:'com.google.Chrome',name:'Google Chrome'},{id:'ai.getpod.computer-use',name:'GetPod Computer Use'}]}]])('%s',async(_name,patch)=>{
+  const state=chrome(patch);state.controls=state.controls.filter((c:any)=>c.ref!=='m1'&&c.ref!=='c5');
+  let asked=0;
+  const r=await run(fixture(state,{evaluate:()=>{asked++;return {answers:{}};}}),'เปิด tab ใหม่');
+  expect(asked).toBe(1);
+  expect(r.trace.events.some(e=>['SHORTCUT_NOT_OFFERED','SHORTCUT_UNAVAILABLE'].includes(e.reason??''))).toBe(false);
  });
- test('another application in front keeps the bring-the-browser-forward hint',async()=>{
-  const state=chrome({application:'ai.getpod.computer-use',windowTitle:'GetPod Computer Use',apps:[{id:'com.google.Chrome',name:'Google Chrome'},{id:'ai.getpod.computer-use',name:'GetPod Computer Use'}]});
-  state.controls=state.controls.filter((c:any)=>c.ref!=='m1'&&c.ref!=='c5');
-  const r=await run(fixture(state),'เปิด tab ใหม่');
-  expect(r.trace.events.filter(e=>e.phase==='waiting').map(e=>e.reason)).toEqual(['SHORTCUT_UNAVAILABLE']);
+ test('a standard shortcut the helper drops falls through to Jev too',async()=>{
+  const state=chrome({capabilities:{standardCommands:['tab:new']}});state.controls=state.controls.filter((c:any)=>c.ref!=='m1'&&c.ref!=='c5');
+  let asked=0;
+  const r=await run(fixture(()=>({...state,standardCommand:'tab:new'}),{evaluate:()=>{asked++;return {answers:{}};}}),'เปิด tab ใหม่');
+  expect(asked).toBe(1);
+  expect(r.trace.events.some(e=>['SHORTCUT_NOT_OFFERED','SHORTCUT_UNAVAILABLE'].includes(e.reason??''))).toBe(false);
  });
 });
 

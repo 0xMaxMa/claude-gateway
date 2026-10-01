@@ -58,12 +58,13 @@ describe('P0-2 erase vs Delete (revision 43: "ลบๆๆๆ" pressed Notes Del
    expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'c7'})]);
   }
  });
- test('below Jev\'s normal confidence bar nothing is pressed (LOW_CONFIDENCE)',async()=>{
+ // Audit d09d63d0 item 1: no confidence bar for a direct command; Jev's best choice runs.
+ test.each(['ลบๆๆๆ','press it','それを押して'])('an unsure pick (0.4) still runs for the user\'s command: %s',async command=>{
   const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;
   const f=fixture(state,'press:c7',0.4);
-  const r=await run(f,'ลบๆๆๆ');
-  expect(f.actions()).toEqual([]);
-  expect(r.trace.events.some(e=>e.reason==='LOW_CONFIDENCE')).toBe(true);
+  const r=await run(f,command);
+  expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'c7'})]);
+  expect(r.trace.events.some(e=>e.reason==='LOW_CONFIDENCE')).toBe(false);
  });
  test('"ok" on a dialog presses what Jev picks',async()=>{
   const dialog={generation:'g2',application:'com.apple.Notes',windowTitle:'',truncated:false,apps:[],focusedControl:{role:'AXSheet',label:'alert'},
@@ -98,10 +99,13 @@ describe('E2E-2 shortcut steps execute their shortcut',()=>{
   expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'m1'})]);
   expect(r.lastAction).toMatchObject({kind:'press',label:'Menu: File → New Tab'});
  });
- test('an unavailable shortcut returns control rather than doing something else',async()=>{
+ // Audit d09d63d0 item 5: no target for the shortcut means Jev decides, not a refusal.
+ test('a shortcut with no target on screen falls through to Jev',async()=>{
   const f=fixture(notes(),'press:c8',0.9);
   const r=await run(f,'Cmd+T');
-  expect(f.actions()).toEqual([]);expect(r.trace.events.some(e=>e.reason==='SHORTCUT_UNAVAILABLE')).toBe(true);
+  expect(f.requests).toHaveLength(1);
+  expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'c8'})]);
+  expect(r.trace.events.some(e=>e.reason==='SHORTCUT_UNAVAILABLE')).toBe(false);
  });
 });
 
@@ -109,7 +113,6 @@ describe('P0-3 per-command outcome text',()=>{
  const base={status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1,phase:'terminal'};
  test.each([
   [{...base,lastAction:{kind:'press',label:'Delete',role:'AXButton'},trace:[{phase:'waiting',reason:'ACTION_DISPATCHED'}]},/Done: pressed "Delete"/],
-  [{...base,steps:0,trace:[{phase:'decided',confidence:0.42},{phase:'waiting',reason:'LOW_CONFIDENCE'}]},/Not done.*0\.42/],
   [{...base,steps:0,trace:[{phase:'waiting',reason:'FIELD_TEXT_REQUIRED'}]},/Not done.*quotes/],
   [{...base,steps:0,trace:[{phase:'waiting',reason:'FOCUS_REQUIRED'}]},/Not done.*focus/i],
   [{...base,steps:0,trace:[{phase:'waiting',reason:'NO_SUPPORTED_ACTION'}]},/Not done.*no visible control/i],
@@ -135,13 +138,12 @@ describe('READ_REQUEST: a direct command that asks about the screen',()=>{
   expect(computerOutcomeText(report)).toMatch(/^Read request:/);
   expect(directCommandSpeech({computerReport:report},ask,{thai:true})).toBeUndefined();
  });
- test('an uncertain READ_REQUEST stays LOW_CONFIDENCE, and agent control is never offered it',async()=>{
+ test('an unsure READ_REQUEST still goes to the agent, and agent control is never offered it',async()=>{
   const {readRequested}=await import('../../../src/automation/command-speech');
   const low=fixture(chrome(),'READ_REQUEST',0.4);
   const r=await run(low,ask);
   expect(low.actions()).toEqual([]);
-  expect(r.trace.events.some(e=>e.reason==='LOW_CONFIDENCE')).toBe(true);
-  expect(readRequested({computerReport:{...r,trace:r.trace.events} as never})).toBe(false);
+  expect(readRequested({computerReport:{...r,trace:r.trace.events} as never})).toBe(true);
   const agent=fixture(chrome(),'READ_REQUEST');
   const a=await runComputerUse({goal:ask,yieldAfterAction:true},agent.deps,new AbortController().signal);
   expect(Object.keys(agent.requests[0].questions.action.criteria)).not.toContain('READ_REQUEST');
@@ -191,18 +193,22 @@ describe('AGENT_HANDOFF: Jev gives up on a single direct command',()=>{
   // If the gateway does not hand it off, the not-done line is still spoken.
   expect(directCommandSpeech({computerReport:report},odd,{thai:true})?.spoken).toBeTruthy();
  });
- test('step parts, agent control, low confidence and deterministic not-done never request a hand-off',async()=>{
+ // Audit d09d63d0 item 3: any single command that ran nothing qualifies (the runtime
+ // never hands off the agent's own hand-off command again); a step run, an action
+ // that ran, and an answer of its own (scroll limit, confirmation) do not.
+ test('a hand-off is requested for any unexecuted single command, never for step runs or actions that ran',async()=>{
   const {agentHandoffRequested}=await import('../../../src/automation/command-speech');
-  const step=fixture(chrome(),'BLOCKED');
-  const s=await runComputerUse({goal:odd,yieldAfterInteraction:true,maxSteps:3},step.deps,new AbortController().signal);
-  expect(agentHandoffRequested({computerReport:{...s,trace:s.trace.events} as never})).toBe(false);
   const low=fixture(chrome(),'BLOCKED',0.4);
   const l=await run(low,odd);
-  expect(agentHandoffRequested({computerReport:{...l,trace:l.trace.events} as never})).toBe(false);
+  expect(agentHandoffRequested({computerReport:{...l,trace:l.trace.events} as never})).toBe(true);
   const handoff=fixture(chrome(),'UNCLEAR');
-  const h=await runComputerUse({goal:odd,yieldAfterInteraction:true,agentCommand:true},handoff.deps,new AbortController().signal);
+  await runComputerUse({goal:odd,yieldAfterInteraction:true,agentCommand:true},handoff.deps,new AbortController().signal);
   expect(Object.keys(handoff.requests[0].questions.action.criteria)).not.toContain('UNCLEAR');
-  expect(agentHandoffRequested({computerReport:{...h,trace:h.trace.events} as never})).toBe(false);
+  const base={status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1};
+  expect(agentHandoffRequested({computerReport:{...base,stepRun:{total:2,completed:0,stopReason:'STEP_NOT_EXECUTED',stoppedAt:1,remaining:[]},trace:[{phase:'waiting',reason:'NO_SUPPORTED_ACTION'}]} as never})).toBe(false);
+  expect(agentHandoffRequested({computerReport:{...base,steps:1,trace:[{phase:'waiting',reason:'NO_SUPPORTED_ACTION'}]} as never})).toBe(false);
+  expect(agentHandoffRequested({computerReport:{...base,trace:[{phase:'waiting',reason:'CONFIRMATION_REQUIRED'}]} as never})).toBe(false);
+  expect(agentHandoffRequested({computerReport:{...base,reason:'OUTCOME_UNKNOWN',trace:[{phase:'waiting',reason:'NO_SUPPORTED_ACTION'}]} as never})).toBe(false);
  });
  const agentRun=(f:ReturnType<typeof fixture>,goal:string)=>runComputerUse({goal,yieldAfterInteraction:true,agentCommand:true},f.deps,new AbortController().signal);
  // Session d8013081: the agent's command keeps protection, but Jev (not a word
@@ -306,5 +312,19 @@ describe('the session-start round',()=>{
  test('an actionable first command still runs',async()=>{
   const f=fixture(chrome(),'press:c50',0.9);await start(f,'เข้า link แรก');
   expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'c50'})]);
+ });
+});
+
+// Audit d09d63d0 item 7: a changing screen is looked at again after a second and
+// Jev decides afresh (at most twice) before the command returns unexecuted.
+describe('a changing screen is decided afresh',()=>{
+ test('Jev WAIT, then a press on the settled screen runs',async()=>{
+  const f=fixture(chrome(),'press:c50',0.9);let asked=0;const evaluate=f.deps.evaluate;
+  f.deps.evaluate=async(req:any,s:AbortSignal)=>{asked++;const a:any=await evaluate(req,s);if(asked===1)a.answers.action={choice:'WAIT',confidence:0.9,probabilities:Object.fromEntries(Object.keys(req.questions.action.criteria).map(k=>[k,k==='WAIT'?0.9:0.1/(Object.keys(req.questions.action.criteria).length-1)]))};return a;};
+  const started=Date.now();const r=await run(f,'open the first result');
+  expect(Date.now()-started).toBeGreaterThanOrEqual(900);
+  expect(asked).toBe(2);
+  expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'c50'})]);
+  expect(r.trace.events.some(e=>e.reason==='UI_NOT_READY')).toBe(false);
  });
 });

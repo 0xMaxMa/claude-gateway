@@ -37,3 +37,42 @@ for(const modality of ['text','live_voice'] as const)test(`${modality} correctio
   expect(denied.task).toBeUndefined();expect(store.task(task.taskId)!.revision).toBe(3);
  }finally{store.close();rmSync(root,{recursive:true,force:true});}
 });
+
+// Audit d09d63d0 item 2 (session a2f5a205): with a FIELD_TEXT_REQUIRED question
+// pending, "เข้า Facebook" was swallowed as STATE_CONFLICT and became a message to
+// the agent. The owner's new command supersedes the question and runs.
+describe('a new direct command supersedes a pending question or a failed round',()=>{
+ function fixture(adapter:'computer'|'browser'){
+  const root=mkdtempSync(join(tmpdir(),'live-supersede-')),store=new OrchestrationStore(join(root,'db'),'a'),tasks=new TaskService(store),decisions=new DecisionService(store);
+  const scope={agentId:'a',agentSessionId:'s',source:'api' as const,accountId:'u',chatId:'c',threadKey:'',principalId:'u'},capabilities={execute:true,writeMemory:false};
+  const accepted=store.acceptInput({scope,text:'open',capabilities});
+  const decision=decisions.begin(accepted.conversationId,'u',[accepted.inputId]);
+  const task=tasks.spawn({...accepted,...decision,principalId:'u',...capabilities,actionId:'spawn'},{title:'Live',instructions:'Open',targetProfile:'gateway-managed',gatewayTarget:{adapter,sessionId:'t',name:'T'}});
+  const set=(patch:Record<string,unknown>)=>{const t=store.task(task.taskId)!;Object.assign(t,patch);delete t.activeAttemptId;store.transaction(()=>store.saveTask(t,t.stateVersion));};
+  const send=(text:string)=>liveExecutionInput(store,tasks,{scope,text,modality:'live_voice',ingressKey:randomUUID(),metadata:{executionTaskId:task.taskId}},capabilities)!;
+  return {store,task,set,send,close:()=>{store.close();rmSync(root,{recursive:true,force:true});}};
+ }
+ test.each(['computer','browser'] as const)('%s: a pending FIELD_TEXT_REQUIRED question is closed and the command runs',adapter=>{
+  const f=fixture(adapter);try{
+   const report={status:'blocked',reason:'FIELD_TEXT_REQUIRED',steps:0,evaluations:1};
+   f.set({state:'waiting_input',automationController:'user',...(adapter==='computer'?{computerReport:report}:{browserReport:report}),pendingQuestion:{questionId:randomUUID(),text:'What should be typed in Search?',revision:1}});
+   const r=f.send('เข้า Facebook');
+   expect(r).toMatchObject({status:'applied',revision:2});
+   const t=f.store.task(f.task.taskId)!;
+   expect(t.pendingQuestion).toBeUndefined();expect(t.state).toBe('queued');
+   expect(f.store.get('SELECT store_user_message FROM conversation_inputs WHERE id=?',r.inputId)!.store_user_message).toBe(0);
+  }finally{f.close();}
+ });
+ test.each(['ADAPTER_TIMEOUT','JEV_INVALID_RESPONSE','TIMEOUT','CANCELLED'])('a round that failed with %s takes the next command',reason=>{
+  const f=fixture('computer');try{
+   f.set({state:'failed',automationController:'user',computerReport:{status:'blocked',reason,steps:0,evaluations:1}});
+   expect(f.send('เข้า Yahoo')).toMatchObject({status:'applied',revision:2});
+  }finally{f.close();}
+ });
+ test.each([['computer',{computerReport:{status:'blocked',reason:'OUTCOME_UNKNOWN',steps:1}}],['browser',{browserReport:{status:'blocked',reason:'NO_PROGRESS',steps:1,evaluations:1,lastAction:{operationId:'op',operation:'CLICK',outcome:'unknown'}}}]] as const)('%s: an action whose result is unknown is never superseded',(adapter,patch)=>{
+  const f=fixture(adapter);try{
+   f.set({state:'failed',automationController:'user',...patch});
+   expect(f.send('กด Send')).toMatchObject({status:'needs_agent',code:'STATE_CONFLICT'});
+  }finally{f.close();}
+ });
+});

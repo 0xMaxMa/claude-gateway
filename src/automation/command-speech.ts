@@ -10,23 +10,22 @@ import {spokenCommand} from './direct-command';
  * silent; the user hears the device. Thai for a Thai command or a Thai
  * conversation ("Go." in a Thai session), else English. "Say it again" is
  * spoken only while the task still takes commands; an ended task says so.
+ * Most not-done commands are handed to the agent instead (agentHandoffRequested),
+ * which answers; these lines remain for the rest, such as the agent's own
+ * hand-off command.
  * Speaks only the user's own command words, and the chosen control's label when
  * asking to confirm the agent's high-impact command. The recorded
  * line (chat and history, authored as assistant) names the command generically,
  * so user words never become assistant-authored transcript text.
  */
 const THAI:Record<string,string>={
- LOW_CONFIDENCE:'ไม่แน่ใจว่า {command} คือปุ่มไหน ลองพูดใหม่อีกครั้ง',
  NO_SUPPORTED_ACTION:'ไม่เจอปุ่ม {command} บนหน้าจอ',
- SEQUENCE_TOO_LONG:'ตัวเลขยาวเกินไป พูดทีละไม่เกินแปดหลัก',
  CONFIRM:'จะกด {target} ใช่ไหม',
  SCREEN_CHANGING:'หน้าจอกำลังเปลี่ยน ลองพูดใหม่อีกครั้ง',
  PARTIAL:'กดได้ {done} จาก {planned} แล้วหยุด',
  UNKNOWN:'ไม่แน่ใจว่า {command} ทำไปแล้วหรือยัง ดูหน้าจอก่อนสั่งใหม่',
- CLARIFY:'ถามกลับว่าหมายถึงตัวเลขไหน',
  NEW_TAB:'เปิดแท็บใหม่ไม่ได้ บอกชื่อเว็บแทน',
  START_URL:'แท็บยังว่าง บอกชื่อเว็บก่อน เช่น เข้า google.com',
- BRING_BROWSER_FRONT:'ใช้คำสั่งนี้กับแอปที่อยู่หน้าสุดไม่ได้ เอาเบราว์เซอร์ขึ้นมาไว้หน้าสุดก่อน',
  OBSCURED:'มีบางอย่างบังปุ่มหรือลิงก์นั้นอยู่ ปิดหน้าต่างที่บังก่อน แล้วสั่งใหม่',
  NAVIGATION:'ไม่แน่ใจว่าจะเข้าเว็บไหน บอกชื่อเว็บให้ชัด เช่น เข้า yahoo.com',
  UNCLEAR:'ไม่เข้าใจคำสั่ง {command} ลองพูดแบบอื่นดู',
@@ -34,17 +33,13 @@ const THAI:Record<string,string>={
  DEFAULT:'ยังไม่ได้ทำ {command} ลองพูดใหม่อีกครั้ง',
 };
 const ENGLISH:Record<string,string>={
- LOW_CONFIDENCE:'Not sure which button {command} means. Please say it again.',
  NO_SUPPORTED_ACTION:'Could not find {command} on the screen.',
- SEQUENCE_TOO_LONG:'That number is too long. Say at most eight digits at a time.',
  CONFIRM:'Press {target}?',
  SCREEN_CHANGING:'The screen was changing. Please say it again.',
  PARTIAL:'Pressed {done} of {planned}, then stopped.',
  UNKNOWN:'Not sure whether {command} ran. Check the screen before saying it again.',
- CLARIFY:'Asked which number was meant.',
  NEW_TAB:'A new tab cannot be opened here. Say the site name instead.',
  START_URL:'The tab is still blank. Say the site first, for example go to google.com.',
- BRING_BROWSER_FRONT:'That shortcut does not work in the app in front. Bring the browser to the front first.',
  OBSCURED:'Something is covering that button or link. Close it first, then say it again.',
  NAVIGATION:'Not sure which website to open. Say its address, for example go to yahoo.com.',
  UNCLEAR:'Did not understand {command}. Try saying it another way.',
@@ -52,11 +47,9 @@ const ENGLISH:Record<string,string>={
  DEFAULT:'{command} was not done. Please say it again.',
 };
 const KIND:Record<string,string>={
- LOW_CONFIDENCE:'LOW_CONFIDENCE',LOW_OPERATION_CONFIDENCE:'LOW_CONFIDENCE',LOW_TARGET_CONFIDENCE:'LOW_CONFIDENCE',
- NO_SUPPORTED_ACTION:'NO_SUPPORTED_ACTION',SEQUENCE_TARGET_MISSING:'NO_SUPPORTED_ACTION',
- SEQUENCE_TOO_LONG:'SEQUENCE_TOO_LONG',CONFIRMATION_REQUIRED:'CONFIRM',
+ NO_SUPPORTED_ACTION:'NO_SUPPORTED_ACTION',SEQUENCE_TARGET_MISSING:'NO_SUPPORTED_ACTION',CONFIRMATION_REQUIRED:'CONFIRM',
  UI_NOT_READY:'SCREEN_CHANGING',STALE_OBSERVATION:'SCREEN_CHANGING',ACTION_CONTEXT_CHANGED:'SCREEN_CHANGING',STALE_RETRY_BUDGET:'SCREEN_CHANGING',WAIT_BUDGET:'SCREEN_CHANGING',
- NEW_TAB_OUT_OF_SCOPE:'NEW_TAB',SHORTCUT_UNAVAILABLE:'BRING_BROWSER_FRONT',START_URL_REQUIRED:'START_URL',
+ NEW_TAB_OUT_OF_SCOPE:'NEW_TAB',START_URL_REQUIRED:'START_URL',
  TARGET_OBSCURED:'OBSCURED',NAVIGATION_UNRESOLVED:'NAVIGATION',UNCLEAR:'UNCLEAR',
 };
 export interface SpeechContext {
@@ -75,19 +68,23 @@ export function readRequested(outcome:{computerReport?:ComputerTaskReport;browse
   [...(Array.isArray(computer.trace)?computer.trace:[])].reverse().find(e=>e.phase==='waiting'&&e.reason!=='POST_ACTION_EVIDENCE_STALE')?.reason==='READ_REQUEST';
  return !!browser&&!browser.stepRun&&browser.reason==='COMMAND_WAITING_INPUT'&&browser.commandOutcome?.reason==='READ_REQUEST'&&!browser.lastConfirmedAction&&browser.lastAction?.outcome!=='unknown';
 }
+// Not-done outcomes that are answers in themselves: a read request (its own
+// route), the session start, a confirmation question or the user's "no", and
+// plain facts nothing else could change.
+const NO_HANDOFF=new Set(['READ_REQUEST','SESSION_READY','CONFIRMATION_REQUIRED','CONFIRMATION_DECLINED','NEW_TAB_OUT_OF_SCOPE','SCROLL_LIMIT','HISTORY_UNAVAILABLE','NOTHING_TO_ERASE','KEY_UNSUPPORTED']);
 /**
- * Jev itself gave up on a single direct command (BLOCKED or UNCLEAR, no action
- * ran): the gateway may hand the same input to the agent once. Step runs, deterministic
- * not-done outcomes and uncertain receipts never qualify.
+ * A single direct command that ran nothing and did not end in an answer of its
+ * own: the gateway hands the same input to the agent once, instead of "say it
+ * again". Step runs, any action that ran, and uncertain receipts never qualify.
  */
 export function agentHandoffRequested(outcome:{computerReport?:ComputerTaskReport;browserReport?:BrowserTaskReport}):boolean{
  const computer=outcome.computerReport,browser=outcome.browserReport;
  if(computer){
   if(computer.stepRun||computer.reason!=='COMMAND_WAITING_INPUT'||computer.steps)return false;
   const waiting=[...(Array.isArray(computer.trace)?computer.trace:[])].reverse().find(e=>e.phase==='waiting'&&e.reason!=='POST_ACTION_EVIDENCE_STALE');
-  return waiting?.decisionMode==='jev'&&['NO_SUPPORTED_ACTION','UNCLEAR'].includes(waiting.reason??'');
+  return !!waiting?.reason&&!NO_HANDOFF.has(waiting.reason);
  }
- return !!browser&&!browser.stepRun&&browser.reason==='COMMAND_WAITING_INPUT'&&browser.commandOutcome?.gaveUp===true&&!browser.lastConfirmedAction&&browser.lastAction?.outcome!=='unknown';
+ return !!browser&&!browser.stepRun&&browser.reason==='COMMAND_WAITING_INPUT'&&browser.commandOutcome?.done===false&&!NO_HANDOFF.has(browser.commandOutcome.reason??'')&&!browser.lastConfirmedAction&&browser.lastAction?.outcome!=='unknown';
 }
 export function directCommandSpeech(outcome:{computerReport?:ComputerTaskReport;browserReport?:BrowserTaskReport},command:string,context:SpeechContext={}):{spoken:string;recorded:string}|undefined{
  // The agent speaks the answer itself.
@@ -103,7 +100,6 @@ export function directCommandSpeech(outcome:{computerReport?:ComputerTaskReport;
  if(line?.startsWith(UNKNOWN_PREFIX))return render(words.UNKNOWN);
  if(!line?.startsWith('Not done'))return;
  if(context.ended)return render(words.ENDED);
- if(computer?.clarification)return {spoken:computer.clarification,recorded:words.CLARIFY};
  const sequence=computer?.lastAction?.sequence,planned=computer?.lastAction?.planned;
  if(sequence&&planned&&sequence.length<planned)return render(words.PARTIAL.replace('{done}',String(sequence.length)).replace('{planned}',String(planned)));
  const reason=computer?[...(computer.trace??[])].reverse().find(e=>e.phase==='waiting'&&e.reason!=='POST_ACTION_EVIDENCE_STALE')?.reason??computer.reason:browser!.commandOutcome?.reason??browser!.reason;

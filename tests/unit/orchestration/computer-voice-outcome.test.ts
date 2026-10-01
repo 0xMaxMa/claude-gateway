@@ -22,7 +22,7 @@ const low:ComputerTaskReport={status:'needs_input',reason:'COMMAND_WAITING_INPUT
  trace:[{phase:'decided',confidence:0.45,sequence:3,round:1,at:1,revision:9,steps:0,evaluations:1},{phase:'waiting',reason:'LOW_CONFIDENCE',sequence:4,round:1,at:2,revision:9,steps:0,evaluations:1}]};
 const unsupported:ComputerTaskReport={status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1,phase:'terminal',trace:[{phase:'waiting',reason:'NO_SUPPORTED_ACTION',sequence:4,round:1,at:2,revision:3,steps:0,evaluations:1}]};
 const pressed:ComputerTaskReport={status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:0,phase:'terminal',lastAction:{kind:'press',label:'5',role:'AXButton'}};
-const clarify={status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:0,phase:'terminal',clarification:'ห้า หรือ ห้าสิบ?',trace:[{phase:'waiting',reason:'NUMBER_AMBIGUOUS',sequence:2,round:1,at:2,revision:7,steps:0,evaluations:0}]} as ComputerTaskReport;
+const changing:ComputerTaskReport={status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1,phase:'terminal',trace:[{phase:'waiting',reason:'UI_NOT_READY',sequence:4,round:1,at:2,revision:9,steps:0,evaluations:1}]};
 
 test('V2: the controller hands each settled round its own command input, also when a queued command starts next',async()=>{
  const root=mkdtempSync(join(tmpdir(),'voice-round-')),store=new OrchestrationStore(join(root,'db'),'a'),tasks=new TaskService(store);
@@ -66,22 +66,22 @@ describe('V2: spoken outcome for live_voice direct commands',()=>{
   const notices=(inputId:string)=>runtime.store.all("SELECT r.generated_text FROM assistant_responses r JOIN conversation_decisions d ON d.id=r.decision_id WHERE d.kind='notice' AND EXISTS(SELECT 1 FROM json_each(d.input_ids_json) WHERE value=?)",inputId).map(r=>String(r.generated_text));
   return {runtime,taskId:task.taskId,heard,command,settle,notices,close:async()=>{unsubscribe();await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}};
  }
- test('a LOW_CONFIDENCE voice command produces exactly one short Thai voice message',async()=>{
+ // LOW_CONFIDENCE no longer exists for a direct command (audit d09d63d0); a
+ // not-done round that is not handed off still gets exactly one spoken line.
+ test('a not-done voice command produces exactly one short Thai voice message',async()=>{
   const f=await fixture();try{
    const input=f.command('ห้า','live_voice');
-   f.settle(input,low);f.settle(input,low);
+   f.settle(input,changing);f.settle(input,changing);
    expect(f.heard).toHaveBeenCalledTimes(1);
-   expect(f.heard.mock.calls[0][0]).toMatchObject({spoken:'ไม่แน่ใจว่า ห้า คือปุ่มไหน ลองพูดใหม่อีกครั้ง',speechOnly:true});
+   expect(f.heard.mock.calls[0][0]).toMatchObject({spoken:'หน้าจอกำลังเปลี่ยน ลองพูดใหม่อีกครั้ง',speechOnly:true});
    // L2: history keeps a generic line; the user's words are only spoken back.
-   expect(f.notices(input)).toEqual(['ไม่แน่ใจว่า คำสั่งนี้ คือปุ่มไหน ลองพูดใหม่อีกครั้ง']);
-   expect(f.heard.mock.calls[0][0].text).toBe('ไม่แน่ใจว่า คำสั่งนี้ คือปุ่มไหน ลองพูดใหม่อีกครั้ง');
+   expect(f.notices(input)).toEqual(['หน้าจอกำลังเปลี่ยน ลองพูดใหม่อีกครั้ง']);
   }finally{await f.close();}
  });
- test('NO_SUPPORTED_ACTION and a number clarification are spoken too',async()=>{
+ test('NO_SUPPORTED_ACTION is spoken too',async()=>{
   const f=await fixture();try{
    f.settle(f.command('บัว','live_voice'),unsupported);
-   f.settle(f.command('ห้า ห้าสิบ','live_voice'),clarify);
-   expect(f.heard.mock.calls.map(c=>c[0].spoken)).toEqual(['ไม่เจอปุ่ม บัว บนหน้าจอ','ห้า หรือ ห้าสิบ?']);
+   expect(f.heard.mock.calls.map(c=>c[0].spoken)).toEqual(['ไม่เจอปุ่ม บัว บนหน้าจอ']);
   }finally{await f.close();}
  });
  test('H1: an unresolved receipt is never spoken as "not done, say it again"',async()=>{
@@ -96,10 +96,12 @@ describe('V2: spoken outcome for live_voice direct commands',()=>{
   }finally{await f.close();}
  });
  test('a command that ended the task never says "say it again"',async()=>{
-  // Session a4b9ee81: JEV_INVALID_RESPONSE failed the task, yet the voice said "ลองพูดใหม่".
+  // Session a4b9ee81: the task ended, yet the voice said "ลองพูดใหม่". A failed round
+  // now takes the next command (audit d09d63d0), so only a closed session ends it.
   const failed:ComputerTaskReport={status:'blocked',reason:'JEV_QUOTA_EXCEEDED',steps:0,evaluations:0,phase:'terminal'};
   const f=await fixture();try{
-   f.settle(f.command('คริยา','live_voice'),failed,'failed');
+   const input=f.command('คริยา','live_voice');
+   (f.runtime as any).speakDirectOutcome({...f.runtime.store.task(f.taskId)!,state:'failed',automationSession:{status:'closed',idleTimeoutMs:1,closedAt:1,closedReason:'user'},computerReport:failed},{revision:2,inputId:input,outcome:{type:'failed',computerReport:failed}});
    expect(f.heard.mock.calls.map(c=>c[0].spoken)).toEqual(['ยังไม่ได้ทำ คริยา และงานนี้หยุดไปแล้ว ต้องเริ่มงานใหม่']);
   }finally{await f.close();}
  });

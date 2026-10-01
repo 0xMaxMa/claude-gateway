@@ -227,6 +227,9 @@ const COMMAND_NOT_DONE = new Set([...COMMAND_DECISION_FAILURES,"STALE_OBSERVATIO
 // A leased read after navigation waits in the extension, then reports
 // STALE_OBSERVATION cause NAVIGATION_PENDING. Re-read only; never replay the action.
 const NAVIGATION_WAIT_MAX = 6;
+// A changing page is read again after a second, not at once, so it can settle
+// and Jev decides afresh on it (develop: 100 ms retries all hit the same change).
+export const STALE_RETRY_DELAY_MS = 1000;
 const NAVIGATION_WAIT_MS = 250;
 class BrowserUseError extends Error {
   constructor(
@@ -412,7 +415,6 @@ export async function runBrowserUse(
     commandOutcome: BrowserCommandOutcome | undefined,
     commandAction: BrowserCommandAction | undefined;
   let navigationWaits = 0;
-  let gaveUp = false;
   let steps = 0,
     evaluations = 0,
     noProgress = 0,
@@ -445,8 +447,10 @@ export async function runBrowserUse(
         commandOutcome = { done: true, reason: "PAGE_STILL_LOADING", ...(commandAction ? { action: commandAction } : {}) };
         status = "needs_verification";
         reason = "COMMAND_WAITING_INPUT";
-      } else if (status === "blocked" && COMMAND_NOT_DONE.has(reason)) {
-        commandOutcome = { done: false, reason, ...(gaveUp ? { gaveUp: true } : {}), ...(commandAction ? { action: commandAction } : {}) };
+      } else if (status === "blocked" && (COMMAND_NOT_DONE.has(reason) || (reason === "FIELD_TEXT_REQUIRED" && !input.stepPart))) {
+        // A single direct command missing its text is not a pending question: the agent gets it.
+        if (reason === "FIELD_TEXT_REQUIRED") fieldRequest = undefined;
+        commandOutcome = { done: false, reason, ...(commandAction ? { action: commandAction } : {}) };
         status = "needs_verification";
         reason = "COMMAND_WAITING_INPUT";
       } else if (status === "needs_verification" && reason === "COMMAND_WAITING_INPUT" && lastAction?.outcome === "confirmed")
@@ -604,10 +608,10 @@ export async function runBrowserUse(
         emit({phase:"recovery",reason:"STALE_OBSERVATION",staleRetries,consecutiveStale});
         await bounded(s => new Promise<void>((resolve,reject) => {
           const abort=()=>{clearTimeout(delay);s.removeEventListener("abort",abort);reject(Error("TASK_CANCELLED"));};
-          const delay=setTimeout(()=>{s.removeEventListener("abort",abort);resolve();},100);
+          const delay=setTimeout(()=>{s.removeEventListener("abort",abort);resolve();},STALE_RETRY_DELAY_MS);
           s.addEventListener("abort",abort,{once:true});
           if(s.aborted)abort();
-        }),1000);
+        }),STALE_RETRY_DELAY_MS+1000);
       }
     }
   }
@@ -805,7 +809,18 @@ export async function runBrowserUse(
     if (initial.native_new_tab === true) {
       // A blank tab has nothing to act on, but "เข้า <site>" (or the one site a
       // task goal names) is its own start page. Only http/https URLs qualify.
-      const url = blankTabUrl(input.goal, input.command === true);
+      let url = blankTabUrl(input.goal, input.command === true);
+      // A direct command naming a site the fixed forms do not read ("เข้า yahoo
+      // ไทย"): the text helper resolves it, as for Jev's NAVIGATE. The page has
+      // nothing yet, so only the command is given.
+      if (!url && input.command && deps.resolveFieldText && textCalls < input.maxTextCalls) {
+        textCalls++;
+        const resolved = z.object({ text: z.string().max(2000).nullable() }).strict()
+          .parse(await bounded(s => interruptible(child => deps.resolveFieldText!({ goal: input.goal, field: structuredClone(ADDRESS_FIELD), page: { url: "", title: "", text: "" } }, child), s, deps.interruptSignal), 15000));
+        check();
+        url = navigationUrl(resolved.text) ?? undefined;
+        emit({phase:"field",reason:url?"NAVIGATION_RESOLVED":"NAVIGATION_UNRESOLVED"});
+      }
       if (!url) return result("blocked", "START_URL_REQUIRED");
       if (input.command) commandAction = { kind: "navigate", url };
       const action = await mutate("NAVIGATE", "tab_navigate", () => ({ url, observe: true }));
@@ -949,20 +964,17 @@ export async function runBrowserUse(
       if (op.confidence < input.operationConfidence){return result("blocked", "LOW_OPERATION_CONFIDENCE");}
       // The next browser operation atomically checks current ownership/consent.
       // A separate renewal here would add a redundant browser round trip.
-      // Jev gave up on a single direct command: the gateway may hand it to the agent once.
-      const handoff = input.command && !input.stepPart && !input.agentCommand && !lastConfirmedAction;
       if (input.sessionStart && !lastConfirmedAction && ["BLOCKED", "UNCLEAR", "READ_REQUEST"].includes(op.choice)) {
         commandOutcome = { done: false, reason: "SESSION_READY" };
         return result("needs_verification", "COMMAND_WAITING_INPUT");
       }
+      // Jev gave up: a not-done direct command the gateway may hand to the agent.
       if (op.choice === "BLOCKED" || op.choice === "UNCLEAR") {
-        gaveUp = handoff;
         return result("blocked", op.choice === "UNCLEAR" ? "UNCLEAR" : "NO_SUPPORTED_ACTION");
       }
       // No action: the gateway hands the command to the agent, which reads the page.
       if (op.choice === "READ_REQUEST") {
-        // Computer Use's confident bar (computer-policy readChoice); an uncertain read stays a not-done command.
-        if (op.confidence < 0.55 || op.probabilities.READ_REQUEST < 0.5) return result("blocked", "LOW_OPERATION_CONFIDENCE");
+        // Even an unsure read goes to the agent, which answers from fresh evidence.
         commandOutcome = { done: false, reason: "READ_REQUEST", ...(commandAction ? { action: commandAction } : {}) };
         return result("needs_verification", "COMMAND_WAITING_INPUT");
       }
@@ -1201,6 +1213,13 @@ export async function runBrowserUse(
             staleRetries++;
         consecutiveStale++;
         emit({phase:"recovery",reason:"STALE_OBSERVATION",staleRetries,consecutiveStale});
+            // Let the page settle for a second, then Jev decides afresh on it.
+            await bounded(s => new Promise<void>((resolve,reject) => {
+              const abort=()=>{clearTimeout(delay);s.removeEventListener("abort",abort);reject(Error("TASK_CANCELLED"));};
+              const delay=setTimeout(()=>{s.removeEventListener("abort",abort);resolve();},STALE_RETRY_DELAY_MS);
+              s.addEventListener("abort",abort,{once:true});
+              if(s.aborted)abort();
+            }),STALE_RETRY_DELAY_MS+1000);
             page = BrowserObservation.parse(
               await observeFresh(),
             );

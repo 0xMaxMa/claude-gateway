@@ -94,15 +94,15 @@ describe('a5 Computer Use: quitting is Jev\'s own choice, not a word at the star
   expect(r.lastAction).toMatchObject({kind:'press',label:'Menu: Chrome → Google Chromeを終了'});
  });
  // Session d8013081: a separate 0.85 bar refused "ปิด chrome" at 0.79/0.77. Jev's normal bar applies.
- test('quitting uses Jev\'s normal confidence bar: 0.7 quits, 0.4 does not',async()=>{
-  const sure=desktop(chrome(),()=>'quit:m0',0.7);
-  await command(sure,'Chromeを終了して');
-  expect(sure.actions()).toEqual([{kind:'press',ref:'m0'}]);
-  const unsure=desktop(chrome(),()=>'quit:m0',0.4);
-  const r=await command(unsure,'Chromeを終了して');
-  expect(unsure.actions()).toEqual([]);
-  expect(r.trace.events.some(e=>e.reason==='LOW_CONFIDENCE')).toBe(true);
+ // Audit d09d63d0 item 1: no confidence bar at all for the user's own command.
+ test('quitting runs on Jev\'s choice whatever its confidence (0.7, 0.4)',async()=>{
+  for(const confidence of [0.7,0.4]){
+   const f=desktop(chrome(),()=>'quit:m0',confidence);
+   await command(f,'Chromeを終了して');
+   expect(f.actions()).toEqual([{kind:'press',ref:'m0'}]);
+  }
  });
+
  test('the agent\'s command for a handed-off utterance may quit, after the user confirms',async()=>{
   const f=desktop(chrome(),()=>'quit:m0');
   const r=await command(f,'Chromeを終了して',{agentCommand:true});

@@ -36,9 +36,6 @@ describe('spoken outcome', () => {
  test('a new tab outside the approved tab says to name the site, in Thai',()=>{
   expect(directCommandSpeech({browserReport:browserReport('NEW_TAB_OUT_OF_SCOPE')},'เปิดแท็บใหม่')?.spoken).toBe('เปิดแท็บใหม่ไม่ได้ บอกชื่อเว็บแทน');
  });
- test('a shortcut with GetPod in front says to bring the browser forward',()=>{
-  expect(directCommandSpeech({computerReport:computerReport('SHORTCUT_UNAVAILABLE')},'เปิดแท็บใหม่')?.spoken).toBe('ใช้คำสั่งนี้กับแอปที่อยู่หน้าสุดไม่ได้ เอาเบราว์เซอร์ขึ้นมาไว้หน้าสุดก่อน');
- });
  test('"Go." in a Thai conversation is answered in Thai',()=>{
   expect(directCommandSpeech({computerReport:computerReport('NO_SUPPORTED_ACTION')},'Go.')?.spoken).toBe('Could not find Go on the screen.');
   expect(directCommandSpeech({computerReport:computerReport('NO_SUPPORTED_ACTION')},'Go.',{thai:true})?.spoken).toBe('ไม่เจอปุ่ม Go บนหน้าจอ');

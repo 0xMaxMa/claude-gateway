@@ -545,7 +545,9 @@ for(const mode of ['valid','uncertain','invalid','wrong-kind','stale','revision'
   return r;
  };
  const r=await runComputerUse({goal:'Click Field 149',interactionContext:'Prior command evidence',yieldAfterInteraction:true},f.deps,abort.signal);
- assert.equal(f.calls.filter(c=>c.name==='computer_action').length,['valid','stale'].includes(mode)?1:0);
+ // Audit d09d63d0: an unsure target for a direct command still runs Jev's best
+ // choice (item 1); a stale rejection runs nothing and is decided afresh (item 7).
+ assert.equal(f.calls.filter(c=>c.name==='computer_action').length,mode==='stale'?2:['valid','uncertain'].includes(mode)?1:0);
  if(mode==='stale')assert.equal(r.steps,0);
  if(!['stale','revision'].includes(mode))assert.equal(queries,1);
  if(mode==='valid')assert.equal(r.evaluations,1);
@@ -588,9 +590,17 @@ for(const mode of ['type-only','submit','renamed','renumbered','focus-changed','
  if(mode==='unknown')assert.equal(r.status,'needs_reconciliation');
  if(mode==='focus-changed'||mode==='window-changed')assert(r.trace.events.some(e=>e.reason==='SUBMIT_CONTEXT_CHANGED'));
 });
-for(const mode of ['none','uncertain','invalid'])test('literal payload cannot be fabricated by a command choice: '+mode,async()=>{
+// The payload is always one of the command's own candidates; an unsure choice
+// among them (audit d09d63d0 item 1) is typed, NONE or an invented index is not.
+test('an unsure literal candidate from the command itself is typed',async()=>{
  const f=fixture([]);delete f.deps.thinking;
- f.deps.evaluate=async req=>{const r=responseFor(req,'type:c1');r.answers.text=choiceFor(req.questions.text.criteria,mode==='invalid'?'TEXT:99':mode==='none'?'NONE':'TEXT:0');if(mode==='uncertain')r.answers.text.confidence=.1;return r;};
+ f.deps.evaluate=async req=>{const r=responseFor(req,'type:c1');r.answers.text={...choiceFor(req.questions.text.criteria,'TEXT:0'),confidence:.1};return r;};
+ await runComputerUse({goal:'Type "Bangkok"',yieldAfterInteraction:true},f.deps,new AbortController().signal);
+ assert.equal(f.calls.filter(c=>c.name==='computer_action')[0]?.args.text,'Bangkok');
+});
+for(const mode of ['none','invalid'])test('literal payload cannot be fabricated by a command choice: '+mode,async()=>{
+ const f=fixture([]);delete f.deps.thinking;
+ f.deps.evaluate=async req=>{const r=responseFor(req,'type:c1');r.answers.text=choiceFor(req.questions.text.criteria,mode==='invalid'?'TEXT:99':'NONE');return r;};
  const r=await runComputerUse({goal:'Type "Bangkok"',yieldAfterInteraction:true},f.deps,new AbortController().signal);
  assert.equal(f.calls.filter(c=>c.name==='computer_action').length,0);assert.equal(r.evaluations,1);
 });
@@ -657,7 +667,7 @@ for(const command of ['เข้า yahoo','ค้นหา จองตั๋�
  assert.equal(f.calls.find(c=>c.name==='computer_action')!.args.text,command.slice(command.indexOf(' ')+1));
 });
 
-for(const mode of ['none','uncertain'])for(const direct of ['yieldAfterAction','yieldAfterInteraction'])test('direct commands never call a configured writer when text is '+mode+' / '+direct,async()=>{
+for(const mode of ['none'])for(const direct of ['yieldAfterAction','yieldAfterInteraction'])test('direct commands never call a configured writer when text is '+mode+' / '+direct,async()=>{
  const f=fixture(['type:c1']);let thinking=0,captures=0;
  (f.state as any).screenshotAvailable=true;
  f.deps.thinking=async()=>{thinking++;return {text:'invented'};};
@@ -689,12 +699,15 @@ test('standard command with unavailable target waits without model or action',as
  const r=await runComputerUse({goal:'scroll down',yieldAfterInteraction:true},f.deps,new AbortController().signal);
  assert.equal(r.steps,0);assert(r.trace.events.some(e=>e.reason==='NO_SUPPORTED_ACTION'));
 });
-test('standard command rejected by native freshness is never replayed',async()=>{
+// Audit d09d63d0 item 7: a not-executed stale rejection is looked at again and
+// decided afresh, at most twice, then the command returns unexecuted.
+test('standard command rejected by native freshness is re-decided twice at most, never counted as done',async()=>{
  const f=fixture([]);Object.assign(f.state,{standardCommand:'scroll:down',supportedActions:['scroll:down']});
  const call=f.deps.call;f.deps.call=async(name,args,s)=>{const r=await call(name,args,s);return name==='computer_action'?{state:'not_executed',error:'STALE_OBSERVATION'}:r;};
  const r=await runComputerUse({goal:'scroll down',yieldAfterInteraction:true},f.deps,new AbortController().signal);
- assert.equal(r.steps,0);assert.equal(f.calls.filter(c=>c.name==='computer_action').length,1);
-});
+ assert.equal(r.steps,0);assert.equal(f.calls.filter(c=>c.name==='computer_action').length,3);
+ assert(r.trace.events.some(e=>e.phase==='waiting'&&e.reason==='STALE_OBSERVATION'));
+},10000);
 
 for(const accepted of [true,false])test('direct action uses original generation and honors native rejection: '+accepted,async()=>{
  const f=fixture(['open:com.example.Browser']);f.state.apps.push({id:'com.example.Browser',name:'Browser'});
@@ -744,12 +757,17 @@ for(const command of ['กดลูกศรขึ้น','กดลูกศร
  assert.equal(r.steps,1);assert.equal(r.evaluations,0);
  assert.equal(f.calls.filter(c=>c.name==='computer_observe').length,1);
 });
-test('exact key cannot target missing or sensitive focus',async()=>{
- for(const focus of [undefined,{ref:'c1',role:'AXSecureTextField',label:'Password',sensitive:true}]){
-  const f=fixture([]);Object.assign(f.state,{focusedControl:focus});
-  const r=await runComputerUse({goal:'press enter',yieldAfterInteraction:true},f.deps,new AbortController().signal);
-  assert.equal(r.steps,0);assert.equal(r.evaluations,0);
- }
+test('exact key cannot target sensitive focus',async()=>{
+ const f=fixture([]);Object.assign(f.state,{focusedControl:{ref:'c1',role:'AXSecureTextField',label:'Password',sensitive:true}});
+ const r=await runComputerUse({goal:'press enter',yieldAfterInteraction:true},f.deps,new AbortController().signal);
+ assert.equal(r.steps,0);assert.equal(r.evaluations,0);
+});
+// Audit d09d63d0 item 10: with no reported focus the key goes to the app in front.
+for(const goal of ['press enter','กด escape'])test('exact key with no reported focus is sent to the front application: '+goal,async()=>{
+ const f=fixture([]);Object.assign(f.state,{focusedControl:undefined});
+ const r=await runComputerUse({goal,yieldAfterInteraction:true},f.deps,new AbortController().signal);
+ assert.equal(r.steps,1);assert.equal(r.evaluations,0);
+ assert.equal(f.calls.find(c=>c.name==='computer_action')!.args.kind,'key');
 });
 test('legacy single-pane scroll bypasses inference with observed pane ref',async()=>{
  const f=fixture([]);Object.assign(f.state,{supportedActions:['scroll:down'],scrollAreas:[{ref:'s0',label:'Content',bounds:{x:0,y:0,width:1,height:1}}]});

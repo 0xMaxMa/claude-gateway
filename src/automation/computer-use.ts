@@ -1,4 +1,4 @@
-import {buildComputerCommand,readComputerCommand,labelCommand,labelTarget,standardComputerCommand,standardKeyboardCommand,standardNavigationCommand,shortcutCommand,shortcutTarget,addressCommand,addressFields,quitShortcut,frontIsBrowser,helperSupports,STANDARD_QUIT} from './computer-command';
+import {buildComputerCommand,readComputerCommand,labelCommand,labelTarget,standardComputerCommand,standardKeyboardCommand,standardNavigationCommand,shortcutCommand,shortcutTarget,addressCommand,addressFields,quitShortcut,helperSupports,STANDARD_QUIT} from './computer-command';
 import {eraseCommand,focusedTextField,textFocused} from './computer-safety';
 import {decisionInstructions,readChoice,observedEffect,decisionState,literalTextCandidates} from './computer-policy';
 import {checkInterruption,interruptible} from './interrupt';
@@ -9,6 +9,7 @@ import {z} from 'zod';
 import {runLoop} from '../../lib/automation/index.cjs';
 
 export const COMPUTER_USE_CONTRACT_VERSION = 1;
+const REDECIDE_MAX=2,REDECIDE_DELAY_MS=1000;
 // Relay errors raised before an operation is recorded (getpod-computer-use
 // relay.ts execute). DEVICE_OFFLINE can also follow the record, so it becomes
 // not_executed only when the receipt lookup confirms no operation exists.
@@ -62,7 +63,7 @@ export interface ComputerUseDependencies {
  progress?:(event:ComputerProgress)=>void;
  verify?:(state:ComputerState,goal:string,signal:AbortSignal)=>Promise<boolean>;
 }
-export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'needs_input'|'blocked'|'cancelled'|'needs_reconciliation';reason:string;revision:number;steps:number;evaluations:number;trace:{events:ComputerProgress[];truncated:boolean};operationId?:string;observation?:ComputerState;stepRun?:import('./computer-steps').ComputerStepRun;lastAction?:ComputerLastAction;clarification?:string}
+export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'needs_input'|'blocked'|'cancelled'|'needs_reconciliation';reason:string;revision:number;steps:number;evaluations:number;trace:{events:ComputerProgress[];truncated:boolean};operationId?:string;observation?:ComputerState;stepRun?:import('./computer-steps').ComputerStepRun;lastAction?:ComputerLastAction}
 /** The command's own interaction, for the owner's outcome line. Never typed text. */
 export interface ComputerLastAction {kind:string;label?:string;role?:string;key?:string;direction?:string;appId?:string;count?:number;blocked?:boolean;sequence?:string[];planned?:number;
  /** Not run: the agent's command chose a high-impact action and the user was asked to confirm it. */
@@ -103,10 +104,17 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  let standardDropped=false;
  // A spoken number pressed digit by digit: the labels still to press (each
  // re-matched on a fresh observation), the planned count and the labels done.
- let labelPresses:string[][]=[],labelPlanned=0,clarification:string|undefined;const labelPressed:string[]=[];
+ let labelPresses:string[][]=[],labelPlanned=0;const labelPressed:string[]=[];
  const supports=(state:ComputerState,name:string)=>!standardDropped&&helperSupports(state,'standardCommands',name);
  // Only a browser offers tab and address shortcuts; another app in front needs the browser first.
- const shortcutMissing=(state:ComputerState)=>waitForCommand(frontIsBrowser(state)?'SHORTCUT_NOT_OFFERED':'SHORTCUT_UNAVAILABLE');
+ // A shortcut or address fast path whose target is not on screen hands the
+ // command to Jev for the rest of this run instead of refusing it.
+ let fastFailed=false;
+ // A changing screen (Jev's WAIT, or a target that moved before input) is looked
+ // at again after a second, up to twice, before the command returns unexecuted.
+ // Only while nothing of this command has run: a planned follow-up is never re-decided.
+ let redecided=0;
+ const settleDelay=()=>new Promise<void>((resolve,reject)=>{const stop=()=>{clearTimeout(t);reject(Error('CANCELLED'));};const t=setTimeout(()=>{runSignal.removeEventListener('abort',stop);resolve();},REDECIDE_DELAY_MS);runSignal.addEventListener('abort',stop,{once:true});});
  let focusThenType:{identity:string;role:string;text:string;submit?:boolean;pressed?:boolean}|undefined,focusAttempted=false;
  const direct=input.yieldAfterAction||input.yieldAfterInteraction;
  const standard=direct?standardComputerCommand(input.goal):undefined;
@@ -126,7 +134,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
   trace.push(event);if(trace.length>2000)trace.shift();
   try{deps.progress?.(event);}catch{/* Diagnostic sinks cannot change a dispatched action's outcome. */}
  };
- const result=(status:ComputerUseResult['status'],reason:string,validationReason?:string):ComputerUseResult=>{emit('terminal',{status,reason,...(validationReason?{validationReason}:{})});return {status,reason,revision:goal.revision,steps,evaluations,trace:{events:[...trace],truncated:sequence>trace.length},...(pending?{operationId:pending}:{}),...(last?{observation:last}:{}),...(lastAction?{lastAction}:{}),...(clarification?{clarification}:{})};};
+ const result=(status:ComputerUseResult['status'],reason:string,validationReason?:string):ComputerUseResult=>{emit('terminal',{status,reason,...(validationReason?{validationReason}:{})});return {status,reason,revision:goal.revision,steps,evaluations,trace:{events:[...trace],truncated:sequence>trace.length},...(pending?{operationId:pending}:{}),...(last?{observation:last}:{}),...(lastAction?{lastAction}:{})};};
  const waitForCommand=(reason:string,extra:Partial<ComputerProgress>={})=>{emit('waiting',{reason,...extra});return result('needs_input','COMMAND_WAITING_INPUT');};
  const check=()=>{runSignal.throwIfAborted();if(!deps.authorized())throw Error('ACCESS_DENIED');};
  const update=()=>{const n=deps.latestGoal?.();if(n&&n.revision>goal.revision){satisfiedField=undefined;submitAfterType=undefined;previous=undefined;prematureDone=0;history.length=0;ineffective.clear();transitions.clear();consecutiveOpens=0;cycling=false;noProgress=0;goal=z.object({revision:z.number().int().positive(),goal:z.string().min(1).max(16000)}).parse(n);}};
@@ -189,9 +197,11 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      if(state.standardCommand!==requested){standardDropped=true;addressPending=undefined;}
      else{
       const control=state.controls.find(c=>c.ref==='standard-'+requested.replace(':','-')&&c.actions.includes('press'));
-      if(!control){addressPending=undefined;return {result:shortcutMissing(state)}};
-      const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
-      return {action:{action:'standard-shortcut',generation:state.generation,revision,targets:new Map([['standard-shortcut',action]]),observedContinuation:true}};
+      if(!control){addressPending=undefined;fastFailed=true;}
+      else{
+       const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
+       return {action:{action:'standard-shortcut',generation:state.generation,revision,targets:new Map([['standard-shortcut',action]]),observedContinuation:true}};
+      }
      }
     }
     if(direct&&focusThenType){
@@ -226,9 +236,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      // A keypad shows every digit once (Calculator, a dial pad). Elsewhere "clear",
      // "add" or "one" are ordinary words for Jev, not a button to press blindly.
      const keypad=spoken&&['0','1','2','3','4','5','6','7','8','9'].every(digit=>labelTarget(state,[digit]));
-     if(spoken&&'clarification' in spoken&&keypad){clarification=spoken.clarification;await capture();return {result:waitForCommand('NUMBER_AMBIGUOUS')};}
-     if(spoken&&'tooLong' in spoken&&keypad)return {result:waitForCommand('SEQUENCE_TOO_LONG')};
-     if(spoken&&'presses' in spoken&&keypad){
+     if(spoken&&keypad){
       const controls=spoken.presses.map(labels=>labelTarget(state,labels));
       // "ลบ" beside a visible Delete control could mean either: Jev decides.
       const eraseWord=eraseCommand(goal.goal)!==undefined&&state.controls.some(c=>!c.sensitive&&c.role!=='AXMenuItem'&&eraseCommand(c.label)!==undefined);
@@ -237,26 +245,27 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
        return pressLabel(controls[0]!);
       }
      }
-     const shortcut=fast?shortcutCommand(goal.goal):undefined;
+     const shortcut=fast&&!fastFailed?shortcutCommand(goal.goal):undefined;
      if(shortcut){
       if(shortcut.standard&&supports(state,shortcut.standard))return requestStandard(shortcut.standard);
       const control=shortcutTarget(state,shortcut.labels);
-      if(!control)return {result:shortcutMissing(state)};
-      const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
-      return {action:{action:'shortcut',generation:state.generation,revision,targets:new Map([['shortcut',action]]),observedContinuation:true}};
+      if(control){
+       const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
+       return {action:{action:'shortcut',generation:state.generation,revision,targets:new Map([['shortcut',action]]),observedContinuation:true}};
+      }
      }
      // The exact Cmd+Q shortcut uses the helper's guarded quit; any other quit
      // wording (any language) is Jev's own quit choice below.
-     if(fast&&quitShortcut(goal.goal)&&supports(state,'app:quit'))return requestStandard('app:quit');
+     if(fast&&!fastFailed&&quitShortcut(goal.goal)&&supports(state,'app:quit'))return requestStandard('app:quit');
      // Opening a site or address types it into the browser address field and
      // submits it; without such a field the normal decision applies. The field
      // is found by role (after address:focus, the focused field), never by its
      // on-screen name; several candidates are Jev's choice.
-     const address=addressPending??addressCommand(goal.goal);
+     const address=addressPending??(fastFailed?undefined:addressCommand(goal.goal));
      const fields=address&&!addressPending?addressFields(state):[];
      let bar=addressPending?focusedTextField(state):fields.length===1?fields[0]:undefined;
      if(address&&!bar&&!addressPending&&supports(state,'address:focus')){addressPending=address;return requestStandard('address:focus');}
-     if(addressPending&&!bar){addressPending=undefined;return {result:shortcutMissing(state)};}
+     if(addressPending&&!bar)fastFailed=true;
      addressPending=undefined;
      if(address&&!bar&&fields.length>1){
       const criteria:Record<string,string>={NONE:'None of these fields is the browser address bar'};
@@ -265,7 +274,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
       const answer=await interruptible(s=>deps.evaluate({requestId,state:{command:goal.goal,desktop:{application:state.application,windowTitle:state.windowTitle}},questions:{field:{type:'choice',instructions:{command:goal.goal,question:'Which field is the web browser address bar, where a web address is entered (not a search or input field inside the web page)?'},criteria}}},s),runSignal,deps.interruptSignal);
       check();checkInterruption(deps.interruptSignal);evaluations++;
       const picked=readChoice(answer.answers.field,criteria);emit('decided',{requestId,confidence:picked.confidence,elapsedMs:Date.now()-started});
-      if(picked.confident&&picked.choice!=='NONE')bar=fields.find(f=>'field:'+f.ref===picked.choice);
+      if(picked.choice!=='NONE')bar=fields.find(f=>'field:'+f.ref===picked.choice);
      }
      if(address&&bar){
       const action={kind:'type',ref:bar.ref};emit('decided',summary(action,state));
@@ -274,7 +283,8 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     }
     const key=direct&&fast?standardKeyboardCommand(goal.goal):undefined;
     if(key){
-     if(!state.focusedControl||state.focusedControl.sensitive)return {result:waitForCommand('NO_SUPPORTED_ACTION')};
+     // Without a reported focus the key goes to the application in front.
+     if(state.focusedControl?.sensitive)return {result:waitForCommand('NO_SUPPORTED_ACTION')};
      const action={kind:'key',key};emit('decided',summary(action,state));
      return {action:{action:'key',generation:state.generation,revision,targets:new Map([['key',action]]),observedContinuation:true}};
     }
@@ -342,9 +352,12 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      emit('decided',{...(targets.has(selected.action)?summary(targets.get(selected.action)!):{}),requestId,confidence:selected.confidence,elapsedMs:Date.now()-started});
      // The agent's opening text for a session the user drives ("open a session, wait
      // for the user") is no command: anything but an action just means ready.
-     if(input.sessionStart&&(!selected.confident||!targets.has(selected.action))){await capture();return {result:waitForCommand('SESSION_READY')};}
-     if(!selected.confident){await capture();return {result:waitForCommand('LOW_CONFIDENCE')};}
-     if(selected.action==='WAIT'){await capture();return {result:waitForCommand('UI_NOT_READY')};}
+     if(input.sessionStart&&!targets.has(selected.action)){await capture();return {result:waitForCommand('SESSION_READY')};}
+     // The screen was still changing: look again shortly and let Jev decide afresh.
+     if(selected.action==='WAIT'){
+      if(steps===0&&redecided<REDECIDE_MAX){redecided++;await settleDelay();return {action:{action:'STANDARD_OBSERVE',generation:state.generation,revision,targets:new Map<string,Record<string,unknown>>()}};}
+      await capture();return {result:waitForCommand('UI_NOT_READY')};
+     }
      // Jev gave up on a single direct command (decisionMode jev marks it): the gateway may hand it to the agent once.
      if(selected.action==='BLOCKED'||selected.action==='UNCLEAR'){await capture();return {result:waitForCommand(selected.action==='UNCLEAR'?'UNCLEAR':'NO_SUPPORTED_ACTION',input.yieldAfterInteraction&&input.readRequest?{decisionMode:'jev'}:{})};}
      // No action: the gateway hands the command to the agent, which reads the screen.
@@ -381,6 +394,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      if(selected.choice==='DONE'){await capture();return {result:waitForCommand('COMPLETION_NOT_ESTABLISHED')};}
     }
     // Completion is assessed before the mutation confidence gate, as in computer-use-jev.
+    // Agent-driven runs keep the mutation confidence gate; a direct command has none.
     if(targets.has(selected.choice)&&!selected.confident){await capture();return {result:waitForCommand('LOW_CONFIDENCE')};}
     prematureDone=0;
     return {action:{action:selected.choice,generation:state.generation,revision,targets}};
@@ -445,7 +459,10 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
       ? fresh.apps.some(app=>app.id===action.app_id)
       : !!last&&fingerprint(fresh)===fingerprint(last)&&JSON.stringify([fresh.controls.map(c=>c.ref),fresh.scrollAreas?.map(a=>a.ref)])===JSON.stringify([last.controls.map(c=>c.ref),last.scrollAreas?.map(a=>a.ref)]);
     if(!contextMatches){
-      last=fresh;noProgress++;emit('waiting',{reason:'ACTION_CONTEXT_CHANGED'});if(direct){await capture();return waitForCommand('ACTION_CONTEXT_CHANGED');}return;
+      last=fresh;noProgress++;emit('waiting',{reason:'ACTION_CONTEXT_CHANGED'});
+      // Nothing ran: look again shortly and let Jev decide afresh on the new screen.
+      if(direct&&steps===0&&redecided<REDECIDE_MAX){redecided++;noProgress--;await settleDelay();return;}
+      if(direct){await capture();return waitForCommand('ACTION_CONTEXT_CHANGED');}return;
     }
     last=fresh;d.generation=fresh.generation;
     const operationId=randomUUID();await deps.beforeMutation(operationId,{...action,generation:d.generation,revision:goal.revision});
@@ -479,7 +496,8 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     pending=undefined;
     if(receipt.state==='not_executed'){
      emit('acted',{...summary(action),operationId,outcome:'not_executed',reason:receipt.error&&/^[A-Z][A-Z_0-9]{0,79}$/.test(receipt.error)?receipt.error:'ACTION_REJECTED',elapsedMs:Date.now()-started});
-     if(receipt.error==='STALE_OBSERVATION'){if(direct)return waitForCommand('STALE_OBSERVATION');noProgress++;return;}
+     // Not executed on a changed screen: look again shortly and let Jev decide afresh.
+     if(receipt.error==='STALE_OBSERVATION'){if(direct&&(steps>0||redecided>=REDECIDE_MAX))return waitForCommand('STALE_OBSERVATION');if(direct){redecided++;await settleDelay();return;}noProgress++;return;}
      const typed=last?.controls.find(c=>c.ref===action.ref);
      if(direct&&receipt.error==='FOCUS_REQUIRED'&&action.kind==='type'&&typeof action.text==='string'&&!focusAttempted&&typed?.identity&&typed.actions.includes('press')){
       focusAttempted=true;focusThenType={identity:typed.identity,role:typed.role,text:action.text,...(submitAfterType?{submit:true}:{})};submitAfterType=undefined;return;

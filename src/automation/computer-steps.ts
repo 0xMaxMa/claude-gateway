@@ -35,7 +35,7 @@ const SCROLL_NO_EFFECT_MAX = 3;
 const RETRYABLE_REASONS = new Set(['UI_NOT_READY','STALE_OBSERVATION','ACTION_CONTEXT_CHANGED','POST_ACTION_EVIDENCE_STALE']);
 // The previous step's page may still be loading: its first changed tree can
 // lack the target (E2E: Google results absent 3 s after Enter). Re-observe later.
-const LOADING_REASONS = new Set(['NO_SUPPORTED_ACTION','SHORTCUT_UNAVAILABLE','SHORTCUT_NOT_OFFERED']);
+const LOADING_REASONS = new Set(['NO_SUPPORTED_ACTION']);
 const LOADING_DELAY_MS = 800;
 
 

@@ -48,7 +48,8 @@ describe('V1 exact-label press runs before Jev',()=>{
   const twice=structuredClone(calculator) as any;twice.controls.push({...twice.controls.find((c:any)=>c.ref==='c11'),ref:'c99',identity:undefined});
   const f=fixture(twice);const r=await run(f,'ห้า');
   expect(f.requests).toHaveLength(1);expect(f.presses()).toEqual([]);
-  expect(r.trace.events.some(e=>e.reason==='LOW_CONFIDENCE')).toBe(true);
+  // Jev's own answer decides (BLOCKED here); no confidence bar stops it first.
+  expect(r.trace.events.some(e=>e.reason==='LOW_CONFIDENCE')).toBe(false);
  });
  test('a menu item labelled "5" (View → Decimal Places → 5) is never a candidate',async()=>{
   const menuOnly=structuredClone(calculator) as any;menuOnly.controls=menuOnly.controls.filter((c:any)=>c.ref!=='c11');
@@ -102,25 +103,25 @@ describe('V3 multi-digit utterances',()=>{
   const names=f.calls.map(c=>c.name).filter(n=>n!=='computer_release');
   expect(names.slice(0,5)).toEqual(['computer_acquire','computer_observe','computer_action','computer_observe','computer_action']);
  });
- test.each([['ร้อยห้า','105 หรือ 150?'],['พันห้า','1005 หรือ 1500?'],['หมื่นสอง','10002 หรือ 12000?'],['สองร้อยห้า','205 หรือ 250?']])('M3: shorthand %s asks %s and presses nothing',async(command,question)=>{
+ test.each([['ร้อยห้า','105 หรือ 150?'],['พันห้า','1005 หรือ 1500?'],['หมื่นสอง','10002 หรือ 12000?'],['สองร้อยห้า','205 หรือ 250?']])('M3: shorthand %s (%s) is left to Jev, never asked back',async(command)=>{
+  // Audit d09d63d0 item 9: no clarification question; Jev decides from the screen.
   const f=fixture();const r=await run(f,command);
-  expect(f.presses()).toEqual([]);expect(f.requests).toHaveLength(0);
-  expect((r as any).clarification).toBe(question);
+  expect(f.requests).toHaveLength(1);expect(f.presses()).toEqual([]);
+  expect((r as any).clarification).toBeUndefined();
  });
  test.each([['ร้อยห้าสิบ',['c14','c11','c18']],['ร้อยเอ็ด',['c14','c18','c14']]])('M3: an unambiguous %s presses %j',async(command,refs)=>{
   const f=fixture();await run(f,command);
   expect(f.presses()).toEqual(refs);
  });
- test('"ห้า ห้าสิบ" asks which number and presses nothing',async()=>{
+ test('"ห้า ห้าสิบ" is left to Jev instead of asking which number',async()=>{
   const f=fixture();const r=await run(f,'ห้า ห้าสิบ');
-  expect(f.presses()).toEqual([]);expect(f.requests).toHaveLength(0);
-  expect((r as any).clarification).toBe('ห้า หรือ ห้าสิบ?');
-  expect(computerOutcomeText(report(r) as any)).toBe('Not done: ห้า หรือ ห้าสิบ?');
+  expect(f.requests).toHaveLength(1);expect(f.presses()).toEqual([]);
+  expect(computerOutcomeText(report(r) as any)).not.toMatch(/หรือ/);
  });
- test('sequences are bounded to 8 presses',async()=>{
-  const f=fixture();const r=await run(f,'123456789');
-  expect(f.presses()).toEqual([]);expect(r.trace.events.some(e=>e.reason==='SEQUENCE_TOO_LONG')).toBe(true);
-  const ok=fixture();await run(ok,'12345678');expect(ok.presses()).toHaveLength(8);
+ // Audit d09d63d0 item 9: no 8-digit cap; a long number is pressed digit by digit.
+ test.each([['123456789',9],['1234567890',10]])('%s presses all %i digits',async(command,count)=>{
+  const f=fixture();await run(f,command);
+  expect(f.requests).toHaveLength(0);expect(f.presses()).toHaveLength(count as number);
  });
  test('an unknown receipt mid-sequence stops the sequence and never replays',async()=>{
   const f=fixture(calculator,(_args,count)=>count===2?{state:'unknown'}:{state:'completed'});
