@@ -940,9 +940,8 @@ is marked (`commandOutcome.gaveUp` on Remote Browser; a `waiting` trace event wi
 `decisionMode: "jev"` on Computer Use), and the gateway hands the same input to
 the agent through the read-request route. The control receipt becomes `needs_agent`
 with code `AGENT_HANDOFF`, the message is recorded in history, and the agent gets
-a turn even under user control. A live-voice command first hears a short line
-("ขอคิดแป๊บนะ" / "Let me think about that."), because the agent takes several
-seconds. Low confidence, deterministic not-done outcomes (scroll limit, no search
+a turn even under user control. Nothing is spoken at the hand-off; the agent's
+own reply is the only response. Low confidence, deterministic not-done outcomes (scroll limit, no search
 field, and so on), uncertain receipts and step runs never hand off.
 
 The agent reads fresh evidence and may send **at most one** command for that

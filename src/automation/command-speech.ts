@@ -88,10 +88,6 @@ export function agentHandoffRequested(outcome:{computerReport?:ComputerTaskRepor
  }
  return !!browser&&!browser.stepRun&&browser.reason==='COMMAND_WAITING_INPUT'&&browser.commandOutcome?.gaveUp===true&&!browser.lastConfirmedAction&&browser.lastAction?.outcome!=='unknown';
 }
-/** Spoken while the agent works out a handed-off command (it takes several seconds). */
-export function agentHandoffSpeech(thai:boolean):string{
- return thai?'ขอคิดแป๊บนะ':'Let me think about that.';
-}
 export function directCommandSpeech(outcome:{computerReport?:ComputerTaskReport;browserReport?:BrowserTaskReport},command:string,context:SpeechContext={}):{spoken:string;recorded:string}|undefined{
  // The agent speaks the answer itself.
  if(readRequested(outcome))return;

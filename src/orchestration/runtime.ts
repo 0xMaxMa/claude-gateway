@@ -3,7 +3,7 @@ import {CURRENT_CONTROL_ROUND_SQL} from './control-notification';
 import {evaluateComputerChoices} from '../automation/computer-choice-ids';
 import {attachComputerEndScreenshot} from './computer-end-screenshot';
 import {handDirectCommandToAgent,liveExecutionInput,liveControlReceipt} from './live-execution-input';
-import {agentHandoffRequested,agentHandoffSpeech,directCommandSpeech,readRequested} from '../automation/command-speech';
+import {agentHandoffRequested,directCommandSpeech,readRequested} from '../automation/command-speech';
 import {ComputerTaskAdapter} from './gateway-tasks/computer';
 import {ComputerConnectors} from '../jev/computer-connector';
 import { AutomaticBrowserBindings } from '../jev/automatic-browser-bindings';
@@ -685,24 +685,12 @@ export class AgentOrchestrationRuntime {
       return;
     }
     // Jev gave up on the user's single command: the agent gets one turn (and one command) for it.
+    // Nothing is spoken meanwhile; the agent's own reply is the only response.
     if (direct && agentHandoffRequested(round.outcome) && handDirectCommandToAgent(this.store, task, round.inputId!, round.revision, 'AGENT_HANDOFF')) {
-      this.speakHandoff(task, round.inputId!);
       void this.flushHistory().catch(() => {}); this.pumpMailbox();
       return;
     }
     this.speakDirectOutcome(task, round);
-  }
-  /** "Let me think" while the agent works on a handed-off live-voice command (it takes several seconds). */
-  private speakHandoff(task: TaskSnapshot, inputId: string): void {
-    const input = this.store.get('SELECT conversation_id,principal_id,modality FROM conversation_inputs WHERE id=?', inputId);
-    if (input?.modality !== 'live_voice' || input.conversation_id !== task.conversationId || input.principal_id !== task.ownerPrincipalId) return;
-    const listener = this.voiceListeners.get(task.agentSessionId);
-    if (listener?.principalId !== task.ownerPrincipalId) return;
-    const text = agentHandoffSpeech(this.speaksThai(task.conversationId));
-    // Not linked to the input: the agent's own reply to it follows.
-    const responseId = this.decisions.notice(task.conversationId, text, false);
-    this.publishText(task.agentSessionId, responseId, text, true);
-    try { listener.receive({ responseId, text, spoken: text, speechOnly: true }); } catch { /* Playback cannot change the hand-off. */ }
   }
   /** A direct command spoken in live voice that did nothing gets one short spoken
    * reply through the live voice session; success and typed commands stay silent. */

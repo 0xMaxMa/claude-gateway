@@ -61,13 +61,15 @@ const until=async(fn:()=>boolean)=>{const start=Date.now();while(!fn()){if(Date.
 const spoken=(heard:jest.Mock)=>heard.mock.calls.map(c=>c[0].spoken);
 
 describe.each(['browser','computer'] as const)('%s',adapter=>{
- test.each(['NO_SUPPORTED_ACTION','UNCLEAR'])('Jev giving up (%s) hands the same input to the agent with one command allowed, and says it is thinking',async reason=>{
+ test.each(['NO_SUPPORTED_ACTION','UNCLEAR'])('Jev giving up (%s) hands the same input to the agent with one command allowed and says nothing itself',async reason=>{
   const f=await fixture(adapter);try{
    const applied=f.command(odd);
    expect(applied).toMatchObject({status:'applied',taskId:f.taskId});
    f.settle(gaveUp(adapter,reason));
    expect(liveControlReceipt(f.runtime.store,applied.inputId)).toMatchObject({status:'needs_agent',code:'AGENT_HANDOFF',taskId:f.taskId});
-   expect(spoken(f.heard)).toEqual(['ขอคิดแป๊บนะ']);
+   // No interim line: the agent's own reply is the only response.
+   expect(f.heard).not.toHaveBeenCalled();
+   expect(f.runtime.store.all("SELECT 1 FROM assistant_responses WHERE generated_text LIKE '%แป๊บ%' OR generated_text LIKE '%think about%'")).toEqual([]);
    await until(()=>f.prompts.length>0);
    expect(f.prompts[0]).toContain('Jev could not decide it');expect(f.prompts[0]).toContain(odd);
    expect(f.prompts[0]).toContain('Execution eligible: true');
@@ -101,7 +103,6 @@ describe.each(['browser','computer'] as const)('%s',adapter=>{
    f.settle(gaveUp(adapter));
    expect(f.handoffs()).toHaveLength(1);
    expect(spoken(f.heard)).toHaveLength(1);
-   expect(spoken(f.heard)[0]).not.toBe('ขอคิดแป๊บนะ');
    expect(spoken(f.heard)[0]).toContain('เอาอันนั้นมาให้');
    await new Promise(r=>setTimeout(r,50));
    expect(f.prompts).toHaveLength(turns);
@@ -167,7 +168,7 @@ describe.each(['browser','computer'] as const)('%s',adapter=>{
    f.settle(adapter==='browser'?deterministicBrowser:deterministicComputer);
    expect(liveControlReceipt(f.runtime.store,applied.inputId)).toMatchObject({status:'applied'});
    expect(f.handoffs()).toHaveLength(0);
-   expect(spoken(f.heard)).toHaveLength(1);expect(spoken(f.heard)[0]).not.toBe('ขอคิดแป๊บนะ');
+   expect(spoken(f.heard)).toHaveLength(1);
    expect(f.prompts).toEqual([]);
   }finally{await f.close();}
  });
