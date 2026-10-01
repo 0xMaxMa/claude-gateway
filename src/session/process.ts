@@ -1673,8 +1673,7 @@ export class SessionProcess extends EventEmitter {
         const cause = (err as NodeJS.ErrnoException).code;
         const missingWorkspace = cause === 'ENOENT' && !fs.existsSync(this.agentConfig.workspace);
         const code = missingWorkspace ? 'WORKSPACE_DIRECTORY_MISSING'
-          : cause === 'ENOENT' ? (isAppAgent ? 'CONTAINER_RUNTIME_NOT_FOUND' : 'CLAUDE_BINARY_NOT_FOUND') : cause === 'EACCES' || cause === 'EPERM' ? 'PROCESS_PERMISSION_DENIED'
-          : cause === 'E2BIG' || cause === 'ENAMETOOLONG' ? 'PROCESS_ARGS_TOO_LARGE' : 'PROCESS_START_FAILED';
+          : cause === 'ENOENT' ? (isAppAgent ? 'CONTAINER_RUNTIME_NOT_FOUND' : 'CLAUDE_BINARY_NOT_FOUND') : cause === 'EACCES' || cause === 'EPERM' ? 'PROCESS_PERMISSION_DENIED' : 'PROCESS_START_FAILED';
         this.emit('startup-error', Object.assign(new Error(code), { code }));
       }
     });
