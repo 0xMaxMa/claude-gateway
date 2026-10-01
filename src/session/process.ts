@@ -228,6 +228,8 @@ export class SessionProcess extends EventEmitter {
   private containerAttempt?: { directory: string; config: string };
   /** Bumped by stop(): a spawnProcess() that awaited across it abandons its spawn. */
   private spawnEpoch = 0;
+  // Bumped by every start(): a stop() still awaiting after one ran no longer owns the session's live state.
+  private starts = 0;
   managedGroupStopped = false;
   get processId(): number | undefined { return this.isRunning() ? this.process?.pid : undefined; }
   get managedProcessId(): number | undefined { return this.managedProcessGroup; }
@@ -435,6 +437,7 @@ export class SessionProcess extends EventEmitter {
   }
 
   async start(): Promise<void> {
+    this.starts++;
     this.stopping = false;
     this.restartCount = 0;
     this.setupRestartWatcher();
@@ -2095,21 +2098,34 @@ export class SessionProcess extends EventEmitter {
     this.managedConnectorPaths = new Set();
     this.managedMcpConfigPath = undefined;
     this.sessionDirPath = undefined;
-    if (this.containerAttempt && this.agentConfig.container) {
-      this.managedGroupStopped = await stopContainerProfile(this.agentConfig.container, this.containerAttempt.directory);
-      this.containerAttempt = undefined;
-    }
-    if (this.managedProcessGroup) {
-      const hostStopped = await stopProcessGroup(this.managedProcessGroup);
-      this.managedGroupStopped = this.agentConfig.type === 'app-agent' ? this.managedGroupStopped && hostStopped : hostStopped;
-      if (this.managedGroupStopped) this.managedProcessGroup = undefined;
-    }
-    this.resetBackgroundDispatchState();
-    await this.restartWatcher?.close();
+    // The same for the spawn's live state: a start() during the awaits below
+    // attaches its own child, group, attempt and watcher, which this stop must
+    // neither signal nor clear. A newer stop() of that spawn handles them.
+    const starts = this.starts;
+    const superseded = (): boolean => this.starts !== starts;
+    const proc = this.process;
+    const attempt = this.containerAttempt;
+    const group = this.managedProcessGroup;
+    const watcher = this.restartWatcher;
     this.restartWatcher = null;
-    try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}
-    if (this.source === 'telegram' && !this.runtimeProfile) {
-      try { fs.rmSync(path.join(this.typingDir, `${this.chatId}.processing`), { force: true }); } catch {}
+    let exited = false;
+    const exit = proc ? new Promise<void>(resolve => proc.once('exit', () => { exited = true; resolve(); })) : undefined;
+    this.resetBackgroundDispatchState();
+    if (attempt && this.agentConfig.container) {
+      this.managedGroupStopped = await stopContainerProfile(this.agentConfig.container, attempt.directory);
+      if (this.containerAttempt === attempt) this.containerAttempt = undefined;
+    }
+    if (group) {
+      const hostStopped = await stopProcessGroup(group);
+      this.managedGroupStopped = this.agentConfig.type === 'app-agent' ? this.managedGroupStopped && hostStopped : hostStopped;
+      if (this.managedGroupStopped && this.managedProcessGroup === group) this.managedProcessGroup = undefined;
+    }
+    await watcher?.close();
+    if (!superseded()) {
+      try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}
+      if (this.source === 'telegram' && !this.runtimeProfile) {
+        try { fs.rmSync(path.join(this.typingDir, `${this.chatId}.processing`), { force: true }); } catch {}
+      }
     }
     // mcp-config.json under here holds fully-substituted secrets (channel bot
     // tokens, GATEWAY_API_KEY, connector OAuth tokens) — it must not outlive
@@ -2130,28 +2146,21 @@ export class SessionProcess extends EventEmitter {
         fs.rmSync(path.join(this.agentConfig.workspace, '.sessions', this.sessionId), { recursive: true, force: true });
       } catch {}
     };
-    if (!this.process) {
+    // A child that failed to spawn never exits; its 'error' handler already let go of it.
+    if (!proc || exited || (this.process !== proc && !proc.pid)) {
       removeSessionDir();
       return;
     }
 
-    return new Promise((resolve) => {
-      const proc = this.process!;
-      let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
-      proc.once('exit', () => {
-        if (forceKillTimer !== null) {
-          clearTimeout(forceKillTimer);
-          forceKillTimer = null;
-        }
-        if (this.process === proc) this.process = null;
-        removeSessionDir();
-        resolve();
-      });
-      proc.kill('SIGTERM');
-      forceKillTimer = setTimeout(() => {
-        forceKillTimer = null;
-        if (this.process) proc.kill('SIGKILL');
-      }, 10_000);
-    });
+    let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+    proc.kill('SIGTERM');
+    forceKillTimer = setTimeout(() => {
+      forceKillTimer = null;
+      if (!exited) proc.kill('SIGKILL');
+    }, 10_000);
+    await exit;
+    if (forceKillTimer !== null) clearTimeout(forceKillTimer);
+    if (this.process === proc) this.process = null;
+    removeSessionDir();
   }
 }

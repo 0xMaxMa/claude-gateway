@@ -18,7 +18,7 @@ jest.mock('child_process', () => {
       // A host file is read now, the way the CLI reads it at startup.
       const promptFile = file && fs.existsSync(file) ? { content: fs.readFileSync(file, 'utf8'), mode: fs.statSync(file).mode & 0o777 } : undefined;
       const proc = new EventEmitter();
-      Object.assign(proc, { pid: 4242, stdin: { writable: true, write: jest.fn(), end: jest.fn(), on: jest.fn() }, stdout: new EventEmitter(), stderr: new EventEmitter(), kill: jest.fn(() => { if (!holdExit) setImmediate(() => proc.emit('exit', 0, 'SIGTERM')); return true; }) });
+      Object.assign(proc, { pid: 4242 + spawned.length, stdin: { writable: true, write: jest.fn(), end: jest.fn(), on: jest.fn() }, stdout: new EventEmitter(), stderr: new EventEmitter(), kill: jest.fn(() => { if (!holdExit) setImmediate(() => proc.emit('exit', 0, 'SIGTERM')); return true; }) });
       spawned.push({ bin, args, promptFile, proc });
       return proc;
     }),
@@ -43,10 +43,17 @@ jest.mock('../../../src/connectors/resolve', () => ({
   resolveEnabledConnectors: () => connectors,
 }));
 // A worker's fake child must not become a managed process group: stopping one signals its pgid.
+// A test that needs one sets `supervised`; the group stop is then a fake the test can hold open.
+let supervised = false;
+let groupStop: (group: number) => Promise<boolean> = async () => true;
 jest.mock('../../../src/orchestration/process-supervisor', () => ({
   ...jest.requireActual('../../../src/orchestration/process-supervisor'),
-  processSupervisorSupported: () => false,
+  processSupervisorSupported: () => supervised,
+  recordProcessRoot: () => {},
+  stopProcessGroup: jest.fn((group: number) => groupStop(group)),
 }));
+let containerStop: (directory: string) => Promise<boolean> = async () => true;
+let attempts = 0;
 const containerWrites: { args: string[]; input: string }[] = [];
 jest.mock('../../../src/orchestration/container', () => {
   const real = jest.requireActual('../../../src/orchestration/container');
@@ -55,11 +62,11 @@ jest.mock('../../../src/orchestration/container', () => {
     // The real one writes the prompt in the same docker exec as the ticket (see
     // container-system-prompt.test.ts); record what it was asked to write.
     prepareContainerProfile: jest.fn(async (_agent: unknown, _profile: unknown, systemPrompt?: (directory: string) => Promise<string | undefined>) => {
-      const directory = '/tmp/gateway-orch-0f0f0f0f-0000-4000-8000-000000000000';
+      const directory = '/tmp/gateway-orch-0f0f0f0f-0000-4000-8000-' + String(attempts++).padStart(12, '0');
       containerWrites.push({ args: [directory + '/system-prompt.md'], input: (await systemPrompt?.(directory)) ?? '' });
       return { directory, config: directory + '/mcp.json' };
     }),
-    stopContainerProfile: jest.fn(async () => true),
+    stopContainerProfile: jest.fn((_container: string, directory: string) => containerStop(directory)),
     containerNode: jest.fn(async (_container: string, script: string, args: string[] = [], input = '') => {
       if (script.includes('/workspace/CLAUDE.md')) return 'Container context';
       containerWrites.push({ args, input });
@@ -73,6 +80,8 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionProcess } from '../../../src/session/process';
 import { OrchestrationError } from '../../../src/orchestration/types';
+import { stopContainerProfile } from '../../../src/orchestration/container';
+import { stopProcessGroup } from '../../../src/orchestration/process-supervisor';
 import { responseFailureMessage } from '../../../src/orchestration/response-errors';
 import type { AgentConfig, GatewayConfig } from '../../../src/types';
 import type { RuntimeProfile } from '../../../src/session/runtime-profile';
@@ -87,6 +96,8 @@ let workspace: string;
 
 beforeEach(() => {
   spawned.length = 0; logged.length = 0; containerWrites.length = 0; spawnError = undefined; holdExit = false; connectors = {};
+  supervised = false; groupStop = async () => true; containerStop = async () => true; attempts = 0;
+  jest.mocked(stopProcessGroup).mockClear(); jest.mocked(stopContainerProfile).mockClear();
   root = mkdtempSync(join(tmpdir(), 'prompt-file-'));
   workspace = join(root, 'workspace'); mkdirSync(workspace);
   home = root;
@@ -244,4 +255,63 @@ test('a respawn while an earlier stop() still waits for its exit keeps the sessi
   holdExit = false;
   await sp.stop();
   expect(existsSync(join(workspace, '.sessions', 'session-dir'))).toBe(false);
+});
+
+// Respawn while an earlier stop() is still awaiting: the stale stop and the turn that
+// called it act only on the spawn they stopped, never on the one that replaced it.
+const held = () => { let release!: (value: boolean) => void; const promise = new Promise<boolean>(resolve => { release = resolve; }); return { promise, release }; };
+const tick = () => new Promise(resolve => setTimeout(resolve, 20));
+function worker(type?: 'app-agent'): SessionProcess {
+  const agent = { id: 'a', workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] }, ...(type ? { type, container: 'app-test' } : {}) } as unknown as AgentConfig;
+  return new SessionProcess('session:w', 'api', agent,
+    { gateway: { headless: true, timezone: 'UTC', logDir: join(root, 'logs') }, agents: [agent] } as GatewayConfig,
+    { getContextReset: () => undefined, loadSession: async () => [] } as any, undefined,
+    { role: 'worker', mcpConfigPath: join(root, 'mcp.json'), overlay: OVERLAY, ...(type ? {} : { hostExecution: true, context: 'c' }), capacityReserved: true } as RuntimeProfile);
+}
+
+test('a stale stop() signals only the child it stopped, not the one a respawn attached during its group stop', async () => {
+  supervised = true;
+  const sp = worker();
+  await sp.start();
+  const group = held();
+  groupStop = () => group.promise;
+  holdExit = true;
+  const stopping = sp.stop();
+  await sp.start();
+  const [{ proc: first }, { proc: second }] = spawned as { proc: any }[];
+  group.release(true);
+  await tick();
+  expect(first.kill).toHaveBeenCalledWith('SIGTERM');
+  expect(second.kill).not.toHaveBeenCalled();
+  expect((sp as any).managedProcessGroup).toBe(second.pid);
+  first.emit('exit', 0, 'SIGTERM');
+  await stopping;
+  expect(sp.isRunning()).toBe(true);
+  groupStop = async () => true;
+  holdExit = false;
+  await sp.stop();
+  expect(jest.mocked(stopProcessGroup).mock.calls.map(([pid]) => pid)).toEqual([first.pid, second.pid]);
+});
+
+test('a stale stop() neither clears nor orphans the container attempt a respawn attached during its container stop', async () => {
+  const sp = worker('app-agent');
+  await sp.start();
+  const container = held();
+  containerStop = () => container.promise;
+  holdExit = true;
+  const stopping = sp.stop();
+  spawned[0].proc.emit('exit', 0, 'SIGTERM');
+  await sp.start();
+  const directory = (n: number) => '/tmp/gateway-orch-0f0f0f0f-0000-4000-8000-' + String(n).padStart(12, '0');
+  expect((sp as any).containerAttempt?.directory).toBe(directory(1));
+  container.release(true);
+  await tick();
+  expect((sp as any).containerAttempt?.directory).toBe(directory(1));
+  expect((spawned[1].proc as any).kill).not.toHaveBeenCalled();
+  await stopping;
+  expect(sp.isRunning()).toBe(true);
+  containerStop = async () => true;
+  holdExit = false;
+  await sp.stop();
+  expect(jest.mocked(stopContainerProfile).mock.calls.map(([, dir]) => dir)).toEqual([directory(0), directory(1)]);
 });
