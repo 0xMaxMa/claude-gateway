@@ -21,7 +21,8 @@ const HINTS:Record<string,string>={
  SHORTCUT_NOT_OFFERED:'the browser in front did not offer this command as a menu item or shortcut. Name the menu item as it appears on screen.',
  NOTHING_TO_ERASE:'the focused field is already empty.',
  ERASE_UNAVAILABLE:'the focused field is too long to edit safely this way.',
- DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED:'{target} is a high-impact control (delete, send, pay, quit or confirm). To proceed, name the action in the command, for example "กด Delete" or "confirm delete".',
+ CONFIRMATION_REQUIRED:'{target} is high-impact, so the user was asked to confirm it; their yes or no answers.',
+ CONFIRMATION_DECLINED:'the user said no, so it was not pressed.',
  COMPLETION_NOT_ESTABLISHED:'the result could not be confirmed from the screen.',
  SEQUENCE_TARGET_MISSING:'the next button was not found exactly once on the screen.',
  SEQUENCE_TOO_LONG:'the number is too long to press safely. Say at most 8 digits at a time.',
@@ -57,6 +58,7 @@ export function computerOutcomeText(report:ComputerTaskReport):string{
  // The device may have acted: never tell the owner it was not done.
  if(report.reason==='OUTCOME_UNKNOWN')return `${UNKNOWN_PREFIX} the last action may have run. Check the screen before sending the command again.`;
  if(report.clarification)return `Not done: ${report.clarification}`;
+ if(waiting==='SESSION_READY'&&!report.steps)return 'Ready: the session is open and waits for the next command.';
  if(waiting==='READ_REQUEST'&&!report.steps)return 'Read request: nothing was pressed; the assistant answers from the current screen.';
  // A spoken number stopped part-way: say how far it got, never "Done".
  const sequence=report.lastAction?.sequence,planned=report.lastAction?.planned;

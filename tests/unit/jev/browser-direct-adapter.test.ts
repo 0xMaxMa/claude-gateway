@@ -106,3 +106,22 @@ test('an agent-controlled completion candidate still goes to parent verification
  await f.a.submit(task({automationController:'agent'}),'r','Open the page');
  expect((await settle(f.a,task({automationController:'agent'}),'r')).type).toBe('unknown');
 });
+
+// Session d8013081: the agent's high-impact hand-off command asks the user; their
+// next command carries the question so Jev can read the yes or no.
+test('the user\'s next command answers the hand-off confirmation; only the spawn round is the session start',async()=>{
+ const f=fixture();
+ await f.a.submit(task(),'r1','open a session and wait');await settle(f.a,task(),'r1');
+ expect(f.contexts[0]).toMatchObject({sessionStart:true});
+ f.setRun(async()=>({status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1,commandOutcome:{done:false,reason:'CONFIRMATION_REQUIRED',action:{kind:'click',label:'Send'}}}));
+ const handoff=task({revision:2,executionControl:{revision:2,agentHandoff:true} as never});
+ await f.a.submit(handoff,'r2','click Send');await settle(f.a,handoff,'r2');
+ expect(f.contexts[1]).toMatchObject({agentCommand:true});expect(f.contexts[1].sessionStart).toBeUndefined();
+ f.setRun(async()=>({status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1}));
+ const reply=task({revision:3,executionControl:{revision:3} as never});
+ await f.a.submit(reply,'r3','yes');await settle(f.a,reply,'r3');
+ expect(f.contexts[2]).toMatchObject({goal:'yes',confirmation:{command:'click Send',label:'Send'}});
+ const next=task({revision:4,executionControl:{revision:4} as never});
+ await f.a.submit(next,'r4','scroll down');await settle(f.a,next,'r4');
+ expect(f.contexts[3].confirmation).toBeUndefined();
+});

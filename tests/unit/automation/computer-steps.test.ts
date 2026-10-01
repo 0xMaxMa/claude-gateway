@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {parseComputerSteps,runComputerSteps,destructiveText} from '../../../src/automation/computer-steps';
+import {parseComputerSteps,runComputerSteps} from '../../../src/automation/computer-steps';
 import {standardNavigationCommand} from '../../../src/automation/computer-command';
 import {validateJevRequest} from '../../../src/jev/validation';
 import type {ComputerUseDependencies} from '../../../src/automation/computer-use';
@@ -119,15 +119,6 @@ test('standard navigation grammar is exact',()=>{
  expect(standardNavigationCommand('go back to the first result')).toBeUndefined();
 });
 
-test('destructive vocabulary ignores quoted payloads',()=>{
- expect(destructiveText('กดส่งข้อความ')).toBe(true);
- expect(destructiveText('click Delete account')).toBe(true);
- expect(destructiveText('OK')).toBe(true);
- expect(destructiveText('OK Google')).toBe(false);
- expect(destructiveText('พิมพ์ "delete me"')).toBe(false);
- expect(destructiveText('scroll down')).toBe(false);
-});
-
 test('explicit browse steps run on one lease without returning between steps',async()=>{
  const f=desktop(browsePlan);
  const r=await run(['เปิด tab ใหม่','เข้า google','ค้น xxx','เข้า link แรก','scroll ลงมา','ย้อนกลับ'],f.deps);
@@ -181,20 +172,21 @@ test('an ambiguous target (BLOCKED) stops rather than guessing',async()=>{
  expect(f.actions()).toHaveLength(0);
 });
 
-test('a destructive step is never dispatched from the list',async()=>{
- const f=desktop(browsePlan);
- const r=await run(['เปิด tab ใหม่','กดส่งข้อความ','scroll ลงมา'],f.deps);
- expect(r.stepRun).toMatchObject({stopReason:'DESTRUCTIVE_STEP',stoppedAt:2,completed:1,remaining:['กดส่งข้อความ','scroll ลงมา']});
- expect(f.questions).toHaveLength(0);expect(f.actions()).toHaveLength(1);
- expect(f.snapshots()).toBe(1);
+// Session d8013081: the user's own step list is their authorization; words
+// such as ส่ง/ยืนยัน or a Delete control chosen by Jev do not stop it.
+test('a step list with ส่ง and ยืนยัน runs to the end',async()=>{
+ const f=desktop((command,req)=>command==='กดส่งข้อความ'?answer(req,'press:newtab'):command==='ยืนยัน'?answer(req,'press:link1'):browsePlan(command,req));
+ const r=await run(['กดส่งข้อความ','ยืนยัน'],f.deps);
+ expect(r.stepRun).toMatchObject({stopReason:'ALL_STEPS_DONE',completed:2});
+ expect(f.actions()).toHaveLength(2);
 });
 
-test('a destructive target chosen by Jev is fenced before its write-ahead receipt',async()=>{
- const f=desktop((command,req)=>answer(req,'press:danger'));
- const r=await run(['เข้า link แรก','scroll ลงมา'],f.deps);
- expect(r.stepRun).toMatchObject({stopReason:'DESTRUCTIVE_ACTION',stoppedAt:1,completed:0});
- expect(r.status).toBe('needs_input');
- expect(f.fenced).toHaveLength(0);expect(f.actions()).toHaveLength(0);
+test('a high-impact target Jev chooses for a step is pressed',async()=>{
+ const f=desktop((command,req)=>command==='ลบบัญชี'?answer(req,'press:danger'):browsePlan(command,req));
+ const r=await run(['ลบบัญชี','เข้า link แรก'],f.deps);
+ expect(f.actions()[0]).toMatchObject({kind:'press',ref:'danger'});
+ expect(f.fenced.length).toBeGreaterThan(0);
+ expect(r.stepRun?.stopReason).not.toBe('DESTRUCTIVE_ACTION');
 });
 
 test('a step without an observable AX change stops the run as stuck',async()=>{

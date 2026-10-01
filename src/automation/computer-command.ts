@@ -35,7 +35,9 @@ const targetQuestions:Record<string,string>={
  navigate:'Which available history direction matches `command`?',
 };
 type Request=Parameters<ComputerUseDependencies['evaluate']>[0];
-export function buildComputerCommand(state:ComputerState,command:string,targets:Map<string,Record<string,unknown>>,descriptions:Record<string,string>,context:string|undefined,allowSubmit:boolean,readRequest=false){
+export const IMPACT_QUESTION='Would doing `command` on what is shown be high-impact: hard to undo, or acting for the user toward others or their accounts and data?';
+export const IMPACT_CRITERIA={ROUTINE:'Routine: looking, moving around, opening, scrolling, searching, or typing without sending',HIGH_IMPACT:'High-impact: for example deleting, sending, submitting, paying or buying, publishing, quitting an application, signing out, or confirming such an operation'};
+export function buildComputerCommand(state:ComputerState,command:string,targets:Map<string,Record<string,unknown>>,descriptions:Record<string,string>,context:string|undefined,allowSubmit:boolean,readRequest=false,impact=false){
  const kinds:Record<string,string>={WAIT:'The interface is still changing; wait for a later command',BLOCKED:'No offered operation matches this command',DONE:'No operation is required by the current observed state'};
  // Only the user's own direct command can be a question for the assistant.
  if(readRequest){kinds.READ_REQUEST=READ_REQUEST_CRITERION;kinds.UNCLEAR=UNCLEAR_CRITERION;}
@@ -55,6 +57,9 @@ export function buildComputerCommand(state:ComputerState,command:string,targets:
   if(Object.keys(criteria).length>255)throw Error('ACTION_SPACE_TOO_LARGE');
   questions['target_'+kind]={type:'choice',instructions:targetQuestions[kind]+' Use current labels, roles and context. Choose BLOCKED if no offered target matches. Earlier interaction is only reference context.',criteria};
  }
+ // The agent's command for a handed-off utterance: Jev judges, by meaning in
+ // any language, whether doing it is high-impact, so the user confirms first.
+ if(impact)questions.impact={type:'choice',instructions:IMPACT_QUESTION,criteria:IMPACT_CRITERIA};
  const literals=commandTextCandidates(command,Boolean(focusedTextField(state)));
  if(kinds.type){
   if(literals.length)questions.text={type:'choice',instructions:'Which candidate is the exact text or URL to enter for `command`? Select only its payload, excluding instructions or explanations. NONE means no supplied candidate fits.',criteria:Object.fromEntries([['NONE','No candidate is the required payload'],...literals.map((text,i)=>['TEXT:'+i,JSON.stringify({text})])])};

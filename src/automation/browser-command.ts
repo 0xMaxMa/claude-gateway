@@ -1,5 +1,4 @@
 import {addressCommand,historyCommand,keyCommand,newTabCommand,normalizeCommand,scrollCommand,textCommand} from './direct-command';
-import {commandAuthorizes,destructiveLabel,DESTRUCTIVE_CONFIDENCE,type DestructiveTarget} from './computer-safety';
 
 /**
  * Remote Browser direct-command layer. The grammar is the one Computer Use
@@ -101,37 +100,6 @@ export function searchFields<T extends PageElement>(elements:T[]):{unique?:T;can
  if(search.length===1)return {unique:search[0],candidates};
  if(candidates.length===1)return {unique:candidates[0],candidates};
  return {candidates:search.length>1?search:candidates};
-}
-
-/**
- * A pending click/select on a high-impact control (delete, send, pay, confirm,
- * publish, quit) needs the command to name the same operation and a confident
- * decision. strict (step mode) also fences generic confirm labels.
- */
-export function browserDestructiveBlock(element:PageElement|undefined,option:string|undefined,command:string,confidence:number,strict:boolean):DestructiveTarget|undefined {
- if(!element)return strict?{label:'unobserved control',groups:[]}:undefined;
- const target=destructiveLabel({label:option?`${element.label} ${option}`:element.label,value:element.value,context:element.context},strict);
- if(!target)return;
- // A step list is typed up front; a high-impact step always returns control.
- if(strict)return target;
- return commandAuthorizes(command,target)&&confidence>=DESTRUCTIVE_CONFIDENCE?undefined:target;
-}
-
-/**
- * Step mode (strict): Enter, or typing with submit, can send whatever form the
- * page holds, and the observation does not say which field has focus. Only a
- * search field submits freely; otherwise a high-impact field or any high-impact
- * control on the page (Send, Delete, Pay...) returns control, as the Computer
- * Use step fence does for Enter on a high-impact focused control.
- */
-export function browserSubmitBlock(elements:PageElement[],field:PageElement|undefined,strict:boolean):DestructiveTarget|undefined {
- if(!strict||(field&&searchLike(field)))return;
- const own=field&&destructiveLabel({label:field.label,value:field.value,context:field.context},true);
- if(own)return own;
- for(const element of elements){
-  const risky=destructiveLabel({label:element.label,value:element.value,context:element.context},false);
-  if(risky)return risky;
- }
 }
 
 /** Previous command context for the next direct command: references only, never replay. */

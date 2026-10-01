@@ -1,5 +1,5 @@
 import {buildComputerCommand,readComputerCommand,labelCommand,labelTarget,standardComputerCommand,standardKeyboardCommand,standardNavigationCommand,shortcutCommand,shortcutTarget,addressCommand,addressFields,quitShortcut,frontIsBrowser,helperSupports,STANDARD_QUIT} from './computer-command';
-import {agentCommandBlock,commandAuthorizes,destructiveLabel,destructiveTarget,DESTRUCTIVE_CONFIDENCE,eraseCommand,focusedTextField,textFocused} from './computer-safety';
+import {eraseCommand,focusedTextField,textFocused} from './computer-safety';
 import {decisionInstructions,readChoice,observedEffect,decisionState,literalTextCandidates} from './computer-policy';
 import {checkInterruption,interruptible} from './interrupt';
 import {randomUUID} from 'node:crypto';
@@ -64,13 +64,32 @@ export interface ComputerUseDependencies {
 }
 export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'needs_input'|'blocked'|'cancelled'|'needs_reconciliation';reason:string;revision:number;steps:number;evaluations:number;trace:{events:ComputerProgress[];truncated:boolean};operationId?:string;observation?:ComputerState;stepRun?:import('./computer-steps').ComputerStepRun;lastAction?:ComputerLastAction;clarification?:string}
 /** The command's own interaction, for the owner's outcome line. Never typed text. */
-export interface ComputerLastAction {kind:string;label?:string;role?:string;key?:string;direction?:string;appId?:string;count?:number;blocked?:boolean;sequence?:string[];planned?:number}
+export interface ComputerLastAction {kind:string;label?:string;role?:string;key?:string;direction?:string;appId?:string;count?:number;blocked?:boolean;sequence?:string[];planned?:number;
+ /** Not run: the agent's command chose a high-impact action and the user was asked to confirm it. */
+ confirm?:boolean}
 const PreparedInput=z.object({application:z.string().min(1).max(200),label:z.string().min(1).max(500),text:z.string().max(2000),role:z.string().max(100).optional(),windowTitle:nativeText(500).optional()}).strict();
-const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),readRequest:z.boolean().default(false),agentCommand:z.boolean().default(false),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
+const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),readRequest:z.boolean().default(false),agentCommand:z.boolean().default(false),sessionStart:z.boolean().default(false),confirmation:z.object({command:z.string().min(1).max(2000),label:z.string().max(250)}).strict().optional(),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
 const fingerprint=(s:ComputerState)=>JSON.stringify([s.application,s.windowTitle,s.text,s.supportedActions,s.focusedControl&&{role:s.focusedControl.role,label:s.focusedControl.label},s.controls.map(({ref,...c})=>c),s.scrollAreas?.map(({ref,...area})=>area),s.truncated]);
+/** Jev reads the user's reply to a confirmation question, in any language. */
+async function confirmationReply(label:string,reply:string,deps:ComputerUseDependencies,signal:AbortSignal):Promise<'YES'|'NO'|'OTHER'>{
+ const criteria={YES:'The user agrees: do it',NO:'The user declines or wants to stop',OTHER:'The reply is a different command, not an answer to the question'};
+ try{
+  const answer=await interruptible(s=>deps.evaluate({requestId:randomUUID(),state:{question:`Press ${JSON.stringify(label)}?`,reply},questions:{reply:{type:'choice',instructions:{command:reply,question:'The assistant asked the user the `question` before pressing a high-impact control. Does `reply` answer it?'},criteria}}},s),signal,deps.interruptSignal);
+  const picked=readChoice(answer.answers.reply,criteria);
+  return picked.confident?picked.choice as 'YES'|'NO'|'OTHER':'OTHER';
+ }catch(error){
+  // Interruption and cancellation stop the run; an unreadable answer is never a yes.
+  if(signal.aborted||deps.interruptSignal?.aborted)throw error;
+  return 'OTHER';
+ }
+}
 export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,signal:AbortSignal):Promise<ComputerUseResult>{
- const input=Input.parse(raw),runSignal=AbortSignal.any([signal,AbortSignal.timeout(input.timeoutMs)]);
- let goal:GoalRevision={revision:input.revision,goal:input.goal},steps=0,evaluations=0,sequence=0,round=0;
+ let input=Input.parse(raw);const runSignal=AbortSignal.any([signal,AbortSignal.timeout(input.timeoutMs)]);
+ // The user's reply to "press <label>?" for the agent's high-impact command:
+ // Jev reads it in any language. Yes runs that command as the user's own.
+ const reply=input.confirmation?await confirmationReply(input.confirmation.label,input.goal,deps,runSignal):undefined;
+ if(reply==='YES')input={...input,goal:input.confirmation!.command};
+ let goal:GoalRevision={revision:input.revision,goal:input.goal},steps=0,evaluations=reply?1:0,sequence=0,round=0;
  let noProgress=0;
  let lastAction:ComputerLastAction|undefined,erasing:number|undefined;
  // Typing refused with FOCUS_REQUIRED focuses the same field once, then types
@@ -148,6 +167,9 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
    },
    decide:async state=>{
     check();const revision=goal.revision;if(direct&&goal.revision!==input.revision)return {result:result('cancelled','REVISION_SUPERSEDED')};
+    if(reply==='NO'){await capture();return {result:waitForCommand('CONFIRMATION_DECLINED')};}
+    // The agent's command reaches Jev on every path, so its impact is judged before any action.
+    const fast=!input.agentCommand;
     const requestStandard=(command:string)=>{standardRequest=command;return {action:{action:'STANDARD_OBSERVE',generation:state.generation,revision,targets:new Map<string,Record<string,unknown>>()}};};
     if(direct&&backspaceLeft>0){
      if(!state.focusedControl||state.focusedControl.sensitive){backspaceLeft=0;return {result:waitForCommand('FOCUS_REQUIRED')}};
@@ -158,7 +180,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     if(direct&&labelPresses.length){
      // The next digit of a spoken number, matched again on this fresh frame.
      const control=labelTarget(state,labelPresses[0]);
-     if(!control||destructiveTarget(state,{kind:'press',ref:control.ref},false)){labelPresses=[];await capture();return {result:waitForCommand('SEQUENCE_TARGET_MISSING')};}
+     if(!control){labelPresses=[];await capture();return {result:waitForCommand('SEQUENCE_TARGET_MISSING')};}
      labelPresses.shift();return pressLabel(control);
     }
     if(direct&&standardRequest){
@@ -199,9 +221,8 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
       return {action:{action:'erase',generation:state.generation,revision,targets:new Map([['erase',action]]),literal:characters.slice(0,-erasing).join(''),observedContinuation:true}};
      }
      // A spoken digit or operator naming exactly one visible button is pressed
-     // without Jev. Text focus means words are text; several matches, none, or
-     // a high-impact label keep the Jev path and its confirmation guard.
-     const spoken=textFocused(state)?undefined:labelCommand(goal.goal);
+     // without Jev. Text focus means words are text; several matches or none keep the Jev path.
+     const spoken=!fast||textFocused(state)?undefined:labelCommand(goal.goal);
      // A keypad shows every digit once (Calculator, a dial pad). Elsewhere "clear",
      // "add" or "one" are ordinary words for Jev, not a button to press blindly.
      const keypad=spoken&&['0','1','2','3','4','5','6','7','8','9'].every(digit=>labelTarget(state,[digit]));
@@ -209,14 +230,14 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      if(spoken&&'tooLong' in spoken&&keypad)return {result:waitForCommand('SEQUENCE_TOO_LONG')};
      if(spoken&&'presses' in spoken&&keypad){
       const controls=spoken.presses.map(labels=>labelTarget(state,labels));
-      // "ลบ" beside a visible Delete/Remove control could mean either.
-      const eraseWord=eraseCommand(goal.goal)!==undefined&&state.controls.some(c=>!c.sensitive&&c.role!=='AXMenuItem'&&destructiveLabel({label:c.label,value:c.value},false)?.groups.includes('delete'));
-      if(!eraseWord&&controls.every(c=>c&&!destructiveTarget(state,{kind:'press',ref:c.ref},false))){
+      // "ลบ" beside a visible Delete control could mean either: Jev decides.
+      const eraseWord=eraseCommand(goal.goal)!==undefined&&state.controls.some(c=>!c.sensitive&&c.role!=='AXMenuItem'&&eraseCommand(c.label)!==undefined);
+      if(!eraseWord&&controls.every(Boolean)){
        labelPresses=spoken.presses.slice(1);labelPlanned=spoken.presses.length;labelPressed.length=0;
        return pressLabel(controls[0]!);
       }
      }
-     const shortcut=shortcutCommand(goal.goal);
+     const shortcut=fast?shortcutCommand(goal.goal):undefined;
      if(shortcut){
       if(shortcut.standard&&supports(state,shortcut.standard))return requestStandard(shortcut.standard);
       const control=shortcutTarget(state,shortcut.labels);
@@ -226,7 +247,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      }
      // The exact Cmd+Q shortcut uses the helper's guarded quit; any other quit
      // wording (any language) is Jev's own quit choice below.
-     if(quitShortcut(goal.goal)&&supports(state,'app:quit'))return requestStandard('app:quit');
+     if(fast&&quitShortcut(goal.goal)&&supports(state,'app:quit'))return requestStandard('app:quit');
      // Opening a site or address types it into the browser address field and
      // submits it; without such a field the normal decision applies. The field
      // is found by role (after address:focus, the focused field), never by its
@@ -251,7 +272,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
       return {action:{action:'address',generation:state.generation,revision,targets:new Map([['address',action]]),literal:address,submit:true,observedContinuation:true}};
      }
     }
-    const key=direct?standardKeyboardCommand(goal.goal):undefined;
+    const key=direct&&fast?standardKeyboardCommand(goal.goal):undefined;
     if(key){
      if(!state.focusedControl||state.focusedControl.sensitive)return {result:waitForCommand('NO_SUPPORTED_ACTION')};
      const action={kind:'key',key};emit('decided',summary(action,state));
@@ -268,7 +289,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      const action={kind:'scroll',direction:standard.split(':')[1],...(state.scrollAreas?.length?{ref:state.scrollAreas[0].ref}:{})};emit('decided',summary(action,state));
      return {action:{action:'scroll',generation:state.generation,revision,targets:new Map([['scroll',action]]),observedContinuation:true}};
     }
-    if(standard&&state.standardCommand===standard){
+    if(fast&&standard&&state.standardCommand===standard){
      const action:Record<string,unknown>=standard==='close:window'?{kind:'press',ref:'standard-close'}:{kind:'scroll',direction:standard.split(':')[1]};
      const available=standard==='close:window'?state.controls.some(c=>c.ref==='standard-close'&&c.actions.includes('press')):state.supportedActions?.includes(standard);
      if(!available)return {result:waitForCommand('NO_SUPPORTED_ACTION')};
@@ -282,7 +303,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     // A direct command gets menu-bar commands as their own choice (matched by
     // meaning, any language) and quitting the front app as another.
     const menus=direct?state.controls.filter(c=>!c.sensitive&&c.role==='AXMenuItem'&&c.actions.includes('press')):[];
-    if(direct&&!input.agentCommand){
+    if(direct){
      const front=state.apps.find(app=>app.id===state.application)?.name??state.application;
      if(supports(state,'app:quit'))offer('quit:'+STANDARD_QUIT,JSON.stringify({operation:'Quit the application in front',application:front}),{kind:'press',ref:STANDARD_QUIT});
      else for(const c of menus)offer('quit:'+c.ref,JSON.stringify({kind:'press',ref:c.ref,label:c.label,role:c.role}),{kind:'press',ref:c.ref});
@@ -314,32 +335,33 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     }
     const requestId=randomUUID(),started=Date.now();emit('evaluating',{requestId,decisionMode:'jev'});
     if(direct){
-     const command=buildComputerCommand(state,goal.goal,targets,criteria,input.interactionContext,input.yieldAfterInteraction,input.yieldAfterInteraction&&input.readRequest);
+     const command=buildComputerCommand(state,goal.goal,targets,criteria,input.interactionContext,input.yieldAfterInteraction,input.yieldAfterInteraction&&input.readRequest,input.agentCommand);
      const answer=await interruptible(s=>deps.evaluate({requestId,...command.request},s),runSignal,deps.interruptSignal);
      check();checkInterruption(deps.interruptSignal);evaluations++;
      const selected=readComputerCommand(command,answer.answers);
      emit('decided',{...(targets.has(selected.action)?summary(targets.get(selected.action)!):{}),requestId,confidence:selected.confidence,elapsedMs:Date.now()-started});
+     // The agent's opening text for a session the user drives ("open a session, wait
+     // for the user") is no command: anything but an action just means ready.
+     if(input.sessionStart&&(!selected.confident||!targets.has(selected.action))){await capture();return {result:waitForCommand('SESSION_READY')};}
      if(!selected.confident){await capture();return {result:waitForCommand('LOW_CONFIDENCE')};}
      if(selected.action==='WAIT'){await capture();return {result:waitForCommand('UI_NOT_READY')};}
      // Jev gave up on a single direct command (decisionMode jev marks it): the gateway may hand it to the agent once.
      if(selected.action==='BLOCKED'||selected.action==='UNCLEAR'){await capture();return {result:waitForCommand(selected.action==='UNCLEAR'?'UNCLEAR':'NO_SUPPORTED_ACTION',input.yieldAfterInteraction&&input.readRequest?{decisionMode:'jev'}:{})};}
      // No action: the gateway hands the command to the agent, which reads the screen.
      if(selected.action==='READ_REQUEST'){await capture();return {result:waitForCommand('READ_REQUEST')};}
-     // Quitting is high-impact: only Jev's own confident quit choice, never the
-     // agent's command for a handed-off utterance (it is not offered then).
-     if(selected.action.startsWith('quit:')){
-      if(selected.confidence<DESTRUCTIVE_CONFIDENCE){lastAction={kind:'press',label:'Quit',blocked:true};await capture();return {result:waitForCommand('DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED')};}
-      if(selected.action==='quit:'+STANDARD_QUIT)return requestStandard('app:quit');
-      return {action:{...selected,generation:state.generation,revision,targets}};
+     // The user's own command is their authorization. The agent's command for a
+     // handed-off utterance runs only when Jev judged it routine; otherwise the
+     // user is asked to confirm the chosen action (any language, read by Jev).
+     if(input.agentCommand&&targets.has(selected.action)&&command.request.questions.impact){
+      const impact=readChoice(answer.answers.impact,command.request.questions.impact.criteria);
+      if(!(impact.confident&&impact.choice==='ROUTINE')){
+       const planned=targets.get(selected.action),control=state.controls.find(c=>c.ref===planned?.ref);
+       const label=selected.action.startsWith('quit:')?'Quit '+(state.apps.find(app=>app.id===state.application)?.name??state.application):planned?.kind==='key'?String(planned.key):planned?.kind==='open'?state.apps.find(app=>app.id===planned.app_id)?.name??String(planned.app_id):control?.label??selected.action;
+       lastAction={kind:String(planned?.kind??'press'),label:label.slice(0,200),blocked:true,confirm:true};
+       await capture();return {result:waitForCommand('CONFIRMATION_REQUIRED')};
+      }
      }
-     // A high-impact target needs a confident decision AND a command that
-     // names that operation itself; "ok" or a vague reference is not enough.
-     const planned=targets.get(selected.action),risky=planned&&destructiveTarget(state,planned,false);
-     // The agent's command for a handed-off utterance never authorizes one (the user's words did not name it).
-     if(risky&&(input.agentCommand||!(selected.confidence>=DESTRUCTIVE_CONFIDENCE&&commandAuthorizes(goal.goal,risky)))){
-      lastAction={kind:String(planned!.kind),label:risky.label.slice(0,200),blocked:true};
-      await capture();return {result:waitForCommand('DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED')};
-     }
+     if(selected.action==='quit:'+STANDARD_QUIT)return requestStandard('app:quit');
      return {action:{...selected,generation:state.generation,revision,targets}};
     }
     // Non-interactive callers retain bounded execution, with a single concrete
@@ -426,9 +448,6 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
       last=fresh;noProgress++;emit('waiting',{reason:'ACTION_CONTEXT_CHANGED'});if(direct){await capture();return waitForCommand('ACTION_CONTEXT_CHANGED');}return;
     }
     last=fresh;d.generation=fresh.generation;
-    // The agent's command for a handed-off utterance gains no high-impact authority on any path.
-    const agentBlock=input.agentCommand?agentCommandBlock(last,action,Boolean(d.submit)&&d.action!=='address'):undefined;
-    if(agentBlock){lastAction={kind:String(action.kind),label:agentBlock.label.slice(0,200),blocked:true};await capture();return waitForCommand('DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED');}
     const operationId=randomUUID();await deps.beforeMutation(operationId,{...action,generation:d.generation,revision:goal.revision});
     check();if(deps.interruptSignal?.aborted){emit('acted',{operationId,outcome:'not_executed',reason:'REVISION_SUPERSEDED'});checkInterruption(deps.interruptSignal);}update();if(goal.revision!==d.revision){emit('acted',{operationId,outcome:'not_executed',reason:'GOAL_CHANGED'});return;}
     pending=operationId;emit('acting',{...summary(action),operationId});const started=Date.now();

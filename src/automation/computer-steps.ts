@@ -1,7 +1,6 @@
 import {z} from 'zod';
 import {observedEffect} from './computer-policy';
 import {checkInterruption} from './interrupt';
-import {destructiveTarget,destructiveText} from './computer-safety';
 import {runComputerUse,ComputerObservation} from './computer-use';
 import type {ComputerProgress,ComputerState,ComputerUseDependencies,ComputerUseResult} from './computer-use';
 import {COMMAND_STEPS_MAX,COMMAND_STEPS_TIMEOUT_MS,STEP_TEXT_MAX,parseCommandSteps,stepParts} from './command-steps';
@@ -12,8 +11,9 @@ import type {CommandStepRun,CommandStepStopReason} from './command-steps';
  * step on one desktop lease, without returning to the parent agent between
  * steps. Every step reuses the direct single-command controller, so its
  * confidence gate, literal-text guard, write-ahead receipt and never-replay
- * reconciliation are unchanged. The runner only adds step sequencing, a
- * destructive-action fence, per-step AX verification and hard caps.
+ * reconciliation are unchanged. The runner only adds step sequencing,
+ * per-step AX verification and hard caps. The user's own list is their
+ * authorization: no step is held back for what it says or presses.
  */
 // The step grammar is shared with Remote Browser step mode (command-steps.ts).
 export {stepParts};
@@ -38,12 +38,6 @@ const RETRYABLE_REASONS = new Set(['UI_NOT_READY','STALE_OBSERVATION','ACTION_CO
 const LOADING_REASONS = new Set(['NO_SUPPORTED_ACTION','SHORTCUT_UNAVAILABLE','SHORTCUT_NOT_OFFERED']);
 const LOADING_DELAY_MS = 800;
 
-
-export {destructiveText};
-/** Target of a pending mutation, judged strictly from the observation it was decided on. */
-export function destructiveAction(state:ComputerState | undefined, action:Record<string,unknown>) {
-  return destructiveTarget(state, action, true) !== undefined;
-}
 
 const StepsInput = z.object({
   steps: z.array(z.string().min(1).max(STEP_TEXT_MAX)).min(2).max(COMPUTER_STEPS_MAX),
@@ -106,8 +100,6 @@ export async function runComputerSteps(raw:unknown, deps:ComputerUseDependencies
     snapshot: deps.snapshot && (async (state, snapshotSignal) => {captured = true;return deps.snapshot!(state, snapshotSignal);}),
     beforeMutation: async (operationId, action) => {
       const planned = action as Record<string,unknown>;
-      // Checked before the write-ahead receipt, so a fenced action leaves no operation.
-      if (destructiveAction(last, planned)) throw Error('DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED');
       before ??= last && structuredClone(last);
       await deps.beforeMutation(operationId, action);
       dispatched = planned;
@@ -146,9 +138,6 @@ export async function runComputerSteps(raw:unknown, deps:ComputerUseDependencies
     for (; index < input.steps.length; index++) {
       const step = input.steps[index];
       captured = false;
-      // The step list was typed up front; a high-impact step still needs a
-      // separate explicit confirmation, so it is never dispatched from here.
-      if (destructiveText(step)) return await finish('needs_input', 'COMMAND_WAITING_INPUT', stop(index, 'DESTRUCTIVE_STEP'));
       // A list item may join commands ("open Chrome then press Cmd+T"). Each
       // part must run; a step is done only when every part had its effect.
       const parts = stepParts(step);
@@ -184,7 +173,6 @@ export async function runComputerSteps(raw:unknown, deps:ComputerUseDependencies
           return timedOut() ? await finish('blocked', 'TIMEOUT', stop(index, 'TIMEOUT'), false) : await finish('cancelled', result.reason, stop(index, 'CANCELLED'), false);
         }
         const waiting = lastWaiting(result);
-        if (result.reason === 'DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED' || waiting === 'DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED') return await finish('needs_input', 'COMMAND_WAITING_INPUT', stop(index, 'DESTRUCTIVE_ACTION'));
         if (result.status !== 'needs_input' || waiting !== 'ACTION_DISPATCHED' || !dispatched || !before) {
           // Low confidence, ambiguous target, missing text or a rejected action:
           // the parent decides. A blocked controller keeps its own status.

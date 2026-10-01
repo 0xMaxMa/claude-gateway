@@ -174,23 +174,12 @@ describe("Jev path in command mode", () => {
     expect(result).toMatchObject({ status: "needs_verification", reason: "COMMAND_WAITING_INPUT", commandOutcome: { done: false, reason: "NO_SUPPORTED_ACTION" } });
     expect(browserOutcomeText(result)).toMatch(/^Not done: nothing on the page matches/);
   });
-  test("a destructive control needs the command to name it", async () => {
+  // Session d8013081: the user's own command is their authorization; no word has to name the control.
+  test.each(["click the first button", "ลบ", "send", "送信"])("%s clicks the high-impact control Jev chose", async command => {
     const b = browser(page({ elements: [el("d1", "Delete account")] }), { page_click: (_a, p) => ({ ...p, text: "deleted" }) });
-    const result = await run("click the first button", b, jev({ operation: () => "CLICK" }));
-    expect(b.mutations()).toEqual([]);
-    expect(result.commandOutcome).toMatchObject({ done: false, reason: "DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED", action: { label: "Delete account" } });
-    expect(browserOutcomeText(result)).toContain('"Delete account" is a high-impact control');
-  });
-  test("naming the operation with a confident decision authorizes it", async () => {
-    const b = browser(page({ elements: [el("d1", "Delete account")] }), { page_click: (_a, p) => ({ ...p, text: "deleted" }) });
-    await run("กด delete account", b, jev({ operation: () => "CLICK" }));
+    const result = await run(command, b, jev({ operation: () => "CLICK" }, 0.7));
     expect(b.mutations().map(m => m.name)).toEqual(["page_click"]);
-  });
-  test("low confidence still blocks a named destructive operation", async () => {
-    const b = browser(page({ elements: [el("d1", "Pay now")] }));
-    const result = await run("pay now", b, jev({ operation: () => "CLICK" }, 0.7));
-    expect(b.mutations()).toEqual([]);
-    expect(result.commandOutcome?.reason).toBe("DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED");
+    expect(result.commandOutcome).toMatchObject({ done: true, action: { kind: "click", label: "Delete account" } });
   });
   test("previous command context reaches the decision as reference only", async () => {
     const b = browser(page());
@@ -268,25 +257,40 @@ describe("H2/H1: a confirmed or unresolved action is never reported Not done", (
   });
 });
 
-describe("M5: step mode fences Enter and submit like Computer Use", () => {
+describe("the agent's command for a hand-off: Jev judges impact, the user confirms", () => {
   const compose = () => page({ elements: [el("body", "Message body", { tag: "textarea", operations: ["TYPE_TEXT"] }), el("send", "Send")] });
-  test("Enter on a page with a Send button returns control and sends nothing", async () => {
-    const b = browser(compose());
-    const result = await run("enter", b, jev(), { strictDestructive: true });
-    expect(b.mutations()).toEqual([]);
-    expect(result.commandOutcome).toMatchObject({ done: false, reason: "DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED", action: { kind: "key", label: "Send" } });
+  test("a step part presses Enter beside a Send button (the user's own list)", async () => {
+    const b = browser(compose(), { page_keypress: (_a, p) => ({ ...p, text: "sent" }) });
+    expect((await run("enter", b, jev(), { stepPart: true })).commandOutcome?.done).toBe(true);
   });
-  test("search-and-submit into a non-search field is fenced in step mode", async () => {
+  test("a high-impact click for the agent's command waits for the user's confirmation", async () => {
     const b = browser(compose());
-    const result = await run('ค้นหา "ok"', b, jev(), { strictDestructive: true });
+    const j = jev({ operation: () => "CLICK", click_target: ids => ids.find(id => id.includes("send"))!, impact: () => "HIGH_IMPACT" });
+    const result = await run("click Send", b, j, { agentCommand: true });
+    expect(j.requests[0].questions.impact).toBeDefined();
     expect(b.mutations()).toEqual([]);
-    expect(result.commandOutcome).toMatchObject({ done: false, reason: "DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED" });
+    expect(result.commandOutcome).toMatchObject({ done: false, reason: "CONFIRMATION_REQUIRED", action: { kind: "click", label: "Send" } });
   });
-  test("a search box still submits in step mode, and direct (non-step) Enter is unchanged", async () => {
-    const search = browser(page({ elements: [el("q", "Search", { tag: "input", role: "searchbox", operations: ["TYPE_TEXT"] }), el("send", "Send")] }), { page_type: (_a, p) => ({ ...p, text: "results" }) });
-    expect((await run("ค้นหา แมว", search, jev(), { strictDestructive: true })).commandOutcome?.done).toBe(true);
-    const direct = browser(compose(), { page_keypress: (_a, p) => ({ ...p, text: "sent" }) });
-    expect((await run("enter", direct)).commandOutcome?.done).toBe(true);
+  test("the agent's Enter is not a fast path: Jev judges it", async () => {
+    const b = browser(compose());
+    const j = jev({ operation: () => "KEY", impact: () => "HIGH_IMPACT" });
+    const result = await run("enter", b, j, { agentCommand: true });
+    expect(j.requests).toHaveLength(1);expect(b.mutations()).toEqual([]);
+    expect(result.commandOutcome?.reason).toBe("CONFIRMATION_REQUIRED");
+  });
+  test("a routine action for the agent's command just runs", async () => {
+    const b = browser(compose(), { page_click: (_a, p) => ({ ...p, text: "x" }) });
+    await run("click Send", b, jev({ operation: () => "CLICK", click_target: ids => ids.find(id => id.includes("send"))! }), { agentCommand: true });
+    expect(b.mutations().map(m => m.name)).toEqual(["page_click"]);
+  });
+  test.each([["YES", 1], ["NO", 0]] as const)("the user's reply %s, read by Jev, runs or cancels the agent's command", async (reply, clicks) => {
+    const b = browser(compose(), { page_click: (_a, p) => ({ ...p, text: "x" }) });
+    const j = jev({ reply: () => reply, operation: () => "CLICK", click_target: ids => ids.find(id => id.includes("send"))! });
+    const result = await run("はい", b, j, { confirmation: { command: "click Send", label: "Send" } });
+    expect(j.requests[0].state).toMatchObject({ reply: "はい" });
+    expect(b.mutations()).toHaveLength(clicks);
+    if (reply === "YES") expect(j.requests[1].state.goal).toBe("click Send");
+    else expect(result.commandOutcome).toEqual({ done: false, reason: "CONFIRMATION_DECLINED" });
   });
 });
 
@@ -317,7 +321,7 @@ describe("READ_REQUEST: a direct command that asks about the page", () => {
     expect(readRequested({ browserReport: result as never })).toBe(false);
   });
   test("only a single user command is offered READ_REQUEST; a READ_REQUEST answer elsewhere is invalid", async () => {
-    for (const extra of [{ command: false }, { strictDestructive: true }]) {
+    for (const extra of [{ command: false }, { stepPart: true }]) {
       const b = fixtures(), j = jev({ operation: () => "READ_REQUEST" });
       const result = await run(ask, b, j, extra);
       expect(Object.keys(j.requests[0].questions.operation.criteria)).not.toContain("READ_REQUEST");
@@ -417,7 +421,7 @@ describe("NAVIGATE: Jev opens a named site in the bound tab", () => {
     expect(Object.keys(decisionQuestions(p, "x", new Set(), true, false, true).questions.operation.criteria)).not.toContain("NAVIGATE");
     expect(Object.keys(decisionQuestions(p, "x", new Set(), false, false, true).questions.operation.criteria)).not.toContain("NAVIGATE");
     expect(Object.keys(decisionQuestions(p, "x", new Set(), true).questions.operation.criteria)).not.toContain("NAVIGATE");
-    for (const extra of [{ command: false }, { strictDestructive: true }]) {
+    for (const extra of [{ command: false }, { stepPart: true }]) {
       const b = navigable(), j = jev({ operation: () => "NAVIGATE" });
       const result = await runNav("เข้าเว็บไซต์ Yahoo", b, j, resolver("https://www.yahoo.com"), extra);
       expect(Object.keys(j.requests[0].questions.operation.criteria)).not.toContain("NAVIGATE");
@@ -517,7 +521,7 @@ describe("AGENT_HANDOFF: Jev gives up on a single direct command", () => {
   test("step mode, agent tasks and deterministic or low-confidence not-done never request a hand-off", async () => {
     const { agentHandoffRequested } = await import("../../../src/automation/command-speech");
     const strict = browser(page()), sj = jev({ operation: () => "BLOCKED" });
-    const s = await run(odd, strict, sj, { strictDestructive: true });
+    const s = await run(odd, strict, sj, { stepPart: true });
     expect(Object.keys(sj.requests[0].questions.operation.criteria)).not.toContain("UNCLEAR");
     expect(s.commandOutcome?.gaveUp).toBeUndefined();
     expect(agentHandoffRequested({ browserReport: s as never })).toBe(false);
@@ -529,5 +533,16 @@ describe("AGENT_HANDOFF: Jev gives up on a single direct command", () => {
     expect(agentHandoffRequested({ browserReport: low as never })).toBe(false);
     const stepRun = { ...(await run(odd, browser(page()), jev({ operation: () => "BLOCKED" }))), stepRun: { total: 2, completed: 0 } };
     expect(agentHandoffRequested({ browserReport: stepRun as never })).toBe(false);
+  });
+});
+
+// Session d8013081: the agent's spawn text is no user command; it never ends "Not done".
+describe("the session-start round", () => {
+  test.each(["BLOCKED", "UNCLEAR"])("Jev %s means ready", async operation => {
+    const b = browser(page());
+    const result = await run("open a session and wait for the user", b, jev({ operation: () => operation }), { sessionStart: true });
+    expect(b.mutations()).toEqual([]);
+    expect(result.commandOutcome).toEqual({ done: false, reason: "SESSION_READY" });
+    expect(browserOutcomeText(result)).toMatch(/^Ready:/);
   });
 });

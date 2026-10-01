@@ -31,8 +31,12 @@ export interface BrowserExecutionContext {
   command?: boolean;
   /** Previous direct command context; references only, never replayed. */
   interactionContext?: string;
-  /** The agent's command for a handed-off utterance: every high-impact control returns control. */
-  strictDestructive?: boolean;
+  /** The agent's command for a handed-off utterance: a high-impact action waits for the user's confirmation. */
+  agentCommand?: boolean;
+  /** The user's reply to that confirmation question; yes runs the agent's command. */
+  confirmation?: {command:string;label:string};
+  /** The agent's opening text for a session the user drives; no action means ready. */
+  sessionStart?: boolean;
   /** The user's explicit step list (step mode). */
   steps?: string[];
   fields?: Array<{label:string;text:string}>;
@@ -56,7 +60,7 @@ export interface BrowserIntegrationConfig { bindings: BrowserConnectorConfig[]; 
 export type BrowserToolCall = (name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
 export interface BrowserLogicModule {
   BROWSER_USE_CONTRACT_VERSION: 1;
-  /** Optional v1 inputs the module accepts: 'direct_command' (command, interactionContext, strictDestructive) and 'steps'. */
+  /** Optional v1 inputs the module accepts: 'direct_command' (command, interactionContext, agentCommand, confirmation) and 'steps'. */
   BROWSER_USE_FEATURES?: readonly string[];
   runBrowserSteps?: (input: Record<string, unknown>, dependencies: Parameters<BrowserLogicModule['runBrowserUse']>[1], signal: AbortSignal) => Promise<BrowserExecutionResult>;
   runBrowserUse(input: { yieldAfterAction?: boolean; command?: boolean; interactionContext?: string; contractVersion: 1; goal: string; startUrl?: string; scope: BrowserScope; fields?: BrowserConnectorConfig['fields'] } & BrowserConnectorConfig['budget'], dependencies: {

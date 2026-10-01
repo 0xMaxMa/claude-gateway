@@ -67,20 +67,19 @@ test("the user's example runs end to end on one lease: new tab, google, search, 
   expect(browserOutcomeText(result)).toBe("5/5 steps done. Step 1: stayed in the approved tab (no new tab is opened).");
 });
 
-test("a destructive step returns control before anything runs", async () => {
+// Session d8013081: the user's own step list is their authorization.
+test("a step that says ลบ runs like any other step", async () => {
   const b = browser(google(blank()));
   const result = await run(["ค้นหา แมว", "ลบ account"], b);
-  expect(b.mutations()).toEqual(["page_type"]);
-  expect(result.stepRun).toMatchObject({ completed: 1, stopReason: "DESTRUCTIVE_STEP", stoppedAt: 2, remaining: ["ลบ account"] });
+  expect(b.mutations()).toEqual(["page_type", "page_click"]);
+  expect(result.stepRun?.stopReason).not.toBe("DESTRUCTIVE_STEP");
 });
-
-test("a high-impact control chosen for a harmless-looking step is fenced in step mode", async () => {
+test("a high-impact control Jev chooses for a step is clicked", async () => {
   const b = browser(google(blank()), { page_type: (_a, p) => ({ ...p, text: "confirm", elements: [el("ok", "OK", { tag: "button", role: "button" })] }) });
-  const result = await run(["ค้นหา แมว", "เข้า link แรก"], b);
-  expect(b.mutations()).toEqual(["page_type"]);
-  expect(result.stepRun).toMatchObject({ completed: 1, stopReason: "DESTRUCTIVE_ACTION", stoppedAt: 2 });
+  const result = await run(["ค้นหา แมว", "ยืนยัน"], b);
+  expect(b.mutations()).toEqual(["page_type", "page_click"]);
+  expect(result.stepRun?.stopReason).not.toBe("DESTRUCTIVE_ACTION");
 });
-
 test("a read during navigation commit is retried; the search is never resent", async () => {
   const b = browser(google(blank()));
   const pending = { error: "STALE_OBSERVATION", cause: "NAVIGATION_PENDING", action_executed: false };

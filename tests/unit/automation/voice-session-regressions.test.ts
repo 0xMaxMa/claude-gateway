@@ -3,7 +3,6 @@ import {historyCommand,newTabCommand} from '../../../src/automation/direct-comma
 import {blankTabUrl,planBrowserCommand} from '../../../src/automation/browser-command';
 import {shortcutCommand} from '../../../src/automation/computer-command';
 import {directCommandSpeech} from '../../../src/automation/command-speech';
-import {destructiveText} from '../../../src/automation/computer-safety';
 import {runBrowserUse,type BrowserUseDependencies,type Observation} from '../../../src/automation/browser-use';
 import {JevError} from '../../../src/jev/types';
 import type {BrowserTaskReport} from '../../../src/jev/browser-contract';
@@ -67,11 +66,6 @@ describe('blank Remote Browser tab', () => {
   expect(acceptsDirectCommand({...task,state:'cancelled'})).toBe(false);
   expect(acceptsDirectCommand({...task,browserReport:{...browserReport,reason:'OUTCOME_UNKNOWN'}})).toBe(false);
  });
-});
-
-describe('a step that only checks the page is not high-impact', () => {
- test.each(['confirm the page has loaded','Confirm that the page is loaded','verify the video is visible','ยืนยันว่าหน้าโหลดแล้ว'])('%s',step=>expect(destructiveText(step)).toBe(false));
- test.each(['confirm order','confirm','กดยืนยัน','confirm the payment','ยืนยันการโอน'])('%s stays high-impact',step=>expect(destructiveText(step)).toBe(true));
 });
 
 describe('Remote Browser direct commands', () => {

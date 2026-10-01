@@ -130,7 +130,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
     // New optional inputs go only to a module that advertises them; an older
     // installed runner keeps its strict v1 input and the one-action behavior.
     const features = new Set(Array.isArray(module.BROWSER_USE_FEATURES) ? module.BROWSER_USE_FEATURES : []);
-    const direct = context.command && features.has('direct_command') ? {command:true,...(context.interactionContext?{interactionContext:context.interactionContext.slice(0,8000)}:{}),...(context.strictDestructive?{strictDestructive:true}:{})} : {};
+    const direct = context.command && features.has('direct_command') ? {command:true,...(context.interactionContext?{interactionContext:context.interactionContext.slice(0,8000)}:{}),...(context.agentCommand?{agentCommand:true}:{}),...(context.confirmation?{confirmation:context.confirmation}:{}),...(context.sessionStart?{sessionStart:true}:{})} : {};
     const stepMode = context.steps?.length && features.has('steps') && typeof module.runBrowserSteps === 'function';
     const fields=[...(binding.fields??[]).filter(b=>!(context.fields??[]).some(f=>f.label.normalize("NFKC").trim().replace(/\s+/g," ")===b.label.normalize("NFKC").trim().replace(/\s+/g," "))),...(context.fields??[])];
     const dependencies = (): Parameters<BrowserLogicModule['runBrowserUse']>[1] => ({

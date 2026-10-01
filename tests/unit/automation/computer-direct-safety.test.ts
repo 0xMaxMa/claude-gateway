@@ -1,5 +1,5 @@
 import {runComputerUse,type ComputerUseDependencies} from '../../../src/automation/computer-use';
-import {eraseCommand,destructiveTarget,commandAuthorizes} from '../../../src/automation/computer-safety';
+import {eraseCommand} from '../../../src/automation/computer-safety';
 import {computerOutcomeText} from '../../../src/automation/computer-outcome';
 
 // Shapes recorded from conversation 7d256cb7, task e0361cb8 revisions 43-45
@@ -29,19 +29,19 @@ function chrome(){
   ]};
 }
 const choice=(criteria:Record<string,unknown>,chosen:string,confidence:number)=>({choice:chosen,confidence,probabilities:Object.fromEntries(Object.keys(criteria).map(k=>[k,k===chosen?confidence:(1-confidence)/(Object.keys(criteria).length-1||1)]))});
-function fixture(state:any,chosen?:string,confidence=1){
+function fixture(state:any,chosen?:string,confidence=1,extra:Record<string,string>={}){
  const calls:any[]=[],requests:any[]=[];
  const deps:ComputerUseDependencies={authorized:()=>true,beforeMutation:()=>{},snapshot:async()=>{},
   call:async(name,args)=>{calls.push({name,args});return name==='computer_acquire'?{lease_token:'lease'}:name==='computer_observe'?structuredClone(state):{state:'completed'};},
   evaluate:async req=>{requests.push(req);const kind=chosen?.split(':')[0]??'BLOCKED';
-   return {answers:Object.fromEntries(Object.entries(req.questions).map(([name,q])=>[name,choice(q.criteria as any,name==='action'?kind:name==='target_'+kind?chosen!:name==='text'?'NONE':'BLOCKED',confidence)]))};}};
+   return {answers:Object.fromEntries(Object.entries(req.questions).map(([name,q])=>[name,choice(q.criteria as any,extra[name]??(name==='action'?kind:name==='target_'+kind?chosen!:name==='text'?'NONE':name==='impact'?'HIGH_IMPACT':'BLOCKED'),confidence)]))};}};
  const actions=()=>calls.filter(c=>c.name==='computer_action').map(c=>c.args);
  return {deps,calls,requests,actions};
 }
 // The gateway's single direct command under user control (gateway-tasks/computer.ts).
 const run=(f:ReturnType<typeof fixture>,goal:string)=>runComputerUse({goal,yieldAfterInteraction:true,readRequest:true},f.deps,new AbortController().signal);
 
-describe('P0-2 destructive misfire (revision 43: "ลบๆๆๆ" pressed Notes Delete at confidence 0.59)',()=>{
+describe('P0-2 erase vs Delete (revision 43: "ลบๆๆๆ" pressed Notes Delete at confidence 0.59)',()=>{
  test('an erase command in a focused text field erases characters instead of asking Jev',async()=>{
   const f=fixture(notes(),'press:c7',0.59);
   const r=await run(f,'ลบๆๆๆ');
@@ -49,34 +49,30 @@ describe('P0-2 destructive misfire (revision 43: "ลบๆๆๆ" pressed Notes
   expect(f.actions()).toEqual([expect.objectContaining({kind:'type',ref:'c0',text:'l;'})]);
   expect(r.lastAction).toMatchObject({kind:'erase',label:'AXTextArea',count:4});
  });
- test('a low-confidence press on a Delete button is never dispatched',async()=>{
+ // Session d8013081: the user's own command is their authorization. Whatever
+ // Jev confidently picks for it runs; no word in the command has to name it.
+ test('a press Jev picks for the user\'s command runs, whatever the control or the words',async()=>{
   const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;
-  const f=fixture(state,'press:c7',0.59);
+  for(const command of ['ลบ','send','送信','กดปุ่มนั้น']){
+   const f=fixture(state,'press:c7',0.77);await run(f,command);
+   expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'c7'})]);
+  }
+ });
+ test('below Jev\'s normal confidence bar nothing is pressed (LOW_CONFIDENCE)',async()=>{
+  const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;
+  const f=fixture(state,'press:c7',0.4);
   const r=await run(f,'ลบๆๆๆ');
   expect(f.actions()).toEqual([]);
-  expect(r.status).toBe('needs_input');
-  expect(r.trace.events.some(e=>e.reason==='DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED')).toBe(true);
-  expect(r.lastAction).toMatchObject({kind:'press',label:'Delete',blocked:true});
+  expect(r.trace.events.some(e=>e.reason==='LOW_CONFIDENCE')).toBe(true);
  });
- test('a confident press needs the command itself to name the operation',async()=>{
-  const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;
-  const vague=fixture(state,'press:c7',0.95);await run(vague,'กดปุ่มนั้น');expect(vague.actions()).toEqual([]);
-  const explicit=fixture(state,'press:c7',0.95);await run(explicit,'กด Delete');expect(explicit.actions()).toEqual([expect.objectContaining({kind:'press',ref:'c7'})]);
- });
- test('"ok" cannot confirm a destructive dialog; naming the operation can',async()=>{
+ test('"ok" on a dialog presses what Jev picks',async()=>{
   const dialog={generation:'g2',application:'com.apple.Notes',windowTitle:'',truncated:false,apps:[],focusedControl:{role:'AXSheet',label:'alert'},
    text:['Are you sure you want to delete this note?'],controls:[{ref:'c0',role:'AXButton',label:'OK',actions:['press'],context:'Are you sure you want to delete this note?'}]};
-  const ok=fixture(dialog,'press:c0',0.95);await run(ok,'ok');expect(ok.actions()).toEqual([]);
-  const confirm=fixture(dialog,'press:c0',0.95);await run(confirm,'ยืนยันลบ');expect(confirm.actions()).toHaveLength(1);
-  // An informational alert after the fact stays a normal confirmation.
-  const info={...dialog,text:['Deleted notes are moved to the Recently Deleted folder.'],controls:[{...dialog.controls[0],context:'Deleted notes are moved to the Recently Deleted folder.'}]};
-  const dismiss=fixture(info,'press:c0',0.95);await run(dismiss,'ok');expect(dismiss.actions()).toHaveLength(1);
+  const ok=fixture(dialog,'press:c0',0.95);await run(ok,'ok');expect(ok.actions()).toHaveLength(1);
  });
- test('erase vocabulary and shared policy',()=>{
+ test('erase vocabulary',()=>{
   expect(eraseCommand('ลบ')).toBe(1);expect(eraseCommand('ลบๆๆๆ')).toBe(4);expect(eraseCommand('delete 3')).toBe(3);expect(eraseCommand('backspace x2')).toBe(2);
   expect(eraseCommand('ลบ note นี้')).toBeUndefined();expect(eraseCommand('delete account')).toBeUndefined();
-  const target=destructiveTarget(notes() as any,{kind:'press',ref:'c7'},false)!;
-  expect(target.label).toBe('Delete');expect(commandAuthorizes('ลบโน้ต',target)).toBe(true);expect(commandAuthorizes('ok',target)).toBe(false);
  });
 });
 
@@ -117,7 +113,7 @@ describe('P0-3 per-command outcome text',()=>{
   [{...base,steps:0,trace:[{phase:'waiting',reason:'FIELD_TEXT_REQUIRED'}]},/Not done.*quotes/],
   [{...base,steps:0,trace:[{phase:'waiting',reason:'FOCUS_REQUIRED'}]},/Not done.*focus/i],
   [{...base,steps:0,trace:[{phase:'waiting',reason:'NO_SUPPORTED_ACTION'}]},/Not done.*no visible control/i],
-  [{...base,steps:0,lastAction:{kind:'press',label:'Delete',blocked:true},trace:[{phase:'waiting',reason:'DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED'}]},/Not done.*"Delete".*name the action/],
+  [{...base,steps:0,lastAction:{kind:'press',label:'Delete',blocked:true,confirm:true},trace:[{phase:'waiting',reason:'CONFIRMATION_REQUIRED'}]},/Not done.*"Delete".*asked to confirm/],
   [{...base,steps:5,stepRun:{total:5,completed:3,stopReason:'STEP_NOT_EXECUTED',stoppedAt:4,stoppedStep:'เข้า link แรก',detail:'NO_SUPPORTED_ACTION',remaining:['เข้า link แรก','scroll ลงมา']}},/3\/5 steps done.*step 4 "เข้า link แรก".*NO_SUPPORTED_ACTION/s],
  ])('%#',(report,expected)=>{expect(computerOutcomeText(report as any)).toMatch(expected);});
 });
@@ -209,44 +205,106 @@ describe('AGENT_HANDOFF: Jev gives up on a single direct command',()=>{
   expect(agentHandoffRequested({computerReport:{...h,trace:h.trace.events} as never})).toBe(false);
  });
  const agentRun=(f:ReturnType<typeof fixture>,goal:string)=>runComputerUse({goal,yieldAfterInteraction:true,agentCommand:true},f.deps,new AbortController().signal);
- test('the agent command for a hand-off never answers a generic confirm dialog',async()=>{
+ // Session d8013081: the agent's command keeps protection, but Jev (not a word
+ // list) judges its impact, and a high-impact action asks the user first.
+ test('the agent command runs a routine action; a high-impact one asks the user, naming it',async()=>{
   const info={generation:'g2',application:'com.apple.Notes',windowTitle:'',truncated:false,apps:[],focusedControl:{role:'AXSheet',label:'alert'},
    text:['Apply these settings?'],controls:[{ref:'c0',role:'AXButton',label:'OK',actions:['press'],context:'Apply these settings?'}]};
-  const user=fixture(info,'press:c0',0.95);await run(user,'ok');expect(user.actions()).toHaveLength(1);
-  const agent=fixture(info,'press:c0',0.95);const r=await agentRun(agent,'press OK');
-  expect(agent.actions()).toEqual([]);
-  expect(r.lastAction).toMatchObject({kind:'press',label:'OK',blocked:true});
+  const routine=fixture(info,'press:c0',0.95,{impact:'ROUTINE'});await agentRun(routine,'press OK');
+  expect(routine.requests[0].questions.impact).toBeDefined();
+  expect(routine.actions()).toHaveLength(1);
+  const risky=fixture(info,'press:c0',0.95);const r=await agentRun(risky,'press OK');
+  expect(risky.actions()).toEqual([]);
+  expect(r.trace.events.filter(e=>e.phase==='waiting').at(-1)?.reason).toBe('CONFIRMATION_REQUIRED');
+  expect(r.lastAction).toMatchObject({kind:'press',label:'OK',blocked:true,confirm:true});
+  // An unsure impact answer asks too.
+  const unsure=fixture(info,'press:c0',0.95,{impact:'ROUTINE'});
+  unsure.deps.evaluate=(orig=>async(req:any,sig:AbortSignal)=>{const a:any=await orig(req,sig);if(a.answers.impact)a.answers.impact={choice:'ROUTINE',confidence:0.5,probabilities:{ROUTINE:0.5,HIGH_IMPACT:0.5}};return a;})(unsure.deps.evaluate);
+  await agentRun(unsure,'press OK');expect(unsure.actions()).toEqual([]);
+  // The user's own command is never asked about.
+  const user=fixture(info,'press:c0',0.95);await run(user,'ok');
+  expect(user.requests[0].questions.impact).toBeUndefined();expect(user.actions()).toHaveLength(1);
  });
  const chat=(field:{role:string;label:string})=>({generation:'g1',application:'com.example.Chat',windowTitle:'Chat',truncated:false,apps:[{id:'com.example.Chat',name:'Chat'}],
   focusedControl:{ref:'c0',...field},text:[],
   controls:[{ref:'c0',...field,value:'hello',focused:true,actions:['press','type']},{ref:'c1',role:'AXButton',label:'Send',actions:['press']}]});
- test('the agent command for a hand-off never submits with Enter beside a high-impact control',async()=>{
+ test('the agent\'s Enter goes through Jev\'s impact judgement; the user\'s Enter just runs',async()=>{
   const user=fixture(chat({role:'AXTextArea',label:'Message'}));await run(user,'press enter');
-  expect(user.actions()).toEqual([expect.objectContaining({kind:'key',key:'enter'})]);
-  const agent=fixture(chat({role:'AXTextArea',label:'Message'}));const r=await agentRun(agent,'press enter');
-  expect(agent.actions()).toEqual([]);
-  expect(r.trace.events.some(e=>e.reason==='DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED')).toBe(true);
-  expect(r.lastAction).toMatchObject({kind:'key',label:'Send',blocked:true});
-  // A search field still submits for the agent.
-  const search=fixture(chat({role:'AXSearchField',label:'Search'}));await agentRun(search,'press enter');
+  expect(user.requests).toHaveLength(0);expect(user.actions()).toEqual([expect.objectContaining({kind:'key',key:'enter'})]);
+  const agent=fixture(chat({role:'AXTextArea',label:'Message'}),'key:enter',0.95);const r=await agentRun(agent,'press enter');
+  expect(agent.requests).toHaveLength(1);expect(agent.actions()).toEqual([]);
+  expect(r.lastAction).toMatchObject({kind:'key',label:'enter',confirm:true});
+  const search=fixture(chat({role:'AXSearchField',label:'Search'}),'key:enter',0.95,{impact:'ROUTINE'});await agentRun(search,'press enter');
   expect(search.actions()).toEqual([expect.objectContaining({kind:'key',key:'enter'})]);
  });
- test('the agent command for a hand-off never quits the app in front',async()=>{
+ test('quitting is offered to the agent\'s command too, and asks the user first',async()=>{
   const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;
-  const agent=fixture(state);const r=await agentRun(agent,'quit notes');
-  // Quitting is not even offered to Jev for the agent's command.
-  expect(agent.requests[0].questions.action.criteria.quit).toBeUndefined();
+  const agent=fixture(state,'quit:m1',0.95);const r=await agentRun(agent,'quit notes');
+  expect(Object.keys(agent.requests[0].questions.target_quit.criteria)).toContain('quit:m1');
   expect(agent.actions()).toEqual([]);
-  expect(r.status).toBe('needs_input');
+  expect(r.lastAction).toMatchObject({label:'Quit Notes',confirm:true});
  });
- test('the agent command for a hand-off never presses a high-impact control, even when named',async()=>{
+ // The user's next command answers the question; Jev reads it in any language.
+ const answer=(f:ReturnType<typeof fixture>,goal:string)=>runComputerUse({goal,yieldAfterInteraction:true,readRequest:true,confirmation:{command:'quit notes',label:'Quit Notes'}},f.deps,new AbortController().signal);
+ test.each(['ใช่','yes','はい'])('"%s" runs the agent\'s command as the user\'s own',async reply=>{
   const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;
-  const user=fixture(state,'press:c7',0.95);
-  await run(user,'กด Delete');
-  expect(user.actions()).toHaveLength(1);
-  const agent=fixture(state,'press:c7',0.95);
-  const r=await runComputerUse({goal:'กด Delete',yieldAfterInteraction:true,agentCommand:true},agent.deps,new AbortController().signal);
-  expect(agent.actions()).toEqual([]);
-  expect(r.trace.events.some(e=>e.reason==='DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED')).toBe(true);
+  const f=fixture(state,'quit:m1',0.95,{reply:'YES'});await answer(f,reply);
+  expect(f.requests[0].questions.reply).toBeDefined();expect(f.requests[0].state.reply).toBe(reply);
+  expect(f.requests[1].state.command).toBe('quit notes');expect(f.requests[1].questions.impact).toBeUndefined();
+  expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'m1'})]);
+ });
+ test('"no" cancels: nothing runs and nothing is spoken',async()=>{
+  const {directCommandSpeech}=await import('../../../src/automation/command-speech');
+  const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;
+  const f=fixture(state,'quit:m1',0.95,{reply:'NO'});const r=await answer(f,'ไม่');
+  expect(f.requests).toHaveLength(1);expect(f.actions()).toEqual([]);
+  expect(r.trace.events.filter(e=>e.phase==='waiting').at(-1)?.reason).toBe('CONFIRMATION_DECLINED');
+  expect(directCommandSpeech({computerReport:{...r,trace:r.trace.events} as never},'ไม่',{thai:true})).toBeUndefined();
+ });
+ test('a different command instead of an answer runs as itself',async()=>{
+  const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;
+  const f=fixture(state,'press:c8',0.95,{reply:'OTHER'});await answer(f,'new note');
+  expect(f.requests[1].state.command).toBe('new note');
+  expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'c8'})]);
+ });
+ test('the confirmation question is spoken in the conversation language, naming the control',async()=>{
+  const {directCommandSpeech}=await import('../../../src/automation/command-speech');
+  const report={status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1,lastAction:{kind:'press',label:'Quit Google Chrome',blocked:true,confirm:true},trace:[{phase:'waiting',reason:'CONFIRMATION_REQUIRED'}]} as never;
+  expect(directCommandSpeech({computerReport:report},'Pit.',{thai:true})?.spoken).toBe('จะกด Quit Google Chrome ใช่ไหม');
+  expect(directCommandSpeech({computerReport:report},'close it',{})?.spoken).toBe('Press Quit Google Chrome?');
+ });
+});
+
+// Session d8013081: "ปิด chrome" / "chrome" quit nothing because Jev's quit
+// choice (0.79, 0.77) was under a separate 0.85 bar. Jev's normal bar applies.
+describe('the user\'s quit command',()=>{
+ test.each(['ปิด chrome','chrome','Quit','終了'])('%s with Jev\'s quit at 0.77 quits',async command=>{
+  const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;
+  const f=fixture(state,'quit:m1',0.77);await run(f,command);
+  expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'m1'})]);
+ });
+ test('the helper\'s standard quit runs for the user at 0.77',async()=>{
+  const state:any=notes();delete state.focusedControl;state.controls[0].focused=false;state.capabilities={standardCommands:['app:quit']};
+  const f=fixture(state,'quit:standard-app-quit',0.77);await run(f,'ปิดโน้ต');
+  expect(f.calls.some(c=>c.name==='computer_observe'&&c.args.standard_command==='app:quit')).toBe(true);
+ });
+});
+
+// Session d8013081: the agent's spawn text ("เปิด Computer Use session…") is no
+// user command; it never ends "Not done". A real first command still runs.
+describe('the session-start round',()=>{
+ const start=(f:ReturnType<typeof fixture>,goal:string)=>runComputerUse({goal,yieldAfterInteraction:true,readRequest:true,sessionStart:true},f.deps,new AbortController().signal);
+ test.each(['BLOCKED','UNCLEAR','READ_REQUEST'])('Jev %s means ready, not Not done, and says nothing',async chosen=>{
+  const {directCommandSpeech,agentHandoffRequested}=await import('../../../src/automation/command-speech');
+  const f=fixture(chrome(),chosen);const r=await start(f,'เปิด Computer Use session รอคำสั่งถัดไปจากผู้ใช้');
+  expect(f.actions()).toEqual([]);
+  const report={...r,trace:r.trace.events} as never;
+  expect(computerOutcomeText(report)).toMatch(/^Ready:/);
+  expect(directCommandSpeech({computerReport:report},'x',{thai:true})).toBeUndefined();
+  expect(agentHandoffRequested({computerReport:report})).toBe(false);
+ });
+ test('an actionable first command still runs',async()=>{
+  const f=fixture(chrome(),'press:c50',0.9);await start(f,'เข้า link แรก');
+  expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'c50'})]);
  });
 });

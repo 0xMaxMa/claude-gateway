@@ -533,11 +533,11 @@ Jev decision over the observed controls and dispatches at most one action.
   choose another control, such as closing the overlay. If its stale budget runs
   out on a covered target, it ends as `TARGET_OBSCURED`. A real page change
   before input is still re-read and retried as before.
-- **High-impact controls.** Clicking or selecting a control whose label, value or
-  context names delete, send, submit, pay, buy, publish, quit or confirm (English
-  or Thai) needs a command that names the same operation and a Jev confidence of
-  at least 0.85. Otherwise nothing is dispatched
-  (`DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED`).
+- **High-impact controls.** The user's own command is their authorization: a
+  click or selection Jev chooses for it runs under Jev's normal confidence rules,
+  whatever the control is called and whatever words the command uses (`ลบ`,
+  `send`, `送信`). There is no word list. The agent's command for a handed-off
+  utterance is the exception; see [Agent hand-off](#agent-hand-off-when-jev-gives-up).
 - **Outcome line.** Each settled command sets the task progress text to `Done:
   …` (for example `Done: searched in "Search"`) or `Not done: …` with a hint.
   A not-done command dispatched nothing; the session keeps waiting for the next
@@ -586,11 +586,8 @@ user's own step list, for example
 lease. The grammar is the one described in
 [Step-by-step commands](#step-by-step-commands): the user's initiating message is
 used verbatim when it is a step list, at most 12 steps within 120 seconds. Each
-part is one direct command as above with the strict high-impact fence (every
-high-impact control, including a generic `OK`, returns control). The page does
-not report keyboard focus, so a bare `enter` step, or a search step whose field
-is not search-like, returns control when the field or any control on the page is
-high-impact (for example a `Send` button); search boxes submit as usual. A
+part is one direct command as above. The user's own list is their authorization:
+no step is held back for what it says or for the control Jev chooses. A
 binding's `budget.maxSteps` / `budget.maxEvaluations` bound the whole run (each
 part still takes at most 3 actions and 6 decisions); reaching them stops with
 `ACTION_BUDGET` / `EVALUATION_BUDGET`. After each
@@ -667,12 +664,6 @@ completed steps, `stopReason` and remaining steps, when:
 
 - a Jev decision is below the confidence threshold, is ambiguous, or needs text
   (`STEP_NOT_EXECUTED`)
-- a step's wording or chosen target is high-impact, such as send, submit, delete,
-  trash, quit, pay, buy, confirm or a dialog OK (`DESTRUCTIVE_STEP`,
-  `DESTRUCTIVE_ACTION`). These steps are never dispatched automatically, and the
-  parent agent must get explicit user confirmation. A step that only checks the
-  page, such as `confirm the page has loaded` or `ยืนยันว่าหน้าโหลดแล้ว`, is not
-  high-impact; the agent is told not to add such steps at all
 - an action produces no observable change (`STEP_NO_EFFECT`). Up to three
   boundary scrolls in a row are tolerated and listed in `unverifiedSteps`
 - an action outcome is unknown (`OUTCOME_UNKNOWN`). This uses normal
@@ -716,9 +707,7 @@ mutation outcomes that cannot be established remain fenced for reconciliation.
 ### Direct commands
 
 These rules apply to every single Computer Use command, whether typed by the user
-through direct control or sent by the agent. Step lists apply them to each part
-and keep their stricter checks above; for example a step that says `ลบ` stops as
-`DESTRUCTIVE_STEP`.
+through direct control or sent by the agent. Step lists apply them to each part.
 
 - **Erasing text.** With a text field focused, `ลบ`, `ลบๆๆ`, `delete 3`,
   `backspace x2` and similar erase characters at the end of that field (one plus
@@ -728,13 +717,11 @@ and keep their stricter checks above; for example a step that says `ลบ` stop
   reports focus on the static text inside a field (Chrome does after typing),
   the field is the one typeable text field holding exactly that text; two such
   fields are ambiguous and nothing is erased.
-- **High-impact controls.** Pressing a control labelled delete, remove, trash,
-  send, submit, pay, buy, confirm, quit, sign out and similar (English or Thai),
-  or `OK`/`Yes` in a dialog whose text names such an operation, needs a Jev
-  confidence of at least 0.85 and a command that itself names the same
-  operation, for example `กด Delete` or `ยืนยันลบ`. `ok` or a vague reference is
-  not enough. Otherwise nothing is dispatched and the command waits with
-  `DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED`.
+- **High-impact controls.** The user's own command is their authorization: a
+  press Jev chooses for it runs under Jev's normal confidence rules, whatever the
+  control is called (`Delete`, `Send`, a dialog `OK`) and whatever words the
+  command uses. There is no word list. The agent's command for a handed-off
+  utterance is the exception; see [Agent hand-off](#agent-hand-off-when-jev-gives-up).
 - **Browser shortcuts.** `Cmd+T`/`⌘T`/`new tab`/`เปิด tab ใหม่`/`เปิดแท็กใหม่`, `Cmd+N`/`new
   window` and `Cmd+W`/`close tab`/`ปิดแท็บ` press the front application's own
   menu command (or an identically named button) without Jev. If it is not
@@ -754,9 +741,9 @@ and keep their stricter checks above; for example a step that says `ลบ` stop
   (`ปิด chrome`, `quit chrome`, `Chromeを終了して`); a command that only starts
   with `ปิด`/`close`, such as `close notification`, is decided like any other.
   With the helper's `app:quit` the guarded quit shortcut runs; otherwise Jev picks
-  the front application's own Quit menu command. It needs a Jev confidence of at
-  least 0.85 (otherwise `DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED`) and is never
-  offered to the agent's command for a handed-off utterance. A command naming an
+  the front application's own Quit menu command. Jev's normal confidence rules
+  apply (below them, `LOW_CONFIDENCE`). For the agent's command for a handed-off
+  utterance, quitting asks the user first. A command naming an
   application that is not in front is left to Jev, which answers `BLOCKED`.
   `Cmd+Q` uses `app:quit` directly when the helper offers it.
 - **Spoken filler words.** Before matching these phrases, a leading `เอ่อ`,
@@ -770,12 +757,12 @@ and keep their stricter checks above; for example a step that says `ลบ` stop
   or `press 5` press `5`; `บวก`/`ลบ`/`คูณ`/`หาร`/`เท่ากับ` (or `plus`, `+`,
   `เครื่องหมายบวก` and so on) press `Add`/`Subtract`/`Multiply`/`Divide`/`Equals`
   (or `+ − × ÷ =`); `เคลียร์` presses `Clear` or `All Clear`. The button must be
-  the only pressable, non-sensitive, non-menu control with that label, and not a
-  high-impact control; two matches or none leave the command to Jev unchanged.
+  the only pressable, non-sensitive, non-menu control with that label; two
+  matches or none leave the command to Jev unchanged.
   While keyboard focus is in a text field these words are text, not buttons.
   `ลบ` erases in a focused text field (see above); with no text focus it presses
-  `Subtract` only when no visible Delete/Remove-type control could be meant,
-  otherwise Jev decides with the high-impact rule. A number is pressed digit by
+  `Subtract` only when no visible Delete control could be meant, otherwise Jev
+  decides. A number is pressed digit by
   digit: `ห้า ศูนย์`, `ห้าสิบ` and `50` press `5` then `0`, each matched again
   on a fresh observation after the previous press settles. At most 8 presses
   (`SEQUENCE_TOO_LONG` otherwise). Two number forms that disagree, such as
@@ -810,7 +797,7 @@ and keep their stricter checks above; for example a step that says `ลบ` stop
 - **Outcome line.** Each settled command sets the task progress text to what was
   done (for example `Done: pressed "New Tab"`) or why nothing was done, with a
   hint (`LOW_CONFIDENCE` with its score, `FIELD_TEXT_REQUIRED`, `FOCUS_REQUIRED`,
-  `NO_SUPPORTED_ACTION`, a high-impact stop, or the step at which a step run
+  `NO_SUPPORTED_ACTION`, a confirmation question, or the step at which a step run
   stopped).
 - **Rapid commands.** While the user controls the task, a command sent while
   their previous command is still running or queued waits in a first-in,
@@ -950,16 +937,32 @@ the utterance settled at. It cannot include field values, inputs or `start_url`.
 Other tools and targets, including `task_cancel`, are rejected (`AGENT_HANDOFF_ONE_COMMAND`). A second command is
 rejected (`AGENT_HANDOFF_USED`), and so is one sent after the user has already
 given a newer command (`REVISION_CONFLICT`). The command runs as the user's next
-direct command; the user keeps control. It never runs as a step list, and it
-gains no extra authority: high-impact controls always return control (Remote
-Browser `strictDestructive`; Computer Use `agentCommand`), whatever the agent's
-words say. That includes a generic `OK`/`Continue`, quitting the app, and Enter
-(or typing that submits) while a high-impact control such as `Send` is shown;
-search and address fields still submit. It is not offered `READ_REQUEST`, `UNCLEAR` or `NAVIGATE`. If Jev
+direct command; the user keeps control. It never runs as a step list. The
+agent wrote it, not the user, so its impact is checked by meaning rather than by
+a word list: alongside the action question, Jev answers whether doing the command
+on what is shown is high-impact (deleting, sending, submitting, paying,
+publishing, quitting an app, signing out, or confirming such an operation). It
+does not take the deterministic fast paths that could act without Jev (Enter, key
+shortcuts, number keys, `Cmd+Q`). Unless Jev confidently judges it routine,
+nothing is dispatched (`CONFIRMATION_REQUIRED`) and the user hears one question
+naming the chosen control, in the conversation language: `จะกด Quit Google
+Chrome ใช่ไหม` / `Press Quit Google Chrome?`. The user's next command answers it.
+Jev reads that reply in any language (`ใช่`, `yes`, `はい`, `ไม่`): yes runs the
+agent's command as the user's own command; no runs nothing and says nothing
+(`CONFIRMATION_DECLINED`); anything else is an ordinary new command. The
+question is asked once. It is not offered `READ_REQUEST`, `UNCLEAR` or `NAVIGATE`. If Jev
 gives up on it, it never hands off again: the not-done line is spoken against the
 user's original words and the session waits for the next command. If the meaning
 is still unclear or the input is a question, the agent answers or asks instead of
 acting. Page and screen text stays untrusted, and sensitive values are never read
 out.
+
+**Session start.** Every Remote Browser and Computer Use task starts under user
+control, so its spawn instructions are the first round. They are the agent's
+words, not a user command, and are often just "open a session and wait". If Jev
+finds no action in them (`BLOCKED`, `UNCLEAR`, `READ_REQUEST`; on Computer Use
+also low confidence), the round ends ready (`SESSION_READY`, outcome `Ready: the session
+is open and waits for the next command.`), never `Not done`, and nothing is
+spoken or handed off. A concrete first command still runs.
 
 A safely stopped confidence/provider failure permits a fresh explicit command on the same open task. A closed session or uncertain mutation cannot be resumed this way; inspect and reconcile the retained receipt first.

@@ -46,7 +46,7 @@ function desktop(initial:any,plan:(req:any)=>string|undefined=()=>undefined,conf
   },
   evaluate:async req=>{requests.push(req);const chosen=plan(req);const kind=chosen?.split(':')[0]??'BLOCKED';
    return {answers:Object.fromEntries(Object.entries(req.questions).map(([name,q]:[string,any])=>[name,choice(q.criteria,
-    name==='field'?chosen??'NONE':name==='action'?kind:name==='target_'+kind?chosen!:name==='text'?Object.keys(q.criteria).find(k=>k!=='NONE')??'NONE':'BLOCKED',confidence)]))};}};
+    name==='field'?chosen??'NONE':name==='impact'?'HIGH_IMPACT':name==='action'?kind:name==='target_'+kind?chosen!:name==='text'?Object.keys(q.criteria).find(k=>k!=='NONE')??'NONE':'BLOCKED',confidence)]))};}};
  return {deps,requests,actions:()=>calls.filter(c=>c.name==='computer_action').map(({args:{lease_token,operation_id,generation,...rest}})=>rest)};
 }
 const command=(f:ReturnType<typeof desktop>,goal:string,extra:Record<string,unknown>={})=>runComputerUse({goal,yieldAfterInteraction:true,...extra},f.deps,new AbortController().signal);
@@ -93,17 +93,22 @@ describe('a5 Computer Use: quitting is Jev\'s own choice, not a word at the star
   expect(f.actions()).toEqual([{kind:'press',ref:'m0'}]);
   expect(r.lastAction).toMatchObject({kind:'press',label:'Menu: Chrome → Google Chromeを終了'});
  });
- test('an unsure quit choice quits nothing',async()=>{
-  const f=desktop(chrome(),()=>'quit:m0',0.7);
-  const r=await command(f,'Chromeを終了して');
-  expect(f.actions()).toEqual([]);
-  expect(r.trace.events.some(e=>e.reason==='DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED')).toBe(true);
+ // Session d8013081: a separate 0.85 bar refused "ปิด chrome" at 0.79/0.77. Jev's normal bar applies.
+ test('quitting uses Jev\'s normal confidence bar: 0.7 quits, 0.4 does not',async()=>{
+  const sure=desktop(chrome(),()=>'quit:m0',0.7);
+  await command(sure,'Chromeを終了して');
+  expect(sure.actions()).toEqual([{kind:'press',ref:'m0'}]);
+  const unsure=desktop(chrome(),()=>'quit:m0',0.4);
+  const r=await command(unsure,'Chromeを終了して');
+  expect(unsure.actions()).toEqual([]);
+  expect(r.trace.events.some(e=>e.reason==='LOW_CONFIDENCE')).toBe(true);
  });
- test('the agent\'s command for a handed-off utterance is never offered quitting',async()=>{
+ test('the agent\'s command for a handed-off utterance may quit, after the user confirms',async()=>{
   const f=desktop(chrome(),()=>'quit:m0');
-  await command(f,'Chromeを終了して',{agentCommand:true});
-  expect(f.requests[0].questions.action.criteria.quit).toBeUndefined();
+  const r=await command(f,'Chromeを終了して',{agentCommand:true});
+  expect(f.requests[0].questions.action.criteria.quit).toBeDefined();
   expect(f.actions()).toEqual([]);
+  expect(r.lastAction).toMatchObject({confirm:true});
  });
 });
 
@@ -182,12 +187,14 @@ describe('a3 Remote Browser: history, keys and a new tab are Jev operations',()=
   expect(b.mutations()).toEqual([]);
   expect(r.commandOutcome).toMatchObject({done:false,reason:'NEW_TAB_OUT_OF_SCOPE'});
  });
- test('steps, the agent\'s strict command and an old extension are not offered these operations',async()=>{
-  for(const [extra,observation] of [[{command:false},page()],[{strictDestructive:true},page()],[{},page({navigation:undefined})]] as const){
+ test('steps and an old extension are not offered these operations; the agent\'s command is, without READ_REQUEST',async()=>{
+  for(const [extra,observation] of [[{command:false},page()],[{stepPart:true},page()],[{},page({navigation:undefined})]] as const){
    const j=jev({});await browse('前のページに戻って',extension(observation as Observation),j,extra);
    const offered=Object.keys(j.requests[0].questions.operation.criteria);
    expect(offered).not.toContain('HISTORY_BACK');expect(offered).not.toContain('KEY');
-  }
+  }  const agent=jev({});await browse('前のページに戻って',extension(page()),agent,{agentCommand:true});
+  const offered=Object.keys(agent.requests[0].questions.operation.criteria);
+  expect(offered).toEqual(expect.arrayContaining(['HISTORY_BACK','KEY']));expect(offered).not.toContain('READ_REQUEST');expect(offered).not.toContain('UNCLEAR');
  });
  test('the exact phrase stays a fast path with no Jev round-trip',async()=>{
   const b=extension(),j=jev({});

@@ -7,7 +7,7 @@ export const COMMAND_STEPS_TIMEOUT_MS = 120000;
 export const STEP_TEXT_MAX = 300;
 
 export type CommandStepStopReason =
-  | 'ALL_STEPS_DONE' | 'DESTRUCTIVE_STEP' | 'DESTRUCTIVE_ACTION' | 'STEP_NO_EFFECT'
+  | 'ALL_STEPS_DONE' | 'STEP_NO_EFFECT'
   | 'STEP_NOT_EXECUTED' | 'OUTCOME_UNKNOWN' | 'TIMEOUT' | 'CANCELLED' | 'FAILED';
 /** Parent-facing summary. Step text is the user's own command, never app content. */
 export interface CommandStepRun {

@@ -22,7 +22,7 @@ export interface BrowserTaskBinding {
   inspect?: (result:Partial<BrowserExecutionResult>|undefined,signal:AbortSignal,authorized:()=>boolean,screenshot?:boolean)=>Promise<NonNullable<BrowserEvidence['fresh']>>;
   run: (context: BrowserExecutionContext) => Promise<BrowserExecutionResult>;
 }
-interface Receipt {command?:string;interaction?:{action?:BrowserCommandAction;url?:string;title?:string};trace?:BrowserTrace;revision?:number;taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';lastDispatchedMutation?:BrowserMutationCheckpoint;recordedAt?:number;inspection?:{id:string;at:number;continuation?:'completed'|'not_executed'|'legacy_focus_only'};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
+interface Receipt {command?:string;interaction?:{action?:BrowserCommandAction;url?:string;title?:string;confirm?:{label:string}};trace?:BrowserTrace;revision?:number;taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';lastDispatchedMutation?:BrowserMutationCheckpoint;recordedAt?:number;inspection?:{id:string;at:number;continuation?:'completed'|'not_executed'|'legacy_focus_only'};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
 export class BrowserTaskAdapter implements GatewayTaskAdapter {
   readonly name='browser';
   private readonly running=new Map<string,{controller:AbortController;interrupt:AbortController;done:Promise<void>}>();
@@ -102,9 +102,12 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const previousContext=previous&&(previous.revision??0)<task.revision?previous:undefined;
     const interactionContext=previousContext?browserInteractionContext({command:previousContext.command,...previousContext.interaction}):'';
     // Step mode takes only the user's own step list; field answers keep the one-command path.
-    // The agent's command for a handed-off utterance: one command, no step list, and
-    // it gains no authority over high-impact controls (strict fence, no hand-off again).
+    // The agent's command for a handed-off utterance: one command, no step list, no
+    // hand-off again, and a high-impact action waits for the user's confirmation.
     const agentHandoff=command&&task.executionControl?.agentHandoff===true&&task.executionControl.revision===task.revision;
+    // The user's next command answers that question (Jev reads yes or no).
+    const asked=!agentHandoff?previousContext?.interaction?.confirm:undefined;
+    const confirmation=asked&&typeof previousContext?.command==='string'?{command:previousContext.command,label:asked.label}:undefined;
     const stepMode=command&&!agentHandoff&&this.options.stepMode?.()===true&&!answers?.length;
     const userText=stepMode?this.options.userSteps?.(task):undefined;
     const steps=stepMode?(userText?parseCommandSteps(userText):undefined)??parseCommandSteps(instructions):undefined;
@@ -114,7 +117,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const authorized=()=>{try{return this.options.allowedTask?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
     // The installed browser package owns execution; gateway owns the request lifetime.
     let providerFailure:BrowserExecutionResult['providerFailure'];
-    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({requestConsent,interruptSignal:interrupt.signal,goal:instructions,...(command?{command:true}:{}),...(agentHandoff?{strictDestructive:true}:{}),...(interactionContext?{interactionContext}:{}),...(steps?{steps}:{}),startUrl:startUrl ?? (answers?.some(a=>!a.questionId.startsWith('prepared:')) || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl),fields,signal:controller.signal,authorized,
+    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({requestConsent,interruptSignal:interrupt.signal,goal:instructions,...(command?{command:true}:{}),...(agentHandoff?{agentCommand:true}:{}),...(confirmation&&!steps?{confirmation}:{}),...(command&&task.revision===1&&task.executionControl?.revision!==1&&!steps?{sessionStart:true}:{}),...(interactionContext?{interactionContext}:{}),...(steps?{steps}:{}),startUrl:startUrl ?? (answers?.some(a=>!a.questionId.startsWith('prepared:')) || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl),fields,signal:controller.signal,authorized,
       evaluate:async(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');try{return await this.options.evaluate(task,request,signal,authorized);}catch(e){if(e instanceof JevError)providerFailure={code:e.code,...e.metadata};throw e;}},
       trace:event=>{
         if(!authorized())return;
@@ -162,7 +165,8 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
         const page=result.observation as {url?:unknown;title?:unknown}|undefined;
         // Best effort: a missing context only loses "อีก" resolution, never the outcome.
         try{this.write(task,'interaction-context',{taskId:task.taskId,requestId:'interaction-context',principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',command:instructions.slice(0,2000),
-          interaction:{...(result.commandOutcome?.done&&result.commandOutcome.action?{action:result.commandOutcome.action}:{}),...(typeof page?.url==='string'?{url:page.url.slice(0,2000)}:{}),...(typeof page?.title==='string'?{title:page.title.slice(0,250)}:{})}});}catch{/* see above */}
+          interaction:{...(result.commandOutcome?.done&&result.commandOutcome.action?{action:result.commandOutcome.action}:{}),
+            ...(result.commandOutcome?.reason==='CONFIRMATION_REQUIRED'?{confirm:{label:(result.commandOutcome.action?.label??'').slice(0,250)}}:{}),...(typeof page?.url==='string'?{url:page.url.slice(0,2000)}:{}),...(typeof page?.title==='string'?{title:page.title.slice(0,250)}:{})}});}catch{/* see above */}
       }
       const {observation:_,trace:__,...browserReport}=result;
       outcome.browserReport=browserReport;

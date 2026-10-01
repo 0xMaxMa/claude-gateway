@@ -1,6 +1,5 @@
 import {z} from 'zod';
 import {randomUUID} from 'node:crypto';
-import {destructiveText} from './computer-safety';
 import {COMMAND_STEPS_MAX,COMMAND_STEPS_TIMEOUT_MS,STEP_TEXT_MAX,stepParts,type CommandStepRun,type CommandStepStopReason} from './command-steps';
 import type {BrowserTraceEvent} from './browser-trace';
 import type {BrowserUseDependencies,BrowserUseInput,BrowserUseResult,Observation} from './browser-use';
@@ -10,8 +9,8 @@ import type {BrowserUseDependencies,BrowserUseInput,BrowserUseResult,Observation
  * one tab lease without returning to the parent agent between steps. Each part
  * is one direct command of the single-command runner, so its fast paths,
  * confidence gate, write-ahead receipt and never-replay rules are unchanged.
- * This file adds sequencing, the strict destructive fence, per-step effect
- * verification and the same caps as Computer Use step mode.
+ * This file adds sequencing, per-step effect verification and the same caps
+ * as Computer Use step mode. The user's own list is their authorization.
  */
 const STEP_RETRY_MAX = 2;
 const LOADING_DELAY_MS = 800;
@@ -120,8 +119,6 @@ export async function runBrowserStepsWith(runOne: RunOne, parse: (value: unknown
   try {
     for (; index < input.steps.length; index++) {
       const step = input.steps[index];
-      // A typed step list is not confirmation of a high-impact step.
-      if (destructiveText(step)) return waiting(stop(index, 'DESTRUCTIVE_STEP'));
       const parts = stepParts(step);
       let stepChanged = true, lastKind: string | undefined;
       doneParts = [];
@@ -133,7 +130,7 @@ export async function runBrowserStepsWith(runOne: RunOne, parse: (value: unknown
           if (actionsLeft < 1 || evaluationsLeft < 1) return waiting(stop(index, 'STEP_NOT_EXECUTED', actionsLeft < 1 ? 'ACTION_BUDGET' : 'EVALUATION_BUDGET'));
           before = undefined;
           const context = [input.interactionContext, index ? 'Completed steps in this run: ' + input.steps.slice(0, index).map((s, i) => `${i + 1}) ${s}`).join('; ') : ''].filter(Boolean).join('\n').slice(-8000);
-          result = await runOne({contractVersion: 1, goal: part, scope: input.scope, command: true, yieldAfterAction: true, strictDestructive: true,
+          result = await runOne({contractVersion: 1, goal: part, scope: input.scope, command: true, yieldAfterAction: true, stepPart: true,
             fields: input.fields, maxSteps: actionsLeft, maxEvaluations: evaluationsLeft, timeoutMs: Math.max(1000, deadline - Date.now()),
             ...(input.maxTextCalls !== undefined ? {maxTextCalls: input.maxTextCalls} : {}), ...(input.maxStaleRetries !== undefined ? {maxStaleRetries: input.maxStaleRetries} : {}),
             ...(input.operationConfidence !== undefined ? {operationConfidence: input.operationConfidence} : {}), ...(input.targetConfidence !== undefined ? {targetConfidence: input.targetConfidence} : {}),
@@ -158,7 +155,6 @@ export async function runBrowserStepsWith(runOne: RunOne, parse: (value: unknown
           if (result.status === 'failed' || result.status === 'blocked') return finish(result.status, result.reason, stop(index, 'FAILED', result.reason));
           return waiting(stop(index, 'STEP_NOT_EXECUTED', result.reason));
         }
-        if (outcome.reason === 'DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED') return waiting(stop(index, 'DESTRUCTIVE_ACTION', outcome.reason));
         if (outcome.action?.kind === 'new_tab') {
           // Scope stays on the approved tab; the following steps run there.
           notes.push(`Step ${index + 1}: stayed in the approved tab (no new tab is opened).`);

@@ -64,10 +64,11 @@ describe('V1 exact-label press runs before Jev',()=>{
   const f=fixture(sensitive);await run(f,'5');
   expect(f.presses()).toEqual([]);
  });
- test('a high-impact control is left to Jev and its confirmation guard',async()=>{
+ // Session d8013081: the user's own command is their authorization, whatever the control says.
+ test('the user\'s spoken label presses its one visible button, whatever its value says',async()=>{
   const destructive=structuredClone(calculator) as any;Object.assign(destructive.controls.find((c:any)=>c.ref==='c13'),{label:'−',value:'Remove item'});
   const f=fixture(destructive);await run(f,'minus');
-  expect(f.presses()).toEqual([]);expect(f.requests).toHaveLength(1);
+  expect(f.presses()).toEqual(['c13']);expect(f.requests).toHaveLength(0);
  });
 });
 

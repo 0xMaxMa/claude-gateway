@@ -18,7 +18,8 @@ const HINTS:Record<string,string>={
  PAGE_CONTENT_UNAVAILABLE:'the page has no readable content yet. Wait for it to load, then send the command again.',
  WAIT_BUDGET:'the page kept changing. Send the command again when it settles.',
  ACTION_SPACE_TOO_LARGE:'the page has too many controls to choose from. Scroll to the part you need or name the control.',
- DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED:'{target} is a high-impact control (delete, send, pay, publish or confirm). To proceed, name the action in the command, for example "กด Delete" or "confirm delete".',
+ CONFIRMATION_REQUIRED:'{target} is high-impact, so the user was asked to confirm it; their yes or no answers.',
+ CONFIRMATION_DECLINED:'the user said no, so it was not pressed.',
  HISTORY_UNAVAILABLE:'there is no page to go {direction} to in this tab.',
  SCROLL_LIMIT:'the page is already at the {edge}.',
  NEW_TAB_OUT_OF_SCOPE:'Remote Browser works only in the one tab you approved, so no new tab was opened. Send the site or address (for example "เข้า google") and it opens in this tab.',
@@ -57,6 +58,7 @@ export function browserOutcomeText(report:BrowserTaskReport):string{
  if(report.stepRun)return stepRunText(report.stepRun,detail=>HINTS[detail]?hint(detail):undefined);
  const outcome=report.commandOutcome;
  if(report.reason==='OUTCOME_UNKNOWN'||report.lastAction?.outcome==='unknown')return `${UNKNOWN_PREFIX} the last action may have run. Check the page before sending the command again.`;
+ if(outcome?.reason==='SESSION_READY')return 'Ready: the session is open and waits for the next command.';
  if(outcome?.done)return `Done: ${done(outcome.action)}.${outcome.reason==='PAGE_STILL_LOADING'?' The page was still loading; check it before the next command.':' Send the next command.'}`;
  const reason=outcome?.reason??report.reason;
  if(reason==='READ_REQUEST')return 'Read request: nothing was clicked; the assistant answers from the current page.';

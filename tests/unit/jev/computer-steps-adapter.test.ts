@@ -90,3 +90,32 @@ test('P1-8: "zoom อีก" after "zoom" reaches Jev verbatim, with the previou
   expect(second.interactionContext).toContain('"previousAction":{"kind":"press","label":"Zoom in","role":"AXButton"}');
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
+
+// Session d8013081: the agent's high-impact hand-off command asks the user; their
+// next command carries the question so Jev can read the yes or no. The agent's
+// spawn text ("เปิด Computer Use session…") is marked as the session start.
+test('the user\'s next command answers the hand-off confirmation; the spawn round is the session start',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-confirm-'));runComputerUse.mockClear();
+ const callTool=jest.fn(async()=>({content:[{type:'text',text:'{"state":"approved"}'}]}));
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ const connectors={get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})};
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true});
+ const settle=async(task:any,request:string)=>{for(let i=0;i<50;i++){if(typeof await adapter.inspect(task,request)==='object')return;await new Promise(r=>setImmediate(r));}};
+ try{
+  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,automationController:'user',gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+  await adapter.submit(task,'r1','เปิด Computer Use session รอคำสั่งถัดไปจากผู้ใช้');await settle(task,'r1');
+  expect(runComputerUse.mock.calls[0][0]).toMatchObject({sessionStart:true});
+  runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{deps.observation({generation:'g',application:'com.google.Chrome',controls:[],apps:[],truncated:false});return {status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1,lastAction:{kind:'press',label:'Quit Google Chrome',blocked:true,confirm:true}};});
+  const handoff={...task,revision:2,executionControl:{revision:2,agentHandoff:true}};
+  await adapter.submit(handoff,'r2','quit chrome');await settle(handoff,'r2');
+  expect(runComputerUse.mock.calls[1][0]).toMatchObject({agentCommand:true});
+  expect(runComputerUse.mock.calls[1][0].sessionStart).toBeUndefined();
+  const reply={...task,revision:3,executionControl:{revision:3}};
+  await adapter.submit(reply,'r3','ใช่');await settle(reply,'r3');
+  expect(runComputerUse.mock.calls[2][0]).toMatchObject({goal:'ใช่',confirmation:{command:'quit chrome',label:'Quit Google Chrome'}});
+  // Asked once: the round after the answer carries no question.
+  const next={...task,revision:4,executionControl:{revision:4}};
+  await adapter.submit(next,'r4','scroll down');await settle(next,'r4');
+  expect(runComputerUse.mock.calls[3][0].confirmation).toBeUndefined();
+ }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});

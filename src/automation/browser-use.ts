@@ -5,7 +5,8 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {COMMAND_DECISION_FAILURES,READ_REQUEST_CRITERION,UNCLEAR_CRITERION,textCommand} from "./direct-command";
 import {runBrowserStepsWith,type BrowserStepsInput} from "./browser-steps";
-import {blankTabUrl,browserDestructiveBlock,navigationUrl,browserSubmitBlock,planBrowserCommand,searchFields,type BrowserCommandAction,type BrowserCommandOutcome,type BrowserCommandPlan,type BrowserKey} from "./browser-command";
+import {IMPACT_CRITERIA,IMPACT_QUESTION} from "./computer-command";
+import {blankTabUrl,navigationUrl,planBrowserCommand,searchFields,type BrowserCommandAction,type BrowserCommandOutcome,type BrowserCommandPlan,type BrowserKey} from "./browser-command";
 
 export const BROWSER_USE_CONTRACT_VERSION = 1 as const;
 /** Optional inputs this runner accepts within contract v1; hosts pass them only when advertised. */
@@ -167,12 +168,19 @@ const Input = z
     maxStaleRetries: z.number().int().min(0).max(10).default(2),
     maxTextCalls: z.number().int().min(0).max(60).default(10),
     yieldAfterAction: z.boolean().default(false),
-    /** The goal is the user's own direct command: deterministic fast paths,
-     * destructive guard and a Done/Not done outcome instead of a blocked stop. */
+    /** The goal is the user's own direct command: deterministic fast paths
+     * and a Done/Not done outcome instead of a blocked stop. */
     command: z.boolean().default(false),
     interactionContext: z.string().max(8000).optional(),
-    /** Step mode: every high-impact control returns control, whatever the step says. */
-    strictDestructive: z.boolean().default(false),
+    /** One part of the user's step list: no read request or agent hand-off. */
+    stepPart: z.boolean().default(false),
+    /** The agent's command for a handed-off utterance: Jev judges its impact,
+     * and a high-impact action waits for the user's confirmation. */
+    agentCommand: z.boolean().default(false),
+    /** The agent's opening text for a session the user drives: no action means ready, not "not done". */
+    sessionStart: z.boolean().default(false),
+    /** The user's reply to that confirmation question; yes runs the agent's command. */
+    confirmation: z.object({ command: z.string().min(1).max(2000), label: z.string().max(250) }).strict().optional(),
     maxSteps: z.number().int().min(1).max(100).default(30),
     maxEvaluations: z.number().int().min(1).max(150).default(50),
     timeoutMs: z.number().int().min(1000).max(600000).default(120000),
@@ -215,7 +223,7 @@ export type BrowserUseResult = {
 // A Jev decision that failed or timed out ends this command, not the task
 // (session b01a566f: one ADAPTER_TIMEOUT failed the whole voice session).
 // Configuration, access and quota failures still stop the task.
-const COMMAND_NOT_DONE = new Set([...COMMAND_DECISION_FAILURES,"STALE_OBSERVATION","STALE_RETRY_BUDGET","NO_SUPPORTED_ACTION","LOW_OPERATION_CONFIDENCE","LOW_TARGET_CONFIDENCE","NO_PROGRESS","PAGE_CONTENT_UNAVAILABLE","WAIT_BUDGET","ACTION_SPACE_TOO_LARGE","DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED","HISTORY_UNAVAILABLE","SCROLL_LIMIT","NEW_TAB_OUT_OF_SCOPE","START_URL_REQUIRED","KEY_UNSUPPORTED","ACTION_BUDGET","EVALUATION_BUDGET","TARGET_OBSCURED","NAVIGATION_UNRESOLVED","UNCLEAR"]);
+const COMMAND_NOT_DONE = new Set([...COMMAND_DECISION_FAILURES,"STALE_OBSERVATION","STALE_RETRY_BUDGET","NO_SUPPORTED_ACTION","LOW_OPERATION_CONFIDENCE","LOW_TARGET_CONFIDENCE","NO_PROGRESS","PAGE_CONTENT_UNAVAILABLE","WAIT_BUDGET","ACTION_SPACE_TOO_LARGE","CONFIRMATION_REQUIRED","CONFIRMATION_DECLINED","HISTORY_UNAVAILABLE","SCROLL_LIMIT","NEW_TAB_OUT_OF_SCOPE","START_URL_REQUIRED","KEY_UNSUPPORTED","ACTION_BUDGET","EVALUATION_BUDGET","TARGET_OBSCURED","NAVIGATION_UNRESOLVED","UNCLEAR"]);
 // A leased read after navigation waits in the extension, then reports
 // STALE_OBSERVATION cause NAVIGATION_PENDING. Re-read only; never replay the action.
 const NAVIGATION_WAIT_MAX = 6;
@@ -283,7 +291,7 @@ const ADDRESS_FIELD: Observation["elements"][number] = { ref: "address", label: 
 function pageOrigin(url: string): string {
   try { const u = new URL(url); return ["http:", "https:"].includes(u.protocol) ? u.origin + "/" : ""; } catch { return ""; }
 }
-export function decisionQuestions(page: Observation, goal = "", exhaustedTextFields = new Set<string>(), command = false, readRequest = command, navigate = false) {
+export function decisionQuestions(page: Observation, goal = "", exhaustedTextFields = new Set<string>(), command = false, readRequest = command, navigate = false, agentCommand = false) {
   const targets = new Map<
     string,
     { element: Observation["elements"][number]; option?: string }
@@ -298,7 +306,8 @@ export function decisionQuestions(page: Observation, goal = "", exhaustedTextFie
   if (command && readRequest) { operations.READ_REQUEST = READ_REQUEST_CRITERION; operations.UNCLEAR = UNCLEAR_CRITERION; }
   // Likewise only before this command acted, and only with a text helper to resolve the site.
   if (command && readRequest && navigate) operations.NAVIGATE = NAVIGATE_CRITERION;
-  if (command && readRequest) {
+  // The agent's command for a hand-off gets these operations too (its Enter is no fast path).
+  if ((command || agentCommand) && readRequest) {
     operations.NEW_TAB = NEW_TAB_CRITERION;
     // tab_history and page_keypress need extension 0.3.5+ (observation.navigation).
     if (page.navigation) {
@@ -384,7 +393,7 @@ export async function runBrowserUse(
 ): Promise<BrowserUseResult> {
   const parsedInput = Input.safeParse(raw);
   if (!parsedInput.success) throw new BrowserUseInputError();
-  const input = parsedInput.data;
+  let input = parsedInput.data;
   const controller = new AbortController();
   const cancelled = () => controller.abort();
   signal.addEventListener("abort", cancelled, { once: true });
@@ -673,13 +682,6 @@ export async function runBrowserUse(
     if (plan.kind === "key") {
       commandAction = { kind: "key", key: plan.key };
       if (!modern) return result("blocked", "KEY_UNSUPPORTED");
-      const block = plan.key === "Enter" ? browserSubmitBlock(page!.elements, undefined, input.strictDestructive) : undefined;
-      if (block) {
-        // Checked before any dispatch: nothing was sent.
-        commandAction = { kind: "key", key: plan.key, label: block.label };
-        emit({phase:"recovery",reason:"DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED",operation:"KEY"});
-        return result("blocked", "DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED");
-      }
       const action = await mutate("KEY", "page_keypress", () => ({ key: plan.key, ...(plan.repeat > 1 ? { repeat: plan.repeat } : {}), generation: page!.generation }));
       return isResult(action) ? action : done();
     }
@@ -695,12 +697,6 @@ export async function runBrowserUse(
     if (!field && fields.candidates.length) field = await chooseSearchField(fields.candidates);
     commandAction = { kind: "search", ...(field ? { label: field.label } : {}) };
     if (!field) return result("blocked", fields.candidates.length ? "LOW_TARGET_CONFIDENCE" : "NO_SUPPORTED_ACTION");
-    const block = browserSubmitBlock(page!.elements, field, input.strictDestructive);
-    if (block) {
-      commandAction = { kind: "search", label: block.label };
-      emit({phase:"recovery",reason:"DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED",operation:"SEARCH"});
-      return result("blocked", "DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED");
-    }
     const label = field.label;
     for (let attempt = 0; attempt < 2; attempt++) {
       const chosen = field!;
@@ -790,8 +786,22 @@ export async function runBrowserUse(
       steps++;
       progress({ phase: "acted", operationId });
     }
+    if (input.confirmation) {
+      // The user's reply to "press <label>?" for the agent's high-impact command, read by Jev in any language.
+      const criteria = { YES: "The user agrees: do it", NO: "The user declines or wants to stop", OTHER: "The reply is a different command, not an answer to the question" };
+      const request = { requestId: randomUUID(), state: { question: `Press ${JSON.stringify(input.confirmation.label)}?`, reply: input.goal },
+        questions: { reply: { type: "choice" as const, instructions: "The assistant asked the user the `question` before pressing a high-impact control. Does `reply` answer it?", criteria } } };
+      evaluations++;
+      const answer = await bounded((s) => interruptible(child => deps.evaluate(request, child), s, deps.interruptSignal), 15000);
+      check();
+      const reply = (() => { try { const c = choice(answer?.answers?.reply, Object.keys(criteria)); return c.confidence >= 0.55 ? c.choice : "OTHER"; } catch { return "OTHER"; } })();
+      if (reply === "NO") { commandOutcome = { done: false, reason: "CONFIRMATION_DECLINED" }; return result("needs_verification", "COMMAND_WAITING_INPUT"); }
+      if (reply === "YES") input = { ...input, goal: input.confirmation.command };
+    }
     const initial = await observeFresh();
-    const plan = input.command ? planBrowserCommand(input.goal) : undefined;
+    // The agent's Enter reaches Jev, so its impact is judged before it can submit anything.
+    const planned = input.command ? planBrowserCommand(input.goal) : undefined;
+    const plan = input.agentCommand && planned?.kind === "key" ? undefined : planned;
     if (initial.native_new_tab === true) {
       // A blank tab has nothing to act on, but "เข้า <site>" (or the one site a
       // task goal names) is its own start page. Only http/https URLs qualify.
@@ -849,7 +859,9 @@ export async function runBrowserUse(
         values.set(entry.text,(values.get(entry.text)??0)+1);repeats.set(field,values);
       }
       const exhaustedTextFields=new Set([...repeats].filter(([,values])=>[...values.values()].some(n=>n>=2)).map(([field])=>field));
-      const { questions, targets } = decisionQuestions(page, input.goal,exhaustedTextFields,input.command&&!input.strictDestructive,!lastConfirmedAction,!!deps.resolveFieldText);
+      const { questions, targets } = decisionQuestions(page, input.goal,exhaustedTextFields,input.command&&!input.stepPart&&!input.agentCommand,!lastConfirmedAction,!!deps.resolveFieldText,input.agentCommand);
+      // Jev judges, by meaning in any language, whether the agent's command is high-impact.
+      if (input.agentCommand) questions.impact = { type: "choice", instructions: IMPACT_QUESTION.replace("`command`", "`goal`"), criteria: IMPACT_CRITERIA };
       if (
         Object.values(questions).some(
           (q) => Object.keys(q.criteria).length > 255,
@@ -938,7 +950,11 @@ export async function runBrowserUse(
       // The next browser operation atomically checks current ownership/consent.
       // A separate renewal here would add a redundant browser round trip.
       // Jev gave up on a single direct command: the gateway may hand it to the agent once.
-      const handoff = input.command && !input.strictDestructive && !lastConfirmedAction;
+      const handoff = input.command && !input.stepPart && !input.agentCommand && !lastConfirmedAction;
+      if (input.sessionStart && !lastConfirmedAction && ["BLOCKED", "UNCLEAR", "READ_REQUEST"].includes(op.choice)) {
+        commandOutcome = { done: false, reason: "SESSION_READY" };
+        return result("needs_verification", "COMMAND_WAITING_INPUT");
+      }
       if (op.choice === "BLOCKED" || op.choice === "UNCLEAR") {
         gaveUp = handoff;
         return result("blocked", op.choice === "UNCLEAR" ? "UNCLEAR" : "NO_SUPPORTED_ACTION");
@@ -971,6 +987,17 @@ export async function runBrowserUse(
         );
       }
       if (steps >= input.maxSteps) return result("blocked", "ACTION_BUDGET");
+      // The user's own command is their authorization; the agent's command runs
+      // only when Jev judged it routine, otherwise the user confirms the action.
+      if (input.agentCommand && op.choice !== "WAIT" && !(validated.impact?.choice === "ROUTINE" && validated.impact.confidence >= 0.55)) {
+        const target = validated[op.choice.toLowerCase() + "_target"];
+        const selected = target && targets.get(op.choice + ":" + target.choice);
+        const label = selected ? selected.element.label : op.choice === "KEY" ? validated.key_target?.choice ?? "Enter" : op.choice;
+        const kinds: Record<string, BrowserCommandAction["kind"]> = { CLICK: "click", SELECT: "select", TYPE_TEXT: "type", KEY: "key", NAVIGATE: "navigate", NEW_TAB: "new_tab", HISTORY_BACK: "history", HISTORY_FORWARD: "history", SCROLL_UP: "scroll", SCROLL_DOWN: "scroll" };
+        commandAction = { kind: kinds[op.choice] ?? "click", label: label.slice(0, 250) };
+        emit({phase:"recovery",reason:"CONFIRMATION_REQUIRED",operation:op.choice});
+        return result("blocked", "CONFIRMATION_REQUIRED");
+      }
       if (op.choice === "NEW_TAB") return (await directCommand({ kind: "new_tab" }))!;
       if (op.choice === "HISTORY_BACK" || op.choice === "HISTORY_FORWARD")
         return (await directCommand({ kind: "history", direction: op.choice === "HISTORY_BACK" ? "back" : "forward" })) ?? result("blocked", "NO_SUPPORTED_ACTION");
@@ -1036,16 +1063,6 @@ export async function runBrowserUse(
               : op.choice === "SELECT"
                 ? "page_select"
                 : "page_type";
-          if (input.command && name !== "page_type") {
-            const optionLabel = selected.option ? selected.element.options?.find(o => o.ref === selected.option)?.label : undefined;
-            const block = browserDestructiveBlock(selected.element, optionLabel, input.goal, Math.min(op.confidence, target.confidence), input.strictDestructive);
-            if (block) {
-              // Checked before any receipt or dispatch: nothing was sent.
-              commandAction = { kind: name === "page_select" ? "select" : "click", label: block.label };
-              emit({phase:"recovery",reason:"DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED",operation:op.choice});
-              return result("blocked", "DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED");
-            }
-          }
           if (name === "page_select") args.option_ref = selected.option;
           if (name === "page_type") {
             const matches = fieldValues.filter(
