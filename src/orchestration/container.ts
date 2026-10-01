@@ -106,24 +106,27 @@ export async function prepareContainerProfile(agent: AgentConfig, profile: Runti
   const payload = { role, socket: '/workspace/' + basename(ticket.socket), token: ticket.token, tools: ticket.tools };
   const config = { mcpServers: { gateway: { command: 'node', args: ['-e', MCP_CLIENT, dir + '/ticket.json'] } } };
   const prompt = await systemPrompt?.(dir);
-  await containerNode(agent.container!, `const fs=require('fs');const c=[];process.stdin.on('data',b=>c.push(b));process.stdin.on('end',()=>{const p=JSON.parse(Buffer.concat(c).toString('utf8'));fs.mkdirSync(p.dir,{mode:448});fs.writeFileSync(p.dir+'/ticket.json',JSON.stringify(p.ticket),{mode:384});fs.writeFileSync(p.dir+'/mcp.json',JSON.stringify(p.config),{mode:384});if(p.prompt!==undefined)fs.writeFileSync(p.dir+'/system-prompt.md',p.prompt,{mode:384});});`, [], JSON.stringify({ dir, ticket: payload, config, prompt }));
-  if (profile.checkpointCommand) await containerNode(agent.container!, "require('fs').writeFileSync(process.argv[1],process.argv[2],{mode:384})", [dir + '/checkpoint.cjs', CHECKPOINT_HOOK]);
-  if (profile.skillPluginDir) {
-    const files: Record<string, string> = {}; let bytes = 0;
-    const visit = async (base: string, rel = ''): Promise<void> => {
-      for (const name of await readdir(base)) {
-        const p = join(base, name), r = rel ? rel + '/' + name : name, stat = await lstat(p);
-        if (stat.isSymbolicLink()) throw new OrchestrationError('SKILL_RESOURCE_SYMLINK_DENIED');
-        if (stat.isDirectory()) await visit(p, r);
-        else if (stat.isFile()) { bytes += stat.size; if (bytes > 10*1024*1024) throw new OrchestrationError('SKILL_RESOURCES_TOO_LARGE'); files[r] = (await readFile(p)).toString('base64'); }
-      }
-    };
-    await visit(profile.skillPluginDir);
-    await containerNode(agent.container!, `const fs=require('fs'),path=require('path');let s='';process.stdin.on('data',b=>s+=b);process.stdin.on('end',()=>{for(const [name,data] of Object.entries(JSON.parse(s))){const p=path.join(process.argv[1],name);fs.mkdirSync(path.dirname(p),{recursive:true,mode:448});fs.writeFileSync(p,Buffer.from(data,'base64'),{mode:384});}});`, [dir + '/skill-plugin'], JSON.stringify(files));
-  }
-  if (profile.containerSkill) {
-    await containerNode(agent.container!, `const fs=require('fs'),path=require('path');let s='';process.stdin.on('data',b=>s+=b);process.stdin.on('end',()=>{const p=JSON.parse(s),root=fs.realpathSync(p.skill.resourceRoot),file=fs.realpathSync(p.skill.filePath),rel=path.relative(root,file);if(rel==='..'||rel.startsWith('../')||path.isAbsolute(rel))throw Error('SKILL_RESOURCE_PATH_INVALID');let size=0;fs.cpSync(root,p.destination,{recursive:true,dereference:false,filter:src=>{const t=fs.lstatSync(src);if(t.isSymbolicLink()||!t.isFile()&&!t.isDirectory())return false;if(t.isFile()&&(size+=t.size)>10485760)throw Error('SKILL_RESOURCES_TOO_LARGE');return true;}});fs.writeFileSync(path.join(p.destination,rel),p.skill.content,{mode:384});fs.writeFileSync(path.join(p.destination,'RESOURCE_ROOT.txt'),'Plugin root: '+p.destination+'\\nAssigned entry: '+path.join(p.destination,rel),{mode:384});});`, [], JSON.stringify({ skill: profile.containerSkill, destination: dir + '/skill-plugin' }));
-  }
+  // A step that fails after the setup exec would otherwise leave the ticket and prompt behind.
+  try {
+    await containerNode(agent.container!, `const fs=require('fs');const c=[];process.stdin.on('data',b=>c.push(b));process.stdin.on('end',()=>{const p=JSON.parse(Buffer.concat(c).toString('utf8'));fs.mkdirSync(p.dir,{mode:448});fs.writeFileSync(p.dir+'/ticket.json',JSON.stringify(p.ticket),{mode:384});fs.writeFileSync(p.dir+'/mcp.json',JSON.stringify(p.config),{mode:384});if(p.prompt!==undefined)fs.writeFileSync(p.dir+'/system-prompt.md',p.prompt,{mode:384});});`, [], JSON.stringify({ dir, ticket: payload, config, prompt }));
+    if (profile.checkpointCommand) await containerNode(agent.container!, "require('fs').writeFileSync(process.argv[1],process.argv[2],{mode:384})", [dir + '/checkpoint.cjs', CHECKPOINT_HOOK]);
+    if (profile.skillPluginDir) {
+      const files: Record<string, string> = {}; let bytes = 0;
+      const visit = async (base: string, rel = ''): Promise<void> => {
+        for (const name of await readdir(base)) {
+          const p = join(base, name), r = rel ? rel + '/' + name : name, stat = await lstat(p);
+          if (stat.isSymbolicLink()) throw new OrchestrationError('SKILL_RESOURCE_SYMLINK_DENIED');
+          if (stat.isDirectory()) await visit(p, r);
+          else if (stat.isFile()) { bytes += stat.size; if (bytes > 10*1024*1024) throw new OrchestrationError('SKILL_RESOURCES_TOO_LARGE'); files[r] = (await readFile(p)).toString('base64'); }
+        }
+      };
+      await visit(profile.skillPluginDir);
+      await containerNode(agent.container!, `const fs=require('fs'),path=require('path');let s='';process.stdin.on('data',b=>s+=b);process.stdin.on('end',()=>{for(const [name,data] of Object.entries(JSON.parse(s))){const p=path.join(process.argv[1],name);fs.mkdirSync(path.dirname(p),{recursive:true,mode:448});fs.writeFileSync(p,Buffer.from(data,'base64'),{mode:384});}});`, [dir + '/skill-plugin'], JSON.stringify(files));
+    }
+    if (profile.containerSkill) {
+      await containerNode(agent.container!, `const fs=require('fs'),path=require('path');let s='';process.stdin.on('data',b=>s+=b);process.stdin.on('end',()=>{const p=JSON.parse(s),root=fs.realpathSync(p.skill.resourceRoot),file=fs.realpathSync(p.skill.filePath),rel=path.relative(root,file);if(rel==='..'||rel.startsWith('../')||path.isAbsolute(rel))throw Error('SKILL_RESOURCE_PATH_INVALID');let size=0;fs.cpSync(root,p.destination,{recursive:true,dereference:false,filter:src=>{const t=fs.lstatSync(src);if(t.isSymbolicLink()||!t.isFile()&&!t.isDirectory())return false;if(t.isFile()&&(size+=t.size)>10485760)throw Error('SKILL_RESOURCES_TOO_LARGE');return true;}});fs.writeFileSync(path.join(p.destination,rel),p.skill.content,{mode:384});fs.writeFileSync(path.join(p.destination,'RESOURCE_ROOT.txt'),'Plugin root: '+p.destination+'\\nAssigned entry: '+path.join(p.destination,rel),{mode:384});});`, [], JSON.stringify({ skill: profile.containerSkill, destination: dir + '/skill-plugin' }));
+    }
+  } catch (error) { await stopContainerProfile(agent.container!, dir); throw error; }
   return { config: dir + '/mcp.json', directory: dir };
 }
 
@@ -157,7 +160,7 @@ if(alive()){try{process.kill(-saved.pid,'SIGKILL');}catch(e){if(e.code!=='ESRCH'
 for(const p of fs.readdirSync('/proc').filter(p=>/^\d+$/.test(p))){try{if(fs.readFileSync('/proc/'+p+'/environ').toString().split('\0').includes('GATEWAY_CONTAINER_ATTEMPT='+d))process.kill(Number(p),'SIGKILL');}catch(e){if(!['ENOENT','ESRCH','EACCES'].includes(e.code))throw e;}}
 }finally{
 // The ticket (a bridge token) and the appended system prompt (see SessionProcess.writeSystemPromptFile)
-// are read once at startup. Remove them even when the identity is missing (a stop during startup) or a
+// are read once at startup. Remove them even when the identity is missing (a stop during startup, or a startup that failed) or a
 // kill failed; best effort, so the stop verdict is unchanged.
 for(const f of ['ticket.json','system-prompt.md'])try{fs.rmSync(d+'/'+f,{force:true});}catch{}
 }

@@ -39,7 +39,7 @@ jest.mock('os', () => {
   return { ...real, homedir: () => process.env.TEST_HOME ?? real.homedir() };
 });
 
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionProcess } from '../../../src/session/process';
@@ -71,11 +71,11 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-function session(): SessionProcess {
+function session(profile: Partial<RuntimeProfile> = {}): SessionProcess {
   const agent = { id: 'a', type: 'app-agent', container: 'app-test', workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] } } as unknown as AgentConfig;
   const gateway = { gateway: { headless: true, timezone: 'UTC', logDir: join(root, 'logs') }, agents: [agent] } as GatewayConfig;
   const store = { getContextReset: () => undefined, loadSession: async () => [], loadTelegramSession: async () => [] } as any;
-  return new SessionProcess('session:c', 'api', agent, gateway, store, undefined, { role: 'agent', mcpConfigPath: join(root, 'mcp.json'), overlay: OVERLAY, capacityReserved: true } as RuntimeProfile);
+  return new SessionProcess('session:c', 'api', agent, gateway, store, undefined, { role: 'agent', mcpConfigPath: join(root, 'mcp.json'), overlay: OVERLAY, capacityReserved: true, ...profile } as RuntimeProfile);
 }
 
 const posix = process.platform === 'win32' ? test.skip : test;
@@ -116,4 +116,18 @@ posix.each([
     expect(existsSync(directory + '/system-prompt.md')).toBe(false);
   }
   expect(sp.isRunning()).toBe(false);
+});
+
+posix('a start() that fails after the attempt directory is created leaves no ticket or prompt in the container', async () => {
+  // Skill resources are copied after the setup exec; a symlink among them is refused there.
+  const plugin = join(root, 'plugin'); mkdirSync(plugin);
+  symlinkSync(join(root, 'ticket.json'), join(plugin, 'link'));
+  const sp = session({ skillPluginDir: plugin });
+  await expect(sp.start()).rejects.toMatchObject({ code: 'SKILL_RESOURCE_SYMLINK_DENIED' });
+  expect(launches).toHaveLength(0);
+  expect(attempts()).toHaveLength(1);
+  for (const directory of attempts()) {
+    expect(existsSync(directory + '/ticket.json')).toBe(false);
+    expect(existsSync(directory + '/system-prompt.md')).toBe(false);
+  }
 });
