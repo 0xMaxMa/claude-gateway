@@ -34,4 +34,5 @@ export class BackgroundWork {
   }
 
   get pending(): boolean { return this.calls.size > 0 || this.tasks.size > 0; }
+  get pendingCount(): number { return this.calls.size + this.tasks.size; }
 }

@@ -41,6 +41,8 @@ export interface TaskResult {
   summary: string;
   artifactIds: string[];
   diff?: { text: string; truncated: boolean };
+  /** The worker's final result was accepted after native background work stayed silent past the grace period. */
+  unresolvedBackground?: import('./process-turn').UnresolvedBackground;
 }
 /** A fixed gateway adapter, never an arbitrary command or another model worker. */
 export interface GatewayTaskTarget {
@@ -78,14 +80,15 @@ export interface TaskSnapshot {
   activeAttemptId?: string;
   replacedByTaskId?: string;
   workspaceEvidence?: { registered: Array<{ mode: string; path: string; lifecycleState: string }>; observedFilePaths: string[]; currentFilesystemVerified: false };
-  supervision?: { id: string; reason: 'stale_progress' | 'repeated_tools'; observedAt: number; message: string; deliveredAt?: number };
+  supervision?: { id: string; reason: 'stale_progress' | 'repeated_tools' | 'result_seen_not_terminal'; observedAt: number; message: string; deliveredAt?: number };
   /** Measured lifecycle categories, not CPU time or inferred CI progress. */
   timing?: import('./tasks/timing').TaskTiming;
   execution?: import('./execution-observation').ExecutionObservation;
   recentTools?: Array<{name: string; description?: string; type: string; isError?: boolean; occurredAt: number}>;
   workflow?: import("./workflow").TaskWorkflow;
   latestProgress?: { text: string; observedAt: number; source: 'worker' | 'runtime' };
-  cancellation?: { requestedBy: 'user' | 'agent'; requestedAt: number };
+  /** `supervisor` is the runtime's stale-progress limit; its stop ends the task as failed, not cancelled. */
+  cancellation?: { requestedBy: 'user' | 'agent' | 'supervisor'; requestedAt: number; reason?: string };
   pendingQuestion?: { questionId: string; text: string; revision: number };
   result?: TaskResult;
   failure?: TaskFailure;

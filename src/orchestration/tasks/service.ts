@@ -275,7 +275,11 @@ export class TaskService {
     }
     if (TERMINAL_TASK_STATES.has(task.state)) return task;
     if (task.state === 'cancel_requested') {
-      if (replacedByTaskId) { task.replacedByTaskId = replacedByTaskId; this.store.saveTask(task, task.stateVersion); }
+      // An explicit cancel turns a pending supervisor stop into a cancellation.
+      const overridesStall = task.cancellation?.requestedBy === 'supervisor';
+      if (overridesStall) task.cancellation = { requestedBy, requestedAt: Date.now() };
+      if (replacedByTaskId) task.replacedByTaskId = replacedByTaskId;
+      if (replacedByTaskId || overridesStall) this.store.saveTask(task, task.stateVersion);
       return task;
     }
     if (replacedByTaskId) task.replacedByTaskId = replacedByTaskId;
@@ -295,11 +299,13 @@ export class TaskService {
     this.store.transaction(() => {
       const attempt = this.store.attempt(attemptId), task = attempt && this.store.task(attempt.taskId);
       if (!attempt || !task || attempt.generation !== generation || task.activeAttemptId !== attemptId || task.state !== 'cancel_requested') throw new OrchestrationError('STALE_ATTEMPT');
-      const message = stopped ? `Cancelled by ${task.cancellation?.requestedBy ?? 'agent'}. Task execution stopped; existing files and prior effects are retained.` : 'Cannot verify that this task has stopped. Retry cleanup; no unrelated processes were stopped.';
-      task.state = stopped ? 'cancelled' : 'needs_reconciliation';
+      const stalled = this.stalledFailure(task);
+      const message = stopped ? (stalled ? stalled.message : `Cancelled by ${task.cancellation?.requestedBy ?? 'agent'}. Task execution stopped; existing files and prior effects are retained.`) : 'Cannot verify that this task has stopped. Retry cleanup; no unrelated processes were stopped.';
+      task.state = stopped ? (stalled ? 'failed' : 'cancelled') : 'needs_reconciliation';
       task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: message };
       if (stopped) {
         attempt.state = 'ended'; task.activeAttemptId = undefined; delete task.failure;
+        if (stalled) { attempt.failure = stalled; task.failure = stalled; }
         this.pool.release(task.taskId, false);
       } else {
         attempt.state = 'unknown'; task.failure = { code: 'CLEANUP_UNCONFIRMED', message, observedAt: Date.now() };
@@ -479,16 +485,45 @@ export class TaskService {
       this.store.run('UPDATE tasks SET snapshot_json=? WHERE id=? AND active_attempt_id=?', JSON.stringify(task), task.taskId, attemptId);
       this.store.appendEvent(task.conversationId, 'task.execution', observation, task.taskId);
       const attempt = this.store.attempt(attemptId)!;
-      if (observation.observedAt - (attempt.startedAt ?? attempt.processIdentity?.startedAt ?? task.createdAt) >= this.config.tasks.progressStaleMs) {
-        this.supervise(task, 'stale_progress', 'A scheduled progress update is due. Report completed steps, the current step, and any concrete dependency being awaited. Use substantive evidence; process/tool activity alone does not prove progress. Do not volunteer reassurance that the task is not stuck or is really running.', observation.observedAt);
+      const startedAt = attempt.startedAt ?? attempt.processIdentity?.startedAt ?? task.createdAt;
+      // Reviews alone never end a task (#557): past the limit without a new
+      // worker report, stop the attempt through the cancellation path.
+      const reportedAt = Math.max(startedAt, task.latestProgress?.source === 'worker' ? task.latestProgress.observedAt : 0);
+      const limit = this.config.tasks.progressStaleLimitMs;
+      if (limit && task.state === 'running' && observation.observedAt - reportedAt >= limit) {
+        this.stopStalled(task, observation.observedAt - reportedAt, observation);
+        return;
+      }
+      if (observation.observedAt - startedAt >= this.config.tasks.progressStaleMs) {
+        if (observation.resultSeenAt !== undefined) {
+          this.supervise(task, 'result_seen_not_terminal', `The worker returned a final result ${Math.max(0, Math.round((observation.observedAt - observation.resultSeenAt) / 1000))}s ago, but ${observation.pendingBackground ?? 0} native background task(s) have not reported completion, so the task is not terminal yet. The result is accepted automatically once the background grace period passes without activity. Report what is still being awaited; stop background work that is no longer needed.`, observation.observedAt);
+        } else {
+          this.supervise(task, 'stale_progress', 'A scheduled progress update is due. Report completed steps, the current step, and any concrete dependency being awaited. Use substantive evidence; process/tool activity alone does not prove progress. Do not volunteer reassurance that the task is not stuck or is really running.', observation.observedAt);
+        }
       }
     });
   }
-  private supervise(task: TaskSnapshot, reason: 'stale_progress' | 'repeated_tools', message: string, now = Date.now()): void {
+  private stopStalled(task: TaskSnapshot, quietMs: number, observation: import('../execution-observation').ExecutionObservation): void {
+    const minutes = Math.round(quietMs / 60000);
+    const reason = `No new worker progress report for ${minutes} minute(s), past tasks.progressStaleLimitMs (${Math.round(this.config.tasks.progressStaleLimitMs / 60000)} minute(s)).` +
+      (observation.resultSeenAt !== undefined ? ` A final result was received but ${observation.pendingBackground ?? 0} native background task(s) never reported completion.` : '') +
+      ' Stopped the attempt; existing files and prior effects are retained. Inspect them before retrying.';
+    task.cancellation = { requestedBy: 'supervisor', requestedAt: observation.observedAt, reason };
+    task.state = 'cancel_requested';
+    task.latestProgress = { source: 'runtime', observedAt: observation.observedAt, text: `Stopping: ${reason}` };
+    this.store.saveTask(task, task.stateVersion);
+    this.store.appendEvent(task.conversationId, 'task.progress_stalled', { taskId: task.taskId, attemptId: observation.attemptId, quietMs, limitMs: this.config.tasks.progressStaleLimitMs, resultSeenAt: observation.resultSeenAt, pendingBackground: observation.pendingBackground }, task.taskId);
+    this.store.enqueue('interrupt', `stalled:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
+  }
+  /** A supervisor stop is a failure with its evidence, not a user/agent cancellation. */
+  private stalledFailure(task: TaskSnapshot): TaskSnapshot['failure'] {
+    return task.cancellation?.requestedBy === 'supervisor' ? { code: 'PROGRESS_STALLED', message: task.cancellation.reason ?? 'No new worker progress report within tasks.progressStaleLimitMs.', observedAt: task.cancellation.requestedAt } : undefined;
+  }
+  private supervise(task: TaskSnapshot, reason: NonNullable<TaskSnapshot['supervision']>['reason'], message: string, now = Date.now()): void {
     // Keep internal inspection frequent even when user-facing reports are quiet.
     // The agent independently decides whether this review merits a message.
     const since = task.supervision?.observedAt ?? (task.activeAttemptId ? this.store.attempt(task.activeAttemptId)?.startedAt : undefined) ?? task.createdAt;
-    if ((task.supervision || reason === 'stale_progress') && now - since < this.config.tasks.progressNotifyCooldownMs) return;
+    if ((task.supervision || reason !== 'repeated_tools') && now - since < this.config.tasks.progressNotifyCooldownMs) return;
     task.supervision = { id: randomUUID(), reason, observedAt: now, message };
     this.store.saveTask(task, task.stateVersion);
     this.notify(task);
@@ -612,8 +647,9 @@ export class TaskService {
         attempt.result = outcome.result; task.result = outcome.result;
         outcome = { type: 'failed', failure: { code: 'WORKER_BLOCKED', message: task.workflow!.checkpoint.findings.filter(f => f.status === 'open').map(f => f.summary).join('\n').slice(0, 4096), observedAt: Date.now() } };
       }
+      const stalled = task.state === 'cancel_requested' ? this.stalledFailure(task) : undefined;
       if (outcome.type !== 'completed' && outcome.type !== 'paused') {
-        attempt.failure = outcome.failure ?? taskFailure(undefined, outcome.type === 'stopped' ? 'WORKER_STOPPED' : 'WORKER_FAILED');
+        attempt.failure = stalled ?? outcome.failure ?? taskFailure(undefined, outcome.type === 'stopped' ? 'WORKER_STOPPED' : 'WORKER_FAILED');
         task.failure = attempt.failure;
       } else { delete task.failure; }
       if (outcome.type === 'unknown') { attempt.state = 'unknown'; task.state = 'needs_reconciliation'; }
@@ -621,15 +657,19 @@ export class TaskService {
         attempt.state = 'ended'; task.activeAttemptId = undefined;
         if (outcome.type === 'completed') attempt.result = outcome.result;
         if (task.state === 'cancel_requested') {
-          task.state = outcome.type === 'completed' && task.revision === attempt.revision ? 'completed' : 'cancelled';
+          task.state = outcome.type === 'completed' && task.revision === attempt.revision ? 'completed' : stalled ? 'failed' : 'cancelled';
         } else if (task.state === 'waiting_input' && task.pendingQuestion) { /* retain question; execution slot now free */ }
         else if (task.state === 'interrupting' || task.revision > attempt.revision) task.state = 'queued';
         else task.state = outcome.type === 'completed' ? 'completed' : 'failed';
         if (task.state === 'completed' && outcome.type === 'completed') task.result = outcome.result;
       }
+      if (task.state === 'failed' && stalled) task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: stalled.message };
       if (task.state === 'cancelled') {
         delete task.failure;
         task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: `Cancelled by ${task.cancellation?.requestedBy ?? 'agent'}. Existing files and prior effects are retained.` };
+      }
+      if (outcome.type === 'completed' && outcome.result.unresolvedBackground) {
+        this.store.appendEvent(task.conversationId, 'task.background_unresolved', { attemptId, ...outcome.result.unresolvedBackground }, task.taskId);
       }
       if (outcome.type !== 'unknown') this.pool.release(task.taskId, outcome.type === 'completed' || outcome.type === 'paused');
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);

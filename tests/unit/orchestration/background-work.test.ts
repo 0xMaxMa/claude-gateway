@@ -108,3 +108,80 @@ test('asynchronous schema capture cannot promote an interim result after backgro
   await Promise.resolve();expect(done).toBe(false);
   release();await expect(turn.result).resolves.toMatchObject({text:'Verified final outcome'});
 });
+
+// #557: the driver's policy observes idle silence and (by default) has no total
+// deadline, so a missing task_notification must not wedge the turn forever.
+function driverLike(backgroundGraceMs = 60) {
+  const proc = Object.assign(new EventEmitter(), {
+    runtimeProfile: { role: 'worker', hostExecution: true },
+    start: async () => {}, sendMessage: jest.fn(), interrupt: jest.fn(),
+    managedGroupStopped: true, stop: jest.fn(async () => { (proc as unknown as EventEmitter).emit('exit'); }),
+  }) as unknown as WorkerProcess;
+  const observations: unknown[] = [];
+  const turn = startProcessTurn(proc, 'Run the background check', undefined, undefined, undefined, [], {
+    startupTimeoutMs: 1000, firstResponseTimeoutMs: 1000, idleTimeoutMs: 20, acceptToolProgress: true, idleAction: 'observe',
+    backgroundGraceMs, onObservation: value => observations.push(value),
+  });
+  const emit = (event: object) => (proc as unknown as EventEmitter).emit('output', JSON.stringify(event));
+  return {proc, turn, emit, observations};
+}
+const backgroundBash = {type:'assistant',message:{content:[{type:'tool_use',id:'bg',name:'Bash',input:{command:'fixture',run_in_background:true}}]}};
+const bgStarted = {type:'system',subtype:'task_started',task_id:'bg-task',tool_use_id:'bg'};
+const settledWithin = (promise: Promise<unknown>, ms: number) => Promise.race([promise.then(() => true, () => true), new Promise(resolve => setTimeout(() => resolve(false), ms))]);
+
+test('a final result with a background task that never notifies resolves with that result after the grace period (#557)',async()=>{
+  const {turn,emit,observations}=driverLike(60); await Promise.resolve();
+  emit(backgroundBash); emit(bgStarted); emit({type:'result',result:'Final report: done.'});
+  await new Promise(resolve=>setTimeout(resolve,30));
+  expect(await settledWithin(turn.result,0)).toBe(false);
+  expect(await settledWithin(turn.result,500)).toBe(true);
+  await expect(turn.result).resolves.toMatchObject({text:'Final report: done.',interrupted:false,unresolvedBackground:{pendingTasks:1,graceMs:60}});
+  expect(observations.length).toBeGreaterThan(0);
+});
+
+test('native task activity during the grace period keeps a long background wait open (#557)',async()=>{
+  const {turn,emit}=driverLike(60); await Promise.resolve();
+  emit(backgroundBash); emit(bgStarted); emit({type:'result',result:'Waiting for CI'});
+  for (let i=0;i<6;i++) {
+    await new Promise(resolve=>setTimeout(resolve,30));
+    emit({type:'system',subtype:'task_progress',task_id:'bg-task',tool_use_id:'bg'});
+  }
+  expect(await settledWithin(turn.result,0)).toBe(false);
+  emit({type:'system',subtype:'task_notification',task_id:'bg-task',tool_use_id:'bg',status:'completed'});
+  emit({type:'result',result:'CI passed at fixture SHA'});
+  await expect(turn.result).resolves.toMatchObject({text:'CI passed at fixture SHA',interrupted:false});
+  await expect(turn.result).resolves.not.toHaveProperty('unresolvedBackground');
+});
+
+test('a fresh result during the grace period replaces the stored fallback text (#557)',async()=>{
+  const {turn,emit}=driverLike(60); await Promise.resolve();
+  emit(backgroundBash); emit(bgStarted); emit({type:'result',result:'Waiting'});
+  emit({type:'assistant',message:{content:[{type:'text',text:'Checked again'}]}});
+  emit({type:'result',result:'Still waiting; partial evidence collected'});
+  await expect(turn.result).resolves.toMatchObject({text:'Still waiting; partial evidence collected',unresolvedBackground:{pendingTasks:1}});
+});
+
+test('an empty waiting result is not a final report when the grace period expires (#557)',async()=>{
+  const {turn,emit}=driverLike(30); await Promise.resolve();
+  emit(backgroundBash); emit(bgStarted); emit({type:'result',result:''});
+  await expect(turn.result).rejects.toMatchObject({code:'WORKER_RESULT_MISSING'});
+});
+
+test('the quiet observation reports a final result that is still waiting on background work (#557)',async()=>{
+  const {turn,emit,observations}=driverLike(10000); await Promise.resolve();
+  emit(backgroundBash); emit(bgStarted); emit({type:'result',result:'Final report: done.'});
+  await new Promise(resolve=>setTimeout(resolve,60));
+  expect(observations.at(-1)).toMatchObject({resultSeenAt:expect.any(Number),pendingBackground:1});
+  await turn.stop();
+});
+
+test('after background work reports back, grace never replaces the fresh turn with the stale result (#557)',async()=>{
+  const {turn,emit}=driverLike(40); await Promise.resolve();
+  emit(backgroundBash); emit(bgStarted); emit({type:'result',result:'Waiting for CI'});
+  emit({type:'system',subtype:'task_notification',task_id:'bg-task',tool_use_id:'bg',status:'completed'});
+  emit({type:'assistant',message:{content:[{type:'tool_use',id:'slow',name:'Bash',input:{command:'fixture'}}]}});
+  expect(await settledWithin(turn.result,150)).toBe(false);
+  emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:'slow',content:'ok'}]}});
+  emit({type:'result',result:'CI passed and verified'});
+  await expect(turn.result).resolves.toMatchObject({text:'CI passed and verified'});
+});

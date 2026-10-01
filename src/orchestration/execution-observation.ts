@@ -12,6 +12,9 @@ export interface TurnObservation {
   activeTools: string[];
   quiet: boolean;
   lastTool?: ToolOutcome;
+  /** A successful final result was received but native background work is still pending. */
+  resultSeenAt?: number;
+  pendingBackground?: number;
 }
 export interface ExecutionObservation extends TurnObservation {
   attemptId: string;
