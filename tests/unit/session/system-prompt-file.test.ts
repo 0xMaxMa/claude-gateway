@@ -39,7 +39,13 @@ jest.mock('../../../src/orchestration/container', () => {
   const real = jest.requireActual('../../../src/orchestration/container');
   return {
     ...real,
-    prepareContainerProfile: jest.fn(async () => ({ directory: '/tmp/gateway-orch-0f0f0f0f-0000-4000-8000-000000000000', config: '/tmp/gateway-orch-0f0f0f0f-0000-4000-8000-000000000000/mcp.json' })),
+    // The real one writes the prompt in the same docker exec as the ticket (see
+    // container-system-prompt.test.ts); record what it was asked to write.
+    prepareContainerProfile: jest.fn(async (_agent: unknown, _profile: unknown, systemPrompt?: (directory: string) => Promise<string | undefined>) => {
+      const directory = '/tmp/gateway-orch-0f0f0f0f-0000-4000-8000-000000000000';
+      containerWrites.push({ args: [directory + '/system-prompt.md'], input: (await systemPrompt?.(directory)) ?? '' });
+      return { directory, config: directory + '/mcp.json' };
+    }),
     stopContainerProfile: jest.fn(async () => true),
     containerNode: jest.fn(async (_container: string, script: string, args: string[] = [], input = '') => {
       if (script.includes('/workspace/CLAUDE.md')) return 'Container context';
@@ -49,7 +55,7 @@ jest.mock('../../../src/orchestration/container', () => {
   };
 });
 
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionProcess } from '../../../src/session/process';
@@ -122,21 +128,6 @@ test('an app-agent prompt is written inside the container attempt directory over
   // The prompt never touches the host or the argv of the docker CLI.
   for (const arg of args) expect(arg).not.toContain(OVERLAY);
   expect(existsSync(file)).toBe(false);
-  await sp.stop();
-});
-
-test('the container write script creates a 0600 file with exactly the stdin bytes', async () => {
-  const sp = session('app-agent');
-  await sp.start();
-  const file = spawned[0].args[spawned[0].args.indexOf('--append-system-prompt-file') + 1];
-  const { containerNode } = jest.requireMock('../../../src/orchestration/container');
-  const [, script] = (containerNode as jest.Mock).mock.calls.find(([, , args]) => args?.includes(file));
-  const local = join(root, 'system-prompt.md');
-  const { execFileSync } = jest.requireActual('child_process');
-  execFileSync(process.execPath, ['-e', script, local], { input: CONTEXT });
-  expect(readFileSync(local, 'utf8')).toBe(CONTEXT);
-  const { statSync } = jest.requireActual('fs');
-  if (process.platform !== 'win32') expect(statSync(local).mode & 0o777).toBe(0o600);
   await sp.stop();
 });
 

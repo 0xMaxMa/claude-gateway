@@ -727,16 +727,10 @@ export class SessionProcess extends EventEmitter {
    * (MAX_ARG_STRLEN), so a large workspace context or skill catalog would fail
    * every spawn (#559); argv is also world-readable through /proc/<pid>/cmdline.
    * The host CLI reads a 0600 file beside the attempt's MCP config (a 0700
-   * directory). A container CLI reads a 0600 file in its own attempt directory,
-   * written over docker exec stdin like the attempt's mcp.json and ticket. */
-  private async writeSystemPromptFile(args: string[], mcpConfigPath: string | null): Promise<string[]> {
+   * directory). A container CLI reads one that prepareContainerProfile writes in its attempt
+   * directory, in the same docker exec as the attempt's mcp.json and ticket. */
+  private writeSystemPromptFile(args: string[], mcpConfigPath: string | null): string[] {
     if (!this.runtimeProfile) return args;
-    if (this.containerAttempt) {
-      const moved = appendSystemPromptViaFile(args, this.containerAttempt.directory + '/system-prompt.md');
-      if (moved.prompt === undefined) return args;
-      await containerNode(this.agentConfig.container!, "const fs=require('fs');const c=[];process.stdin.on('data',b=>c.push(b));process.stdin.on('end',()=>{fs.writeFileSync(process.argv[1],Buffer.concat(c),{mode:384});fs.chmodSync(process.argv[1],384);});", [this.containerAttempt.directory + '/system-prompt.md'], moved.prompt);
-      return moved.args;
-    }
     const file = path.join(path.dirname(mcpConfigPath ?? this.runtimeProfile.mcpConfigPath), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, '_')}.md`);
     const moved = appendSystemPromptViaFile(args, file);
     if (moved.prompt === undefined) return args;
@@ -976,7 +970,7 @@ export class SessionProcess extends EventEmitter {
     return (personal.enabled && personal.recordRetrievals) || (shared.enabled && shared.recordRetrievals) ? '1' : '';
   }
 
-  private buildArgs(mcpConfigPath: string | null, model: string): string[] {
+  private buildArgs(mcpConfigPath: string | null, model: string, containerAttempt = this.containerAttempt): string[] {
     const args: string[] = [
       '--model', model,
       '--input-format', 'stream-json',
@@ -999,7 +993,7 @@ export class SessionProcess extends EventEmitter {
           throw error;
         }
       }
-      const profileArgs = runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: this.containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${this.containerAttempt.directory}/checkpoint.cjs ${this.containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: this.containerAttempt && this.runtimeProfile.skillPluginDir ? this.containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []);
+      const profileArgs = runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${containerAttempt.directory}/checkpoint.cjs ${containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: containerAttempt && this.runtimeProfile.skillPluginDir ? containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []);
       args.push(...profileArgs);
       if (this.runtimeProfile.cliSession) {
         const session = this.runtimeProfile.cliSession;
@@ -1051,9 +1045,17 @@ export class SessionProcess extends EventEmitter {
     assertContainerBinding(this.agentConfig, this.runtimeProfile);
     const isAppAgent = this.agentConfig.type === 'app-agent' && !!this.agentConfig.container;
 
+    const freshModel = this.readFreshModel();
+    let containerArgs: string[] | undefined;
     if (isAppAgent && this.runtimeProfile) {
-      this.containerAttempt = await prepareContainerProfile(this.agentConfig, this.runtimeProfile);
-      this.runtimeProfile.context = await containerNode(this.agentConfig.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))");
+      const profile = this.runtimeProfile, container = this.agentConfig.container!;
+      const attempt = await prepareContainerProfile(this.agentConfig, profile, async directory => {
+        profile.context = await containerNode(container, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))");
+        const moved = appendSystemPromptViaFile(this.buildArgs(null, freshModel, { directory, config: directory + '/mcp.json' }), directory + '/system-prompt.md');
+        containerArgs = moved.args;
+        return moved.prompt;
+      });
+      this.containerAttempt = attempt;
     }
     const mcpConfigPath = this.writeMcpConfig();
 
@@ -1064,8 +1066,7 @@ export class SessionProcess extends EventEmitter {
     const effectiveMcpPath = (isAppAgent && mcpConfigPath) ? toContainerPath(mcpConfigPath) : mcpConfigPath;
     const containerRestartPath = isAppAgent ? toContainerPath(this.restartSignalPath) : this.restartSignalPath;
 
-    const freshModel = this.readFreshModel();
-    const args = await this.writeSystemPromptFile(this.buildArgs(effectiveMcpPath, freshModel), mcpConfigPath);
+    const args = containerArgs ?? this.writeSystemPromptFile(this.buildArgs(effectiveMcpPath, freshModel), mcpConfigPath);
 
     // Resolve the claude binary. An explicit CLAUDE_BIN (which may carry args) is
     // parsed by parseClaudeBin; otherwise probe PATH and the native-installer / legacy

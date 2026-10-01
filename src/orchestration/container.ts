@@ -92,7 +92,10 @@ request.on('error',()=>reply(q.id,{content:[{type:'text',text:'Task bridge unava
 }catch(e){if(q?.id!==undefined)reply(q.id,null,{code:-32603,message:'Invalid MCP request'});}});
 `;
 
-export async function prepareContainerProfile(agent: AgentConfig, profile: RuntimeProfile): Promise<{ config: string; directory: string }> {
+/** `systemPrompt`, called after validation with the attempt directory, returns the
+ * appended system prompt; the same docker exec that writes the ticket writes it 0600
+ * to `<directory>/system-prompt.md` (see SessionProcess.writeSystemPromptFile). */
+export async function prepareContainerProfile(agent: AgentConfig, profile: RuntimeProfile, systemPrompt?: (directory: string) => Promise<string | undefined>): Promise<{ config: string; directory: string }> {
   await validateContainer(agent);
   const original = JSON.parse(await readFile(profile.mcpConfigPath, 'utf8')).mcpServers.gateway;
   const ticket = JSON.parse(await readFile(original.env.GATEWAY_ORCHESTRATION_TICKET_FILE, 'utf8'));
@@ -102,7 +105,8 @@ export async function prepareContainerProfile(agent: AgentConfig, profile: Runti
   const dir = '/tmp/gateway-orch-' + randomUUID();
   const payload = { role, socket: '/workspace/' + basename(ticket.socket), token: ticket.token, tools: ticket.tools };
   const config = { mcpServers: { gateway: { command: 'node', args: ['-e', MCP_CLIENT, dir + '/ticket.json'] } } };
-  await containerNode(agent.container!, `const fs=require('fs');let s='';process.stdin.on('data',b=>s+=b);process.stdin.on('end',()=>{const p=JSON.parse(s);fs.mkdirSync(p.dir,{mode:448});fs.writeFileSync(p.dir+'/ticket.json',JSON.stringify(p.ticket),{mode:384});fs.writeFileSync(p.dir+'/mcp.json',JSON.stringify(p.config),{mode:384});});`, [], JSON.stringify({ dir, ticket: payload, config }));
+  const prompt = await systemPrompt?.(dir);
+  await containerNode(agent.container!, `const fs=require('fs');const c=[];process.stdin.on('data',b=>c.push(b));process.stdin.on('end',()=>{const p=JSON.parse(Buffer.concat(c).toString('utf8'));fs.mkdirSync(p.dir,{mode:448});fs.writeFileSync(p.dir+'/ticket.json',JSON.stringify(p.ticket),{mode:384});fs.writeFileSync(p.dir+'/mcp.json',JSON.stringify(p.config),{mode:384});if(p.prompt!==undefined)fs.writeFileSync(p.dir+'/system-prompt.md',p.prompt,{mode:384});});`, [], JSON.stringify({ dir, ticket: payload, config, prompt }));
   if (profile.checkpointCommand) await containerNode(agent.container!, "require('fs').writeFileSync(process.argv[1],process.argv[2],{mode:384})", [dir + '/checkpoint.cjs', CHECKPOINT_HOOK]);
   if (profile.skillPluginDir) {
     const files: Record<string, string> = {}; let bytes = 0;
