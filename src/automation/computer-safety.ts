@@ -1,4 +1,5 @@
 import type {ComputerState} from './computer-use';
+import {normalizeCommand} from './direct-command';
 
 /**
  * Shared high-impact action policy for direct commands and step runs. Pure:
@@ -65,11 +66,16 @@ const TEXT_ROLES=new Set(['AXTextField','AXTextArea','AXSearchField','AXComboBox
  * erase characters, not press a Delete button. Returns the character count.
  */
 export function eraseCommand(command:string):number|undefined{
- const normalized=command.trim().toLocaleLowerCase().replace(/\s+/gu,' ');
+ const normalized=normalizeCommand(command);
  const match=/^(?:กด ?|press )?(?:ลบ|backspace|delete|del)((?: ?ๆ)*)(?: ?(?:x ?)?(\d{1,2})(?: ?(?:ครั้ง|ตัว|ตัวอักษร|times?|chars?|characters?))?)?$/u.exec(normalized);
  if(!match)return;
  const count=match[2]?Number(match[2]):1+(match[1].match(/ๆ/gu)?.length??0);
  return count>=1?Math.min(count,50):undefined;
+}
+/** Keyboard focus is in text (any text role, sensitive or not): words there are text editing. */
+export function textFocused(state:ComputerState){
+ const role=state.focusedControl?.role;
+ return Boolean(role&&(TEXT_ROLES.has(role)||role==='AXStaticText'));
 }
 /** The focused, non-sensitive, typeable text field an erase command applies to. */
 export function focusedTextField(state:ComputerState){

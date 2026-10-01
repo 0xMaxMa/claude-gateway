@@ -22,12 +22,14 @@ const HINTS:Record<string,string>={
  ERASE_UNAVAILABLE:'the focused field is too long to edit safely this way.',
  DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED:'{target} is a high-impact control (delete, send, pay, quit or confirm). To proceed, name the action in the command, for example "กด Delete" or "confirm delete".',
  COMPLETION_NOT_ESTABLISHED:'the result could not be confirmed from the screen.',
+ SEQUENCE_TARGET_MISSING:'the next button was not found exactly once on the screen.',
+ SEQUENCE_TOO_LONG:'the number is too long to press safely. Say at most 8 digits at a time.',
 };
 const quoted=(label?:string)=>label?JSON.stringify(label.slice(0,80)):'the chosen control';
-function done(action:NonNullable<ComputerTaskReport['lastAction']>){
+export function computerActionText(action:NonNullable<ComputerTaskReport['lastAction']>){
  switch(action.kind){
   case 'erase':return `erased ${action.count??1} character${action.count===1?'':'s'} in ${quoted(action.label)}`;
-  case 'press':return `pressed ${quoted(action.label)}`;
+  case 'press':return action.sequence?.length?`pressed ${action.sequence.map(label=>quoted(label)).join(', ')}`:`pressed ${quoted(action.label)}`;
   case 'type':return `entered text in ${quoted(action.label)}`;
   case 'key':return `pressed the ${action.key??''} key`.replace('  ',' ');
   case 'scroll':return `scrolled ${action.direction??''}`.trim();
@@ -49,7 +51,11 @@ export function computerOutcomeText(report:ComputerTaskReport):string{
  if(run)return stepRunText(run,detail=>HINTS[detail]?hint(detail,report):undefined);
  const trace=report.trace??[];
  const waiting=[...trace].reverse().find(e=>e.phase==='waiting'&&e.reason!=='POST_ACTION_EVIDENCE_STALE')?.reason;
- if(report.lastAction&&!report.lastAction.blocked&&report.steps>0)return `Done: ${done(report.lastAction)}. Send the next command.`;
+ if(report.clarification)return `Not done: ${report.clarification}`;
+ // A spoken number stopped part-way: say how far it got, never "Done".
+ const sequence=report.lastAction?.sequence,planned=report.lastAction?.planned;
+ if(sequence&&planned&&sequence.length<planned)return `Not done: pressed ${sequence.length} of ${planned} (${sequence.map(label=>quoted(label)).join(', ')}), then stopped${waiting&&HINTS[waiting]?`: ${hint(waiting,report)}`:'.'}`;
+ if(report.lastAction&&!report.lastAction.blocked&&report.steps>0)return `Done: ${computerActionText(report.lastAction)}. Send the next command.`;
  if(report.steps>0)return 'Done: the action was sent. Send the next command.';
  if(waiting&&HINTS[waiting])return `Not done: ${hint(waiting,report)}`;
  return `Not done: ${waiting??report.reason}. Send the next command.`;

@@ -6,7 +6,23 @@ import {literalTextCandidates} from './computer-policy';
  * never substring intent guessing. Compound, negated, targeted and ambiguous
  * commands return undefined and stay on the normal Jev decision path.
  */
-export const normalizeCommand = (command:string) => command.trim().toLocaleLowerCase().replace(/\s+/gu,' ');
+// Speech-to-text adds hesitation fillers, polite particles and a final full
+// stop ("เอาล่ะ กด enter.", "เลื่อนลงครับ"; session 35bd8aff). They are dropped
+// for matching only: the stored command and Jev's goal stay verbatim, and a
+// filler or particle that is the whole command is kept.
+const FILLERS=/^(?:เอ่อ|อ่า|เอาล่ะ|โอเค|ok|okay)[\s,]+/iu;
+const PARTICLES=/\s*(?:ครับ|ค่ะ|คะ|นะ|หน่อย|จ้า|เจ้า)$/u;
+/** The command without spoken fillers, particles or trailing .!? (case kept). */
+export function spokenCommand(command:string):string {
+ let text=command.trim().replace(/\s+/gu,' '),previous='';
+ while(text!==previous){
+  previous=text;
+  const next=text.replace(/[\s.!?。…]+$/u,'').replace(PARTICLES,'').replace(FILLERS,'').trim();
+  if(next)text=next;
+ }
+ return text;
+}
+export const normalizeCommand = (command:string) => spokenCommand(command).toLocaleLowerCase();
 
 const SCROLL:Record<string,'up'|'down'>={
  'scroll up':'up','scroll down':'down',
@@ -75,7 +91,7 @@ const SITES:Record<string,string>={google:'google.com','กูเกิล':'goo
  chatgpt:'chatgpt.com',pantip:'pantip.com',shopee:'shopee.co.th',lazada:'lazada.co.th'};
 /** "เข้า google", "เปิด youtube", "go to example.com" or a bare address: the address to open. */
 export function addressCommand(command:string):string|undefined {
- const trimmed=command.trim();
+ const trimmed=spokenCommand(command);
  const match=/^(?:(?:เข้า(?:ไป)?(?:ที่|เว็บ)?|เปิด(?:เว็บ)?|ไปที่|ไป|go to|open|visit)\s*)?(.+)$/iu.exec(trimmed)!;
  const target=match[1].trim(),verb=target!==trimmed;
  if(/\s/u.test(target))return;

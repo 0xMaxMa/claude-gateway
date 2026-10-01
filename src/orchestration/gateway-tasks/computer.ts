@@ -113,7 +113,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
      this.options.progress?.(t,{status:'running',reason:e.reason??e.phase,steps:e.steps,evaluations:e.evaluations,phase:e.phase,trace:receipt.trace.slice(-12)});
     }
    },workSignal);
-   const report={status:result.status,reason:result.reason,steps:result.steps,evaluations:result.evaluations,phase:'terminal',trace:receipt.trace?.slice(-12),...(fieldRequest?{fieldRequest}:{}),...(result.stepRun?{stepRun:result.stepRun}:{}),...(result.lastAction?{lastAction:result.lastAction}:{})};
+   const report={status:result.status,reason:result.reason,steps:result.steps,evaluations:result.evaluations,phase:'terminal',trace:receipt.trace?.slice(-12),...(fieldRequest?{fieldRequest}:{}),...(result.stepRun?{stepRun:result.stepRun}:{}),...(result.lastAction?{lastAction:result.lastAction}:{}),...(result.clarification?{clarification:result.clarification}:{})};
    let outcome:WorkerOutcome;
    if(result.status==='succeeded'&&!receipt.operationId&&authorized())outcome={type:'completed',result:{summary:`Computer goal independently verified. ${result.steps} actions.`,artifactIds:[]}};
    else if(result.status==='needs_reconciliation'&&continuationReady&&!receipt.operationId){report.status='needs_input';report.reason='COMMAND_WAITING_INPUT';outcome={type:'paused'};}

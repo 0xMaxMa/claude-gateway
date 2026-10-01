@@ -1,5 +1,5 @@
-import {buildComputerCommand,readComputerCommand,standardComputerCommand,standardKeyboardCommand,standardNavigationCommand,shortcutCommand,shortcutTarget,menuRelevant,addressCommand,addressField,quitCommand,quitTarget,bareText,frontIsNamed,frontIsBrowser,helperSupports} from './computer-command';
-import {commandAuthorizes,destructiveTarget,DESTRUCTIVE_CONFIDENCE,eraseCommand,focusedTextField} from './computer-safety';
+import {buildComputerCommand,readComputerCommand,labelCommand,labelTarget,standardComputerCommand,standardKeyboardCommand,standardNavigationCommand,shortcutCommand,shortcutTarget,menuRelevant,addressCommand,addressField,quitCommand,quitTarget,bareText,frontIsNamed,frontIsBrowser,helperSupports} from './computer-command';
+import {commandAuthorizes,destructiveLabel,destructiveTarget,DESTRUCTIVE_CONFIDENCE,eraseCommand,focusedTextField,textFocused} from './computer-safety';
 import {decisionInstructions,readChoice,observedEffect,decisionState,literalTextCandidates} from './computer-policy';
 import {checkInterruption,interruptible} from './interrupt';
 import {randomUUID} from 'node:crypto';
@@ -57,9 +57,9 @@ export interface ComputerUseDependencies {
  progress?:(event:ComputerProgress)=>void;
  verify?:(state:ComputerState,goal:string,signal:AbortSignal)=>Promise<boolean>;
 }
-export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'needs_input'|'blocked'|'cancelled'|'needs_reconciliation';reason:string;revision:number;steps:number;evaluations:number;trace:{events:ComputerProgress[];truncated:boolean};operationId?:string;observation?:ComputerState;stepRun?:import('./computer-steps').ComputerStepRun;lastAction?:ComputerLastAction}
+export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'needs_input'|'blocked'|'cancelled'|'needs_reconciliation';reason:string;revision:number;steps:number;evaluations:number;trace:{events:ComputerProgress[];truncated:boolean};operationId?:string;observation?:ComputerState;stepRun?:import('./computer-steps').ComputerStepRun;lastAction?:ComputerLastAction;clarification?:string}
 /** The command's own interaction, for the owner's outcome line. Never typed text. */
-export interface ComputerLastAction {kind:string;label?:string;role?:string;key?:string;direction?:string;appId?:string;count?:number;blocked?:boolean}
+export interface ComputerLastAction {kind:string;label?:string;role?:string;key?:string;direction?:string;appId?:string;count?:number;blocked?:boolean;sequence?:string[];planned?:number}
 const PreparedInput=z.object({application:z.string().min(1).max(200),label:z.string().min(1).max(500),text:z.string().max(2000),role:z.string().max(100).optional(),windowTitle:nativeText(500).optional()}).strict();
 const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
 const fingerprint=(s:ComputerState)=>JSON.stringify([s.application,s.windowTitle,s.text,s.supportedActions,s.focusedControl&&{role:s.focusedControl.role,label:s.focusedControl.label},s.controls.map(({ref,...c})=>c),s.scrollAreas?.map(({ref,...area})=>area),s.truncated]);
@@ -77,6 +77,9 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  // ordinary observation (E2E: develop relay predating gcu #67). The advertised
  // capability is then not usable for the rest of this run.
  let standardDropped=false;
+ // A spoken number pressed digit by digit: the labels still to press (each
+ // re-matched on a fresh observation), the planned count and the labels done.
+ let labelPresses:string[][]=[],labelPlanned=0,clarification:string|undefined;const labelPressed:string[]=[];
  const supports=(state:ComputerState,name:string)=>!standardDropped&&helperSupports(state,'standardCommands',name);
  // Only a browser offers tab and address shortcuts; another app in front needs the browser first.
  const shortcutMissing=(state:ComputerState)=>waitForCommand(frontIsBrowser(state)?'SHORTCUT_NOT_OFFERED':'SHORTCUT_UNAVAILABLE');
@@ -99,7 +102,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
   trace.push(event);if(trace.length>2000)trace.shift();
   try{deps.progress?.(event);}catch{/* Diagnostic sinks cannot change a dispatched action's outcome. */}
  };
- const result=(status:ComputerUseResult['status'],reason:string):ComputerUseResult=>{emit('terminal',{status,reason});return {status,reason,revision:goal.revision,steps,evaluations,trace:{events:[...trace],truncated:sequence>trace.length},...(pending?{operationId:pending}:{}),...(last?{observation:last}:{}),...(lastAction?{lastAction}:{})};};
+ const result=(status:ComputerUseResult['status'],reason:string):ComputerUseResult=>{emit('terminal',{status,reason});return {status,reason,revision:goal.revision,steps,evaluations,trace:{events:[...trace],truncated:sequence>trace.length},...(pending?{operationId:pending}:{}),...(last?{observation:last}:{}),...(lastAction?{lastAction}:{}),...(clarification?{clarification}:{})};};
  const waitForCommand=(reason:string)=>{emit('waiting',{reason});return result('needs_input','COMMAND_WAITING_INPUT');};
  const check=()=>{runSignal.throwIfAborted();if(!deps.authorized())throw Error('ACCESS_DENIED');};
  const update=()=>{const n=deps.latestGoal?.();if(n&&n.revision>goal.revision){satisfiedField=undefined;submitAfterType=undefined;previous=undefined;prematureDone=0;history.length=0;ineffective.clear();transitions.clear();consecutiveOpens=0;cycling=false;noProgress=0;goal=z.object({revision:z.number().int().positive(),goal:z.string().min(1).max(16000)}).parse(n);}};
@@ -146,6 +149,13 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      backspaceLeft--;const action={kind:'key',key:'backspace'};emit('decided',summary(action,state));
      return {action:{action:'backspace',generation:state.generation,revision,targets:new Map([['backspace',action]]),observedContinuation:true}};
     }
+    const pressLabel=(control:ComputerState['controls'][number])=>{const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));return {action:{action:'label',generation:state.generation,revision,targets:new Map([['label',action]]),observedContinuation:true}};};
+    if(direct&&labelPresses.length){
+     // The next digit of a spoken number, matched again on this fresh frame.
+     const control=labelTarget(state,labelPresses[0]);
+     if(!control||destructiveTarget(state,{kind:'press',ref:control.ref},false)){labelPresses=[];await capture();return {result:waitForCommand('SEQUENCE_TARGET_MISSING')};}
+     labelPresses.shift();return pressLabel(control);
+    }
     if(direct&&standardRequest){
      // The helper's compact observation for one guarded keyboard shortcut.
      const requested=standardRequest;standardRequest=undefined;
@@ -182,6 +192,22 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
       if(characters.length>=2000)return {result:waitForCommand('ERASE_UNAVAILABLE')};
       const action={kind:'type',ref:field.ref};erasing=Math.min(erase,characters.length);emit('decided',summary(action,state));
       return {action:{action:'erase',generation:state.generation,revision,targets:new Map([['erase',action]]),literal:characters.slice(0,-erasing).join(''),observedContinuation:true}};
+     }
+     // A spoken digit or operator naming exactly one visible button is pressed
+     // without Jev. Text focus means words are text; several matches, none, or
+     // a high-impact label keep the Jev path and its confirmation guard.
+     const spoken=textFocused(state)?undefined:labelCommand(goal.goal);
+     const keypad=spoken&&['0','1','2','3','4','5','6','7','8','9'].some(digit=>labelTarget(state,[digit]));
+     if(spoken&&'clarification' in spoken&&keypad){clarification=spoken.clarification;await capture();return {result:waitForCommand('NUMBER_AMBIGUOUS')};}
+     if(spoken&&'tooLong' in spoken&&keypad)return {result:waitForCommand('SEQUENCE_TOO_LONG')};
+     if(spoken&&'presses' in spoken){
+      const controls=spoken.presses.map(labels=>labelTarget(state,labels));
+      // "ลบ" beside a visible Delete/Remove control could mean either.
+      const eraseWord=eraseCommand(goal.goal)!==undefined&&state.controls.some(c=>!c.sensitive&&c.role!=='AXMenuItem'&&destructiveLabel({label:c.label,value:c.value},false)?.groups.includes('delete'));
+      if(!eraseWord&&controls.every(c=>c&&!destructiveTarget(state,{kind:'press',ref:c.ref},false))){
+       labelPresses=spoken.presses.slice(1);labelPlanned=spoken.presses.length;labelPressed.length=0;
+       return pressLabel(controls[0]!);
+      }
      }
      const shortcut=shortcutCommand(goal.goal);
      if(shortcut){
@@ -416,7 +442,8 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     }
     previous={state:structuredClone(last!),signature:fingerprint(last!),identity:identity(last!,action),action,field:last?.controls.find(c=>c.ref===action.ref)};
     steps++;emit('acted',{...summary(action),operationId,outcome:'completed',elapsedMs:Date.now()-started});
-    {const control=previous.field;lastAction={kind:erasing!==undefined?'erase':String(action.kind),...(control&&!control.sensitive?{label:control.label.slice(0,200),role:control.role}:{}),...(typeof action.key==='string'?{key:action.key}:{}),...(typeof action.direction==='string'?{direction:action.direction}:{}),...(typeof action.app_id==='string'?{appId:action.app_id}:{}),...(erasing!==undefined?{count:erasing}:{})};}
+    {const control=previous.field;lastAction={kind:erasing!==undefined?'erase':String(action.kind),...(control&&!control.sensitive?{label:control.label.slice(0,200),role:control.role}:{}),...(typeof action.key==='string'?{key:action.key}:{}),...(typeof action.direction==='string'?{direction:action.direction}:{}),...(typeof action.app_id==='string'?{appId:action.app_id}:{}),...(erasing!==undefined?{count:erasing}:{})};
+     if(d.action==='label'&&labelPlanned>1&&control){labelPressed.push(control.label.slice(0,20));lastAction={...lastAction,sequence:[...labelPressed],planned:labelPlanned};}}
     // Consume this command once. A preselected type-and-submit interaction has
     // one guarded Enter remaining; it never asks Jev to extend the command.
     // Waiting with fresh evidence does not assert the user goal succeeded.
@@ -424,7 +451,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     // behind a document scan/screenshot after a known completed operation.
     // This acknowledges dispatch, not verified goal completion. Agent control
     // still gathers fresh evidence; unknown outcomes take reconciliation above.
-    const continuing=Boolean(submitAfterType||focusThenType||addressPending||backspaceLeft>0);
+    const continuing=Boolean(submitAfterType||focusThenType||addressPending||backspaceLeft>0||labelPresses.length>0);
     if(input.yieldAfterInteraction&&!continuing){last=undefined;return waitForCommand('ACTION_DISPATCHED');}
     if(standard&&last?.standardCommand===standard)return waitForCommand('ACTION_DISPATCHED');
     if(direct&&!continuing){

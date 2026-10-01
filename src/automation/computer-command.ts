@@ -125,7 +125,7 @@ const SHORTCUTS:Array<{key:string;phrases:string[];labels:string[];standard?:'ta
  {key:'w',phrases:['close tab','close this tab','ปิด tab','ปิดแท็บ'],labels:['close tab','ปิดแท็บ'],standard:'tab:close'},
 ];
 export function shortcutCommand(command:string):{shortcut:string;labels:string[];standard?:'tab:new'|'tab:close'}|undefined {
- const normalized=command.trim().toLocaleLowerCase().replace(/\s+/gu,' ');
+ const normalized=normalizeCommand(command);
  const explicit=/(?:^|[\s(])(?:cmd|command|⌘) ?\+? ?([a-z])(?![a-z])/u.exec(normalized);
  // A shortcut inside a compound command is only one of its parts.
  if(explicit&&!/[,、，]|\s(?:แล้ว|then|and)\s/u.test(normalized)){
@@ -157,6 +157,77 @@ export function menuRelevant(command:string,label:string,contentMatch=false){
 }
 
 export {textCommand,addressCommand,repeatCommand};
+// Spoken digits and calculator operators name a visible button exactly
+// (session 35bd8aff: "ห้า" with button "5" on screen reached Jev at 0.45).
+// A finite vocabulary of whole labels; anything else keeps the Jev path.
+const DIGITS:Record<string,string>={'ศูนย์':'0','หนึ่ง':'1','สอง':'2','สาม':'3','สี่':'4','ห้า':'5','หก':'6','เจ็ด':'7','แปด':'8','เก้า':'9',
+ zero:'0',one:'1',two:'2',three:'3',four:'4',five:'5',six:'6',seven:'7',eight:'8',nine:'9'};
+const OPERATORS:Array<{words:string[];labels:string[]}>=[
+ {words:['บวก','plus','add','+'],labels:['add','plus','+']},
+ // "ลบ" is also erase; computer-use.ts runs erase first for a focused text field.
+ {words:['ลบ','minus','subtract','-','−'],labels:['subtract','minus','−','-']},
+ {words:['คูณ','times','multiply','×','*'],labels:['multiply','times','×','*']},
+ {words:['หาร','divide','divided by','÷','/'],labels:['divide','÷','/']},
+ {words:['เท่ากับ','equals','equal','='],labels:['equals','equal','=']},
+ {words:['เคลียร์','clear','all clear','ac'],labels:['clear','all clear','ac','c']},
+];
+const MULTIPLIERS:Array<[string,number]>=[['ล้าน',1e6],['แสน',1e5],['หมื่น',1e4],['พัน',1e3],['ร้อย',100],['สิบ',10]];
+const UNITS:Array<[string,number]>=[...Object.entries(DIGITS).filter(([w])=>/\p{Script=Thai}/u.test(w)).map(([w,d]):[string,number]=>[w,Number(d)]),['เอ็ด',1],['ยี่',2]];
+/** Digits a spoken token stands for: "5", "๕", "ห้า", "ห้าสิบ" (50), "ห้าศูนย์" (5, 0). */
+function spokenDigits(token:string):string|undefined{
+ if(/^[0-9๐-๙]+$/u.test(token))return token.replace(/[๐-๙]/gu,d=>String(d.charCodeAt(0)-0x0e50));
+ if(Object.hasOwn(DIGITS,token))return DIGITS[token];
+ const words:Array<{unit?:number;multiplier?:number;word:string}>=[];
+ for(let rest=token;rest;){
+  const unit=UNITS.find(([w])=>rest.startsWith(w)),multiplier=MULTIPLIERS.find(([w])=>rest.startsWith(w));
+  if(!unit&&!multiplier)return;
+  words.push(unit?{unit:unit[1],word:unit[0]}:{multiplier:multiplier![1],word:multiplier![0]});
+  rest=rest.slice((unit?unit[0]:multiplier![0]).length);
+ }
+ // Only digit words, said one by one ("ห้าศูนย์"): the digits in order.
+ if(words.every(w=>w.unit!==undefined&&w.word!=='เอ็ด'&&w.word!=='ยี่'))return words.map(w=>String(w.unit)).join('');
+ // A Thai numeral: units scale the following place value, strictly descending.
+ let total=0,pending:number|undefined,last=Infinity;
+ for(const [i,w] of words.entries()){
+  if(w.unit!==undefined){
+   if(pending!==undefined||(w.word==='เอ็ด'&&(i===0||words[i-1].multiplier===undefined))||(w.word==='ยี่'&&words[i+1]?.multiplier!==10))return;
+   pending=w.unit;continue;
+  }
+  if(w.multiplier!>=last)return;
+  total+=(pending??1)*w.multiplier!;pending=undefined;last=w.multiplier!;
+ }
+ return String(total+(pending??0));
+}
+export type LabelCommand={presses:string[][];spoken:string}|{clarification:string}|{tooLong:true};
+/** Most presses one spoken number may expand to. */
+export const MAX_LABEL_PRESSES=8;
+/**
+ * "ห้า", "กดเลข 5", "เท่ากับ", "ห้า ศูนย์", "ห้าสิบ": the visible labels to press,
+ * in order. Two number forms that disagree ("ห้า ห้าสิบ") need a clarification.
+ */
+export function labelCommand(command:string):LabelCommand|undefined{
+ const payload=normalizeCommand(command).replace(/^(?:(?:กด|press|click|คลิก|แตะ|tap)\s*)?(?:(?:ปุ่ม|เลข|ตัวเลข|เครื่องหมาย|button|number)\s*)?/u,'').trim();
+ if(!payload)return;
+ const operator=OPERATORS.find(o=>o.words.includes(payload));
+ if(operator)return {presses:[operator.labels],spoken:payload};
+ const tokens=payload.split(' '),digits=tokens.map(spokenDigits);
+ if(digits.some(d=>d===undefined))return;
+ // Each token alone, or single digits one by one; a multi-digit form beside
+ // another number is a self-correction or a mishearing, never concatenated.
+ if(tokens.length>1&&digits.some(d=>d!.length>1))return {clarification:tokens.join(' หรือ ')+'?'};
+ const sequence=digits.join('');
+ if(sequence.length>MAX_LABEL_PRESSES)return {tooLong:true};
+ return {presses:[...sequence].map(d=>[d]),spoken:payload};
+}
+/**
+ * The one visible, pressable, non-sensitive, non-menu control whose whole
+ * label is one of the given labels. Several or none: undefined (Jev decides).
+ */
+export function labelTarget(state:ComputerState,labels:string[]){
+ const matches=state.controls.filter(c=>!c.sensitive&&c.role!=='AXMenuItem'&&c.actions.includes('press')&&labels.includes(c.label.trim().toLocaleLowerCase()));
+ return matches.length===1?matches[0]:undefined;
+}
+
 /** The browser address/search field of the front window, if exactly one is observed. */
 export function addressField(state:ComputerState){
  const fields=state.controls.filter(c=>!c.sensitive&&c.actions.includes('type')&&['AXTextField','AXComboBox','AXSearchField'].includes(c.role)&&
@@ -166,7 +237,7 @@ export function addressField(state:ComputerState){
 
 /** "ปิด chrome", "quit chrome", "ปิดแอป", "Cmd+Q": quit the front application by name. */
 export function quitCommand(command:string):{app?:string}|undefined {
- const normalized=command.trim().toLocaleLowerCase().replace(/\s+/gu,' ');
+ const normalized=normalizeCommand(command);
  if(/^(?:กด )?(?:cmd|command|⌘) ?\+? ?q$/u.test(normalized))return {};
  const match=/^(?:ปิด|quit|close|ออกจาก)(?: ?(?:แอป|แอพ|app|application|โปรแกรม))?(?: (.+))?$/u.exec(normalized);
  if(!match)return;
