@@ -17,12 +17,16 @@ export const VOICE_ECHO_WINDOW_MS=2000;
  * Only that pair is one command: the same words for the same task within the
  * window, one copy spoken and the other a plain typed message. Repeating a
  * command in the same modality, or after the window, still runs it again.
+ * The first copy pairs whatever its outcome (applied, or a user message for
+ * the agent: session a2f5a205), so the echo never becomes a second message.
+ * The latest input, not the latest receipt: a hand-off of an older command can
+ * be recorded after it.
  */
 function voiceEcho(store:OrchestrationStore,conversationId:string,taskId:string,inputId:string):boolean {
   const current=store.get('SELECT modality,text,created_at,ingress_json FROM conversation_inputs WHERE id=?',inputId)!;
   const previous=store.get(`SELECT i.modality,i.text,i.created_at,i.ingress_json FROM conversation_events e JOIN conversation_inputs i ON i.id=json_extract(e.payload_json,'$.payload.inputId')
-    WHERE e.conversation_id=? AND e.type='input.execution_control' AND json_extract(e.payload_json,'$.payload.taskId')=? AND json_extract(e.payload_json,'$.payload.status')='applied'
-    AND json_type(e.payload_json,'$.payload.code') IS NULL AND i.id<>? ORDER BY e.seq DESC LIMIT 1`,conversationId,taskId,inputId);
+    WHERE e.conversation_id=? AND e.type='input.execution_control' AND json_extract(e.payload_json,'$.payload.taskId')=? AND coalesce(json_extract(e.payload_json,'$.payload.code'),'')<>'DUPLICATE_VOICE_ECHO'
+    AND i.id<>? ORDER BY i.input_seq DESC,e.seq DESC LIMIT 1`,conversationId,taskId,inputId);
   if(!previous||Number(current.created_at)-Number(previous.created_at)>VOICE_ECHO_WINDOW_MS)return false;
   const spoken=[current,previous].filter(row=>row.modality==='live_voice');
   const typed=[current,previous].filter(row=>row.modality==='text');
@@ -65,18 +69,19 @@ export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,in
       const current=store.task(target);
       if(!current||current.agentSessionId!==input.scope.agentSessionId||current.conversationId!==receipt.conversationId||current.ownerPrincipalId!==input.scope.principalId)throw new OrchestrationError('ACCESS_DENIED');
       control.taskId=target;
-      const session=automationSession(current);
-      if(session?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
-      // Explicit task destination resumes the same session with a fresh command.
-      // Unknown mutations remain fenced by controlByUser.
-      if(input.attachmentIds?.length)throw new OrchestrationError('INVALID_INPUT');
-      if(voiceEcho(store,receipt.conversationId,target,receipt.inputId)){
+      // Before any other check: an echo is never a second user message.
+      if(!input.attachmentIds?.length&&voiceEcho(store,receipt.conversationId,target,receipt.inputId)){
         // Acknowledged like an applied command, but the task is not revised again.
         control={...control,status:'applied',code:'DUPLICATE_VOICE_ECHO',revision:current.revision};
         store.appendEvent(receipt.conversationId,'input.execution_control',control,control.taskId);
         store.completeInputReceipt(receipt);
         return {...control,reused:false};
       }
+      const session=automationSession(current);
+      if(session?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
+      // Explicit task destination resumes the same session with a fresh command.
+      // Unknown mutations remain fenced by controlByUser.
+      if(input.attachmentIds?.length)throw new OrchestrationError('INVALID_INPUT');
       task=tasks.controlByUser(receipt.conversationId,input.scope.principalId,target,{id:receipt.inputId,action:'revise',expectedRevision:current.revision,text:input.text});
       control={...control,status:'applied',revision:task.revision};
     }catch(error){
