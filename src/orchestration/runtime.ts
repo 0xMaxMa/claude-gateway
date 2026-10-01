@@ -3,6 +3,7 @@ import {CURRENT_CONTROL_ROUND_SQL} from './control-notification';
 import {evaluateComputerChoices} from '../automation/computer-choice-ids';
 import {attachComputerEndScreenshot} from './computer-end-screenshot';
 import {liveExecutionInput,liveControlReceipt} from './live-execution-input';
+import {directCommandSpeech} from '../automation/command-speech';
 import {ComputerTaskAdapter} from './gateway-tasks/computer';
 import {ComputerConnectors} from '../jev/computer-connector';
 import { AutomaticBrowserBindings } from '../jev/automatic-browser-bindings';
@@ -81,7 +82,7 @@ import { ClaudeWorkerDriver } from './tasks/driver';
 import { WorkerDriver, WorkerScheduler } from './tasks/scheduler';
 import { OrchestrationHistoryWriter } from './history';
 import { ProcessTurn, startProcessTurn } from './process-turn';
-import { OrchestrationError, ExecutionCapabilities, ConversationScope } from './types';
+import { OrchestrationError, ExecutionCapabilities, ConversationScope, type TaskSnapshot, type WorkerOutcome } from './types';
 import { recoverOrchestration } from './recovery';
 import { acquireInstanceLock } from './instance-lock';
 import { DeliveryOutbox, channelSender, ChannelSender } from './delivery';
@@ -376,7 +377,7 @@ export class AgentOrchestrationRuntime {
       if (!agent.orchestration?.enabled) runtime.drain();
       await runtime.flushHistory();
       scheduler.start();
-      runtime.gatewayTasks = new GatewayTaskController(tasks, gatewayAdapters);
+      runtime.gatewayTasks = new GatewayTaskController(tasks, gatewayAdapters, undefined, (task, round) => runtime.speakDirectOutcome(task, round));
       gatewayTick.run = () => { void runtime.gatewayTasks?.tick().catch(() => {}); };
       runtime.gatewayTasks.start();
       runtime.mailboxTimer = setInterval(() => {
@@ -661,6 +662,20 @@ export class AgentOrchestrationRuntime {
     for (const listener of this.textListeners.get(sessionId) ?? []) {
       try { this.authorizeSession(sessionId, listener.principalId); listener.receive({ responseId, text, final }); } catch { /* One client cannot stop inference. */ }
     }
+  }
+  /** A direct command spoken in live voice that did nothing gets one short spoken
+   * reply through the live voice session; success and typed commands stay silent. */
+  speakDirectOutcome(task: TaskSnapshot, round: { revision: number; inputId?: string; outcome: WorkerOutcome }): void {
+    if (this.closing || !round.inputId || task.automationController !== 'user' || !['computer','browser'].includes(task.gatewayTarget?.adapter ?? '')) return;
+    const input = this.store.get('SELECT conversation_id,principal_id,modality,text FROM conversation_inputs WHERE id=?', round.inputId);
+    if (input?.modality !== 'live_voice' || input.conversation_id !== task.conversationId || input.principal_id !== task.ownerPrincipalId) return;
+    const listener = this.voiceListeners.get(task.agentSessionId);
+    const text = listener?.principalId === task.ownerPrincipalId ? directCommandSpeech(round.outcome, String(input.text)) : undefined;
+    if (!text || this.responseIdForInput(round.inputId)) return;
+    const responseId = this.decisions.notice(task.conversationId, text, false, round.inputId);
+    this.publishText(task.agentSessionId, responseId, text, true);
+    try { listener!.receive({ responseId, text, spoken: text, speechOnly: true }); } catch { /* Playback cannot change the settled round. */ }
+    void this.flushHistory().catch(() => {});
   }
   saveVoiceAudio(sessionId: string, principalId: string, responseId: string, audio: Buffer): void {
     this.authorizeSession(sessionId, principalId);

@@ -39,7 +39,9 @@ export class GatewayTaskController {
   private recoveries=new Map<string,Promise<void>>();
   private stopCheckAfter=new Map<string,number>();
   private recoveryAfter=new Map<string,number>();
-  constructor(private readonly tasks: TaskService, private readonly adapters: Map<string, GatewayTaskAdapter>, private readonly reportError: (e: unknown) => void = e => console.warn(JSON.stringify({event:'gateway_task_tracking_error',code:taskFailure(e).code}))) {}
+  constructor(private readonly tasks: TaskService, private readonly adapters: Map<string, GatewayTaskAdapter>, private readonly reportError: (e: unknown) => void = e => console.warn(JSON.stringify({event:'gateway_task_tracking_error',code:taskFailure(e).code})),
+    /** A finished round, with the user input that started it when it was a direct command. */
+    private readonly settled?: (task: TaskSnapshot, round: {revision: number; inputId?: string; outcome: WorkerOutcome}) => void) {}
   start(): void {
     this.timer = setInterval(() => { void this.tick().catch(this.reportError); }, 1000);
     this.timer.unref();
@@ -165,8 +167,12 @@ export class GatewayTaskController {
             {type:'unknown',failure:taskFailure(new Error('No durable request receipt. Inspect the target before retrying; the request was not sent again.'),'GATEWAY_REQUEST_UNCONFIRMED')});
         } else {
           if (current.state === 'starting') this.tasks.started(attempt.attemptId, attempt.generation);
+          // Read before finish: a queued direct command replaces executionControl.
+          const inputId = current.executionControl?.revision === attempt.revision ? current.executionControl.id : undefined;
+          const finished = this.tasks.finish(attempt.attemptId, attempt.generation, outcome);
+          try { this.settled?.(finished, {revision: attempt.revision, inputId, outcome}); } catch (error) { this.reportError(error); }
           // A queued direct command is claimed on an immediate follow-up pass.
-          if (this.tasks.finish(attempt.attemptId, attempt.generation, outcome).state === 'queued') this.again = true;
+          if (finished.state === 'queued') this.again = true;
         }
       } catch (error) {
         // Transport/inspection failures cannot prove that the target stopped.
