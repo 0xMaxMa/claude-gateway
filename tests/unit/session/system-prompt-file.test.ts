@@ -22,6 +22,12 @@ jest.mock('child_process', () => {
     }),
   };
 });
+// runtimeProfileArgs reads ~/.claude/settings.json; keep the host's file out of these tests.
+let home: string | undefined;
+jest.mock('os', () => {
+  const real = jest.requireActual('os');
+  return { ...real, homedir: () => home ?? real.homedir() };
+});
 const logged: { level: string; message: string; meta?: unknown }[] = [];
 jest.mock('../../../src/logger', () => {
   const real = jest.requireActual('../../../src/logger');
@@ -64,9 +70,10 @@ beforeEach(() => {
   spawned.length = 0; logged.length = 0; containerWrites.length = 0; spawnError = undefined;
   root = mkdtempSync(join(tmpdir(), 'prompt-file-'));
   workspace = join(root, 'workspace'); mkdirSync(workspace);
+  home = root;
   writeFileSync(join(root, 'mcp.json'), JSON.stringify({ mcpServers: {} }));
 });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
+afterEach(() => { home = undefined; rmSync(root, { recursive: true, force: true }); });
 
 function session(type?: 'app-agent'): SessionProcess {
   const agent = { id: 'a', workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] }, ...(type ? { type, container: 'app-test' } : {}) } as unknown as AgentConfig;
