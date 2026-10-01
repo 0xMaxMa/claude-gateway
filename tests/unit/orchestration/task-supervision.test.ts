@@ -303,3 +303,11 @@ test('background grace and stale-progress limit are validated (#557)',()=>{
  // Existing configs with a long review interval still load; the implicit limit leaves room for a review.
  expect(resolveOrchestrationConfig({tasks:{progressStaleMs:10800000}}).tasks).toMatchObject({progressStaleMs:10800000,progressStaleLimitMs:10800000+300000});
 });
+test('a config created or migrated from config.template.json keeps the implicit stale-limit floor (#557)',()=>{
+ const {resolveOrchestrationConfig}=require('../../../src/orchestration/config');
+ // Fresh installs copy the template and the migrator adds its missing keys, so a
+ // value written there is explicit in every agent config, not a default.
+ const template=JSON.parse(require('fs').readFileSync(require('path').join(__dirname,'../../../config.template.json'),'utf8')).agents[0].orchestration;
+ const tasks={...template.tasks,progressStaleMs:10800000};
+ expect(resolveOrchestrationConfig({...template,tasks}).tasks.progressStaleLimitMs).toBe(10800000+tasks.progressNotifyCooldownMs);
+});
