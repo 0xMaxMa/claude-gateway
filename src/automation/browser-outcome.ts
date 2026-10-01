@@ -29,6 +29,8 @@ const HINTS:Record<string,string>={
  COMPLETION_CANDIDATE:'the page already appears to match; no action was needed.',
  ACTION_BUDGET:'the action limit for one command was reached. Send the next command.',
  EVALUATION_BUDGET:'the decision limit for one command was reached. Send the command again, more specifically.',
+ TARGET_OBSCURED:'something is covering {target} (for example a pop-up, banner or menu), so it was not clicked. Close what covers it, then send the command again.',
+ NAVIGATION_UNRESOLVED:'could not tell which website to open. Say its address, for example "เข้า yahoo.com".',
  TEXT_ENTRY_NOT_REQUESTED:'nothing was typed because the command did not ask to type. Start it with พิมพ์/ค้นหา or type/search, for example: พิมพ์ "hello".',
 };
 // The decision service failed for this command only; the session keeps going.

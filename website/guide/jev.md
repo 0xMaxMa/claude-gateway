@@ -490,6 +490,17 @@ Jev decision over the observed controls and dispatches at most one action.
   is not search-like is fenced (see below).
 - `เข้า google`, `เปิด youtube`, `go to example.com`, a bare URL: `tab_navigate`
   in the bound tab.
+- **Named sites.** A navigation the grammar does not cover (`เข้าเว็บไซต์ Yahoo`,
+  `งั้นเปลี่ยนไปเข้า yahoo`) goes to Jev, which may choose `NAVIGATE`. It is
+  offered only to a single direct command that has not acted yet, when the host
+  has a text helper. The text helper (the same one that fills field values)
+  turns the command into an address from the command and the current URL and
+  title only, never page text. There is no site list. The address must be
+  `http`/`https` or a bare domain, with no credentials, IP address, `localhost` or
+  single-label host; any other scheme (`javascript:`, `data:`, `file:` ...) is
+  refused. A refused or unresolved address dispatches nothing
+  (`NAVIGATION_UNRESOLVED`), and an uncertain `NAVIGATE` is
+  `LOW_OPERATION_CONFIDENCE`. Otherwise `tab_navigate` opens it in the bound tab.
 - `อีก`, `again`: repeats the previous command, decided afresh on the current
   page. The previous command, what it did and the page it ended on are passed to
   Jev as reference context only.
@@ -504,6 +515,14 @@ Jev decision over the observed controls and dispatches at most one action.
   the approved scope silently. The command answers `NEW_TAB_OUT_OF_SCOPE` and the
   next command (for example `เข้า google`) runs in the approved tab. In step mode
   the step is recorded as a note and the run continues in the same tab.
+- **Covered targets.** When something covers the chosen link or button (the
+  extension's `STALE_OBSERVATION` with cause `TARGET_OBSCURED`), the page is not
+  changing, so a direct command is not retried. It reports `TARGET_OBSCURED`
+  (spoken as "something is covering that button or link") instead of using up
+  the stale-read budget as "the screen is changing". An agent task may still
+  choose another control, such as closing the overlay. If its stale budget runs
+  out on a covered target, it ends as `TARGET_OBSCURED`. A real page change
+  before input is still re-read and retried as before.
 - **High-impact controls.** Clicking or selecting a control whose label, value or
   context names delete, send, submit, pay, buy, publish, quit or confirm (English
   or Thai) needs a command that names the same operation and a Jev confidence of

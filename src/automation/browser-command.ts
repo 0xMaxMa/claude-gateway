@@ -48,6 +48,26 @@ export function planBrowserCommand(command:string):BrowserCommandPlan|undefined 
 }
 
 /**
+ * The address Jev's text helper resolved for a named site ("เข้าเว็บไซต์ Yahoo"),
+ * or undefined. Untrusted model output: only an http(s) URL or a bare host, a
+ * public-looking domain name (no IP, localhost or single label), no
+ * credentials. Every other scheme (javascript:, data:, file: ...) is refused.
+ */
+export function navigationUrl(text:string|null|undefined):string|undefined {
+ const value=text?.trim()??'';
+ if(!value||value.length>2048||/\s/u.test(value))return;
+ const explicit=/^https?:\/\/[^/]/iu.test(value);
+ // Anything else with a scheme or a leading separator is not a web address.
+ if(!explicit&&!/^[\p{L}\p{N}]/u.test(value)||!explicit&&/^[a-z][a-z0-9+.-]*:/iu.test(value))return;
+ let url:URL;
+ try{url=new URL(explicit?value:'https://'+value);}catch{return;}
+ if(!['http:','https:'].includes(url.protocol)||url.username||url.password)return;
+ const labels=url.hostname.split('.');
+ if(labels.length<2||labels.some(label=>!label)||!/^(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/u.test(labels.at(-1)!))return;
+ return url.href;
+}
+
+/**
  * The page a blank New Tab opens for this goal: a navigation command, or (for
  * an agent's task goal) the one web address it names. Never a non-web scheme.
  */

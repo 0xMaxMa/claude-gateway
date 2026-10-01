@@ -359,3 +359,130 @@ describe("READ_REQUEST: a direct command that asks about the page", () => {
     expect(typing.commandOutcome).toMatchObject({ done: true, action: { kind: "type" } });
   });
 });
+
+// Session d88943d1: "เข้าเว็บไซต์ Yahoo" / "งั้นเปลี่ยนไปเข้า yahoo" missed the address
+// grammar and Jev, offered no navigation, chose TYPE_TEXT (TEXT_ENTRY_NOT_REQUESTED).
+// Jev now chooses NAVIGATE and the text helper resolves the site; no site list.
+describe("NAVIGATE: Jev opens a named site in the bound tab", () => {
+  const navigable = () => browser(page({ elements: [el("e0", "About"), el("q", "Search", { tag: "input", role: "searchbox", operations: ["TYPE_TEXT"] })] }), { tab_navigate: (a, p) => ({ ...p, url: String(a.url), title: "Yahoo" }) });
+  const resolver = (text: string | null) => {
+    const requests: unknown[] = [];
+    return { requests, resolveFieldText: async (request: unknown) => { requests.push(request); return { text }; } };
+  };
+  const runNav = (goal: string, b: ReturnType<typeof browser>, j: ReturnType<typeof jev>, r: ReturnType<typeof resolver>, extra: Record<string, unknown> = {}) =>
+    runBrowserUse({ goal, scope, command: true, yieldAfterAction: true, ...extra } as never, { call: b.call, evaluate: j.evaluate, resolveFieldText: r.resolveFieldText }, new AbortController().signal);
+  test.each(["เข้าเว็บไซต์ Yahoo", "งั้นเปลี่ยนไปเข้า yahoo", "go to the yahoo website"])("%s navigates to the resolved address", async command => {
+    expect(planBrowserCommand(command)).toBeUndefined();
+    const b = navigable(), j = jev({ operation: () => "NAVIGATE" }), r = resolver("https://www.yahoo.com");
+    const result = await runNav(command, b, j, r);
+    expect(Object.keys(j.requests[0].questions.operation.criteria)).toContain("NAVIGATE");
+    expect(b.mutations()).toEqual([{ name: "tab_navigate", args: expect.objectContaining({ url: "https://www.yahoo.com/", observe: true }) }]);
+    expect(result.commandOutcome).toEqual({ done: true, action: { kind: "navigate", url: "https://www.yahoo.com/" } });
+    expect(browserOutcomeText(result)).toBe('Done: opened "https://www.yahoo.com/". Send the next command.');
+    // The helper sees the command and the current address, never page text.
+    expect(r.requests).toHaveLength(1);
+    expect(r.requests[0]).toMatchObject({ goal: command, field: { type: "url" }, page: { url: "https://start.test/", text: "" } });
+  });
+  test("a bare host from the helper opens over https", async () => {
+    const b = navigable();
+    await runNav("เข้าเว็บไซต์ Yahoo", b, jev({ operation: () => "NAVIGATE" }), resolver("yahoo.co.jp"));
+    expect(b.mutations()[0].args.url).toBe("https://yahoo.co.jp/");
+  });
+  test.each([["javascript:alert(1)"], ["JavaScript:alert(1)"], ["data:text/html,<b>x</b>"], ["file:///etc/passwd"], ["ftp://yahoo.com"], ["https://user:pw@yahoo.com"], ["user@yahoo.com"],
+    ["yahoo"], ["https://localhost/"], ["yahoo .com"], ["//yahoo.com"], ["chrome://settings"], ["about:blank"], [null]])("unsafe or unresolved address %p sends nothing", async text => {
+    const b = navigable();
+    const result = await runNav("เข้าเว็บไซต์ Yahoo", b, jev({ operation: () => "NAVIGATE" }), resolver(text));
+    expect(b.mutations()).toEqual([]);
+    expect(result).toMatchObject({ status: "needs_verification", reason: "COMMAND_WAITING_INPUT", commandOutcome: { done: false, reason: "NAVIGATION_UNRESOLVED" } });
+    expect(browserOutcomeText(result)).toMatch(/^Not done: could not tell which website to open/);
+  });
+  test("an uncertain NAVIGATE keeps the existing not-done behaviour and resolves nothing", async () => {
+    const b = navigable(), r = resolver("https://www.yahoo.com");
+    const result = await runNav("เข้าเว็บไซต์ Yahoo", b, jev({ operation: () => "NAVIGATE" }, 0.3), r);
+    expect(b.mutations()).toEqual([]);
+    expect(r.requests).toHaveLength(0);
+    expect(result.commandOutcome).toEqual({ done: false, reason: "LOW_OPERATION_CONFIDENCE" });
+  });
+  test("NAVIGATE is offered only to a single command that has not acted and has a text helper", async () => {
+    const { decisionQuestions } = await import("../../../src/automation/browser-use");
+    const p = page();
+    expect(Object.keys(decisionQuestions(p, "x", new Set(), true, true, true).questions.operation.criteria)).toContain("NAVIGATE");
+    expect(Object.keys(decisionQuestions(p, "x", new Set(), true, false, true).questions.operation.criteria)).not.toContain("NAVIGATE");
+    expect(Object.keys(decisionQuestions(p, "x", new Set(), false, false, true).questions.operation.criteria)).not.toContain("NAVIGATE");
+    expect(Object.keys(decisionQuestions(p, "x", new Set(), true).questions.operation.criteria)).not.toContain("NAVIGATE");
+    for (const extra of [{ command: false }, { strictDestructive: true }]) {
+      const b = navigable(), j = jev({ operation: () => "NAVIGATE" });
+      const result = await runNav("เข้าเว็บไซต์ Yahoo", b, j, resolver("https://www.yahoo.com"), extra);
+      expect(Object.keys(j.requests[0].questions.operation.criteria)).not.toContain("NAVIGATE");
+      expect(b.mutations()).toEqual([]);
+      expect(result.commandOutcome?.reason ?? result.reason).not.toBe("NAVIGATION_UNRESOLVED");
+    }
+    const j = jev({ operation: () => "BLOCKED" });
+    await run("เข้าเว็บไซต์ Yahoo", navigable(), j);
+    expect(Object.keys(j.requests[0].questions.operation.criteria)).not.toContain("NAVIGATE");
+  });
+  test("the regex fast path, the TYPE_TEXT guard and READ_REQUEST are unchanged", async () => {
+    const fast = navigable(), j = jev(), r = resolver("https://evil.test");
+    await runNav("เข้า google", fast, j, r);
+    expect(j.requests).toHaveLength(0);
+    expect(r.requests).toHaveLength(0);
+    expect(fast.mutations()).toEqual([{ name: "tab_navigate", args: expect.objectContaining({ url: "https://google.com/" }) }]);
+    const typed = navigable();
+    const guard = await runNav("เข้าเว็บไซต์ Yahoo", typed, jev({ operation: () => "TYPE_TEXT" }), resolver("https://www.yahoo.com"));
+    expect(typed.mutations()).toEqual([]);
+    expect(guard.commandOutcome?.reason).toBe("TEXT_ENTRY_NOT_REQUESTED");
+    const read = await runNav("อ่านให้ฟังหน่อย", navigable(), jev({ operation: () => "READ_REQUEST" }), resolver("https://www.yahoo.com"));
+    expect(read.commandOutcome).toEqual({ done: false, reason: "READ_REQUEST" });
+  });
+  test("navigationUrl accepts only http(s) web hosts without credentials", async () => {
+    const { navigationUrl } = await import("../../../src/automation/browser-command");
+    expect(navigationUrl("https://www.yahoo.com/news?x=1")).toBe("https://www.yahoo.com/news?x=1");
+    expect(navigationUrl("http://example.org")).toBe("http://example.org/");
+    expect(navigationUrl(" yahoo.com ")).toBe("https://yahoo.com/");
+    for (const bad of ["javascript:void(0)", "vbscript:x", "data:,x", "file:///c:/x", "blob:https://a.com/x", "https://a:b@yahoo.com", "https://yahoo.com@evil.com", "http://127.0.0.1", "https://yahoo", "", "x".repeat(2100) + ".com"])
+      expect(navigationUrl(bad)).toBeUndefined();
+  });
+});
+
+// Session d88943d1: the extension rejects a click whose target is covered with
+// STALE_OBSERVATION cause TARGET_OBSCURED. Retrying the same covered click three
+// times ended as STALE_RETRY_BUDGET, spoken as "the screen is changing".
+describe("TARGET_OBSCURED: a covered target is its own outcome", () => {
+  const covered = () => browser(page({ elements: [el("l1", "Yahoo News", { tag: "a", role: "link" })] }), { page_click: () => ({ error: "STALE_OBSERVATION", cause: "TARGET_OBSCURED", action_executed: false }) });
+  test("a direct command stops at once with TARGET_OBSCURED and its own speech", async () => {
+    const { directCommandSpeech } = await import("../../../src/automation/command-speech");
+    const b = covered(), j = jev({ operation: () => "CLICK" });
+    const result = await run("กด Yahoo News", b, j);
+    expect(b.calls.filter(c => c.name === "page_click")).toHaveLength(1);
+    expect(j.requests).toHaveLength(1);
+    expect(result.staleRetries).toBe(0);
+    expect(result).toMatchObject({ status: "needs_verification", reason: "COMMAND_WAITING_INPUT", commandOutcome: { done: false, reason: "TARGET_OBSCURED", action: { kind: "click", label: "Yahoo News" } } });
+    expect(browserOutcomeText(result)).toMatch(/^Not done: something is covering "Yahoo News"/);
+    const speech = directCommandSpeech({ browserReport: result as never }, "กด Yahoo News");
+    expect(speech?.spoken).toContain("มีบางอย่างบัง");
+    expect(speech?.spoken).not.toContain("หน้าจอกำลังเปลี่ยน");
+    expect(directCommandSpeech({ browserReport: result as never }, "click Yahoo News")?.spoken).toMatch(/covering/);
+  });
+  test("a covered search field on the direct search path is not retried either", async () => {
+    const b = browser(page({ elements: [el("s1", "Search", { tag: "input", role: "searchbox", operations: ["TYPE_TEXT"] })] }), { page_type: () => ({ error: "STALE_OBSERVATION", cause: "TARGET_OBSCURED", action_executed: false }) });
+    const result = await run("ค้นหา แมว", b);
+    expect(b.calls.filter(c => c.name === "page_type")).toHaveLength(1);
+    expect(result.commandOutcome).toMatchObject({ done: false, reason: "TARGET_OBSCURED" });
+  });
+  test("an agent task may re-decide (e.g. close the overlay) but ends as TARGET_OBSCURED, not STALE_RETRY_BUDGET", async () => {
+    const b = covered();
+    const result = await runBrowserUse({ goal: "Open Yahoo News", scope, maxStaleRetries: 1 }, { call: b.call, evaluate: jev({ operation: () => "CLICK" }).evaluate }, new AbortController().signal);
+    expect(result).toMatchObject({ status: "blocked", reason: "TARGET_OBSCURED" });
+  });
+  test("a real page change before the click still re-reads and retries as before", async () => {
+    let stale = true;
+    const b = browser(page({ elements: [el("l1", "Yahoo News", { tag: "a", role: "link" })] }), { page_click: (_a, p) => {
+      if (stale) { stale = false; return { error: "STALE_OBSERVATION", cause: "TARGET_STATE_CHANGED", action_executed: false }; }
+      return { ...p, url: "https://news.yahoo.com/" };
+    } });
+    const result = await run("กด Yahoo News", b, jev({ operation: () => "CLICK" }));
+    expect(b.calls.filter(c => c.name === "page_click")).toHaveLength(2);
+    expect(result.staleRetries).toBe(1);
+    expect(result.commandOutcome).toMatchObject({ done: true, action: { kind: "click", label: "Yahoo News" } });
+  });
+});
