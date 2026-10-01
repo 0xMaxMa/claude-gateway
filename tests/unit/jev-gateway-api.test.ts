@@ -1,6 +1,6 @@
 import express from 'express';
 import request from 'supertest';
-import { createJevRouter } from '../../src/api/jev-router';
+import { createJevRouter, jsonExceptJevEvaluate } from '../../src/api/jev-router';
 import { gatewayJev, jevAllowed } from '../../src/orchestration/jev-gateway';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 import { mkdtempSync, rmSync } from 'fs';
@@ -11,7 +11,7 @@ const dir=mkdtempSync(join(tmpdir(),'jev-api-'));
 const agent={id:'alpha',jev:{enabled:true}} as AgentConfig;
 const config={gateway:{logDir:join(dir,'logs'),jev:{enabled:true,provider:'typesafe',model:'jev-test'},api:{keys:[{key:'write-test-key',agents:['alpha'],write:true},{key:'read-test-key',agents:['alpha'],write:false}]}},agents:[agent]} as unknown as GatewayConfig;
 const agents=new Map([['alpha',agent]]);
-const app=express();app.use(express.json());app.use('/api',createJevRouter(config,agents));
+const app=express();app.use(jsonExceptJevEvaluate());app.use('/api',createJevRouter(config,agents));
 afterAll(()=>{gatewayJev(config).close();rmSync(dir,{recursive:true,force:true});});
 afterEach(()=>jest.restoreAllMocks());
 const input={agentId:'alpha',state:'hello',questions:{match:{type:'noul',instructions:'Greeting?'}}};
@@ -46,4 +46,26 @@ test('global enable and per-agent disable never expand access',()=>{
  expect(jevAllowed(config,agent)).toBe(true);
  config.gateway.jev!.enabled=false;expect(jevAllowed(config,agent)).toBe(false);config.gateway.jev!.enabled=true;
  config.gateway.jev!.allowedAgentIds=['beta'];expect(jevAllowed(config,agent)).toBe(false);delete config.gateway.jev!.allowedAgentIds;
+});
+test('M7: bodies above the 100kB global parser reach Jev up to the 1 MiB maxInputBytes ceiling, with Jev error codes',async()=>{
+ const evaluate=jest.spyOn(gatewayJev(config).service,'evaluate').mockResolvedValue({requestId:'r',requestedModel:'jev-test',model:'jev-test',answers:{match:{type:'noul',noul:1}},usage:{input_tokens:3,output_tokens:0}});
+ const ok=await request(app).post('/api/v1/jev/evaluate').set('Authorization','Bearer write-test-key').send({...input,state:'x'.repeat(200*1024)});
+ expect(ok.status).toBe(200);expect(evaluate).toHaveBeenCalledTimes(1);
+ const big=await request(app).post('/api/v1/jev/evaluate').set('Authorization','Bearer write-test-key').send({...input,state:'x'.repeat(1100*1024)});
+ expect(big.status).toBe(413);expect(big.body.error.code).toBe('JEV_INVALID_REQUEST');
+ const bad=await request(app).post('/api/v1/jev/evaluate').set('Authorization','Bearer write-test-key').set('content-type','application/json').send('{oops');
+ expect(bad.status).toBe(400);expect(bad.body.error.code).toBe('JEV_INVALID_REQUEST');
+ // Unauthenticated large bodies are refused before parsing.
+ expect((await request(app).post('/api/v1/jev/evaluate').send({...input,state:'x'.repeat(200*1024)})).status).toBe(401);
+ // Every other route keeps the 100kB global limit.
+ const other=express();other.use(jsonExceptJevEvaluate());other.post('/api/other',(_q,r)=>r.json({}));
+ expect((await request(other).post('/api/other').send({x:'x'.repeat(200*1024)})).status).toBe(413);
+});
+test('L8: an empty or non-printable requestId is rejected before it is hashed',async()=>{
+ const evaluate=jest.spyOn(gatewayJev(config).service,'evaluate');
+ for(const requestId of ['',' ','a\nb','x'.repeat(257)]){
+  const r=await request(app).post('/api/v1/jev/evaluate').set('Authorization','Bearer write-test-key').send({...input,requestId});
+  expect(r.status).toBe(400);expect(r.body.error.code).toBe('JEV_INVALID_REQUEST');
+ }
+ expect(evaluate).not.toHaveBeenCalled();
 });

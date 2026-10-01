@@ -87,3 +87,37 @@ test('a command typed during an agent-planned round corrects it once; later comm
   expect(f.instructions().filter(text=>text.startsWith('Latest user correction'))).toHaveLength(1);
  }finally{f.close();}
 });
+
+test('M1: speech while a direct command runs is not a pause, so it queues FIFO instead of merging as a correction',()=>{
+ const f=fixture();try{
+  f.run();
+  expect(f.tasks.voicePauseApplies(f.task.taskId)).toBe(false);
+  expect(f.send('6').state).toBe('running');
+  expect(f.store.task(f.task.taskId)!.queuedCommands?.map(c=>c.text)).toEqual(['6']);
+  expect(f.instructions().some(text=>text.includes('Latest user correction'))).toBe(false);
+  // The agent driving: speech is an interruption and still pauses.
+  f.tasks.controlByUser(f.store.task(f.task.taskId)!.conversationId,'u',f.task.taskId,{id:randomUUID(),action:'agent',expectedRevision:f.store.task(f.task.taskId)!.revision});
+  expect(f.tasks.voicePauseApplies(f.task.taskId)).toBe(true);
+ }finally{f.close();}
+});
+
+test('M2: pausing with queued commands says which commands were not sent',()=>{
+ const f=fixture();try{
+  f.run();f.send('+');f.send('3');
+  const paused=f.tasks.controlByUser(f.store.task(f.task.taskId)!.conversationId,'u',f.task.taskId,{id:randomUUID(),action:'pause',expectedRevision:f.store.task(f.task.taskId)!.revision});
+  expect(paused.queuedCommands).toBeUndefined();
+  expect(paused.latestProgress?.text).toContain('2 queued commands were not sent: "+", "3".');
+  expect(f.store.all("SELECT 1 FROM conversation_events WHERE type='task.command_queue_dropped'")).toHaveLength(1);
+ }finally{f.close();}
+});
+
+test('L3: handing control to the agent drops the user\'s queued commands and says so',()=>{
+ const f=fixture();try{
+  const attempt=f.run();f.send('+');f.send('3');
+  const handed=f.tasks.controlByUser(f.store.task(f.task.taskId)!.conversationId,'u',f.task.taskId,{id:randomUUID(),action:'agent',expectedRevision:f.store.task(f.task.taskId)!.revision});
+  expect(handed.queuedCommands).toBeUndefined();
+  expect(handed.latestProgress?.text).toContain('2 queued commands were not sent: "+", "3".');
+  f.settle(attempt);
+  expect(f.instructions()).toEqual(['9']);
+ }finally{f.close();}
+});

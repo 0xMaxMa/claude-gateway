@@ -4,6 +4,7 @@ import {resolveBrowserConnection} from './browser-connector';
 import {resolveEnabledConnectors} from '../connectors/resolve';
 import type {AgentConfig,GatewayConfig} from '../types';
 import {createHash} from 'crypto';
+import {readRelayGrants} from './relay-grants';
 import type {CommandContext} from '../orchestration/types';
 export interface ComputerBinding {id:string;name:string;principalId:string;conversationId:string;connectorId:string;scope:{device_id:string;grant_id:string}}
 export class ComputerConnectors {
@@ -16,19 +17,19 @@ export class ComputerConnectors {
   const binding=this.get(id,principal,conversation),connection=this.connection(binding.connectorId);
   const response=await fetch(new URL('/v1/computer-grants',connection.endpoint),{redirect:'error',headers:connection.headers,signal:AbortSignal.timeout(4000)});
   if(!response.ok)throw Error('COMPUTER_DISCOVERY_UNAVAILABLE');
-  const text=await response.text();if(text.length>262144)throw Error('COMPUTER_DISCOVERY_INVALID');
+  const grants=await readRelayGrants(response,'COMPUTER_DISCOVERY_INVALID');
   if(JSON.stringify(connection)!==JSON.stringify(this.connection(binding.connectorId)))throw Error('COMPUTER_CONNECTOR_CHANGED');
-  const body=JSON.parse(text),grant=Array.isArray(body.grants)?body.grants.find((g:any)=>g.id===binding.scope.grant_id&&g.deviceId===binding.scope.device_id):undefined;
+  const grant=grants.find((g:any)=>g?.id===binding.scope.grant_id&&g.deviceId===binding.scope.device_id);
   return {status:!grant?'unknown':grant.online===false?'disconnected':grant.online!==true?'unknown':grant.ready===true?'connected':'waiting_access',...(Number.isSafeInteger(grant?.stoppedAt)&&grant.stoppedAt>0?{stoppedAt:grant.stoppedAt}:{})};
  }
  async stoppedAt(id:string,principal:string,conversation:string):Promise<number|undefined>{return (await this.accessState(id,principal,conversation)).stoppedAt;}
  async discover(context:Pick<CommandContext,'principalId'|'conversationId'>,authorized:()=>boolean){
   const found:ComputerBinding[]=[];const check=()=>{if(!authorized())throw Error('ACCESS_DENIED');};check();
   for(const id of this.ids().slice(0,10)){
-   const connection=this.connection(id);const read=async()=>{const r=await fetch(new URL('/v1/computer-grants',connection.endpoint),{redirect:'error',headers:connection.headers,signal:AbortSignal.timeout(10000)});if(!r.ok)throw Error('COMPUTER_DISCOVERY_UNAVAILABLE');const text=await r.text();if(text.length>262144)throw Error('COMPUTER_DISCOVERY_INVALID');const body=JSON.parse(text);if(!Array.isArray(body.grants))throw Error('COMPUTER_DISCOVERY_INVALID');return body.grants;};
+   const connection=this.connection(id);const read=async()=>{const r=await fetch(new URL('/v1/computer-grants',connection.endpoint),{redirect:'error',headers:connection.headers,signal:AbortSignal.timeout(10000)});if(!r.ok)throw Error('COMPUTER_DISCOVERY_UNAVAILABLE');return readRelayGrants(r,'COMPUTER_DISCOVERY_INVALID');};
    let grants=await read();check();
    check();if(JSON.stringify(connection)!==JSON.stringify(this.connection(id)))throw Error('COMPUTER_CONNECTOR_CHANGED');
-   for(const g of grants){if((g.expiresAt!==undefined&&g.expiresAt!==0&&(!Number.isFinite(g.expiresAt)||g.expiresAt<=Date.now()))||g.online!==true)continue;if(!/^[0-9a-f-]{36}$/i.test(g.id)||!/^[0-9a-f-]{36}$/i.test(g.deviceId))continue;
+   for(const g of grants){if(!g||typeof g!=='object')continue;if((g.expiresAt!==undefined&&g.expiresAt!==0&&(!Number.isFinite(g.expiresAt)||g.expiresAt<=Date.now()))||g.online!==true)continue;if(!/^[0-9a-f-]{36}$/i.test(g.id)||!/^[0-9a-f-]{36}$/i.test(g.deviceId))continue;
     const scope={device_id:g.deviceId,grant_id:g.id};found.push({id:'computer-'+createHash('sha256').update(JSON.stringify([this.agent.id,context.principalId,context.conversationId,id,scope])).digest('hex'),name:'Computer Use · '+String(g.label??'Computer').slice(0,80),principalId:context.principalId,conversationId:context.conversationId,connectorId:id,scope});
    }
   }

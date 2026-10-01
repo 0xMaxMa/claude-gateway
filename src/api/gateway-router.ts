@@ -1,6 +1,6 @@
 import { createBrowserBindingsRouter } from './browser-bindings-router';
 import { gatewayJev, jevAllowed } from '../orchestration/jev-gateway';
-import { createJevRouter } from './jev-router';
+import { createJevRouter, jsonExceptJevEvaluate } from './jev-router';
 import { collectDashboardProcesses, ProcessOwner } from './dashboard-processes';
 import { DashboardSessions } from './dashboard-sessions';
 import { readMemoryActivity, activitySummary, MaintenanceReader } from './memory-activity';
@@ -632,7 +632,9 @@ export class GatewayRouter {
       createWebhooksRouter(this.agents, this.gatewayConfig?.gateway?.logDir ?? '/tmp'),
     );
 
-    this.app.use(express.json());
+    // Jev evaluation parses its own body after authentication, against a limit
+    // that fits the configurable maxInputBytes (see jev-router.ts).
+    this.app.use(jsonExceptJevEvaluate());
 
     // `/cli` webview terminal viewer routes (device flow + agent-scoped viewer).
     // Registered here (after the body parser, before the /api auth router) so it

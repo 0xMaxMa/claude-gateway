@@ -650,6 +650,7 @@ export class AgentRunner extends EventEmitter {
     const task=runtime.store.task(taskId)!;
     if(task.executionControl?.action==='pause'&&['pending','paused'].includes(task.executionControl.phase))return;
     if(!['queued','starting','running','interrupting'].includes(task.state))return;
+    if(!runtime.tasks.voicePauseApplies(detail.taskId))return;
     runtime.controlTask(sessionId,principalId,detail.taskId,{id:randomUUID(),action:'pause',expectedRevision:task.revision});
   }
   async controlApiTask(sessionId:string,principalId:string,taskId:string,command:Parameters<import('../orchestration/tasks/service').TaskService['controlByUser']>[3]) {

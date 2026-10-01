@@ -28,12 +28,13 @@ interface Options {
   fetch?: typeof fetch;
   onEvaluation?: (event: JevEvaluationEvent) => void;
 }
+const LEDGER_MAX = 4096, LEDGER_PER_PRINCIPAL = 1024;
 interface Waiter { limit: number; accept: () => void; reject: (error: Error) => void; signal: AbortSignal; abort: () => void }
 /** The single queue is shared across config generations. No retries or source fallback. */
 export class JevService {
   private active = 0;
   private queue: Waiter[] = [];
-  private requests = new Map<string, { digest: string; expires: number; settled: boolean }>();
+  private requests = new Map<string, { principalId: string; digest: string; expires: number; settled: boolean }>();
   constructor(private readonly options: Options) {}
   evaluate(input: JevRequest, context: JevContext): Promise<JevResult> {
     const config = structuredClone(this.options.getConfig());
@@ -54,12 +55,21 @@ export class JevService {
         // Never let a second caller detach the original cancellation/deadline contract.
         throw new JevError('REQUEST_CONFLICT', 'Request ID has already been submitted; inspect the original evaluation result.');
       }
-      if (this.requests.size >= 4096) throw new JevError('QUEUE_FULL', 'The Jev request ledger is full; retry later.');
-      const result = this.run(request, requestId, config, context);
-      const entry = { digest, expires: now + 300000, settled: false };
+      const result = () => this.run(request, requestId, config, context);
+      // Only a caller-chosen request ID can be submitted twice; a generated one
+      // needs no idempotency entry and must not consume the shared ledger.
+      if (!request.requestId) return result();
+      // One principal's burst fills only its own share; settled entries yield to new work.
+      let own = 0;
+      for (const entry of this.requests.values()) if (entry.principalId === context.principalId) own++;
+      if (own >= LEDGER_PER_PRINCIPAL) throw new JevError('QUEUE_FULL', 'Too many recent Jev request IDs for this caller; retry later.');
+      for (const [k, entry] of this.requests) { if (this.requests.size < LEDGER_MAX) break; if (entry.settled) this.requests.delete(k); }
+      if (this.requests.size >= LEDGER_MAX) throw new JevError('QUEUE_FULL', 'The Jev request ledger is full; retry later.');
+      const entry = { principalId: context.principalId, digest, expires: now + 300000, settled: false };
+      const pending = result();
       this.requests.set(key, entry);
-      void result.then(() => { entry.settled = true; entry.expires = Date.now() + 300000; }, () => { entry.settled = true; entry.expires = Date.now() + 300000; });
-      return result;
+      void pending.then(() => { entry.settled = true; entry.expires = Date.now() + 300000; }, () => { entry.settled = true; entry.expires = Date.now() + 300000; });
+      return pending;
     } catch (error) { return Promise.reject(error); }
   }
   private async run(request: JevRequest, requestId: string, config: JevConfig, context: JevContext): Promise<JevResult> {

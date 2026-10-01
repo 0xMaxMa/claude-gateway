@@ -244,3 +244,48 @@ test("a Jev DONE after the opening navigation reports Done: opened <start url>",
   expect(result.commandOutcome).toEqual({ done: true, action: { kind: "navigate", url: "https://www.google.com/" } });
   expect(browserOutcomeText(result)).toBe('Done: opened "https://www.google.com/". Send the next command.');
 });
+
+describe("H2/H1: a confirmed or unresolved action is never reported Not done", () => {
+  test("a confirmed navigation whose next page never settles is Done, not a repeat invitation", async () => {
+    const b = browser(page());
+    let navigated = false;
+    const call: BrowserUseDependencies["call"] = async (name, args, signal) => {
+      if (name === "tab_navigate") { b.calls.push({ name, args }); navigated = true; return { state: "completed", result: {} }; }
+      if (name === "page_observe" && navigated) return { error: "STALE_OBSERVATION", action_executed: false };
+      return b.call(name, args, signal);
+    };
+    const result = await runBrowserUse({ goal: "เข้า google", scope, command: true, yieldAfterAction: true, maxStaleRetries: 1 } as never, { call, evaluate: jev().evaluate }, new AbortController().signal);
+    expect(b.mutations()).toHaveLength(1);
+    expect(result.lastAction?.outcome).toBe("confirmed");
+    expect(result.commandOutcome).toMatchObject({ done: true, reason: "PAGE_STILL_LOADING" });
+    expect(browserOutcomeText(result)).toBe('Done: opened "https://google.com/". The page was still loading; check it before the next command.');
+  });
+  test("an unresolved receipt says the action may have run", async () => {
+    const b = browser(page(), { tab_navigate: () => ({ error: "OUTCOME_UNKNOWN" }) });
+    const result = await run("เข้า google", b);
+    expect(result.lastAction?.outcome).toBe("unknown");
+    expect(browserOutcomeText(result)).toMatch(/^Unknown: the last action may have run/);
+  });
+});
+
+describe("M5: step mode fences Enter and submit like Computer Use", () => {
+  const compose = () => page({ elements: [el("body", "Message body", { tag: "textarea", operations: ["TYPE_TEXT"] }), el("send", "Send")] });
+  test("Enter on a page with a Send button returns control and sends nothing", async () => {
+    const b = browser(compose());
+    const result = await run("enter", b, jev(), { strictDestructive: true });
+    expect(b.mutations()).toEqual([]);
+    expect(result.commandOutcome).toMatchObject({ done: false, reason: "DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED", action: { kind: "key", label: "Send" } });
+  });
+  test("search-and-submit into a non-search field is fenced in step mode", async () => {
+    const b = browser(compose());
+    const result = await run('ค้นหา "ok"', b, jev(), { strictDestructive: true });
+    expect(b.mutations()).toEqual([]);
+    expect(result.commandOutcome).toMatchObject({ done: false, reason: "DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED" });
+  });
+  test("a search box still submits in step mode, and direct (non-step) Enter is unchanged", async () => {
+    const search = browser(page({ elements: [el("q", "Search", { tag: "input", role: "searchbox", operations: ["TYPE_TEXT"] }), el("send", "Send")] }), { page_type: (_a, p) => ({ ...p, text: "results" }) });
+    expect((await run("ค้นหา แมว", search, jev(), { strictDestructive: true })).commandOutcome?.done).toBe(true);
+    const direct = browser(compose(), { page_keypress: (_a, p) => ({ ...p, text: "sent" }) });
+    expect((await run("enter", direct)).commandOutcome?.done).toBe(true);
+  });
+});

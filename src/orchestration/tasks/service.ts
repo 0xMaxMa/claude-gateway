@@ -4,6 +4,7 @@ import {ComputerInputs} from '../../jev/computer-inputs';
 import {automationSession} from './automation-session';
 import {computerActionText,computerOutcomeText} from '../../automation/computer-outcome';
 import {browserOutcomeText} from '../../automation/browser-outcome';
+import {textCommand} from '../../automation/direct-command';
 import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
 import { isAbsolute } from 'path';
 import { parseWorkflow, advanceWorkflow } from '../workflow';
@@ -52,6 +53,14 @@ export function taskIndexEntry(task: TaskSnapshot) {
 }
 
 const ACTION_LOG_MAX = 12;
+const CORRECTION_HEAD = 'Latest user correction (apply first; supersedes conflicting earlier requirements):\n';
+/** The round's own command for the log: a correction's latest text, never its preamble, and never typed field text. */
+function loggedCommand(instructions: string): string {
+  let command = instructions.startsWith(CORRECTION_HEAD) ? instructions.slice(CORRECTION_HEAD.length).split('\n\nEarlier requirements and corrections')[0] : instructions;
+  const typed = textCommand(command);
+  if (typed) command = command.replace(typed.text, '[text]');
+  return command;
+}
 const clip = (text: string, max: number) => { const chars = [...text.replace(/\s+/gu, ' ').trim()]; return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : chars.join(''); };
 /** Appends one round's own outcome line, so a later summary need not infer earlier rounds from the latest report. */
 function recordAction(task: TaskSnapshot, revision: number, command: string, outcome: WorkerOutcome): void {
@@ -62,7 +71,7 @@ function recordAction(task: TaskSnapshot, revision: number, command: string, out
   // A step-run line counts steps; name the last completed action as well.
   if (last && !last.blocked && !result.startsWith('Done:')) result += ` Last completed action: ${computerActionText(last)}.`;
   if (outcome.type === 'unknown') result = 'Outcome unknown; not replayed. ' + result;
-  task.actionLog = [...(task.actionLog ?? []).filter(entry => entry.revision !== revision), { revision, command: clip(command, 80), result: clip(result, 240) }].slice(-ACTION_LOG_MAX);
+  task.actionLog = [...(task.actionLog ?? []).filter(entry => entry.revision !== revision), { revision, command: clip(loggedCommand(command), 80), result: clip(result, 240) }].slice(-ACTION_LOG_MAX);
 }
 
 /** Task mutations use short durable transactions; admission probes are read-only. */
@@ -383,6 +392,12 @@ export class TaskService {
       if(command.action==='agent'||command.action==='user'){
         if(command.text!==undefined)throw new OrchestrationError('INVALID_INPUT');
         task.automationController=command.action;
+        // The agent drives now: the user's queued direct commands must not run under it.
+        if(command.action==='agent'&&task.queuedCommands?.length){
+          const queue=task.queuedCommands;delete task.queuedCommands;
+          task.latestProgress={source:'runtime',observedAt:Date.now(),text:`Control handed to the agent. ${queue.length} queued command${queue.length===1?' was':'s were'} not sent: ${queue.map(c=>JSON.stringify(c.text.slice(0,60))).join(', ')}.`.slice(0,4096)};
+          this.store.appendEvent(conversationId,'task.command_queue_dropped',{taskId,count:queue.length,reason:'agent_control'},taskId);
+        }
         this.store.saveTask(task,task.stateVersion);
         this.store.run('INSERT INTO task_commands VALUES(?,?,?,?,?,?,?,?,?)',id,taskId,conversationId,principalId,null,'user_control',hash,JSON.stringify(task),Date.now());
         if(command.action==='agent'&&task.state==='waiting_input'&&!task.activeAttemptId&&!task.pendingQuestion&&task.executionControl?.phase!=='paused')this.notify(task);
@@ -402,10 +417,14 @@ export class TaskService {
       if(command.action==='revise')boundedText(command.text??'',4000);
       else if(command.text!==undefined)throw new OrchestrationError('INVALID_INPUT');
       const previous=this.revision(taskId,task.revision);
+      // Never drop queued words silently: say which commands will not run.
+      const unsent=command.action==='pause'?task.queuedCommands??[]:[];
+      const dropped=unsent.length?` ${unsent.length} queued command${unsent.length===1?' was':'s were'} not sent: ${unsent.map(c=>JSON.stringify(c.text.slice(0,60))).join(', ')}.`:'';
+      if(unsent.length)this.store.appendEvent(conversationId,'task.command_queue_dropped',{taskId,count:unsent.length,reason:'paused'},taskId);
       if(command.action==='pause')delete task.queuedCommands;
       // A user's own command is still settling: the next one waits its turn,
       // verbatim, instead of superseding it or being folded into a correction.
-      if(command.action==='revise'&&['browser','computer'].includes(task.gatewayTarget?.adapter??'')&&previous.directCommand===true&&(['queued','starting','running'].includes(task.state)||(task.state==='interrupting'&&task.executionControl?.action==='revise'))){
+      if(command.action==='revise'&&this.queuesDirectCommand(task,previous)){
         const queue=task.queuedCommands??[];
         if(queue.length>=COMMAND_QUEUE_MAX)throw new OrchestrationError('COMMAND_QUEUE_FULL','Too many commands are waiting. Wait for the current ones to finish or pause.');
         task.queuedCommands=[...queue,{id:command.id,text:command.text!,at:Date.now()}];
@@ -417,19 +436,30 @@ export class TaskService {
       }
       const priorAnswers=previous.answers?.map(a=>({field:a.browserFieldLabel??a.computerFieldLabel,text:a.text}));
       const nextCommand=command.action==='revise'&&(paused||recoverable);
-      const instructions=nextCommand?command.text!:command.action==='revise'?'Latest user correction (apply first; supersedes conflicting earlier requirements):\n'+command.text+'\n\nEarlier requirements and corrections, newest first. Keep only requirements compatible with the latest correction; do not perform superseded actions:\n'+previous.instructions+(priorAnswers?.length?'\n\nEarlier user answers (subject to the latest correction):\n'+JSON.stringify(priorAnswers):''):previous.instructions;
+      const instructions=nextCommand?command.text!:command.action==='revise'?CORRECTION_HEAD+command.text+'\n\nEarlier requirements and corrections, newest first. Keep only requirements compatible with the latest correction; do not perform superseded actions:\n'+previous.instructions+(priorAnswers?.length?'\n\nEarlier user answers (subject to the latest correction):\n'+JSON.stringify(priorAnswers):''):previous.instructions;
       boundedText(instructions,task.gatewayTarget?.adapter==='browser'?8000:16000);
       task.revision++;
       if(recoverable){delete task.computerReport;delete task.failure;delete task.browserReport;delete task.gatewayDispatch;}
       this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,requestBrowserConsent:command.action!=='pause',revision:task.revision,instructions,mode:'interrupt_and_resume',computerInputs:command.action==='revise'?undefined:previous.computerInputs,answers:command.action==='revise'?undefined:previous.answers,browserRecoveryCount:0,guidance:undefined,guidanceBasis:undefined,...(command.action==='revise'?{directCommand:true}:{})}));
       task.executionControl={id:command.id,action:command.action,revision:task.revision,phase:task.activeAttemptId?'pending':command.action==='pause'?'paused':'pending',requestedAt:Date.now()};
       task.state=task.activeAttemptId?'interrupting':command.action==='pause'?'waiting_input':'queued';
-      task.latestProgress={source:'runtime',observedAt:Date.now(),text:task.activeAttemptId?'Control accepted; settling the current action before applying it.':command.action==='pause'?'Automation paused.':'Control accepted; resuming from a fresh observation.'};
+      task.latestProgress={source:'runtime',observedAt:Date.now(),text:((task.activeAttemptId?'Control accepted; settling the current action before applying it.':command.action==='pause'?'Automation paused.':'Control accepted; resuming from a fresh observation.')+dropped).slice(0,4096)};
       this.store.saveTask(task,task.stateVersion);
       this.store.appendEvent(conversationId,'task.control_accepted',{taskId,control:task.executionControl},taskId);
       this.store.run('INSERT INTO task_commands VALUES(?,?,?,?,?,?,?,?,?)',id,taskId,conversationId,principalId,null,'user_control',hash,JSON.stringify(task),Date.now());
       return task;
     });
+  }
+  /** A user's direct command is still settling, so a new one joins the FIFO queue. */
+  private queuesDirectCommand(task:TaskSnapshot,previous:TaskRevision):boolean {
+    return ['browser','computer'].includes(task.gatewayTarget?.adapter??'')&&previous.directCommand===true&&(['queued','starting','running'].includes(task.state)||(task.state==='interrupting'&&task.executionControl?.action==='revise'));
+  }
+  /** Speech while a direct command settles is the next command, not an interruption:
+   * pausing first would fold it into a correction of the running command. */
+  voicePauseApplies(taskId:string):boolean {
+    const task=this.store.task(taskId);
+    if(!task)return false;
+    return !(task.automationController==='user'&&this.queuesDirectCommand(task,this.revision(taskId,task.revision)));
   }
   cancel(context: CommandContext, taskId: string, replacedByTaskId?: string): TaskSnapshot {
     return this.command(context, 'cancel', { taskId, ...(replacedByTaskId ? { replacedByTaskId } : {}) }, false, () => this.cancelOwned(context.conversationId, taskId, replacedByTaskId), taskId);

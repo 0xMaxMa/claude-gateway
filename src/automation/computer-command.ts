@@ -173,10 +173,14 @@ const OPERATORS:Array<{words:string[];labels:string[]}>=[
 ];
 const MULTIPLIERS:Array<[string,number]>=[['ล้าน',1e6],['แสน',1e5],['หมื่น',1e4],['พัน',1e3],['ร้อย',100],['สิบ',10]];
 const UNITS:Array<[string,number]>=[...Object.entries(DIGITS).filter(([w])=>/\p{Script=Thai}/u.test(w)).map(([w,d]):[string,number]=>[w,Number(d)]),['เอ็ด',1],['ยี่',2]];
-/** Digits a spoken token stands for: "5", "๕", "ห้า", "ห้าสิบ" (50), "ห้าศูนย์" (5, 0). */
-function spokenDigits(token:string):string|undefined{
- if(/^[0-9๐-๙]+$/u.test(token))return token.replace(/[๐-๙]/gu,d=>String(d.charCodeAt(0)-0x0e50));
- if(Object.hasOwn(DIGITS,token))return DIGITS[token];
+/**
+ * Digits a spoken token stands for: "5", "๕", "ห้า", "ห้าสิบ" (50), "ห้าศูนย์" (5, 0).
+ * A trailing digit after ร้อย/พัน/หมื่น/แสน/ล้าน is also everyday shorthand for the
+ * next place down ("ร้อยห้า" is 105 or 150): that reading is returned as shorthand.
+ */
+function spokenNumber(token:string):{digits:string;shorthand?:string}|undefined{
+ if(/^[0-9๐-๙]+$/u.test(token))return {digits:token.replace(/[๐-๙]/gu,d=>String(d.charCodeAt(0)-0x0e50))};
+ if(Object.hasOwn(DIGITS,token))return {digits:DIGITS[token]};
  const words:Array<{unit?:number;multiplier?:number;word:string}>=[];
  for(let rest=token;rest;){
   const unit=UNITS.find(([w])=>rest.startsWith(w)),multiplier=MULTIPLIERS.find(([w])=>rest.startsWith(w));
@@ -185,7 +189,7 @@ function spokenDigits(token:string):string|undefined{
   rest=rest.slice((unit?unit[0]:multiplier![0]).length);
  }
  // Only digit words, said one by one ("ห้าศูนย์"): the digits in order.
- if(words.every(w=>w.unit!==undefined&&w.word!=='เอ็ด'&&w.word!=='ยี่'))return words.map(w=>String(w.unit)).join('');
+ if(words.every(w=>w.unit!==undefined&&w.word!=='เอ็ด'&&w.word!=='ยี่'))return {digits:words.map(w=>String(w.unit)).join('')};
  // A Thai numeral: units scale the following place value, strictly descending.
  let total=0,pending:number|undefined,last=Infinity;
  for(const [i,w] of words.entries()){
@@ -196,7 +200,8 @@ function spokenDigits(token:string):string|undefined{
   if(w.multiplier!>=last)return;
   total+=(pending??1)*w.multiplier!;pending=undefined;last=w.multiplier!;
  }
- return String(total+(pending??0));
+ const shorthand=pending!==undefined&&last>=100&&words.at(-1)!.word!=='เอ็ด'&&words.at(-2)?.multiplier===last?String(total+pending*last/10):undefined;
+ return {digits:String(total+(pending??0)),...(shorthand?{shorthand}:{})};
 }
 export type LabelCommand={presses:string[][];spoken:string}|{clarification:string}|{tooLong:true};
 /** Most presses one spoken number may expand to. */
@@ -210,8 +215,12 @@ export function labelCommand(command:string):LabelCommand|undefined{
  if(!payload)return;
  const operator=OPERATORS.find(o=>o.words.includes(payload));
  if(operator)return {presses:[operator.labels],spoken:payload};
- const tokens=payload.split(' '),digits=tokens.map(spokenDigits);
- if(digits.some(d=>d===undefined))return;
+ const tokens=payload.split(' '),numbers=tokens.map(spokenNumber);
+ if(numbers.some(n=>n===undefined))return;
+ // Never guess between the formal and the shorthand reading: ask.
+ const shorthand=numbers.find(n=>n!.shorthand);
+ if(shorthand)return {clarification:`${shorthand.digits} หรือ ${shorthand.shorthand}?`};
+ const digits=numbers.map(n=>n!.digits);
  // Each token alone, or single digits one by one; a multi-digit form beside
  // another number is a self-correction or a mishearing, never concatenated.
  if(tokens.length>1&&digits.some(d=>d!.length>1))return {clarification:tokens.join(' หรือ ')+'?'};

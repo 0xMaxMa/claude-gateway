@@ -54,6 +54,9 @@ test('computerSteps is a recognised Jev feature flag',()=>{
  const {validateJevConfig}=require('../../../src/jev/validation');
  expect(()=>validateJevConfig({features:{computerSteps:{enabled:true}}})).not.toThrow();
  expect(()=>validateJevConfig({features:{computerSteps:{enabled:'yes'}}})).toThrow();
+ // L7: only implemented features are accepted; the unused reserved flags are gone.
+ for(const flag of ['computerTasks','browserTasks','browserSteps'])expect(()=>validateJevConfig({features:{[flag]:{enabled:true}}})).not.toThrow();
+ for(const flag of ['skillRouting','progressFiltering','conversationIntake'])expect(()=>validateJevConfig({features:{[flag]:{enabled:true}}})).toThrow();
 });
 
 test('E2E-3: the user\'s own step list is used verbatim instead of the agent\'s rewritten goal',async()=>{

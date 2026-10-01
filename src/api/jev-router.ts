@@ -1,10 +1,28 @@
-import { Router, Request } from 'express';
+import express, { Router, Request, Response, NextFunction, RequestHandler } from 'express';
 import { createHash } from 'crypto';
 import { AgentConfig, GatewayConfig, ApiKey } from '../types';
 import { canWriteAgent, canAccessAgent, createApiAuthMiddleware } from './auth';
 import { gatewayJev, jevAllowed } from '../orchestration/jev-gateway';
 import { JevError, JevRequest } from '../jev/types';
 
+export const JEV_EVALUATE_PATH='/api/v1/jev/evaluate';
+// The global JSON parser stops at 100kB; maxInputBytes may be configured up to
+// 1 MiB, plus room for agentId/requestId and JSON framing.
+const JEV_BODY_LIMIT=1048576+8192;
+const jevJson=express.json({limit:JEV_BODY_LIMIT});
+/** Parses the evaluation body after authentication; parse failures keep the Jev error shape. */
+function jevBody(req:Request,res:Response,next:NextFunction){
+  jevJson(req,res,(error?:unknown)=>{
+    if(!error){next();return;}
+    const tooLarge=(error as {type?:string}).type==='entity.too.large';
+    res.status(tooLarge?413:400).json({error:{code:'JEV_INVALID_REQUEST',message:tooLarge?'Jev request body exceeds the gateway limit.':'Jev request body is not valid JSON.'}});
+  });
+}
+/** The gateway-wide JSON parser, leaving the Jev evaluation body to jevBody. */
+export function jsonExceptJevEvaluate(): RequestHandler {
+  const json=express.json();
+  return (req,res,next)=>req.method==='POST'&&req.path===JEV_EVALUATE_PATH?next():json(req,res,next);
+}
 /** Evaluation is a paid action. An API key must have write access to its agent. */
 export function createJevRouter(config: GatewayConfig, agents: Map<string, AgentConfig>): Router {
   const router=Router();
@@ -14,7 +32,7 @@ export function createJevRouter(config: GatewayConfig, agents: Map<string, Agent
     const current=key && config.gateway.api?.keys.find(k=>k.key===key.key);
     return Boolean(current && (write?canWriteAgent(current,agentId):canAccessAgent(current,agentId)));
   };
-  router.post('/v1/jev/evaluate', async(req,res)=>{
+  router.post('/v1/jev/evaluate', jevBody, async(req,res)=>{
     const body=req.body;
     const agent=typeof body?.agentId==='string' ? agents.get(body.agentId) : undefined;
     if(!agent || !allowed(req,agent.id,true)){res.status(403).json({error:'ACCESS_DENIED'});return;}
@@ -23,8 +41,9 @@ export function createJevRouter(config: GatewayConfig, agents: Map<string, Agent
     const onClose=()=>{if(!res.writableFinished)controller.abort();};res.once('close',onClose);
     try {
       const principalId=createHash('sha256').update((req as Request & {apiKey: ApiKey}).apiKey.key).digest('hex');
+      // Validate the caller's own ID before deriving the internal one from it.
+      if(body.requestId!==undefined && (typeof body.requestId!=='string'||!/^[\x21-\x7e]{1,256}$/.test(body.requestId))) throw new JevError('INVALID_REQUEST','Invalid request ID.');
       const requestId=typeof body.requestId==='string' ? createHash('sha256').update(JSON.stringify([principalId,agent.id,body.requestId])).digest('hex') : undefined;
-      if(body.requestId!==undefined && (typeof body.requestId!=='string'||body.requestId.length>256)) throw new JevError('INVALID_REQUEST','Invalid request ID.');
       const result=await gatewayJev(config).service.evaluate({state:body.state,questions:body.questions,...(requestId ? {requestId} : {})} as JevRequest, {
         principalId,agentId:agent.id,consumer:'api',signal:controller.signal,
         authorize:()=>allowed(req,agent.id,true)&&agents.has(agent.id)&&jevAllowed(config,agents.get(agent.id)!)

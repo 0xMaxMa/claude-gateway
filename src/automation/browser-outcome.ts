@@ -1,4 +1,4 @@
-import {stepRunText} from './computer-outcome';
+import {stepRunText,UNKNOWN_PREFIX} from './computer-outcome';
 import type {BrowserTaskReport} from '../jev/browser-contract';
 import type {BrowserCommandAction} from './browser-command';
 
@@ -48,7 +48,8 @@ function hint(reason:string,action?:BrowserCommandAction){
 export function browserOutcomeText(report:BrowserTaskReport):string{
  if(report.stepRun)return stepRunText(report.stepRun,detail=>HINTS[detail]?hint(detail):undefined);
  const outcome=report.commandOutcome;
- if(outcome?.done)return `Done: ${done(outcome.action)}. Send the next command.`;
+ if(report.reason==='OUTCOME_UNKNOWN'||report.lastAction?.outcome==='unknown')return `${UNKNOWN_PREFIX} the last action may have run. Check the page before sending the command again.`;
+ if(outcome?.done)return `Done: ${done(outcome.action)}.${outcome.reason==='PAGE_STILL_LOADING'?' The page was still loading; check it before the next command.':' Send the next command.'}`;
  const reason=outcome?.reason??report.reason;
  if(outcome&&HINTS[reason])return `Not done: ${hint(reason,outcome.action)}`;
  if(report.lastAction?.outcome==='confirmed'&&report.steps>0)return 'Done: the action was sent. Send the next command.';

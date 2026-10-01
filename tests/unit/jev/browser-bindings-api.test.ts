@@ -41,3 +41,16 @@ test('scope proof failure or API-key revocation during proof cannot persist a bi
  expect((await request(app).post(url).set('Authorization','Bearer admin-fixture').send(body)).status).toBe(403);
  expect(JSON.parse(readFileSync(path,'utf8')).gateway.jev.browser.bindings).toEqual([]);
 });
+test('L9: evidence distinguishes a bad query (400) and a temporary outage (503) from an access denial (403)',async()=>{
+ const {OrchestrationError}=require('../../../src/orchestration/types');
+ const evidenceUrl='/v1/agents/a/sessions/session/tasks/task/browser-evidence';
+ const auth=(r:request.Test)=>r.set('Authorization','Bearer admin-fixture');
+ runner.browserEvidence=jest.fn(async()=>({observedAt:1}));
+ expect((await auth(request(app).get(evidenceUrl))).status).toBe(200);
+ expect((await auth(request(app).get(evidenceUrl+'?refresh=yes'))).body).toEqual({error:'INVALID_REFRESH'});
+ runner.browserEvidence=jest.fn(async()=>{throw new OrchestrationError('BROWSER_INSPECTION_UNAVAILABLE');});
+ const outage=await auth(request(app).get(evidenceUrl));expect(outage.status).toBe(503);expect(outage.body).toEqual({error:'BROWSER_INSPECTION_UNAVAILABLE'});
+ runner.browserEvidence=jest.fn(async()=>{throw new OrchestrationError('ACCESS_DENIED');});
+ expect((await auth(request(app).get(evidenceUrl))).status).toBe(403);
+ expect((await request(app).get(evidenceUrl)).status).toBe(401);
+});

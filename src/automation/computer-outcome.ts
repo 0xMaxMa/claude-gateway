@@ -25,6 +25,8 @@ const HINTS:Record<string,string>={
  SEQUENCE_TARGET_MISSING:'the next button was not found exactly once on the screen.',
  SEQUENCE_TOO_LONG:'the number is too long to press safely. Say at most 8 digits at a time.',
 };
+/** A round whose last dispatched action has no receipt; it may have run. */
+export const UNKNOWN_PREFIX='Unknown:';
 const quoted=(label?:string)=>label?JSON.stringify(label.slice(0,80)):'the chosen control';
 export function computerActionText(action:NonNullable<ComputerTaskReport['lastAction']>){
  switch(action.kind){
@@ -51,6 +53,8 @@ export function computerOutcomeText(report:ComputerTaskReport):string{
  if(run)return stepRunText(run,detail=>HINTS[detail]?hint(detail,report):undefined);
  const trace=report.trace??[];
  const waiting=[...trace].reverse().find(e=>e.phase==='waiting'&&e.reason!=='POST_ACTION_EVIDENCE_STALE')?.reason;
+ // The device may have acted: never tell the owner it was not done.
+ if(report.reason==='OUTCOME_UNKNOWN')return `${UNKNOWN_PREFIX} the last action may have run. Check the screen before sending the command again.`;
  if(report.clarification)return `Not done: ${report.clarification}`;
  // A spoken number stopped part-way: say how far it got, never "Done".
  const sequence=report.lastAction?.sequence,planned=report.lastAction?.planned;

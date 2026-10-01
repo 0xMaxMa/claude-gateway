@@ -4,4 +4,3 @@ export * from './service';
 export * from './browser-contract';
 export { BrowserConnectorRegistry, validateBrowserIntegration } from './browser-connector';
 
-export * from './skill-routing';

@@ -57,3 +57,14 @@ test('connection status distinguishes offline, missing approval and reconnection
  global.fetch=jest.fn(async()=>new Response('unavailable',{status:503}));
  await expect(connectors.accessState(binding.id,'p','c')).rejects.toThrow('COMPUTER_DISCOVERY_UNAVAILABLE');
 });
+test('L5: malformed or oversized relay replies are COMPUTER_DISCOVERY_INVALID, read with a streaming cap',async()=>{
+ global.fetch=jest.fn(async()=>new Response('{not json'));
+ await expect(new ComputerConnectors(config(),{id:'a'} as any).discover(context,()=>true)).rejects.toThrow('COMPUTER_DISCOVERY_INVALID');
+ let pulled=0;const chunk=new Uint8Array(65536).fill(32);
+ const endless=new ReadableStream<Uint8Array>({pull(c){pulled++;c.enqueue(chunk);}});
+ global.fetch=jest.fn(async()=>new Response(endless));
+ await expect(new ComputerConnectors(config(),{id:'a'} as any).discover(context,()=>true)).rejects.toThrow('COMPUTER_DISCOVERY_INVALID');
+ expect(pulled).toBeLessThan(10);
+ global.fetch=jest.fn(async()=>new Response(JSON.stringify({grants:[null,grant]})));
+ await expect(new ComputerConnectors(config(),{id:'a'} as any).discover(context,()=>true)).resolves.toHaveLength(1);
+});

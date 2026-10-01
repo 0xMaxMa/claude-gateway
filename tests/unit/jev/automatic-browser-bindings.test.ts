@@ -37,3 +37,25 @@ test('browser-specific reasoning config takes precedence over shared Thinking co
  cfg.gateway.jev.thinking.model='new';expect(a.config()!.textHelper!.model).toBe('old');
  delete cfg.gateway.jev.browser.textHelper;expect(a.config()!.textHelper!.model).toBe('new');
 });
+test('M6: one malformed relay tab is skipped and the other approved tabs are still bound',async()=>{
+ const warn=jest.spyOn(console,'warn').mockImplementation(()=>{});
+ try{
+  const bad={...grant,id:'bad',policy:{control:true,tabs:[{id:{nested:true}},null]}};
+  const a=new AutomaticBrowserBindings(config(),{id:'a'} as any,join(dir,'b'),jest.fn().mockResolvedValue(reply([bad,grant,null])));
+  await a.refresh('p','c');
+  expect(a.config()!.bindings.map(b=>b.scope)).toEqual([{device_id:'d',grant_id:'g',tab_id:'t'}]);
+  expect(warn).toHaveBeenCalledTimes(1);expect(String(warn.mock.calls[0][0])).not.toContain('secret');
+ }finally{warn.mockRestore();}
+});
+test('L5: malformed relay JSON is a discovery error, not a SyntaxError',async()=>{
+ const a=new AutomaticBrowserBindings(config(),{id:'a'} as any,join(dir,'b'),jest.fn().mockResolvedValue(new Response('{not json')));
+ await expect(a.refresh('p','c')).rejects.toThrow('BROWSER_DISCOVERY_INVALID');
+});
+test('L5: adapter shutdown aborts an in-flight discovery request instead of waiting out its timeout',async()=>{
+ const stop=new AbortController();
+ const fetcher=jest.fn((_url:URL,init:RequestInit)=>new Promise<Response>((_resolve,reject)=>init.signal!.addEventListener('abort',()=>reject(init.signal!.reason),{once:true})));
+ const a=new AutomaticBrowserBindings(config(),{id:'a'} as any,join(dir,'b'),fetcher as any);
+ const pending=a.refresh('p','c',false,()=>true,stop.signal);
+ stop.abort();
+ await expect(pending).rejects.toBeDefined();
+});

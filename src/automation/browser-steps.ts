@@ -22,6 +22,7 @@ const SCROLL_NO_EFFECT_MAX = 3;
 const STABLE_OBSERVATIONS = 8;
 const STABLE_DELAY_MS = 300;
 // The previous step's page may still be loading (results absent right after Enter).
+const PART_ACTIONS = 3, PART_EVALUATIONS = 6;
 const LOADING_REASONS = new Set(['NO_SUPPORTED_ACTION','LOW_TARGET_CONFIDENCE','LOW_OPERATION_CONFIDENCE','PAGE_CONTENT_UNAVAILABLE']);
 // Steps whose effect may legitimately be invisible in a structured observation.
 const TOLERANT_KINDS = new Set(['scroll','key']);
@@ -35,7 +36,8 @@ const StepsInput = z.object({
   startUrl: z.string().max(8192).optional(),
   fields: z.array(z.object({label:z.string().min(1).max(250),text:z.string().max(2000)}).strict()).max(60).default([]),
   timeoutMs: z.number().int().min(1000).max(600000).default(COMMAND_STEPS_TIMEOUT_MS),
-  maxSteps: z.number().int().optional(), maxEvaluations: z.number().int().optional(), maxTextCalls: z.number().int().min(0).max(60).optional(),
+  /** Whole-run budgets from the binding; each step part still gets at most 3 actions / 6 decisions. */
+  maxSteps: z.number().int().min(1).max(100).optional(), maxEvaluations: z.number().int().min(1).max(150).optional(), maxTextCalls: z.number().int().min(0).max(60).optional(),
   maxStaleRetries: z.number().int().min(0).max(10).optional(), operationConfidence: z.number().min(0).max(1).optional(), targetConfidence: z.number().min(0).max(1).optional(),
 }).strict();
 export type BrowserStepsInput = z.input<typeof StepsInput>;
@@ -127,10 +129,12 @@ export async function runBrowserStepsWith(runOne: RunOne, parse: (value: unknown
         let result: BrowserUseResult | undefined;
         for (let attempt = 0; attempt <= STEP_RETRY_MAX; attempt++) {
           runSignal.throwIfAborted();
+          const actionsLeft = Math.min(PART_ACTIONS, (input.maxSteps ?? Infinity) - actions), evaluationsLeft = Math.min(PART_EVALUATIONS, (input.maxEvaluations ?? Infinity) - evaluations);
+          if (actionsLeft < 1 || evaluationsLeft < 1) return waiting(stop(index, 'STEP_NOT_EXECUTED', actionsLeft < 1 ? 'ACTION_BUDGET' : 'EVALUATION_BUDGET'));
           before = undefined;
           const context = [input.interactionContext, index ? 'Completed steps in this run: ' + input.steps.slice(0, index).map((s, i) => `${i + 1}) ${s}`).join('; ') : ''].filter(Boolean).join('\n').slice(-8000);
           result = await runOne({contractVersion: 1, goal: part, scope: input.scope, command: true, yieldAfterAction: true, strictDestructive: true,
-            fields: input.fields, maxSteps: 3, maxEvaluations: 6, timeoutMs: Math.max(1000, deadline - Date.now()),
+            fields: input.fields, maxSteps: actionsLeft, maxEvaluations: evaluationsLeft, timeoutMs: Math.max(1000, deadline - Date.now()),
             ...(input.maxTextCalls !== undefined ? {maxTextCalls: input.maxTextCalls} : {}), ...(input.maxStaleRetries !== undefined ? {maxStaleRetries: input.maxStaleRetries} : {}),
             ...(input.operationConfidence !== undefined ? {operationConfidence: input.operationConfidence} : {}), ...(input.targetConfidence !== undefined ? {targetConfidence: input.targetConfidence} : {}),
             ...(input.startUrl && index === 0 && part === parts[0] && attempt === 0 ? {startUrl: input.startUrl} : {}),

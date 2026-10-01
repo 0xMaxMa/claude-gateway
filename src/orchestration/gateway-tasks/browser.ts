@@ -27,8 +27,10 @@ interface Receipt {command?:string;interaction?:{action?:BrowserCommandAction;ur
 export class BrowserTaskAdapter implements GatewayTaskAdapter {
   readonly name='browser';
   private readonly running=new Map<string,{controller:AbortController;interrupt:AbortController;done:Promise<void>}>();
+  /** Ends in-flight discovery and consent waits when the adapter shuts down. */
+  private readonly closing=new AbortController();
   constructor(private readonly options:{agentId:string;root:string;allowed:()=>boolean;bindings:()=>BrowserTaskBinding[];
-    refreshBindings?:(context:CommandContext)=>Promise<void>;
+    refreshBindings?:(context:CommandContext,signal:AbortSignal)=>Promise<void>;
     evaluate:(task:TaskSnapshot,request:JevRequest,signal:AbortSignal,authorized:()=>boolean)=>Promise<JevResult>;
     onProgress?:(task:TaskSnapshot,progress:BrowserProgress)=>void;
     allowedTask?:(task:TaskSnapshot)=>boolean;
@@ -49,7 +51,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
   async discover(query='',offset=0,context?:CommandContext):Promise<unknown> {
     if(!this.options.allowed()||!context)throw new OrchestrationError('BROWSER_NOT_ALLOWED');
     if(!Number.isSafeInteger(offset)||offset<0||typeof query!=='string')throw new OrchestrationError('INVALID_INPUT');
-    await this.options.refreshBindings?.(context);
+    await this.options.refreshBindings?.(context,this.closing.signal);
     if(!this.options.allowed())throw new OrchestrationError('BROWSER_NOT_ALLOWED');
     const bindings=this.options.bindings().filter(b=>b.version===1&&b.principalId===context.principalId&&b.conversationId===context.conversationId&&`${b.id} ${b.name}`.toLowerCase().includes(query.toLowerCase()));
     return {scope:'browser',instruction:'Use task_spawn with target_profile=gateway-managed and gateway_target={adapter:browser,session_id:<target ID>}. For opening a website, include start_url with the user-requested HTTP(S) URL. Browser targets are supported; do not use safemode or a direct MCP worker.',hint:bindings.length ? undefined : 'No approved browser tab is ready. Approve the access request in the browser extension, then discover again. Do not fall back to direct browser tools.',targets:bindings.slice(offset,offset+25).map(b=>({adapter:'browser',session_id:b.id,name:b.name,version:1})),next_offset:offset+25<bindings.length?offset+25:null};
@@ -263,7 +265,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       this.write(task,requestId,receipt);
     }
   }
-  async close():Promise<void>{const runs=[...this.running.values()];runs.forEach(r=>r.controller.abort());await Promise.allSettled(runs.map(r=>r.done));}
+  async close():Promise<void>{this.closing.abort();const runs=[...this.running.values()];runs.forEach(r=>r.controller.abort());await Promise.allSettled(runs.map(r=>r.done));}
 }
 
 function knownBrowserStop(result:BrowserExecutionResult|undefined,dispatched:BrowserMutationCheckpoint|undefined):boolean {

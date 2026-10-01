@@ -251,7 +251,7 @@ export class AgentOrchestrationRuntime {
       stepMode:()=>gateway.gateway.jev?.features?.browserSteps?.enabled===true,settled:()=>gatewayTick.run(),userSteps,
       allowed:()=>jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true,
       bindings:browserBindings,
-      refreshBindings:async context=>{store.assertMember(context.conversationId,context.principalId);await automaticBrowsers.refresh(context.principalId,context.conversationId,context.execute,()=>{try{store.assertMember(context.conversationId,context.principalId);return jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true;}catch{return false;}});store.assertMember(context.conversationId,context.principalId);},
+      refreshBindings:async (context,signal)=>{store.assertMember(context.conversationId,context.principalId);await automaticBrowsers.refresh(context.principalId,context.conversationId,context.execute,()=>{try{store.assertMember(context.conversationId,context.principalId);return jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true;}catch{return false;}},signal);store.assertMember(context.conversationId,context.principalId);},
       allowedEvidence:task=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return Boolean(store.task(task.taskId));}catch{return false;}},
       allowedTask:(task)=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);const current=store.task(task.taskId);return Boolean(current && current.activeAttemptId===task.activeAttemptId && ['starting','running','interrupting'].includes(current.state));}catch{return false;}},
       onNeedsInput:(task,question)=>{
@@ -670,11 +670,12 @@ export class AgentOrchestrationRuntime {
     const input = this.store.get('SELECT conversation_id,principal_id,modality,text FROM conversation_inputs WHERE id=?', round.inputId);
     if (input?.modality !== 'live_voice' || input.conversation_id !== task.conversationId || input.principal_id !== task.ownerPrincipalId) return;
     const listener = this.voiceListeners.get(task.agentSessionId);
-    const text = listener?.principalId === task.ownerPrincipalId ? directCommandSpeech(round.outcome, String(input.text)) : undefined;
-    if (!text || this.responseIdForInput(round.inputId)) return;
-    const responseId = this.decisions.notice(task.conversationId, text, false, round.inputId);
-    this.publishText(task.agentSessionId, responseId, text, true);
-    try { listener!.receive({ responseId, text, spoken: text, speechOnly: true }); } catch { /* Playback cannot change the settled round. */ }
+    const speech = listener?.principalId === task.ownerPrincipalId ? directCommandSpeech(round.outcome, String(input.text)) : undefined;
+    if (!speech || this.responseIdForInput(round.inputId)) return;
+    // History keeps the generic line; only playback carries the user's own words.
+    const responseId = this.decisions.notice(task.conversationId, speech.recorded, false, round.inputId);
+    this.publishText(task.agentSessionId, responseId, speech.recorded, true);
+    try { listener!.receive({ responseId, text: speech.recorded, spoken: speech.spoken, speechOnly: true }); } catch { /* Playback cannot change the settled round. */ }
     void this.flushHistory().catch(() => {});
   }
   saveVoiceAudio(sessionId: string, principalId: string, responseId: string, audio: Buffer): void {

@@ -101,6 +101,15 @@ describe('V3 multi-digit utterances',()=>{
   const names=f.calls.map(c=>c.name).filter(n=>n!=='computer_release');
   expect(names.slice(0,5)).toEqual(['computer_acquire','computer_observe','computer_action','computer_observe','computer_action']);
  });
+ test.each([['ร้อยห้า','105 หรือ 150?'],['พันห้า','1005 หรือ 1500?'],['หมื่นสอง','10002 หรือ 12000?'],['สองร้อยห้า','205 หรือ 250?']])('M3: shorthand %s asks %s and presses nothing',async(command,question)=>{
+  const f=fixture();const r=await run(f,command);
+  expect(f.presses()).toEqual([]);expect(f.requests).toHaveLength(0);
+  expect((r as any).clarification).toBe(question);
+ });
+ test.each([['ร้อยห้าสิบ',['c14','c11','c18']],['ร้อยเอ็ด',['c14','c18','c14']]])('M3: an unambiguous %s presses %j',async(command,refs)=>{
+  const f=fixture();await run(f,command);
+  expect(f.presses()).toEqual(refs);
+ });
  test('"ห้า ห้าสิบ" asks which number and presses nothing',async()=>{
   const f=fixture();const r=await run(f,'ห้า ห้าสิบ');
   expect(f.presses()).toEqual([]);expect(f.requests).toHaveLength(0);
@@ -117,6 +126,8 @@ describe('V3 multi-digit utterances',()=>{
   const r=await run(f,'ห้า ศูนย์ ห้า');
   expect(f.presses()).toEqual(['c11','c18']);
   expect(r).toMatchObject({status:'needs_reconciliation',reason:'OUTCOME_UNKNOWN'});
+  // H1: never "pressed 1 of 3" or "Not done" — the second press may have landed.
+  expect(computerOutcomeText(report(r) as any)).toMatch(/^Unknown: the last action may have run/);
  });
  test('a press rejected mid-sequence stops and reports how far it got',async()=>{
   const f=fixture(calculator,(_args,count)=>count===2?{state:'not_executed',error:'STALE_OBSERVATION'}:{state:'completed'});
@@ -147,5 +158,23 @@ describe('V5 fillers and particles are ignored for matching only',()=>{
  test('the verbatim goal still reaches Jev when nothing matches',async()=>{
   const f=fixture();await run(f,'เอาล่ะ Percent ครับ.');
   expect(f.requests[0].state.command).toBe('เอาล่ะ Percent ครับ.');
+ });
+});
+
+describe('L4: exact-label presses need a keypad on screen',()=>{
+ const noKeypad=()=>({...calculator,controls:calculator.controls.filter((c:any)=>!/^[0-9]$/.test(c.label.trim()))});
+ test.each(['clear','add','plus','เคลียร์'])('%s outside a keypad goes to Jev instead of pressing',async command=>{
+  const state=noKeypad();
+  expect(state.controls.some((c:any)=>['clear','add','all clear','ac'].includes(c.label.trim().toLowerCase()))).toBe(true);
+  const f=fixture(state);await run(f,command);
+  expect(f.requests.length).toBeGreaterThan(0);expect(f.presses()).toEqual([]);
+ });
+ test('the same words on the calculator keypad still press directly',async()=>{
+  const f=fixture();await run(f,'add');
+  expect(f.requests).toHaveLength(0);expect(f.presses()).toHaveLength(1);
+ });
+ test('"OK Google" is not an address (the filler leaves a bare site name)',()=>{
+  expect(addressCommand('OK Google')).toBeUndefined();expect(addressCommand('โอเค google')).toBeUndefined();
+  expect(addressCommand('โอเค เข้า google')).toBe('google.com');
  });
 });

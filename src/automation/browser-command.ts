@@ -76,6 +76,23 @@ export function browserDestructiveBlock(element:PageElement|undefined,option:str
  return commandAuthorizes(command,target)&&confidence>=DESTRUCTIVE_CONFIDENCE?undefined:target;
 }
 
+/**
+ * Step mode (strict): Enter, or typing with submit, can send whatever form the
+ * page holds, and the observation does not say which field has focus. Only a
+ * search field submits freely; otherwise a high-impact field or any high-impact
+ * control on the page (Send, Delete, Pay...) returns control, as the Computer
+ * Use step fence does for Enter on a high-impact focused control.
+ */
+export function browserSubmitBlock(elements:PageElement[],field:PageElement|undefined,strict:boolean):DestructiveTarget|undefined {
+ if(!strict||(field&&searchLike(field)))return;
+ const own=field&&destructiveLabel({label:field.label,value:field.value,context:field.context},true);
+ if(own)return own;
+ for(const element of elements){
+  const risky=destructiveLabel({label:element.label,value:element.value,context:element.context},false);
+  if(risky)return risky;
+ }
+}
+
 /** Previous command context for the next direct command: references only, never replay. */
 export function browserInteractionContext(previous:{command?:string;action?:BrowserCommandAction;url?:string;title?:string}|undefined):string {
  if(!previous?.command)return '';

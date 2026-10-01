@@ -8,6 +8,9 @@ import { apiPrincipal } from '../orchestration/identity';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
 import { inspectBrowser, resolveBrowserConnection, validateBrowserIntegration } from '../jev/browser-connector';
 import { JevError } from '../jev/types';
+import { OrchestrationError } from '../orchestration/types';
+
+const EVIDENCE_UNAVAILABLE=new Set(['BROWSER_EVIDENCE_UNAVAILABLE','BROWSER_INSPECTION_UNAVAILABLE','ORCHESTRATION_DISABLED']);
 import { jevAllowed } from '../orchestration/jev-gateway';
 import type { BrowserConnectorConfig, BrowserIntegrationConfig } from '../jev/browser-contract';
 
@@ -82,9 +85,17 @@ export function createBrowserBindingsRouter(config:GatewayConfig,runners:Map<str
     });res.status(204).end();}catch(e){error(res,e);}
   });
   router.get(base+'/tasks/:taskId/browser-evidence',(req,res,next)=>createApiAuthMiddleware(config.gateway.api?.keys??[])(req,res,next),async(req,res)=>{
-    try {const key=currentKey(req),runner=runners.get(req.params.agentId);if(!runner || (req.query.refresh!==undefined&&req.query.refresh!=='true'&&req.query.refresh!=='false'))throw Error('ACCESS_DENIED');
+    if(req.query.refresh!==undefined&&req.query.refresh!=='true'&&req.query.refresh!=='false'){res.status(400).json({error:'INVALID_REFRESH'});return;}
+    try {const key=currentKey(req),runner=runners.get(req.params.agentId);if(!runner)throw Error('ACCESS_DENIED');
       res.setHeader('Cache-Control','no-store');const evidence=await runner.browserEvidence(req.params.sessionId,apiPrincipal(key),req.params.taskId,req.query.refresh==='true');currentKey(req);res.json(evidence);
-    }catch{res.status(403).json({error:'BROWSER_EVIDENCE_UNAVAILABLE'});}
+    }catch(e){
+      const code=e instanceof OrchestrationError?e.code:e instanceof Error?e.message:'';
+      // A reachable task whose evidence cannot be read now is a temporary 503,
+      // not an access denial. Ownership failures stay an indistinct 403.
+      if(EVIDENCE_UNAVAILABLE.has(code)){res.status(503).json({error:code});return;}
+      if(!(e instanceof OrchestrationError)&&code!=='ACCESS_DENIED')console.warn(JSON.stringify({ts:new Date().toISOString(),level:'warn',event:'Browser evidence request failed',agentId:req.params.agentId,error:/^[A-Z][A-Z0-9_]{0,79}$/.test(code)?code:'UNEXPECTED'}));
+      res.status(403).json({error:'BROWSER_EVIDENCE_UNAVAILABLE'});
+    }
   });
   return router;
 }

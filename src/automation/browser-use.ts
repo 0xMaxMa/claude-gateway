@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {textCommand} from "./direct-command";
 import {runBrowserStepsWith,type BrowserStepsInput} from "./browser-steps";
-import {browserDestructiveBlock,planBrowserCommand,searchFields,type BrowserCommandAction,type BrowserCommandOutcome,type BrowserCommandPlan} from "./browser-command";
+import {browserDestructiveBlock,browserSubmitBlock,planBrowserCommand,searchFields,type BrowserCommandAction,type BrowserCommandOutcome,type BrowserCommandPlan} from "./browser-command";
 
 export const BROWSER_USE_CONTRACT_VERSION = 1 as const;
 /** Optional inputs this runner accepts within contract v1; hosts pass them only when advertised. */
@@ -394,7 +394,14 @@ export async function runBrowserUse(
     reason: string,
   ): BrowserUseResult => {
     if (input.command && !commandOutcome && lastAction?.outcome !== "unknown") {
-      if (status === "blocked" && COMMAND_NOT_DONE.has(reason)) {
+      // The extension confirmed the action, then the next page would not settle
+      // within the stale budget. The command ran; "not done" would invite a
+      // repeated submit or navigation.
+      if (status === "blocked" && reason === "STALE_RETRY_BUDGET" && lastAction?.outcome === "confirmed") {
+        commandOutcome = { done: true, reason: "PAGE_STILL_LOADING", ...(commandAction ? { action: commandAction } : {}) };
+        status = "needs_verification";
+        reason = "COMMAND_WAITING_INPUT";
+      } else if (status === "blocked" && COMMAND_NOT_DONE.has(reason)) {
         commandOutcome = { done: false, reason, ...(commandAction ? { action: commandAction } : {}) };
         status = "needs_verification";
         reason = "COMMAND_WAITING_INPUT";
@@ -627,6 +634,13 @@ export async function runBrowserUse(
     if (plan.kind === "key") {
       commandAction = { kind: "key", key: plan.key };
       if (!modern) return result("blocked", "KEY_UNSUPPORTED");
+      const block = plan.key === "Enter" ? browserSubmitBlock(page!.elements, undefined, input.strictDestructive) : undefined;
+      if (block) {
+        // Checked before any dispatch: nothing was sent.
+        commandAction = { kind: "key", key: plan.key, label: block.label };
+        emit({phase:"recovery",reason:"DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED",operation:"KEY"});
+        return result("blocked", "DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED");
+      }
       const action = await mutate("KEY", "page_keypress", () => ({ key: plan.key, ...(plan.repeat > 1 ? { repeat: plan.repeat } : {}), generation: page!.generation }));
       return isResult(action) ? action : done();
     }
@@ -642,6 +656,12 @@ export async function runBrowserUse(
     if (!field && fields.candidates.length) field = await chooseSearchField(fields.candidates);
     commandAction = { kind: "search", ...(field ? { label: field.label } : {}) };
     if (!field) return result("blocked", fields.candidates.length ? "LOW_TARGET_CONFIDENCE" : "NO_SUPPORTED_ACTION");
+    const block = browserSubmitBlock(page!.elements, field, input.strictDestructive);
+    if (block) {
+      commandAction = { kind: "search", label: block.label };
+      emit({phase:"recovery",reason:"DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED",operation:"SEARCH"});
+      return result("blocked", "DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED");
+    }
     const label = field.label;
     for (let attempt = 0; attempt < 2; attempt++) {
       const chosen = field!;

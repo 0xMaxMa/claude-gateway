@@ -197,10 +197,12 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      // without Jev. Text focus means words are text; several matches, none, or
      // a high-impact label keep the Jev path and its confirmation guard.
      const spoken=textFocused(state)?undefined:labelCommand(goal.goal);
-     const keypad=spoken&&['0','1','2','3','4','5','6','7','8','9'].some(digit=>labelTarget(state,[digit]));
+     // A keypad shows every digit once (Calculator, a dial pad). Elsewhere "clear",
+     // "add" or "one" are ordinary words for Jev, not a button to press blindly.
+     const keypad=spoken&&['0','1','2','3','4','5','6','7','8','9'].every(digit=>labelTarget(state,[digit]));
      if(spoken&&'clarification' in spoken&&keypad){clarification=spoken.clarification;await capture();return {result:waitForCommand('NUMBER_AMBIGUOUS')};}
      if(spoken&&'tooLong' in spoken&&keypad)return {result:waitForCommand('SEQUENCE_TOO_LONG')};
-     if(spoken&&'presses' in spoken){
+     if(spoken&&'presses' in spoken&&keypad){
       const controls=spoken.presses.map(labels=>labelTarget(state,labels));
       // "ลบ" beside a visible Delete/Remove control could mean either.
       const eraseWord=eraseCommand(goal.goal)!==undefined&&state.controls.some(c=>!c.sensitive&&c.role!=='AXMenuItem'&&destructiveLabel({label:c.label,value:c.value},false)?.groups.includes('delete'));

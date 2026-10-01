@@ -54,6 +54,17 @@ describe('Jev evaluation boundary', () => {
     await f.service.evaluate({ ...request, requestId: 'same' }, { ...context, principalId: 'agent:b' }); expect(f.fetcher).toHaveBeenCalledTimes(2);
     const calls = f.fetcher.mock.calls as any[][]; expect(JSON.parse(calls[0][1].body).request_id).not.toBe(JSON.parse(calls[1][1].body).request_id);
   });
+  it('M4: one caller filling its ledger share does not starve other callers or ID-less requests', async () => {
+    const f = fixture();
+    for (let i = 0; i < 1024; i++) await f.service.evaluate({ ...request, requestId: `burst-${i}` }, context);
+    await expect(f.service.evaluate({ ...request, requestId: 'burst-over' }, context)).rejects.toMatchObject({ code: 'QUEUE_FULL' });
+    // Generated IDs cannot repeat, so they need no ledger entry.
+    await expect(f.service.evaluate(request, context)).resolves.toMatchObject({ requestId: expect.any(String) });
+    await expect(f.service.evaluate({ ...request, requestId: 'burst-0' }, { ...context, principalId: 'agent:computer' })).resolves.toBeDefined();
+    // Settled entries yield when the shared ledger is full.
+    for (const p of ['b', 'c', 'd']) for (let i = 0; i < 1024; i++) await f.service.evaluate({ ...request, requestId: `x-${i}` }, { ...context, principalId: `agent:${p}` });
+    await expect(f.service.evaluate({ ...request, requestId: 'late' }, { ...context, principalId: 'agent:e' })).resolves.toBeDefined();
+  });
   it('revalidates permission after inference and retains usage evidence for revoked results', async () => {
     const f = fixture(); let allowed = true;
     f.fetcher.mockImplementation(async () => { allowed = false; return response(); });

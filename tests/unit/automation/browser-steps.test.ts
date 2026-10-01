@@ -162,3 +162,11 @@ test("after a page-changing step the next step waits for the page to settle (E2E
   expect(b.calls.filter(c => c.name === "page_click")).toHaveLength(1);
   expect(result.stepRun).toMatchObject({ completed: 2, stopReason: "ALL_STEPS_DONE" });
 }, 20000);
+
+test("L6: a binding's whole-run maxSteps is honored instead of a hardcoded per-part budget", async () => {
+  const b = browser(blank());
+  const result = await runBrowserSteps({ steps: ["เข้า google", "ค้นหา แมว", "scroll ลงมา"], scope, maxSteps: 2 }, { call: b.call, evaluate }, new AbortController().signal);
+  expect(b.mutations()).toEqual(["tab_navigate", "page_type"]);
+  expect(result.stepRun).toMatchObject({ completed: 2, stopReason: "STEP_NOT_EXECUTED", stoppedAt: 3, detail: "ACTION_BUDGET" });
+  expect(browserOutcomeText(result)).toContain("action limit");
+});

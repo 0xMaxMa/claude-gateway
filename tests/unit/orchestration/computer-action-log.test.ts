@@ -55,3 +55,20 @@ test('V6: the action log is bounded in entries and text',()=>{
   expect(Buffer.byteLength(JSON.stringify(log))).toBeLessThan(6000);
  }finally{f.close();}
 });
+
+test('L1: a correction logs the user\'s latest words, not the preamble, and typed text is never logged',()=>{
+ const f=fixture();try{
+  // Sent while the agent's opening round runs: stored as a correction revision.
+  const attempt=f.tasks.claim(f.task.taskId)!;f.tasks.started(attempt.attemptId,attempt.generation);
+  f.send('กด 5 แทน');
+  expect(f.tasks.revision(f.task.taskId,2).instructions).toMatch(/^Latest user correction/);
+  f.tasks.finish(attempt.attemptId,attempt.generation,{type:'paused',computerReport:pressed('1')} as WorkerOutcome);
+  f.round(pressed('5'));
+  f.send('พิมพ์ "hunter2 secret"');f.round(pressed('Field'));
+  const log=(f.store.task(f.task.taskId) as any).actionLog;
+  expect(log.find((e:any)=>e.revision===2).command).toBe('กด 5 แทน');
+  const typed=log.find((e:any)=>e.revision===3);
+  expect(typed.command).toBe('พิมพ์ "[text]"');
+  expect(JSON.stringify(log)).not.toContain('hunter2');
+ }finally{f.close();}
+});

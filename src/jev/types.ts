@@ -17,7 +17,7 @@ export interface JevConfig {
   apiKeyFile?: string; apiKeyEnv?: string; timeoutMs?: number; maxConcurrentRequests?: number;
   maxQueueSize?: number; maxInputBytes?: number; maxQuestions?: number;
   allowedAgentIds?: string[];
-  features?: Partial<Record<'computerTasks' | 'computerSteps' | 'browserTasks' | 'browserSteps' | 'skillRouting' | 'progressFiltering' | 'conversationIntake', { enabled?: boolean }>>;
+  features?: Partial<Record<'computerTasks' | 'computerSteps' | 'browserTasks' | 'browserSteps', { enabled?: boolean }>>;
 }
 export interface JevResult {
   requestId: string; requestedModel: string; model: string; answers: Record<string, JevAnswer>;

@@ -89,7 +89,7 @@ Each agent can set `jev.enabled: false` to narrow global permission. An agent ca
 
 There are no automatic retries or automatic switches to another billing source. A timeout or cancelled request does not establish that the provider did no work or charged nothing.
 
-The `features` block reserves `browserTasks`, `skillRouting`, `progressFiltering`, and `conversationIntake` enable flags. `computerSteps` enables step-by-step Computer Use (see below). These do not automatically install a browser adapter or activate future classification features. See the implementation boundary below.
+The `features` block accepts four enable flags: `computerTasks` (Computer Use connectors; on by default, set `enabled: false` to disable), `computerSteps` (step-by-step Computer Use), `browserTasks` (Remote Browser tasks through an installed adapter) and `browserSteps` (step-by-step Remote Browser commands). Any other key is rejected as invalid configuration. Enabling a flag does not install a browser adapter; see the sections below.
 
 ## Typed questions and answers
 
@@ -159,9 +159,11 @@ Successful gateway response:
 
 Optional `billing` contains `charged_credits` and an optional `rate_version`, as reported by the compatible upstream. These are not inferred from token counts or multiplied again by the gateway.
 
-`requestId` is optional on requests. Reusing an ID within the same caller scope is rejected rather than silently repeating a paid request. The local ledger is bounded and retained for five minutes; it is not durable across gateway restarts. Upstream IDs are hashed and caller-scoped. Durable deduplication and billing reconciliation belong to the upstream; a conflict response is not a cached answer.
+`requestId` is optional on requests: 1–256 printable ASCII characters without spaces, otherwise `JEV_INVALID_REQUEST`. Reusing an ID within the same caller scope is rejected rather than silently repeating a paid request. Only caller-supplied IDs enter the local ledger; it holds at most 4096 IDs (1024 per caller), each retained for five minutes, and is not durable across gateway restarts. Upstream IDs are hashed and caller-scoped. Durable deduplication and billing reconciliation belong to the upstream; a conflict response is not a cached answer.
 
 Read usage with `GET /api/v1/jev/usage?agentId=assistant&limit=50&offset=0`. The API returns `{ "records": [], "total": 0 }` when no measurements exist. Read access to that agent is required. `limit` is 1–100 and `offset` is nonnegative. Usage records contain metadata, latency, outcome, model, reported usage and optional billing, never raw state, questions, DOM or credentials. The local store retains at most 10,000 records. Jev requests are separate from conversational context-window tokens.
+
+The HTTP body may be up to 1 MiB plus a small envelope, so any configured `maxInputBytes` (at most 1 MiB) is usable; it is parsed only after authentication. A larger body returns HTTP 413 and a body that is not JSON returns HTTP 400, both with `JEV_INVALID_REQUEST`.
 
 Errors expose a typed `JEV_...` code where the evaluation service handles the failure: invalid request/configuration, access denial, missing credentials, unsupported model, quota, rate limit, timeout, cancellation, provider failure, malformed response or request conflict. Safe retry/reset headers are retained when supplied; raw provider error bodies are not exposed because they can contain submitted state or credentials.
 
@@ -240,45 +242,6 @@ A durable running receipt is written **before** dispatch. A running receipt foun
 
 Test verified effects, missing field input, absent/false verification, stale rejection, uncertain mutations, cancellation/revocation/disconnection, gateway restart, cross-agent/principal/conversation denial and app-agent isolation. Test direct/upstream managed/BYOK accounting separately with live credentials. Do not claim comparative token savings or production browser reliability from a small synthetic sample.
 
-## Optional skill recommendations
-
-`src/jev/skill-routing.ts` exports `recommendJevSkills()` for integrations that already know the **effective authorized skill catalog** for the current principal, worker harness, and host or container. This is an opt-in metadata helper, not an installed Claude Code/Codex hook. Setting a feature flag alone does not automatically discover skills or change native worker routing.
-
-The caller supplies stable local IDs, names, descriptions, and applicability flags. Only task context and names/descriptions go to the evaluator; the helper does not read or transmit skill files, local paths, plugin configuration, or full bodies. Supply a short current-task description with enough context for follow-ups, rather than the whole conversation. Do not put secrets or filesystem paths inside the names/descriptions themselves.
-
-```ts
-const routing = await recommendJevSkills({
-  enabled: config.features?.skillRouting?.enabled === true,
-  nativeRoutingActive: nativeSkillPluginAlreadyHandlesThisInput,
-  task: currentInstruction,
-  context: currentTaskSummary,
-  catalog: authorizedEffectiveCatalog,
-  explicitIds: explicitlyRequestedSkillIds,
-  requiredIds: requiredSkillIds,
-  ongoingIds: ongoingTaskSkillIds,
-  catalogVersion: version,
-  currentCatalogVersion: () => effectiveCatalogVersion(),
-  evaluate: (request, signal) => jevService.evaluate(request, {
-    principalId,
-    agentId,
-    consumer: 'skill-routing',
-    signal,
-    authorize: currentPrincipalMayUseJev,
-  }),
-  signal: taskSignal,
-});
-```
-
-Explicitly requested, required, and ongoing skills are retained separately and are not scored. Disabled, inaccessible, and manual-only entries are excluded from **optional** recommendations. Explicit manual-only skills remain eligible to be preserved. A missing, disabled, or inaccessible required entry triggers native fallback instead of silently dropping the requirement; the native path still enforces current permissions.
-
-Each optional skill receives an independent Noul relevance probability, so multiple skills can be recommended. The default threshold is `0.6`; it is configurable by the integration and is not proof that a skill is correct. Low probabilities produce no optional recommendation, without being treated as an API error.
-
-All candidates must fit the configured batch, request-size, and total-time bounds. The helper validates every planned batch before the first evaluation, never silently truncates the catalog or context, and falls back to native selection on oversized input, invalid or missing answers, errors, cancellation, or catalog-version changes. A failed later batch discards earlier partial recommendations. Defaults are 32 candidates per batch, 32 batches, 64 KiB per request, and a 10-second deadline for the entire operation; configure these to fit the shared evaluation service's limits.
-
-Use `mode === 'native'` to keep ordinary skill selection. With `mode === 'recommended'`, retain `preservedIds` and map `recommendedIds` back to the still-authorized local catalog before reading skill bodies. Recommendations grant no MCP/tool access and never prevent the worker from discovering additional skills later. Coordinate with native routing plugins: if one already owns this input, pass `nativeRoutingActive: true` so this helper does not issue duplicate requests.
-
-No automatic native hook is installed by this helper, and no measured token saving is claimed. Selecting metadata does not unload tool schemas. Integrations must measure actual loaded context and task quality before enabling routing broadly.
-
 ## Check readiness and troubleshoot
 
 Run `claude-gateway doctor` after editing configuration. When Jev is enabled, its local check validates the configuration and checks referenced credential-file readability/size or the direct credential environment reference. It does not prove upstream authentication or perform paid Jev inference. Use the bounded HTTP example above when you explicitly want to test the configured provider end to end.
@@ -305,6 +268,8 @@ All routes below are under `/api/v1/agents/:agentId/sessions/:sessionId`:
 | `DELETE /browser-bindings/:bindingId` | Admin-only: remove that scoped binding and fence ongoing access. |
 | `GET /tasks/:taskId/browser-evidence` | Read the scoped task's retained receipt/observation; never invokes inference. |
 | `GET /tasks/:taskId/browser-evidence?refresh=true` | Inspect the currently approved tab and retained operation ID without replaying an action. |
+
+The evidence routes return HTTP 400 `INVALID_REFRESH` when `refresh` is not `true` or `false`, HTTP 503 with the code (`BROWSER_EVIDENCE_UNAVAILABLE`, `BROWSER_INSPECTION_UNAVAILABLE` or `ORCHESTRATION_DISABLED`) when evidence cannot be read right now, and HTTP 403 `BROWSER_EVIDENCE_UNAVAILABLE` for any access or ownership failure.
 
 Example POST body:
 
@@ -469,7 +434,7 @@ The adapter observes and acts inside one task, without waking the conversational
 {"baseUrl":"https://models.example/v1","model":"your-small-text-model","apiKeyEnv":"JEV_TEXT_API_KEY"}
 ```
 
-The default API is `openai-chat` (`/chat/completions`); set `api: "anthropic-messages"` for `/messages`. `baseUrl` includes the API version path, e.g. `/v1`. An absolute `apiKeyFile` may replace `apiKeyEnv`. Credentials remain in Gateway and are excluded from CLI children. The helper receives goal, selected field, page context and recent actions and returns only `{text:string|null}`. Null means missing information; the parent can answer from conversation or ask the user. Provider/parse failures never become invented text. Without this config or a trusted installed hook, missing fields still go to the parent. Config reload replaces and fences affected bindings.
+The default API is `openai-chat` (`/chat/completions`, `Authorization: Bearer`); set `api: "anthropic-messages"` for `/messages` (`x-api-key`). Each call allows up to 4096 output tokens, enough for a 2000-character field value. `baseUrl` includes the API version path, e.g. `/v1`. An absolute `apiKeyFile` may replace `apiKeyEnv`. Credentials remain in Gateway and are excluded from CLI children. The helper receives goal, selected field, page context and recent actions and returns only `{text:string|null}`. Null means missing information; the parent can answer from conversation or ask the user. Provider/parse failures never become invented text. Without this config or a trusted installed hook, missing fields still go to the parent. Config reload replaces and fences affected bindings.
 
 Runner confidence gates default to zero (validated argmax); explicitly configured positive gates remain supported. Consent, sensitive-field restrictions, observed target validation, stale checks, durable mutation receipts, budgets and independent final verification remain enforced. The parent reviews completion and real blockers rather than each ordinary action.
 
@@ -519,7 +484,8 @@ Jev decision over the observed controls and dispatches at most one action.
   rejection is recorded as not executed, never as an unknown outcome.
 - `ค้นหา X`, `search X`: `page_type` with `submit: true` (text and Enter under one
   operation ID) into the only search-like field. With several editable fields,
-  one Jev question chooses the field.
+  one Jev question chooses the field. In step mode, submitting into a field that
+  is not search-like is fenced (see below).
 - `เข้า google`, `เปิด youtube`, `go to example.com`, a bare URL: `tab_navigate`
   in the bound tab.
 - `อีก`, `again`: repeats the previous command, decided afresh on the current
@@ -540,15 +506,24 @@ Jev decision over the observed controls and dispatches at most one action.
 - **Outcome line.** Each settled command sets the task progress text to `Done:
   …` (for example `Done: searched in "Search"`) or `Not done: …` with a hint.
   A not-done command dispatched nothing; the session keeps waiting for the next
-  command instead of failing.
+  command instead of failing. When the extension confirmed the action but the
+  next page did not settle within the stale-read budget, the line is still
+  `Done: …` and adds that the page was still loading. When the receipt for the
+  last action is missing, the line starts with `Unknown:` (the action may have
+  run) and nothing is repeated.
 - **Action log.** Each settled round also appends its outcome line (and, for a
   step run, the last completed action, such as `pressed "All Clear"`) to the
   task's `actionLog`, the last 12 rounds with short command and result text.
+  For a correction the command is the user's latest words; text a command types
+  is logged as `[text]`.
   `task_status` and the per-turn task context include it, so a summary after many
   commands reports what each round did rather than only the latest one.
 - **Rapid commands.** Commands typed while the previous one is running are
   queued first-in, first-out (up to 20) and delivered verbatim, exactly as for
-  Computer Use. A settled round is applied at once and the next command
+  Computer Use. Speech on the live voice session while the user's previous
+  command runs joins the same queue instead of pausing it. Pausing, or handing
+  control to the agent, drops queued commands and the progress text lists those
+  not sent. A settled round is applied at once and the next command
   dispatched without waiting for the next poll.
 - **Replaced sessions.** A new spawn for the same tab replaces a session that
   failed before any tab action; a session that acted still needs `task_update`
@@ -570,7 +545,13 @@ lease. The grammar is the one described in
 [Step-by-step commands](#step-by-step-commands): the user's initiating message is
 used verbatim when it is a step list, at most 12 steps within 120 seconds. Each
 part is one direct command as above with the strict high-impact fence (every
-high-impact control, including a generic `OK`, returns control). After each
+high-impact control, including a generic `OK`, returns control). The page does
+not report keyboard focus, so a bare `enter` step, or a search step whose field
+is not search-like, returns control when the field or any control on the page is
+high-impact (for example a `Send` button); search boxes submit as usual. A
+binding's `budget.maxSteps` / `budget.maxEvaluations` bound the whole run (each
+part still takes at most 3 actions and 6 decisions); reaching them stops with
+`ACTION_BUDGET` / `EVALUATION_BUDGET`. After each
 action the page is compared with the state before it, polling a few fresh reads
 while a navigation commits; scroll and key steps without a visible change are
 listed in `unverifiedSteps`. A step that finds nothing right after an earlier
@@ -744,9 +725,14 @@ and keep their stricter checks above; for example a step that says `ลบ` stop
   digit: `ห้า ศูนย์`, `ห้าสิบ` and `50` press `5` then `0`, each matched again
   on a fresh observation after the previous press settles. At most 8 presses
   (`SEQUENCE_TOO_LONG` otherwise). Two number forms that disagree, such as
-  `ห้า ห้าสิบ`, press nothing and ask back (`ห้า หรือ ห้าสิบ?`). If a press is
-  refused part-way the rest is not pressed and the outcome says how far it got;
-  an uncertain press stops for reconciliation and is never repeated.
+  `ห้า ห้าสิบ`, press nothing and ask back (`ห้า หรือ ห้าสิบ?`). Everyday
+  shorthand that ends in a digit after `ร้อย`, `พัน`, `หมื่น`, `แสน` or `ล้าน`
+  (`ร้อยห้า` is 105 or 150) also asks back (`105 หรือ 150?`); `ร้อยห้าสิบ` and
+  `ร้อยเอ็ด` are unambiguous. These presses need a keypad on screen (each digit
+  0–9 shown exactly once, as in Calculator); elsewhere words such as `clear`,
+  `add` or `one` go to Jev. If a press is refused part-way the rest is not
+  pressed and the outcome says how far it got; an uncertain press stops for
+  reconciliation, is reported as `Unknown:` and is never repeated.
 - **Keys.** A bare key name such as `enter`, `return`, `tab`, `esc`, `up`,
   `ลูกศรลง` or `arrow left` presses that key, like `กด enter`.
 - **Text.** `ค้นหา X`, `search X`, `พิมพ์ X` and `type X` offer `X` itself as the
@@ -881,8 +867,8 @@ Authenticated clients can send text directly to an existing scoped browser/compu
 
 Actions are `pause`, `revise`, `resume`, `agent`, and `user`. Only `revise` accepts `text` (1–4000 characters). Use the current task revision; a conflicting revision or reused command ID with different contents returns HTTP 409. Accepted commands return HTTP 202 with the updated task. Switching `agent`/`user` changes who supplies subsequent instructions; it does not bypass consent, ownership or an unresolved mutation.
 
-On the existing voice WebSocket, `voice.start` and `voice.configure` accept `execution_task_id` as a task UUID, or `null` to return to the conversational agent. The target remains fixed across segments of one utterance. Confirmed speech can pause new actions while the correction is transcribed; microphone noise alone does not authorize a new command. Stop cannot undo an OS/browser action already dispatched.
+On the existing voice WebSocket, `voice.start` and `voice.configure` accept `execution_task_id` as a task UUID, or `null` to return to the conversational agent. The target remains fixed across segments of one utterance. Confirmed speech can pause new actions while the correction is transcribed (except while the user's own direct command runs: then the speech is queued as the next command); microphone noise alone does not authorize a new command. Stop cannot undo an OS/browser action already dispatched.
 
-A spoken direct command that does nothing gets one short spoken reply on that voice session, in Thai for a Thai command and English otherwise: for example `ไม่แน่ใจว่า ห้า คือปุ่มไหน ลองพูดใหม่อีกครั้ง` (low confidence), `ไม่เจอปุ่ม บัว บนหน้าจอ` (no matching control), or the clarification `ห้า หรือ ห้าสิบ?`. It repeats only the user's own words, never screen text, and is also added to the conversation history. A command that ran stays silent, since the user can see the result. Typed commands are unchanged: the outcome line stays on the task, with no extra chat notice. Speech recognition quality (for example `บวก` heard as `บัว`) is outside the gateway.
+A spoken direct command that does nothing gets one short spoken reply on that voice session, in Thai for a Thai command and English otherwise: for example `ไม่แน่ใจว่า ห้า คือปุ่มไหน ลองพูดใหม่อีกครั้ง` (low confidence), `ไม่เจอปุ่ม บัว บนหน้าจอ` (no matching control), or the clarification `ห้า หรือ ห้าสิบ?`. When the receipt for the last action is missing, it says the gateway is not sure the command ran and to check the screen before repeating it (`ไม่แน่ใจว่า ห้า ทำไปแล้วหรือยัง ดูหน้าจอก่อนสั่งใหม่`), never "say it again". It repeats only the user's own words, never screen text. The conversation history records a generic form (`ไม่แน่ใจว่า คำสั่งนี้ คือปุ่มไหน ...`), so the user's words are never stored as assistant text. A command that ran stays silent, since the user can see the result. Typed commands are unchanged: the outcome line stays on the task, with no extra chat notice. Speech recognition quality (for example `บวก` heard as `บัว`) is outside the gateway.
 
 A safely stopped confidence/provider failure permits a fresh explicit command on the same open task. A closed session or uncertain mutation cannot be resumed this way; inspect and reconcile the retained receipt first.

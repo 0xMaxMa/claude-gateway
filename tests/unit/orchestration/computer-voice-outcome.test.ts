@@ -72,7 +72,9 @@ describe('V2: spoken outcome for live_voice direct commands',()=>{
    f.settle(input,low);f.settle(input,low);
    expect(f.heard).toHaveBeenCalledTimes(1);
    expect(f.heard.mock.calls[0][0]).toMatchObject({spoken:'ไม่แน่ใจว่า ห้า คือปุ่มไหน ลองพูดใหม่อีกครั้ง',speechOnly:true});
-   expect(f.notices(input)).toEqual(['ไม่แน่ใจว่า ห้า คือปุ่มไหน ลองพูดใหม่อีกครั้ง']);
+   // L2: history keeps a generic line; the user's words are only spoken back.
+   expect(f.notices(input)).toEqual(['ไม่แน่ใจว่า คำสั่งนี้ คือปุ่มไหน ลองพูดใหม่อีกครั้ง']);
+   expect(f.heard.mock.calls[0][0].text).toBe('ไม่แน่ใจว่า คำสั่งนี้ คือปุ่มไหน ลองพูดใหม่อีกครั้ง');
   }finally{await f.close();}
  });
  test('NO_SUPPORTED_ACTION and a number clarification are spoken too',async()=>{
@@ -80,6 +82,16 @@ describe('V2: spoken outcome for live_voice direct commands',()=>{
    f.settle(f.command('บัว','live_voice'),unsupported);
    f.settle(f.command('ห้า ห้าสิบ','live_voice'),clarify);
    expect(f.heard.mock.calls.map(c=>c[0].spoken)).toEqual(['ไม่เจอปุ่ม บัว บนหน้าจอ','ห้า หรือ ห้าสิบ?']);
+  }finally{await f.close();}
+ });
+ test('H1: an unresolved receipt is never spoken as "not done, say it again"',async()=>{
+  // Relay timed out after the press may have landed; repeating would show 55.
+  const unknown:ComputerTaskReport={status:'needs_reconciliation',reason:'OUTCOME_UNKNOWN',steps:0,evaluations:0,phase:'terminal',
+   trace:[{phase:'acted',outcome:'unknown',operationId:'op',sequence:3,round:1,at:2,revision:4,steps:0,evaluations:0}],lastAction:{kind:'press',label:'5',sequence:['5','0'],planned:3}} as ComputerTaskReport;
+  const f=await fixture();try{
+   f.settle(f.command('ห้า','live_voice'),unknown);
+   f.settle(f.command('five','live_voice'),unknown);
+   expect(f.heard.mock.calls.map(c=>c[0].spoken)).toEqual(['ไม่แน่ใจว่า ห้า ทำไปแล้วหรือยัง ดูหน้าจอก่อนสั่งใหม่','Not sure whether five ran. Check the screen before saying it again.']);
   }finally{await f.close();}
  });
  test('a successful voice command stays silent',async()=>{
