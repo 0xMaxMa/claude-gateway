@@ -61,7 +61,8 @@ export interface TaskSnapshot {
   computerConnection?: ComputerConnectionStatus;
   automationController?: "agent" | "user";
   automationSession?: import("./tasks/automation-session").AutomationSession;
-  executionControl?: {id:string;action:'pause'|'revise'|'resume';revision:number;phase:'pending'|'applied'|'paused'|'blocked';requestedAt:number};
+  /** agentHandoff: the agent's one command for a handed-off utterance (TaskRevision.agentHandoffInputId). */
+  executionControl?: {id:string;action:'pause'|'revise'|'resume';revision:number;phase:'pending'|'applied'|'paused'|'blocked';requestedAt:number;agentHandoff?:true};
   /** Direct user commands typed while a user-controlled computer/browser round is busy; delivered verbatim, FIFO. */
   queuedCommands?: Array<{id:string;text:string;at:number}>;
   /** What each Browser/Computer round actually did, newest last; bounded for later summaries. */
@@ -124,6 +125,8 @@ export interface TaskRevision {
   guidanceBasis?: { attemptId?: string; workflowVersion: number; progressAt: number };
   /** Created from the user's own typed control text, not an agent goal. */
   directCommand?: boolean;
+  /** The agent's one command for this handed-off utterance (input ID); it never hands off again. */
+  agentHandoffInputId?: string;
   answers?: Array<{ questionId: string; text: string; inputId: string; browserFieldLabel?: string; computerFieldLabel?:string; computerApplication?:string;computerWindowTitle?:string;computerFieldRole?:string }>;
   taskId: string;
   revision: number;

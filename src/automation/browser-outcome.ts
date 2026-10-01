@@ -10,6 +10,7 @@ import type {BrowserCommandAction} from './browser-command';
  * beyond the chosen control's label.
  */
 const HINTS:Record<string,string>={
+ UNCLEAR:'the command was not understood. Say it another way, or name the link, button or field as it appears on the page.',
  NO_SUPPORTED_ACTION:'nothing on the page matches this command. Name the link, button or field as it appears on the page.',
  LOW_OPERATION_CONFIDENCE:'the command did not match one action confidently. Name the link, button or field as it appears on the page.',
  LOW_TARGET_CONFIDENCE:'no link, button or field matched this command confidently. Name it as it appears on the page.',

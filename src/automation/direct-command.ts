@@ -83,6 +83,13 @@ export const COMMAND_DECISION_FAILURES:ReadonlySet<string>=new Set(['ADAPTER_TIM
  */
 export const READ_REQUEST_CRITERION='The command only asks to read aloud, summarize, describe or answer a question about what is already shown on the page or screen; it requests no click, typing, key press, scrolling or navigation. The assistant answers it from the current view instead of acting.';
 
+/**
+ * Jev's own "I do not understand this command": offered with READ_REQUEST, so
+ * only to a single direct command. Choosing it (or BLOCKED) hands the command
+ * to the agent once instead of asking the user to repeat it.
+ */
+export const UNCLEAR_CRITERION='The command itself is unclear: its meaning or the intended action cannot be understood from the words and the current view, so no offered operation can be chosen for it. The assistant interprets it instead.';
+
 /** Phrases that ask for a new browser tab (Cmd+T). */
 export const NEW_TAB_PHRASES=['new tab','open new tab','open a new tab','เปิด tab ใหม่','เปิดแท็บใหม่','tab ใหม่','แท็บใหม่'];
 /**

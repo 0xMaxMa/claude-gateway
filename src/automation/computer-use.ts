@@ -66,7 +66,7 @@ export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'nee
 /** The command's own interaction, for the owner's outcome line. Never typed text. */
 export interface ComputerLastAction {kind:string;label?:string;role?:string;key?:string;direction?:string;appId?:string;count?:number;blocked?:boolean;sequence?:string[];planned?:number}
 const PreparedInput=z.object({application:z.string().min(1).max(200),label:z.string().min(1).max(500),text:z.string().max(2000),role:z.string().max(100).optional(),windowTitle:nativeText(500).optional()}).strict();
-const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),readRequest:z.boolean().default(false),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
+const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),readRequest:z.boolean().default(false),agentCommand:z.boolean().default(false),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
 const fingerprint=(s:ComputerState)=>JSON.stringify([s.application,s.windowTitle,s.text,s.supportedActions,s.focusedControl&&{role:s.focusedControl.role,label:s.focusedControl.label},s.controls.map(({ref,...c})=>c),s.scrollAreas?.map(({ref,...area})=>area),s.truncated]);
 export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,signal:AbortSignal):Promise<ComputerUseResult>{
  const input=Input.parse(raw),runSignal=AbortSignal.any([signal,AbortSignal.timeout(input.timeoutMs)]);
@@ -108,7 +108,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
   try{deps.progress?.(event);}catch{/* Diagnostic sinks cannot change a dispatched action's outcome. */}
  };
  const result=(status:ComputerUseResult['status'],reason:string,validationReason?:string):ComputerUseResult=>{emit('terminal',{status,reason,...(validationReason?{validationReason}:{})});return {status,reason,revision:goal.revision,steps,evaluations,trace:{events:[...trace],truncated:sequence>trace.length},...(pending?{operationId:pending}:{}),...(last?{observation:last}:{}),...(lastAction?{lastAction}:{}),...(clarification?{clarification}:{})};};
- const waitForCommand=(reason:string)=>{emit('waiting',{reason});return result('needs_input','COMMAND_WAITING_INPUT');};
+ const waitForCommand=(reason:string,extra:Partial<ComputerProgress>={})=>{emit('waiting',{reason,...extra});return result('needs_input','COMMAND_WAITING_INPUT');};
  const check=()=>{runSignal.throwIfAborted();if(!deps.authorized())throw Error('ACCESS_DENIED');};
  const update=()=>{const n=deps.latestGoal?.();if(n&&n.revision>goal.revision){satisfiedField=undefined;submitAfterType=undefined;previous=undefined;prematureDone=0;history.length=0;ineffective.clear();transitions.clear();consecutiveOpens=0;cycling=false;noProgress=0;goal=z.object({revision:z.number().int().positive(),goal:z.string().min(1).max(16000)}).parse(n);}};
  const call=async(name:string,args:Record<string,unknown>={})=>{check();return deps.call(name,{...args,...(lease?{lease_token:lease}:{})},runSignal);};
@@ -314,13 +314,16 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      const selected=readComputerCommand(command,answer.answers);
      emit('decided',{...(targets.has(selected.action)?summary(targets.get(selected.action)!):{}),requestId,confidence:selected.confidence,elapsedMs:Date.now()-started});
      if(!selected.confident){await capture();return {result:waitForCommand('LOW_CONFIDENCE')};}
-     if(selected.action==='WAIT'||selected.action==='BLOCKED'){await capture();return {result:waitForCommand(selected.action==='WAIT'?'UI_NOT_READY':'NO_SUPPORTED_ACTION')};}
+     if(selected.action==='WAIT'){await capture();return {result:waitForCommand('UI_NOT_READY')};}
+     // Jev gave up on a single direct command (decisionMode jev marks it): the gateway may hand it to the agent once.
+     if(selected.action==='BLOCKED'||selected.action==='UNCLEAR'){await capture();return {result:waitForCommand(selected.action==='UNCLEAR'?'UNCLEAR':'NO_SUPPORTED_ACTION',input.yieldAfterInteraction&&input.readRequest?{decisionMode:'jev'}:{})};}
      // No action: the gateway hands the command to the agent, which reads the screen.
      if(selected.action==='READ_REQUEST'){await capture();return {result:waitForCommand('READ_REQUEST')};}
      // A high-impact target needs a confident decision AND a command that
      // names that operation itself; "ok" or a vague reference is not enough.
      const planned=targets.get(selected.action),risky=planned&&destructiveTarget(state,planned,false);
-     if(risky&&!(selected.confidence>=DESTRUCTIVE_CONFIDENCE&&commandAuthorizes(goal.goal,risky))){
+     // The agent's command for a handed-off utterance never authorizes one (the user's words did not name it).
+     if(risky&&(input.agentCommand||!(selected.confidence>=DESTRUCTIVE_CONFIDENCE&&commandAuthorizes(goal.goal,risky)))){
       lastAction={kind:String(planned!.kind),label:risky.label.slice(0,200),blocked:true};
       await capture();return {result:waitForCommand('DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED')};
      }

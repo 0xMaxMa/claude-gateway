@@ -106,7 +106,10 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     if(repeated)instructions=repeated;
     const interactionContext=previousContext?browserInteractionContext({command:previousContext.command,...previousContext.interaction}):'';
     // Step mode takes only the user's own step list; field answers keep the one-command path.
-    const stepMode=command&&this.options.stepMode?.()===true&&!answers?.length;
+    // The agent's command for a handed-off utterance: one command, no step list, and
+    // it gains no authority over high-impact controls (strict fence, no hand-off again).
+    const agentHandoff=command&&task.executionControl?.agentHandoff===true&&task.executionControl.revision===task.revision;
+    const stepMode=command&&!agentHandoff&&this.options.stepMode?.()===true&&!answers?.length;
     const userText=stepMode?this.options.userSteps?.(task):undefined;
     const steps=stepMode?(userText?parseCommandSteps(userText):undefined)??parseCommandSteps(instructions):undefined;
     // Durable receipt precedes any side effect; restart never replays this request.
@@ -115,7 +118,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const authorized=()=>{try{return this.options.allowedTask?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
     // The installed browser package owns execution; gateway owns the request lifetime.
     let providerFailure:BrowserExecutionResult['providerFailure'];
-    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({requestConsent,interruptSignal:interrupt.signal,goal:instructions,...(command?{command:true}:{}),...(interactionContext?{interactionContext}:{}),...(steps?{steps}:{}),startUrl:startUrl ?? (answers?.some(a=>!a.questionId.startsWith('prepared:')) || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl),fields,signal:controller.signal,authorized,
+    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({requestConsent,interruptSignal:interrupt.signal,goal:instructions,...(command?{command:true}:{}),...(agentHandoff?{strictDestructive:true}:{}),...(interactionContext?{interactionContext}:{}),...(steps?{steps}:{}),startUrl:startUrl ?? (answers?.some(a=>!a.questionId.startsWith('prepared:')) || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl),fields,signal:controller.signal,authorized,
       evaluate:async(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');try{return await this.options.evaluate(task,request,signal,authorized);}catch(e){if(e instanceof JevError)providerFailure={code:e.code,...e.metadata};throw e;}},
       trace:event=>{
         if(!authorized())return;

@@ -171,3 +171,51 @@ describe('READ_REQUEST: a direct command that asks about the screen',()=>{
   expect(r.steps).toBe(1);
  });
 });
+
+// Session d88943d1 item 3: when Jev gives up on a single direct command (BLOCKED,
+// or its new UNCLEAR choice) the gateway hands that command to the agent once.
+describe('AGENT_HANDOFF: Jev gives up on a single direct command',()=>{
+ const odd='เอาอันนั้นมาให้หน่อย';
+ test('UNCLEAR is offered with READ_REQUEST only to a single direct command',async()=>{
+  const f=fixture(chrome(),'BLOCKED');
+  await run(f,odd);
+  expect(Object.keys(f.requests[0].questions.action.criteria)).toEqual(expect.arrayContaining(['READ_REQUEST','UNCLEAR','BLOCKED']));
+  const step=fixture(chrome(),'BLOCKED');
+  await runComputerUse({goal:odd,yieldAfterInteraction:true,maxSteps:3},step.deps,new AbortController().signal);
+  expect(Object.keys(step.requests[0].questions.action.criteria)).not.toContain('UNCLEAR');
+ });
+ test.each([['BLOCKED','NO_SUPPORTED_ACTION'],['UNCLEAR','UNCLEAR']])('Jev %s dispatches nothing and requests a hand-off',async(chosen,reason)=>{
+  const {agentHandoffRequested,directCommandSpeech}=await import('../../../src/automation/command-speech');
+  const f=fixture(chrome(),chosen);
+  const r=await run(f,odd);
+  expect(f.actions()).toEqual([]);
+  const report={...r,trace:r.trace.events} as never;
+  expect(r.trace.events.filter(e=>e.phase==='waiting').at(-1)).toMatchObject({reason,decisionMode:'jev'});
+  expect(agentHandoffRequested({computerReport:report})).toBe(true);
+  // If the gateway does not hand it off, the not-done line is still spoken.
+  expect(directCommandSpeech({computerReport:report},odd,{thai:true})?.spoken).toBeTruthy();
+ });
+ test('step parts, agent control, low confidence and deterministic not-done never request a hand-off',async()=>{
+  const {agentHandoffRequested}=await import('../../../src/automation/command-speech');
+  const step=fixture(chrome(),'BLOCKED');
+  const s=await runComputerUse({goal:odd,yieldAfterInteraction:true,maxSteps:3},step.deps,new AbortController().signal);
+  expect(agentHandoffRequested({computerReport:{...s,trace:s.trace.events} as never})).toBe(false);
+  const low=fixture(chrome(),'BLOCKED',0.4);
+  const l=await run(low,odd);
+  expect(agentHandoffRequested({computerReport:{...l,trace:l.trace.events} as never})).toBe(false);
+  const handoff=fixture(chrome(),'UNCLEAR');
+  const h=await runComputerUse({goal:odd,yieldAfterInteraction:true,agentCommand:true},handoff.deps,new AbortController().signal);
+  expect(Object.keys(handoff.requests[0].questions.action.criteria)).not.toContain('UNCLEAR');
+  expect(agentHandoffRequested({computerReport:{...h,trace:h.trace.events} as never})).toBe(false);
+ });
+ test('the agent command for a hand-off never presses a high-impact control, even when named',async()=>{
+  const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;
+  const user=fixture(state,'press:c7',0.95);
+  await run(user,'กด Delete');
+  expect(user.actions()).toHaveLength(1);
+  const agent=fixture(state,'press:c7',0.95);
+  const r=await runComputerUse({goal:'กด Delete',yieldAfterInteraction:true,agentCommand:true},agent.deps,new AbortController().signal);
+  expect(agent.actions()).toEqual([]);
+  expect(r.trace.events.some(e=>e.reason==='DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED')).toBe(true);
+ });
+});

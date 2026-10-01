@@ -7,6 +7,7 @@ import type {ComputerTaskReport} from '../orchestration/types';
  */
 const HINTS:Record<string,string>={
  LOW_CONFIDENCE:'no visible control matched this command confidently{confidence}. Name the button, link or field as it appears on screen.',
+ UNCLEAR:'the command was not understood. Say it another way, or name the item as it appears on screen.',
  NO_SUPPORTED_ACTION:'no visible control matches this command. Check that the right window is in front, or name the item as it appears on screen.',
  FIELD_TEXT_REQUIRED:'no text to enter was found in the command. Put the text in quotes, for example: พิมพ์ "hello".',
  FOCUS_REQUIRED:'the target needs keyboard focus first. Click the field, then send the command again.',

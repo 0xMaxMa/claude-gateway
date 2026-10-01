@@ -15,7 +15,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { taskFailure } from './failure';
 import { WorkerPool } from './pool';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { OrchestrationStore, boundedText, payloadHash } from '../store';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../config';
 import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode } from '../types';
@@ -27,6 +27,11 @@ export interface SpawnTask { browserFields?:unknown; computerInputs?:TaskRevisio
 const INDEXED_FINISHED_TASKS = 20;
 /** Direct Computer/Remote Browser commands that may wait behind a settling round. */
 const COMMAND_QUEUE_MAX = 20;
+/** Stable control ID for the agent's one command on a handed-off utterance. */
+export function handoffCommandId(inputId: string): string {
+  const h = createHash('sha256').update('agent-handoff:' + inputId).digest('hex');
+  return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`;
+}
 
 export type TaskIndexEntry = ReturnType<typeof taskIndexEntry>;
 /** One index row: identity, live state and how to fetch the rest — never a report body.
@@ -304,7 +309,13 @@ export class TaskService {
         Boolean(task.activeAttemptId) && task.browserReport?.status === 'needs_verification' &&
         ['COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(task.browserReport.reason) &&
         !task.browserReport.providerFailure && task.browserReport.lastAction?.outcome !== 'unknown';
-      if(task.automationController==='user')throw new OrchestrationError('USER_CONTROLS_AUTOMATION');
+      if(task.automationController==='user'){
+        // Jev gave up on this utterance and handed it to the agent: exactly one
+        // command, as the user's own next direct command (user keeps control).
+        const handoff=this.agentHandoff(context,task,expectedRevision,mode,browserFields,computerInputs,startUrl);
+        if(handoff)return this.applyDirectControl(context.conversationId,taskId,task,{id:handoffCommandId(context.inputId),action:'revise',text:instruction},undefined,context.inputId);
+        throw new OrchestrationError('USER_CONTROLS_AUTOMATION');
+      }
       const agentControl = !context.execute &&
         ['browser','computer'].includes(task.gatewayTarget?.adapter??'') && task.capabilities.execute && task.ownerPrincipalId===context.principalId &&
         task.state==='waiting_input'&&!task.activeAttemptId&&!task.pendingQuestion&&task.executionControl?.phase!=='paused'&&
@@ -403,48 +414,74 @@ export class TaskService {
         if(command.action==='agent'&&task.state==='waiting_input'&&!task.activeAttemptId&&!task.pendingQuestion&&task.executionControl?.phase!=='paused')this.notify(task);
         return task;
       }
-      task.automationController='user';
-      const paused=pausedForCommand(task);
-      const recoverable=command.action==='revise'&&stoppedForCommand(task);
-      if(!['queued','starting','running','interrupting'].includes(task.state)&&!paused&&!recoverable)throw new OrchestrationError('STATE_CONFLICT');
-      // Only the owner's own pause (settled or still settling) leaves interrupted work. A settled
-      // round waiting for the next command has nothing to resume: re-running it would replay it.
-      if(command.action==='resume'&&!(task.executionControl?.action==='pause'&&['pending','paused'].includes(task.executionControl.phase)))throw new OrchestrationError('NOTHING_TO_RESUME','Nothing to resume: the last command already finished. Give the next command instead.');
-      if(command.action==='revise')boundedText(command.text??'',4000);
-      else if(command.text!==undefined)throw new OrchestrationError('INVALID_INPUT');
-      const previous=this.revision(taskId,task.revision);
-      // Never drop queued words silently: say which commands will not run.
-      const unsent=command.action==='pause'?task.queuedCommands??[]:[];
-      const dropped=unsent.length?` ${unsent.length} queued command${unsent.length===1?' was':'s were'} not sent: ${unsent.map(c=>JSON.stringify(c.text.slice(0,60))).join(', ')}.`:'';
-      if(unsent.length)this.store.appendEvent(conversationId,'task.command_queue_dropped',{taskId,count:unsent.length,reason:'paused'},taskId);
-      if(command.action==='pause')delete task.queuedCommands;
-      // A user's own command is still settling: the next one waits its turn,
-      // verbatim, instead of superseding it or being folded into a correction.
-      if(command.action==='revise'&&this.queuesDirectCommand(task,previous)){
-        const queue=task.queuedCommands??[];
-        if(queue.length>=COMMAND_QUEUE_MAX)throw new OrchestrationError('COMMAND_QUEUE_FULL','Too many commands are waiting. Wait for the current ones to finish or pause.');
-        task.queuedCommands=[...queue,{id:command.id,text:command.text!,at:Date.now()}];
-        task.latestProgress={source:'runtime',observedAt:Date.now(),text:`Queued: ${JSON.stringify(command.text!.slice(0,120))} runs after the current command (${task.queuedCommands.length} waiting).`};
-        this.store.saveTask(task,task.stateVersion);
-        this.store.appendEvent(conversationId,'task.command_queued',{taskId,commandId:command.id,position:task.queuedCommands.length},taskId);
-        this.store.run('INSERT INTO task_commands VALUES(?,?,?,?,?,?,?,?,?)',id,taskId,conversationId,principalId,null,'user_control',hash,JSON.stringify(task),Date.now());
-        return task;
-      }
-      const priorAnswers=previous.answers?.map(a=>({field:a.browserFieldLabel??a.computerFieldLabel,text:a.text}));
-      const nextCommand=command.action==='revise'&&(paused||recoverable);
-      const instructions=nextCommand?command.text!:command.action==='revise'?CORRECTION_HEAD+command.text+'\n\nEarlier requirements and corrections, newest first. Keep only requirements compatible with the latest correction; do not perform superseded actions:\n'+previous.instructions+(priorAnswers?.length?'\n\nEarlier user answers (subject to the latest correction):\n'+JSON.stringify(priorAnswers):''):previous.instructions;
-      boundedText(instructions,task.gatewayTarget?.adapter==='browser'?8000:16000);
-      task.revision++;
-      if(recoverable){delete task.computerReport;delete task.failure;delete task.browserReport;delete task.gatewayDispatch;}
-      this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,requestBrowserConsent:command.action!=='pause',revision:task.revision,instructions,mode:'interrupt_and_resume',computerInputs:command.action==='revise'?undefined:previous.computerInputs,answers:command.action==='revise'?undefined:previous.answers,browserRecoveryCount:0,guidance:undefined,guidanceBasis:undefined,...(command.action==='revise'?{directCommand:true}:{})}));
-      task.executionControl={id:command.id,action:command.action,revision:task.revision,phase:task.activeAttemptId?'pending':command.action==='pause'?'paused':'pending',requestedAt:Date.now()};
-      task.state=task.activeAttemptId?'interrupting':command.action==='pause'?'waiting_input':'queued';
-      task.latestProgress={source:'runtime',observedAt:Date.now(),text:((task.activeAttemptId?'Control accepted; settling the current action before applying it.':command.action==='pause'?'Automation paused.':'Control accepted; resuming from a fresh observation.')+dropped).slice(0,4096)};
-      this.store.saveTask(task,task.stateVersion);
-      this.store.appendEvent(conversationId,'task.control_accepted',{taskId,control:task.executionControl},taskId);
-      this.store.run('INSERT INTO task_commands VALUES(?,?,?,?,?,?,?,?,?)',id,taskId,conversationId,principalId,null,'user_control',hash,JSON.stringify(task),Date.now());
-      return task;
+      return this.applyDirectControl(conversationId,taskId,task,{id:command.id,action:command.action,text:command.text},task=>this.store.run('INSERT INTO task_commands VALUES(?,?,?,?,?,?,?,?,?)',id,taskId,conversationId,principalId,null,'user_control',hash,JSON.stringify(task),Date.now()));
     });
+  }
+  /**
+   * The agent turn for a handed-off utterance (needs_agent AGENT_HANDOFF receipt
+   * on this input and task) may send one command: same task, the receipt's
+   * revision (no newer user command), the round settled and waiting, no fields,
+   * inputs or navigation, and never twice for the same utterance.
+   */
+  private agentHandoff(context:CommandContext,task:TaskSnapshot,expectedRevision:number,mode:ChangeMode,browserFields:unknown,computerInputs:unknown,startUrl:unknown):boolean {
+    const receipt=this.liveReceipt(context.inputId);
+    if(receipt?.code!=='AGENT_HANDOFF'||receipt.status!=='needs_agent'||receipt.taskId!==task.taskId)return false;
+    if(!context.execute||task.ownerPrincipalId!==context.principalId)throw new OrchestrationError('EXECUTION_DENIED');
+    if(this.store.get("SELECT 1 FROM task_revisions WHERE task_id=? AND json_extract(payload_json,'$.agentHandoffInputId')=?",task.taskId,context.inputId))
+      throw new OrchestrationError('AGENT_HANDOFF_USED','The one command for this handed-off utterance was already sent. Report its outcome; do not send another.');
+    if(mode!=='when_ready'||browserFields!==undefined||computerInputs!==undefined||startUrl!==undefined)throw new OrchestrationError('INVALID_INPUT','A handed-off command is one plain next command: mode=when_ready, no fields, inputs or start_url.');
+    if(expectedRevision!==receipt.revision||task.revision!==receipt.revision)throw new OrchestrationError('REVISION_CONFLICT','The user has given a newer command since this utterance; do not act on it.');
+    if(task.activeAttemptId||!(pausedForCommand(task)||stoppedForCommand(task)))throw new OrchestrationError('STATE_CONFLICT');
+    return true;
+  }
+  /** The latest live-control receipt of an input (live-execution-input.ts liveControlReceipt). */
+  private liveReceipt(inputId:string):{taskId?:string;status?:string;code?:string;revision?:number}|undefined {
+    const row=this.store.get("SELECT payload_json FROM conversation_events WHERE type='input.execution_control' AND json_extract(payload_json,'$.payload.inputId')=? ORDER BY seq DESC LIMIT 1",inputId);
+    return row?JSON.parse(String(row.payload_json)).payload:undefined;
+  }
+  /** The owner's pause/revise/resume, or (agentHandoffInputId) the agent's single command for a handed-off utterance. Runs inside the caller's transaction. */
+  private applyDirectControl(conversationId:string,taskId:string,task:TaskSnapshot,command:{id:string;action:'pause'|'revise'|'resume';text?:string},record?:(task:TaskSnapshot)=>void,agentHandoffInputId?:string):TaskSnapshot {
+    task.automationController='user';
+    const paused=pausedForCommand(task);
+    const recoverable=command.action==='revise'&&stoppedForCommand(task);
+    if(!['queued','starting','running','interrupting'].includes(task.state)&&!paused&&!recoverable)throw new OrchestrationError('STATE_CONFLICT');
+    // Only the owner's own pause (settled or still settling) leaves interrupted work. A settled
+    // round waiting for the next command has nothing to resume: re-running it would replay it.
+    if(command.action==='resume'&&!(task.executionControl?.action==='pause'&&['pending','paused'].includes(task.executionControl.phase)))throw new OrchestrationError('NOTHING_TO_RESUME','Nothing to resume: the last command already finished. Give the next command instead.');
+    if(command.action==='revise')boundedText(command.text??'',4000);
+    else if(command.text!==undefined)throw new OrchestrationError('INVALID_INPUT');
+    const previous=this.revision(taskId,task.revision);
+    // Never drop queued words silently: say which commands will not run.
+    const unsent=command.action==='pause'?task.queuedCommands??[]:[];
+    const dropped=unsent.length?` ${unsent.length} queued command${unsent.length===1?' was':'s were'} not sent: ${unsent.map(c=>JSON.stringify(c.text.slice(0,60))).join(', ')}.`:'';
+    if(unsent.length)this.store.appendEvent(conversationId,'task.command_queue_dropped',{taskId,count:unsent.length,reason:'paused'},taskId);
+    if(command.action==='pause')delete task.queuedCommands;
+    // A user's own command is still settling: the next one waits its turn,
+    // verbatim, instead of superseding it or being folded into a correction.
+    if(command.action==='revise'&&this.queuesDirectCommand(task,previous)){
+      const queue=task.queuedCommands??[];
+      if(queue.length>=COMMAND_QUEUE_MAX)throw new OrchestrationError('COMMAND_QUEUE_FULL','Too many commands are waiting. Wait for the current ones to finish or pause.');
+      task.queuedCommands=[...queue,{id:command.id,text:command.text!,at:Date.now()}];
+      task.latestProgress={source:'runtime',observedAt:Date.now(),text:`Queued: ${JSON.stringify(command.text!.slice(0,120))} runs after the current command (${task.queuedCommands.length} waiting).`};
+      this.store.saveTask(task,task.stateVersion);
+      this.store.appendEvent(conversationId,'task.command_queued',{taskId,commandId:command.id,position:task.queuedCommands.length},taskId);
+      record?.(task);
+      return task;
+    }
+    const priorAnswers=previous.answers?.map(a=>({field:a.browserFieldLabel??a.computerFieldLabel,text:a.text}));
+    const nextCommand=command.action==='revise'&&(paused||recoverable);
+    const instructions=nextCommand?command.text!:command.action==='revise'?CORRECTION_HEAD+command.text+'\n\nEarlier requirements and corrections, newest first. Keep only requirements compatible with the latest correction; do not perform superseded actions:\n'+previous.instructions+(priorAnswers?.length?'\n\nEarlier user answers (subject to the latest correction):\n'+JSON.stringify(priorAnswers):''):previous.instructions;
+    boundedText(instructions,task.gatewayTarget?.adapter==='browser'?8000:16000);
+    task.revision++;
+    if(recoverable){delete task.computerReport;delete task.failure;delete task.browserReport;delete task.gatewayDispatch;}
+    this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,requestBrowserConsent:command.action!=='pause',revision:task.revision,instructions,mode:'interrupt_and_resume',computerInputs:command.action==='revise'?undefined:previous.computerInputs,answers:command.action==='revise'?undefined:previous.answers,browserRecoveryCount:0,guidance:undefined,guidanceBasis:undefined,...(command.action==='revise'?{directCommand:true}:{}),agentHandoffInputId}));
+    task.executionControl={id:command.id,action:command.action,revision:task.revision,phase:task.activeAttemptId?'pending':command.action==='pause'?'paused':'pending',requestedAt:Date.now(),...(agentHandoffInputId?{agentHandoff:true as const}:{})};
+    task.state=task.activeAttemptId?'interrupting':command.action==='pause'?'waiting_input':'queued';
+    task.latestProgress={source:'runtime',observedAt:Date.now(),text:((task.activeAttemptId?'Control accepted; settling the current action before applying it.':command.action==='pause'?'Automation paused.':'Control accepted; resuming from a fresh observation.')+dropped).slice(0,4096)};
+    this.store.saveTask(task,task.stateVersion);
+    this.store.appendEvent(conversationId,'task.control_accepted',{taskId,control:task.executionControl},taskId);
+    record?.(task);
+    return task;
   }
   /** A user's direct command is still settling, so a new one joins the FIFO queue. */
   private queuesDirectCommand(task:TaskSnapshot,previous:TaskRevision):boolean {
@@ -458,6 +495,8 @@ export class TaskService {
     return !(task.automationController==='user'&&this.queuesDirectCommand(task,this.revision(taskId,task.revision)));
   }
   cancel(context: CommandContext, taskId: string, replacedByTaskId?: string): TaskSnapshot {
+    // A handed-off utterance allows one task_update only; it never ends the user's session.
+    if (this.liveReceipt(context.inputId)?.code === 'AGENT_HANDOFF') throw new OrchestrationError('AGENT_HANDOFF_ONE_COMMAND', 'This input may only become one task_update mode=when_ready on the handed-off task.');
     return this.command(context, 'cancel', { taskId, ...(replacedByTaskId ? { replacedByTaskId } : {}) }, false, () => this.cancelOwned(context.conversationId, taskId, replacedByTaskId), taskId);
   }
   /** Authenticated user control bypasses inference, but retains conversation ownership and task fencing. */

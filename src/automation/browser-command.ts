@@ -17,7 +17,8 @@ export type BrowserCommandPlan=
  | {kind:'new_tab'};
 /** What a direct browser command did, for the owner's outcome line. Never typed text. */
 export interface BrowserCommandAction {kind:'scroll'|'key'|'history'|'navigate'|'search'|'click'|'type'|'select'|'new_tab'|'wait';label?:string;direction?:string;key?:string;url?:string}
-export interface BrowserCommandOutcome {done:boolean;action?:BrowserCommandAction;reason?:string}
+/** gaveUp: Jev itself chose BLOCKED or UNCLEAR for a single direct command (agent hand-off candidate). */
+export interface BrowserCommandOutcome {done:boolean;action?:BrowserCommandAction;reason?:string;gaveUp?:boolean}
 
 const KEY_NAMES:Record<string,BrowserKey>={enter:'Enter',tab:'Tab',escape:'Escape',up:'ArrowUp',down:'ArrowDown',left:'ArrowLeft',right:'ArrowRight'};
 // Browser-only history words. Computer Use keeps its own vocabulary unchanged.

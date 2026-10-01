@@ -486,3 +486,42 @@ describe("TARGET_OBSCURED: a covered target is its own outcome", () => {
     expect(result.commandOutcome).toMatchObject({ done: true, action: { kind: "click", label: "Yahoo News" } });
   });
 });
+
+// Session d88943d1 item 3: Jev giving up on a single direct command (BLOCKED or
+// UNCLEAR) marks it for a one-time agent hand-off; nothing else changes.
+describe("AGENT_HANDOFF: Jev gives up on a single direct command", () => {
+  const odd = "เอาอันนั้นมาให้หน่อย";
+  test("UNCLEAR is offered exactly where READ_REQUEST is", async () => {
+    const { decisionQuestions } = await import("../../../src/automation/browser-use");
+    const p = page();
+    expect(Object.keys(decisionQuestions(p, odd, new Set(), true).questions.operation.criteria)).toEqual(expect.arrayContaining(["READ_REQUEST", "UNCLEAR"]));
+    expect(Object.keys(decisionQuestions(p, odd, new Set(), true, false).questions.operation.criteria)).not.toContain("UNCLEAR");
+    expect(Object.keys(decisionQuestions(p, odd, new Set(), false).questions.operation.criteria)).not.toContain("UNCLEAR");
+  });
+  test.each([["BLOCKED", "NO_SUPPORTED_ACTION"], ["UNCLEAR", "UNCLEAR"]])("Jev %s sends nothing and requests a hand-off", async (chosen, reason) => {
+    const { agentHandoffRequested, directCommandSpeech } = await import("../../../src/automation/command-speech");
+    const b = browser(page());
+    const result = await run(odd, b, jev({ operation: () => chosen }));
+    expect(b.mutations()).toEqual([]);
+    expect(result).toMatchObject({ status: "needs_verification", reason: "COMMAND_WAITING_INPUT", commandOutcome: { done: false, reason, gaveUp: true } });
+    expect(agentHandoffRequested({ browserReport: result as never })).toBe(true);
+    expect(browserOutcomeText(result)).toMatch(/^Not done:/);
+    expect(directCommandSpeech({ browserReport: result as never }, odd, { thai: true })?.spoken).toBeTruthy();
+  });
+  test("step mode, agent tasks and deterministic or low-confidence not-done never request a hand-off", async () => {
+    const { agentHandoffRequested } = await import("../../../src/automation/command-speech");
+    const strict = browser(page()), sj = jev({ operation: () => "BLOCKED" });
+    const s = await run(odd, strict, sj, { strictDestructive: true });
+    expect(Object.keys(sj.requests[0].questions.operation.criteria)).not.toContain("UNCLEAR");
+    expect(s.commandOutcome?.gaveUp).toBeUndefined();
+    expect(agentHandoffRequested({ browserReport: s as never })).toBe(false);
+    const agent = await run(odd, browser(page()), jev({ operation: () => "BLOCKED" }), { command: false });
+    expect(agentHandoffRequested({ browserReport: agent as never })).toBe(false);
+    const limit = await run("scroll down", browser(page({ scroll: { up: true, down: false } })));
+    expect(agentHandoffRequested({ browserReport: limit as never })).toBe(false);
+    const low = await run(odd, browser(page()), jev({ operation: () => "CLICK" }, 0.3), { targetConfidence: 0.5 });
+    expect(agentHandoffRequested({ browserReport: low as never })).toBe(false);
+    const stepRun = { ...(await run(odd, browser(page()), jev({ operation: () => "BLOCKED" }))), stepRun: { total: 2, completed: 0 } };
+    expect(agentHandoffRequested({ browserReport: stepRun as never })).toBe(false);
+  });
+});

@@ -3,7 +3,7 @@ import {BrowserTraceEvent, BrowserTrace} from "./browser-trace";
 import { runLoop } from "../../lib/automation/index.cjs";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import {COMMAND_DECISION_FAILURES,READ_REQUEST_CRITERION,textCommand,textEntryRequested} from "./direct-command";
+import {COMMAND_DECISION_FAILURES,READ_REQUEST_CRITERION,UNCLEAR_CRITERION,textCommand,textEntryRequested} from "./direct-command";
 import {runBrowserStepsWith,type BrowserStepsInput} from "./browser-steps";
 import {blankTabUrl,browserDestructiveBlock,navigationUrl,browserSubmitBlock,planBrowserCommand,searchFields,type BrowserCommandAction,type BrowserCommandOutcome,type BrowserCommandPlan} from "./browser-command";
 
@@ -215,7 +215,7 @@ export type BrowserUseResult = {
 // A Jev decision that failed or timed out ends this command, not the task
 // (session b01a566f: one ADAPTER_TIMEOUT failed the whole voice session).
 // Configuration, access and quota failures still stop the task.
-const COMMAND_NOT_DONE = new Set([...COMMAND_DECISION_FAILURES,"TEXT_ENTRY_NOT_REQUESTED","STALE_OBSERVATION","STALE_RETRY_BUDGET","NO_SUPPORTED_ACTION","LOW_OPERATION_CONFIDENCE","LOW_TARGET_CONFIDENCE","NO_PROGRESS","PAGE_CONTENT_UNAVAILABLE","WAIT_BUDGET","ACTION_SPACE_TOO_LARGE","DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED","HISTORY_UNAVAILABLE","SCROLL_LIMIT","NEW_TAB_OUT_OF_SCOPE","START_URL_REQUIRED","KEY_UNSUPPORTED","ACTION_BUDGET","EVALUATION_BUDGET","TARGET_OBSCURED","NAVIGATION_UNRESOLVED"]);
+const COMMAND_NOT_DONE = new Set([...COMMAND_DECISION_FAILURES,"TEXT_ENTRY_NOT_REQUESTED","STALE_OBSERVATION","STALE_RETRY_BUDGET","NO_SUPPORTED_ACTION","LOW_OPERATION_CONFIDENCE","LOW_TARGET_CONFIDENCE","NO_PROGRESS","PAGE_CONTENT_UNAVAILABLE","WAIT_BUDGET","ACTION_SPACE_TOO_LARGE","DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED","HISTORY_UNAVAILABLE","SCROLL_LIMIT","NEW_TAB_OUT_OF_SCOPE","START_URL_REQUIRED","KEY_UNSUPPORTED","ACTION_BUDGET","EVALUATION_BUDGET","TARGET_OBSCURED","NAVIGATION_UNRESOLVED","UNCLEAR"]);
 // A leased read after navigation waits in the extension, then reports
 // STALE_OBSERVATION cause NAVIGATION_PENDING. Re-read only; never replay the action.
 const NAVIGATION_WAIT_MAX = 6;
@@ -281,7 +281,7 @@ export function decisionQuestions(page: Observation, goal = "", exhaustedTextFie
     BLOCKED: "No supported action can make progress",
   };
   // Only a single direct command (not a step of a list) that has not acted yet can be a question for the assistant.
-  if (command && readRequest) operations.READ_REQUEST = READ_REQUEST_CRITERION;
+  if (command && readRequest) { operations.READ_REQUEST = READ_REQUEST_CRITERION; operations.UNCLEAR = UNCLEAR_CRITERION; }
   // Likewise only before this command acted, and only with a text helper to resolve the site.
   if (command && readRequest && navigate) operations.NAVIGATE = NAVIGATE_CRITERION;
   if (page.scroll.up) operations.SCROLL_UP = "Scroll up";
@@ -380,6 +380,7 @@ export async function runBrowserUse(
     commandOutcome: BrowserCommandOutcome | undefined,
     commandAction: BrowserCommandAction | undefined;
   let navigationWaits = 0;
+  let gaveUp = false;
   let steps = 0,
     evaluations = 0,
     noProgress = 0,
@@ -413,7 +414,7 @@ export async function runBrowserUse(
         status = "needs_verification";
         reason = "COMMAND_WAITING_INPUT";
       } else if (status === "blocked" && COMMAND_NOT_DONE.has(reason)) {
-        commandOutcome = { done: false, reason, ...(commandAction ? { action: commandAction } : {}) };
+        commandOutcome = { done: false, reason, ...(gaveUp ? { gaveUp: true } : {}), ...(commandAction ? { action: commandAction } : {}) };
         status = "needs_verification";
         reason = "COMMAND_WAITING_INPUT";
       } else if (status === "needs_verification" && reason === "COMMAND_WAITING_INPUT" && lastAction?.outcome === "confirmed")
@@ -913,7 +914,12 @@ export async function runBrowserUse(
       if (op.confidence < input.operationConfidence){return result("blocked", "LOW_OPERATION_CONFIDENCE");}
       // The next browser operation atomically checks current ownership/consent.
       // A separate renewal here would add a redundant browser round trip.
-      if (op.choice === "BLOCKED") {return result("blocked", "NO_SUPPORTED_ACTION");}
+      // Jev gave up on a single direct command: the gateway may hand it to the agent once.
+      const handoff = input.command && !input.strictDestructive && !lastConfirmedAction;
+      if (op.choice === "BLOCKED" || op.choice === "UNCLEAR") {
+        gaveUp = handoff;
+        return result("blocked", op.choice === "UNCLEAR" ? "UNCLEAR" : "NO_SUPPORTED_ACTION");
+      }
       // No action: the gateway hands the command to the agent, which reads the page.
       if (op.choice === "READ_REQUEST") {
         // Computer Use's confident bar (computer-policy readChoice); an uncertain read stays a not-done command.

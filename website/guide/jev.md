@@ -907,4 +907,35 @@ A spoken direct command that does nothing gets one short spoken reply on that vo
 
 **Read requests.** A direct command that only asks about what is shown (for example `อ่านให้ฟังหน่อย ลิเวอร์พูลจะเตะกับใครในแมตช์ถัดไป` or `what does this page say?`) is not an action. Jev decides this itself, in any language, by choosing `READ_REQUEST` among its offered operations; there is no keyword list. Only a single direct command under user control that has not dispatched an action yet is offered `READ_REQUEST`; agent control and every step of a Remote Browser or Computer Use step list are not, so a step list never stops as a read request. A `READ_REQUEST` below the confident bar (confidence 0.55, probability 0.5), or a malformed decision, keeps the ordinary not-done behaviour. No step is dispatched. The gateway then makes the same input an ordinary user turn: its control receipt becomes `needs_agent` with code `READ_REQUEST`, the message is recorded in history, and the agent answers it, also while the user controls the task. That turn is read-only (`execute` off, task mutations rejected with `READ_REQUEST_ONLY`). The agent reads fresh evidence (`task_status` with `browser_evidence=fresh` or `computer_evidence=fresh`) and answers in 1–3 short sentences (at most about 400 characters). Page and screen text stays untrusted data, and sensitive field values and token-bearing URLs are never read out. No "not done" line is spoken for a read request; the typed echo of a spoken read request is still deduplicated.
 
+**Agent hand-off when Jev gives up.** Jev's normal path is unchanged: there is no
+confidence threshold, and fast paths, `NAVIGATE`, `READ_REQUEST` and the text-entry
+guard behave as before. Where `READ_REQUEST` is offered (a single direct command
+under user control that has not acted yet), Jev is also offered `UNCLEAR`: "I do
+not understand this command". When Jev itself gives up on such a command, by
+choosing `BLOCKED` or `UNCLEAR` (Computer Use: also a confident `BLOCKED` target), nothing is dispatched. The outcome
+is marked (`commandOutcome.gaveUp` on Remote Browser; a `waiting` trace event with
+`decisionMode: "jev"` on Computer Use), and the gateway hands the same input to
+the agent through the read-request route. The control receipt becomes `needs_agent`
+with code `AGENT_HANDOFF`, the message is recorded in history, and the agent gets
+a turn even under user control. A live-voice command first hears a short line
+("ขอคิดแป๊บนะ" / "Let me think about that."), because the agent takes several
+seconds. Low confidence, deterministic not-done outcomes (scroll limit, no search
+field, and so on), uncertain receipts and step runs never hand off.
+
+The agent reads fresh evidence and may send **at most one** command for that
+utterance: a `task_update` with `mode=when_ready` on the same task, at the revision
+the utterance settled at. It cannot include field values, inputs or `start_url`.
+Other tools and targets, including `task_cancel`, are rejected (`AGENT_HANDOFF_ONE_COMMAND`). A second command is
+rejected (`AGENT_HANDOFF_USED`), and so is one sent after the user has already
+given a newer command (`REVISION_CONFLICT`). The command runs as the user's next
+direct command; the user keeps control. It never runs as a step list, and it
+gains no extra authority: high-impact controls always return control (Remote
+Browser `strictDestructive`; Computer Use `agentCommand`), whatever the agent's
+words say. It is not offered `READ_REQUEST`, `UNCLEAR` or `NAVIGATE`. If Jev
+gives up on it, it never hands off again: the not-done line is spoken against the
+user's original words and the session waits for the next command. If the meaning
+is still unclear or the input is a question, the agent answers or asks instead of
+acting. Page and screen text stays untrusted, and sensitive values are never read
+out.
+
 A safely stopped confidence/provider failure permits a fresh explicit command on the same open task. A closed session or uncertain mutation cannot be resumed this way; inspect and reconcile the retained receipt first.

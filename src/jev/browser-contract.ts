@@ -31,6 +31,8 @@ export interface BrowserExecutionContext {
   command?: boolean;
   /** Previous direct command context; references only, never replayed. */
   interactionContext?: string;
+  /** The agent's command for a handed-off utterance: every high-impact control returns control. */
+  strictDestructive?: boolean;
   /** The user's explicit step list (step mode). */
   steps?: string[];
   fields?: Array<{label:string;text:string}>;

@@ -28,6 +28,7 @@ const THAI:Record<string,string>={
  BRING_BROWSER_FRONT:'ใช้คำสั่งนี้กับแอปที่อยู่หน้าสุดไม่ได้ เอาเบราว์เซอร์ขึ้นมาไว้หน้าสุดก่อน',
  OBSCURED:'มีบางอย่างบังปุ่มหรือลิงก์นั้นอยู่ ปิดหน้าต่างที่บังก่อน แล้วสั่งใหม่',
  NAVIGATION:'ไม่แน่ใจว่าจะเข้าเว็บไหน บอกชื่อเว็บให้ชัด เช่น เข้า yahoo.com',
+ UNCLEAR:'ไม่เข้าใจคำสั่ง {command} ลองพูดแบบอื่นดู',
  TEXT_ENTRY:'ไม่ได้พิมพ์อะไรลงไป ถ้าจะพิมพ์ให้พูดว่า พิมพ์ ตามด้วยข้อความ',
  ENDED:'ยังไม่ได้ทำ {command} และงานนี้หยุดไปแล้ว ต้องเริ่มงานใหม่',
  DEFAULT:'ยังไม่ได้ทำ {command} ลองพูดใหม่อีกครั้ง',
@@ -46,6 +47,7 @@ const ENGLISH:Record<string,string>={
  BRING_BROWSER_FRONT:'That shortcut does not work in the app in front. Bring the browser to the front first.',
  OBSCURED:'Something is covering that button or link. Close it first, then say it again.',
  NAVIGATION:'Not sure which website to open. Say its address, for example go to yahoo.com.',
+ UNCLEAR:'Did not understand {command}. Try saying it another way.',
  TEXT_ENTRY:'Nothing was typed. To type, say type followed by the text.',
  ENDED:'{command} was not done, and this task has ended. Start a new one to continue.',
  DEFAULT:'{command} was not done. Please say it again.',
@@ -56,7 +58,7 @@ const KIND:Record<string,string>={
  SEQUENCE_TOO_LONG:'SEQUENCE_TOO_LONG',DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED:'DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED',
  UI_NOT_READY:'SCREEN_CHANGING',STALE_OBSERVATION:'SCREEN_CHANGING',ACTION_CONTEXT_CHANGED:'SCREEN_CHANGING',STALE_RETRY_BUDGET:'SCREEN_CHANGING',WAIT_BUDGET:'SCREEN_CHANGING',
  NEW_TAB_OUT_OF_SCOPE:'NEW_TAB',SHORTCUT_UNAVAILABLE:'BRING_BROWSER_FRONT',TEXT_ENTRY_NOT_REQUESTED:'TEXT_ENTRY',START_URL_REQUIRED:'START_URL',
- TARGET_OBSCURED:'OBSCURED',NAVIGATION_UNRESOLVED:'NAVIGATION',
+ TARGET_OBSCURED:'OBSCURED',NAVIGATION_UNRESOLVED:'NAVIGATION',UNCLEAR:'UNCLEAR',
 };
 export interface SpeechContext {
  /** The conversation speaks Thai (voice locale, or its recent commands). */
@@ -73,6 +75,24 @@ export function readRequested(outcome:{computerReport?:ComputerTaskReport;browse
  if(computer)return !computer.stepRun&&computer.reason==='COMMAND_WAITING_INPUT'&&!computer.steps&&
   [...(Array.isArray(computer.trace)?computer.trace:[])].reverse().find(e=>e.phase==='waiting'&&e.reason!=='POST_ACTION_EVIDENCE_STALE')?.reason==='READ_REQUEST';
  return !!browser&&!browser.stepRun&&browser.reason==='COMMAND_WAITING_INPUT'&&browser.commandOutcome?.reason==='READ_REQUEST'&&!browser.lastConfirmedAction&&browser.lastAction?.outcome!=='unknown';
+}
+/**
+ * Jev itself gave up on a single direct command (BLOCKED or UNCLEAR, no action
+ * ran): the gateway may hand the same input to the agent once. Step runs, deterministic
+ * not-done outcomes and uncertain receipts never qualify.
+ */
+export function agentHandoffRequested(outcome:{computerReport?:ComputerTaskReport;browserReport?:BrowserTaskReport}):boolean{
+ const computer=outcome.computerReport,browser=outcome.browserReport;
+ if(computer){
+  if(computer.stepRun||computer.reason!=='COMMAND_WAITING_INPUT'||computer.steps)return false;
+  const waiting=[...(Array.isArray(computer.trace)?computer.trace:[])].reverse().find(e=>e.phase==='waiting'&&e.reason!=='POST_ACTION_EVIDENCE_STALE');
+  return waiting?.decisionMode==='jev'&&['NO_SUPPORTED_ACTION','UNCLEAR'].includes(waiting.reason??'');
+ }
+ return !!browser&&!browser.stepRun&&browser.reason==='COMMAND_WAITING_INPUT'&&browser.commandOutcome?.gaveUp===true&&!browser.lastConfirmedAction&&browser.lastAction?.outcome!=='unknown';
+}
+/** Spoken while the agent works out a handed-off command (it takes several seconds). */
+export function agentHandoffSpeech(thai:boolean):string{
+ return thai?'ขอคิดแป๊บนะ':'Let me think about that.';
 }
 export function directCommandSpeech(outcome:{computerReport?:ComputerTaskReport;browserReport?:BrowserTaskReport},command:string,context:SpeechContext={}):{spoken:string;recorded:string}|undefined{
  // The agent speaks the answer itself.

@@ -32,17 +32,19 @@ function voiceEcho(store:OrchestrationStore,conversationId:string,taskId:string,
 }
 /**
  * Jev judged the user's applied direct command a question about what is shown
- * (READ_REQUEST); nothing ran. The same input becomes a normal user turn with a
- * needs_agent receipt, so the agent answers it, during user control too, and
- * history records it. Applies once, only to that task's applied receipt.
+ * (READ_REQUEST), or gave up on it (AGENT_HANDOFF: BLOCKED or UNCLEAR); nothing
+ * ran. The same input becomes a normal user turn with a needs_agent receipt, so
+ * the agent answers it (or sends one command for it), during user control too,
+ * and history records it. Applies once, only to that task's applied receipt.
  */
-export function handReadRequestToAgent(store:OrchestrationStore,task:TaskSnapshot,inputId:string,revision:number):boolean {
+export type DirectHandoffCode='READ_REQUEST'|'AGENT_HANDOFF';
+export function handDirectCommandToAgent(store:OrchestrationStore,task:TaskSnapshot,inputId:string,revision:number,code:DirectHandoffCode):boolean {
   return store.transaction(()=>{
     const input=store.get('SELECT conversation_id,principal_id,status FROM conversation_inputs WHERE id=?',inputId);
     if(!input||input.conversation_id!==task.conversationId||input.principal_id!==task.ownerPrincipalId||input.status!=='handled')return false;
     const receipt=liveControlReceipt(store,inputId);
     if(receipt?.taskId!==task.taskId||receipt.status!=='applied'||receipt.code)return false;
-    store.appendEvent(task.conversationId,'input.execution_control',{inputId,taskId:task.taskId,status:'needs_agent',code:'READ_REQUEST',revision} satisfies LiveControlReceipt,task.taskId);
+    store.appendEvent(task.conversationId,'input.execution_control',{inputId,taskId:task.taskId,status:'needs_agent',code,revision} satisfies LiveControlReceipt,task.taskId);
     store.run("UPDATE conversation_inputs SET status='accepted',store_user_message=1 WHERE id=?",inputId);
     store.run("UPDATE history_operations SET state='pending',updated_at=? WHERE operation_id=? AND input_id=?",Date.now(),`input:${inputId}`,inputId);
     return true;
