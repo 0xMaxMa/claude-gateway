@@ -333,8 +333,11 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     if (!stopPromise) {
       stopped = true;
       if (!settled) process.recordTurnOutcome?.('cancelled');
-      // Await real exit; SIGINT's boolean is not an acknowledgment.
+      // Await real exit; SIGINT's boolean is not an acknowledgment. stop()
+      // resolves on this turn's own child's exit, so settle from it rather than
+      // from 'exit', which a child a later start() attached may emit first.
       process.interrupt(); stopPromise = process.stop();
+      process.off('exit', exit); void stopPromise.then(exit, exit);
     }
     return stopPromise;
   };
@@ -344,7 +347,8 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
   if (policy) arm('startup', policy.startupTimeoutMs);
   process.on('output', output); process.on('exit', exit); process.on('startup-error', startupError);
   void (alreadyStarted ? Promise.resolve() : process.start()).then(() => {
-    if (stopped || settled) return process.stop();
+    // A stop during start() may abandon the spawn, so no 'exit' will settle the turn.
+    if (stopped || settled) return Promise.resolve(process.stop()).then(exit);
     process.sendMessage(prompt, images);
   }).catch(error => { fail(error); void process.stop(); });
   return { accepted, providerReady, result, stop };

@@ -100,11 +100,11 @@ export function runtimeProfileArgs(profile: RuntimeProfile, extraFlags: string[]
 }
 
 /**
- * Windows caps a whole command line at 32767 characters, and an agent's
- * appended system prompt (workspace context + orchestration overlay) alone is
- * routinely larger, so spawn fails with ENAMETOOLONG. Rewrites the prompt into
- * --append-system-prompt-file `file`, keeping other args; the caller writes
- * `prompt` to `file` (see SessionProcess.writeSystemPromptFile).
+ * The appended system prompt (workspace context + orchestration overlay) is too
+ * large for a command line: Windows caps the whole line at 32767 characters and
+ * Linux caps a single argument at 128 KiB, failing spawn with ENAMETOOLONG/E2BIG.
+ * Rewrites the prompt into --append-system-prompt-file `file`, keeping other args;
+ * the caller writes `prompt` to `file` (see SessionProcess.writeSystemPromptFile).
  */
 export function appendSystemPromptViaFile(args: string[], file: string): { args: string[]; prompt?: string } {
   const at = args.lastIndexOf('--append-system-prompt');

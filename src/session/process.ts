@@ -5,7 +5,7 @@ import { RequestToolCapture, RequestToolSchemas } from './request-tool-capture';
 import type { InputImage } from './input-image';
 import { prepareContainerProfile, stopContainerProfile, CONTAINER_SUPERVISOR, containerNode, assertContainerBinding } from '../orchestration/container';
 import { spawn, ChildProcess } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -13,8 +13,8 @@ import * as path from 'path';
 import { appendSystemPromptViaFile, RuntimeProfile, runtimeProfileArgs } from './runtime-profile';
 import { StringDecoder } from 'string_decoder';
 import { processSupervisorSupported, recordProcessRoot, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
-import { commandLineLimited } from '../orchestration/process-platform';
 import { gatewayCapacity } from '../orchestration/capacity';
+import { OrchestrationError } from '../orchestration/types';
 import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
 import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
@@ -226,6 +226,10 @@ const STATE_SUBDIR: Record<ChatChannel, string> = {
 export class SessionProcess extends EventEmitter {
   private managedProcessGroup?: number;
   private containerAttempt?: { directory: string; config: string };
+  /** Bumped by stop(): a spawnProcess() that awaited across it abandons its spawn. */
+  private spawnEpoch = 0;
+  // Bumped by every start(): a stop() still awaiting after one ran no longer owns the session's live state.
+  private starts = 0;
   managedGroupStopped = false;
   get processId(): number | undefined { return this.isRunning() ? this.process?.pid : undefined; }
   get managedProcessId(): number | undefined { return this.managedProcessGroup; }
@@ -433,6 +437,7 @@ export class SessionProcess extends EventEmitter {
   }
 
   async start(): Promise<void> {
+    this.starts++;
     this.stopping = false;
     this.restartCount = 0;
     this.setupRestartWatcher();
@@ -718,19 +723,26 @@ export class SessionProcess extends EventEmitter {
   }
 
   private managedMcpConfigPath?: string;
-  /** Windows only: the appended system prompt, too long for a command line. */
+  /** Host file holding the appended system prompt (see writeSystemPromptFile). */
   private systemPromptPath?: string;
   private managedConnectorPaths = new Set<string>();
+  /** `.sessions/<id>`, once a spawn without a runtime profile has written its mcp-config.json there. */
+  private sessionDirPath?: string;
 
-  /** Host spawns where the command line is capped (Windows) move the appended
-   * system prompt into a 0600 file beside the attempt's MCP config (a 0700
-   * directory). Containers are skipped: their CLI sees container paths. */
+  /** The appended system prompt never travels on the command line: Windows caps a
+   * whole command line at 32767 characters and Linux caps ONE argument at 128 KiB
+   * (MAX_ARG_STRLEN), so a large workspace context or skill catalog would fail
+   * every spawn (#559); argv is also world-readable through /proc/<pid>/cmdline.
+   * The host CLI reads a 0600 file beside the attempt's MCP config (a 0700
+   * directory), named per spawn so stopping one spawn never removes another's.
+   * A container CLI reads one that prepareContainerProfile writes in its attempt
+   * directory, in the same docker exec as the attempt's mcp.json and ticket. */
   private writeSystemPromptFile(args: string[], mcpConfigPath: string | null): string[] {
-    if (!this.runtimeProfile || !commandLineLimited() || this.agentConfig.type === 'app-agent') return args;
-    const file = path.join(path.dirname(mcpConfigPath ?? this.runtimeProfile.mcpConfigPath), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, '_')}.md`);
+    if (!this.runtimeProfile) return args;
+    const file = path.join(path.dirname(mcpConfigPath ?? this.runtimeProfile.mcpConfigPath), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, '_')}-${randomUUID()}.md`);
     const moved = appendSystemPromptViaFile(args, file);
     if (moved.prompt === undefined) return args;
-    fs.writeFileSync(file, moved.prompt, { mode: 0o600 });
+    fs.writeFileSync(file, moved.prompt, { mode: 0o600, flag: 'wx' });
     this.systemPromptPath = file;
     return moved.args;
   }
@@ -762,6 +774,7 @@ export class SessionProcess extends EventEmitter {
       throw new Error('invalid session id');
     }
     fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+    this.sessionDirPath = sessionDir;
 
     const mcpServerPath = path.resolve(__dirname, '..', '..', 'mcp', 'server.ts');
 
@@ -965,7 +978,7 @@ export class SessionProcess extends EventEmitter {
     return (personal.enabled && personal.recordRetrievals) || (shared.enabled && shared.recordRetrievals) ? '1' : '';
   }
 
-  private buildArgs(mcpConfigPath: string | null, model: string): string[] {
+  private buildArgs(mcpConfigPath: string | null, model: string, containerAttempt = this.containerAttempt): string[] {
     const args: string[] = [
       '--model', model,
       '--input-format', 'stream-json',
@@ -988,7 +1001,7 @@ export class SessionProcess extends EventEmitter {
           throw error;
         }
       }
-      const profileArgs = runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: this.containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${this.containerAttempt.directory}/checkpoint.cjs ${this.containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: this.containerAttempt && this.runtimeProfile.skillPluginDir ? this.containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []);
+      const profileArgs = runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${containerAttempt.directory}/checkpoint.cjs ${containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: containerAttempt && this.runtimeProfile.skillPluginDir ? containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []);
       args.push(...profileArgs);
       if (this.runtimeProfile.cliSession) {
         const session = this.runtimeProfile.cliSession;
@@ -1032,17 +1045,31 @@ export class SessionProcess extends EventEmitter {
     });
   }
 
-  private async spawnProcess(): Promise<void> {
+  /** Resolves false when a stop() during its awaits abandoned the spawn: nothing was
+   * started, and a container attempt it prepared is already cleaned up. */
+  private async spawnProcess(): Promise<boolean> {
+    const epoch = this.spawnEpoch;
     const { historyPrompt, loadedAtSpawn, archivedCount, messageCountAtSpawn } = await this.buildInitialPrompt();
+    if (epoch !== this.spawnEpoch) return false;
     this.spawnContext = { loadedAtSpawn, archivedCount, messageCountAtSpawn };
 
     // Determine if this is a docker-exec app-agent before computing paths
     assertContainerBinding(this.agentConfig, this.runtimeProfile);
     const isAppAgent = this.agentConfig.type === 'app-agent' && !!this.agentConfig.container;
 
+    const freshModel = this.readFreshModel();
+    let containerArgs: string[] | undefined;
     if (isAppAgent && this.runtimeProfile) {
-      this.containerAttempt = await prepareContainerProfile(this.agentConfig, this.runtimeProfile);
-      this.runtimeProfile.context = await containerNode(this.agentConfig.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))");
+      const profile = this.runtimeProfile, container = this.agentConfig.container!;
+      const attempt = await prepareContainerProfile(this.agentConfig, profile, async directory => {
+        profile.context = await containerNode(container, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))");
+        const moved = appendSystemPromptViaFile(this.buildArgs(null, freshModel, { directory, config: directory + '/mcp.json' }), directory + '/system-prompt.md');
+        containerArgs = moved.args;
+        return moved.prompt;
+      });
+      // stop() could not see this attempt yet; remove its ticket and prompt here.
+      if (epoch !== this.spawnEpoch) { await stopContainerProfile(container, attempt.directory); return false; }
+      this.containerAttempt = attempt;
     }
     const mcpConfigPath = this.writeMcpConfig();
 
@@ -1053,8 +1080,7 @@ export class SessionProcess extends EventEmitter {
     const effectiveMcpPath = (isAppAgent && mcpConfigPath) ? toContainerPath(mcpConfigPath) : mcpConfigPath;
     const containerRestartPath = isAppAgent ? toContainerPath(this.restartSignalPath) : this.restartSignalPath;
 
-    const freshModel = this.readFreshModel();
-    const args = this.writeSystemPromptFile(this.buildArgs(effectiveMcpPath, freshModel), effectiveMcpPath);
+    const args = containerArgs ?? this.writeSystemPromptFile(this.buildArgs(effectiveMcpPath, freshModel), mcpConfigPath);
 
     // Resolve the claude binary. An explicit CLAUDE_BIN (which may carry args) is
     // parsed by parseClaudeBin; otherwise probe PATH and the native-installer / legacy
@@ -1224,9 +1250,20 @@ export class SessionProcess extends EventEmitter {
       ...(this.runtimeProfile?.role === 'worker' && processSupervisorSupported() && workerSpawnDetached() ? { detached: true } : {}),
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
-    }); } catch (error) { toolCapture?.close(); releaseCapacity(); throw error; }
+    }); } catch (error) {
+      toolCapture?.close(); releaseCapacity();
+      // Node throws E2BIG/ENAMETOOLONG (and most other execve failures) from spawn()
+      // itself; they never reach proc.on('error') below, so log them here. Sizes
+      // only: the arguments may carry prompts and settings.
+      const cause = (error as NodeJS.ErrnoException).code;
+      const bytes = [spawnBin, ...spawnArgs].map(arg => Buffer.byteLength(arg));
+      this.logger.error('session subprocess could not be spawned', { sessionId: this.sessionId, code: cause, argCount: bytes.length, largestArgBytes: Math.max(...bytes), totalArgBytes: bytes.reduce((sum, n) => sum + n, 0) });
+      if (cause === 'E2BIG' || cause === 'ENAMETOOLONG') throw new OrchestrationError('PROCESS_ARGS_TOO_LARGE', `spawn ${cause}`);
+      throw error;
+    }
 
     this.process = proc;
+    const startsAtSpawn = this.starts;
     proc.once('exit', releaseCapacity);
     proc.once('exit', () => { setTimeout(() => toolCapture?.close(), 200).unref(); });
     proc.once('error', () => toolCapture?.close());
@@ -1590,6 +1627,14 @@ export class SessionProcess extends EventEmitter {
         sessionId: this.sessionId,
       });
       if (ptyStreamSocketPath) ptyStreamRegistry.close(ptyStreamSocketPath);
+      // A start() while an earlier stop() still waited for this exit owns the
+      // session now, whether or not its child is attached yet; this exit is not
+      // that session's death, so no 'exit' listener may see it and nothing restarts.
+      // The stopped turn settles when its stop() resolves.
+      if (this.starts !== startsAtSpawn || (this.process && this.process !== proc)) {
+        if (this.process === proc) this.process = null;
+        return;
+      }
       this.process = null;
       this._exited = true;
       this.resetBackgroundDispatchState();
@@ -1632,6 +1677,7 @@ export class SessionProcess extends EventEmitter {
         this.emit('startup-error', Object.assign(new Error(code), { code }));
       }
     });
+    return true;
   }
 
   private scheduleRestart(): void {
@@ -1672,9 +1718,10 @@ export class SessionProcess extends EventEmitter {
           // sendMessage() will no longer silently no-op. Emitted on every
           // successful crash-triggered respawn — cheap, and nothing currently
           // listens outside that one call site.
-          .then(() => {
+          .then(spawned => {
             this._restartScheduled = false;
-            this.emit('restarted');
+            if (spawned) this.emit('restarted');
+            else this.emit('restartFailed', new Error('Session restart abandoned: session stopping'));
           })
           .catch(err => {
             this._restartScheduled = false;
@@ -2042,21 +2089,48 @@ export class SessionProcess extends EventEmitter {
   async stop(): Promise<void> {
     if (this.diagnostics.outcome === 'pending' && !this.diagnostics.stopReason) this.diagnostics.stopReason = 'shutdown';
     this.stopping = true;
-    if (this.containerAttempt && this.agentConfig.container) {
-      this.managedGroupStopped = await stopContainerProfile(this.agentConfig.container, this.containerAttempt.directory);
-      this.containerAttempt = undefined;
-    }
-    if (this.managedProcessGroup) {
-      const hostStopped = await stopProcessGroup(this.managedProcessGroup);
-      this.managedGroupStopped = this.agentConfig.type === 'app-agent' ? this.managedGroupStopped && hostStopped : hostStopped;
-      if (this.managedGroupStopped) this.managedProcessGroup = undefined;
-    }
-    this.resetBackgroundDispatchState();
-    await this.restartWatcher?.close();
+    this.spawnEpoch++;
+    // Take over what the spawn being stopped wrote, so a start() while this stop
+    // still waits for the exit records its own files from scratch. Connector and
+    // MCP config files keep fixed names, and such a start() rewrites them in place:
+    // at the exit, removeSessionDir skips every path that newer spawn holds again.
+    const owned = {
+      systemPrompt: this.systemPromptPath,
+      connectors: [...this.managedConnectorPaths],
+      managedMcpConfig: this.managedMcpConfigPath,
+    };
+    this.systemPromptPath = undefined;
+    this.managedConnectorPaths = new Set();
+    this.managedMcpConfigPath = undefined;
+    this.sessionDirPath = undefined;
+    // The same for the spawn's live state: a start() during the awaits below
+    // attaches its own child, group, attempt and watcher, which this stop must
+    // neither signal nor clear. A newer stop() of that spawn handles them.
+    const starts = this.starts;
+    const superseded = (): boolean => this.starts !== starts;
+    const proc = this.process;
+    const attempt = this.containerAttempt;
+    const group = this.managedProcessGroup;
+    const watcher = this.restartWatcher;
     this.restartWatcher = null;
-    try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}
-    if (this.source === 'telegram' && !this.runtimeProfile) {
-      try { fs.rmSync(path.join(this.typingDir, `${this.chatId}.processing`), { force: true }); } catch {}
+    let exited = false;
+    const exit = proc ? new Promise<void>(resolve => proc.once('exit', () => { exited = true; resolve(); })) : undefined;
+    this.resetBackgroundDispatchState();
+    if (attempt && this.agentConfig.container) {
+      this.managedGroupStopped = await stopContainerProfile(this.agentConfig.container, attempt.directory);
+      if (this.containerAttempt === attempt) this.containerAttempt = undefined;
+    }
+    if (group) {
+      const hostStopped = await stopProcessGroup(group);
+      this.managedGroupStopped = this.agentConfig.type === 'app-agent' ? this.managedGroupStopped && hostStopped : hostStopped;
+      if (this.managedGroupStopped && this.managedProcessGroup === group) this.managedProcessGroup = undefined;
+    }
+    await watcher?.close();
+    if (!superseded()) {
+      try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}
+      if (this.source === 'telegram' && !this.runtimeProfile) {
+        try { fs.rmSync(path.join(this.typingDir, `${this.chatId}.processing`), { force: true }); } catch {}
+      }
     }
     // mcp-config.json under here holds fully-substituted secrets (channel bot
     // tokens, GATEWAY_API_KEY, connector OAuth tokens) — it must not outlive
@@ -2066,43 +2140,32 @@ export class SessionProcess extends EventEmitter {
     // subprocess (or, for a container agent, the still-running container that
     // bind-mounts this path) can be alive for up to the 10s graceful-shutdown
     // window immediately after this point, and must not find it gone under it.
+    // A newer spawn that wrote the shared directory owns it now; its stop removes it.
     const removeSessionDir = (): void => {
-      for (const filename of this.managedConnectorPaths) { try { fs.rmSync(filename, {force:true}); } catch {} }
-      this.managedConnectorPaths.clear();
-      if (this.managedMcpConfigPath) {
-        try { fs.rmSync(this.managedMcpConfigPath, { force: true }); } catch {}
-        this.managedMcpConfigPath = undefined;
+      const reclaimed = (file: string): boolean => this.managedConnectorPaths.has(file) || file === this.managedMcpConfigPath;
+      for (const file of [...owned.connectors, owned.managedMcpConfig, owned.systemPrompt]) {
+        if (file && !reclaimed(file)) { try { fs.rmSync(file, { force: true }); } catch {} }
       }
-      if (this.systemPromptPath) {
-        try { fs.rmSync(this.systemPromptPath, { force: true }); } catch {}
-        this.systemPromptPath = undefined;
-      }
+      if (this.sessionDirPath) return;
       try {
         fs.rmSync(path.join(this.agentConfig.workspace, '.sessions', this.sessionId), { recursive: true, force: true });
       } catch {}
     };
-    if (!this.process) {
+    // A child that failed to spawn never exits; its 'error' handler already let go of it.
+    if (!proc || exited || (this.process !== proc && !proc.pid)) {
       removeSessionDir();
       return;
     }
 
-    return new Promise((resolve) => {
-      const proc = this.process!;
-      let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
-      proc.once('exit', () => {
-        if (forceKillTimer !== null) {
-          clearTimeout(forceKillTimer);
-          forceKillTimer = null;
-        }
-        this.process = null;
-        removeSessionDir();
-        resolve();
-      });
-      proc.kill('SIGTERM');
-      forceKillTimer = setTimeout(() => {
-        forceKillTimer = null;
-        if (this.process) proc.kill('SIGKILL');
-      }, 10_000);
-    });
+    let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+    proc.kill('SIGTERM');
+    forceKillTimer = setTimeout(() => {
+      forceKillTimer = null;
+      if (!exited) proc.kill('SIGKILL');
+    }, 10_000);
+    await exit;
+    if (forceKillTimer !== null) clearTimeout(forceKillTimer);
+    if (this.process === proc) this.process = null;
+    removeSessionDir();
   }
 }

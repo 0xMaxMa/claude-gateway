@@ -8,7 +8,6 @@ import { TaskBridge } from '../../../src/orchestration/bridge';
 import { TaskWorkspaces } from '../../../src/orchestration/tasks/workspace';
 import { ClaudeWorkerDriver } from '../../../src/orchestration/tasks/driver';
 import { liveGroupMembers, processSupervisorSupported } from '../../../src/orchestration/process-supervisor';
-import * as platforms from '../../../src/orchestration/process-platform';
 import { setProcessPlatform } from '../../../src/orchestration/process-platform';
 import type { TaskAttempt } from '../../../src/orchestration/types';
 import { AgentConfig, GatewayConfig } from '../../../src/types';
@@ -59,37 +58,21 @@ test('a supervised worker completes only after its process tree is proven stoppe
   });
 }, 60000);
 
-// getpod-app's seeded agent appends ~48KB; Windows caps a whole command line at
-// 32767 chars, so passing it inline fails the spawn with ENAMETOOLONG there.
-test('a 60KB system prompt spawns on every OS (through a private file on Windows, removed once the session stops)', async () => {
+// Windows caps a whole command line at 32767 chars and Linux caps ONE argument at
+// 128 KiB (MAX_ARG_STRLEN), so a prompt passed inline failed every spawn with
+// ENAMETOOLONG/E2BIG (#559). Every OS now reads it from a private file instead.
+test('a 200KB system prompt spawns on every OS through a private file, removed once the session stops', async () => {
   await fixture('complete', async ({ start, argsfile }) => {
     const handle = await start();
     expect(await handle.result).toMatchObject({ type: 'completed' });
-    const { args, promptFileChars }: { args: string[]; promptFileChars: number } = JSON.parse(readFileSync(argsfile, 'utf8'));
-    if (process.platform === 'win32') {
-      expect(args).not.toContain('--append-system-prompt');
-      expect(promptFileChars).toBeGreaterThan(60000);
-      const file = args[args.indexOf('--append-system-prompt-file') + 1];
-      expect(args.reduce((n, arg) => n + arg.length + 3, 0)).toBeLessThan(32767);
-      expect(existsSync(file)).toBe(false); // the result settles after the session stopped
-    } else {
-      expect(args).not.toContain('--append-system-prompt-file');
-      expect(args[args.indexOf('--append-system-prompt') + 1].length).toBeGreaterThan(60000);
-    }
-  }, 60000 /* CLAUDE.md padding */);
-}, 60000);
-
-test('a command-line-limited host writes the prompt file before spawn and removes it with the session', async () => {
-  const limited = jest.spyOn(platforms, 'commandLineLimited').mockReturnValue(true);
-  try {
-    await fixture('complete', async ({ start, argsfile }) => {
-      expect(await (await start()).result).toMatchObject({ type: 'completed' });
-      const { args, promptFileChars }: { args: string[]; promptFileChars: number } = JSON.parse(readFileSync(argsfile, 'utf8'));
-      expect(args).not.toContain('--append-system-prompt');
-      expect(promptFileChars).toBeGreaterThan(60000);
-      expect(existsSync(args[args.indexOf('--append-system-prompt-file') + 1])).toBe(false);
-    }, 60000);
-  } finally { limited.mockRestore(); }
+    const { args, promptFileBytes, promptFileMode }: { args: string[]; promptFileBytes: number; promptFileMode: number } = JSON.parse(readFileSync(argsfile, 'utf8'));
+    expect(args).not.toContain('--append-system-prompt');
+    expect(promptFileBytes).toBeGreaterThan(200000);
+    if (process.platform !== 'win32') expect(promptFileMode).toBe(0o600);
+    for (const arg of args) expect(Buffer.byteLength(arg)).toBeLessThan(128 * 1024 - 1);
+    expect(args.reduce((n, arg) => n + arg.length + 3, 0)).toBeLessThan(32767);
+    expect(existsSync(args[args.indexOf('--append-system-prompt-file') + 1])).toBe(false); // the result settles after the session stopped
+  }, 200000 /* CLAUDE.md padding */);
 }, 60000);
 
 test('cancelling a running worker kills the whole tree, grandchild included', async () => {

@@ -129,6 +129,7 @@ Chat delivery, synchronous API responses, SSE and resumed terminal frames share 
 | Failure | Diagnostic |
 | --- | --- |
 | Claude executable missing / cannot start | `CLAUDE_BINARY_NOT_FOUND`, `CONTAINER_RUNTIME_NOT_FOUND`, `PROCESS_PERMISSION_DENIED`, `PROCESS_START_FAILED` |
+| Startup arguments exceed the OS limit (`E2BIG` / `ENAMETOOLONG`) | `PROCESS_ARGS_TOO_LARGE` |
 | Workspace context missing | `WORKSPACE_CONTEXT_MISSING`, `WORKSPACE_DIRECTORY_MISSING` |
 | Process dies during a turn | `PROCESS_EXITED` |
 | Response cannot be saved / is too large | `RESPONSE_PERSISTENCE_FAILED`, `RESPONSE_TOO_LARGE` |
