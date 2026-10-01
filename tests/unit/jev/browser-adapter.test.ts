@@ -94,6 +94,20 @@ test('provider reset metadata survives runner handoff without raw provider prose
  expect(outcome.browserReport?.providerFailure).toEqual({code:'QUOTA_EXCEEDED',status:402,resetAt:'2030-01-01T00:00:00Z',retryAfter:'30'});
  expect(JSON.stringify(outcome)).not.toContain('private provider prose');
 });
+// Session b01a566f: one Jev timeout on a voice command failed the task; later commands got STATE_CONFLICT.
+test('a direct command whose Jev decision failed pauses the task instead of failing it',async()=>{
+ const binding:BrowserTaskBinding={version:1,id:'target',name:'Browser',principalId:'owner',conversationId:'chat',run:async(c)=>{
+  try{await c.evaluate({state:'page',questions:{}},c.signal);}catch{}
+  return {status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1,commandOutcome:{done:false,reason:'INVALID_RESPONSE'}};
+ }};
+ const {JevError}=require('../../../src/jev/types');
+ const a=new BrowserTaskAdapter({agentId:'alpha',root:dir,allowed:()=>true,bindings:()=>[binding],evaluate:async()=>{throw new JevError('INVALID_RESPONSE','private provider prose',{validationReason:'ANSWER_KEYS'});}});adapters.push(a);
+ const t=task({automationController:'user'} as Partial<TaskSnapshot>);
+ await a.submit(t,'r','เปิดแท็บ Google ใหม่');const outcome=await settle(a,t);
+ expect(outcome.type).toBe('paused');
+ expect(outcome.browserReport?.providerFailure).toEqual({code:'INVALID_RESPONSE',validationReason:'ANSWER_KEYS'});
+ expect(JSON.stringify(outcome)).not.toContain('private provider prose');
+});
 test('interrupted receipts allow read-only inspection but cannot authorize verification',async()=>{
  const f=fixture();f.run.mockImplementation(untilAbort);const t=task({gatewayDispatch:{requestId:'r',submittedAt:Date.now()}});
  await f.a.submit(t,'r','goal');await new Promise(setImmediate);

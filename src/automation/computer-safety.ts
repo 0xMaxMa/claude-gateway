@@ -20,7 +20,10 @@ const CONFIRM_LABELS=/^(?:ok|okay|yes|allow|continue|agree|accept|ตกลง|�
 /** Direct commands need this confidence, plus an explicit matching verb, before a high-impact press. */
 export const DESTRUCTIVE_CONFIDENCE=0.85;
 
-const masked=(text:string)=>text.replace(/"[^"\n]*"|“[^”\n]*”/gu,quoted=>'\u0000'.repeat(quoted.length)).trim();
+// "Confirm the page has loaded" checks a state; it presses nothing (session
+// b01a566f flagged it DESTRUCTIVE_STEP). Only load/visibility checks qualify.
+const STATE_CHECK=/\b(?:confirm|verify|check)\s+(?:that\s+)?(?:the\s+)?(?:page|site|website|tab|video|results?)\s+(?:has\s+|have\s+|is\s+|are\s+)?(?:been\s+)?(?:fully\s+)?(?:loaded|opened|open|ready|shown|visible|displayed)\b|ยืนยันว่า\s*(?:หน้า(?:เว็บ|เพจ)?|เว็บ|เพจ|วิดีโอ|ผลลัพธ์)?\s*(?:โหลด|เปิด|แสดง|ขึ้น)(?:เสร็จ|แล้ว|ขึ้น|ครบ)*/giu;
+const masked=(text:string)=>text.replace(/"[^"\n]*"|“[^”\n]*”/gu,quoted=>'\u0000'.repeat(quoted.length)).replace(STATE_CHECK,check=>'\u0000'.repeat(check.length)).trim();
 const groups=(text:string|undefined)=>text?GROUPS.filter(g=>g.pattern.test(masked(text))).map(g=>g.id):[];
 export function destructiveText(text:string|undefined){
  if(!text)return false;

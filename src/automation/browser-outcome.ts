@@ -27,7 +27,11 @@ const HINTS:Record<string,string>={
  COMPLETION_CANDIDATE:'the page already appears to match; no action was needed.',
  ACTION_BUDGET:'the action limit for one command was reached. Send the next command.',
  EVALUATION_BUDGET:'the decision limit for one command was reached. Send the command again, more specifically.',
+ TEXT_ENTRY_NOT_REQUESTED:'nothing was typed because the command did not ask to type. Start it with พิมพ์/ค้นหา or type/search, for example: พิมพ์ "hello".',
 };
+// The decision service failed for this command only; the session keeps going.
+for(const code of ['ADAPTER_TIMEOUT','DEADLINE_EXCEEDED','INVALID_RESPONSE','PROVIDER_UNAVAILABLE','RATE_LIMITED','MODEL_UNAVAILABLE','QUEUE_FULL','REQUEST_CONFLICT','INVALID_DECISION'])
+ HINTS[code]='no decision was made for this command ('+code+'). Send the command again.';
 const quoted=(label?:string)=>label?JSON.stringify(label.slice(0,80)):'the chosen control';
 function done(action:BrowserCommandAction|undefined){
  switch(action?.kind){

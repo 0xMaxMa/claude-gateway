@@ -39,7 +39,12 @@ export class GatewayJev {
   private db?: DatabaseSync;
   constructor(private readonly config: GatewayConfig) {
     this.service = new JevService({getConfig: () => config.gateway.jev, resolveConnection: resolveGatewayJevConnection,
-      onEvaluation: event => {try{this.record(event);}catch{console.warn(JSON.stringify({event:'jev_usage_record_failed',requestId:event.requestId}));}}});
+      onEvaluation: event => {
+        // Failures go to the gateway log too: codes and ids only, never request content or credentials.
+        if(event.outcome==='failed')console.warn(JSON.stringify({event:'jev_evaluation_failed',requestId:event.requestId,consumer:event.consumer,taskId:event.taskId,
+          errorCode:event.errorCode,...(event.validationReason&&/^[A-Z][A-Z_]{0,39}$/.test(event.validationReason)?{validationReason:event.validationReason}:{}),elapsedMs:event.elapsedMs}));
+        try{this.record(event);}catch{console.warn(JSON.stringify({event:'jev_usage_record_failed',requestId:event.requestId}));}
+      }});
   }
   private database(): DatabaseSync {
     if (!this.db) {

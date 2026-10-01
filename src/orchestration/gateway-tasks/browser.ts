@@ -150,7 +150,8 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       const uncertain = result.lastAction?.outcome === 'unknown';
       if(result.status==='succeeded' && !authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');
       if(result.status==='succeeded' && !uncertain)outcome={type:'completed',result:{summary:`Browser goal independently verified. ${result.steps} actions, ${result.evaluations} evaluations.`,artifactIds:[]}};
-      else if(!uncertain&&!providerFailure&&['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT'].includes(result.reason)){outcome={type:'paused'};}
+      // A direct command whose Jev decision failed is Not done; the task keeps taking commands.
+      else if(!uncertain&&(!providerFailure||(command&&result.commandOutcome?.done===false))&&['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT'].includes(result.reason)){outcome={type:'paused'};}
       // A user's direct command is not parent-verified: a completion candidate
       // waits for their next command instead of an agent reconciliation nobody
       // is asked to perform (E2E: the session refused every later command).

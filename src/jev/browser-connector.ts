@@ -84,6 +84,7 @@ async function credential(binding: BrowserConnectorConfig): Promise<string> {
   if (!key || key.length > 16384 || /[\x00-\x20\x7f]/.test(key)) throw Error('BROWSER_CREDENTIAL_UNAVAILABLE');
   return key;
 }
+const CONSENT_WAITING_DELAY_MS=1500;
 export async function executeBrowserModule(modulePath: string, binding: BrowserConnectorConfig, context: BrowserExecutionContext, connection?: BrowserConnection, helper?:import('./browser-contract').BrowserTextHelperConfig, timezone='UTC'): Promise<BrowserExecutionResult> {
   const assertAccess = () => { if (!context.authorized()) throw Error('ACCESS_DENIED'); };
   assertAccess(); context.signal.throwIfAborted();
@@ -99,13 +100,16 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
     if(context.requestConsent){
       const signal=context.interruptSignal ? AbortSignal.any([context.signal,context.interruptSignal]) : context.signal;
       const waiting=()=>context.progress({phase:'waiting_consent',steps:0,evaluations:0});
-      waiting();
+      // An already approved grant answers at once: report waiting only when the
+      // check takes a while, not as a flash on every command.
+      const slow=setTimeout(waiting,CONSENT_WAITING_DELAY_MS);
       let reason:string|undefined;
       try{reason=await requestBrowserConsent(client,binding.scope,signal,context.authorized,waiting);}
       catch(error){
         if(context.signal.aborted||context.interruptSignal?.aborted)return {status:'cancelled',reason:context.interruptSignal?.aborted?'REVISION_SUPERSEDED':'CANCELLED',steps:0,evaluations:0};
         throw error;
       }
+      finally{clearTimeout(slow);}
       if(reason)return {status:'blocked',reason,steps:0,evaluations:0};
     }
     const call = module.mcpBrowserTransport(async (name,args,signal) => {

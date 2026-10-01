@@ -323,6 +323,31 @@ test.each(['PROVIDER_UNAVAILABLE','RATE_LIMITED','OUTCOME_UNKNOWN'] as const)('J
  assert(!JSON.stringify(result).includes('Provider details'));
 });
 
+// Session a4b9ee81: one JEV_INVALID_RESPONSE on "คริยา" failed the whole voice task
+// and dropped the queued commands; nothing recorded why Jev's answer was rejected.
+test('a direct command whose Jev answer is invalid is Not done, keeps waiting, and records the validation reason',async()=>{
+ const f=fixture(['key:enter']);
+ f.deps.evaluate=async()=>{throw new JevError('INVALID_RESPONSE','Provider details must not be copied.',{validationReason:'DISTRIBUTION_SUM'});};
+ const r=await runComputerUse({goal:'คริยา',yieldAfterAction:true},f.deps,new AbortController().signal);
+ assert.equal(r.status,'needs_input');assert.equal(r.reason,'COMMAND_WAITING_INPUT');
+ assert.deepEqual(r.trace.events.filter(e=>e.phase==='waiting').map(e=>[e.reason,e.validationReason]),[['JEV_INVALID_RESPONSE','DISTRIBUTION_SUM']]);
+ assert.equal(f.calls.filter(c=>c.name==='computer_action').length,0);
+ assert(!JSON.stringify(r).includes('Provider details'));
+});
+test('agent-controlled work still stops on an invalid Jev answer, with the validation reason on the record',async()=>{
+ const f=fixture(['key:enter']);
+ f.deps.evaluate=async()=>{throw new JevError('INVALID_RESPONSE','x',{validationReason:'CHOICE_MISMATCH'});};
+ const r=await runComputerUse({goal:'Press Enter once'},f.deps,new AbortController().signal);
+ assert.equal(r.status,'blocked');assert.equal(r.reason,'JEV_INVALID_RESPONSE');
+ assert.equal(r.trace.events.at(-1)?.validationReason,'CHOICE_MISMATCH');
+});
+test('a direct command still stops the task on a Jev quota failure',async()=>{
+ const f=fixture(['key:enter']);
+ f.deps.evaluate=async()=>{throw new JevError('QUOTA_EXCEEDED','x');};
+ const r=await runComputerUse({goal:'คริยา',yieldAfterAction:true},f.deps,new AbortController().signal);
+ assert.equal(r.status,'blocked');assert.equal(r.reason,'JEV_QUOTA_EXCEEDED');
+});
+
 test('uncertain kind on a large desktop does not select or execute a target',async()=>{
  const f=fixture([]);f.state.apps=Array.from({length:70},(_,i)=>({id:'app-'+i,name:'App '+i}));
  let evaluations=0;

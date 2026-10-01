@@ -1,6 +1,6 @@
 import type {ComputerState,ComputerUseDependencies} from './computer-use';
 import {decisionState,literalTextCandidates,readChoice} from './computer-policy';
-import {NEW_TAB_PHRASES,addressCommand,historyCommand,keyCommand,normalizeCommand,repeatCommand,scrollCommand,textCommand} from './direct-command';
+import {NEW_TAB_PHRASES,addressCommand,historyCommand,keyCommand,newTabCommand,normalizeCommand,repeatCommand,scrollCommand,textCommand} from './direct-command';
 
 // Command controller design: moritzkremb/jev-voice-browser, MIT,
 // 198a0764395a666f8398026c0d8abdaf6d1866c5, src/jev.js buildRequest and
@@ -133,7 +133,9 @@ export function shortcutCommand(command:string):{shortcut:string;labels:string[]
   return known&&{shortcut:'cmd+'+known.key,labels:known.labels,...(known.standard?{standard:known.standard}:{})};
  }
  const phrase=normalized.replace(/^(?:กด|press) /u,'');
- const known=SHORTCUTS.find(s=>s.phrases.includes(phrase));
+ // A site inside the request ("เปิดแท็บ Google ใหม่") is more than Cmd+T.
+ const tab=newTabCommand(command);
+ const known=SHORTCUTS.find(s=>tab&&!tab.site?s.key==='t':s.phrases.includes(phrase));
  return known&&{shortcut:'cmd+'+known.key,labels:known.labels,...(known.standard?{standard:known.standard}:{})};
 }
 /** The observed menu command (preferred) or button that performs a shortcut. */

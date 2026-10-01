@@ -1,3 +1,4 @@
+import {normalizeCommand} from '../automation/direct-command';
 import {automationSession} from './tasks/automation-session';
 import {AcceptInput, OrchestrationStore} from './store';
 import {TaskService} from './tasks/service';
@@ -7,6 +8,27 @@ export interface LiveControlReceipt {inputId:string;taskId?:string;status:'appli
 export function liveControlReceipt(store:OrchestrationStore,inputId:string):LiveControlReceipt|undefined {
   const row=store.get("SELECT payload_json FROM conversation_events WHERE type='input.execution_control' AND json_extract(payload_json,'$.payload.inputId')=? ORDER BY seq DESC LIMIT 1",inputId);
   return row?JSON.parse(String(row.payload_json)).payload:undefined;
+}
+/** A voice command and its typed echo arrive within this window (observed 0.25–1.7s). */
+export const VOICE_ECHO_WINDOW_MS=2000;
+/**
+ * The GetPod web client posts each live-voice transcript again as a typed
+ * message (sessions b01a566f, a4b9ee81), so every voice command ran twice.
+ * Only that pair is one command: the same words for the same task within the
+ * window, one copy spoken and the other a plain typed message. Repeating a
+ * command in the same modality, or after the window, still runs it again.
+ */
+function voiceEcho(store:OrchestrationStore,conversationId:string,taskId:string,inputId:string):boolean {
+  const current=store.get('SELECT modality,text,created_at,ingress_json FROM conversation_inputs WHERE id=?',inputId)!;
+  const previous=store.get(`SELECT i.modality,i.text,i.created_at,i.ingress_json FROM conversation_events e JOIN conversation_inputs i ON i.id=json_extract(e.payload_json,'$.payload.inputId')
+    WHERE e.conversation_id=? AND e.type='input.execution_control' AND json_extract(e.payload_json,'$.payload.taskId')=? AND json_extract(e.payload_json,'$.payload.status')='applied'
+    AND json_type(e.payload_json,'$.payload.code') IS NULL AND i.id<>? ORDER BY e.seq DESC LIMIT 1`,conversationId,taskId,inputId);
+  if(!previous||Number(current.created_at)-Number(previous.created_at)>VOICE_ECHO_WINDOW_MS)return false;
+  const spoken=[current,previous].filter(row=>row.modality==='live_voice');
+  const typed=[current,previous].filter(row=>row.modality==='text');
+  // The echo is a plain message: no image/video options or other prompt context.
+  if(spoken.length!==1||typed.length!==1||JSON.parse(String(typed[0].ingress_json)).metadata?.promptContext)return false;
+  return normalizeCommand(String(current.text))===normalizeCommand(String(previous.text));
 }
 /** Apply explicitly targeted control without conversational inference. */
 export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,input:AcceptInput,capabilities:ExecutionCapabilities,maxPending=100):(LiveControlReceipt & {task?:TaskSnapshot;reused:boolean})|undefined {
@@ -28,6 +50,13 @@ export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,in
       // Explicit task destination resumes the same session with a fresh command.
       // Unknown mutations remain fenced by controlByUser.
       if(input.attachmentIds?.length)throw new OrchestrationError('INVALID_INPUT');
+      if(voiceEcho(store,receipt.conversationId,target,receipt.inputId)){
+        // Acknowledged like an applied command, but the task is not revised again.
+        control={...control,status:'applied',code:'DUPLICATE_VOICE_ECHO',revision:current.revision};
+        store.appendEvent(receipt.conversationId,'input.execution_control',control,control.taskId);
+        store.completeInputReceipt(receipt);
+        return {...control,reused:false};
+      }
       task=tasks.controlByUser(receipt.conversationId,input.scope.principalId,target,{id:receipt.inputId,action:'revise',expectedRevision:current.revision,text:input.text});
       control={...control,status:'applied',revision:task.revision};
     }catch(error){

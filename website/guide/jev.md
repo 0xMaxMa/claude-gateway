@@ -478,7 +478,9 @@ Jev decision over the observed controls and dispatches at most one action.
   observed `generation`. At the top or bottom nothing is sent (`SCROLL_LIMIT`).
 - `enter`, `กด tab`, `esc`, `ลูกศรลง`, `backspace x3`: `page_keypress` (native
   key codes, so Enter submits and Tab moves focus).
-- `กลับ`, `ย้อนกลับ`, `back`, `ไปข้างหน้า`, `forward`: `tab_history`. When
+- `กลับ`, `ย้อนกลับ`, `ย้อนกลับไปหน้าก่อนหน้า` (and the same with or without
+  `ไป`/`หน้าก่อน`/`หน้าที่แล้ว`), `back`, `go back to the previous page`,
+  `ไปข้างหน้า`, `forward`: `tab_history`. When
   `observation.navigation` says there is no such entry, nothing is sent and the
   command reports `HISTORY_UNAVAILABLE`; the extension's own `HISTORY_UNAVAILABLE`
   rejection is recorded as not executed, never as an unknown outcome.
@@ -492,8 +494,12 @@ Jev decision over the observed controls and dispatches at most one action.
   page. The previous command, what it did and the page it ended on are passed to
   Jev as reference context only.
 - `พิมพ์ X` / `type X`: when Jev chooses a field, `X` itself is the text (never
-  generated text).
-- **New tab.** A binding is one user-approved tab. `เปิด tab ใหม่`, `new tab` and
+  generated text). A direct command types only when it starts with a text-entry
+  verb (`พิมพ์`, `ค้นหา`, `กรอก`, `ใส่`, `type`, `search`, `fill` and so on). If
+  Jev chooses to type for any other command, for example the page's own audio
+  heard as a command, nothing is typed (`TEXT_ENTRY_NOT_REQUESTED`).
+- **New tab.** A binding is one user-approved tab. `เปิด tab ใหม่`, `new tab`,
+  `เปิดแท็บ Google ใหม่`, `เปิดแท็กใหม่` (as speech recognition often hears it) and
   `Cmd+T` do not open another tab (`tab_open` is not allowed): that would widen
   the approved scope silently. The command answers `NEW_TAB_OUT_OF_SCOPE` and the
   next command (for example `เข้า google`) runs in the approved tab. In step mode
@@ -506,7 +512,13 @@ Jev decision over the observed controls and dispatches at most one action.
 - **Outcome line.** Each settled command sets the task progress text to `Done:
   …` (for example `Done: searched in "Search"`) or `Not done: …` with a hint.
   A not-done command dispatched nothing; the session keeps waiting for the next
-  command instead of failing. When the extension confirmed the action but the
+  command instead of failing. This includes a Jev decision that timed out or was
+  invalid (`ADAPTER_TIMEOUT`, `DEADLINE_EXCEEDED`, `INVALID_RESPONSE`, provider
+  unavailable or rate limited): only that command is not done, and queued
+  commands still run. Jev configuration, access and quota failures still stop
+  the task. An invalid Jev answer records which check failed
+  (`validationReason`, for example `DISTRIBUTION_SUM`) in the report and the
+  gateway log, never the answer itself. When the extension confirmed the action but the
   next page did not settle within the stale-read budget, the line is still
   `Done: …` and adds that the page was still loading. When the receipt for the
   last action is missing, the line starts with `Unknown:` (the action may have
@@ -628,7 +640,9 @@ completed steps, `stopReason` and remaining steps, when:
 - a step's wording or chosen target is high-impact, such as send, submit, delete,
   trash, quit, pay, buy, confirm or a dialog OK (`DESTRUCTIVE_STEP`,
   `DESTRUCTIVE_ACTION`). These steps are never dispatched automatically, and the
-  parent agent must get explicit user confirmation
+  parent agent must get explicit user confirmation. A step that only checks the
+  page, such as `confirm the page has loaded` or `ยืนยันว่าหน้าโหลดแล้ว`, is not
+  high-impact; the agent is told not to add such steps at all
 - an action produces no observable change (`STEP_NO_EFFECT`). Up to three
   boundary scrolls in a row are tolerated and listed in `unverifiedSteps`
 - an action outcome is unknown (`OUTCOME_UNKNOWN`). This uses normal
@@ -691,7 +705,7 @@ and keep their stricter checks above; for example a step that says `ลบ` stop
   operation, for example `กด Delete` or `ยืนยันลบ`. `ok` or a vague reference is
   not enough. Otherwise nothing is dispatched and the command waits with
   `DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED`.
-- **Browser shortcuts.** `Cmd+T`/`⌘T`/`new tab`/`เปิด tab ใหม่`, `Cmd+N`/`new
+- **Browser shortcuts.** `Cmd+T`/`⌘T`/`new tab`/`เปิด tab ใหม่`/`เปิดแท็กใหม่`, `Cmd+N`/`new
   window` and `Cmd+W`/`close tab`/`ปิดแท็บ` press the front application's own
   menu command (or an identically named button) without Jev. If it is not
   available the command waits rather than doing something else:
@@ -869,6 +883,6 @@ Actions are `pause`, `revise`, `resume`, `agent`, and `user`. Only `revise` acce
 
 On the existing voice WebSocket, `voice.start` and `voice.configure` accept `execution_task_id` as a task UUID, or `null` to return to the conversational agent. The target remains fixed across segments of one utterance. Confirmed speech can pause new actions while the correction is transcribed (except while the user's own direct command runs: then the speech is queued as the next command); microphone noise alone does not authorize a new command. Stop cannot undo an OS/browser action already dispatched.
 
-A spoken direct command that does nothing gets one short spoken reply on that voice session, in Thai for a Thai command and English otherwise: for example `ไม่แน่ใจว่า ห้า คือปุ่มไหน ลองพูดใหม่อีกครั้ง` (low confidence), `ไม่เจอปุ่ม บัว บนหน้าจอ` (no matching control), or the clarification `ห้า หรือ ห้าสิบ?`. When the receipt for the last action is missing, it says the gateway is not sure the command ran and to check the screen before repeating it (`ไม่แน่ใจว่า ห้า ทำไปแล้วหรือยัง ดูหน้าจอก่อนสั่งใหม่`), never "say it again". It repeats only the user's own words, never screen text. The conversation history records a generic form (`ไม่แน่ใจว่า คำสั่งนี้ คือปุ่มไหน ...`), so the user's words are never stored as assistant text. A command that ran stays silent, since the user can see the result. Typed commands are unchanged: the outcome line stays on the task, with no extra chat notice. Speech recognition quality (for example `บวก` heard as `บัว`) is outside the gateway.
+A spoken direct command that does nothing gets one short spoken reply on that voice session, in Thai for a Thai command or a Thai conversation (`voice.language`, else any of the conversation's last five messages in Thai, so `Go.` is answered in Thai) and English otherwise: for example `ไม่แน่ใจว่า ห้า คือปุ่มไหน ลองพูดใหม่อีกครั้ง` (low confidence), `ไม่เจอปุ่ม บัว บนหน้าจอ` (no matching control), or the clarification `ห้า หรือ ห้าสิบ?`. When the receipt for the last action is missing, it says the gateway is not sure the command ran and to check the screen before repeating it (`ไม่แน่ใจว่า ห้า ทำไปแล้วหรือยัง ดูหน้าจอก่อนสั่งใหม่`), never "say it again". It repeats only the user's own words, never screen text. The conversation history records a generic form (`ไม่แน่ใจว่า คำสั่งนี้ คือปุ่มไหน ...`), so the user's words are never stored as assistant text. A command that ran stays silent, since the user can see the result. Other replies include `เปิดแท็บใหม่ไม่ได้ บอกชื่อเว็บแทน` (`NEW_TAB_OUT_OF_SCOPE`) and a request to bring the browser to the front (`SHORTCUT_UNAVAILABLE`). "Say it again" is spoken only while the task still takes commands; if the command ended the task, the reply says the task has stopped and a new one is needed. Typed commands are unchanged: the outcome line stays on the task, with no extra chat notice. When the client posts a live-voice transcript again as a typed message for the same task within 2 seconds, with the same words, the second copy is acknowledged without running the command twice; a command repeated in the same modality, or later, still runs. Speech recognition quality (for example `บวก` heard as `บัว`) is outside the gateway.
 
 A safely stopped confidence/provider failure permits a fresh explicit command on the same open task. A closed session or uncertain mutation cannot be resumed this way; inspect and reconcile the retained receipt first.

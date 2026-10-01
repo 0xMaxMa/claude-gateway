@@ -44,7 +44,17 @@ export interface ComputerProgress {
  action?:'open'|'press'|'type'|'key'|'scroll'|'navigate'|'WAIT'|'DONE'|'BLOCKED';key?:string;ref?:string;role?:string;
  targetGeneration?:string;focused?:boolean;operationId?:string;requestId?:string;confidence?:number;elapsedMs?:number;
  outcome?:'completed'|'not_executed'|'unknown';changed?:boolean;reason?:string;status?:ComputerUseResult['status'];
+ /** Which Jev response check failed (JEV_INVALID_RESPONSE); a fixed code, never response content. */
+ validationReason?:string;
 }
+/**
+ * Jev failures that end one direct command, not the task: the user can speak
+ * the next command (sessions b01a566f, a4b9ee81). Configuration, access and
+ * quota failures still stop the task so the agent can explain them.
+ */
+export const COMMAND_JEV_FAILURES=new Set(['DEADLINE_EXCEEDED','INVALID_RESPONSE','PROVIDER_UNAVAILABLE','RATE_LIMITED','MODEL_UNAVAILABLE','QUEUE_FULL','REQUEST_CONFLICT']);
+/** A bounded diagnostic code from a Jev error; anything else is dropped. */
+export const jevValidationReason=(error:unknown)=>error instanceof JevError&&typeof error.metadata.validationReason==='string'&&/^[A-Z][A-Z_]{0,39}$/.test(error.metadata.validationReason)?error.metadata.validationReason:undefined;
 export interface ComputerUseDependencies {
  interruptSignal?:AbortSignal;
  call(name:string,args:Record<string,unknown>,signal:AbortSignal):Promise<unknown>;
@@ -102,7 +112,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
   trace.push(event);if(trace.length>2000)trace.shift();
   try{deps.progress?.(event);}catch{/* Diagnostic sinks cannot change a dispatched action's outcome. */}
  };
- const result=(status:ComputerUseResult['status'],reason:string):ComputerUseResult=>{emit('terminal',{status,reason});return {status,reason,revision:goal.revision,steps,evaluations,trace:{events:[...trace],truncated:sequence>trace.length},...(pending?{operationId:pending}:{}),...(last?{observation:last}:{}),...(lastAction?{lastAction}:{}),...(clarification?{clarification}:{})};};
+ const result=(status:ComputerUseResult['status'],reason:string,validationReason?:string):ComputerUseResult=>{emit('terminal',{status,reason,...(validationReason?{validationReason}:{})});return {status,reason,revision:goal.revision,steps,evaluations,trace:{events:[...trace],truncated:sequence>trace.length},...(pending?{operationId:pending}:{}),...(last?{observation:last}:{}),...(lastAction?{lastAction}:{}),...(clarification?{clarification}:{})};};
  const waitForCommand=(reason:string)=>{emit('waiting',{reason});return result('needs_input','COMMAND_WAITING_INPUT');};
  const check=()=>{runSignal.throwIfAborted();if(!deps.authorized())throw Error('ACCESS_DENIED');};
  const update=()=>{const n=deps.latestGoal?.();if(n&&n.revision>goal.revision){satisfiedField=undefined;submitAfterType=undefined;previous=undefined;prematureDone=0;history.length=0;ineffective.clear();transitions.clear();consecutiveOpens=0;cycling=false;noProgress=0;goal=z.object({revision:z.number().int().positive(),goal:z.string().min(1).max(16000)}).parse(n);}};
@@ -471,7 +481,13 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     }
    }
   });
- }catch(error){return result(pending||(error instanceof Error&&error.message==='COMPUTER_RECONCILIATION_REQUIRED')?'needs_reconciliation':(signal.aborted||deps.interruptSignal?.aborted)?'cancelled':'blocked',pending?'OUTCOME_UNKNOWN':deps.interruptSignal?.aborted?'REVISION_SUPERSEDED':signal.aborted?'CANCELLED':runSignal.aborted?'TIMEOUT':error instanceof JevError?'JEV_'+error.code:error instanceof Error&&/^[A-Z][A-Z_0-9]{0,79}$/.test(error.message)?error.message:'COMPUTER_USE_FAILED');}
+ }catch(error){
+  if(direct&&!pending&&error instanceof JevError&&COMMAND_JEV_FAILURES.has(error.code)&&!signal.aborted&&!deps.interruptSignal?.aborted&&!runSignal.aborted){
+   const validationReason=jevValidationReason(error);
+   emit('waiting',{reason:'JEV_'+error.code,...(validationReason?{validationReason}:{})});
+   return result('needs_input','COMMAND_WAITING_INPUT');
+  }
+  return result(pending||(error instanceof Error&&error.message==='COMPUTER_RECONCILIATION_REQUIRED')?'needs_reconciliation':(signal.aborted||deps.interruptSignal?.aborted)?'cancelled':'blocked',pending?'OUTCOME_UNKNOWN':deps.interruptSignal?.aborted?'REVISION_SUPERSEDED':signal.aborted?'CANCELLED':runSignal.aborted?'TIMEOUT':error instanceof JevError?'JEV_'+error.code:error instanceof Error&&/^[A-Z][A-Z_0-9]{0,79}$/.test(error.message)?error.message:'COMPUTER_USE_FAILED',jevValidationReason(error));}
  finally{
   // The relay keeps a lease until it is released (there is no expiry) and a
   // re-acquire returns the same token, so every exit path releases, once retried.

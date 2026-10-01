@@ -1,4 +1,4 @@
-import {NEW_TAB_PHRASES,addressCommand,historyCommand,keyCommand,normalizeCommand,scrollCommand,textCommand} from './direct-command';
+import {addressCommand,historyCommand,keyCommand,newTabCommand,normalizeCommand,scrollCommand,textCommand} from './direct-command';
 import {commandAuthorizes,destructiveLabel,DESTRUCTIVE_CONFIDENCE,type DestructiveTarget} from './computer-safety';
 
 /**
@@ -27,7 +27,7 @@ const SCROLL_EXTRA:Record<string,'up'|'down'>={'scroll ลงไป':'down','เ
 /** A deterministic plan for an unambiguous command, or undefined for a Jev decision. */
 export function planBrowserCommand(command:string):BrowserCommandPlan|undefined {
  const normalized=normalizeCommand(command);
- if(NEW_TAB_PHRASES.includes(normalized.replace(/^(?:กด|press) /u,''))||/^(?:กด |press )?(?:cmd|command|ctrl|⌘) ?\+? ?t$/u.test(normalized))return {kind:'new_tab'};
+ if(newTabCommand(command)||/^(?:กด |press )?(?:cmd|command|ctrl|⌘) ?\+? ?t$/u.test(normalized))return {kind:'new_tab'};
  const history=historyCommand(command)??(Object.hasOwn(HISTORY_EXTRA,normalized)?HISTORY_EXTRA[normalized]:undefined);
  if(history)return {kind:'history',direction:history};
  const scroll=scrollCommand(command)??(Object.hasOwn(SCROLL_EXTRA,normalized)?SCROLL_EXTRA[normalized]:undefined);

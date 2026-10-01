@@ -62,7 +62,7 @@ describe('V2: spoken outcome for live_voice direct commands',()=>{
   runtime.store.transaction(()=>runtime.store.saveTask(current,current.stateVersion));
   const heard=jest.fn(),unsubscribe=runtime.subscribeVoiceResults(sid,'owner',heard);
   const command=(text:string,modality?:'live_voice')=>runtime.store.acceptInput({scope,text,storeUserMessage:false,...(modality?{modality}:{}),capabilities:{execute:true,writeMemory:false}}).inputId;
-  const settle=(inputId:string,computerReport:ComputerTaskReport)=>(runtime as any).speakDirectOutcome?.(runtime.store.task(task.taskId)!,{revision:2,inputId,outcome:{type:'paused',computerReport}});
+  const settle=(inputId:string,computerReport:ComputerTaskReport,state?:'failed')=>(runtime as any).speakDirectOutcome?.({...runtime.store.task(task.taskId)!,...(state?{state}:{})},{revision:2,inputId,outcome:{type:state??'paused',computerReport}});
   const notices=(inputId:string)=>runtime.store.all("SELECT r.generated_text FROM assistant_responses r JOIN conversation_decisions d ON d.id=r.decision_id WHERE d.kind='notice' AND EXISTS(SELECT 1 FROM json_each(d.input_ids_json) WHERE value=?)",inputId).map(r=>String(r.generated_text));
   return {runtime,heard,command,settle,notices,close:async()=>{unsubscribe();await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}};
  }
@@ -91,7 +91,23 @@ describe('V2: spoken outcome for live_voice direct commands',()=>{
   const f=await fixture();try{
    f.settle(f.command('ห้า','live_voice'),unknown);
    f.settle(f.command('five','live_voice'),unknown);
-   expect(f.heard.mock.calls.map(c=>c[0].spoken)).toEqual(['ไม่แน่ใจว่า ห้า ทำไปแล้วหรือยัง ดูหน้าจอก่อนสั่งใหม่','Not sure whether five ran. Check the screen before saying it again.']);
+   // "five" in this Thai conversation is answered in Thai (session a4b9ee81 "Go.").
+   expect(f.heard.mock.calls.map(c=>c[0].spoken)).toEqual(['ไม่แน่ใจว่า ห้า ทำไปแล้วหรือยัง ดูหน้าจอก่อนสั่งใหม่','ไม่แน่ใจว่า five ทำไปแล้วหรือยัง ดูหน้าจอก่อนสั่งใหม่']);
+  }finally{await f.close();}
+ });
+ test('a command that ended the task never says "say it again"',async()=>{
+  // Session a4b9ee81: JEV_INVALID_RESPONSE failed the task, yet the voice said "ลองพูดใหม่".
+  const failed:ComputerTaskReport={status:'blocked',reason:'JEV_QUOTA_EXCEEDED',steps:0,evaluations:0,phase:'terminal'};
+  const f=await fixture();try{
+   f.settle(f.command('คริยา','live_voice'),failed,'failed');
+   expect(f.heard.mock.calls.map(c=>c[0].spoken)).toEqual(['ยังไม่ได้ทำ คริยา และงานนี้หยุดไปแล้ว ต้องเริ่มงานใหม่']);
+  }finally{await f.close();}
+ });
+ test('an English conversation keeps English speech',async()=>{
+  const f=await fixture();try{
+   for(let i=0;i<5;i++)f.command('scroll down');
+   f.settle(f.command('Go.','live_voice'),unsupported);
+   expect(f.heard.mock.calls.map(c=>c[0].spoken)).toEqual(['Could not find Go on the screen.']);
   }finally{await f.close();}
  });
  test('a successful voice command stays silent',async()=>{

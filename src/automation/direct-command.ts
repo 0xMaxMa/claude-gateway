@@ -57,14 +57,39 @@ const HISTORY:Record<string,'back'|'forward'>={
  'back':'back','go back':'back','ย้อนกลับ':'back','กลับหน้าก่อน':'back','กลับไปหน้าก่อน':'back',
  'forward':'forward','go forward':'forward','ไปข้างหน้า':'forward','ไปหน้าถัดไป':'forward',
 };
+// Spoken Thai "back" wording varies ("ย้อนกลับไปหน้าก่อนหน้า", session
+// b01a566f): back/return + optional "ไป" + optional "the previous page".
+const THAI_BACK=/^(?:ย้อนกลับ|ย้อน|กลับ)(?:ไป)?(?:ที่)?(?:หน้า(?:ก่อน(?:หน้า)?(?:นี้)?|ที่แล้ว|เดิม))$|^ย้อนกลับ(?:ไป)?$/u;
+const ENGLISH_BACK=/^(?:go )?back(?: to)?(?: the)? previous page$|^previous page$/u;
 /** Exact history commands; anything else keeps the normal Jev path. */
 export function historyCommand(command:string):'back'|'forward'|undefined {
  const normalized=normalizeCommand(command);
- return Object.hasOwn(HISTORY,normalized)?HISTORY[normalized]:undefined;
+ if(Object.hasOwn(HISTORY,normalized))return HISTORY[normalized];
+ if(THAI_BACK.test(normalized.replace(/\s+/gu,''))||ENGLISH_BACK.test(normalized))return 'back';
 }
 
 /** Phrases that ask for a new browser tab (Cmd+T). */
 export const NEW_TAB_PHRASES=['new tab','open new tab','open a new tab','เปิด tab ใหม่','เปิดแท็บใหม่','tab ใหม่','แท็บใหม่'];
+/**
+ * A new-tab request, also as STT hears it ("แท็ก" for "แท็บ") and with a
+ * site between ("เปิดแท็บ Google ใหม่"). The site is reported, never opened
+ * in a new tab here: each surface decides what a new tab means.
+ */
+export function newTabCommand(command:string):{site?:string}|undefined {
+ const normalized=normalizeCommand(command).replace(/^(?:กด|press) /u,'').replace(/แท็ก/gu,'แท็บ');
+ if(NEW_TAB_PHRASES.includes(normalized)||/^(?:เปิด ?)?(?:tab|แท็บ) ?ใหม่$/u.test(normalized))return {};
+ const site=/^เปิด ?(?:tab|แท็บ) (.+?) ?ใหม่$|^open (?:a )?new tab (?:for |with |to )?(.+)$/u.exec(normalized);
+ const name=(site?.[1]??site?.[2])?.trim();
+ return name&&!/\s/u.test(name)?{site:name}:undefined;
+}
+
+// Text entry needs the user's own verb at the start: a stray transcript (the
+// page's audio heard as a command, session b01a566f) must never be typed.
+const TEXT_ENTRY=/^(?:ช่วย ?)?(?:พิมพ์|ค้นหา|ค้น|กรอก|ใส่|เขียน|search|type|fill|write|enter text|input)(?![a-z])/iu;
+/** The command explicitly asks to enter text (พิมพ์/ค้นหา/กรอก/search/type ...). */
+export function textEntryRequested(command:string):boolean {
+ return TEXT_ENTRY.test(spokenCommand(command));
+}
 
 const TEXT_VERBS=/^(?:ค้นหา|ค้น|search for|search|พิมพ์|type|กรอก)\s*(.+)$/iu;
 /**

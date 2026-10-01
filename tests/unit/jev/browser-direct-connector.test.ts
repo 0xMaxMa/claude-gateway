@@ -3,7 +3,8 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {inspectBrowser,executeBrowserModule} from '../../../src/jev/browser-connector';
 const mockCall=jest.fn(),mockClose=jest.fn(async()=>{});
-jest.mock('@modelcontextprotocol/sdk/client/index.js',()=>({Client:jest.fn().mockImplementation(()=>({connect:async()=>{},callTool:mockCall,close:mockClose}))}));
+const mockListTools=jest.fn(async()=>({tools:[{name:'browser_request_access'}]}));
+jest.mock('@modelcontextprotocol/sdk/client/index.js',()=>({Client:jest.fn().mockImplementation(()=>({connect:async()=>{},callTool:mockCall,listTools:mockListTools,close:mockClose}))}));
 // Jest's VM has no native dynamic import; load the fixture runner with require.
 jest.mock('../../../src/jev/browser-module-import',()=>({importBrowserModule:async(url:string)=>{const {fileURLToPath}=require('node:url');return require(fileURLToPath(url));}}));
 const binding:any={id:'b',name:'Browser',agentId:'a',principalId:'u',conversationId:'c',connectorId:'paired',scope:{device_id:'d',grant_id:'g',tab_id:'t'}};
@@ -57,4 +58,20 @@ test('direct-command inputs reach only a runner that advertises them',async()=>{
  expect((globalThis as any).__browserInput.command).toBeUndefined();
  await executeBrowserModule(runner([],['direct_command']),binding,context({command:true,interactionContext:'ctx'}),connection);
  expect((globalThis as any).__browserInput).toMatchObject({command:true,interactionContext:'ctx'});
+});
+
+// Session b01a566f: "Waiting for browser approval" flashed on every command although the grant was approved.
+test('an already approved grant reports no consent wait',async()=>{
+ mockCall.mockImplementation(async({name})=>reply(name==='browser_request_access'?{state:'approved'}:{state:'completed',result:{}}));
+ const c=context({requestConsent:true});
+ await executeBrowserModule(runner([]),binding,c,connection);
+ expect(mockCall.mock.calls.map(x=>x[0].name)).toContain('browser_request_access');
+ expect(c.progress.mock.calls.filter((x:any[])=>x[0].phase==='waiting_consent')).toEqual([]);
+});
+test('a pending grant still reports the consent wait',async()=>{
+ let asked=0;
+ mockCall.mockImplementation(async({name})=>reply(name==='browser_request_access'?{state:asked++?'approved':'pending'}:{state:'completed',result:{}}));
+ const c=context({requestConsent:true});
+ await executeBrowserModule(runner([]),binding,c,connection);
+ expect(c.progress.mock.calls.filter((x:any[])=>x[0].phase==='waiting_consent').length).toBeGreaterThan(0);
 });
