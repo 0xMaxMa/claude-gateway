@@ -139,6 +139,8 @@ export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVo
     throw new OrchestrationError('INVALID_CONFIG', 'Invalid provider admission thresholds, cooldown order or probe lease');
   if (result.channels.some(c => !['api', ...CHAT_CHANNELS].includes(c)) || new Set(result.channels).size !== result.channels.length) throw new OrchestrationError('INVALID_CONFIG', 'Invalid orchestration.channels');
   if (result.conversation.backend !== 'inherit' || !['isolated-worktree', 'shared-lock', 'host', 'container'].includes(result.tasks.workspaceMode) || result.voice.transport !== 'websocket') throw new OrchestrationError('INVALID_CONFIG', 'Unsupported orchestration backend, workspace mode or transport');
+  // The default limit must still leave room for one progress review and its cooldown.
+  if (config?.tasks?.progressStaleLimitMs === undefined) result.tasks.progressStaleLimitMs = Math.max(result.tasks.progressStaleLimitMs, result.tasks.progressStaleMs + result.tasks.progressNotifyCooldownMs);
   if (config?.tasks?.progressStaleLimitMs && result.tasks.progressStaleLimitMs < result.tasks.progressStaleMs) throw new OrchestrationError('INVALID_CONFIG', 'tasks.progressStaleLimitMs must be zero or at least tasks.progressStaleMs');
   if (result.tasks.repeatedToolThreshold > 64) throw new OrchestrationError('INVALID_CONFIG', 'tasks.repeatedToolThreshold must be between 1 and 64');
   if (!['next_user_turn', 'existing_receive_path'].includes(result.conversation.notificationPolicy)) throw new OrchestrationError('INVALID_CONFIG', 'Invalid notification policy');

@@ -194,3 +194,9 @@ test('grace does not expire while a foreground tool is still running in a later 
   emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:'slow',content:'ok'}]}});
   await expect(turn.result).resolves.toMatchObject({text:'Waiting for CI',unresolvedBackground:{pendingTasks:1}});
 });
+
+test('an oversized waiting result fails as too large, not as missing, when the grace period expires (#557)',async()=>{
+  const {turn,emit}=driverLike(30); await Promise.resolve();
+  emit(backgroundBash); emit(bgStarted); emit({type:'result',result:'x'.repeat(262145)});
+  await expect(turn.result).rejects.toMatchObject({code:'RESPONSE_TOO_LARGE'});
+});

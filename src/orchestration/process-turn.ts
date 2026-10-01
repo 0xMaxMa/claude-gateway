@@ -114,6 +114,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     if ([...activeTools.keys()].some(id => !waitingResult!.openTools.has(id))) { armGrace(); return; }
     text = waitingResult.text;
     if (!text.trim()) { fail(new OrchestrationError('WORKER_RESULT_MISSING', 'The worker ended without a final response while background work never reported completion. Inspect its changes before retrying.')); return; }
+    if (Buffer.byteLength(text) > 262144) { fail(new OrchestrationError('RESPONSE_TOO_LARGE')); return; }
     if (!waitingResult.streamed && !publish(text)) return;
     const unresolvedBackground = { pendingTasks: background.pendingCount, graceMs: policy!.backgroundGraceMs!, resultSeenAt: waitingResult.seenAt };
     process.recordTurnOutcome?.('completed');
@@ -151,7 +152,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       usageCollector.observe(event);
       const candidate = process.runtimeProfile?.responseSchema && event.structured_output && typeof event.structured_output === 'object'
         ? JSON.stringify(event.structured_output) : typeof event.result === 'string' && event.result ? event.result : text;
-      waitingResult = { text: Buffer.byteLength(candidate) > 262144 ? '' : candidate, streamed, seenAt: Date.now(), openTools: new Set(activeTools.keys()) };
+      waitingResult = { text: candidate, streamed, seenAt: Date.now(), openTools: new Set(activeTools.keys()) };
       text = ''; streamed = false;
       resolveAccepted();
       if (policy) arm('idle', policy.idleTimeoutMs);

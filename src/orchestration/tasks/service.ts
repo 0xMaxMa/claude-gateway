@@ -299,8 +299,8 @@ export class TaskService {
     this.store.transaction(() => {
       const attempt = this.store.attempt(attemptId), task = attempt && this.store.task(attempt.taskId);
       if (!attempt || !task || attempt.generation !== generation || task.activeAttemptId !== attemptId || task.state !== 'cancel_requested') throw new OrchestrationError('STALE_ATTEMPT');
-      const stalled = this.stalledFailure(task);
-      const message = stopped ? (stalled ? stalled.message : `Cancelled by ${task.cancellation?.requestedBy ?? 'agent'}. Task execution stopped; existing files and prior effects are retained.`) : 'Cannot verify that this task has stopped. Retry cleanup; no unrelated processes were stopped.';
+      const stalled = this.stalledFailure(task, stopped);
+      const message = stalled ? stalled.message : stopped ? `Cancelled by ${task.cancellation?.requestedBy ?? 'agent'}. Task execution stopped; existing files and prior effects are retained.` : 'Cannot verify that this task has stopped. Retry cleanup; no unrelated processes were stopped.';
       task.state = stopped ? (stalled ? 'failed' : 'cancelled') : 'needs_reconciliation';
       task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: message };
       if (stopped) {
@@ -308,7 +308,7 @@ export class TaskService {
         if (stalled) { attempt.failure = stalled; task.failure = stalled; }
         this.pool.release(task.taskId, false);
       } else {
-        attempt.state = 'unknown'; task.failure = { code: 'CLEANUP_UNCONFIRMED', message, observedAt: Date.now() };
+        attempt.state = 'unknown'; task.failure = stalled ?? { code: 'CLEANUP_UNCONFIRMED', message, observedAt: Date.now() };
       }
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
       this.store.appendEvent(task.conversationId, 'task.cleanup', { stopped, message }, task.taskId);
@@ -506,8 +506,7 @@ export class TaskService {
   private stopStalled(task: TaskSnapshot, quietMs: number, observation: import('../execution-observation').ExecutionObservation): void {
     const minutes = Math.round(quietMs / 60000);
     const reason = `No new worker progress report for ${minutes} minute(s), past tasks.progressStaleLimitMs (${Math.round(this.config.tasks.progressStaleLimitMs / 60000)} minute(s)).` +
-      (observation.resultSeenAt !== undefined ? ` A final result was received but ${observation.pendingBackground ?? 0} native background task(s) never reported completion.` : '') +
-      ' Stopped the attempt; existing files and prior effects are retained. Inspect them before retrying.';
+      (observation.resultSeenAt !== undefined ? ` A final result was received but ${observation.pendingBackground ?? 0} native background task(s) never reported completion.` : '');
     task.cancellation = { requestedBy: 'supervisor', requestedAt: observation.observedAt, reason };
     task.state = 'cancel_requested';
     task.latestProgress = { source: 'runtime', observedAt: observation.observedAt, text: `Stopping: ${reason}` };
@@ -515,9 +514,14 @@ export class TaskService {
     this.store.appendEvent(task.conversationId, 'task.progress_stalled', { taskId: task.taskId, attemptId: observation.attemptId, quietMs, limitMs: this.config.tasks.progressStaleLimitMs, resultSeenAt: observation.resultSeenAt, pendingBackground: observation.pendingBackground }, task.taskId);
     this.store.enqueue('interrupt', `stalled:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
   }
-  /** A supervisor stop is a failure with its evidence, not a user/agent cancellation. */
-  private stalledFailure(task: TaskSnapshot): TaskSnapshot['failure'] {
-    return task.cancellation?.requestedBy === 'supervisor' ? { code: 'PROGRESS_STALLED', message: task.cancellation.reason ?? 'No new worker progress report within tasks.progressStaleLimitMs.', observedAt: task.cancellation.requestedAt } : undefined;
+  /** A supervisor stop is a failure with its evidence, not a user/agent cancellation.
+   * An unconfirmed stop keeps the cleanup code every other unconfirmed stop uses. */
+  private stalledFailure(task: TaskSnapshot, stopped = true): TaskSnapshot['failure'] {
+    if (task.cancellation?.requestedBy !== 'supervisor') return undefined;
+    const reason = task.cancellation.reason ?? 'No new worker progress report within tasks.progressStaleLimitMs.';
+    return stopped
+      ? { code: 'PROGRESS_STALLED', message: `${reason} Stopped the attempt; existing files and prior effects are retained. Inspect them before retrying.`, observedAt: task.cancellation.requestedAt }
+      : { code: 'CLEANUP_UNCONFIRMED', message: `${reason} Cannot verify that the attempt stopped. Retry cleanup; no unrelated processes were stopped.`, observedAt: Date.now() };
   }
   private supervise(task: TaskSnapshot, reason: NonNullable<TaskSnapshot['supervision']>['reason'], message: string, now = Date.now()): void {
     // Keep internal inspection frequent even when user-facing reports are quiet.
@@ -647,7 +651,7 @@ export class TaskService {
         attempt.result = outcome.result; task.result = outcome.result;
         outcome = { type: 'failed', failure: { code: 'WORKER_BLOCKED', message: task.workflow!.checkpoint.findings.filter(f => f.status === 'open').map(f => f.summary).join('\n').slice(0, 4096), observedAt: Date.now() } };
       }
-      const stalled = task.state === 'cancel_requested' ? this.stalledFailure(task) : undefined;
+      const stalled = task.state === 'cancel_requested' ? this.stalledFailure(task, outcome.type !== 'unknown') : undefined;
       if (outcome.type !== 'completed' && outcome.type !== 'paused') {
         attempt.failure = stalled ?? outcome.failure ?? taskFailure(undefined, outcome.type === 'stopped' ? 'WORKER_STOPPED' : 'WORKER_FAILED');
         task.failure = attempt.failure;

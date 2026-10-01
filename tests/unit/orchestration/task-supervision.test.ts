@@ -254,6 +254,15 @@ test('a stopped stalled task left for scheduler cleanup also ends as failed, not
  expect(x.store.task(x.task.taskId)).toMatchObject({state:'failed',failure:{code:'PROGRESS_STALLED'}});
  }finally{x.store.close();clock.mockRestore();}
 });
+test.each(['finish','cleanup'])('an unconfirmed stall stop (%s) needs reconciliation without claiming the attempt stopped (#557)',path=>{
+ const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
+ clock.mockReturnValue(16000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,16000));
+ if(path==='finish')x.tasks.finish(x.attempt.attemptId,1,{type:'unknown'});else x.tasks.finishCleanup(x.attempt.attemptId,1,false);
+ const task=x.store.task(x.task.taskId)!;
+ expect(task).toMatchObject({state:'needs_reconciliation',failure:{code:'CLEANUP_UNCONFIRMED',message:expect.stringContaining('No new worker progress report')}});
+ expect(task.failure!.message).not.toContain('Stopped the attempt');
+ }finally{x.store.close();clock.mockRestore();}
+});
 test('a user cancel during a supervisor stop ends the task as cancelled (#557)',()=>{
  const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
  clock.mockReturnValue(16000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,16000));
@@ -291,6 +300,6 @@ test('background grace and stale-progress limit are validated (#557)',()=>{
  expect(()=>resolveOrchestrationConfig({tasks:{progressStaleLimitMs:-1}})).toThrow('positive bounded integer');
  expect(()=>resolveOrchestrationConfig({tasks:{progressStaleLimitMs:'2h'}})).toThrow('Invalid orchestration.tasks.progressStaleLimitMs');
  expect(()=>resolveOrchestrationConfig({tasks:{progressStaleMs:600000,progressStaleLimitMs:60000}})).toThrow('progressStaleLimitMs must be zero or at least');
- // Existing configs with a long review interval keep working under the default limit.
- expect(resolveOrchestrationConfig({tasks:{progressStaleMs:10800000}}).tasks).toMatchObject({progressStaleMs:10800000,progressStaleLimitMs:7200000});
+ // Existing configs with a long review interval still load; the implicit limit leaves room for a review.
+ expect(resolveOrchestrationConfig({tasks:{progressStaleMs:10800000}}).tasks).toMatchObject({progressStaleMs:10800000,progressStaleLimitMs:10800000+300000});
 });
