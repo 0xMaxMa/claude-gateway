@@ -3,6 +3,7 @@ import { isBuiltinCommand } from '../agent/builtin-commands';
 import { SkillDefinition } from '../skills/parser';
 import { ConversationScope } from './types';
 import { readFileSync } from 'fs';
+import { SKILL_CATALOG_BUDGET_BYTES } from './skill-catalog-budget';
 
 export interface TaskSkill { invocation?: 'cli'; name: string; args: string; content: string; filePath: string; resourceRoot?: string; fileScope?: 'container'; requires?: SkillDefinition['requires']; }
 /** Registry resolution belongs to trusted ingress, never to model-supplied paths. */
@@ -13,10 +14,7 @@ export function resolveSkill(text: string, source: ConversationScope['source'], 
   return resolveNamedSkill(match[1], match[3]?.trim() ?? '', registry);
 }
 
-/** Default UTF-8 byte budget for the catalog in the agent's appended system prompt
- * (orchestration.conversation.skillCatalogBytes). It is resent on every decision
- * turn, and hundreds of installed plugin skills would otherwise grow it without bound. */
-export const SKILL_CATALOG_BUDGET_BYTES = 64 * 1024;
+export { SKILL_CATALOG_BUDGET_BYTES };
 
 /** Only installed, user-invocable skills are advertised; never expose bodies or paths.
  * A catalog over `budgetBytes` keeps every name and shortens the free-text selection
