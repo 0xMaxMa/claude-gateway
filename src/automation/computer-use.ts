@@ -66,7 +66,7 @@ export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'nee
 /** The command's own interaction, for the owner's outcome line. Never typed text. */
 export interface ComputerLastAction {kind:string;label?:string;role?:string;key?:string;direction?:string;appId?:string;count?:number;blocked?:boolean;sequence?:string[];planned?:number}
 const PreparedInput=z.object({application:z.string().min(1).max(200),label:z.string().min(1).max(500),text:z.string().max(2000),role:z.string().max(100).optional(),windowTitle:nativeText(500).optional()}).strict();
-const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
+const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),readRequest:z.boolean().default(false),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
 const fingerprint=(s:ComputerState)=>JSON.stringify([s.application,s.windowTitle,s.text,s.supportedActions,s.focusedControl&&{role:s.focusedControl.role,label:s.focusedControl.label},s.controls.map(({ref,...c})=>c),s.scrollAreas?.map(({ref,...area})=>area),s.truncated]);
 export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,signal:AbortSignal):Promise<ComputerUseResult>{
  const input=Input.parse(raw),runSignal=AbortSignal.any([signal,AbortSignal.timeout(input.timeoutMs)]);
@@ -308,7 +308,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     }
     const requestId=randomUUID(),started=Date.now();emit('evaluating',{requestId,decisionMode:'jev'});
     if(direct){
-     const command=buildComputerCommand(state,goal.goal,targets,criteria,input.interactionContext,input.yieldAfterInteraction,input.yieldAfterInteraction);
+     const command=buildComputerCommand(state,goal.goal,targets,criteria,input.interactionContext,input.yieldAfterInteraction,input.yieldAfterInteraction&&input.readRequest);
      const answer=await interruptible(s=>deps.evaluate({requestId,...command.request},s),runSignal,deps.interruptSignal);
      check();checkInterruption(deps.interruptSignal);evaluations++;
      const selected=readComputerCommand(command,answer.answers);

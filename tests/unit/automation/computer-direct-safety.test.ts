@@ -38,7 +38,8 @@ function fixture(state:any,chosen?:string,confidence=1){
  const actions=()=>calls.filter(c=>c.name==='computer_action').map(c=>c.args);
  return {deps,calls,requests,actions};
 }
-const run=(f:ReturnType<typeof fixture>,goal:string)=>runComputerUse({goal,yieldAfterInteraction:true},f.deps,new AbortController().signal);
+// The gateway's single direct command under user control (gateway-tasks/computer.ts).
+const run=(f:ReturnType<typeof fixture>,goal:string)=>runComputerUse({goal,yieldAfterInteraction:true,readRequest:true},f.deps,new AbortController().signal);
 
 describe('P0-2 destructive misfire (revision 43: "ลบๆๆๆ" pressed Notes Delete at confidence 0.59)',()=>{
  test('an erase command in a focused text field erases characters instead of asking Jev',async()=>{
@@ -150,6 +151,15 @@ describe('READ_REQUEST: a direct command that asks about the screen',()=>{
   expect(Object.keys(agent.requests[0].questions.action.criteria)).not.toContain('READ_REQUEST');
   expect(agent.actions()).toEqual([]);
   expect(readRequested({computerReport:{...a,trace:a.trace.events} as never})).toBe(false);
+ });
+ test('a part of a step list (yieldAfterInteraction without readRequest) is never offered READ_REQUEST',async()=>{
+  const {readRequested}=await import('../../../src/automation/command-speech');
+  const f=fixture(chrome(),'READ_REQUEST');
+  const r=await runComputerUse({goal:ask,yieldAfterInteraction:true,maxSteps:3},f.deps,new AbortController().signal);
+  expect(Object.keys(f.requests[0].questions.action.criteria)).not.toContain('READ_REQUEST');
+  expect(f.actions()).toEqual([]);
+  expect(r.trace.events.some(e=>e.reason==='READ_REQUEST')).toBe(false);
+  expect(readRequested({computerReport:{...r,trace:r.trace.events} as never})).toBe(false);
  });
  test('a command that types the word อ่าน still types it',async()=>{
   const state=chrome();(state.controls[0] as any).focused=true;

@@ -325,6 +325,19 @@ describe("READ_REQUEST: a direct command that asks about the page", () => {
       expect(result.commandOutcome?.reason ?? result.reason).not.toBe("READ_REQUEST");
     }
   });
+  // PR #525 review F2: once this command has dispatched an action it is no longer
+  // a pure question, so it is not offered READ_REQUEST and never handed off as one.
+  test("a command that already acted is neither offered nor handed off as READ_REQUEST", async () => {
+    const { readRequested } = await import("../../../src/automation/command-speech");
+    const { decisionQuestions } = await import("../../../src/automation/browser-use");
+    const p = page({ elements: [el("e0", "Fixtures")] });
+    expect(Object.keys(decisionQuestions(p, ask, new Set(), true).questions.operation.criteria)).toContain("READ_REQUEST");
+    expect(Object.keys(decisionQuestions(p, ask, new Set(), true, false).questions.operation.criteria)).not.toContain("READ_REQUEST");
+    const acted = { ...(await run(ask, fixtures(), jev({ operation: () => "READ_REQUEST" }))), steps: 1,
+      lastAction: { operationId: "op-1", operation: "CLICK", outcome: "confirmed" as const },
+      lastConfirmedAction: { operationId: "op-1", operation: "CLICK", outcome: "confirmed" as const } };
+    expect(readRequested({ browserReport: acted as never })).toBe(false);
+  });
   test("a malformed READ_REQUEST decision is an invalid decision, never a read request", async () => {
     const b = fixtures();
     const evaluate: BrowserUseDependencies["evaluate"] = async request => ({ model: "test-jev", answers: Object.fromEntries(Object.entries(request.questions).map(([key, q]) =>

@@ -67,7 +67,7 @@ export function readRequested(outcome:{computerReport?:ComputerTaskReport;browse
  const computer=outcome.computerReport,browser=outcome.browserReport;
  if(computer)return !computer.stepRun&&computer.reason==='COMMAND_WAITING_INPUT'&&!computer.steps&&
   [...(Array.isArray(computer.trace)?computer.trace:[])].reverse().find(e=>e.phase==='waiting'&&e.reason!=='POST_ACTION_EVIDENCE_STALE')?.reason==='READ_REQUEST';
- return !!browser&&!browser.stepRun&&browser.reason==='COMMAND_WAITING_INPUT'&&browser.commandOutcome?.reason==='READ_REQUEST'&&browser.lastAction?.outcome!=='unknown';
+ return !!browser&&!browser.stepRun&&browser.reason==='COMMAND_WAITING_INPUT'&&browser.commandOutcome?.reason==='READ_REQUEST'&&!browser.lastConfirmedAction&&browser.lastAction?.outcome!=='unknown';
 }
 export function directCommandSpeech(outcome:{computerReport?:ComputerTaskReport;browserReport?:BrowserTaskReport},command:string,context:SpeechContext={}):{spoken:string;recorded:string}|undefined{
  // The agent speaks the answer itself.

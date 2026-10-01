@@ -311,3 +311,15 @@ test('E2E e6149724: the first step re-observes a shortcut target that is not sho
  expect(f.actions().map(a=>[a.kind,a.ref??a.direction])).toEqual([['press','newtab'],['scroll','down']]);
  expect(r.stepRun).toMatchObject({stopReason:'ALL_STEPS_DONE',completed:2});
 });
+
+// PR #525 review F1: a step of a list must never stop the list as READ_REQUEST;
+// only a single direct command under user control is offered it.
+describe('step lists and READ_REQUEST',()=>{
+ test('no step of a list is offered READ_REQUEST',async()=>{
+  const d=desktop(browsePlan);
+  const r=await run(['ค้น xxx','เข้า link แรก'],d.deps);
+  expect(d.questions.length).toBeGreaterThan(0);
+  for(const q of d.questions)expect(Object.keys(q.questions.action.criteria)).not.toContain('READ_REQUEST');
+  expect(r.stepRun).toMatchObject({total:2,completed:2});
+ });
+});
