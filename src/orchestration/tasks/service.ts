@@ -2,7 +2,7 @@ import {CURRENT_CONTROL_ROUND_SQL} from '../control-notification';
 import {preparedBrowserAnswers} from '../browser-fields';
 import {ComputerInputs} from '../../jev/computer-inputs';
 import {automationSession} from './automation-session';
-import {computerOutcomeText} from '../../automation/computer-outcome';
+import {computerActionText,computerOutcomeText} from '../../automation/computer-outcome';
 import {browserOutcomeText} from '../../automation/browser-outcome';
 import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
 import { isAbsolute } from 'path';
@@ -45,9 +45,24 @@ export function taskIndexEntry(task: TaskSnapshot) {
     cancellation: task.cancellation, replacedByTaskId: task.replacedByTaskId,
     workstreamId: task.workstreamId, continueTaskId: task.continueTaskId, continuationPolicy: task.continuationPolicy,
     resultAvailable: Boolean(task.result),
+    actionLog: task.actionLog,
     computerConnection:task.computerConnection, automationController:task.automationController??"agent", gatewayTarget: task.gatewayTarget, automationSession: automationSession(task),
     details: { tool: 'task_status', task_id: task.taskId },
   };
+}
+
+const ACTION_LOG_MAX = 12;
+const clip = (text: string, max: number) => { const chars = [...text.replace(/\s+/gu, ' ').trim()]; return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : chars.join(''); };
+/** Appends one round's own outcome line, so a later summary need not infer earlier rounds from the latest report. */
+function recordAction(task: TaskSnapshot, revision: number, command: string, outcome: WorkerOutcome): void {
+  let result = task.gatewayTarget?.adapter === 'computer' && outcome.computerReport ? computerOutcomeText(outcome.computerReport)
+    : task.gatewayTarget?.adapter === 'browser' && outcome.browserReport ? browserOutcomeText(outcome.browserReport) : undefined;
+  if (result === undefined) return;
+  const last = outcome.computerReport?.lastAction;
+  // A step-run line counts steps; name the last completed action as well.
+  if (last && !last.blocked && !result.startsWith('Done:')) result += ` Last completed action: ${computerActionText(last)}.`;
+  if (outcome.type === 'unknown') result = 'Outcome unknown; not replayed. ' + result;
+  task.actionLog = [...(task.actionLog ?? []).filter(entry => entry.revision !== revision), { revision, command: clip(command, 80), result: clip(result, 240) }].slice(-ACTION_LOG_MAX);
 }
 
 /** Task mutations use short durable transactions; admission probes are read-only. */
@@ -850,6 +865,7 @@ export class TaskService {
       const { task, attempt } = this.active(attemptId, generation);
       if (task.gatewayTarget?.adapter === 'computer' && outcome.computerReport) task.computerReport=outcome.computerReport;
       if (task.gatewayTarget?.adapter === 'browser' && outcome.browserReport) task.browserReport=outcome.browserReport;
+      if (outcome.computerReport || outcome.browserReport) recordAction(task, attempt.revision, this.revision(task.taskId, attempt.revision).instructions, outcome);
       // A structured unresolved blocker is not successful task completion.
       const waitingForCommand=outcome.type==='paused'&&['browser','computer'].includes(task.gatewayTarget?.adapter??'')&&['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(outcome.computerReport?.reason??outcome.browserReport?.reason??'');
       if (outcome.type === 'paused' && !waitingForCommand && !(task.state === 'waiting_input' && task.pendingQuestion) &&

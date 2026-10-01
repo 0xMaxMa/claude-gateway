@@ -64,6 +64,8 @@ export interface TaskSnapshot {
   executionControl?: {id:string;action:'pause'|'revise'|'resume';revision:number;phase:'pending'|'applied'|'paused'|'blocked';requestedAt:number};
   /** Direct user commands typed while a user-controlled computer/browser round is busy; delivered verbatim, FIFO. */
   queuedCommands?: Array<{id:string;text:string;at:number}>;
+  /** What each Browser/Computer round actually did, newest last; bounded for later summaries. */
+  actionLog?: Array<{revision:number;command:string;result:string}>;
   computerReport?:ComputerTaskReport;
   gatewayTarget?: GatewayTaskTarget;
   browserReport?: import('../jev/browser-contract').BrowserTaskReport;
