@@ -1263,6 +1263,7 @@ export class SessionProcess extends EventEmitter {
     }
 
     this.process = proc;
+    const startsAtSpawn = this.starts;
     proc.once('exit', releaseCapacity);
     proc.once('exit', () => { setTimeout(() => toolCapture?.close(), 200).unref(); });
     proc.once('error', () => toolCapture?.close());
@@ -1626,10 +1627,14 @@ export class SessionProcess extends EventEmitter {
         sessionId: this.sessionId,
       });
       if (ptyStreamSocketPath) ptyStreamRegistry.close(ptyStreamSocketPath);
-      // A start() while an earlier stop() still waited for this exit already
-      // attached a newer child; this exit is not that session's death, so no
-      // 'exit' listener may see it. The stopped turn settles when its stop() resolves.
-      if (this.process && this.process !== proc) return;
+      // A start() while an earlier stop() still waited for this exit owns the
+      // session now, whether or not its child is attached yet; this exit is not
+      // that session's death, so no 'exit' listener may see it and nothing restarts.
+      // The stopped turn settles when its stop() resolves.
+      if (this.starts !== startsAtSpawn || (this.process && this.process !== proc)) {
+        if (this.process === proc) this.process = null;
+        return;
+      }
       this.process = null;
       this._exited = true;
       this.resetBackgroundDispatchState();

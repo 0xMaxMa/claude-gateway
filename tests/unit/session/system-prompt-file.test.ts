@@ -337,3 +337,63 @@ test('a stale stop() neither clears nor orphans the container attempt a respawn 
   await sp.stop();
   expect(jest.mocked(stopContainerProfile).mock.calls.map(([, dir]) => dir)).toEqual([directory(0), directory(1)]);
 });
+
+// The mirror case: the stopped child exits while the respawn is still preparing, before its
+// own child is attached. That exit belongs to the stop, not to the session the respawn owns.
+function holdPreparation(sp: SessionProcess): () => void {
+  let release!: () => void;
+  const real = (sp as any).buildInitialPrompt.bind(sp);
+  jest.spyOn(sp as any, 'buildInitialPrompt').mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(real()); }));
+  return () => release();
+}
+
+test('the stopped child\'s exit during a respawn\'s preparation does not settle the turn the respawn serves', async () => {
+  const sp = session();
+  await sp.start();
+  holdExit = true;
+  const stopping = sp.stop();
+  const release = holdPreparation(sp);
+  const turn = startProcessTurn(sp, 'hello', undefined);
+  let outcome: unknown;
+  void turn.result.then(value => { outcome = value; }, error => { outcome = error; });
+  await tick();
+  spawned[0].proc.emit('exit', 0, 'SIGTERM');
+  await stopping;
+  await tick();
+  expect(outcome).toBeUndefined();
+  release();
+  await tick();
+  expect(spawned).toHaveLength(2);
+  expect(sp.isRunning()).toBe(true);
+  expect(outcome).toBeUndefined();
+  holdExit = false;
+  await turn.stop();
+  await tick();
+  expect(outcome).toEqual({ text: '', interrupted: true });
+});
+
+test('the stopped child\'s exit during a respawn\'s preparation neither reports an exit nor schedules a crash restart', async () => {
+  const agent = { id: 'a', workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] } } as unknown as AgentConfig;
+  const sp = new SessionProcess('session-channel', 'api', agent,
+    { gateway: { headless: true, timezone: 'UTC', logDir: join(root, 'logs') }, agents: [agent] } as GatewayConfig,
+    { getContextReset: () => undefined, loadSession: async () => [] } as any);
+  await sp.start();
+  holdExit = true;
+  const stopping = sp.stop();
+  const release = holdPreparation(sp);
+  const starting = sp.start();
+  const exits = jest.fn();
+  sp.on('exit', exits);
+  await tick();
+  spawned[0].proc.emit('exit', 0, 'SIGTERM');
+  await stopping;
+  release();
+  await starting;
+  // A scheduled restart would spawn a second child over this one, orphaning it.
+  expect(exits).not.toHaveBeenCalled();
+  expect((sp as any)._restartScheduled).toBe(false);
+  expect(sp.isRunning()).toBe(true);
+  holdExit = false;
+  await sp.stop();
+  expect(spawned).toHaveLength(2);
+});
