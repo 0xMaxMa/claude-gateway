@@ -1,8 +1,10 @@
 // Issue #559: the appended system prompt used to travel as ONE argv entry on
 // every non-Windows host. Linux caps a single argument at MAX_ARG_STRLEN
 // (128 KiB including the NUL), so a large prompt failed every spawn with E2BIG.
-const spawned: { bin: string; args: string[]; promptFile?: { content: string; mode: number } }[] = [];
+const spawned: { bin: string; args: string[]; promptFile?: { content: string; mode: number }; proc: import('events').EventEmitter }[] = [];
 let spawnError: string | undefined;
+// While set, SIGTERM does not end the fake CLI: the test emits its 'exit' itself.
+let holdExit = false;
 jest.mock('child_process', () => {
   const real = jest.requireActual('child_process');
   const { EventEmitter } = jest.requireActual('events');
@@ -15,9 +17,9 @@ jest.mock('child_process', () => {
       const file = at >= 0 ? args[at + 1] : undefined;
       // A host file is read now, the way the CLI reads it at startup.
       const promptFile = file && fs.existsSync(file) ? { content: fs.readFileSync(file, 'utf8'), mode: fs.statSync(file).mode & 0o777 } : undefined;
-      spawned.push({ bin, args, promptFile });
       const proc = new EventEmitter();
-      Object.assign(proc, { pid: 4242, stdin: { writable: true, write: jest.fn(), end: jest.fn(), on: jest.fn() }, stdout: new EventEmitter(), stderr: new EventEmitter(), kill: jest.fn(() => { setImmediate(() => proc.emit('exit', 0, 'SIGTERM')); return true; }) });
+      Object.assign(proc, { pid: 4242, stdin: { writable: true, write: jest.fn(), end: jest.fn(), on: jest.fn() }, stdout: new EventEmitter(), stderr: new EventEmitter(), kill: jest.fn(() => { if (!holdExit) setImmediate(() => proc.emit('exit', 0, 'SIGTERM')); return true; }) });
+      spawned.push({ bin, args, promptFile, proc });
       return proc;
     }),
   };
@@ -55,7 +57,7 @@ jest.mock('../../../src/orchestration/container', () => {
   };
 });
 
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionProcess } from '../../../src/session/process';
@@ -73,7 +75,7 @@ let root: string;
 let workspace: string;
 
 beforeEach(() => {
-  spawned.length = 0; logged.length = 0; containerWrites.length = 0; spawnError = undefined;
+  spawned.length = 0; logged.length = 0; containerWrites.length = 0; spawnError = undefined; holdExit = false;
   root = mkdtempSync(join(tmpdir(), 'prompt-file-'));
   workspace = join(root, 'workspace'); mkdirSync(workspace);
   home = root;
@@ -152,4 +154,40 @@ test('any other synchronous spawn failure is logged before it propagates', async
   expect(logged.some(entry => entry.level === 'error' && JSON.stringify(entry.meta ?? {}).includes('EINVAL'))).toBe(true);
   for (const entry of logged) expect(JSON.stringify(entry)).not.toContain('บริบทของเอเจนต์');
   await sp.stop();
+});
+
+const promptFiles = () => readdirSync(root).filter(name => name.startsWith('system-prompt-'));
+
+test('a stop() while start() is still preparing abandons the spawn: no CLI and no prompt file are left behind', async () => {
+  const sp = session();
+  let release!: () => void;
+  const real = (sp as any).buildInitialPrompt.bind(sp);
+  jest.spyOn(sp as any, 'buildInitialPrompt').mockImplementation(() => new Promise(resolve => { release = () => resolve(real()); }));
+  const starting = sp.start();
+  await sp.stop();
+  release();
+  await starting;
+  expect(spawned).toHaveLength(0);
+  expect(promptFiles()).toEqual([]);
+  expect(sp.isRunning()).toBe(false);
+});
+
+test('a respawn while an earlier stop() still waits for its exit keeps its own prompt file and child', async () => {
+  const sp = session();
+  await sp.start();
+  holdExit = true;
+  const stopping = sp.stop();
+  await sp.start();
+  expect(spawned).toHaveLength(2);
+  const file = (n: number) => spawned[n].args[spawned[n].args.indexOf('--append-system-prompt-file') + 1];
+  expect(file(1)).not.toBe(file(0));
+  spawned[0].proc.emit('exit', 0, 'SIGTERM');
+  await stopping;
+  // The first stop removed only the first spawn's prompt; the second child is still this session's.
+  expect(existsSync(file(0))).toBe(false);
+  expect(existsSync(file(1))).toBe(true);
+  expect(sp.isRunning()).toBe(true);
+  holdExit = false;
+  await sp.stop();
+  expect(existsSync(file(1))).toBe(false);
 });

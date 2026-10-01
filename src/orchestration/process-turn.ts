@@ -344,7 +344,8 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
   if (policy) arm('startup', policy.startupTimeoutMs);
   process.on('output', output); process.on('exit', exit); process.on('startup-error', startupError);
   void (alreadyStarted ? Promise.resolve() : process.start()).then(() => {
-    if (stopped || settled) return process.stop();
+    // A stop during start() may abandon the spawn, so no 'exit' will settle the turn.
+    if (stopped || settled) return Promise.resolve(process.stop()).then(exit);
     process.sendMessage(prompt, images);
   }).catch(error => { fail(error); void process.stop(); });
   return { accepted, providerReady, result, stop };

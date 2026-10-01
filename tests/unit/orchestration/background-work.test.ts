@@ -200,3 +200,20 @@ test('an oversized waiting result fails as too large, not as missing, when the g
   emit(backgroundBash); emit(bgStarted); emit({type:'result',result:'x'.repeat(262145)});
   await expect(turn.result).rejects.toMatchObject({code:'RESPONSE_TOO_LARGE'});
 });
+
+test('a turn stopped while its process is still starting settles as interrupted even when no child was spawned (#559)', async () => {
+  let started!: () => void;
+  const proc = Object.assign(new EventEmitter(), {
+    runtimeProfile: { role: 'agent' },
+    // SessionProcess abandons a spawn that a stop() overtook: start() resolves, no 'exit' follows.
+    start: () => new Promise<void>(resolve => { started = resolve; }), sendMessage: jest.fn(), interrupt: jest.fn(),
+    managedGroupStopped: true, stop: jest.fn(async () => {}),
+  }) as unknown as WorkerProcess;
+  const turn = startProcessTurn(proc, 'Hello', undefined);
+  turn.accepted.catch(() => {});
+  const stopped = turn.stop();
+  started();
+  await stopped;
+  await expect(turn.result).resolves.toMatchObject({ interrupted: true });
+  expect(proc.sendMessage).not.toHaveBeenCalled();
+});

@@ -5,7 +5,7 @@ import { RequestToolCapture, RequestToolSchemas } from './request-tool-capture';
 import type { InputImage } from './input-image';
 import { prepareContainerProfile, stopContainerProfile, CONTAINER_SUPERVISOR, containerNode, assertContainerBinding } from '../orchestration/container';
 import { spawn, ChildProcess } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -226,6 +226,8 @@ const STATE_SUBDIR: Record<ChatChannel, string> = {
 export class SessionProcess extends EventEmitter {
   private managedProcessGroup?: number;
   private containerAttempt?: { directory: string; config: string };
+  /** Bumped by stop(): a spawnProcess() that awaited across it abandons its spawn. */
+  private spawnEpoch = 0;
   managedGroupStopped = false;
   get processId(): number | undefined { return this.isRunning() ? this.process?.pid : undefined; }
   get managedProcessId(): number | undefined { return this.managedProcessGroup; }
@@ -727,15 +729,15 @@ export class SessionProcess extends EventEmitter {
    * (MAX_ARG_STRLEN), so a large workspace context or skill catalog would fail
    * every spawn (#559); argv is also world-readable through /proc/<pid>/cmdline.
    * The host CLI reads a 0600 file beside the attempt's MCP config (a 0700
-   * directory). A container CLI reads one that prepareContainerProfile writes in its attempt
+   * directory), named per spawn so stopping one spawn never removes another's.
+   * A container CLI reads one that prepareContainerProfile writes in its attempt
    * directory, in the same docker exec as the attempt's mcp.json and ticket. */
   private writeSystemPromptFile(args: string[], mcpConfigPath: string | null): string[] {
     if (!this.runtimeProfile) return args;
-    const file = path.join(path.dirname(mcpConfigPath ?? this.runtimeProfile.mcpConfigPath), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, '_')}.md`);
+    const file = path.join(path.dirname(mcpConfigPath ?? this.runtimeProfile.mcpConfigPath), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, '_')}-${randomUUID()}.md`);
     const moved = appendSystemPromptViaFile(args, file);
     if (moved.prompt === undefined) return args;
-    fs.writeFileSync(file, moved.prompt, { mode: 0o600 });
-    fs.chmodSync(file, 0o600); // A respawn reuses the name; mode applies only on create.
+    fs.writeFileSync(file, moved.prompt, { mode: 0o600, flag: 'wx' });
     this.systemPromptPath = file;
     return moved.args;
   }
@@ -1037,8 +1039,12 @@ export class SessionProcess extends EventEmitter {
     });
   }
 
-  private async spawnProcess(): Promise<void> {
+  /** Resolves false when a stop() during its awaits abandoned the spawn: nothing was
+   * started, and a container attempt it prepared is already cleaned up. */
+  private async spawnProcess(): Promise<boolean> {
+    const epoch = this.spawnEpoch;
     const { historyPrompt, loadedAtSpawn, archivedCount, messageCountAtSpawn } = await this.buildInitialPrompt();
+    if (epoch !== this.spawnEpoch) return false;
     this.spawnContext = { loadedAtSpawn, archivedCount, messageCountAtSpawn };
 
     // Determine if this is a docker-exec app-agent before computing paths
@@ -1055,6 +1061,8 @@ export class SessionProcess extends EventEmitter {
         containerArgs = moved.args;
         return moved.prompt;
       });
+      // stop() could not see this attempt yet; remove its ticket and prompt here.
+      if (epoch !== this.spawnEpoch) { await stopContainerProfile(container, attempt.directory); return false; }
       this.containerAttempt = attempt;
     }
     const mcpConfigPath = this.writeMcpConfig();
@@ -1612,6 +1620,9 @@ export class SessionProcess extends EventEmitter {
         sessionId: this.sessionId,
       });
       if (ptyStreamSocketPath) ptyStreamRegistry.close(ptyStreamSocketPath);
+      // A start() while an earlier stop() still waited for this exit already
+      // attached a newer child; this exit is not that session's death.
+      if (this.process && this.process !== proc) return;
       this.process = null;
       this._exited = true;
       this.resetBackgroundDispatchState();
@@ -1655,6 +1666,7 @@ export class SessionProcess extends EventEmitter {
         this.emit('startup-error', Object.assign(new Error(code), { code }));
       }
     });
+    return true;
   }
 
   private scheduleRestart(): void {
@@ -1695,9 +1707,10 @@ export class SessionProcess extends EventEmitter {
           // sendMessage() will no longer silently no-op. Emitted on every
           // successful crash-triggered respawn — cheap, and nothing currently
           // listens outside that one call site.
-          .then(() => {
+          .then(spawned => {
             this._restartScheduled = false;
-            this.emit('restarted');
+            if (spawned) this.emit('restarted');
+            else this.emit('restartFailed', new Error('Session restart abandoned: session stopping'));
           })
           .catch(err => {
             this._restartScheduled = false;
@@ -2065,6 +2078,11 @@ export class SessionProcess extends EventEmitter {
   async stop(): Promise<void> {
     if (this.diagnostics.outcome === 'pending' && !this.diagnostics.stopReason) this.diagnostics.stopReason = 'shutdown';
     this.stopping = true;
+    this.spawnEpoch++;
+    // Only the prompt of the spawn being stopped: a start() while this stop still
+    // waits for the exit writes its own file, which must survive that exit.
+    const systemPromptPath = this.systemPromptPath;
+    this.systemPromptPath = undefined;
     if (this.containerAttempt && this.agentConfig.container) {
       this.managedGroupStopped = await stopContainerProfile(this.agentConfig.container, this.containerAttempt.directory);
       this.containerAttempt = undefined;
@@ -2096,10 +2114,7 @@ export class SessionProcess extends EventEmitter {
         try { fs.rmSync(this.managedMcpConfigPath, { force: true }); } catch {}
         this.managedMcpConfigPath = undefined;
       }
-      if (this.systemPromptPath) {
-        try { fs.rmSync(this.systemPromptPath, { force: true }); } catch {}
-        this.systemPromptPath = undefined;
-      }
+      if (systemPromptPath) { try { fs.rmSync(systemPromptPath, { force: true }); } catch {} }
       try {
         fs.rmSync(path.join(this.agentConfig.workspace, '.sessions', this.sessionId), { recursive: true, force: true });
       } catch {}
@@ -2117,7 +2132,7 @@ export class SessionProcess extends EventEmitter {
           clearTimeout(forceKillTimer);
           forceKillTimer = null;
         }
-        this.process = null;
+        if (this.process === proc) this.process = null;
         removeSessionDir();
         resolve();
       });

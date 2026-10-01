@@ -98,3 +98,22 @@ posix('the prompt is written by the docker exec that creates the attempt, so a s
   expect(existsSync(file)).toBe(false);
   expect(existsSync(file.replace('system-prompt.md', 'ticket.json'))).toBe(false);
 });
+
+posix.each([
+  ['reading /workspace/CLAUDE.md', '/workspace/CLAUDE.md'],
+  ['creating the attempt directory', 'ticket.json'],
+])('a stop() while start() is %s starts no CLI and leaves no ticket or prompt in the container', async (_label, marker) => {
+  const sp = session();
+  let stopping: Promise<void> | undefined;
+  duringExec = script => { if (script.includes(marker) && !stopping) stopping = sp.stop(); };
+  await sp.start();
+  await stopping;
+  expect(stopping).toBeDefined();
+  expect(launches).toHaveLength(0);
+  expect(attempts()).toHaveLength(1);
+  for (const directory of attempts()) {
+    expect(existsSync(directory + '/ticket.json')).toBe(false);
+    expect(existsSync(directory + '/system-prompt.md')).toBe(false);
+  }
+  expect(sp.isRunning()).toBe(false);
+});
