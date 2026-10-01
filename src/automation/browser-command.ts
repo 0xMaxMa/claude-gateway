@@ -51,13 +51,18 @@ export function planBrowserCommand(command:string):BrowserCommandPlan|undefined 
  * The page a blank New Tab opens for this goal: a navigation command, or (for
  * an agent's task goal) the one web address it names. Never a non-web scheme.
  */
+// A bare "report.pdf" in a task goal names a file, not a site. Hosts ending in a
+// common file extension need an explicit scheme or www. to count as a start page.
+const FILE_EXTENSION=/\.(?:pdf|docx?|xlsx?|pptx?|csv|txt|json|xml|ya?ml|md|log|zip|gz|tar|rar|7z|png|jpe?g|gif|webp|svg|heic|mp[34]|mov|wav|js|ts|py|sh|exe|dmg|pkg|app|iso)$/iu;
 export function blankTabUrl(goal:string,command:boolean):string|undefined {
  const plan=planBrowserCommand(goal);
  if(plan||command)return plan?.kind==='navigate'?plan.url:undefined;
  const urls=new Set(goal.split(/\s+/u).flatMap(word=>{
   const token=word.replace(/^[("'“‘<]+|[)"'”’>.,;:!?]+$/gu,'');
-  const named=/^(?:https?:\/\/|www\.)|\.[a-z]{2,}(?:\/|$)/iu.test(token)?planBrowserCommand(token):undefined;
-  return named?.kind==='navigate'?[named.url]:[];
+  const explicit=/^(?:https?:\/\/|www\.)/iu.test(token);
+  const named=explicit||/\.[a-z]{2,}(?:\/|$)/iu.test(token)?planBrowserCommand(token):undefined;
+  if(named?.kind!=='navigate'||(!explicit&&FILE_EXTENSION.test(new URL(named.url).hostname)))return [];
+  return [named.url];
  }));
  return urls.size===1?[...urls][0]:undefined;
 }

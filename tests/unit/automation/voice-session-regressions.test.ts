@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {historyCommand,newTabCommand,textEntryRequested} from '../../../src/automation/direct-command';
-import {planBrowserCommand} from '../../../src/automation/browser-command';
+import {blankTabUrl,planBrowserCommand} from '../../../src/automation/browser-command';
 import {shortcutCommand} from '../../../src/automation/computer-command';
 import {directCommandSpeech} from '../../../src/automation/command-speech';
 import {destructiveText} from '../../../src/automation/computer-safety';
@@ -120,5 +120,14 @@ describe('Remote Browser direct commands', () => {
  test('a quota failure still stops the task',async()=>{
   const {result}=await run('เปิดคลิปแรก',{evaluate:async()=>{throw new JevError('QUOTA_EXCEEDED','provider prose');}});
   expect(result.status).toBe('failed');
+ });
+});
+
+describe('blank-tab start page from a task goal', () => {
+ test.each(['open the file report.pdf','summarise notes.md for me','upload photo.jpeg'])('a file name is not a site: %s',goal=>{
+  expect(blankTabUrl(goal,false)).toBeUndefined();
+ });
+ test.each([['find flights on expedia.com','https://expedia.com/'],['read https://example.com/report.pdf','https://example.com/report.pdf'],['open www.report.md','https://www.report.md/']])('a named site is the start page: %s',(goal,url)=>{
+  expect(blankTabUrl(goal,false)).toBe(url);
  });
 });

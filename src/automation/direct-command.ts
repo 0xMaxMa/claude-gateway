@@ -68,6 +68,14 @@ export function historyCommand(command:string):'back'|'forward'|undefined {
  if(THAI_BACK.test(normalized.replace(/\s+/gu,''))||ENGLISH_BACK.test(normalized))return 'back';
 }
 
+/**
+ * Decision failures that end one direct command, not the task, on both surfaces:
+ * the user can speak the next command (sessions b01a566f, a4b9ee81). Jev error
+ * codes plus the runners' own timeout and malformed-answer codes. Configuration,
+ * access and quota failures still stop the task so the agent can explain them.
+ */
+export const COMMAND_DECISION_FAILURES:ReadonlySet<string>=new Set(['ADAPTER_TIMEOUT','DEADLINE_EXCEEDED','INVALID_RESPONSE','PROVIDER_UNAVAILABLE','RATE_LIMITED','MODEL_UNAVAILABLE','QUEUE_FULL','REQUEST_CONFLICT','INVALID_DECISION']);
+
 /** Phrases that ask for a new browser tab (Cmd+T). */
 export const NEW_TAB_PHRASES=['new tab','open new tab','open a new tab','เปิด tab ใหม่','เปิดแท็บใหม่','tab ใหม่','แท็บใหม่'];
 /**

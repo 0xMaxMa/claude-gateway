@@ -76,6 +76,11 @@ jobs:
         if: runner.os == 'Linux'
         run: npm run typecheck
 
+      # Jest transpiles only (isolatedModules), so type-check the test files here.
+      - name: Typecheck tests
+        if: runner.os == 'Linux'
+        run: npm run typecheck:tests
+
       - name: Supervisor, sampler and worker end-to-end
         run: >-
           npx jest --ci --verbose

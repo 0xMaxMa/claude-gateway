@@ -1,4 +1,5 @@
 import {stepRunText,UNKNOWN_PREFIX} from './computer-outcome';
+import {COMMAND_DECISION_FAILURES} from './direct-command';
 import type {BrowserTaskReport} from '../jev/browser-contract';
 import type {BrowserCommandAction} from './browser-command';
 
@@ -31,7 +32,7 @@ const HINTS:Record<string,string>={
  TEXT_ENTRY_NOT_REQUESTED:'nothing was typed because the command did not ask to type. Start it with พิมพ์/ค้นหา or type/search, for example: พิมพ์ "hello".',
 };
 // The decision service failed for this command only; the session keeps going.
-for(const code of ['ADAPTER_TIMEOUT','DEADLINE_EXCEEDED','INVALID_RESPONSE','PROVIDER_UNAVAILABLE','RATE_LIMITED','MODEL_UNAVAILABLE','QUEUE_FULL','REQUEST_CONFLICT','INVALID_DECISION'])
+for(const code of COMMAND_DECISION_FAILURES)
  HINTS[code]='no decision was made for this command ('+code+'). Send the command again.';
 const quoted=(label?:string)=>label?JSON.stringify(label.slice(0,80)):'the chosen control';
 function done(action:BrowserCommandAction|undefined){

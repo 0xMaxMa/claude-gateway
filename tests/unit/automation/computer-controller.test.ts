@@ -334,6 +334,15 @@ test('a direct command whose Jev answer is invalid is Not done, keeps waiting, a
  assert.equal(f.calls.filter(c=>c.name==='computer_action').length,0);
  assert(!JSON.stringify(r).includes('Provider details'));
 });
+// A malformed answer (target of another kind) is a failed decision too, as on Remote Browser.
+test('a direct command whose decision is malformed (INVALID_DECISION) is Not done and keeps waiting',async()=>{
+ const f=fixture(['key:enter']);
+ f.deps.evaluate=async()=>{throw Error('INVALID_DECISION');};
+ const r=await runComputerUse({goal:'คริยา',yieldAfterAction:true},f.deps,new AbortController().signal);
+ assert.equal(r.status,'needs_input');assert.equal(r.reason,'COMMAND_WAITING_INPUT');
+ assert.deepEqual(r.trace.events.filter(e=>e.phase==='waiting').map(e=>e.reason),['INVALID_DECISION']);
+ assert.equal(f.calls.filter(c=>c.name==='computer_action').length,0);
+});
 test('agent-controlled work still stops on an invalid Jev answer, with the validation reason on the record',async()=>{
  const f=fixture(['key:enter']);
  f.deps.evaluate=async()=>{throw new JevError('INVALID_RESPONSE','x',{validationReason:'CHOICE_MISMATCH'});};

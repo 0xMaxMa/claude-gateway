@@ -4,6 +4,7 @@ import {decisionInstructions,readChoice,observedEffect,decisionState,literalText
 import {checkInterruption,interruptible} from './interrupt';
 import {randomUUID} from 'node:crypto';
 import {JevError} from '../jev/types';
+import {COMMAND_DECISION_FAILURES} from './direct-command';
 import {z} from 'zod';
 import {runLoop} from '../../lib/automation/index.cjs';
 
@@ -47,12 +48,6 @@ export interface ComputerProgress {
  /** Which Jev response check failed (JEV_INVALID_RESPONSE); a fixed code, never response content. */
  validationReason?:string;
 }
-/**
- * Jev failures that end one direct command, not the task: the user can speak
- * the next command (sessions b01a566f, a4b9ee81). Configuration, access and
- * quota failures still stop the task so the agent can explain them.
- */
-export const COMMAND_JEV_FAILURES=new Set(['DEADLINE_EXCEEDED','INVALID_RESPONSE','PROVIDER_UNAVAILABLE','RATE_LIMITED','MODEL_UNAVAILABLE','QUEUE_FULL','REQUEST_CONFLICT']);
 /** A bounded diagnostic code from a Jev error; anything else is dropped. */
 export const jevValidationReason=(error:unknown)=>error instanceof JevError&&typeof error.metadata.validationReason==='string'&&/^[A-Z][A-Z_]{0,39}$/.test(error.metadata.validationReason)?error.metadata.validationReason:undefined;
 export interface ComputerUseDependencies {
@@ -482,9 +477,11 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
    }
   });
  }catch(error){
-  if(direct&&!pending&&error instanceof JevError&&COMMAND_JEV_FAILURES.has(error.code)&&!signal.aborted&&!deps.interruptSignal?.aborted&&!runSignal.aborted){
+  // A failed decision ends this command only: a Jev error, or a malformed answer (INVALID_DECISION).
+  const decisionFailure=error instanceof JevError?error.code:error instanceof Error&&error.message==='INVALID_DECISION'?error.message:undefined;
+  if(direct&&!pending&&decisionFailure&&COMMAND_DECISION_FAILURES.has(decisionFailure)&&!signal.aborted&&!deps.interruptSignal?.aborted&&!runSignal.aborted){
    const validationReason=jevValidationReason(error);
-   emit('waiting',{reason:'JEV_'+error.code,...(validationReason?{validationReason}:{})});
+   emit('waiting',{reason:(error instanceof JevError?'JEV_':'')+decisionFailure,...(validationReason?{validationReason}:{})});
    return result('needs_input','COMMAND_WAITING_INPUT');
   }
   return result(pending||(error instanceof Error&&error.message==='COMPUTER_RECONCILIATION_REQUIRED')?'needs_reconciliation':(signal.aborted||deps.interruptSignal?.aborted)?'cancelled':'blocked',pending?'OUTCOME_UNKNOWN':deps.interruptSignal?.aborted?'REVISION_SUPERSEDED':signal.aborted?'CANCELLED':runSignal.aborted?'TIMEOUT':error instanceof JevError?'JEV_'+error.code:error instanceof Error&&/^[A-Z][A-Z_0-9]{0,79}$/.test(error.message)?error.message:'COMPUTER_USE_FAILED',jevValidationReason(error));}

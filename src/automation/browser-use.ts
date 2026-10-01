@@ -3,7 +3,7 @@ import {BrowserTraceEvent, BrowserTrace} from "./browser-trace";
 import { runLoop } from "../../lib/automation/index.cjs";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import {textCommand,textEntryRequested} from "./direct-command";
+import {COMMAND_DECISION_FAILURES,textCommand,textEntryRequested} from "./direct-command";
 import {runBrowserStepsWith,type BrowserStepsInput} from "./browser-steps";
 import {blankTabUrl,browserDestructiveBlock,browserSubmitBlock,planBrowserCommand,searchFields,type BrowserCommandAction,type BrowserCommandOutcome,type BrowserCommandPlan} from "./browser-command";
 
@@ -215,7 +215,6 @@ export type BrowserUseResult = {
 // A Jev decision that failed or timed out ends this command, not the task
 // (session b01a566f: one ADAPTER_TIMEOUT failed the whole voice session).
 // Configuration, access and quota failures still stop the task.
-const COMMAND_DECISION_FAILURES = new Set(["ADAPTER_TIMEOUT","DEADLINE_EXCEEDED","INVALID_RESPONSE","PROVIDER_UNAVAILABLE","RATE_LIMITED","MODEL_UNAVAILABLE","QUEUE_FULL","REQUEST_CONFLICT","INVALID_DECISION"]);
 const COMMAND_NOT_DONE = new Set([...COMMAND_DECISION_FAILURES,"TEXT_ENTRY_NOT_REQUESTED","STALE_OBSERVATION","STALE_RETRY_BUDGET","NO_SUPPORTED_ACTION","LOW_OPERATION_CONFIDENCE","LOW_TARGET_CONFIDENCE","NO_PROGRESS","PAGE_CONTENT_UNAVAILABLE","WAIT_BUDGET","ACTION_SPACE_TOO_LARGE","DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED","HISTORY_UNAVAILABLE","SCROLL_LIMIT","NEW_TAB_OUT_OF_SCOPE","START_URL_REQUIRED","KEY_UNSUPPORTED","ACTION_BUDGET","EVALUATION_BUDGET"]);
 // A leased read after navigation waits in the extension, then reports
 // STALE_OBSERVATION cause NAVIGATION_PENDING. Re-read only; never replay the action.
