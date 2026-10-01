@@ -100,8 +100,11 @@ Withheld inputs do not create failed token turns or fabricated zero-usage rows.
 | `maxDecisionDurationMs` | `600000` | Total decision budget; separate from worker task runtime |
 | `preemptionGraceMs` | `250` | Accepted configuration field; currently not consumed by runtime preemption |
 | `maxPendingInputs` | `100` | Bound queued conversation input |
+| `skillCatalogBytes` | `65536` | UTF-8 byte budget for the installed skill catalog in the agent system prompt. Over the budget, every skill name stays listed and each description, `readWhen` and keyword is shortened to one shared cap; a catalog within the budget is unchanged |
 
 `decisionTimeoutMs` is a compatibility alias for `idleTimeoutMs`. Its original template value `15000` is normalized to the modern default. Set `idleTimeoutMs` explicitly for new configurations.
+
+The agent and worker system prompt (workspace `CLAUDE.md`, orchestration rules and the skill catalog) is always passed to Claude Code as a private `0600` file through `--append-system-prompt-file`, never as a command-line argument. Linux limits a single argument to 128 KiB and Windows limits the whole command line to 32767 characters, and command lines are readable by other local users. Host sessions write the file beside the attempt's MCP configuration and remove it when the session stops. App-agents write it over `docker exec` standard input into the container's own attempt directory, and it is removed when that attempt stops. If a spawn still exceeds an operating-system argument limit, the turn fails with `PROCESS_ARGS_TOO_LARGE` and the agent log records the argument count and sizes, never their content.
 
 `intakeWaitMs` measures received material, not microphone silence or an upload in progress. Voice turn detection has its own `turns.silenceCommitMs`. See [intake behavior](../guide/orchestration.md#conversation-intake).
 
