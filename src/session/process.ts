@@ -1627,7 +1627,8 @@ export class SessionProcess extends EventEmitter {
       });
       if (ptyStreamSocketPath) ptyStreamRegistry.close(ptyStreamSocketPath);
       // A start() while an earlier stop() still waited for this exit already
-      // attached a newer child; this exit is not that session's death.
+      // attached a newer child; this exit is not that session's death, so no
+      // 'exit' listener may see it. The stopped turn settles when its stop() resolves.
       if (this.process && this.process !== proc) return;
       this.process = null;
       this._exited = true;

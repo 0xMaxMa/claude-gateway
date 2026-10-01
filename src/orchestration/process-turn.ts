@@ -333,8 +333,11 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     if (!stopPromise) {
       stopped = true;
       if (!settled) process.recordTurnOutcome?.('cancelled');
-      // Await real exit; SIGINT's boolean is not an acknowledgment.
+      // Await real exit; SIGINT's boolean is not an acknowledgment. stop()
+      // resolves on this turn's own child's exit, so settle from it rather than
+      // from 'exit', which a child a later start() attached may emit first.
       process.interrupt(); stopPromise = process.stop();
+      process.off('exit', exit); void stopPromise.then(exit, exit);
     }
     return stopPromise;
   };

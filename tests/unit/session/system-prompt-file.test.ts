@@ -80,6 +80,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionProcess } from '../../../src/session/process';
 import { OrchestrationError } from '../../../src/orchestration/types';
+import { startProcessTurn } from '../../../src/orchestration/process-turn';
 import { stopContainerProfile } from '../../../src/orchestration/container';
 import { stopProcessGroup } from '../../../src/orchestration/process-supervisor';
 import { responseFailureMessage } from '../../../src/orchestration/response-errors';
@@ -268,6 +269,27 @@ function worker(type?: 'app-agent'): SessionProcess {
     { getContextReset: () => undefined, loadSession: async () => [] } as any, undefined,
     { role: 'worker', mcpConfigPath: join(root, 'mcp.json'), overlay: OVERLAY, ...(type ? {} : { hostExecution: true, context: 'c' }), capacityReserved: true } as RuntimeProfile);
 }
+
+test('the turn that stopped settles as interrupted on its own child\'s exit, never on the exit of the child that replaced it', async () => {
+  const sp = session();
+  const turn = startProcessTurn(sp, 'hello', undefined);
+  await tick();
+  expect(spawned).toHaveLength(1);
+  holdExit = true;
+  const stopping = turn.stop();
+  await sp.start();
+  expect(spawned).toHaveLength(2);
+  let outcome: unknown;
+  void turn.result.then(value => { outcome = value; }, error => { outcome = error; });
+  // The replacement dies first: that is not the stopped turn's exit.
+  spawned[1].proc.emit('exit', 1, null);
+  await tick();
+  expect(outcome).toBeUndefined();
+  spawned[0].proc.emit('exit', 0, 'SIGTERM');
+  await stopping;
+  await tick();
+  expect(outcome).toEqual({ text: '', interrupted: true });
+});
 
 test('a stale stop() signals only the child it stopped, not the one a respawn attached during its group stop', async () => {
   supervised = true;
