@@ -128,3 +128,68 @@ describe('5. capability-gated standard commands',()=>{
   expect(f.actions().map(a=>[a.kind,a.ref??a.key,a.text])).toEqual([['press','standard-address-focus',undefined],['type','c0','google.com'],['key','enter',undefined]]);
  });
 });
+
+// Live E2E (task e6149724): the develop relay predated gcu #67 and dropped
+// standard_command, so the helper returned an ordinary observation while still
+// advertising the capability. Every shortcut stopped with SHORTCUT_UNAVAILABLE.
+describe('6. a relay that drops standard_command',()=>{
+ const caps={standardCommands:['tab:new','address:focus','tab:close','app:quit'],keys:['backspace','enter']};
+ test('a new tab falls back to the observed menu command',async()=>{
+  const f=fixture(()=>chrome({capabilities:caps}));
+  const r=await run(f,'เปิด tab ใหม่');
+  expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'m1'})]);
+  expect(r.trace.events.some(e=>e.reason==='SHORTCUT_UNAVAILABLE')).toBe(false);
+ });
+ test('it asks for a standard command at most once per run',async()=>{
+  const f=fixture(()=>chrome({capabilities:caps}));
+  await run(f,'เปิด tab ใหม่');
+  expect(f.calls.filter(c=>c.name==='computer_observe'&&c.args.standard_command)).toHaveLength(1);
+ });
+ test('an address with no observed bar continues with the normal decision',async()=>{
+  const state=chrome({capabilities:caps});state.controls=state.controls.filter((c:any)=>c.ref!=='c0');
+  let asked=0;
+  const f=fixture(()=>state,{evaluate:()=>{asked++;return {answers:{}};}});
+  const r=await run(f,'เข้า google');
+  expect(asked).toBe(1);
+  expect(r.trace.events.some(e=>e.reason==='SHORTCUT_UNAVAILABLE')).toBe(false);
+ });
+});
+
+describe('7. shortcut hints name the real obstacle',()=>{
+ test('a browser in front without the command is not told to bring the browser forward',async()=>{
+  const state=chrome();state.controls=state.controls.filter((c:any)=>c.ref!=='m1'&&c.ref!=='c5');
+  const r=await run(fixture(state),'เปิด tab ใหม่');
+  expect(r.trace.events.filter(e=>e.phase==='waiting').map(e=>e.reason)).toEqual(['SHORTCUT_NOT_OFFERED']);
+ });
+ test('another application in front keeps the bring-the-browser-forward hint',async()=>{
+  const state=chrome({application:'ai.getpod.computer-use',windowTitle:'GetPod Computer Use',apps:[{id:'com.google.Chrome',name:'Google Chrome'},{id:'ai.getpod.computer-use',name:'GetPod Computer Use'}]});
+  state.controls=state.controls.filter((c:any)=>c.ref!=='m1'&&c.ref!=='c5');
+  const r=await run(fixture(state),'เปิด tab ใหม่');
+  expect(r.trace.events.filter(e=>e.phase==='waiting').map(e=>e.reason)).toEqual(['SHORTCUT_UNAVAILABLE']);
+ });
+});
+
+// Live E2E (task e6149724): after typing into Google's search box Chrome reported
+// focus on the box's inner static text, so "ลบๆ" found no focused field.
+describe('8. erase when focus is reported on the text inside a field',()=>{
+ const google=(extra:Record<string,unknown>={})=>({generation:'g1',application:'com.google.Chrome',windowTitle:'Google - Google Chrome',truncated:false,apps:[{id:'com.google.Chrome',name:'Google Chrome'}],
+  focusedControl:{ref:'c0',role:'AXStaticText',label:'test123'},
+  controls:[{ref:'c0',role:'AXStaticText',label:'test123',value:'test123',focused:true,actions:['press']},
+   {ref:'c1',role:'AXTextArea',label:'ค้นหา',value:'test123',focused:false,actions:['press','type']},
+   {ref:'c31',role:'AXTextField',label:'Address and search bar',value:'google.com',focused:false,actions:['press','type']}],...extra});
+ test('the field holding the focused text is erased with backspace',async()=>{
+  const f=fixture(google({capabilities:{standardCommands:[],keys:['backspace']}}));
+  const r=await run(f,'ลบๆ');
+  expect(f.actions()).toEqual([expect.objectContaining({kind:'key',key:'backspace'}),expect.objectContaining({kind:'key',key:'backspace'})]);
+  expect(r.lastAction).toMatchObject({kind:'erase',count:2});
+ });
+ test('without backspace the same field is rewritten',async()=>{
+  const f=fixture(google());await run(f,'ลบๆ');
+  expect(f.actions()).toEqual([expect.objectContaining({kind:'type',ref:'c1',text:'test1'})]);
+ });
+ test('static text matching two fields is ambiguous and erases nothing',async()=>{
+  const state=google();state.controls.push({ref:'c2',role:'AXTextField',label:'Other',value:'test123',focused:false,actions:['press','type']});
+  const f=fixture(state);await run(f,'ลบๆ');
+  expect(f.actions().filter(a=>a.kind==='type'||a.key==='backspace')).toEqual([]);
+ });
+});

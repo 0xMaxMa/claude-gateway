@@ -283,7 +283,7 @@ test('E2E-2: a listed step joining two commands runs both; a named shortcut runs
  const g=desktop((command,req)=>answer(req,'open:com.google.Chrome'));
  g.state.controls=g.state.controls.filter((c:any)=>c.ref!=='newtab');
  const stopped=await run(['เปิด Chrome แล้วกด Cmd+T','scroll ลงมา'],g.deps);
- expect(stopped.stepRun).toMatchObject({stopReason:'STEP_NOT_EXECUTED',stoppedAt:1,completed:0,detail:'SHORTCUT_UNAVAILABLE',doneParts:['เปิด Chrome']});
+ expect(stopped.stepRun).toMatchObject({stopReason:'STEP_NOT_EXECUTED',stoppedAt:1,completed:0,detail:'SHORTCUT_NOT_OFFERED',doneParts:['เปิด Chrome']});
 });
 
 test('E2E-1: a step whose target is still loading re-observes instead of stopping at once',async()=>{
@@ -300,4 +300,14 @@ test('E2E-1: a step whose target is still loading re-observes instead of stoppin
  const r=await run(['ค้น xxx','เข้า link แรก'],f.deps);
  expect(r.stepRun).toMatchObject({stopReason:'ALL_STEPS_DONE',completed:2});
  expect(f.actions().at(-1)).toMatchObject({kind:'press',ref:'link1'});
+});
+
+test('E2E e6149724: the first step re-observes a shortcut target that is not shown yet, like later steps',async()=>{
+ const f=desktop(browsePlan);
+ const newtab=f.state.controls.find((c:any)=>c.ref==='newtab');f.state.controls=f.state.controls.filter((c:any)=>c!==newtab);
+ const call=f.deps.call;let observes=0;
+ f.deps.call=async(name,args,signal)=>{if(name==='computer_observe'&&++observes===2)f.state.controls.unshift(newtab);return call(name,args,signal);};
+ const r=await run(['เปิด tab ใหม่','scroll ลงมา'],f.deps);
+ expect(f.actions().map(a=>[a.kind,a.ref??a.direction])).toEqual([['press','newtab'],['scroll','down']]);
+ expect(r.stepRun).toMatchObject({stopReason:'ALL_STEPS_DONE',completed:2});
 });

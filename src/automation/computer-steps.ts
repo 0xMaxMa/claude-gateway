@@ -35,7 +35,7 @@ const SCROLL_NO_EFFECT_MAX = 3;
 const RETRYABLE_REASONS = new Set(['UI_NOT_READY','STALE_OBSERVATION','ACTION_CONTEXT_CHANGED','POST_ACTION_EVIDENCE_STALE']);
 // The previous step's page may still be loading: its first changed tree can
 // lack the target (E2E: Google results absent 3 s after Enter). Re-observe later.
-const LOADING_REASONS = new Set(['NO_SUPPORTED_ACTION','SHORTCUT_UNAVAILABLE']);
+const LOADING_REASONS = new Set(['NO_SUPPORTED_ACTION','SHORTCUT_UNAVAILABLE','SHORTCUT_NOT_OFFERED']);
 const LOADING_DELAY_MS = 800;
 
 
@@ -168,7 +168,9 @@ export async function runComputerSteps(raw:unknown, deps:ComputerUseDependencies
           actions += result.steps;evaluations += result.evaluations;
           lastAction = result.lastAction ?? lastAction;
           const waitingReason = lastWaiting(result) ?? '';
-          const retryable = RETRYABLE_REASONS.has(waitingReason) || (LOADING_REASONS.has(waitingReason) && (index > 0 || part !== parts[0]));
+          // The first step is retried too: an app brought forward just before the
+          // list ran can still be drawing its window (E2E e6149724 stopped at 0/5).
+          const retryable = RETRYABLE_REASONS.has(waitingReason) || LOADING_REASONS.has(waitingReason);
           if (result.status !== 'needs_input' || result.steps || !retryable || attempt === STEP_RETRY_MAX) break;
           prefetched = undefined;
           await delay(LOADING_REASONS.has(waitingReason) ? LOADING_DELAY_MS : RETRY_DELAY_MS, runSignal);

@@ -201,6 +201,11 @@ export function bareText(command:string,state:ComputerState){
 }
 
 /** The helper advertises this standard_command or key (capability-gated contract). */
+// macOS browsers whose File menu offers New Tab / Close Tab.
+const BROWSER_APPS=new Set(['com.google.Chrome','com.google.Chrome.beta','com.google.Chrome.canary','com.apple.Safari','com.apple.SafariTechnologyPreview','org.mozilla.firefox','com.microsoft.edgemac','com.brave.Browser','company.thebrowser.Browser','com.operasoftware.Opera','com.vivaldi.Vivaldi','org.chromium.Chromium']);
+export function frontIsBrowser(state:ComputerState){
+ return BROWSER_APPS.has(state.application);
+}
 export function helperSupports(state:ComputerState,kind:'standardCommands'|'keys',name:string){
  return state.capabilities?.[kind]?.includes(name)===true;
 }

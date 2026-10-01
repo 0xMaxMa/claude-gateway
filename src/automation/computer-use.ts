@@ -1,4 +1,4 @@
-import {buildComputerCommand,readComputerCommand,standardComputerCommand,standardKeyboardCommand,standardNavigationCommand,shortcutCommand,shortcutTarget,menuRelevant,addressCommand,addressField,quitCommand,quitTarget,bareText,frontIsNamed,helperSupports} from './computer-command';
+import {buildComputerCommand,readComputerCommand,standardComputerCommand,standardKeyboardCommand,standardNavigationCommand,shortcutCommand,shortcutTarget,menuRelevant,addressCommand,addressField,quitCommand,quitTarget,bareText,frontIsNamed,frontIsBrowser,helperSupports} from './computer-command';
 import {commandAuthorizes,destructiveTarget,DESTRUCTIVE_CONFIDENCE,eraseCommand,focusedTextField} from './computer-safety';
 import {decisionInstructions,readChoice,observedEffect,decisionState,literalTextCandidates} from './computer-policy';
 import {checkInterruption,interruptible} from './interrupt';
@@ -73,6 +73,13 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  // Capability-gated helper commands: a standard_command observation to request,
  // an address awaiting its focused bar, and remaining Backspace presses.
  let standardRequest:string|undefined,addressPending:string|undefined,backspaceLeft=0;
+ // A relay older than the helper drops standard_command and answers with an
+ // ordinary observation (E2E: develop relay predating gcu #67). The advertised
+ // capability is then not usable for the rest of this run.
+ let standardDropped=false;
+ const supports=(state:ComputerState,name:string)=>!standardDropped&&helperSupports(state,'standardCommands',name);
+ // Only a browser offers tab and address shortcuts; another app in front needs the browser first.
+ const shortcutMissing=(state:ComputerState)=>waitForCommand(frontIsBrowser(state)?'SHORTCUT_NOT_OFFERED':'SHORTCUT_UNAVAILABLE');
  let focusThenType:{identity:string;role:string;text:string;submit?:boolean;pressed?:boolean}|undefined,focusAttempted=false;
  const direct=input.yieldAfterAction||input.yieldAfterInteraction;
  const standard=direct?standardComputerCommand(input.goal):undefined;
@@ -142,10 +149,13 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     if(direct&&standardRequest){
      // The helper's compact observation for one guarded keyboard shortcut.
      const requested=standardRequest;standardRequest=undefined;
-     const control=state.standardCommand===requested?state.controls.find(c=>c.ref==='standard-'+requested.replace(':','-')&&c.actions.includes('press')):undefined;
-     if(!control){addressPending=undefined;return {result:waitForCommand('SHORTCUT_UNAVAILABLE')}};
-     const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
-     return {action:{action:'standard-shortcut',generation:state.generation,revision,targets:new Map([['standard-shortcut',action]]),observedContinuation:true}};
+     if(state.standardCommand!==requested){standardDropped=true;addressPending=undefined;}
+     else{
+      const control=state.controls.find(c=>c.ref==='standard-'+requested.replace(':','-')&&c.actions.includes('press'));
+      if(!control){addressPending=undefined;return {result:shortcutMissing(state)}};
+      const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
+      return {action:{action:'standard-shortcut',generation:state.generation,revision,targets:new Map([['standard-shortcut',action]]),observedContinuation:true}};
+     }
     }
     if(direct&&focusThenType){
      const pending=focusThenType,control=state.controls.find(c=>!c.sensitive&&c.identity===pending.identity&&c.role===pending.role);
@@ -175,9 +185,9 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      }
      const shortcut=shortcutCommand(goal.goal);
      if(shortcut){
-      if(shortcut.standard&&helperSupports(state,'standardCommands',shortcut.standard))return requestStandard(shortcut.standard);
+      if(shortcut.standard&&supports(state,shortcut.standard))return requestStandard(shortcut.standard);
       const control=shortcutTarget(state,shortcut.labels);
-      if(!control)return {result:waitForCommand('SHORTCUT_UNAVAILABLE')};
+      if(!control)return {result:shortcutMissing(state)};
       const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
       return {action:{action:'shortcut',generation:state.generation,revision,targets:new Map([['shortcut',action]]),observedContinuation:true}};
      }
@@ -186,7 +196,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      const quit=quitCommand(goal.goal);
      if(quit){
       if(!frontIsNamed(state,quit.app))return {result:waitForCommand('SHORTCUT_UNAVAILABLE')};
-      if(helperSupports(state,'standardCommands','app:quit'))return requestStandard('app:quit');
+      if(supports(state,'app:quit'))return requestStandard('app:quit');
       const control=quitTarget(state,quit.app);
       if(!control)return {result:waitForCommand('SHORTCUT_UNAVAILABLE')};
       const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
@@ -195,8 +205,8 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      // Opening a site or address types it into the browser address field and
      // submits it; without such a field the normal decision applies.
      const address=addressPending??addressCommand(goal.goal),bar=address?addressField(state):undefined;
-     if(address&&!bar&&!addressPending&&helperSupports(state,'standardCommands','address:focus')){addressPending=address;return requestStandard('address:focus');}
-     if(addressPending&&!bar){addressPending=undefined;return {result:waitForCommand('SHORTCUT_UNAVAILABLE')};}
+     if(address&&!bar&&!addressPending&&supports(state,'address:focus')){addressPending=address;return requestStandard('address:focus');}
+     if(addressPending&&!bar){addressPending=undefined;return {result:shortcutMissing(state)};}
      addressPending=undefined;
      if(address&&bar){
       const action={kind:'type',ref:bar.ref};emit('decided',summary(action,state));
