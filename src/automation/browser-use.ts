@@ -3,7 +3,7 @@ import {BrowserTraceEvent, BrowserTrace} from "./browser-trace";
 import { runLoop } from "../../lib/automation/index.cjs";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import {COMMAND_DECISION_FAILURES,READ_REQUEST_CRITERION,UNCLEAR_CRITERION,textCommand,textEntryRequested} from "./direct-command";
+import {COMMAND_DECISION_FAILURES,READ_REQUEST_CRITERION,UNCLEAR_CRITERION,textCommand} from "./direct-command";
 import {runBrowserStepsWith,type BrowserStepsInput} from "./browser-steps";
 import {blankTabUrl,browserDestructiveBlock,navigationUrl,browserSubmitBlock,planBrowserCommand,searchFields,type BrowserCommandAction,type BrowserCommandOutcome,type BrowserCommandPlan} from "./browser-command";
 
@@ -215,7 +215,7 @@ export type BrowserUseResult = {
 // A Jev decision that failed or timed out ends this command, not the task
 // (session b01a566f: one ADAPTER_TIMEOUT failed the whole voice session).
 // Configuration, access and quota failures still stop the task.
-const COMMAND_NOT_DONE = new Set([...COMMAND_DECISION_FAILURES,"TEXT_ENTRY_NOT_REQUESTED","STALE_OBSERVATION","STALE_RETRY_BUDGET","NO_SUPPORTED_ACTION","LOW_OPERATION_CONFIDENCE","LOW_TARGET_CONFIDENCE","NO_PROGRESS","PAGE_CONTENT_UNAVAILABLE","WAIT_BUDGET","ACTION_SPACE_TOO_LARGE","DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED","HISTORY_UNAVAILABLE","SCROLL_LIMIT","NEW_TAB_OUT_OF_SCOPE","START_URL_REQUIRED","KEY_UNSUPPORTED","ACTION_BUDGET","EVALUATION_BUDGET","TARGET_OBSCURED","NAVIGATION_UNRESOLVED","UNCLEAR"]);
+const COMMAND_NOT_DONE = new Set([...COMMAND_DECISION_FAILURES,"STALE_OBSERVATION","STALE_RETRY_BUDGET","NO_SUPPORTED_ACTION","LOW_OPERATION_CONFIDENCE","LOW_TARGET_CONFIDENCE","NO_PROGRESS","PAGE_CONTENT_UNAVAILABLE","WAIT_BUDGET","ACTION_SPACE_TOO_LARGE","DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED","HISTORY_UNAVAILABLE","SCROLL_LIMIT","NEW_TAB_OUT_OF_SCOPE","START_URL_REQUIRED","KEY_UNSUPPORTED","ACTION_BUDGET","EVALUATION_BUDGET","TARGET_OBSCURED","NAVIGATION_UNRESOLVED","UNCLEAR"]);
 // A leased read after navigation waits in the extension, then reports
 // STALE_OBSERVATION cause NAVIGATION_PENDING. Re-read only; never replay the action.
 const NAVIGATION_WAIT_MAX = 6;
@@ -1009,13 +1009,6 @@ export async function runBrowserUse(
               : op.choice === "SELECT"
                 ? "page_select"
                 : "page_type";
-          // A direct command types only when the user asked to type: never
-          // a stray transcript or generated text (session b01a566f).
-          if (input.command && name === "page_type" && !textEntryRequested(input.goal)) {
-            commandAction = { kind: "type", label: selected.element.label };
-            emit({phase:"recovery",reason:"TEXT_ENTRY_NOT_REQUESTED",operation:op.choice});
-            return result("blocked", "TEXT_ENTRY_NOT_REQUESTED");
-          }
           if (input.command && name !== "page_type") {
             const optionLabel = selected.option ? selected.element.options?.find(o => o.ref === selected.option)?.label : undefined;
             const block = browserDestructiveBlock(selected.element, optionLabel, input.goal, Math.min(op.confidence, target.confidence), input.strictDestructive);

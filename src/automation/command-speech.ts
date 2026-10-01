@@ -29,7 +29,6 @@ const THAI:Record<string,string>={
  OBSCURED:'มีบางอย่างบังปุ่มหรือลิงก์นั้นอยู่ ปิดหน้าต่างที่บังก่อน แล้วสั่งใหม่',
  NAVIGATION:'ไม่แน่ใจว่าจะเข้าเว็บไหน บอกชื่อเว็บให้ชัด เช่น เข้า yahoo.com',
  UNCLEAR:'ไม่เข้าใจคำสั่ง {command} ลองพูดแบบอื่นดู',
- TEXT_ENTRY:'ไม่ได้พิมพ์อะไรลงไป ถ้าจะพิมพ์ให้พูดว่า พิมพ์ ตามด้วยข้อความ',
  ENDED:'ยังไม่ได้ทำ {command} และงานนี้หยุดไปแล้ว ต้องเริ่มงานใหม่',
  DEFAULT:'ยังไม่ได้ทำ {command} ลองพูดใหม่อีกครั้ง',
 };
@@ -48,7 +47,6 @@ const ENGLISH:Record<string,string>={
  OBSCURED:'Something is covering that button or link. Close it first, then say it again.',
  NAVIGATION:'Not sure which website to open. Say its address, for example go to yahoo.com.',
  UNCLEAR:'Did not understand {command}. Try saying it another way.',
- TEXT_ENTRY:'Nothing was typed. To type, say type followed by the text.',
  ENDED:'{command} was not done, and this task has ended. Start a new one to continue.',
  DEFAULT:'{command} was not done. Please say it again.',
 };
@@ -57,7 +55,7 @@ const KIND:Record<string,string>={
  NO_SUPPORTED_ACTION:'NO_SUPPORTED_ACTION',SEQUENCE_TARGET_MISSING:'NO_SUPPORTED_ACTION',
  SEQUENCE_TOO_LONG:'SEQUENCE_TOO_LONG',DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED:'DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED',
  UI_NOT_READY:'SCREEN_CHANGING',STALE_OBSERVATION:'SCREEN_CHANGING',ACTION_CONTEXT_CHANGED:'SCREEN_CHANGING',STALE_RETRY_BUDGET:'SCREEN_CHANGING',WAIT_BUDGET:'SCREEN_CHANGING',
- NEW_TAB_OUT_OF_SCOPE:'NEW_TAB',SHORTCUT_UNAVAILABLE:'BRING_BROWSER_FRONT',TEXT_ENTRY_NOT_REQUESTED:'TEXT_ENTRY',START_URL_REQUIRED:'START_URL',
+ NEW_TAB_OUT_OF_SCOPE:'NEW_TAB',SHORTCUT_UNAVAILABLE:'BRING_BROWSER_FRONT',START_URL_REQUIRED:'START_URL',
  TARGET_OBSCURED:'OBSCURED',NAVIGATION_UNRESOLVED:'NAVIGATION',UNCLEAR:'UNCLEAR',
 };
 export interface SpeechContext {

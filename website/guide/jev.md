@@ -505,10 +505,10 @@ Jev decision over the observed controls and dispatches at most one action.
   page. The previous command, what it did and the page it ended on are passed to
   Jev as reference context only.
 - `พิมพ์ X` / `type X`: when Jev chooses a field, `X` itself is the text (never
-  generated text). A direct command types only when it starts with a text-entry
-  verb (`พิมพ์`, `ค้นหา`, `กรอก`, `ใส่`, `type`, `search`, `fill` and so on). If
-  Jev chooses to type for any other command, for example the page's own audio
-  heard as a command, nothing is typed (`TEXT_ENTRY_NOT_REQUESTED`).
+  generated text). Any other command Jev decides is text entry (for example
+  `เลือกต้นทางเป็นเชียงใหม่`) types the value the text helper resolves for that
+  field, such as `เชียงใหม่`; there is no text-entry verb list. Typing never
+  presses Enter unless the command asked to search or submit.
 - **New tab.** A binding is one user-approved tab. `เปิด tab ใหม่`, `new tab`,
   `เปิดแท็บ Google ใหม่`, `เปิดแท็กใหม่` (as speech recognition often hears it) and
   `Cmd+T` do not open another tab (`tab_open` is not allowed): that would widen

@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto';
-import {historyCommand,newTabCommand,textEntryRequested} from '../../../src/automation/direct-command';
+import {historyCommand,newTabCommand} from '../../../src/automation/direct-command';
 import {blankTabUrl,planBrowserCommand} from '../../../src/automation/browser-command';
 import {shortcutCommand} from '../../../src/automation/computer-command';
 import {directCommandSpeech} from '../../../src/automation/command-speech';
@@ -80,15 +80,15 @@ describe('Remote Browser direct commands', () => {
   elements:[{ref:'s1',label:'ค้นหา',tag:'input',role:'combobox',operations:['TYPE_TEXT'],in_viewport:true},{ref:'v1',label:'First video',tag:'a',role:'link',operations:['CLICK'],in_viewport:true}],
   scroll:{up:false,down:true},truncated:{text:false,elements:false},navigation:{can_go_back:true,can_go_forward:false}} as Observation;
  function extension(){
-  const calls:string[]=[];
-  const call:BrowserUseDependencies['call']=async(name)=>{
-   calls.push(name);
+  const calls:string[]=[],sent:Record<string,unknown>={};
+  const call:BrowserUseDependencies['call']=async(name,args)=>{
+   calls.push(name);sent[name]=args;
    if(name==='browser_task_acquire')return {state:'completed',result:{protocol_version:1,lease_token:randomUUID()}};
    if(name.startsWith('browser_task_'))return {state:'completed',result:{}};
    if(name==='page_observe')return structuredClone(page);
    return {state:'completed',result:{observation:{...structuredClone(page),generation:'g2'}}};
   };
-  return {call,mutations:()=>calls.filter(n=>n.startsWith('page_')&&n!=='page_observe')};
+  return {call,mutations:()=>calls.filter(n=>n.startsWith('page_')&&n!=='page_observe'),args:(name:string)=>sent[name]};
  }
  const pick=(operation:string):BrowserUseDependencies['evaluate']=>async request=>({model:'jev',answers:Object.fromEntries(Object.entries(request.questions).map(([key,q])=>{
   const ids=Object.keys(q.criteria),choice=key==='operation'?operation:ids[0];
@@ -98,19 +98,22 @@ describe('Remote Browser direct commands', () => {
   const b=extension();
   return runBrowserUse({contractVersion:1,goal,scope,command:true,yieldAfterAction:true} as never,{call:b.call,evaluate:pick('TYPE_TEXT'),...deps} as BrowserUseDependencies,new AbortController().signal).then(result=>({result,b}));
  };
- // The video's own audio, heard as a command (seq 4, 14:42:04).
- const transcript='วันนี้เราจะมาดูวิธีทำอาหารง่ายๆ ที่บ้านกันนะครับ เริ่มจากเตรียมวัตถุดิบให้พร้อม แล้วก็ตั้งกระทะให้ร้อนก่อน';
- test('a stray transcript is never typed into a field',async()=>{
-  const resolveFieldText=jest.fn(async()=>({text:transcript}));
-  const {result,b}=await run(transcript,{resolveFieldText} as never);
-  expect(b.mutations()).toEqual([]);
-  expect(resolveFieldText).not.toHaveBeenCalled();
-  expect(result).toMatchObject({status:'needs_verification',reason:'COMMAND_WAITING_INPUT',commandOutcome:{done:false,reason:'TEXT_ENTRY_NOT_REQUESTED'}});
- });
- test('an explicit พิมพ์ still types',async()=>{
-  expect(textEntryRequested('พิมพ์ แมว')).toBe(true);
-  const {b}=await run('พิมพ์ แมว',{});
+ // Session 032df5c6: Jev chose TYPE_TEXT for commands without a typing verb
+ // and was overruled (TEXT_ENTRY_NOT_REQUESTED). Jev's TYPE_TEXT is trusted.
+ test.each([['เลือกต้นทางเป็นเชียงใหม่','เชียงใหม่'],['จองตั๋วสุโขทัยไปกรุงเทพ','สุโขทัย']])('%s types the value Jev chose',async(command,value)=>{
+  const resolveFieldText=jest.fn(async()=>({text:value}));
+  const {result,b}=await run(command,{resolveFieldText} as never);
+  expect(resolveFieldText).toHaveBeenCalledTimes(1);
   expect(b.mutations()).toEqual(['page_type']);
+  expect(b.args('page_type')).toMatchObject({ref:'s1',text:value});
+  expect(result.commandOutcome).toMatchObject({done:true,action:{kind:'type'}});
+ });
+ test('an explicit พิมพ์ still types its own payload without the helper',async()=>{
+  const resolveFieldText=jest.fn(async()=>({text:'other'}));
+  const {b}=await run('พิมพ์ แมว',{resolveFieldText} as never);
+  expect(b.mutations()).toEqual(['page_type']);
+  expect(b.args('page_type')).toMatchObject({text:'แมว'});
+  expect(resolveFieldText).not.toHaveBeenCalled();
  });
  test.each(['INVALID_RESPONSE','DEADLINE_EXCEEDED'] as const)('Jev %s is Not done for this command only',async code=>{
   const {result,b}=await run('เปิดคลิปแรก',{evaluate:async()=>{throw new JevError(code,'provider prose',{validationReason:'DISTRIBUTION_SUM'});}});

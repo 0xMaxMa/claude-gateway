@@ -361,7 +361,7 @@ describe("READ_REQUEST: a direct command that asks about the page", () => {
 });
 
 // Session d88943d1: "เข้าเว็บไซต์ Yahoo" / "งั้นเปลี่ยนไปเข้า yahoo" missed the address
-// grammar and Jev, offered no navigation, chose TYPE_TEXT (TEXT_ENTRY_NOT_REQUESTED).
+// grammar and Jev, offered no navigation, chose TYPE_TEXT, which a since-removed verb gate refused.
 // Jev now chooses NAVIGATE and the text helper resolves the site; no site list.
 describe("NAVIGATE: Jev opens a named site in the bound tab", () => {
   const navigable = () => browser(page({ elements: [el("e0", "About"), el("q", "Search", { tag: "input", role: "searchbox", operations: ["TYPE_TEXT"] })] }), { tab_navigate: (a, p) => ({ ...p, url: String(a.url), title: "Yahoo" }) });
@@ -428,16 +428,15 @@ describe("NAVIGATE: Jev opens a named site in the bound tab", () => {
     await run("เข้าเว็บไซต์ Yahoo", navigable(), j);
     expect(Object.keys(j.requests[0].questions.operation.criteria)).not.toContain("NAVIGATE");
   });
-  test("the regex fast path, the TYPE_TEXT guard and READ_REQUEST are unchanged", async () => {
+  test("the regex fast path and READ_REQUEST are unchanged; Jev's TYPE_TEXT is trusted", async () => {
     const fast = navigable(), j = jev(), r = resolver("https://evil.test");
     await runNav("เข้า google", fast, j, r);
     expect(j.requests).toHaveLength(0);
     expect(r.requests).toHaveLength(0);
     expect(fast.mutations()).toEqual([{ name: "tab_navigate", args: expect.objectContaining({ url: "https://google.com/" }) }]);
     const typed = navigable();
-    const guard = await runNav("เข้าเว็บไซต์ Yahoo", typed, jev({ operation: () => "TYPE_TEXT" }), resolver("https://www.yahoo.com"));
-    expect(typed.mutations()).toEqual([]);
-    expect(guard.commandOutcome?.reason).toBe("TEXT_ENTRY_NOT_REQUESTED");
+    await runNav("เข้าเว็บไซต์ Yahoo", typed, jev({ operation: () => "TYPE_TEXT" }), resolver("yahoo"));
+    expect(typed.mutations()).toEqual([{ name: "page_type", args: expect.objectContaining({ ref: "q", text: "yahoo" }) }]);
     const read = await runNav("อ่านให้ฟังหน่อย", navigable(), jev({ operation: () => "READ_REQUEST" }), resolver("https://www.yahoo.com"));
     expect(read.commandOutcome).toEqual({ done: false, reason: "READ_REQUEST" });
   });

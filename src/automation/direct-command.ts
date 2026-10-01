@@ -105,14 +105,6 @@ export function newTabCommand(command:string):{site?:string}|undefined {
  return name&&!/\s/u.test(name)?{site:name}:undefined;
 }
 
-// Text entry needs the user's own verb at the start: a stray transcript (the
-// page's audio heard as a command, session b01a566f) must never be typed.
-const TEXT_ENTRY=/^(?:ช่วย ?)?(?:พิมพ์|ค้นหา|ค้น|กรอก|ใส่|เขียน|search|type|fill|write|enter text|input)(?![a-z])/iu;
-/** The command explicitly asks to enter text (พิมพ์/ค้นหา/กรอก/search/type ...). */
-export function textEntryRequested(command:string):boolean {
- return TEXT_ENTRY.test(spokenCommand(command));
-}
-
 const TEXT_VERBS=/^(?:ค้นหา|ค้น|search for|search|พิมพ์|type|กรอก)\s*(.+)$/iu;
 /**
  * The literal payload of "ค้นหา X" / "search X" (typed and submitted) and
