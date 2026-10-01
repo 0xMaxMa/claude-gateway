@@ -656,11 +656,10 @@ export class AgentRunner extends EventEmitter {
     runtime.controlTask(sessionId,principalId,detail.taskId,{id,action:'pause',expectedRevision:task.revision});
     return id;
   }
-  /** Speech that produced no command (empty, muted, lost, or a deduplicated echo when inputId is given)
-   * resumes the task, but only if this voice pause is still the latest control. */
-  async releaseVoicePause(sessionId:string,principalId:string,taskId:string,pauseId:string,inputId?:string):Promise<void> {
+  /** Speech that produced no command (empty, muted or lost) resumes the task,
+   * but only if this voice pause is still the latest control. */
+  async releaseVoicePause(sessionId:string,principalId:string,taskId:string,pauseId:string):Promise<void> {
     const runtime=await this.getOrchestration();
-    if(inputId&&(await import('../orchestration/live-execution-input')).liveControlReceipt(runtime.store,inputId)?.code!=='DUPLICATE_VOICE_ECHO')return;
     const task=runtime.store.task(taskId);
     if(task?.executionControl?.id!==pauseId||task.executionControl.action!=='pause')return;
     runtime.controlTask(sessionId,principalId,taskId,{id:randomUUID(),action:'resume',expectedRevision:task.revision});

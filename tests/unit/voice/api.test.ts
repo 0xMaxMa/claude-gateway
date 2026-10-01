@@ -218,7 +218,7 @@ test('speech that yields no command releases its provisional pause; an admitted 
     await until(()=>Boolean(session.commitId));
     session.emit({type:'commit_done',commitId:session.commitId!});
     await until(()=>release.mock.calls.length===1);
-    expect(release.mock.calls[0]).toEqual(['p','api:owner',task,'pause-1',undefined]);
+    expect(release.mock.calls[0]).toEqual(['p','api:owner',task,'pause-1']);
     expect(submit).not.toHaveBeenCalled();
     // Muting mid-utterance discards the words, so it releases too.
     await until(()=>events.filter(e=>e.state==='listening'&&e.utterance_id).length>=2);
@@ -226,8 +226,8 @@ test('speech that yields no command releases its provisional pause; an admitted 
     await until(()=>pause.mock.calls.length===2);
     ws.send(JSON.stringify({type:'voice.mute',muted:true,policy:'discard',last_audio_seq:0}));
     await until(()=>release.mock.calls.length===2);
-    expect(release.mock.calls[1]).toEqual(['p','api:owner',task,'pause-2',undefined]);
-    // An admitted utterance is checked against its receipt (only a deduplicated echo resumes).
+    expect(release.mock.calls[1]).toEqual(['p','api:owner',task,'pause-2']);
+    // An admitted utterance is a command: the pause stands, nothing is released.
     ws.send(JSON.stringify({type:'voice.mute',muted:false,policy:'discard',last_audio_seq:0}));
     await until(()=>events.filter(e=>e.state==='listening'&&e.utterance_id).length>=3);
     session=await speak('Click Send');
@@ -236,8 +236,9 @@ test('speech that yields no command releases its provisional pause; an admitted 
     await until(()=>Boolean(session.commitId));
     session.emit({type:'segment_final',segmentId:'segment',text:'Click Send'});
     session.emit({type:'commit_done',commitId:session.commitId!});
-    await until(()=>release.mock.calls.length===3);
-    expect(release.mock.calls[2]).toEqual(['p','api:owner',task,'pause-3','input']);
+    await until(()=>submit.mock.calls.length===1);
+    await new Promise(r=>setTimeout(r,50));
+    expect(release).toHaveBeenCalledTimes(2);
   }finally{ws?.terminate();await api.close();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
 

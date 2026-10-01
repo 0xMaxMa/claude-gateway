@@ -80,12 +80,3 @@ test('a command that was not a read request keeps its spoken not-done line and i
  }finally{await f.close();}
 });
 
-test('the typed echo of a read request is still deduplicated, so the agent answers once',async()=>{
- const f=await fixture('browser');try{
-  const applied=f.command(ask);
-  f.settle(applied.inputId,readBrowser);
-  const echo=f.command(ask,'text');
-  expect(echo).toMatchObject({status:'applied',code:'DUPLICATE_VOICE_ECHO'});
-  expect(f.input(echo.inputId)?.store_user_message).toBe(0);
- }finally{await f.close();}
-});

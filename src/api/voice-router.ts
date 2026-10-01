@@ -178,8 +178,8 @@ export class VoiceApi {
       let executionTaskId:string|undefined;
       let speechTarget:{taskId?:string; pause?:Promise<string|undefined>}|undefined;
       // The pause on first words is provisional: speech that yields no command resumes the task.
-      const release=(target:typeof speechTarget,inputId?:string)=>{
-        if(target?.taskId&&target.pause)void target.pause.then(pauseId=>pauseId?runner.releaseVoicePause(ticket.sessionId,ticket.principalId,target.taskId!,pauseId,inputId):undefined)
+      const release=(target:typeof speechTarget)=>{
+        if(target?.taskId&&target.pause)void target.pause.then(pauseId=>pauseId?runner.releaseVoicePause(ticket.sessionId,ticket.principalId,target.taskId!,pauseId):undefined)
           .catch(error=>console.warn(JSON.stringify({ts:new Date().toISOString(),level:'warn',event:'Voice pause release failed',agentId:ticket.agentId,sessionId:ticket.sessionId,code:error?.code??'ERROR'})));
       };
       const discardSpeech=()=>{const target=speechTarget;speechTarget=undefined;release(target);};
@@ -222,7 +222,6 @@ export class VoiceApi {
             let accepted;
             try{accepted=await runner.submitVoiceUtterance(ticket.sessionId,ticket.chatId,ticket.principalId,text,utteranceId,ticket.allowTools,ticket.model,target.taskId);}
             catch(error){release(target);throw error;}
-            release(target,accepted.inputId);
             return accepted;
           },
           () => runner.stopVoiceResponse(ticket.sessionId), { ...voice.turns, maxBufferedAudioMs: voice.playback.maxBufferedAudioMs, language: voice.language, mergeWindowMs: 1200 },
