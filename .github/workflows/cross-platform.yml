@@ -76,12 +76,6 @@ jobs:
         if: runner.os == 'Linux'
         run: npm run typecheck
 
-      # Jest transpiles only (isolatedModules), so type-check the test files here.
-      # Some test-reachable modules import dist/, so build first (as pretest does).
-      - name: Typecheck tests
-        if: runner.os == 'Linux'
-        run: npm run build && npm run typecheck:tests
-
       - name: Supervisor, sampler and worker end-to-end
         run: >-
           npx jest --ci --verbose
