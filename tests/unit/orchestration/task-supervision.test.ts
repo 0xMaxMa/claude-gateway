@@ -261,6 +261,13 @@ test('a user cancel during a supervisor stop ends the task as cancelled (#557)',
  expect(x.tasks.finish(x.attempt.attemptId,1,{type:'stopped'})).toMatchObject({state:'cancelled',cancellation:{requestedBy:'user'}});
  }finally{x.store.close();clock.mockRestore();}
 });
+test('an agent cancel during a supervisor stop keeps the stall failure evidence (#557)',()=>{
+ const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
+ clock.mockReturnValue(16000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,16000));
+ x.tasks.cancel({...x.ctx,actionId:'agent-cancel'},x.task.taskId);
+ expect(x.tasks.finish(x.attempt.attemptId,1,{type:'stopped'})).toMatchObject({state:'failed',failure:{code:'PROGRESS_STALLED'},cancellation:{requestedBy:'supervisor'}});
+ }finally{x.store.close();clock.mockRestore();}
+});
 test('a final result still waiting on background work raises a distinct supervision reason (#557)',()=>{
  const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
  clock.mockReturnValue(12000);x.tasks.observeExecution(x.attempt.attemptId,1,{...observation(x.attempt.attemptId,12000),resultSeenAt:11000,pendingBackground:1});
@@ -284,4 +291,6 @@ test('background grace and stale-progress limit are validated (#557)',()=>{
  expect(()=>resolveOrchestrationConfig({tasks:{progressStaleLimitMs:-1}})).toThrow('positive bounded integer');
  expect(()=>resolveOrchestrationConfig({tasks:{progressStaleLimitMs:'2h'}})).toThrow('Invalid orchestration.tasks.progressStaleLimitMs');
  expect(()=>resolveOrchestrationConfig({tasks:{progressStaleMs:600000,progressStaleLimitMs:60000}})).toThrow('progressStaleLimitMs must be zero or at least');
+ // Existing configs with a long review interval keep working under the default limit.
+ expect(resolveOrchestrationConfig({tasks:{progressStaleMs:10800000}}).tasks).toMatchObject({progressStaleMs:10800000,progressStaleLimitMs:7200000});
 });

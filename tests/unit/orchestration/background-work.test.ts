@@ -185,3 +185,12 @@ test('after background work reports back, grace never replaces the fresh turn wi
   emit({type:'result',result:'CI passed and verified'});
   await expect(turn.result).resolves.toMatchObject({text:'CI passed and verified'});
 });
+
+test('grace does not expire while a foreground tool is still running in a later turn (#557)',async()=>{
+  const {turn,emit}=driverLike(40); await Promise.resolve();
+  emit(backgroundBash); emit(bgStarted); emit({type:'result',result:'Waiting for CI'});
+  emit({type:'assistant',message:{content:[{type:'tool_use',id:'slow',name:'Bash',input:{command:'fixture'}}]}});
+  expect(await settledWithin(turn.result,150)).toBe(false);
+  emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:'slow',content:'ok'}]}});
+  await expect(turn.result).resolves.toMatchObject({text:'Waiting for CI',unresolvedBackground:{pendingTasks:1}});
+});

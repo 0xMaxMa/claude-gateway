@@ -70,7 +70,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
   let lastTool: ToolOutcome | undefined;
   // The latest successful result received while native background work was
   // still pending. It becomes the answer only if that work never reports back.
-  let waitingResult: { text: string; streamed: boolean; seenAt: number } | undefined;
+  let waitingResult: { text: string; streamed: boolean; seenAt: number; openTools: Set<string> } | undefined;
   let graceTimer: ReturnType<typeof setTimeout> | undefined;
   const observe = () => {
     if (settled) return;
@@ -110,6 +110,8 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     // Once every background task has reported back, the worker owes a fresh
     // result and may be mid-turn; never replace that with the stale one.
     if (settled || !waitingResult || !background.pending) return;
+    // A tool opened after that result means the worker is mid-turn, not finished.
+    if ([...activeTools.keys()].some(id => !waitingResult!.openTools.has(id))) { armGrace(); return; }
     text = waitingResult.text;
     if (!text.trim()) { fail(new OrchestrationError('WORKER_RESULT_MISSING', 'The worker ended without a final response while background work never reported completion. Inspect its changes before retrying.')); return; }
     if (!waitingResult.streamed && !publish(text)) return;
@@ -149,7 +151,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       usageCollector.observe(event);
       const candidate = process.runtimeProfile?.responseSchema && event.structured_output && typeof event.structured_output === 'object'
         ? JSON.stringify(event.structured_output) : typeof event.result === 'string' && event.result ? event.result : text;
-      waitingResult = { text: Buffer.byteLength(candidate) > 262144 ? '' : candidate, streamed: streamed && candidate === text, seenAt: Date.now() };
+      waitingResult = { text: Buffer.byteLength(candidate) > 262144 ? '' : candidate, streamed, seenAt: Date.now(), openTools: new Set(activeTools.keys()) };
       text = ''; streamed = false;
       resolveAccepted();
       if (policy) arm('idle', policy.idleTimeoutMs);

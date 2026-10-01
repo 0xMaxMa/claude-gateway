@@ -275,8 +275,8 @@ export class TaskService {
     }
     if (TERMINAL_TASK_STATES.has(task.state)) return task;
     if (task.state === 'cancel_requested') {
-      // An explicit cancel turns a pending supervisor stop into a cancellation.
-      const overridesStall = task.cancellation?.requestedBy === 'supervisor';
+      // A user's explicit stop wins; an agent cancel must not erase the stall evidence.
+      const overridesStall = task.cancellation?.requestedBy === 'supervisor' && requestedBy === 'user';
       if (overridesStall) task.cancellation = { requestedBy, requestedAt: Date.now() };
       if (replacedByTaskId) task.replacedByTaskId = replacedByTaskId;
       if (replacedByTaskId || overridesStall) this.store.saveTask(task, task.stateVersion);
