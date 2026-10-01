@@ -723,6 +723,8 @@ export class SessionProcess extends EventEmitter {
   /** Host file holding the appended system prompt (see writeSystemPromptFile). */
   private systemPromptPath?: string;
   private managedConnectorPaths = new Set<string>();
+  /** `.sessions/<id>`, once a spawn without a runtime profile has written its mcp-config.json there. */
+  private sessionDirPath?: string;
 
   /** The appended system prompt never travels on the command line: Windows caps a
    * whole command line at 32767 characters and Linux caps ONE argument at 128 KiB
@@ -769,6 +771,7 @@ export class SessionProcess extends EventEmitter {
       throw new Error('invalid session id');
     }
     fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+    this.sessionDirPath = sessionDir;
 
     const mcpServerPath = path.resolve(__dirname, '..', '..', 'mcp', 'server.ts');
 
@@ -2079,10 +2082,19 @@ export class SessionProcess extends EventEmitter {
     if (this.diagnostics.outcome === 'pending' && !this.diagnostics.stopReason) this.diagnostics.stopReason = 'shutdown';
     this.stopping = true;
     this.spawnEpoch++;
-    // Only the prompt of the spawn being stopped: a start() while this stop still
-    // waits for the exit writes its own file, which must survive that exit.
-    const systemPromptPath = this.systemPromptPath;
+    // Take over what the spawn being stopped wrote, so a start() while this stop
+    // still waits for the exit records its own files from scratch. Connector and
+    // MCP config files keep fixed names, and such a start() rewrites them in place:
+    // at the exit, removeSessionDir skips every path that newer spawn holds again.
+    const owned = {
+      systemPrompt: this.systemPromptPath,
+      connectors: [...this.managedConnectorPaths],
+      managedMcpConfig: this.managedMcpConfigPath,
+    };
     this.systemPromptPath = undefined;
+    this.managedConnectorPaths = new Set();
+    this.managedMcpConfigPath = undefined;
+    this.sessionDirPath = undefined;
     if (this.containerAttempt && this.agentConfig.container) {
       this.managedGroupStopped = await stopContainerProfile(this.agentConfig.container, this.containerAttempt.directory);
       this.containerAttempt = undefined;
@@ -2107,14 +2119,13 @@ export class SessionProcess extends EventEmitter {
     // subprocess (or, for a container agent, the still-running container that
     // bind-mounts this path) can be alive for up to the 10s graceful-shutdown
     // window immediately after this point, and must not find it gone under it.
+    // A newer spawn that wrote the shared directory owns it now; its stop removes it.
     const removeSessionDir = (): void => {
-      for (const filename of this.managedConnectorPaths) { try { fs.rmSync(filename, {force:true}); } catch {} }
-      this.managedConnectorPaths.clear();
-      if (this.managedMcpConfigPath) {
-        try { fs.rmSync(this.managedMcpConfigPath, { force: true }); } catch {}
-        this.managedMcpConfigPath = undefined;
+      const reclaimed = (file: string): boolean => this.managedConnectorPaths.has(file) || file === this.managedMcpConfigPath;
+      for (const file of [...owned.connectors, owned.managedMcpConfig, owned.systemPrompt]) {
+        if (file && !reclaimed(file)) { try { fs.rmSync(file, { force: true }); } catch {} }
       }
-      if (systemPromptPath) { try { fs.rmSync(systemPromptPath, { force: true }); } catch {} }
+      if (this.sessionDirPath) return;
       try {
         fs.rmSync(path.join(this.agentConfig.workspace, '.sessions', this.sessionId), { recursive: true, force: true });
       } catch {}

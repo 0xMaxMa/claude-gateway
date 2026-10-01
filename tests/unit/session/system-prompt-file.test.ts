@@ -36,6 +36,17 @@ jest.mock('../../../src/logger', () => {
   const record = (level: string) => (message: string, meta?: unknown) => { logged.push({ level, message, meta }); };
   return { ...real, createLogger: () => ({ debug: record('debug'), info: record('info'), warn: record('warn'), error: record('error') }) };
 });
+// Connectors resolved for the next spawn, one fixed-name file per entry (connector-<i>.json).
+let connectors: Record<string, unknown> = {};
+jest.mock('../../../src/connectors/resolve', () => ({
+  ...jest.requireActual('../../../src/connectors/resolve'),
+  resolveEnabledConnectors: () => connectors,
+}));
+// A worker's fake child must not become a managed process group: stopping one signals its pgid.
+jest.mock('../../../src/orchestration/process-supervisor', () => ({
+  ...jest.requireActual('../../../src/orchestration/process-supervisor'),
+  processSupervisorSupported: () => false,
+}));
 const containerWrites: { args: string[]; input: string }[] = [];
 jest.mock('../../../src/orchestration/container', () => {
   const real = jest.requireActual('../../../src/orchestration/container');
@@ -75,7 +86,7 @@ let root: string;
 let workspace: string;
 
 beforeEach(() => {
-  spawned.length = 0; logged.length = 0; containerWrites.length = 0; spawnError = undefined; holdExit = false;
+  spawned.length = 0; logged.length = 0; containerWrites.length = 0; spawnError = undefined; holdExit = false; connectors = {};
   root = mkdtempSync(join(tmpdir(), 'prompt-file-'));
   workspace = join(root, 'workspace'); mkdirSync(workspace);
   home = root;
@@ -190,4 +201,47 @@ test('a respawn while an earlier stop() still waits for its exit keeps its own p
   holdExit = false;
   await sp.stop();
   expect(existsSync(file(1))).toBe(false);
+});
+
+test('a respawn while an earlier stop() still waits for its exit keeps the connector files and MCP config it rewrote', async () => {
+  const agent = { id: 'a', workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] } } as unknown as AgentConfig;
+  const sp = new SessionProcess('session:1', 'api', agent,
+    { gateway: { headless: true, timezone: 'UTC', logDir: join(root, 'logs') }, agents: [agent] } as GatewayConfig,
+    { getContextReset: () => undefined, loadSession: async () => [] } as any, undefined,
+    { role: 'worker', hostExecution: true, mcpConfigPath: join(root, 'mcp.json'), overlay: OVERLAY, context: 'c', capacityReserved: true } as RuntimeProfile);
+  const files = () => readdirSync(root).filter(name => name.startsWith('connector-') || name === 'managed-connectors.json').sort();
+  connectors = { alpha: { command: 'alpha' }, beta: { command: 'beta' } };
+  await sp.start();
+  expect(files()).toEqual(['connector-0.json', 'connector-1.json', 'managed-connectors.json']);
+  holdExit = true;
+  const stopping = sp.stop();
+  connectors = { alpha: { command: 'alpha' } };
+  await sp.start();
+  spawned[0].proc.emit('exit', 0, 'SIGTERM');
+  await stopping;
+  // The first stop removed only what the second spawn did not write again.
+  expect(files()).toEqual(['connector-0.json', 'managed-connectors.json']);
+  expect(sp.isRunning()).toBe(true);
+  holdExit = false;
+  await sp.stop();
+  expect(files()).toEqual([]);
+});
+
+test('a respawn while an earlier stop() still waits for its exit keeps the session directory holding its mcp-config.json', async () => {
+  const agent = { id: 'a', workspace, description: 'fixture', env: '', allow_tools: true, claude: { model: 'fixture', extraFlags: [] } } as unknown as AgentConfig;
+  const sp = new SessionProcess('session-dir', 'api', agent,
+    { gateway: { headless: true, timezone: 'UTC', logDir: join(root, 'logs') }, agents: [agent] } as GatewayConfig,
+    { getContextReset: () => undefined, loadSession: async () => [] } as any);
+  const config = join(workspace, '.sessions', 'session-dir', 'mcp-config.json');
+  await sp.start();
+  expect(existsSync(config)).toBe(true);
+  holdExit = true;
+  const stopping = sp.stop();
+  await sp.start();
+  spawned[0].proc.emit('exit', 0, 'SIGTERM');
+  await stopping;
+  expect(existsSync(config)).toBe(true);
+  holdExit = false;
+  await sp.stop();
+  expect(existsSync(join(workspace, '.sessions', 'session-dir'))).toBe(false);
 });
