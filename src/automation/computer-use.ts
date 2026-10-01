@@ -115,6 +115,9 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  // Only while nothing of this command has run: a planned follow-up is never re-decided.
  let redecided=0;
  const settleDelay=()=>new Promise<void>((resolve,reject)=>{const stop=()=>{clearTimeout(t);reject(Error('CANCELLED'));};const t=setTimeout(()=>{runSignal.removeEventListener('abort',stop);resolve();},REDECIDE_DELAY_MS);runSignal.addEventListener('abort',stop,{once:true});});
+ // The re-decided command is planned again from scratch: a plan made for the
+ // rejected first input (remaining digits, Backspaces, a submit) must not resume.
+ const replan=()=>{labelPresses=[];labelPlanned=0;labelPressed.length=0;backspaceLeft=0;erasing=undefined;submitAfterType=undefined;addressPending=undefined;if(focusThenType)focusThenType.pressed=false;};
  let focusThenType:{identity:string;role:string;text:string;submit?:boolean;pressed?:boolean}|undefined,focusAttempted=false;
  const direct=input.yieldAfterAction||input.yieldAfterInteraction;
  const standard=direct?standardComputerCommand(input.goal):undefined;
@@ -461,7 +464,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     if(!contextMatches){
       last=fresh;noProgress++;emit('waiting',{reason:'ACTION_CONTEXT_CHANGED'});
       // Nothing ran: look again shortly and let Jev decide afresh on the new screen.
-      if(direct&&steps===0&&redecided<REDECIDE_MAX){redecided++;noProgress--;await settleDelay();return;}
+      if(direct&&steps===0&&redecided<REDECIDE_MAX){redecided++;noProgress--;replan();await settleDelay();return;}
       if(direct){await capture();return waitForCommand('ACTION_CONTEXT_CHANGED');}return;
     }
     last=fresh;d.generation=fresh.generation;
@@ -497,7 +500,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     if(receipt.state==='not_executed'){
      emit('acted',{...summary(action),operationId,outcome:'not_executed',reason:receipt.error&&/^[A-Z][A-Z_0-9]{0,79}$/.test(receipt.error)?receipt.error:'ACTION_REJECTED',elapsedMs:Date.now()-started});
      // Not executed on a changed screen: look again shortly and let Jev decide afresh.
-     if(receipt.error==='STALE_OBSERVATION'){if(direct&&(steps>0||redecided>=REDECIDE_MAX))return waitForCommand('STALE_OBSERVATION');if(direct){redecided++;await settleDelay();return;}noProgress++;return;}
+     if(receipt.error==='STALE_OBSERVATION'){if(direct&&(steps>0||redecided>=REDECIDE_MAX))return waitForCommand('STALE_OBSERVATION');if(direct){redecided++;replan();await settleDelay();return;}noProgress++;return;}
      const typed=last?.controls.find(c=>c.ref===action.ref);
      if(direct&&receipt.error==='FOCUS_REQUIRED'&&action.kind==='type'&&typeof action.text==='string'&&!focusAttempted&&typed?.identity&&typed.actions.includes('press')){
       focusAttempted=true;focusThenType={identity:typed.identity,role:typed.role,text:action.text,...(submitAfterType?{submit:true}:{})};submitAfterType=undefined;return;

@@ -81,6 +81,13 @@ describe('V1 "ลบ": erase in a focused text field, Subtract only when unambig
   const f=fixture(textEdit());await run(f,'ลบ');
   expect(f.calls.filter(c=>c.name==='computer_action').map(c=>c.args)).toEqual([expect.objectContaining({kind:'key',key:'backspace'})]);
  });
+ test('a first Backspace rejected as stale is re-planned: "delete 3" still erases three',async()=>{
+  // Review F1, same root: the remaining count used to survive the re-decide, losing one.
+  const f=fixture({...textEdit(),text:['abc']},(_args,count)=>count===1?{state:'not_executed',error:'STALE_OBSERVATION'}:{state:'completed'});
+  const r=await run(f,'delete 3');
+  expect(f.calls.filter(c=>c.name==='computer_action').map(c=>c.args.key)).toEqual(['backspace','backspace','backspace','backspace']);
+  expect(r.lastAction).toMatchObject({kind:'erase',count:3});
+ });
  test('on Calculator with no text focus "ลบ" presses Subtract',async()=>{
   const f=fixture();await run(f,'ลบ');
   expect(f.requests).toHaveLength(0);expect(f.presses()).toEqual(['c13']);
@@ -130,6 +137,13 @@ describe('V3 multi-digit utterances',()=>{
   expect(r).toMatchObject({status:'needs_reconciliation',reason:'OUTCOME_UNKNOWN'});
   // H1: never "pressed 1 of 3" or "Not done" — the second press may have landed.
   expect(computerOutcomeText(report(r) as any)).toMatch(/^Unknown: the last action may have run/);
+ });
+ test('a first digit rejected as stale is re-decided with the whole number, none skipped',async()=>{
+  // Review F1: the re-decide used to resume the plan after "1" and pressed only 2, 3.
+  const f=fixture(calculator,(_args,count)=>count===1?{state:'not_executed',error:'STALE_OBSERVATION'}:{state:'completed'});
+  const r=await run(f,'1 2 3');
+  expect(f.presses()).toEqual(['c14','c14','c15','c16']);
+  expect(r.lastAction).toMatchObject({sequence:['1','2','3'],planned:3});
  });
  test('a press rejected mid-sequence stops and reports how far it got',async()=>{
   const f=fixture(calculator,(_args,count)=>count===2?{state:'not_executed',error:'STALE_OBSERVATION'}:{state:'completed'});
