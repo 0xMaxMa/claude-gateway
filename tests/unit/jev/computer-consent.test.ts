@@ -248,3 +248,41 @@ test.each([false,true])('owner approval status reflects an actual pending reques
   expect(callTool).toHaveBeenCalledTimes(pending?2:1);
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('an unanswered access prompt times out and says so instead of implying a denial',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-access-timeout-'));runComputerUse.mockClear();
+ const callTool=jest.fn(async()=>({content:[{type:'text',text:'{"state":"pending"}'}]}));
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:{get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})} as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true,accessWaitMs:0});
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ try{await adapter.submit(task,'r','Open Notes');let outcome:any;for(let i=0;i<50;i++){outcome=await adapter.inspect(task,'r');if(typeof outcome==='object')break;await new Promise(setImmediate);}
+  expect(outcome).toMatchObject({type:'failed',failure:{code:'COMPUTER_ACCESS_TIMEOUT'},computerReport:{reason:'COMPUTER_ACCESS_TIMEOUT',steps:0}});
+  expect(outcome.failure.message).toContain('not a denial');expect(runComputerUse).not.toHaveBeenCalled();
+ }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});
+
+test.each(['CONTROL_DENIED','OBSERVATION_DENIED','DEVICE_OFFLINE','CONSENT_REQUIRED'])('relay rejection %s keeps its cause code for the controller',async code=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-reject-'));
+ const callTool=jest.fn(async({name}:any)=>name==='computer_request_access'?{content:[{type:'text',text:'{"state":"approved"}'}]}:{isError:true,content:[{type:'text',text:JSON.stringify({error:code})}]});
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ let seen='';
+ runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{await deps.call('computer_action',{operation_id:'00000000-0000-4000-8000-000000000000'},new AbortController().signal).catch((e:Error)=>{seen=e.message;});return {status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:0};});
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:{get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})} as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true});
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ try{await adapter.submit(task,'r','Open Notes');for(let i=0;i<50;i++){if(typeof await adapter.inspect(task,'r')==='object')break;await new Promise(setImmediate);}expect(seen).toBe(code);}
+ finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});
+
+test('app_query sent to the helper is capped at 4000 characters without splitting a character',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-app-query-'));
+ const callTool=jest.fn(async({name}:any)=>({content:[{type:'text',text:name==='computer_request_access'?'{"state":"approved"}':'{}'}]}));
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{await deps.call('computer_observe',{},new AbortController().signal);return {status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:0};});
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:{get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})} as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true});
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ const goal='ค'.repeat(3999)+'😀'+'ข'.repeat(6000);
+ try{await adapter.submit(task,'r',goal);for(let i=0;i<50;i++){if(typeof await adapter.inspect(task,'r')==='object')break;await new Promise(setImmediate);}
+  const sent=(callTool.mock.calls as any[]).find(([c])=>c.name==='computer_observe')[0].arguments.app_query as string;
+  expect([...sent]).toHaveLength(4000);expect(sent.endsWith('😀')).toBe(true);expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(sent)).toBe(false);
+ }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});

@@ -17,6 +17,9 @@ export interface BrowserExecutionResult {
   fieldRequest?: {ref:string;label:string;reason:'missing'|'ambiguous'};
   lastEvaluation?: {requestId:string;model?:string};
   lastConfirmedAction?: {operationId:string;operation:string;outcome:'confirmed'};
+  /** Direct user command: what it did, or why nothing was done. */
+  commandOutcome?: import('../automation/browser-command').BrowserCommandOutcome;
+  stepRun?: import('../automation/command-steps').CommandStepRun;
 }
 export interface BrowserExecutionContext {
   requestConsent?: boolean;
@@ -24,6 +27,12 @@ export interface BrowserExecutionContext {
   trace?: (event:BrowserTraceEvent)=>void;
   startUrl?: string;
   goal: string;
+  /** The goal is the user's own direct command (user-controlled session). */
+  command?: boolean;
+  /** Previous direct command context; references only, never replayed. */
+  interactionContext?: string;
+  /** The user's explicit step list (step mode). */
+  steps?: string[];
   fields?: Array<{label:string;text:string}>;
   signal: AbortSignal;
   authorized(): boolean;
@@ -45,7 +54,10 @@ export interface BrowserIntegrationConfig { bindings: BrowserConnectorConfig[]; 
 export type BrowserToolCall = (name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
 export interface BrowserLogicModule {
   BROWSER_USE_CONTRACT_VERSION: 1;
-  runBrowserUse(input: { yieldAfterAction?: boolean; contractVersion: 1; goal: string; startUrl?: string; scope: BrowserScope; fields?: BrowserConnectorConfig['fields'] } & BrowserConnectorConfig['budget'], dependencies: {
+  /** Optional v1 inputs the module accepts: 'direct_command' (command, interactionContext, strictDestructive) and 'steps'. */
+  BROWSER_USE_FEATURES?: readonly string[];
+  runBrowserSteps?: (input: Record<string, unknown>, dependencies: Parameters<BrowserLogicModule['runBrowserUse']>[1], signal: AbortSignal) => Promise<BrowserExecutionResult>;
+  runBrowserUse(input: { yieldAfterAction?: boolean; command?: boolean; interactionContext?: string; contractVersion: 1; goal: string; startUrl?: string; scope: BrowserScope; fields?: BrowserConnectorConfig['fields'] } & BrowserConnectorConfig['budget'], dependencies: {
     interruptSignal?:AbortSignal;
     trace?: (event:BrowserTraceEvent)=>void;
     call: BrowserToolCall;

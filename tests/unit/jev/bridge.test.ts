@@ -137,6 +137,8 @@ test('enabled app browser schemas discover, inspect and verify only scoped brows
     expect(await agent.call({scope:'safemode'},'capabilities_list')).toMatchObject({error:'ACCESS_DENIED',reason:'SAFEMODE_HOST_ONLY'});
     const spawned = await agent.call({title:'Verify result',instructions:'Verify expected result',target_profile:'gateway-managed',gateway_target:{adapter:'browser',session_id:'browser-a'}},'task_spawn');
     expect(spawned).not.toHaveProperty('error');
+    // Parent verification is the agent-controlled flow; a user's direct command pauses instead.
+    f.tasks.controlByUser(f.context.conversationId,f.context.principalId,String(f.store.all('SELECT id FROM tasks')[0].id),{id:'00000000-0000-4000-8000-000000000003',action:'agent',expectedRevision:1});
     for(let i=0;i<20;i++){await controller.tick();await new Promise(resolve=>setImmediate(resolve));}
     const rows=f.store.all('SELECT id,state FROM tasks'); expect(rows).toHaveLength(1);expect(rows[0].state).toBe('needs_reconciliation');
     const taskId=String(rows[0].id);

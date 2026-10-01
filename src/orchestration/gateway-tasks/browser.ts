@@ -7,6 +7,9 @@ import { join } from 'path';
 import { JevError, JevRequest, JevResult } from '../../jev/types';
 import { CommandContext, GatewayTaskTarget, OrchestrationError, TaskSnapshot, TaskRevision, WorkerOutcome } from '../types';
 import { GatewayTaskAdapter } from './controller';
+import { parseCommandSteps } from '../../automation/command-steps';
+import { repeatCommand } from '../../automation/direct-command';
+import { browserInteractionContext, type BrowserCommandAction } from '../../automation/browser-command';
 
 /** Registered by trusted host integration, never by a model-supplied URL or command.
  * Transport v1 must enforce ownership, grants and atomic revision fences itself.
@@ -20,7 +23,7 @@ export interface BrowserTaskBinding {
   inspect?: (result:Partial<BrowserExecutionResult>|undefined,signal:AbortSignal,authorized:()=>boolean,screenshot?:boolean)=>Promise<NonNullable<BrowserEvidence['fresh']>>;
   run: (context: BrowserExecutionContext) => Promise<BrowserExecutionResult>;
 }
-interface Receipt {trace?:BrowserTrace;revision?:number;taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';lastDispatchedMutation?:BrowserMutationCheckpoint;recordedAt?:number;inspection?:{id:string;at:number;continuation?:'completed'|'not_executed'|'legacy_focus_only'};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
+interface Receipt {command?:string;interaction?:{action?:BrowserCommandAction;url?:string;title?:string};trace?:BrowserTrace;revision?:number;taskId:string;requestId:string;principalId:string;conversationId:string;status:'running'|'ended';lastDispatchedMutation?:BrowserMutationCheckpoint;recordedAt?:number;inspection?:{id:string;at:number;continuation?:'completed'|'not_executed'|'legacy_focus_only'};outcome?:WorkerOutcome;browserResult?:BrowserExecutionResult}
 export class BrowserTaskAdapter implements GatewayTaskAdapter {
   readonly name='browser';
   private readonly running=new Map<string,{controller:AbortController;interrupt:AbortController;done:Promise<void>}>();
@@ -30,6 +33,12 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     onProgress?:(task:TaskSnapshot,progress:BrowserProgress)=>void;
     allowedTask?:(task:TaskSnapshot)=>boolean;
     allowedEvidence?:(task:TaskSnapshot)=>boolean;
+    /** gateway.jev.features.browserSteps.enabled, read per submission (live reload). */
+    stepMode?:()=>boolean;
+    /** The user's own initiating message for the first round, if any. */
+    userSteps?:(task:TaskSnapshot)=>string|undefined;
+    /** A round settled: apply it (and any queued command) now, not on the next poll. */
+    settled?:()=>void;
     onNeedsInput?:(task:TaskSnapshot,question:string)=>boolean}){}
   private binding(id:string,principalId:string,conversationId:string,requireEnabled=true):BrowserTaskBinding {
     if(requireEnabled&&!this.options.allowed())throw new OrchestrationError('BROWSER_NOT_ALLOWED');
@@ -86,13 +95,25 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const values=new Map<string,{label:string;text:string}>();
     for(const answer of answers??[])if(answer.browserFieldLabel){if(answer.text.length>2000)throw new OrchestrationError('BROWSER_FIELD_VALUE_TOO_LONG');values.set(answer.browserFieldLabel.normalize("NFKC").trim().replace(/\s+/g," "),{label:answer.browserFieldLabel,text:answer.text});}
     const fields=[...values.values()];
+    // A user-controlled round is the user's own direct command (as for Computer Use).
+    const command=task.automationController==='user';
+    const previous=command?this.read(task,'interaction-context'):undefined;
+    const previousContext=previous&&(previous.revision??0)<task.revision?previous:undefined;
+    // "อีก"/"again" repeats the previous command, decided afresh on the current page.
+    const repeated=previousContext?repeatCommand(instructions,previousContext.command):undefined;
+    if(repeated)instructions=repeated;
+    const interactionContext=previousContext?browserInteractionContext({command:previousContext.command,...previousContext.interaction}):'';
+    // Step mode takes only the user's own step list; field answers keep the one-command path.
+    const stepMode=command&&this.options.stepMode?.()===true&&!answers?.length;
+    const userText=stepMode?this.options.userSteps?.(task):undefined;
+    const steps=stepMode?(userText?parseCommandSteps(userText):undefined)??parseCommandSteps(instructions):undefined;
     // Durable receipt precedes any side effect; restart never replays this request.
     this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'running'});
     const controller=new AbortController(),interrupt=new AbortController();
     const authorized=()=>{try{return this.options.allowedTask?.(task)!==false && this.binding(binding.id,task.ownerPrincipalId,task.conversationId)===binding;}catch{return false;}};
     // The installed browser package owns execution; gateway owns the request lifetime.
     let providerFailure:BrowserExecutionResult['providerFailure'];
-    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({requestConsent,interruptSignal:interrupt.signal,goal:instructions,startUrl:startUrl ?? (answers?.some(a=>!a.questionId.startsWith('prepared:')) || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl),fields,signal:controller.signal,authorized,
+    const execution = boundedExecution(controller,authorized,()=> Promise.resolve().then(() => binding.run({requestConsent,interruptSignal:interrupt.signal,goal:instructions,...(command?{command:true}:{}),...(interactionContext?{interactionContext}:{}),...(steps?{steps}:{}),startUrl:startUrl ?? (answers?.some(a=>!a.questionId.startsWith('prepared:')) || task.appliedRevision>0 ?undefined:task.gatewayTarget?.startUrl),fields,signal:controller.signal,authorized,
       evaluate:async(request,signal)=>{if(!authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');try{return await this.options.evaluate(task,request,signal,authorized);}catch(e){if(e instanceof JevError)providerFailure={code:e.code,...e.metadata};throw e;}},
       trace:event=>{
         if(!authorized())return;
@@ -107,7 +128,7 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       beforeMutation:(operationId,operation)=>{
         controller.signal.throwIfAborted();
         if(!authorized())throw new OrchestrationError('ACCESS_DENIED');
-        if(!/^[0-9a-f-]{36}$/i.test(operationId) || !['page_click','page_type','page_select','page_scroll','tab_navigate'].includes(operation))throw new OrchestrationError('INVALID_BROWSER_OPERATION');
+        if(!/^[0-9a-f-]{36}$/i.test(operationId) || !['page_click','page_type','page_select','page_scroll','page_keypress','tab_navigate','tab_history'].includes(operation))throw new OrchestrationError('INVALID_BROWSER_OPERATION');
         const receipt=this.read(task,requestId);
         if(!receipt || receipt.status!=='running')throw new OrchestrationError('BROWSER_REQUEST_ENDED');
         receipt.lastDispatchedMutation={operationId,operation,recordedAt:Date.now()};
@@ -128,14 +149,25 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
       if(result.status==='succeeded' && !authorized())throw new OrchestrationError('BROWSER_NOT_ALLOWED');
       if(result.status==='succeeded' && !uncertain)outcome={type:'completed',result:{summary:`Browser goal independently verified. ${result.steps} actions, ${result.evaluations} evaluations.`,artifactIds:[]}};
       else if(!uncertain&&!providerFailure&&['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT'].includes(result.reason)){outcome={type:'paused'};}
+      // A user's direct command is not parent-verified: a completion candidate
+      // waits for their next command instead of an agent reconciliation nobody
+      // is asked to perform (E2E: the session refused every later command).
+      else if(command&&!uncertain&&!providerFailure&&result.status==='needs_verification'&&['COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(result.reason)){outcome={type:'paused'};}
       else outcome={type:uncertain?'unknown':result.status==='cancelled'?'stopped':result.status==='failed'||knownBrowserStop(result,dispatched)?'failed':'unknown',failure:{code:'BROWSER_'+result.reason.toUpperCase(),message:'Browser work stopped: '+result.reason+'. '+result.steps+' actions, '+result.evaluations+' evaluations. '+(result.reason==='FIELD_TEXT_REQUIRED'?'Use established user facts to answer the missing field; ask the user only if the value is unknown.':(['MODEL_BLOCKED','NO_SUPPORTED_ACTION'].includes(result.reason)?'The model found no supported next action; this is not evidence of bot detection or site denial. Inspect the browser evidence.':'Verify the browser state before continuing.')),observedAt:Date.now()}};
       if(outcome.type!=='completed' && outcome.failure && providerFailure)outcome.failure.message+=`${providerFailure.validationReason?' Validation: '+providerFailure.validationReason+'.':''}${providerFailure.resetAt?' Resets at '+providerFailure.resetAt+'.':''}${providerFailure.retryAfter?' Retry after '+providerFailure.retryAfter+'.':''}`;
+      if(command){
+        // Context for the next direct command: what this one did and where it ended.
+        const page=result.observation as {url?:unknown;title?:unknown}|undefined;
+        // Best effort: a missing context only loses "อีก" resolution, never the outcome.
+        try{this.write(task,'interaction-context',{taskId:task.taskId,requestId:'interaction-context',principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',command:instructions.slice(0,2000),
+          interaction:{...(result.commandOutcome?.done&&result.commandOutcome.action?{action:result.commandOutcome.action}:{}),...(typeof page?.url==='string'?{url:page.url.slice(0,2000)}:{}),...(typeof page?.title==='string'?{title:page.title.slice(0,250)}:{})}});}catch{/* see above */}
+      }
       const {observation:_,trace:__,...browserReport}=result;
       outcome.browserReport=browserReport;
       this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',trace:this.read(task,requestId)?.trace,lastDispatchedMutation:this.read(task,requestId)?.lastDispatchedMutation,outcome,browserResult:result});
     }).catch(()=>{
       this.write(task,requestId,{recordedAt:Date.now(),taskId:task.taskId,requestId,principalId:task.ownerPrincipalId,conversationId:task.conversationId,status:'ended',trace:this.read(task,requestId)?.trace,lastDispatchedMutation:this.read(task,requestId)?.lastDispatchedMutation,outcome:{type:'unknown',failure:{code:'BROWSER_OUTCOME_UNKNOWN',message:'Browser request outcome could not be recorded. Inspect before retrying.',observedAt:Date.now()}}});
-    }).finally(()=>this.running.delete(this.key(task,requestId)));
+    }).finally(()=>{this.running.delete(this.key(task,requestId));try{this.options.settled?.();}catch{/* Polling still applies the outcome. */}});
     this.running.set(this.key(task,requestId),{controller,interrupt,done});
     // A filesystem failure cannot become an unhandled rejection; receipt stays uncertain.
     void done.catch(()=>{});
@@ -249,8 +281,10 @@ function validateBrowserResult(result: BrowserExecutionResult): void {
     if(t.version!==1||!Array.isArray(t.events)||t.events.length>1024||typeof t.truncated!=='boolean'||typeof t.sinkFailed!=='boolean')throw Error('INVALID_BROWSER_TRACE');
     for(const e of t.events)TraceEvent.parse(e);
   }
-  if (!result || Object.keys(result).some(k=>!['trace','status','reason','steps','evaluations','staleRetries','textCalls','lastAction','observation','contractVersion','fieldRequest','lastEvaluation','lastConfirmedAction'].includes(k)) || !['succeeded','blocked','cancelled','failed','needs_verification'].includes(result.status) || (result.status==='succeeded' && result.reason!=='VERIFIED') || typeof result.reason !== 'string' || !/^[A-Z][A-Z0-9_]{0,100}$/.test(result.reason) || ![result.steps,result.evaluations].every(n=>Number.isSafeInteger(n)&&n>=0) ||
+  if (!result || Object.keys(result).some(k=>!['trace','status','reason','steps','evaluations','staleRetries','textCalls','lastAction','observation','contractVersion','fieldRequest','lastEvaluation','lastConfirmedAction','commandOutcome','stepRun'].includes(k)) || !['succeeded','blocked','cancelled','failed','needs_verification'].includes(result.status) || (result.status==='succeeded' && result.reason!=='VERIFIED') || typeof result.reason !== 'string' || !/^[A-Z][A-Z0-9_]{0,100}$/.test(result.reason) || ![result.steps,result.evaluations].every(n=>Number.isSafeInteger(n)&&n>=0) ||
     (result.lastAction && (!['confirmed','unknown','not_executed'].includes(result.lastAction.outcome) || typeof result.lastAction.operationId !== 'string' || typeof result.lastAction.operation !== 'string')) ||
+    (result.commandOutcome!==undefined && (typeof result.commandOutcome!=='object' || typeof result.commandOutcome.done!=='boolean' || (result.commandOutcome.reason!==undefined && !/^[A-Z][A-Z0-9_]{0,100}$/.test(String(result.commandOutcome.reason))))) ||
+    (result.stepRun!==undefined && (typeof result.stepRun!=='object' || ![result.stepRun.total,result.stepRun.completed].every(n=>Number.isSafeInteger(n)&&n>=0) || !Array.isArray(result.stepRun.remaining))) ||
     (result.fieldRequest && (typeof result.fieldRequest.label!=='string' || result.fieldRequest.label.length>250 || typeof result.fieldRequest.ref!=='string' || result.fieldRequest.ref.length>100 || !['missing','ambiguous'].includes(result.fieldRequest.reason))) || Buffer.byteLength(JSON.stringify(result))>1048576) throw Error('INVALID_BROWSER_RESULT');
 }
 

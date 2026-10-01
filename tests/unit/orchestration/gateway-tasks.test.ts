@@ -66,7 +66,8 @@ test('active managed requests accept a durable revision and dispatch it in the s
  const updated=tasks.update({...context,actionId:'amend'},task.taskId,1,'Continue the same goal with new instructions','when_ready');
  expect(updated.revision).toBe(2);expect(updated.state).toBe('running');await controller.tick();expect(adapter.submit).toHaveBeenCalledTimes(1);
  outcome={type:'completed',result:{summary:'First request done',artifactIds:[]}};
- await controller.tick();expect(store.task(task.taskId)?.state).toBe('queued');await controller.tick();
+ // Settling queues revision 2; the controller claims it on an immediate follow-up pass.
+ await controller.tick();expect(['queued','starting','running']).toContain(store.task(task.taskId)?.state);await controller.tick();
  expect(adapter.submit).toHaveBeenCalledTimes(2);expect(adapter.submit).toHaveBeenLastCalledWith(expect.objectContaining({taskId:task.taskId,revision:2}),expect.any(String),'Continue the same goal with new instructions',undefined,false,undefined);
  expect(store.all('SELECT id FROM tasks')).toHaveLength(1);
 });
@@ -393,6 +394,8 @@ test('cancel a finished read-only completion candidate after restart releases it
  const browser=new BrowserTaskAdapter({agentId:'operator',root:join(directory,'browser'),allowed:()=>true,evaluate:jest.fn(),bindings:()=>bindings});
  controller=new GatewayTaskController(tasks,new Map([['browser',browser]]));
  const task=tasks.spawn({...context,actionId:'browser-spawn'},{title:'Read results',instructions:'Read the open page',targetProfile:'gateway-managed',gatewayTarget:{adapter:'browser',sessionId:'tab',name:'Tab'}});
+ // Parent verification belongs to agent control; a user's direct command pauses instead.
+ tasks.controlByUser(context.conversationId,context.principalId,task.taskId,{id:'00000000-0000-4000-8000-0000000000a1',action:'agent',expectedRevision:1});
  await controller.tick();await new Promise(setImmediate);await controller.tick();
  expect(store.task(task.taskId)?.state).toBe('needs_reconciliation');
  await controller.close();store.close();open();recoverOrchestration(store);

@@ -2,6 +2,8 @@ import {CURRENT_CONTROL_ROUND_SQL} from '../control-notification';
 import {preparedBrowserAnswers} from '../browser-fields';
 import {ComputerInputs} from '../../jev/computer-inputs';
 import {automationSession} from './automation-session';
+import {computerOutcomeText} from '../../automation/computer-outcome';
+import {browserOutcomeText} from '../../automation/browser-outcome';
 import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
 import { isAbsolute } from 'path';
 import { parseWorkflow, advanceWorkflow } from '../workflow';
@@ -22,6 +24,8 @@ export interface SpawnTask { browserFields?:unknown; computerInputs?:TaskRevisio
 /** How many finished tasks the per-turn index page keeps. Unfinished tasks are never dropped;
  * older finished ones stay reachable through task_status with an explicit task_id. */
 const INDEXED_FINISHED_TASKS = 20;
+/** Direct Computer/Remote Browser commands that may wait behind a settling round. */
+const COMMAND_QUEUE_MAX = 20;
 
 export type TaskIndexEntry = ReturnType<typeof taskIndexEntry>;
 /** One index row: identity, live state and how to fetch the rest — never a report body.
@@ -192,9 +196,22 @@ export class TaskService {
     if (command.gatewayTarget && (command.workingDirectory || command.skill || command.contextRefs?.length)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
     return this.command(context, 'spawn', command, true, () => {
       const conversation = this.store.get('SELECT * FROM conversations WHERE id=?', context.conversationId)!;
+      let replaced:TaskSnapshot|undefined;
       if(['browser','computer'].includes(command.gatewayTarget?.adapter ?? '')) {
         const existing=this.store.all("SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.gatewayTarget.adapter')=? AND json_extract(snapshot_json,'$.gatewayTarget.sessionId')=?",context.conversationId,command.gatewayTarget!.adapter,command.gatewayTarget!.sessionId).map(row=>JSON.parse(String(row.snapshot_json)) as TaskSnapshot).find(task=>task.ownerPrincipalId===context.principalId && automationSession(task)?.status!=='closed');
-        if(existing)throw new OrchestrationError('AUTOMATION_SESSION_EXISTS',`This device session already has task ${existing.taskId} at revision ${existing.revision}. Inspect it and use task_update when_ready for the next goal on the same task. Do not open another tab or replay completed work.`);
+        // A computer session that never acted (failed before or while waiting
+        // for access) holds nothing worth continuing; a new spawn replaces it.
+        const neverActed=(existing?.gatewayTarget?.adapter==='computer'&&(existing.computerReport?.steps??0)===0&&!existing.computerReport?.trace?.some(event=>event.outcome==='unknown')&&
+          ((existing.state==='failed'&&!existing.activeAttemptId)||(existing.state==='running'&&existing.computerReport?.status==='waiting_access')))||
+          // A Remote Browser session that failed before any tab action likewise holds nothing.
+          (existing?.gatewayTarget?.adapter==='browser'&&existing.state==='failed'&&!existing.activeAttemptId&&(existing.browserReport?.steps??0)===0&&
+            existing.browserReport?.lastAction?.outcome!=='unknown'&&!existing.browserReport?.lastConfirmedAction);
+        if(existing&&neverActed)replaced=existing;
+        else if(existing){
+          const report=existing.computerReport??existing.browserReport;
+          const cause=`state ${existing.state}${report?.reason?`, last result ${report.reason}`:''}${existing.failure?.code?` (${existing.failure.code})`:''}, controlled by the ${existing.automationController==='user'?'user':'agent'}`;
+          throw new OrchestrationError('AUTOMATION_SESSION_EXISTS',`This device session already has task ${existing.taskId} at revision ${existing.revision}: ${cause}. This is not a permission problem. Inspect it with task_status and use task_update when_ready for the next goal on the same task${existing.automationController==='user'?' (the user controls it; wait for them or ask them to hand control back)':''}, or task_cancel it to end that session. Do not open another tab or replay completed work.`);
+        }
       }
 
       const available = new Set<string>();
@@ -238,6 +255,10 @@ export class TaskService {
       this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', task.taskId, 1, JSON.stringify(revision));
       this.store.appendEvent(task.conversationId, 'task.created', task, task.taskId);
       this.store.enqueue('schedule', `schedule:${task.taskId}:1`, { taskId: task.taskId });
+      if (replaced) {
+        this.cancelOwned(context.conversationId, replaced.taskId, task.taskId);
+        this.store.appendEvent(task.conversationId, 'task.session_replaced', { taskId: replaced.taskId, replacedByTaskId: task.taskId }, replaced.taskId);
+      }
       return task;
     });
   }
@@ -359,20 +380,33 @@ export class TaskService {
         task.gatewayTarget?.adapter==='browser' && task.browserReport?.status==='blocked' &&
         task.browserReport.reason!=='OUTCOME_UNKNOWN' && !task.browserReport.providerFailure &&
         task.browserReport.lastAction?.outcome!=='unknown';
-      const stoppedComputer=command.action==='revise'&&task.state==='failed'&&!task.activeAttemptId&&task.gatewayTarget?.adapter==='computer'&&task.computerReport?.status==='blocked'&&((task.computerReport.reason==='COMPUTER_USE_FAILED'&&task.computerReport.steps===0&&task.computerReport.evaluations===0)||/^THINKING_(?:HTTP_[0-9]{3}|[A-Z_]{1,64})$/.test(task.computerReport.reason)||['JEV_PROVIDER_UNAVAILABLE','JEV_DEADLINE_EXCEEDED','JEV_RATE_LIMITED','JEV_QUOTA_EXCEEDED','JEV_MODEL_UNAVAILABLE','JEV_AUTHENTICATION_FAILED','JEV_INVALID_CONFIG','JEV_DISABLED','JEV_QUEUE_FULL','LOW_CONFIDENCE','COMPLETION_NOT_ESTABLISHED','LOOP_CYCLE_BUDGET','TIMEOUT','NO_SUPPORTED_ACTION','ACTION_BUDGET','THINKING_WAITING_INPUT','THINKING_SCREENSHOT_REQUIRED','COMPUTER_SCREENSHOT_STALE','COMPUTER_SCREENSHOT_UNAVAILABLE','SCREEN_RECORDING_PERMISSION_REQUIRED','SCREENSHOT_CAPTURE_FAILED','SCREENSHOT_WINDOW_UNAVAILABLE','SCREENSHOT_SENSITIVE_CONTENT','SCREENSHOT_UNSUPPORTED','SCREENSHOT_TOO_LARGE','NATIVE_PROCESS_EXITED','NATIVE_REQUEST_TIMEOUT','NATIVE_START_FAILED','NATIVE_IO_ERROR','INVALID_NATIVE_RESPONSE','COMPUTER_ACCESS_DENIED','COMPUTER_ACCESS_STOPPED','COMPUTER_ACCESS_UNAVAILABLE'].includes(task.computerReport.reason));
+      const stoppedComputer=command.action==='revise'&&task.state==='failed'&&!task.activeAttemptId&&task.gatewayTarget?.adapter==='computer'&&task.computerReport?.status==='blocked'&&((task.computerReport.reason==='COMPUTER_USE_FAILED'&&task.computerReport.steps===0&&task.computerReport.evaluations===0)||/^THINKING_(?:HTTP_[0-9]{3}|[A-Z_]{1,64})$/.test(task.computerReport.reason)||['JEV_PROVIDER_UNAVAILABLE','JEV_DEADLINE_EXCEEDED','JEV_RATE_LIMITED','JEV_QUOTA_EXCEEDED','JEV_MODEL_UNAVAILABLE','JEV_AUTHENTICATION_FAILED','JEV_INVALID_CONFIG','JEV_DISABLED','JEV_QUEUE_FULL','LOW_CONFIDENCE','COMPLETION_NOT_ESTABLISHED','LOOP_CYCLE_BUDGET','TIMEOUT','NO_SUPPORTED_ACTION','ACTION_BUDGET','THINKING_WAITING_INPUT','THINKING_SCREENSHOT_REQUIRED','COMPUTER_SCREENSHOT_STALE','COMPUTER_SCREENSHOT_UNAVAILABLE','SCREEN_RECORDING_PERMISSION_REQUIRED','SCREENSHOT_CAPTURE_FAILED','SCREENSHOT_WINDOW_UNAVAILABLE','SCREENSHOT_SENSITIVE_CONTENT','SCREENSHOT_UNSUPPORTED','SCREENSHOT_TOO_LARGE','NATIVE_PROCESS_EXITED','NATIVE_REQUEST_TIMEOUT','NATIVE_START_FAILED','NATIVE_IO_ERROR','INVALID_NATIVE_RESPONSE','COMPUTER_ACCESS_DENIED','COMPUTER_ACCESS_STOPPED','COMPUTER_ACCESS_UNAVAILABLE','COMPUTER_ACCESS_TIMEOUT'].includes(task.computerReport.reason));
       const recoverable=stoppedBrowser||stoppedComputer||completedRound;
       if(!['queued','starting','running','interrupting'].includes(task.state)&&!paused&&!recoverable)throw new OrchestrationError('STATE_CONFLICT');
       if(command.action==='resume'&&!paused)throw new OrchestrationError('STATE_CONFLICT');
       if(command.action==='revise')boundedText(command.text??'',4000);
       else if(command.text!==undefined)throw new OrchestrationError('INVALID_INPUT');
       const previous=this.revision(taskId,task.revision);
+      if(command.action==='pause')delete task.queuedCommands;
+      // A user's own command is still settling: the next one waits its turn,
+      // verbatim, instead of superseding it or being folded into a correction.
+      if(command.action==='revise'&&['browser','computer'].includes(task.gatewayTarget?.adapter??'')&&previous.directCommand===true&&(['queued','starting','running'].includes(task.state)||(task.state==='interrupting'&&task.executionControl?.action==='revise'))){
+        const queue=task.queuedCommands??[];
+        if(queue.length>=COMMAND_QUEUE_MAX)throw new OrchestrationError('COMMAND_QUEUE_FULL','Too many commands are waiting. Wait for the current ones to finish or pause.');
+        task.queuedCommands=[...queue,{id:command.id,text:command.text!,at:Date.now()}];
+        task.latestProgress={source:'runtime',observedAt:Date.now(),text:`Queued: ${JSON.stringify(command.text!.slice(0,120))} runs after the current command (${task.queuedCommands.length} waiting).`};
+        this.store.saveTask(task,task.stateVersion);
+        this.store.appendEvent(conversationId,'task.command_queued',{taskId,commandId:command.id,position:task.queuedCommands.length},taskId);
+        this.store.run('INSERT INTO task_commands VALUES(?,?,?,?,?,?,?,?,?)',id,taskId,conversationId,principalId,null,'user_control',hash,JSON.stringify(task),Date.now());
+        return task;
+      }
       const priorAnswers=previous.answers?.map(a=>({field:a.browserFieldLabel??a.computerFieldLabel,text:a.text}));
       const nextCommand=command.action==='revise'&&(paused||recoverable);
       const instructions=nextCommand?command.text!:command.action==='revise'?'Latest user correction (apply first; supersedes conflicting earlier requirements):\n'+command.text+'\n\nEarlier requirements and corrections, newest first. Keep only requirements compatible with the latest correction; do not perform superseded actions:\n'+previous.instructions+(priorAnswers?.length?'\n\nEarlier user answers (subject to the latest correction):\n'+JSON.stringify(priorAnswers):''):previous.instructions;
       boundedText(instructions,task.gatewayTarget?.adapter==='browser'?8000:16000);
       task.revision++;
       if(recoverable){delete task.computerReport;delete task.failure;delete task.browserReport;delete task.gatewayDispatch;}
-      this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,requestBrowserConsent:command.action!=='pause',revision:task.revision,instructions,mode:'interrupt_and_resume',computerInputs:command.action==='revise'?undefined:previous.computerInputs,answers:command.action==='revise'?undefined:previous.answers,browserRecoveryCount:0,guidance:undefined,guidanceBasis:undefined}));
+      this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,requestBrowserConsent:command.action!=='pause',revision:task.revision,instructions,mode:'interrupt_and_resume',computerInputs:command.action==='revise'?undefined:previous.computerInputs,answers:command.action==='revise'?undefined:previous.answers,browserRecoveryCount:0,guidance:undefined,guidanceBasis:undefined,...(command.action==='revise'?{directCommand:true}:{})}));
       task.executionControl={id:command.id,action:command.action,revision:task.revision,phase:task.activeAttemptId?'pending':command.action==='pause'?'paused':'pending',requestedAt:Date.now()};
       task.state=task.activeAttemptId?'interrupting':command.action==='pause'?'waiting_input':'queued';
       task.latestProgress={source:'runtime',observedAt:Date.now(),text:task.activeAttemptId?'Control accepted; settling the current action before applying it.':command.action==='pause'?'Automation paused.':'Control accepted; resuming from a fresh observation.'};
@@ -419,6 +453,7 @@ export class TaskService {
     // stop; it must not turn that stall into a user/agent cancellation.
     const retriesStall = task.state === 'needs_reconciliation' && task.cancellation?.requestedBy === 'supervisor';
     if (!retriesStall) task.cancellation = { requestedBy, requestedAt: Date.now() };
+    delete task.queuedCommands;
     task.state = task.activeAttemptId || (task.gatewayTarget?.adapter==='computer' && task.gatewayDispatch) ? 'cancel_requested' : 'cancelled';
     task.pendingQuestion = undefined;
     delete task.failure;
@@ -840,11 +875,12 @@ export class TaskService {
         } else if (task.state === 'waiting_input' && task.pendingQuestion) { /* retain question; execution slot now free */ }
         else if(task.executionControl?.phase==='pending'&&task.executionControl.action==='pause'){task.state='waiting_input';task.executionControl.phase='paused';delete task.failure;}
         else if (task.state === 'interrupting' || task.revision > attempt.revision) task.state = 'queued';
-        else if(waitingForCommand){task.state='waiting_input';task.latestProgress={source:'runtime',observedAt:Date.now(),text:'Waiting for your next command.'};}
+        else if(waitingForCommand){task.state='waiting_input';task.latestProgress={source:'runtime',observedAt:Date.now(),text:task.gatewayTarget?.adapter==='computer'&&outcome.computerReport?computerOutcomeText(outcome.computerReport):task.gatewayTarget?.adapter==='browser'&&outcome.browserReport?browserOutcomeText(outcome.browserReport):'Waiting for your next command.'};}
         else task.state = outcome.type === 'completed' ? 'completed' : 'failed';
         if (task.state === 'completed' && outcome.type === 'completed') task.result = outcome.result;
       }
       if (task.state === 'failed' && stalled) task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: stalled.message };
+      if (task.queuedCommands?.length) this.nextQueuedCommand(task, waitingForCommand || outcome.type === 'completed');
       if (task.state === 'cancelled') {
         delete task.failure;
         task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: `Cancelled by ${task.cancellation?.requestedBy ?? 'agent'}. Existing files and prior effects are retained.` };
@@ -858,6 +894,30 @@ export class TaskService {
       else if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation' || (waitingForCommand&&task.state==='waiting_input'&&task.automationController!=='user'&&task.executionControl?.phase!=='paused')) this.notify(task);
       return task;
     });
+  }
+  /** Delivers the oldest queued direct command after a settled round, or drops
+   * the queue when the round did not settle cleanly; queued text is never replayed later. */
+  private nextQueuedCommand(task: TaskSnapshot, settled: boolean): void {
+    const queue = task.queuedCommands ?? [];
+    if (!settled || !['waiting_input','completed'].includes(task.state) || task.pendingQuestion || task.executionControl?.phase === 'paused' || automationSession(task)?.status === 'closed') {
+      if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation' || task.state === 'waiting_input') {
+        const dropped = `${queue.length} queued command${queue.length === 1 ? ' was' : 's were'} not sent because the previous command did not finish normally: ${queue.map(c => JSON.stringify(c.text.slice(0, 60))).join(', ')}.`;
+        task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: [task.latestProgress?.text, dropped].filter(Boolean).join('\n').slice(0, 4096) };
+        delete task.queuedCommands;
+      }
+      return;
+    }
+    const [next, ...rest] = queue;
+    const previous = this.revision(task.taskId, task.revision);
+    task.revision++;
+    this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', task.taskId, task.revision, JSON.stringify({...previous, requestBrowserConsent: true, revision: task.revision, instructions: next.text, mode: 'interrupt_and_resume', computerInputs: undefined, answers: undefined, browserRecoveryCount: 0, guidance: undefined, guidanceBasis: undefined, directCommand: true}));
+    task.queuedCommands = rest.length ? rest : undefined;
+    if (!task.queuedCommands) delete task.queuedCommands;
+    if (task.state === 'completed') { delete task.result; delete task.computerReport; delete task.browserReport; delete task.gatewayDispatch; }
+    task.executionControl = { id: next.id, action: 'revise', revision: task.revision, phase: 'pending', requestedAt: Date.now() };
+    task.state = 'queued';
+    const done = task.latestProgress?.text;
+    task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: [done, `Running queued command: ${JSON.stringify(next.text.slice(0, 120))}${rest.length ? ` (${rest.length} more waiting)` : ''}.`].filter(Boolean).join('\n').slice(0, 4096) };
   }
   private notify(task: TaskSnapshot): void {
     const input = this.store.get('SELECT binding_id FROM conversation_inputs WHERE id=?', task.initiatingInputId)!;

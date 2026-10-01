@@ -8,6 +8,7 @@ const {mkdtempSync,mkdirSync,rmSync}=require('node:fs');
 const {tmpdir}=require('node:os');
 const {join}=require('node:path');
 const {execFile}=require('node:child_process');
+const {randomUUID}=require('node:crypto');
 const {TaskBridge}=require('../dist/orchestration/bridge');
 const {TaskFiles}=require('../dist/orchestration/task-files');
 const assert=require('node:assert/strict');
@@ -26,7 +27,7 @@ async function runGatewayBrowserFixture(options){
  const connector={id:'fixture-browser',name:'Fixture',agentId:'fixture-agent',principalId:'fixture-user',conversationId:accepted.conversationId,endpoint:options.endpoint,apiKeyFile:options.credentialFile,scope:options.scope,fields:options.fields,budget:{timeoutMs:60000,maxSteps:10,maxEvaluations:12}};
  const binding={version:1,id:'fixture-browser',name:'Isolated fixture',principalId:'fixture-user',conversationId:accepted.conversationId,
   run:c=>executeBrowserModule(options.logicModule,connector,c),inspect:(result,signal,authorized)=>inspectBrowser(connector,result,signal,authorized)};
- const adapter=new BrowserTaskAdapter({agentId:'fixture-agent',root:join(root,'receipts'),allowed:()=>true,bindings:()=>[binding],evaluate:(_task,request,signal)=>options.evaluate(request,signal)});
+ const adapter=new BrowserTaskAdapter({agentId:'fixture-agent',root:join(root,'receipts'),allowed:()=>true,bindings:()=>[binding],stepMode:()=>options.browserSteps===true,evaluate:(_task,request,signal)=>options.evaluate(request,signal)});
  const adapters=new Map([['browser',adapter]]),controller=new GatewayTaskController(tasks,adapters);
  let bridge,callAgent;
  try{
@@ -47,7 +48,10 @@ async function runGatewayBrowserFixture(options){
  }
   const task=callAgent ? await callAgent('task_spawn',{title:'Browser integration fixture',instructions:options.goal,target_profile:'gateway-managed',gateway_target:{adapter:'browser',session_id:binding.id,...(options.startUrl?{start_url:options.startUrl}:{})}}) : tasks.spawn(context,{title:'Browser integration fixture',instructions:options.goal,targetProfile:'gateway-managed',gatewayTarget:adapter.resolve({adapter:'browser',session_id:binding.id,...(options.startUrl?{start_url:options.startUrl}:{})},context)});
   assert(task.taskId,'Container must create a real gateway-managed task');
-  const until=Date.now()+75000;
+  // Parent verification is the agent-controlled flow; a user-controlled round
+  // is a direct command that waits for the next command instead.
+  if(options.parentVerify)tasks.controlByUser(accepted.conversationId,'fixture-user',task.taskId,{id:randomUUID(),action:'agent',expectedRevision:task.revision});
+  const until=Date.now()+75000;let rounds=0;
   while(Date.now()<until){
    await controller.tick();let current=store.task(task.taskId);
    if(current.state==='needs_reconciliation' && options.parentVerify){
@@ -56,9 +60,15 @@ async function runGatewayBrowserFixture(options){
     const proof=callAgent ? (await callAgent('task_status',{task_id:current.taskId,browser_evidence:'fresh'})).browserEvidence : await adapter.evidence(current,true);
     const evidence=await options.parentVerify(proof);
     if(typeof evidence==='string' && evidence.trim())current=callAgent ? await callAgent('task_update',{task_id:current.taskId,expected_revision:current.revision,mode:'verify_browser',expected_request_id:proof.requestId,evidence_id:proof.evidenceId,instruction:evidence}) : tasks.verifyBrowser({...context,actionId:'verify-browser'},current.taskId,current.revision,proof.requestId,proof.evidenceId,evidence,()=>adapter.verifyEvidence(current,proof.requestId,proof.evidenceId));
-    if(!callAgent && current.state==='completed')await adapter.recordVerified(current,proof.requestId);
    }
-   if(['completed','failed','needs_reconciliation','waiting_input','cancelled'].includes(current.state))return {containerBridge:Boolean(callAgent),state:current.state,result:current.result,failure:current.failure,browserReport:current.browserReport};
+   // Direct-command rounds yield after one confirmed action (yieldAfterAction):
+   // the session waits for the next command. A fixture may supply it; the
+   // command is sent as user control text, verbatim, like a typed message.
+   if(current.state==='waiting_input' && current.browserReport?.reason==='COMMAND_WAITING_INPUT' && options.nextCommand && rounds<(options.maxRounds??5)){
+    const text=await options.nextCommand(current);
+    if(typeof text==='string' && text.trim()){rounds++;tasks.controlByUser(current.conversationId,'fixture-user',current.taskId,{id:randomUUID(),action:'revise',expectedRevision:current.revision,text});await new Promise(r=>setTimeout(r,20));continue;}
+   }
+   if(['completed','failed','needs_reconciliation','waiting_input','cancelled'].includes(current.state))return {containerBridge:Boolean(callAgent),state:current.state,result:current.result,failure:current.failure,browserReport:current.browserReport,rounds,latestProgress:current.latestProgress?.text};
    await new Promise(r=>setTimeout(r,20));
   }
   throw Error('Gateway browser task did not settle');

@@ -62,6 +62,8 @@ test('parent can confirm only a fresh scoped completion candidate with durable i
  const controller=new GatewayTaskController(tasks,new Map([['browser',adapter]]));
  try{
   const task=tasks.spawn(context,{title:'Fill name',instructions:'Fill name',targetProfile:'gateway-managed',gatewayTarget:adapter.resolve({adapter:'browser',session_id:'target'},context)});
+  // Parent verification is the agent-controlled flow; a user's direct command pauses instead.
+  tasks.controlByUser(task.conversationId,context.principalId,task.taskId,{id:'00000000-0000-4000-8000-000000000002',action:'agent',expectedRevision:1});
   for(let i=0;i<10;i++){await controller.tick();await new Promise(setImmediate);}
   const waiting=store.task(task.taskId)!;expect(waiting.state).toBe('needs_reconciliation');
   const proof=await adapter.evidence(waiting,true),check=()=>adapter.verifyEvidence(waiting,proof.requestId,proof.evidenceId!);

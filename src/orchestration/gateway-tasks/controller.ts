@@ -34,6 +34,8 @@ export class GatewayTaskController {
   private timer?: ReturnType<typeof setInterval>;
   private closed = false;
   private pending?: Promise<void>;
+  /** A tick requested during a run (settled round, user control) runs again right after it. */
+  private again = false;
   private recoveries=new Map<string,Promise<void>>();
   private stopCheckAfter=new Map<string,number>();
   private recoveryAfter=new Map<string,number>();
@@ -45,10 +47,13 @@ export class GatewayTaskController {
   }
   tick(): Promise<void> {
     if (this.closed) return Promise.resolve();
-    if (this.pending) return this.pending;
+    if (this.pending) { this.again = true; return this.pending; }
     const run = this.run();
     this.pending = run;
-    void run.finally(() => { if (this.pending === run) this.pending = undefined; }).catch(this.reportError);
+    void run.finally(() => {
+      if (this.pending === run) this.pending = undefined;
+      if (this.again && !this.closed) { this.again = false; void this.tick().catch(this.reportError); }
+    }).catch(this.reportError);
     return run;
   }
   private async run(): Promise<void> {
@@ -160,7 +165,8 @@ export class GatewayTaskController {
             {type:'unknown',failure:taskFailure(new Error('No durable request receipt. Inspect the target before retrying; the request was not sent again.'),'GATEWAY_REQUEST_UNCONFIRMED')});
         } else {
           if (current.state === 'starting') this.tasks.started(attempt.attemptId, attempt.generation);
-          this.tasks.finish(attempt.attemptId, attempt.generation, outcome);
+          // A queued direct command is claimed on an immediate follow-up pass.
+          if (this.tasks.finish(attempt.attemptId, attempt.generation, outcome).state === 'queued') this.again = true;
         }
       } catch (error) {
         // Transport/inspection failures cannot prove that the target stopped.

@@ -38,7 +38,7 @@ export interface CommandContext extends ExecutionCapabilities {
  * list), and an unexpected one (a valid list carrying tools outside the resolved profile). */
 export interface InventoryRejection { kind: 'missing' | 'malformed' | 'unexpected'; rejectedTools: string[]; }
 export interface TaskFailure { code: string; message: string; observedAt: number; provider?: import('./provider-admission').ProviderFailure; inventory?: InventoryRejection; }
-export interface ComputerTaskReport {status:string;reason:string;steps:number;evaluations?:number;phase?:string;trace?:import('../automation/computer-use').ComputerProgress[];fieldRequest?:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'}}
+export interface ComputerTaskReport {status:string;reason:string;steps:number;evaluations?:number;phase?:string;trace?:import('../automation/computer-use').ComputerProgress[];fieldRequest?:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'};stepRun?:import('../automation/computer-steps').ComputerStepRun;lastAction?:import('../automation/computer-use').ComputerLastAction}
 export type WorkerOutcome = ({type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure}) & {computerReport?:ComputerTaskReport;browserReport?: import('../jev/browser-contract').BrowserTaskReport};
 export interface TaskResult {
   summary: string;
@@ -62,6 +62,8 @@ export interface TaskSnapshot {
   automationController?: "agent" | "user";
   automationSession?: import("./tasks/automation-session").AutomationSession;
   executionControl?: {id:string;action:'pause'|'revise'|'resume';revision:number;phase:'pending'|'applied'|'paused'|'blocked';requestedAt:number};
+  /** Direct user commands typed while a user-controlled computer/browser round is busy; delivered verbatim, FIFO. */
+  queuedCommands?: Array<{id:string;text:string;at:number}>;
   computerReport?:ComputerTaskReport;
   gatewayTarget?: GatewayTaskTarget;
   browserReport?: import('../jev/browser-contract').BrowserTaskReport;
@@ -118,6 +120,8 @@ export interface TaskRevision {
   /** Bounded supervision advice; never replaces user authorization or the assigned goal. */
   guidance?: string;
   guidanceBasis?: { attemptId?: string; workflowVersion: number; progressAt: number };
+  /** Created from the user's own typed control text, not an agent goal. */
+  directCommand?: boolean;
   answers?: Array<{ questionId: string; text: string; inputId: string; browserFieldLabel?: string; computerFieldLabel?:string; computerApplication?:string;computerWindowTitle?:string;computerFieldRole?:string }>;
   taskId: string;
   revision: number;

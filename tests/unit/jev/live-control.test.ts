@@ -79,12 +79,15 @@ test('controls reject other principals and stale revisions before changing work'
  }finally{await f.close();}
 });
 
-test('newer correction replaces a pending pause without losing prior corrections',async()=>{
+test('a correction replaces a pending pause; the next direct command waits its turn verbatim',async()=>{
  const f=fixture();try{
   await f.pump();f.control('pause');f.control('revise','Destination Manchester');f.control('revise','Keep all three children');await f.pump();
-  expect(f.calls).toHaveLength(2);
-  expect(f.calls[1].goal).toContain('Destination Manchester');expect(f.calls[1].goal).toContain('Keep all three children');
-  expect(f.calls[1].goal.indexOf('Keep all three children')).toBeLessThan(f.calls[1].goal.indexOf('Destination Manchester'));
+  // Remote Browser follows Computer Use: a user's command typed while their
+  // previous one is settling is queued FIFO, never folded into a correction.
+  expect(f.calls).toHaveLength(3);
+  expect(f.calls[1].goal).toContain('Destination Manchester');expect(f.calls[1].goal).toContain('Two adults and three children to London');
+  expect(f.calls[1].goal).not.toContain('Keep all three children');
+  expect(f.calls[2].goal).toBe('Keep all three children');
   expect(f.store.task(f.task.taskId)).toMatchObject({state:'completed',revision:4});
  }finally{await f.close();}
 });

@@ -1,5 +1,6 @@
 import type {ComputerState,ComputerUseDependencies} from './computer-use';
 import {decisionState,literalTextCandidates,readChoice} from './computer-policy';
+import {NEW_TAB_PHRASES,addressCommand,historyCommand,keyCommand,normalizeCommand,repeatCommand,scrollCommand,textCommand} from './direct-command';
 
 // Command controller design: moritzkremb/jev-voice-browser, MIT,
 // 198a0764395a666f8398026c0d8abdaf6d1866c5, src/jev.js buildRequest and
@@ -86,35 +87,120 @@ export function readComputerCommand(command:ReturnType<typeof buildComputerComma
 export function commandTextCandidates(command:string):string[] {
  const exact=literalTextCandidates(command);
  if(exact.length)return exact;
+ const payload=textCommand(command)?.text;
  const starts=[...command.matchAll(/\S+/gu)].map(m=>m.index!);
  // Long instructions need interpretation; do not grow a quadratic prompt or
 // silently discard their ending. This path only offers short direct commands.
- if(starts.length<2||starts.length>8||command.length>500)return [];
- return [...new Set(starts.slice(1).map(start=>command.slice(start).trimEnd()))];
+ if(starts.length<2||starts.length>8||command.length>500)return payload?[payload]:[];
+ return [...new Set([...(payload?[payload]:[]),...starts.slice(1).map(start=>command.slice(start).trimEnd())])];
 }
 
 // Explicit standard-command vocabulary, not substring intent guessing. Compound,
 // negated, targeted and ambiguous commands stay on the normal Jev path.
 export function standardComputerCommand(command:string):'scroll:up'|'scroll:down'|'close:window'|undefined {
- const normalized=command.trim().toLocaleLowerCase().replace(/\s+/gu,' ');
- const commands:Record<string,'scroll:up'|'scroll:down'|'close:window'>={
-  'scroll up':'scroll:up','scroll down':'scroll:down',
-  'scroll ขึ้น':'scroll:up','scroll ลง':'scroll:down','scroll ขึ้นไป':'scroll:up','scroll ลงมา':'scroll:down',
-  'เลื่อนขึ้น':'scroll:up','เลื่อนลง':'scroll:down','เลื่อนขึ้นไป':'scroll:up','เลื่อนลงมา':'scroll:down',
-  'close window':'close:window','close the window':'close:window','ปิดหน้าต่าง':'close:window',
- };
+ const scroll=scrollCommand(command);
+ if(scroll)return scroll==='up'?'scroll:up':'scroll:down';
+ const normalized=normalizeCommand(command);
+ const commands:Record<string,'close:window'>={'close window':'close:window','close the window':'close:window','ปิดหน้าต่าง':'close:window'};
  return Object.hasOwn(commands,normalized)?commands[normalized]:undefined;
 }
 
 // Exact key commands follow the existing native key executor contract.
 // This is a finite command grammar, not a site/target inference shortcut.
-export function standardKeyboardCommand(command:string):string|undefined {
+export const standardKeyboardCommand=keyCommand;
+
+// Exact history commands map to the native navigate action when the current
+// observation advertises it. Anything else keeps the normal Jev path.
+export function standardNavigationCommand(command:string):'navigate:back'|'navigate:forward'|undefined {
+ const direction=historyCommand(command);
+ return direction&&`navigate:${direction}`;
+}
+
+// Well-known browser shortcuts map to the application's own menu command (or
+// its identically named toolbar button), so a step that names the shortcut
+// performs exactly that command. Other shortcuts keep the normal Jev path.
+const SHORTCUTS:Array<{key:string;phrases:string[];labels:string[];standard?:'tab:new'|'tab:close'}>=[
+ {key:'t',phrases:NEW_TAB_PHRASES,labels:['new tab','แท็บใหม่'],standard:'tab:new'},
+ {key:'n',phrases:['new window','open new window','open a new window','เปิดหน้าต่างใหม่','หน้าต่างใหม่'],labels:['new window','หน้าต่างใหม่']},
+ {key:'w',phrases:['close tab','close this tab','ปิด tab','ปิดแท็บ'],labels:['close tab','ปิดแท็บ'],standard:'tab:close'},
+];
+export function shortcutCommand(command:string):{shortcut:string;labels:string[];standard?:'tab:new'|'tab:close'}|undefined {
  const normalized=command.trim().toLocaleLowerCase().replace(/\s+/gu,' ');
- const aliases:Record<string,string>={
-  'กดลูกศรขึ้น':'up','กดลูกศรลง':'down','กดลูกศรซ้าย':'left','กดลูกศรขวา':'right',
-  'กด enter':'enter','กด tab':'tab','กด escape':'escape',
-  'press arrow up':'up','press arrow down':'down','press arrow left':'left','press arrow right':'right',
-  'press enter':'enter','press tab':'tab','press escape':'escape',
- };
- return Object.hasOwn(aliases,normalized)?aliases[normalized]:undefined;
+ const explicit=/(?:^|[\s(])(?:cmd|command|⌘) ?\+? ?([a-z])(?![a-z])/u.exec(normalized);
+ // A shortcut inside a compound command is only one of its parts.
+ if(explicit&&!/[,、，]|\s(?:แล้ว|then|and)\s/u.test(normalized)){
+  const known=SHORTCUTS.find(s=>s.key===explicit[1]);
+  return known&&{shortcut:'cmd+'+known.key,labels:known.labels,...(known.standard?{standard:known.standard}:{})};
+ }
+ const phrase=normalized.replace(/^(?:กด|press) /u,'');
+ const known=SHORTCUTS.find(s=>s.phrases.includes(phrase));
+ return known&&{shortcut:'cmd+'+known.key,labels:known.labels,...(known.standard?{standard:known.standard}:{})};
+}
+/** The observed menu command (preferred) or button that performs a shortcut. */
+export function shortcutTarget(state:ComputerState,labels:string[]){
+ const name=(label:string,menu:boolean)=>(menu?label.split('→').at(-1)!:label).trim().toLocaleLowerCase();
+ const matches=(menu:boolean)=>state.controls.filter(c=>!c.sensitive&&c.actions.includes('press')&&(c.role==='AXMenuItem')===menu&&labels.includes(name(c.label,menu)));
+ const menu=matches(true);if(menu.length===1)return menu[0];
+ const buttons=matches(false).filter(c=>c.role==='AXButton');
+ return buttons.length===1?buttons[0]:undefined;
+}
+// Menu-bar commands dilute a direct decision. Offer one only when the command
+// asks for a menu or shares a word with its label.
+export function menuRelevant(command:string,label:string,contentMatch=false){
+ const normalized=command.toLocaleLowerCase();
+ if(/\bmenu\b|เมนู/u.test(normalized))return true;
+ // An in-content control that matches the command wins over a menu command
+ // with the same word (recorded "zoom" pressed Window → Zoom, not Zoom in).
+ if(contentMatch)return false;
+ const words=new Set(normalized.split(/[^\p{L}\p{N}]+/u).filter(w=>w.length>=3));
+ return label.replace(/^Menu:\s*/u,'').toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).some(w=>w.length>=3&&words.has(w));
+}
+
+export {textCommand,addressCommand,repeatCommand};
+/** The browser address/search field of the front window, if exactly one is observed. */
+export function addressField(state:ComputerState){
+ const fields=state.controls.filter(c=>!c.sensitive&&c.actions.includes('type')&&['AXTextField','AXComboBox','AXSearchField'].includes(c.role)&&
+  /address|location|smart search|search or enter|ที่อยู่/iu.test(c.label));
+ return fields.length===1?fields[0]:undefined;
+}
+
+/** "ปิด chrome", "quit chrome", "ปิดแอป", "Cmd+Q": quit the front application by name. */
+export function quitCommand(command:string):{app?:string}|undefined {
+ const normalized=command.trim().toLocaleLowerCase().replace(/\s+/gu,' ');
+ if(/^(?:กด )?(?:cmd|command|⌘) ?\+? ?q$/u.test(normalized))return {};
+ const match=/^(?:ปิด|quit|close|ออกจาก)(?: ?(?:แอป|แอพ|app|application|โปรแกรม))?(?: (.+))?$/u.exec(normalized);
+ if(!match)return;
+ const app=match[1]?.trim();
+ // Tabs, windows and dialogs have their own commands.
+ if(app&&/^(?:tab|แท็บ|window|หน้าต่าง|the window|this tab|dialog|popup)$/u.test(app))return;
+ if(!app&&!/(?:แอป|แอพ|app|application|โปรแกรม)$/u.test(normalized))return;
+ return app?{app}:{};
+}
+/** The front application's own Quit menu command, when the named app is in front. */
+/** Whether the named application (or any, when unnamed) is the one in front. */
+export function frontIsNamed(state:ComputerState,app?:string){
+ if(!app)return true;
+ const front=state.apps.find(a=>a.id===state.application);
+ const named=(value:string)=>value.toLocaleLowerCase().includes(app)||app.includes(value.toLocaleLowerCase());
+ return Boolean(front&&(named(front.name)||named(front.id.split('.').at(-1)!)));
+}
+export function quitTarget(state:ComputerState,app?:string){
+ if(!frontIsNamed(state,app))return;
+ const items=state.controls.filter(c=>c.role==='AXMenuItem'&&c.actions.includes('press')&&/^(?:quit\b|ออกจาก)/iu.test(c.label.split('→').at(-1)!.trim()));
+ return items.length===1?items[0]:undefined;
+}
+
+/** Bare text for a focused field: not a command, not a visible control's name. */
+export function bareText(command:string,state:ComputerState){
+ const text=command.trim();
+ if(!text||text.length>200||/\n/u.test(text))return false;
+ const verbs=/^(?:กด|คลิก|คลิ๊ก|แตะ|เลือก|เปิด|ปิด|เข้า|ไป|เลื่อน|scroll|click|press|tap|select|open|close|go|back|forward|zoom|ซูม|ย้อน|ลบ|delete|ค้น|search|พิมพ์|type)/iu;
+ if(verbs.test(text))return false;
+ const words=text.toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter(w=>w.length>=2);
+ return !state.controls.some(c=>{const label=c.label.replace(/^Menu:\s*/u,'').toLocaleLowerCase();return words.some(w=>label.split(/[^\p{L}\p{N}]+/u).includes(w));});
+}
+
+/** The helper advertises this standard_command or key (capability-gated contract). */
+export function helperSupports(state:ComputerState,kind:'standardCommands'|'keys',name:string){
+ return state.capabilities?.[kind]?.includes(name)===true;
 }

@@ -10,7 +10,7 @@ import type {SessionProcess} from '../../../src/session/process';
 import type {AgentConfig,GatewayConfig} from '../../../src/types';
 import {UNREADABLE_DISPLAY_NOTICE} from '../../../src/orchestration/speech';
 
-test.each(['committed','reconnected','screen-fresh','screen-changed','screen-recorded','screen-unavailable','screen-user','screen-owner','screen-stopped','uncommitted','historical','ordinary','ordinary-answer','ordinary-spawn','ordinary-no-command','ordinary-wrong-owner','ordinary-worker','ordinary-historical','ordinary-malformed','nonempty','malformed'])(
+test.each(['committed','reconnected','screen-fresh','screen-changed','screen-recorded','screen-unavailable','screen-user','screen-owner','screen-stopped','uncommitted','historical','ordinary','ordinary-answer','ordinary-spawn','ordinary-no-command','ordinary-wrong-owner','ordinary-worker','ordinary-historical','ordinary-malformed','nonempty','malformed','user-took-control'])(
  'control reply uses durable current-turn evidence before suppressing an empty reply: %s',async mode=>{
  const ordinary=mode.startsWith('ordinary');
  const committed=mode==='committed'||mode==='reconnected'||mode.startsWith('screen-')||['ordinary','ordinary-answer','ordinary-spawn'].includes(mode);
@@ -29,7 +29,9 @@ test.each(['committed','reconnected','screen-fresh','screen-changed','screen-rec
    if(mode==='screen-fresh'){expect(prompt).toContain('fresh-control-marker');expect(prompt).toContain('computer-control:');expect(images).toHaveLength(1);}
    else if(mode.startsWith('screen-')){expect(prompt).not.toContain('fresh-control-marker');expect(images).toHaveLength(0);}
    const current=runtime.store.get("SELECT id FROM conversation_decisions WHERE conversation_id=? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",conversationId)!;
-   if(!['uncommitted','ordinary-no-command'].includes(mode))runtime.store.run('INSERT INTO task_commands VALUES(?,?,?,?,?,?,?,?,?)',randomUUID(),taskId,conversationId,mode==='ordinary-wrong-owner'?'someone-else':'owner',mode.endsWith('historical')?'earlier-decision':current.id,mode==='ordinary-answer'?'answer':mode==='ordinary-spawn'?'spawn':'update','fixture','{}',Date.now());
+   // P1-9: the user takes control back while this agent control turn is in flight.
+   if(mode==='user-took-control'){const t=runtime.store.task(taskId)!;t.automationController='user';runtime.store.transaction(()=>runtime.store.saveTask(t,t.stateVersion));}
+   if(!['uncommitted','ordinary-no-command','user-took-control'].includes(mode))runtime.store.run('INSERT INTO task_commands VALUES(?,?,?,?,?,?,?,?,?)',randomUUID(),taskId,conversationId,mode==='ordinary-wrong-owner'?'someone-else':'owner',mode.endsWith('historical')?'earlier-decision':current.id,mode==='ordinary-answer'?'answer':mode==='ordinary-spawn'?'spawn':'update','fixture','{}',Date.now());
    this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));
    this.emit('output',JSON.stringify({type:'result',result:mode==='nonempty'?'{"display_text":"Need the departure date."}':mode.endsWith('malformed')?'{"display_text":':'{"display_text":""}'}));
   }}) as unknown as SessionProcess,releaseAgentSession:async()=>{},
@@ -64,7 +66,7 @@ test.each(['committed','reconnected','screen-fresh','screen-changed','screen-rec
   const reply=await runtime.send({scope,text:'Continue control',storeUserMessage:ordinary,...(!ordinary?{ingressKey:'notification:'+notification.id}:{})},{execute:false,writeMemory:false},{timeoutMs:3000,onText:seen});
   unsubscribe();
   expect(inferenceCalls).toBe(mode==='screen-stopped'?0:1);
-  expect(reply).toBe(mode==='screen-stopped'?'Response stopped.':committed?'':mode==='nonempty'?'Need the departure date.':UNREADABLE_DISPLAY_NOTICE);
+  expect(reply).toBe(mode==='screen-stopped'?'Response stopped.':committed||mode==='user-took-control'?'':mode==='nonempty'?'Need the departure date.':UNREADABLE_DISPLAY_NOTICE);
   if(committed){expect(heard).not.toHaveBeenCalled();expect(seen).not.toHaveBeenCalled();expect(runtime.store.all("SELECT event_id FROM conversation_events WHERE type='response.schema_unstructured'")).toHaveLength(0);}
  }finally{await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
 });

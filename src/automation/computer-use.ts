@@ -1,4 +1,5 @@
-import {buildComputerCommand,readComputerCommand,standardComputerCommand,standardKeyboardCommand} from './computer-command';
+import {buildComputerCommand,readComputerCommand,standardComputerCommand,standardKeyboardCommand,standardNavigationCommand,shortcutCommand,shortcutTarget,menuRelevant,addressCommand,addressField,quitCommand,quitTarget,bareText,frontIsNamed,helperSupports} from './computer-command';
+import {commandAuthorizes,destructiveTarget,DESTRUCTIVE_CONFIDENCE,eraseCommand,focusedTextField} from './computer-safety';
 import {decisionInstructions,readChoice,observedEffect,decisionState,literalTextCandidates} from './computer-policy';
 import {checkInterruption,interruptible} from './interrupt';
 import {randomUUID} from 'node:crypto';
@@ -7,6 +8,10 @@ import {z} from 'zod';
 import {runLoop} from '../../lib/automation/index.cjs';
 
 export const COMPUTER_USE_CONTRACT_VERSION = 1;
+// Relay errors raised before an operation is recorded (getpod-computer-use
+// relay.ts execute). DEVICE_OFFLINE can also follow the record, so it becomes
+// not_executed only when the receipt lookup confirms no operation exists.
+const PRE_DISPATCH_REJECTIONS=new Set(['DEVICE_OFFLINE','CONSENT_REQUIRED','OBSERVATION_DENIED','CONTROL_DENIED','APPLICATION_NOT_ALLOWED','COMPUTER_BUSY']);
 // Swift String.prefix counts extended grapheme clusters, not JS UTF-16 units.
 // Keep native display text intact; the MCP response already has a byte/size bound.
 const nativeSegmenter = new Intl.Segmenter('en', {granularity:'grapheme'});
@@ -15,10 +20,20 @@ const nativeText = (limit:number) => z.string().max(262144).refine(value=>{
  return true;
 }, 'Native text exceeds its grapheme limit');
 
+// Newer helpers may add action names within one contract version; ignore the
+// ones this Gateway does not know instead of rejecting the whole observation.
+const known=<T extends string>(values:readonly [T,...T[]],max=100)=>z.preprocess(raw=>Array.isArray(raw)?raw.filter(value=>(values as readonly unknown[]).includes(value)):raw,z.array(z.enum(values)).max(max));
+/** Named commands a helper runs as one guarded keyboard shortcut (standard_command). */
+export const STANDARD_SHORTCUTS=['tab:new','address:focus','tab:close','app:quit'] as const;
+const contractMajor=(value:unknown)=>typeof value==='number'?Math.trunc(value):typeof value==='string'?Number.parseInt(value,10):NaN;
 const ControlBounds=z.object({x:z.number().finite().min(0).max(1),y:z.number().finite().min(0).max(1),width:z.number().finite().positive().max(1),height:z.number().finite().positive().max(1)}).refine(b=>b.x+b.width<=1.000001&&b.y+b.height<=1.000001);
-const Control=z.object({identity:z.string().uuid().optional(),bounds:ControlBounds.optional(),ref:z.string().min(1).max(100),label:nativeText(500),context:nativeText(500).optional(),role:z.string().max(100),value:nativeText(2000).optional(),focused:z.boolean().optional(),actions:z.array(z.enum(['press','type'])),sensitive:z.boolean().optional()});
+const Control=z.object({identity:z.string().uuid().optional(),bounds:ControlBounds.optional(),ref:z.string().min(1).max(100),label:nativeText(500),context:nativeText(500).optional(),role:z.string().max(100),value:nativeText(2000).optional(),focused:z.boolean().optional(),actions:known(['press','type'] as const),sensitive:z.boolean().optional()});
 const ScrollArea=z.object({ref:z.string().min(1).max(100),label:nativeText(500),bounds:z.object({x:z.number().finite().min(0).max(1),y:z.number().finite().min(0).max(1),width:z.number().finite().positive().max(1),height:z.number().finite().positive().max(1)}).refine(b=>b.x+b.width<=1.000001&&b.y+b.height<=1.000001)});
-export const ComputerObservation=z.object({standardCommand:z.enum(['scroll:up','scroll:down','close:window']).optional(),scrollAreas:z.array(ScrollArea).max(16).refine(rows=>new Set(rows.map(r=>r.ref)).size===rows.length).optional(),supportedActions:z.array(z.enum(['scroll:up','scroll:down','navigate:back','navigate:forward'])).max(4).optional(),screenshotAvailable:z.boolean().optional(),screenshotRestriction:z.string().max(100).optional(),observationStats:z.object({visited:z.number().int().nonnegative(),candidates:z.number().int().nonnegative(),exported:z.number().int().nonnegative(),incomplete:z.boolean()}).optional(),generation:z.string().min(1),application:z.string(),controls:z.array(Control).max(150),focusedControl:z.object({ref:z.string().max(100).optional(),role:z.string().max(100),label:nativeText(500),sensitive:z.boolean().optional()}).optional(),windowTitle:nativeText(500).optional(),text:z.array(nativeText(300)).max(80).optional(),truncated:z.boolean(),platform:z.object({os:z.string(),osVersion:z.string(),appVersion:z.string().optional(),helperVersion:z.string().max(100).optional(),helperBuild:z.string().max(100).optional(),helperCommit:z.string().max(100).optional()}).optional(),apps:z.array(z.object({id:z.string(),name:z.string()})).max(100)});
+export const ComputerObservation=z.object({contractVersion:z.union([z.number(),z.string().max(20)]).optional().catch(undefined),capabilities:z.object({standardCommands:z.array(z.string().max(100)).max(64).optional(),keys:z.array(z.string().max(40)).max(64).optional()}).optional().catch(undefined),standardCommand:z.enum(['scroll:up','scroll:down','close:window',...STANDARD_SHORTCUTS]).optional().catch(undefined),scrollAreas:z.array(ScrollArea).max(16).refine(rows=>new Set(rows.map(r=>r.ref)).size===rows.length).optional(),supportedActions:known(['scroll:up','scroll:down','navigate:back','navigate:forward'] as const,4).optional(),screenshotAvailable:z.boolean().optional(),screenshotRestriction:z.string().max(100).optional(),observationStats:z.object({visited:z.number().int().nonnegative(),candidates:z.number().int().nonnegative(),exported:z.number().int().nonnegative(),incomplete:z.boolean()}).optional(),generation:z.string().min(1),application:z.string(),controls:z.array(Control).max(150),focusedControl:z.object({ref:z.string().max(100).optional(),role:z.string().max(100),label:nativeText(500),sensitive:z.boolean().optional()}).optional(),windowTitle:nativeText(500).optional(),text:z.array(nativeText(300)).max(80).optional(),truncated:z.boolean(),platform:z.object({os:z.string(),osVersion:z.string(),appVersion:z.string().optional(),helperVersion:z.string().max(100).optional(),helperBuild:z.string().max(100).optional(),helperCommit:z.string().max(100).optional()}).optional(),apps:z.array(z.object({id:z.string(),name:z.string()})).max(100)}).transform(state=>{
+ // A helper that reports a different major contract cannot be driven safely.
+ if(state.contractVersion!==undefined&&contractMajor(state.contractVersion)!==COMPUTER_USE_CONTRACT_VERSION)throw Error('COMPUTER_CONTRACT_UNSUPPORTED');
+ return state;
+});
 export type ComputerState=z.infer<typeof ComputerObservation>;
 export interface GoalRevision {revision:number;goal:string}
 /** Structural diagnostics only: no typed text, window contents or private field labels. */
@@ -42,7 +57,9 @@ export interface ComputerUseDependencies {
  progress?:(event:ComputerProgress)=>void;
  verify?:(state:ComputerState,goal:string,signal:AbortSignal)=>Promise<boolean>;
 }
-export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'needs_input'|'blocked'|'cancelled'|'needs_reconciliation';reason:string;revision:number;steps:number;evaluations:number;trace:{events:ComputerProgress[];truncated:boolean};operationId?:string;observation?:ComputerState}
+export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'needs_input'|'blocked'|'cancelled'|'needs_reconciliation';reason:string;revision:number;steps:number;evaluations:number;trace:{events:ComputerProgress[];truncated:boolean};operationId?:string;observation?:ComputerState;stepRun?:import('./computer-steps').ComputerStepRun;lastAction?:ComputerLastAction}
+/** The command's own interaction, for the owner's outcome line. Never typed text. */
+export interface ComputerLastAction {kind:string;label?:string;role?:string;key?:string;direction?:string;appId?:string;count?:number;blocked?:boolean}
 const PreparedInput=z.object({application:z.string().min(1).max(200),label:z.string().min(1).max(500),text:z.string().max(2000),role:z.string().max(100).optional(),windowTitle:nativeText(500).optional()}).strict();
 const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
 const fingerprint=(s:ComputerState)=>JSON.stringify([s.application,s.windowTitle,s.text,s.supportedActions,s.focusedControl&&{role:s.focusedControl.role,label:s.focusedControl.label},s.controls.map(({ref,...c})=>c),s.scrollAreas?.map(({ref,...area})=>area),s.truncated]);
@@ -50,6 +67,13 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  const input=Input.parse(raw),runSignal=AbortSignal.any([signal,AbortSignal.timeout(input.timeoutMs)]);
  let goal:GoalRevision={revision:input.revision,goal:input.goal},steps=0,evaluations=0,sequence=0,round=0;
  let noProgress=0;
+ let lastAction:ComputerLastAction|undefined,erasing:number|undefined;
+ // Typing refused with FOCUS_REQUIRED focuses the same field once, then types
+ // the same text: one command, one decision, no Jev round-trip in between.
+ // Capability-gated helper commands: a standard_command observation to request,
+ // an address awaiting its focused bar, and remaining Backspace presses.
+ let standardRequest:string|undefined,addressPending:string|undefined,backspaceLeft=0;
+ let focusThenType:{identity:string;role:string;text:string;submit?:boolean;pressed?:boolean}|undefined,focusAttempted=false;
  const direct=input.yieldAfterAction||input.yieldAfterInteraction;
  const standard=direct?standardComputerCommand(input.goal):undefined;
  let submitAfterType:{application:string;identity:string;role:string;text:string}|undefined;
@@ -68,7 +92,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
   trace.push(event);if(trace.length>2000)trace.shift();
   try{deps.progress?.(event);}catch{/* Diagnostic sinks cannot change a dispatched action's outcome. */}
  };
- const result=(status:ComputerUseResult['status'],reason:string):ComputerUseResult=>{emit('terminal',{status,reason});return {status,reason,revision:goal.revision,steps,evaluations,trace:{events:[...trace],truncated:sequence>trace.length},...(pending?{operationId:pending}:{}),...(last?{observation:last}:{})};};
+ const result=(status:ComputerUseResult['status'],reason:string):ComputerUseResult=>{emit('terminal',{status,reason});return {status,reason,revision:goal.revision,steps,evaluations,trace:{events:[...trace],truncated:sequence>trace.length},...(pending?{operationId:pending}:{}),...(last?{observation:last}:{}),...(lastAction?{lastAction}:{})};};
  const waitForCommand=(reason:string)=>{emit('waiting',{reason});return result('needs_input','COMMAND_WAITING_INPUT');};
  const check=()=>{runSignal.throwIfAborted();if(!deps.authorized())throw Error('ACCESS_DENIED');};
  const update=()=>{const n=deps.latestGoal?.();if(n&&n.revision>goal.revision){satisfiedField=undefined;submitAfterType=undefined;previous=undefined;prematureDone=0;history.length=0;ineffective.clear();transitions.clear();consecutiveOpens=0;cycling=false;noProgress=0;goal=z.object({revision:z.number().int().positive(),goal:z.string().min(1).max(16000)}).parse(n);}};
@@ -85,7 +109,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
    signal:runSignal,maxCycles:input.maxSteps*3+5,stageTimeoutMs:input.timeoutMs,
    thinking:!direct&&deps.thinking?(r,s)=>interruptible(child=>deps.thinking!(r,child),s,deps.interruptSignal):undefined,maxThinkingCalls:input.maxSteps,thinkingTimeoutMs:60000,
    observe:async ctx=>{
-    round=ctx.cycle+1;check();checkInterruption(deps.interruptSignal);update();emit('observing');const started=Date.now();last=ComputerObservation.parse(await call('computer_observe',standard?{standard_command:standard}:{}));check();deps.observation?.(last);
+    round=ctx.cycle+1;check();checkInterruption(deps.interruptSignal);update();emit('observing');const started=Date.now();const requested=standardRequest??standard;last=ComputerObservation.parse(await call('computer_observe',requested?{standard_command:requested}:{}));check();deps.observation?.(last);
     if(previous){
      const changed=observedEffect(previous.state,last,previous.action);
      const transition=JSON.stringify([previous.identity,fingerprint(last)]);
@@ -109,11 +133,86 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
    },
    decide:async state=>{
     check();const revision=goal.revision;if(direct&&goal.revision!==input.revision)return {result:result('cancelled','REVISION_SUPERSEDED')};
+    const requestStandard=(command:string)=>{standardRequest=command;return {action:{action:'STANDARD_OBSERVE',generation:state.generation,revision,targets:new Map<string,Record<string,unknown>>()}};};
+    if(direct&&backspaceLeft>0){
+     if(!state.focusedControl||state.focusedControl.sensitive){backspaceLeft=0;return {result:waitForCommand('FOCUS_REQUIRED')}};
+     backspaceLeft--;const action={kind:'key',key:'backspace'};emit('decided',summary(action,state));
+     return {action:{action:'backspace',generation:state.generation,revision,targets:new Map([['backspace',action]]),observedContinuation:true}};
+    }
+    if(direct&&standardRequest){
+     // The helper's compact observation for one guarded keyboard shortcut.
+     const requested=standardRequest;standardRequest=undefined;
+     const control=state.standardCommand===requested?state.controls.find(c=>c.ref==='standard-'+requested.replace(':','-')&&c.actions.includes('press')):undefined;
+     if(!control){addressPending=undefined;return {result:waitForCommand('SHORTCUT_UNAVAILABLE')}};
+     const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
+     return {action:{action:'standard-shortcut',generation:state.generation,revision,targets:new Map([['standard-shortcut',action]]),observedContinuation:true}};
+    }
+    if(direct&&focusThenType){
+     const pending=focusThenType,control=state.controls.find(c=>!c.sensitive&&c.identity===pending.identity&&c.role===pending.role);
+     if(!control){focusThenType=undefined;await capture();return {result:waitForCommand('FOCUS_REQUIRED')};}
+     const typeInto=(literal:string,submit?:boolean)=>{const action={kind:'type',ref:control.ref};emit('decided',summary(action,state));return {action:{action:'focused-type',generation:state.generation,revision,targets:new Map([['focused-type',action]]),literal,...(submit?{submit}:{}),observedContinuation:true}};};
+     if(!pending.pressed&&!control.focused&&control.actions.includes('press')){
+      pending.pressed=true;const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
+      return {action:{action:'focus',generation:state.generation,revision,targets:new Map([['focus',action]]),observedContinuation:true}};
+     }
+     focusThenType=undefined;return typeInto(pending.text,pending.submit);
+    }
+    if(direct&&!submitAfterType){
+     // Erasing in a focused text field is text editing, never a Delete button.
+     const erase=eraseCommand(goal.goal),field=erase?focusedTextField(state):undefined;
+     if(erase&&field){
+      const characters=[...nativeSegmenter.segment(field.value??'')].map(part=>part.segment);
+      if(!characters.length)return {result:waitForCommand('NOTHING_TO_ERASE')};
+      // A value at the observation limit may be clipped; replacing it would lose text.
+      // A helper with a Backspace key erases in place, keeping formatting.
+      if(erase<=10&&helperSupports(state,'keys','backspace')){
+       erasing=Math.min(erase,characters.length);backspaceLeft=erasing-1;const action={kind:'key',key:'backspace'};emit('decided',summary(action,state));
+       return {action:{action:'backspace',generation:state.generation,revision,targets:new Map([['backspace',action]]),observedContinuation:true}};
+      }
+      if(characters.length>=2000)return {result:waitForCommand('ERASE_UNAVAILABLE')};
+      const action={kind:'type',ref:field.ref};erasing=Math.min(erase,characters.length);emit('decided',summary(action,state));
+      return {action:{action:'erase',generation:state.generation,revision,targets:new Map([['erase',action]]),literal:characters.slice(0,-erasing).join(''),observedContinuation:true}};
+     }
+     const shortcut=shortcutCommand(goal.goal);
+     if(shortcut){
+      if(shortcut.standard&&helperSupports(state,'standardCommands',shortcut.standard))return requestStandard(shortcut.standard);
+      const control=shortcutTarget(state,shortcut.labels);
+      if(!control)return {result:waitForCommand('SHORTCUT_UNAVAILABLE')};
+      const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
+      return {action:{action:'shortcut',generation:state.generation,revision,targets:new Map([['shortcut',action]]),observedContinuation:true}};
+     }
+     // Quitting is high-impact; only an explicit quit of the app in front runs,
+     // through that app's own Quit command.
+     const quit=quitCommand(goal.goal);
+     if(quit){
+      if(!frontIsNamed(state,quit.app))return {result:waitForCommand('SHORTCUT_UNAVAILABLE')};
+      if(helperSupports(state,'standardCommands','app:quit'))return requestStandard('app:quit');
+      const control=quitTarget(state,quit.app);
+      if(!control)return {result:waitForCommand('SHORTCUT_UNAVAILABLE')};
+      const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
+      return {action:{action:'quit',generation:state.generation,revision,targets:new Map([['quit',action]]),observedContinuation:true}};
+     }
+     // Opening a site or address types it into the browser address field and
+     // submits it; without such a field the normal decision applies.
+     const address=addressPending??addressCommand(goal.goal),bar=address?addressField(state):undefined;
+     if(address&&!bar&&!addressPending&&helperSupports(state,'standardCommands','address:focus')){addressPending=address;return requestStandard('address:focus');}
+     if(addressPending&&!bar){addressPending=undefined;return {result:waitForCommand('SHORTCUT_UNAVAILABLE')};}
+     addressPending=undefined;
+     if(address&&bar){
+      const action={kind:'type',ref:bar.ref};emit('decided',summary(action,state));
+      return {action:{action:'address',generation:state.generation,revision,targets:new Map([['address',action]]),literal:address,submit:true,observedContinuation:true}};
+     }
+    }
     const key=direct?standardKeyboardCommand(goal.goal):undefined;
     if(key){
      if(!state.focusedControl||state.focusedControl.sensitive)return {result:waitForCommand('NO_SUPPORTED_ACTION')};
      const action={kind:'key',key};emit('decided',summary(action,state));
      return {action:{action:'key',generation:state.generation,revision,targets:new Map([['key',action]]),observedContinuation:true}};
+    }
+    const navigation=direct?standardNavigationCommand(goal.goal):undefined;
+    if(navigation&&state.supportedActions?.includes(navigation)){
+     const action={kind:'navigate',direction:navigation.split(':')[1]};emit('decided',summary(action,state));
+     return {action:{action:'navigate',generation:state.generation,revision,targets:new Map([['navigate',action]]),observedContinuation:true}};
     }
     // Older relays may omit the compact-observation hint. An exact scroll
     // command still needs no inference when there is only one observed pane.
@@ -128,12 +227,20 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      const targets=new Map([['standard',action]]);emit('decided',summary(action,state));
      return {action:{action:'standard',generation:state.generation,revision,targets,observedContinuation:true}};
     }
+    // Plain text while a text field has focus is text for that field, unless it
+    // names a visible control or reads as a command (recorded "starwork").
+    const focusedField=direct?focusedTextField(state):undefined;
+    if(focusedField&&!standard&&!submitAfterType&&bareText(goal.goal,state)){
+     const action={kind:'type',ref:focusedField.ref};emit('decided',summary(action,state));
+     return {action:{action:'bare-text',generation:state.generation,revision,targets:new Map([['bare-text',action]]),literal:goal.goal.trim(),observedContinuation:true}};
+    }
     const criteria:Record<string,string>={WAIT:'Wait briefly for the observed UI to change',DONE:'The CURRENT command is satisfied by visible evidence. Opening or activating an app completes an open-only command. Focusing a search field does NOT complete a search or typing command; independent verification follows',BLOCKED:'No supported step can progress'};
     const targets=new Map<string,Record<string,unknown>>();
     const offer=(id:string,description:string,action:Record<string,unknown>)=>{if((ineffective.get(identity(state,action))??0)>=2)return;criteria[id]=description;targets.set(id,action);};
     for(const app of state.apps)if(direct||app.id!==state.application||(!state.windowTitle&&state.controls.length===0))offer('open:'+app.id,(app.id===state.application?(direct&&(state.windowTitle||state.controls.length>0)?'Activate ':'Reopen '):'Open ')+app.name+(app.id===state.application&&!direct?' (already active without an actionable window)':''),{kind:'open',app_id:app.id});
+    const contentMatch=direct&&state.controls.some(c=>!c.sensitive&&c.role!=='AXMenuItem'&&menuRelevant(goal.goal,c.label));
     for(const c of state.controls){
-     if(c.sensitive)continue;
+     if(c.sensitive||(direct&&c.role==='AXMenuItem'&&!menuRelevant(goal.goal,c.label,contentMatch)))continue;
      for(const kind of c.actions){
       if(kind==='type'&&satisfiedField?.application===state.application&&satisfiedField.windowTitle===state.windowTitle&&satisfiedField.role===c.role&&satisfiedField.value===c.value){
        const matches=(other:ComputerState['controls'][number])=>other.role===c.role&&(satisfiedField!.label===other.label);
@@ -165,6 +272,13 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      emit('decided',{...(targets.has(selected.action)?summary(targets.get(selected.action)!):{}),requestId,confidence:selected.confidence,elapsedMs:Date.now()-started});
      if(!selected.confident){await capture();return {result:waitForCommand('LOW_CONFIDENCE')};}
      if(selected.action==='WAIT'||selected.action==='BLOCKED'){await capture();return {result:waitForCommand(selected.action==='WAIT'?'UI_NOT_READY':'NO_SUPPORTED_ACTION')};}
+     // A high-impact target needs a confident decision AND a command that
+     // names that operation itself; "ok" or a vague reference is not enough.
+     const planned=targets.get(selected.action),risky=planned&&destructiveTarget(state,planned,false);
+     if(risky&&!(selected.confidence>=DESTRUCTIVE_CONFIDENCE&&commandAuthorizes(goal.goal,risky))){
+      lastAction={kind:String(planned!.kind),label:risky.label.slice(0,200),blocked:true};
+      await capture();return {result:waitForCommand('DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED')};
+     }
      return {action:{...selected,generation:state.generation,revision,targets}};
     }
     // Non-interactive callers retain bounded execution, with a single concrete
@@ -190,6 +304,7 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
    },
    execute:async(d,ctx)=>{
     check();checkInterruption(deps.interruptSignal);update();if(goal.revision!==d.revision)return direct?result('cancelled','REVISION_SUPERSEDED'):undefined;
+    if(d.action==='STANDARD_OBSERVE')return;
     if(d.action==='WAIT'){if(last)previous={state:structuredClone(last),signature:fingerprint(last),identity:'wait',action:{kind:'WAIT'}};emit('waiting');await new Promise<void>((resolve,reject)=>{const stop=()=>{clearTimeout(t);reject(Error('CANCELLED'));};const t=setTimeout(()=>{runSignal.removeEventListener('abort',stop);resolve();},250);runSignal.addEventListener('abort',stop,{once:true});});return;}
     if(d.action==='BLOCKED'){await capture();return waitForCommand('NO_SUPPORTED_ACTION');}
     if(d.action==='DONE'){
@@ -254,9 +369,9 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     check();if(deps.interruptSignal?.aborted){emit('acted',{operationId,outcome:'not_executed',reason:'REVISION_SUPERSEDED'});checkInterruption(deps.interruptSignal);}update();if(goal.revision!==d.revision){emit('acted',{operationId,outcome:'not_executed',reason:'GOAL_CHANGED'});return;}
     pending=operationId;emit('acting',{...summary(action),operationId});const started=Date.now();
     const Receipt=z.object({state:z.enum(['completed','not_executed','unknown']),error:z.string().optional()});
-    let receipt:z.infer<typeof Receipt>;
+    let receipt:z.infer<typeof Receipt>;let rejected:string|undefined;
     try{receipt=Receipt.parse(await call('computer_action',{...action,generation:d.generation,operation_id:operationId}));}
-    catch{receipt={state:'unknown'};}
+    catch(error){receipt={state:'unknown'};if(error instanceof Error&&PRE_DISPATCH_REJECTIONS.has(error.message))rejected=error.message;}
     if(receipt.state==='unknown'){
      emit('reconciling',{...summary(action),operationId,reason:'CHECKING_RECORDED_RESULT'});
      // Read receipts only; never resend the action after a transport failure.
@@ -264,6 +379,10 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
       check();const status=await deps.call('computer_operation_status',{operation_id:operationId},runSignal).catch(()=>undefined);
       const parsed=z.object({operation_id:z.literal(operationId),state:z.enum(['completed','not_executed','unknown']),error:z.string().optional(),owner_acknowledged:z.boolean().optional()}).safeParse(status);
       if(parsed.success){if(parsed.data.owner_acknowledged)return result('cancelled','OWNER_ACKNOWLEDGED_UNKNOWN');receipt=parsed.data;}
+      // An explicit relay rejection with no recorded operation never reached the
+      // device. A bare transport failure with no receipt stays unknown.
+      else if(rejected&&z.object({state:z.literal('not_found')}).safeParse(status).success)receipt={state:'not_executed',error:rejected};
+      else if(rejected&&status===undefined&&rejected!=='DEVICE_OFFLINE')receipt={state:'not_executed',error:rejected};
       if(receipt.state==='unknown'&&retry<2)await new Promise(resolve=>setTimeout(resolve,250));
      }
     }
@@ -278,11 +397,16 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     if(receipt.state==='not_executed'){
      emit('acted',{...summary(action),operationId,outcome:'not_executed',reason:receipt.error&&/^[A-Z][A-Z_0-9]{0,79}$/.test(receipt.error)?receipt.error:'ACTION_REJECTED',elapsedMs:Date.now()-started});
      if(receipt.error==='STALE_OBSERVATION'){if(direct)return waitForCommand('STALE_OBSERVATION');noProgress++;return;}
+     const typed=last?.controls.find(c=>c.ref===action.ref);
+     if(direct&&receipt.error==='FOCUS_REQUIRED'&&action.kind==='type'&&typeof action.text==='string'&&!focusAttempted&&typed?.identity&&typed.actions.includes('press')){
+      focusAttempted=true;focusThenType={identity:typed.identity,role:typed.role,text:action.text,...(submitAfterType?{submit:true}:{})};submitAfterType=undefined;return;
+     }
      if(receipt.error&&['TARGET_OCCLUDED','FOCUS_REQUIRED','FOCUS_UNSUPPORTED'].includes(receipt.error)){last=ComputerObservation.parse(await call('computer_observe'));check();deps.observation?.(last);await capture();return waitForCommand(receipt.error);}
      return result('blocked',receipt.error&&/^[A-Z][A-Z_0-9]{0,79}$/.test(receipt.error)?receipt.error:'ACTION_REJECTED');
     }
     previous={state:structuredClone(last!),signature:fingerprint(last!),identity:identity(last!,action),action,field:last?.controls.find(c=>c.ref===action.ref)};
     steps++;emit('acted',{...summary(action),operationId,outcome:'completed',elapsedMs:Date.now()-started});
+    {const control=previous.field;lastAction={kind:erasing!==undefined?'erase':String(action.kind),...(control&&!control.sensitive?{label:control.label.slice(0,200),role:control.role}:{}),...(typeof action.key==='string'?{key:action.key}:{}),...(typeof action.direction==='string'?{direction:action.direction}:{}),...(typeof action.app_id==='string'?{appId:action.app_id}:{}),...(erasing!==undefined?{count:erasing}:{})};}
     // Consume this command once. A preselected type-and-submit interaction has
     // one guarded Enter remaining; it never asks Jev to extend the command.
     // Waiting with fresh evidence does not assert the user goal succeeded.
@@ -290,9 +414,10 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     // behind a document scan/screenshot after a known completed operation.
     // This acknowledges dispatch, not verified goal completion. Agent control
     // still gathers fresh evidence; unknown outcomes take reconciliation above.
-    if(input.yieldAfterInteraction&&!submitAfterType){last=undefined;return waitForCommand('ACTION_DISPATCHED');}
+    const continuing=Boolean(submitAfterType||focusThenType||addressPending||backspaceLeft>0);
+    if(input.yieldAfterInteraction&&!continuing){last=undefined;return waitForCommand('ACTION_DISPATCHED');}
     if(standard&&last?.standardCommand===standard)return waitForCommand('ACTION_DISPATCHED');
-    if(direct&&!submitAfterType){
+    if(direct&&!continuing){
      // Navigation can replace the focused window between observing and capture.
      // Refresh evidence only; the completed operation must never be replayed.
      for(let attempt=0;attempt<3;attempt++){
@@ -308,5 +433,9 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
    }
   });
  }catch(error){return result(pending||(error instanceof Error&&error.message==='COMPUTER_RECONCILIATION_REQUIRED')?'needs_reconciliation':(signal.aborted||deps.interruptSignal?.aborted)?'cancelled':'blocked',pending?'OUTCOME_UNKNOWN':deps.interruptSignal?.aborted?'REVISION_SUPERSEDED':signal.aborted?'CANCELLED':runSignal.aborted?'TIMEOUT':error instanceof JevError?'JEV_'+error.code:error instanceof Error&&/^[A-Z][A-Z_0-9]{0,79}$/.test(error.message)?error.message:'COMPUTER_USE_FAILED');}
- finally{if(lease){try{await deps.call('computer_release',{lease_token:lease},AbortSignal.timeout(2000));}catch{/* Lease expiry owns abandoned work. */}}}
+ finally{
+  // The relay keeps a lease until it is released (there is no expiry) and a
+  // re-acquire returns the same token, so every exit path releases, once retried.
+  if(lease)for(let attempt=0;attempt<2;attempt++){try{await deps.call('computer_release',{lease_token:lease},AbortSignal.timeout(2000));break;}catch{/* Retry once; the owner can still stop access on the Mac. */}}
+ }
 }

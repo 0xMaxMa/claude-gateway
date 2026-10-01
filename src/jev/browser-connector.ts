@@ -14,6 +14,7 @@ import type { BrowserConnectorConfig, BrowserExecutionContext, BrowserExecutionR
 import type { BrowserTaskBinding } from '../orchestration/gateway-tasks/browser';
 import { JevError } from './types';
 import { isReservedJevCredentialEnv } from './child-env';
+import { importBrowserModule } from './browser-module-import';
 
 const invalid = (): never => { throw new JevError('INVALID_CONFIG', 'Invalid browser integration configuration.'); };
 const object = (v: unknown): v is Record<string, any> => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
@@ -70,9 +71,10 @@ export function resolveBrowserConnection(config: GatewayConfig, agent: AgentConf
   return {endpoint,headers:{Authorization:entries[0][1]}};
 }
 
-// Preserve native import for optional ESM packages when gateway is compiled as CJS.
-const importModule = new Function('url', 'return import(url)') as (url: string) => Promise<BrowserLogicModule>;
-const tools = new Set(['browser_task_acquire','browser_task_renew','browser_task_release','page_observe','page_click','page_type','page_select','page_scroll','tab_navigate']);
+// tab_open is deliberately absent: a binding is one approved tab and a new tab would widen it.
+const tools = new Set(['browser_task_acquire','browser_task_renew','browser_task_release','page_observe','page_click','page_type','page_select','page_scroll','page_keypress','tab_navigate','tab_history']);
+/** Tab/page mutations that need the durable write-ahead fence. */
+export const BROWSER_MUTATIONS = new Set(['page_click','page_type','page_select','page_scroll','page_keypress','tab_navigate','tab_history']);
 async function credential(binding: BrowserConnectorConfig): Promise<string> {
   let key: string;
   if (binding.apiKeyFile) {
@@ -86,7 +88,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
   const assertAccess = () => { if (!context.authorized()) throw Error('ACCESS_DENIED'); };
   assertAccess(); context.signal.throwIfAborted();
   const resolved = isAbsolute(modulePath) ? modulePath : createRequire(__filename).resolve(modulePath);
-  const module = await importModule(pathToFileURL(resolved).href);
+  const module = await importBrowserModule(pathToFileURL(resolved).href);
   if (module.BROWSER_USE_CONTRACT_VERSION !== 1 || typeof module.runBrowserUse !== 'function' || typeof module.mcpBrowserTransport !== 'function') throw Error('BROWSER_ADAPTER_INCOMPATIBLE');
   const key = connection ? undefined : await credential(binding);
   assertAccess(); context.signal.throwIfAborted();
@@ -110,7 +112,7 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       // Release only the already-held lease even after config revocation; no other late call is allowed.
       if (name !== 'browser_task_release') assertAccess();
       if (!tools.has(name) || ['device_id','grant_id','tab_id'].some(k => args[k] !== binding.scope[k as keyof typeof binding.scope])) throw Error('BROWSER_SCOPE_DENIED');
-      if (name === 'tab_navigate' || (name.startsWith('page_') && name !== 'page_observe')) {
+      if (BROWSER_MUTATIONS.has(name) || (name.startsWith('page_') && name !== 'page_observe')) {
         if(context.interruptSignal?.aborted)return {content:[{type:'text',text:JSON.stringify({error:'REVISION_SUPERSEDED',action_executed:false})}],isError:true};
         if (!context.beforeMutation || typeof args.operation_id !== 'string') throw Error('BROWSER_CHECKPOINT_UNAVAILABLE');
         context.signal.throwIfAborted();
@@ -121,7 +123,13 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       return {content:result.content as unknown[],isError:result.isError as boolean | undefined};
     });
     let independentlyVerified = false;
-    const result = await runBrowserController(context, loopSignal => module.runBrowserUse({contractVersion:1,yieldAfterAction:true,goal:context.goal,...(context.startUrl?{startUrl:context.startUrl}:{}),scope:binding.scope,fields:[...(binding.fields??[]).filter(b=>!(context.fields??[]).some(f=>f.label.normalize("NFKC").trim().replace(/\s+/g," ")===b.label.normalize("NFKC").trim().replace(/\s+/g," "))),...(context.fields??[])],...binding.budget}, {
+    // New optional inputs go only to a module that advertises them; an older
+    // installed runner keeps its strict v1 input and the one-action behavior.
+    const features = new Set(Array.isArray(module.BROWSER_USE_FEATURES) ? module.BROWSER_USE_FEATURES : []);
+    const direct = context.command && features.has('direct_command') ? {command:true,...(context.interactionContext?{interactionContext:context.interactionContext.slice(0,8000)}:{})} : {};
+    const stepMode = context.steps?.length && features.has('steps') && typeof module.runBrowserSteps === 'function';
+    const fields=[...(binding.fields??[]).filter(b=>!(context.fields??[]).some(f=>f.label.normalize("NFKC").trim().replace(/\s+/g," ")===b.label.normalize("NFKC").trim().replace(/\s+/g," "))),...(context.fields??[])];
+    const dependencies = (): Parameters<BrowserLogicModule['runBrowserUse']>[1] => ({
       call,
       trace:context.trace,
       interruptSignal:context.interruptSignal,
@@ -131,7 +139,10 @@ export async function executeBrowserModule(modulePath: string, binding: BrowserC
       ...(helper?{
         resolveFieldText:async(request:unknown,signal:AbortSignal)=>{assertAccess();const result=await thinkBrowserField(await thinkingProvider(helper),{...(request as object),referenceTime:new Date().toISOString(),timezone},signal);assertAccess();return result;},
       }:{}),
-    }, loopSignal));
+    });
+    const result = await runBrowserController(context, loopSignal => stepMode
+      ? module.runBrowserSteps!({contractVersion:1,steps:context.steps,scope:binding.scope,fields,...(context.startUrl?{startUrl:context.startUrl}:{}),...(context.interactionContext?{interactionContext:context.interactionContext.slice(0,8000)}:{}),...binding.budget,...(binding.budget?.timeoutMs?{timeoutMs:Math.min(binding.budget.timeoutMs,120000)}:{})}, dependencies(), loopSignal)
+      : module.runBrowserUse({contractVersion:1,yieldAfterAction:true,...direct,goal:context.goal,...(context.startUrl?{startUrl:context.startUrl}:{}),scope:binding.scope,fields,...binding.budget}, dependencies(), loopSignal));
     if (result.status === 'succeeded') {
       assertAccess();
       if (!independentlyVerified || context.signal.aborted) return {...result,status:'needs_verification',reason:'VERIFICATION_FAILED'};
@@ -157,6 +168,7 @@ function browserTransport(connection: BrowserConnection): StreamableHTTPClientTr
     }) as typeof fetch,
   });
 }
+const INSPECTION_STALE_RETRIES=4;
 /** Read-only reconciliation. Operation IDs come from this task's durable receipt, never caller input. */
 export async function inspectBrowser(binding: BrowserConnectorConfig, result: Partial<BrowserExecutionResult> | undefined, signal: AbortSignal, authorized:()=>boolean, connection?:BrowserConnection,screenshot=false): Promise<NonNullable<import('./browser-contract').BrowserEvidence['fresh']>> {
   const check=()=>{signal.throwIfAborted();if(!authorized())throw Error('ACCESS_DENIED');};
@@ -168,11 +180,19 @@ export async function inspectBrowser(binding: BrowserConnectorConfig, result: Pa
   try {
     await client.connect(browserTransport(resolved),{signal,timeout:10000});
     const read=async(name:string,args:Record<string,unknown>)=>{
+      for(let attempt=0;;attempt++){
       check();const reply=await client.callTool({name,arguments:args},undefined,{signal,timeout:10000});check();
-      if(reply.isError)throw Error('BROWSER_INSPECTION_FAILED');
       const text=(reply.content as Array<{type:string;text?:string}>).filter(c=>c.type==='text').map(c=>c.text??'').join('');
+      if(reply.isError){
+        // A read during a committing navigation is retryable (extension 0.3.5+:
+        // STALE_OBSERVATION, cause NAVIGATION_PENDING). Reads never mutate.
+        let stale=false;try{stale=name==='page_observe'&&JSON.parse(text).error==='STALE_OBSERVATION';}catch{}
+        if(stale&&attempt<INSPECTION_STALE_RETRIES){await new Promise<void>(resolve=>setTimeout(resolve,250*(attempt+1)));continue;}
+        throw Error('BROWSER_INSPECTION_FAILED');
+      }
       if(Buffer.byteLength(text)>262144)throw Error('BROWSER_EVIDENCE_TOO_LARGE');
       try{return JSON.parse(text);}catch{throw Error('BROWSER_EVIDENCE_INVALID');}
+      }
     };
     // A leased read never reopens consent after Stop/revoke; acquire fails closed if another task owns the tab.
     const acquired=await read('browser_task_acquire',{...binding.scope,operation_id:randomUUID()});
