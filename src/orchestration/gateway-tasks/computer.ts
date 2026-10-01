@@ -6,7 +6,6 @@ import {mkdirSync,readFileSync,openSync,writeFileSync,fsyncSync,closeSync,rename
 import {join} from 'path';
 import type {ComputerProgress,ComputerUseDependencies,ComputerUseResult} from '../../automation/computer-use';
 import {parseComputerSteps,runComputerSteps} from '../../automation/computer-steps';
-import {repeatCommand} from '../../automation/computer-command';
 import {ComputerConnectors,withComputerConnection} from '../../jev/computer-connector';
 import type {CommandContext,TaskSnapshot,TaskAttempt,TaskRevision,WorkerOutcome,GatewayTaskTarget} from '../types';
 import {GatewayRequestNotSentError,type GatewayTaskAdapter} from './controller';
@@ -52,9 +51,6 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
   const authorized=()=>{try{return this.permitted(t.ownerPrincipalId,t.conversationId)&&this.options.active(t)&&JSON.stringify(this.options.connectors.connection(b.connectorId))===JSON.stringify(connection);}catch{return false;}};
   const previousContext=this.read(t,'interaction-context');
   const contextNote=previousContext&&previousContext.revision<t.revision?computerContinuationContext(previousContext.snapshot,previousContext.trace,previousContext.command,previousContext.lastAction):'';
-  // "อีก"/"again"/"zoom อีก" repeats the previous command, decided afresh on the current screen.
-  const repeated=previousContext&&previousContext.revision<t.revision?repeatCommand(goal,previousContext.command):undefined;
-  if(repeated)goal=repeated;
   const receipt:Receipt={revision:t.revision,taskId:t.taskId,requestId:r,principal:t.ownerPrincipalId,conversation:t.conversationId,ended:false};this.write(t,r,receipt);
   const interrupt=new AbortController(),abort=new AbortController(),signal=AbortSignal.any([abort.signal,AbortSignal.timeout(725000)]),key=this.file(t,r);
   const fence=setInterval(()=>{if(!authorized())abort.abort();},250);fence.unref();

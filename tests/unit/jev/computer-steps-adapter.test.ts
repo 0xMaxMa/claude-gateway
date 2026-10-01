@@ -71,7 +71,7 @@ test('E2E-3: the user\'s own step list is used verbatim instead of the agent\'s 
  expect(runComputerSteps.mock.calls[0][0].steps).toEqual(['เปิด tab ใหม่','scroll ลงมา']);
 });
 
-test('P1-8: "zoom อีก" after "zoom" runs "zoom" again, with the previous action as context',async()=>{
+test('P1-8: "zoom อีก" after "zoom" reaches Jev verbatim, with the previous command and action as context',async()=>{
  const root=mkdtempSync(join(tmpdir(),'computer-repeat-'));runComputerUse.mockClear();
  const callTool=jest.fn(async()=>({content:[{type:'text',text:'{"state":"approved"}'}]}));
  jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
@@ -84,7 +84,9 @@ test('P1-8: "zoom อีก" after "zoom" runs "zoom" again, with the previous a
   await adapter.submit(task,'r1','zoom');await settle(task,'r1');
   await adapter.submit({...task,revision:2},'r2','zoom อีก');await settle({...task,revision:2},'r2');
   const second=runComputerUse.mock.calls[1][0];
-  expect(second.goal).toBe('zoom');
+  expect(second.goal).toBe('zoom อีก');
+  expect(second.interactionContext).toContain('"previousCommand":"zoom"');
+  expect(second.interactionContext).toContain('do it again, in any language, means the previous command');
   expect(second.interactionContext).toContain('"previousAction":{"kind":"press","label":"Zoom in","role":"AXButton"}');
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });

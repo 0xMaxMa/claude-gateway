@@ -87,10 +87,10 @@ describe('E2E-1 in-content controls are not diluted by menu-bar items',()=>{
   const offered=Object.keys(f.requests[0].questions.target_press.criteria);
   expect(offered).toContain('press:c50');expect(offered.some(id=>id.startsWith('press:m'))).toBe(false);
  });
- test('a command that names a menu or shares its words keeps those menu items',async()=>{
-  const f=fixture(chrome(),'press:m4',0.9);
+ test('menu-bar items are offered as their own menu choice',async()=>{
+  const f=fixture(chrome(),'menu:m4',0.9);
   await run(f,'show full history');
-  expect(Object.keys(f.requests[0].questions.target_press.criteria)).toContain('press:m4');
+  expect(Object.keys(f.requests[0].questions.target_menu.criteria)).toContain('menu:m4');
  });
 });
 
@@ -234,8 +234,10 @@ describe('AGENT_HANDOFF: Jev gives up on a single direct command',()=>{
  test('the agent command for a hand-off never quits the app in front',async()=>{
   const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;
   const agent=fixture(state);const r=await agentRun(agent,'quit notes');
+  // Quitting is not even offered to Jev for the agent's command.
+  expect(agent.requests[0].questions.action.criteria.quit).toBeUndefined();
   expect(agent.actions()).toEqual([]);
-  expect(r.lastAction).toMatchObject({blocked:true});
+  expect(r.status).toBe('needs_input');
  });
  test('the agent command for a hand-off never presses a high-impact control, even when named',async()=>{
   const state=notes();delete (state as any).focusedControl;state.controls[0].focused=false;

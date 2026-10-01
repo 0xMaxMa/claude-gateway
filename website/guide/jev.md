@@ -501,9 +501,19 @@ Jev decision over the observed controls and dispatches at most one action.
   refused. A refused or unresolved address dispatches nothing
   (`NAVIGATION_UNRESOLVED`), and an uncertain `NAVIGATE` is
   `LOW_OPERATION_CONFIDENCE`. Otherwise `tab_navigate` opens it in the bound tab.
-- `อีก`, `again`: repeats the previous command, decided afresh on the current
-  page. The previous command, what it did and the page it ended on are passed to
-  Jev as reference context only.
+- **History, keys and a new tab in any language.** The phrases above are only a
+  fast path. Any other wording (for example `前のページに戻って` or
+  `エスケープキーを押して`) goes to Jev, which may choose `HISTORY_BACK`,
+  `HISTORY_FORWARD`, `KEY` (with the key: Enter, Tab, Escape, Backspace or an
+  arrow) or `NEW_TAB`. They are offered only to a single direct command that has
+  not acted yet (not to steps or to the agent's hand-off command), and history and
+  keys only with extension 0.3.5+. Each runs the same primitive as its phrase,
+  with the same rules: `HISTORY_UNAVAILABLE`, the submit fence on Enter, and
+  `NEW_TAB_OUT_OF_SCOPE`.
+- **Repeating.** `อีก`, `again` or `もう一回` is sent to Jev as it is. The previous
+  command, what it did and the page it ended on are passed to Jev as reference
+  context, which says that a command asking to do it again means the previous
+  command, decided afresh on the current page. There is no repeat word list.
 - `พิมพ์ X` / `type X`: when Jev chooses a field, `X` itself is the text (never
   generated text). Any other command Jev decides is text entry (for example
   `เลือกต้นทางเป็นเชียงใหม่`) types the value the text helper resolves for that
@@ -735,10 +745,20 @@ and keep their stricter checks above; for example a step that says `ลบ` stop
   bare address such as `www.google.com` types the address into the browser's
   address bar and presses Enter, without Jev. A few well-known site names map to
   their address (`google` → `google.com`); other text needs a domain or URL.
-  Without an address bar in the front window, the normal decision applies.
-- **Quitting an app.** `ปิด chrome`, `quit chrome`, `ปิดแอป` or `Cmd+Q` press the
-  front application's own Quit menu command. The named application must be the
-  one in front; otherwise nothing is dispatched (`SHORTCUT_UNAVAILABLE`).
+  The address bar is found by accessibility role, not by its on-screen name
+  (which depends on the system language): in a front browser, the one typeable
+  text field, combo box or search field. With several, a helper that offers
+  `address:focus` focuses the bar; otherwise one Jev question picks it. Without
+  an address bar (or outside a browser), the normal decision applies.
+- **Quitting an app.** Quitting is Jev's own `quit` choice, in any language
+  (`ปิด chrome`, `quit chrome`, `Chromeを終了して`); a command that only starts
+  with `ปิด`/`close`, such as `close notification`, is decided like any other.
+  With the helper's `app:quit` the guarded quit shortcut runs; otherwise Jev picks
+  the front application's own Quit menu command. It needs a Jev confidence of at
+  least 0.85 (otherwise `DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED`) and is never
+  offered to the agent's command for a handed-off utterance. A command naming an
+  application that is not in front is left to Jev, which answers `BLOCKED`.
+  `Cmd+Q` uses `app:quit` directly when the helper offers it.
 - **Spoken filler words.** Before matching these phrases, a leading `เอ่อ`,
   `อ่า`, `เอาล่ะ`, `โอเค` or `ok`, trailing particles (`ครับ`, `ค่ะ`, `คะ`, `นะ`,
   `หน่อย`, `จ้า`, `เจ้า`) and a trailing `.`, `!` or `?` are ignored, so
@@ -771,19 +791,22 @@ and keep their stricter checks above; for example a step that says `ลบ` stop
   `ลูกศรลง` or `arrow left` presses that key, like `กด enter`.
 - **Text.** `ค้นหา X`, `search X`, `พิมพ์ X` and `type X` offer `X` itself as the
   text to enter, including Thai commands where the verb joins the text
-  (`ค้นหาเที่ยวบิน เชียงใหม่ โอซาก้า`). While a text field has focus, plain text
-  that is neither a command nor the name of a visible control (for example
-  `starwork`) is typed into that field without Enter.
+  (`ค้นหาเที่ยวบิน เชียงใหม่ โอซาก้า`). While a text field has focus, a command
+  with no such text also offers the whole command as the text, and Jev decides
+  whether it is text to type (for example `starwork` or `こんにちは`, typed without
+  Enter) or an action (`送信ボタンを押して` presses the button). There is no verb
+  list.
 - **Unfocused fields.** If the device refuses typing with `FOCUS_REQUIRED`, the
   same command clicks that field once and types the same text, then presses
   Enter if the command submits. It needs no second Jev decision.
-- **Repeating.** `อีก`, `again` or `zoom อีก` repeats the previous command (or
-  the named one), decided again on the current screen. The previous command and
-  what it did (action and target label) are passed to Jev as context.
-- **Menu-bar items** are offered to Jev only when the command mentions a menu or
-  shares a word with the item and no in-window control matches it as well, so
-  page content is not crowded out by up to 80 menu commands. For example `zoom`
-  offers Maps' `Zoom in`/`Zoom out` buttons, not `Window → Zoom`.
+- **Repeating.** `อีก`, `again` or `zoom อีก` is sent to Jev as it is. The
+  previous command and what it did (action and target label) are passed to Jev
+  as context, which says that a command asking to do it again means the previous
+  command, decided again on the current screen. There is no repeat word list.
+- **Menu-bar items** are Jev's separate `menu` choice, matched by meaning in any
+  language (`コピーして` or `คัดลอก` chooses `Edit → Copy`). In-window controls
+  stay under `press`, so `zoom` still chooses Maps' `Zoom in` button over
+  `Window → Zoom` without any word matching.
 - **Outcome line.** Each settled command sets the task progress text to what was
   done (for example `Done: pressed "New Tab"`) or why nothing was done, with a
   hint (`LOW_CONFIDENCE` with its score, `FIELD_TEXT_REQUIRED`, `FOCUS_REQUIRED`,

@@ -13,7 +13,7 @@ function chrome(extra:Record<string,unknown>={}){
   ...extra};
 }
 const choice=(criteria:Record<string,unknown>,chosen:string)=>({choice:chosen,confidence:0.95,probabilities:Object.fromEntries(Object.keys(criteria).map(k=>[k,k===chosen?0.95:0.05/(Object.keys(criteria).length-1||1)]))});
-function fixture(state:any,handlers:{action?:(args:any)=>any;status?:(args:any)=>any;release?:()=>any;evaluate?:()=>any}={}){
+function fixture(state:any,handlers:{action?:(args:any)=>any;status?:(args:any)=>any;release?:()=>any;evaluate?:(req:any)=>any}={}){
  const calls:any[]=[];
  const deps:ComputerUseDependencies={authorized:()=>true,beforeMutation:()=>{},snapshot:async()=>{},
   call:async(name,args)=>{
@@ -25,7 +25,7 @@ function fixture(state:any,handlers:{action?:(args:any)=>any;status?:(args:any)=
    if(name==='computer_operation_status')return handlers.status?handlers.status(args):{state:'not_found'};
    return {};
   },
-  evaluate:async req=>{if(handlers.evaluate)return handlers.evaluate();return {answers:Object.fromEntries(Object.entries(req.questions).map(([name,q])=>[name,choice(q.criteria as any,name==='action'?'press':name==='target_press'?'press:c5':'BLOCKED')]))};}};
+  evaluate:async req=>{if(handlers.evaluate)return handlers.evaluate(req);return {answers:Object.fromEntries(Object.entries(req.questions).map(([name,q])=>[name,choice(q.criteria as any,name==='action'?'press':name==='target_press'?'press:c5':'BLOCKED')]))};}};
  return {deps,calls,actions:()=>calls.filter(c=>c.name==='computer_action').map(c=>c.args)};
 }
 const run=(f:ReturnType<typeof fixture>,goal:string,signal=new AbortController().signal)=>runComputerUse({goal,yieldAfterInteraction:true},f.deps,signal);
@@ -98,10 +98,17 @@ describe('5. capability-gated standard commands',()=>{
   ?{generation:'s1',application:'com.google.Chrome',standardCommand:args.standard_command,truncated:true,apps:[],capabilities:{standardCommands:['tab:new','address:focus','tab:close','app:quit'],keys:['backspace','enter']},
     controls:[{ref:'standard-'+args.standard_command.replace(':','-'),role:'keyboardShortcut',label:'shortcut',actions:['press']}]}
   :chrome({capabilities:{standardCommands:['tab:new','address:focus','tab:close','app:quit'],keys:['backspace','enter']}});
- test.each([['เปิด tab ใหม่','tab:new'],['ปิด tab','tab:close'],['ปิด chrome','app:quit']])('%s uses standard_command %s when advertised',async(command,standard)=>{
+ test.each([['เปิด tab ใหม่','tab:new'],['ปิด tab','tab:close']])('%s uses standard_command %s when advertised',async(command,standard)=>{
   const f=fixture(capable);await run(f,command);
   expect(f.calls.some(c=>c.name==='computer_observe'&&c.args.standard_command===standard)).toBe(true);
   expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'standard-'+standard.replace(':','-')})]);
+ });
+ // Quitting is Jev's own quit choice (any language); app:quit stays the guarded helper command.
+ test.each(['ปิด chrome','Cmd+Q'])('%s uses standard_command app:quit when advertised',async command=>{
+  const quit=(req:any)=>({answers:Object.fromEntries(Object.entries(req.questions).map(([name,q]:[string,any])=>[name,choice(q.criteria,name==='action'?'quit':name==='target_quit'?'quit:standard-app-quit':Object.keys(q.criteria)[0])]))});
+  const f=fixture(capable,{evaluate:quit});await run(f,command);
+  expect(f.calls.some(c=>c.name==='computer_observe'&&c.args.standard_command==='app:quit')).toBe(true);
+  expect(f.actions()).toEqual([expect.objectContaining({kind:'press',ref:'standard-app-quit'})]);
  });
  test('without the capability the menu path is kept',async()=>{
   const f=fixture(chrome());await run(f,'เปิด tab ใหม่');

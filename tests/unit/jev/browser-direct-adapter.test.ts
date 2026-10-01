@@ -54,14 +54,25 @@ test('an agent-controlled round keeps the agent goal path',async()=>{
  expect(f.contexts[0].command).toBeUndefined();
 });
 
-test('"อีก" repeats the previous command with its context, decided afresh',async()=>{
+test('"อีก" reaches Jev verbatim with the previous command as context, decided afresh',async()=>{
  const f=fixture();
  f.setRun(async()=>({status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:0,lastAction:{operationId:op,operation:'SCROLL_DOWN',outcome:'confirmed'},commandOutcome:{done:true,action:{kind:'scroll',direction:'down'}},observation:{url:'https://a.test/',title:'A'}}));
  await f.a.submit(task(),'r1','scroll ลง');await settle(f.a,task(),'r1');
  await f.a.submit(task({revision:2}),'r2','อีก');await settle(f.a,task({revision:2}),'r2');
- expect(f.contexts[1].goal).toBe('scroll ลง');
+ expect(f.contexts[1].goal).toBe('อีก');
+ expect(f.contexts[1].interactionContext).toContain('do it again, in any language, means the previous command');
  expect(f.contexts[1].interactionContext).toContain('"previousCommand":"scroll ลง"');
  expect(f.contexts[1].interactionContext).toContain('"kind":"scroll"');
+});
+
+test('a Japanese "again" also reaches Jev verbatim with the previous command as context',async()=>{
+ const f=fixture();
+ f.setRun(async()=>({status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:0,lastAction:{operationId:op,operation:'SCROLL_DOWN',outcome:'confirmed'},commandOutcome:{done:true,action:{kind:'scroll',direction:'down'}},observation:{url:'https://a.test/',title:'A'}}));
+ await f.a.submit(task(),'r1','下にスクロール');await settle(f.a,task(),'r1');
+ await f.a.submit(task({revision:2}),'r2','もう一回');await settle(f.a,task({revision:2}),'r2');
+ expect(f.contexts[1].goal).toBe('もう一回');
+ expect(f.contexts[1].interactionContext).toContain('"previousCommand":"下にスクロール"');
+ expect(f.contexts[1].interactionContext).toContain('do it again, in any language, means the previous command');
 });
 
 test('step mode passes the user\'s own step list only when browserSteps is enabled',async()=>{

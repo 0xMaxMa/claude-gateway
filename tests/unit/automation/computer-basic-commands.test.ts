@@ -1,5 +1,5 @@
 import {runComputerUse,type ComputerUseDependencies} from '../../../src/automation/computer-use';
-import {repeatCommand,standardKeyboardCommand,textCommand} from '../../../src/automation/computer-command';
+import {standardKeyboardCommand,textCommand} from '../../../src/automation/computer-command';
 import {computerContinuationContext} from '../../../src/orchestration/gateway-tasks/computer-context';
 
 // Shapes recorded from conversation 7d256cb7, task e0361cb8: revision 9 (Chrome,
@@ -59,15 +59,17 @@ describe('P1-4 basic commands run without a Jev round-trip',()=>{
   expect(f.requests).toHaveLength(0);
   expect(f.actions()).toEqual([{kind:'type',ref:'c0',text:url},{kind:'key',key:'enter'}]);
  });
+ // Quitting is Jev's own quit choice: one decision, then the app's own Quit command.
  test.each(['ปิด chrome','quit chrome','ปิดแอป','Cmd+Q'])('%s quits the front app through its own Quit menu command',async command=>{
-  const f=fixture(chrome());
+  const f=fixture(chrome(),()=>'quit:m0');
   const r=await run(f,command);
-  expect(f.requests).toHaveLength(0);expect(f.actions()).toEqual([{kind:'press',ref:'m0'}]);
+  expect(f.requests).toHaveLength(1);expect(f.actions()).toEqual([{kind:'press',ref:'m0'}]);
   expect(r.lastAction).toMatchObject({kind:'press',label:'Menu: Chrome → Quit Google Chrome'});
  });
  test('quitting an app that is not in front is refused rather than guessed',async()=>{
   const f=fixture(chrome());const r=await run(f,'ปิด maps');
-  expect(f.actions()).toEqual([]);expect(r.trace.events.some(e=>e.reason==='SHORTCUT_UNAVAILABLE')).toBe(true);
+  expect(f.requests[0].questions.target_quit).toBeDefined();
+  expect(f.actions()).toEqual([]);expect(r.trace.events.some(e=>e.reason==='NO_SUPPORTED_ACTION')).toBe(true);
  });
  test('ปิด tab presses Close Tab',async()=>{const f=fixture(chrome());await run(f,'ปิด tab');expect(f.actions()).toEqual([{kind:'press',ref:'m2'}]);});
 });
@@ -79,9 +81,11 @@ describe('P1-5 text extraction',()=>{
   expect(Object.values(f.requests[0].questions.text.criteria)).toContain(JSON.stringify({text:'เที่ยวบิน เชียงใหม่ โอซาก้า'}));
   expect(f.actions()).toEqual([{kind:'type',ref:'c0',text:'เที่ยวบิน เชียงใหม่ โอซาก้า'},{kind:'key',key:'enter'}]);
  });
- test('revision 30: bare text with a focused field is typed without Enter',async()=>{
-  const f=fixture(maps(true));await run(f,'starwork');
-  expect(f.requests).toHaveLength(0);expect(f.actions()).toEqual([{kind:'type',ref:'c0',text:'starwork'}]);
+ test('revision 30: bare text with a focused field is typed without Enter, as Jev decides',async()=>{
+  const f=fixture(maps(true),()=>'type:c0');await run(f,'starwork');
+  expect(f.requests).toHaveLength(1);
+  expect(Object.values(f.requests[0].questions.text.criteria)).toContain(JSON.stringify({text:'starwork'}));
+  expect(f.actions()).toEqual([{kind:'type',ref:'c0',text:'starwork'}]);
  });
  test('bare text naming a visible control is not typed',async()=>{
   const f=fixture(maps(true),req=>'press:c14');await run(f,'zoom');
@@ -119,16 +123,10 @@ describe('P1-8 command context and in-content preference',()=>{
   const offered=Object.keys(f.requests[0].questions.target_press.criteria);
   expect(offered).toContain('press:c14');expect(offered.some(id=>id.startsWith('press:m'))).toBe(false);
  });
- test('a command that names the menu keeps it',async()=>{
-  const f=fixture(maps(false),req=>'press:m1');await run(f,'เมนู window zoom');
-  expect(Object.keys(f.requests[0].questions.target_press.criteria)).toContain('press:m1');
- });
- test('"อีก" and "zoom อีก" repeat the previous command',()=>{
-  expect(repeatCommand('zoom อีก','zoom')).toBe('zoom');
-  expect(repeatCommand('อีก','zoom in')).toBe('zoom in');
-  expect(repeatCommand('again','scroll down')).toBe('scroll down');
-  expect(repeatCommand('อีกครั้ง',undefined)).toBeUndefined();
-  expect(repeatCommand('เปิดอีกแท็บ','zoom')).toBeUndefined();
+ test('menu-bar commands are their own choice for Jev',async()=>{
+  const f=fixture(maps(false),req=>'menu:m1');await run(f,'เมนู window zoom');
+  expect(Object.keys(f.requests[0].questions.target_menu.criteria)).toContain('menu:m1');
+  expect(f.actions()).toEqual([{kind:'press',ref:'m1'}]);
  });
  test('the previous action and its target reach Jev as context',()=>{
   const note=computerContinuationContext({observedAt:1,state:{application:'com.apple.Maps'}},[],'zoom',{kind:'press',label:'Zoom in',role:'AXButton'});

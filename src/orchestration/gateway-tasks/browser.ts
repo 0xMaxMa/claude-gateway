@@ -8,7 +8,6 @@ import { JevError, JevRequest, JevResult } from '../../jev/types';
 import { CommandContext, GatewayTaskTarget, OrchestrationError, TaskSnapshot, TaskRevision, WorkerOutcome } from '../types';
 import { GatewayTaskAdapter } from './controller';
 import { parseCommandSteps } from '../../automation/command-steps';
-import { repeatCommand } from '../../automation/direct-command';
 import { browserInteractionContext, type BrowserCommandAction } from '../../automation/browser-command';
 
 /** Registered by trusted host integration, never by a model-supplied URL or command.
@@ -101,9 +100,6 @@ export class BrowserTaskAdapter implements GatewayTaskAdapter {
     const command=task.automationController==='user';
     const previous=command?this.read(task,'interaction-context'):undefined;
     const previousContext=previous&&(previous.revision??0)<task.revision?previous:undefined;
-    // "อีก"/"again" repeats the previous command, decided afresh on the current page.
-    const repeated=previousContext?repeatCommand(instructions,previousContext.command):undefined;
-    if(repeated)instructions=repeated;
     const interactionContext=previousContext?browserInteractionContext({command:previousContext.command,...previousContext.interaction}):'';
     // Step mode takes only the user's own step list; field answers keep the one-command path.
     // The agent's command for a handed-off utterance: one command, no step list, and

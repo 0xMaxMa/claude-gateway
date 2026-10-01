@@ -1,4 +1,4 @@
-import {buildComputerCommand,readComputerCommand,labelCommand,labelTarget,standardComputerCommand,standardKeyboardCommand,standardNavigationCommand,shortcutCommand,shortcutTarget,menuRelevant,addressCommand,addressField,quitCommand,quitTarget,bareText,frontIsNamed,frontIsBrowser,helperSupports} from './computer-command';
+import {buildComputerCommand,readComputerCommand,labelCommand,labelTarget,standardComputerCommand,standardKeyboardCommand,standardNavigationCommand,shortcutCommand,shortcutTarget,addressCommand,addressFields,quitShortcut,frontIsBrowser,helperSupports,STANDARD_QUIT} from './computer-command';
 import {agentCommandBlock,commandAuthorizes,destructiveLabel,destructiveTarget,DESTRUCTIVE_CONFIDENCE,eraseCommand,focusedTextField,textFocused} from './computer-safety';
 import {decisionInstructions,readChoice,observedEffect,decisionState,literalTextCandidates} from './computer-policy';
 import {checkInterruption,interruptible} from './interrupt';
@@ -224,23 +224,28 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
       const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
       return {action:{action:'shortcut',generation:state.generation,revision,targets:new Map([['shortcut',action]]),observedContinuation:true}};
      }
-     // Quitting is high-impact; only an explicit quit of the app in front runs,
-     // through that app's own Quit command.
-     const quit=quitCommand(goal.goal);
-     if(quit){
-      if(!frontIsNamed(state,quit.app))return {result:waitForCommand('SHORTCUT_UNAVAILABLE')};
-      if(supports(state,'app:quit'))return requestStandard('app:quit');
-      const control=quitTarget(state,quit.app);
-      if(!control)return {result:waitForCommand('SHORTCUT_UNAVAILABLE')};
-      const action={kind:'press',ref:control.ref};emit('decided',summary(action,state));
-      return {action:{action:'quit',generation:state.generation,revision,targets:new Map([['quit',action]]),observedContinuation:true}};
-     }
+     // The exact Cmd+Q shortcut uses the helper's guarded quit; any other quit
+     // wording (any language) is Jev's own quit choice below.
+     if(quitShortcut(goal.goal)&&supports(state,'app:quit'))return requestStandard('app:quit');
      // Opening a site or address types it into the browser address field and
-     // submits it; without such a field the normal decision applies.
-     const address=addressPending??addressCommand(goal.goal),bar=address?addressField(state):undefined;
+     // submits it; without such a field the normal decision applies. The field
+     // is found by role (after address:focus, the focused field), never by its
+     // on-screen name; several candidates are Jev's choice.
+     const address=addressPending??addressCommand(goal.goal);
+     const fields=address&&!addressPending?addressFields(state):[];
+     let bar=addressPending?focusedTextField(state):fields.length===1?fields[0]:undefined;
      if(address&&!bar&&!addressPending&&supports(state,'address:focus')){addressPending=address;return requestStandard('address:focus');}
      if(addressPending&&!bar){addressPending=undefined;return {result:shortcutMissing(state)};}
      addressPending=undefined;
+     if(address&&!bar&&fields.length>1){
+      const criteria:Record<string,string>={NONE:'None of these fields is the browser address bar'};
+      for(const field of fields)criteria['field:'+field.ref]=JSON.stringify({role:field.role,label:field.label,value:field.value,focused:field.focused});
+      const requestId=randomUUID(),started=Date.now();emit('evaluating',{requestId,decisionMode:'jev'});
+      const answer=await interruptible(s=>deps.evaluate({requestId,state:{command:goal.goal,desktop:{application:state.application,windowTitle:state.windowTitle}},questions:{field:{type:'choice',instructions:{command:goal.goal,question:'Which field is the web browser address bar, where a web address is entered (not a search or input field inside the web page)?'},criteria}}},s),runSignal,deps.interruptSignal);
+      check();checkInterruption(deps.interruptSignal);evaluations++;
+      const picked=readChoice(answer.answers.field,criteria);emit('decided',{requestId,confidence:picked.confidence,elapsedMs:Date.now()-started});
+      if(picked.confident&&picked.choice!=='NONE')bar=fields.find(f=>'field:'+f.ref===picked.choice);
+     }
      if(address&&bar){
       const action={kind:'type',ref:bar.ref};emit('decided',summary(action,state));
       return {action:{action:'address',generation:state.generation,revision,targets:new Map([['address',action]]),literal:address,submit:true,observedContinuation:true}};
@@ -270,20 +275,21 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      const targets=new Map([['standard',action]]);emit('decided',summary(action,state));
      return {action:{action:'standard',generation:state.generation,revision,targets,observedContinuation:true}};
     }
-    // Plain text while a text field has focus is text for that field, unless it
-    // names a visible control or reads as a command (recorded "starwork").
-    const focusedField=direct?focusedTextField(state):undefined;
-    if(focusedField&&!standard&&!submitAfterType&&bareText(goal.goal,state)){
-     const action={kind:'type',ref:focusedField.ref};emit('decided',summary(action,state));
-     return {action:{action:'bare-text',generation:state.generation,revision,targets:new Map([['bare-text',action]]),literal:goal.goal.trim(),observedContinuation:true}};
-    }
     const criteria:Record<string,string>={WAIT:'Wait briefly for the observed UI to change',DONE:'The CURRENT command is satisfied by visible evidence. Opening or activating an app completes an open-only command. Focusing a search field does NOT complete a search or typing command; independent verification follows',BLOCKED:'No supported step can progress'};
     const targets=new Map<string,Record<string,unknown>>();
     const offer=(id:string,description:string,action:Record<string,unknown>)=>{if((ineffective.get(identity(state,action))??0)>=2)return;criteria[id]=description;targets.set(id,action);};
     for(const app of state.apps)if(direct||app.id!==state.application||(!state.windowTitle&&state.controls.length===0))offer('open:'+app.id,(app.id===state.application?(direct&&(state.windowTitle||state.controls.length>0)?'Activate ':'Reopen '):'Open ')+app.name+(app.id===state.application&&!direct?' (already active without an actionable window)':''),{kind:'open',app_id:app.id});
-    const contentMatch=direct&&state.controls.some(c=>!c.sensitive&&c.role!=='AXMenuItem'&&menuRelevant(goal.goal,c.label));
+    // A direct command gets menu-bar commands as their own choice (matched by
+    // meaning, any language) and quitting the front app as another.
+    const menus=direct?state.controls.filter(c=>!c.sensitive&&c.role==='AXMenuItem'&&c.actions.includes('press')):[];
+    if(direct&&!input.agentCommand){
+     const front=state.apps.find(app=>app.id===state.application)?.name??state.application;
+     if(supports(state,'app:quit'))offer('quit:'+STANDARD_QUIT,JSON.stringify({operation:'Quit the application in front',application:front}),{kind:'press',ref:STANDARD_QUIT});
+     else for(const c of menus)offer('quit:'+c.ref,JSON.stringify({kind:'press',ref:c.ref,label:c.label,role:c.role}),{kind:'press',ref:c.ref});
+    }
+    for(const c of menus)offer('menu:'+c.ref,JSON.stringify({kind:'press',ref:c.ref,label:c.label,role:c.role}),{kind:'press',ref:c.ref});
     for(const c of state.controls){
-     if(c.sensitive||(direct&&c.role==='AXMenuItem'&&!menuRelevant(goal.goal,c.label,contentMatch)))continue;
+     if(c.sensitive||menus.includes(c))continue;
      for(const kind of c.actions){
       if(kind==='type'&&satisfiedField?.application===state.application&&satisfiedField.windowTitle===state.windowTitle&&satisfiedField.role===c.role&&satisfiedField.value===c.value){
        const matches=(other:ComputerState['controls'][number])=>other.role===c.role&&(satisfiedField!.label===other.label);
@@ -319,6 +325,13 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      if(selected.action==='BLOCKED'||selected.action==='UNCLEAR'){await capture();return {result:waitForCommand(selected.action==='UNCLEAR'?'UNCLEAR':'NO_SUPPORTED_ACTION',input.yieldAfterInteraction&&input.readRequest?{decisionMode:'jev'}:{})};}
      // No action: the gateway hands the command to the agent, which reads the screen.
      if(selected.action==='READ_REQUEST'){await capture();return {result:waitForCommand('READ_REQUEST')};}
+     // Quitting is high-impact: only Jev's own confident quit choice, never the
+     // agent's command for a handed-off utterance (it is not offered then).
+     if(selected.action.startsWith('quit:')){
+      if(selected.confidence<DESTRUCTIVE_CONFIDENCE){lastAction={kind:'press',label:'Quit',blocked:true};await capture();return {result:waitForCommand('DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED')};}
+      if(selected.action==='quit:'+STANDARD_QUIT)return requestStandard('app:quit');
+      return {action:{...selected,generation:state.generation,revision,targets}};
+     }
      // A high-impact target needs a confident decision AND a command that
      // names that operation itself; "ok" or a vague reference is not enough.
      const planned=targets.get(selected.action),risky=planned&&destructiveTarget(state,planned,false);

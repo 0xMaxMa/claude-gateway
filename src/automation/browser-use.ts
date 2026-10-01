@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {COMMAND_DECISION_FAILURES,READ_REQUEST_CRITERION,UNCLEAR_CRITERION,textCommand} from "./direct-command";
 import {runBrowserStepsWith,type BrowserStepsInput} from "./browser-steps";
-import {blankTabUrl,browserDestructiveBlock,navigationUrl,browserSubmitBlock,planBrowserCommand,searchFields,type BrowserCommandAction,type BrowserCommandOutcome,type BrowserCommandPlan} from "./browser-command";
+import {blankTabUrl,browserDestructiveBlock,navigationUrl,browserSubmitBlock,planBrowserCommand,searchFields,type BrowserCommandAction,type BrowserCommandOutcome,type BrowserCommandPlan,type BrowserKey} from "./browser-command";
 
 export const BROWSER_USE_CONTRACT_VERSION = 1 as const;
 /** Optional inputs this runner accepts within contract v1; hosts pass them only when advertised. */
@@ -268,6 +268,16 @@ const NEXT_ACTION =
 // Jev picks the operation only; the text helper resolves the address and
 // navigationUrl() checks it. No site list.
 const NAVIGATE_CRITERION = "The command asks to open or go to a website by its name, domain or address in this tab, rather than to use a link or control shown on the page. The address is resolved separately.";
+// History, keys and a new tab are Jev's choices too (any language); the exact
+// phrase lists in browser-command.ts are only a fast path. Each runs through
+// the same guarded primitive as its fast path (Enter keeps the submit fence).
+const HISTORY_CRITERIA = {
+  HISTORY_BACK: "The command asks to go back to the previous page in this tab's history.",
+  HISTORY_FORWARD: "The command asks to go forward to the next page in this tab's history.",
+};
+const KEY_CRITERION = "The command asks to press a keyboard key (such as Enter, Tab, Escape, Backspace or an arrow key) on the current focus, rather than click a control or type text.";
+const NEW_TAB_CRITERION = "The command asks to open a new, separate browser tab.";
+const KEYS: Record<BrowserKey, string> = { Enter: "Enter (submits or activates the focused element)", Tab: "Tab (moves focus to the next element)", Escape: "Escape (closes or cancels)", Backspace: "Backspace (deletes the character before the cursor)", ArrowUp: "Arrow up", ArrowDown: "Arrow down", ArrowLeft: "Arrow left", ArrowRight: "Arrow right" };
 const ADDRESS_FIELD: Observation["elements"][number] = { ref: "address", label: "Address of the website the command asks to open (an https URL or a domain name, not a search query)", tag: "input", type: "url", operations: ["TYPE_TEXT"] };
 /** Only the current site (origin) of a web page; never its path, query or a non-web URL. */
 function pageOrigin(url: string): string {
@@ -288,6 +298,15 @@ export function decisionQuestions(page: Observation, goal = "", exhaustedTextFie
   if (command && readRequest) { operations.READ_REQUEST = READ_REQUEST_CRITERION; operations.UNCLEAR = UNCLEAR_CRITERION; }
   // Likewise only before this command acted, and only with a text helper to resolve the site.
   if (command && readRequest && navigate) operations.NAVIGATE = NAVIGATE_CRITERION;
+  if (command && readRequest) {
+    operations.NEW_TAB = NEW_TAB_CRITERION;
+    // tab_history and page_keypress need extension 0.3.5+ (observation.navigation).
+    if (page.navigation) {
+      Object.assign(operations, HISTORY_CRITERIA);
+      operations.KEY = KEY_CRITERION;
+      questions.key_target = { type: "choice", instructions: JSON.stringify({ goal, operation: "KEY", target: "Which keyboard key does the command ask to press?" }), criteria: { ...KEYS } };
+    }
+  }
   if (page.scroll.up) operations.SCROLL_UP = "Scroll up";
   if (page.scroll.down) operations.SCROLL_DOWN = "Scroll down";
   for (const op of ["CLICK", "TYPE_TEXT", "SELECT"] as const) {
@@ -952,6 +971,14 @@ export async function runBrowserUse(
         );
       }
       if (steps >= input.maxSteps) return result("blocked", "ACTION_BUDGET");
+      if (op.choice === "NEW_TAB") return (await directCommand({ kind: "new_tab" }))!;
+      if (op.choice === "HISTORY_BACK" || op.choice === "HISTORY_FORWARD")
+        return (await directCommand({ kind: "history", direction: op.choice === "HISTORY_BACK" ? "back" : "forward" })) ?? result("blocked", "NO_SUPPORTED_ACTION");
+      if (op.choice === "KEY") {
+        const key = validated.key_target;
+        if (!key || key.confidence < input.targetConfidence) return result("blocked", "LOW_TARGET_CONFIDENCE");
+        return (await directCommand({ kind: "key", key: key.choice as BrowserKey, repeat: 1 }))!;
+      }
       if (op.choice === "NAVIGATE") {
         if (op.confidence < 0.55 || op.probabilities.NAVIGATE < 0.5) return result("blocked", "LOW_OPERATION_CONFIDENCE");
         if (textCalls >= input.maxTextCalls) return result("blocked", "TEXT_BUDGET");

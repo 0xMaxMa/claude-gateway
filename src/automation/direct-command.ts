@@ -139,13 +139,3 @@ export function addressCommand(command:string):string|undefined {
  const url=literalTextCandidates(target);
  return url.length===1&&url[0]===target&&/^(?:https?:\/\/|www\.)|\.[a-z]{2,}(?:\/|$)/iu.test(target)?target:undefined;
 }
-
-/**
- * "อีก", "again", "zoom อีก": repeat the previous command (or the named one).
- * The repeated command is decided afresh on the current state, never replayed.
- */
-export function repeatCommand(command:string,previous:string|undefined):string|undefined {
- const match=/^(?:(.+?)\s*)?(?:อีก(?:ครั้ง|ที|รอบ)?|again|once more|repeat|ซ้ำ)$/iu.exec(command.trim());
- if(!match)return;
- return match[1]?.trim()||previous?.trim()||undefined;
-}
