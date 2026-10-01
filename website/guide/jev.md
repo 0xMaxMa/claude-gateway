@@ -89,7 +89,7 @@ Each agent can set `jev.enabled: false` to narrow global permission. An agent ca
 
 There are no automatic retries or automatic switches to another billing source. A timeout or cancelled request does not establish that the provider did no work or charged nothing.
 
-The `features` block reserves `browserTasks`, `skillRouting`, `progressFiltering`, and `conversationIntake` enable flags. These do not automatically install a browser adapter or activate future classification features. See the implementation boundary below.
+The `features` block reserves `browserTasks`, `skillRouting`, `progressFiltering`, and `conversationIntake` enable flags. `computerSteps` enables step-by-step Computer Use (see below). These do not automatically install a browser adapter or activate future classification features. See the implementation boundary below.
 
 ## Typed questions and answers
 
@@ -494,6 +494,78 @@ before claiming a retry is queued; provider failures, cancellation and unknown
 mutations remain excluded from automatic recovery. An unchanged page alone does
 not prove a website is blocking automation.
 
+### Remote Browser direct commands and step mode
+
+While the user controls a Remote Browser task (the default after spawn), each
+command runs as a direct command, as for Computer Use. An unambiguous command
+maps to one extension primitive without a Jev round-trip; anything else gets one
+Jev decision over the observed controls and dispatches at most one action.
+
+- `scroll ลง`, `เลื่อนขึ้น`, `scroll down`, `page down`: `page_scroll` with the
+  observed `generation`. At the top or bottom nothing is sent (`SCROLL_LIMIT`).
+- `enter`, `กด tab`, `esc`, `ลูกศรลง`, `backspace x3`: `page_keypress` (native
+  key codes, so Enter submits and Tab moves focus).
+- `กลับ`, `ย้อนกลับ`, `back`, `ไปข้างหน้า`, `forward`: `tab_history`. When
+  `observation.navigation` says there is no such entry, nothing is sent and the
+  command reports `HISTORY_UNAVAILABLE`; the extension's own `HISTORY_UNAVAILABLE`
+  rejection is recorded as not executed, never as an unknown outcome.
+- `ค้นหา X`, `search X`: `page_type` with `submit: true` (text and Enter under one
+  operation ID) into the only search-like field. With several editable fields,
+  one Jev question chooses the field.
+- `เข้า google`, `เปิด youtube`, `go to example.com`, a bare URL: `tab_navigate`
+  in the bound tab.
+- `อีก`, `again`: repeats the previous command, decided afresh on the current
+  page. The previous command, what it did and the page it ended on are passed to
+  Jev as reference context only.
+- `พิมพ์ X` / `type X`: when Jev chooses a field, `X` itself is the text (never
+  generated text).
+- **New tab.** A binding is one user-approved tab. `เปิด tab ใหม่`, `new tab` and
+  `Cmd+T` do not open another tab (`tab_open` is not allowed): that would widen
+  the approved scope silently. The command answers `NEW_TAB_OUT_OF_SCOPE` and the
+  next command (for example `เข้า google`) runs in the approved tab. In step mode
+  the step is recorded as a note and the run continues in the same tab.
+- **High-impact controls.** Clicking or selecting a control whose label, value or
+  context names delete, send, submit, pay, buy, publish, quit or confirm (English
+  or Thai) needs a command that names the same operation and a Jev confidence of
+  at least 0.85. Otherwise nothing is dispatched
+  (`DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED`).
+- **Outcome line.** Each settled command sets the task progress text to `Done:
+  …` (for example `Done: searched in "Search"`) or `Not done: …` with a hint.
+  A not-done command dispatched nothing; the session keeps waiting for the next
+  command instead of failing.
+- **Rapid commands.** Commands typed while the previous one is running are
+  queued first-in, first-out (up to 20) and delivered verbatim, exactly as for
+  Computer Use. A settled round is applied at once and the next command
+  dispatched without waiting for the next poll.
+- **Replaced sessions.** A new spawn for the same tab replaces a session that
+  failed before any tab action; a session that acted still needs `task_update`
+  or `task_cancel`.
+
+`page_keypress`, `tab_history` and `page_type` `submit` need Remote Browser
+extension 0.3.5+, which also reports `observation.navigation` and
+`truncated.title/url`. Without `navigation` in the observation, keys report
+`KEY_UNSUPPORTED` and back/forward and search use the normal Jev decision
+instead. A leased read after a navigation may fail with `STALE_OBSERVATION`
+cause `NAVIGATION_PENDING`; Gateway re-reads with a short backoff (its own
+budget of six reads) and never replays the action. Fresh inspection reads retry
+the same way.
+
+Set `features.browserSteps.enabled: true` (default: off, live reload) to run the
+user's own step list, for example
+`เปิด tab ใหม่, เข้า google, ค้นหา แมว, เข้า link แรก, scroll ลงมา`, on one tab
+lease. The grammar is the one described in
+[Step-by-step commands](#step-by-step-commands): the user's initiating message is
+used verbatim when it is a step list, at most 12 steps within 120 seconds. Each
+part is one direct command as above with the strict high-impact fence (every
+high-impact control, including a generic `OK`, returns control). After each
+action the page is compared with the state before it, polling a few fresh reads
+while a navigation commits; scroll and key steps without a visible change are
+listed in `unverifiedSteps`. A step that finds nothing right after an earlier
+step is re-observed up to twice; nothing was dispatched, so no action repeats.
+`browserReport.stepRun` has the same `stopReason` values, `doneParts` and
+`remaining` as Computer Use, plus `notes` (for example the kept tab).
+Answers to field questions keep the one-command path.
+
 ## Fresh-state decisions
 
 Browser Use and Computer Use select actions with Jev using fresh MCP observations.
@@ -517,6 +589,58 @@ are available by default; set `features.computerTasks.enabled: false` to disable
 The shared `gateway.jev.thinking` supplies field text and independent completion
 verification. Without a Thinking helper, unknown field values require input and
 completion candidates are never reported as verified success.
+
+### Step-by-step commands
+
+Set `features.computerSteps.enabled: true` (default: off) to run an explicit step
+list without returning to the parent agent after each step, for example
+`เปิด tab ใหม่, เข้า google, ค้น cats, เข้า link แรก, scroll ลงมา`. A numbered or
+bulleted list yields exactly its items; text before the list, such as a role
+sentence or a `Steps:` header, is ignored. Otherwise steps are split on commas, new
+lines, and the Thai connectors `แล้ว` and `จากนั้น` (when preceded by a space),
+after dropping a leading `You are ...`/`คุณกำลัง ...` context sentence, a
+header line ending in `:`, and an inline header such as
+`ทำตามขั้นตอนนี้ทีละขั้น: a, b` (a colon followed by a space; URLs and times are
+never headers). Pacing notes such as `start with step 1` or
+`เริ่มจากขั้นตอนที่ 1` are ignored. Quoted text is never split. Text after a list,
+mixed numbered and bulleted items, conditional wording anywhere, a single
+step, more than 12 steps, or a step over 300 characters keeps the normal
+one-command path. Answers, recovery notes and agent-prepared field values also
+keep the normal one-command path.
+
+When the user's own message that started the round contains a step list, that
+list is used verbatim instead of the parent agent's rewritten goal; the agent
+goal is used only when the user's message is not a step list. Direct control
+text and later continuations of the same message never reuse it.
+
+One desktop lease is held for the run. Each step is handled as a direct command:
+Jev chooses only from observed controls, and typed text comes only from that
+step's own words. Exact scroll, key and back/forward commands skip Jev, and so
+do the browser shortcuts below. A listed step that joins commands with `แล้ว`,
+`จากนั้น` or `then` (for example `เปิด Chrome แล้วกด Cmd+T`) runs each part in
+order and completes only when every part took effect; when it stops part-way,
+`stepRun.doneParts` lists the parts already done. After each part, the
+accessibility tree is compared with the state before the action. If a step finds
+no matching control right after an earlier step, for example a results page
+still loading, it is re-observed up to twice before stopping; nothing was
+dispatched, so this never repeats an action. Screenshots are captured only when
+the run stops.
+
+The run stops and returns control, with `computerReport.stepRun` giving the
+completed steps, `stopReason` and remaining steps, when:
+
+- a Jev decision is below the confidence threshold, is ambiguous, or needs text
+  (`STEP_NOT_EXECUTED`)
+- a step's wording or chosen target is high-impact, such as send, submit, delete,
+  trash, quit, pay, buy, confirm or a dialog OK (`DESTRUCTIVE_STEP`,
+  `DESTRUCTIVE_ACTION`). These steps are never dispatched automatically, and the
+  parent agent must get explicit user confirmation
+- an action produces no observable change (`STEP_NO_EFFECT`). Up to three
+  boundary scrolls in a row are tolerated and listed in `unverifiedSteps`
+- an action outcome is unknown (`OUTCOME_UNKNOWN`). This uses normal
+  reconciliation and never replays the action
+- the 120-second run limit is reached (`TIMEOUT`), or all steps are done
+  (`ALL_STEPS_DONE`)
 
 1. Call `capabilities_list` with `scope: "computer"` to discover ready devices.
 2. Submit `task_spawn` with `target_profile: "gateway-managed"` and
@@ -550,6 +674,133 @@ field value. Known answers are reused only for a uniquely matching scoped field.
 After restart, queued computer work refreshes scoped device discovery before
 requesting consent. Definite failures before dispatch end as failed; transport or
 mutation outcomes that cannot be established remain fenced for reconciliation.
+
+### Direct commands
+
+These rules apply to every single Computer Use command, whether typed by the user
+through direct control or sent by the agent. Step lists apply them to each part
+and keep their stricter checks above; for example a step that says `ลบ` stops as
+`DESTRUCTIVE_STEP`.
+
+- **Erasing text.** With a text field focused, `ลบ`, `ลบๆๆ`, `delete 3`,
+  `backspace x2` and similar erase characters at the end of that field (one plus
+  one per `ๆ`, or the given count, up to 50). They never press a Delete button.
+  The field value is rewritten without those characters, so this is refused
+  (`ERASE_UNAVAILABLE`) when the observed value may be clipped.
+- **High-impact controls.** Pressing a control labelled delete, remove, trash,
+  send, submit, pay, buy, confirm, quit, sign out and similar (English or Thai),
+  or `OK`/`Yes` in a dialog whose text names such an operation, needs a Jev
+  confidence of at least 0.85 and a command that itself names the same
+  operation, for example `กด Delete` or `ยืนยันลบ`. `ok` or a vague reference is
+  not enough. Otherwise nothing is dispatched and the command waits with
+  `DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED`.
+- **Browser shortcuts.** `Cmd+T`/`⌘T`/`new tab`/`เปิด tab ใหม่`, `Cmd+N`/`new
+  window` and `Cmd+W`/`close tab`/`ปิดแท็บ` press the front application's own
+  menu command (or an identically named button) without Jev. If it is not
+  available the command waits with `SHORTCUT_UNAVAILABLE` rather than doing
+  something else.
+- **Opening a site.** `เข้า google`, `เปิด youtube`, `go to example.com` or a
+  bare address such as `www.google.com` types the address into the browser's
+  address bar and presses Enter, without Jev. A few well-known site names map to
+  their address (`google` → `google.com`); other text needs a domain or URL.
+  Without an address bar in the front window, the normal decision applies.
+- **Quitting an app.** `ปิด chrome`, `quit chrome`, `ปิดแอป` or `Cmd+Q` press the
+  front application's own Quit menu command. The named application must be the
+  one in front; otherwise nothing is dispatched (`SHORTCUT_UNAVAILABLE`).
+- **Keys.** A bare key name such as `enter`, `return`, `tab`, `esc`, `up`,
+  `ลูกศรลง` or `arrow left` presses that key, like `กด enter`.
+- **Text.** `ค้นหา X`, `search X`, `พิมพ์ X` and `type X` offer `X` itself as the
+  text to enter, including Thai commands where the verb joins the text
+  (`ค้นหาเที่ยวบิน เชียงใหม่ โอซาก้า`). While a text field has focus, plain text
+  that is neither a command nor the name of a visible control (for example
+  `starwork`) is typed into that field without Enter.
+- **Unfocused fields.** If the device refuses typing with `FOCUS_REQUIRED`, the
+  same command clicks that field once and types the same text, then presses
+  Enter if the command submits. It needs no second Jev decision.
+- **Repeating.** `อีก`, `again` or `zoom อีก` repeats the previous command (or
+  the named one), decided again on the current screen. The previous command and
+  what it did (action and target label) are passed to Jev as context.
+- **Menu-bar items** are offered to Jev only when the command mentions a menu or
+  shares a word with the item and no in-window control matches it as well, so
+  page content is not crowded out by up to 80 menu commands. For example `zoom`
+  offers Maps' `Zoom in`/`Zoom out` buttons, not `Window → Zoom`.
+- **Outcome line.** Each settled command sets the task progress text to what was
+  done (for example `Done: pressed "New Tab"`) or why nothing was done, with a
+  hint (`LOW_CONFIDENCE` with its score, `FIELD_TEXT_REQUIRED`, `FOCUS_REQUIRED`,
+  `NO_SUPPORTED_ACTION`, a high-impact stop, or the step at which a step run
+  stopped).
+- **Rapid commands.** While the user controls the task, a command sent while
+  their previous command is still running or queued waits in a first-in,
+  first-out queue (up to 20) and then runs verbatim. It is never merged into a
+  correction or cancelled as superseded. A command sent while an agent-planned
+  round runs still corrects that round once; later commands queue behind the
+  correction. Pause and cancel clear the queue. If a command fails, needs an
+  answer or has an uncertain outcome, the remaining queued commands are dropped
+  and listed in the progress text, never replayed later. A settled round, or an
+  interrupted one, is applied immediately and the next round dispatched, instead
+  of waiting for the next one-second poll.
+- **Control handover.** If the user takes control back while an agent control
+  turn is still running, that turn's refused `task_update` and empty reply are
+  suppressed instead of showing an unreadable-reply notice.
+
+### Computer helper contract
+
+Gateway speaks contract version 1 with the computer helper and relay. The rules
+below are what a helper must implement for the optional features; helpers that
+omit them keep working through the fallbacks.
+
+- **Version.** An observation may include `contractVersion`. A different major
+  version stops the command with `COMPUTER_CONTRACT_UNSUPPORTED` before any
+  action. Without the field, version 1 is assumed. Gateway sends no new request
+  fields, because current helpers validate their arguments strictly.
+- **Forward-compatible observations.** Unknown values in `supportedActions`, in
+  a control's `actions`, in `standardCommand` and in `capabilities` are ignored.
+  They do not reject the whole observation.
+- **Capabilities.** An observation may include
+  `capabilities: { "standardCommands": [...], "keys": [...] }`.
+  - When `standardCommands` lists `tab:new`, `tab:close`, `app:quit` or
+    `address:focus`, Gateway observes with `standard_command` set to that name.
+    It expects `standardCommand` echoed back and one control with ref
+    `standard-tab-new`, `standard-tab-close`, `standard-app-quit` or
+    `standard-address-focus`, then presses it.
+  - `address:focus` is used only when no address field is observed. The URL is
+    then typed into the newly focused field and submitted.
+  - When `keys` lists `backspace`, erasing up to 10 characters sends that many
+    `{kind:"key",key:"backspace"}` actions instead of rewriting the field.
+  - Without these capabilities, Gateway uses the application's own menu command
+    or rewrites the field, as described under Direct commands.
+- **`app_query`** is at most 4000 characters, cut on a character boundary. The
+  helper's request line limit is 32KB and Thai text expands in UTF-8.
+- **Pre-dispatch rejections.** If `computer_action` fails with `DEVICE_OFFLINE`,
+  `CONSENT_REQUIRED`, `OBSERVATION_DENIED`, `CONTROL_DENIED`,
+  `APPLICATION_NOT_ALLOWED` or `COMPUTER_BUSY`, Gateway checks the operation
+  receipt.
+  - `{"state":"not_found"}` (with no `operation_id`) means the action was not
+    executed, and the command stops with that cause.
+  - A recorded receipt is always trusted.
+  - If the receipt cannot be read, only `DEVICE_OFFLINE` stays unknown, because
+    the relay can also report it after recording the operation.
+  - A failure without a cause code stays unknown and is reconciled, never
+    replayed.
+- **Leases.** The relay never expires a lease, and acquiring again returns the
+  same token. Gateway releases the lease on every exit path (done, failure,
+  cancel, timeout, shutdown) and retries a failed release once.
+
+### Device sessions and access requests
+
+An unanswered access prompt on the Mac ends the request after five minutes with
+`COMPUTER_ACCESS_TIMEOUT`, so the failed task no longer holds the device (see
+below). Like
+`COMPUTER_ACCESS_UNAVAILABLE`, this is not a denial or a missing macOS
+permission, and no desktop action was performed.
+
+A task that failed or ended without performing any desktop action does not
+block the device: a new `task_spawn` for the same device replaces it, and the old
+task ends with `replacedByTaskId`. Any other open session returns
+`AUTOMATION_SESSION_EXISTS` with that task's state, last result and controller.
+Continue it with `task_update`, or cancel it. A user-controlled session stays
+open while it waits for the user's next command. Once a round has failed, the
+session expires after the normal idle timeout, whoever controlled it.
 
 ### Computer connection status
 
