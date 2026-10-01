@@ -1,4 +1,5 @@
-import { skillCatalog, SKILL_CATALOG_BUDGET_BYTES } from '../../../src/orchestration/skills';
+import { skillCatalog } from '../../../src/orchestration/skills';
+import { SKILL_CATALOG_BUDGET_BYTES } from '../../../src/orchestration/skill-catalog-budget';
 import { ORCHESTRATION_DEFAULTS, resolveOrchestrationConfig } from '../../../src/orchestration/config';
 import type { SkillRegistry } from '../../../src/skills/loader';
 import type { SkillDefinition } from '../../../src/skills/parser';
@@ -78,8 +79,7 @@ test('the default budget has one source: the config default and skillCatalog bot
   jest.isolateModules(() => {
     jest.doMock('../../../src/orchestration/skill-catalog-budget', () => ({ SKILL_CATALOG_BUDGET_BYTES: 4096 }));
     const { ORCHESTRATION_DEFAULTS: defaults } = jest.requireActual<typeof import('../../../src/orchestration/config')>('../../../src/orchestration/config');
-    const { skillCatalog: catalog, SKILL_CATALOG_BUDGET_BYTES: budget } = jest.requireActual<typeof import('../../../src/orchestration/skills')>('../../../src/orchestration/skills');
-    expect(budget).toBe(4096);
+    const { skillCatalog: catalog } = jest.requireActual<typeof import('../../../src/orchestration/skills')>('../../../src/orchestration/skills');
     expect(defaults.conversation.skillCatalogBytes).toBe(4096);
     expect(Buffer.byteLength(catalog(largeRegistry(20, 0)))).toBeLessThanOrEqual(4096);
   });

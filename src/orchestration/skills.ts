@@ -14,8 +14,6 @@ export function resolveSkill(text: string, source: ConversationScope['source'], 
   return resolveNamedSkill(match[1], match[3]?.trim() ?? '', registry);
 }
 
-export { SKILL_CATALOG_BUDGET_BYTES };
-
 /** Only installed, user-invocable skills are advertised; never expose bodies or paths.
  * A catalog over `budgetBytes` keeps every name and shortens the free-text selection
  * hints (description, readWhen, keywords, argumentHint) to one shared byte cap. */
