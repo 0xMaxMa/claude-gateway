@@ -21,3 +21,13 @@ posix('stopping a container attempt removes its appended system prompt file (#55
     expect(existsSync(directory + '/process.json')).toBe(true);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+posix('a prompt file that cannot be removed does not turn a successful stop into a failure', async () => {
+  const directory = '/tmp/gateway-orch-' + randomUUID();
+  mkdirSync(directory + '/system-prompt.md', { recursive: true, mode: 0o700 });
+  writeFileSync(directory + '/system-prompt.md/entry', 'x'); // rmSync without recursive fails on a non-empty directory
+  try {
+    writeFileSync(directory + '/process.json', JSON.stringify({ pid: 2 ** 22 - 1, start: 'gone' }));
+    expect(await stopContainerProfile('app-test', directory)).toBe(true);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
