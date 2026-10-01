@@ -13,7 +13,6 @@ import * as path from 'path';
 import { appendSystemPromptViaFile, RuntimeProfile, runtimeProfileArgs } from './runtime-profile';
 import { StringDecoder } from 'string_decoder';
 import { processSupervisorSupported, recordProcessRoot, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
-import { commandLineLimited } from '../orchestration/process-platform';
 import { gatewayCapacity } from '../orchestration/capacity';
 import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
@@ -718,19 +717,30 @@ export class SessionProcess extends EventEmitter {
   }
 
   private managedMcpConfigPath?: string;
-  /** Windows only: the appended system prompt, too long for a command line. */
+  /** Host file holding the appended system prompt (see writeSystemPromptFile). */
   private systemPromptPath?: string;
   private managedConnectorPaths = new Set<string>();
 
-  /** Host spawns where the command line is capped (Windows) move the appended
-   * system prompt into a 0600 file beside the attempt's MCP config (a 0700
-   * directory). Containers are skipped: their CLI sees container paths. */
-  private writeSystemPromptFile(args: string[], mcpConfigPath: string | null): string[] {
-    if (!this.runtimeProfile || !commandLineLimited() || this.agentConfig.type === 'app-agent') return args;
+  /** The appended system prompt never travels on the command line: Windows caps a
+   * whole command line at 32767 characters and Linux caps ONE argument at 128 KiB
+   * (MAX_ARG_STRLEN), so a large workspace context or skill catalog would fail
+   * every spawn (#559); argv is also world-readable through /proc/<pid>/cmdline.
+   * The host CLI reads a 0600 file beside the attempt's MCP config (a 0700
+   * directory). A container CLI reads a 0600 file in its own attempt directory,
+   * written over docker exec stdin like the attempt's mcp.json and ticket. */
+  private async writeSystemPromptFile(args: string[], mcpConfigPath: string | null): Promise<string[]> {
+    if (!this.runtimeProfile) return args;
+    if (this.containerAttempt) {
+      const moved = appendSystemPromptViaFile(args, this.containerAttempt.directory + '/system-prompt.md');
+      if (moved.prompt === undefined) return args;
+      await containerNode(this.agentConfig.container!, "const fs=require('fs');const c=[];process.stdin.on('data',b=>c.push(b));process.stdin.on('end',()=>{fs.writeFileSync(process.argv[1],Buffer.concat(c),{mode:384});fs.chmodSync(process.argv[1],384);});", [this.containerAttempt.directory + '/system-prompt.md'], moved.prompt);
+      return moved.args;
+    }
     const file = path.join(path.dirname(mcpConfigPath ?? this.runtimeProfile.mcpConfigPath), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, '_')}.md`);
     const moved = appendSystemPromptViaFile(args, file);
     if (moved.prompt === undefined) return args;
     fs.writeFileSync(file, moved.prompt, { mode: 0o600 });
+    fs.chmodSync(file, 0o600); // A respawn reuses the name; mode applies only on create.
     this.systemPromptPath = file;
     return moved.args;
   }
@@ -1054,7 +1064,7 @@ export class SessionProcess extends EventEmitter {
     const containerRestartPath = isAppAgent ? toContainerPath(this.restartSignalPath) : this.restartSignalPath;
 
     const freshModel = this.readFreshModel();
-    const args = this.writeSystemPromptFile(this.buildArgs(effectiveMcpPath, freshModel), effectiveMcpPath);
+    const args = await this.writeSystemPromptFile(this.buildArgs(effectiveMcpPath, freshModel), mcpConfigPath);
 
     // Resolve the claude binary. An explicit CLAUDE_BIN (which may carry args) is
     // parsed by parseClaudeBin; otherwise probe PATH and the native-installer / legacy

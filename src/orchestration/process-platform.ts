@@ -343,8 +343,5 @@ export function processPlatform(): ProcessPlatform | undefined {
   if (selected === undefined) selected = process.platform === 'linux' ? linuxPlatform : process.platform === 'darwin' ? darwinPlatform : process.platform === 'win32' ? windowsPlatform() : null;
   return selected ?? undefined;
 }
-/** Windows caps a whole command line at 32767 characters. An OS property, not a
- * supervisor one, so it holds even where no supervisor is selected. */
-export function commandLineLimited(): boolean { return process.platform === 'win32'; }
 /** Test hook: substitute a platform (e.g. a mocked Windows supervisor on Linux CI). */
 export function setProcessPlatform(platform: ProcessPlatform | null | undefined): void { selected = platform; }

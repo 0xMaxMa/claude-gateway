@@ -1,5 +1,5 @@
 import { execFile } from 'child_process';
-import { commandLineLimited, darwinPlatform, windowsPowerShell, linuxPlatform, parseDarwinPs, parsePsCpuTicks, parseWindowsSnapshot, processPlatform, setProcessPlatform, windowsPlatform, windowsTree, type ProcessPlatform } from '../../../src/orchestration/process-platform';
+import { darwinPlatform, windowsPowerShell, linuxPlatform, parseDarwinPs, parsePsCpuTicks, parseWindowsSnapshot, processPlatform, setProcessPlatform, windowsPlatform, windowsTree, type ProcessPlatform } from '../../../src/orchestration/process-platform';
 import { cleanupPersistedProcess, processSupervisorSupported, recordProcessRoot, stopProcessGroup, terminateProbeTree, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
 import { ProcessActivitySampler } from '../../../src/orchestration/process-activity';
 
@@ -34,14 +34,6 @@ describe('platform selection', () => {
   test('without a supervisor, spawns keep the POSIX detached default; only Windows stays attached', () => {
     asOs('freebsd'); expect(workerSpawnDetached()).toBe(true);
     asOs('win32'); setProcessPlatform(null); expect(workerSpawnDetached()).toBe(false);
-  });
-  test('command-line length is an OS limit, independent of the selected supervisor', () => {
-    asOs('win32');
-    for (const platform of [null, linuxPlatform, windowsPlatform()]) { setProcessPlatform(platform); expect(commandLineLimited()).toBe(true); }
-    for (const os of ['linux', 'darwin', 'freebsd']) {
-      asOs(os);
-      for (const platform of [null, windowsPlatform()]) { setProcessPlatform(platform); expect(commandLineLimited()).toBe(false); }
-    }
   });
 });
 

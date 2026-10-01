@@ -1108,7 +1108,7 @@ export class AgentOrchestrationRuntime {
       const previousReports = internalReview ? recentCommunicatedProgress(this.store, receipt.conversationId) : [];
       // Anthropic's prompt cache is a strict prefix match over [tools, system, messages],
       // evaluated ahead of the per-turn user message. Mutating ticket.profile.overlay (which
-      // becomes --append-system-prompt, part of the cached system block) or attaching
+      // becomes the --append-system-prompt-file content, part of the cached system block) or attaching
       // ticket.profile.responseSchema (which becomes --json-schema, appending a synthetic
       // StructuredOutput tool to the cached tools block) for only SOME turns of a session
       // (report/internalReview turns, semantic-intake turns, speech-enabled turns) makes
