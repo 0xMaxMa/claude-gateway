@@ -12,7 +12,7 @@ module.exports = {
   // (e.g. session-process.test.ts, ~1.9GB in one file) never accumulates on top
   // of a worker's earlier residue and OOM-kills the process.
   maxWorkers: 2,
-  workerIdleMemoryLimit: '768MB',
+  workerIdleMemoryLimit: '512MB',
   transform: {
     '^.+\\.tsx?$': ['ts-jest', {
       tsconfig: {
@@ -23,6 +23,11 @@ module.exports = {
         skipLibCheck: true,
         resolveJsonModule: true,
         rootDir: '.',
+        // Transpile only. Type-checking in ts-jest keeps a full TypeScript
+        // program alive in every worker (~300MB+ per worker on a cold cache),
+        // which pushed workers to the heap cap. `pretest` runs
+        // `npm run typecheck:tests` (tsconfig.test.json, src + tests) instead.
+        isolatedModules: true,
       }
     }]
   },
