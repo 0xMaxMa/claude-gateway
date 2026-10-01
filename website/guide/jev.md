@@ -365,6 +365,14 @@ with the browser owner. If approval is pending, approve it and discover again.
 Multiple browser targets must be selected explicitly. Offline, expired, unapproved
 and read-only grants are not offered as executable targets.
 
+When Computer Use is also enabled, both can drive Chrome on the user's Mac. The
+agent chooses from the latest user request: Remote Browser, the shared tab or the
+extension selects Remote Browser; Computer Use, the Mac, the desktop or a native
+application selects Computer Use. An open task of either kind does not by itself
+select its environment for a new request. A browser or website request that names
+neither gets one short question first ("Remote Browser on your Chrome tab, or
+Computer Use on your Mac?"), and the answer is reused for related follow-ups.
+
 Discovered targets are stored in the agent's orchestration directory as
 `browser-bindings.json`, without connector credentials. Manual bindings remain
 supported. Connector enablement/credentials and relay permissions remain authoritative
@@ -621,8 +629,8 @@ do the browser shortcuts below. A listed step that joins commands with `แล�
 order and completes only when every part took effect; when it stops part-way,
 `stepRun.doneParts` lists the parts already done. After each part, the
 accessibility tree is compared with the state before the action. If a step finds
-no matching control right after an earlier step, for example a results page
-still loading, it is re-observed up to twice before stopping; nothing was
+no matching control, for example a results page still loading or a window
+still opening for the first step, it is re-observed up to twice before stopping; nothing was
 dispatched, so this never repeats an action. Screenshots are captured only when
 the run stops.
 
@@ -686,7 +694,10 @@ and keep their stricter checks above; for example a step that says `ลบ` stop
   `backspace x2` and similar erase characters at the end of that field (one plus
   one per `ๆ`, or the given count, up to 50). They never press a Delete button.
   The field value is rewritten without those characters, so this is refused
-  (`ERASE_UNAVAILABLE`) when the observed value may be clipped.
+  (`ERASE_UNAVAILABLE`) when the observed value may be clipped. When the helper
+  reports focus on the static text inside a field (Chrome does after typing),
+  the field is the one typeable text field holding exactly that text; two such
+  fields are ambiguous and nothing is erased.
 - **High-impact controls.** Pressing a control labelled delete, remove, trash,
   send, submit, pay, buy, confirm, quit, sign out and similar (English or Thai),
   or `OK`/`Yes` in a dialog whose text names such an operation, needs a Jev
@@ -697,8 +708,9 @@ and keep their stricter checks above; for example a step that says `ลบ` stop
 - **Browser shortcuts.** `Cmd+T`/`⌘T`/`new tab`/`เปิด tab ใหม่`, `Cmd+N`/`new
   window` and `Cmd+W`/`close tab`/`ปิดแท็บ` press the front application's own
   menu command (or an identically named button) without Jev. If it is not
-  available the command waits with `SHORTCUT_UNAVAILABLE` rather than doing
-  something else.
+  available the command waits rather than doing something else:
+  `SHORTCUT_NOT_OFFERED` when a browser is in front but offers no such command,
+  `SHORTCUT_UNAVAILABLE` when another application is in front.
 - **Opening a site.** `เข้า google`, `เปิด youtube`, `go to example.com` or a
   bare address such as `www.google.com` types the address into the browser's
   address bar and presses Enter, without Jev. A few well-known site names map to
@@ -769,6 +781,10 @@ omit them keep working through the fallbacks.
     `{kind:"key",key:"backspace"}` actions instead of rewriting the field.
   - Without these capabilities, Gateway uses the application's own menu command
     or rewrites the field, as described under Direct commands.
+  - A relay older than the helper may drop `standard_command` and return an
+    ordinary observation. Gateway then stops asking for standard commands for the
+    rest of that command and continues on that observation through the menu
+    command or the normal decision.
 - **`app_query`** is at most 4000 characters, cut on a character boundary. The
   helper's request line limit is 32KB and Thai text expands in UTF-8.
 - **Pre-dispatch rejections.** If `computer_action` fails with `DEVICE_OFFLINE`,
