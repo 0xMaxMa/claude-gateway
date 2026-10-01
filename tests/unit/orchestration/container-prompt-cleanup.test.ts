@@ -16,8 +16,10 @@ posix('stopping a container attempt removes its appended system prompt file (#55
     // A process identity that is no longer alive, so nothing is signalled.
     writeFileSync(directory + '/process.json', JSON.stringify({ pid: 2 ** 22 - 1, start: 'gone' }));
     writeFileSync(directory + '/system-prompt.md', 'prompt', { mode: 0o600 });
+    writeFileSync(directory + '/ticket.json', '{"token":"bridge-token"}', { mode: 0o600 });
     expect(await stopContainerProfile('app-test', directory)).toBe(true);
     expect(existsSync(directory + '/system-prompt.md')).toBe(false);
+    expect(existsSync(directory + '/ticket.json')).toBe(false);
     expect(existsSync(directory + '/process.json')).toBe(true);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
@@ -29,5 +31,29 @@ posix('a prompt file that cannot be removed does not turn a successful stop into
   try {
     writeFileSync(directory + '/process.json', JSON.stringify({ pid: 2 ** 22 - 1, start: 'gone' }));
     expect(await stopContainerProfile('app-test', directory)).toBe(true);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+posix('a stop with no process identity (stopped during startup) still removes the ticket and prompt, and still reports failure', async () => {
+  const directory = '/tmp/gateway-orch-' + randomUUID();
+  mkdirSync(directory, { mode: 0o700 });
+  try {
+    writeFileSync(directory + '/system-prompt.md', 'prompt', { mode: 0o600 });
+    writeFileSync(directory + '/ticket.json', '{"token":"bridge-token"}', { mode: 0o600 });
+    writeFileSync(directory + '/mcp.json', '{}', { mode: 0o600 });
+    expect(await stopContainerProfile('app-test', directory)).toBe(false);
+    expect(existsSync(directory + '/system-prompt.md')).toBe(false);
+    expect(existsSync(directory + '/ticket.json')).toBe(false);
+    expect(existsSync(directory + '/mcp.json')).toBe(true);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+posix('an attempt path outside /tmp/gateway-orch-* is rejected before anything is removed', async () => {
+  const directory = '/tmp/not-an-attempt-' + randomUUID();
+  mkdirSync(directory, { mode: 0o700 });
+  try {
+    writeFileSync(directory + '/ticket.json', '{}', { mode: 0o600 });
+    expect(await stopContainerProfile('app-test', directory)).toBe(false);
+    expect(existsSync(directory + '/ticket.json')).toBe(true);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

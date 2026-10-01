@@ -144,14 +144,19 @@ export async function stopContainerProfile(container: string, directory: string)
   try {
     await containerNode(container, String.raw`const fs=require('fs');const d=process.argv[1];
 if(!/^\/tmp\/gateway-orch-[a-f0-9-]+$/.test(d))throw Error('Invalid attempt');
-let saved;try{saved=JSON.parse(fs.readFileSync(d+'/process.json','utf8'));}catch{throw Error('Process identity missing');}
-const alive=()=>{try{return fs.readFileSync('/proc/'+saved.pid+'/stat','utf8').split(') ')[1].split(' ')[19]===saved.start;}catch{return false;}};
+let saved,alive;
+try{
+try{saved=JSON.parse(fs.readFileSync(d+'/process.json','utf8'));}catch{throw Error('Process identity missing');}
+alive=()=>{try{return fs.readFileSync('/proc/'+saved.pid+'/stat','utf8').split(') ')[1].split(' ')[19]===saved.start;}catch{return false;}};
 if(alive()){try{process.kill(-saved.pid,'SIGKILL');}catch(e){if(e.code!=='ESRCH')throw e;}}
 // Include detached descendants which retain the attempt marker (e.g. tool shells).
 for(const p of fs.readdirSync('/proc').filter(p=>/^\d+$/.test(p))){try{if(fs.readFileSync('/proc/'+p+'/environ').toString().split('\0').includes('GATEWAY_CONTAINER_ATTEMPT='+d))process.kill(Number(p),'SIGKILL');}catch(e){if(!['ENOENT','ESRCH','EACCES'].includes(e.code))throw e;}}
-// The appended system prompt (see SessionProcess.writeSystemPromptFile) is read once at
-// startup. Removing it is best effort and must not change the stop verdict.
-try{fs.rmSync(d+'/system-prompt.md',{force:true});}catch{}
+}finally{
+// The ticket (a bridge token) and the appended system prompt (see SessionProcess.writeSystemPromptFile)
+// are read once at startup. Remove them even when the identity is missing (a stop during startup) or a
+// kill failed; best effort, so the stop verdict is unchanged.
+for(const f of ['ticket.json','system-prompt.md'])try{fs.rmSync(d+'/'+f,{force:true});}catch{}
+}
 setTimeout(()=>{if(alive()){const stat=fs.readFileSync('/proc/'+saved.pid+'/stat','utf8');if(stat.split(') ')[1][0]!=='Z')process.exit(1);}},100);
 `, [directory]);
     return true;
