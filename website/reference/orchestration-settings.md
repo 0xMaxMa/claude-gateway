@@ -20,7 +20,9 @@ This is an agent-entry fragment. Keep the agent's existing workspace, Claude mod
       "workerIdleTtlMs": 600000,
       "idleTimeoutMs": 300000,
       "questionReminderMs": 600000,
-      "maxDurationMs": 0
+      "maxDurationMs": 0,
+      "backgroundGraceMs": 900000,
+      "progressStaleLimitMs": 7200000
     }
   },
   "voice": { "enabled": false }
@@ -117,11 +119,19 @@ Worker execution defaults to `auto`: GPT tasks select native Codex when ready an
 | `maxQueuedPerAgent` | `100` | Pending queue bound across the agent |
 | `idleTimeoutMs` | `300000` | Quiet-worker observation budget; not an unconditional five-minute kill |
 | `maxDurationMs` | `0` | Optional hard task deadline; zero disables total-duration expiry |
+| `backgroundGraceMs` | `900000` | How long a worker's final result waits for silent native background work (`Monitor`, background `Bash`/`Agent`) before it is accepted; native task events and real progress restart it. Must be positive |
+| `progressStaleMs` | `180000` | Elapsed attempt time before internal progress reviews start |
+| `progressNotifyCooldownMs` | `300000` | Minimum interval between progress reviews |
+| `progressStaleLimitMs` | `7200000` | Stop a worker that has sent no new progress report for this long and fail the task with `PROGRESS_STALLED`; `0` keeps reviews advisory only. Must be `0` or at least `progressStaleMs` |
 | `questionReminderMs` | `600000` | Minimum cooldown for agent-chosen question reminders: 1×, then 3×, then 6×; also requires three new user messages, not a fixed send schedule |
 | `interruptAckTimeoutMs` | `5000` | Accepted configuration field; currently not consumed by the interruption path |
 | `workspaceMode` | `host` | Host agents' workspace policy; installed app-agents use `container` |
 | `projectRoot` | empty | Optional starting directory; empty uses the agent workspace |
 | `resourceRetentionDays` | `7` | Retention policy for task resources; distinct from conversation history retention |
+
+A final result that arrives while native background work is still pending is not the task's answer yet: the worker normally receives the background task's completion and replies again. If that completion never arrives, the result is accepted after `backgroundGraceMs` of silence. The task completes with `result.unresolvedBackground` (`pendingTasks`, `graceMs`, `resultSeenAt`) and a `task.background_unresolved` event, so the missing completion stays visible. While the result is waiting, progress reviews use the reason `result_seen_not_terminal` instead of `stale_progress`.
+
+`progressStaleLimitMs` is the last resort for a worker that stops reporting. Only a new `task_report_progress` text restarts it; process activity does not. When it passes, the attempt is stopped through the normal cancellation path (`cancellation.requestedBy: "supervisor"`), a `task.progress_stalled` event is recorded, and the task ends `failed` with `PROGRESS_STALLED`. If the stop cannot be confirmed, the task ends `needs_reconciliation`. A user or agent cancel during that stop still ends the task `cancelled`.
 
 `defaultTimeoutMs` is the compatibility alias for the worker inactivity budget. If explicitly set and `idleTimeoutMs` is absent, it supplies that budget; it is not a fixed wall-clock task limit. Task queue limits and worker concurrency are different controls: a queued task does not mean another worker is already running it.
 
