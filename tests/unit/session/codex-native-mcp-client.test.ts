@@ -57,6 +57,8 @@ test('native MCP adapter strips inherited and explicit Jev env without altering 
     await client.listTools();
     const env=(spawn as jest.Mock).mock.calls[0][2].env;
     expect(env.OPENAI_API_KEY).toBe('native-auth');
-    for(const key of ['TYPESAFE_API_KEY','JEV_API_KEY','PRIVATE_NATIVE_JEV_TOKEN'])expect(env).not.toHaveProperty(key);
+    expect(env).not.toHaveProperty('PRIVATE_NATIVE_JEV_TOKEN');
+    // Jev uses a dedicated key, so vendor default names stay available to other tools.
+    expect(env).toMatchObject({TYPESAFE_API_KEY:'private-a',JEV_API_KEY:'private-b'});
   } finally {process.env=original;}
 });

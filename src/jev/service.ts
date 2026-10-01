@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { JevConfig, JevConnection, JevContext, JevError, JevErrorCode, JevEvaluationEvent, JevRequest, JevResult } from './types';
 import { validateJevConfig, validateJevRequest, validateJevResponse } from './validation';
+import { JEV_DEFAULT_API_KEY_ENV } from './child-env';
 
 export function jevEndpoint(connection: JevConnection, provider: JevConfig['provider']): URL {
   let url: URL;
@@ -17,7 +18,7 @@ export async function resolveDirectJevConnection(config: JevConfig): Promise<Jev
   if (config.provider !== 'typesafe') throw new JevError('INVALID_CONFIG', 'An upstream connection resolver is required.');
   if (config.apiKeyFile && config.apiKeyEnv) throw new JevError('INVALID_CONFIG', 'Choose one Jev credential reference.');
   let apiKey = '';
-  try { apiKey = config.apiKeyFile ? (await readFile(config.apiKeyFile, 'utf8')).trim() : (process.env[config.apiKeyEnv ?? 'TYPESAFE_API_KEY'] ?? '').trim(); }
+  try { apiKey = config.apiKeyFile ? (await readFile(config.apiKeyFile, 'utf8')).trim() : (process.env[config.apiKeyEnv ?? JEV_DEFAULT_API_KEY_ENV] ?? '').trim(); }
   catch { throw new JevError('AUTHENTICATION_FAILED', 'The Jev credential file cannot be read.'); }
   if (!apiKey || apiKey.length > 16384 || /[\r\n]/.test(apiKey)) throw new JevError('AUTHENTICATION_FAILED', 'A valid Jev credential is required.');
   return { baseUrl: config.baseUrl ?? 'https://api.typesafe.ai', apiKey };

@@ -774,11 +774,9 @@ export class AgentOrchestrationRuntime {
       input.acceptedInputId=live.inputId;
       // Successful direct controls are acknowledged by the task state, not a chat/TTS notice.
       if(live.status==='applied')return {inputId:live.inputId,text:''};
-      const text=live.code==='AUTOMATION_SESSION_CLOSED'?'This control session has ended. Start a new session to continue.':'The command was not applied ('+(live.code??'CONTROL_UNAVAILABLE')+'). The previous action may need review before continuing.';
-      const receipt=this.store.acceptInput({...input,capabilities},this.config.conversation.maxPendingInputs);
-      const existing=this.responseIdForInput(live.inputId);
-      if(!existing){const responseId=this.store.compose(()=>this.decisions.notice(receipt.conversationId,text,true,receipt.inputId));this.publishText(input.scope.agentSessionId,responseId,text,true);}
-      return {inputId:live.inputId,text};
+      // A command that could not be applied is a normal user turn: the agent
+      // reads its durable receipt (liveControlDirective) and answers it.
+      return undefined;
     }
     input = this.questionControls.normalizeReply(input);
     if (!this.questionControls.matches(input)) return undefined;

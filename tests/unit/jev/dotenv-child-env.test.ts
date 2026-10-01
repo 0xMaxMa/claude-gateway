@@ -22,7 +22,8 @@ test('managed CLI dotenv bootstrap and real descendant cannot restore vendor cre
     const managed = managedJevChildEnv(base, { apiKeyEnv: 'PRIVATE_BOOTSTRAP_TOKEN' });
     // Even a later overlay must not reintroduce the key during CLI bootstrap.
     managed.PRIVATE_BOOTSTRAP_TOKEN = 'overlaid-secret';
-    expect(run(managed)).toEqual({ vendor: [false, false, false], claude: 'native-claude', codex: 'native-codex' });
+    // Jev uses a dedicated key here, so vendor default names belong to other tools.
+    expect(run(managed)).toEqual({ vendor: [true, true, false], claude: 'native-claude', codex: 'native-codex' });
     expect(run(base)).toEqual({ vendor: [true, true, true], claude: 'native-claude', codex: 'native-codex' });
   } finally { rmSync(home, { recursive: true, force: true }); }
 });

@@ -7,12 +7,17 @@ export function isReservedJevCredentialEnv(name: string): boolean {
     || (/^GATEWAY_/.test(name) && !/^GATEWAY_JEV_/.test(name))
     || /^(PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|LANG|TERM|NODE_OPTIONS|BASH_ENV|ENV|ZDOTDIR|LD_PRELOAD|LD_LIBRARY_PATH|SSL_CERT_FILE|SSL_CERT_DIR)$/.test(name);
 }
+// Only names Jev actually reads are private: a vendor default such as
+// TYPESAFE_API_KEY may belong to an unrelated MCP connector when Jev does not use it.
 // Retain observed references for the process lifetime so hot reload cannot turn an
 // old credential into an ordinary inherited child variable. Values are never stored.
-const privateNames = new Set(['TYPESAFE_API_KEY', 'JEV_API_KEY', 'JEV_TEXT_API_KEY']);
+const privateNames = new Set<string>();
+/** Mirrors JevService: without apiKeyFile/apiKeyEnv it reads TYPESAFE_API_KEY. */
+export const JEV_DEFAULT_API_KEY_ENV = 'TYPESAFE_API_KEY';
 export function jevCredentialEnvNames(config?: JevConfig): string[] {
   if (config?.apiKeyEnv && isReservedJevCredentialEnv(config.apiKeyEnv)) throw new JevError('INVALID_CONFIG', 'Jev apiKeyEnv must use a dedicated credential variable, not native CLI authentication or process controls.');
   if (config?.apiKeyEnv) privateNames.add(config.apiKeyEnv);
+  else if (config && !config.apiKeyFile) privateNames.add(JEV_DEFAULT_API_KEY_ENV);
   for(const textKey of [config?.thinking?.apiKeyEnv,config?.browser?.textHelper?.apiKeyEnv]){
   if(textKey){if(isReservedJevCredentialEnv(textKey))throw new JevError('INVALID_CONFIG','Browser text helper requires a dedicated credential variable.');privateNames.add(textKey);}}
   for (const binding of config?.browser?.bindings ?? []) {

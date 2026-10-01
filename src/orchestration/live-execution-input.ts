@@ -35,7 +35,10 @@ export function liveExecutionInput(store:OrchestrationStore,tasks:TaskService,in
       control.code=error.code;
     }
     store.appendEvent(receipt.conversationId,'input.execution_control',control,control.taskId);
-    store.completeInputReceipt(receipt);
+    // Applied commands are acknowledged by the task state. Anything else stays a
+    // pending user message so the agent gets a turn and history records it.
+    if(control.status==='applied')store.completeInputReceipt(receipt);
+    else store.run('UPDATE conversation_inputs SET store_user_message=1 WHERE id=?',receipt.inputId);
     return {...control,task,reused:false};
   });
 }

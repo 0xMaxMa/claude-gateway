@@ -3,6 +3,7 @@ import { responseFailureMessage } from '../orchestration/response-errors';
 import { voiceSettingsRouter } from './voice-settings-router';
 import { Router, Request, Response } from 'express';
 import { apiPrincipal } from '../orchestration/identity';
+import { OrchestrationError } from '../orchestration/types';
 import { randomUUID, createHash } from 'crypto';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
@@ -95,6 +96,12 @@ const SAFE_FILENAME_RE = /^[a-zA-Z0-9._\-() ]+$/;
 // escape the agent's directory. Clients may pass custom (non-UUID) session ids, so
 // this preserves that while blocking path traversal.
 const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+// Task and command ids are server/client-generated UUIDs; controlByUser rejects anything else.
+const TASK_CONTROL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const TASK_CONTROL_ERROR_STATUS: Record<string, number> = {
+  INVALID_INPUT: 400, EXECUTION_DENIED: 403, AUTOMATION_SESSION_CLOSED: 410, COMMAND_QUEUE_FULL: 429,
+  REVISION_CONFLICT: 409, STATE_CONFLICT: 409, IDEMPOTENCY_CONFLICT: 409, ORCHESTRATION_DISABLED: 409,
+};
 export function isValidSessionId(v: unknown): v is string {
   return typeof v === 'string' && SESSION_ID_RE.test(v);
 }
@@ -4800,12 +4807,20 @@ export function createApiRouter(
   router.post('/v1/agents/:agentId/sessions/:sessionId/tasks/:taskId/control',auth,async(req:Request,res:Response)=>{
     const {agentId,sessionId,taskId}=req.params as {agentId:string;sessionId:string;taskId:string};
     const key=(req as AuthedRequest).apiKey,runner=agentRunners.get(agentId);
-    if(!canAccessAgent(key,agentId)||!runner||!isValidSessionId(sessionId)||!isValidSessionId(taskId)){res.status(403).json({error:'ACCESS_DENIED'});return;}
+    if(!canAccessAgent(key,agentId)||!runner){res.status(403).json({error:'ACCESS_DENIED'});return;}
+    if(!isValidSessionId(sessionId)||!TASK_CONTROL_UUID_RE.test(taskId)){res.status(400).json({error:'INVALID_INPUT'});return;}
     if(!(runner.getAgentConfig().allow_tools??Boolean(key.allow_tools))){res.status(403).json({error:'EXECUTION_DENIED'});return;}
     const b=req.body;
-    if(!b||Object.keys(b).some(k=>!['id','action','expectedRevision','text'].includes(k))||!isValidSessionId(b.id)||!['pause','revise','resume','agent','user'].includes(b.action)||!Number.isSafeInteger(b.expectedRevision)||b.expectedRevision<1||(b.action==='revise'?(typeof b.text!=='string'||!b.text.trim()||b.text.length>4000):b.text!==undefined)){res.status(400).json({error:'INVALID_INPUT'});return;}
+    if(!b||Object.keys(b).some(k=>!['id','action','expectedRevision','text'].includes(k))||typeof b.id!=='string'||!TASK_CONTROL_UUID_RE.test(b.id)||!['pause','revise','resume','agent','user'].includes(b.action)||!Number.isSafeInteger(b.expectedRevision)||b.expectedRevision<1||(b.action==='revise'?(typeof b.text!=='string'||!b.text.trim()||b.text.length>4000):b.text!==undefined)){res.status(400).json({error:'INVALID_INPUT'});return;}
     try{res.status(202).json({task:await runner.controlApiTask(sessionId,apiPrincipal(key),taskId,b)});}
-    catch(e){const code=e instanceof Error?e.message:'';res.status(['REVISION_CONFLICT','STATE_CONFLICT','IDEMPOTENCY_CONFLICT'].includes(code)?409:403).json({error:['REVISION_CONFLICT','STATE_CONFLICT','IDEMPOTENCY_CONFLICT','EXECUTION_DENIED','ORCHESTRATION_DISABLED'].includes(code)?code:'ACCESS_DENIED'});}
+    catch(e){
+      // Map by code: OrchestrationError messages may carry human-readable detail.
+      const code=e instanceof OrchestrationError?e.code:e instanceof Error?e.message:'';
+      const status=TASK_CONTROL_ERROR_STATUS[code];
+      if(status){res.status(status).json({error:code});return;}
+      // Unknown codes (e.g. TASK_NOT_FOUND) stay ACCESS_DENIED so task existence is not revealed.
+      res.status(403).json({error:'ACCESS_DENIED'});
+    }
   });
 
   router.post('/v1/agents/:agentId/sessions/:sessionId/tasks/:taskId/cancel', auth, async (req: Request, res: Response) => {

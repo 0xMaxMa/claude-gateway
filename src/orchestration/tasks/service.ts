@@ -925,7 +925,9 @@ export class TaskService {
         else task.state = outcome.type === 'completed' ? 'completed' : 'failed';
         if (task.state === 'completed' && outcome.type === 'completed') task.result = outcome.result;
       }
-      if (task.state === 'failed' && stalled) task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: stalled.message };
+      // A paused or superseded-revision result skips the failure branch above;
+      // a stalled stop still ends failed, so it must carry the stall reason.
+      if (task.state === 'failed' && stalled) { attempt.failure = stalled; task.failure = stalled; task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: stalled.message }; }
       if (task.queuedCommands?.length) this.nextQueuedCommand(task, waitingForCommand || outcome.type === 'completed');
       if (task.state === 'cancelled') {
         delete task.failure;

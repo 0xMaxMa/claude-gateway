@@ -22,6 +22,8 @@ test('gateway-created safemode request child receives no Jev key and keeps nativ
   await adapter.submit({agentId:'a',gatewayTarget:{adapter:'safemode',sessionId:id}} as TaskSnapshot,'request-one','Inspect authorized work');
   const env=(spawn as jest.Mock).mock.calls[0][2].env;
   expect(env.ANTHROPIC_API_KEY).toBe('native-claude');expect(env.OPENAI_API_KEY).toBe('native-codex');
-  for(const key of ['TYPESAFE_API_KEY','JEV_API_KEY','PRIVATE_SAFEMODE_JEV_TOKEN'])expect(env).not.toHaveProperty(key);
+  expect(env).not.toHaveProperty('PRIVATE_SAFEMODE_JEV_TOKEN');
+  // Jev uses a dedicated key, so vendor default names stay available to other tools.
+  expect(env).toMatchObject({TYPESAFE_API_KEY:'a',JEV_API_KEY:'b'});
  }finally{process.env=original;rmSync(root,{recursive:true,force:true});jest.clearAllMocks();}
 });

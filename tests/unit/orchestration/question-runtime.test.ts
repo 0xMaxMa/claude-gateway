@@ -480,3 +480,26 @@ test('a computer field question attaches scoped window pixels and context to its
   expect(receivedImages).toContainEqual({type:'image',source:{type:'base64',media_type:'image/jpeg',data:'/9j/AA=='}});expect(promptText).toContain('computer-snapshot:');expect(promptText).toContain('com.apple.Maps');expect(promptText).not.toContain('/9j/AA==');
  }finally{await f.close();}
 });
+
+test.each(['send','submit'] as const)('a direct command that cannot be applied falls back to an agent turn with the input recorded (%s)',async path=>{
+ const f=await fixture();try{
+  const t=f.runtime.store.task(f.task.taskId)!;
+  f.runtime.store.transaction(()=>{f.runtime.store.run("UPDATE task_attempts SET state='ended' WHERE task_id=?",t.taskId);t.gatewayTarget={adapter:'browser',sessionId:'fixture',name:'Browser'};t.state='queued';t.activeAttemptId=undefined;t.pendingQuestion=undefined;f.runtime.store.saveTask(t,t.stateVersion);});
+  jest.spyOn((f.runtime as any).gatewayTasks,'signalControl').mockImplementation(()=>{});
+  // Force the direct control to be rejected the way a concurrent revision would be.
+  jest.spyOn(f.runtime.tasks,'controlByUser').mockImplementation(()=>{throw new OrchestrationError('STATE_CONFLICT');});
+  let promptText='';
+  f.createAgentSession.mockImplementation(async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter,prompt:string){promptText=prompt;this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));this.emit('output',JSON.stringify({type:'result',result:'I checked the task and will continue from its current state.'}));}}) as unknown as SessionProcess);
+  const input={scope:f.scope,text:'Go to Manchester instead',ingressKey:randomUUID(),metadata:{executionTaskId:t.taskId}};
+  let inputId:string,text:string;
+  if(path==='send'){text=await f.runtime.send(input,{execute:true,writeMemory:false},{timeoutMs:5000});inputId=f.runtime.store.get('SELECT id FROM conversation_inputs WHERE text=?',input.text)!.id as string;}
+  else{const submitted=f.runtime.submitInput(input,{execute:true,writeMemory:false});inputId=submitted.inputId;(f.runtime as any).pumpMailbox();text=await submitted.response;}
+  expect(f.createAgentSession).toHaveBeenCalled();
+  expect(text).toContain('continue from its current state');
+  expect(promptText).toContain('"status":"needs_agent"');expect(promptText).toContain('STATE_CONFLICT');
+  expect(f.runtime.store.get('SELECT store_user_message FROM conversation_inputs WHERE id=?',inputId)!.store_user_message).toBe(1);
+  expect(f.runtime.store.get("SELECT COUNT(*) AS n FROM conversation_inputs WHERE text=?",input.text)!.n).toBe(1);
+  expect(f.runtime.store.get("SELECT COUNT(*) AS n FROM assistant_responses WHERE generated_text LIKE 'The command was not applied%'")!.n).toBe(0);
+  expect(f.runtime.store.task(t.taskId)?.revision).toBe(1);
+ }finally{await f.close();}
+});

@@ -88,6 +88,7 @@ jest.mock('child_process', () => ({
 import { SessionProcess, resolveMaxHistoryMessages, MAX_HISTORY_MESSAGES } from '../../src/session/process';
 import { SessionStore } from '../../src/session/store';
 import { AgentConfig, GatewayConfig } from '../../src/types';
+import { validateJevConfig } from '../../src/jev/validation';
 
 // ── SessionProcess registry ───────────────────────────────────────────────────
 // start() opens a chokidar FSWatcher that only stop() closes. Tests create many
@@ -224,13 +225,15 @@ describe('SessionProcess', () => {
   it.each([false,true])('does not forward Jev vendor credentials into Claude runtime (container=%s)', async container => {
     const previous = { ...process.env };
     Object.assign(process.env, { TYPESAFE_API_KEY:'jev-default-secret', JEV_API_KEY:'jev-alias-secret', PRIVATE_JEV_TOKEN:'jev-explicit-secret', ANTHROPIC_API_KEY:'native-cli-token' });
+    validateJevConfig({enabled:true,provider:'typesafe',model:'jev'}); // an earlier default-credential config keeps TYPESAFE_API_KEY private after reload
     gatewayConfig.gateway.jev={enabled:true,provider:'typesafe',model:'jev',apiKeyEnv:'PRIVATE_JEV_TOKEN'};
     const config = container ? { ...agentConfig, type:'app-agent' as const, container:'fixture-container' } : agentConfig;
     const sp = makeSp('jev-env-'+container,'api',config,gatewayConfig,sessionStore);
     try {
       await sp.start();
       const [, args, settings] = spawnMock.mock.calls.at(-1);
-      for(const key of ['TYPESAFE_API_KEY','JEV_API_KEY','PRIVATE_JEV_TOKEN']) {
+      expect(settings.env.JEV_API_KEY).toBe('jev-alias-secret');
+      for(const key of ['TYPESAFE_API_KEY','PRIVATE_JEV_TOKEN']) {
         expect(settings.env).not.toHaveProperty(key);
         if(container)expect(args).toContain(key+'=');
       }
