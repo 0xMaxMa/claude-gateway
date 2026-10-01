@@ -76,6 +76,13 @@ export function historyCommand(command:string):'back'|'forward'|undefined {
  */
 export const COMMAND_DECISION_FAILURES:ReadonlySet<string>=new Set(['ADAPTER_TIMEOUT','DEADLINE_EXCEEDED','INVALID_RESPONSE','PROVIDER_UNAVAILABLE','RATE_LIMITED','MODEL_UNAVAILABLE','QUEUE_FULL','REQUEST_CONFLICT','INVALID_DECISION']);
 
+/**
+ * Jev's own choice for a direct command that asks about what is shown instead
+ * of acting on it, in any language: no keyword list decides this. The command
+ * then goes to the agent, which answers from fresh evidence.
+ */
+export const READ_REQUEST_CRITERION='The command only asks to read aloud, summarize, describe or answer a question about what is already shown on the page or screen; it requests no click, typing, key press, scrolling or navigation. The assistant answers it from the current view instead of acting.';
+
 /** Phrases that ask for a new browser tab (Cmd+T). */
 export const NEW_TAB_PHRASES=['new tab','open new tab','open a new tab','เปิด tab ใหม่','เปิดแท็บใหม่','tab ใหม่','แท็บใหม่'];
 /**

@@ -308,13 +308,15 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     }
     const requestId=randomUUID(),started=Date.now();emit('evaluating',{requestId,decisionMode:'jev'});
     if(direct){
-     const command=buildComputerCommand(state,goal.goal,targets,criteria,input.interactionContext,input.yieldAfterInteraction);
+     const command=buildComputerCommand(state,goal.goal,targets,criteria,input.interactionContext,input.yieldAfterInteraction,input.yieldAfterInteraction);
      const answer=await interruptible(s=>deps.evaluate({requestId,...command.request},s),runSignal,deps.interruptSignal);
      check();checkInterruption(deps.interruptSignal);evaluations++;
      const selected=readComputerCommand(command,answer.answers);
      emit('decided',{...(targets.has(selected.action)?summary(targets.get(selected.action)!):{}),requestId,confidence:selected.confidence,elapsedMs:Date.now()-started});
      if(!selected.confident){await capture();return {result:waitForCommand('LOW_CONFIDENCE')};}
      if(selected.action==='WAIT'||selected.action==='BLOCKED'){await capture();return {result:waitForCommand(selected.action==='WAIT'?'UI_NOT_READY':'NO_SUPPORTED_ACTION')};}
+     // No action: the gateway hands the command to the agent, which reads the screen.
+     if(selected.action==='READ_REQUEST'){await capture();return {result:waitForCommand('READ_REQUEST')};}
      // A high-impact target needs a confident decision AND a command that
      // names that operation itself; "ok" or a vague reference is not enough.
      const planned=targets.get(selected.action),risky=planned&&destructiveTarget(state,planned,false);

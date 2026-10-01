@@ -289,3 +289,60 @@ describe("M5: step mode fences Enter and submit like Computer Use", () => {
     expect((await run("enter", direct)).commandOutcome?.done).toBe(true);
   });
 });
+
+// Session 3e950913: "อ่านให้ฟังหน่อย ลิเวอร์พูลจะเตะกับใครในแมตช์ถัดไป" under user control
+// ended as a 0-step completion candidate and the agent never answered. Jev, not a
+// keyword list, now marks such a command READ_REQUEST; nothing is dispatched.
+describe("READ_REQUEST: a direct command that asks about the page", () => {
+  const ask = "อ่านให้ฟังหน่อย ลิเวอร์พูลจะเตะกับใครในแมตช์ถัดไป";
+  const fixtures = () => browser(page({ text: "Liverpool v Arsenal, Saturday 18:30", elements: [el("e0", "Fixtures"), el("e1", "Search", { tag: "input", role: "searchbox", operations: ["TYPE_TEXT"] })] }));
+  test("Jev's READ_REQUEST runs no step and reports the read request, not a failed command", async () => {
+    const { readRequested, directCommandSpeech } = await import("../../../src/automation/command-speech");
+    const b = fixtures(), j = jev({ operation: () => "READ_REQUEST" });
+    const result = await run(ask, b, j);
+    expect(Object.keys(j.requests[0].questions.operation.criteria)).toContain("READ_REQUEST");
+    expect(b.mutations()).toEqual([]);
+    expect(result).toMatchObject({ status: "needs_verification", reason: "COMMAND_WAITING_INPUT", steps: 0, commandOutcome: { done: false, reason: "READ_REQUEST" } });
+    expect(readRequested({ browserReport: result as never })).toBe(true);
+    expect(browserOutcomeText(result)).toMatch(/^Read request:/);
+    // The agent answers; no "not done, say it again" line is spoken.
+    expect(directCommandSpeech({ browserReport: result as never }, ask, { thai: true })).toBeUndefined();
+  });
+  test("an uncertain READ_REQUEST keeps the existing not-done behaviour", async () => {
+    const { readRequested } = await import("../../../src/automation/command-speech");
+    const b = fixtures();
+    const result = await run(ask, b, jev({ operation: () => "READ_REQUEST" }, 0.3));
+    expect(b.mutations()).toEqual([]);
+    expect(result.commandOutcome).toEqual({ done: false, reason: "LOW_OPERATION_CONFIDENCE" });
+    expect(readRequested({ browserReport: result as never })).toBe(false);
+  });
+  test("only a single user command is offered READ_REQUEST; a READ_REQUEST answer elsewhere is invalid", async () => {
+    for (const extra of [{ command: false }, { strictDestructive: true }]) {
+      const b = fixtures(), j = jev({ operation: () => "READ_REQUEST" });
+      const result = await run(ask, b, j, extra);
+      expect(Object.keys(j.requests[0].questions.operation.criteria)).not.toContain("READ_REQUEST");
+      expect(b.mutations()).toEqual([]);
+      expect(result.commandOutcome?.reason ?? result.reason).not.toBe("READ_REQUEST");
+    }
+  });
+  test("a malformed READ_REQUEST decision is an invalid decision, never a read request", async () => {
+    const b = fixtures();
+    const evaluate: BrowserUseDependencies["evaluate"] = async request => ({ model: "test-jev", answers: Object.fromEntries(Object.entries(request.questions).map(([key, q]) =>
+      [key, key === "operation" ? { choice: "READ_REQUEST", confidence: 0.9, probabilities: { READ_REQUEST: 0.9 } } : { choice: Object.keys(q.criteria)[0], confidence: 0.9, probabilities: Object.fromEntries(Object.keys(q.criteria).map((id, i) => [id, i ? 0 : 1])) }])) });
+    const result = await run(ask, b, { evaluate, requests: [] });
+    expect(b.mutations()).toEqual([]);
+    expect(result.commandOutcome).toEqual({ done: false, reason: "INVALID_DECISION" });
+  });
+  test("commands that contain the word อ่าน still act as before", async () => {
+    const searched = browser(page({ elements: [el("e1", "Search", { tag: "input", role: "searchbox", operations: ["TYPE_TEXT"] })] }), { page_type: (a, p) => ({ ...p, elements: p.elements.map(e => e.ref === a.ref ? { ...e, value: String(a.text) } : e) }), page_keypress: (_a, p) => ({ ...p, url: "https://start.test/?q=1" }) });
+    const j = jev();
+    const result = await run("ค้นหา อ่านการ์ตูน", searched, j);
+    expect(j.requests).toHaveLength(0);
+    expect(searched.mutations()).toEqual([{ name: "page_type", args: expect.objectContaining({ ref: "e1", text: "อ่านการ์ตูน", submit: true }) }]);
+    expect(result.commandOutcome).toMatchObject({ done: true });
+    const typed = browser(page({ elements: [el("e1", "Note", { tag: "input", operations: ["TYPE_TEXT"] })] }), { page_type: (a, p) => ({ ...p, elements: p.elements.map(e => e.ref === a.ref ? { ...e, value: String(a.text) } : e) }) });
+    const typing = await run("พิมพ์ อ่านแล้ว", typed, jev({ operation: () => "TYPE_TEXT" }));
+    expect(typed.mutations()).toEqual([{ name: "page_type", args: expect.objectContaining({ ref: "e1", text: "อ่านแล้ว" }) }]);
+    expect(typing.commandOutcome).toMatchObject({ done: true, action: { kind: "type" } });
+  });
+});

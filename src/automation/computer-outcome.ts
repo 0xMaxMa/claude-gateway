@@ -56,6 +56,7 @@ export function computerOutcomeText(report:ComputerTaskReport):string{
  // The device may have acted: never tell the owner it was not done.
  if(report.reason==='OUTCOME_UNKNOWN')return `${UNKNOWN_PREFIX} the last action may have run. Check the screen before sending the command again.`;
  if(report.clarification)return `Not done: ${report.clarification}`;
+ if(waiting==='READ_REQUEST'&&!report.steps)return 'Read request: nothing was pressed; the assistant answers from the current screen.';
  // A spoken number stopped part-way: say how far it got, never "Done".
  const sequence=report.lastAction?.sequence,planned=report.lastAction?.planned;
  if(sequence&&planned&&sequence.length<planned)return `Not done: pressed ${sequence.length} of ${planned} (${sequence.map(label=>quoted(label)).join(', ')}), then stopped${waiting&&HINTS[waiting]?`: ${hint(waiting,report)}`:'.'}`;

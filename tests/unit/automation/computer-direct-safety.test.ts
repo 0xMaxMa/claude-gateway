@@ -120,3 +120,44 @@ describe('P0-3 per-command outcome text',()=>{
   [{...base,steps:5,stepRun:{total:5,completed:3,stopReason:'STEP_NOT_EXECUTED',stoppedAt:4,stoppedStep:'เข้า link แรก',detail:'NO_SUPPORTED_ACTION',remaining:['เข้า link แรก','scroll ลงมา']}},/3\/5 steps done.*step 4 "เข้า link แรก".*NO_SUPPORTED_ACTION/s],
  ])('%#',(report,expected)=>{expect(computerOutcomeText(report as any)).toMatch(expected);});
 });
+
+// Session 3e950913 asked to read the page aloud under direct control. Jev decides
+// READ_REQUEST (no keyword list); nothing is pressed and the agent answers.
+describe('READ_REQUEST: a direct command that asks about the screen',()=>{
+ const ask='อ่านให้ฟังหน่อย ลิเวอร์พูลจะเตะกับใครในแมตช์ถัดไป';
+ test('Jev READ_REQUEST dispatches nothing and is reported as a read request',async()=>{
+  const {readRequested,directCommandSpeech}=await import('../../../src/automation/command-speech');
+  const f=fixture(chrome(),'READ_REQUEST');
+  const r=await run(f,ask);
+  expect(Object.keys(f.requests[0].questions.action.criteria)).toContain('READ_REQUEST');
+  expect(f.actions()).toEqual([]);
+  expect(r).toMatchObject({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0});
+  // The gateway adapter records trace events on the task report.
+  const report={...r,trace:r.trace.events} as never;
+  expect(readRequested({computerReport:report})).toBe(true);
+  expect(computerOutcomeText(report)).toMatch(/^Read request:/);
+  expect(directCommandSpeech({computerReport:report},ask,{thai:true})).toBeUndefined();
+ });
+ test('an uncertain READ_REQUEST stays LOW_CONFIDENCE, and agent control is never offered it',async()=>{
+  const {readRequested}=await import('../../../src/automation/command-speech');
+  const low=fixture(chrome(),'READ_REQUEST',0.4);
+  const r=await run(low,ask);
+  expect(low.actions()).toEqual([]);
+  expect(r.trace.events.some(e=>e.reason==='LOW_CONFIDENCE')).toBe(true);
+  expect(readRequested({computerReport:{...r,trace:r.trace.events} as never})).toBe(false);
+  const agent=fixture(chrome(),'READ_REQUEST');
+  const a=await runComputerUse({goal:ask,yieldAfterAction:true},agent.deps,new AbortController().signal);
+  expect(Object.keys(agent.requests[0].questions.action.criteria)).not.toContain('READ_REQUEST');
+  expect(agent.actions()).toEqual([]);
+  expect(readRequested({computerReport:{...a,trace:a.trace.events} as never})).toBe(false);
+ });
+ test('a command that types the word อ่าน still types it',async()=>{
+  const state=chrome();(state.controls[0] as any).focused=true;
+  const f=fixture(state,'type:c0'),evaluate=f.deps.evaluate;
+  // The literal payload is chosen as Jev's text head would choose it.
+  f.deps.evaluate=async(req,signal)=>{const answer=await evaluate(req,signal);if(req.questions.text)(answer.answers as any).text=choice(req.questions.text.criteria,Object.keys(req.questions.text.criteria).find(k=>k!=='NONE')!,1);return answer;};
+  const r=await run(f,'พิมพ์ "อ่านการ์ตูน"');
+  expect(f.actions()).toEqual([expect.objectContaining({kind:'type',text:'อ่านการ์ตูน'})]);
+  expect(r.steps).toBe(1);
+ });
+});

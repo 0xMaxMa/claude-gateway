@@ -1,6 +1,6 @@
 import type {ComputerState,ComputerUseDependencies} from './computer-use';
 import {decisionState,literalTextCandidates,readChoice} from './computer-policy';
-import {NEW_TAB_PHRASES,addressCommand,historyCommand,keyCommand,newTabCommand,normalizeCommand,repeatCommand,scrollCommand,textCommand} from './direct-command';
+import {NEW_TAB_PHRASES,READ_REQUEST_CRITERION,addressCommand,historyCommand,keyCommand,newTabCommand,normalizeCommand,repeatCommand,scrollCommand,textCommand} from './direct-command';
 
 // Command controller design: moritzkremb/jev-voice-browser, MIT,
 // 198a0764395a666f8398026c0d8abdaf6d1866c5, src/jev.js buildRequest and
@@ -30,8 +30,10 @@ const targetQuestions:Record<string,string>={
  navigate:'Which available history direction matches `command`?',
 };
 type Request=Parameters<ComputerUseDependencies['evaluate']>[0];
-export function buildComputerCommand(state:ComputerState,command:string,targets:Map<string,Record<string,unknown>>,descriptions:Record<string,string>,context:string|undefined,allowSubmit:boolean){
+export function buildComputerCommand(state:ComputerState,command:string,targets:Map<string,Record<string,unknown>>,descriptions:Record<string,string>,context:string|undefined,allowSubmit:boolean,readRequest=false){
  const kinds:Record<string,string>={WAIT:'The interface is still changing; wait for a later command',BLOCKED:'No offered operation matches this command',DONE:'No operation is required by the current observed state'};
+ // Only the user's own direct command can be a question for the assistant.
+ if(readRequest)kinds.READ_REQUEST=READ_REQUEST_CRITERION;
  const questions:Request['questions']={};
  for(const action of targets.values())kinds[String(action.kind)]=operations[String(action.kind)];
  if(allowSubmit&&kinds.type)kinds.submit_text=operations.submit_text;
