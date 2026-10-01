@@ -541,6 +541,11 @@ Jev decision over the observed controls and dispatches at most one action.
   …` (for example `Done: searched in "Search"`) or `Not done: …` with a hint.
   A not-done command dispatched nothing; the session keeps waiting for the next
   command instead of failing.
+- **Action log.** Each settled round also appends its outcome line (and, for a
+  step run, the last completed action, such as `pressed "All Clear"`) to the
+  task's `actionLog`, the last 12 rounds with short command and result text.
+  `task_status` and the per-turn task context include it, so a summary after many
+  commands reports what each round did rather than only the latest one.
 - **Rapid commands.** Commands typed while the previous one is running are
   queued first-in, first-out (up to 20) and delivered verbatim, exactly as for
   Computer Use. A settled round is applied at once and the next command
@@ -719,6 +724,29 @@ and keep their stricter checks above; for example a step that says `ลบ` stop
 - **Quitting an app.** `ปิด chrome`, `quit chrome`, `ปิดแอป` or `Cmd+Q` press the
   front application's own Quit menu command. The named application must be the
   one in front; otherwise nothing is dispatched (`SHORTCUT_UNAVAILABLE`).
+- **Spoken filler words.** Before matching these phrases, a leading `เอ่อ`,
+  `อ่า`, `เอาล่ะ`, `โอเค` or `ok`, trailing particles (`ครับ`, `ค่ะ`, `คะ`, `นะ`,
+  `หน่อย`, `จ้า`, `เจ้า`) and a trailing `.`, `!` or `?` are ignored, so
+  `เลื่อนลงครับ` scrolls down and `เอาล่ะ กด enter.` presses Enter. This is for
+  matching only: the stored command, the text sent to Jev and step lists stay
+  verbatim, and a filler said on its own is kept.
+- **Numbers and calculator keys.** A spoken digit or operator presses the one
+  visible button with that exact label, without Jev: `ห้า`, `5`, `๕`, `กดเลข 5`
+  or `press 5` press `5`; `บวก`/`ลบ`/`คูณ`/`หาร`/`เท่ากับ` (or `plus`, `+`,
+  `เครื่องหมายบวก` and so on) press `Add`/`Subtract`/`Multiply`/`Divide`/`Equals`
+  (or `+ − × ÷ =`); `เคลียร์` presses `Clear` or `All Clear`. The button must be
+  the only pressable, non-sensitive, non-menu control with that label, and not a
+  high-impact control; two matches or none leave the command to Jev unchanged.
+  While keyboard focus is in a text field these words are text, not buttons.
+  `ลบ` erases in a focused text field (see above); with no text focus it presses
+  `Subtract` only when no visible Delete/Remove-type control could be meant,
+  otherwise Jev decides with the high-impact rule. A number is pressed digit by
+  digit: `ห้า ศูนย์`, `ห้าสิบ` and `50` press `5` then `0`, each matched again
+  on a fresh observation after the previous press settles. At most 8 presses
+  (`SEQUENCE_TOO_LONG` otherwise). Two number forms that disagree, such as
+  `ห้า ห้าสิบ`, press nothing and ask back (`ห้า หรือ ห้าสิบ?`). If a press is
+  refused part-way the rest is not pressed and the outcome says how far it got;
+  an uncertain press stops for reconciliation and is never repeated.
 - **Keys.** A bare key name such as `enter`, `return`, `tab`, `esc`, `up`,
   `ลูกศรลง` or `arrow left` presses that key, like `กด enter`.
 - **Text.** `ค้นหา X`, `search X`, `พิมพ์ X` and `type X` offer `X` itself as the
@@ -854,5 +882,7 @@ Authenticated clients can send text directly to an existing scoped browser/compu
 Actions are `pause`, `revise`, `resume`, `agent`, and `user`. Only `revise` accepts `text` (1–4000 characters). Use the current task revision; a conflicting revision or reused command ID with different contents returns HTTP 409. Accepted commands return HTTP 202 with the updated task. Switching `agent`/`user` changes who supplies subsequent instructions; it does not bypass consent, ownership or an unresolved mutation.
 
 On the existing voice WebSocket, `voice.start` and `voice.configure` accept `execution_task_id` as a task UUID, or `null` to return to the conversational agent. The target remains fixed across segments of one utterance. Confirmed speech can pause new actions while the correction is transcribed; microphone noise alone does not authorize a new command. Stop cannot undo an OS/browser action already dispatched.
+
+A spoken direct command that does nothing gets one short spoken reply on that voice session, in Thai for a Thai command and English otherwise: for example `ไม่แน่ใจว่า ห้า คือปุ่มไหน ลองพูดใหม่อีกครั้ง` (low confidence), `ไม่เจอปุ่ม บัว บนหน้าจอ` (no matching control), or the clarification `ห้า หรือ ห้าสิบ?`. It repeats only the user's own words, never screen text, and is also added to the conversation history. A command that ran stays silent, since the user can see the result. Typed commands are unchanged: the outcome line stays on the task, with no extra chat notice. Speech recognition quality (for example `บวก` heard as `บัว`) is outside the gateway.
 
 A safely stopped confidence/provider failure permits a fresh explicit command on the same open task. A closed session or uncertain mutation cannot be resumed this way; inspect and reconcile the retained receipt first.
