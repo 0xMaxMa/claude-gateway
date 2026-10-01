@@ -1,7 +1,7 @@
 import {CURRENT_CONTROL_ROUND_SQL} from '../control-notification';
 import {preparedBrowserAnswers} from '../browser-fields';
 import {ComputerInputs} from '../../jev/computer-inputs';
-import {automationSession} from './automation-session';
+import {automationSession,pausedForCommand,stoppedForCommand} from './automation-session';
 import {computerActionText,computerOutcomeText} from '../../automation/computer-outcome';
 import {browserOutcomeText} from '../../automation/browser-outcome';
 import {textCommand} from '../../automation/direct-command';
@@ -404,14 +404,8 @@ export class TaskService {
         return task;
       }
       task.automationController='user';
-      const paused=task.state==='waiting_input'&&!task.activeAttemptId&&(task.executionControl?.phase==='paused'||['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(task.computerReport?.reason??task.browserReport?.reason??''));
-      const completedRound=command.action==='revise'&&task.state==='completed'&&!task.activeAttemptId;
-      const stoppedBrowser=command.action==='revise' && task.state==='failed' && !task.activeAttemptId &&
-        task.gatewayTarget?.adapter==='browser' && task.browserReport?.status==='blocked' &&
-        task.browserReport.reason!=='OUTCOME_UNKNOWN' && !task.browserReport.providerFailure &&
-        task.browserReport.lastAction?.outcome!=='unknown';
-      const stoppedComputer=command.action==='revise'&&task.state==='failed'&&!task.activeAttemptId&&task.gatewayTarget?.adapter==='computer'&&task.computerReport?.status==='blocked'&&((task.computerReport.reason==='COMPUTER_USE_FAILED'&&task.computerReport.steps===0&&task.computerReport.evaluations===0)||/^THINKING_(?:HTTP_[0-9]{3}|[A-Z_]{1,64})$/.test(task.computerReport.reason)||['JEV_PROVIDER_UNAVAILABLE','JEV_DEADLINE_EXCEEDED','JEV_RATE_LIMITED','JEV_QUOTA_EXCEEDED','JEV_MODEL_UNAVAILABLE','JEV_AUTHENTICATION_FAILED','JEV_INVALID_CONFIG','JEV_DISABLED','JEV_QUEUE_FULL','LOW_CONFIDENCE','COMPLETION_NOT_ESTABLISHED','LOOP_CYCLE_BUDGET','TIMEOUT','NO_SUPPORTED_ACTION','ACTION_BUDGET','THINKING_WAITING_INPUT','THINKING_SCREENSHOT_REQUIRED','COMPUTER_SCREENSHOT_STALE','COMPUTER_SCREENSHOT_UNAVAILABLE','SCREEN_RECORDING_PERMISSION_REQUIRED','SCREENSHOT_CAPTURE_FAILED','SCREENSHOT_WINDOW_UNAVAILABLE','SCREENSHOT_SENSITIVE_CONTENT','SCREENSHOT_UNSUPPORTED','SCREENSHOT_TOO_LARGE','NATIVE_PROCESS_EXITED','NATIVE_REQUEST_TIMEOUT','NATIVE_START_FAILED','NATIVE_IO_ERROR','INVALID_NATIVE_RESPONSE','COMPUTER_ACCESS_DENIED','COMPUTER_ACCESS_STOPPED','COMPUTER_ACCESS_UNAVAILABLE','COMPUTER_ACCESS_TIMEOUT'].includes(task.computerReport.reason));
-      const recoverable=stoppedBrowser||stoppedComputer||completedRound;
+      const paused=pausedForCommand(task);
+      const recoverable=command.action==='revise'&&stoppedForCommand(task);
       if(!['queued','starting','running','interrupting'].includes(task.state)&&!paused&&!recoverable)throw new OrchestrationError('STATE_CONFLICT');
       if(command.action==='resume'&&!paused)throw new OrchestrationError('STATE_CONFLICT');
       if(command.action==='revise')boundedText(command.text??'',4000);

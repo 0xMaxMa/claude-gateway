@@ -159,7 +159,7 @@ test('browser start URL is explicit, validated and passed to the runner',async()
 
 test('missing start URL ends cleanly and legacy uncertain receipts can be cleaned up',async()=>{
  const f=fixture();f.run.mockResolvedValue({status:'blocked',reason:'START_URL_REQUIRED',steps:0,evaluations:0});
- await f.a.submit(task(),'r','goal');expect(await settle(f.a)).toMatchObject({type:'failed',failure:{code:'BROWSER_START_URL_REQUIRED'}});
+ await f.a.submit(task(),'r','goal');expect(await settle(f.a)).toMatchObject({type:'failed',failure:{code:'BROWSER_START_URL_REQUIRED',message:expect.stringContaining('ask the user which site to open')}});
  const file=join(dir,readdirSync(dir)[0]);const receipt=JSON.parse(readFileSync(file,'utf8'));
  receipt.outcome.type='unknown';writeFileSync(file,JSON.stringify(receipt));
  expect(await f.make().inspect(task(),'r')).toMatchObject({type:'failed'});

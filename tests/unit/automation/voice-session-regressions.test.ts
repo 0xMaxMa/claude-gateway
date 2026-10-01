@@ -7,7 +7,8 @@ import {destructiveText} from '../../../src/automation/computer-safety';
 import {runBrowserUse,type BrowserUseDependencies,type Observation} from '../../../src/automation/browser-use';
 import {JevError} from '../../../src/jev/types';
 import type {BrowserTaskReport} from '../../../src/jev/browser-contract';
-import type {ComputerTaskReport} from '../../../src/orchestration/types';
+import type {ComputerTaskReport,TaskSnapshot} from '../../../src/orchestration/types';
+import {acceptsDirectCommand} from '../../../src/orchestration/tasks/automation-session';
 
 // Sessions b01a566f (Remote Browser, YouTube) and a4b9ee81 (Computer Use).
 
@@ -49,6 +50,22 @@ describe('spoken outcome', () => {
   const ended=directCommandSpeech({computerReport:report},'คริยา',{ended:true})!;
   expect(ended.spoken).toBe('ยังไม่ได้ทำ คริยา และงานนี้หยุดไปแล้ว ต้องเริ่มงานใหม่');
   expect(ended.spoken).not.toContain('ลองพูดใหม่');
+ });
+});
+
+// Session 4d9ee168: a blank tab failed START_URL_REQUIRED, then the voice said
+// "task ended, start a new one" although the same task took the next commands.
+describe('blank Remote Browser tab', () => {
+ test('START_URL_REQUIRED tells the user to name the site, in Thai',()=>{
+  const report={contractVersion:1,status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:0,commandOutcome:{done:false,reason:'START_URL_REQUIRED'}} as BrowserTaskReport;
+  expect(directCommandSpeech({browserReport:report},'เลื่อนลง')?.spoken).toBe('แท็บยังว่าง บอกชื่อเว็บก่อน เช่น เข้า google.com');
+ });
+ test('a failed round that still takes commands is not spoken as ended',()=>{
+  const browserReport={contractVersion:1,status:'blocked',reason:'START_URL_REQUIRED',steps:0,evaluations:0} as BrowserTaskReport;
+  const task={state:'failed',automationController:'user',gatewayTarget:{adapter:'browser',sessionId:'b',name:'B'},browserReport,updatedAt:Date.now()} as unknown as TaskSnapshot;
+  expect(acceptsDirectCommand(task)).toBe(true);
+  expect(acceptsDirectCommand({...task,state:'cancelled'})).toBe(false);
+  expect(acceptsDirectCommand({...task,browserReport:{...browserReport,reason:'OUTCOME_UNKNOWN'}})).toBe(false);
  });
 });
 

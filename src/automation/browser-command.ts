@@ -47,6 +47,21 @@ export function planBrowserCommand(command:string):BrowserCommandPlan|undefined 
  }
 }
 
+/**
+ * The page a blank New Tab opens for this goal: a navigation command, or (for
+ * an agent's task goal) the one web address it names. Never a non-web scheme.
+ */
+export function blankTabUrl(goal:string,command:boolean):string|undefined {
+ const plan=planBrowserCommand(goal);
+ if(plan||command)return plan?.kind==='navigate'?plan.url:undefined;
+ const urls=new Set(goal.split(/\s+/u).flatMap(word=>{
+  const token=word.replace(/^[("'“‘<]+|[)"'”’>.,;:!?]+$/gu,'');
+  const named=/^(?:https?:\/\/|www\.)|\.[a-z]{2,}(?:\/|$)/iu.test(token)?planBrowserCommand(token):undefined;
+  return named?.kind==='navigate'?[named.url]:[];
+ }));
+ return urls.size===1?[...urls][0]:undefined;
+}
+
 export interface PageElement {ref:string;label:string;tag:string;role?:string;type?:string;context?:string;value?:string;sensitive?:boolean;disabled?:boolean;readonly?:boolean;in_viewport?:boolean;operations:readonly string[]}
 const typeable=(e:PageElement)=>e.in_viewport!==false&&!e.sensitive&&!e.disabled&&!e.readonly&&e.operations.includes('TYPE_TEXT');
 const searchLike=(e:PageElement)=>['searchbox','combobox'].includes(e.role??'')||e.type==='search'||/search|ค้นหา|query|คำค้น/iu.test(`${e.label} ${e.context??''}`);

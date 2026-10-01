@@ -24,6 +24,7 @@ const THAI:Record<string,string>={
  UNKNOWN:'ไม่แน่ใจว่า {command} ทำไปแล้วหรือยัง ดูหน้าจอก่อนสั่งใหม่',
  CLARIFY:'ถามกลับว่าหมายถึงตัวเลขไหน',
  NEW_TAB:'เปิดแท็บใหม่ไม่ได้ บอกชื่อเว็บแทน',
+ START_URL:'แท็บยังว่าง บอกชื่อเว็บก่อน เช่น เข้า google.com',
  BRING_BROWSER_FRONT:'ใช้คำสั่งนี้กับแอปที่อยู่หน้าสุดไม่ได้ เอาเบราว์เซอร์ขึ้นมาไว้หน้าสุดก่อน',
  TEXT_ENTRY:'ไม่ได้พิมพ์อะไรลงไป ถ้าจะพิมพ์ให้พูดว่า พิมพ์ ตามด้วยข้อความ',
  ENDED:'ยังไม่ได้ทำ {command} และงานนี้หยุดไปแล้ว ต้องเริ่มงานใหม่',
@@ -39,6 +40,7 @@ const ENGLISH:Record<string,string>={
  UNKNOWN:'Not sure whether {command} ran. Check the screen before saying it again.',
  CLARIFY:'Asked which number was meant.',
  NEW_TAB:'A new tab cannot be opened here. Say the site name instead.',
+ START_URL:'The tab is still blank. Say the site first, for example go to google.com.',
  BRING_BROWSER_FRONT:'That shortcut does not work in the app in front. Bring the browser to the front first.',
  TEXT_ENTRY:'Nothing was typed. To type, say type followed by the text.',
  ENDED:'{command} was not done, and this task has ended. Start a new one to continue.',
@@ -49,7 +51,7 @@ const KIND:Record<string,string>={
  NO_SUPPORTED_ACTION:'NO_SUPPORTED_ACTION',SEQUENCE_TARGET_MISSING:'NO_SUPPORTED_ACTION',
  SEQUENCE_TOO_LONG:'SEQUENCE_TOO_LONG',DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED:'DESTRUCTIVE_ACTION_CONFIRMATION_REQUIRED',
  UI_NOT_READY:'SCREEN_CHANGING',STALE_OBSERVATION:'SCREEN_CHANGING',ACTION_CONTEXT_CHANGED:'SCREEN_CHANGING',STALE_RETRY_BUDGET:'SCREEN_CHANGING',WAIT_BUDGET:'SCREEN_CHANGING',
- NEW_TAB_OUT_OF_SCOPE:'NEW_TAB',SHORTCUT_UNAVAILABLE:'BRING_BROWSER_FRONT',TEXT_ENTRY_NOT_REQUESTED:'TEXT_ENTRY',
+ NEW_TAB_OUT_OF_SCOPE:'NEW_TAB',SHORTCUT_UNAVAILABLE:'BRING_BROWSER_FRONT',TEXT_ENTRY_NOT_REQUESTED:'TEXT_ENTRY',START_URL_REQUIRED:'START_URL',
 };
 export interface SpeechContext {
  /** The conversation speaks Thai (voice locale, or its recent commands). */

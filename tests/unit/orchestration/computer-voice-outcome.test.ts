@@ -64,7 +64,7 @@ describe('V2: spoken outcome for live_voice direct commands',()=>{
   const command=(text:string,modality?:'live_voice')=>runtime.store.acceptInput({scope,text,storeUserMessage:false,...(modality?{modality}:{}),capabilities:{execute:true,writeMemory:false}}).inputId;
   const settle=(inputId:string,computerReport:ComputerTaskReport,state?:'failed')=>(runtime as any).speakDirectOutcome?.({...runtime.store.task(task.taskId)!,...(state?{state}:{})},{revision:2,inputId,outcome:{type:state??'paused',computerReport}});
   const notices=(inputId:string)=>runtime.store.all("SELECT r.generated_text FROM assistant_responses r JOIN conversation_decisions d ON d.id=r.decision_id WHERE d.kind='notice' AND EXISTS(SELECT 1 FROM json_each(d.input_ids_json) WHERE value=?)",inputId).map(r=>String(r.generated_text));
-  return {runtime,heard,command,settle,notices,close:async()=>{unsubscribe();await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}};
+  return {runtime,taskId:task.taskId,heard,command,settle,notices,close:async()=>{unsubscribe();await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}};
  }
  test('a LOW_CONFIDENCE voice command produces exactly one short Thai voice message',async()=>{
   const f=await fixture();try{
@@ -101,6 +101,15 @@ describe('V2: spoken outcome for live_voice direct commands',()=>{
   const f=await fixture();try{
    f.settle(f.command('คริยา','live_voice'),failed,'failed');
    expect(f.heard.mock.calls.map(c=>c[0].spoken)).toEqual(['ยังไม่ได้ทำ คริยา และงานนี้หยุดไปแล้ว ต้องเริ่มงานใหม่']);
+  }finally{await f.close();}
+ });
+ test('a failed round that still takes commands says "say it again", not "start a new task"',async()=>{
+  // Session 4d9ee168: the "ended" line was spoken while the same task ran the next commands.
+  const failed:ComputerTaskReport={status:'blocked',reason:'JEV_QUOTA_EXCEEDED',steps:0,evaluations:0,phase:'terminal'};
+  const f=await fixture();try{
+   const input=f.command('คริยา','live_voice');
+   (f.runtime as any).speakDirectOutcome({...f.runtime.store.task(f.taskId)!,state:'failed',computerReport:failed},{revision:2,inputId:input,outcome:{type:'failed',computerReport:failed}});
+   expect(f.heard.mock.calls.map(c=>c[0].spoken)).toEqual(['ยังไม่ได้ทำ คริยา ลองพูดใหม่อีกครั้ง']);
   }finally{await f.close();}
  });
  test('an English conversation keeps English speech',async()=>{

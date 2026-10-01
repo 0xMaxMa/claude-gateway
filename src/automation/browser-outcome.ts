@@ -20,6 +20,7 @@ const HINTS:Record<string,string>={
  HISTORY_UNAVAILABLE:'there is no page to go {direction} to in this tab.',
  SCROLL_LIMIT:'the page is already at the {edge}.',
  NEW_TAB_OUT_OF_SCOPE:'Remote Browser works only in the one tab you approved, so no new tab was opened. Send the site or address (for example "เข้า google") and it opens in this tab.',
+ START_URL_REQUIRED:'the tab is still blank. Send the site or address first (for example "เข้า google.com") and it opens in this tab.',
  KEY_UNSUPPORTED:'this browser extension version cannot press keys. Update the Remote Browser extension (0.3.5 or later).',
  STALE_OBSERVATION:'the page changed before the action ran. Send the command again.',
  STALE_RETRY_BUDGET:'the page kept changing. Send the command again when it settles.',

@@ -83,6 +83,7 @@ import { WorkerDriver, WorkerScheduler } from './tasks/scheduler';
 import { OrchestrationHistoryWriter } from './history';
 import { ProcessTurn, startProcessTurn } from './process-turn';
 import { OrchestrationError, ExecutionCapabilities, ConversationScope, TERMINAL_TASK_STATES, type TaskSnapshot, type WorkerOutcome } from './types';
+import { acceptsDirectCommand } from './tasks/automation-session';
 import { recoverOrchestration } from './recovery';
 import { acquireInstanceLock } from './instance-lock';
 import { DeliveryOutbox, channelSender, ChannelSender } from './delivery';
@@ -670,7 +671,7 @@ export class AgentOrchestrationRuntime {
     const input = this.store.get('SELECT conversation_id,principal_id,modality,text FROM conversation_inputs WHERE id=?', round.inputId);
     if (input?.modality !== 'live_voice' || input.conversation_id !== task.conversationId || input.principal_id !== task.ownerPrincipalId) return;
     const listener = this.voiceListeners.get(task.agentSessionId);
-    const speech = listener?.principalId === task.ownerPrincipalId ? directCommandSpeech(round.outcome, String(input.text), { thai: this.speaksThai(task.conversationId), ended: TERMINAL_TASK_STATES.has(task.state) }) : undefined;
+    const speech = listener?.principalId === task.ownerPrincipalId ? directCommandSpeech(round.outcome, String(input.text), { thai: this.speaksThai(task.conversationId), ended: TERMINAL_TASK_STATES.has(task.state) && !acceptsDirectCommand(task) }) : undefined;
     if (!speech || this.responseIdForInput(round.inputId)) return;
     // History keeps the generic line; only playback carries the user's own words.
     const responseId = this.decisions.notice(task.conversationId, speech.recorded, false, round.inputId);

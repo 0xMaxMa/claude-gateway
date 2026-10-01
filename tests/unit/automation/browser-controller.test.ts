@@ -739,6 +739,75 @@ test("new tab without explicit URL reports setup requirement, not malformed prot
   assert.equal(result.reason, "START_URL_REQUIRED");
   assert.equal(result.evaluations, 0);
 });
+test("navigation command on a new tab opens the named site instead of START_URL_REQUIRED", async () => {
+  for (const [goal, url] of [
+    ["เข้า www.facebook.com", "https://www.facebook.com/"],
+    ["go to example.com", "https://example.com/"],
+    ["www.facebook.com", "https://www.facebook.com/"],
+  ] as const) {
+    const f = fixture([]),
+      call = f.deps.call;
+    let blank = true;
+    f.deps.call = (name, args, signal) => {
+      if (name === "page_observe" && blank) return Promise.resolve({ native_new_tab: true });
+      if (name === "tab_navigate") blank = false;
+      return call(name, args, signal);
+    };
+    const result = await runBrowserUse(
+      { goal, scope, command: true },
+      f.deps,
+      new AbortController().signal,
+    );
+    assert.notEqual(result.reason, "START_URL_REQUIRED", goal);
+    assert.deepEqual(result.commandOutcome, { done: true, action: { kind: "navigate", url } }, goal);
+    assert.deepEqual(f.calls.filter((c) => c.name === "tab_navigate").map((c) => c.args.url), [url], goal);
+    assert.equal(result.evaluations, 0, goal);
+  }
+});
+test("agent task on a new tab opens the one site its goal names, then decides as usual", async () => {
+  const f = fixture(["DONE"]),
+    call = f.deps.call;
+  let blank = true;
+  f.deps.call = (name, args, signal) => {
+    if (name === "page_observe" && blank) return Promise.resolve({ native_new_tab: true });
+    if (name === "tab_navigate") blank = false;
+    return call(name, args, signal);
+  };
+  const result = await runBrowserUse(
+    { goal: "Open www.facebook.com and check the feed.", scope },
+    f.deps,
+    new AbortController().signal,
+  );
+  assert.notEqual(result.reason, "START_URL_REQUIRED");
+  assert.deepEqual(f.calls.filter((c) => c.name === "tab_navigate").map((c) => c.args.url), ["https://www.facebook.com/"]);
+  assert(result.evaluations >= 1);
+});
+test("agent task on a new tab without exactly one site still reports START_URL_REQUIRED", async () => {
+  for (const goal of ["Open the site the user mentioned", "Compare example.com with example.org", "Open javascript:alert(1)"]) {
+    const f = fixture([]),
+      call = f.deps.call;
+    f.deps.call = (name, args, signal) =>
+      name === "page_observe" ? Promise.resolve({ native_new_tab: true }) : call(name, args, signal);
+    const result = await runBrowserUse({ goal, scope }, f.deps, new AbortController().signal);
+    assert.equal(result.reason, "START_URL_REQUIRED", goal);
+    assert.equal(f.calls.filter((c) => c.name === "tab_navigate").length, 0, goal);
+  }
+});
+test("non-navigation command or unsafe scheme on a new tab still reports START_URL_REQUIRED", async () => {
+  for (const goal of ["scroll down", "เข้า javascript:alert(1)", "open file:///etc/passwd", "เข้า data:text/html,x"]) {
+    const f = fixture([]),
+      call = f.deps.call;
+    f.deps.call = (name, args, signal) =>
+      name === "page_observe" ? Promise.resolve({ native_new_tab: true }) : call(name, args, signal);
+    const result = await runBrowserUse(
+      { goal, scope, command: true },
+      f.deps,
+      new AbortController().signal,
+    );
+    assert.equal(result.commandOutcome?.reason ?? result.reason, "START_URL_REQUIRED", goal);
+    assert.equal(f.calls.filter((c) => c.name === "tab_navigate").length, 0, goal);
+  }
+});
 test("non-web URLs and embedded credentials cannot be used for initial navigation", async () => {
   for (const startUrl of [
     "javascript:alert(1)",
