@@ -87,9 +87,10 @@ test('catalog pagination retains every tool and all automatic/shared/native skil
 
 test('app and disabled agents never inspect host MCP or connector configuration', async () => {
   const gateway = {
-    get gateway() {
+    gateway: new Proxy({ jev: undefined }, { get(target, key) {
+      if (key === 'jev') return target.jev;
       throw Error('HOST_CONFIGURATION_READ');
-    },
+    } }),
   } as unknown as GatewayConfig;
   const app = await new CapabilityCatalog(
     { id: 'app', type: 'app-agent' } as AgentConfig,

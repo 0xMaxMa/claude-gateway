@@ -1,3 +1,5 @@
+import { sanitizeJevChildEnv } from '../jev/child-env';
+import { jevAllowed } from './jev-gateway';
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
 import { mkdtemp, writeFile, rm } from 'fs/promises';
@@ -52,10 +54,10 @@ export function probeMcpConfiguration(
     const child = spawn(command, args, {
       cwd,
       detached: workerSpawnDetached(),
-      env: {
+      env: sanitizeJevChildEnv({
         ...process.env,
         ...(pathWithNativeBin() ? { PATH: pathWithNativeBin() } : {}),
-      },
+      }),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     recordProcessRoot(child);
@@ -298,7 +300,8 @@ export class CapabilityCatalog {
   };
   constructor(
     private readonly agent: AgentConfig,
-    private readonly gateway: GatewayConfig
+    private readonly gateway: GatewayConfig,
+    private readonly options: { browserEnabled?: () => boolean } = {}
   ) {}
   async snapshot(): Promise<CapabilitySnapshot> {
     const now = new Date().toISOString();
@@ -322,14 +325,14 @@ export class CapabilityCatalog {
               via: 'worker',
             })
           ),
-          ...containerTaskTools('agent').map((t) => ({
+          ...containerTaskTools('agent', jevAllowed(this.gateway,this.agent), Boolean(this.options.browserEnabled?.())).map((t) => ({
             name: `mcp__gateway__${t.name}`,
             description: t.description,
             server: 'gateway',
             status: 'available',
             via: 'agent',
           })),
-          ...containerTaskTools('worker').map((t) => ({
+          ...containerTaskTools('worker', jevAllowed(this.gateway,this.agent)).map((t) => ({
             name: `mcp__gateway__${t.name}`,
             description: t.description,
             server: 'gateway',
@@ -353,7 +356,7 @@ export class CapabilityCatalog {
     );
     const key = createHash('sha256')
       .update(
-        JSON.stringify({ host, servers, agent: this.agent, env: process.env })
+        JSON.stringify({ host, servers, agent: this.agent, jev:jevAllowed(this.gateway,this.agent), env: process.env })
       )
       .digest('hex');
     if (this.cache?.key === key && this.cache.until > Date.now())
@@ -395,6 +398,8 @@ export class CapabilityCatalog {
     host: boolean,
     connectors: Record<string, unknown>
   ): Promise<CapabilitySnapshot> {
+    const sanitizeServers = (values: Record<string, any>): Record<string, unknown> => Object.fromEntries(Object.entries(values).map(([name, server]) => [name, server && typeof server === 'object' && server.env ? { ...server, env: sanitizeJevChildEnv(server.env, this.gateway.gateway.jev) } : server]));
+    connectors = sanitizeServers(connectors);
     const directory = await mkdtemp(join(tmpdir(), 'gateway-capabilities-'));
     try {
       let servers = connectors;
@@ -445,13 +450,14 @@ export class CapabilityCatalog {
             {
               cwd: this.agent.workspace,
               detached: workerSpawnDetached(),
-              env: {
+              env: sanitizeJevChildEnv({
                 ...process.env,
+                GATEWAY_JEV_ENABLED: jevAllowed(this.gateway,this.agent)?'true':'',
                 GATEWAY_WORKSPACE_DIR: this.agent.workspace,
                 GATEWAY_ORIGIN_CHANNEL: 'api',
                 GETPOD_BROWSER_URL:
                   process.env.GETPOD_BROWSER_URL ?? 'http://127.0.0.1:10880',
-              },
+              }, this.gateway.gateway.jev),
               stdio: ['pipe', 'pipe', 'pipe'],
             }
           );
@@ -485,7 +491,7 @@ export class CapabilityCatalog {
               reject(Error('CAPABILITY_DISCOVERY_UNAVAILABLE'));
             }
           });
-          child.stdin.end(JSON.stringify({ servers, observed }));
+          child.stdin.end(JSON.stringify({ servers: sanitizeServers(servers), observed }));
         }
       );
       if (cliFailed)

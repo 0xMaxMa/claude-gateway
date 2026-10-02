@@ -232,6 +232,15 @@ test('repeated observations past the stale-progress limit stop the attempt and f
  expect(done).toMatchObject({state:'failed',failure:{code:'PROGRESS_STALLED',message:expect.stringContaining('No new worker progress report')}});
  }finally{x.store.close();clock.mockRestore();}
 });
+test.each(['paused','completed for an old revision'] as const)('a stalled stop whose worker reports %s still records why it failed',kind=>{
+ const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
+ clock.mockReturnValue(16000);x.tasks.observeExecution(x.attempt.attemptId,1,observation(x.attempt.attemptId,16000));
+ if(kind!=='paused')x.store.transaction(()=>{const t=x.store.task(x.task.taskId)!;t.revision++;x.store.saveTask(t,t.stateVersion);});
+ const done=x.tasks.finish(x.attempt.attemptId,1,kind==='paused'?{type:'paused'}:{type:'completed',result:{summary:'Old revision result',artifactIds:[]}});
+ expect(done).toMatchObject({state:'failed',failure:{code:'PROGRESS_STALLED',message:expect.stringContaining('No new worker progress report')}});
+ expect(x.store.attempt(x.attempt.attemptId)!.failure?.code).toBe('PROGRESS_STALLED');
+ }finally{x.store.close();clock.mockRestore();}
+});
 test('a new worker progress report resets the stale-progress limit (#557)',()=>{
  const clock=jest.spyOn(Date,'now').mockReturnValue(10000),x=stalledSetup();try{
  clock.mockReturnValue(14000);x.tasks.progress(x.attempt.attemptId,1,'Built the fixture.');

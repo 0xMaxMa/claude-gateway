@@ -1,3 +1,4 @@
+import { sanitizeJevChildEnv, jevCredentialEnvNames } from '../jev/child-env';
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
 import { homedir, userInfo } from 'os';
@@ -25,7 +26,7 @@ export function parseCliSkills(value: unknown): CliSkill[] {
 export function probeCliSkills(command: string, args: string[], cwd: string, timeoutMs = 10000): Promise<CliSkill[]> {
   return new Promise((resolve, reject) => {
     const id = randomUUID();
-    const child = spawn(command, args, {cwd, detached: workerSpawnDetached(), env: {...process.env, ...(pathWithNativeBin() ? {PATH:pathWithNativeBin()} : {})}, stdio:['pipe','pipe','pipe']});
+    const child = spawn(command, args, {cwd, detached: workerSpawnDetached(), env: sanitizeJevChildEnv({...process.env, ...(pathWithNativeBin() ? {PATH:pathWithNativeBin()} : {})}), stdio:['pipe','pipe','pipe']});
     recordProcessRoot(child);
     let buffer = '', bytes = 0, result: CliSkill[] | undefined, failure: Error | undefined, finished = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
@@ -84,7 +85,7 @@ export function discoverCliSkills(agent: AgentConfig, cwd = agent.orchestration?
     if(container){
       await validateContainer(agent); // Never probe host CLI as fallback for an app.
       let uid=1000;try{uid=userInfo().uid;}catch{/* match runtime fallback */}
-      return await probeCliSkills('docker',['exec','--workdir','/workspace','--user',String(uid),'-e',`HOME=${homedir()}`,'-i',agent.container!,binary,...args],agent.workspace);
+      return await probeCliSkills('docker',['exec','--workdir','/workspace','--user',String(uid),'-e',`HOME=${homedir()}`,...jevCredentialEnvNames(gateway?.gateway.jev).flatMap(name=>['-e',`${name}=`]),'-i',agent.container!,binary,...args],agent.workspace);
     }
     return await probeCliSkills(hostCommand!.command,[...hostCommand!.args,...args],cwd);
     } finally { release?.(); }

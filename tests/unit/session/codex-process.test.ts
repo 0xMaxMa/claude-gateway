@@ -18,6 +18,7 @@ import { providerFailure } from '../../../src/orchestration/provider-admission';
 import { startProcessTurn } from '../../../src/orchestration/process-turn';
 import { prepareContainerProfile, containerNode, stopContainerProfile } from '../../../src/orchestration/container';
 import { stopProcessGroup, workerSpawnDetached } from '../../../src/orchestration/process-supervisor';
+import { validateJevConfig } from '../../../src/jev/validation';
 jest.mock('../../../src/orchestration/container', () => ({ ...jest.requireActual('../../../src/orchestration/container'), prepareContainerProfile: jest.fn(), containerNode: jest.fn(), stopContainerProfile: jest.fn().mockResolvedValue(true) }));
 jest.mock('child_process', () => ({ spawn: jest.fn() }));
 jest.mock('../../../src/orchestration/process-supervisor', () => ({ recordProcessRoot: jest.fn(), stopProcessGroup: jest.fn().mockResolvedValue(true), workerSpawnDetached: jest.fn().mockReturnValue(true) }));
@@ -625,4 +626,26 @@ test('rejects incorrect config readback before any model request', async () => {
  await adapter.start();adapter.sendMessage('never execute');await waitUntil(()=>errors.length>0);
  expect(errors[0].message).toContain('context window configuration mismatch');
  expect(rpc.some(r=>r.method==='thread/start')).toBe(false);
+});
+
+test.each([false,true])('Codex host/container strips Jev credentials after overlays but retains native auth (container=%s)', async container => {
+  const previous = { ...process.env };
+  Object.assign(process.env,{TYPESAFE_API_KEY:'jev-default-secret',JEV_API_KEY:'jev-alias-secret',PRIVATE_JEV_TOKEN:'jev-explicit-secret'});
+  validateJevConfig({enabled:true,provider:'typesafe',model:'jev'}); // an earlier default-credential config keeps TYPESAFE_API_KEY private after reload
+  options.gateway={gateway:{jev:{enabled:true,provider:'typesafe',model:'jev',apiKeyEnv:'PRIVATE_JEV_TOKEN'},workers:{environment:{PRIVATE_JEV_TOKEN:'jev-overlay-secret'}}},agents:[]} as any;
+  options.profile.hostExecution = !container;
+  if(container){
+    options.agent.type='app-agent';options.agent.container='worker-container';options.profile.containerExecution=true;
+    (prepareContainerProfile as jest.Mock).mockResolvedValue({directory:'/tmp/gateway-orch-fixture',config:'/tmp/gateway-orch-fixture/mcp.json'});
+    (containerNode as jest.Mock).mockImplementation(async(_container,script,args)=>script.includes('createHash')?'fixture-sha':script.includes('homedir')?'/home/worker':args?.[0]?.endsWith('mcp.json')?JSON.stringify({mcpServers:{gateway:{command:'node',args:['container-bridge.js']}}}):'');
+  }
+  try {
+    await launch();
+    const [,args,settings]=(spawn as jest.Mock).mock.calls[0];
+    if(!container)expect(settings.env.JEV_API_KEY).toBe('jev-alias-secret'); // docker exec only forwards named worker variables
+    for(const key of ['TYPESAFE_API_KEY','PRIVATE_JEV_TOKEN']){expect(settings.env).not.toHaveProperty(key);if(container)expect(args).toContain(key+'=');}
+    expect(settings.env.GATEWAY_CODEX_API_KEY).toBe('api-secret');
+    expect(JSON.stringify(args)).not.toMatch(/jev-default-secret|jev-alias-secret|jev-explicit-secret|jev-overlay-secret/);
+    if(!container)expect(await readFile(join(settings.env.CODEX_HOME,'config.toml'),'utf8')).not.toContain('jev-overlay-secret');
+  } finally {process.env=previous;}
 });

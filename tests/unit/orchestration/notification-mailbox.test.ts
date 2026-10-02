@@ -5,6 +5,7 @@ import { OrchestrationStore } from '../../../src/orchestration/store';
 import { TaskService } from '../../../src/orchestration/tasks/service';
 import { DecisionService } from '../../../src/orchestration/decisions';
 import { pendingReports } from '../../../src/orchestration/notification-mailbox';
+import {CURRENT_CONTROL_ROUND_SQL} from '../../../src/orchestration/control-notification';
 
 function seed(store: OrchestrationStore, session: string) {
  const tasks=new TaskService(store),decisions=new DecisionService(store);
@@ -89,4 +90,79 @@ test('a prolonged report outage backs off to one hour across restart without con
   expect(pendingReports(store,[],[],true,ended+7200000)).toHaveLength(0);
   expect(store.get('SELECT status FROM notifications WHERE id=?',f.notificationId)?.status).toBe('handled');
  }finally{store.close();rmSync(root,{recursive:true,force:true});}
+});
+
+test.each(['COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'])('agent control wakes for each settled step (%s) even with next-user-turn reporting policy',reason=>{
+ const store=new OrchestrationStore(':memory:','a');
+ try {
+  const f=seed(store,'control');const row=store.get('SELECT task_id FROM notifications WHERE id=?',f.notificationId)!;
+  const task=store.task(String(row.task_id))!;
+  store.transaction(()=>{task.state='waiting_input';task.gatewayTarget={adapter:'browser',sessionId:'tab',name:'Browser'};task.browserReport={contractVersion:1,status:'needs_verification',reason,steps:1,evaluations:1};store.saveTask(task,task.stateVersion);store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);});
+  expect(pendingReports(store,[],[],false).map(r=>r.notification_id)).toContain(f.notificationId);
+  store.transaction(()=>{task.automationController='user';store.saveTask(task,task.stateVersion);store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);});
+  expect(pendingReports(store,[],[],false)).toHaveLength(0);
+  expect(pendingReports(store,[],[],true)).toHaveLength(0);
+ }finally{store.close();}
+});
+
+test('direct control stays silent until a confirmed user disconnect, then reports once',()=>{
+ const store=new OrchestrationStore(':memory:','a');
+ try {
+  const f=seed(store,'disconnect');const row=store.get('SELECT task_id FROM notifications WHERE id=?',f.notificationId)!;
+  const task=store.task(String(row.task_id))!;
+  store.transaction(()=>{task.automationController='user';task.state='cancel_requested';task.cancellation={requestedBy:'user',requestedAt:Date.now()};store.saveTask(task,task.stateVersion);store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);});
+  expect(pendingReports(store,[],[],true)).toHaveLength(0);
+  store.transaction(()=>{task.state='cancelled';store.saveTask(task,task.stateVersion);});
+  expect(pendingReports(store,[],[],true)).toHaveLength(0); // stale progress does not wake the agent
+  store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);
+  expect(pendingReports(store,[],[],false).map(r=>r.notification_id)).toEqual([f.notificationId]);
+  store.run("UPDATE notifications SET status='handled' WHERE id=?",f.notificationId);
+  expect(pendingReports(store,[],[],true)).toHaveLength(0);
+ }finally{store.close();}
+});
+
+
+test.each(['computer','browser'])('superseded %s step notifications do not interrupt the next control operation',adapter=>{
+ const store=new OrchestrationStore(':memory:','a');
+ try{
+  const f=seed(store,'control');const row=store.get('SELECT task_id FROM notifications WHERE id=?',f.notificationId)!;
+  const task=store.task(String(row.task_id))!;
+  store.transaction(()=>{task.state='running';task.automationController='agent';task.gatewayTarget={adapter:adapter as 'computer'|'browser',sessionId:'target',name:'Device'};store.saveTask(task,task.stateVersion);});
+  expect(pendingReports(store,[],[],true)).toHaveLength(0);
+  store.transaction(()=>{task.state='waiting_input';task.computerReport={status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1};store.saveTask(task,task.stateVersion);});
+  expect(pendingReports(store,[],[],true)).toHaveLength(0);
+  store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);
+  expect(pendingReports(store,[],[],true).map(r=>r.notification_id)).toEqual([f.notificationId]);
+ }finally{store.close();}
+});
+
+test.each(['reconnect','new-revision','new-dispatch','user-control','paused'])(
+ 'a pending control notification survives only the same authorized settled round: %s',change=>{
+ const store=new OrchestrationStore(':memory:','a');
+ try{
+  const f=seed(store,'reconnect');
+  const row=store.get('SELECT task_id FROM notifications WHERE id=?',f.notificationId)!;
+  const task=store.task(String(row.task_id))!;
+  store.transaction(()=>{
+   task.state='waiting_input';task.automationController='agent';
+   task.gatewayTarget={adapter:'computer',sessionId:'device',name:'Computer'};
+   task.computerReport={status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1};
+   store.saveTask(task,task.stateVersion);
+   store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);
+  });
+  for(const status of ['disconnected','connected'] as const){
+   task.computerConnection=status;store.transaction(()=>store.saveTask(task,task.stateVersion));
+  }
+  if(change!=='reconnect')store.transaction(()=>{
+   if(change==='new-revision')task.revision++;
+   if(change==='new-dispatch')task.gatewayDispatch={...task.gatewayDispatch!,requestId:'later-dispatch'};
+   if(change==='user-control')task.automationController='user';
+   if(change==='paused')task.executionControl={id:'pause',action:'pause',revision:task.revision,phase:'paused',requestedAt:Date.now()};
+   store.saveTask(task,task.stateVersion);
+  });
+  const expected=change==='reconnect'?[f.notificationId]:[];
+  for(const automatic of [false,true])expect(pendingReports(store,[],[],automatic).map(r=>r.notification_id)).toEqual(expected);
+  // The runtime must build a control-step prompt for the same eligible notice.
+  expect(store.all(`SELECT n.id FROM notifications n JOIN tasks t ON t.id=n.task_id WHERE n.id=? AND ${CURRENT_CONTROL_ROUND_SQL}`,f.notificationId).map(r=>r.id)).toEqual(expected);
+ }finally{store.close();}
 });

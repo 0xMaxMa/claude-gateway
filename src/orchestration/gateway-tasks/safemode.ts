@@ -1,3 +1,4 @@
+import { managedJevChildEnv } from '../../jev/child-env';
 import { spawn } from 'child_process';
 import { openSync, closeSync } from 'fs';
 import { resolve, join } from 'path';
@@ -68,7 +69,7 @@ export class SafemodeTaskAdapter implements GatewayTaskAdapter {
     const fd = openSync(join(store.dir(target.sessionId),`task-${requestId}.log`),'a',0o600);
     try {
       await new Promise<void>((ok,fail) => {
-        const child = spawn(process.execPath,args,{detached:true,stdio:['ignore',fd,fd]});
+        const child = spawn(process.execPath,args,{detached:true,env:managedJevChildEnv(process.env),stdio:['ignore',fd,fd]});
         child.once('error',fail);
         child.once('spawn',() => { child.unref(); ok(); });
       });

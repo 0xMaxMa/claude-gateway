@@ -52,7 +52,7 @@ Environment placeholders use `${VARIABLE_NAME}` syntax. Keep actual values in th
 
 Run `claude-gateway doctor` after changes, then verify the affected capability. Config migration adds new defaults and backs up the previous configuration; preserve those backups when upgrading. Some configuration changes hot-reload, while operations that replace installed code require a restart.
 
-Continue with [gateway settings](./gateway-settings.md), [memory and knowledge settings](./memory-settings.md), [orchestration settings](./orchestration-settings.md), or [voice configuration](../guide/voice.md).
+Continue with [gateway settings](./gateway-settings.md), [memory and knowledge settings](./memory-settings.md), [orchestration settings](./orchestration-settings.md), [voice configuration](../guide/voice.md), or [Jev evaluations](../guide/jev.md).
 
 ## Enable orchestration
 
@@ -80,3 +80,29 @@ Voice settings changes apply to new voice connections and later replies; reconne
 Do not copy an entire example over an existing config: this can discard agent entries, credentials, and unrelated settings. The API offers scoped updates to individual resources.
 
 See [worker command environment](../guide/worker-harnesses.md#worker-command-environment) for startup-hook examples, native shell differences, reserved variables, and container behavior.
+
+
+### Computer Use via Jev
+
+`gateway.jev.features.computerTasks.enabled` controls Gateway-managed desktop
+execution (defaults to enabled when Jev is enabled). Agent Jev allowlists and
+connector enablement still apply. Set it to `false` to disable new desktop work;
+active runs check authorization before further actions. The shared
+`gateway.jev.thinking` provides text and independent goal verification.
+`gateway.jev.features.computerSteps.enabled` (default `false`) runs an explicit
+user step list on one desktop lease without a parent-agent turn between steps.
+See [Step-by-step commands](../guide/jev.md#step-by-step-commands).
+
+### Remote Browser direct commands via Jev
+
+`gateway.jev.features.browserTasks.enabled` controls Gateway-managed Remote
+Browser tasks. While the user controls a browser task, each command runs as a
+direct command (fast paths for scroll, keys, back/forward, search and opening a
+site; otherwise one Jev decision). `gateway.jev.features.browserSteps.enabled`
+(default `false`, applied on live reload) runs an explicit user step list on one
+tab lease without a parent-agent turn between steps, with the same 12-step and
+120-second limits as `computerSteps`. See
+[Remote Browser direct commands](../guide/jev.md#remote-browser-direct-commands-and-step-mode).
+Pairing credentials belong in connector secrets, never in prompts or agent
+containers. See [Computer Use connectors](../guide/jev.md#computer-use-connectors)
+for discovery, scoped targets, local consent and restart behavior.

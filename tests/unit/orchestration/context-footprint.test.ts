@@ -47,8 +47,19 @@ test('the measured tool schemas always include conversation_intake, which is alw
   // The declared inventory no longer depends on semanticIntake, so measuring it against that
   // flag under-reported the real cached prefix by one whole tool schema.
   const row=contextFootprint(dir).rows.find(r=>r.name.startsWith('Agent gateway tool'))!;
-  expect(row.name).toContain('('+AGENT_TASK_TOOLS.length+')');
+  expect(row.name).toContain('('+AGENT_TASK_TOOLS.filter(t=>t.name!=='jev_evaluate').length+')');
   expect(AGENT_TASK_TOOLS.map(t=>t.name)).toContain('conversation_intake');
   expect(row.tokens!).toBeGreaterThan(0);
  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('optional Jev changes footprint independently of the workspace cache', () => {
+ const dir=mkdtempSync(join(tmpdir(),'footprint-jev-'));
+ try {
+  const disabled=contextFootprint(dir).rows.find(r=>r.name.startsWith('Agent gateway tool'))!;
+  const enabled=contextFootprint(dir,true).rows.find(r=>r.name.startsWith('Agent gateway tool'))!;
+  expect(enabled.tokens!).toBeGreaterThan(disabled.tokens!);
+  expect(enabled.name).toContain('('+AGENT_TASK_TOOLS.length+')');
+  expect(contextFootprint(dir).rows.find(r=>r.name.startsWith('Agent gateway tool'))).toEqual(disabled);
+ } finally {rmSync(dir,{recursive:true,force:true});}
 });

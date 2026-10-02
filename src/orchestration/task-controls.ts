@@ -1,3 +1,4 @@
+import {automationSession} from './tasks/automation-session';
 import { timingTotals } from './tasks/timing';
 import { executionDescription, executionDetails } from './execution-observation';
 import { OrchestrationStore } from './store';
@@ -21,7 +22,7 @@ export class TaskControls {
     const activityDetails = task.execution && ['running','starting'].includes(task.state) ? executionDetails(task.execution) : undefined;
     const attemptRow = this.store.get('SELECT payload_json FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', task.taskId);
     const harness = attemptRow ? (JSON.parse(String(attemptRow.payload_json)) as import('./types').TaskAttempt).harness : undefined;
-    return { gatewayTarget: task.gatewayTarget, executionType: task.gatewayTarget ? 'gateway-managed' as const : 'worker' as const, harness, timing: timingTotals(task), timingMeasuredFrom: task.timing?.measuredFrom, supervision: task.supervision, progressText, activityDetails, startedAt, finishedAt, taskId: task.taskId, title: task.title.slice(0,200), state: task.state, replacedByTaskId: task.replacedByTaskId,
+    return { computerConnection:task.computerConnection, automationController:task.automationController??"agent", automationSession:automationSession(task), executionControl:task.executionControl, revision:task.revision, appliedRevision:task.appliedRevision, pendingRevision:task.gatewayTarget && task.activeAttemptId && task.revision>1 && task.revision>task.appliedRevision ? task.revision : undefined, browserReport: task.browserReport, computerReport:task.computerReport, gatewayTarget: task.gatewayTarget, executionType: task.gatewayTarget ? 'gateway-managed' as const : 'worker' as const, harness, timing: timingTotals(task), timingMeasuredFrom: task.timing?.measuredFrom, supervision: task.supervision, progressText, activityDetails, startedAt, finishedAt, taskId: task.taskId, title: task.title.slice(0,200), state: task.state, replacedByTaskId: task.replacedByTaskId,
       cancellation: task.cancellation, failure: task.failure, execution: task.execution, progress: [task.failure ? `${task.failure.code}: ${task.failure.message}` : latestProgress?.text.slice(0,1500), task.execution && ['running','starting'].includes(task.state) ? executionDescription(task.execution) : undefined, task.replacedByTaskId ? `Replaced by task ${task.replacedByTaskId}` : undefined].filter(Boolean).join('\n') || undefined, question: task.pendingQuestion?.text.slice(0,1000), questionId: task.pendingQuestion?.questionId,
       updatedAt: Math.max(task.updatedAt, Number(activity?.occurred_at ?? 0), task.execution?.lastActivityAt ?? 0), canStop: ['queued','starting','running','waiting_input','interrupting','recovering','needs_reconciliation'].includes(task.state) };
   }
@@ -45,6 +46,10 @@ export class TaskControls {
   answer(sessionId: string, principalId: string, taskId: string, questionId: string, answer: string, acceptedInputId?: string) {
     const task=this.owned(sessionId,principalId,taskId);
     return this.view(this.tasks.answerByUser(task.conversationId,principalId,taskId,questionId,answer,acceptedInputId));
+  }
+  control(sessionId:string,principalId:string,taskId:string,command:Parameters<TaskService['controlByUser']>[3]) {
+    const task=this.owned(sessionId,principalId,taskId);
+    return this.tasks.controlByUser(task.conversationId,principalId,taskId,command);
   }
   cancel(sessionId: string, principalId: string, taskId: string) {
     const task=this.owned(sessionId,principalId,taskId);

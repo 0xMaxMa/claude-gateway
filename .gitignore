@@ -12,6 +12,7 @@ mcp/**/*.d.ts.map
 # the npm package, which whitelists dist/ via package.json `files`)
 .tsbuildinfo
 .tsbuildinfo-check
+.tsbuildinfo-tests
 
 # Environment & config
 .env

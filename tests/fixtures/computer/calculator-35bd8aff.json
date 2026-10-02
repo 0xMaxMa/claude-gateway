@@ -1,0 +1,469 @@
+{
+ "contractVersion": 1,
+ "capabilities": {
+  "standardCommands": [
+   "scroll:up",
+   "scroll:down",
+   "close:window",
+   "address:focus",
+   "app:quit",
+   "tab:close",
+   "tab:new"
+  ],
+  "keys": [
+   "backspace",
+   "down",
+   "enter",
+   "escape",
+   "left",
+   "right",
+   "tab",
+   "up"
+  ]
+ },
+ "scrollAreas": [
+  {
+   "ref": "s0",
+   "label": "Input",
+   "bounds": {
+    "x": 0.050505050505050504,
+    "y": 0.2,
+    "width": 0.898989898989899,
+    "height": 0.12
+   }
+  }
+ ],
+ "supportedActions": [
+  "scroll:up",
+  "scroll:down"
+ ],
+ "screenshotAvailable": true,
+ "generation": "84DED739-8C8F-40CC-AF2E-B65BCB1CDAA8",
+ "application": "com.apple.calculator",
+ "focusedControl": {
+  "role": "AXUnknown",
+  "label": "AXUnknown"
+ },
+ "windowTitle": "Calculator",
+ "text": [
+  "‎0"
+ ],
+ "truncated": false,
+ "platform": {
+  "os": "macos",
+  "osVersion": "15.6.1",
+  "appVersion": "11.0.0",
+  "helperVersion": "0.2.72",
+  "helperBuild": "36801796605",
+  "helperCommit": "53bb7d6998a8b8b57a0742329bb3fb49f5c2157a"
+ },
+ "controls": [
+  {
+   "identity": "4E9D872E-0DD4-45FD-BF8C-AD22C6E8CDD1",
+   "bounds": {
+    "x": 0.05555555555555555,
+    "y": 0.03142857142857143,
+    "width": 0.08080808080808081,
+    "height": 0.045714285714285714
+   },
+   "ref": "c0",
+   "label": "Close window",
+   "context": "Minimize window",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "09B16A40-ACE5-41F0-A72A-1A92A0AE8E48",
+   "bounds": {
+    "x": 0.15656565656565657,
+    "y": 0.03142857142857143,
+    "width": 0.08080808080808081,
+    "height": 0.045714285714285714
+   },
+   "ref": "c1",
+   "label": "Minimize window",
+   "context": "Close window",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "5EE6E496-C406-46BC-9B6D-665C6C66A4D0",
+   "bounds": {
+    "x": 0.050505050505050504,
+    "y": 0.3342857142857143,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c2",
+   "label": "All Clear",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "51B949BC-1BCA-4A89-98E3-4B3C159BE190",
+   "bounds": {
+    "x": 0.2828282828282828,
+    "y": 0.3342857142857143,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c3",
+   "label": "Change Sign",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "0720EB6A-CC67-4E92-98C3-52781E27FEC4",
+   "bounds": {
+    "x": 0.5151515151515151,
+    "y": 0.3342857142857143,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c4",
+   "label": "Percent",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "92CA153A-67A8-4EF9-A97F-281E9AA6AAFE",
+   "bounds": {
+    "x": 0.7474747474747475,
+    "y": 0.3342857142857143,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c5",
+   "label": "Divide",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "F4967528-904C-4287-8186-53A45CB22464",
+   "bounds": {
+    "x": 0.050505050505050504,
+    "y": 0.4657142857142857,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c6",
+   "label": "7",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "2ADD9C35-4EF2-4E8C-800B-E7DED9CC82A4",
+   "bounds": {
+    "x": 0.2828282828282828,
+    "y": 0.4657142857142857,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c7",
+   "label": "8",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "CA9C0446-707F-4801-926A-1127CC343815",
+   "bounds": {
+    "x": 0.5151515151515151,
+    "y": 0.4657142857142857,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c8",
+   "label": "9",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "DE47564E-B12A-40E3-9109-1B6CBB483B1B",
+   "bounds": {
+    "x": 0.7474747474747475,
+    "y": 0.4657142857142857,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c9",
+   "label": "Multiply",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "076BE2C2-7AED-4E2E-A973-25D61A27FB41",
+   "bounds": {
+    "x": 0.050505050505050504,
+    "y": 0.5971428571428572,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c10",
+   "label": "4",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "8B0B9FC6-CAF8-4F1A-ACBC-C3BF218B93D0",
+   "bounds": {
+    "x": 0.2828282828282828,
+    "y": 0.5971428571428572,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c11",
+   "label": "5",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "4D571F95-340C-496D-8DE2-960E3D7E43B3",
+   "bounds": {
+    "x": 0.5151515151515151,
+    "y": 0.5971428571428572,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c12",
+   "label": "6",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "2EC33F75-7353-434F-8C74-1F48299354BF",
+   "bounds": {
+    "x": 0.7474747474747475,
+    "y": 0.5971428571428572,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c13",
+   "label": "Subtract",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "AD64A2E8-E05F-441E-95B2-B1FD693CA7B7",
+   "bounds": {
+    "x": 0.050505050505050504,
+    "y": 0.7285714285714285,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c14",
+   "label": "1",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "A926EC90-BF0C-4FF9-84B0-9F4241114B7D",
+   "bounds": {
+    "x": 0.2828282828282828,
+    "y": 0.7285714285714285,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c15",
+   "label": "2",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "00538436-2B83-49FF-BFBF-B2FBA336378A",
+   "bounds": {
+    "x": 0.5151515151515151,
+    "y": 0.7285714285714285,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c16",
+   "label": "3",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "3707421A-CC40-4F52-A09B-4AB7E7AC1C33",
+   "bounds": {
+    "x": 0.7474747474747475,
+    "y": 0.7285714285714285,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c17",
+   "label": "Add",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "FC63B753-2CC2-4F3A-8951-AC171C2FA449",
+   "bounds": {
+    "x": 0.2828282828282828,
+    "y": 0.86,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c18",
+   "label": "0",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "DB55DD9D-EE04-48EB-825B-C806D21ED3FC",
+   "bounds": {
+    "x": 0.5151515151515151,
+    "y": 0.86,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c19",
+   "label": "Point",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "identity": "D1221D64-9412-4200-9E8C-82663F1D0678",
+   "bounds": {
+    "x": 0.7474747474747475,
+    "y": 0.86,
+    "width": 0.20202020202020202,
+    "height": 0.11428571428571428
+   },
+   "ref": "c20",
+   "label": "Equals",
+   "role": "AXButton",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "ref": "m34",
+   "label": "Menu: View → Decimal Places → 1",
+   "role": "AXMenuItem",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "ref": "m3",
+   "label": "Menu: Calculator → Quit Calculator",
+   "role": "AXMenuItem",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "ref": "m14",
+   "label": "Menu: Window → Close",
+   "role": "AXMenuItem",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "ref": "m33",
+   "label": "Menu: View → Decimal Places → 0",
+   "role": "AXMenuItem",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "ref": "m38",
+   "label": "Menu: View → Decimal Places → 5",
+   "role": "AXMenuItem",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  },
+  {
+   "ref": "m42",
+   "label": "Menu: View → Decimal Places → 9",
+   "role": "AXMenuItem",
+   "focused": false,
+   "actions": [
+    "press"
+   ]
+  }
+ ],
+ "apps": [
+  {
+   "id": "com.apple.calculator",
+   "name": "Calculator"
+  },
+  {
+   "id": "com.google.Chrome",
+   "name": "Google Chrome"
+  },
+  {
+   "id": "com.apple.TextEdit",
+   "name": "TextEdit"
+  }
+ ],
+ "_source": "develop pod, task a68812d5 (session 35bd8aff) revision 2 snapshot; menu bar trimmed to 6 items incl. \"Decimal Places → 5\""
+}

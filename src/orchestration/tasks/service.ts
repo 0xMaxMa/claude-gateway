@@ -1,3 +1,11 @@
+import {CURRENT_CONTROL_ROUND_SQL} from '../control-notification';
+import {preparedBrowserAnswers} from '../browser-fields';
+import {ComputerInputs} from '../../jev/computer-inputs';
+import {automationSession,pausedForCommand,stoppedForCommand} from './automation-session';
+import {computerActionText,computerOutcomeText} from '../../automation/computer-outcome';
+import {browserOutcomeText} from '../../automation/browser-outcome';
+import {textCommand} from '../../automation/direct-command';
+import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
 import { isAbsolute } from 'path';
 import { parseWorkflow, advanceWorkflow } from '../workflow';
 import { advanceTiming } from './timing';
@@ -7,16 +15,23 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { taskFailure } from './failure';
 import { WorkerPool } from './pool';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { OrchestrationStore, boundedText, payloadHash } from '../store';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../config';
 import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode } from '../types';
 
-export interface SpawnTask { gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal'; }
+export interface SpawnTask { browserFields?:unknown; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal'; }
 
 /** How many finished tasks the per-turn index page keeps. Unfinished tasks are never dropped;
  * older finished ones stay reachable through task_status with an explicit task_id. */
 const INDEXED_FINISHED_TASKS = 20;
+/** Direct Computer/Remote Browser commands that may wait behind a settling round. */
+const COMMAND_QUEUE_MAX = 20;
+/** Stable control ID for the agent's one command on a handed-off utterance. */
+export function handoffCommandId(inputId: string): string {
+  const h = createHash('sha256').update('agent-handoff:' + inputId).digest('hex');
+  return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`;
+}
 
 export type TaskIndexEntry = ReturnType<typeof taskIndexEntry>;
 /** One index row: identity, live state and how to fetch the rest — never a report body.
@@ -36,9 +51,32 @@ export function taskIndexEntry(task: TaskSnapshot) {
     cancellation: task.cancellation, replacedByTaskId: task.replacedByTaskId,
     workstreamId: task.workstreamId, continueTaskId: task.continueTaskId, continuationPolicy: task.continuationPolicy,
     resultAvailable: Boolean(task.result),
-    gatewayTarget: task.gatewayTarget,
+    actionLog: task.actionLog,
+    computerConnection:task.computerConnection, automationController:task.automationController??"agent", gatewayTarget: task.gatewayTarget, automationSession: automationSession(task),
     details: { tool: 'task_status', task_id: task.taskId },
   };
+}
+
+const ACTION_LOG_MAX = 12;
+const CORRECTION_HEAD = 'Latest user correction (apply first; supersedes conflicting earlier requirements):\n';
+/** The round's own command for the log: a correction's latest text, never its preamble, and never typed field text. */
+function loggedCommand(instructions: string): string {
+  let command = instructions.startsWith(CORRECTION_HEAD) ? instructions.slice(CORRECTION_HEAD.length).split('\n\nEarlier requirements and corrections')[0] : instructions;
+  const typed = textCommand(command);
+  if (typed) command = command.replace(typed.text, '[text]');
+  return command;
+}
+const clip = (text: string, max: number) => { const chars = [...text.replace(/\s+/gu, ' ').trim()]; return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : chars.join(''); };
+/** Appends one round's own outcome line, so a later summary need not infer earlier rounds from the latest report. */
+function recordAction(task: TaskSnapshot, revision: number, command: string, outcome: WorkerOutcome): void {
+  let result = task.gatewayTarget?.adapter === 'computer' && outcome.computerReport ? computerOutcomeText(outcome.computerReport)
+    : task.gatewayTarget?.adapter === 'browser' && outcome.browserReport ? browserOutcomeText(outcome.browserReport) : undefined;
+  if (result === undefined) return;
+  const last = outcome.computerReport?.lastAction;
+  // A step-run line counts steps; name the last completed action as well.
+  if (last && !last.blocked && !result.startsWith('Done:')) result += ` Last completed action: ${computerActionText(last)}.`;
+  if (outcome.type === 'unknown') result = 'Outcome unknown; not replayed. ' + result;
+  task.actionLog = [...(task.actionLog ?? []).filter(entry => entry.revision !== revision), { revision, command: clip(loggedCommand(command), 80), result: clip(result, 240) }].slice(-ACTION_LOG_MAX);
 }
 
 /** Task mutations use short durable transactions; admission probes are read-only. */
@@ -111,10 +149,10 @@ export class TaskService {
     if (!task || task.conversationId !== conversationId) throw new OrchestrationError('ACCESS_DENIED');
     return task;
   }
-  status(conversationId: string, principalId: string, taskId?: string): TaskSnapshot[] {
+  status(conversationId: string, principalId: string, taskId?: string): Array<TaskSnapshot & { currentInstructions?: string }> {
     this.store.assertMember(conversationId, principalId);
     if (taskId) { const task = this.owned(taskId, conversationId); delete task.skill; return [this.withRecentTools(task)]; }
-    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR id IN
+    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
       (SELECT id FROM tasks WHERE conversation_id=? AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT 100))
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`, conversationId, conversationId).map(row => {
       const task = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
@@ -146,12 +184,13 @@ export class TaskService {
   }
   /** Bounded recent-task page: every unfinished task, plus only the newest finished ones. */
   private indexPage(conversationId: string): TaskSnapshot[] {
-    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR id IN
+    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
       (SELECT id FROM tasks WHERE conversation_id=? AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT ${INDEXED_FINISHED_TASKS}))
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`,
       conversationId, conversationId).map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot);
   }
-  private withRecentTools(task: TaskSnapshot): TaskSnapshot {
+  private withRecentTools(task: TaskSnapshot): TaskSnapshot & { currentInstructions?: string } {
+    task.automationSession = automationSession(task);
     task.recentTools = this.store.all("SELECT payload_json,occurred_at FROM conversation_events WHERE conversation_id=? AND type='tool.activity' AND json_extract(payload_json,'$.task_id')=? ORDER BY seq DESC LIMIT 8", task.conversationId, task.taskId).map(row => {
       const event = JSON.parse(String(row.payload_json)).payload;
       return {name: String(event.name ?? 'unknown'), description: typeof event.input?.description === 'string' ? taskFailure(new Error(event.input.description)).message.slice(0,512) : undefined, type: String(event.type), isError: event.is_error, occurredAt: Number(row.occurred_at)};
@@ -163,15 +202,22 @@ export class TaskService {
         .map(row => String(row.path).slice(0,2048)),
       currentFilesystemVerified: false,
     };
-    return task;
+    // Direct corrections bypass the parent inference turn. Hydrated status and
+    // notifications must carry the current goal so verification cannot use stale memory.
+    return ['browser','computer'].includes(task.gatewayTarget?.adapter ?? '')
+      ? {...task,currentInstructions:this.revision(task.taskId,task.revision).instructions}
+      : task;
   }
   spawn(context: CommandContext, command: SpawnTask): TaskSnapshot {
+    if(command.computerInputs!==undefined){command.computerInputs=ComputerInputs.parse(command.computerInputs);if(command.gatewayTarget?.adapter!=='computer')throw new OrchestrationError('INVALID_INPUT');}
     if (command.workingDirectory !== undefined) {
       if (this.config.tasks.workspaceMode !== 'host') throw new OrchestrationError('WORKING_DIRECTORY_HOST_ONLY');
       if (typeof command.workingDirectory !== 'string' || !isAbsolute(command.workingDirectory) || /[\r\n\0]/.test(command.workingDirectory) || Buffer.byteLength(command.workingDirectory) > 4096) throw new OrchestrationError('INVALID_WORKING_DIRECTORY');
     }
     if (command.continueTaskId !== undefined) boundedText(command.continueTaskId, 128);
     if (command.continuationPolicy !== undefined && (!command.continueTaskId || !['after_success', 'after_terminal'].includes(command.continuationPolicy))) throw new OrchestrationError('INVALID_INPUT');
+    const prepared=preparedBrowserAnswers(command.browserFields,context.inputId);
+    if(command.browserFields!==undefined&&command.gatewayTarget?.adapter!=='browser')throw new OrchestrationError('INVALID_BROWSER_FIELDS');
     boundedText(command.title, 512); boundedText(command.instructions); boundedText(command.targetProfile, 128);
     if ((command.contextRefs?.length ?? 0) > 64 || command.contextRefs?.some(ref => typeof ref !== 'string' || ref.length > 1024)) throw new OrchestrationError('INVALID_INPUT');
     if (!['default-worker', 'media-worker', 'skill-worker', 'gateway-managed'].includes(command.targetProfile)) throw new OrchestrationError('UNKNOWN_WORKER_PROFILE');
@@ -179,6 +225,24 @@ export class TaskService {
     if (command.gatewayTarget && (command.workingDirectory || command.skill || command.contextRefs?.length)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
     return this.command(context, 'spawn', command, true, () => {
       const conversation = this.store.get('SELECT * FROM conversations WHERE id=?', context.conversationId)!;
+      let replaced:TaskSnapshot|undefined;
+      if(['browser','computer'].includes(command.gatewayTarget?.adapter ?? '')) {
+        const existing=this.store.all("SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.gatewayTarget.adapter')=? AND json_extract(snapshot_json,'$.gatewayTarget.sessionId')=?",context.conversationId,command.gatewayTarget!.adapter,command.gatewayTarget!.sessionId).map(row=>JSON.parse(String(row.snapshot_json)) as TaskSnapshot).find(task=>task.ownerPrincipalId===context.principalId && automationSession(task)?.status!=='closed');
+        // A computer session that never acted (failed before or while waiting
+        // for access) holds nothing worth continuing; a new spawn replaces it.
+        const neverActed=(existing?.gatewayTarget?.adapter==='computer'&&(existing.computerReport?.steps??0)===0&&!existing.computerReport?.trace?.some(event=>event.outcome==='unknown')&&
+          ((existing.state==='failed'&&!existing.activeAttemptId)||(existing.state==='running'&&existing.computerReport?.status==='waiting_access')))||
+          // A Remote Browser session that failed before any tab action likewise holds nothing.
+          (existing?.gatewayTarget?.adapter==='browser'&&existing.state==='failed'&&!existing.activeAttemptId&&(existing.browserReport?.steps??0)===0&&
+            existing.browserReport?.lastAction?.outcome!=='unknown'&&!existing.browserReport?.lastConfirmedAction);
+        if(existing&&neverActed)replaced=existing;
+        else if(existing){
+          const report=existing.computerReport??existing.browserReport;
+          const cause=`state ${existing.state}${report?.reason?`, last result ${report.reason}`:''}${existing.failure?.code?` (${existing.failure.code})`:''}, controlled by the ${existing.automationController==='user'?'user':'agent'}`;
+          throw new OrchestrationError('AUTOMATION_SESSION_EXISTS',`This device session already has task ${existing.taskId} at revision ${existing.revision}: ${cause}. This is not a permission problem. Inspect it with task_status and use task_update when_ready for the next goal on the same task${existing.automationController==='user'?' (the user controls it; wait for them or ask them to hand control back)':''}, or task_cancel it to end that session. Do not open another tab or replay completed work.`);
+        }
+      }
+
       const available = new Set<string>();
       for (const input of this.store.all('SELECT id,attachment_refs_json FROM conversation_inputs WHERE conversation_id=?', context.conversationId)) {
         available.add(String(input.id)); available.add(`input:${input.id}`);
@@ -204,31 +268,92 @@ export class TaskService {
         task.continuationPolicy = command.continuationPolicy ?? 'after_success';
         task.latestProgress = { source: 'runtime', observedAt: now, text: `Queued after task ${prior.taskId} (${task.continuationPolicy}).` };
       }
-      if (command.gatewayTarget) task.gatewayTarget = command.gatewayTarget;
+      if (command.gatewayTarget) { task.gatewayTarget = command.gatewayTarget;
+        if (["browser","computer"].includes(command.gatewayTarget.adapter)) {
+          task.automationSession={status:"active",idleTimeoutMs:this.config.tasks.automationIdleTimeoutMs};
+          task.automationController="user";
+        }
+      }
       if (command.skill) task.skill = command.skill;
       if (context.model && !command.gatewayTarget) task.model = context.model;
       const projectRoot = command.workingDirectory || (this.config.tasks.workspaceMode === 'host' && prior?.resourceProfile?.mode === 'host' ? prior.resourceProfile.projectRoot : undefined) || this.config.tasks.projectRoot || this.defaultProjectRoot;
       if (projectRoot && !command.gatewayTarget) task.resourceProfile = { projectRoot, mode: this.config.tasks.workspaceMode };
       this.store.run('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)', task.taskId, task.conversationId, task.state, 1, 1, null, JSON.stringify(task), now, now);
-      const revision: TaskRevision = { taskId: task.taskId, revision: 1, instructions: command.instructions,
-        contextRefs: command.contextRefs ?? [], mode: 'when_ready', originatingInputId: context.inputId };
+      const revision: TaskRevision = { requestBrowserConsent:command.gatewayTarget?.adapter==='browser', taskId: task.taskId, revision: 1, instructions: command.instructions, computerInputs:command.computerInputs,
+        answers:prepared, contextRefs: command.contextRefs ?? [], mode: 'when_ready', originatingInputId: context.inputId };
       this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', task.taskId, 1, JSON.stringify(revision));
       this.store.appendEvent(task.conversationId, 'task.created', task, task.taskId);
       this.store.enqueue('schedule', `schedule:${task.taskId}:1`, { taskId: task.taskId });
+      if (replaced) {
+        this.cancelOwned(context.conversationId, replaced.taskId, task.taskId);
+        this.store.appendEvent(task.conversationId, 'task.session_replaced', { taskId: replaced.taskId, replacedByTaskId: task.taskId }, replaced.taskId);
+      }
       return task;
     });
   }
-  update(context: CommandContext, taskId: string, expectedRevision: number, instruction: string, mode: ChangeMode): TaskSnapshot {
-    boundedText(instruction);
+  update(context: CommandContext, taskId: string, expectedRevision: number, instruction: string, mode: ChangeMode, browserFields?:unknown, computerInputs?:TaskRevision["computerInputs"], startUrl?:unknown): TaskSnapshot {
+    let browserUrl:string|undefined;
+    if(startUrl!==undefined){
+      if(!context.execute)throw new OrchestrationError('EXECUTION_DENIED');
+      try{if(typeof startUrl!=='string'||startUrl.length>8192)throw Error();const u=new URL(startUrl);if(!['http:','https:'].includes(u.protocol)||u.username||u.password)throw Error();browserUrl=u.href;}catch{throw new OrchestrationError('INVALID_BROWSER_START_URL');}
+    }
+    boundedText(instruction);if(computerInputs!==undefined)computerInputs=ComputerInputs.parse(computerInputs);
     if (!['when_ready', 'interrupt_and_resume'].includes(mode)) throw new OrchestrationError('INVALID_INPUT');
-    return this.command(context, 'update', { taskId, expectedRevision, instruction, mode }, context.execute, () => {
+    const prepared=preparedBrowserAnswers(browserFields,context.inputId);
+    return this.command(context, 'update', { taskId, expectedRevision, instruction, mode, browserFields, computerInputs, startUrl }, context.execute, () => {
       const task = this.owned(taskId, context.conversationId), version = task.stateVersion;
-      if (TERMINAL_TASK_STATES.has(task.state)) throw new OrchestrationError('TASK_TERMINAL');
-      if (['cancel_requested', 'recovering', 'needs_reconciliation', 'interrupting'].includes(task.state)) throw new OrchestrationError('STATE_CONFLICT');
+      if(browserUrl!==undefined&&task.gatewayTarget?.adapter!=='browser')throw new OrchestrationError('INVALID_BROWSER_START_URL');
+      if(computerInputs!==undefined&&task.gatewayTarget?.adapter!=='computer')throw new OrchestrationError('INVALID_INPUT');
+      if(automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED','This automation session was ended or expired. Ask for a new authorized session; never replay its previous action.');
+      const completionReview = task.gatewayTarget?.adapter === 'browser' && task.state === 'needs_reconciliation' &&
+        Boolean(task.activeAttemptId) && task.browserReport?.status === 'needs_verification' &&
+        ['COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(task.browserReport.reason) &&
+        !task.browserReport.providerFailure && task.browserReport.lastAction?.outcome !== 'unknown';
+      if(task.automationController==='user'){
+        // Jev gave up on this utterance and handed it to the agent: exactly one
+        // command, as the user's own next direct command (user keeps control).
+        const handoff=this.agentHandoff(context,task,expectedRevision,mode,browserFields,computerInputs,startUrl);
+        if(handoff)return this.applyDirectControl(context.conversationId,taskId,task,{id:handoffCommandId(context.inputId),action:'revise',text:instruction},undefined,context.inputId);
+        throw new OrchestrationError('USER_CONTROLS_AUTOMATION');
+      }
+      const agentControl = !context.execute &&
+        ['browser','computer'].includes(task.gatewayTarget?.adapter??'') && task.capabilities.execute && task.ownerPrincipalId===context.principalId &&
+        task.state==='waiting_input'&&!task.activeAttemptId&&!task.pendingQuestion&&task.executionControl?.phase!=='paused'&&
+        ['COMMAND_WAITING_INPUT','THINKING_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(task.browserReport?.reason??task.computerReport?.reason??'')&&
+        !task.browserReport?.providerFailure&&task.browserReport?.lastAction?.outcome!=='unknown'&&
+        // Device disconnect/reconnect changes stateVersion without changing the
+        // settled action. Authorize this decision against its immutable round,
+        // while the current ownership, controller and idle guards still apply.
+        Boolean(this.store.get(`SELECT n.id FROM notifications n JOIN tasks t ON t.id=n.task_id
+          WHERE n.task_id=? AND n.decision_id=? AND n.status='assigned' AND ${CURRENT_CONTROL_ROUND_SQL} LIMIT 1`,
+          taskId,context.decisionId));
+      // A provider failure before the first action can be replanned by the
+      // assigned parent. Never extend this to post-action or uncertain outcomes.
+      const preActionProviderFailure = task.computerReport?.status === 'blocked' &&
+        task.computerReport.steps === 0 &&
+        /^THINKING_HTTP_(429|502|503|504)$/.test(task.computerReport.reason) &&
+        !task.computerReport.trace?.some(event => event.outcome === 'unknown');
+      const computerRecovery = !context.execute && task.gatewayTarget?.adapter === 'computer' &&
+        task.capabilities.execute && task.ownerPrincipalId === context.principalId &&
+        task.state === 'failed' && !task.activeAttemptId && task.executionControl?.phase !== 'paused' &&
+        (preActionProviderFailure || ['COMPLETION_CANDIDATE','VERIFICATION_FAILED','NO_SUPPORTED_ACTION','COMPUTER_TEXT_UNGROUNDED'].includes(task.computerReport?.reason ?? '')) &&
+        Boolean(this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion));
+      const browserRecovery = agentControl || computerRecovery || !context.execute && task.gatewayTarget?.adapter === 'browser' &&
+        task.capabilities.execute && task.ownerPrincipalId === context.principalId &&
+        !task.browserReport?.providerFailure && task.browserReport?.lastAction?.outcome !== 'unknown' &&
+        (completionReview || (task.state === 'failed' && !task.activeAttemptId &&
+        ['LOW_OPERATION_CONFIDENCE','LOW_TARGET_CONFIDENCE','STALE_RETRY_BUDGET','TARGET_OBSCURED','PAGE_CONTENT_UNAVAILABLE','MODEL_BLOCKED','OBSERVATION_TRUNCATED','NO_PROGRESS','NO_SUPPORTED_ACTION','TEXT_BUDGET'].includes(task.browserReport?.reason ?? ''))) &&
+        Boolean(this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion));
+      if (TERMINAL_TASK_STATES.has(task.state) && !(task.gatewayTarget && (context.execute || browserRecovery) && ['completed','failed'].includes(task.state) && !task.activeAttemptId)) throw new OrchestrationError('TASK_TERMINAL');
+      if (['cancel_requested', 'recovering', 'needs_reconciliation', 'interrupting'].includes(task.state) && !(completionReview && (context.execute || browserRecovery))) throw new OrchestrationError('STATE_CONFLICT');
       if (task.revision !== expectedRevision) throw new OrchestrationError('REVISION_CONFLICT');
-      if (task.gatewayTarget && task.state !== 'queued') throw new OrchestrationError('GATEWAY_TASK_ALREADY_SENT', 'This request was already sent. Queue a follow-up task with continue_task_id instead.');
+      if (task.gatewayTarget && (task.ownerPrincipalId !== context.principalId || (!context.execute && !browserRecovery))) throw new OrchestrationError('EXECUTION_DENIED');
+      if (task.gatewayTarget && mode !== 'when_ready') throw new OrchestrationError('INVALID_INPUT', 'Use when_ready for Gateway-managed tasks; the current request must settle before revised instructions run.');
+      if(browserFields!==undefined&&task.gatewayTarget?.adapter!=='browser')throw new OrchestrationError('INVALID_BROWSER_FIELDS');
       const priorRevision = this.revision(taskId, expectedRevision);
-      if (!context.execute) {
+      if (browserRecovery && !agentControl && ((priorRevision.browserRecoveryCount ?? 0) >= 3 || priorRevision.guidance === instruction))
+        throw new OrchestrationError('BROWSER_RECOVERY_EXHAUSTED', 'Inspect the evidence and explain the unresolved blocker; do not repeat the same plan.');
+      if (!context.execute && !browserRecovery) {
         // A worker progress report increments stateVersion without revoking this
         // alert. Bind advice to the immutable alert and attempt, not that counter.
         const assigned = this.store.get(`SELECT n.id FROM notifications n JOIN conversation_events e
@@ -242,12 +367,19 @@ export class TaskService {
         const alreadyAdvised = this.store.get("SELECT action_id FROM task_commands WHERE task_id=? AND decision_id=? AND command_type='update' LIMIT 1", taskId, context.decisionId);
         if (!assigned || alreadyAdvised || !task.supervision || task.state !== 'running' || !task.capabilities.execute || mode !== 'when_ready') throw new OrchestrationError('EXECUTION_DENIED');
       }
+      if(completionReview) {
+        const attempt=this.store.attempt(task.activeAttemptId!)!;
+        attempt.state='ended';this.store.saveAttempt(attempt);this.pool.release(task.taskId,false);
+        task.activeAttemptId=undefined;task.state='failed';
+      }
       task.revision++;
-      const revision: TaskRevision = { taskId, revision: task.revision, instructions: instruction,
-        contextRefs: priorRevision.contextRefs, mode, originatingInputId: context.inputId,
-        ...(!context.execute ? { instructions: priorRevision.instructions, answers: priorRevision.answers, originatingInputId: priorRevision.originatingInputId, guidance: instruction, guidanceBasis: {attemptId: task.activeAttemptId, workflowVersion: task.workflow?.version??0, progressAt: task.latestProgress?.observedAt??0} } : {}) };
+      const revision: TaskRevision = { ...(browserUrl?{browserNavigation:{url:browserUrl,revision:task.revision}}:{}), requestBrowserConsent:context.execute && task.gatewayTarget?.adapter==='browser', taskId, revision: task.revision, instructions: instruction, computerInputs:context.execute||computerRecovery||agentControl?computerInputs:priorRevision.computerInputs,
+        answers:prepared, contextRefs: priorRevision.contextRefs, mode, originatingInputId: context.inputId,
+        ...(!context.execute&&!computerRecovery&&!agentControl ? { instructions: priorRevision.instructions, answers: prepared??priorRevision.answers, originatingInputId: priorRevision.originatingInputId, guidance: instruction, guidanceBasis: {attemptId: task.activeAttemptId, workflowVersion: task.workflow?.version??0, progressAt: task.latestProgress?.observedAt??0} } : {}),
+        ...(browserRecovery&&!agentControl ? {browserRecoveryCount:(priorRevision.browserRecoveryCount ?? 0)+1,guidanceBasis:undefined} : {}) };
       this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify(revision));
-      if (task.state === 'waiting_input') { task.pendingQuestion = undefined; task.state = task.activeAttemptId ? 'interrupting' : 'queued'; }
+      if (task.gatewayTarget && ['completed','failed'].includes(task.state)) { task.state='queued'; delete task.gatewayDispatch; delete task.executionControl; delete task.failure; delete task.result; delete task.browserReport; delete task.computerReport; delete task.latestProgress; if(context.execute)task.initiatingInputId=context.inputId; }
+      if (task.state === 'waiting_input') { task.pendingQuestion = undefined; task.state = task.activeAttemptId ? (task.gatewayTarget ? 'running' : 'interrupting') : 'queued'; }
       else if (mode === 'interrupt_and_resume' && task.activeAttemptId) task.state = 'interrupting';
       this.store.saveTask(task, version);
       this.store.appendEvent(task.conversationId, 'task.revision_accepted', { taskId, revision: task.revision }, taskId);
@@ -255,7 +387,118 @@ export class TaskService {
       return task;
     }, taskId);
   }
+  /** Direct authenticated user control: no inference turn, no second task. */
+  controlByUser(conversationId:string,principalId:string,taskId:string,command:{id:string;action:'pause'|'revise'|'resume'|'agent'|'user';expectedRevision:number;text?:string}):TaskSnapshot {
+    return this.store.transaction(()=>{
+      this.store.assertMember(conversationId,principalId);
+      const task=this.owned(taskId,conversationId);
+      if(task.ownerPrincipalId!==principalId)throw new OrchestrationError('ACCESS_DENIED');
+      if(!/^[0-9a-f-]{36}$/i.test(command.id)||!['pause','revise','resume','agent','user'].includes(command.action)||!Number.isSafeInteger(command.expectedRevision))throw new OrchestrationError('INVALID_INPUT');
+      const id='user-control:'+command.id,hash=payloadHash({taskId,...command});
+      const prior=this.store.get('SELECT * FROM task_commands WHERE action_id=?',id);
+      if(prior){if(prior.principal_id!==principalId||prior.conversation_id!==conversationId)throw new OrchestrationError('ACCESS_DENIED');if(prior.payload_hash!==hash)throw new OrchestrationError('IDEMPOTENCY_CONFLICT');return task;}
+      if(!['browser','computer'].includes(task.gatewayTarget?.adapter??'')||!task.capabilities.execute)throw new OrchestrationError('EXECUTION_DENIED');
+      if(automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
+      if(task.revision!==command.expectedRevision)throw new OrchestrationError('REVISION_CONFLICT');
+      if(command.action==='agent'||command.action==='user'){
+        if(command.text!==undefined)throw new OrchestrationError('INVALID_INPUT');
+        task.automationController=command.action;
+        // The agent drives now: the user's queued direct commands must not run under it.
+        if(command.action==='agent'&&task.queuedCommands?.length){
+          const queue=task.queuedCommands;delete task.queuedCommands;
+          task.latestProgress={source:'runtime',observedAt:Date.now(),text:`Control handed to the agent. ${queue.length} queued command${queue.length===1?' was':'s were'} not sent: ${queue.map(c=>JSON.stringify(c.text.slice(0,60))).join(', ')}.`.slice(0,4096)};
+          this.store.appendEvent(conversationId,'task.command_queue_dropped',{taskId,count:queue.length,reason:'agent_control'},taskId);
+        }
+        this.store.saveTask(task,task.stateVersion);
+        this.store.run('INSERT INTO task_commands VALUES(?,?,?,?,?,?,?,?,?)',id,taskId,conversationId,principalId,null,'user_control',hash,JSON.stringify(task),Date.now());
+        if(command.action==='agent'&&task.state==='waiting_input'&&!task.activeAttemptId&&!task.pendingQuestion&&task.executionControl?.phase!=='paused')this.notify(task);
+        return task;
+      }
+      return this.applyDirectControl(conversationId,taskId,task,{id:command.id,action:command.action,text:command.text},task=>this.store.run('INSERT INTO task_commands VALUES(?,?,?,?,?,?,?,?,?)',id,taskId,conversationId,principalId,null,'user_control',hash,JSON.stringify(task),Date.now()));
+    });
+  }
+  /**
+   * The agent turn for a handed-off utterance (needs_agent AGENT_HANDOFF receipt
+   * on this input and task) may send one command: same task, the receipt's
+   * revision (no newer user command), the round settled and waiting, no fields,
+   * inputs or navigation, and never twice for the same utterance.
+   */
+  private agentHandoff(context:CommandContext,task:TaskSnapshot,expectedRevision:number,mode:ChangeMode,browserFields:unknown,computerInputs:unknown,startUrl:unknown):boolean {
+    const receipt=this.liveReceipt(context.inputId);
+    if(receipt?.code!=='AGENT_HANDOFF'||receipt.status!=='needs_agent'||receipt.taskId!==task.taskId)return false;
+    if(!context.execute||task.ownerPrincipalId!==context.principalId)throw new OrchestrationError('EXECUTION_DENIED');
+    if(this.store.get("SELECT 1 FROM task_revisions WHERE task_id=? AND json_extract(payload_json,'$.agentHandoffInputId')=?",task.taskId,context.inputId))
+      throw new OrchestrationError('AGENT_HANDOFF_USED','The one command for this handed-off utterance was already sent. Report its outcome; do not send another.');
+    if(mode!=='when_ready'||browserFields!==undefined||computerInputs!==undefined||startUrl!==undefined)throw new OrchestrationError('INVALID_INPUT','A handed-off command is one plain next command: mode=when_ready, no fields, inputs or start_url.');
+    if(expectedRevision!==receipt.revision||task.revision!==receipt.revision)throw new OrchestrationError('REVISION_CONFLICT','The user has given a newer command since this utterance; do not act on it.');
+    if(task.activeAttemptId||!(pausedForCommand(task)||stoppedForCommand(task)))throw new OrchestrationError('STATE_CONFLICT');
+    return true;
+  }
+  /** The latest live-control receipt of an input (live-execution-input.ts liveControlReceipt). */
+  private liveReceipt(inputId:string):{taskId?:string;status?:string;code?:string;revision?:number}|undefined {
+    const row=this.store.get("SELECT payload_json FROM conversation_events WHERE type='input.execution_control' AND json_extract(payload_json,'$.payload.inputId')=? ORDER BY seq DESC LIMIT 1",inputId);
+    return row?JSON.parse(String(row.payload_json)).payload:undefined;
+  }
+  /** The owner's pause/revise/resume, or (agentHandoffInputId) the agent's single command for a handed-off utterance. Runs inside the caller's transaction. */
+  private applyDirectControl(conversationId:string,taskId:string,task:TaskSnapshot,command:{id:string;action:'pause'|'revise'|'resume';text?:string},record?:(task:TaskSnapshot)=>void,agentHandoffInputId?:string):TaskSnapshot {
+    task.automationController='user';
+    const paused=pausedForCommand(task);
+    const recoverable=command.action==='revise'&&stoppedForCommand(task);
+    if(!['queued','starting','running','interrupting'].includes(task.state)&&!paused&&!recoverable)throw new OrchestrationError('STATE_CONFLICT');
+    // Only the owner's own pause (settled or still settling) leaves interrupted work. A settled
+    // round waiting for the next command has nothing to resume: re-running it would replay it.
+    if(command.action==='resume'&&!(task.executionControl?.action==='pause'&&['pending','paused'].includes(task.executionControl.phase)))throw new OrchestrationError('NOTHING_TO_RESUME','Nothing to resume: the last command already finished. Give the next command instead.');
+    if(command.action==='revise')boundedText(command.text??'',4000);
+    else if(command.text!==undefined)throw new OrchestrationError('INVALID_INPUT');
+    const previous=this.revision(taskId,task.revision);
+    // Never drop queued words silently: say which commands will not run.
+    const unsent=command.action==='pause'?task.queuedCommands??[]:[];
+    const dropped=unsent.length?` ${unsent.length} queued command${unsent.length===1?' was':'s were'} not sent: ${unsent.map(c=>JSON.stringify(c.text.slice(0,60))).join(', ')}.`:'';
+    if(unsent.length)this.store.appendEvent(conversationId,'task.command_queue_dropped',{taskId,count:unsent.length,reason:'paused'},taskId);
+    if(command.action==='pause')delete task.queuedCommands;
+    // A user's own command is still settling: the next one waits its turn,
+    // verbatim, instead of superseding it or being folded into a correction.
+    if(command.action==='revise'&&this.queuesDirectCommand(task,previous)){
+      const queue=task.queuedCommands??[];
+      if(queue.length>=COMMAND_QUEUE_MAX)throw new OrchestrationError('COMMAND_QUEUE_FULL','Too many commands are waiting. Wait for the current ones to finish or pause.');
+      task.queuedCommands=[...queue,{id:command.id,text:command.text!,at:Date.now()}];
+      task.latestProgress={source:'runtime',observedAt:Date.now(),text:`Queued: ${JSON.stringify(command.text!.slice(0,120))} runs after the current command (${task.queuedCommands.length} waiting).`};
+      this.store.saveTask(task,task.stateVersion);
+      this.store.appendEvent(conversationId,'task.command_queued',{taskId,commandId:command.id,position:task.queuedCommands.length},taskId);
+      record?.(task);
+      return task;
+    }
+    const priorAnswers=previous.answers?.map(a=>({field:a.browserFieldLabel??a.computerFieldLabel,text:a.text}));
+    const nextCommand=command.action==='revise'&&(paused||recoverable);
+    const instructions=nextCommand?command.text!:command.action==='revise'?CORRECTION_HEAD+command.text+'\n\nEarlier requirements and corrections, newest first. Keep only requirements compatible with the latest correction; do not perform superseded actions:\n'+previous.instructions+(priorAnswers?.length?'\n\nEarlier user answers (subject to the latest correction):\n'+JSON.stringify(priorAnswers):''):previous.instructions;
+    boundedText(instructions,task.gatewayTarget?.adapter==='browser'?8000:16000);
+    task.revision++;
+    if(recoverable&&!paused){delete task.computerReport;delete task.failure;delete task.browserReport;delete task.gatewayDispatch;}
+    // The owner's new command supersedes any pending question (saveTask closes its record).
+    if(command.action==='revise')delete task.pendingQuestion;
+    this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,requestBrowserConsent:command.action!=='pause',revision:task.revision,instructions,mode:'interrupt_and_resume',computerInputs:command.action==='revise'?undefined:previous.computerInputs,answers:command.action==='revise'?undefined:previous.answers,browserRecoveryCount:0,guidance:undefined,guidanceBasis:undefined,...(command.action==='revise'?{directCommand:true}:{}),agentHandoffInputId}));
+    task.executionControl={id:command.id,action:command.action,revision:task.revision,phase:task.activeAttemptId?'pending':command.action==='pause'?'paused':'pending',requestedAt:Date.now(),...(agentHandoffInputId?{agentHandoff:true as const}:{})};
+    task.state=task.activeAttemptId?'interrupting':command.action==='pause'?'waiting_input':'queued';
+    task.latestProgress={source:'runtime',observedAt:Date.now(),text:((task.activeAttemptId?'Control accepted; settling the current action before applying it.':command.action==='pause'?'Automation paused.':'Control accepted; resuming from a fresh observation.')+dropped).slice(0,4096)};
+    this.store.saveTask(task,task.stateVersion);
+    this.store.appendEvent(conversationId,'task.control_accepted',{taskId,control:task.executionControl},taskId);
+    record?.(task);
+    return task;
+  }
+  /** A user's direct command is still settling, so a new one joins the FIFO queue. */
+  private queuesDirectCommand(task:TaskSnapshot,previous:TaskRevision):boolean {
+    return ['browser','computer'].includes(task.gatewayTarget?.adapter??'')&&previous.directCommand===true&&(['queued','starting','running'].includes(task.state)||(task.state==='interrupting'&&task.executionControl?.action==='revise'));
+  }
+  /** Speech while a direct command settles is the next command, not an interruption:
+   * pausing first would fold it into a correction of the running command. */
+  voicePauseApplies(taskId:string):boolean {
+    const task=this.store.task(taskId);
+    if(!task)return false;
+    return !(task.automationController==='user'&&this.queuesDirectCommand(task,this.revision(taskId,task.revision)));
+  }
   cancel(context: CommandContext, taskId: string, replacedByTaskId?: string): TaskSnapshot {
+    // A handed-off utterance allows one task_update only; it never ends the user's session.
+    if (this.liveReceipt(context.inputId)?.code === 'AGENT_HANDOFF') throw new OrchestrationError('AGENT_HANDOFF_ONE_COMMAND', 'This input may only become one task_update mode=when_ready on the handed-off task.');
     return this.command(context, 'cancel', { taskId, ...(replacedByTaskId ? { replacedByTaskId } : {}) }, false, () => this.cancelOwned(context.conversationId, taskId, replacedByTaskId), taskId);
   }
   /** Authenticated user control bypasses inference, but retains conversation ownership and task fencing. */
@@ -273,7 +516,11 @@ export class TaskService {
       if (replacedByTaskId === taskId) throw new OrchestrationError('INVALID_REPLACEMENT');
       this.owned(replacedByTaskId, conversationId);
     }
-    if (TERMINAL_TASK_STATES.has(task.state)) return task;
+    if (TERMINAL_TASK_STATES.has(task.state) && !(task.gatewayTarget?.adapter==='computer' && task.gatewayDispatch && automationSession(task)?.status!=='closed')) {
+      const session=automationSession(task);
+      if(session && session.status!=='closed'){task.automationSession={...session,status:'closed',closedAt:Date.now(),closedReason:requestedBy};this.store.saveTask(task,task.stateVersion);}
+      return task;
+    }
     if (task.state === 'cancel_requested') {
       // A user's explicit stop wins; an agent cancel must not erase the stall evidence.
       const overridesStall = task.cancellation?.requestedBy === 'supervisor' && requestedBy === 'user';
@@ -288,14 +535,24 @@ export class TaskService {
     // stop; it must not turn that stall into a user/agent cancellation.
     const retriesStall = task.state === 'needs_reconciliation' && task.cancellation?.requestedBy === 'supervisor';
     if (!retriesStall) task.cancellation = { requestedBy, requestedAt: Date.now() };
-    task.state = task.activeAttemptId ? 'cancel_requested' : 'cancelled';
+    delete task.queuedCommands;
+    task.state = task.activeAttemptId || (task.gatewayTarget?.adapter==='computer' && task.gatewayDispatch) ? 'cancel_requested' : 'cancelled';
     task.pendingQuestion = undefined;
     delete task.failure;
-    task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: task.activeAttemptId ? `Cancellation requested by ${requestedBy}; verifying that task execution has stopped.` : `Cancelled by ${requestedBy}. Existing files and prior effects are retained.` };
+    task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: task.state==='cancel_requested' ? 'Disconnecting; waiting for execution and access to stop.' : 'Session ended. Existing files and prior effects are retained.' };
     this.store.saveTask(task, version);
     if (task.state === 'cancelled') this.notify(task);
     else this.store.enqueue('interrupt', `cancel:${taskId}:${task.stateVersion}`, { taskId });
     return task;
+  }
+  /** A settled computer round still owns device access until explicit revocation. */
+  finishIdleComputerCleanup(taskId:string,requestId:string):void {
+    this.store.transaction(()=>{
+      const task=this.store.task(taskId);
+      if(!task||task.state!=='cancel_requested'||task.activeAttemptId||task.gatewayTarget?.adapter!=='computer'||task.gatewayDispatch?.requestId!==requestId)throw new OrchestrationError('STALE_ATTEMPT');
+      task.state='cancelled';task.latestProgress={source:'runtime',observedAt:Date.now(),text:'Computer Use disconnected.'};
+      this.store.saveTask(task,task.stateVersion);this.notify(task);
+    });
   }
   /** Scheduler-only cleanup acknowledgment; never authorizes new worker writes. */
   finishCleanup(attemptId: string, generation: number, stopped: boolean): void {
@@ -318,10 +575,33 @@ export class TaskService {
       this.notify(task);
     });
   }
-  answer(context: CommandContext, taskId: string, questionId: string, answer: string): TaskSnapshot {
-    boundedText(answer);
-    return this.command(context, 'answer', { taskId, questionId, answer }, true,
-      () => this.answerOwned(context.conversationId, taskId, questionId, answer, context.inputId), taskId);
+  answer(context: CommandContext, taskId: string, questionId: string, answer: string, browserFields?:unknown, computerInputs?:TaskRevision["computerInputs"]): TaskSnapshot {
+    boundedText(answer);if(computerInputs!==undefined)computerInputs=ComputerInputs.parse(computerInputs);
+    const prepared=preparedBrowserAnswers(browserFields,context.inputId);
+    return this.command(context, 'answer', { taskId, questionId, answer, browserFields, computerInputs }, context.execute, () => {
+      if (!context.execute) {
+        const task = this.owned(taskId, context.conversationId);
+        this.assertQuestion(task, questionId);
+        // A notification can fill missing browser text in its own authorized task,
+        // never approve a new operation, answer an unrelated task, or grant consent.
+        const assigned = this.store.get(`SELECT n.id FROM notifications n JOIN conversation_events e
+          ON e.conversation_id=n.conversation_id AND e.type='task.state_changed'
+          AND json_extract(e.payload_json,'$.payload.taskId')=n.task_id
+          AND json_extract(e.payload_json,'$.payload.stateVersion')=n.task_state_version
+          WHERE n.task_id=? AND n.conversation_id=? AND n.decision_id=? AND n.status='assigned'
+          AND json_extract(e.payload_json,'$.payload.pendingQuestion.questionId')=? LIMIT 1`,
+          taskId, context.conversationId, context.decisionId, questionId);
+        const reviewed = context.questionReviewIds?.includes(questionId) && this.store.get(
+          'SELECT question_id FROM task_questions WHERE question_id=? AND task_id=? AND closed=0 AND revision=?',questionId,taskId,task.revision);
+        const missingBrowser=task.gatewayTarget?.adapter==='browser'&&task.browserReport?.reason==='FIELD_TEXT_REQUIRED'&&task.browserReport.fieldRequest?.reason==='missing'&&Boolean(task.browserReport.fieldRequest.label);
+        const missingComputer=task.gatewayTarget?.adapter==='computer'&&task.computerReport?.reason==='FIELD_TEXT_REQUIRED'&&task.computerReport.fieldRequest?.reason==='missing'&&Boolean(task.computerReport.fieldRequest.label);
+        if ((!assigned && !reviewed) || task.ownerPrincipalId !== context.principalId || !task.capabilities.execute || (!missingBrowser&&!missingComputer))
+          throw new OrchestrationError('EXECUTION_DENIED', `EXECUTION_DENIED: This is an internal report/non-executing turn (execute capability is off for this turn), so it cannot commit a task answer here. This is a turn-scoped permission boundary — not a system outage, and not proof that a prior answer was rejected or lost: any task command already committed on an executing turn stays durably saved and reaches the worker when it resumes. Do not retry this mutation on this turn or report the service as unavailable; reconcile the worker's request against the committed answer/receipt, and surface only a genuinely new decision to the user on a normal turn.`);
+      }
+      if(browserFields!==undefined&&this.owned(taskId,context.conversationId).gatewayTarget?.adapter!=='browser')throw new OrchestrationError('INVALID_BROWSER_FIELDS');
+      if(computerInputs!==undefined&&this.owned(taskId,context.conversationId).gatewayTarget?.adapter!=='computer')throw new OrchestrationError('INVALID_INPUT');
+      return this.answerOwned(context.conversationId, taskId, questionId, answer, context.inputId,prepared,computerInputs);
+    }, taskId);
   }
   /** A scoped authenticated reply is user authorization, without a fabricated model decision. */
   answerByUser(conversationId: string, principalId: string, taskId: string, questionId: string, answer: string, acceptedInputId?: string): TaskSnapshot {
@@ -373,18 +653,22 @@ export class TaskService {
   private assertQuestion(task: TaskSnapshot, questionId: string): void {
     if (task.state !== 'waiting_input' || task.pendingQuestion?.questionId !== questionId || task.pendingQuestion.revision !== task.revision) throw new OrchestrationError('STALE_QUESTION');
   }
-  private answerOwned(conversationId: string, taskId: string, questionId: string, answer: string, inputId: string): TaskSnapshot {
+  private answerOwned(conversationId: string, taskId: string, questionId: string, answer: string, inputId: string, prepared?:TaskRevision['answers'], computerInputs?:TaskRevision['computerInputs']): TaskSnapshot {
     const task = this.owned(taskId, conversationId), version = task.stateVersion;
     this.assertQuestion(task, questionId);
     // Persist early answers, while fencing scheduling until the old attempt really ends.
     const previous = this.revision(taskId, task.revision);
+    const browserFieldLabel=task.gatewayTarget?.adapter==='browser' && task.browserReport?.reason==='FIELD_TEXT_REQUIRED' && task.browserReport.fieldRequest?.reason==='missing' ? task.browserReport.fieldRequest.label : undefined;
+    if(browserFieldLabel && answer.length>2000)throw new OrchestrationError('BROWSER_FIELD_VALUE_TOO_LONG');
+    const computerField=task.gatewayTarget?.adapter==='computer'&&task.computerReport?.fieldRequest?.reason==='missing'?task.computerReport.fieldRequest:undefined;
+    if(computerField&&answer.length>2000)throw new OrchestrationError('COMPUTER_FIELD_VALUE_TOO_LONG');
     task.revision++;
-    this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify({ ...previous, revision: task.revision,
-      answers: [...(previous.answers ?? []), { questionId, text: answer, inputId }], originatingInputId: inputId }));
+    this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', taskId, task.revision, JSON.stringify({ ...previous, ...(computerInputs!==undefined?{computerInputs}:{}), revision: task.revision,
+      answers: [...(previous.answers ?? []), ...(prepared??[]), { questionId, text: answer, inputId, ...(browserFieldLabel ? {browserFieldLabel} : {}),...(computerField?{computerFieldLabel:computerField.label,computerApplication:computerField.application,computerWindowTitle:computerField.windowTitle,computerFieldRole:computerField.role}:{}) }], originatingInputId: inputId }));
     task.pendingQuestion = undefined;
-    task.state = task.activeAttemptId ? 'interrupting' : 'queued';
+    task.state = task.activeAttemptId ? (task.gatewayTarget ? 'running' : 'interrupting') : 'queued';
     this.store.saveTask(task, version);
-    this.store.enqueue(task.activeAttemptId ? 'interrupt' : 'schedule', `answer:${questionId}`, { taskId });
+    this.store.enqueue(task.activeAttemptId && !task.gatewayTarget ? 'interrupt' : 'schedule', `answer:${questionId}`, { taskId });
     if (this.store.get("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_intake'")) {
       const input = this.store.get('SELECT principal_id,binding_id,input_seq FROM conversation_inputs WHERE id=? AND conversation_id=?', inputId, conversationId)!;
       this.store.run(`DELETE FROM conversation_intake WHERE conversation_id=? AND principal_id=? AND binding_id=?
@@ -456,6 +740,7 @@ export class TaskService {
       if (task.state !== 'starting') throw new OrchestrationError('STATE_CONFLICT');
       attempt.state = 'running'; attempt.startedAt = Date.now(); attempt.processIdentity = identity;
       task.state = 'running'; task.appliedRevision = attempt.revision;
+      if(task.executionControl?.revision===attempt.revision)task.executionControl.phase='applied';
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
       this.store.appendEvent(task.conversationId, 'task.revision_applied', { revision: attempt.revision }, task.taskId);
       return task;
@@ -618,13 +903,14 @@ export class TaskService {
       return result;
     });
   }
-  requestInput(attemptId: string, generation: number, question: string, actionId?: string): TaskSnapshot {
+  requestInput(attemptId: string, generation: number, question: string, actionId?: string, computerReport?:TaskSnapshot['computerReport']): TaskSnapshot {
     boundedText(question, 4096);
     return this.store.transaction(() => {
       const { task, attempt } = this.active(attemptId, generation);
       const receipt = this.workerReceipt(attemptId, actionId, 'question', question);
       if (receipt.prior) return receipt.prior as TaskSnapshot;
       if (task.state !== 'running' || task.revision !== attempt.revision) throw new OrchestrationError('SUPERSEDED_QUESTION');
+      if(computerReport&&task.gatewayTarget?.adapter==='computer')task.computerReport=computerReport;
       task.state = 'waiting_input';
       task.pendingQuestion = { questionId: randomUUID(), text: question, revision: attempt.revision };
       this.store.saveTask(task, task.stateVersion); this.notify(task);
@@ -644,9 +930,13 @@ export class TaskService {
     }
     return this.store.transaction(() => {
       const { task, attempt } = this.active(attemptId, generation);
+      if (task.gatewayTarget?.adapter === 'computer' && outcome.computerReport) task.computerReport=outcome.computerReport;
+      if (task.gatewayTarget?.adapter === 'browser' && outcome.browserReport) task.browserReport=outcome.browserReport;
+      if (outcome.computerReport || outcome.browserReport) recordAction(task, attempt.revision, this.revision(task.taskId, attempt.revision).instructions, outcome);
       // A structured unresolved blocker is not successful task completion.
-      if (outcome.type === 'paused' && !(task.state === 'waiting_input' && task.pendingQuestion) &&
-        task.state !== 'interrupting' && task.state !== 'cancel_requested') throw new OrchestrationError('STATE_CONFLICT');
+      const waitingForCommand=outcome.type==='paused'&&['browser','computer'].includes(task.gatewayTarget?.adapter??'')&&['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(outcome.computerReport?.reason??outcome.browserReport?.reason??'');
+      if (outcome.type === 'paused' && !waitingForCommand && !(task.state === 'waiting_input' && task.pendingQuestion) &&
+        task.state !== 'interrupting' && task.state !== 'cancel_requested' && !(task.gatewayTarget && task.revision > attempt.revision)) throw new OrchestrationError('STATE_CONFLICT');
       // Keep the full final report, and preserve cancellation / new revisions / questions.
       const blocked = outcome.type === 'completed' && task.workflow?.attemptId === attemptId &&
         task.workflow.checkpoint.phase === 'blocked' && task.workflow.checkpoint.findings.some(f => f.status === 'open');
@@ -659,18 +949,23 @@ export class TaskService {
         attempt.failure = stalled ?? outcome.failure ?? taskFailure(undefined, outcome.type === 'stopped' ? 'WORKER_STOPPED' : 'WORKER_FAILED');
         task.failure = attempt.failure;
       } else { delete task.failure; }
-      if (outcome.type === 'unknown') { attempt.state = 'unknown'; task.state = 'needs_reconciliation'; }
+      if (outcome.type === 'unknown') { if(task.executionControl?.phase==='pending')task.executionControl.phase='blocked'; attempt.state = 'unknown'; task.state = 'needs_reconciliation'; }
       else {
         attempt.state = 'ended'; task.activeAttemptId = undefined;
         if (outcome.type === 'completed') attempt.result = outcome.result;
         if (task.state === 'cancel_requested') {
           task.state = outcome.type === 'completed' && task.revision === attempt.revision ? 'completed' : stalled ? 'failed' : 'cancelled';
         } else if (task.state === 'waiting_input' && task.pendingQuestion) { /* retain question; execution slot now free */ }
+        else if(task.executionControl?.phase==='pending'&&task.executionControl.action==='pause'){task.state='waiting_input';task.executionControl.phase='paused';delete task.failure;}
         else if (task.state === 'interrupting' || task.revision > attempt.revision) task.state = 'queued';
+        else if(waitingForCommand){task.state='waiting_input';task.latestProgress={source:'runtime',observedAt:Date.now(),text:task.gatewayTarget?.adapter==='computer'&&outcome.computerReport?computerOutcomeText(outcome.computerReport):task.gatewayTarget?.adapter==='browser'&&outcome.browserReport?browserOutcomeText(outcome.browserReport):'Waiting for your next command.'};}
         else task.state = outcome.type === 'completed' ? 'completed' : 'failed';
         if (task.state === 'completed' && outcome.type === 'completed') task.result = outcome.result;
       }
-      if (task.state === 'failed' && stalled) task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: stalled.message };
+      // A paused or superseded-revision result skips the failure branch above;
+      // a stalled stop still ends failed, so it must carry the stall reason.
+      if (task.state === 'failed' && stalled) { attempt.failure = stalled; task.failure = stalled; task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: stalled.message }; }
+      if (task.queuedCommands?.length) this.nextQueuedCommand(task, waitingForCommand || outcome.type === 'completed');
       if (task.state === 'cancelled') {
         delete task.failure;
         task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: `Cancelled by ${task.cancellation?.requestedBy ?? 'agent'}. Existing files and prior effects are retained.` };
@@ -681,9 +976,33 @@ export class TaskService {
       if (outcome.type !== 'unknown') this.pool.release(task.taskId, outcome.type === 'completed' || outcome.type === 'paused');
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
       if (task.state === 'queued') this.store.enqueue('schedule', `schedule:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
-      else if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation') this.notify(task);
+      else if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation' || (waitingForCommand&&task.state==='waiting_input'&&task.automationController!=='user'&&task.executionControl?.phase!=='paused')) this.notify(task);
       return task;
     });
+  }
+  /** Delivers the oldest queued direct command after a settled round, or drops
+   * the queue when the round did not settle cleanly; queued text is never replayed later. */
+  private nextQueuedCommand(task: TaskSnapshot, settled: boolean): void {
+    const queue = task.queuedCommands ?? [];
+    if (!settled || !['waiting_input','completed'].includes(task.state) || task.pendingQuestion || task.executionControl?.phase === 'paused' || automationSession(task)?.status === 'closed') {
+      if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation' || task.state === 'waiting_input') {
+        const dropped = `${queue.length} queued command${queue.length === 1 ? ' was' : 's were'} not sent because the previous command did not finish normally: ${queue.map(c => JSON.stringify(c.text.slice(0, 60))).join(', ')}.`;
+        task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: [task.latestProgress?.text, dropped].filter(Boolean).join('\n').slice(0, 4096) };
+        delete task.queuedCommands;
+      }
+      return;
+    }
+    const [next, ...rest] = queue;
+    const previous = this.revision(task.taskId, task.revision);
+    task.revision++;
+    this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', task.taskId, task.revision, JSON.stringify({...previous, requestBrowserConsent: true, revision: task.revision, instructions: next.text, mode: 'interrupt_and_resume', computerInputs: undefined, answers: undefined, browserRecoveryCount: 0, guidance: undefined, guidanceBasis: undefined, directCommand: true}));
+    task.queuedCommands = rest.length ? rest : undefined;
+    if (!task.queuedCommands) delete task.queuedCommands;
+    if (task.state === 'completed') { delete task.result; delete task.computerReport; delete task.browserReport; delete task.gatewayDispatch; }
+    task.executionControl = { id: next.id, action: 'revise', revision: task.revision, phase: 'pending', requestedAt: Date.now() };
+    task.state = 'queued';
+    const done = task.latestProgress?.text;
+    task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: [done, `Running queued command: ${JSON.stringify(next.text.slice(0, 120))}${rest.length ? ` (${rest.length} more waiting)` : ''}.`].filter(Boolean).join('\n').slice(0, 4096) };
   }
   private notify(task: TaskSnapshot): void {
     const input = this.store.get('SELECT binding_id FROM conversation_inputs WHERE id=?', task.initiatingInputId)!;
@@ -692,16 +1011,83 @@ export class TaskService {
       notificationId, task.conversationId, task.taskId, task.stateVersion, input.binding_id);
     this.store.enqueue('notification', `notification:${task.taskId}:${task.stateVersion}`, { conversationId: task.conversationId, taskId: task.taskId, notificationId });
   }
+  /** Parent independently checks a fresh, scoped browser observation. Never clears an uncertain mutation. */
+  verifyBrowser(context:CommandContext,taskId:string,revision:number,requestId:string,evidenceId:string,evidence:string,check:()=>void):TaskSnapshot {
+    boundedText(evidence,4096);boundedText(requestId,256);boundedText(evidenceId,128);
+    return this.command(context,'verify_browser',{taskId,revision,requestId,evidenceId,evidence},context.execute,()=>{
+      const task=this.owned(taskId,context.conversationId);
+      if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='browser' || !['needs_reconciliation','failed'].includes(task.state) || task.revision!==revision || task.gatewayDispatch?.requestId!==requestId || !task.browserReport || !parentVerifiableBrowserResult(task.browserReport))throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
+      if(!task.capabilities.execute || (!context.execute && !this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion)))throw new OrchestrationError('EXECUTION_DENIED');
+      check();
+      const attemptId=task.activeAttemptId ?? this.store.get("SELECT id FROM task_attempts WHERE task_id=? AND revision=? AND state='ended' ORDER BY generation DESC LIMIT 1",taskId,revision)?.id;
+      const attempt=attemptId ? this.store.attempt(String(attemptId)) : undefined;
+      if(!attempt)throw new OrchestrationError('BROWSER_VERIFICATION_UNAVAILABLE');
+      attempt.state='ended';task.activeAttemptId=undefined;task.state=task.revision>attempt.revision?'queued':'completed';delete task.failure;delete attempt.failure;
+      task.browserReport.status='succeeded';task.browserReport.reason='PARENT_VERIFIED';
+      task.browserReport.verification={source:'parent',evidence,at:Date.now()};
+      task.result={summary:'Parent verified browser result: '+evidence,artifactIds:[]};attempt.result=task.result;
+      this.pool.release(task.taskId,true);
+      this.store.saveAttempt(attempt);this.store.saveTask(task,task.stateVersion);
+      this.store.appendEvent(task.conversationId,'browser.parent_verified',{requestId,evidenceId,evidence},taskId);
+      if(task.state==='queued')this.store.enqueue('schedule',`schedule:${task.taskId}:${task.stateVersion}`,{taskId:task.taskId});else this.notify(task);
+      return task;
+    },taskId);
+  }
+  verifyComputer(context:CommandContext,taskId:string,revision:number,requestId:string,evidenceId:string,evidence:string,check:()=>void):TaskSnapshot {
+    boundedText(evidence,4096);boundedText(requestId,256);boundedText(evidenceId,128);
+    return this.command(context,'verify_computer',{taskId,revision,requestId,evidenceId,evidence},context.execute,()=>{
+      const task=this.owned(taskId,context.conversationId);
+      if(task.ownerPrincipalId!==context.principalId || task.gatewayTarget?.adapter!=='computer' || !['failed','waiting_input'].includes(task.state) || task.revision!==revision || task.gatewayDispatch?.requestId!==requestId || !task.computerReport || task.computerReport.status!=='needs_verification')throw new OrchestrationError('COMPUTER_VERIFICATION_UNAVAILABLE');
+      if(!task.capabilities.execute || (!context.execute && !this.store.get("SELECT id FROM notifications WHERE task_id=? AND decision_id=? AND status='assigned' AND task_state_version=?",taskId,context.decisionId,task.stateVersion)))throw new OrchestrationError('EXECUTION_DENIED');
+      check();
+      const attemptId=task.activeAttemptId ?? this.store.get("SELECT id FROM task_attempts WHERE task_id=? AND revision=? AND state='ended' ORDER BY generation DESC LIMIT 1",taskId,revision)?.id;
+      const attempt=attemptId ? this.store.attempt(String(attemptId)) : undefined;
+      if(!attempt)throw new OrchestrationError('COMPUTER_VERIFICATION_UNAVAILABLE');
+      attempt.state='ended';task.activeAttemptId=undefined;task.state=task.revision>attempt.revision?'queued':'completed';delete task.failure;delete attempt.failure;
+      task.computerReport.status='succeeded';task.computerReport.reason='PARENT_VERIFIED';
+      task.result={summary:'Parent verified computer result: '+evidence,artifactIds:[]};attempt.result=task.result;
+      this.pool.release(task.taskId,true);
+      this.store.saveAttempt(attempt);this.store.saveTask(task,task.stateVersion);
+      this.store.appendEvent(task.conversationId,'computer.parent_verified',{requestId,evidenceId,evidence},taskId);
+      if(task.state==='queued')this.store.enqueue('schedule',`schedule:${task.taskId}:${task.stateVersion}`,{taskId:task.taskId});else this.notify(task);
+      return task;
+    },taskId);
+  }
+  /** User-requested continuation from fresh evidence, never replay the old dispatch. */
+  reconcileBrowser(context:CommandContext,taskId:string,revision:number,requestId:string,evidenceId:string,instructions:string,check:()=>string):TaskSnapshot {
+    boundedText(instructions,8000);boundedText(requestId,256);boundedText(evidenceId,128);
+    return this.command(context,'reconcile_browser',{taskId,revision,requestId,evidenceId,instructions},true,()=>{
+      const task=this.owned(taskId,context.conversationId);
+      if(automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
+      if(!context.execute||!task.capabilities.execute||task.ownerPrincipalId!==context.principalId)throw new OrchestrationError('EXECUTION_DENIED');
+      if(task.gatewayTarget?.adapter!=='browser'||task.state!=='needs_reconciliation'||!task.activeAttemptId||task.revision!==revision||task.gatewayDispatch?.requestId!==requestId)throw new OrchestrationError('STATE_CONFLICT');
+      const resolution=check(),attempt=this.store.attempt(task.activeAttemptId)!;
+      attempt.state='ended';this.store.saveAttempt(attempt);this.pool.release(taskId,false);
+      const previous=this.revision(taskId,revision);
+      task.revision++;task.activeAttemptId=undefined;task.state='queued';
+      delete task.failure;delete task.browserReport;delete task.gatewayDispatch;delete task.pendingQuestion;
+      task.executionControl=undefined;
+      this.store.run('INSERT INTO task_revisions VALUES(?,?,?)',taskId,task.revision,JSON.stringify({...previous,requestBrowserConsent:true,revision:task.revision,instructions,mode:'when_ready',originatingInputId:context.inputId,answers:undefined,guidance:undefined,guidanceBasis:undefined,browserRecoveryCount:0}));
+      this.store.saveTask(task,task.stateVersion);
+      this.store.appendEvent(task.conversationId,'browser.continuation_authorized',{requestId,evidenceId,resolution,inputId:context.inputId},taskId);
+      this.store.enqueue('schedule',`schedule:${task.taskId}:${task.stateVersion}`,{taskId});
+      return task;
+    },taskId);
+  }
   /** Offline operator workflow only; not exposed through conversation tools.
    * Caller holds the instance lock and has checked liveness/side effects. */
-  reconcile(taskId: string, state: 'queued' | 'failed' | 'cancelled', evidence: string): TaskSnapshot {
+  reconcile(taskId: string, state: 'queued' | 'failed' | 'cancelled' | 'waiting_input', evidence: string): TaskSnapshot {
     boundedText(evidence, 4096);
-    if (!['queued', 'failed', 'cancelled'].includes(state)) throw new OrchestrationError('INVALID_RECONCILIATION');
+    if (!['queued', 'failed', 'cancelled', 'waiting_input'].includes(state)) throw new OrchestrationError('INVALID_RECONCILIATION');
     return this.store.transaction(() => {
       const task = this.store.task(taskId);
       if (!task || task.state !== 'needs_reconciliation' || !task.activeAttemptId) throw new OrchestrationError('RECONCILIATION_NOT_REQUIRED');
+      if(['queued','waiting_input'].includes(state)&&automationSession(task)?.status==='closed')throw new OrchestrationError('AUTOMATION_SESSION_CLOSED');
       const attempt = this.store.attempt(task.activeAttemptId)!;
       attempt.state = 'ended'; task.activeAttemptId = undefined; task.state = state;
+      if(state==='cancelled')task.failure=undefined;
+      if(state==='queued'&&task.gatewayTarget){task.gatewayDispatch=undefined;task.failure=undefined;task.computerReport=undefined;}
+      if(state==='waiting_input'){task.failure=undefined;task.computerReport={steps:0,...task.computerReport,status:'needs_input',reason:'COMMAND_WAITING_INPUT'};if(task.automationSession)task.automationSession={...task.automationSession,status:'idle',idleSince:Date.now()};}
       this.pool.release(taskId, false);
       task.pendingQuestion = undefined;
       task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: `Operator reconciliation: ${evidence}` };

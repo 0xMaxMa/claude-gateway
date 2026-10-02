@@ -1,3 +1,4 @@
+import { sanitizeJevChildEnv, jevCredentialEnvNames } from '../jev/child-env';
 import { spawn } from 'child_process';
 import { codexPolicyArgs } from './codex-policy';
 import { existsSync } from 'fs';
@@ -14,9 +15,10 @@ export function inspectCodexExtensions(bin: string, cwd: string, env = process.e
     const args = codexPolicyArgs();
     const index = args.indexOf('features.plugins=false');
     if (index >= 1) args.splice(index - 1, 2);
+    const childEnv = sanitizeJevChildEnv(env);
     const nativeArgs = [...args, 'app-server', '--listen', 'stdio://'];
-    const child = container ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', `HOME=${homedir()}`, container, bin, ...nativeArgs], { env, stdio: 'pipe' })
-      : spawn(bin, nativeArgs, { cwd, env, stdio: 'pipe' });
+    const child = container ? spawn('docker', ['exec', '-i', '--workdir', '/workspace', '--user', String(userInfo().uid), '-e', `HOME=${homedir()}`, ...jevCredentialEnvNames().flatMap(name => ['-e', `${name}=`]), container, bin, ...nativeArgs], { env: childEnv, stdio: 'pipe' })
+      : spawn(bin, nativeArgs, { cwd, env: childEnv, stdio: 'pipe' });
     let sequence = 0, buffer = '', bytes = 0, settled = false;
     const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
     const finish = (error?: Error, result?: NativeCodexExtensions) => {
