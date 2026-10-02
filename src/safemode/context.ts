@@ -69,6 +69,35 @@ function writeArtifact(dir: string, name: string, value: unknown): void {
   fs.writeFileSync(path.join(dir, name), JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
 }
 
+type Database = import('node:sqlite').DatabaseSync;
+
+/** Which of `ids` appear in any ID column of the evidence tables. */
+function matchIds(db: Database, ids: string[]): Set<string> {
+  const found = new Set<string>();
+  const knownTables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
+  for (const table of TABLES.filter(name => knownTables.has(name))) {
+    const columns = new Set(db.prepare(`PRAGMA table_info("${table}")`).all().map(row => String(row.name)));
+    for (const name of ID_COLUMNS.filter(column => columns.has(column))) {
+      for (const row of db.prepare(`SELECT DISTINCT "${name}" AS id FROM "${table}" WHERE "${name}" IN (${ids.map(() => '?').join(',')})`).all(...ids)) found.add(String(row.id));
+    }
+  }
+  return found;
+}
+
+/** IDs known to any agent database; unreadable databases are reported by the snapshot itself. */
+async function idsPresent(files: string[], ids: string[]): Promise<Set<string>> {
+  const { DatabaseSync } = await import('node:sqlite');
+  const found = new Set<string>();
+  for (const file of files) {
+    if (found.size === ids.length) break;
+    try {
+      const db = new DatabaseSync(file, { readOnly: true });
+      try { db.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=100'); matchIds(db, ids).forEach(id => found.add(id)); } finally { db.close(); }
+    } catch { /* Snapshot notes the unavailable database. */ }
+  }
+  return found;
+}
+
 /** Export bounded rows through a read-only SQLite transaction. Never copy a live
  * DB without its WAL, instantiate a migrating gateway store, or acquire leases. */
 async function databaseSnapshot(filename: string, targetIds: string[]): Promise<{ matchedTargets: string[] } & Record<string, unknown> | undefined> {
@@ -81,16 +110,8 @@ async function databaseSnapshot(filename: string, targetIds: string[]): Promise<
     const knownTables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
     // Find the requested evidence before applying the snapshot/agent limits.
     // Otherwise an alphabetically late agent can disappear from a targeted investigation.
-    const matchedTargets = new Set<string>();
-    if (targetIds.length) {
-      for (const table of TABLES.filter(name => knownTables.has(name))) {
-        const columns = new Set(db.prepare(`PRAGMA table_info("${table}")`).all().map(row => String(row.name)));
-        for (const name of ID_COLUMNS.filter(column => columns.has(column))) {
-          for (const row of db.prepare(`SELECT DISTINCT "${name}" AS id FROM "${table}" WHERE "${name}" IN (${targetIds.map(() => '?').join(',')})`).all(...targetIds)) matchedTargets.add(String(row.id));
-        }
-      }
-      if (!matchedTargets.size) { db.exec('ROLLBACK'); return undefined; }
-    }
+    const matchedTargets = targetIds.length ? matchIds(db, targetIds) : new Set<string>();
+    if (targetIds.length && !matchedTargets.size) { db.exec('ROLLBACK'); return undefined; }
     const conversationIds = knownTables.has('conversations') && targetIds.length
       ? db.prepare(`SELECT id FROM conversations WHERE agent_session_id IN (${targetIds.map(() => '?').join(',')}) LIMIT 50`).all(...targetIds).map(row => String(row.id)) : [];
     const linkedIds: Record<string, string[]> = {};
@@ -211,7 +232,13 @@ export async function prepareContext(workspace: string, configPath?: string, req
   const configFile = expandHome(configPath || runtime?.configPath || process.env.GATEWAY_CONFIG || path.join(os.homedir(), '.claude-gateway', 'config.json'));
   try { writeArtifact(diagnostics, 'config.json', sanitizeDiagnostic(JSON.parse(readBounded(configFile)))); }
   catch { notes.push('Config unavailable, malformed or over size limit.'); }
-  const requestedTargets = extractTargetIds(requestPrompt);
+  const agentsDir = agentsDirForConfig(configFile);
+  const agents: AgentLocation[] = listAgents(agentsDir);
+  const candidates = extractTargetIds(requestPrompt);
+  const prefixed = candidates.filter(id => !UUID.test(id));
+  const known = prefixed.length ? await idsPresent(agents.flatMap(agent => agent.databases), prefixed) : new Set<string>();
+  // A model name, date or ticket number looks like a prefixed ID; it is a target only when the gateway knows it.
+  const requestedTargets = candidates.filter(id => UUID.test(id) || known.has(id));
   const targetFile = path.join(workspace, 'evidence-targets.json');
   let targets = requestedTargets.slice(0, 10);
   if (targets.length) fs.writeFileSync(targetFile, JSON.stringify(targets), { mode: 0o600 });
@@ -235,9 +262,7 @@ export async function prepareContext(workspace: string, configPath?: string, req
   if (!targets.length) notes.push('No target IDs supplied. Evidence is a bounded general snapshot; for a session ID given later, query the live databases listed in locations.json directly.');
   const omittedAgents: { agent: string; reason: string }[] = [];
   const selectedAgents: string[] = [];
-  const agentsDir = agentsDirForConfig(configFile);
   const databases: Record<string, unknown> = {};
-  const agents: AgentLocation[] = listAgents(agentsDir);
   const matched = new Set<string>();
   if (!agents.length) notes.push('Agent data directory unavailable or empty.');
   let includedAgents = 0;

@@ -33,7 +33,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Only credentials used by the selected native provider belong in its environment. */
 export function nativeEnvironment(cli: SafemodeCli, source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  const common = /^(HOME|USER|LOGNAME|PATH|SHELL|TERM|COLORTERM|TERM_PROGRAM|TERM_PROGRAM_VERSION|COLORFGBG|NO_COLOR|FORCE_COLOR|CLICOLOR|CLICOLOR_FORCE|TMUX|TMUX_PANE|LANG|LC_[A-Z_]+|TZ|TMPDIR|TEMP|TMP|XDG_CONFIG_HOME|XDG_CACHE_HOME|XDG_DATA_HOME|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|GATEWAY_CONFIG|GH_TOKEN|GITHUB_TOKEN|GH_HOST|GH_ENTERPRISE_TOKEN)$/;
+  const common = /^(HOME|USER|LOGNAME|PATH|SHELL|TERM|COLORTERM|TERM_PROGRAM|TERM_PROGRAM_VERSION|COLORFGBG|NO_COLOR|FORCE_COLOR|CLICOLOR|CLICOLOR_FORCE|TMUX|TMUX_PANE|LANG|LC_[A-Z_]+|TZ|TMPDIR|TEMP|TMP|XDG_CONFIG_HOME|XDG_CACHE_HOME|XDG_DATA_HOME|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|IS_SANDBOX|GATEWAY_CONFIG|GH_TOKEN|GITHUB_TOKEN|GH_HOST|GH_ENTERPRISE_TOKEN)$/;
   const provider = cli === 'claude'
     ? /^(CLAUDE_CONFIG_DIR|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|ANTHROPIC_MODEL|CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|AWS_[A-Z_]+|GOOGLE_APPLICATION_CREDENTIALS|ANTHROPIC_VERTEX_PROJECT_ID|CLOUD_ML_REGION|ANTHROPIC_FOUNDRY_[A-Z_]+)$/
     : /^(CODEX_HOME|CODEX_ACCESS_TOKEN|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_ORG_ID|OPENAI_PROJECT_ID)$/;
@@ -41,6 +41,7 @@ export function nativeEnvironment(cli: SafemodeCli, source: NodeJS.ProcessEnv = 
     if (value !== undefined && (common.test(key) || provider.test(key))) env[key] = value;
   }
   // gh credentials and the gateway config path let safemode publish issues and repair.
+  // IS_SANDBOX: a root install that already declares a sandbox can use bypassPermissions.
   // Never propagate gateway leases, SDK nesting or shell startup injection.
   return env;
 }

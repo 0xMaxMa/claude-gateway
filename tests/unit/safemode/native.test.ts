@@ -15,9 +15,10 @@ it('forwards provider, gh and gateway-config environment but not gateway tokens 
   const env = nativeEnvironment('claude', {
     HOME: '/home/operator', PATH: '/bin', ANTHROPIC_API_KEY: 'provider', OPENAI_API_KEY: 'other-provider',
     GH_TOKEN: 'github', GATEWAY_CONFIG: '/srv/gateway/config.json', GATEWAY_API_TOKEN: 'gateway', NODE_OPTIONS: '--require injected', BASH_ENV: '/injected',
-    CLAUDECODE: '1', CODEX_THREAD_ID: 'parent',
+    CLAUDECODE: '1', CODEX_THREAD_ID: 'parent', IS_SANDBOX: '1',
   });
-  expect(env).toEqual({ HOME: '/home/operator', PATH: '/bin', ANTHROPIC_API_KEY: 'provider', GH_TOKEN: 'github', GATEWAY_CONFIG: '/srv/gateway/config.json' });
+  // IS_SANDBOX lets a root install that already declares a sandbox use bypassPermissions.
+  expect(env).toEqual({ HOME: '/home/operator', PATH: '/bin', ANTHROPIC_API_KEY: 'provider', GH_TOKEN: 'github', GATEWAY_CONFIG: '/srv/gateway/config.json', IS_SANDBOX: '1' });
 });
 
 it.each(['interactive', 'headless'] as const)('Claude %s safemode has unrestricted host access without permission prompts', mode => {

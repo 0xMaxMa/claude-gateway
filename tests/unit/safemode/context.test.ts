@@ -240,10 +240,17 @@ test('prose tokens such as dates never displace a session UUID from the ten-targ
   agentDb('example', ID);
   const noise = Array.from({ length: 12 }, (_, i) => `step-${i}`).join(' ');
   await prepareContext(workspace, config, `On 2026-10-02 ${noise} the session ${ID} failed`);
-  const { targetIds } = artifact('coverage.json');
-  expect(targetIds[0]).toBe(ID);
-  expect(targetIds).toHaveLength(10);
-  expect(targetIds).not.toContain('2026-10-02');
+  expect(artifact('coverage.json').targetIds).toEqual([ID]);
+});
+
+test('ID-like prose the gateway does not know neither empties the general snapshot nor replaces saved targets', async () => {
+  agentDb('example', ID);
+  await prepareContext(workspace, config, 'Compare claude-opus-4-5 on node-v22 for ticket E-1234 at 2026-10-02T03:00Z');
+  expect(artifact('coverage.json').targetIds).toEqual([]);
+  expect(Object.keys(artifact('databases.json'))).toEqual(['example/orchestration.db']);
+  await prepareContext(workspace, config, `Inspect ${ID}`);
+  await prepareContext(workspace, config, 'Now try claude-opus-4-5 again');
+  expect(artifact('coverage.json').targetIds).toEqual([ID]);
 });
 
 test('only the per-session stream named after a target is promoted, not any log containing the ID text', async () => {
