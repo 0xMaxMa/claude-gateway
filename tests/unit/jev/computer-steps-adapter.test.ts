@@ -149,3 +149,31 @@ test('a reply round superseded mid-way keeps the question for the resumed reply'
   expect(runComputerUse.mock.calls[3][0].interactionContext).toContain('"previousCommand":"yes"');
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
+
+// Review F1: a reply round that already pressed the confirmed action consumes the
+// question even when it ends superseded or unknown; a resumed "yes" is a new command.
+test.each([
+ ['as superseded',{status:'cancelled',reason:'REVISION_SUPERSEDED',steps:1,evaluations:1}],
+ ['with an unknown outcome',{status:'needs_reconciliation',reason:'COMPUTER_OUTCOME_UNKNOWN',steps:1,evaluations:1}],
+])('a reply round that acted and ended %s does not re-arm the question',async(_name,ended)=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-confirm-'));runComputerUse.mockClear();
+ const callTool=jest.fn(async()=>({content:[{type:'text',text:'{"state":"approved"}'}]}));
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ const connectors={get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})};
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true});
+ const settle=async(task:any,request:string)=>{for(let i=0;i<50;i++){if(typeof await adapter.inspect(task,request)==='object')return;await new Promise(r=>setImmediate(r));}};
+ const observe=(deps:any)=>deps.observation({generation:'g',application:'com.google.Chrome',controls:[],apps:[],truncated:false});
+ try{
+  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,automationController:'user',gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+  runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{observe(deps);return {status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1,lastAction:{kind:'press',label:'Quit Google Chrome',blocked:true,confirm:true}};});
+  const handoff={...task,revision:2,executionControl:{revision:2,agentHandoff:true}};
+  await adapter.submit(handoff,'r2','quit chrome');await settle(handoff,'r2');
+  runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{observe(deps);await deps.beforeMutation('op-1',{});observe(deps);return ended;});
+  const answer={...task,revision:3,executionControl:{revision:3}};
+  await adapter.submit(answer,'r3','yes');await settle(answer,'r3');
+  expect(runComputerUse.mock.calls[1][0].confirmation).toEqual({command:'quit chrome',label:'Quit Google Chrome'});
+  const resumed={...task,revision:4,executionControl:{revision:4}};
+  await adapter.submit(resumed,'r4','yes');await settle(resumed,'r4');
+  expect(runComputerUse.mock.calls[2][0].confirmation).toBeUndefined();
+ }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});
