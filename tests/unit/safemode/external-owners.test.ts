@@ -95,3 +95,44 @@ it('does not require private exe or environment metadata from unrelated daemons'
   jest.spyOn(fs, 'readlinkSync').mockImplementation(() => { throw Object.assign(new Error('denied'), { code: 'EPERM' }); });
   expect(findExternalNativeOwners(options)).toEqual([]);
 });
+
+describe('codex managed daemon', () => {
+  const codex = { ...options, cli: 'codex' as const };
+  const lock = `/fixture/.codex/thread-writer-locks/${id}.lock`;
+  const rollout = `/fixture/.codex/sessions/2026/10/02/rollout-x-${id}.jsonl`;
+  function daemon(pid: number, parent = 1) {
+    processFixture(pid, 'codex', 'app-server --managed-daemon', '/outside', parent);
+    entries.set(`/proc/${pid}/fd`, ['3', '4']);
+    entries.set(`/proc/${pid}/fd/3`, lock);
+    entries.set(`/proc/${pid}/fd/4`, rollout);
+  }
+  it('does not treat the daemon holding the session lock fds as an external owner', () => {
+    daemon(9100);
+    expect(() => assertNoExternalNativeOwner(codex)).not.toThrow();
+    expect(findExternalNativeOwners(codex)).toEqual([]);
+  });
+  it('ignores a daemon that appears after the managed child started', () => {
+    processFixture(9001, 'launcher');
+    expect(() => assertNoExternalNativeOwner({ ...codex, ignorePids: [9001] })).not.toThrow();
+    daemon(9100);
+    expect(() => assertNoExternalNativeOwner({ ...codex, ignorePids: [9001] })).not.toThrow();
+  });
+  it('ignores a daemon identified only by its pid-update-loop parent', () => {
+    processFixture(9099, 'codex', 'app-server daemon pid-update-loop');
+    processFixture(9100, 'codex', 'serve', '/outside', 9099);
+    entries.set('/proc/9100/fd', ['3']); entries.set('/proc/9100/fd/3', lock);
+    expect(() => assertNoExternalNativeOwner(codex)).not.toThrow();
+  });
+  it('still detects an external codex resume of the same id next to the daemon', () => {
+    daemon(9100); processFixture(9200, 'codex', `resume ${id}`);
+    expect(findExternalNativeOwners(codex)).toEqual([{ pid: 9200 }]);
+    expect(() => assertNoExternalNativeOwner(codex)).toThrow(/process 9200 \(argv\)/);
+  });
+  it('still detects a non-daemon codex in the same cwd and one holding the lock fd', () => {
+    processFixture(9300, 'codex', '', options.cwd);
+    expect(() => assertNoExternalNativeOwner(codex)).toThrow(/process 9300 \(cwd\)/);
+    entries.clear(); entries.set('/proc', []);
+    processFixture(9400, 'codex', 'resume'); entries.set('/proc/9400/fd', ['3']); entries.set('/proc/9400/fd/3', lock);
+    expect(() => assertNoExternalNativeOwner(codex)).toThrow(/process 9400 \(file-descriptor\)/);
+  });
+});
