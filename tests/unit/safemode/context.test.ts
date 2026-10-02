@@ -264,3 +264,10 @@ test('only the per-session stream named after a target is promoted, not any log 
   expect(logs['cron-agent:session:cron-7.log']).toBeDefined();
   expect(logs['cron-agent:session:cron-70.log']).toBeUndefined();
 });
+
+test('a UUID joined to a prefix (session_id:<uuid>, <agent>:session:<uuid>.log) is still a target', async () => {
+  agentDb('example', ID);
+  await prepareContext(workspace, config, `see session_id:${ID} and example:session:${ID}.log`);
+  expect(artifact('coverage.json').targetIds).toEqual([ID]);
+  expect(Object.keys(artifact('databases.json'))).toEqual(['example/orchestration.db']);
+});

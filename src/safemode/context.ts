@@ -27,9 +27,11 @@ function isTargetId(token: string): boolean {
 
 /** UUIDs first, so prose tokens cannot push a real session ID past the ten-target limit. */
 function extractTargetIds(text: string): string[] {
+  // UUIDs are matched on their own too, so `session_id:<uuid>` or `<agent>:session:<uuid>.log` still yield the UUID.
+  const uuids = (text.match(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi) ?? []).map(id => id.toLowerCase());
   const tokens = (text.match(/[A-Za-z0-9][A-Za-z0-9_.:-]*/g) ?? []).map(token => token.replace(/[.:-]+$/, '')).filter(isTargetId)
     .map(id => UUID.test(id) ? id.toLowerCase() : id);
-  return [...new Set([...tokens.filter(id => UUID.test(id)), ...tokens])];
+  return [...new Set([...uuids, ...tokens])];
 }
 
 /** Preserve correlation UUIDs while scrubbing credential assignments and opaque tokens. */
@@ -322,7 +324,7 @@ Gateway session IDs may be given at any point in this conversation; look each on
 - history.db: messages.session_id
 - log files named <agent>:session:<id>.log
 If an ID matches more than one agent (a chat ID usually talks to several agents), list the matches and ask which agent is meant.
-The sqlite3 CLI may be missing. Query with Node instead, opening live databases read-only so the running gateway is not blocked: ${process.execPath} -e 'const {DatabaseSync}=require("node:sqlite"); const db=new DatabaseSync(process.argv[1],{readOnly:true}); console.log(db.prepare("SELECT * FROM conversations WHERE agent_session_id=?").all(process.argv[2]))' <db-path> <id>
+The sqlite3 CLI may be missing. Query with Node instead, opening live databases read-only so the running gateway is not blocked: "${process.execPath}" -e 'const {DatabaseSync}=require("node:sqlite"); const db=new DatabaseSync(process.argv[1],{readOnly:true}); console.log(db.prepare("SELECT * FROM conversations WHERE agent_session_id=?").all(process.argv[2]))' <db-path> <id>
 The diagnostics/ files are only a bounded, redacted starting snapshot.
 Before writing a file or live database, back it up; before writing a live database, stop the gateway or confirm it is idle.
 Runtime evidence: ${runtimeStatus}. Source: ${sourcePath ? path.basename(sourcePath) : 'unavailable'}. Use the recorded build commit/version, not main or the current checkout HEAD, for conclusions. A modified build has changes missing from canonical source. Dead startup records are last-run evidence only; launcher metadata does not identify a running gateway.
