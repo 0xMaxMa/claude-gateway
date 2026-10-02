@@ -15,11 +15,27 @@ export interface ExternalOwnerOptions {
 function vanished(error: unknown): boolean {
   return ['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code || '');
 }
+/** How the process was tied to this conversation. */
+export type ExternalOwnerKind = 'registry' | 'cwd' | 'argv' | 'file-descriptor' | 'process';
 export class ExternalOwnerFound extends Error {
-  constructor(readonly pid: number) { super(`Busy: external native CLI process ${pid} may own this conversation. Close it before resuming; safemode will not stop an unmanaged process.`); }
+  constructor(readonly pid: number, readonly kind: ExternalOwnerKind = 'process') { super(`Busy: external native CLI process ${pid} (${kind}) may own this conversation. Close it before resuming; safemode will not stop an unmanaged process.`); }
 }
-function busy(pid: number): never {
-  throw new ExternalOwnerFound(pid);
+function busy(pid: number, kind: ExternalOwnerKind): never {
+  throw new ExternalOwnerFound(pid, kind);
+}
+function readArgv(pid: number): string[] | undefined {
+  try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean); }
+  catch (error) { if (vanished(error)) return undefined; throw error; }
+}
+/**
+ * Codex's own background daemon (`codex app-server --managed-daemon`, or the
+ * `app-server daemon pid-update-loop` that launches it) serves every Codex
+ * session of this user, including safemode's managed child. It is not a
+ * competing client, but it holds the session's lock/rollout fds.
+ */
+function isCodexManagedDaemon(argv: string[], parentArgv: string[] | undefined): boolean {
+  if (argv.includes('app-server') && argv.includes('--managed-daemon')) return true;
+  return !!parentArgv && parentArgv.includes('app-server') && parentArgv.includes('daemon') && parentArgv.includes('pid-update-loop');
 }
 function startTime(pid: number): string | undefined {
   try {
@@ -90,7 +106,7 @@ function inspectExternalNativeOwner(options: ExternalOwnerOptions): void {
       // Older registries lacking a start identity cannot disprove a live owner.
       if (record.procStart !== undefined && String(record.procStart) !== liveStart) continue;
       knownRegistry.set(pid, record);
-      if (options.nativeSessionId ? record.sessionId === options.nativeSessionId : record.cwd === options.cwd) busy(pid);
+      if (options.nativeSessionId ? record.sessionId === options.nativeSessionId : record.cwd === options.cwd) busy(pid, 'registry');
     }
   }
   for (const entry of fs.readdirSync('/proc')) {
@@ -106,6 +122,10 @@ function inspectExternalNativeOwner(options: ExternalOwnerOptions): void {
       // deliberately make those files unreadable (e.g. non-dumpable daemons).
       const candidate = [argv[0] || '', argv[1] || ''].some(value => nativeName(value, options.cli));
       if (!candidate) continue;
+      if (options.cli === 'codex') {
+        const parent = parents.get(pid);
+        if (isCodexManagedDaemon(argv, parent ? readArgv(parent) : undefined)) continue;
+      }
       // Native homes are distinct stores, so the same UUID in another home is
       // not this conversation. Extract only these three routing keys; never
       // return, log or include process environment/arguments in errors.
@@ -124,11 +144,11 @@ function inspectExternalNativeOwner(options: ExternalOwnerOptions): void {
       const record = knownRegistry.get(pid);
       if (record && options.nativeSessionId && record.sessionId) continue;
       const cwd = fs.readlinkSync(path.join(root, 'cwd'));
-      if (cwd === options.cwd) busy(pid);
+      if (cwd === options.cwd) busy(pid, 'cwd');
       if (options.nativeSessionId) {
         for (let i = 0; i < argv.length; i++) {
-          if (['--resume', '-r', '--session-id', 'resume'].includes(argv[i]) && argv[i + 1] === options.nativeSessionId) busy(pid);
-          if (argv[i] === `--resume=${options.nativeSessionId}` || argv[i] === `--session-id=${options.nativeSessionId}`) busy(pid);
+          if (['--resume', '-r', '--session-id', 'resume'].includes(argv[i]) && argv[i + 1] === options.nativeSessionId) busy(pid, 'argv');
+          if (argv[i] === `--resume=${options.nativeSessionId}` || argv[i] === `--session-id=${options.nativeSessionId}`) busy(pid, 'argv');
         }
         // Codex app-server and resume picker need no UUID in argv. A live file
         // descriptor proves access even when the CLI holds a kernel writer lock.
@@ -138,7 +158,7 @@ function inspectExternalNativeOwner(options: ExternalOwnerOptions): void {
           catch (error) { if (vanished(error)) continue; throw error; }
           const name = path.basename(target);
           if ((target.startsWith(path.join(nativeHome, 'thread-writer-locks') + path.sep) && name === `${options.nativeSessionId}.lock`)
-              || (target.startsWith(path.join(nativeHome, 'sessions') + path.sep) && name.endsWith(`-${options.nativeSessionId}.jsonl`))) busy(pid);
+              || (target.startsWith(path.join(nativeHome, 'sessions') + path.sep) && name.endsWith(`-${options.nativeSessionId}.jsonl`))) busy(pid, 'file-descriptor');
         }
         // Claude can switch conversations without changing argv. An unregistered
         // live Claude in this user context cannot be ruled out safely.
