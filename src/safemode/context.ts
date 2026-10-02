@@ -19,14 +19,17 @@ const TABLES = ['conversations', 'conversation_inputs', 'conversation_decisions'
 const ID_COLUMNS = ['id', 'session_id', 'agent_session_id', 'cli_session_id', 'conversation_id', 'response_id', 'task_id'];
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
-/** Gateway IDs are not always UUIDs (`cron-…`, `telegram:123`), so accept prefixed IDs carrying a digit. */
+/** Gateway IDs are not always UUIDs (`cron-…`, `telegram:123`), so accept prefixed IDs
+ * carrying a letter and a digit (a bare date such as 2026-10-02 is not an ID). */
 function isTargetId(token: string): boolean {
-  return UUID.test(token) || (/^[A-Za-z0-9][A-Za-z0-9_.:-]{3,127}$/.test(token) && /[:-]/.test(token) && /\d/.test(token));
+  return UUID.test(token) || (/^[A-Za-z0-9][A-Za-z0-9_.:-]{3,127}$/.test(token) && /[:-]/.test(token) && /\d/.test(token) && /[A-Za-z]/.test(token));
 }
 
+/** UUIDs first, so prose tokens cannot push a real session ID past the ten-target limit. */
 function extractTargetIds(text: string): string[] {
-  const tokens = (text.match(/[A-Za-z0-9][A-Za-z0-9_.:-]*/g) ?? []).map(token => token.replace(/[.:-]+$/, '')).filter(isTargetId);
-  return [...new Set(tokens.map(id => UUID.test(id) ? id.toLowerCase() : id))];
+  const tokens = (text.match(/[A-Za-z0-9][A-Za-z0-9_.:-]*/g) ?? []).map(token => token.replace(/[.:-]+$/, '')).filter(isTargetId)
+    .map(id => UUID.test(id) ? id.toLowerCase() : id);
+  return [...new Set([...tokens.filter(id => UUID.test(id)), ...tokens])];
 }
 
 /** Preserve correlation UUIDs while scrubbing credential assignments and opaque tokens. */
@@ -68,7 +71,7 @@ function writeArtifact(dir: string, name: string, value: unknown): void {
 
 /** Export bounded rows through a read-only SQLite transaction. Never copy a live
  * DB without its WAL, instantiate a migrating gateway store, or acquire leases. */
-async function databaseSnapshot(filename: string, targetIds: string[]): Promise<unknown> {
+async function databaseSnapshot(filename: string, targetIds: string[]): Promise<{ matchedTargets: string[] } & Record<string, unknown> | undefined> {
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(filename, { readOnly: true });
   try {
@@ -221,7 +224,7 @@ export async function prepareContext(workspace: string, configPath?: string, req
       .map(entry => ({ name: entry.name, time: fs.statSync(path.join(logDir, entry.name)).mtimeMs }))
       .sort((a, b) => b.time - a.time);
     // Per-session streams are named <agent>:session:<id>.log; keep a target's stream even when it is old.
-    const files = [...all.filter(file => targets.some(id => file.name.includes(id))), ...all].filter((file, index, list) => list.indexOf(file) === index).slice(0, 8);
+    const files = [...all.filter(file => targets.some(id => file.name.endsWith(`:session:${id}.log`))), ...all].filter((file, index, list) => list.indexOf(file) === index).slice(0, 8);
     const logs: Record<string, unknown> = {};
     for (const file of files) {
       try { logs[file.name] = sanitizeDiagnostic(readBounded(path.join(logDir, file.name), true)); }
@@ -246,7 +249,7 @@ export async function prepareContext(workspace: string, configPath?: string, req
     for (const file of agent.databases) {
       const name = `${agent.agent}/${path.basename(file)}`;
       try {
-        const snapshot = await databaseSnapshot(file, targets) as { matchedTargets: string[] } | undefined;
+        const snapshot = await databaseSnapshot(file, targets);
         if (snapshot !== undefined) { databases[name] = snapshot; included = true; snapshot.matchedTargets.forEach(id => matched.add(id)); }
       } catch { notes.push(`Database unavailable or unsupported: ${name}`); }
     }

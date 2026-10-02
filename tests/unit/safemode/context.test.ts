@@ -235,3 +235,25 @@ test('non-UUID gateway IDs target the snapshot, keep an old per-session log stre
   await prepareContext(workspace, config);
   expect(artifact('coverage.json').targetIds).toEqual(['cron-nightly-7']);
 });
+
+test('prose tokens such as dates never displace a session UUID from the ten-target limit', async () => {
+  agentDb('example', ID);
+  const noise = Array.from({ length: 12 }, (_, i) => `step-${i}`).join(' ');
+  await prepareContext(workspace, config, `On 2026-10-02 ${noise} the session ${ID} failed`);
+  const { targetIds } = artifact('coverage.json');
+  expect(targetIds[0]).toBe(ID);
+  expect(targetIds).toHaveLength(10);
+  expect(targetIds).not.toContain('2026-10-02');
+});
+
+test('only the per-session stream named after a target is promoted, not any log containing the ID text', async () => {
+  agentDb('cron-agent', 'cron-7');
+  for (const name of ['cron-agent:session:cron-7.log', 'cron-agent:session:cron-70.log']) {
+    const file = path.join(root, 'logs', name); fs.writeFileSync(file, name); fs.utimesSync(file, 1_600_000_000, 1_600_000_000);
+  }
+  for (let i = 0; i < 8; i++) fs.writeFileSync(path.join(root, 'logs', `newer-${i}.log`), 'noise\n');
+  await prepareContext(workspace, config, 'inspect cron-7');
+  const logs = artifact('logs.json').logs;
+  expect(logs['cron-agent:session:cron-7.log']).toBeDefined();
+  expect(logs['cron-agent:session:cron-70.log']).toBeUndefined();
+});
