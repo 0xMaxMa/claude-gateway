@@ -53,7 +53,7 @@ const { buildNativeInvocation } = require('../../dist/safemode/native');
       const id = events.find(event => event.type === 'thread.started')?.thread_id;
       assert(id); if (nativeSessionId) assert.equal(id, nativeSessionId);
       await new Promise(resolve => setTimeout(resolve, 200));
-      assert.equal(fs.existsSync(marker), false, 'notify executed outside the read-only workspace');
+      assert.equal(fs.existsSync(marker), false, 'notify executed outside the investigation workspace');
       return id;
     }
     await run(await run());
