@@ -167,5 +167,107 @@ test('unmatched target IDs are reported instead of substituting unrelated rows',
   db.prepare('INSERT INTO conversations VALUES (?,?)').run('other',OTHER); db.close();
   await prepareContext(workspace,config,ID);
   expect(artifact('databases.json')).toEqual({});
-  expect(artifact('coverage.json').notes).toContain('No matching database evidence found for the requested IDs.');
+  expect(artifact('coverage.json').notes.join(' ')).toContain(`Target ID ${ID} matched no agent database`);
+});
+
+function agentDb(name: string, sessionId: string, mtime?: number): string {
+  const dir = path.join(root, 'agents', name); fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'orchestration.db');
+  const db = new DatabaseSync(file);
+  db.exec('CREATE TABLE conversations(id TEXT, agent_session_id TEXT);');
+  db.prepare('INSERT INTO conversations VALUES (?,?)').run(`conversation-${name}`, sessionId); db.close();
+  if (mtime !== undefined) fs.utimesSync(file, mtime, mtime);
+  return file;
+}
+
+test('the bootstrap grants full access and points at the live data, so a session ID given later can be looked up directly', async () => {
+  agentDb('example', ID);
+  const { prompt } = await prepareContext(workspace, config);
+  expect(prompt).toContain('full, unrestricted access');
+  expect(prompt).toContain(path.join(root, 'agents'));
+  expect(prompt).toContain(path.join(root, 'logs'));
+  expect(prompt).toContain(config);
+  expect(prompt).toContain('Gateway session IDs may be given at any point');
+  expect(prompt).not.toMatch(/Do not change its config|Do not restart|Do not execute code/);
+  expect(prompt).not.toContain(ID);
+});
+
+test('locations.json lists every agent and its live database path beyond the snapshot cap', async () => {
+  const files = Array.from({ length: 12 }, (_, i) => agentDb(`agent-${String(i).padStart(2, '0')}`, i === 11 ? ID : OTHER));
+  await prepareContext(workspace, config);
+  const locations = artifact('locations.json');
+  expect(locations.agentsDir).toBe(path.join(root, 'agents'));
+  expect(locations.logDir).toBe(path.join(root, 'logs'));
+  expect(locations.config).toBe(config);
+  expect(locations.agents).toHaveLength(12);
+  expect(locations.agents.flatMap((agent: { databases: string[] }) => agent.databases).sort()).toEqual(files.sort());
+});
+
+test('an untargeted snapshot selects the most recently active agents, not the first directory names', async () => {
+  for (let i = 0; i < 12; i++) agentDb(`agent-${String(i).padStart(2, '0')}`, OTHER, 1_700_000_000 + i * 60);
+  await prepareContext(workspace, config);
+  const coverage = artifact('coverage.json');
+  expect(coverage.selectedAgents).toEqual(['agent-11', 'agent-10', 'agent-09', 'agent-08', 'agent-07', 'agent-06', 'agent-05', 'agent-04']);
+  expect(coverage.omittedAgents).toEqual(['agent-03', 'agent-02', 'agent-01', 'agent-00'].map(agent => ({ agent, reason: 'agent_limit' })));
+  expect(artifact('locations.json').agents[0].agent).toBe('agent-11');
+});
+
+test('each target ID that matched no database is named, while matched targets are not', async () => {
+  agentDb('example', ID);
+  await prepareContext(workspace, config, `${ID} ${OTHER}`);
+  const notes = artifact('coverage.json').notes.join(' ');
+  expect(notes).toContain(`Target ID ${OTHER} matched no agent database`);
+  expect(notes).not.toContain(`Target ID ${ID} matched`);
+  expect(artifact('databases.json')['example/orchestration.db'].matchedTargets).toEqual([ID]);
+});
+
+test('non-UUID gateway IDs target the snapshot, keep an old per-session log stream, and persist across resume', async () => {
+  agentDb('cron-agent', 'cron-nightly-7');
+  agentDb('other', OTHER);
+  const old = path.join(root, 'logs', 'cron-agent:session:cron-nightly-7.log');
+  fs.writeFileSync(old, 'session failed: E2BIG\n'); fs.utimesSync(old, 1_600_000_000, 1_600_000_000);
+  for (let i = 0; i < 9; i++) fs.writeFileSync(path.join(root, 'logs', `newer-${i}.log`), 'noise\n');
+  await prepareContext(workspace, config, 'Why did cron-nightly-7 fail?');
+  expect(artifact('coverage.json').targetIds).toEqual(['cron-nightly-7']);
+  expect(Object.keys(artifact('databases.json'))).toEqual(['cron-agent/orchestration.db']);
+  expect(artifact('logs.json').logs['cron-agent:session:cron-nightly-7.log']).toContain('E2BIG');
+  expect(Object.keys(artifact('logs.json').logs)).toHaveLength(8);
+  await prepareContext(workspace, config);
+  expect(artifact('coverage.json').targetIds).toEqual(['cron-nightly-7']);
+});
+
+test('prose tokens such as dates never displace a session UUID from the ten-target limit', async () => {
+  agentDb('example', ID);
+  const noise = Array.from({ length: 12 }, (_, i) => `step-${i}`).join(' ');
+  await prepareContext(workspace, config, `On 2026-10-02 ${noise} the session ${ID} failed`);
+  expect(artifact('coverage.json').targetIds).toEqual([ID]);
+});
+
+test('ID-like prose the gateway does not know neither empties the general snapshot nor replaces saved targets', async () => {
+  agentDb('example', ID);
+  await prepareContext(workspace, config, 'Compare claude-opus-4-5 on node-v22 for ticket E-1234 at 2026-10-02T03:00Z');
+  expect(artifact('coverage.json').targetIds).toEqual([]);
+  expect(Object.keys(artifact('databases.json'))).toEqual(['example/orchestration.db']);
+  await prepareContext(workspace, config, `Inspect ${ID}`);
+  await prepareContext(workspace, config, 'Now try claude-opus-4-5 again');
+  expect(artifact('coverage.json').targetIds).toEqual([ID]);
+});
+
+test('only the per-session stream named after a target is promoted, not any log containing the ID text', async () => {
+  agentDb('cron-agent', 'cron-7');
+  for (const name of ['cron-agent:session:cron-7.log', 'cron-agent:session:cron-70.log']) {
+    const file = path.join(root, 'logs', name); fs.writeFileSync(file, name); fs.utimesSync(file, 1_600_000_000, 1_600_000_000);
+  }
+  for (let i = 0; i < 8; i++) fs.writeFileSync(path.join(root, 'logs', `newer-${i}.log`), 'noise\n');
+  await prepareContext(workspace, config, 'inspect cron-7');
+  const logs = artifact('logs.json').logs;
+  expect(logs['cron-agent:session:cron-7.log']).toBeDefined();
+  expect(logs['cron-agent:session:cron-70.log']).toBeUndefined();
+});
+
+test('a UUID joined to a prefix (session_id:<uuid>, <agent>:session:<uuid>.log) is still a target', async () => {
+  agentDb('example', ID);
+  await prepareContext(workspace, config, `see session_id:${ID} and example:session:${ID}.log`);
+  expect(artifact('coverage.json').targetIds).toEqual([ID]);
+  expect(Object.keys(artifact('databases.json'))).toEqual(['example/orchestration.db']);
 });

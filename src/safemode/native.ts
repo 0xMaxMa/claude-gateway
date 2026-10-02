@@ -33,14 +33,16 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Only credentials used by the selected native provider belong in its environment. */
 export function nativeEnvironment(cli: SafemodeCli, source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  const common = /^(HOME|USER|LOGNAME|PATH|SHELL|TERM|COLORTERM|TERM_PROGRAM|TERM_PROGRAM_VERSION|COLORFGBG|NO_COLOR|FORCE_COLOR|CLICOLOR|CLICOLOR_FORCE|TMUX|TMUX_PANE|LANG|LC_[A-Z_]+|TZ|TMPDIR|TEMP|TMP|XDG_CONFIG_HOME|XDG_CACHE_HOME|XDG_DATA_HOME|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS)$/;
+  const common = /^(HOME|USER|LOGNAME|PATH|SHELL|TERM|COLORTERM|TERM_PROGRAM|TERM_PROGRAM_VERSION|COLORFGBG|NO_COLOR|FORCE_COLOR|CLICOLOR|CLICOLOR_FORCE|TMUX|TMUX_PANE|LANG|LC_[A-Z_]+|TZ|TMPDIR|TEMP|TMP|XDG_CONFIG_HOME|XDG_CACHE_HOME|XDG_DATA_HOME|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|IS_SANDBOX|GATEWAY_CONFIG|GH_TOKEN|GITHUB_TOKEN|GH_HOST|GH_ENTERPRISE_TOKEN)$/;
   const provider = cli === 'claude'
     ? /^(CLAUDE_CONFIG_DIR|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|ANTHROPIC_MODEL|CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|AWS_[A-Z_]+|GOOGLE_APPLICATION_CREDENTIALS|ANTHROPIC_VERTEX_PROJECT_ID|CLOUD_ML_REGION|ANTHROPIC_FOUNDRY_[A-Z_]+)$/
     : /^(CODEX_HOME|CODEX_ACCESS_TOKEN|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_ORG_ID|OPENAI_PROJECT_ID)$/;
   for (const [key, value] of Object.entries(source)) {
     if (value !== undefined && (common.test(key) || provider.test(key))) env[key] = value;
   }
-  // Never propagate gateway leases, SDK nesting, shell injection or GitHub credentials.
+  // gh credentials and the gateway config path let safemode publish issues and repair.
+  // IS_SANDBOX: a root install that already declares a sandbox can use bypassPermissions.
+  // Never propagate gateway leases, SDK nesting or shell startup injection.
   return env;
 }
 
@@ -70,8 +72,8 @@ export function buildNativeInvocation(options: NativeOptions): NativeInvocation 
   let env = nativeEnvironment(options.cli, options.env);
   let model = options.model && options.model !== 'inherit' ? options.model : undefined;
   if (options.cli === 'claude' && options.mode === 'headless') {
-    // --restricted excludes settings customizations. Preserve only native auth
-    // environment and model preference, never hooks, commands or permission grants.
+    // Pass native auth explicitly in case --safe-mode skips settings customizations. Preserve only native auth
+    // environment and model preference, never hooks or commands.
     let nativeModel: string | undefined;
     try {
       const settings = JSON.parse(fs.readFileSync(path.join(env.CLAUDE_CONFIG_DIR || path.join(env.HOME || os.homedir(), '.claude'), 'settings.json'), 'utf8'));
@@ -108,8 +110,10 @@ export function buildNativeInvocation(options: NativeOptions): NativeInvocation 
     const claude = claudeCommand(options.env?.CLAUDE_BIN || process.env.CLAUDE_BIN, () => resolveClaudeBin(env));
     const command = claude.command;
     const nativeSessionId = options.nativeSessionId || randomUUID();
-    const args = [...claude.args, '--safe-mode', '--strict-mcp-config', '--permission-mode', options.mode === 'headless' ? 'dontAsk' : 'manual'];
-    if (options.mode === 'headless') args.push('--restricted', '--print', '--output-format', 'stream-json', '--verbose', '--tools', 'Read,Glob,Grep');
+    // Safemode repairs the gateway: full host access in both modes, no permission prompts.
+    // --safe-mode only skips the (possibly broken) native customizations.
+    const args = [...claude.args, '--safe-mode', '--strict-mcp-config', '--permission-mode', 'bypassPermissions'];
+    if (options.mode === 'headless') args.push('--print', '--output-format', 'stream-json', '--verbose');
     args.push(options.resume ? '--resume' : '--session-id', nativeSessionId);
     if (model) args.push('--model', model);
     if (prompt) args.push('--', prompt);
@@ -118,10 +122,12 @@ export function buildNativeInvocation(options: NativeOptions): NativeInvocation 
   const command = options.env?.CODEX_BIN || process.env.CODEX_BIN || 'codex';
   const args = [
     ...codexPolicyArgs(),
-    '-c', 'shell_environment_policy.inherit="none"',
-    '-c', 'shell_environment_policy.set={}',
-    '-c', 'sandbox_mode="read-only"',
-    '-c', `approval_policy="${options.mode === 'headless' ? 'never' : 'on-request'}"`,
+    // Full host access for reading and repairing the gateway. The environment is already
+    // filtered, so the shell inherits all of it (PATH for node, gh credentials).
+    '-c', 'sandbox_mode="danger-full-access"',
+    '-c', 'shell_environment_policy.inherit="all"',
+    '-c', 'shell_environment_policy.ignore_default_excludes=true',
+    '-c', 'approval_policy="never"',
     ...disabledCodexServers(command, options.cwd, env),
   ];
   if (model) args.push('--model', model);

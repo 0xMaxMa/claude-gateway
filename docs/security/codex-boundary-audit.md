@@ -4,10 +4,10 @@ Reviewed for PR #520, 2026-09-20. Native verification used the installed Codex C
 
 ## Fixes
 
-- Restricted safemode explicitly sets `notify=[]`. Disabling `features.hooks` alone does not disable legacy notification programs. Before the fix, a harmless notification fixture wrote outside the read-only investigation workspace; afterward fresh and resumed turns completed without executing it.
-- Workers and restricted safemode share startup overrides disabling hooks, plugins, apps, browser/computer tools, native multi-agent, shell snapshots, image generation, automatic skill MCP installation and workspace dependency setup. These overrides apply before thread creation, including container launches. Gateway tools and explicit coding commands remain available according to the task profile.
+- Default safemode explicitly sets `notify=[]`. Disabling `features.hooks` alone does not disable legacy notification programs. Before the fix, a harmless notification fixture wrote outside the investigation workspace; afterward fresh and resumed turns completed without executing it. Safemode itself runs with full host access (`danger-full-access`, no approvals) so it can repair the gateway; disabling native side channels keeps a broken native configuration from interfering, it does not limit safemode.
+- Workers and default safemode share startup overrides disabling hooks, plugins, apps, browser/computer tools, native multi-agent, shell snapshots, image generation, automatic skill MCP installation and workspace dependency setup. These overrides apply before thread creation, including container launches. Gateway tools and explicit coding commands remain available according to the task profile.
 - Worker effective configuration rejects enabled native side channels, executable hooks/notify, unexpected project layers, mismatched MCP commands/arguments/environment, and provider drift before starting a model thread.
-- Deliberate interactive safemode `--params` retains operator-selected native options. It is not a restricted unattended execution mode and cannot be supplied through MCP or headless send.
+- Deliberate interactive safemode `--params` retains operator-selected native options. It cannot be supplied through MCP or headless send.
 
 ## Checked boundaries
 

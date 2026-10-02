@@ -11,13 +11,26 @@ let root: string;
 beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'safemode-native-test-')); exec.mockReturnValue('[]'); });
 afterEach(() => { fs.rmSync(root, { recursive: true, force: true }); jest.clearAllMocks(); });
 
-it('isolates provider credentials from gateway, GitHub and shell startup injection', () => {
+it('forwards provider, gh and gateway-config environment but not gateway tokens or shell startup injection', () => {
   const env = nativeEnvironment('claude', {
     HOME: '/home/operator', PATH: '/bin', ANTHROPIC_API_KEY: 'provider', OPENAI_API_KEY: 'other-provider',
-    GH_TOKEN: 'github', GATEWAY_API_TOKEN: 'gateway', NODE_OPTIONS: '--require injected', BASH_ENV: '/injected',
-    CLAUDECODE: '1', CODEX_THREAD_ID: 'parent',
+    GH_TOKEN: 'github', GATEWAY_CONFIG: '/srv/gateway/config.json', GATEWAY_API_TOKEN: 'gateway', NODE_OPTIONS: '--require injected', BASH_ENV: '/injected',
+    CLAUDECODE: '1', CODEX_THREAD_ID: 'parent', IS_SANDBOX: '1',
   });
-  expect(env).toEqual({ HOME: '/home/operator', PATH: '/bin', ANTHROPIC_API_KEY: 'provider' });
+  // IS_SANDBOX lets a root install that already declares a sandbox use bypassPermissions.
+  expect(env).toEqual({ HOME: '/home/operator', PATH: '/bin', ANTHROPIC_API_KEY: 'provider', GH_TOKEN: 'github', GATEWAY_CONFIG: '/srv/gateway/config.json', IS_SANDBOX: '1' });
+});
+
+it.each(['interactive', 'headless'] as const)('Claude %s safemode has unrestricted host access without permission prompts', mode => {
+  const inv = buildNativeInvocation({ cli: 'claude', mode, cwd: root, nativeSessionId: id });
+  expect(inv.args).toEqual(expect.arrayContaining(['--permission-mode', 'bypassPermissions', '--safe-mode', '--strict-mcp-config']));
+  for (const restriction of ['--restricted', '--tools', 'dontAsk', 'manual']) expect(inv.args).not.toContain(restriction);
+});
+
+it.each(['interactive', 'headless'] as const)('Codex %s safemode runs with full host access and no approvals', mode => {
+  const inv = buildNativeInvocation({ cli: 'codex', mode, cwd: root });
+  expect(inv.args).toEqual(expect.arrayContaining(['sandbox_mode="danger-full-access"', 'approval_policy="never"', 'shell_environment_policy.inherit="all"']));
+  expect(inv.args.join(' ')).not.toMatch(/read-only|on-request|inherit="none"/);
 });
 
 it('Claude starts a real interactive session with explicit identity and native model default', () => {
@@ -28,9 +41,9 @@ it('Claude starts a real interactive session with explicit identity and native m
   expect(inv.args.slice(-2)).toEqual(['--', 'diagnose\n\n--help']);
 });
 
-it('Claude takeover resumes the identical conversation and removes writing/command tools', () => {
+it('Claude takeover resumes the identical conversation', () => {
   const inv = buildNativeInvocation({ cli: 'claude', mode: 'headless', cwd: root, nativeSessionId: id, resume: true, context: 'updated runtime evidence', prompt: 'continue', model: 'sonnet' });
-  expect(inv.args).toEqual(expect.arrayContaining(['--resume', id, '--tools', 'Read,Glob,Grep', '--restricted', '--safe-mode', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--model', 'sonnet']));
+  expect(inv.args).toEqual(expect.arrayContaining(['--resume', id, '--print', '--safe-mode', '--strict-mcp-config', '--permission-mode', 'bypassPermissions', '--model', 'sonnet']));
   expect(inv.args).not.toContain('--session-id');
   expect(inv.args).not.toContain('--fork-session');
   expect(inv.args.at(-1)).toBe('updated runtime evidence\n\ncontinue');
@@ -39,7 +52,7 @@ it('Claude takeover resumes the identical conversation and removes writing/comma
 it('Codex explicitly disables configured MCP servers instead of trusting an empty merged table', () => {
   exec.mockReturnValue(JSON.stringify([{ name: 'shell' }, { name: 'quoted.server' }]));
   const inv = buildNativeInvocation({ cli: 'codex', mode: 'headless', cwd: root, nativeSessionId: id, resume: true, prompt: 'continue' });
-  expect(inv.args).toEqual(expect.arrayContaining(['sandbox_mode="read-only"', 'approval_policy="never"', 'notify=[]', 'features.hooks=false', 'features.plugins=false', 'mcp_servers."shell".enabled=false', 'mcp_servers."quoted.server".enabled=false', '--ignore-rules', 'resume', id]));
+  expect(inv.args).toEqual(expect.arrayContaining(['sandbox_mode="danger-full-access"', 'approval_policy="never"', 'notify=[]', 'features.hooks=false', 'features.plugins=false', 'mcp_servers."shell".enabled=false', 'mcp_servers."quoted.server".enabled=false', '--ignore-rules', 'resume', id]));
   expect(inv.args).not.toContain('--last');
   expect(inv.args).not.toContain('--dangerously-bypass-approvals-and-sandbox');
   expect(inv.args.slice(-2)).toEqual(['--', 'continue']);
@@ -77,18 +90,18 @@ it('refuses ambiguous native sessions instead of silently resuming a different c
   expect(() => discoverCodexSession({ cwd: '/dedicated', startedAt: '2026-09-20T12:00:00Z', codexHome: root })).toThrow('Multiple native Codex sessions');
 });
 
-it('preserves the native Claude model when restricted mode excludes user customizations', () => {
+it('preserves the native Claude model and auth when safe mode excludes user customizations', () => {
   const config = path.join(root, 'claude'); fs.mkdirSync(config);
   fs.writeFileSync(path.join(config, 'settings.json'), JSON.stringify({ model: 'native-model', env: { CLAUDE_CODE_OAUTH_TOKEN: 'test-auth', ANTHROPIC_BASE_URL: 'https://provider.example', NODE_OPTIONS: 'injected' }, hooks: { unsafe: true } }));
   const inv = buildNativeInvocation({ cli: 'claude', mode: 'headless', cwd: root, model: 'inherit', env: { CLAUDE_CONFIG_DIR: config } });
-  expect(inv.args).toEqual(expect.arrayContaining(['--model', 'native-model', '--restricted']));
+  expect(inv.args).toEqual(expect.arrayContaining(['--model', 'native-model', '--safe-mode']));
   expect(inv.args.join(' ')).not.toContain('unsafe');
   expect(inv.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('test-auth');
   expect(inv.env.NODE_OPTIONS).toBeUndefined();
 });
 
 
-it('keeps deliberate interactive params separate from restricted defaults', () => {
+it('keeps deliberate interactive params separate from safemode defaults', () => {
   const inv = buildNativeInvocation({ cli: 'codex', mode: 'interactive', cwd: root, nativeArgs: ['--model', 'gpt-test'] });
   expect(inv.args).not.toContain('notify=[]');
   const restricted = buildNativeInvocation({ cli: 'codex', mode: 'interactive', cwd: root });
