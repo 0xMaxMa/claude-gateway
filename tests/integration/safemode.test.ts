@@ -32,7 +32,7 @@ describe('safemode detached CLI worker', () => {
     fs.writeFileSync(path.join(home,'.claude-gateway','config.json'),JSON.stringify({marker:'wrong default',gateway:{}}));
     fs.writeFileSync(path.join(dir,'session.json'),JSON.stringify({id,name:'investigation',cli:'claude',model:'inherit',createdAt:new Date().toISOString(),nativeSessionId:nativeId,configPath:targetConfig}));
     const fake = path.join(home,'native-cli');
-    fs.writeFileSync(fake,`#!/usr/bin/env node\nconst args=process.argv.slice(2);\nif(!args.includes('--resume')||!args.includes('${nativeId}')||!args.includes('--restricted'))process.exit(3);\nconsole.log(JSON.stringify({type:'system',subtype:'init',session_id:'${nativeId}'}));\nconsole.log(JSON.stringify({type:'result',result:'fixture diagnostic completed'}));\n`,{mode:0o700});
+    fs.writeFileSync(fake,`#!/usr/bin/env node\nconst args=process.argv.slice(2);\nif(!args.includes('--resume')||!args.includes('${nativeId}')||!args.includes('bypassPermissions'))process.exit(3);\nconsole.log(JSON.stringify({type:'system',subtype:'init',session_id:'${nativeId}'}));\nconsole.log(JSON.stringify({type:'result',result:'fixture diagnostic completed'}));\n`,{mode:0o700});
     env = {...process.env,HOME:home,CLAUDE_BIN:fake};
     delete env.GATEWAY_CONFIG; delete env.CLAUDE_CONFIG_DIR; delete env.CODEX_HOME;
   });
@@ -52,7 +52,7 @@ console.log(JSON.stringify({type:'result',result:'Report: '+args.at(-1)}));
     for(const request of ['first','second']) {
       await exec(process.execPath,[entry,'safemode','send',nativeId,'--wait','--no-bootstrap','--agent-id=operator','--request-id='+request,'--prompt='+request],{env,timeout:15000});
       const args=JSON.parse(fs.readFileSync(path.join(home,'last-args.json'),'utf8'));
-      expect(args.join(' ')).not.toContain('You are investigating');expect(args).toContain('--restricted');
+      expect(args.join(' ')).not.toContain('safemode investigator');expect(args).toContain('bypassPermissions');
     }
     expect((await command('status',nativeId,'--request-id=first')).request.result).toBe('Report: first');
     expect((await command('status',nativeId,'--request-id=second')).request.result).toBe('Report: second');
@@ -123,7 +123,7 @@ const {recoverOrchestration}=require(${JSON.stringify(path.join(modules,'orchest
       const captured=JSON.parse(fs.readFileSync(path.join(home,'captured.json'),'utf8'));
       expect(captured).toContain(nativeId);
       if(cli==='codex')expect(captured[captured.indexOf('--cd')+1]).toBe(path.join(home,'.claude-gateway','safemode',prompt ? nativeId : id,'workspace'));
-      expect(captured.join(' ')).not.toContain('You are investigating');
+      expect(captured.join(' ')).not.toContain('safemode investigator');
       expect(captured.includes('--')).toBe(!!prompt);
       if(prompt)expect(captured.at(-1)).toBe(prompt);
       expect(fs.existsSync(path.join(home,'.claude-gateway','safemode',nativeId,'workspace','diagnostics','provenance.json'))).toBe(true);
@@ -233,8 +233,8 @@ if(args.includes('--print')||args.includes('exec')){
       const second = recorded()[1];
       expect(second.id).toBe(activeId);
       expect(second.args).toEqual(expect.arrayContaining(cli === 'claude'
-        ? ['--resume',activeId,'--restricted','Read,Glob,Grep']
-        : ['exec','--json','resume',activeId,'sandbox_mode="read-only"','approval_policy="never"']));
+        ? ['--resume',activeId,'--permission-mode','bypassPermissions']
+        : ['exec','--json','resume',activeId,'sandbox_mode="danger-full-access"','approval_policy="never"']));
       expect(second.args).not.toContain(permission);
       const resumed = terminal('--resume',activeId!,'--params='+permission);
       await waitFor(()=>recorded().length===3);
