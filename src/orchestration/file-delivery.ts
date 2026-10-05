@@ -1,13 +1,15 @@
 import { orderLineRequest } from '../shared/line-request-order';
-import { readFileSync, realpathSync, statSync } from 'fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'fs';
 import { join, relative, isAbsolute } from 'path';
-import { homedir } from 'os';
+import { homedir, tmpdir } from 'os';
 import type { AgentConfig } from '../types';
 import type { Row } from './store';
 import type { DeliveryOutcome } from './delivery';
 import { MediaStore } from '../history/media-store';
 import { ShareStore, shareEnv, validateShareFile, detectShareMime, detectAudioMime } from '../share/share-store';
 import { handleLineRejection } from './line-quota';
+import { convertLineAudio } from '../voice/line-audio';
+import { ingestOrchestrationMedia } from './media';
 
 export interface ChannelFile { path: string; name: string; kind: 'image' | 'file' | 'audio'; caption: string; durationMs?: number; }
 export function resolveChannelFile(agent: AgentConfig, file: ChannelFile): {path: string; bytes: Buffer} {
@@ -25,12 +27,21 @@ export function resolveChannelFile(agent: AgentConfig, file: ChannelFile): {path
 export async function sendChannelFile(agent: AgentConfig, binding: Row, file: ChannelFile, id: string, request: typeof fetch, enabled: () => boolean = () => true, pendingLineGroupSize: () => number = () => 0): Promise<DeliveryOutcome> {
   if(!enabled())return {state:'failed',code:'VOICE_REPLY_DISABLED'};
   const agentsRoot = join(agent.workspace, '../..');
-  // LINE's audio message needs a duration; staged audio without one is sent as a plain file there.
-  if (file.kind === 'audio' && binding.channel === 'line' && file.durationMs === undefined) file = { ...file, kind: 'file' };
   const source = String(binding.channel), chat = String(binding.chat_id), thread = String(binding.thread_key);
   let path: string, bytes: Buffer;
   try { ({path, bytes} = resolveChannelFile(agent, file)); }
   catch { return {state: 'failed', code: 'ATTACHMENT_UNAVAILABLE'}; }
+  // LINE plays only AAC M4A and needs its duration; staged audio (e.g. narration MP3) arrives with neither.
+  if (file.kind === 'audio' && source === 'line' && file.durationMs === undefined) {
+    const temporary = mkdtempSync(join(tmpdir(), 'gateway-line-audio-'));
+    try {
+      const converted = join(temporary, 'audio.m4a');
+      const durationMs = await convertLineAudio(path, converted);
+      file = { ...file, path: ingestOrchestrationMedia(agentsRoot, agent.id, 'line-audio', converted), name: file.name.replace(/\.[A-Za-z0-9]+$/, '') + '.m4a', durationMs };
+      ({path, bytes} = resolveChannelFile(agent, file));
+    } catch { return {state: 'failed', code: 'LINE_AUDIO_CONVERSION_FAILED'}; }
+    finally { rmSync(temporary, {recursive: true, force: true}); }
+  }
   const mime = file.kind==='audio' ? detectAudioMime(bytes.subarray(0,12)) ?? 'application/octet-stream' : detectShareMime(bytes.subarray(0, 12)) ?? 'application/octet-stream';
   const image = file.kind === 'image' && mime.startsWith('image/');
   const call = (url: string, init: RequestInit) => {

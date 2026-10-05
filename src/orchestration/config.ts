@@ -107,6 +107,8 @@ export const AGENT_VOICE_DEFAULTS = {
 };
 export type ResolvedOrchestrationConfig = ReturnType<typeof resolveOrchestrationConfig>;
 
+/** Upper bounds for voice.narrate: targetChars is the provider's per-request cap. */
+export const NARRATE_LIMITS = { targetChars: 4000, maxParts: 200, partTimeoutMs: 300000, maxChars: 2000000 } as const;
 // Validate the complete tree, including unknown keys: a misspelled capacity or
 // secret field must not be silently accepted as a working configuration.
 export function validateTree(value: unknown, template: unknown, prefix: string): void {
@@ -143,6 +145,11 @@ export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVo
       narrate: { ...d.voice.narrate, ...voice?.narrate } },
   };
   for (const role of ['tts', 'stt', 'notes'] as const) result.voice[role].provider = canonicalVoiceProvider(result.voice[role].provider);
+  // validateTree guarantees positive integers; narrate also needs upper bounds that match the TTS and bridge limits.
+  for (const [key, max] of Object.entries(NARRATE_LIMITS) as [keyof typeof NARRATE_LIMITS, number][])
+    if (result.voice.narrate[key] > max) throw new OrchestrationError('INVALID_CONFIG', `voice.narrate.${key} must be at most ${max}`);
+  // Narration spends TTS credit, so it never runs for an agent whose voice is switched off.
+  if (!result.voice.enabled) result.voice.narrate.enabled = false;
   const admission = result.providerAdmission;
   if (admission.failureThreshold > 100 || admission.initialCooldownMs > admission.secondCooldownMs || admission.secondCooldownMs > admission.maxCooldownMs || admission.probeLeaseMs < 1000)
     throw new OrchestrationError('INVALID_CONFIG', 'Invalid provider admission thresholds, cooldown order or probe lease');

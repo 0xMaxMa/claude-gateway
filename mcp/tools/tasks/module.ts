@@ -15,13 +15,18 @@ export const WORKER_REPORT_TOOLS: McpToolDefinition[] = [
   { name: 'task_request_input', description: 'Ask the user for information required by your task, then end this turn immediately.', inputSchema: schema({ question: text }, ['question']) },
 ];
 
+const LONG_RUNNING_TOOLS = new Set(['narrate']);
+export const LONG_RUNNING_MAX_MS = 2 * 60 * 60 * 1000;
 export async function callTaskBridge(tool: string, args: Record<string, unknown>, requestId: string, signal: AbortSignal): Promise<McpToolResult> {
   // Rotated by the gateway at each decision/attempt boundary. A loaded token is
   // immutable for this request; late requests cannot borrow the next decision.
   const { readFile } = await import('node:fs/promises');
   const scope = JSON.parse(await readFile(process.env.GATEWAY_ORCHESTRATION_TICKET_FILE!, 'utf8')) as { url: string; token: string };
-  const response = await fetch(scope.url, { method: 'POST', signal, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${scope.token}` },
-    body: JSON.stringify({ tool, args, action_id: requestId }) });
+  // Bun's fetch gives up after 300s without a response. Narration answers only when every part is spoken
+  // (up to maxParts x partTimeoutMs), so that call alone has no idle timeout, bounded by an overall maximum.
+  const long = LONG_RUNNING_TOOLS.has(tool);
+  const response = await fetch(scope.url, { method: 'POST', signal: long ? AbortSignal.any([signal, AbortSignal.timeout(LONG_RUNNING_MAX_MS)]) : signal, ...(long ? { timeout: false } : {}), headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${scope.token}` },
+    body: JSON.stringify({ tool, args, action_id: requestId }) } as RequestInit);
   const body = await response.text();
   if(response.ok && tool==='task_status') {
     const value=JSON.parse(body),image=value.screenshot;

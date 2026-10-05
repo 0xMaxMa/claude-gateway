@@ -146,15 +146,24 @@ For PaxaLabs, the corresponding integration examples are `paxa-tts-flash-v1` and
 
 A task worker can read text aloud in full with the `narrate` tool. Ask the agent, for example, to "read this page to me": the worker fetches the page, then passes the text (or a file path inside the task scope) to `narrate`. The tool never fetches URLs and never rewrites the text; it summarizes only if the worker is asked to summarize before calling it.
 
-The gateway splits the text deterministically (paragraphs, then sentences, then words, then length) into pieces of about `targetChars`, synthesizes each piece with the chat's TTS voice, and stages `narration-NN-of-MM.mp3`. Because a worker can stage at most 10 files, longer texts are merged in order with `ffmpeg`. The files are delivered with the agent's next reply, after the task completes; Telegram receives them as audio messages. Container workers cannot use `narrate`. Managed voice credit is checked before every piece; if it runs out, the pieces already produced are still delivered and the worker reports where it stopped.
+The gateway splits the text deterministically (paragraphs, then sentences, then words, then length) into pieces of about `targetChars`, synthesizes each piece with the chat's TTS voice, and stages `narration-NN-of-MM.mp3`. Because a worker can stage at most 10 files, longer texts are merged in order with `ffmpeg`. The files are delivered with the agent's next reply, after the task completes. Container workers cannot use `narrate`. Managed voice credit is checked before every piece; if it runs out, the pieces already produced are still delivered and the worker reports where it stopped.
+
+Runs of symbols with nothing to pronounce (for example a line of `=` characters) are never sent to the TTS provider; they are merged into a neighbouring piece when it still fits one request, otherwise skipped, and the result reports `skipped_chars`. `NARRATE_EMPTY` means the text has nothing speakable at all. A call can run for a long time (up to `maxParts` × `partTimeoutMs`); the worker waits for it without the usual 5-minute response limit, capped at 2 hours overall. The files the call needs are reserved up front, so a parallel `narrate` or `task_stage_file` cannot take them while TTS credit is being spent; if too few of the 10 slots are free, the call fails with `TOO_MANY_ARTIFACTS` before any synthesis.
+
+| Channel | How the audio arrives |
+| --- | --- |
+| Telegram | Audio messages (`sendAudio`) |
+| WhatsApp Cloud | Audio messages |
+| Discord, Slack | File attachments |
+| LINE | Converted to AAC M4A at delivery time (needs `ffmpeg` and `ffprobe`) and sent as a playable audio message with its duration. A single file longer than 10 minutes cannot be converted for LINE and is reported as `LINE_AUDIO_CONVERSION_FAILED` |
 
 | `voice.narrate` field | Default | Purpose |
 | --- | --- | --- |
-| `enabled` | `true` | Allow the tool |
-| `maxChars` | `100000` | Reject longer text (`NARRATE_TOO_LONG`) |
-| `maxParts` | `60` | Reject texts that split into more pieces (`NARRATE_TOO_LONG`) |
-| `targetChars` | `800` | Soft size of one piece (capped at 4000) |
-| `partTimeoutMs` | `60000` | Timeout of one TTS call |
+| `enabled` | `true` | Allow the tool; it is always off while `voice.enabled` is `false` |
+| `maxChars` | `100000` | Reject longer text (`NARRATE_TOO_LONG`); at most `2000000` |
+| `maxParts` | `60` | Reject texts that split into more pieces (`NARRATE_TOO_LONG`); at most `200` |
+| `targetChars` | `800` | Soft size of one piece; at most `4000` |
+| `partTimeoutMs` | `60000` | Timeout of one TTS call; at most `300000` |
 
 ## Turn timing and playback settings
 

@@ -1,6 +1,6 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdirSync, readFileSync, rmSync, writeFileSync, statSync } from 'fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, statSync } from 'fs';
 import { join } from 'path';
 import { createHash } from 'crypto';
 import { OrchestrationError } from './types';
@@ -26,7 +26,7 @@ export interface NarrateDeps {
 }
 export interface NarrateResult {
   ok: boolean; parts_total: number; parts_staged: number; files: number; chars: number;
-  stopped_reason?: string; error?: string;
+  skipped_chars?: number; stopped_reason?: string; error?: string;
 }
 
 const MAX_FILES = 10;
@@ -87,20 +87,22 @@ export function workerNarrate(deps: NarrateDeps) {
     const text = source(deps, attemptId, generation, args, config.maxChars);
     if (!isSpeakable(text)) throw new OrchestrationError('NARRATE_EMPTY', 'NARRATE_EMPTY: the text has no speakable characters.');
     if (text.length > config.maxChars) throw new OrchestrationError('NARRATE_TOO_LONG', `NARRATE_TOO_LONG: ${text.length} characters exceeds voice.narrate.maxChars=${config.maxChars}.`);
-    // Symbol-only pieces cannot be synthesized; fold them into a neighbour so the text stays intact.
+    // Symbol-only pieces cannot be synthesized. Fold them into a neighbour while it still fits one TTS request;
+    // a run that does not fit is skipped (never sent to TTS) so the splitter's pieces still cover the text.
     const pieces: string[] = [];
-    let carry = '';
+    let carry = '', skipped = 0;
+    const skip = (symbols: string) => { skipped += symbols.length; };
     for (const piece of splitNarration(text, Math.min(config.targetChars, MAX_TTS_CHARS))) {
-      if (isSpeakable(piece.text)) { pieces.push(carry + piece.text); carry = ''; }
-      else if (pieces.length) pieces[pieces.length - 1] += piece.text;
+      if (isSpeakable(piece.text)) {
+        if (carry && carry.length + piece.text.length <= MAX_TTS_CHARS) pieces.push(carry + piece.text); else { skip(carry); pieces.push(piece.text); }
+        carry = '';
+      } else if (pieces.length && pieces[pieces.length - 1].length + piece.text.length <= MAX_TTS_CHARS) pieces[pieces.length - 1] += piece.text;
+      else if (pieces.length) skip(piece.text);
       else carry += piece.text;
     }
-    if (pieces.some(piece => piece.length > MAX_TTS_CHARS)) throw new OrchestrationError('NARRATE_EMPTY', `NARRATE_EMPTY: a run of non-speakable characters is longer than ${MAX_TTS_CHARS}; remove it before narrating.`);
     if (pieces.length > config.maxParts) throw new OrchestrationError('NARRATE_TOO_LONG', `NARRATE_TOO_LONG: ${pieces.length} parts exceeds voice.narrate.maxParts=${config.maxParts}.`);
-    // The 10-artifact cap is per attempt: leave room for files the worker already staged.
-    // Files from an earlier call with this same action id are not "other" files: a retry must plan the same groups.
-    const own = `${actionId.replace(/[\\%_]/g, '\\$&')}:narrate:%`;
-    const room = MAX_FILES - Number(deps.files.store.get("SELECT COUNT(*) n FROM task_files WHERE attempt_id=? AND action_id NOT LIKE ? ESCAPE '\\'", attemptId, own)!.n);
+    // The 10-artifact cap is per attempt: leave room for files the worker already staged or is about to stage.
+    const room = deps.files.room(attemptId, actionId);
     if (room < 1) throw new OrchestrationError('TOO_MANY_ARTIFACTS', 'TOO_MANY_ARTIFACTS: this task already staged the maximum of 10 files.');
     const groups = narrationGroups(pieces.length, room);
     if (groups.some(group => group.length > 1) && !await hasFfmpeg())
@@ -111,9 +113,11 @@ export function workerNarrate(deps: NarrateDeps) {
     const tts = (deps.provider ?? ttsProvider)(settings);
     if (!tts.synthesizeFile) throw new OrchestrationError('NARRATE_TTS_UNSUPPORTED', 'NARRATE_TTS_UNSUPPORTED: the configured TTS provider cannot produce audio files.');
     const voiceId = await (deps.voice ?? resolveVoiceId)(settings);
+    // Reserve the files before any TTS credit is spent, so a parallel call cannot take them meanwhile.
+    const reservation = deps.files.reserve(attemptId, actionId, groups.length);
     const work = join(mediaDir, `narrate-${createHash('sha256').update(`${attemptId}:${actionId}`).digest('hex').slice(0, 16)}`);
-    rmSync(work, { recursive: true, force: true });
-    mkdirSync(work, { recursive: true, mode: 0o700 });
+    try { rmSync(work, { recursive: true, force: true }); mkdirSync(work, { recursive: true, mode: 0o700 }); }
+    catch (error) { reservation.release(); throw error; }
     const done: string[] = [];
     let stopped: string | undefined;
     try {
@@ -139,7 +143,7 @@ export function workerNarrate(deps: NarrateDeps) {
         const parts = group.filter(index => index < done.length).map(index => done[index]);
         if (!parts.length) break;
         const name = join(work, `narration-${String(fileIndex + 1).padStart(2, '0')}-of-${String(groups.length).padStart(2, '0')}.mp3`);
-        if (parts.length === 1) { writeFileSync(name, readFileSync(parts[0]), { mode: 0o600 }); }
+        if (parts.length === 1) renameSync(parts[0], name);
         else {
           try { await merge(parts, name, signal); }
           catch (error) {
@@ -147,12 +151,12 @@ export function workerNarrate(deps: NarrateDeps) {
             throw new OrchestrationError('NARRATE_MERGE_FAILED', `NARRATE_MERGE_FAILED: ffmpeg could not merge ${parts.length} parts (${(error as NodeJS.ErrnoException).code ?? 'exit'}).`);
           }
         }
-        deps.files.stage(attemptId, generation, `${actionId}:narrate:${fileIndex}`, { path: name });
+        deps.files.stage(attemptId, generation, `${actionId}:narrate:${fileIndex}`, { path: name }, reservation.token);
         staged += parts.length;
       }
-      const result: NarrateResult = { ok: !stopped, parts_total: pieces.length, parts_staged: staged, files: groups.filter(g => g[0] < done.length).length, chars: text.length };
+      const result: NarrateResult = { ok: !stopped, parts_total: pieces.length, parts_staged: staged, files: groups.filter(g => g[0] < done.length).length, chars: text.length, ...(skipped ? { skipped_chars: skipped } : {}) };
       if (stopped) { result.stopped_reason = stopped; result.error = stopped; }
       return result;
-    } finally { rmSync(work, { recursive: true, force: true }); }
+    } finally { reservation.release(); rmSync(work, { recursive: true, force: true }); }
   };
 }

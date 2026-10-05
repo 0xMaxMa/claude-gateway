@@ -1,4 +1,4 @@
-import { realpathSync, statSync, readFileSync, mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, existsSync, lstatSync, unlinkSync } from 'fs';
+import { realpathSync, statSync, readFileSync, readSync, mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, existsSync, lstatSync, unlinkSync } from 'fs';
 import { join, relative, isAbsolute, basename, dirname } from 'path';
 import { randomUUID, createHash } from 'crypto';
 import { OrchestrationStore, boundedText, payloadHash } from './store';
@@ -7,10 +7,13 @@ import { ingestOrchestrationMedia } from './media';
 import { MediaStore } from '../history/media-store';
 import { detectImageMime, detectAudioMime } from '../share/share-store';
 
+const MAX_STAGED_FILES = 10;
+
 export class TaskFiles {
   constructor(readonly store: OrchestrationStore, readonly agentsRoot: string, private readonly containerSpool?: string, private readonly workspace = join(agentsRoot, store.agentId, 'workspace')) {}
   private readonly capturedImages = new Map<string, Map<string, string>>();
   private readonly pendingImageTools = new Map<string, Set<string>>();
+  private readonly reservations = new Map<string, Set<{ files: number }>>();
 
   /** Capture actual MCP image bytes, never model-authored paths or assistant text. */
   captureOutput(attemptId: string, generation: number, line: string): void {
@@ -85,15 +88,32 @@ export class TaskFiles {
     if (!permitted || !statSync(path).isFile()) throw new OrchestrationError('ARTIFACT_PATH_DENIED', 'ARTIFACT_PATH_DENIED: File is outside this task scope. Use the original file’s absolute path in the active task workspace, a supplied input attachment, or this session’s media directory. Do not copy it to the agent-wide media root. The gateway stages authorized files automatically.');
     return path;
   }
-  stage(attemptId: string, generation: number, actionId: string, args: Record<string, unknown>) {
+  /** Staged-file slots still free for `actionId`: files staged by an earlier call with this id are its own, not "other" files. */
+  room(attemptId: string, actionId: string): number {
+    const own = `${actionId.replace(/[\\%_]/g, '\\$&')}:narrate:%`;
+    const used = Number(this.store.get("SELECT COUNT(*) n FROM task_files WHERE attempt_id=? AND action_id NOT LIKE ? ESCAPE '\\'", attemptId, own)!.n);
+    return Math.max(0, MAX_STAGED_FILES - used - this.reservedFiles(attemptId));
+  }
+  /** Hold `files` slots for a long-running producer so stage() calls made meanwhile cannot take them. */
+  reserve(attemptId: string, actionId: string, files: number): { token: object; release: () => void } {
+    if (this.room(attemptId, actionId) < files) throw new OrchestrationError('TOO_MANY_ARTIFACTS', 'TOO_MANY_ARTIFACTS: this task already staged the maximum of 10 files.');
+    const token = { files }, held = this.reservations.get(attemptId) ?? new Set<{ files: number }>();
+    held.add(token); this.reservations.set(attemptId, held);
+    return { token, release: () => { held.delete(token); if (!held.size) this.reservations.delete(attemptId); } };
+  }
+  private reservedFiles(attemptId: string, except?: object): number {
+    let total = 0;
+    for (const held of this.reservations.get(attemptId) ?? []) if (held !== except) total += held.files;
+    return total;
+  }
+  stage(attemptId: string, generation: number, actionId: string, args: Record<string, unknown>, reservation?: object) {
     const { task } = this.scope(attemptId, generation);
     boundedText(actionId, 256);
     const old = this.store.get('SELECT * FROM task_files WHERE attempt_id=? AND action_id=?', attemptId, actionId);
-    if (old) {
-      if (old.args_hash !== payloadHash(args)) throw new OrchestrationError('IDEMPOTENCY_CONFLICT');
-      return { artifactId: String(old.id), path: String(old.path), staged: true };
-    }
-    if (Number(this.store.get('SELECT COUNT(*) n FROM task_files WHERE attempt_id=?', attemptId)!.n) >= 10) throw new OrchestrationError('TOO_MANY_ARTIFACTS');
+    if (old && old.args_hash !== payloadHash(args)) throw new OrchestrationError('IDEMPOTENCY_CONFLICT');
+    // A retry names the same path but may carry newer content: re-ingest and replace the staged copy.
+    if (old && (args.path === undefined || old.response_id !== null)) return { artifactId: String(old.id), path: String(old.path), staged: true };
+    if (!old && Number(this.store.get('SELECT COUNT(*) n FROM task_files WHERE attempt_id=?', attemptId)!.n) + this.reservedFiles(attemptId, reservation) >= MAX_STAGED_FILES) throw new OrchestrationError('TOO_MANY_ARTIFACTS');
     if (args.path !== undefined && args.source_tool_call_id !== undefined) throw new OrchestrationError('INVALID_INPUT', 'Choose path OR source_tool_call_id, not both.');
     const images = this.capturedImages.get(attemptId);
     const captured = args.source_tool_call_id === undefined ? [...(images?.values() ?? [])].at(-1) : images?.get(boundedText(args.source_tool_call_id, 256));
@@ -107,8 +127,13 @@ export class TaskFiles {
     const caption = args.caption === undefined ? '' : boundedText(args.caption, 1024);
     if (statSync(source).size > 50 * 1024 * 1024) throw new OrchestrationError('ATTACHMENT_TOO_LARGE');
     const path = ingestOrchestrationMedia(this.agentsRoot, this.store.agentId, `api-${task.agentSessionId}`, source);
-    const header = readFileSync(source).subarray(0, 12);
+    const header = Buffer.alloc(12), fd = openSync(source, 'r');
+    try { header.fill(0, readSync(fd, header, 0, 12, 0)); } finally { closeSync(fd); }
     const kind = detectImageMime(header) ? 'image' : detectAudioMime(header) ? 'audio' : 'file';
+    if (old) {
+      this.store.run('UPDATE task_files SET path=?, name=?, kind=? WHERE id=?', path, basename(source).replace(/[\r\n]/g, '_').slice(0, 200), kind, old.id);
+      return { artifactId: String(old.id), path, staged: true };
+    }
     // Delivery orders by created_at; keep a multi-file batch (e.g. narration parts) strictly ordered.
     const last = Number(this.store.get('SELECT COALESCE(MAX(created_at),0) n FROM task_files WHERE attempt_id=?', attemptId)!.n);
     const id = randomUUID();

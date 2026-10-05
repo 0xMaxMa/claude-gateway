@@ -176,7 +176,78 @@ describe('narrate service', () => {
       await f.run(n, { text: make(3) });
       await expect(f.run(n, { text: make(3) })).resolves.toMatchObject({ ok: true });
       expect(f.staged()).toHaveLength(f.calls.length / 2);
-      await expect(f.run(f.narrate({ targetChars: 3000 }), { text: `Hello there.\n\n${'-'.repeat(5000)}` })).rejects.toMatchObject({ code: 'NARRATE_EMPTY' });
+    } finally { f.close(); }
+  });
+
+  test('a long symbol-only run is skipped by TTS instead of failing, and only truly empty text is NARRATE_EMPTY', async () => {
+    const f = await fixture();
+    try {
+      const tail = ' tail words'.repeat(70).slice(0, 800);
+      const text = `${tail}\n\n${'='.repeat(3500)}`;
+      const result = await f.run(f.narrate({ targetChars: 800 }), { text });
+      expect(result).toMatchObject({ ok: true, chars: text.length });
+      expect(f.calls.every(call => /[\p{L}\p{N}]/u.test(call) && call.length <= 4000)).toBe(true);
+      expect(f.calls.join('').replace(/[=\s]/g, '')).toBe(tail.replace(/\s/g, ''));
+      const leading = await fixture();
+      try {
+        await expect(leading.run(leading.narrate({ targetChars: 800 }), { text: `${'='.repeat(3500)}\n\n${tail}` })).resolves.toMatchObject({ ok: true });
+        expect(leading.calls.join('').replace(/[=\s]/g, '')).toBe(tail.replace(/\s/g, ''));
+      } finally { leading.close(); }
+      const second = await fixture();
+      try {
+        const mixed = `Hello there.\n\n${'-'.repeat(5000)}\n\nสวัสดีครับ ทุกคน`;
+        await expect(second.run(second.narrate({ targetChars: 3000 }), { text: mixed })).resolves.toMatchObject({ ok: true });
+        expect(second.calls.join('').replace(/-/g, '')).toBe(mixed.replace(/-/g, ''));
+        await expect(second.run(second.narrate(), { text: '='.repeat(5000) })).rejects.toMatchObject({ code: 'NARRATE_EMPTY' });
+      } finally { second.close(); }
+    } finally { f.close(); }
+  });
+
+  test('parallel narrate calls reserve their files up front, so the loser fails before spending TTS', async () => {
+    const f = await fixture();
+    try {
+      let release = () => {}, started = () => {};
+      const held = new Promise<void>(resolve => { release = resolve; }), reached = new Promise<void>(resolve => { started = resolve; });
+      const inner = f.provider();
+      const slow = () => { const tts = inner(); const synthesizeFile = tts.synthesizeFile; return { ...tts, synthesizeFile: async (o: any) => { started(); await held; return synthesizeFile(o); } }; };
+      const running = f.narrate({ targetChars: 40 }, slow as any)(f.attempt.attemptId, f.attempt.generation, 'one', { text: make(25) }, new AbortController().signal);
+      await reached;
+      const before = f.calls.length;
+      await expect(f.narrate({ targetChars: 40 })(f.attempt.attemptId, f.attempt.generation, 'two', { text: make(25) }, new AbortController().signal)).rejects.toMatchObject({ code: 'TOO_MANY_ARTIFACTS' });
+      expect(f.calls.length).toBe(before);
+      release();
+      await expect(running).resolves.toMatchObject({ ok: true, files: 10 });
+    } finally { f.close(); }
+  });
+
+  test('files staged by the worker while narration is synthesizing cannot starve the reserved narration files', async () => {
+    const f = await fixture();
+    try {
+      const other = join(f.resource.path, 'note.txt'); writeFileSync(other, 'note');
+      let refused: unknown;
+      const n = f.narrate({ targetChars: 40 }, f.provider(call => {
+        if (call !== 1) return;
+        for (let i = 0; i < 8; i++) { try { f.files.stage(f.attempt.attemptId, f.attempt.generation, `late-${i}`, { path: other, caption: String(i) }); } catch (error) { refused = error; } }
+      }));
+      await expect(f.run(n, { text: make(3) })).resolves.toMatchObject({ ok: true, files: 3 });
+      expect((refused as { code?: string })?.code).toBe('TOO_MANY_ARTIFACTS');
+      expect(f.staged()).toHaveLength(10);
+    } finally { f.close(); }
+  });
+
+  test('a repeated action id with changed content replaces the staged file instead of keeping the old one', async () => {
+    const f = await fixture();
+    try {
+      const file = join(f.resource.path, 'clip.txt');
+      writeFileSync(file, 'first version');
+      const a = f.files.stage(f.attempt.attemptId, f.attempt.generation, 'same', { path: file });
+      expect(f.files.stage(f.attempt.attemptId, f.attempt.generation, 'same', { path: file })).toEqual(a);
+      writeFileSync(file, 'second, longer version');
+      const b = f.files.stage(f.attempt.attemptId, f.attempt.generation, 'same', { path: file });
+      expect(b.artifactId).toBe(a.artifactId);
+      expect(b.path).not.toBe(a.path);
+      expect(require('fs').readFileSync(join(f.root, 'agent', b.path), 'utf8')).toBe('second, longer version');
+      expect(f.staged()).toHaveLength(1);
     } finally { f.close(); }
   });
 
@@ -250,6 +321,24 @@ describe('narrate service', () => {
 
 describe('staged audio delivery', () => {
   const mp3 = () => { const out = join(tmpdir(), `narrate-d-${process.pid}.mp3`); execFileSync('ffmpeg', ['-nostdin', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'sine=duration=0.3', out]); return out; };
+  test('LINE receives staged mp3 audio as a playable audio message with a duration', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'narrate-line-')), workspace = join(root, 'agent', 'workspace');
+    mkdirSync(join(root, 'agent', 'media', 'c'), { recursive: true }); mkdirSync(workspace, { recursive: true });
+    writeFileSync(join(root, 'agent', '.public-base'), 'https://fixture.invalid/gateway');
+    const prior = process.env.SHARE_DB_PATH; process.env.SHARE_DB_PATH = join(root, 'shares.db');
+    const agent = { id: 'agent', workspace, line: { channelAccessToken: 'fixture' } } as AgentConfig;
+    require('fs').copyFileSync(mp3(), join(root, 'agent', 'media', 'c', 'a.mp3'));
+    const request = jest.fn(async (_url: string, _init: RequestInit) => new Response('{}', { status: 200 }));
+    const binding = { channel: 'line', chat_id: 'U1', thread_key: '', conversation_id: 'conv' } as any;
+    try {
+      const outcome = await sendChannelFile(agent, binding, { path: 'media/c/a.mp3', name: 'narration-01-of-01.mp3', kind: 'audio', caption: '' }, 'i1', request as unknown as typeof fetch);
+      expect(outcome).toMatchObject({ state: 'delivered' });
+      const body = JSON.parse(String(request.mock.calls[0][1].body));
+      expect(body.messages[0]).toMatchObject({ type: 'audio', originalContentUrl: expect.stringMatching(/\/audio\.m4a$/) });
+      expect(body.messages[0].duration).toBeGreaterThan(0);
+    } finally { if (prior === undefined) delete process.env.SHARE_DB_PATH; else process.env.SHARE_DB_PATH = prior; rmSync(root, { recursive: true, force: true }); }
+  });
+
   test('Telegram receives staged audio through sendAudio, other kinds are unchanged', async () => {
     const root = mkdtempSync(join(tmpdir(), 'narrate-del-')), agentsRoot = root;
     const workspace = join(root, 'agent', 'workspace'); mkdirSync(join(root, 'agent', 'media', 'c'), { recursive: true }); mkdirSync(workspace, { recursive: true });
@@ -266,5 +355,29 @@ describe('staged audio delivery', () => {
       expect(fields[0]).toContain('audio');
       expect(agentsRoot).toBeTruthy();
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe('worker bridge client', () => {
+  // Bun's fetch aborts at 300s without a response (measured); narrate must opt out, other tools must not.
+  test('only narrate calls the bridge without Bun\'s idle timeout, under an overall maximum', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'narrate-ticket-')), ticket = join(dir, 'ticket.json');
+    writeFileSync(ticket, JSON.stringify({ url: 'http://127.0.0.1:1/', token: 't' }));
+    const prior = process.env.GATEWAY_ORCHESTRATION_TICKET_FILE; process.env.GATEWAY_ORCHESTRATION_TICKET_FILE = ticket;
+    const original = globalThis.fetch, seen: Array<Record<string, any>> = [];
+    globalThis.fetch = (async (_url: string, init: Record<string, any>) => { seen.push(init); return new Response('{}'); }) as unknown as typeof fetch;
+    try {
+      const { callTaskBridge, LONG_RUNNING_MAX_MS } = await import('../../../mcp/tools/tasks/module');
+      const caller = new AbortController();
+      await callTaskBridge('narrate', { text: 'x' }, 'a', caller.signal);
+      await callTaskBridge('task_stage_file', { path: 'x' }, 'b', caller.signal);
+      expect(seen[0].timeout).toBe(false);
+      expect(seen[1].timeout).toBeUndefined();
+      expect(seen[1].signal).toBe(caller.signal);
+      expect(seen[0].signal).not.toBe(caller.signal);
+      expect(LONG_RUNNING_MAX_MS).toBeGreaterThan(60 * 60 * 1000);
+      caller.abort();
+      expect(seen[0].signal.aborted).toBe(true);
+    } finally { globalThis.fetch = original; if (prior === undefined) delete process.env.GATEWAY_ORCHESTRATION_TICKET_FILE; else process.env.GATEWAY_ORCHESTRATION_TICKET_FILE = prior; rmSync(dir, { recursive: true, force: true }); }
   });
 });
