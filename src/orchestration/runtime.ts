@@ -93,6 +93,7 @@ import { BoundedQueue } from './bounded-queue';
 import { gatewayCapacity } from './capacity';
 import { ResourceCleanup } from './tasks/cleanup';
 import { TaskFiles } from './task-files';
+import { workerNarrate } from './narrate';
 import { workerShares } from './worker-shares';
 import { ProviderAdmissionStore, ProviderPermit, ProviderWaiting, providerFailure } from './provider-admission';
 import { resolveProviderScope, resolvedCodexProviderScope } from './provider-scope';
@@ -295,6 +296,10 @@ export class AgentOrchestrationRuntime {
       progress:(task,report)=>store.transaction(()=>{const current=store.task(task.taskId);if(!current||current.activeAttemptId!==task.activeAttemptId||!['starting','running','interrupting'].includes(current.state))return;current.computerReport=report;current.latestProgress={source:'runtime',observedAt:Date.now(),text:`Computer Use: ${report.phase} · ${report.steps} actions · ${report.evaluations??0} evaluations.${current.queuedCommands?.length?` ${current.queuedCommands.length} queued command${current.queuedCommands.length===1?'':'s'} waiting.`:''}`};store.saveTask(current,current.stateVersion);})
     }));
     const bridge = new TaskBridge(tasks, files, workerShares(files, agent, gateway), host.skills ? () => host.skills!() : undefined, agent.type === 'app-agent' ? { agent, spool: join(root, 'container-files') } : undefined, workerCrons(files, agent, gateway), gatewayAdapters);
+    const voiceConfig = () => resolveOrchestrationConfig(agent.orchestration, agent.voice ?? { enabled: false }).voice;
+    const narrateVoices = new TelegramVoices(store, () => voiceConfig().tts);
+    bridge.narrateCall = workerNarrate({ files, config: () => voiceConfig().narrate,
+      settings: chat => narrateVoices.settings(channelVoiceKey(chat.source, chat.chat_id, chat.thread_key ?? '')) });
     bridge.computerEnabled = computerAllowed;
     bridge.jevEnabled = () => jevAllowed(gateway, agent);
     bridge.browserEnabled = () => Boolean(gateway.gateway.jev?.browser) && jevAllowed(gateway, agent) && gateway.gateway.jev?.features?.browserTasks?.enabled === true;

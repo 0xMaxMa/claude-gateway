@@ -142,6 +142,20 @@ For OpenRouter, select `openrouter` (direct) or `upstream:openrouter` (connected
 
 For PaxaLabs, the corresponding integration examples are `paxa-tts-flash-v1` and `paxa-stt-lite-v1-preview`. Its gateway integration supports Thai and English only. Choose another available provider/model for other languages. Do not infer language support solely from the selected voice's gender.
 
+## Long-form narration
+
+A task worker can read text aloud in full with the `narrate` tool. Ask the agent, for example, to "read this page to me": the worker fetches the page, then passes the text (or a file path inside the task scope) to `narrate`. The tool never fetches URLs and never rewrites the text; it summarizes only if the worker is asked to summarize before calling it.
+
+The gateway splits the text deterministically (paragraphs, then sentences, then words, then length) into pieces of about `targetChars`, synthesizes each piece with the chat's TTS voice, and stages `narration-NN-of-MM.mp3`. Because a worker can stage at most 10 files, longer texts are merged in order with `ffmpeg`. The files are delivered with the agent's next reply, after the task completes; Telegram receives them as audio messages. Container workers cannot use `narrate`. Managed voice credit is checked before every piece; if it runs out, the pieces already produced are still delivered and the worker reports where it stopped.
+
+| `voice.narrate` field | Default | Purpose |
+| --- | --- | --- |
+| `enabled` | `true` | Allow the tool |
+| `maxChars` | `100000` | Reject longer text (`NARRATE_TOO_LONG`) |
+| `maxParts` | `60` | Reject texts that split into more pieces (`NARRATE_TOO_LONG`) |
+| `targetChars` | `800` | Soft size of one piece (capped at 4000) |
+| `partTimeoutMs` | `60000` | Timeout of one TTS call |
+
 ## Turn timing and playback settings
 
 | Setting under `voice` | Default | Meaning |

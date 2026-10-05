@@ -5,7 +5,7 @@ import { OrchestrationStore, boundedText, payloadHash } from './store';
 import { OrchestrationError } from './types';
 import { ingestOrchestrationMedia } from './media';
 import { MediaStore } from '../history/media-store';
-import { detectImageMime } from '../share/share-store';
+import { detectImageMime, detectAudioMime } from '../share/share-store';
 
 export class TaskFiles {
   constructor(readonly store: OrchestrationStore, readonly agentsRoot: string, private readonly containerSpool?: string, private readonly workspace = join(agentsRoot, store.agentId, 'workspace')) {}
@@ -107,9 +107,12 @@ export class TaskFiles {
     const caption = args.caption === undefined ? '' : boundedText(args.caption, 1024);
     if (statSync(source).size > 50 * 1024 * 1024) throw new OrchestrationError('ATTACHMENT_TOO_LARGE');
     const path = ingestOrchestrationMedia(this.agentsRoot, this.store.agentId, `api-${task.agentSessionId}`, source);
-    const kind = detectImageMime(readFileSync(source).subarray(0, 12)) ? 'image' : 'file';
+    const header = readFileSync(source).subarray(0, 12);
+    const kind = detectImageMime(header) ? 'image' : detectAudioMime(header) ? 'audio' : 'file';
+    // Delivery orders by created_at; keep a multi-file batch (e.g. narration parts) strictly ordered.
+    const last = Number(this.store.get('SELECT COALESCE(MAX(created_at),0) n FROM task_files WHERE attempt_id=?', attemptId)!.n);
     const id = randomUUID();
-    this.store.run('INSERT INTO task_files VALUES(?,?,?,?,?,?,?,?,?,?,?)', id, task.taskId, attemptId, actionId, path, basename(source).replace(/[\r\n]/g, '_').slice(0, 200), kind, caption, null, Date.now(), payloadHash(args));
+    this.store.run('INSERT INTO task_files VALUES(?,?,?,?,?,?,?,?,?,?,?)', id, task.taskId, attemptId, actionId, path, basename(source).replace(/[\r\n]/g, '_').slice(0, 200), kind, caption, null, Math.max(Date.now(), last + 1), payloadHash(args));
     return { artifactId: id, path, staged: true };
   }
   remember(attemptId: string, generation: number, actionId: string, args: Record<string, unknown>) {

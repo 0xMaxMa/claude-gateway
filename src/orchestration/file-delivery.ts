@@ -25,6 +25,8 @@ export function resolveChannelFile(agent: AgentConfig, file: ChannelFile): {path
 export async function sendChannelFile(agent: AgentConfig, binding: Row, file: ChannelFile, id: string, request: typeof fetch, enabled: () => boolean = () => true, pendingLineGroupSize: () => number = () => 0): Promise<DeliveryOutcome> {
   if(!enabled())return {state:'failed',code:'VOICE_REPLY_DISABLED'};
   const agentsRoot = join(agent.workspace, '../..');
+  // LINE's audio message needs a duration; staged audio without one is sent as a plain file there.
+  if (file.kind === 'audio' && binding.channel === 'line' && file.durationMs === undefined) file = { ...file, kind: 'file' };
   const source = String(binding.channel), chat = String(binding.chat_id), thread = String(binding.thread_key);
   let path: string, bytes: Buffer;
   try { ({path, bytes} = resolveChannelFile(agent, file)); }
@@ -38,11 +40,12 @@ export async function sendChannelFile(agent: AgentConfig, binding: Row, file: Ch
   let response: Response;
   try {
     if (source === 'telegram' && agent.telegram?.botToken) {
-      const form = new FormData(), photo = image && bytes.length <= 10 * 1024 * 1024;
+      const form = new FormData(), photo = image && bytes.length <= 10 * 1024 * 1024, audio = file.kind === 'audio' && mime.startsWith('audio/');
+      const [field, method] = photo ? ['photo', 'sendPhoto'] : audio ? ['audio', 'sendAudio'] : ['document', 'sendDocument'];
       form.set('chat_id', chat); if (thread) form.set('message_thread_id', thread);
       if (file.caption) form.set('caption', file.caption);
-      form.set(photo ? 'photo' : 'document', new Blob([new Uint8Array(bytes)], { type: mime }), file.name);
-      response = await call(`https://api.telegram.org/bot${agent.telegram.botToken}/${photo ? 'sendPhoto' : 'sendDocument'}`, { method: 'POST', body: form });
+      form.set(field, new Blob([new Uint8Array(bytes)], { type: mime }), file.name);
+      response = await call(`https://api.telegram.org/bot${agent.telegram.botToken}/${method}`, { method: 'POST', body: form });
     } else if (source === 'whatsapp_cloud' && agent.whatsapp_cloud?.accessToken && agent.whatsapp_cloud.phoneNumberId) {
       const url = `https://graph.facebook.com/v20.0/${encodeURIComponent(agent.whatsapp_cloud.phoneNumberId)}`;
       const headers = {Authorization: `Bearer ${agent.whatsapp_cloud.accessToken}`};

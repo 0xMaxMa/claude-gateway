@@ -76,6 +76,8 @@ export interface OrchestrationConfig {
     tts?: { provider?: string; model?: string; voiceId?: string };
     turns?: { silenceCommitMs?: number; finalizationTimeoutMs?: number; maxUtteranceMs?: number };
     playback?: { maxBufferedAudioMs?: number; bargeIn?: boolean };
+    /** Long-form `narrate` worker tool: read supplied text aloud as a sequence of audio files. */
+    narrate?: { enabled?: boolean; maxChars?: number; maxParts?: number; targetChars?: number; partTimeoutMs?: number };
   };
 }
 export type AgentVoiceConfig = NonNullable<OrchestrationConfig['voice']>;
@@ -93,7 +95,8 @@ export const ORCHESTRATION_DEFAULTS = {
     stt: { provider: 'elevenlabs', model: 'scribe_v2_realtime' },
     tts: { provider: 'elevenlabs', model: 'eleven_v3_conversational', voiceId: '' },
     turns: { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000 },
-    playback: { maxBufferedAudioMs: 1500, bargeIn: true } },
+    playback: { maxBufferedAudioMs: 1500, bargeIn: true },
+    narrate: { enabled: true, maxChars: 100000, maxParts: 60, targetChars: 800, partTimeoutMs: 60000 } },
 };
 // New agents start disabled and choose models explicitly from connected providers.
 export const AGENT_VOICE_DEFAULTS = {
@@ -136,7 +139,8 @@ export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVo
     events: { ...d.events, ...config?.events },
     voice: { ...d.voice, ...voice, notes: { ...d.voice.notes, ...voice?.notes },
       stt: { ...d.voice.stt, ...voice?.stt }, tts: { ...d.voice.tts, ...voice?.tts },
-      turns: { ...d.voice.turns, ...voice?.turns }, playback: { ...d.voice.playback, ...voice?.playback } },
+      turns: { ...d.voice.turns, ...voice?.turns }, playback: { ...d.voice.playback, ...voice?.playback },
+      narrate: { ...d.voice.narrate, ...voice?.narrate } },
   };
   for (const role of ['tts', 'stt', 'notes'] as const) result.voice[role].provider = canonicalVoiceProvider(result.voice[role].provider);
   const admission = result.providerAdmission;
