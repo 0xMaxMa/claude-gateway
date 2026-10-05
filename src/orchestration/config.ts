@@ -76,6 +76,8 @@ export interface OrchestrationConfig {
     tts?: { provider?: string; model?: string; voiceId?: string };
     turns?: { silenceCommitMs?: number; finalizationTimeoutMs?: number; maxUtteranceMs?: number };
     playback?: { maxBufferedAudioMs?: number; bargeIn?: boolean };
+    /** Long-form `narrate` worker tool: read supplied text aloud as a sequence of audio files. */
+    narrate?: { enabled?: boolean; maxChars?: number; maxParts?: number; targetChars?: number; partTimeoutMs?: number };
   };
 }
 export type AgentVoiceConfig = NonNullable<OrchestrationConfig['voice']>;
@@ -93,7 +95,8 @@ export const ORCHESTRATION_DEFAULTS = {
     stt: { provider: 'elevenlabs', model: 'scribe_v2_realtime' },
     tts: { provider: 'elevenlabs', model: 'eleven_v3_conversational', voiceId: '' },
     turns: { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000 },
-    playback: { maxBufferedAudioMs: 1500, bargeIn: true } },
+    playback: { maxBufferedAudioMs: 1500, bargeIn: true },
+    narrate: { enabled: true, maxChars: 100000, maxParts: 60, targetChars: 800, partTimeoutMs: 60000 } },
 };
 // New agents start disabled and choose models explicitly from connected providers.
 export const AGENT_VOICE_DEFAULTS = {
@@ -104,6 +107,8 @@ export const AGENT_VOICE_DEFAULTS = {
 };
 export type ResolvedOrchestrationConfig = ReturnType<typeof resolveOrchestrationConfig>;
 
+/** Upper bounds for voice.narrate: targetChars is the provider's per-request cap. */
+export const NARRATE_LIMITS = { targetChars: 4000, maxParts: 200, partTimeoutMs: 300000, maxChars: 2000000 } as const;
 // Validate the complete tree, including unknown keys: a misspelled capacity or
 // secret field must not be silently accepted as a working configuration.
 export function validateTree(value: unknown, template: unknown, prefix: string): void {
@@ -136,9 +141,15 @@ export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVo
     events: { ...d.events, ...config?.events },
     voice: { ...d.voice, ...voice, notes: { ...d.voice.notes, ...voice?.notes },
       stt: { ...d.voice.stt, ...voice?.stt }, tts: { ...d.voice.tts, ...voice?.tts },
-      turns: { ...d.voice.turns, ...voice?.turns }, playback: { ...d.voice.playback, ...voice?.playback } },
+      turns: { ...d.voice.turns, ...voice?.turns }, playback: { ...d.voice.playback, ...voice?.playback },
+      narrate: { ...d.voice.narrate, ...voice?.narrate } },
   };
   for (const role of ['tts', 'stt', 'notes'] as const) result.voice[role].provider = canonicalVoiceProvider(result.voice[role].provider);
+  // validateTree guarantees positive integers; narrate also needs upper bounds that match the TTS and bridge limits.
+  for (const [key, max] of Object.entries(NARRATE_LIMITS) as [keyof typeof NARRATE_LIMITS, number][])
+    if (result.voice.narrate[key] > max) throw new OrchestrationError('INVALID_CONFIG', `voice.narrate.${key} must be at most ${max}`);
+  // Narration spends TTS credit, so it never runs for an agent whose voice is switched off.
+  if (!result.voice.enabled) result.voice.narrate.enabled = false;
   const admission = result.providerAdmission;
   if (admission.failureThreshold > 100 || admission.initialCooldownMs > admission.secondCooldownMs || admission.secondCooldownMs > admission.maxCooldownMs || admission.probeLeaseMs < 1000)
     throw new OrchestrationError('INVALID_CONFIG', 'Invalid provider admission thresholds, cooldown order or probe lease');

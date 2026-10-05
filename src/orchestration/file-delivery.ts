@@ -1,13 +1,16 @@
 import { orderLineRequest } from '../shared/line-request-order';
-import { readFileSync, realpathSync, statSync } from 'fs';
+import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'fs';
 import { join, relative, isAbsolute } from 'path';
-import { homedir } from 'os';
+import { homedir, tmpdir } from 'os';
 import type { AgentConfig } from '../types';
 import type { Row } from './store';
 import type { DeliveryOutcome } from './delivery';
 import { MediaStore } from '../history/media-store';
 import { ShareStore, shareEnv, validateShareFile, detectShareMime, detectAudioMime } from '../share/share-store';
 import { handleLineRejection } from './line-quota';
+import { convertLineAudio, LineAudioError } from '../voice/line-audio';
+import { ingestOrchestrationMedia } from './media';
+import { VoiceError } from '../voice/types';
 
 export interface ChannelFile { path: string; name: string; kind: 'image' | 'file' | 'audio'; caption: string; durationMs?: number; }
 export function resolveChannelFile(agent: AgentConfig, file: ChannelFile): {path: string; bytes: Buffer} {
@@ -22,6 +25,24 @@ export function resolveChannelFile(agent: AgentConfig, file: ChannelFile): {path
   } catch { throw new Error('ATTACHMENT_UNAVAILABLE'); }
   return {path, bytes};
 }
+// Converted LINE audio is served through a 30-minute share; anything older than this is unreferenced.
+const LINE_AUDIO_RETENTION_MS = 60 * 60 * 1000;
+function sweepLineAudio(agentsRoot: string, agentId: string): void {
+  try {
+    const dir = join(agentsRoot, agentId, 'media', 'line-audio'), cutoff = Date.now() - LINE_AUDIO_RETENTION_MS;
+    for (const name of readdirSync(dir)) {
+      const file = join(dir, name);
+      try { if (statSync(file).mtimeMs < cutoff) rmSync(file, { force: true }); } catch { /* raced with another sweep */ }
+    }
+  } catch { /* directory does not exist yet */ }
+}
+function lineAudioFailure(agentId: string, error: unknown, bytes: number): DeliveryOutcome {
+  const code = error instanceof LineAudioError ? error.code : error instanceof VoiceError && error.code === 'VOICE_DEPENDENCY_FFMPEG_UNAVAILABLE' || error instanceof VoiceError && error.code === 'VOICE_DEPENDENCY_FFPROBE_UNAVAILABLE' ? 'LINE_AUDIO_FFMPEG_UNAVAILABLE' : 'LINE_AUDIO_CONVERSION_FAILED';
+  const outcomeCode = code === 'LINE_AUDIO_SIZE_INVALID' ? 'LINE_AUDIO_TOO_LARGE' : code;
+  const message = error instanceof LineAudioError ? error.detail : outcomeCode === 'LINE_AUDIO_FFMPEG_UNAVAILABLE' ? 'ffmpeg/ffprobe is not installed; run `claude-gateway doctor fix`' : 'ffmpeg could not convert the audio for LINE';
+  console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'LINE audio conversion failed', agentId, code: outcomeCode, inputBytes: bytes, message }));
+  return { state: 'failed', code: outcomeCode, message };
+}
 export async function sendChannelFile(agent: AgentConfig, binding: Row, file: ChannelFile, id: string, request: typeof fetch, enabled: () => boolean = () => true, pendingLineGroupSize: () => number = () => 0): Promise<DeliveryOutcome> {
   if(!enabled())return {state:'failed',code:'VOICE_REPLY_DISABLED'};
   const agentsRoot = join(agent.workspace, '../..');
@@ -29,6 +50,18 @@ export async function sendChannelFile(agent: AgentConfig, binding: Row, file: Ch
   let path: string, bytes: Buffer;
   try { ({path, bytes} = resolveChannelFile(agent, file)); }
   catch { return {state: 'failed', code: 'ATTACHMENT_UNAVAILABLE'}; }
+  // LINE plays only AAC M4A and needs its duration; staged audio (e.g. narration MP3) arrives with neither.
+  if (file.kind === 'audio' && source === 'line' && file.durationMs === undefined) {
+    const temporary = mkdtempSync(join(tmpdir(), 'gateway-line-audio-'));
+    try {
+      const converted = join(temporary, 'audio.m4a');
+      sweepLineAudio(agentsRoot, agent.id);
+      const durationMs = await convertLineAudio(path, converted, '64k');
+      file = { ...file, path: ingestOrchestrationMedia(agentsRoot, agent.id, 'line-audio', converted), name: file.name.replace(/\.[A-Za-z0-9]+$/, '') + '.m4a', durationMs };
+      ({path, bytes} = resolveChannelFile(agent, file));
+    } catch (error) { return lineAudioFailure(agent.id, error, bytes.length); }
+    finally { rmSync(temporary, {recursive: true, force: true}); }
+  }
   const mime = file.kind==='audio' ? detectAudioMime(bytes.subarray(0,12)) ?? 'application/octet-stream' : detectShareMime(bytes.subarray(0, 12)) ?? 'application/octet-stream';
   const image = file.kind === 'image' && mime.startsWith('image/');
   const call = (url: string, init: RequestInit) => {
@@ -38,11 +71,12 @@ export async function sendChannelFile(agent: AgentConfig, binding: Row, file: Ch
   let response: Response;
   try {
     if (source === 'telegram' && agent.telegram?.botToken) {
-      const form = new FormData(), photo = image && bytes.length <= 10 * 1024 * 1024;
+      const form = new FormData(), photo = image && bytes.length <= 10 * 1024 * 1024, audio = file.kind === 'audio' && mime.startsWith('audio/');
+      const [field, method] = photo ? ['photo', 'sendPhoto'] : audio ? ['audio', 'sendAudio'] : ['document', 'sendDocument'];
       form.set('chat_id', chat); if (thread) form.set('message_thread_id', thread);
       if (file.caption) form.set('caption', file.caption);
-      form.set(photo ? 'photo' : 'document', new Blob([new Uint8Array(bytes)], { type: mime }), file.name);
-      response = await call(`https://api.telegram.org/bot${agent.telegram.botToken}/${photo ? 'sendPhoto' : 'sendDocument'}`, { method: 'POST', body: form });
+      form.set(field, new Blob([new Uint8Array(bytes)], { type: mime }), file.name);
+      response = await call(`https://api.telegram.org/bot${agent.telegram.botToken}/${method}`, { method: 'POST', body: form });
     } else if (source === 'whatsapp_cloud' && agent.whatsapp_cloud?.accessToken && agent.whatsapp_cloud.phoneNumberId) {
       const url = `https://graph.facebook.com/v20.0/${encodeURIComponent(agent.whatsapp_cloud.phoneNumberId)}`;
       const headers = {Authorization: `Bearer ${agent.whatsapp_cloud.accessToken}`};

@@ -6,7 +6,7 @@ import { CRON_TOOLS } from '../cron/tool-schemas';
 import { containerTaskTools } from './container-tool-schemas';
 import { retryableMutation } from './mutation-recovery';
 import { CHECKPOINT_HOOK } from './tasks/checkpoint-hook';
-import { createServer, Server } from 'http';
+import { createServer, Server, ServerResponse } from 'http';
 import { randomBytes } from 'crypto';
 import { mkdirSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
@@ -60,6 +60,7 @@ export class TaskBridge {
   jevEnabled?: () => boolean;
   browserEnabled?: () => boolean;
   computerEnabled?: () => boolean;
+  narrateCall?: (attemptId: string, generation: number, actionId: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
   jevCall?: (scope: Scope, args: Record<string, unknown>, actionId: string, signal: AbortSignal) => Promise<unknown>;
   private readonly scopes = new Map<string, Scope>();
   private readonly cancellations = new Map<string, AbortController>();
@@ -68,6 +69,14 @@ export class TaskBridge {
   captureWorkerOutput(attemptId: string, generation: number, line: string): void {
     try { this.files?.captureOutput(attemptId, generation, line); }
     catch { /* A failed image capture must not break worker execution. Staging reports missing capture. */ }
+  }
+  /** Run a long tool call that is aborted when the task is cancelled or the caller drops the connection. */
+  private async cancelOnDisconnect<T>(response: ServerResponse, cancelled: AbortSignal, call: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const disconnected = new AbortController();
+    const onClose = () => { if (!response.writableFinished) disconnected.abort(); };
+    response.once('close', onClose);
+    try { return await call(AbortSignal.any([cancelled, disconnected.signal])); }
+    finally { response.off('close', onClose); }
   }
   async start(): Promise<void> {
     const server = createServer(async (request, response) => {
@@ -283,17 +292,17 @@ export class TaskBridge {
             this.files.scope(scope.attemptId, scope.generation);
             result = await this.shareCall(scope.attemptId, scope.generation, a);
           }
+          else if (command.tool === 'narrate' && !this.container && this.files && this.narrateCall) {
+            this.files.scope(scope.attemptId, scope.generation);
+            const cancelled = this.cancellations.get(token!);
+            if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
+            result = await this.cancelOnDisconnect(response, cancelled.signal, signal => this.narrateCall!(scope.attemptId, scope.generation, command.action_id, a, signal));
+          }
           else if (CRON_TOOLS.some(tool => tool.name === command.tool) && this.files && this.cronCall) {
             this.files.scope(scope.attemptId, scope.generation);
             const cancelled = this.cancellations.get(token!);
             if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
-            const disconnected = new AbortController();
-            const onClose = () => { if (!response.writableFinished) disconnected.abort(); };
-            response.once('close', onClose);
-            try {
-              result = await this.cronCall(scope.attemptId, scope.generation, command.tool, a,
-                AbortSignal.any([cancelled.signal, disconnected.signal]));
-            } finally { response.off('close', onClose); }
+            result = await this.cancelOnDisconnect(response, cancelled.signal, signal => this.cronCall!(scope.attemptId, scope.generation, command.tool, a, signal));
           }
           else throw new OrchestrationError('TOOL_DENIED');
         }
@@ -312,7 +321,7 @@ export class TaskBridge {
         const acknowledgementRecovery = code === 'ACKNOWLEDGEMENT_DELIVERY_PENDING'
           ? { message: 'The acknowledgement has not been confirmed as delivered. Do not retry the task mutation yet; wait for delivery to settle, then retry only if the request is still current.' }
           : undefined;
-        response.end(JSON.stringify({ error: code, ...(error instanceof JevError ? {message:error.message,...error.metadata} : {}), ...(inputDetails?.length ? {details:inputDetails} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && ['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && ['EXECUTION_DENIED', 'USER_INPUT_REQUIRED'].includes(code) && error.message !== code ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...intakeRecovery, ...acknowledgementRecovery, ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED', 'BROWSER_EVIDENCE_REQUIRED', 'LIVE_CONTROL_TARGET_ONLY', 'AUTOMATION_SESSION_EXISTS', 'AUTOMATION_SESSION_CLOSED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        response.end(JSON.stringify({ error: code, ...(error instanceof JevError ? {message:error.message,...error.metadata} : {}), ...(inputDetails?.length ? {details:inputDetails} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && (['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) || code.startsWith('NARRATE_')) ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && ['EXECUTION_DENIED', 'USER_INPUT_REQUIRED'].includes(code) && error.message !== code ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...intakeRecovery, ...acknowledgementRecovery, ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED', 'BROWSER_EVIDENCE_REQUIRED', 'LIVE_CONTROL_TARGET_ONLY', 'AUTOMATION_SESSION_EXISTS', 'AUTOMATION_SESSION_CLOSED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;
