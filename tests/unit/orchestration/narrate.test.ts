@@ -169,6 +169,17 @@ describe('narrate service', () => {
     } finally { f.close(); }
   });
 
+  test('a retry with the same action id is idempotent and an over-long symbol run is rejected', async () => {
+    const f = await fixture();
+    try {
+      const n = f.narrate();
+      await f.run(n, { text: make(3) });
+      await expect(f.run(n, { text: make(3) })).resolves.toMatchObject({ ok: true });
+      expect(f.staged()).toHaveLength(f.calls.length / 2);
+      await expect(f.run(f.narrate({ targetChars: 3000 }), { text: `Hello there.\n\n${'-'.repeat(5000)}` })).rejects.toMatchObject({ code: 'NARRATE_EMPTY' });
+    } finally { f.close(); }
+  });
+
   describe('path input', () => {
     test('a file inside the task scope is narrated; content never appears in errors', async () => {
       const f = await fixture();

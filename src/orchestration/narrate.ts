@@ -2,7 +2,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { mkdirSync, readFileSync, rmSync, writeFileSync, statSync } from 'fs';
 import { join } from 'path';
-import { randomUUID } from 'crypto';
+import { createHash } from 'crypto';
 import { OrchestrationError } from './types';
 import { TaskFiles } from './task-files';
 import { VoiceError } from '../voice/types';
@@ -95,6 +95,7 @@ export function workerNarrate(deps: NarrateDeps) {
       else if (pieces.length) pieces[pieces.length - 1] += piece.text;
       else carry += piece.text;
     }
+    if (pieces.some(piece => piece.length > MAX_TTS_CHARS)) throw new OrchestrationError('NARRATE_EMPTY', `NARRATE_EMPTY: a run of non-speakable characters is longer than ${MAX_TTS_CHARS}; remove it before narrating.`);
     if (pieces.length > config.maxParts) throw new OrchestrationError('NARRATE_TOO_LONG', `NARRATE_TOO_LONG: ${pieces.length} parts exceeds voice.narrate.maxParts=${config.maxParts}.`);
     // The 10-artifact cap is per attempt: leave room for files the worker already staged.
     const room = MAX_FILES - Number(deps.files.store.get('SELECT COUNT(*) n FROM task_files WHERE attempt_id=?', attemptId)!.n);
@@ -108,7 +109,8 @@ export function workerNarrate(deps: NarrateDeps) {
     const tts = (deps.provider ?? ttsProvider)(settings);
     if (!tts.synthesizeFile) throw new OrchestrationError('NARRATE_TTS_UNSUPPORTED', 'NARRATE_TTS_UNSUPPORTED: the configured TTS provider cannot produce audio files.');
     const voiceId = await (deps.voice ?? resolveVoiceId)(settings);
-    const work = join(mediaDir, `narrate-${randomUUID()}`);
+    const work = join(mediaDir, `narrate-${createHash('sha256').update(`${attemptId}:${actionId}`).digest('hex').slice(0, 16)}`);
+    rmSync(work, { recursive: true, force: true });
     mkdirSync(work, { recursive: true, mode: 0o700 });
     const done: string[] = [];
     let stopped: string | undefined;
