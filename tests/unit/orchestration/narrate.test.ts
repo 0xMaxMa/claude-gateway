@@ -94,6 +94,17 @@ describe('narrate service', () => {
     } finally { f.close(); }
   });
 
+  test('files already staged by the worker reduce the room for narration files', async () => {
+    const f = await fixture();
+    try {
+      const other = join(f.resource.path, 'note.txt'); writeFileSync(other, 'note');
+      for (let i = 0; i < 4; i++) f.files.stage(f.attempt.attemptId, f.attempt.generation, `pre-${i}`, { path: other, caption: String(i) });
+      const result = await f.run(f.narrate(), { text: make(25) });
+      expect(result).toMatchObject({ ok: true, files: 6 });
+      expect(f.staged()).toHaveLength(10);
+    } finally { f.close(); }
+  });
+
   test('ffmpeg missing for a merge fails before any TTS call', async () => {
     const f = await fixture();
     try {

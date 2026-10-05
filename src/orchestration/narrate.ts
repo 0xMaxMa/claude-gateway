@@ -46,8 +46,8 @@ async function ffmpegMerge(inputs: string[], output: string, signal: AbortSignal
 }
 
 /** Adjacent parts per output file so that at most MAX_FILES files are produced. */
-export function narrationGroups(parts: number): number[][] {
-  const files = Math.min(parts, MAX_FILES), groups: number[][] = [];
+export function narrationGroups(parts: number, maxFiles = MAX_FILES): number[][] {
+  const files = Math.min(parts, maxFiles), groups: number[][] = [];
   let next = 0;
   for (let file = 0; file < files; file++) {
     const size = Math.floor(parts / files) + (file < parts % files ? 1 : 0);
@@ -96,7 +96,10 @@ export function workerNarrate(deps: NarrateDeps) {
       else carry += piece.text;
     }
     if (pieces.length > config.maxParts) throw new OrchestrationError('NARRATE_TOO_LONG', `NARRATE_TOO_LONG: ${pieces.length} parts exceeds voice.narrate.maxParts=${config.maxParts}.`);
-    const groups = narrationGroups(pieces.length);
+    // The 10-artifact cap is per attempt: leave room for files the worker already staged.
+    const room = MAX_FILES - Number(deps.files.store.get('SELECT COUNT(*) n FROM task_files WHERE attempt_id=?', attemptId)!.n);
+    if (room < 1) throw new OrchestrationError('TOO_MANY_ARTIFACTS', 'TOO_MANY_ARTIFACTS: this task already staged the maximum of 10 files.');
+    const groups = narrationGroups(pieces.length, room);
     if (groups.some(group => group.length > 1) && !await hasFfmpeg())
       throw new OrchestrationError('NARRATE_FFMPEG_MISSING', `NARRATE_FFMPEG_MISSING: ${pieces.length} parts need merging into at most ${MAX_FILES} files and ffmpeg is not installed.`);
 
