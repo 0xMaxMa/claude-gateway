@@ -298,7 +298,7 @@ export class AgentOrchestrationRuntime {
     const bridge = new TaskBridge(tasks, files, workerShares(files, agent, gateway), host.skills ? () => host.skills!() : undefined, agent.type === 'app-agent' ? { agent, spool: join(root, 'container-files') } : undefined, workerCrons(files, agent, gateway), gatewayAdapters);
     const voiceConfig = () => resolveOrchestrationConfig(agent.orchestration, agent.voice ?? { enabled: false }).voice;
     const narrateVoices = new TelegramVoices(store, () => voiceConfig().tts);
-    bridge.narrateCall = workerNarrate({ files, config: () => voiceConfig().narrate,
+    bridge.narrateCall = workerNarrate({ files, config: () => voiceConfig().narrate, voiceEnabled: () => voiceConfig().enabled,
       settings: chat => narrateVoices.settings(channelVoiceKey(chat.source, chat.chat_id, chat.thread_key ?? '')) });
     bridge.computerEnabled = computerAllowed;
     bridge.jevEnabled = () => jevAllowed(gateway, agent);

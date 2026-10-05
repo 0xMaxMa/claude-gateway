@@ -155,11 +155,11 @@ Runs of symbols with nothing to pronounce (for example a line of `=` characters)
 | Telegram | Audio messages (`sendAudio`) |
 | WhatsApp Cloud | Audio messages |
 | Discord, Slack | File attachments |
-| LINE | Converted to AAC M4A at delivery time (needs `ffmpeg` and `ffprobe`) and sent as a playable audio message with its duration. A single file longer than 10 minutes cannot be converted for LINE and is reported as `LINE_AUDIO_CONVERSION_FAILED` |
+| LINE | Converted to AAC-LC M4A at delivery time (needs `ffmpeg` and `ffprobe`; 64 kbps mono, so 10 minutes measures about 4.9 MB against LINE's 5 MB cap) and sent as a playable audio message with its duration. A file longer than 10 minutes or larger than 5 MB cannot be sent: delivery fails with `LINE_AUDIO_TOO_LARGE` (the message states the measured size and the limit), `LINE_AUDIO_FFMPEG_UNAVAILABLE` when `ffmpeg`/`ffprobe` is missing, or `LINE_AUDIO_CONVERSION_FAILED` when ffmpeg cannot convert the audio. Converted files are removed after an hour |
 
 | `voice.narrate` field | Default | Purpose |
 | --- | --- | --- |
-| `enabled` | `true` | Allow the tool; it is always off while `voice.enabled` is `false` |
+| `enabled` | `true` | Allow the tool; it is always off while `voice.enabled` is `false` (the call then fails with `NARRATE_VOICE_DISABLED`) |
 | `maxChars` | `100000` | Reject longer text (`NARRATE_TOO_LONG`); at most `2000000` |
 | `maxParts` | `60` | Reject texts that split into more pieces (`NARRATE_TOO_LONG`); at most `200` |
 | `targetChars` | `800` | Soft size of one piece; at most `4000` |

@@ -9,7 +9,7 @@ import { callTaskBridge } from '../tasks/module';
 export const NARRATE_TOOL: McpToolDefinition = {
   name: 'narrate',
   description:
-    'Read text aloud to the user as a sequence of audio messages. Use this when the user asks to HEAR a page, post, document or file — ' +
+    'Narrate text to speech: read text aloud to the user as a sequence of voice/audio messages (TTS). Use this when the user asks to HEAR a page, post, document or file — ' +
     'pass the full text (or a file path inside this task) and every character is spoken, in order. ' +
     'Pass exactly one of `text` or `path`. Do NOT summarize or shorten the text you pass unless the user asked for a summary; ' +
     'the tool never rewrites it. This tool cannot fetch URLs: fetch the page yourself and pass its text. ' +

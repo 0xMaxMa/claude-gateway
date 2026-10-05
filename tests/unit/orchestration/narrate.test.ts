@@ -145,6 +145,16 @@ describe('narrate service', () => {
     } finally { f.close(); }
   });
 
+  test('a disabled voice is reported as such, not as voice.narrate.enabled', async () => {
+    const f = await fixture();
+    try {
+      const n = f.narrate({}, f.provider(), { voiceEnabled: () => false });
+      await expect(f.run(n, { text: 'hello there' })).rejects.toMatchObject({ code: 'NARRATE_VOICE_DISABLED', message: expect.stringContaining('voice.enabled') });
+      await expect(f.run(n, { text: 'hello there' })).rejects.not.toMatchObject({ message: expect.stringContaining('voice.narrate.enabled') });
+      expect(f.calls).toHaveLength(0);
+    } finally { f.close(); }
+  });
+
   test('guards report the config key and value', async () => {
     const f = await fixture();
     try {

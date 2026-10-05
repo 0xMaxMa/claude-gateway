@@ -11,7 +11,7 @@ import { OrchestrationStore, Row } from './store';
 import { sendChannelFile, ChannelFile } from './file-delivery';
 import { handleLineRejection, lineRetryBackoffMs, LINE_RATE_LIMIT_MAX_ATTEMPTS } from './line-quota';
 
-export type DeliveryOutcome = { state: 'delivered'; providerId?: string } | { state: 'failed' | 'unknown'; code: string; speechSynthesisFailed?: boolean; retryAfterMs?: number };
+export type DeliveryOutcome = { state: 'delivered'; providerId?: string } | { state: 'failed' | 'unknown'; code: string; message?: string; speechSynthesisFailed?: boolean; retryAfterMs?: number };
 export type DeliveryControl = { label: string; data: string };
 export type ChannelSender = (binding: Row, text: string, deliveryId: string, file?: ChannelFile, speech?: SpeechDelivery, textFormat?: 'HTML' | 'text', controls?: DeliveryControl[]) => Promise<DeliveryOutcome>;
 
@@ -227,7 +227,7 @@ export class DeliveryOutbox {
             return;
           }
           this.store.run('UPDATE deliveries SET state=?,provider_message_id=?,updated_at=? WHERE id=?', result.state, result.state === 'delivered' ? result.providerId ?? null : null, Date.now(), id);
-          this.store.run('UPDATE outbox SET state=?,last_error=? WHERE id=?', result.state === 'delivered' ? 'completed' : result.state, result.state === 'delivered' ? null : result.code, row.id);
+          this.store.run('UPDATE outbox SET state=?,last_error=? WHERE id=?', result.state === 'delivered' ? 'completed' : result.state, result.state === 'delivered' ? null : result.message ? `${result.code}: ${result.message}` : result.code, row.id);
           if (delivery.modality === 'speech' && result.state === 'failed' && result.speechSynthesisFailed) {
             const key = `speech-failure:${id}`;
             if (!this.store.get('SELECT id FROM outbox WHERE dedup_key=?', key)) {

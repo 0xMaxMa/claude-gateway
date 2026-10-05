@@ -16,6 +16,8 @@ export interface NarrateTts { provider: string; model: string; voiceId: string; 
 export interface NarrateDeps {
   files: TaskFiles;
   config: () => NarrateConfig;
+  /** False when the agent's voice is switched off (voice.enabled); defaults to true. */
+  voiceEnabled?: () => boolean;
   /** Voice settings of the chat the task belongs to (per-chat voice choice wins). */
   settings: (conversation: { source: string; chat_id: string; thread_key: string }) => NarrateTts;
   provider?: typeof ttsProvider;
@@ -83,6 +85,7 @@ export function workerNarrate(deps: NarrateDeps) {
   return async (attemptId: string, generation: number, actionId: string, args: Record<string, unknown>, signal: AbortSignal): Promise<NarrateResult> => {
     const config = deps.config();
     const { conversation, mediaDir } = deps.files.scope(attemptId, generation);
+    if (deps.voiceEnabled && !deps.voiceEnabled()) throw new OrchestrationError('NARRATE_VOICE_DISABLED', 'NARRATE_VOICE_DISABLED: voice is disabled for this agent (voice.enabled is false), so narration is unavailable.');
     if (!config.enabled) throw new OrchestrationError('NARRATE_DISABLED', 'NARRATE_DISABLED: voice.narrate.enabled is false.');
     const text = source(deps, attemptId, generation, args, config.maxChars);
     if (!isSpeakable(text)) throw new OrchestrationError('NARRATE_EMPTY', 'NARRATE_EMPTY: the text has no speakable characters.');
