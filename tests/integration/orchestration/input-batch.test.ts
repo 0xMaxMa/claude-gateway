@@ -202,3 +202,17 @@ test.each([
     expect(f.runtime.store.get("SELECT count(*) n FROM conversation_events WHERE type='response.superseded'")!.n).toBe(0);
   }finally{release();await f.close();}
 });
+
+test('the mailbox admits a session before scanning its queued rows for a batch',async()=>{
+  const batching=jest.spyOn(require('../../../src/orchestration/input-batch'),'inputBatch');
+  const f=await fixture();
+  try{
+    const queued=Array.from({length:5},(_,i)=>submit(f,`Queued fragment ${i}`));
+    for(const item of queued)void item.response.catch(()=>{});
+    // Keep the burst inside its quiet window so every pump only inspects it.
+    f.runtime.store.run("UPDATE conversation_inputs SET created_at=?",Date.now()+60000);
+    batching.mockClear();
+    (f.runtime as any).pumpMailbox();
+    expect(batching).toHaveBeenCalledTimes(1);
+  }finally{batching.mockRestore();await f.close();}
+});

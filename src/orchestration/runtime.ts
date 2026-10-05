@@ -967,11 +967,14 @@ export class AgentOrchestrationRuntime {
     for (const row of rows) {
       mailboxCursor = Number(row.mailbox_row);
       if (this.active.size >= this.config.conversation.maxActiveSessions) break;
+      // Batch members share the row's conversation and session, so admission is
+      // decided before scanning later rows for the batch.
+      const head: AcceptInput = JSON.parse(String(row.ingress_json));
+      if (!head.scope || !head.capabilities || this.active.has(head.scope.agentSessionId)) continue;
+      if (visitedSessions.has(head.scope.agentSessionId)) continue;
+      visitedSessions.add(head.scope.agentSessionId);
       const batch = inputBatch(this.store, row, this.batchDebounceMs(), this.config.conversation.inputMaxWaitMs);
       const input = batch.input;
-      if (!input.scope || !input.capabilities || this.active.has(input.scope.agentSessionId)) continue;
-      if (visitedSessions.has(input.scope.agentSessionId)) continue;
-      visitedSessions.add(input.scope.agentSessionId);
       if (Date.now() < batch.readyAt) continue;
       const scope = resolveProviderScope(this.agent, this.gateway, input.model, 'agent');
       const waiting = this.providerAdmission.inspect(scope, this.config.providerAdmission);
