@@ -527,25 +527,8 @@ export class AgentRunner extends EventEmitter {
           sendLinkedChannel: (...args) => this.sendLinkedOrchestrationChannel(...args),
           skills: () => this.skillRegistry,
           refreshSkills: async () => {
-            try {
-              const { discoverCliSkills } = await import('../orchestration/cli-skills');
-              this.skillRegistry.cliSkills = [];
-              delete this.skillRegistry.cliDiscoveryError;
-              try { this.skillRegistry.cliSkills = await discoverCliSkills(this.agentConfig, undefined, this.gatewayConfig); }
-              catch { this.skillRegistry.cliDiscoveryError = 'CLI_SKILL_DISCOVERY_UNAVAILABLE'; }
-              const { discoverWorkerExtensions } = await import('../session/worker-extensions');
-              const extensions = await discoverWorkerExtensions(this.agentConfig, this.gatewayConfig);
-              const merged = new Map(this.skillRegistry.cliSkills.map(skill => [skill.name, skill]));
-              for (const skill of extensions.skills) merged.set(skill.name, { ...merged.get(skill.name), ...skill });
-              this.skillRegistry.cliSkills = [...merged.values()];
-              this.skillRegistry.extensionServers = Object.keys(extensions.servers);
-              this.skillRegistry.extensionNotices = extensions.notices;
-            } catch {
-              this.skillRegistry.cliSkills = [];
-              this.skillRegistry.extensionServers = [];
-              this.skillRegistry.extensionNotices = [];
-              this.skillRegistry.cliDiscoveryError = 'CLI_SKILL_DISCOVERY_UNAVAILABLE';
-            }
+            const { refreshCliSkillRegistry } = await import('../orchestration/cli-skills');
+            await refreshCliSkillRegistry(this.skillRegistry, this.agentConfig, this.gatewayConfig);
           },
           onManagedTurn: (sessionId, text, metrics, skills) => {
             const key = `orchestration:${sessionId}`;
