@@ -8,10 +8,17 @@ import { SKILL_CATALOG_BUDGET_BYTES } from './skill-catalog-budget';
 export interface TaskSkill { invocation?: 'cli'; name: string; args: string; content: string; filePath: string; resourceRoot?: string; fileScope?: 'container'; requires?: SkillDefinition['requires']; }
 /** Registry resolution belongs to trusted ingress, never to model-supplied paths. */
 export function resolveSkill(text: string, source: ConversationScope['source'], registry?: SkillRegistry): TaskSkill | undefined {
-  if (!registry || isBuiltinCommand(text.trim(), source)) return;
+  const command = registry && skillCommand(text, source);
+  return command && resolveNamedSkill(command.name, command.args, registry);
+}
+
+/** The `/name args` shape that ingress resolves against the skill registry, whether or
+ * not `name` is installed yet. Builtin commands and path-like text (`/home/x`) never match. */
+export function skillCommand(text: string, source: ConversationScope['source']): { name: string; args: string } | undefined {
+  if (isBuiltinCommand(text.trim(), source)) return;
   const match = /^\/([\w:.-]+)(?:@([\w]+))?(?:\s+([\s\S]*))?$/.exec(text.trim());
   if (!match || (match[2] && source !== 'telegram')) return;
-  return resolveNamedSkill(match[1], match[3]?.trim() ?? '', registry);
+  return { name: match[1], args: match[3]?.trim() ?? '' };
 }
 
 /** Only installed, user-invocable skills are advertised; never expose bodies or paths.

@@ -1,6 +1,7 @@
 import { OrchestrationStore, AcceptInput } from '../../src/orchestration/store';
 import { inputBatch, batchableInput } from '../../src/orchestration/input-batch';
 import { resolveOrchestrationConfig } from '../../src/orchestration/config';
+import { resolveSkill } from '../../src/orchestration/skills';
 const scope={agentId:'a',agentSessionId:'s',source:'telegram' as const,accountId:'bot',chatId:'chat',threadKey:'',principalId:'p'};
 const base:AcceptInput={scope,text:'first fragment',capabilities:{execute:true,writeMemory:false}};
 
@@ -81,5 +82,24 @@ test('in-flight inputs are re-admitted so a running batch can be compared with t
     expect(inputBatch(store,row,1500,8000,[a.inputId,b.inputId]).inputIds).toEqual([a.inputId,b.inputId]);
     const c=store.acceptInput({...base,text:'third'});
     expect(inputBatch(store,row,1500,8000,[a.inputId,b.inputId]).inputIds).toEqual([a.inputId,b.inputId,c.inputId]);
+  }finally{store.close();}
+});
+
+test('a skill-shaped command unresolved at ingress stays alone so the turn can still resolve it',()=>{
+  // e.g. received while the CLI skill list refreshes, or the skill was installed after receipt.
+  expect(batchableInput({...base,text:'/review-pr 567'})).toBe(false);
+  expect(batchableInput({...base,text:'/review-pr@my_bot 567'})).toBe(false);
+  const registry={skills:new Map(),cliSkills:[{name:'review-pr',description:'Review a PR'}]};
+  const store=new OrchestrationStore(':memory:','a');
+  try{
+    const chat=store.acceptInput(base);
+    const command=store.acceptInput({...base,text:'/review-pr 567'});
+    store.acceptInput({...base,text:'focus on the batching change'});
+    const row=(id:string)=>store.get('SELECT * FROM conversation_inputs WHERE id=?',id)!;
+    // A chat burst ends before the command instead of absorbing it.
+    expect(inputBatch(store,row(chat.inputId),1500,8000).inputIds).toEqual([chat.inputId]);
+    const batch=inputBatch(store,row(command.inputId),1500,8000);
+    expect(batch.inputIds).toEqual([command.inputId]);
+    expect(resolveSkill(batch.input.text,'telegram',registry)?.name).toBe('review-pr');
   }finally{store.close();}
 });

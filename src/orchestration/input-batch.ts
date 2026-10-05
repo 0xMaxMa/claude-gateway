@@ -1,13 +1,15 @@
 import { AcceptInput, OrchestrationStore, Row, payloadHash } from './store';
 import { isChatChannel } from '../history/types';
+import { skillCommand } from './skills';
 
-/** Only human text/photo bursts on chat channels. Builtin commands never reach
- * the mailbox and skills are resolved at ingress, so neither needs a text rule.
+/** Only human text/photo bursts on chat channels. Skill-shaped commands stay alone
+ * even when unresolved at ingress (registry refreshing, skill installed later) so the
+ * turn can still resolve them; builtin commands never reach the mailbox.
  * API requests and live/recorded voice retain their immediate/control semantics. */
 export function batchableInput(input: AcceptInput): boolean {
   return isChatChannel(input.scope.source)
     && input.storeUserMessage !== false && (!input.modality || input.modality === 'text')
-    && !input.requestId && !input.skill
+    && !input.requestId && !input.skill && !skillCommand(input.text, input.scope.source)
     && !input.metadata?.executionTaskId && !input.metadata?.recoveryBatch;
 }
 
