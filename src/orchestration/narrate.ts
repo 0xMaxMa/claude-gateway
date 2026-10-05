@@ -98,7 +98,9 @@ export function workerNarrate(deps: NarrateDeps) {
     if (pieces.some(piece => piece.length > MAX_TTS_CHARS)) throw new OrchestrationError('NARRATE_EMPTY', `NARRATE_EMPTY: a run of non-speakable characters is longer than ${MAX_TTS_CHARS}; remove it before narrating.`);
     if (pieces.length > config.maxParts) throw new OrchestrationError('NARRATE_TOO_LONG', `NARRATE_TOO_LONG: ${pieces.length} parts exceeds voice.narrate.maxParts=${config.maxParts}.`);
     // The 10-artifact cap is per attempt: leave room for files the worker already staged.
-    const room = MAX_FILES - Number(deps.files.store.get('SELECT COUNT(*) n FROM task_files WHERE attempt_id=?', attemptId)!.n);
+    // Files from an earlier call with this same action id are not "other" files: a retry must plan the same groups.
+    const own = `${actionId.replace(/[\\%_]/g, '\\$&')}:narrate:%`;
+    const room = MAX_FILES - Number(deps.files.store.get("SELECT COUNT(*) n FROM task_files WHERE attempt_id=? AND action_id NOT LIKE ? ESCAPE '\\'", attemptId, own)!.n);
     if (room < 1) throw new OrchestrationError('TOO_MANY_ARTIFACTS', 'TOO_MANY_ARTIFACTS: this task already staged the maximum of 10 files.');
     const groups = narrationGroups(pieces.length, room);
     if (groups.some(group => group.length > 1) && !await hasFfmpeg())

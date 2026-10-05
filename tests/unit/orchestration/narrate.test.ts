@@ -180,6 +180,18 @@ describe('narrate service', () => {
     } finally { f.close(); }
   });
 
+  test('a retry after a full ten-file narration plans the same groups and stays idempotent', async () => {
+    const f = await fixture();
+    try {
+      const n = f.narrate({ targetChars: 30, maxParts: 60 });
+      const first = await f.run(n, { text: make(14) });
+      expect(first.files).toBe(10);
+      const before = f.staged().length;
+      await expect(f.run(n, { text: make(14) })).resolves.toMatchObject({ ok: true, files: 10 });
+      expect(f.staged()).toHaveLength(before);
+    } finally { f.close(); }
+  });
+
   describe('path input', () => {
     test('a file inside the task scope is narrated; content never appears in errors', async () => {
       const f = await fixture();
