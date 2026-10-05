@@ -967,7 +967,7 @@ export class AgentOrchestrationRuntime {
     for (const row of rows) {
       mailboxCursor = Number(row.mailbox_row);
       if (this.active.size >= this.config.conversation.maxActiveSessions) break;
-      const batch = inputBatch(this.store, row, this.config.conversation.semanticIntake ? this.config.conversation.inputDebounceMs : 0, this.config.conversation.inputMaxWaitMs);
+      const batch = inputBatch(this.store, row, this.batchDebounceMs(), this.config.conversation.inputMaxWaitMs);
       const input = batch.input;
       if (!input.scope || !input.capabilities || this.active.has(input.scope.agentSessionId)) continue;
       if (visitedSessions.has(input.scope.agentSessionId)) continue;
@@ -998,6 +998,10 @@ export class AgentOrchestrationRuntime {
     if (this.active.size >= this.config.conversation.maxActiveSessions) break mailbox;
     }
   }
+  private batchDebounceMs(): number {
+    return this.config.conversation.semanticIntake ? this.config.conversation.inputDebounceMs : 0;
+  }
+
   private async run(input: AcceptInput, capabilities: ExecutionCapabilities, options: { timeoutMs: number; model?: string; onText?: (text: string) => void; onTool?: (event: ToolActivity) => void; inputIds?: string[] }): Promise<string> {
     const sessionId = input.scope.agentSessionId;
     const channelTts = this.telegramVoices.settings(channelVoiceKey(input.scope.source,input.scope.chatId,input.scope.threadKey));
@@ -1478,7 +1482,14 @@ export class AgentOrchestrationRuntime {
       }
       const committedAction = this.store.get('SELECT action_id FROM task_commands WHERE decision_id=? LIMIT 1', decision.decisionId);
       const supersededCount = Number(this.store.get("SELECT count(*) n FROM conversation_events WHERE conversation_id=? AND type='response.superseded' AND json_extract(payload_json,'$.payload.inputId')=?", receipt.conversationId, decision.inputIds[0])?.n ?? 0);
-      if (bufferChat && newerInputPending() && !response.interrupted && !active.stopping && !acknowledgementId && !committedAction && !unsafeToReplay && supersededCount < 2) {
+      // Supersede only when the batcher would now absorb newer input into this
+      // batch; an incompatible follow-up gets its own turn without re-inference.
+      const batchGrows = () => {
+        const first = this.store.get('SELECT * FROM conversation_inputs WHERE id=?', decision.inputIds[0]);
+        return !!first && inputBatch(this.store, first, this.batchDebounceMs(), this.config.conversation.inputMaxWaitMs, decision.inputIds)
+          .inputIds.some(id => !decision.inputIds.includes(id));
+      };
+      if (bufferChat && newerInputPending() && batchGrows() && !response.interrupted && !active.stopping && !acknowledgementId && !committedAction && !unsafeToReplay && supersededCount < 2) {
         this.store.compose(() => {
           this.decisions.finish(decision, '', 'interrupted', undefined, false);
           for (const id of decision.inputIds) this.store.run("UPDATE conversation_inputs SET status='accepted' WHERE id=?", id);

@@ -70,3 +70,16 @@ test('text that merely starts with a slash is ordinary user text, not a command'
     expect(inputBatch(store,store.get('SELECT * FROM conversation_inputs WHERE id=?',first.inputId)!,1500,8000).inputIds).toEqual([first.inputId,second.inputId]);
   }finally{store.close();}
 });
+
+test('in-flight inputs are re-admitted so a running batch can be compared with the next one',()=>{
+  const store=new OrchestrationStore(':memory:','a');
+  try{
+    const a=store.acceptInput(base),b=store.acceptInput({...base,text:'second'});
+    store.run("UPDATE conversation_inputs SET status='assigned'");
+    const row=store.get('SELECT * FROM conversation_inputs WHERE id=?',a.inputId)!;
+    expect(inputBatch(store,row,1500,8000).inputIds).toEqual([a.inputId]);
+    expect(inputBatch(store,row,1500,8000,[a.inputId,b.inputId]).inputIds).toEqual([a.inputId,b.inputId]);
+    const c=store.acceptInput({...base,text:'third'});
+    expect(inputBatch(store,row,1500,8000,[a.inputId,b.inputId]).inputIds).toEqual([a.inputId,b.inputId,c.inputId]);
+  }finally{store.close();}
+});

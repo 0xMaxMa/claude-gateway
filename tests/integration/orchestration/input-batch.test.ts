@@ -179,3 +179,26 @@ test('a restart during the debounce window recovers the whole burst from durable
     expect(JSON.parse(String(f.runtime.store.get("SELECT input_ids_json FROM conversation_decisions WHERE kind='user'")!.input_ids_json))).toEqual([a.inputId,b.inputId]);
   }finally{await f.close();}
 });
+
+test.each([
+  ['a reply to a different message', {metadata:{repliedMessageId:'other-message'}}, undefined],
+  ['a different execution grant', {}, {execute:false,writeMemory:false}],
+  ['a recorded voice note', {modality:'voice_note' as const}, undefined],
+  ['an installed skill', {skill:{name:'fixture-skill',args:'',content:'Fixture skill.',filePath:'/fixture/SKILL.md'}}, undefined],
+  ['a different model', {model:'other-model'}, undefined],
+])('%s arriving while thinking gets its own turn instead of replaying the answer',async(_label,change,capabilities)=>{
+  let ready!:()=>void,release!:()=>void;
+  const started=new Promise<void>(resolve=>{ready=resolve;});const proceed=new Promise<void>(resolve=>{release=resolve;});
+  const f=await fixture(async(_call,process,turn)=>{
+    if(turn===1){ready();await proceed;finish(process,'Answer about repo A.');}
+    else finish(process,'Separate answer.');
+  });
+  try{
+    const a=submit(f,'Explain repo A');await started;
+    const b=f.runtime.submitInput({scope:f.scope,text:'Follow-up',...change},capabilities??{execute:true,writeMemory:false});
+    void b.response.catch(()=>{});release();
+    expect(await a.response).toBe('Answer about repo A.');
+    expect(f.prompts.filter(prompt=>prompt.includes('Explain repo A'))).toHaveLength(1);
+    expect(f.runtime.store.get("SELECT count(*) n FROM conversation_events WHERE type='response.superseded'")!.n).toBe(0);
+  }finally{release();await f.close();}
+});

@@ -11,7 +11,9 @@ export function batchableInput(input: AcceptInput): boolean {
     && !input.metadata?.executionTaskId && !input.metadata?.recoveryBatch;
 }
 
-export function inputBatch(store: OrchestrationStore, first: Row, debounceMs: number, maxWaitMs: number) {
+/** `inflight` re-admits the running batch's own (assigned) inputs so the caller
+ * can ask whether newer mail would join them under the same rules. */
+export function inputBatch(store: OrchestrationStore, first: Row, debounceMs: number, maxWaitMs: number, inflight: string[] = []) {
   const initial: AcceptInput = JSON.parse(String(first.ingress_json));
   const rows = [first];
   const inputs = [initial];
@@ -23,7 +25,7 @@ export function inputBatch(store: OrchestrationStore, first: Row, debounceMs: nu
       && payloadHash([input.model, input.capabilities, input.metadata?.repliedMessageId])
         === payloadHash([initial.model, initial.capabilities, initial.metadata?.repliedMessageId]);
     let bytes = Buffer.byteLength(String(first.ingress_json));
-    for (const row of store.all("SELECT * FROM conversation_inputs WHERE conversation_id=? AND status='accepted' AND input_seq>? ORDER BY input_seq LIMIT 99", first.conversation_id, first.input_seq)) {
+    for (const row of store.all("SELECT * FROM conversation_inputs WHERE conversation_id=? AND (status='accepted' OR id IN (SELECT value FROM json_each(?))) AND input_seq>? ORDER BY input_seq LIMIT 99", first.conversation_id, JSON.stringify(inflight), first.input_seq)) {
       const input: AcceptInput = JSON.parse(String(row.ingress_json));
       bytes += Buffer.byteLength(String(row.ingress_json));
       const attachmentCount = new Set([...inputs.flatMap(item => item.attachmentIds ?? []), ...(input.attachmentIds ?? [])]).size;
