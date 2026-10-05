@@ -223,3 +223,57 @@ test('deduplicated image aliases identify the original among multiple images and
     expect(f.prompts[4]).not.toContain(JSON.stringify(mapping));
   } finally { await f.close(); }
 });
+
+test('resumed deferred recovery replays the original request instead of empty cached deltas', async () => {
+  let reading!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { reading = resolve; });
+  const proceed = new Promise<void>(resolve => { release = resolve; });
+  const f = await fixture(async (call, process, turn) => {
+    if (turn === 1) {
+      reading(); await proceed;
+      expect(await call('conversation_intake', {mode:'ready', acknowledgement:'Inspecting the signing workflow.', preparation:'Inspect both repositories for the signing workflow.'})).toMatchObject({deferred:true});
+    } else {
+      const prompt = f.prompts[turn - 1];
+      expect(prompt).toContain('Inspect original signing workflow');
+      expect(prompt).toContain('"deferredDispatch":true');
+      expect(prompt).toContain('Inspect both repositories for the signing workflow.');
+      if (turn === 2) { finish(process, 'These are signing secret names.'); return; }
+      expect(turn).toBe(3);
+      await call('conversation_intake', {mode:'ready', acknowledgement:'Inspecting both repositories now.'});
+      const task = await call('task_spawn', {title:'Inspect signing', instructions:'Inspect both repositories read-only.', target_profile:'default-worker'});
+      expect(task.taskId).toBeTruthy();
+      expect(await call('conversation_intake', {mode:'resolve',task_id:task.taskId,resolution:'Original inspection dispatched.'})).toEqual({resolved:true});
+    }
+    finish(process);
+  });
+  try {
+    const first = f.runtime.submitInput({scope:f.scope,text:'Inspect original signing workflow'}, {execute:true,writeMemory:false});
+    await started;
+    const second = f.runtime.submitInput({scope:f.scope,text:'Here is the screenshot'}, {execute:true,writeMemory:false});
+    release(); await first.response; await second.response;
+    for (let i=0;i<300 && !f.runtime.store.get('SELECT id FROM tasks');i++) await new Promise(resolve => setTimeout(resolve,10));
+    expect(f.failures).toEqual([]);
+    expect(f.runtime.store.get('SELECT count(*) n FROM tasks')!.n).toBe(1);
+    for (let i=0;i<100 && (f.runtime as any).active.size;i++) await new Promise(resolve => setTimeout(resolve,10));
+    expect(f.runtime.store.get('SELECT count(*) n FROM conversation_intake')!.n).toBe(0);
+  } finally { release(); await f.close(); }
+});
+
+test('ready without dispatch gets one recovery; an acknowledgement alone is a visible failure, not success', async () => {
+  const f = await fixture(async (call, process, turn) => {
+    if (turn === 1) await call('conversation_intake', {mode:'ready', acknowledgement:'I will inspect both repositories.', preparation:'Inspect the original signing workflow.'});
+    else { expect(turn).toBe(2); expect(f.prompts[1]).toContain('Inspect the original signing workflow.'); }
+    finish(process, 'Understood.');
+  });
+  try {
+    await f.send('Inspect the original signing workflow.');
+    for (let i=0;i<300 && !f.runtime.store.get("SELECT event_id FROM conversation_events WHERE type='response.dispatch_unresolved'");i++) await new Promise(resolve => setTimeout(resolve,10));
+    expect(f.failures).toEqual([]);
+    const failed = f.runtime.store.get("SELECT generated_text FROM assistant_responses WHERE state='failed'");
+    expect(failed?.generated_text).toContain('not complete');
+    expect(f.runtime.store.get('SELECT count(*) n FROM tasks')!.n).toBe(0);
+    expect(JSON.parse(String(f.runtime.store.get('SELECT data_json FROM conversation_intake')!.data_json)).deferredDispatch).toBe(true);
+    expect(f.prompts).toHaveLength(2);
+    expect((await f.sessions.loadSession('a','s')).filter(row => row.role==='assistant').some(row => row.content==='Understood.')).toBe(false);
+  } finally { await f.close(); }
+});

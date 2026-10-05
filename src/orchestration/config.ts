@@ -16,6 +16,10 @@ export interface OrchestrationConfig {
     semanticIntake?: boolean;
     /** Silence after the newest incomplete material before one clarification. */
     intakeWaitMs?: number;
+    /** Quiet period for consecutive human chat messages; zero disables batching. */
+    inputDebounceMs?: number;
+    /** Maximum initial batching delay, even if messages keep arriving. */
+    inputMaxWaitMs?: number;
     maxActiveSessions?: number;
     notificationPolicy?: 'next_user_turn' | 'existing_receive_path';
     /** Legacy alias; the original 15000ms template value uses the modern default. */
@@ -84,7 +88,7 @@ export const ORCHESTRATION_DEFAULTS = {
   providerAdmission: PROVIDER_ADMISSION_DEFAULTS,
   enabled: false,
   channels: ['api'],
-  conversation: { backend: 'inherit' as const, semanticIntake: false, intakeWaitMs: 2000, maxActiveSessions: 2, notificationPolicy: 'existing_receive_path' as const,
+  conversation: { backend: 'inherit' as const, semanticIntake: false, intakeWaitMs: 2000, inputDebounceMs: 1500, inputMaxWaitMs: 8000, maxActiveSessions: 2, notificationPolicy: 'existing_receive_path' as const,
     decisionTimeoutMs: 120000, idleTimeoutMs: 120000, startupTimeoutMs: 120000, firstResponseTimeoutMs: 120000, compactionTimeoutMs: 300000, maxDecisionDurationMs: 600000, preemptionGraceMs: 250, maxPendingInputs: 100, skillCatalogBytes: SKILL_CATALOG_BUDGET_BYTES },
   tasks: { automationIdleTimeoutMs: 1800000, maxConcurrentPerAgent: 10, maxConcurrentPerConversation: 10, workerIdleTtlMs: 600000, maxQueuedPerConversation: 20,
     maxQueuedPerAgent: 100, defaultTimeoutMs: 1800000, idleTimeoutMs: 300000, maxDurationMs: 0, backgroundGraceMs: 900000, questionReminderMs: 600000, progressStaleMs: 180000, progressNotifyCooldownMs: 300000, progressStaleLimitMs: 7200000, repeatedToolThreshold: 6, interruptAckTimeoutMs: 5000, workspaceMode: 'host' as const, projectRoot: '', resourceRetentionDays: 7 },
@@ -117,7 +121,7 @@ export function validateTree(value: unknown, template: unknown, prefix: string):
       if (!Array.isArray(item) || (!item.length && key !== 'allowedOrigins') || item.some(v => typeof v !== 'string')) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a string array`);
     } else if (expected && typeof expected === 'object') validateTree(item, expected, where);
     else if (typeof item !== typeof expected) throw new OrchestrationError('INVALID_CONFIG', `Invalid ${where}`);
-    else if (typeof item === 'number' && (!Number.isSafeInteger(item) || item < (['maxDurationMs', 'progressStaleLimitMs'].includes(key) ? 0 : 1) || item > 2147483647)) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a positive bounded integer`);
+    else if (typeof item === 'number' && (!Number.isSafeInteger(item) || item < (['maxDurationMs', 'progressStaleLimitMs', 'inputDebounceMs'].includes(key) ? 0 : 1) || item > 2147483647)) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a positive bounded integer`);
   }
 }
 export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVoice?: AgentVoiceConfig) {
@@ -139,6 +143,8 @@ export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVo
       turns: { ...d.voice.turns, ...voice?.turns }, playback: { ...d.voice.playback, ...voice?.playback } },
   };
   for (const role of ['tts', 'stt', 'notes'] as const) result.voice[role].provider = canonicalVoiceProvider(result.voice[role].provider);
+  if (result.conversation.inputDebounceMs > result.conversation.inputMaxWaitMs || result.conversation.inputMaxWaitMs > 30000)
+    throw new OrchestrationError('INVALID_CONFIG', 'inputDebounceMs must not exceed inputMaxWaitMs, which must be at most 30000');
   const admission = result.providerAdmission;
   if (admission.failureThreshold > 100 || admission.initialCooldownMs > admission.secondCooldownMs || admission.secondCooldownMs > admission.maxCooldownMs || admission.probeLeaseMs < 1000)
     throw new OrchestrationError('INVALID_CONFIG', 'Invalid provider admission thresholds, cooldown order or probe lease');
