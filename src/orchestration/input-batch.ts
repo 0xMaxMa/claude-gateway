@@ -1,11 +1,13 @@
 import { AcceptInput, OrchestrationStore, Row, payloadHash } from './store';
+import { isChatChannel } from '../history/types';
 
-/** Only human text/photo bursts on chat channels. Commands, API requests and
- * live/recorded voice retain their existing immediate/control semantics. */
+/** Only human text/photo bursts on chat channels. Builtin commands never reach
+ * the mailbox and skills are resolved at ingress, so neither needs a text rule.
+ * API requests and live/recorded voice retain their immediate/control semantics. */
 export function batchableInput(input: AcceptInput): boolean {
-  return ['telegram', 'discord', 'line', 'slack'].includes(input.scope.source)
+  return isChatChannel(input.scope.source)
     && input.storeUserMessage !== false && (!input.modality || input.modality === 'text')
-    && !input.requestId && !input.skill && !/^\s*\//.test(input.text)
+    && !input.requestId && !input.skill
     && !input.metadata?.executionTaskId && !input.metadata?.recoveryBatch;
 }
 

@@ -6,7 +6,7 @@ const base:AcceptInput={scope,text:'first fragment',capabilities:{execute:true,w
 
 test.each([
   {storeUserMessage:false}, {modality:'live_voice' as const}, {modality:'voice_note' as const},
-  {text:'/stop'}, {requestId:'request'}, {scope:{...scope,source:'api' as const}},
+  {skill:{name:'fixture-skill',args:'',content:'',filePath:'/fixture/SKILL.md'}}, {requestId:'request'}, {scope:{...scope,source:'api' as const}},
   {metadata:{executionTaskId:'task'}},
 ])('controls and independently scoped requests bypass batching: %j',change=>{
   expect(batchableInput({...base,...change})).toBe(false);
@@ -14,7 +14,7 @@ test.each([
 
 test.each([
   {model:'different-model'}, {capabilities:{execute:false,writeMemory:false}},
-  {scope:{...scope,principalId:'other'}}, {metadata:{repliedMessageId:'other-message'}}, {text:'/stop'},
+  {scope:{...scope,principalId:'other'}}, {metadata:{repliedMessageId:'other-message'}}, {skill:{name:'fixture-skill',args:'',content:'',filePath:'/fixture/SKILL.md'}},
 ])('a boundary stops the batch without swallowing the next request: %j',change=>{
   const store=new OrchestrationStore(':memory:','a');
   try{
@@ -54,5 +54,19 @@ test('a burst stays within the worker context-reference limit without dropping l
     const batch=inputBatch(store,store.get('SELECT * FROM conversation_inputs WHERE id=?',first.inputId)!,1500,8000);
     expect(batch.inputIds).toHaveLength(64);
     expect(store.get("SELECT count(*) n FROM conversation_inputs WHERE status='accepted'")!.n).toBe(71);
+  }finally{store.close();}
+});
+
+test.each(['telegram','discord','line','slack','whatsapp','whatsapp_cloud','wechat'] as const)('every chat channel batches human text: %s',source=>{
+  expect(batchableInput({...base,scope:{...scope,source}})).toBe(true);
+});
+
+test('text that merely starts with a slash is ordinary user text, not a command',()=>{
+  // Builtin commands are answered before the mailbox and skills are tagged at ingress.
+  expect(batchableInput({...base,text:'/home/user/app.log check this file'})).toBe(true);
+  const store=new OrchestrationStore(':memory:','a');
+  try{
+    const first=store.acceptInput(base),second=store.acceptInput({...base,text:'/home/user/app.log too'});
+    expect(inputBatch(store,store.get('SELECT * FROM conversation_inputs WHERE id=?',first.inputId)!,1500,8000).inputIds).toEqual([first.inputId,second.inputId]);
   }finally{store.close();}
 });
