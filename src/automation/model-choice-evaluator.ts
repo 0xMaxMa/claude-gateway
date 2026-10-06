@@ -8,7 +8,8 @@ export const DEFAULT_COMPUTER_MODEL_TIMEOUT_MS = 20000;
 /** Self-reported model confidence is not calibrated like Jev's probabilities, so the model
  * backend needs more than readChoice's 0.55 gate. Below this, a choice is reported unconfident. */
 export const DEFAULT_COMPUTER_MIN_CONFIDENCE = 0.7;
-const MAX_INPUT_BYTES = 131072, MAX_RESPONSE_BYTES = 65536;
+const MAX_INPUT_BYTES = 131072;
+const MAX_RESPONSE_BYTES = 65536;
 
 /** `bearer` is ANTHROPIC_AUTH_TOKEN; `oauth` is CLAUDE_CODE_OAUTH_TOKEN (Claude subscription login). */
 export interface ModelConnection { baseUrl: string; apiKey: string; scheme: 'x-api-key' | 'bearer' | 'oauth' }
@@ -23,10 +24,10 @@ export function modelAuthHeaders(connection: ModelConnection, endpoint: URL): Re
   if (connection.scheme === 'oauth' && anthropicHost(endpoint)) throw new Error(COMPUTER_MODEL_OAUTH_UNSUPPORTED);
   return { authorization: `Bearer ${connection.apiKey}` };
 }
-/** The field-filling Thinking helper always authenticates with x-api-key. That works for an API key
- * and for a proxy route that accepts it; a Bearer-only identity sent directly to Anthropic does not. */
+/** The Thinking helper sends the same header as modelAuthHeaders (x-api-key or Bearer), so the only
+ * unsupported combination is the same one: a subscription OAuth token sent directly to Anthropic. */
 export function thinkingCredentialSupported(connection: ModelConnection, endpoint: URL): boolean {
-  return connection.scheme === 'x-api-key' || !anthropicHost(endpoint);
+  return connection.scheme !== 'oauth' || !anthropicHost(endpoint);
 }
 export interface ModelEvaluationEvent {
   requestId: string; model: string; elapsedMs: number; outcome: 'completed' | 'failed'; errorCode?: JevErrorCode | typeof COMPUTER_MODEL_OAUTH_UNSUPPORTED;
@@ -161,7 +162,7 @@ export async function evaluateWithModel(request: Request, options: ModelChoiceOp
   } finally {
     try {
       options.onEvaluation?.({ requestId: createHash('sha256').update(request.requestId).digest('hex').slice(0, 16), model: options.model, elapsedMs: Date.now() - startedAt,
-        outcome: failure ? 'failed' : 'completed', errorCode: failure instanceof JevError ? failure.code : failure && COMPUTER_MODEL_OAUTH_UNSUPPORTED,
+        outcome: failure ? 'failed' : 'completed', errorCode: failure instanceof JevError ? failure.code : failure ? COMPUTER_MODEL_OAUTH_UNSUPPORTED : undefined,
         validationReason: failure instanceof JevError ? failure.metadata.validationReason : undefined, usage, inputBytes, options: optionCount });
     } catch { /* Diagnostics cannot change a decision outcome. */ }
   }

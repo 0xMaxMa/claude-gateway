@@ -38,9 +38,9 @@ export function computerThinking(gateway: GatewayConfig, agent: AgentConfig): Br
   if (configured || computerDecisions(gateway, agent) !== 'model') return configured;
   return { resolve: async () => {
     const identity = agentIdentity('Computer Use'), url = messagesEndpoint(identity.baseUrl);
-    // Thinking sends x-api-key; refuse rather than send a Bearer-only token in the wrong header.
+    // OAuth tokens are refused direct to Anthropic; the others are sent in the header their identity requires.
     if (!thinkingCredentialSupported(identity, url)) throw new Error(COMPUTER_MODEL_OAUTH_UNSUPPORTED);
     url.pathname = url.pathname.replace(/\/messages$/, '');
-    return { api: 'anthropic-messages', baseUrl: url.toString().replace(/\/$/, ''), model: computerModel(gateway), apiKey: identity.apiKey };
+    return { api: 'anthropic-messages', baseUrl: url.toString().replace(/\/$/, ''), model: computerModel(gateway), apiKey: identity.apiKey, authScheme: identity.scheme === 'x-api-key' ? 'x-api-key' : 'bearer' };
   } };
 }

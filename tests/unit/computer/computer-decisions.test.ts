@@ -98,7 +98,7 @@ describe('decision dispatch', () => {
     expect(computerThinking(withHelper, agentConfig())).toBe(configured);
     const fallback = computerThinking(gatewayConfig(false, undefined, true, { model: 'claude-sonnet-5' }), agentConfig()) as { resolve: () => Promise<any> };
     const resolved = await fallback.resolve();
-    expect(resolved).toEqual({ api: 'anthropic-messages', baseUrl: 'https://api.getpod.test/v1', model: 'claude-sonnet-5', apiKey: TOKEN });
+    expect(resolved).toEqual({ api: 'anthropic-messages', baseUrl: 'https://api.getpod.test/v1', model: 'claude-sonnet-5', apiKey: TOKEN, authScheme: 'bearer' });
   });
 
   describe('credential paths', () => {
@@ -141,7 +141,7 @@ describe('decision dispatch', () => {
       expect(logged).toContain(`"errorCode":"${COMPUTER_MODEL_OAUTH_UNSUPPORTED}"`);
       expect(logged).not.toContain(TOKEN);
     });
-    test('Thinking fallback (always x-api-key) refuses a Bearer-only identity sent directly to Anthropic', async () => {
+    test('Thinking fallback refuses an OAuth token sent directly to Anthropic', async () => {
       const thinking = () => (computerThinking(gatewayConfig(false, undefined, true), agentConfig()) as { resolve: () => Promise<any> }).resolve();
       settings.mockReturnValue({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com', CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
       await expect(thinking()).rejects.toThrow(COMPUTER_MODEL_OAUTH_UNSUPPORTED);
@@ -149,6 +149,13 @@ describe('decision dispatch', () => {
       await expect(thinking()).resolves.toMatchObject({ baseUrl: 'https://api.anthropic.com/v1', apiKey: TOKEN });
       settings.mockReturnValue({ ANTHROPIC_BASE_URL: 'https://proxy.getpod.test', CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
       await expect(thinking()).resolves.toMatchObject({ baseUrl: 'https://proxy.getpod.test/v1' });
+    });
+    test('Thinking fallback carries the identity scheme so ANTHROPIC_AUTH_TOKEN is sent as Bearer', async () => {
+      const thinking = () => (computerThinking(gatewayConfig(false, undefined, true), agentConfig()) as { resolve: () => Promise<any> }).resolve();
+      settings.mockReturnValue({ ANTHROPIC_BASE_URL: 'https://proxy.getpod.test/anthropic', ANTHROPIC_AUTH_TOKEN: TOKEN });
+      await expect(thinking()).resolves.toMatchObject({ apiKey: TOKEN, authScheme: 'bearer' });
+      settings.mockReturnValue({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_API_KEY: TOKEN });
+      await expect(thinking()).resolves.toMatchObject({ apiKey: TOKEN, authScheme: 'x-api-key' });
     });
   });
 
