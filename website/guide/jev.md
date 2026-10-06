@@ -601,7 +601,7 @@ Answers to field questions keep the one-command path.
 
 ## Fresh-state decisions
 
-Browser Use and Computer Use select actions with Jev using fresh MCP observations.
+Browser Use and Computer Use select actions with Jev (Computer Use can use the agent model instead, see [Computer Use without Jev](#computer-use-without-jev)) using fresh MCP observations.
 Experience Packs and learning have been removed: no registry downloads, stored
 hints or learned rules are used. Remove the former `gateway.jev.experience` setting
 from existing configuration. Existing experience cache directories are unused.

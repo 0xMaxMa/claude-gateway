@@ -106,6 +106,8 @@ request IDs and trusted operator agent controls are described in the
 Paired desktop MCP connectors can also run through Jev as Gateway-managed
 Computer Use tasks, with local application consent and the same shared Thinking
 configuration. See [Computer Use connectors](website/guide/jev.md#computer-use-connectors).
+Without Jev, Computer Use can instead decide each step with the agent's own model via
+`gateway.computerUse`; see [Computer Use without Jev](website/guide/jev.md#computer-use-without-jev).
 
 ### Computer Use consent
 

@@ -51,4 +51,4 @@ Save the returned session identifier if you need to continue that session; send 
 
 The gateway mounts router-local `/v1/...` paths under `/api`, so public URLs use `/api/v1/...`. Root endpoints such as `/health` and `/dashboard` retain their own paths. Use the [HTTP API reference](/api/) for complete schemas, SSE events, error codes and authorization rules, including [tasks](/api/tasks), [voice](/api/voice), [apps](/api/apps) and [connectors](/api/connectors).
 
-`GET /api/v1/connectors` includes `capabilities.computerUseTasks: true` when the installed Gateway supports managed Computer Use. Clients should check this before pairing a computer; this protocol capability does not imply Jev configuration or local application permission is ready.
+`GET /api/v1/connectors` includes `capabilities.computerUseTasks: true` when the installed Gateway supports managed Computer Use. Clients should check this before pairing a computer; this protocol capability does not imply that a Computer Use decision backend (Jev or the agent model via `gateway.computerUse`) is configured or that local application permission is granted.

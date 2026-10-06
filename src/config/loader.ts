@@ -78,7 +78,7 @@ function validEnabledOnly(value: unknown): boolean {
   if (value === undefined) return true;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const entries = Object.entries(value as Record<string, unknown>);
-  return entries.every(([key, v]) => key === 'enabled' && typeof v === 'boolean') ;
+  return entries.every(([key, v]) => key === 'enabled' && typeof v === 'boolean');
 }
 
 /**
