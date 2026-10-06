@@ -1,5 +1,5 @@
 import {mkdtempSync,rmSync} from 'fs';import {tmpdir} from 'os';import {join} from 'path';
-import {ComputerTaskAdapter} from '../../../src/orchestration/gateway-tasks/computer';
+import {ComputerTaskAdapter,COMPUTER_GOAL_MAX_STEPS} from '../../../src/orchestration/gateway-tasks/computer';
 import {withComputerConnection} from '../../../src/jev/computer-connector';
 jest.mock('../../../src/jev/computer-connector',()=>({withComputerConnection:jest.fn()}));
 jest.mock('../../../src/automation/computer-use',()=>({runComputerUse:jest.fn(async()=>({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:0}))}));
@@ -99,20 +99,22 @@ test('the user\'s next command answers the hand-off confirmation; the spawn roun
  const callTool=jest.fn(async()=>({content:[{type:'text',text:'{"state":"approved"}'}]}));
  jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
  const connectors={get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})};
- const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true});
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true,decisionMode:()=>'model'});
  const settle=async(task:any,request:string)=>{for(let i=0;i<50;i++){if(typeof await adapter.inspect(task,request)==='object')return;await new Promise(r=>setImmediate(r));}};
  try{
   const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,automationController:'user',gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
   await adapter.submit(task,'r1','เปิด Computer Use session รอคำสั่งถัดไปจากผู้ใช้');await settle(task,'r1');
-  expect(runComputerUse.mock.calls[0][0]).toMatchObject({sessionStart:true});
+  // The agent's goal runs to the goal within a bounded number of actions (pod-jinawong: it stopped after opening Chrome).
+  expect(runComputerUse.mock.calls[0][0]).toMatchObject({sessionStart:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS});
+  expect(runComputerUse.mock.calls[0][1].decisionMode()).toBe('model');
   runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{deps.observation({generation:'g',application:'com.google.Chrome',controls:[],apps:[],truncated:false});return {status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1,lastAction:{kind:'press',label:'Quit Google Chrome',blocked:true,confirm:true}};});
   const handoff={...task,revision:2,executionControl:{revision:2,agentHandoff:true}};
   await adapter.submit(handoff,'r2','quit chrome');await settle(handoff,'r2');
   expect(runComputerUse.mock.calls[1][0]).toMatchObject({agentCommand:true});
-  expect(runComputerUse.mock.calls[1][0].sessionStart).toBeUndefined();
+  expect(runComputerUse.mock.calls[1][0].sessionStart).toBeUndefined();expect(runComputerUse.mock.calls[1][0].runToGoal).toBeUndefined();
   const reply={...task,revision:3,executionControl:{revision:3}};
   await adapter.submit(reply,'r3','ใช่');await settle(reply,'r3');
-  expect(runComputerUse.mock.calls[2][0]).toMatchObject({goal:'ใช่',confirmation:{command:'quit chrome',label:'Quit Google Chrome'}});
+  expect(runComputerUse.mock.calls[2][0]).toMatchObject({goal:'ใช่',confirmation:{command:'quit chrome',label:'Quit Google Chrome'}});expect(runComputerUse.mock.calls[2][0].runToGoal).toBeUndefined();
   // Asked once: the round after the answer carries no question.
   const next={...task,revision:4,executionControl:{revision:4}};
   await adapter.submit(next,'r4','scroll down');await settle(next,'r4');
