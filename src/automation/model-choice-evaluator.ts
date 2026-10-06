@@ -15,7 +15,12 @@ const MAX_RESPONSE_BYTES = 65536;
 export interface ModelConnection { baseUrl: string; apiKey: string; scheme: 'x-api-key' | 'bearer' | 'oauth' }
 /** Claude subscription OAuth tokens are not accepted for direct Messages calls by this gateway. */
 export const COMPUTER_MODEL_OAUTH_UNSUPPORTED = 'COMPUTER_MODEL_OAUTH_UNSUPPORTED';
-const anthropicHost = (url: URL) => url.hostname === 'anthropic.com' || url.hostname.endsWith('.anthropic.com');
+// A trailing dot (api.anthropic.com.) is the same DNS name, so it must not slip past the check.
+const anthropicHost = (url: URL) => { const host = url.hostname.toLowerCase().replace(/\.+$/, ''); return host === 'anthropic.com' || host.endsWith('.anthropic.com'); };
+/** The one auth-scheme mapping: x-api-key stays x-api-key; bearer and oauth (proxy only) go as Bearer. */
+export const wireAuthScheme = (connection: ModelConnection): 'x-api-key' | 'bearer' => connection.scheme === 'x-api-key' ? 'x-api-key' : 'bearer';
+/** Base URL (the Messages endpoint minus /messages) that the Thinking helper re-appends /messages to. */
+export const messagesBaseUrl = (endpoint: URL): string => { const url = new URL(endpoint); url.pathname = url.pathname.replace(/\/messages$/, ''); return url.toString().replace(/\/$/, ''); };
 /** A subscription OAuth token is never sent directly to Anthropic; every other identity/endpoint pair is allowed.
  * One predicate for modelAuthHeaders and the Thinking helper, so the two paths cannot disagree. */
 export function credentialSupported(connection: ModelConnection, endpoint: URL): boolean {
@@ -27,7 +32,7 @@ export function credentialSupported(connection: ModelConnection, endpoint: URL):
  * No other gateway path adds OAuth-specific headers (e.g. anthropic-beta), so oauth == bearer on a proxy. */
 export function modelAuthHeaders(connection: ModelConnection, endpoint: URL): Record<string, string> {
   if (!credentialSupported(connection, endpoint)) throw new Error(COMPUTER_MODEL_OAUTH_UNSUPPORTED);
-  if (connection.scheme === 'x-api-key') return { 'x-api-key': connection.apiKey };
+  if (wireAuthScheme(connection) === 'x-api-key') return { 'x-api-key': connection.apiKey };
   return { authorization: `Bearer ${connection.apiKey}` };
 }
 export interface ModelEvaluationEvent {
@@ -85,11 +90,11 @@ export function decisionData(request: Request): string {
   return `<decision_data>\n${json}\n</decision_data>`;
 }
 
-export function modelRequestBody(request: Request, model: string) {
+export function modelRequestBody(request: Request, model: string, content = decisionData(request)) {
   const count = Object.keys(request.questions).length;
   return {
     model, max_tokens: Math.min(1024, 128 + 64 * count), temperature: 0, system: MODEL_CHOICE_SYSTEM,
-    messages: [{ role: 'user', content: decisionData(request) }],
+    messages: [{ role: 'user', content }],
     tools: [answerTool(request)], tool_choice: { type: 'tool', name: 'answer' },
   };
 }
@@ -144,7 +149,7 @@ export async function evaluateWithModel(request: Request, options: ModelChoiceOp
     const response = await (options.fetch ?? fetch)(endpoint, {
       method: 'POST', redirect: 'error', signal: combined,
       headers: { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', ...auth },
-      body: JSON.stringify(modelRequestBody(request, options.model)),
+      body: JSON.stringify(modelRequestBody(request, options.model, content)),
     });
     // Provider prose can echo request content; only the status is kept.
     if (!response.ok) { void response.body?.cancel().catch(() => undefined); throw new JevError(statusCode(response.status), `Model decision failed (HTTP ${response.status}).`, { status: response.status }); }

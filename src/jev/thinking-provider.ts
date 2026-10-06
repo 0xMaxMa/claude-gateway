@@ -13,5 +13,7 @@ export async function thinkingProvider(config:BrowserTextHelperConfig):Promise<T
 /** Provider transport/config errors are blockers, never a request for missing user facts. */
 export function thinkingFailure(error:unknown):Error {
  const code=error instanceof Error?error.message:'';
- return Error(/^THINKING_(?:HTTP_[0-9]{3}|[A-Z_]{1,64})$/.test(code)?code:'THINKING_PROVIDER_FAILED');
+ // Config the user must fix keeps its own code (Computer Use identity/endpoint resolution), without the underlying message.
+ if((error as {code?:unknown})?.code==='INVALID_CONFIG')return Error('INVALID_CONFIG');
+ return Error(/^THINKING_(?:HTTP_[0-9]{3}|[A-Z_]{1,64})$/.test(code)||code==='COMPUTER_MODEL_OAUTH_UNSUPPORTED'?code:'THINKING_PROVIDER_FAILED');
 }

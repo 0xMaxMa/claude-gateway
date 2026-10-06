@@ -3,9 +3,10 @@ import type { ComputerUseDependencies } from '../automation/computer-use';
 import type { ThinkingConfig } from '../../lib/automation/thinking.cjs';
 import type { BrowserTextHelperConfig } from '../jev/browser-contract';
 import { evaluateComputerChoices } from '../automation/computer-choice-ids';
-import { DEFAULT_COMPUTER_MIN_CONFIDENCE, DEFAULT_COMPUTER_MODEL, DEFAULT_COMPUTER_MODEL_TIMEOUT_MS, COMPUTER_MODEL_OAUTH_UNSUPPORTED, evaluateWithModel, messagesEndpoint, credentialSupported } from '../automation/model-choice-evaluator';
+import { DEFAULT_COMPUTER_MIN_CONFIDENCE, DEFAULT_COMPUTER_MODEL, DEFAULT_COMPUTER_MODEL_TIMEOUT_MS, COMPUTER_MODEL_OAUTH_UNSUPPORTED, evaluateWithModel, messagesEndpoint, messagesBaseUrl, wireAuthScheme, credentialSupported } from '../automation/model-choice-evaluator';
 import type { JevService } from '../jev/service';
 import type { JevRequest } from '../jev/types';
+import { createLogger } from '../logger';
 import { agentIdentity, computerDecisions, gatewayJev } from './jev-gateway';
 import type { TaskSnapshot } from './types';
 
@@ -17,8 +18,12 @@ const computerModel = (gateway: GatewayConfig) => gateway.gateway.computerUse?.m
  * choice IDs and readChoice validation via evaluateComputerChoices. */
 export function computerEvaluator(gateway: GatewayConfig, agent: AgentConfig, member: (task: TaskSnapshot) => boolean,
   jev: () => Pick<JevService, 'evaluate'> = () => gatewayJev(gateway).service, fetchImpl?: typeof fetch): Evaluate {
+  let log: ReturnType<typeof createLogger> | undefined;
+  const logger = () => log ??= createLogger(agent.id, gateway.gateway.logDir);
   return (task, request, signal) => {
     const backend = computerDecisions(gateway, agent);
+    // No backend is allowed: reject here rather than falling into Jev, and never authorize (undefined === undefined).
+    if (backend === undefined) return Promise.reject(Error('COMPUTER_NOT_ALLOWED'));
     // A live config change to the other backend (or off) revokes an in-flight decision.
     const authorize = () => member(task) && computerDecisions(gateway, agent) === backend;
     if (backend === 'model') return evaluateComputerChoices(request, wire => evaluateWithModel(wire, {
@@ -26,7 +31,11 @@ export function computerEvaluator(gateway: GatewayConfig, agent: AgentConfig, me
       minConfidence: gateway.gateway.computerUse?.minConfidence ?? DEFAULT_COMPUTER_MIN_CONFIDENCE,
       connection: async () => agentIdentity('Computer Use'), authorize, fetch: fetchImpl,
       // Codes, sizes and token counts only; never request content or credentials.
-      onEvaluation: event => console[event.outcome === 'failed' ? 'warn' : 'log'](JSON.stringify({ event: 'computer_model_evaluation', agentId: agent.id, taskId: task.taskId, ...event })),
+      onEvaluation: event => {
+        const entry = { agentId: agent.id, taskId: task.taskId, ...event };
+        if (event.outcome === 'failed') console.warn(JSON.stringify({ event: 'computer_model_evaluation', ...entry }));
+        else logger().debug('computer_model_evaluation', entry);
+      },
     }, signal));
     return evaluateComputerChoices(request, wire => jev().evaluate(wire as JevRequest, { principalId: task.ownerPrincipalId, agentId: agent.id, sessionId: task.agentSessionId, taskId: task.taskId, consumer: 'computer', signal, authorize }));
   };
@@ -38,9 +47,8 @@ export function computerThinking(gateway: GatewayConfig, agent: AgentConfig): Br
   if (configured || computerDecisions(gateway, agent) !== 'model') return configured;
   return { resolve: async () => {
     const identity = agentIdentity('Computer Use'), url = messagesEndpoint(identity.baseUrl);
-    // Same mapping as modelAuthHeaders: x-api-key stays x-api-key; bearer and oauth (proxy only) are Bearer. OAuth direct to Anthropic is refused.
+    // OAuth direct to Anthropic is refused; the scheme mapping is shared with modelAuthHeaders.
     if (!credentialSupported(identity, url)) throw new Error(COMPUTER_MODEL_OAUTH_UNSUPPORTED);
-    url.pathname = url.pathname.replace(/\/messages$/, '');
-    return { api: 'anthropic-messages', baseUrl: url.toString().replace(/\/$/, ''), model: computerModel(gateway), apiKey: identity.apiKey, authScheme: identity.scheme === 'x-api-key' ? 'x-api-key' : 'bearer' };
+    return { api: 'anthropic-messages', baseUrl: messagesBaseUrl(url), model: computerModel(gateway), apiKey: identity.apiKey, authScheme: wireAuthScheme(identity) };
   } };
 }

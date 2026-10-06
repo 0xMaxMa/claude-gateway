@@ -1,5 +1,6 @@
 jest.mock('../../../src/config/claude-settings', () => ({ claudeSettingsEnv: jest.fn() }));
 import { claudeSettingsEnv } from '../../../src/config/claude-settings';
+import { configureLogging, resetLoggingForTests } from '../../../src/logger';
 import { agentIdentity, computerDecisions } from '../../../src/orchestration/jev-gateway';
 import { computerEvaluator, computerThinking } from '../../../src/orchestration/computer-decisions';
 import { COMPUTER_MODEL_OAUTH_UNSUPPORTED, DEFAULT_COMPUTER_MODEL } from '../../../src/automation/model-choice-evaluator';
@@ -76,9 +77,17 @@ describe('decision dispatch', () => {
     expect((result.answers.action as any)).toMatchObject({ choice: 'press:k1', confidence: 0.9 });
     expect(jev).not.toHaveBeenCalled();
     expect(fetch).toHaveBeenCalledTimes(1);
-    const logged = log.mock.calls.map(c => String(c[0])).join('\n');
+    // Successful decisions go through the Logger at debug level, not console.log.
+    expect(log).not.toHaveBeenCalled();
+    const lines: string[] = [];
+    configureLogging({ level: 'debug' } as any);
+    jest.spyOn(process.stdout, 'write').mockImplementation((chunk: any) => { lines.push(String(chunk)); return true; });
+    await run(task, request, new AbortController().signal);
+    const logged = lines.join('\n');
     expect(logged).toContain('computer_model_evaluation');
+    expect(logged).toContain('"level": "debug"');
     expect(logged).not.toContain(TOKEN);
+    resetLoggingForTests();
   });
 
   test('switching the backend or losing membership mid-call revokes the decision', async () => {
@@ -156,6 +165,34 @@ describe('decision dispatch', () => {
       await expect(thinking()).resolves.toMatchObject({ apiKey: TOKEN, authScheme: 'bearer' });
       settings.mockReturnValue({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_API_KEY: TOKEN });
       await expect(thinking()).resolves.toMatchObject({ apiKey: TOKEN, authScheme: 'x-api-key' });
+    });
+  });
+
+  describe('fail-closed dispatch and hostname normalization', () => {
+    test('with Computer Use off, no backend is reachable: COMPUTER_NOT_ALLOWED, Jev and model never called', async () => {
+      const evaluate = jest.fn(), fetch = jest.fn();
+      for (const config of [gatewayConfig(undefined, undefined, undefined), gatewayConfig(false, undefined, false), gatewayConfig(true, false, undefined)]) {
+        const error = await computerEvaluator(config, agentConfig(), () => true, () => ({ evaluate }), fetch as any)(task, request, new AbortController().signal).catch(e => e);
+        expect(error).toMatchObject({ message: 'COMPUTER_NOT_ALLOWED' });
+      }
+      expect(evaluate).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+    });
+    test('authorize handed to Jev is revoked when the backend goes away mid-task (undefined !== jev)', async () => {
+      const config = gatewayConfig(true, undefined, undefined);
+      let seen: (() => boolean) | undefined;
+      const evaluate = jest.fn(async (_w: any, o: any) => { seen = o.authorize; return jevAnswer; });
+      await computerEvaluator(config, agentConfig(), () => true, () => ({ evaluate } as any))(task, request, new AbortController().signal);
+      expect(seen!()).toBe(true);
+      delete (config.gateway as any).jev;
+      expect(seen!()).toBe(false);
+    });
+    test.each(['https://api.anthropic.com./', 'https://API.ANTHROPIC.COM../v1', 'https://anthropic.com./'])('OAuth token to %s is still refused as direct Anthropic', async base => {
+      settings.mockReturnValue({ ANTHROPIC_BASE_URL: base, CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
+      jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const fetch = jest.fn();
+      const error = await computerEvaluator(gatewayConfig(false, undefined, true), agentConfig(), () => true, undefined, fetch as any)(task, request, new AbortController().signal).catch(e => e);
+      expect(error.message).toBe(COMPUTER_MODEL_OAUTH_UNSUPPORTED);
+      expect(fetch).not.toHaveBeenCalled();
     });
   });
 
