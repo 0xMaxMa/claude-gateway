@@ -83,6 +83,15 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `GET` | `/api/v1/agents/:agentId/files/:filename` | Key | Read a workspace file |
 | `PUT` | `/api/v1/agents/:agentId/files/:filename` | Write | Write a workspace file |
 
+## Projects API {#projects-api}
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/projects` | Pod key | List projects under `~/projects` |
+| `POST` | `/api/v1/projects` | Pod key + Write | Create a project directory, optionally with `git init` |
+| `GET` | `/api/v1/projects/:name/tree` | Pod key | List one directory level of a project |
+| `GET` | `/api/v1/projects/:name/file` | Pod key | Read a file from a project |
+
 ## Telegram Channel API {#telegram-channel-api}
 
 | Method | Path | Auth | Description |

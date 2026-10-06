@@ -77,6 +77,7 @@ export default defineConfig({
         ] },
         { text: 'History', link: '/api/history' },
         { text: 'Workspace files', link: '/api/workspace' },
+        { text: 'Projects', link: '/api/projects' },
         { text: 'Skills', link: '/api/skills' },
         { text: 'Cron jobs', link: '/api/crons' },
         { text: 'Media', link: '/api/media' },
