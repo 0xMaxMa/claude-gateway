@@ -39,6 +39,7 @@ describe('GET /api/v1/capabilities', () => {
       version: expect.any(String),
       capabilities: {
         cross_channel_message: expect.any(Array),
+        projects: expect.any(Array),
       },
     });
     expect(res.body.version.length).toBeGreaterThan(0);
@@ -57,6 +58,11 @@ describe('GET /api/v1/capabilities', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.capabilities.cross_channel_message).toContain('telegram');
+  });
+
+  it('advertises project list/create/read', async () => {
+    const res = await request(buildApp(apiKeys)).get('/api/v1/capabilities').set(AUTH);
+    expect(res.body.capabilities.projects).toEqual(['list', 'create', 'read']);
   });
 
   it('only advertises channel identifiers the gateway itself uses', () => {

@@ -163,7 +163,8 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/capabilities 
 {
   "version": "2.0.9",
   "capabilities": {
-    "cross_channel_message": ["telegram", "discord", "line", "slack", "whatsapp", "whatsapp_cloud", "wechat"]
+    "cross_channel_message": ["telegram", "discord", "line", "slack", "whatsapp", "whatsapp_cloud", "wechat"],
+    "projects": ["list", "create", "read"]
   }
 }
 ```
@@ -175,12 +176,14 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/capabilities 
 | `version` | `string` | The gateway's `package.json` version. **Informational only** — never gate a feature on it; use the capability keys. |
 | `capabilities` | `object` | One entry per supported feature. A key that is **absent** means the feature is **not** supported. |
 | `capabilities.cross_channel_message` | `string[]` | Channel identifiers for which a client may inject a message into a session that belongs to that channel via `POST /api/v1/agents/:agentId/chats/:chatId/sessions/:sessionId/messages`. The injected message is delivered into the session and echoed to the channel's conversation so its users see what was sent from elsewhere. A channel is listed only once that round-trip actually works for it. |
+| `capabilities.projects` | `string[]` | Operations of the [Projects API](/api/projects) this build serves. |
 
 ### Capability keys
 
 | Key | Value | Meaning |
 |-----|-------|---------|
 | `cross_channel_message` | `string[]` of channel ids | Cross-channel message injection is supported for sessions whose channel is in the array. Currently every channel the gateway supports: `["telegram", "discord", "line", "slack", "whatsapp", "whatsapp_cloud", "wechat"]` — the web→channel echo fires for all of them. |
+| `projects` | `string[]` of operations | The [Projects API](/api/projects) is served. Currently `["list", "create", "read"]`. Later releases append values (for example `"git"`), so check `includes("list")` before showing project browsing. |
 
 Channel identifiers are the gateway's canonical channel names — the same strings a
 session reports as its `channel` — drawn from `CHAT_CHANNELS` in
@@ -199,8 +202,8 @@ use one of these; there is no fourth.
 | `string[]` | A feature supported for an enumerated set (channels, formats, providers) | `value.includes(x)` — an **empty array means supported by nothing** | `"cross_channel_message": ["telegram"]` |
 | `object` | A feature with parameters or limits; the fields inside are themselves additive-only | key present ⇒ supported; read the fields you know, treat a **missing field as unknown** and behave conservatively | `"attachments": { "max_bytes": 20971520, "mime_types": ["image/png"] }` |
 
-The examples other than `cross_channel_message` are **illustrative only** — they are
-not served by the gateway today. The real response currently contains exactly one key.
+The examples other than `cross_channel_message` and `projects` are **illustrative only**.
+The gateway does not serve them today.
 
 Rules that hold for every key, now and later:
 
@@ -246,6 +249,7 @@ interface GatewayCapabilities {
   version: string; // informational — do not gate on it
   capabilities: {
     cross_channel_message?: ChatChannel[];
+    projects?: string[];
     // future keys are added here; every one stays optional
   };
 }

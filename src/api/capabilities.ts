@@ -37,11 +37,19 @@ import { GATEWAY_VERSION } from './gateway-version';
  */
 export const CROSS_CHANNEL_MESSAGE_CHANNELS: readonly ChatChannel[] = [...CHAT_CHANNELS];
 
+/**
+ * Project browsing operations served by projects-router.ts. Later phases
+ * append values; clients gate the feature on `includes('list')`.
+ */
+export const PROJECTS_CAPABILITIES = ['list', 'create', 'read'] as const;
+export type ProjectsCapability = (typeof PROJECTS_CAPABILITIES)[number];
+
 export interface CapabilitiesResponse {
   /** Gateway version from package.json. Informational — clients should key off `capabilities`, not parse this. */
   version: string;
   capabilities: {
     cross_channel_message: ChatChannel[];
+    projects: ProjectsCapability[];
   };
 }
 
@@ -50,6 +58,7 @@ export function buildCapabilitiesResponse(version: string = GATEWAY_VERSION): Ca
     version,
     capabilities: {
       cross_channel_message: [...CROSS_CHANNEL_MESSAGE_CHANNELS],
+      projects: [...PROJECTS_CAPABILITIES],
     },
   };
 }

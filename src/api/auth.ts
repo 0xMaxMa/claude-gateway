@@ -68,6 +68,14 @@ export function canWriteAgent(apiKey: ApiKey, agentId: string): boolean {
 }
 
 /**
+ * Returns true if the key may read pod-wide data that belongs to no single
+ * agent (e.g. ~/projects): admin, or scoped to every agent.
+ */
+export function canAccessPod(apiKey: ApiKey): boolean {
+  return apiKey.admin === true || apiKey.agents === '*';
+}
+
+/**
  * Returns true if the key has admin privileges (cross-agent + destructive ops).
  */
 export function isAdmin(apiKey: ApiKey): boolean {
