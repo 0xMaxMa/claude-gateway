@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -222,6 +223,12 @@ describe('readFileContent', () => {
     if (!res.ok) throw new Error(res.error);
     expect(res.value).toMatchObject({ kind: 'text', path: 'alias', content: 'hi' });
   });
+
+  it('refuses a FIFO as not_a_file without blocking on open', async () => {
+    const dir = makeProject('p');
+    execFileSync('mkfifo', [path.join(dir, 'pipe')]);
+    expect(await readFileContent(root, name('p'), rel('pipe'))).toEqual({ ok: false, error: 'not_a_file' });
+  }, 5000);
 
   it('maps a directory to not_a_file', async () => {
     makeProject('p', { 'src/a': '' });

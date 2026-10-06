@@ -228,7 +228,8 @@ export async function readFileContent(
 
   let handle: fsp.FileHandle;
   try {
-    handle = await fsp.open(file.value, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    // O_NONBLOCK so a FIFO fails the isFile check instead of blocking open() until a writer appears.
+    handle = await fsp.open(file.value, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
   } catch (e) {
     return err(errnoToCode(e));
   }
