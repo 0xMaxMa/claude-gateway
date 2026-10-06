@@ -119,6 +119,17 @@ export async function listProjects(root: string): Promise<FsResult<ProjectList>>
   return ok({ root, exists: true, projects });
 }
 
+/** execFile rejects with a numeric exit code, or an errno string when git could not be spawned. */
+type GitInitError = Error & { code?: number | string; signal?: NodeJS.Signals | null };
+
+/** Built only from the exit status: git's stderr can carry paths and config the client must not see. */
+function gitInitWarning(e: GitInitError): string {
+  if (e.signal) return `git init failed (signal ${e.signal})`;
+  if (typeof e.code === 'number') return `git init failed (exit code ${e.code})`;
+  if (typeof e.code === 'string' && /^E[A-Z]+$/.test(e.code)) return `git init failed (${e.code})`;
+  return 'git init failed';
+}
+
 export async function createProject(
   root: string,
   name: ProjectName,
@@ -140,7 +151,8 @@ export async function createProject(
       const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
       await execFileAsync('git', ['init', '-q', '--', dir], { cwd: dir, timeout: GIT_INIT_TIMEOUT_MS, env });
     } catch (e) {
-      warning = `git init failed: ${(e as Error).message}`;
+      warning = gitInitWarning(e as GitInitError);
+      console.warn(`projects: git init in ${dir} failed: ${(e as Error).message}`);
     }
   }
 

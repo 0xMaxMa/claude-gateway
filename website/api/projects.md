@@ -90,12 +90,14 @@ curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json"
 
 If the project already exists the response is `409 project_exists` and the
 existing directory is not touched. If `git init` fails, the directory is kept
-and the response is still `201`, with a `warning`:
+and the response is still `201`, with a `warning`. The warning names only the
+exit code, the signal, or the spawn error (such as `ENOENT` when git is not
+installed). It never includes git's output, which the gateway logs instead.
 
 ```json
 {
   "project": { "name": "nogit", "path": "/home/getpod/projects/nogit", "modified_at": "2026-10-06T07:41:58.698Z", "is_git": false },
-  "warning": "git init failed: spawn git ENOENT"
+  "warning": "git init failed (ENOENT)"
 }
 ```
 

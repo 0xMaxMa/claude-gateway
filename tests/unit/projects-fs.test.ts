@@ -119,12 +119,31 @@ describe('createProject', () => {
     try {
       const res = await createProject(root, name('nogit'), true);
       if (!res.ok) throw new Error(res.error);
-      expect(res.value.warning).toMatch(/git init failed/);
+      expect(res.value.warning).toBe('git init failed (ENOENT)');
       expect(res.value.project.is_git).toBe(false);
     } finally {
       process.env.PATH = savedPath;
     }
     expect(fs.statSync(path.join(root, 'nogit')).isDirectory()).toBe(true);
+  });
+
+  it.each([
+    ['exit 3', 'git init failed (exit code 3)'],
+    ['kill -TERM $$', 'git init failed (signal SIGTERM)'],
+  ])('reports a failing git (%s) without echoing its stderr, which is only logged', async (ending, warning) => {
+    const bin = fs.mkdtempSync(path.join(base, 'fake-bin-'));
+    fs.writeFileSync(path.join(bin, 'git'), `#!/bin/sh\necho "SECRET-STDERR $HOME" >&2\n${ending}\n`, { mode: 0o755 });
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}:${savedPath}`;
+    try {
+      const res = await createProject(root, name('broken'), true);
+      if (!res.ok) throw new Error(res.error);
+      expect(res.value.warning).toBe(warning);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('SECRET-STDERR'));
   });
 });
 
