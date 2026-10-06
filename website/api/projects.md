@@ -18,7 +18,9 @@ array includes `"list"`. An older gateway omits the key.
 returns this as `root`, so a client never has to rebuild the home path. The
 gateway follows symlinks with `realpath` and refuses any project, directory, or
 file whose real location is outside the root (for a project) or outside the
-project (for a path inside it).
+project (for a path inside it). Hardlinks are not detected: a hardlinked file reads like any other file,
+because the API is a view of what the gateway's user can already read, not a
+sandbox.
 
 ## Errors {#errors}
 
