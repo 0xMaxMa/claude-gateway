@@ -24,8 +24,9 @@ export function validateBrowserIntegration(value: BrowserIntegrationConfig | und
   if (!object(value) || Object.keys(value).some(k => !['bindings','textHelper'].includes(k)) || !Array.isArray(value.bindings) || value.bindings.length > 100) invalid();
   if(value.textHelper!==undefined){
     const h=value.textHelper;
-    if(!object(h)||Object.keys(h).some(k=>!['api','baseUrl','model','apiKeyEnv','apiKeyFile'].includes(k))||!string(h.model)||Boolean(h.apiKeyEnv)===Boolean(h.apiKeyFile))invalid();
+    if(!object(h)||Object.keys(h).some(k=>!['api','baseUrl','model','apiKeyEnv','apiKeyFile','authScheme'].includes(k))||!string(h.model)||Boolean(h.apiKeyEnv)===Boolean(h.apiKeyFile))invalid();
     if(h.api!==undefined&&!['openai-chat','anthropic-messages'].includes(h.api))invalid();
+    if(h.authScheme!==undefined&&(!['x-api-key','bearer'].includes(h.authScheme)||h.api!=='anthropic-messages'))invalid();
     validateEndpoint(h.baseUrl);
     if(h.apiKeyEnv!==undefined&&(!string(h.apiKeyEnv)||!/^[A-Za-z_][A-Za-z0-9_]*$/.test(h.apiKeyEnv)||isReservedJevCredentialEnv(h.apiKeyEnv)))invalid();
     if(h.apiKeyFile!==undefined&&(!string(h.apiKeyFile,4096)||!isAbsolute(h.apiKeyFile)))invalid();

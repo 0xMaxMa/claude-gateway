@@ -601,11 +601,11 @@ Answers to field questions keep the one-command path.
 
 ## Fresh-state decisions
 
-Browser Use and Computer Use select actions with Jev using fresh MCP observations.
+Browser Use and Computer Use select actions with Jev (Computer Use can use the agent model instead, see [Computer Use without Jev](#computer-use-without-jev)) using fresh MCP observations.
 Experience Packs and learning have been removed: no registry downloads, stored
 hints or learned rules are used. Remove the former `gateway.jev.experience` setting
 from existing configuration. Existing experience cache directories are unused.
-Thinking remains available for field text and independent completion verification. Computer control always starts with Jev; low confidence or three consecutive ineffective observations may invoke one screenshot-backed Thinking action. A stale decision is discarded before dispatch. The Mac app cannot override provider routing. Thinking/provider errors are reported as blockers, not missing-input requests. A new explicit command can resume a known stopped round; unknown mutation outcomes still require reconciliation.
+Thinking remains available for field text and independent completion verification. Computer control always starts with the step decision (Jev, or the agent model without Jev); low confidence or three consecutive ineffective observations may invoke one screenshot-backed Thinking action. A stale decision is discarded before dispatch. The Mac app cannot override provider routing. Thinking/provider errors are reported as blockers, not missing-input requests. A new explicit command can resume a known stopped round; unknown mutation outcomes still require reconciliation.
 Task ownership, consent and durable mutation receipts are unchanged.
 
 ## Computer Use connectors
@@ -619,9 +619,84 @@ computer or its relay.
 
 With Jev enabled and the agent permitted by `allowedAgentIds`, computer tasks
 are available by default; set `features.computerTasks.enabled: false` to disable.
+Without Jev, a gateway can opt in to [Computer Use with the agent model](#computer-use-without-jev).
 The shared `gateway.jev.thinking` supplies field text and independent completion
 verification. Without a Thinking helper, unknown field values require input and
 completion candidates are never reported as verified success.
+
+### Computer Use without Jev
+
+`gateway.computerUse` lets Computer Use run when Jev is off. Each controller
+step (which action, whether the command is done, the impact of an agent
+command, the user's yes/no reply, which field, which literal text) is then
+decided by one Anthropic Messages call made with the agent's own endpoint and
+credential: the `ANTHROPIC_BASE_URL` and token group the agent's Claude CLI
+uses, resolved as one group exactly as for an upstream Jev connection.
+
+An `ANTHROPIC_API_KEY` is sent as `x-api-key`, directly or through a proxy.
+An `ANTHROPIC_AUTH_TOKEN` is sent as a Bearer token. A Claude subscription
+login (`CLAUDE_CODE_OAUTH_TOKEN`) works only through a gateway or proxy
+`ANTHROPIC_BASE_URL`. Pointed directly at `*.anthropic.com` it is not supported,
+and each step is blocked with `COMPUTER_MODEL_OAUTH_UNSUPPORTED` before any
+request is sent.
+
+```json
+{
+  "gateway": {
+    "computerUse": {
+      "enabled": true,
+      "model": "claude-haiku-4-5-20251001",
+      "timeoutMs": 20000,
+      "minConfidence": 0.7
+    }
+  }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Opt in. Off by default, so existing gateways are unchanged. |
+| `model` | `claude-haiku-4-5-20251001` | Model for each step decision and, without `jev.thinking`, for field text. |
+| `timeoutMs` | `20000` | Per-decision deadline, 1000 to 120000. |
+| `minConfidence` | `0.7` | Model confidence below this counts as unsure, 0.55 to 1. |
+
+Precedence: when Jev serves Computer Use for the agent (`jev.enabled`,
+`allowedAgentIds`, `features.computerTasks`), Jev decides every step and
+`gateway.computerUse` has no effect. `agents[].computerUse.enabled: false`
+removes one agent from the model backend; it never enables Computer Use on its
+own. `allow_tools: false` disables both. Both settings reload live; a decision in
+flight is discarded if the backend changes or access is revoked before it returns.
+
+Haiku 4.5 is the default because a step is a closed choice among listed options,
+made once per controller step: latency and per-step cost matter more than open
+reasoning, and the forced answer schema leaves the model nothing else to do.
+Choose a larger model with `model` if your observations need it.
+
+Safety is the same controller as with Jev: choice keys are opaque per request,
+every answer is validated before an action is selected, and a high-impact agent
+command runs only on a confident `ROUTINE` impact answer, otherwise the user is
+asked. Self-reported model confidence is not calibrated like Jev probabilities,
+so the model backend applies the stricter `minConfidence` gate. Screen content is
+sent as one escaped `<decision_data>` JSON block that the system prompt marks as
+untrusted, and the forced `answer` tool only accepts the listed option keys.
+
+Failures are bounded codes with no retry or replay: HTTP 402 `QUOTA_EXCEEDED`,
+429 `RATE_LIMITED`, 401 `AUTHENTICATION_FAILED`, 403 `ACCESS_DENIED`, 404
+`MODEL_UNAVAILABLE`, a deadline `DEADLINE_EXCEEDED`, an unusable answer
+`INVALID_RESPONSE`, anything else `PROVIDER_UNAVAILABLE`. The task stops with
+reason `JEV_<code>` (the controller's existing decision reason prefix); a direct
+command hands the request to the agent as with Jev. The gateway log records one
+`computer_model_evaluation` line per decision with codes, sizes and token usage,
+never screen content or credentials. These calls are not Jev evaluations: they
+do not appear in Jev usage history and are billed as ordinary model requests on
+the agent's identity.
+
+Without `jev.thinking` or `jev.browser.textHelper`, field text uses the same
+identity and model through the Messages API (`x-api-key` header).
+
+When Computer Use is not enabled for an agent, computer discovery returns
+`COMPUTER_NOT_ALLOWED` with a non-retryable message, and other computer adapter
+failures return their own `COMPUTER_*` code instead of `INVALID_REQUEST`.
 
 ### Step-by-step commands
 

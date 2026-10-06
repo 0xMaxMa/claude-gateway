@@ -55,7 +55,7 @@ export interface BrowserConnectorConfig {
   budget?: { maxSteps?: number; maxEvaluations?: number; timeoutMs?: number; maxTextCalls?: number; maxStaleRetries?: number; operationConfidence?: number; targetConfidence?: number };
 }
 /** Host-owned connection for Jev Loop tool-free reasoning. */
-export interface BrowserTextHelperConfig { api?:'openai-chat'|'anthropic-messages'; baseUrl:string; model:string; apiKeyEnv?:string; apiKeyFile?:string }
+export interface BrowserTextHelperConfig { api?:'openai-chat'|'anthropic-messages'; baseUrl:string; model:string; apiKeyEnv?:string; apiKeyFile?:string; /** Credential header for anthropic-messages: x-api-key (default) or Bearer for a proxy. */ authScheme?:'x-api-key'|'bearer' }
 export interface BrowserIntegrationConfig { bindings: BrowserConnectorConfig[]; textHelper?: BrowserTextHelperConfig }
 export type BrowserToolCall = (name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
 export interface BrowserLogicModule {

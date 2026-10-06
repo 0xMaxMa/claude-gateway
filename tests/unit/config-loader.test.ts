@@ -583,4 +583,22 @@ describe('config-loader', () => {
     });
   });
   });
+
+  it('validates gateway.computerUse and agents[].computerUse; default stays off', () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    const base = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'valid-2-agents.json'), 'utf8'));
+    fs.writeFileSync(configPath, JSON.stringify(base));
+    expect(loadConfig(configPath).gateway.computerUse).toBeUndefined();
+    fs.writeFileSync(configPath, JSON.stringify({ ...base, gateway: { ...base.gateway, computerUse: { enabled: true, model: 'claude-haiku-4-5-20251001', minConfidence: 0.8 } } }));
+    expect(loadConfig(configPath).gateway.computerUse).toEqual({ enabled: true, model: 'claude-haiku-4-5-20251001', minConfidence: 0.8 });
+    for (const computerUse of [{ enabled: 'yes' }, { minConfidence: 0.3 }, { unknown: true }]) {
+      fs.writeFileSync(configPath, JSON.stringify({ ...base, gateway: { ...base.gateway, computerUse } }));
+      expect(() => loadConfig(configPath)).toThrow(ConfigValidationError);
+    }
+    const skipped: SkippedAgent[] = [];
+    fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], computerUse: { enabled: 'no' } }, base.agents[1]] }));
+    const loaded = loadConfig(configPath, { onSkippedAgent: agent => skipped.push(agent) });
+    expect(loaded.agents.map(agent => agent.id)).toEqual(['baerbel']);
+    expect(skipped.map(agent => agent.reason)).toEqual([expect.stringMatching(/Computer Use/)]);
+  });
 });

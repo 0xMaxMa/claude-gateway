@@ -84,6 +84,9 @@ See [worker command environment](../guide/worker-harnesses.md#worker-command-env
 
 ### Computer Use via Jev
 
+Without Jev, `gateway.computerUse.enabled` lets the agent's own model decide each
+step; see [Computer Use without Jev](../guide/jev.md#computer-use-without-jev).
+
 `gateway.jev.features.computerTasks.enabled` controls Gateway-managed desktop
 execution (defaults to enabled when Jev is enabled). Agent Jev allowlists and
 connector enablement still apply. Set it to `false` to disable new desktop work;
