@@ -202,6 +202,14 @@ describe('listDir', () => {
     expect(await readFileContent(root, name('evil'), rel('secret'))).toEqual({ ok: false, error: 'path_escape' });
   });
 
+  it('refuses a directory symlink that escapes the project', async () => {
+    const dir = makeProject('p');
+    const outside = fs.mkdtempSync(path.join(base, 'outside-'));
+    fs.writeFileSync(path.join(outside, 'secret'), 's');
+    fs.symlinkSync(outside, path.join(dir, 'out'));
+    expect(await listDir(root, name('p'), rel('out'))).toEqual({ ok: false, error: 'path_escape' });
+  });
+
   it('refuses a directory swapped for an escaping symlink after the realpath check', async () => {
     const dir = makeProject('p', { 'sub/x': '' });
     const outside = fs.mkdtempSync(path.join(base, 'outside-'));

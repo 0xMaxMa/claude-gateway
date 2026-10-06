@@ -11,6 +11,7 @@ const apiKeys: ApiKey[] = [
   { key: 'k-pod-write', agents: '*', write: true },
   { key: 'k-pod-read', agents: '*' },
   { key: 'k-agent', agents: ['alfred'], write: true },
+  { key: 'k-star-list', agents: ['*'], write: true },
 ];
 const as = (key: string) => ({ Authorization: `Bearer ${key}` });
 const POD = as('k-pod-write');
@@ -47,6 +48,13 @@ describe('auth', () => {
     const res = await call(request(app)).set(as('k-agent'));
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('forbidden_key');
+  });
+
+  it.each(routes)('%s refuses agents: ["*"], which is a list and not pod-wide scope', async (_label, call) => {
+    seed();
+    const res = await call(request(app)).set(as('k-star-list'));
+    expect([res.status, res.body.code]).toEqual([403, 'forbidden_key']);
+    expect(fs.existsSync(path.join(root, 'x'))).toBe(false);
   });
 
   it.each(routes)('%s requires a key', async (_label, call) => {
@@ -179,6 +187,19 @@ describe('GET /api/v1/projects/:name/tree and /file', () => {
 
     const tree = await request(app).get('/api/v1/projects/app/tree').set(POD);
     expect(tree.body.entries).toContainEqual({ kind: 'symlink', name: 'passwd', path: 'passwd', target_kind: 'outside' });
+  });
+
+  it('refuses to read through or list an intermediate directory symlink to /etc', async () => {
+    seed();
+    fs.symlinkSync('/etc', path.join(root, 'app', 'etcdir'));
+
+    const file = await request(app).get('/api/v1/projects/app/file?path=etcdir/passwd').set(POD);
+    expect([file.status, file.body.code]).toEqual([403, 'path_escape']);
+    expect(JSON.stringify(file.body)).not.toContain('root:');
+
+    const tree = await request(app).get('/api/v1/projects/app/tree?path=etcdir').set(POD);
+    expect([tree.status, tree.body.code]).toEqual([403, 'path_escape']);
+    expect(tree.body.entries).toBeUndefined();
   });
 
   it('refuses a project directory that is itself a symlink out of the root', async () => {
