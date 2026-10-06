@@ -17,7 +17,8 @@ export interface ModelConnection { baseUrl: string; apiKey: string; scheme: 'x-a
 export const COMPUTER_MODEL_OAUTH_UNSUPPORTED = 'COMPUTER_MODEL_OAUTH_UNSUPPORTED';
 // A trailing dot (api.anthropic.com.) is the same DNS name, so it must not slip past the check.
 const anthropicHost = (url: URL) => { const host = url.hostname.toLowerCase().replace(/\.+$/, ''); return host === 'anthropic.com' || host.endsWith('.anthropic.com'); };
-/** The one auth-scheme mapping: x-api-key stays x-api-key; bearer and oauth (proxy only) go as Bearer. */
+/** The one auth-scheme mapping (mirrored in lib/automation/thinking.cjs anthropicCredentialHeader, which cannot import TS;
+ * tests/unit/computer/auth-scheme-parity.test.ts asserts both produce the same header): x-api-key stays x-api-key; bearer and oauth (proxy only) go as Bearer. */
 export const wireAuthScheme = (connection: ModelConnection): 'x-api-key' | 'bearer' => connection.scheme === 'x-api-key' ? 'x-api-key' : 'bearer';
 /** Base URL (the Messages endpoint minus /messages) that the Thinking helper re-appends /messages to. */
 export const messagesBaseUrl = (endpoint: URL): string => { const url = new URL(endpoint); url.pathname = url.pathname.replace(/\/messages$/, ''); return url.toString().replace(/\/$/, ''); };

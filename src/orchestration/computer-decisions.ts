@@ -19,6 +19,7 @@ const computerModel = (gateway: GatewayConfig) => gateway.gateway.computerUse?.m
 export function computerEvaluator(gateway: GatewayConfig, agent: AgentConfig, member: (task: TaskSnapshot) => boolean,
   jev: () => Pick<JevService, 'evaluate'> = () => gatewayJev(gateway).service, fetchImpl?: typeof fetch): Evaluate {
   let log: ReturnType<typeof createLogger> | undefined;
+  let logWarned = false;
   const logger = () => log ??= createLogger(agent.id, gateway.gateway.logDir);
   return (task, request, signal) => {
     const backend = computerDecisions(gateway, agent);
@@ -34,7 +35,12 @@ export function computerEvaluator(gateway: GatewayConfig, agent: AgentConfig, me
       onEvaluation: event => {
         const entry = { agentId: agent.id, taskId: task.taskId, ...event };
         if (event.outcome === 'failed') console.warn(JSON.stringify({ event: 'computer_model_evaluation', ...entry }));
-        else logger().debug('computer_model_evaluation', entry);
+        else {
+          // createLogger can throw (e.g. unwritable logDir); surface it once instead of losing debug logs silently.
+          try { logger().debug('computer_model_evaluation', entry); } catch (err) {
+            if (!logWarned) { logWarned = true; console.warn(JSON.stringify({ event: 'computer_model_log_unavailable', agentId: agent.id, reason: (err as NodeJS.ErrnoException)?.code ?? 'unknown' })); }
+          }
+        }
       },
     }, signal));
     return evaluateComputerChoices(request, wire => jev().evaluate(wire as JevRequest, { principalId: task.ownerPrincipalId, agentId: agent.id, sessionId: task.agentSessionId, taskId: task.taskId, consumer: 'computer', signal, authorize }));

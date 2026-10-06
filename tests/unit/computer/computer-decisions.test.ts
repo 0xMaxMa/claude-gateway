@@ -202,4 +202,19 @@ describe('decision dispatch', () => {
     settings.mockReturnValue({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_API_KEY: TOKEN });
     expect(agentIdentity()).toMatchObject({ scheme: 'x-api-key' });
   });
+  test('an unwritable logDir is reported once without changing the decision or leaking secrets', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const config = gatewayConfig(false, undefined, true);
+    (config.gateway as any).logDir = '/dev/null/cannot-create';
+    const fetch = jest.fn(async () => new Response(JSON.stringify({ stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'answer', input: { action: { choice: '0', confidence: 0.9 } } }] }), { headers: { 'content-type': 'application/json' } }));
+    const run = computerEvaluator(config, agentConfig(), () => true, undefined, fetch as any);
+    for (let i = 0; i < 2; i++) {
+      const result = await run(task, request, new AbortController().signal);
+      expect((result.answers.action as any)).toMatchObject({ choice: 'press:k1', confidence: 0.9 });
+    }
+    const lines = warn.mock.calls.map(call => String(call[0])).filter(line => line.includes('computer_model_log_unavailable'));
+    expect(lines).toHaveLength(1);
+    expect(lines.join('')).not.toContain(TOKEN);
+  });
+
 });
