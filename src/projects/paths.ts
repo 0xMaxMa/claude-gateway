@@ -26,7 +26,7 @@ const PROJECT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MAX_REL_PATH = 4096;
 
 export function parseProjectName(raw: unknown): Result<ProjectName, 'invalid_name'> {
-  if (typeof raw !== 'string' || !PROJECT_NAME_RE.test(raw) || raw === '.' || raw === '..') {
+  if (typeof raw !== 'string' || !PROJECT_NAME_RE.test(raw)) {
     return err('invalid_name');
   }
   return ok(raw as ProjectName);

@@ -37,10 +37,7 @@ import { GATEWAY_VERSION } from './gateway-version';
  */
 export const CROSS_CHANNEL_MESSAGE_CHANNELS: readonly ChatChannel[] = [...CHAT_CHANNELS];
 
-/**
- * Project browsing operations served by projects-router.ts. Later phases
- * append values; clients gate the feature on `includes('list')`.
- */
+/** Project browsing operations served by projects-router.ts; clients gate the feature on `includes('list')`. */
 export const PROJECTS_CAPABILITIES = ['list', 'create', 'read'] as const;
 export type ProjectsCapability = (typeof PROJECTS_CAPABILITIES)[number];
 

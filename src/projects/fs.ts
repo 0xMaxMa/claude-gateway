@@ -18,7 +18,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-export const FILE_SIZE_LIMIT = 1024 * 1024;
+const FILE_SIZE_LIMIT = 1024 * 1024;
 export const TREE_ENTRY_LIMIT = 2000;
 const BINARY_SNIFF_BYTES = 8192;
 const GIT_INIT_TIMEOUT_MS = 10_000;
@@ -79,7 +79,6 @@ async function describeProject(root: string, realDir: string, name: ProjectName)
   return { name, path: path.join(root, name), modified_at: st.mtime.toISOString(), is_git: isGit };
 }
 
-/** Real path of `<root>/<name>`, refused unless it is a directory inside the real root. */
 async function resolveProjectDir(root: string, name: ProjectName): Promise<FsResult<string>> {
   const realRoot = await realRootOf(root);
   if (!realRoot.ok) return realRoot;
@@ -163,7 +162,7 @@ export async function createProject(
 
   try {
     const project = await describeProject(root, await fsp.realpath(dir), name);
-    return ok(warning === undefined ? { project } : { project, warning });
+    return ok({ project, warning });
   } catch (e) {
     return err(errnoToCode(e));
   }
@@ -248,12 +247,7 @@ async function openedInside(handle: fsp.FileHandle, realProjectDir: string): Pro
   return opened !== null && isInside(realProjectDir, opened);
 }
 
-export async function readFileContent(
-  root: string,
-  name: ProjectName,
-  rel: RelPath,
-  limit: number = FILE_SIZE_LIMIT,
-): Promise<FsResult<FileContent>> {
+export async function readFileContent(root: string, name: ProjectName, rel: RelPath): Promise<FsResult<FileContent>> {
   const projectDir = await resolveProjectDir(root, name);
   if (!projectDir.ok) return projectDir;
   const file = await resolveInside(projectDir.value, rel);
@@ -271,7 +265,7 @@ export async function readFileContent(
     const st = await handle.stat();
     if (!st.isFile()) return err('not_a_file');
     const meta = { path: rel, size: st.size, modified_at: st.mtime.toISOString() };
-    if (st.size > limit) return ok({ kind: 'too_large', ...meta, limit });
+    if (st.size > FILE_SIZE_LIMIT) return ok({ kind: 'too_large', ...meta, limit: FILE_SIZE_LIMIT });
 
     const buf = Buffer.alloc(st.size);
     let filled = 0;
