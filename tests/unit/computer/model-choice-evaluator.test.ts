@@ -2,7 +2,7 @@ import { runComputerUse, type ComputerUseDependencies } from '../../../src/autom
 import { evaluateComputerChoices } from '../../../src/automation/computer-choice-ids';
 import { readChoice } from '../../../src/automation/computer-policy';
 import {
-  DEFAULT_COMPUTER_MIN_CONFIDENCE, DEFAULT_COMPUTER_MODEL, MODEL_CHOICE_SYSTEM, choiceAnswer, decisionData, evaluateWithModel, messagesEndpoint,
+  DEFAULT_COMPUTER_MIN_CONFIDENCE, DEFAULT_COMPUTER_MODEL, MODEL_CHOICE_SYSTEM, acceptsTemperature, choiceAnswer, decisionData, evaluateWithModel, messagesEndpoint,
   modelRequestBody, validateComputerUseConfig, type ModelChoiceOptions, type ModelEvaluationEvent,
 } from '../../../src/automation/model-choice-evaluator';
 import { JevError } from '../../../src/jev/types';
@@ -67,6 +67,26 @@ describe('model choice evaluator', () => {
     expect(sent.body).toMatchObject({ model: DEFAULT_COMPUTER_MODEL, temperature: 0, tool_choice: { type: 'tool', name: 'answer' }, system: MODEL_CHOICE_SYSTEM });
     expect(sent.body.tools[0].input_schema.properties.action.properties.choice.enum).toEqual(['0', '1', '2']);
     expect((sent.init.headers as Record<string, string>)['x-api-key']).toBe(TOKEN);
+  });
+
+  test('temperature goes only to Haiku 4.5; claude-sonnet-5 (which 400s on it) and other models get none', async () => {
+    const request: Request = { requestId: 'r-temp', state: { goal: 'x' }, questions: { action: { type: 'choice', instructions: { goal: 'pick' }, criteria: { '0': 'press', '1': 'DONE' } } } } as any;
+    // Mirrors the provider: Sonnet 5 rejects any request carrying `temperature`.
+    const p = provider(body => body.model === 'claude-sonnet-5' && 'temperature' in body
+      ? new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'temperature is deprecated for this model' } }), { status: 400, headers: { 'content-type': 'application/json' } })
+      : { action: { choice: '1', confidence: 0.9 } });
+    for (const model of ['claude-sonnet-5', DEFAULT_COMPUTER_MODEL]) {
+      const result = await evaluateWithModel(request, options(p.fetch, { model }), new AbortController().signal);
+      expect(readChoice(result.answers.action, request.questions.action.criteria as Record<string, string>)).toMatchObject({ choice: '1', confident: true });
+    }
+    expect(p.calls.map(c => c.body.model)).toEqual(['claude-sonnet-5', DEFAULT_COMPUTER_MODEL]);
+    expect(p.calls[0].body).not.toHaveProperty('temperature');
+    expect(p.calls[1].body).toMatchObject({ temperature: 0 });
+    for (const model of ['claude-haiku-4-5', 'claude-haiku-4-5-20251001', 'us.anthropic.claude-haiku-4-5-20251001-v1:0', 'claude-haiku-4-5@20251001']) expect(acceptsTemperature(model)).toBe(true);
+    for (const model of ['claude-sonnet-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-haiku-4-50', 'my-claude-haiku-4-5x', 'gpt-4o']) {
+      expect(acceptsTemperature(model)).toBe(false);
+      expect(modelRequestBody(request, model)).not.toHaveProperty('temperature');
+    }
   });
 
   test('confidence gate: readChoice 0.55 holds, and the model backend reports anything under its stricter gate as unconfident', () => {
