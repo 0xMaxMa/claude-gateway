@@ -528,7 +528,7 @@ export class AgentRunner extends EventEmitter {
           skills: () => this.skillRegistry,
           refreshSkills: async () => {
             const { refreshCliSkillRegistry } = await import('../orchestration/cli-skills');
-            await refreshCliSkillRegistry(this.skillRegistry, this.agentConfig, this.gatewayConfig);
+            await refreshCliSkillRegistry(() => this.skillRegistry, this.agentConfig, this.gatewayConfig);
           },
           onManagedTurn: (sessionId, text, metrics, skills) => {
             const key = `orchestration:${sessionId}`;

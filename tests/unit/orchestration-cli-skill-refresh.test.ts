@@ -9,7 +9,7 @@ const agent = { id: 'a', workspace: '/tmp' } as AgentConfig;
 test('a refresh keeps the previous CLI skills resolvable until the new list is ready', async () => {
   const registry: SkillRegistry = { skills: new Map(), cliSkills: [{ name: 'review-pr', description: 'Review a PR' }] };
   let finish!: (skills: { name: string; description: string }[]) => void;
-  const refresh = refreshCliSkillRegistry(registry, agent, undefined, () => new Promise(resolve => { finish = resolve; }));
+  const refresh = refreshCliSkillRegistry(() => registry, agent, undefined, () => new Promise(resolve => { finish = resolve; }));
   // Ingress for a message received while CLI discovery is still running.
   expect(resolveSkill('/review-pr 567', 'telegram', registry)?.name).toBe('review-pr');
   finish([{ name: 'review-pr', description: 'Review a PR' }, { name: 'deploy', description: 'Deploy' }]);
@@ -20,10 +20,22 @@ test('a refresh keeps the previous CLI skills resolvable until the new list is r
 
 test('a failed CLI discovery reports the error without leaving a half-built list', async () => {
   const registry: SkillRegistry = { skills: new Map(), cliSkills: [{ name: 'old', description: '' }] };
-  await refreshCliSkillRegistry(registry, agent, undefined, async () => { throw new Error('probe failed'); });
+  await refreshCliSkillRegistry(() => registry, agent, undefined, async () => { throw new Error('probe failed'); });
   expect(registry.cliSkills).toEqual([]);
   expect(registry.cliDiscoveryError).toBe('CLI_SKILL_DISCOVERY_UNAVAILABLE');
-  await refreshCliSkillRegistry(registry, agent, undefined, async () => [{ name: 'new', description: '' }]);
+  await refreshCliSkillRegistry(() => registry, agent, undefined, async () => [{ name: 'new', description: '' }]);
   expect(registry.cliSkills?.map(skill => skill.name)).toEqual(['new']);
+  expect(registry.cliDiscoveryError).toBeUndefined();
+});
+
+test('a skills reload during discovery still receives the refreshed CLI skills', async () => {
+  let registry: SkillRegistry = { skills: new Map(), cliSkills: [{ name: 'old', description: '' }] };
+  let finish!: (skills: { name: string; description: string }[]) => void;
+  const refresh = refreshCliSkillRegistry(() => registry, agent, undefined, () => new Promise(resolve => { finish = resolve; }));
+  // Skills API reload (setSkillRegistry) swaps in a fresh registry mid-refresh.
+  registry = { skills: new Map() };
+  finish([{ name: 'review-pr', description: 'Review a PR' }]);
+  await refresh;
+  expect(resolveSkill('/review-pr 567', 'telegram', registry)?.name).toBe('review-pr');
   expect(registry.cliDiscoveryError).toBeUndefined();
 });
