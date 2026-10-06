@@ -16,18 +16,19 @@ export interface ModelConnection { baseUrl: string; apiKey: string; scheme: 'x-a
 /** Claude subscription OAuth tokens are not accepted for direct Messages calls by this gateway. */
 export const COMPUTER_MODEL_OAUTH_UNSUPPORTED = 'COMPUTER_MODEL_OAUTH_UNSUPPORTED';
 const anthropicHost = (url: URL) => url.hostname === 'anthropic.com' || url.hostname.endsWith('.anthropic.com');
+/** A subscription OAuth token is never sent directly to Anthropic; every other identity/endpoint pair is allowed.
+ * One predicate for modelAuthHeaders and the Thinking helper, so the two paths cannot disagree. */
+export function credentialSupported(connection: ModelConnection, endpoint: URL): boolean {
+  return connection.scheme !== 'oauth' || !anthropicHost(endpoint);
+}
 /** Credential headers per identity type. An API key uses x-api-key; ANTHROPIC_AUTH_TOKEN uses Bearer,
  * as the Claude CLI sends it; an OAuth token is sent as Bearer only to a gateway/proxy route
- * (as the upstream voice connection already does), never directly to Anthropic. */
+ * (as the upstream voice connection already does, src/voice/providers/upstream.ts), never directly to Anthropic.
+ * No other gateway path adds OAuth-specific headers (e.g. anthropic-beta), so oauth == bearer on a proxy. */
 export function modelAuthHeaders(connection: ModelConnection, endpoint: URL): Record<string, string> {
+  if (!credentialSupported(connection, endpoint)) throw new Error(COMPUTER_MODEL_OAUTH_UNSUPPORTED);
   if (connection.scheme === 'x-api-key') return { 'x-api-key': connection.apiKey };
-  if (connection.scheme === 'oauth' && anthropicHost(endpoint)) throw new Error(COMPUTER_MODEL_OAUTH_UNSUPPORTED);
   return { authorization: `Bearer ${connection.apiKey}` };
-}
-/** The Thinking helper sends the same header as modelAuthHeaders (x-api-key or Bearer), so the only
- * unsupported combination is the same one: a subscription OAuth token sent directly to Anthropic. */
-export function thinkingCredentialSupported(connection: ModelConnection, endpoint: URL): boolean {
-  return connection.scheme !== 'oauth' || !anthropicHost(endpoint);
 }
 export interface ModelEvaluationEvent {
   requestId: string; model: string; elapsedMs: number; outcome: 'completed' | 'failed'; errorCode?: JevErrorCode | typeof COMPUTER_MODEL_OAUTH_UNSUPPORTED;

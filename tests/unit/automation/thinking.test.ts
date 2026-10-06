@@ -70,3 +70,10 @@ describe('real fetch against a loopback HTTP server',()=>{
   expect(seen).toHaveLength(0);
  });
 });
+
+test('authScheme is rejected for openai-chat instead of being silently ignored',async()=>{
+ const fetcher=provider({choices:[{finish_reason:'stop',message:{content:'{}'}}]});
+ for(const authScheme of ['x-api-key','bearer'])
+  await expect(thinkJson({api:'openai-chat',baseUrl:'https://model.example/v1',model:'small',apiKey:'fixture-key',authScheme},{instruction:'x',input:{}},new AbortController().signal,fetcher)).rejects.toThrow('THINKING_INVALID_CONFIG');
+ expect(fetcher).not.toHaveBeenCalled();
+});

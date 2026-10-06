@@ -3,7 +3,7 @@ import type { ComputerUseDependencies } from '../automation/computer-use';
 import type { ThinkingConfig } from '../../lib/automation/thinking.cjs';
 import type { BrowserTextHelperConfig } from '../jev/browser-contract';
 import { evaluateComputerChoices } from '../automation/computer-choice-ids';
-import { DEFAULT_COMPUTER_MIN_CONFIDENCE, DEFAULT_COMPUTER_MODEL, DEFAULT_COMPUTER_MODEL_TIMEOUT_MS, COMPUTER_MODEL_OAUTH_UNSUPPORTED, evaluateWithModel, messagesEndpoint, thinkingCredentialSupported } from '../automation/model-choice-evaluator';
+import { DEFAULT_COMPUTER_MIN_CONFIDENCE, DEFAULT_COMPUTER_MODEL, DEFAULT_COMPUTER_MODEL_TIMEOUT_MS, COMPUTER_MODEL_OAUTH_UNSUPPORTED, evaluateWithModel, messagesEndpoint, credentialSupported } from '../automation/model-choice-evaluator';
 import type { JevService } from '../jev/service';
 import type { JevRequest } from '../jev/types';
 import { agentIdentity, computerDecisions, gatewayJev } from './jev-gateway';
@@ -38,8 +38,8 @@ export function computerThinking(gateway: GatewayConfig, agent: AgentConfig): Br
   if (configured || computerDecisions(gateway, agent) !== 'model') return configured;
   return { resolve: async () => {
     const identity = agentIdentity('Computer Use'), url = messagesEndpoint(identity.baseUrl);
-    // OAuth tokens are refused direct to Anthropic; the others are sent in the header their identity requires.
-    if (!thinkingCredentialSupported(identity, url)) throw new Error(COMPUTER_MODEL_OAUTH_UNSUPPORTED);
+    // Same mapping as modelAuthHeaders: x-api-key stays x-api-key; bearer and oauth (proxy only) are Bearer. OAuth direct to Anthropic is refused.
+    if (!credentialSupported(identity, url)) throw new Error(COMPUTER_MODEL_OAUTH_UNSUPPORTED);
     url.pathname = url.pathname.replace(/\/messages$/, '');
     return { api: 'anthropic-messages', baseUrl: url.toString().replace(/\/$/, ''), model: computerModel(gateway), apiKey: identity.apiKey, authScheme: identity.scheme === 'x-api-key' ? 'x-api-key' : 'bearer' };
   } };
