@@ -1,3 +1,4 @@
+import { batchableInput, inputBatch } from './input-batch';
 import {compactComputerPromptState} from './computer-prompt';
 import {CURRENT_CONTROL_ROUND_SQL} from './control-notification';
 import {evaluateComputerChoices} from '../automation/computer-choice-ids';
@@ -780,7 +781,7 @@ export class AgentOrchestrationRuntime {
     this.store.run(`INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,audio_progress_json=excluded.audio_progress_json,updated_at=excluded.updated_at`,
       `voice:${responseId}:${progress.generation}:${progress.epoch}`, responseId, null, binding.id, 'audio', state, null, null, JSON.stringify(progress), Date.now());
   }
-  send(input: AcceptInput, capabilities: ExecutionCapabilities, options: { timeoutMs: number; model?: string; onText?: (text: string) => void; onTool?: (event: ToolActivity) => void }): Promise<string> {
+  send(input: AcceptInput, capabilities: ExecutionCapabilities, options: { timeoutMs: number; model?: string; onText?: (text: string) => void; onTool?: (event: ToolActivity) => void; inputIds?: string[] }): Promise<string> {
     if (this.closing) return Promise.reject(new OrchestrationError('ORCHESTRATION_CLOSING'));
     try {
       input = this.questionControls.normalizeReply(input);
@@ -971,10 +972,15 @@ export class AgentOrchestrationRuntime {
     for (const row of rows) {
       mailboxCursor = Number(row.mailbox_row);
       if (this.active.size >= this.config.conversation.maxActiveSessions) break;
-      const input: AcceptInput = JSON.parse(String(row.ingress_json));
-      if (!input.scope || !input.capabilities || this.active.has(input.scope.agentSessionId)) continue;
-      if (visitedSessions.has(input.scope.agentSessionId)) continue;
-      visitedSessions.add(input.scope.agentSessionId);
+      // Batch members share the row's conversation and session, so admission is
+      // decided before scanning later rows for the batch.
+      const head: AcceptInput = JSON.parse(String(row.ingress_json));
+      if (!head.scope || !head.capabilities || this.active.has(head.scope.agentSessionId)) continue;
+      if (visitedSessions.has(head.scope.agentSessionId)) continue;
+      visitedSessions.add(head.scope.agentSessionId);
+      const batch = inputBatch(this.store, row, this.batchDebounceMs(), this.config.conversation.inputMaxWaitMs);
+      const input = batch.input;
+      if (Date.now() < batch.readyAt) continue;
       const scope = resolveProviderScope(this.agent, this.gateway, input.model, 'agent');
       const waiting = this.providerAdmission.inspect(scope, this.config.providerAdmission);
       if (waiting) {
@@ -984,18 +990,27 @@ export class AgentOrchestrationRuntime {
       }
       // A persisted input retains the authenticated scope and model from ingress.
       // Recovery can repeat inference, but committed tool receipts remain fenced.
-      const result = this.send({ ...input, acceptedInputId: String(row.id) }, input.capabilities,
-        { timeoutMs: this.config.conversation.maxDecisionDurationMs, model: input.model, onTool: event => this.inputTools.get(String(row.id))?.(event), onText: text => {
+      const result = this.send({ ...input, acceptedInputId: String(batch.last.id) }, input.capabilities!,
+        { inputIds: batch.inputIds, timeoutMs: this.config.conversation.maxDecisionDurationMs, model: input.model, onTool: event => this.inputTools.get(String(row.id))?.(event), onText: text => {
           const responseId = this.responseIdForInput(String(row.id));
           if (input.modality !== 'live_voice' && responseId) { try { this.inputStreams.get(String(row.id))?.push({ responseId, text }); } catch { /* slow audio cannot stall inference */ } }
         } });
-      void result.then(text => this.deferred.get(String(row.id))?.resolve(text), error => this.deferred.get(String(row.id))?.reject(error))
-        .finally(() => this.deferred.delete(String(row.id)));
+      void result.then(text => {
+        // Superseded, uncommitted inputs remain durable and their callers wait
+        // for the replacement decision rather than receiving an empty answer.
+        for (const id of batch.inputIds) if (this.store.get('SELECT status FROM conversation_inputs WHERE id=?', id)?.status === 'handled') {
+          this.deferred.get(id)?.resolve(text); this.deferred.delete(id);
+        }
+      }, error => { for (const id of batch.inputIds) { this.deferred.get(id)?.reject(error); this.deferred.delete(id); } });
     }
     if (this.active.size >= this.config.conversation.maxActiveSessions) break mailbox;
     }
   }
-  private async run(input: AcceptInput, capabilities: ExecutionCapabilities, options: { timeoutMs: number; model?: string; onText?: (text: string) => void; onTool?: (event: ToolActivity) => void }): Promise<string> {
+  private batchDebounceMs(): number {
+    return this.config.conversation.semanticIntake ? this.config.conversation.inputDebounceMs : 0;
+  }
+
+  private async run(input: AcceptInput, capabilities: ExecutionCapabilities, options: { timeoutMs: number; model?: string; onText?: (text: string) => void; onTool?: (event: ToolActivity) => void; inputIds?: string[] }): Promise<string> {
     const sessionId = input.scope.agentSessionId;
     const channelTts = this.telegramVoices.settings(channelVoiceKey(input.scope.source,input.scope.chatId,input.scope.threadKey));
     if (this.active.has(sessionId)) throw new OrchestrationError('CONFLICT');
@@ -1035,7 +1050,7 @@ export class AgentOrchestrationRuntime {
       if (this.draining) this.store.run("UPDATE conversations SET status='draining' WHERE id=?", receipt.conversationId);
       this.seenSessions.add(sessionId);
       this.questionControls.tick();
-      const decision = this.decisions.begin(receipt.conversationId, input.scope.principalId, [receipt.inputId], input.requestId);
+      const decision = this.decisions.begin(receipt.conversationId, input.scope.principalId, options.inputIds ?? [receipt.inputId], input.requestId);
       active.decision = decision;
       if (questionReview) {
         // Notifications may arrive after this internal input was queued. A
@@ -1094,9 +1109,9 @@ export class AgentOrchestrationRuntime {
       const semantic = this.config.conversation.semanticIntake && !active.notification && !liveControl;
       const prepared = semantic ? this.intake.context(receipt.conversationId, input.scope.principalId, String(admitted!.binding_id)) : undefined;
       const recoveryInputId = input.ingressKey?.startsWith('intake-recovery:') ? input.ingressKey.slice('intake-recovery:'.length) : undefined;
-      const preparedInputIds = [...new Set([...(prepared?.inputIds ?? []), ...(recoveryInputId ? [recoveryInputId] : [])])];
+      const preparedInputIds = [...new Set([...(prepared?.inputIds ?? []), ...(!recoveryInputId && (prepared?.inputIds?.length || decision.inputIds.length > 1) ? decision.inputIds : []), ...(recoveryInputId ? [recoveryInputId] : [])])];
       const preparedInputs = preparedInputIds.length ? this.store.all(`SELECT id,text,attachment_refs_json,ingress_json FROM conversation_inputs
-        WHERE conversation_id=? AND principal_id=? AND binding_id=? AND id IN (SELECT value FROM json_each(?))`,
+        WHERE conversation_id=? AND principal_id=? AND binding_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY input_seq`,
         receipt.conversationId, input.scope.principalId, admitted!.binding_id, JSON.stringify(preparedInputIds)) : [];
       const preparedRefs = preparedInputs.flatMap(row => JSON.parse(String(row.attachment_refs_json)) as string[]);
       if (preparedRefs.length) input = {...input, attachmentIds:[...new Set([...(input.attachmentIds ?? []), ...preparedRefs])]};
@@ -1128,13 +1143,17 @@ export class AgentOrchestrationRuntime {
       }
       // Immutable source IDs remain available to workers. Only the model delivery
       // is incremental; full canonical text and attachment references are retained.
-      const freshPreparedInputs = preparedInputs.filter(row => row.id !== receipt.inputId && !contextPlan.includes('materials',String(row.id)));
+      // Unresolved execution is an obligation, not optional cached context. Replay
+      // it on follow-up/recovery even when this CLI has seen it before.
+      const replayPending = Boolean(prepared?.deferredDispatch || recoveryInputId);
+      const freshPreparedInputs = preparedInputs.filter(row => row.id !== receipt.inputId && (replayPending || !contextPlan.includes('materials',String(row.id))));
       for (const row of freshPreparedInputs) contextPlan.mark('materials',String(row.id),true);
       contextPlan.mark('materials',receipt.inputId,true);
       const intakeValue = (value: typeof prepared) => value ? {mode:value.mode,deferredDispatch:value.deferredDispatch,
         preparation:value.preparation,inputIds:value.inputIds,task_id:value.task_id,resolution:value.resolution} : null;
       const pendingState = intakeValue(prepared);
-      const pendingChanges = contextPlan.select('intake',[{id:'pending',value:pendingState}],row=>row.id);
+      const pendingDelta = contextPlan.select('intake',[{id:'pending',value:pendingState}],row=>row.id);
+      const pendingChanges = replayPending ? [{id:'pending',value:pendingState}] : pendingDelta;
 
       if (!semantic && input.skill && input.modality !== 'live_voice' && !channelSpeech && !visualInput.images.length && !visualInput.unavailable.length) {
         const task = this.tasks.spawn({ ...capabilities, ...receipt, ...decision, principalId: input.scope.principalId,
@@ -1258,7 +1277,7 @@ export class AgentOrchestrationRuntime {
           }
           if (tool === 'task_answer') return;
           if (!intakeChoice || intakeChoice.mode==='wait' || intakeChoice.mode==='resolve' || !acknowledgementReady) throw new OrchestrationError('ACKNOWLEDGEMENT_REQUIRED');
-          if (tool==='task_spawn' && preparedInputs.length) args.context_refs=[...new Set([...(Array.isArray(args.context_refs) ? args.context_refs : []),...preparedRefs,...preparedInputs.map(row=>String(row.id))])];
+          if (tool==='task_spawn' && !args.gateway_target && preparedInputs.length) args.context_refs=[...new Set([...(Array.isArray(args.context_refs) ? args.context_refs : []),...preparedRefs,...preparedInputs.map(row=>String(row.id))])];
           if (intakeChoice.mode==='update' && (tool==='task_spawn' || args.task_id!==intakeChoice.task_id)) {
             const attempt = attemptedTaskActions.get(actionId);
             if (attempt) attempt.intendedUpdateTaskId = intakeChoice.task_id;
@@ -1416,13 +1435,16 @@ export class AgentOrchestrationRuntime {
         this.decisions.finish(decision, display, 'interrupted', undefined, false);
         await this.flushHistory(); return display;
       }
+      let unsafeToReplay = false;
       agentSession.on('output', toolActivity(event => {
+        if (event.type === 'tool_use' && !/^(StructuredOutput|mcp__gateway__(conversation_intake|capabilities_list|memory_get|memory_search|task_status))$/.test(event.name)) unsafeToReplay = true;
         this.store.transaction(() => this.store.appendEvent(receipt.conversationId, internalReview ? 'progress.review.tool' : 'tool.activity', { ...event, responseId: decision.responseId, role: 'agent' }));
         if (!internalReview) options.onTool?.(event);
       }));
+      const bufferChat = semantic && this.config.conversation.inputDebounceMs > 0 && batchableInput(input);
       let rawDisplay = '', structuredStarted = false;
       const displayChunk = (chunk: string) => {
-        if (internalReview || questionReview) return; // Buffer until the notify/silence decision is final.
+        if (internalReview || questionReview || bufferChat || recoveryInputId) return; // Buffer until the notify/silence decision is final.
         if (semantic && (intakeChoice?.mode==='wait' || intakeDeferred || acknowledgementId)) return;
         // The union schema is declared on every turn now, so every turn may stream
         // StructuredOutput arguments and only display_text may be published. A plain-text
@@ -1465,6 +1487,27 @@ export class AgentOrchestrationRuntime {
         try {
           if (this.providerAdmission.settle(providerPermit, 'success', this.config.providerAdmission)) this.providerRecovered(providerPermit.scope);
         } catch { /* Provider bookkeeping cannot invalidate a completed inference. */ }
+      }
+      const committedAction = this.store.get('SELECT action_id FROM task_commands WHERE decision_id=? LIMIT 1', decision.decisionId);
+      const supersededCount = Number(this.store.get("SELECT count(*) n FROM conversation_events WHERE conversation_id=? AND type='response.superseded' AND json_extract(payload_json,'$.payload.inputId')=?", receipt.conversationId, decision.inputIds[0])?.n ?? 0);
+      // Supersede only when the batcher would now absorb newer input into this
+      // batch; an incompatible follow-up gets its own turn without re-inference.
+      const batchGrows = () => {
+        const first = this.store.get('SELECT * FROM conversation_inputs WHERE id=?', decision.inputIds[0]);
+        return !!first && inputBatch(this.store, first, this.batchDebounceMs(), this.config.conversation.inputMaxWaitMs, decision.inputIds)
+          .inputIds.some(id => !decision.inputIds.includes(id));
+      };
+      if (bufferChat && newerInputPending() && batchGrows() && !response.interrupted && !active.stopping && !acknowledgementId && !committedAction && !unsafeToReplay && supersededCount < 2) {
+        this.store.compose(() => {
+          this.decisions.finish(decision, '', 'interrupted', undefined, false);
+          for (const id of decision.inputIds) this.store.run("UPDATE conversation_inputs SET status='accepted' WHERE id=?", id);
+          this.store.appendEvent(receipt.conversationId, 'response.superseded', {responseId:decision.responseId, inputId:decision.inputIds[0], inputIds:decision.inputIds});
+        });
+        // No user-visible answer or task action was committed. Re-read canonical
+        // inputs with the newer messages; do not checkpoint discarded context.
+        contextPlan.invalidate();
+        await this.flushHistory();
+        return '';
       }
       if (!response.interrupted) {
         // A completed CLI turn has consumed its tool results. Failed/interrupted
@@ -1547,7 +1590,19 @@ export class AgentOrchestrationRuntime {
             : 'The requested task was not started or updated. Please try again.';
         surfaces.spoken = '';
       }
-      const intakeSilent = semantic && !uncommittedDispatch && (intakeChoice?.mode==='wait' || intakeDeferred || (acknowledgementId && this.store.get("SELECT action_id FROM task_commands WHERE decision_id=? AND command_type IN ('spawn','update','answer') LIMIT 1",decision.decisionId)));
+      const dispatchCommitted = this.store.get("SELECT action_id FROM task_commands WHERE decision_id=? AND command_type IN ('spawn','update','answer') LIMIT 1", decision.decisionId);
+      if (semantic && !response.interrupted && !active.stopping && intakeChoice && ['ready','update'].includes(intakeChoice.mode) && !dispatchCommitted) this.intake.deferDispatch(receipt.inputId);
+      const unresolved = semantic && this.intake.context(receipt.conversationId, input.scope.principalId, String(admitted!.binding_id));
+      const recoveryFailed = Boolean(recoveryInputId && unresolved?.deferredDispatch && unresolved.mode !== 'wait' && !response.interrupted && !active.stopping && !newerInputPending());
+      if (recoveryFailed) {
+        const thai = /[\u0E00-\u0E7F]/.test(input.text + String(unresolved && unresolved.preparation) + preparedInputs.map(row => row.text).join('') + response.text);
+        surfaces.display = thai
+          ? 'ระบบยังจัดการคำขอค้างไม่สำเร็จ: agent จบการกู้คืนโดยไม่ได้ยืนยันว่างานถูกส่งต่อหรือปิดเรื่องแล้ว คำขอเดิมยังถูกเก็บไว้และยังไม่ถือว่าเสร็จค่ะ'
+          : 'The agent ended recovery without confirming that the pending request was dispatched or resolved. The request is still retained and is not complete.';
+        surfaces.spoken = '';
+        this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.dispatch_unresolved', {responseId:decision.responseId, inputId:receipt.inputId}));
+      }
+      const intakeSilent = !recoveryFailed && semantic && !uncommittedDispatch && (intakeChoice?.mode==='wait' || intakeDeferred || (acknowledgementId && unresolved?.deferredDispatch && !dispatchCommitted) || (acknowledgementId && this.store.get("SELECT action_id FROM task_commands WHERE decision_id=? AND command_type IN ('spawn','update','answer') LIMIT 1",decision.decisionId)));
       if (intakeSilent) {
         // A receipt/preparation turn has not reported older task results. Keep
         // their notifications (and attachments) available to the next report.
@@ -1566,7 +1621,7 @@ export class AgentOrchestrationRuntime {
       if(!silent&&!response.interrupted&&display.trim())for(const image of endScreenshots){
         attachComputerEndScreenshot(this.store,join(this.agent.workspace,'../..'),{...image,responseId:decision.responseId!,principalId:input.scope.principalId,conversationId:receipt.conversationId});
       }
-      this.decisions.finish(decision, display, response.interrupted ? 'interrupted' : 'completed', channelSpeech && !silent ? taskSpeech || surfaces.spoken : undefined, !active.stopping && !silent);
+      this.decisions.finish(decision, display, response.interrupted ? 'interrupted' : recoveryFailed ? 'failed' : 'completed', channelSpeech && !silent ? taskSpeech || surfaces.spoken : undefined, !active.stopping && !silent);
       if (active.notification && !response.interrupted) {
         const batch = this.store.get('SELECT COUNT(*)-COUNT(DISTINCT task_id) n FROM notifications WHERE decision_id=?', decision.decisionId);
         try { this.providerAdmission.coalesced(Number(batch?.n ?? 0)); } catch { /* telemetry cannot invalidate a report */ }

@@ -91,6 +91,8 @@ Withheld inputs do not create failed token turns or fabricated zero-usage rows.
 | `backend` | `inherit` | Use the configured Claude Code backend/model; no alternative backend name is supported |
 | `semanticIntake` | `false` | Prepare incomplete materials and combine them with the next instruction |
 | `intakeWaitMs` | `2000` | Wait after the latest incomplete input before asking for clarification; not an extra delay for complete instructions |
+| `inputDebounceMs` | `1500` | With `semanticIntake`, quiet period that combines consecutive human chat messages into one turn; `0` disables batching. Must not exceed `inputMaxWaitMs` |
+| `inputMaxWaitMs` | `8000` | Longest a batch waits from its first message, even while messages keep arriving; at most `30000` |
 | `maxActiveSessions` | `2` | Bound concurrently active conversation decisions per agent |
 | `notificationPolicy` | `existing_receive_path` | Deliver task events through the existing receive path; `next_user_turn` is also accepted |
 | `idleTimeoutMs` | `120000` | Conversation decision inactivity budget; progress renews the idle clock |

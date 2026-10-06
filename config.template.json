@@ -158,7 +158,7 @@
       "signatureEmoji": "",
       "voice": { "enabled": false },
       "orchestration": {
-        "conversation": { "backend": "inherit", "semanticIntake": false, "intakeWaitMs": 2000, "notificationPolicy": "existing_receive_path", "maxActiveSessions": 2, "idleTimeoutMs": 120000 },
+        "conversation": { "backend": "inherit", "semanticIntake": false, "intakeWaitMs": 2000, "inputDebounceMs": 1500, "inputMaxWaitMs": 8000, "notificationPolicy": "existing_receive_path", "maxActiveSessions": 2, "idleTimeoutMs": 120000 },
         "tasks": { "projectRoot": "", "idleTimeoutMs": 300000, "maxDurationMs": 0, "backgroundGraceMs": 900000, "progressStaleMs": 180000, "progressNotifyCooldownMs": 300000, "repeatedToolThreshold": 6, "maxConcurrentPerAgent": 10, "maxConcurrentPerConversation": 10, "workerIdleTtlMs": 600000, "maxQueuedPerAgent": 100, "maxQueuedPerConversation": 20 }
       },
       "heartbeat": {

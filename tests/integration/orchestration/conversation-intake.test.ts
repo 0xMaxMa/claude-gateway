@@ -308,6 +308,7 @@ test('web continuation of a channel chat streams the acknowledgement before the 
 test('activity orders a completed answer after its earlier acknowledgement', async () => {
  const f=await fixture(async call=>{
   await call('conversation_intake',{mode:'ready',acknowledgement:'I am checking the supplied material.'});
+  expect(await call('conversation_intake',{mode:'resolve',resolution:'Inspected the supplied material directly; it contains two sections and no external work remains.'})).toEqual({resolved:true});
   return 'The supplied material has two sections.';
  });
  try {

@@ -6,6 +6,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { gatewayCapacity } from './capacity';
 import { AgentConfig, GatewayConfig } from '../types';
+import type { SkillRegistry } from '../skills/loader';
 import { claudeCommand, pathWithNativeBin } from '../session/claude-bin';
 import { resolveOrchestrationConfig } from './config';
 import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
@@ -94,4 +95,25 @@ export function discoverCliSkills(agent: AgentConfig, cwd = agent.orchestration?
   cache.set(key,{until:Date.now()+30000,value});
   void value.catch(()=>{cache.delete(key);});
   return value;
+}
+
+/** Build the next CLI/extension skill list off to the side and swap it in at once:
+ * ingress resolves skills concurrently and must never see a blank list mid-refresh.
+ * The registry is read at swap time because a skills reload may replace it mid-refresh. */
+export async function refreshCliSkillRegistry(currentRegistry: () => SkillRegistry, agent: AgentConfig, gateway?: GatewayConfig,
+  discoverCli = () => discoverCliSkills(agent, undefined, gateway)): Promise<void> {
+  let cliSkills: CliSkill[] = [], cliDiscoveryError: string | undefined;
+  try {
+    try { cliSkills = await discoverCli(); } catch { cliDiscoveryError = 'CLI_SKILL_DISCOVERY_UNAVAILABLE'; }
+    const { discoverWorkerExtensions } = await import('../session/worker-extensions');
+    const extensions = await discoverWorkerExtensions(agent, gateway);
+    const merged = new Map(cliSkills.map(skill => [skill.name, skill]));
+    for (const skill of extensions.skills) merged.set(skill.name, { ...merged.get(skill.name), ...skill });
+    Object.assign(currentRegistry(), { cliSkills: [...merged.values()], extensionServers: Object.keys(extensions.servers), extensionNotices: extensions.notices });
+  } catch {
+    Object.assign(currentRegistry(), { cliSkills: [], extensionServers: [], extensionNotices: [] });
+    cliDiscoveryError = 'CLI_SKILL_DISCOVERY_UNAVAILABLE';
+  }
+  const registry = currentRegistry();
+  if (cliDiscoveryError) registry.cliDiscoveryError = cliDiscoveryError; else delete registry.cliDiscoveryError;
 }
