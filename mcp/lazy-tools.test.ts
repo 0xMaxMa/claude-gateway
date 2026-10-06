@@ -117,6 +117,7 @@ test('real lazy inventory preserves every execution schema and successful browse
     const execution = direct.filter(tool => !lazy.some(other => other.name === tool.name));
     expect(execution.map(t => t.name)).toContain('generate_image');
     expect(execution.map(t => t.name)).toContain('generate_video');
+    expect(execution.map(t => t.name)).toContain('narrate');
     const searchStart = performance.now();
     for (const tool of execution) {
       const found = await clients[1].callTool({ name: 'tool_search', arguments: { name: tool.name } });
@@ -175,7 +176,7 @@ test('cron tools survive module registration and lazy discovery, while privilege
 test('all registered worker modules follow the scoped execution policy',async()=>{
  const {gatewayModules}=await import('./modules');
  expect(gatewayModules('agent').map(m=>m.id)).toEqual(['memory','safemode']);
- expect(gatewayModules('worker',true).map(m=>m.id)).toEqual(['memory','cron','image','video','share-file','browser']);
+ expect(gatewayModules('worker',true).map(m=>m.id)).toEqual(['memory','cron','image','video','share-file','narrate','browser']);
  const standalone=gatewayModules().map(m=>m.id);
  for(const id of ['cron','image','video','share-file','browser','skills','apps','agent','api','telegram','discord','line','slack','whatsapp','whatsapp_cloud','wechat'])expect(standalone).toContain(id);
 });

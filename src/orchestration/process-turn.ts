@@ -244,7 +244,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       const role = process.runtimeProfile.role;
       const allowed = role === 'agent'
         ? /^(mcp__gateway__(jev_evaluate|capabilities_list|conversation_intake|memory_(get|search)|task_(spawn|status|cancel|update|answer|question)))$/
-        : /^(Read|Glob|Grep|Bash|Edit|Write|Skill|mcp__gateway__(jev_evaluate|tool_search|tool_call|browser_[a-z_]+|generate_image|generate_video|share_file|share_image|memory_(get|search|shared_(get|create|update|delete))|task_(report_progress|request_input|stage_file|memory_append)))$/;
+        : /^(Read|Glob|Grep|Bash|Edit|Write|Skill|mcp__gateway__(jev_evaluate|tool_search|tool_call|browser_[a-z_]+|generate_image|generate_video|narrate|share_file|share_image|memory_(get|search|shared_(get|create|update|delete))|task_(report_progress|request_input|stage_file|memory_append)))$/;
       const workerTools = process.runtimeProfile.workerTools ?? DEFAULT_WORKER_TOOLS;
       const companions = role === 'worker' ? nativeCompanionTools(workerTools) : [];
       const allowedTool = (name: unknown): boolean => {

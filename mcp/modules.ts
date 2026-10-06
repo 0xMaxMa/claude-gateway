@@ -12,6 +12,7 @@ import { BrowserModule } from './tools/browser/module';
 import { ImageModule } from './tools/image/module';
 import { VideoModule } from './tools/video/module';
 import { ShareFileModule } from './tools/share-file/module';
+import { NarrateModule } from './tools/narrate/module';
 import { AppsModule } from './tools/apps/module';
 import { ApiModule } from './tools/api/module';
 import { MemoryModule } from './tools/memory/module';
@@ -31,6 +32,7 @@ export function gatewayModules(
               new ImageModule(),
               new VideoModule(),
               new ShareFileModule(),
+              new NarrateModule(),
               new BrowserModule(),
             ]
           : []),

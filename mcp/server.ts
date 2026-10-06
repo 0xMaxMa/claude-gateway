@@ -34,6 +34,7 @@ const modules = gatewayModules(ORCHESTRATION_ROLE, process.env.GATEWAY_ORCHESTRA
 const toolMap = new Map<string, AnyModule>();
 const visibleTools: McpToolDefinition[] = [];
 
+const WORKER_MEDIA_MODULES = new Set(['cron', 'image', 'video', 'share-file', 'narrate', 'browser']);
 for (const mod of modules) {
   if (!mod.isEnabled()) continue;
 
@@ -47,7 +48,7 @@ for (const mod of modules) {
 
   for (const tool of mod.getTools()) {
     if (ORCHESTRATION_ROLE && !(ORCHESTRATION_ROLE === 'agent' && mod.id === 'safemode') && !['memory_search', 'memory_get'].includes(tool.name) && !(ORCHESTRATION_ROLE === 'worker' &&
-      ((mod.id === 'cron' || mod.id === 'image' || mod.id === 'video' || mod.id === 'share-file' || mod.id === 'browser') || (mod.id === 'memory' && process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true')))) continue;
+      (WORKER_MEDIA_MODULES.has(mod.id) || (mod.id === 'memory' && process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true')))) continue;
     toolMap.set(tool.name, mod);
     visibleTools.push(tool);
   }
