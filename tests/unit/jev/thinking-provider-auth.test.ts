@@ -15,6 +15,6 @@ test('thinkingProvider carries the configured authScheme to the helper',async()=
 test('textHelper validation accepts authScheme only as x-api-key|bearer on anthropic-messages',()=>{
  expect(()=>validateBrowserIntegration({bindings:[],textHelper:{...helper,authScheme:'bearer'}})).not.toThrow();
  expect(()=>validateJevConfig({thinking:{...helper,authScheme:'bearer'}} as never)).not.toThrow();
- expect(()=>validateBrowserIntegration({bindings:[],textHelper:{...helper,authScheme:'oauth'}})).toThrow();
+ expect(()=>validateBrowserIntegration({bindings:[],textHelper:{...helper,authScheme:'oauth'}} as never)).toThrow();
  expect(()=>validateBrowserIntegration({bindings:[],textHelper:{...helper,api:'openai-chat',authScheme:'bearer'}})).toThrow();
 });
