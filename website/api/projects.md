@@ -28,7 +28,7 @@ Every error has the shape `{ "error": string, "code": string }`. Branch on
 | Status | `code` | When |
 |--------|--------|------|
 | 400 | `invalid_name` | The project name fails the name rules below. |
-| 400 | `invalid_path` | The `path` query fails the path rules below. |
+| 400 | `invalid_path` | The `path` query fails the path rules below, or the filesystem rejects it as too long. |
 | 400 | `not_a_directory` | `tree` was asked for a file. |
 | 400 | `not_a_file` | `file` was asked for a directory or a special file. |
 | 403 | `path_escape` | The real path (after symlinks) leaves the project, or the project leaves the root. |

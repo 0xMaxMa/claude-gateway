@@ -51,6 +51,7 @@ const ERRNO_CODES: Record<string, ProjectsErrorCode> = {
   EACCES: 'permission_denied',
   EPERM: 'permission_denied',
   EEXIST: 'project_exists',
+  ENAMETOOLONG: 'invalid_path',
   // Only reachable via a symlink: a loop, or O_NOFOLLOW meeting a link swapped
   // in after realpath. Either way the request tried to leave the real path.
   ELOOP: 'path_escape',

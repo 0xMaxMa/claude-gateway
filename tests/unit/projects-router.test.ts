@@ -125,6 +125,30 @@ describe('GET /api/v1/projects/:name/tree and /file', () => {
     },
   );
 
+  it.each([
+    ['a 4096-char segment', 'x'.repeat(4096)],
+    ['a 3999-char nested path', `${'abcdefghi/'.repeat(399)}abcdefghi`],
+  ])('rejects %s that the OS calls too long with 400 invalid_path', async (_label, p) => {
+    // A deep root, and the directory chain built as far as the OS allows, so
+    // realpath reaches PATH_MAX (4096) instead of stopping at a missing component.
+    const deepRoot = path.join(base, 'd'.repeat(120), 'projects');
+    let dir = path.join(deepRoot, 'app');
+    fs.mkdirSync(dir, { recursive: true });
+    for (const seg of p.split('/')) {
+      dir = path.join(dir, seg);
+      try {
+        fs.mkdirSync(dir);
+      } catch {
+        break;
+      }
+    }
+    const deep = express().use('/api', createProjectsRouter(apiKeys, deepRoot));
+    for (const route of ['tree', 'file']) {
+      const res = await request(deep).get(`/api/v1/projects/app/${route}?path=${p}`).set(POD);
+      expect([route, res.status, res.body.code]).toEqual([route, 400, 'invalid_path']);
+    }
+  });
+
   it('rejects an encoded traversal in the project name', async () => {
     const res = await request(app).get('/api/v1/projects/..%2F..%2Fetc/file?path=passwd').set(POD);
     expect(res.status).toBe(400);

@@ -82,4 +82,8 @@ describe('resolveInside', () => {
   it('reports a missing target as not_found', async () => {
     expect(await resolveInside(root, 'proj/nope')).toEqual({ ok: false, error: 'not_found' });
   });
+
+  it('reports a name the OS calls too long as invalid_path', async () => {
+    expect(await resolveInside(root, 'x'.repeat(4096))).toEqual({ ok: false, error: 'invalid_path' });
+  });
 });
