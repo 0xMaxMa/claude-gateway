@@ -138,6 +138,11 @@ export async function createProject(
   const dir = path.join(root, name);
   try {
     await fsp.mkdir(root, { recursive: true });
+  } catch (e) {
+    // A recursive mkdir only fails with EEXIST when the root is a non-directory.
+    return err((e as NodeJS.ErrnoException).code === 'EEXIST' ? 'not_a_directory' : errnoToCode(e));
+  }
+  try {
     await fsp.mkdir(dir);
   } catch (e) {
     return err(errnoToCode(e));

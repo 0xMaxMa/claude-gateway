@@ -80,6 +80,19 @@ describe('GET /api/v1/projects', () => {
   });
 });
 
+describe('a root that is a regular file', () => {
+  it.each([
+    ['GET /projects', () => request(app).get('/api/v1/projects')],
+    ['POST /projects', () => request(app).post('/api/v1/projects').send({ name: 'x' })],
+    ['GET tree', () => request(app).get('/api/v1/projects/x/tree')],
+  ])('%s returns 400 not_a_directory', async (_label, call) => {
+    fs.writeFileSync(root, 'not a dir');
+    const res = await call().set(POD);
+    expect([res.status, res.body.code]).toEqual([400, 'not_a_directory']);
+    expect(fs.readFileSync(root, 'utf8')).toBe('not a dir');
+  });
+});
+
 describe('POST /api/v1/projects', () => {
   it('creates, then 409s a duplicate while keeping the first project intact', async () => {
     const first = await request(app).post('/api/v1/projects').set(POD).send({ name: 'app' });
