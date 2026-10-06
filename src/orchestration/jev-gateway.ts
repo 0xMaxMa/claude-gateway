@@ -6,6 +6,7 @@ import { GatewayConfig, AgentConfig } from '../types';
 import { claudeSettingsEnv } from '../config/claude-settings';
 import { JevService, resolveDirectJevConnection } from '../jev/service';
 import { JevConfig, JevError, JevEvaluationEvent } from '../jev/types';
+import type { ModelConnection } from '../automation/model-choice-evaluator';
 
 const services = new WeakMap<GatewayConfig, GatewayJev>();
 export function jevAllowed(config: GatewayConfig, agent: AgentConfig): boolean {
@@ -21,6 +22,11 @@ export async function resolveGatewayJevConnection(config: JevConfig) {
     return resolveDirectJevConnection({ ...config, provider: 'typesafe' });
   }
   if (config.baseUrl) throw new JevError('INVALID_CONFIG', 'An explicit upstream Jev baseUrl requires an explicit credential reference.');
+  const { baseUrl, apiKey } = agentIdentity('Upstream Jev');
+  return { baseUrl, apiKey };
+}
+/** The endpoint and credential the agent's own Claude CLI uses, resolved as one group. */
+export function agentIdentity(consumer = 'The agent model identity'): ModelConnection {
   const settings = claudeSettingsEnv();
   const names = ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'] as const;
   // The presence of any setting in this identity group selects settings as a
@@ -29,9 +35,17 @@ export async function resolveGatewayJevConnection(config: JevConfig) {
   const identity = ['ANTHROPIC_BASE_URL', ...names].some(name => name in settings) ? settings : process.env;
   const clean = (value: unknown): string => typeof value === 'string' && value.trim() === value && !/[\x00-\x1f\x7f]/.test(value) ? value : '';
   const baseUrl = clean(identity.ANTHROPIC_BASE_URL);
-  const apiKey = names.map(name => clean(identity[name])).find(Boolean);
-  if (!baseUrl || !apiKey) throw new JevError('INVALID_CONFIG', 'Upstream Jev requires a complete endpoint and credential group in one configuration source.');
-  return { baseUrl, apiKey };
+  const name = names.find(name => clean(identity[name]));
+  if (!baseUrl || !name) throw new JevError('INVALID_CONFIG', `${consumer} requires a complete endpoint and credential group in one configuration source.`);
+  return { baseUrl, apiKey: clean(identity[name]), scheme: name === 'ANTHROPIC_API_KEY' ? 'x-api-key' : name === 'CLAUDE_CODE_OAUTH_TOKEN' ? 'oauth' : 'bearer' };
+}
+/** Who decides each Computer Use step. Jev keeps priority wherever it already served
+ * Computer Use; the agent's own model is used only when gateway.computerUse opts in. */
+export function computerDecisions(config: GatewayConfig, agent: AgentConfig): 'jev' | 'model' | undefined {
+  if (agent.allow_tools === false) return undefined;
+  if (jevAllowed(config, agent) && config.gateway.jev?.features?.computerTasks?.enabled !== false) return 'jev';
+  if (config.gateway.computerUse?.enabled === true && agent.computerUse?.enabled !== false) return 'model';
+  return undefined;
 }
 
 export class GatewayJev {

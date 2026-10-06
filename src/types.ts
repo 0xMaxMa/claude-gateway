@@ -87,6 +87,8 @@ export interface WhatsAppAccountConfig {
 export interface AgentConfig {
   /** May narrow global Jev access; never supplies provider credentials. */
   jev?: { enabled?: boolean };
+  /** May narrow gateway.computerUse; never enables it on its own. */
+  computerUse?: { enabled?: boolean };
   /** Opt-in conversation/task/voice runtime; absent preserves legacy behavior. */
   orchestration?: import('./orchestration/config').OrchestrationConfig;
   voice?: import('./orchestration/config').AgentVoiceConfig;
@@ -443,6 +445,8 @@ export interface GatewayConfig {
   safemode?: { cli?: 'claude' | 'codex'; claude?: { model?: string }; codex?: { model?: string }; allowedAgentIds?: string[] };
   gateway: {
     jev?: import('./jev/types').JevConfig;
+    /** Computer Use without Jev: the agent's own model decides each step. Off by default. */
+    computerUse?: import('./automation/model-choice-evaluator').ComputerUseConfig;
     /** One switch for every Agent/channel; object form supplies shared defaults. */
     orchestration?: import('./orchestration/gateway-config').GatewayOrchestration;
     /** Main Claude process cap shared by legacy, conversation and worker roles. */

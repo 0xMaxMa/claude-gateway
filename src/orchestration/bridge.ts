@@ -26,6 +26,9 @@ type Scope = { role: 'agent'; compactOnly?: boolean; capabilities?: (args: Recor
   { role: 'worker'; attemptId: string; generation: number };
 
 type InputIssue = { field: string; reason: string; correction: string };
+/** Computer adapter failures are plain Errors with a bounded code; surface the code, not INVALID_REQUEST. */
+export const COMPUTER_ADAPTER_ERROR = /^(?:COMPUTER_[A-Z][A-Z_]{0,60}|INVALID_COMPUTER_GOAL)$/;
+const COMPUTER_NOT_ALLOWED_MESSAGE = 'Computer Use is not enabled for this agent on this gateway. Tell the user it is not available here; do not suggest another app or a workaround.';
 function taskSpawnInputIssues(args: Record<string, unknown>): InputIssue[] {
   const issues: InputIssue[] = [];
   for (const field of ['title', 'instructions', 'target_profile'] as const) {
@@ -308,7 +311,8 @@ export class TaskBridge {
         }
         response.end(JSON.stringify(result));
       } catch (error) {
-        const code = error instanceof JevError ? `JEV_${error.code}` : error instanceof OrchestrationError ? error.code : 'INVALID_REQUEST';
+        const adapterCode = !(error instanceof JevError) && !(error instanceof OrchestrationError) && error instanceof Error && COMPUTER_ADAPTER_ERROR.test(error.message) ? error.message : undefined;
+        const code = error instanceof JevError ? `JEV_${error.code}` : error instanceof OrchestrationError ? error.code : adapterCode ?? 'INVALID_REQUEST';
         if (code === 'ACCESS_DENIED' && denialReason) console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', message: 'Task bridge authorization denied', data: { agentId: this.tasks.store.agentId, reason: denialReason } }));
         response.statusCode = code === 'ACCESS_DENIED' ? 403 : 400;
         const taskId = typeof commandArgs.task_id === 'string' && commandArgs.task_id.length <= 256 ? commandArgs.task_id : undefined;
@@ -321,7 +325,7 @@ export class TaskBridge {
         const acknowledgementRecovery = code === 'ACKNOWLEDGEMENT_DELIVERY_PENDING'
           ? { message: 'The acknowledgement has not been confirmed as delivered. Do not retry the task mutation yet; wait for delivery to settle, then retry only if the request is still current.' }
           : undefined;
-        response.end(JSON.stringify({ error: code, ...(error instanceof JevError ? {message:error.message,...error.metadata} : {}), ...(inputDetails?.length ? {details:inputDetails} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && (['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) || code.startsWith('NARRATE_')) ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && ['EXECUTION_DENIED', 'USER_INPUT_REQUIRED'].includes(code) && error.message !== code ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...intakeRecovery, ...acknowledgementRecovery, ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED', 'BROWSER_EVIDENCE_REQUIRED', 'LIVE_CONTROL_TARGET_ONLY', 'AUTOMATION_SESSION_EXISTS', 'AUTOMATION_SESSION_CLOSED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        response.end(JSON.stringify({ error: code, ...(code === 'COMPUTER_NOT_ALLOWED' ? { message: COMPUTER_NOT_ALLOWED_MESSAGE, retryable: false } : {}), ...(error instanceof JevError ? {message:error.message,...error.metadata} : {}), ...(inputDetails?.length ? {details:inputDetails} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && (['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) || code.startsWith('NARRATE_')) ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && ['EXECUTION_DENIED', 'USER_INPUT_REQUIRED'].includes(code) && error.message !== code ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...intakeRecovery, ...acknowledgementRecovery, ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED', 'BROWSER_EVIDENCE_REQUIRED', 'LIVE_CONTROL_TARGET_ONLY', 'AUTOMATION_SESSION_EXISTS', 'AUTOMATION_SESSION_CLOSED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;

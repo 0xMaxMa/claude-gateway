@@ -1,4 +1,5 @@
 import { validateJevConfig } from '../jev/validation';
+import { validateComputerUseConfig } from '../automation/model-choice-evaluator';
 import { configWritePending, withConfigWriteLock, writeConfigAtomicSync } from './config-write-lock';
 import {migrateAgentVoiceConfig,gatewayOrchestrationEnabled,effectiveOrchestration,validateGatewayOrchestration,GatewayOrchestration} from '../orchestration/gateway-config';
 import * as fs from 'fs';
@@ -77,6 +78,7 @@ function interpolateObject(obj: unknown): unknown {
  */
 function validateAgent(agent: Record<string, unknown>, index: number, orchestration?: GatewayOrchestration): string | null {
   if (agent.jev !== undefined && (!agent.jev || typeof agent.jev !== 'object' || Array.isArray(agent.jev) || Object.keys(agent.jev).some(key => key !== 'enabled') || ((agent.jev as any).enabled !== undefined && typeof (agent.jev as any).enabled !== 'boolean'))) return 'Invalid per-agent Jev configuration';
+  if (agent.computerUse !== undefined && (!agent.computerUse || typeof agent.computerUse !== 'object' || Array.isArray(agent.computerUse) || Object.keys(agent.computerUse).some(key => key !== 'enabled') || ((agent.computerUse as any).enabled !== undefined && typeof (agent.computerUse as any).enabled !== 'boolean'))) return 'Invalid per-agent Computer Use configuration';
   try { validateWorkerHarness(agent.workers); } catch (error) { return `agent '${agent.id}': ${(error as Error).message}`; }
   if (agent.voice !== undefined || agent.orchestration !== undefined || orchestration !== undefined) {
     try { resolveOrchestrationConfig(effectiveOrchestration(agent.orchestration as OrchestrationConfig,orchestration), agent.voice as import('../orchestration/config').AgentVoiceConfig); }
@@ -246,6 +248,7 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
     validateGatewayOrchestration((config.gateway as any).orchestration);
     validateWorkerHarness((config.gateway as any).workers);
     validateJevConfig((config.gateway as any).jev);
+    validateComputerUseConfig((config.gateway as any).computerUse);
     for (const model of (config.gateway as any).models ?? []) validateWorkerModel(model);
   } catch(error){throw new ConfigValidationError((error as Error).message);}
   let migratedVoice = false;
