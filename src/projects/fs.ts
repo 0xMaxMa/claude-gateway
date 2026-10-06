@@ -135,8 +135,10 @@ export async function createProject(
   let warning: string | undefined;
   if (gitInit) {
     try {
-      // env passed explicitly: jest gives tests a copied process.env that child_process ignores.
-      await execFileAsync('git', ['init', '-q'], { cwd: dir, timeout: GIT_INIT_TIMEOUT_MS, env: process.env });
+      // GIT_DIR, GIT_WORK_TREE and friends would aim git init at another repository.
+      // env is built from process.env explicitly: jest gives tests a copy that child_process ignores.
+      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
+      await execFileAsync('git', ['init', '-q', '--', dir], { cwd: dir, timeout: GIT_INIT_TIMEOUT_MS, env });
     } catch (e) {
       warning = `git init failed: ${(e as Error).message}`;
     }

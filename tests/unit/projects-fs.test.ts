@@ -93,6 +93,26 @@ describe('createProject', () => {
     expect(fs.statSync(path.join(root, 'repo', '.git')).isDirectory()).toBe(true);
   });
 
+  it('creates the repository in the project even when GIT_* variables point elsewhere', async () => {
+    const elsewhere = path.join(base, 'elsewhere.git');
+    const saved = { GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
+    process.env.GIT_DIR = elsewhere;
+    process.env.GIT_WORK_TREE = base;
+    try {
+      const res = await createProject(root, name('g1'), true);
+      if (!res.ok) throw new Error(res.error);
+      expect(res.value.warning).toBeUndefined();
+      expect(res.value.project.is_git).toBe(true);
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+    expect(fs.existsSync(path.join(root, 'g1', '.git', 'HEAD'))).toBe(true);
+    expect(fs.existsSync(elsewhere)).toBe(false);
+  });
+
   it('keeps the directory and returns a warning when git is not on PATH', async () => {
     const savedPath = process.env.PATH;
     process.env.PATH = fs.mkdtempSync(path.join(base, 'empty-bin-'));
