@@ -31,6 +31,21 @@ function makeProject(n: string, files: Record<string, string | Buffer> = {}): st
   return dir;
 }
 
+/** After realpath resolves a path ending in `suffix`, replace `<dir>/sub` with a symlink to `target`. */
+function swapSubAfterRealpath(dir: string, suffix: string, target: string): void {
+  const realRealpath = fs.promises.realpath;
+  let swapped = false;
+  jest.spyOn(fs.promises, 'realpath').mockImplementation(async (...args: Parameters<typeof realRealpath>) => {
+    const resolved = await realRealpath(...args);
+    if (!swapped && String(args[0]).endsWith(suffix)) {
+      swapped = true;
+      fs.rmSync(path.join(dir, 'sub'), { recursive: true });
+      fs.symlinkSync(target, path.join(dir, 'sub'));
+    }
+    return resolved;
+  });
+}
+
 describe('listProjects', () => {
   it('reports a missing root as exists:false without creating it', async () => {
     expect(await listProjects(root)).toEqual({ ok: true, value: { root, exists: false, projects: [] } });
@@ -148,6 +163,14 @@ describe('listDir', () => {
     expect(await readFileContent(root, name('evil'), rel('secret'))).toEqual({ ok: false, error: 'path_escape' });
   });
 
+  it('refuses a directory swapped for an escaping symlink after the realpath check', async () => {
+    const dir = makeProject('p', { 'sub/x': '' });
+    const outside = fs.mkdtempSync(path.join(base, 'outside-'));
+    fs.writeFileSync(path.join(outside, 'secret'), 's');
+    swapSubAfterRealpath(dir, '/sub', outside);
+    expect(await listDir(root, name('p'), rel('sub'))).toEqual({ ok: false, error: 'path_escape' });
+  });
+
   it('maps a file path to not_a_directory and a missing one to not_found', async () => {
     makeProject('p', { 'a.txt': '' });
     expect(await listDir(root, name('p'), rel('a.txt'))).toEqual({ ok: false, error: 'not_a_directory' });
@@ -215,6 +238,17 @@ describe('readFileContent', () => {
     fs.symlinkSync(path.join(root, 'other', 'secret.txt'), path.join(dir, 'peek'));
     expect(await readFileContent(root, name('p'), rel('peek'))).toEqual({ ok: false, error: 'path_escape' });
   });
+
+  (process.platform === 'linux' ? it : it.skip)(
+    'refuses a file whose parent dir is swapped for an escaping symlink after the realpath check',
+    async () => {
+      const dir = makeProject('p', { 'sub/file': 'inside' });
+      const outside = fs.mkdtempSync(path.join(base, 'outside-'));
+      fs.writeFileSync(path.join(outside, 'file'), 'secret');
+      swapSubAfterRealpath(dir, '/sub/file', outside);
+      expect(await readFileContent(root, name('p'), rel('sub/file'))).toEqual({ ok: false, error: 'path_escape' });
+    },
+  );
 
   it('follows an in-project symlink to its real file', async () => {
     const dir = makeProject('p', { 'real.txt': 'hi' });

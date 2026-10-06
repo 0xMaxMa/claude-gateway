@@ -190,6 +190,10 @@ export async function listDir(root: string, name: ProjectName, rel: RelPath): Pr
   } catch (e) {
     return err(errnoToCode(e));
   }
+  // A path component may have been swapped for a symlink between realpath and readdir.
+  const after = await resolveInside(projectDir.value, rel);
+  if (!after.ok) return after;
+  if (after.value !== dir.value) return err('path_escape');
 
   // Sort and cap on dirent data first so a huge directory costs one lstat per kept entry.
   dirents.sort((a, b) => {
@@ -215,6 +219,16 @@ function decodeText(buf: Buffer): string | null {
   }
 }
 
+/**
+ * Where the open fd really points, so a parent directory swapped for a symlink
+ * after realpath is caught. Needs /proc; other platforms keep only the realpath check.
+ */
+async function openedInside(handle: fsp.FileHandle, realProjectDir: string): Promise<boolean> {
+  if (process.platform !== 'linux') return true;
+  const opened = await fsp.readlink(`/proc/self/fd/${handle.fd}`).catch(() => null);
+  return opened !== null && isInside(realProjectDir, opened);
+}
+
 export async function readFileContent(
   root: string,
   name: ProjectName,
@@ -234,6 +248,7 @@ export async function readFileContent(
     return err(errnoToCode(e));
   }
   try {
+    if (!(await openedInside(handle, projectDir.value))) return err('path_escape');
     const st = await handle.stat();
     if (!st.isFile()) return err('not_a_file');
     const meta = { path: rel, size: st.size, modified_at: st.mtime.toISOString() };
