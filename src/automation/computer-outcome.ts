@@ -50,7 +50,8 @@ export function computerOutcomeText(report:ComputerTaskReport):string{
  const run=report.stepRun;
  if(run)return stepRunText(run,detail=>HINTS[detail]?hint(detail,report):undefined);
  const trace=report.trace??[];
- const waiting=[...trace].reverse().find(e=>e.phase==='waiting'&&e.reason!=='POST_ACTION_EVIDENCE_STALE')?.reason;
+ // A goal run's own end (reached, out of steps) is the report's reason; other stops are waits.
+ const waiting=['GOAL_REACHED','STEP_LIMIT'].includes(report.reason)?report.reason:[...trace].reverse().find(e=>e.phase==='waiting'&&e.reason!=='POST_ACTION_EVIDENCE_STALE')?.reason;
  // The device may have acted: never tell the owner it was not done.
  if(report.reason==='OUTCOME_UNKNOWN')return `${UNKNOWN_PREFIX} the last action may have run. Check the screen before sending the command again.`;
  if(waiting==='SESSION_READY'&&!report.steps)return 'Ready: the session is open and waits for the next command.';
@@ -60,8 +61,8 @@ export function computerOutcomeText(report:ComputerTaskReport):string{
  if(sequence&&planned&&sequence.length<planned)return `Not done: pressed ${sequence.length} of ${planned} (${sequence.map(label=>quoted(label)).join(', ')}), then stopped${waiting&&HINTS[waiting]?`: ${hint(waiting,report)}`:'.'}`;
  // A goal run took several actions: say how it ended, never "Done" for a stop.
  const actions=`${report.steps} action${report.steps===1?'':'s'}`;
- if(waiting==='GOAL_REACHED'&&report.steps>0)return `Done: ${actions}, last ${report.lastAction&&!report.lastAction.blocked?computerActionText(report.lastAction):'the action was sent'}. Send the next command.`;
- if(waiting==='STEP_LIMIT'&&report.steps>0)return `Not finished: stopped after ${actions}, the limit for one command. Check the screen and send the next command.`;
+ if(waiting==='GOAL_REACHED'&&report.steps>0)return `Done: ${actions}, last ${report.lastAction&&!report.lastAction.blocked?computerActionText(report.lastAction):'the action was sent'}.${report.accessReleased?' Computer access was released.':' Send the next command.'}`;
+ if(waiting==='STEP_LIMIT'&&report.steps>0)return `Not finished: stopped after ${actions}, the limit for one goal. Check the screen and send the next command.`;
  if(waiting==='COMPLETION_UNCERTAIN'&&report.steps>0)return `Not confirmed: ${actions} done, and the goal may already be complete, but the screen was not clear enough to say. Check the screen, then send the next command.`;
  if(waiting==='LOW_CONFIDENCE'&&report.steps>0)return `Not finished: ${actions} done, then the next step was unclear from the screen. Say what to do next.`;
  if(report.steps>1&&waiting&&HINTS[waiting])return `Not finished: ${actions} done, then ${hint(waiting,report)}`;
