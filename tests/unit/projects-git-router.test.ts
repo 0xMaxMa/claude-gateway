@@ -245,7 +245,7 @@ describe('POST git/init', () => {
     expect([again.status, again.body.code]).toEqual([409, 'already_a_git_repo']);
   });
 
-  it.each(['init', 'fetch', 'identity', 'commit'])('%s needs a write key', async (action) => {
+  it.each(['init', 'fetch', 'identity', 'commit', 'pull', 'push'])('%s needs a write key', async (action) => {
     fs.mkdirSync(path.join(root, 'plain'));
     const res = await post('plain', action, { name: 'n', email: 'e@x', message: 'm' }, as('k-pod-read'));
     expect([res.status, res.body.code]).toEqual([403, 'forbidden_key']);
@@ -433,5 +433,142 @@ describe('POST git/commit', () => {
     expect((await status('app')).status).toBe(200);
     expect((await first).status).toBe(201);
     expect(git(dir, 'log', '--format=%s', '-2').trim().split('\n')).toEqual(['slow', 'initial']);
+  });
+});
+
+const remoteHead = (branch = 'main') => git(remote, 'rev-parse', `refs/heads/${branch}`).trim();
+
+function commitLocal(dir: string, file: string, content: string): void {
+  write(path.join(dir, file), content);
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '-m', `local ${file}`);
+}
+
+describe('POST git/pull', () => {
+  it('fast-forwards to the upstream', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    commitUpstream('up.txt', 'from upstream');
+    const res = await post('app', 'pull');
+    expect(res.status).toBe(200);
+    expect(res.body.result).toBe('fast_forwarded');
+    expect(res.body.status).toMatchObject({ sync: 'in_sync', ahead: 0, behind: 0 });
+    expect(fs.readFileSync(path.join(dir, 'up.txt'), 'utf8')).toBe('from upstream');
+    expect(head(dir)).toBe(remoteHead());
+  });
+
+  it('reports up_to_date when there is nothing new', async () => {
+    addRemote(makeRepo('app'));
+    const res = await post('app', 'pull');
+    expect([res.status, res.body.result]).toEqual([200, 'up_to_date']);
+  });
+
+  it('409s dirty_would_overwrite and keeps the local edit', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    commitUpstream('README.md', 'upstream edit\n');
+    write(path.join(dir, 'README.md'), 'my unsaved edit\n');
+    const before = head(dir);
+    const res = await post('app', 'pull');
+    expect([res.status, res.body.code]).toEqual([409, 'dirty_would_overwrite']);
+    expect(fs.readFileSync(path.join(dir, 'README.md'), 'utf8')).toBe('my unsaved edit\n');
+    expect(head(dir)).toBe(before);
+  });
+
+  it('409s not_fast_forward when diverged, without creating a merge', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    commitUpstream('up.txt', 'y');
+    commitLocal(dir, 'local.txt', 'x');
+    const before = head(dir);
+    const res = await post('app', 'pull');
+    expect([res.status, res.body.code]).toEqual([409, 'not_fast_forward']);
+    expect(head(dir)).toBe(before);
+    expect((await status('app')).body.sync).toBe('diverged');
+  });
+
+  it('409s conflicts_present mid-merge', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    git(dir, 'checkout', '-q', '-b', 'side');
+    commitLocal(dir, 'README.md', 'side\n');
+    git(dir, 'checkout', '-q', 'main');
+    commitLocal(dir, 'README.md', 'main\n');
+    expect(() => git(dir, 'merge', '-q', 'side')).toThrow();
+    const res = await post('app', 'pull');
+    expect([res.status, res.body.code]).toEqual([409, 'conflicts_present']);
+  });
+
+  it('409s no_upstream, no_remote and detached_head', async () => {
+    const dir = makeRepo('app');
+    expect((await post('app', 'pull')).body.code).toBe('no_remote');
+    git(dir, 'remote', 'add', 'origin', remote);
+    expect((await post('app', 'pull')).body.code).toBe('no_upstream');
+    git(dir, 'checkout', '-q', '--detach');
+    expect((await post('app', 'pull')).body.code).toBe('detached_head');
+  });
+});
+
+describe('POST git/push', () => {
+  it('pushes a fast-forward to the upstream', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    commitLocal(dir, 'local.txt', 'x');
+    const res = await post('app', 'push');
+    expect(res.status).toBe(200);
+    expect(res.body.status).toMatchObject({ sync: 'in_sync', ahead: 0 });
+    expect(remoteHead()).toBe(head(dir));
+  });
+
+  it('publishes a branch with no upstream to the only remote and sets the upstream', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    commitLocal(dir, 'f.txt', 'x');
+    expect((await status('app')).body.sync).toBe('no_upstream');
+    const res = await post('app', 'push');
+    expect(res.status).toBe(200);
+    expect(res.body.status).toMatchObject({ branch: 'feature', upstream: 'origin/feature', sync: 'in_sync' });
+    expect(remoteHead('feature')).toBe(head(dir));
+  });
+
+  it('409s no_upstream with no upstream and more than one remote', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    git(dir, 'remote', 'add', 'second', remote);
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    const res = await post('app', 'push');
+    expect([res.status, res.body.code]).toEqual([409, 'no_upstream']);
+    expect(() => remoteHead('feature')).toThrow();
+  });
+
+  it('never forces: a non-fast-forward is rejected even with a forcing refspec configured', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    git(dir, 'config', 'remote.origin.push', '+refs/heads/*:refs/heads/*');
+    commitUpstream('up.txt', 'y');
+    const upstream = remoteHead();
+    commitLocal(dir, 'local.txt', 'x');
+    const res = await post('app', 'push');
+    expect([res.status, res.body.code]).toEqual([409, 'not_fast_forward']);
+    expect(remoteHead()).toBe(upstream);
+  });
+
+  it('409s no_remote and detached_head', async () => {
+    const dir = makeRepo('app');
+    expect((await post('app', 'push')).body.code).toBe('no_remote');
+    addRemote(dir);
+    git(dir, 'checkout', '-q', '--detach');
+    expect((await post('app', 'push')).body.code).toBe('detached_head');
+  });
+
+  it.each(['pull', 'push'])('%s never returns credentials from an unreachable remote URL', async (action) => {
+    const dir = makeRepo('app');
+    git(dir, 'remote', 'add', 'origin', 'https://bob:s3cret-token@127.0.0.1:9/acme/app.git');
+    git(dir, 'config', 'branch.main.remote', 'origin');
+    git(dir, 'config', 'branch.main.merge', 'refs/heads/main');
+    const res = await post('app', action);
+    expect([res.status, res.body.code]).toEqual([502, 'network']);
+    expect(JSON.stringify(res.body)).not.toContain('s3cret');
   });
 });

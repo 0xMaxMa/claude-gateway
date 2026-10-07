@@ -314,3 +314,61 @@ export function commitAll(
     return last ? ok({ commit: last, status: after.value.status }) : fail('git_failed');
   });
 }
+
+export type PullResult = 'up_to_date' | 'fast_forwarded';
+
+/** Fetch, then merge --ff-only rather than `git pull`, so pull.rebase and similar config cannot change what runs. */
+export function pullFastForward(root: string, name: ProjectName): Promise<GitResult<{ result: PullResult; status: GitStatus }>> {
+  return mutate(root, name, async (dir) => {
+    const repo = await readRepo(dir);
+    if (!repo.ok) return repo;
+    const { status, config } = repo.value;
+    const blocked = blockedBy(status);
+    if (blocked) return blocked;
+    if (!status.remote) return fail('no_remote');
+    if (!status.upstream) return fail('no_upstream');
+
+    const fetch = await git(dir, ['fetch', '--prune', '--', status.remote.name], GIT_TIMEOUTS.network, sshEnv(config));
+    if (!fetch.ok) return fetch;
+    if (fetch.value.code !== 0) return err(classify(fetch.value));
+    const merge = await git(dir, ['merge', '--ff-only', '@{upstream}'], GIT_TIMEOUTS.network);
+    if (!merge.ok) return merge;
+    if (merge.value.code !== 0) return err(classify(merge.value));
+
+    const after = await readRepo(dir);
+    if (!after.ok) return after;
+    const moved = after.value.status.last_commit?.sha !== status.last_commit?.sha;
+    return ok({ result: moved ? 'fast_forwarded' : 'up_to_date', status: after.value.status });
+  });
+}
+
+/**
+ * Pushes HEAD to its upstream, or with no upstream and exactly one remote publishes the branch with -u.
+ * Every refspec is explicit and unforced, so a `+` refspec in remote.<name>.push never applies.
+ */
+export function pushBranch(root: string, name: ProjectName): Promise<GitResult<{ status: GitStatus }>> {
+  return mutate(root, name, async (dir) => {
+    const repo = await readRepo(dir);
+    if (!repo.ok) return repo;
+    const { status, config } = repo.value;
+    const blocked = blockedBy(status);
+    if (blocked) return blocked;
+    if (config.remotes.length === 0) return fail('no_remote');
+
+    const tracking = status.branch ? config.branches[status.branch] : undefined;
+    let args: string[];
+    if (tracking?.remote && tracking.merge) {
+      args = ['push', '--porcelain', tracking.remote, `HEAD:${tracking.merge}`];
+    } else if (config.remotes.length === 1 && status.branch) {
+      args = ['push', '--porcelain', '-u', config.remotes[0].name, `refs/heads/${status.branch}:refs/heads/${status.branch}`];
+    } else {
+      return fail('no_upstream');
+    }
+    const push = await git(dir, args, GIT_TIMEOUTS.network, sshEnv(config));
+    if (!push.ok) return push;
+    if (push.value.code !== 0) return err(classify(push.value));
+
+    const after = await statusAfter(dir);
+    return after.ok ? ok({ status: after.value }) : after;
+  });
+}

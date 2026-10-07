@@ -4,7 +4,7 @@ import { expandHome } from '../utils/paths';
 import { createApiAuthMiddleware, canAccessPod } from './auth';
 import { defineRoute } from './route-registry';
 import { createProject, listDir, listProjects, readFileContent } from '../projects/fs';
-import { commitAll, fetchRemote, getStatus, getSummaries, GitError, GitErrorCode, initRepo, parseCommitRequest, parseIdentity, setIdentity } from '../projects/git';
+import { commitAll, fetchRemote, getStatus, getSummaries, GitError, GitErrorCode, initRepo, parseCommitRequest, parseIdentity, pullFastForward, pushBranch, setIdentity } from '../projects/git';
 import { parseProjectName, parseRelPath, ProjectName, ProjectsErrorCode, Result } from '../projects/paths';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
@@ -181,6 +181,8 @@ export function createProjectsRouter(apiKeys: ApiKey[], root: string): Router {
         return req.ok ? commitAll(root, name, req.value) : req;
       },
     },
+    { action: 'pull', summary: 'Fast-forward a project to its upstream', status: 200, run: (name) => pullFastForward(root, name) },
+    { action: 'push', summary: 'Push a project branch without force', status: 200, run: (name) => pushBranch(root, name) },
   ];
 
   for (const m of mutations) {
