@@ -1,4 +1,4 @@
-import { execFile } from 'child_process';
+import { spawn } from 'child_process';
 import * as path from 'path';
 import { err, ok, Result } from './paths';
 import { redactCredentials } from './git-status';
@@ -32,6 +32,9 @@ export interface RunOptions {
   env?: Record<string, string>;
 }
 
+/** How long a timed-out git gets to clean up its lock files after SIGTERM before the group is killed. */
+const KILL_GRACE_MS = 1_000;
+
 /**
  * Runs git in the project dir `cwd`. Discovery stops at `cwd`, so a folder inside some
  * other repository never reads as a repo itself.
@@ -40,23 +43,54 @@ export function runGit(cwd: string, args: string[], opts: RunOptions): Promise<R
   const env: NodeJS.ProcessEnv = { ...gitEnv(), GIT_CEILING_DIRECTORIES: path.dirname(cwd), ...opts.env };
   if (opts.readOnly) env.GIT_OPTIONAL_LOCKS = '0';
   return new Promise((resolve) => {
-    let timedOut = false;
-    const child = execFile('git', args, { cwd, env, maxBuffer: MAX_OUTPUT, encoding: 'utf8' }, (e, stdout, stderr) => {
+    // Its own process group, so a timeout also reaches the hooks, filters and ssh that git started.
+    const child = spawn('git', args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const signalGroup = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal);
+      } catch {
+        // The group has already exited.
+      }
+    };
+    let settled = false;
+    const settle = (r: Result<GitOutput, GitRunFailure>) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      if (timedOut) return;
-      if (!e) return resolve(ok({ code: 0, stdout, stderr }));
-      const code = (e as { code?: unknown }).code;
-      if (typeof code === 'number') return resolve(ok({ code, stdout, stderr }));
+      resolve(r);
+    };
+
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let size = 0;
+    const collect = (into: Buffer[]) => (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_OUTPUT) {
+        signalGroup('SIGKILL');
+        return settle(err('git_failed'));
+      }
+      into.push(chunk);
+    };
+    child.stdout.on('data', collect(stdout));
+    child.stderr.on('data', collect(stderr));
+
+    child.on('error', (e) => {
       console.warn(`projects: git ${args[0]} in ${cwd} failed: ${redactCredentials(e.message)}`);
-      resolve(err('git_failed'));
+      settle(err('git_failed'));
     });
+    child.on('close', (code) => {
+      if (code === null) return settle(err('git_failed'));
+      settle(ok({ code, stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8') }));
+    });
+
     const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGKILL');
-      // A hook's orphaned child can hold the pipes open long after git dies; let go of them now.
-      child.stdout?.destroy();
-      child.stderr?.destroy();
-      resolve(err('timeout'));
+      // TERM first: git removes its index.lock on TERM but leaves it behind on KILL.
+      signalGroup('SIGTERM');
+      setTimeout(() => signalGroup('SIGKILL'), KILL_GRACE_MS).unref();
+      // An orphan that escaped the group can still hold the pipes open; let go of them now.
+      child.stdout.destroy();
+      child.stderr.destroy();
+      settle(err('timeout'));
     }, opts.timeoutMs);
   });
 }

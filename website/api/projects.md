@@ -189,6 +189,11 @@ prompts for credentials. For ssh it uses `ssh -o BatchMode=yes` unless the
 repository sets `core.sshCommand`. It never forces, never skips hooks, and
 never resets, checks out, or deletes anything.
 
+When git runs past its time limit, the
+gateway stops git and every process git started, such as hooks, filters, and
+ssh. It sends `SIGTERM` first so git removes its lock files, then `SIGKILL`
+one second later.
+
 Only one mutating git route runs per project at a time. A second one gets
 `409 busy`. Reads never wait for a mutation.
 
@@ -231,8 +236,9 @@ three, else `null`.
 
 A file looks like a secret when its name is `.env`, `.env.*` (except
 `.env.example`, `.env.sample`, `.env.template`), `*.pem`, `*.key`, `id_rsa`,
-`id_ed25519`, `*.p12`, `*.pfx`, `.npmrc`, `credentials.json`,
-`service-account*.json`, or `.netrc`.
+`id_dsa`, `id_ecdsa`, `id_ed25519`, `*.p12`, `*.pfx`, `.npmrc`,
+`credentials.json`, `service-account*.json`, `.netrc`, or `.git-credentials`.
+The match ignores case, so `.ENV` and `ID_RSA` count too.
 
 ### GET /api/v1/projects/git-summary {#get-git-summary}
 

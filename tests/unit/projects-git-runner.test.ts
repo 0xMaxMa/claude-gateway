@@ -60,6 +60,31 @@ describe('runGit', () => {
     expect(r).toEqual(err('timeout'));
     expect(Date.now() - started).toBeLessThan(5000);
   });
+
+  const running = (pattern: string) => {
+    try {
+      return execFileSync('pgrep', ['-f', pattern], { encoding: 'utf8' }).trim();
+    } catch {
+      return '';
+    }
+  };
+
+  it('kills the whole process tree on timeout, not just git', async () => {
+    const r = await runGit(repo, ['-c', 'alias.slow=!sleep 31.4159 & sleep 31.4159', 'slow'], { timeoutMs: 300 });
+    expect(r).toEqual(err('timeout'));
+    await new Promise((res) => setTimeout(res, 1500));
+    expect(running('^sleep 31.4159$')).toBe('');
+  });
+
+  it('lets git remove its index.lock when a timeout interrupts it', async () => {
+    fs.writeFileSync(path.join(repo, '.gitattributes'), '*.bin filter=slow\n');
+    fs.writeFileSync(path.join(repo, 'a.bin'), 'x');
+    const r = await runGit(repo, ['-c', 'filter.slow.clean=sleep 27.1828; cat', 'add', '-A'], { timeoutMs: 500 });
+    expect(r).toEqual(err('timeout'));
+    await new Promise((res) => setTimeout(res, 1500));
+    expect(fs.existsSync(path.join(repo, '.git', 'index.lock'))).toBe(false);
+    expect(running('sleep 27.1828')).toBe('');
+  });
 });
 
 describe('withProjectLock', () => {
