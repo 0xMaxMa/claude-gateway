@@ -492,6 +492,13 @@ export interface GatewayConfig {
       keys: ApiKey[];
     };
     /**
+     * Pod-wide root the Projects API browses (default `~/projects`). Distinct
+     * from an agent's `orchestration.tasks.projectRoot`, which is one repo per agent.
+     */
+    projects?: {
+      root?: string;
+    };
+    /**
      * true (default) = headless backend (claude --print + stream-json).
      * false = interactive backend: claude TUI under the claude-pty-shell PTY wrapper.
      */

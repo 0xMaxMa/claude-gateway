@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { GatewayConfig, Logger } from '../types';
+import { expandHome, pathWithin } from '../utils/paths';
 import { resolveGatewayPublicUrl } from './public-url';
 import { upgradeAgentWhatsAppAccounts } from './whatsapp-accounts';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../orchestration/config';
@@ -171,6 +172,37 @@ export function logSkippedAgents(
       reason: s.reason,
       ...(s.missingVar ? { missingVar: s.missingVar } : {}),
     });
+  }
+}
+
+/**
+ * The Projects API serves every file under its root with no denylist, so a root
+ * at or above HOME or the config dir would expose ~/.ssh and config.json.
+ */
+function validateProjectsRoot(raw: unknown, configPath: string): void {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    throw new ConfigValidationError('gateway.projects.root must be a non-empty string');
+  }
+  const root = expandHome(raw);
+  if (!path.isAbsolute(root)) {
+    throw new ConfigValidationError(`gateway.projects.root must be an absolute path or start with ~/ (got "${raw}")`);
+  }
+  // realpath when the path exists, so a symlink to HOME is caught too.
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const resolved = real(root);
+  const home = os.homedir();
+  for (const guarded of [home, path.join(home, '.claude-gateway'), path.dirname(path.resolve(configPath))]) {
+    if (pathWithin(resolved, real(guarded))) {
+      throw new ConfigValidationError(
+        `gateway.projects.root "${raw}" must not be or contain ${guarded}; the Projects API would expose it`,
+      );
+    }
   }
 }
 
@@ -369,6 +401,15 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
       );
     }
     interpolatedGateway.publicUrl = normalizedPublicUrl;
+  }
+
+  const projects = interpolatedGateway.projects;
+  if (projects !== undefined) {
+    if (typeof projects !== 'object' || projects === null || Array.isArray(projects)) {
+      throw new ConfigValidationError('gateway.projects must be an object');
+    }
+    const root = (projects as Record<string, unknown>).root;
+    if (root !== undefined) validateProjectsRoot(root, configPath);
   }
 
   // Interpolate each agent individually — skip agents with missing env vars

@@ -615,4 +615,78 @@ describe('config-loader', () => {
     expect(loaded.agents.map(agent => agent.id)).toEqual(['baerbel']);
     expect(skipped.map(agent => agent.reason)).toEqual([expect.stringMatching(/Computer Use/)]);
   });
+
+  describe('gateway.projects.root', () => {
+    let home: string;
+    let configDir: string;
+
+    beforeEach(() => {
+      home = path.join(tmpDir, 'users', 'pod');
+      configDir = path.join(tmpDir, 'etc');
+      fs.mkdirSync(path.join(home, '.claude-gateway'), { recursive: true });
+      fs.mkdirSync(configDir);
+      mockHomeDir = home;
+    });
+
+    afterEach(() => {
+      mockHomeDir = undefined;
+    });
+
+    const load = (gateway: Record<string, unknown>) => {
+      const configPath = path.join(configDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/tmp', ...gateway }, agents: [] }));
+      return loadConfig(configPath);
+    };
+    const loadRoot = (root: unknown) => load({ projects: { root } });
+
+    it('loads a config with no projects key', () => {
+      expect(load({}).gateway.projects).toBeUndefined();
+    });
+
+    it('accepts a ~/ path and an absolute path outside HOME', () => {
+      expect(loadRoot('~/x').gateway.projects?.root).toBe('~/x');
+      const outside = path.join(tmpDir, 'srv', 'projects');
+      expect(loadRoot(outside).gateway.projects?.root).toBe(outside);
+    });
+
+    it('rejects a relative path', () => {
+      expect(() => loadRoot('projects')).toThrow(/gateway\.projects\.root must be an absolute path/);
+    });
+
+    it('rejects a non-string or blank root', () => {
+      expect(() => loadRoot(42)).toThrow(/gateway\.projects\.root must be a non-empty string/);
+      expect(() => loadRoot('  ')).toThrow(/gateway\.projects\.root must be a non-empty string/);
+    });
+
+    it('rejects /', () => {
+      expect(() => loadRoot('/')).toThrow(/gateway\.projects\.root "\/" must not be or contain/);
+    });
+
+    it('rejects HOME, as ~ or as an absolute path', () => {
+      expect(() => loadRoot('~')).toThrow(/gateway\.projects\.root "~" must not be or contain/);
+      expect(() => loadRoot(home)).toThrow(/gateway\.projects\.root .* must not be or contain/);
+    });
+
+    it('rejects an ancestor of HOME', () => {
+      expect(() => loadRoot(path.join(tmpDir, 'users'))).toThrow(/gateway\.projects\.root .* must not be or contain/);
+    });
+
+    it('rejects HOME when ~/.claude-gateway is a symlink out of HOME', () => {
+      const gatewayData = path.join(tmpDir, 'gateway-data');
+      fs.renameSync(path.join(home, '.claude-gateway'), gatewayData);
+      fs.symlinkSync(gatewayData, path.join(home, '.claude-gateway'));
+      expect(() => loadRoot('~')).toThrow(/gateway\.projects\.root "~" must not be or contain/);
+    });
+
+    it('rejects a symlink that resolves to HOME', () => {
+      const link = path.join(tmpDir, 'home-link');
+      fs.symlinkSync(home, link);
+      expect(() => loadRoot(link)).toThrow(/gateway\.projects\.root .* must not be or contain/);
+    });
+
+    it('rejects the gateway config dir and the directory holding the loaded config', () => {
+      expect(() => loadRoot('~/.claude-gateway')).toThrow(/gateway\.projects\.root .* must not be or contain/);
+      expect(() => loadRoot(configDir)).toThrow(/gateway\.projects\.root .* must not be or contain/);
+    });
+  });
 });
