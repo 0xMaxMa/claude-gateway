@@ -58,6 +58,9 @@
         }
       ]
     },
+    "projects": {
+      "root": "~/projects"
+    },
     "history": {
       "retentionDays": 60,
       "cleanupHour": 0,
