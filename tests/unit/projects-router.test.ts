@@ -3,8 +3,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import request from 'supertest';
-import { createProjectsRouter } from '../../src/api/projects-router';
-import type { ApiKey } from '../../src/types';
+import { createProjectsRouter, resolveProjectsRoot } from '../../src/api/projects-router';
+import type { ApiKey, GatewayConfig } from '../../src/types';
 
 const apiKeys: ApiKey[] = [
   { key: 'k-admin', agents: ['alfred'], admin: true },
@@ -233,5 +233,19 @@ describe('GET /api/v1/projects/:name/tree and /file', () => {
     const res = await request(app).get('/api/v1/projects/app/file?path=src/a.ts').set(POD);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ kind: 'text', path: 'src/a.ts', size: body.length, modified_at: expect.any(String), content: body });
+  });
+});
+
+describe('resolveProjectsRoot', () => {
+  const config = (projects?: { root?: string }) => ({ gateway: { projects }, agents: [] }) as unknown as GatewayConfig;
+
+  it('uses the configured root, expanding ~/', () => {
+    expect(resolveProjectsRoot(config({ root: '/srv/projects' }))).toBe('/srv/projects');
+    expect(resolveProjectsRoot(config({ root: '~/code' }))).toBe(path.join(os.homedir(), 'code'));
+  });
+
+  it('falls back to ~/projects when unset', () => {
+    expect(resolveProjectsRoot(config())).toBe(path.join(os.homedir(), 'projects'));
+    expect(resolveProjectsRoot(config({}))).toBe(path.join(os.homedir(), 'projects'));
   });
 });

@@ -1,7 +1,6 @@
 import { NextFunction, Request, Response, Router } from 'express';
-import * as os from 'os';
-import * as path from 'path';
-import { ApiKey } from '../types';
+import { ApiKey, GatewayConfig } from '../types';
+import { expandHome } from '../utils/paths';
 import { createApiAuthMiddleware, canAccessPod } from './auth';
 import { defineRoute } from './route-registry';
 import { createProject, listDir, listProjects, readFileContent } from '../projects/fs';
@@ -49,20 +48,22 @@ function handle(fn: (req: Request, res: Response) => Promise<void>) {
   };
 }
 
+/** `gateway.projects.root`, which loadConfig has already validated. */
+export function resolveProjectsRoot(config: GatewayConfig): string {
+  return expandHome(config.gateway.projects?.root ?? '~/projects');
+}
+
 /**
- * Pod-wide project browsing under `root` (default `~/projects`). Every route
- * needs a key that can see all agents, since projects are not agent-scoped.
+ * Pod-wide project browsing under `root`. Every route needs a key that can see
+ * all agents, since projects are not agent-scoped.
  */
-export function createProjectsRouter(
-  apiKeys: ApiKey[],
-  root: string = path.join(os.homedir(), 'projects'),
-): Router {
+export function createProjectsRouter(apiKeys: ApiKey[], root: string): Router {
   const router = Router();
   const auth = createApiAuthMiddleware(apiKeys);
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects', auth: 'key', summary: 'List projects under ~/projects', cli: null },
+    { method: 'GET', path: '/v1/projects', auth: 'key', summary: 'List projects under the configured projects root', cli: null },
     auth,
     requirePod,
     handle(async (_req, res) => respond(res, await listProjects(root))),

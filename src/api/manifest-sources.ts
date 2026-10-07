@@ -20,7 +20,7 @@ export function collectManifest(): RouteDef[] {
   createCronRouter(undefined as any);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   createPstackRouter(undefined as any, new Map(), undefined, () => undefined);
-  createProjectsRouter([]);
+  createProjectsRouter([], '');
 
   return getRegisteredRoutes();
 }

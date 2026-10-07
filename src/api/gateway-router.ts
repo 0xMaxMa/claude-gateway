@@ -46,7 +46,7 @@ import { createMetaRouter } from './meta-router';
 import { createCapabilitiesRouter } from './capabilities';
 import { GATEWAY_VERSION } from './gateway-version';
 import { createWorkspaceRouter } from './workspace-router';
-import { createProjectsRouter } from './projects-router';
+import { createProjectsRouter, resolveProjectsRoot } from './projects-router';
 import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
 import { createWebhooksRouter } from './webhooks-router';
@@ -731,9 +731,9 @@ export class GatewayRouter {
       this.app.use('/api', workspaceRouter);
     }
 
-    // Mount pod-wide project browsing (~/projects)
+    // Mount pod-wide project browsing (gateway.projects.root, default ~/projects)
     if (this.gatewayConfig?.gateway?.api?.keys) {
-      this.app.use('/api', createProjectsRouter(this.gatewayConfig.gateway.api.keys));
+      this.app.use('/api', createProjectsRouter(this.gatewayConfig.gateway.api.keys, resolveProjectsRoot(this.gatewayConfig)));
     }
 
     // Mount skills routes
