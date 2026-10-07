@@ -237,11 +237,12 @@ export function pickRemote(cfg: RepoConfig, branch: string | null): { name: stri
   );
 }
 
-const SENSITIVE_EXACT = new Set(['.env', 'id_rsa', 'id_ed25519', '.npmrc', 'credentials.json', '.netrc']);
+const SENSITIVE_EXACT = new Set(['.env', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519', '.npmrc', 'credentials.json', '.netrc', '.git-credentials']);
 const ENV_TEMPLATES = new Set(['.env.example', '.env.sample', '.env.template']);
 
+/** By basename and case-insensitive: `.ENV` holds the same secrets, and macOS checkouts fold case. */
 export function isSensitiveName(file: string): boolean {
-  const base = path.posix.basename(file);
+  const base = path.posix.basename(file).toLowerCase();
   if (SENSITIVE_EXACT.has(base)) return true;
   if (base.startsWith('.env.')) return !ENV_TEMPLATES.has(base);
   if (/\.(pem|key|p12|pfx)$/.test(base)) return true;

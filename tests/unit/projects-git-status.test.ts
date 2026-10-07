@@ -127,7 +127,7 @@ describe('describeRemote and redactCredentials', () => {
 });
 
 describe('isSensitiveName', () => {
-  it.each(['.env', '.env.local', 'cfg/.env.production', 'a.pem', 'k.key', 'id_rsa', 'id_ed25519', 'c.p12', 'c.pfx', '.npmrc', 'credentials.json', 'service-account-prod.json', '.netrc'])(
+  it.each(['.env', '.env.local', 'cfg/.env.production', 'a.pem', 'k.key', 'id_rsa', 'id_ed25519', 'c.p12', 'c.pfx', '.npmrc', 'credentials.json', 'service-account-prod.json', '.netrc', '.ENV', '.Env.Local', 'ID_RSA', 'Server.PEM', 'id_ecdsa', 'id_dsa', '.git-credentials'])(
     '%s is sensitive',
     (f) => expect(isSensitiveName(f)).toBe(true),
   );
