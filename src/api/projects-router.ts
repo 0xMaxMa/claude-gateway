@@ -4,11 +4,12 @@ import { expandHome } from '../utils/paths';
 import { createApiAuthMiddleware, canAccessPod } from './auth';
 import { defineRoute } from './route-registry';
 import { createProject, listDir, listProjects, readFileContent } from '../projects/fs';
+import { getStatus, getSummaries, GitError, GitErrorCode } from '../projects/git';
 import { parseProjectName, parseRelPath, ProjectsErrorCode, Result } from '../projects/paths';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
-const ERRORS: Record<ProjectsErrorCode, { status: number; message: string }> = {
+const ERRORS: Record<ProjectsErrorCode | GitErrorCode, { status: number; message: string }> = {
   invalid_name: { status: 400, message: 'Invalid project name' },
   invalid_path: { status: 400, message: 'Invalid path' },
   not_a_directory: { status: 400, message: 'Not a directory' },
@@ -19,14 +20,37 @@ const ERRORS: Record<ProjectsErrorCode, { status: number; message: string }> = {
   not_found: { status: 404, message: 'Not found' },
   project_exists: { status: 409, message: 'Project already exists' },
   internal: { status: 500, message: 'Internal error' },
+  not_a_git_repo: { status: 409, message: 'Project is not a git repository' },
+  already_a_git_repo: { status: 409, message: 'Project is already a git repository' },
+  nothing_to_commit: { status: 409, message: 'Nothing to commit' },
+  message_required: { status: 400, message: 'A commit message is required' },
+  identity_missing: { status: 409, message: 'Git user.name and user.email are not set' },
+  identity_already_set: { status: 409, message: 'Git identity is already configured' },
+  invalid_identity: { status: 400, message: 'Invalid git name or email' },
+  sensitive_files: { status: 409, message: 'Untracked files look like secrets' },
+  conflicts_present: { status: 409, message: 'Resolve merge conflicts first' },
+  operation_in_progress: { status: 409, message: 'A merge, rebase or similar operation is in progress' },
+  not_fast_forward: { status: 409, message: 'Branch has diverged from its upstream' },
+  dirty_would_overwrite: { status: 409, message: 'Local changes would be overwritten' },
+  no_remote: { status: 409, message: 'No git remote is configured' },
+  no_upstream: { status: 409, message: 'Branch has no upstream' },
+  detached_head: { status: 409, message: 'HEAD is detached' },
+  auth_failed: { status: 502, message: 'The git remote refused the credentials' },
+  network: { status: 502, message: 'Could not reach the git remote' },
+  timeout: { status: 504, message: 'Git took too long' },
+  hook_failed: { status: 422, message: 'A git hook rejected the commit' },
+  busy: { status: 409, message: 'Another git operation is running on this project' },
+  index_locked: { status: 409, message: 'The git index is locked' },
+  git_failed: { status: 500, message: 'Git failed' },
 };
 
-function fail(res: Response, code: ProjectsErrorCode): void {
-  const { status, message } = ERRORS[code];
-  res.status(status).json({ error: message, code });
+function fail(res: Response, error: ProjectsErrorCode | GitError): void {
+  const body = typeof error === 'string' ? { code: error } : error;
+  const { status, message } = ERRORS[body.code];
+  res.status(status).json({ error: message, ...body });
 }
 
-function respond<T>(res: Response, result: Result<T, ProjectsErrorCode>, status = 200): void {
+function respond<T>(res: Response, result: Result<T, ProjectsErrorCode | GitError>, status = 200): void {
   if (result.ok) res.status(status).json(result.value);
   else fail(res, result.error);
 }
@@ -108,6 +132,26 @@ export function createProjectsRouter(apiKeys: ApiKey[], root: string): Router {
       const rel = parseRelPath(req.query.path);
       if (!rel.ok) return fail(res, rel.error);
       respond(res, await readFileContent(root, name.value, rel.value));
+    }),
+  );
+
+  defineRoute(
+    router,
+    { method: 'GET', path: '/v1/projects/git-summary', auth: 'key', summary: 'Git sync summary for every project that is a repository', cli: null },
+    auth,
+    requirePod,
+    handle(async (_req, res) => respond(res, await getSummaries(root))),
+  );
+
+  defineRoute(
+    router,
+    { method: 'GET', path: '/v1/projects/:name/git', auth: 'key', summary: 'Git status of a project', cli: null },
+    auth,
+    requirePod,
+    handle(async (req, res) => {
+      const name = parseProjectName(req.params.name);
+      if (!name.ok) return fail(res, name.error);
+      respond(res, await getStatus(root, name.value));
     }),
   );
 

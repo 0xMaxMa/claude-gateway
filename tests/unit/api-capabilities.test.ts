@@ -62,7 +62,7 @@ describe('GET /api/v1/capabilities', () => {
 
   it('advertises project list/create/read', async () => {
     const res = await request(buildApp(apiKeys)).get('/api/v1/capabilities').set(AUTH);
-    expect(res.body.capabilities.projects).toEqual(['list', 'create', 'read']);
+    expect(res.body.capabilities.projects).toEqual(['list', 'create', 'read', 'git']);
   });
 
   it('only advertises channel identifiers the gateway itself uses', () => {

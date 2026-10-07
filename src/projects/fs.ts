@@ -80,7 +80,7 @@ async function describeProject(root: string, realDir: string, name: ProjectName)
   return { name, path: path.join(root, name), modified_at: st.mtime.toISOString(), is_git: isGit };
 }
 
-async function resolveProjectDir(root: string, name: ProjectName): Promise<FsResult<string>> {
+export async function resolveProjectDir(root: string, name: ProjectName): Promise<FsResult<string>> {
   const realRoot = await realRootOf(root);
   if (!realRoot.ok) return realRoot;
   const dir = await resolveInside(realRoot.value, name);
