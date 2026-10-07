@@ -70,6 +70,17 @@ describe('listProjects', () => {
     ]);
     expect(Number.isNaN(Date.parse(res.value.projects[0].modified_at))).toBe(false);
   });
+
+  it('reports the resolved root when the configured root is a symlink', async () => {
+    makeProject('alpha');
+    const link = path.join(base, 'projects-link');
+    fs.symlinkSync(root, link);
+
+    const res = await listProjects(link);
+    if (!res.ok) throw new Error(res.error);
+    expect(res.value.root).toBe(root);
+    expect(res.value.projects.map((p) => p.path)).toEqual([path.join(root, 'alpha')]);
+  });
 });
 
 describe('createProject', () => {

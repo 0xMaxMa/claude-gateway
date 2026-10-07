@@ -109,13 +109,13 @@ export async function listProjects(root: string): Promise<FsResult<ProjectList>>
     const dir = await resolveProjectDir(root, name.value);
     if (!dir.ok) continue;
     try {
-      projects.push(await describeProject(root, dir.value, name.value));
+      projects.push(await describeProject(realRoot.value, dir.value, name.value));
     } catch {
       // Vanished or unreadable between readdir and stat: not listable.
     }
   }
   projects.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  return ok({ root, exists: true, projects });
+  return ok({ root: realRoot.value, exists: true, projects });
 }
 
 /** execFile rejects with a numeric exit code, or an errno string when git could not be spawned. */
