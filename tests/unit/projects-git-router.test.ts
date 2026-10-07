@@ -245,7 +245,7 @@ describe('POST git/init', () => {
     expect([again.status, again.body.code]).toEqual([409, 'already_a_git_repo']);
   });
 
-  it.each(['init', 'fetch', 'identity'])('%s needs a write key', async (action) => {
+  it.each(['init', 'fetch', 'identity', 'commit'])('%s needs a write key', async (action) => {
     fs.mkdirSync(path.join(root, 'plain'));
     const res = await post('plain', action, { name: 'n', email: 'e@x', message: 'm' }, as('k-pod-read'));
     expect([res.status, res.body.code]).toEqual([403, 'forbidden_key']);
@@ -304,5 +304,134 @@ describe('POST git/identity', () => {
     const again = await post('app', 'identity', { name: 'Other', email: 'o@example.com' });
     expect([again.status, again.body.code]).toEqual([409, 'identity_already_set']);
     expect(git(dir, 'config', '--local', 'user.name').trim()).toBe('Ann Dev');
+  });
+});
+
+function hook(dir: string, name: string, script: string): void {
+  const file = path.join(dir, '.git', 'hooks', name);
+  write(file, `#!/bin/sh\n${script}\n`);
+  fs.chmodSync(file, 0o755);
+}
+
+const head = (dir: string) => git(dir, 'rev-parse', 'HEAD').trim();
+
+describe('POST git/commit', () => {
+  it('stages everything, commits, and returns the commit with a clean status', async () => {
+    const dir = makeRepo('app');
+    setIdentity(dir);
+    write(path.join(dir, 'README.md'), 'changed\n');
+    write(path.join(dir, 'src', 'new.ts'), 'export {};\n');
+    const res = await post('app', 'commit', { message: '  Add new module \n' });
+    expect(res.status).toBe(201);
+    expect(res.body.commit).toEqual({ sha: head(dir), subject: 'Add new module', author: 'Dev', committed_at: expect.any(String) });
+    expect(res.body.status).toMatchObject({ change_count: 0, last_commit: res.body.commit });
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim().split('\n').sort()).toEqual(['README.md', 'src/new.ts']);
+  });
+
+  it('commits the first commit on an unborn branch', async () => {
+    fs.mkdirSync(path.join(root, 'fresh'));
+    await post('fresh', 'init');
+    setIdentity(path.join(root, 'fresh'));
+    write(path.join(root, 'fresh', 'a.txt'), 'a');
+    const res = await post('fresh', 'commit', { message: 'first' });
+    expect(res.status).toBe(201);
+    expect(res.body.status).toMatchObject({ has_commits: true, change_count: 0 });
+  });
+
+  it('409s nothing_to_commit on a clean tree', async () => {
+    setIdentity(makeRepo('app'));
+    const res = await post('app', 'commit', { message: 'noop' });
+    expect([res.status, res.body.code]).toEqual([409, 'nothing_to_commit']);
+  });
+
+  it.each([[{}], [{ message: '' }], [{ message: '   \n' }], [{ message: 42 }], [{ message: 'a\0b' }]])(
+    '400s message_required for %p and stages nothing',
+    async (body) => {
+      const dir = makeRepo('app');
+      setIdentity(dir);
+      write(path.join(dir, 'new.txt'), 'x');
+      const res = await post('app', 'commit', body);
+      expect([res.status, res.body.code]).toEqual([400, 'message_required']);
+      expect(git(dir, 'diff', '--cached', '--name-only')).toBe('');
+    },
+  );
+
+  it('409s identity_missing, then commits once the identity is set', async () => {
+    const dir = makeRepo('app');
+    const before = head(dir);
+    write(path.join(dir, 'new.txt'), 'x');
+    const missing = await post('app', 'commit', { message: 'try' });
+    expect([missing.status, missing.body.code]).toEqual([409, 'identity_missing']);
+    expect(head(dir)).toBe(before);
+
+    expect((await post('app', 'identity', { name: 'Ann', email: 'ann@example.com' })).status).toBe(200);
+    const res = await post('app', 'commit', { message: 'try again' });
+    expect(res.status).toBe(201);
+    expect(res.body.commit.author).toBe('Ann');
+  });
+
+  it('422s hook_failed with redacted output truncated to 2000 bytes', async () => {
+    const dir = makeRepo('app');
+    setIdentity(dir);
+    git(dir, 'remote', 'add', 'origin', 'https://bob:s3cret-token@example.com/acme/app.git');
+    hook(dir, 'pre-commit', `echo "lint failed for $(git remote get-url origin)"\nhead -c 5000 /dev/zero | tr '\\0' x\nexit 1`);
+    const before = head(dir);
+    write(path.join(dir, 'new.txt'), 'x');
+    const res = await post('app', 'commit', { message: 'blocked' });
+    expect([res.status, res.body.code]).toEqual([422, 'hook_failed']);
+    expect(res.body.detail).toMatch(/^lint failed for https:\/\/example\.com\/acme\/app\.git\nxxx/);
+    expect(Buffer.byteLength(res.body.detail)).toBe(2000);
+    expect(JSON.stringify(res.body)).not.toContain('s3cret');
+    expect(head(dir)).toBe(before);
+  });
+
+  it('blocks untracked secrets until allow_sensitive, but not ignored ones', async () => {
+    const dir = makeRepo('app');
+    setIdentity(dir);
+    write(path.join(dir, '.gitignore'), 'ignored.pem\n');
+    write(path.join(dir, 'ignored.pem'), 'key');
+    write(path.join(dir, 'config', '.env'), 'SECRET=1');
+    write(path.join(dir, '.env.example'), 'SECRET=');
+    const before = head(dir);
+
+    const blocked = await post('app', 'commit', { message: 'with secrets' });
+    expect(blocked.status).toBe(409);
+    expect(blocked.body).toEqual({ error: expect.any(String), code: 'sensitive_files', paths: ['config/.env'] });
+    expect(head(dir)).toBe(before);
+    expect(git(dir, 'diff', '--cached', '--name-only')).toBe('');
+
+    const allowed = await post('app', 'commit', { message: 'with secrets', allow_sensitive: true });
+    expect(allowed.status).toBe(201);
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD')).toContain('config/.env');
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD')).not.toContain('ignored.pem');
+  });
+
+  it('409s conflicts_present during a conflicted merge', async () => {
+    const dir = makeRepo('app');
+    setIdentity(dir);
+    git(dir, 'checkout', '-q', '-b', 'side');
+    write(path.join(dir, 'README.md'), 'side\n');
+    git(dir, 'commit', '-q', '-am', 'side');
+    git(dir, 'checkout', '-q', 'main');
+    write(path.join(dir, 'README.md'), 'main\n');
+    git(dir, 'commit', '-q', '-am', 'main');
+    expect(() => git(dir, 'merge', '-q', 'side')).toThrow();
+    const res = await post('app', 'commit', { message: 'resolve' });
+    expect([res.status, res.body.code]).toEqual([409, 'conflicts_present']);
+  });
+
+  it('answers busy to a second mutation while the first runs, and still serves reads', async () => {
+    const dir = makeRepo('app');
+    setIdentity(dir);
+    hook(dir, 'pre-commit', 'sleep 1');
+    write(path.join(dir, 'new.txt'), 'x');
+    const first = post('app', 'commit', { message: 'slow' }).then((r) => r);
+    await new Promise((r) => setTimeout(r, 300));
+    const second = await post('app', 'commit', { message: 'racing' });
+    expect([second.status, second.body.code]).toEqual([409, 'busy']);
+    expect((await post('app', 'fetch')).body.code).toBe('busy');
+    expect((await status('app')).status).toBe(200);
+    expect((await first).status).toBe(201);
+    expect(git(dir, 'log', '--format=%s', '-2').trim().split('\n')).toEqual(['slow', 'initial']);
   });
 });

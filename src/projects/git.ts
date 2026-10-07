@@ -1,4 +1,4 @@
-import { promises as fsp } from 'fs';
+import { constants as fsConstants, promises as fsp } from 'fs';
 import * as path from 'path';
 import { listProjects, resolveProjectDir } from './fs';
 import { GIT_TIMEOUTS, GitOutput, runGit, withProjectLock } from './git-runner';
@@ -10,6 +10,7 @@ import {
   GitSummary,
   parseRepoConfig,
   parseStatusV2,
+  redactCredentials,
   RepoConfig,
   toSummary,
 } from './git-status';
@@ -151,6 +152,7 @@ const OUTPUT_CODES: Array<[RegExp, Exclude<GitErrorCode, 'sensitive_files' | 'ho
   [/Could not resolve host|Connection refused|Connection timed out|Network is unreachable|Failed to connect|unable to access|does not appear to be a git repository|Could not read from remote repository/i, 'network'],
   [/\[rejected\]|non-fast-forward|fetch first|Not possible to fast-forward/i, 'not_fast_forward'],
   [/would be overwritten by merge/i, 'dirty_would_overwrite'],
+  [/nothing to commit|no changes added to commit/i, 'nothing_to_commit'],
 ];
 
 function classify(out: GitOutput): GitError {
@@ -234,5 +236,81 @@ export function setIdentity(root: string, name: ProjectName, id: GitIdentity): P
       if (set.value.code !== 0) return err(classify(set.value));
     }
     return statusAfter(dir);
+  });
+}
+
+/** Refuses work while the tree is mid-merge, mid-rebase or detached; the user resolves those in an editor. */
+function blockedBy(status: GitStatus): GitResult<never> | null {
+  if (status.conflicted_count > 0) return fail('conflicts_present');
+  if (status.operation !== 'none') return fail('operation_in_progress');
+  if (status.detached) return fail('detached_head');
+  return null;
+}
+
+export type CommitMessage = string & { readonly __brand: 'CommitMessage' };
+
+export interface CommitRequest {
+  message: CommitMessage;
+  allowSensitive: boolean;
+}
+
+export function parseCommitRequest(body: unknown): GitResult<CommitRequest> {
+  const { message, allow_sensitive } = (body ?? {}) as { message?: unknown; allow_sensitive?: unknown };
+  // A NUL cannot be passed in argv; it is never part of a real message.
+  if (typeof message !== 'string' || message.trim() === '' || message.includes('\0')) return fail('message_required');
+  return ok({ message: message.trim() as CommitMessage, allowSensitive: allow_sensitive === true });
+}
+
+const COMMIT_HOOKS = ['pre-commit', 'prepare-commit-msg', 'commit-msg'];
+const HOOK_DETAIL_MAX_BYTES = 2000;
+
+/** Whether a commit hook could have produced the failure; honours core.hooksPath. */
+async function hasCommitHook(dir: string): Promise<boolean> {
+  const paths = await git(dir, ['rev-parse', ...COMMIT_HOOKS.flatMap((h) => ['--git-path', `hooks/${h}`])], GIT_TIMEOUTS.read);
+  if (!paths.ok || paths.value.code !== 0) return false;
+  for (const p of paths.value.stdout.split('\n').filter(Boolean)) {
+    if (await fsp.access(path.resolve(dir, p), fsConstants.X_OK).then(() => true, () => false)) return true;
+  }
+  return false;
+}
+
+function hookDetail(out: GitOutput): string {
+  const text = redactCredentials(`${out.stdout}${out.stderr}`.trim());
+  // A cut through a multi-byte character decodes to U+FFFD, which would push past the byte cap.
+  return Buffer.from(text).subarray(0, HOOK_DETAIL_MAX_BYTES).toString().replace(/\uFFFD$/, '');
+}
+
+export function commitAll(
+  root: string,
+  name: ProjectName,
+  req: CommitRequest,
+): Promise<GitResult<{ commit: GitCommitInfo; status: GitStatus }>> {
+  return mutate(root, name, async (dir) => {
+    const repo = await readRepo(dir);
+    if (!repo.ok) return repo;
+    const { status } = repo.value;
+    const blocked = blockedBy(status);
+    if (blocked) return blocked;
+    if (status.change_count === 0) return fail('nothing_to_commit');
+    if (!status.identity_configured) return fail('identity_missing');
+    if (status.sensitive_untracked.length > 0 && !req.allowSensitive) {
+      return err({ code: 'sensitive_files', paths: status.sensitive_untracked });
+    }
+
+    const add = await git(dir, ['add', '-A'], GIT_TIMEOUTS.commit);
+    if (!add.ok) return add;
+    if (add.value.code !== 0) return err(classify(add.value));
+    const commit = await git(dir, ['commit', '-q', '-m', req.message], GIT_TIMEOUTS.commit);
+    if (!commit.ok) return commit;
+    if (commit.value.code !== 0) {
+      const known = classify(commit.value);
+      if (known.code !== 'git_failed' || !(await hasCommitHook(dir))) return err(known);
+      return err({ code: 'hook_failed', detail: hookDetail(commit.value) });
+    }
+
+    const after = await readRepo(dir);
+    if (!after.ok) return after;
+    const last = after.value.status.last_commit;
+    return last ? ok({ commit: last, status: after.value.status }) : fail('git_failed');
   });
 }
