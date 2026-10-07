@@ -2,6 +2,7 @@ import { execFile } from 'child_process';
 import { constants as fsConstants, Dirent, promises as fsp } from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
+import { gitEnv } from './git-runner';
 import {
   err,
   errnoToCode,
@@ -150,10 +151,7 @@ export async function createProject(
   let warning: string | undefined;
   if (gitInit) {
     try {
-      // GIT_DIR, GIT_WORK_TREE and friends would aim git init at another repository.
-      // env is built from process.env explicitly: jest gives tests a copy that child_process ignores.
-      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
-      await execFileAsync('git', ['init', '-q', '--', dir], { cwd: dir, timeout: GIT_INIT_TIMEOUT_MS, env });
+      await execFileAsync('git', ['init', '-q', '--', dir], { cwd: dir, timeout: GIT_INIT_TIMEOUT_MS, env: gitEnv() });
     } catch (e) {
       warning = gitInitWarning(e as GitInitError);
       console.warn(`projects: git init in ${dir} failed: ${(e as Error).message}`);
