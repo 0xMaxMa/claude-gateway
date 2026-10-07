@@ -87,7 +87,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/api/v1/projects` | Pod key | List projects under `~/projects` |
+| `GET` | `/api/v1/projects` | Pod key | List projects under the projects root (default `~/projects`) |
 | `POST` | `/api/v1/projects` | Pod key + Write | Create a project directory, optionally with `git init` |
 | `GET` | `/api/v1/projects/:name/tree` | Pod key | List one directory level of a project |
 | `GET` | `/api/v1/projects/:name/file` | Pod key | Read a file from a project |

@@ -1,8 +1,8 @@
 # Projects API {#projects-api}
 
-Browse the project directories under the pod user's `~/projects`. The web
-dashboard uses these routes to list projects, create a new one, and show a
-read-only file tree and file viewer. Editing is out of scope. Open the project
+Browse the project directories under the pod's projects root, `~/projects` by
+default. The web dashboard uses these routes to list projects, create a new one,
+and show a read-only file tree and file viewer. Editing is out of scope. Open the project
 in the code editor for that.
 
 **Auth.** Every route needs an API key with pod-wide scope: `admin: true` or
@@ -14,13 +14,29 @@ projects belong to the pod, not to an agent. `POST /api/v1/projects` also needs
 `"projects": ["list", "create", "read"]`. Show project browsing only when the
 array includes `"list"`. An older gateway omits the key.
 
-**Root.** Projects live in `path.join(os.homedir(), "projects")`. Every listing
-returns this as `root`, so a client never has to rebuild the home path. The
-gateway follows symlinks with `realpath` and refuses any project, directory, or
+**Root.** Projects live in `gateway.projects.root`, which defaults to
+`~/projects`. Every listing returns the root as `root`, resolved through
+symlinks when it exists, so a client never has to rebuild it. The gateway follows symlinks with `realpath` and refuses any project, directory, or
 file whose real location is outside the root (for a project) or outside the
 project (for a path inside it). Hardlinks are not detected: a hardlinked file reads like any other file,
 because the API is a view of what the gateway's user can already read, not a
 sandbox.
+
+**Configuring the root.** Set `gateway.projects.root` in `config.json` to an
+absolute path or a path starting with `~/`:
+
+```json
+{
+  "gateway": {
+    "projects": { "root": "/srv/projects" }
+  }
+}
+```
+
+The API has no denylist inside the root, so the gateway rejects a configuration
+whose root is `/`, your home directory, `~/.claude-gateway`, the directory holding
+`config.json`, or any directory that contains one of them. Changing the root
+takes effect after a gateway restart.
 
 ## Errors {#errors}
 
@@ -31,7 +47,7 @@ Every error has the shape `{ "error": string, "code": string }`. Branch on
 |--------|--------|------|
 | 400 | `invalid_name` | The project name fails the name rules below. |
 | 400 | `invalid_path` | The `path` query fails the path rules below, or the filesystem rejects it as too long. |
-| 400 | `not_a_directory` | `tree` was asked for a file, or `~/projects` exists but is not a directory. |
+| 400 | `not_a_directory` | `tree` was asked for a file, or the root exists but is not a directory. |
 | 400 | `not_a_file` | `file` was asked for a directory or a special file. |
 | 403 | `path_escape` | The real path (after symlinks) leaves the project, or the project leaves the root. |
 | 403 | `permission_denied` | The gateway's user cannot read it. |
@@ -51,7 +67,7 @@ characters.
 ## GET /api/v1/projects {#get-projects}
 
 List the projects, sorted by name. Only directories, and symlinks that resolve
-to a directory inside the root, are listed. When `~/projects` does not exist the
+to a directory inside the root, are listed. When the root does not exist the
 response has `exists: false`, and the gateway does not create it.
 
 ```bash
@@ -73,7 +89,7 @@ worktree or submodule uses).
 
 ## POST /api/v1/projects {#post-projects}
 
-Create `~/projects/<name>`, creating `~/projects` first if needed. Returns
+Create `<root>/<name>`, creating the root first if needed. Returns
 `201`.
 
 | Field | Required | Description |
