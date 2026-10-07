@@ -2,17 +2,19 @@
 
 Browse the project directories under the pod's projects root, `~/projects` by
 default. The web dashboard uses these routes to list projects, create a new one,
-and show a read-only file tree and file viewer. Editing is out of scope. Open the project
-in the code editor for that.
+show a read-only file tree and file viewer, and run a small set of git
+operations (status, init, fetch, commit, pull, push). Editing files is out of scope.
+Open the project in the code editor for that.
 
 **Auth.** Every route needs an API key with pod-wide scope: `admin: true` or
 `agents: "*"`. A key scoped to specific agents gets `403 forbidden_key`, because
-projects belong to the pod, not to an agent. `POST /api/v1/projects` also needs
-`write: true` (or `admin: true`).
+projects belong to the pod, not to an agent. `POST /api/v1/projects` and every
+`POST .../git/*` route also need `write: true` (or `admin: true`).
 
 **Feature detection.** `GET /api/v1/capabilities` lists
-`"projects": ["list", "create", "read"]`. Show project browsing only when the
-array includes `"list"`. An older gateway omits the key.
+`"projects": ["list", "create", "read", "git"]`. Show project browsing only when
+the array includes `"list"`, and the git UI only when it includes `"git"`. An
+older gateway omits the key, or lists projects without `"git"`.
 
 **Root.** Projects live in `gateway.projects.root`, which defaults to
 `~/projects`. Every listing returns the root as `root`, resolved through
@@ -41,7 +43,8 @@ takes effect after a gateway restart.
 ## Errors {#errors}
 
 Every error has the shape `{ "error": string, "code": string }`. Branch on
-`code`; `error` is human-readable and may change.
+`code`; `error` is human-readable and may change. The git routes add their own
+codes, listed under [Git errors](#git-errors).
 
 | Status | `code` | When |
 |--------|--------|------|
@@ -51,7 +54,7 @@ Every error has the shape `{ "error": string, "code": string }`. Branch on
 | 400 | `not_a_file` | `file` was asked for a directory or a special file. |
 | 403 | `path_escape` | The real path (after symlinks) leaves the project, or the project leaves the root. |
 | 403 | `permission_denied` | The gateway's user cannot read it. |
-| 403 | `forbidden_key` | The key lacks pod-wide scope, or lacks write for `POST`. |
+| 403 | `forbidden_key` | The key lacks pod-wide scope, or lacks write for a `POST`. |
 | 404 | `not_found` | The project or path does not exist. |
 | 409 | `project_exists` | `POST` named a project that already exists. |
 | 500 | `internal` | Anything else. |
@@ -175,3 +178,203 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:10850/api/v1/projects/dem
 
 A symlink inside the project to a file inside the same project is followed. A
 symlink whose target is outside the project returns `403 path_escape`.
+
+## Git {#git}
+
+The git routes act on a project that is a git repository. A project is a
+repository only when its own directory holds the repository. A plain folder
+inside a repository is not one. The gateway runs `git` directly, never through
+a shell, without any `GIT_*` variable from its own environment, and never
+prompts for credentials. For ssh it uses `ssh -o BatchMode=yes` unless the
+repository sets `core.sshCommand`. It never forces, never skips hooks, and
+never resets, checks out, or deletes anything.
+
+Only one mutating git route runs per project at a time. A second one gets
+`409 busy`. Reads never wait for a mutation.
+
+Credentials in a remote URL (`https://user:token@host/x`) are removed from
+every response and log line. Git's own output never reaches the client, except
+for the `detail` of `hook_failed`.
+
+### GitStatus {#git-status}
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `branch` | `string \| null` | Current branch. `null` when HEAD is detached, or the branch has no commits yet. |
+| `detached` | `boolean` | HEAD is detached. |
+| `has_commits` | `boolean` | `false` right after `git init`. |
+| `upstream` | `string \| null` | The upstream, such as `origin/main`. |
+| `ahead`, `behind` | `number` | Commits ahead of and behind the upstream, as of the last fetch. |
+| `sync` | `string` | One of `in_sync`, `ahead`, `behind`, `diverged`, `no_upstream` (a remote exists but the branch tracks nothing), `no_remote`, `detached`. |
+| `remote` | `GitRemote \| null` | The upstream's remote, else `origin`, else the only remote. |
+| `changes` | `GitFileChange[]` | At most 200, ordered conflicted, staged, unstaged, untracked. |
+| `change_count` | `number` | The true number of changed files. |
+| `conflicted_count` | `number` | Files with merge conflicts. |
+| `truncated` | `boolean` | `changes` was cut at 200. |
+| `last_commit` | `GitCommitInfo \| null` | The HEAD commit. |
+| `operation` | `string` | `none`, `merge`, `rebase`, `cherry_pick`, `revert`, or `bisect`. |
+| `identity_configured` | `boolean` | `user.name` and `user.email` both resolve for this repository. |
+| `sensitive_untracked` | `string[]` | Untracked, not ignored files that look like secrets, at most 20. |
+
+`GitFileChange` is `{ path, orig_path?, staged, unstaged }`. `path` is relative
+to the project with forward slashes. `orig_path` is set for renames and copies.
+`staged` and `unstaged` are each `null` or one of `added`, `modified`,
+`deleted`, `renamed`, `copied`, `type_changed`, `untracked` (unstaged only), or
+`conflicted` (on both sides).
+
+`GitRemote` is `{ name, url, host, web_url }`. `host` is `github`, `gitlab`,
+`bitbucket`, or `other`. `web_url` is the repository's web page for the first
+three, else `null`.
+
+`GitCommitInfo` is `{ sha, subject, author, committed_at }`, with
+`committed_at` in ISO 8601.
+
+A file looks like a secret when its name is `.env`, `.env.*` (except
+`.env.example`, `.env.sample`, `.env.template`), `*.pem`, `*.key`, `id_rsa`,
+`id_ed25519`, `*.p12`, `*.pfx`, `.npmrc`, `credentials.json`,
+`service-account*.json`, or `.netrc`.
+
+### GET /api/v1/projects/git-summary {#get-git-summary}
+
+A slim status for every project that is a git repository, for project cards.
+Plain folders are left out. A repository whose status takes longer than 3
+seconds or fails maps to `null`. The gateway reads at most 4 repositories at a
+time.
+
+```bash
+curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/git-summary
+```
+
+```json
+{
+  "summaries": {
+    "app": { "branch": "main", "detached": false, "sync": "in_sync", "ahead": 0, "behind": 0, "change_count": 0, "conflicted_count": 0, "remote_host": "github" },
+    "slow": null
+  }
+}
+```
+
+### GET /api/v1/projects/:name/git {#get-git}
+
+Returns `200` with a [GitStatus](#git-status). Reads time out after 3 seconds.
+
+```bash
+curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/app/git
+```
+
+```json
+{
+  "branch": "main",
+  "detached": false,
+  "has_commits": true,
+  "upstream": "origin/main",
+  "ahead": 1,
+  "behind": 0,
+  "sync": "ahead",
+  "remote": { "name": "origin", "url": "https://github.com/acme/app.git", "host": "github", "web_url": "https://github.com/acme/app" },
+  "changes": [
+    { "path": "README.md", "staged": null, "unstaged": "modified" },
+    { "path": ".env", "staged": null, "unstaged": "untracked" }
+  ],
+  "change_count": 2,
+  "conflicted_count": 0,
+  "truncated": false,
+  "last_commit": { "sha": "5e67…", "subject": "Update readme", "author": "Ann Dev", "committed_at": "2026-10-07T12:20:33+07:00" },
+  "operation": "none",
+  "identity_configured": true,
+  "sensitive_untracked": [".env"]
+}
+```
+
+### POST /api/v1/projects/:name/git/init {#post-git-init}
+
+Runs `git init` in a project that is not yet a repository. Returns `201` with
+a [GitStatus](#git-status), or `409 already_a_git_repo`.
+
+### POST /api/v1/projects/:name/git/fetch {#post-git-fetch}
+
+Runs `git fetch --prune` from the status's `remote`. Returns `200` with a
+[GitStatus](#git-status), whose `ahead` and `behind` are now current.
+
+### POST /api/v1/projects/:name/git/identity {#post-git-identity}
+
+Writes `user.name` and `user.email` to the repository's own config. Refused
+with `409 identity_already_set` when both already resolve, from any config
+file. Returns `200` with a [GitStatus](#git-status).
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | 1 to 100 characters after trimming, with no `<`, `>`, or control characters. |
+| `email` | Yes | One `@`, no whitespace, `<`, or `>`, at most 254 characters. |
+
+### POST /api/v1/projects/:name/git/commit {#post-git-commit}
+
+Stages every change (`git add -A`), then commits. Returns `201` with
+`{ commit: GitCommitInfo, status: GitStatus }`. Hooks run, with a 60 second
+limit.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `message` | Yes | The commit message. Trimmed. Empty means `400 message_required`. |
+| `allow_sensitive` | No | `true` commits even when `sensitive_untracked` is not empty. Without it the response is `409 sensitive_files` with `paths`. |
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"message":"Update readme"}' http://localhost:10850/api/v1/projects/app/git/commit
+```
+
+```json
+{ "error": "Untracked files look like secrets", "code": "sensitive_files", "paths": [".env"] }
+```
+
+The commit is refused while conflicts exist (`conflicts_present`), during a
+merge or similar (`operation_in_progress`), on a detached HEAD
+(`detached_head`), with nothing to commit (`nothing_to_commit`), or without an
+identity (`identity_missing`). When a hook rejects the commit, the response is
+`422 hook_failed` with the hook's output in `detail`, cut to 2000 bytes. The
+changes stay staged.
+
+### POST /api/v1/projects/:name/git/pull {#post-git-pull}
+
+Fetches the upstream's remote, then fast-forwards with
+`git merge --ff-only @{upstream}`. `pull.rebase` and similar settings do not
+apply. Returns `200` with `{ result: "up_to_date" | "fast_forwarded", status: GitStatus }`.
+A diverged branch gets `409 not_fast_forward`. Local changes that the
+fast-forward would overwrite get `409 dirty_would_overwrite`, and stay as they
+were.
+
+### POST /api/v1/projects/:name/git/push {#post-git-push}
+
+Pushes HEAD to its upstream with an explicit, unforced refspec, so a `+`
+refspec in `remote.<name>.push` never applies. With no upstream and exactly
+one remote, it publishes the branch with `git push -u <remote> <branch>`. With
+no upstream and several remotes, the response is `409 no_upstream`. Returns
+`200` with `{ status: GitStatus }`. A push the remote rejects as
+non-fast-forward gets `409 not_fast_forward`.
+
+### Git errors {#git-errors}
+
+| Status | `code` | When |
+|--------|--------|------|
+| 400 | `message_required` | `commit` without a non-empty `message`. |
+| 400 | `invalid_identity` | `identity` with a missing or invalid `name` or `email`. |
+| 409 | `not_a_git_repo` | The project is not a repository. |
+| 409 | `already_a_git_repo` | `init` on a repository. |
+| 409 | `nothing_to_commit` | `commit` on a clean tree. |
+| 409 | `identity_missing` | `commit` without `user.name` and `user.email`. |
+| 409 | `identity_already_set` | `identity` when both already resolve. |
+| 409 | `sensitive_files` | `commit` with untracked secret-looking files. The body has `paths`. |
+| 409 | `conflicts_present` | `commit`, `pull`, or `push` while files have merge conflicts. |
+| 409 | `operation_in_progress` | `commit`, `pull`, or `push` during a merge, rebase, cherry-pick, revert, or bisect. |
+| 409 | `not_fast_forward` | `pull` on a diverged branch, or `push` rejected as non-fast-forward. |
+| 409 | `dirty_would_overwrite` | `pull` blocked by local changes. |
+| 409 | `no_remote` | `fetch`, `pull`, or `push` without a remote. |
+| 409 | `no_upstream` | `pull` without an upstream, or `push` without one and with several remotes. |
+| 409 | `detached_head` | `commit`, `pull`, or `push` on a detached HEAD. |
+| 409 | `busy` | Another git operation is running on this project. |
+| 409 | `index_locked` | `.git/index.lock` exists, usually from another git process. |
+| 422 | `hook_failed` | A commit hook failed. The body has `detail`, at most 2000 bytes. |
+| 502 | `auth_failed` | The remote refused the credentials, or none were available. |
+| 502 | `network` | The remote could not be reached. |
+| 504 | `timeout` | Git ran past its limit: 3 seconds for reads, 60 seconds for fetch, pull, push, and commit. |
+| 500 | `git_failed` | Any other git failure. Git's output is not returned. |
