@@ -85,6 +85,13 @@ describe('runGit', () => {
     expect(fs.existsSync(path.join(repo, '.git', 'index.lock'))).toBe(false);
     expect(running('sleep 27.1828')).toBe('');
   });
+
+  it('never runs core.fsmonitor on a read-only status', async () => {
+    const marker = path.join(base, 'fsmonitor-ran');
+    execFileSync('git', ['config', 'core.fsmonitor', `touch ${marker}; false`], { cwd: repo });
+    value(await runGit(repo, ['status', '--porcelain=v2'], { timeoutMs: 3000, readOnly: true }));
+    expect(fs.existsSync(marker)).toBe(false);
+  });
 });
 
 describe('withProjectLock', () => {

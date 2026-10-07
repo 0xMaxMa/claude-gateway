@@ -189,7 +189,8 @@ prompts for credentials. For ssh it uses `ssh -o BatchMode=yes` unless the
 repository sets `core.sshCommand`. It never forces, never skips hooks, and
 never resets, checks out, or deletes anything.
 
-When git runs past its time limit, the
+Reads run with `core.fsmonitor` turned off, so listing projects never runs a
+command from a repository's config. When git runs past its time limit, the
 gateway stops git and every process git started, such as hooks, filters, and
 ssh. It sends `SIGTERM` first so git removes its lock files, then `SIGKILL`
 one second later.

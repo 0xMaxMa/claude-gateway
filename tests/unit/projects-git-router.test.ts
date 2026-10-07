@@ -215,10 +215,10 @@ describe('GET /api/v1/projects/git-summary', () => {
     addRemote(makeRepo('app'));
     fs.mkdirSync(path.join(root, 'plain'));
     const slow = makeRepo('slow');
-    const hook = path.join(base, 'slow-fsmonitor.sh');
-    write(hook, '#!/bin/sh\nsleep 10\n');
-    fs.chmodSync(hook, 0o755);
-    git(slow, 'config', 'core.fsmonitor', hook);
+    // Opening a FIFO with no writer blocks every git that reads this repo's config.
+    const fifo = path.join(base, 'blocking-include');
+    execFileSync('mkfifo', [fifo]);
+    git(slow, 'config', 'include.path', fifo);
 
     const res = await request(app).get('/api/v1/projects/git-summary').set(as('k-pod-read'));
     expect(res.status).toBe(200);
