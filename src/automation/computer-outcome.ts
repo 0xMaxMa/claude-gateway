@@ -62,6 +62,7 @@ export function computerOutcomeText(report:ComputerTaskReport):string{
  const actions=`${report.steps} action${report.steps===1?'':'s'}`;
  if(waiting==='GOAL_REACHED'&&report.steps>0)return `Done: ${actions}, last ${report.lastAction&&!report.lastAction.blocked?computerActionText(report.lastAction):'the action was sent'}. Send the next command.`;
  if(waiting==='STEP_LIMIT'&&report.steps>0)return `Not finished: stopped after ${actions}, the limit for one command. Check the screen and send the next command.`;
+ if(waiting==='COMPLETION_UNCERTAIN'&&report.steps>0)return `Not confirmed: ${actions} done, and the goal may already be complete, but the screen was not clear enough to say. Check the screen, then send the next command.`;
  if(waiting==='LOW_CONFIDENCE'&&report.steps>0)return `Not finished: ${actions} done, then the next step was unclear from the screen. Say what to do next.`;
  if(report.steps>1&&waiting&&HINTS[waiting])return `Not finished: ${actions} done, then ${hint(waiting,report)}`;
  if(report.lastAction&&!report.lastAction.blocked&&report.steps>0)return `Done: ${computerActionText(report.lastAction)}. Send the next command.`;

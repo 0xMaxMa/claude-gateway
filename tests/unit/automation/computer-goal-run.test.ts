@@ -85,6 +85,57 @@ describe('agent-spawned goal runs to the goal',()=>{
   expect(f.actions()).toEqual([{kind:'open',app_id:'com.apple.Notes'}]);
   expect(waited(r)).toBe('LOW_CONFIDENCE');
  });
+ test('an unsure DONE mid-run stops as COMPLETION_UNCERTAIN, not as an unclear next step',async()=>{
+  const f=fixture([finder,()=>notes(0)],[{pick:'open:com.apple.Notes'},{pick:'DONE',confidence:0.4}]);
+  const r=await spawn(f,'open Notes');
+  expect(waited(r)).toBe('COMPLETION_UNCERTAIN');
+  const text=computerOutcomeText({...r,phase:'terminal',trace:r.trace.events} as any);
+  expect(text).toMatch(/^Not confirmed: 1 action done/);
+  expect(text).toContain('may already be complete');
+  expect(text).not.toContain('unclear');
+ });
+ test('a long interactionContext loses its head, never its tail or the newest history',async()=>{
+  const f=fixture([finder,()=>notes(0),()=>notes(1)],[{pick:'open:com.apple.Notes'},{pick:'press:c8'},{pick:'DONE'}]);
+  const context='HEAD-MARK'+'x'.repeat(7900)+'Completed steps in this run: TAIL-MARK';
+  await spawn(f,'make a new note in Notes',{interactionContext:context});
+  const ctx=f.requests[2].state.previousInteraction as string;
+  expect(ctx).toContain('TAIL-MARK');
+  expect(ctx).not.toContain('HEAD-MARK');
+  expect(ctx).toContain('"action":"press"');
+  expect(ctx.length).toBeLessThanOrEqual(8000);
+ });
+ test('the cap holds for any context length and never splits a surrogate pair',async()=>{
+  for(const n of [7700,7790,7800,7900,8000,9000]){
+   const f=fixture([finder,()=>notes(0),()=>notes(1)],[{pick:'open:com.apple.Notes'},{pick:'press:c8'},{pick:'DONE'}]);
+   await spawn(f,'make a new note in Notes',{interactionContext:'😀'.repeat(n/2)+'e'});
+   const ctx=f.requests[2].state.previousInteraction as string;
+   expect(ctx.length).toBeLessThanOrEqual(8000);
+   expect(ctx).toContain('"action":"press"');
+   expect(ctx).not.toMatch(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+   expect(ctx).not.toMatch(/[\uD800-\uDBFF]($|[^\uDC00-\uDFFF])/);
+  }
+ });
+ test('history carries only allowlisted fields, never screen labels, on the direct path',async()=>{
+  const f=fixture([finder,()=>notes(0),()=>notes(1)],[{pick:'open:com.apple.Notes'},{pick:'press:c8'},{pick:'DONE'}]);
+  await spawn(f,'make a new note in Notes');
+  const ctx=f.requests[2].state.previousInteraction as string;
+  expect(ctx).toContain('"role":"AXButton"');
+  expect(ctx).not.toContain('New Note');
+  expect(ctx).not.toContain('"label"');
+ });
+ test('the non-direct path never sends screen labels in recentActions either',async()=>{
+  const f=fixture([()=>notes(0),()=>notes(1)]);
+  const seen:any[]=[];let asked=0;
+  f.deps.evaluate=async req=>{
+   seen.push(req);const pick=asked++===0?'press:c8':'DONE';
+   return {answers:{action:choice(req.questions.action.criteria as any,pick,0.95),completion:choice(req.questions.completion.criteria as any,pick==='DONE'?'SATISFIED':'REQUIRED_STEP',0.95)}};
+  };
+  await runComputerUse({goal:'make a new note in Notes',maxSteps:4},f.deps,new AbortController().signal);
+  const recent=seen.flatMap(r=>r.state.recentActions??[]);
+  expect(recent.length).toBeGreaterThan(0);
+  expect(JSON.stringify(recent)).not.toContain('New Note');
+  expect(recent.some((a:any)=>a.role==='AXButton')).toBe(true);
+ });
  test('the first goal step keeps the direct best-choice rule',async()=>{
   const f=fixture([finder,()=>notes(0)],[{pick:'open:com.apple.Notes',confidence:0.45},{pick:'DONE'}]);
   const r=await spawn(f,'open Notes');
