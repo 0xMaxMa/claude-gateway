@@ -50,10 +50,12 @@ export function runGit(cwd: string, args: string[], opts: RunOptions): Promise<R
       console.warn(`projects: git ${args[0]} in ${cwd} failed: ${redactCredentials(e.message)}`);
       resolve(err('git_failed'));
     });
-    // Resolve at the deadline rather than on exit: a hook's orphaned child can hold stdout open long after git dies.
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGKILL');
+      // A hook's orphaned child can hold the pipes open long after git dies; let go of them now.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       resolve(err('timeout'));
     }, opts.timeoutMs);
   });
