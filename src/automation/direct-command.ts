@@ -139,3 +139,16 @@ export function addressCommand(command:string):string|undefined {
  const url=literalTextCandidates(target);
  return url.length===1&&url[0]===target&&/^(?:https?:\/\/|www\.)|\.[a-z]{2,}(?:\/|$)/iu.test(target)?target:undefined;
 }
+/**
+ * "open youtube in chrome", "เปิด youtube ใน chrome", or a bare address: the
+ * address plus the browser named for it, if any. One address and one app word
+ * only; anything else is undefined and stays on the model decision path.
+ */
+export function browserAddressCommand(command:string):{address:string;app?:string}|undefined {
+ const plain=addressCommand(command);
+ if(plain)return {address:plain};
+ const match=/^(.+?)\s+(?:in|on|with|using|ใน|บน|ด้วย|ผ่าน)\s*(\S+)$/iu.exec(spokenCommand(command));
+ if(!match)return;
+ const address=addressCommand(match[1]);
+ return address?{address,app:match[2]}:undefined;
+}
