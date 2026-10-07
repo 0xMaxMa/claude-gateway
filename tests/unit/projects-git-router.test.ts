@@ -230,3 +230,79 @@ describe('GET /api/v1/projects/git-summary', () => {
     });
   }, 15_000);
 });
+
+const post = (name: string, action: string, body?: object, key = POD) =>
+  request(app).post(`/api/v1/projects/${name}/git/${action}`).set(key).send(body ?? {});
+
+describe('POST git/init', () => {
+  it('initialises a plain folder once, then 409s already_a_git_repo', async () => {
+    fs.mkdirSync(path.join(root, 'plain'));
+    const res = await post('plain', 'init');
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ has_commits: false, sync: 'no_remote', changes: [] });
+    expect(fs.existsSync(path.join(root, 'plain', '.git', 'HEAD'))).toBe(true);
+    const again = await post('plain', 'init');
+    expect([again.status, again.body.code]).toEqual([409, 'already_a_git_repo']);
+  });
+
+  it.each(['init', 'fetch', 'identity'])('%s needs a write key', async (action) => {
+    fs.mkdirSync(path.join(root, 'plain'));
+    const res = await post('plain', action, { name: 'n', email: 'e@x', message: 'm' }, as('k-pod-read'));
+    expect([res.status, res.body.code]).toEqual([403, 'forbidden_key']);
+    expect(fs.existsSync(path.join(root, 'plain', '.git'))).toBe(false);
+  });
+});
+
+describe('POST git/fetch', () => {
+  it('fetches so a remote commit shows as behind', async () => {
+    addRemote(makeRepo('app'));
+    commitUpstream('up.txt', 'y');
+    expect((await status('app')).body.sync).toBe('in_sync');
+    const res = await post('app', 'fetch');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ sync: 'behind', behind: 1 });
+  });
+
+  it('409s no_remote without a remote', async () => {
+    makeRepo('app');
+    const res = await post('app', 'fetch');
+    expect([res.status, res.body.code]).toEqual([409, 'no_remote']);
+  });
+
+  it('never returns credentials from the remote URL, even when the remote is unreachable', async () => {
+    const dir = makeRepo('app');
+    git(dir, 'remote', 'add', 'origin', 'https://bob:s3cret-token@127.0.0.1:9/acme/app.git');
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await post('app', 'fetch');
+    expect([res.status, res.body.code]).toEqual([502, 'network']);
+    expect(JSON.stringify(res.body)).not.toContain('s3cret');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('s3cret');
+    warn.mockRestore();
+  });
+});
+
+describe('POST git/identity', () => {
+  it.each([
+    [{}],
+    [{ name: '', email: 'a@b.c' }],
+    [{ name: 'A <evil>', email: 'a@b.c' }],
+    [{ name: 'Line\nbreak', email: 'a@b.c' }],
+    [{ name: 'Ann', email: 'not-an-email' }],
+    [{ name: 'Ann', email: 'a b@c.d' }],
+  ])('400s invalid_identity for %p', async (body) => {
+    makeRepo('app');
+    const res = await post('app', 'identity', body);
+    expect([res.status, res.body.code]).toEqual([400, 'invalid_identity']);
+  });
+
+  it('writes a repo-local identity once, then 409s identity_already_set', async () => {
+    const dir = makeRepo('app');
+    const res = await post('app', 'identity', { name: ' Ann Dev ', email: 'ann@example.com' });
+    expect([res.status, res.body.identity_configured]).toEqual([200, true]);
+    expect(git(dir, 'config', '--local', 'user.name').trim()).toBe('Ann Dev');
+    expect(git(dir, 'config', '--local', 'user.email').trim()).toBe('ann@example.com');
+    const again = await post('app', 'identity', { name: 'Other', email: 'o@example.com' });
+    expect([again.status, again.body.code]).toEqual([409, 'identity_already_set']);
+    expect(git(dir, 'config', '--local', 'user.name').trim()).toBe('Ann Dev');
+  });
+});

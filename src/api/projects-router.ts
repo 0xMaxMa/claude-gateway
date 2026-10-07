@@ -4,8 +4,8 @@ import { expandHome } from '../utils/paths';
 import { createApiAuthMiddleware, canAccessPod } from './auth';
 import { defineRoute } from './route-registry';
 import { createProject, listDir, listProjects, readFileContent } from '../projects/fs';
-import { getStatus, getSummaries, GitError, GitErrorCode } from '../projects/git';
-import { parseProjectName, parseRelPath, ProjectsErrorCode, Result } from '../projects/paths';
+import { fetchRemote, getStatus, getSummaries, GitError, GitErrorCode, initRepo, parseIdentity, setIdentity } from '../projects/git';
+import { err, parseProjectName, parseRelPath, ProjectName, ProjectsErrorCode, Result } from '../projects/paths';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
@@ -154,6 +154,40 @@ export function createProjectsRouter(apiKeys: ApiKey[], root: string): Router {
       respond(res, await getStatus(root, name.value));
     }),
   );
+
+  const mutations: Array<{
+    action: string;
+    summary: string;
+    status: number;
+    run: (name: ProjectName, body: unknown) => Promise<Result<unknown, ProjectsErrorCode | GitError>>;
+  }> = [
+    { action: 'init', summary: 'Initialise a git repository in a project', status: 201, run: (name) => initRepo(root, name) },
+    { action: 'fetch', summary: "Fetch and prune the project's git remote", status: 200, run: (name) => fetchRemote(root, name) },
+    {
+      action: 'identity',
+      summary: 'Set the repository-local git user.name and user.email',
+      status: 200,
+      run: async (name, body) => {
+        const id = parseIdentity(body);
+        return id.ok ? setIdentity(root, name, id.value) : err(id.error);
+      },
+    },
+  ];
+
+  for (const m of mutations) {
+    defineRoute(
+      router,
+      { method: 'POST', path: `/v1/projects/:name/git/${m.action}`, auth: 'key', summary: m.summary, cli: null },
+      auth,
+      requirePod,
+      requireWrite,
+      handle(async (req, res) => {
+        const name = parseProjectName(req.params.name);
+        if (!name.ok) return fail(res, name.error);
+        respond(res, await m.run(name.value, req.body), m.status);
+      }),
+    );
+  }
 
   return router;
 }

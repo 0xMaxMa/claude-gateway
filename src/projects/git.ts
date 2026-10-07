@@ -1,7 +1,7 @@
 import { promises as fsp } from 'fs';
 import * as path from 'path';
 import { listProjects, resolveProjectDir } from './fs';
-import { GIT_TIMEOUTS, runGit } from './git-runner';
+import { GIT_TIMEOUTS, GitOutput, runGit, withProjectLock } from './git-runner';
 import {
   buildStatus,
   GitCommitInfo,
@@ -142,4 +142,97 @@ export async function getSummaries(root: string): Promise<GitResult<{ summaries:
     return status.ok ? toSummary(status.value) : null;
   });
   return ok({ summaries: Object.fromEntries(repos.map((p, i) => [p.name, results[i]])) });
+}
+
+/** Ordered: the first pattern found in git's output names the failure. Raw output never reaches the client. */
+const OUTPUT_CODES: Array<[RegExp, Exclude<GitErrorCode, 'sensitive_files' | 'hook_failed'>]> = [
+  [/index\.lock'?: File exists/i, 'index_locked'],
+  [/Authentication failed|could not read (Username|Password)|terminal prompts disabled|Permission denied \(publickey|error: 40[13]/i, 'auth_failed'],
+  [/Could not resolve host|Connection refused|Connection timed out|Network is unreachable|Failed to connect|unable to access|does not appear to be a git repository|Could not read from remote repository/i, 'network'],
+  [/\[rejected\]|non-fast-forward|fetch first|Not possible to fast-forward/i, 'not_fast_forward'],
+  [/would be overwritten by merge/i, 'dirty_would_overwrite'],
+];
+
+function classify(out: GitOutput): GitError {
+  const text = `${out.stderr}\n${out.stdout}`;
+  const hit = OUTPUT_CODES.find(([re]) => re.test(text));
+  return { code: hit ? hit[1] : 'git_failed' };
+}
+
+async function git(dir: string, args: string[], timeoutMs: number, env?: Record<string, string>): Promise<GitResult<GitOutput>> {
+  const r = await runGit(dir, args, { timeoutMs, env });
+  return r.ok ? r : fail(r.error);
+}
+
+/** Network commands must fail rather than ask for an ssh passphrase or host-key confirmation. */
+function sshEnv(cfg: RepoConfig): Record<string, string> {
+  return cfg.sshCommand ? {} : { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' };
+}
+
+/** Runs `fn` on the project's real dir under its mutation lock. */
+async function mutate<T>(root: string, name: ProjectName, fn: (dir: string) => Promise<GitResult<T>>): Promise<GitResult<T>> {
+  const dir = await projectDir(root, name);
+  if (!dir.ok) return dir;
+  const r = await withProjectLock(dir.value, () => fn(dir.value));
+  return !r.ok && r.error === 'busy' ? fail('busy') : (r as GitResult<T>);
+}
+
+async function statusAfter(dir: string): Promise<GitResult<GitStatus>> {
+  const repo = await readRepo(dir);
+  return repo.ok ? ok(repo.value.status) : repo;
+}
+
+export function initRepo(root: string, name: ProjectName): Promise<GitResult<GitStatus>> {
+  return mutate(root, name, async (dir) => {
+    const probe = await git(dir, ['rev-parse', '--absolute-git-dir'], GIT_TIMEOUTS.read);
+    if (!probe.ok) return probe;
+    if (probe.value.code === 0) return fail('already_a_git_repo');
+    const init = await git(dir, ['init', '-q'], GIT_TIMEOUTS.local);
+    if (!init.ok) return init;
+    if (init.value.code !== 0) return err(classify(init.value));
+    return statusAfter(dir);
+  });
+}
+
+export function fetchRemote(root: string, name: ProjectName): Promise<GitResult<GitStatus>> {
+  return mutate(root, name, async (dir) => {
+    const repo = await readRepo(dir);
+    if (!repo.ok) return repo;
+    const { status, config } = repo.value;
+    if (!status.remote) return fail('no_remote');
+    const fetch = await git(dir, ['fetch', '--prune', '--', status.remote.name], GIT_TIMEOUTS.network, sshEnv(config));
+    if (!fetch.ok) return fetch;
+    if (fetch.value.code !== 0) return err(classify(fetch.value));
+    return statusAfter(dir);
+  });
+}
+
+export type GitIdentity = { readonly name: string; readonly email: string } & { readonly __brand: 'GitIdentity' };
+
+const IDENTITY_NAME_MAX = 100;
+const EMAIL_MAX = 254;
+
+export function parseIdentity(body: unknown): GitResult<GitIdentity> {
+  const { name, email } = (body ?? {}) as { name?: unknown; email?: unknown };
+  if (typeof name !== 'string' || typeof email !== 'string') return fail('invalid_identity');
+  const n = name.trim();
+  const e = email.trim();
+  // git drops <, > and newlines from identities, so a value containing them would not round-trip.
+  if (n === '' || n.length > IDENTITY_NAME_MAX || /[<>\x00-\x1f\x7f]/.test(n)) return fail('invalid_identity');
+  if (e.length > EMAIL_MAX || !/^[^\s<>@]+@[^\s<>@]+$/.test(e)) return fail('invalid_identity');
+  return ok({ name: n, email: e } as GitIdentity);
+}
+
+export function setIdentity(root: string, name: ProjectName, id: GitIdentity): Promise<GitResult<GitStatus>> {
+  return mutate(root, name, async (dir) => {
+    const repo = await readRepo(dir);
+    if (!repo.ok) return repo;
+    if (repo.value.status.identity_configured) return fail('identity_already_set');
+    for (const [key, value] of [['user.name', id.name], ['user.email', id.email]]) {
+      const set = await git(dir, ['config', '--local', key, value], GIT_TIMEOUTS.local);
+      if (!set.ok) return set;
+      if (set.value.code !== 0) return err(classify(set.value));
+    }
+    return statusAfter(dir);
+  });
 }
