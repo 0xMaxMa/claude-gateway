@@ -120,6 +120,10 @@ describe('describeRemote and redactCredentials', () => {
     const text = "fatal: unable to access 'https://bob:s3cret@h.example/x.git/' and http://t0k@h2/y";
     expect(redactCredentials(text)).toBe("fatal: unable to access 'https://h.example/x.git/' and http://h2/y");
   });
+
+  it('strips a password that contains an unencoded @', () => {
+    expect(redactCredentials('https://bob:p@ss@h.example/x.git')).toBe('https://h.example/x.git');
+  });
 });
 
 describe('isSensitiveName', () => {
