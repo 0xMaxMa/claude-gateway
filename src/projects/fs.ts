@@ -161,7 +161,7 @@ export async function createProject(
   }
 
   try {
-    const project = await describeProject(root, await fsp.realpath(dir), name);
+    const project = await describeProject(await fsp.realpath(root), await fsp.realpath(dir), name);
     return ok({ project, warning });
   } catch (e) {
     return err(errnoToCode(e));

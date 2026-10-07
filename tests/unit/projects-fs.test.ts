@@ -96,6 +96,20 @@ describe('createProject', () => {
     expect(fs.readFileSync(path.join(root, 'app', 'keep.txt'), 'utf8')).toBe('precious');
   });
 
+  it('reports the same real path that listProjects does when the configured root is a symlink', async () => {
+    fs.mkdirSync(root);
+    const link = path.join(base, 'projects-link');
+    fs.symlinkSync(root, link);
+
+    const created = await createProject(link, name('app'), false);
+    if (!created.ok) throw new Error(created.error);
+    expect(created.value.project.path).toBe(path.join(root, 'app'));
+
+    const listed = await listProjects(link);
+    if (!listed.ok) throw new Error(listed.error);
+    expect(listed.value.projects.map((p) => p.path)).toEqual([created.value.project.path]);
+  });
+
   it('runs git init when asked', async () => {
     const res = await createProject(root, name('repo'), true);
     if (!res.ok) throw new Error(res.error);
