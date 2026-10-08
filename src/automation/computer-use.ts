@@ -562,6 +562,10 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      if(direct&&receipt.error==='FOCUS_REQUIRED'&&action.kind==='type'&&typeof action.text==='string'&&!focusAttempted&&typed?.identity&&typed.actions.includes('press')){
       focusAttempted=true;focusThenType={identity:typed.identity,role:typed.role,text:action.text,...(submitAfterType?{submit:true}:{})};submitAfterType=undefined;return;
      }
+     // Pod-jinawong 2.0.17: the helper listed press on YouTube's search AXTextArea, then
+     // refused it before input. Nothing ran, so a goal run drops that choice and decides
+     // afresh (type on the same field stays offered) instead of failing the whole goal.
+     if(goalRun&&receipt.error==='UNSUPPORTED_ACTION'&&redecided<REDECIDE_MAX){ineffective.set(identity(last!,action),2);redecided++;replan();return;}
      if(receipt.error&&['TARGET_OCCLUDED','FOCUS_REQUIRED','FOCUS_UNSUPPORTED'].includes(receipt.error)){last=ComputerObservation.parse(await call('computer_observe'));check();deps.observation?.(last);await capture();return waitForCommand(receipt.error);}
      return result('blocked',receipt.error&&/^[A-Z][A-Z_0-9]{0,79}$/.test(receipt.error)?receipt.error:'ACTION_REJECTED');
     }
