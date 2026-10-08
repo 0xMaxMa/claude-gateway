@@ -31,6 +31,7 @@ export type GitErrorCode =
   | 'dirty_would_overwrite'
   | 'no_remote'
   | 'no_upstream'
+  | 'upstream_mismatch'
   | 'detached_head'
   | 'auth_failed'
   | 'network'
@@ -343,7 +344,7 @@ export function pullFastForward(root: string, name: ProjectName): Promise<GitRes
 }
 
 /**
- * Pushes HEAD to its upstream, or with no upstream and exactly one remote publishes the branch with -u.
+ * Pushes the branch to its same-named upstream, or with no upstream and exactly one remote publishes it with -u.
  * Every refspec is explicit and unforced, so a `+` refspec in remote.<name>.push never applies.
  */
 export function pushBranch(root: string, name: ProjectName): Promise<GitResult<{ status: GitStatus }>> {
@@ -355,12 +356,15 @@ export function pushBranch(root: string, name: ProjectName): Promise<GitResult<{
     if (blocked) return blocked;
     if (config.remotes.length === 0) return fail('no_remote');
 
+    const branchRef = `refs/heads/${status.branch}`;
     const tracking = status.branch ? config.branches[status.branch] : undefined;
     let args: string[];
     if (tracking?.remote && tracking.merge) {
-      args = ['push', '--porcelain', tracking.remote, `HEAD:${tracking.merge}`];
+      // A branch made with `checkout -b feature origin/main` tracks main; pushing there would move someone else's branch.
+      if (tracking.merge !== branchRef || !config.remotes.some((r) => r.name === tracking.remote)) return fail('upstream_mismatch');
+      args = ['push', '--porcelain', tracking.remote, `${branchRef}:${branchRef}`];
     } else if (config.remotes.length === 1 && status.branch) {
-      args = ['push', '--porcelain', '-u', config.remotes[0].name, `refs/heads/${status.branch}:refs/heads/${status.branch}`];
+      args = ['push', '--porcelain', '-u', config.remotes[0].name, `${branchRef}:${branchRef}`];
     } else {
       return fail('no_upstream');
     }

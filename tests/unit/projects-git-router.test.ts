@@ -532,6 +532,18 @@ describe('POST git/push', () => {
     expect(remoteHead('feature')).toBe(head(dir));
   });
 
+  it('409s upstream_mismatch and leaves the remote alone when the branch tracks a differently named branch', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    git(dir, 'checkout', '-q', '-b', 'feature', 'origin/main');
+    commitLocal(dir, 'f.txt', 'x');
+    const before = remoteHead();
+    const res = await post('app', 'push');
+    expect([res.status, res.body.code]).toEqual([409, 'upstream_mismatch']);
+    expect(remoteHead()).toBe(before);
+    expect(() => remoteHead('feature')).toThrow();
+  });
+
   it('409s no_upstream with no upstream and more than one remote', async () => {
     const dir = makeRepo('app');
     addRemote(dir);
