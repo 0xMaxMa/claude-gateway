@@ -35,7 +35,7 @@ import {
   truncateDetail,
 } from '../utils/tool-labels';
 import { resolveEnabledConnectors } from '../connectors/resolve';
-import type { ProjectChatError, ProjectCwd } from '../projects/chat';
+import { projectContext, type ProjectChatError, type ProjectCwd } from '../projects/chat';
 import type { Result } from '../projects/paths';
 import { isReservedConnectorId } from '../connectors/custom';
 
@@ -269,6 +269,7 @@ export class SessionProcess extends EventEmitter {
    *  instead of running in the agent workspace. */
   projectResolver?: () => Promise<Result<ProjectCwd, ProjectChatError>>;
   private projectCwd?: ProjectCwd;
+  private projectContext?: string;
   // Per-spawn cap on how many history messages buildInitialPrompt re-injects.
   // Defaults to MAX_HISTORY_MESSAGES; the runner lowers it (set before start())
   // when recovering from a repeated request_too_large (32MB) so each retry
@@ -738,6 +739,13 @@ export class SessionProcess extends EventEmitter {
   /** `.sessions/<id>`, once a spawn without a runtime profile has written its mcp-config.json there. */
   private sessionDirPath?: string;
 
+  /** True when the bound project no longer resolves to the directory this process runs in. */
+  async projectMoved(): Promise<boolean> {
+    if (!this.projectResolver || !this.projectCwd) return false;
+    const project = await this.projectResolver();
+    return !project.ok || project.value.dir !== this.projectCwd.dir || project.value.trusted !== this.projectCwd.trusted;
+  }
+
   /** The appended system prompt never travels on the command line: Windows caps a
    * whole command line at 32767 characters and Linux caps ONE argument at 128 KiB
    * (MAX_ARG_STRLEN), so a large workspace context or skill catalog would fail
@@ -746,13 +754,6 @@ export class SessionProcess extends EventEmitter {
    * directory), named per spawn so stopping one spawn never removes another's.
    * A container CLI reads one that prepareContainerProfile writes in its attempt
    * directory, in the same docker exec as the attempt's mcp.json and ticket. */
-  /** True when the bound project no longer resolves to the directory this process runs in. */
-  async projectMoved(): Promise<boolean> {
-    if (!this.projectResolver || !this.projectCwd) return false;
-    const project = await this.projectResolver();
-    return !project.ok || project.value.dir !== this.projectCwd.dir || project.value.trusted !== this.projectCwd.trusted;
-  }
-
   private writeSystemPromptFile(args: string[], mcpConfigPath: string | null): string[] {
     if (!this.runtimeProfile) return args;
     const file = path.join(path.dirname(mcpConfigPath ?? this.runtimeProfile.mcpConfigPath), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, '_')}-${randomUUID()}.md`);
@@ -1046,6 +1047,7 @@ export class SessionProcess extends EventEmitter {
       // The persona CLAUDE.md is only discovered from cwd, which is now the project.
       const persona = path.join(this.agentConfig.workspace, 'CLAUDE.md');
       if (fs.existsSync(persona)) args.push('--append-system-prompt-file', persona);
+      if (this.projectContext) args.push('--append-system-prompt', this.projectContext);
     }
 
     // Enforce allow_tools:false as a real boundary. Gated on the SAME condition as
@@ -1087,6 +1089,8 @@ export class SessionProcess extends EventEmitter {
       if (epoch !== this.spawnEpoch) return false;
       if (!project.ok) throw projectUnavailable(project.error);
       this.projectCwd = project.value;
+      this.projectContext = await projectContext(this.gatewayConfig, project.value);
+      if (epoch !== this.spawnEpoch) return false;
     }
 
     // Determine if this is a docker-exec app-agent before computing paths

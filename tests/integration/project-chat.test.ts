@@ -2,6 +2,7 @@
  * Project-scoped API chat: a session bound to one folder under gateway.projects.root.
  * Real AgentRunner, real filesystem, real HTTP through GatewayRouter.
  */
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -196,6 +197,32 @@ describe('a project-bound legacy chat turn', () => {
     expect(spawn!.cwd).toBe(path.join(h.root, 'site'));
     expect(flagValue(spawn!.argv, '--setting-sources')).toBe('user');
     expect(flagValue(spawn!.argv, '--append-system-prompt-file')).toBe(path.join(h.base, 'agents', 'alfred', 'workspace', 'CLAUDE.md'));
+  });
+
+  it('tells the agent which project and git state it is in, without remote credentials', async () => {
+    h = await harness();
+    const dir = path.join(h.root, 'site');
+    const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init');
+    git('remote', 'add', 'origin', 'https://bob:s3cret-token@github.com/acme/site.git');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'x');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'y');
+    const sessionId = await projectSession(h);
+    expect((await send(h, sessionId, 'hi')).status).toBe(200);
+
+    const block = flagValue(spawns(h)[0]!.argv, '--append-system-prompt');
+    expect(block).toBe(`You are working in project site at ${dir}. Git: branch main, 2 changes, remote github.com.`);
+    const argv = spawns(h)[0]!.argv.join(' ');
+    expect(argv).not.toContain('s3cret');
+    expect(argv).not.toContain('acme/site');
+  });
+
+  it('names the project without git details when the folder is not a repository', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    expect((await send(h, sessionId, 'hi')).status).toBe(200);
+    expect(flagValue(spawns(h)[0]!.argv, '--append-system-prompt')).toBe(`You are working in project site at ${path.join(h.root, 'site')}.`);
   });
 
   it('loads project settings when the operator trusts the project', async () => {

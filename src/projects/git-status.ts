@@ -241,6 +241,12 @@ function hostAndPath(url: string): { host: string; repoPath: string } | null {
   return null;
 }
 
+/** The remote's hostname alone, or null when it is not a plain DNS name. */
+export function remoteHostname(url: string): string | null {
+  const host = hostAndPath(redactCredentials(url))?.host;
+  return host && /^[a-z0-9.-]+$/.test(host) ? host : null;
+}
+
 export function describeRemote(name: string, rawUrl: string): GitRemote {
   const url = redactCredentials(rawUrl);
   const parsed = hostAndPath(url);
