@@ -218,7 +218,9 @@ describe('a project-bound legacy chat turn', () => {
     const [spawn] = spawns(h);
     expect(spawn!.cwd).toBe(path.join(h.root, 'site'));
     expect(flagValue(spawn!.argv, '--setting-sources')).toBe('user');
+    // Both prompt flags on one spawn: the persona comes by file, the project note inline.
     expect(flagValue(spawn!.argv, '--append-system-prompt-file')).toBe(path.join(h.base, 'agents', 'alfred', 'workspace', 'CLAUDE.md'));
+    expect(flagValue(spawn!.argv, '--append-system-prompt')).toBe(`You are working in project site at ${path.join(h.root, 'site')}.`);
   });
 
   it('tells the agent which project and git state it is in, without remote credentials', async () => {

@@ -743,7 +743,7 @@ export class SessionProcess extends EventEmitter {
   async projectMoved(): Promise<boolean> {
     if (!this.projectResolver || !this.projectCwd) return false;
     const project = await this.projectResolver();
-    return !project.ok || project.value.dir !== this.projectCwd.dir || project.value.trusted !== this.projectCwd.trusted;
+    return !project.ok || project.value.dir !== this.projectCwd.dir;
   }
 
   /** The appended system prompt never travels on the command line: Windows caps a
