@@ -17,6 +17,8 @@ export class SessionNotInIndexError extends Error {
   }
 }
 
+export type ProjectBinding = { kind: 'unbound' } | { kind: 'bound'; project: string } | { kind: 'unreadable' };
+
 export class SessionStore {
   private readonly agentsBaseDir: string;
   private readonly queues = new Map<string, PQueue>();
@@ -359,6 +361,7 @@ export class SessionStore {
       const newId = randomUUID();
       const now = Date.now();
       const sessionName = name ?? `Session ${index.sessions.length + 1}`;
+      if (project) this.saveProjectBinding(agentId, newId, project);
       const meta: SessionMeta = {
         id: newId,
         name: sessionName,
@@ -659,6 +662,34 @@ export class SessionStore {
       if (!index.activeSessionId) index.activeSessionId = sessionId;
       await this.saveIndex(agentId, internalChatId, index, 'api');
     });
+  }
+
+  private projectBindingPath(agentId: string, sessionId: string): string {
+    return path.join(this.agentsBaseDir, agentId, 'project-bindings', `${sessionId}.json`);
+  }
+
+  /** Written once when a project chat is created; looked up by session id alone, whichever chat asks. */
+  private saveProjectBinding(agentId: string, sessionId: string, project: string): void {
+    const file = this.projectBindingPath(agentId, sessionId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify({ project }) + '\n', 'utf-8');
+    fs.renameSync(`${file}.tmp`, file);
+  }
+
+  /** No file means the session was never bound. A file that cannot be read is not the same thing. */
+  async loadProjectBinding(agentId: string, sessionId: string): Promise<ProjectBinding> {
+    let raw: string;
+    try {
+      raw = await fs.promises.readFile(this.projectBindingPath(agentId, sessionId), 'utf-8');
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code === 'ENOENT' ? { kind: 'unbound' } : { kind: 'unreadable' };
+    }
+    try {
+      const project = (JSON.parse(raw) as { project?: unknown }).project;
+      return typeof project === 'string' ? { kind: 'bound', project } : { kind: 'unreadable' };
+    } catch {
+      return { kind: 'unreadable' };
+    }
   }
 
   /** Get all session metadata (name) for an agent, keyed by sessionId. */

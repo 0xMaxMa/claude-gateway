@@ -286,6 +286,41 @@ describe('a project-bound legacy chat turn', () => {
     expect((await send(h, plain, 'hi', KEYS.podReader!)).status).toBe(200);
   });
 
+  it('keeps the binding when the send names another chat_id', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    expect((await send(h, sessionId, 'hi', KEYS.podReader!, 'other')).status).toBe(404);
+    expect((await send(h, sessionId, 'hi', KEYS.admin!, 'other')).status).toBe(404);
+    expect((await send(h, sessionId, 'hi')).status).toBe(200);
+    await supertest(h.app).post(`/api/v1/agents/alfred/sessions/${sessionId}/restart`)
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`).query({ chat_id: 'other' });
+    await send(h, sessionId, 'again');
+    expect(spawns(h).length).toBeGreaterThan(0);
+    expect(spawns(h).filter((s) => s.cwd !== path.join(h.root, 'site'))).toEqual([]);
+  });
+
+  it('keeps the binding when the chat index is corrupt', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    expect((await send(h, sessionId, 'hi')).status).toBe(200);
+    fs.writeFileSync(path.join(h.base, 'agents', 'alfred', 'sessions', 'api-web', 'index.json'), '{not json');
+    await supertest(h.app).post(`/api/v1/agents/alfred/sessions/${sessionId}/restart`)
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`).query({ chat_id: 'web' });
+    await send(h, sessionId, 'again');
+    expect(spawns(h).filter((s) => s.cwd !== path.join(h.root, 'site'))).toEqual([]);
+  });
+
+  it('fails closed with PROJECT_UNAVAILABLE when the binding cannot be read', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    fs.writeFileSync(path.join(h.base, 'agents', 'alfred', 'project-bindings', `${sessionId}.json`), '{not json');
+    const res = await send(h, sessionId, 'hi');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROJECT_UNAVAILABLE');
+    expect(spawns(h)).toEqual([]);
+    expect((await send(h, sessionId, 'hi', KEYS.podReader!)).status).toBe(403);
+  });
+
   it('carries project and trusted on the admin sidebar list', async () => {
     h = await harness({ trusted: ['site'] });
     const bound = await projectSession(h);

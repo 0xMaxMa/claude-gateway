@@ -681,11 +681,6 @@ export function createApiRouter(
       res.status(400).json({ error: 'session_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
       return;
     }
-    if (typeof session_id === 'string' && (!canWriteAgent(apiKey, agentId) || !canAccessPod(apiKey))
-        && await runner.apiSessionProject(session_id, chat_id.trim())) {
-      res.status(403).json({ error: 'API key not permitted to drive a project chat', code: 'forbidden_key' });
-      return;
-    }
 
     // Validate media_files
     let validatedMediaFiles: string[] | undefined;
@@ -831,6 +826,11 @@ export function createApiRouter(
         error: `No session '${session_id as string}' in chat '${chatIdStr}'`,
         hint: 'Create it with POST /v1/agents/:agentId/sessions, or omit session_id to start a new one.',
       });
+      return;
+    }
+    if (typeof session_id === 'string' && (!canWriteAgent(apiKey, agentId) || !canAccessPod(apiKey))
+        && (await runner.apiSessionBinding(session_id)).kind !== 'unbound') {
+      res.status(403).json({ error: 'API key not permitted to drive a project chat', code: 'forbidden_key' });
       return;
     }
     const sessionId = (session_id as string | undefined) ?? randomUUID();

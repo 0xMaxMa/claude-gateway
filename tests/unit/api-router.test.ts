@@ -114,8 +114,8 @@ class MockAgentRunner extends EventEmitter {
     return Promise.resolve({ project: project ?? null, trusted: false });
   }
 
-  apiSessionProject(): Promise<undefined> {
-    return Promise.resolve(undefined);
+  apiSessionBinding(): Promise<{ kind: 'unbound' }> {
+    return Promise.resolve({ kind: 'unbound' });
   }
 }
 

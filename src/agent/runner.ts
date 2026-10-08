@@ -29,7 +29,7 @@ import { AgentConfig, CustomConnectorEntry, GatewayConfig, Logger, Message, Mode
 import { withConfigWriteLock, writeConfigAtomicSync } from '../config/config-write-lock';
 import { createLogger } from '../logger';
 import { SessionProcess, MAX_HISTORY_MESSAGES, resolveMaxHistoryMessages, INTERRUPTED_NO_REPLY_TEXT } from '../session/process';
-import { SessionStore, SessionNotInIndexError } from '../session/store';
+import { ProjectBinding, SessionStore, SessionNotInIndexError } from '../session/store';
 import { startNativeCompact } from '../orchestration/native-compact';
 import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
@@ -83,7 +83,7 @@ import type { SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 import { resolveEnabledConnectors } from '../connectors/resolve';
 import { ProjectChatError, ProjectCwd, resolveProjectCwd, sessionProjectView, SessionProjectView } from '../projects/chat';
-import { ProjectName, Result } from '../projects/paths';
+import { err, ProjectName, Result } from '../projects/paths';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
@@ -409,6 +409,7 @@ export class AgentRunner extends EventEmitter {
   // (e.g. the app/agent identifier) is not captured at spawn. Record it here
   // keyed by sessionId so the dashboard can show the actual chat id.
   private readonly apiChatIds = new Map<string, string>();
+  private readonly boundProjects = new Map<string, string>();
 
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
@@ -448,11 +449,20 @@ export class AgentRunner extends EventEmitter {
     return Boolean(this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes('api'));
   }
 
-  /** apiChatIds must be set before the spawn so the session's index can be found. */
-  async apiSessionProject(sessionId: string, chatId = this.apiChatIds.get(sessionId)): Promise<ProjectName | undefined> {
-    if (!chatId) return undefined;
-    const index = await this.sessionStore.loadIndex(this.agentConfig.id, chatId, 'api');
-    return index?.sessions.find((s) => s.id === sessionId)?.project as ProjectName | undefined;
+  /** By session id alone. A session once seen bound stays bound for this process's life. */
+  async apiSessionBinding(sessionId: string): Promise<ProjectBinding> {
+    const known = this.boundProjects.get(sessionId);
+    if (known) return { kind: 'bound', project: known };
+    const binding = await this.sessionStore.loadProjectBinding(this.agentConfig.id, sessionId);
+    if (binding.kind === 'bound') this.boundProjects.set(sessionId, binding.project);
+    return binding;
+  }
+
+  private async apiSessionProjectCwd(sessionId: string): Promise<Result<ProjectCwd, ProjectChatError> | undefined> {
+    const binding = await this.apiSessionBinding(sessionId);
+    if (binding.kind === 'unbound') return undefined;
+    if (binding.kind === 'unreadable') return err({ code: 'project_unavailable', reason: 'internal' });
+    return this.resolveApiProject(binding.project as ProjectName);
   }
 
   async resolveApiProject(name: ProjectName): Promise<Result<ProjectCwd, ProjectChatError>> {
@@ -526,10 +536,7 @@ export class AgentRunner extends EventEmitter {
             this.sessions.set(key, agentSession);
             return agentSession;
           },
-          sessionProject: async ({ source, agentSessionId, chatId }) => {
-            const project = source === 'api' ? await this.apiSessionProject(agentSessionId, chatId) : undefined;
-            return project && resolveProjectCwd(this.gatewayConfig, project);
-          },
+          sessionProject: ({ source, agentSessionId }) => source === 'api' ? this.apiSessionProjectCwd(agentSessionId) : Promise.resolve(undefined),
           releaseAgentSession: async (sessionId, agentSession) => {
             await agentSession.stop();
             for (const [key, value] of this.sessions) if (value === agentSession) this.sessions.delete(key);
@@ -2363,8 +2370,8 @@ export class AgentRunner extends EventEmitter {
 
     // Apply per-session model override (caller already normalized to undefined when == agent default)
     if (modelOverride) proc.modelOverride = modelOverride;
-    const project = source === 'api' ? await this.apiSessionProject(actualSessionId) : undefined;
-    if (project) proc.projectResolver = () => this.resolveApiProject(project);
+    const project = source === 'api' ? await this.apiSessionProjectCwd(actualSessionId) : undefined;
+    if (project) proc.projectResolver = async () => (await this.apiSessionProjectCwd(actualSessionId)) ?? err({ code: 'project_unavailable', reason: 'internal' });
 
     // Keep the searchable memory archive (planning-64) fresh for the memory_search
     // tool. Fire-and-forget, detached, OFF the event loop — never blocks the spawn.
