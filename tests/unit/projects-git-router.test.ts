@@ -911,6 +911,12 @@ describe('a clone of an empty remote', () => {
     expect(head(dir)).toBe(remoteHead());
   });
 
+  it('pull 409s no_upstream while the remote has no commits either', async () => {
+    emptyClone();
+    const res = await post('app', 'pull');
+    expect([res.status, res.body.code]).toEqual([409, 'no_upstream']);
+  });
+
   it('reports upstream_gone after a local commit, and push publishes it', async () => {
     const dir = emptyClone();
     commitLocal(dir, 'a.txt', 'a');

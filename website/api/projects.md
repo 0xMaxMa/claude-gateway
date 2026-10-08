@@ -382,7 +382,9 @@ Fetches the upstream's remote, then fast-forwards with
 `git merge --ff-only @{upstream}`. `pull.rebase` and similar settings do not
 apply. Returns `200` with `{ result: "up_to_date" | "fast_forwarded", status: GitStatus | null }`.
 A diverged branch gets `409 not_fast_forward`. A branch whose upstream was
-deleted on the remote gets `409 no_upstream`. Local changes that the
+deleted on the remote gets `409 no_upstream`. A branch with no commits
+fast-forwards to its upstream when the upstream has commits online, and gets
+`409 no_upstream` when it has none. Local changes that the
 fast-forward would overwrite get `409 dirty_would_overwrite`, and stay as they
 were.
 
