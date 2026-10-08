@@ -59,6 +59,7 @@ function boundedDiffText(text: string): string {
 /** The project folder must still be where admission pinned the task; a moved or renamed project never falls back. */
 async function startProject(gateway: GatewayConfig, task: TaskSnapshot): Promise<ProjectCwd | undefined> {
   if (!task.project) return undefined;
+  if (task.resourceProfile?.mode !== 'host') throw new OrchestrationError('PROJECT_UNSUPPORTED_AGENT', 'Project tasks run only in host workspace mode. No worker was started.');
   const root = task.resourceProfile?.projectRoot ?? '';
   const project = await resolveProjectCwd(gateway, task.project as ProjectName);
   const dir = project.ok ? await resolveInProject(project.value.dir, root) : undefined;
@@ -94,6 +95,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     if (current.state !== 'starting' || current.activeAttemptId !== attempt.attemptId) throw new OrchestrationError('ATTEMPT_CANCELLED_BEFORE_START');
     const directory = join(this.privateRoot, attempt.attemptId);
     let harness = resolveWorkerHarness(this.agent, this.gateway, task.model ?? this.agent.claude.model);
+    if (project && harness.harness === 'codex') throw new OrchestrationError('PROJECT_UNSUPPORTED_AGENT', 'Project tasks cannot run on the Codex worker harness. No worker was started.');
     let authFingerprint: string | undefined;
     let resolvedCredentials: Readonly<CodexCredentials> | undefined;
     if (harness.harness === 'codex') {

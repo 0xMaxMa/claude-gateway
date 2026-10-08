@@ -92,3 +92,13 @@ test('later and continued tasks in the chat inherit the project', async () => {
     }
   });
 });
+
+for (const mode of ['isolated-worktree', 'shared-lock'] as const) {
+  test(`a project-bound chat cannot queue tasks in ${mode} mode`, async () => {
+    await fixture(async ({ store, spawn }) => {
+      const spawned = await spawn('first');
+      expect(spawned.body.error).toBe('PROJECT_UNSUPPORTED_AGENT');
+      expect(store.all('SELECT id FROM tasks')).toHaveLength(0);
+    }, { mode: mode as any });
+  });
+}

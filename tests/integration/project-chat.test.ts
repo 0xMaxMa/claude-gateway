@@ -318,9 +318,9 @@ describe('project chat on an orchestrated gateway', () => {
   beforeEach(async () => { h = await harness({ orchestration: true }); });
   afterEach(async () => { await teardown(h); });
 
-  it('rejects the project with 409 project_unsupported_agent until the orchestrated path honours it', async () => {
+  it('binds the session to the project, since its workers run there', async () => {
     const res = await create(h, 'alfred', KEYS.admin!, { project: 'site' });
-    expect(res.status).toBe(409);
-    expect(res.body).toMatchObject({ code: 'project_unsupported_agent', reason: 'orchestrated' });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ project: 'site' });
   });
 });

@@ -14,16 +14,16 @@ import { AgentConfig, GatewayConfig } from '../../../src/types';
 // A real SessionProcess spawn of the mock CLI, which records its cwd and argv.
 const MOCK = resolve(__dirname, '../../helpers/mock-claude-worker.js');
 
-interface Run { root: string; projectDir: string; argsfile: string; start: () => ReturnType<ClaudeWorkerDriver['start']>; spawned: () => { cwd: string; args: string[] } }
+interface Run { store: OrchestrationStore; taskId: string; root: string; projectDir: string; argsfile: string; start: () => ReturnType<ClaudeWorkerDriver['start']>; spawned: () => { cwd: string; args: string[] } }
 
-async function fixture(body: (run: Run) => Promise<void>, options: { trusted?: boolean } = {}): Promise<void> {
+async function fixture(body: (run: Run) => Promise<void>, options: { trusted?: boolean; model?: string } = {}): Promise<void> {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'project-worker-')));
   const workspace = join(root, 'workspace'), projectDir = join(root, 'projects', 'demo'), argsfile = join(root, 'args.json');
   mkdirSync(workspace); mkdirSync(projectDir, { recursive: true });
   writeFileSync(join(workspace, 'CLAUDE.md'), 'Persona');
   const saved = { bin: process.env.CLAUDE_BIN, mode: process.env.MOCK_WORKER_MODE, args: process.env.MOCK_WORKER_ARGSFILE };
   Object.assign(process.env, { CLAUDE_BIN: `${process.execPath} ${MOCK}`, MOCK_WORKER_MODE: 'complete', MOCK_WORKER_ARGSFILE: argsfile });
-  const agent = { id: 'a', workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] }, orchestration: { tasks: { workspaceMode: 'host' } } } as unknown as AgentConfig;
+  const agent = { id: 'a', workspace, description: 'fixture', env: '', claude: { model: options.model ?? 'fixture', extraFlags: [] }, orchestration: { tasks: { workspaceMode: 'host' } } } as unknown as AgentConfig;
   const gateway = { gateway: { headless: true, timezone: 'UTC', logDir: join(root, 'logs'), projects: { root: join(root, 'projects'), trusted: options.trusted ? ['demo'] : [] } }, agents: [agent] } as unknown as GatewayConfig;
   const store = new OrchestrationStore(':memory:', 'a');
   const tasks = new TaskService(store, agent.orchestration, workspace, async () => resolveProjectCwd(gateway, 'demo' as ProjectName));
@@ -36,7 +36,7 @@ async function fixture(body: (run: Run) => Promise<void>, options: { trusted?: b
     const task = tasks.spawn(context, { project: await tasks.projectPin(context), title: 'Work', instructions: 'Work', targetProfile: 'default-worker' });
     const attempt = tasks.claim(task.taskId)!;
     const driver = new ClaudeWorkerDriver(agent, gateway, tasks, bridge, new TaskWorkspaces(store, workspace, join(root, 'resources')), join(root, 'private'));
-    await body({ root, projectDir, argsfile, start: () => driver.start(store.task(task.taskId)!, attempt, true), spawned: () => JSON.parse(readFileSync(argsfile, 'utf8')) });
+    await body({ store, taskId: task.taskId, root, projectDir, argsfile, start: () => driver.start(store.task(task.taskId)!, attempt, true), spawned: () => JSON.parse(readFileSync(argsfile, 'utf8')) });
   } finally {
     for (const [key, value] of [['CLAUDE_BIN', saved.bin], ['MOCK_WORKER_MODE', saved.mode], ['MOCK_WORKER_ARGSFILE', saved.args]] as const) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     await bridge.close(); store.close(); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
@@ -82,4 +82,19 @@ test('a trusted project worker keeps the default setting sources, so the repo Se
     expect(spawned().args).not.toContain('--setting-sources');
     expect(existsSync(join(root, 'hook-fired'))).toBe(true);
   }, { trusted: true });
+}, 60000);
+
+test('a project task is not started in a non-host workspace mode', async () => {
+  await fixture(async ({ store, taskId, argsfile, start }) => {
+    store.run("UPDATE tasks SET snapshot_json=json_set(snapshot_json,'$.resourceProfile.mode','shared-lock') WHERE id=?", taskId);
+    await expect(start()).rejects.toMatchObject({ code: 'PROJECT_UNSUPPORTED_AGENT' });
+    expect(existsSync(argsfile)).toBe(false);
+  });
+}, 60000);
+
+test('a project task is not started on the Codex worker harness', async () => {
+  await fixture(async ({ argsfile, start }) => {
+    await expect(start()).rejects.toMatchObject({ code: 'PROJECT_UNSUPPORTED_AGENT' });
+    expect(existsSync(argsfile)).toBe(false);
+  }, { model: 'gpt-5' });
 }, 60000);

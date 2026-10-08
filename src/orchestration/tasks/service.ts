@@ -148,6 +148,7 @@ export class TaskService {
     const conversation = this.store.get('SELECT source,agent_session_id,chat_id FROM conversations WHERE id=?', context.conversationId);
     const project = conversation && await this.sessionProject?.({ source: String(conversation.source) as ConversationScope['source'], agentSessionId: String(conversation.agent_session_id), chatId: String(conversation.chat_id) });
     if (!project) return undefined;
+    if (this.config.tasks.workspaceMode !== 'host') throw new OrchestrationError('PROJECT_UNSUPPORTED_AGENT', 'No task was queued: project chats need host workspace mode.');
     if (!project.ok) throw new OrchestrationError('PROJECT_UNAVAILABLE', 'No task was queued: this chat\'s project folder is no longer available.');
     if (workingDirectory === undefined) return { name: project.value.name, dir: project.value.dir };
     const dir = typeof workingDirectory === 'string' ? await resolveInProject(project.value.dir, workingDirectory) : undefined;

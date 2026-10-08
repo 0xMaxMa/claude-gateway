@@ -457,7 +457,6 @@ export class AgentRunner extends EventEmitter {
 
   async resolveApiProject(name: ProjectName): Promise<Result<ProjectCwd, ProjectChatError>> {
     if (this.agentConfig.type === 'app-agent') return { ok: false, error: { code: 'project_unsupported_agent', reason: 'container' } };
-    if (this.apiChannelOrchestrated()) return { ok: false, error: { code: 'project_unsupported_agent', reason: 'orchestrated' } };
     return resolveProjectCwd(this.gatewayConfig, name);
   }
 

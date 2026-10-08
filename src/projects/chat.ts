@@ -12,7 +12,7 @@ export function resolveProjectsRoot(config: GatewayConfig): string {
 }
 
 export type ProjectChatError =
-  | { code: 'project_unsupported_agent'; reason: 'container' | 'orchestrated' }
+  | { code: 'project_unsupported_agent'; reason: 'container' }
   | { code: 'project_not_found' }
   | { code: 'project_unavailable'; reason: ProjectsErrorCode };
 

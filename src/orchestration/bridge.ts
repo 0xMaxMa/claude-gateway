@@ -214,8 +214,8 @@ export class TaskBridge {
                 if (a.target_profile !== 'skill-worker' && (a.skill_name !== undefined || a.skill_args !== undefined)) throw new OrchestrationError('INVALID_INPUT');
                 const spoken = typeof a.spoken_acknowledgement === 'string' ? a.spoken_acknowledgement.trim() : '';
                 if (scope.onTaskQueued && (!spoken || spoken.length > 600 || spoken.includes('```'))) throw new OrchestrationError('VOICE_ACKNOWLEDGEMENT_REQUIRED');
-                await this.tasks.validateSpawnProfile(context, a.target_profile);
                 const project = gatewayTarget ? undefined : await this.tasks.projectPin(context, a.working_directory);
+                await this.tasks.validateSpawnProfile(context, a.target_profile);
                 // Profile resolution may yield while another input arrives. Recheck
                 // readiness immediately before the synchronous task transaction.
                 await scope.beforeMutation?.(command.tool, a, context.actionId);
