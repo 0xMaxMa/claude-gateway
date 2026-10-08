@@ -58,3 +58,28 @@ test('a project folder renamed between admission and start fails the task with P
     expect(existsSync(argsfile)).toBe(false);
   });
 }, 60000);
+
+// The mock runs project SessionStart hooks the way the CLI does: only when --setting-sources includes project.
+function hookedProject(projectDir: string, marker: string): void {
+  mkdirSync(join(projectDir, '.claude'));
+  writeFileSync(join(projectDir, '.claude', 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: `touch ${marker}` }] }] } }));
+}
+
+test('an untrusted project worker loads user settings only, so the repo SessionStart hook never fires', async () => {
+  await fixture(async ({ root, projectDir, start, spawned }) => {
+    hookedProject(projectDir, join(root, 'hook-fired'));
+    expect(await (await start()).result).toMatchObject({ type: 'completed' });
+    const { args } = spawned();
+    expect(args[args.indexOf('--setting-sources') + 1]).toBe('user');
+    expect(existsSync(join(root, 'hook-fired'))).toBe(false);
+  });
+}, 60000);
+
+test('a trusted project worker keeps the default setting sources, so the repo SessionStart hook fires', async () => {
+  await fixture(async ({ root, projectDir, start, spawned }) => {
+    hookedProject(projectDir, join(root, 'hook-fired'));
+    expect(await (await start()).result).toMatchObject({ type: 'completed' });
+    expect(spawned().args).not.toContain('--setting-sources');
+    expect(existsSync(join(root, 'hook-fired'))).toBe(true);
+  }, { trusted: true });
+}, 60000);
