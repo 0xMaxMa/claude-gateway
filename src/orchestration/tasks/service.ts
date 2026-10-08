@@ -7,7 +7,7 @@ import {browserOutcomeText} from '../../automation/browser-outcome';
 import {textCommand} from '../../automation/direct-command';
 import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
 import { isAbsolute } from 'path';
-import type { ProjectChatError, ProjectCwd } from '../../projects/chat';
+import { resolveInProject, type ProjectChatError, type ProjectCwd } from '../../projects/chat';
 import type { Result } from '../../projects/paths';
 import { parseWorkflow, advanceWorkflow } from '../workflow';
 import { advanceTiming } from './timing';
@@ -143,13 +143,16 @@ export class TaskService {
   configure(config?: OrchestrationConfig): void { this.config = resolveOrchestrationConfig(config); }
 
   /** A project-bound chat's tasks run in its project folder. Resolved before the synchronous spawn transaction. */
-  async projectPin(context: CommandContext): Promise<ProjectPin | undefined> {
+  async projectPin(context: CommandContext, workingDirectory?: unknown): Promise<ProjectPin | undefined> {
     if (this.store.get('SELECT action_id FROM task_commands WHERE action_id=?', context.actionId)) return undefined;
     const conversation = this.store.get('SELECT source,agent_session_id,chat_id FROM conversations WHERE id=?', context.conversationId);
     const project = conversation && await this.sessionProject?.({ source: String(conversation.source) as ConversationScope['source'], agentSessionId: String(conversation.agent_session_id), chatId: String(conversation.chat_id) });
     if (!project) return undefined;
     if (!project.ok) throw new OrchestrationError('PROJECT_UNAVAILABLE', 'No task was queued: this chat\'s project folder is no longer available.');
-    return { name: project.value.name, dir: project.value.dir };
+    if (workingDirectory === undefined) return { name: project.value.name, dir: project.value.dir };
+    const dir = typeof workingDirectory === 'string' ? await resolveInProject(project.value.dir, workingDirectory) : undefined;
+    if (!dir?.ok) throw new OrchestrationError('WORKING_DIRECTORY_OUTSIDE_PROJECT', `No task was queued: working_directory must be an existing folder inside this chat's project folder ${project.value.dir}.`);
+    return { name: project.value.name, dir: dir.value };
   }
   /** Admission feedback reaches the agent before a doomed task is committed. */
   async validateSpawnProfile(context: CommandContext, targetProfile: string): Promise<void> {

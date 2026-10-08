@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { OrchestrationStore } from '../../../src/orchestration/store';
@@ -65,4 +65,30 @@ test('a session with no project keeps the configured worker root', async () => {
     expect(task.project).toBeUndefined();
     expect(task.resourceProfile?.projectRoot).toBe(join(root, 'workspace'));
   }, { bound: false });
+});
+
+test('a model-supplied working directory stays inside the project or the spawn fails', async () => {
+  await fixture(async ({ root, projectDir, store, spawn }) => {
+    mkdirSync(join(root, 'projects', 'other'));
+    mkdirSync(join(projectDir, 'src'));
+    symlinkSync(join(root, 'projects', 'other'), join(projectDir, 'escape'));
+    for (const [action, dir] of [['dotdot', '../other'], ['parent', join(projectDir, '..', 'other')], ['absolute', join(root, 'projects', 'other')], ['symlink', join(projectDir, 'escape')]]) {
+      const spawned = await spawn(action, { working_directory: dir });
+      expect({ action, status: spawned.status, error: spawned.body.error }).toEqual({ action, status: expect.any(Number), error: 'WORKING_DIRECTORY_OUTSIDE_PROJECT' });
+    }
+    expect(store.all('SELECT id FROM tasks')).toHaveLength(0);
+    const inside = await spawn('inside', { working_directory: join(projectDir, 'src') });
+    expect(store.task(inside.body.taskId)).toMatchObject({ project: 'demo', resourceProfile: { projectRoot: join(projectDir, 'src') } });
+  });
+});
+
+test('later and continued tasks in the chat inherit the project', async () => {
+  await fixture(async ({ projectDir, store, spawn }) => {
+    const first = await spawn('first');
+    const second = await spawn('second');
+    const continued = await spawn('continued', { continue_task_id: first.body.taskId });
+    for (const spawned of [second, continued]) {
+      expect(store.task(spawned.body.taskId)).toMatchObject({ project: 'demo', resourceProfile: { projectRoot: projectDir, mode: 'host' } });
+    }
+  });
 });

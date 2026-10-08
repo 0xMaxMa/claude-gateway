@@ -1,9 +1,10 @@
+import * as path from 'path';
 import { GatewayConfig } from '../types';
 import { expandHome } from '../utils/paths';
 import { resolveProjectDir } from './fs';
 import { getStatus } from './git';
 import { remoteHostname } from './git-status';
-import { err, ok, ProjectName, ProjectsErrorCode, Result } from './paths';
+import { err, ok, ProjectName, ProjectsErrorCode, resolveInside, Result } from './paths';
 
 /** `gateway.projects.root`, which loadConfig has already validated. */
 export function resolveProjectsRoot(config: GatewayConfig): string {
@@ -34,6 +35,11 @@ export async function resolveProjectCwd(config: GatewayConfig, name: ProjectName
     return err(dir.error === 'not_found' ? { code: 'project_not_found' } : { code: 'project_unavailable', reason: dir.error });
   }
   return ok({ name, dir: dir.value, trusted: config.gateway.projects?.trusted?.includes(name) ?? false });
+}
+
+/** `requested`, relative to or absolute under the project folder, resolved through symlinks; path_escape if it leaves. */
+export function resolveInProject(dir: string, requested: string): Promise<Result<string, ProjectsErrorCode>> {
+  return resolveInside(dir, path.relative(dir, path.resolve(dir, requested)));
 }
 
 /**
