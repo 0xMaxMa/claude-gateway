@@ -3,7 +3,7 @@ import * as path from 'path';
 import { GatewayConfig } from '../types';
 import { expandHome } from '../utils/paths';
 import { resolveProjectDir } from './fs';
-import { getStatus } from './git';
+import { getStatusSummary } from './git';
 import { remoteHostname } from './git-status';
 import { err, ok, ProjectName, ProjectsErrorCode, resolveInside, Result } from './paths';
 
@@ -74,19 +74,22 @@ export function projectLocation(project: ProjectCwd): string {
   return `You are working in project ${project.name} at ${project.dir}.`;
 }
 
+/** A branch name the note may carry verbatim. Git allows far more, and the note is a prompt. */
+const PLAIN_BRANCH_RE = /^[\w./-]{1,100}$/;
+
 /**
  * One line telling the agent where it works: the project, its folder and, when git answers
  * within the read timeout, branch, change count and remote host. Never a remote URL, which
- * can carry a token.
+ * can carry a token, and never a branch name outside the whitelist.
  */
 export async function projectContext(config: GatewayConfig, project: ProjectCwd): Promise<string> {
   const where = projectLocation(project);
-  const status = await getStatus(resolveProjectsRoot(config), project.name).catch(() => null);
+  const status = await getStatusSummary(resolveProjectsRoot(config), project.name).catch(() => null);
   if (!status?.ok) return where;
   const s = status.value;
   const host = s.remote ? remoteHostname(s.remote.url) : null;
   const git = [
-    s.branch ? `branch ${s.branch}` : 'detached HEAD',
+    ...(s.branch === null ? ['detached HEAD'] : PLAIN_BRANCH_RE.test(s.branch) ? [`branch ${s.branch}`] : []),
     `${s.change_count} ${s.change_count === 1 ? 'change' : 'changes'}`,
     ...(host ? [`remote ${host}`] : []),
   ];

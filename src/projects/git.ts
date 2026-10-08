@@ -146,6 +146,11 @@ export function getStatus(root: string, name: ProjectName): Promise<GitResult<Gi
   return readStatus(root, name, DETAIL_READ);
 }
 
+/** The cheaper read for a chat's context note: an untracked folder counts once, and no secret check needs its files. */
+export function getStatusSummary(root: string, name: ProjectName): Promise<GitResult<GitStatus>> {
+  return readStatus(root, name, SUMMARY_READ);
+}
+
 async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const out = new Array<R>(items.length);
   let next = 0;
