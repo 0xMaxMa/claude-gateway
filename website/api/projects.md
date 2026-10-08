@@ -368,10 +368,12 @@ curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json"
 The commit is refused while conflicts exist (`conflicts_present`), during a
 merge or similar (`operation_in_progress`), on a detached HEAD
 (`detached_head`), with nothing to commit (`nothing_to_commit`), or without an
-identity (`identity_missing`). When the commit fails and the repository has a
-`pre-commit`, `prepare-commit-msg`, or `commit-msg` hook, the response is
-`422 hook_failed` with the output in `detail`, cut to 2000 bytes, whatever the
-output says. The
+identity (`identity_missing`). When `git commit` itself fails, a locked index
+(`index_locked`), nothing left to commit after staging (`nothing_to_commit`),
+and a timeout (`timeout`) are reported first. Any other failure in a
+repository with a `pre-commit`, `prepare-commit-msg`, or `commit-msg` hook is
+`422 hook_failed`, with the output in `detail` cut to 2000 bytes, even when
+the hook printed text that looks like a network or credential error. The
 changes stay staged.
 
 ### POST /api/v1/projects/:name/git/pull {#post-git-pull}
@@ -425,7 +427,7 @@ another reason, such as a protected branch or a server hook, gets
 | 409 | `detached_head` | `commit`, `pull`, or `push` on a detached HEAD. |
 | 409 | `busy` | Another git operation is running on this project. |
 | 409 | `index_locked` | `.git/index.lock` exists, usually from another git process. |
-| 422 | `hook_failed` | A commit failed in a repository with a commit hook. The body has `detail`, at most 2000 bytes. |
+| 422 | `hook_failed` | A commit failed in a repository with a commit hook, and the failure was not a locked index, nothing to commit, or a timeout. The body has `detail`, at most 2000 bytes. |
 | 502 | `auth_failed` | The remote refused the credentials, or none were available. |
 | 502 | `network` | The remote could not be reached. |
 | 504 | `timeout` | Git ran past its limit: 3 seconds for the `GET` routes, 10 seconds for `init`, `identity`, and the status reads around every mutating route, 60 seconds for fetch, pull, push, and commit. |

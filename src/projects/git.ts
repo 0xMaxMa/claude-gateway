@@ -170,22 +170,32 @@ export async function getSummaries(root: string): Promise<GitResult<{ summaries:
   return ok({ summaries: Object.fromEntries(repos.map((p, i) => [p.name, results[i]])) });
 }
 
-/** Ordered: the first pattern found in git's output names the failure. Raw output never reaches the client. */
-const OUTPUT_CODES: Array<[RegExp, Exclude<GitErrorCode, 'sensitive_files' | 'hook_failed'>]> = [
+type OutputCode = Exclude<GitErrorCode, 'sensitive_files' | 'hook_failed'>;
+
+/** Failures git itself reports about the local repo; a commit checks these before blaming a hook. */
+const LOCAL_CODES: Array<[RegExp, OutputCode]> = [
   [/index\.lock'?: File exists/i, 'index_locked'],
+  [/nothing to commit|no changes added to commit/i, 'nothing_to_commit'],
+];
+
+/** Ordered: the first pattern found in git's output names the failure. Raw output never reaches the client. */
+const OUTPUT_CODES: Array<[RegExp, OutputCode]> = [
+  ...LOCAL_CODES,
   // A server hook or branch protection; its message is free text and must not read as a network or auth failure.
   [/\[remote rejected\]/i, 'remote_rejected'],
   [/Authentication failed|could not read (Username|Password)|terminal prompts disabled|Permission denied \(publickey|error: 40[13]/i, 'auth_failed'],
   [/Could not resolve host|Connection refused|Connection timed out|Network is unreachable|Failed to connect|unable to access|does not appear to be a git repository|Could not read from remote repository/i, 'network'],
   [/\[rejected\]|non-fast-forward|fetch first|Not possible to fast-forward/i, 'not_fast_forward'],
   [/would be overwritten by merge/i, 'dirty_would_overwrite'],
-  [/nothing to commit|no changes added to commit/i, 'nothing_to_commit'],
 ];
 
-function classify(out: GitOutput): GitError {
+function matchOutput(out: GitOutput, codes: Array<[RegExp, OutputCode]>): OutputCode | null {
   const text = `${out.stderr}\n${out.stdout}`;
-  const hit = OUTPUT_CODES.find(([re]) => re.test(text));
-  return { code: hit ? hit[1] : 'git_failed' };
+  return codes.find(([re]) => re.test(text))?.[1] ?? null;
+}
+
+function classify(out: GitOutput): GitError {
+  return { code: matchOutput(out, OUTPUT_CODES) ?? 'git_failed' };
 }
 
 async function git(dir: string, args: string[], timeoutMs: number, env?: Record<string, string>): Promise<GitResult<GitOutput>> {
@@ -332,6 +342,8 @@ export function commitAll(
     const commit = await git(dir, ['commit', '-q', '-m', req.message], GIT_TIMEOUTS.commit);
     if (!commit.ok) return commit;
     if (commit.value.code !== 0) {
+      const local = matchOutput(commit.value, LOCAL_CODES);
+      if (local) return fail(local);
       // A hook's output is free text: a lint that prints "Could not resolve host" must not read as a network failure.
       if (await hasCommitHook(dir)) return err({ code: 'hook_failed', detail: hookDetail(commit.value) });
       return err(classify(commit.value));

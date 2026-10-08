@@ -82,7 +82,8 @@ const REAL_GIT = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8'
 
 /**
  * Puts a `git` first on PATH that runs the real one, but sleeps SHIM_SLOW_STATUS seconds before
- * every `status`, and once a `SHIM_BREAK_AFTER` command succeeds makes every later `status` fail.
+ * every `status`, once a `SHIM_BREAK_AFTER` command succeeds makes every later `status` fail, and
+ * creates `.git/index.lock` just before a `SHIM_LOCK_BEFORE` command runs.
  */
 function shimGit(): void {
   const bin = path.join(base, 'shim-bin');
@@ -96,6 +97,7 @@ function shimGit(): void {
       '    [ -n "$SHIM_SLOW_STATUS" ] && sleep "$SHIM_SLOW_STATUS"',
       '    [ -e "$flag" ] && exit 1',
       '  fi',
+      '  [ -n "$SHIM_LOCK_BEFORE" ] && [ "$a" = "$SHIM_LOCK_BEFORE" ] && touch .git/index.lock',
       'done',
       `"${REAL_GIT}" "$@"; code=$?`,
       'for a in "$@"; do',
@@ -492,6 +494,32 @@ describe('POST git/commit', () => {
     const res = await post('app', 'commit', { message: 'blocked' });
     expect([res.status, res.body.code]).toEqual([422, 'hook_failed']);
     expect(res.body.detail).toContain('Could not read from remote repository');
+  });
+
+  it('409s nothing_to_commit, not hook_failed, when the only change was staged and then deleted', async () => {
+    const dir = makeRepo('app');
+    setIdentity(dir);
+    write(path.join(dir, 'tmp.txt'), 'x');
+    git(dir, 'add', 'tmp.txt');
+    fs.rmSync(path.join(dir, 'tmp.txt'));
+    hook(dir, 'pre-commit', 'exit 0');
+    const before = head(dir);
+    const res = await post('app', 'commit', { message: 'nothing really' });
+    expect([res.status, res.body.code]).toEqual([409, 'nothing_to_commit']);
+    expect(head(dir)).toBe(before);
+  });
+
+  it('409s index_locked, not hook_failed, when the commit finds the index locked in a repo with a hook', async () => {
+    const dir = makeRepo('app');
+    setIdentity(dir);
+    hook(dir, 'pre-commit', 'exit 0');
+    write(path.join(dir, 'new.txt'), 'x');
+    shimGit();
+    process.env.SHIM_LOCK_BEFORE = 'commit';
+    const before = head(dir);
+    const res = await post('app', 'commit', { message: 'locked' });
+    expect([res.status, res.body.code]).toEqual([409, 'index_locked']);
+    expect(head(dir)).toBe(before);
   });
 
   it('409s conflicts_present during a conflicted merge', async () => {
