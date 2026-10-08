@@ -317,7 +317,9 @@ export class TaskService {
     if (!['default-worker', 'media-worker', 'skill-worker', 'gateway-managed'].includes(command.targetProfile)) throw new OrchestrationError('UNKNOWN_WORKER_PROFILE');
     if ((command.targetProfile === 'gateway-managed') !== Boolean(command.gatewayTarget)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
     if (command.gatewayTarget && (command.workingDirectory || command.skill || command.contextRefs?.length || command.model || command.effort)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
-    return this.command(context, 'spawn', command, true, () => {
+    // The pin is the gateway's, not the caller's: a retry skips resolving it and must still match.
+    const { project: _pin, ...payload } = command;
+    return this.command(context, 'spawn', payload, true, () => {
       const conversation = this.store.get('SELECT * FROM conversations WHERE id=?', context.conversationId)!;
       let replaced:TaskSnapshot|undefined;
       if(['browser','computer'].includes(command.gatewayTarget?.adapter ?? '')) {

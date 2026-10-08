@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { OrchestrationStore } from '../../../src/orchestration/store';
@@ -102,3 +102,13 @@ for (const mode of ['isolated-worktree', 'shared-lock'] as const) {
     }, { mode: mode as any });
   });
 }
+
+test('a retried task_spawn returns the committed task even after the project folder moved', async () => {
+  await fixture(async ({ root, projectDir, spawn }) => {
+    const first = await spawn('first');
+    renameSync(projectDir, join(root, 'projects', 'moved'));
+    const again = await spawn('first');
+    expect({ status: again.status, taskId: again.body.taskId }).toEqual({ status: 200, taskId: first.body.taskId });
+    expect((await spawn('second')).body.error).toBe('PROJECT_UNAVAILABLE');
+  });
+});
