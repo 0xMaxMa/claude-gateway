@@ -698,6 +698,79 @@ When Computer Use is not enabled for an agent, computer discovery returns
 `COMPUTER_NOT_ALLOWED` with a non-retryable message, and other computer adapter
 failures return their own `COMPUTER_*` code instead of `INVALID_REQUEST`.
 
+### Vision mode (Mac, beta)
+
+`gateway.computerUse.mode` chooses how an agent goal is decided. The default,
+`ax`, is the Accessibility controller described above and is unchanged.
+
+```json
+{
+  "gateway": {
+    "computerUse": {
+      "enabled": true,
+      "mode": "vision",
+      "visionModel": "claude-sonnet-5"
+    }
+  }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `mode` | `ax` | `ax`: Accessibility only. `vision`: the model sees the window screenshot and acts with pixel coordinates. `hybrid`: `vision` plus the Accessibility element boxes (in screenshot pixels) as hints. |
+| `visionModel` | `claude-sonnet-5` | Model for vision decisions. It must support the computer toolset (`computer_toolset_20260801`): Opus 5.5, Opus 5, Sonnet 5, Fable 5 / 5.1, Opus 4.8. Any other model (Haiku 4.5 included) keeps the agent on `ax` and logs `computer_vision_model_unsupported` once. |
+
+Vision needs a Computer Use decision backend (Jev or the model backend above)
+and applies to goal runs: the first request of a computer session, an agent
+handoff and agent-controlled tasks. Step lists, mid-session user commands and
+yes/no replies stay on Accessibility. An agent-controlled task runs the goal to
+completion instead of yielding after each action. Each step sends one Messages request with the
+goal, a short escaped `<screen_state>` and the screenshot of the current
+observation generation, through the agent's own endpoint and credential. The
+computer toolset is GA, so no `anthropic-beta` header is sent, and the request
+sets neither `temperature` nor a forced `tool_choice`. The model may also call
+`finish` with `done` or `blocked`; it is told never to buy, send, post, delete,
+sign in or accept terms, and stops with `VISION_HIGH_IMPACT_ACTION` instead.
+
+Model actions map to the helper's raw input kinds (`pointer`, `scroll`,
+`key_chord`, `type_focused`) and are bound to the generation of the screenshot
+the model saw. A coordinate outside that screenshot is refused before dispatch.
+Receipts are read and never replayed: an unknown outcome stops with
+`needs_reconciliation`. `STALE_OBSERVATION`, `TARGET_OCCLUDED` and the helper's
+other no-change refusals take a fresh screenshot and let the model decide again;
+three refusals in a row stop the run. A goal is limited to 8 actions and five
+minutes. The log records one `computer_vision_decision` line per step with codes,
+sizes, image count and token usage, never screenshots or credentials.
+
+Raw input is used only when the helper advertises it in the observation
+(`capabilities.pointer`, `screenshotGeometry` and the per-kind flags). Without
+those, or when the Mac answers `RAW_INPUT_DISABLED` before the first action, the
+same goal runs on Accessibility. This needs a helper and relay with the raw
+input contract (getpod-computer-use #82) and the getpod app switch
+**Allow mouse and keyboard control (beta)**, which is off by default.
+
+#### Mac acceptance test
+
+1. On the Mac, update the getpod app, open Preferences and turn on
+   **Allow mouse and keyboard control (beta)**. Confirm the native prompt.
+2. On the pod, set `gateway.computerUse.mode` to `vision` (or `hybrid`). The
+   setting reloads live.
+3. Ask the agent five times, each from a fresh chat: "Open YouTube in Chrome,
+   search for lofi hip hop and play the first video." Pass: at least 4 of 5 end
+   with a video playing and the task reported as reached.
+4. Watch for:
+   - clicks landing off target (wrong scale, Retina, or a window that moved);
+   - repeated `STALE_OBSERVATION` / `TARGET_OCCLUDED` refusals, or a run ending
+     with three of them;
+   - `VISION_FALLBACK_*` progress reasons, which mean the run went back to
+     Accessibility (switch off, old helper or relay, no Screen Recording
+     permission);
+   - text typed into the wrong field, and any action on a protected app;
+   - the panic hotkey stopping a run mid-action;
+   - per-step latency and token usage in `computer_vision_decision` log lines.
+5. Set `mode` back to `ax` to return to the Accessibility controller; a decision
+   in flight is discarded.
+
 ### Step-by-step commands
 
 Set `features.computerSteps.enabled: true` (default: off) to run an explicit step

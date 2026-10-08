@@ -11,7 +11,7 @@ import { BrowserConnectorRegistry, resolveBrowserConnection } from '../jev/brows
 import { BrowserTaskAdapter, BrowserTaskBinding } from './gateway-tasks/browser';
 import { createHash } from 'crypto';
 import { computerDecisions, gatewayJev, jevAllowed } from './jev-gateway';
-import { computerEvaluator, computerThinking } from './computer-decisions';
+import { computerEvaluator, computerThinking, computerVision } from './computer-decisions';
 import { JevRequest } from '../jev/types';
 import { GatewayTaskController, GatewayTaskAdapter } from './gateway-tasks/controller';
 import { SafemodeTaskAdapter } from './gateway-tasks/safemode';
@@ -295,6 +295,7 @@ export class AgentOrchestrationRuntime {
       member:(principal,conversation)=>{try{store.assertMember(conversation,principal);return true;}catch{return false;}},
       active:task=>{const current=store.task(task.taskId);return Boolean(current&&current.activeAttemptId===task.activeAttemptId&&['starting','running','interrupting'].includes(current.state));},
       evaluate:computerEvaluator(gateway,agent,task=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return true;}catch{return false;}}),
+      vision:computerVision(gateway,agent,task=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return true;}catch{return false;}}),
       needsInput:(task,question)=>{const current=store.task(task.taskId),attempt=task.activeAttemptId?store.attempt(task.activeAttemptId):undefined;if(!current||!attempt||current.activeAttemptId!==task.activeAttemptId||current.revision!==attempt.revision||!['starting','running','interrupting'].includes(current.state))return false;if(current.state==='starting')tasks.started(attempt.attemptId,attempt.generation);tasks.requestInput(attempt.attemptId,attempt.generation,question,undefined,task.computerReport);return true;},
       progress:(task,report)=>store.transaction(()=>{const current=store.task(task.taskId);if(!current||current.activeAttemptId!==task.activeAttemptId||!['starting','running','interrupting'].includes(current.state))return;current.computerReport=report;current.latestProgress={source:'runtime',observedAt:Date.now(),text:`Computer Use: ${report.phase} · ${report.steps} actions · ${report.evaluations??0} evaluations.${current.queuedCommands?.length?` ${current.queuedCommands.length} queued command${current.queuedCommands.length===1?'':'s'} waiting.`:''}`};store.saveTask(current,current.stateVersion);})
     }));

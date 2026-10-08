@@ -7,6 +7,7 @@ import {mkdirSync,readFileSync,openSync,writeFileSync,fsyncSync,closeSync,rename
 import {join} from 'path';
 import type {ComputerProgress,ComputerUseDependencies,ComputerUseResult} from '../../automation/computer-use';
 import {parseComputerSteps,runComputerSteps} from '../../automation/computer-steps';
+import {runVisionComputerUse,COMPUTER_VISION_RUN_TIMEOUT_MS,type VisionDecide} from '../../automation/vision-decider';
 import {ComputerConnectors,withComputerConnection} from '../../jev/computer-connector';
 import type {CommandContext,TaskSnapshot,TaskAttempt,TaskRevision,WorkerOutcome,GatewayTaskTarget} from '../types';
 import {GatewayRequestNotSentError,type GatewayTaskAdapter} from './controller';
@@ -23,7 +24,9 @@ interface Receipt {command?:string;revision:number;taskId:string;requestId:strin
 export class ComputerTaskAdapter implements GatewayTaskAdapter {
  private recoveryChecks=new Map<string,number>();
  readonly name='computer';private runs=new Map<string,{abort:AbortController;interrupt:AbortController;done:Promise<void>}>();
- constructor(private options:{agentId:string;root:string;connectors:ComputerConnectors;allowed:()=>boolean;stepMode?:()=>boolean;settled?:()=>void;userSteps?:(task:TaskSnapshot)=>string|undefined;accessWaitMs?:number;thinking?:()=>import('../../jev/browser-contract').BrowserTextHelperConfig|{resolve:()=>Promise<import('../../../lib/automation/thinking.cjs').ThinkingConfig>}|undefined;timezone?:()=>string;member:(principal:string,conversation:string)=>boolean;active:(task:TaskSnapshot)=>boolean;evaluate:(task:TaskSnapshot,request:Parameters<ComputerUseDependencies['evaluate']>[0],signal:AbortSignal)=>ReturnType<ComputerUseDependencies['evaluate']>;needsInput:(task:TaskSnapshot,question:string)=>boolean;progress?:(task:TaskSnapshot,report:import('../types').ComputerTaskReport)=>void;decisionMode?:()=>'jev'|'model'}){}
+ constructor(private options:{agentId:string;root:string;connectors:ComputerConnectors;allowed:()=>boolean;stepMode?:()=>boolean;settled?:()=>void;userSteps?:(task:TaskSnapshot)=>string|undefined;accessWaitMs?:number;thinking?:()=>import('../../jev/browser-contract').BrowserTextHelperConfig|{resolve:()=>Promise<import('../../../lib/automation/thinking.cjs').ThinkingConfig>}|undefined;timezone?:()=>string;member:(principal:string,conversation:string)=>boolean;active:(task:TaskSnapshot)=>boolean;evaluate:(task:TaskSnapshot,request:Parameters<ComputerUseDependencies['evaluate']>[0],signal:AbortSignal)=>ReturnType<ComputerUseDependencies['evaluate']>;needsInput:(task:TaskSnapshot,question:string)=>boolean;progress?:(task:TaskSnapshot,report:import('../types').ComputerTaskReport)=>void;decisionMode?:()=>'jev'|'model';
+  /** gateway.computerUse.mode vision|hybrid with a toolset-capable model: agent goals decided from the screenshot. */
+  vision?:()=>{mode:'vision'|'hybrid';decide:(task:TaskSnapshot,authorized:()=>boolean)=>VisionDecide}|undefined}){}
  private permitted(p:string,c:string){return this.options.allowed()&&this.options.member(p,c);}
  async discover(query='',offset=0,context?:CommandContext){
   if(!context||!this.permitted(context.principalId,context.conversationId))throw Error('COMPUTER_NOT_ALLOWED');
@@ -77,7 +80,6 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
     if(access!=='approved'&&access!=='pending')throw Error(access==='denied'?'COMPUTER_ACCESS_DENIED':access==='stopped'?'COMPUTER_ACCESS_STOPPED':'COMPUTER_ACCESS_UNAVAILABLE');
    }
    consentSignal.throwIfAborted();
-   const workSignal=AbortSignal.any([signal,AbortSignal.timeout(125000)]);
    // The helper bounds app_query (4000 characters) inside a 32KB request line; never split a character.
    const appQuery=[...goal].slice(0,4000).join('');
    let continuationReady=false;let leaseToken:string|undefined;let fieldRequest:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'}|undefined;
@@ -102,7 +104,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    const userText=stepMode?this.options.userSteps?.(t):undefined;
    const steps=stepMode?(userText?parseComputerSteps(userText):undefined)??parseComputerSteps(goal):undefined;
    const input=steps?{steps,revision:t.revision,...(contextNote?{interactionContext:contextNote}:{})}:{yieldAfterAction:t.automationController==='agent',yieldAfterInteraction:t.automationController==='user',readRequest:t.automationController==='user'&&!agentHandoff,...(agentHandoff?{agentCommand:true}:{}),...(asked?{confirmation:asked,...(previousContext!.goalRun?{resumeGoal:COMPUTER_GOAL_MAX_STEPS}:{})}:{}),...(sessionStart?{sessionStart:true,runToGoal:true,maxSteps:COMPUTER_GOAL_MAX_STEPS}:{}),revision:t.revision,preparedInputs,interactionContext:contextNote,goal:goal+recoveryNote+(answers?.length?'\nKnown answers: '+JSON.stringify(answers.map(a=>a.text)):'')};
-   const result=await (steps?runComputerSteps:runComputerUse)(input,{authorized,interruptSignal:interrupt.signal,
+   const deps:ComputerUseDependencies={authorized,interruptSignal:interrupt.signal,
     confirmed:reply=>{if(asked&&reply==='YES'){command=asked.command;goalRun=previousContext!.goalRun===true;}},
     call:async(name,args,s)=>{if(name!=='computer_release'&&!authorized())throw Error('ACCESS_DENIED');let response=await client.callTool({name,arguments:{...args,...(name==='computer_observe'?{app_query:appQuery}:{}),...b.scope}},undefined,{signal:s,timeout:20000});if(name==='computer_observe'&&response.isError){const raw=(response.content as any[])?.find(x=>x.type==='text')?.text;let oldClient=false;try{oldClient=typeof raw==='string'&&JSON.parse(raw).error==='INVALID_REQUEST';}catch{}if(oldClient){if(!authorized())throw Error('ACCESS_DENIED');response=await client.callTool({name,arguments:{...args,...b.scope}},undefined,{signal:s,timeout:20000});}}const text=(response.content as any[])?.find(x=>x.type==='text')?.text;if(typeof text!=='string'||text.length>262144)throw Error('COMPUTER_RESPONSE_INVALID');const body=JSON.parse(text);if(typeof body?.error==='string'&&/^[A-Z_]{1,80}$/.test(body.error)){receipt.toolErrors=[...(receipt.toolErrors??[]),{tool:name,code:body.error,operationId:typeof args.operation_id==='string'?args.operation_id:undefined,...(typeof body.phase==='string'&&/^[a-z_]{1,40}$/.test(body.phase)?{nativePhase:body.phase}:{}),at:Date.now()}].slice(-40);this.write(t,r,receipt);}if(response.isError){const code=body?.error;const known=['CONTROL_DENIED','OBSERVATION_DENIED','ACCESSIBILITY_PERMISSION_REQUIRED','SCREEN_RECORDING_PERMISSION_REQUIRED','APPLICATION_NOT_ALLOWED','COMPUTER_BUSY','COMPUTER_RECONCILIATION_REQUIRED','CONSENT_REQUIRED','ACCESS_REVOKED','DEVICE_OFFLINE','NATIVE_FAILURE','NATIVE_PROCESS_EXITED','NATIVE_REQUEST_TIMEOUT','NATIVE_START_FAILED','NATIVE_IO_ERROR','INVALID_NATIVE_RESPONSE','SCREENSHOT_UNSUPPORTED','SCREENSHOT_SENSITIVE_CONTENT','SCREENSHOT_CAPTURE_FAILED','SCREENSHOT_WINDOW_UNAVAILABLE','SCREENSHOT_TOO_LARGE','STALE_OBSERVATION','NATIVE_BUSY','OBSERVATION_FAILED','COMPUTER_CLOSED','COMPUTER_NOT_OWNED'];throw Error(known.includes(code)?code:'COMPUTER_TOOL_FAILED');}if(name==='computer_acquire')leaseToken=body.lease_token;if((name==='computer_action'||name==='computer_operation_status')&&body.continuation_ready===true&&body.state==='unknown'){continuationReady=true;delete receipt.operationId;this.write(t,r,receipt);}return body;},
     observation:state=>{const screenshot=receipt.snapshot?.state.generation===state.generation?receipt.snapshot?.screenshot:undefined;receipt.snapshot={observedAt:Date.now(),state,...(screenshot?{screenshot}:{})};this.write(t,r,receipt);observedRound=true;this.write(t,'interaction-context',{...receipt,command:command.slice(0,2000),goalRun,requestId:'interaction-context',snapshot:{observedAt:receipt.snapshot.observedAt,state:{application:state.application,windowTitle:state.windowTitle,focusedControl:state.focusedControl}},...question});},
@@ -130,7 +132,30 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
      receipt.trace=[...(receipt.trace??[]),e].slice(-2000);this.write(t,r,receipt);
      this.options.progress?.(t,{status:'running',reason:e.reason??e.phase,steps:e.steps,evaluations:e.evaluations,phase:e.phase,trace:receipt.trace.slice(-12)});
     }
-   },workSignal);
+   };
+   // Vision decides agent goals from the screenshot; the user's own commands, step lists and confirmation replies stay on Accessibility.
+   const vision=!steps&&!asked&&(t.automationController==='agent'||sessionStart||agentHandoff)?this.options.vision?.():undefined;
+   let result:ComputerUseResult|undefined;
+   if(vision&&'goal' in input){
+    const outcome=await runVisionComputerUse({goal:input.goal,revision:t.revision,maxSteps:'maxSteps' in input&&input.maxSteps?input.maxSteps:COMPUTER_GOAL_MAX_STEPS,...(contextNote?{interactionContext:contextNote}:{})},{
+     mode:vision.mode,decide:vision.decide(t,authorized),authorized,interruptSignal:interrupt.signal,call:deps.call,observation:deps.observation,beforeMutation:deps.beforeMutation,progress:deps.progress,
+     screenshot:async(state,s)=>{
+      if(!authorized())throw Error('ACCESS_DENIED');
+      let text:unknown,image:ReturnType<ComputerTaskAdapter['parseScreenshot']>;
+      try{const response=await client.callTool({name:'computer_screenshot',arguments:{...b.scope,lease_token:leaseToken,generation:state.generation}},undefined,{signal:s,timeout:20000});text=(response.content as any[])?.find(x=>x.type==='text')?.text;image=response.isError?undefined:this.parseScreenshot(text,state.generation);}
+      catch{if(!authorized())throw Error('ACCESS_DENIED');s.throwIfAborted();}
+      if(!authorized())throw Error('ACCESS_DENIED');s.throwIfAborted();
+      const size=image?this.screenshotSize(text):undefined;
+      const error=image?undefined:(()=>{try{const c=JSON.parse(String(text??'{}')).error;return typeof c==='string'&&/^[A-Z_]{1,80}$/.test(c)?c:'COMPUTER_SCREENSHOT_UNAVAILABLE';}catch{return 'COMPUTER_SCREENSHOT_UNAVAILABLE';}})();
+      receipt.snapshot={observedAt:Date.now(),state,...(image?{screenshot:image}:{screenshotError:error})};this.write(t,r,receipt);
+      if(image)this.write(t,'last-screenshot',{...receipt,requestId:'last-screenshot'});
+      return image&&size?{generation:image.generation,data:image.data,...size}:{error:error??'SCREENSHOT_SIZE_MISSING'};
+     },
+    },AbortSignal.any([signal,AbortSignal.timeout(COMPUTER_VISION_RUN_TIMEOUT_MS+5000)]));
+    // No raw input on this Mac (helper or app switch): the same goal runs on Accessibility, nothing has run yet.
+    if(!('fallback' in outcome))result=outcome;
+   }
+   result??=await (steps?runComputerSteps:runComputerUse)(input,deps,AbortSignal.any([signal,AbortSignal.timeout(125000)]));
    // A reached goal ends the device session too: the Mac stops showing it as
    // controlled and the owner's next request asks for access again.
    const accessReleased=result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized()?await this.endSession(client,b.scope):undefined;
@@ -182,6 +207,10 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
   if(t.state==='cancelled'){const saved=this.read(t,'last-screenshot');return receipt?.snapshot?.screenshot?receipt.snapshot:saved?.snapshot;}
   if(!receipt||receipt.revision!==t.revision)return;
   return receipt.snapshot;
+ }
+ /** The capture's pixel size, the coordinate space raw input is bound to. */
+ private screenshotSize(text:unknown){
+  try{const x=JSON.parse(String(text));const ok=(n:unknown)=>Number.isSafeInteger(n)&&(n as number)>0&&(n as number)<=4096;return ok(x.width)&&ok(x.height)?{width:x.width as number,height:x.height as number}:undefined;}catch{return;}
  }
  private parseScreenshot(text:unknown,generation:string){
   if(typeof text!=='string'||text.length>180000)return;
