@@ -218,7 +218,7 @@ for the `detail` of `hook_failed`.
 | `has_commits` | `boolean` | `false` right after `git init`. |
 | `upstream` | `string \| null` | The upstream setting, such as `origin/main`, even when no online copy was found. |
 | `ahead`, `behind` | `number` | Commits ahead of and behind the upstream, as of the last fetch. `0` when `sync` is `upstream_gone`. Before the first commit, `behind` counts every commit of the upstream. |
-| `sync` | `string` | One of `in_sync`, `ahead`, `behind`, `diverged`, `no_upstream`, `upstream_gone`, `no_remote`, `detached`. See [Sync values](#git-sync). Treat a value you do not know as neutral. |
+| `sync` | `string` | One of `in_sync`, `ahead`, `behind`, `diverged`, `no_upstream`, `upstream_gone`, `upstream_mismatch`, `no_remote`, `detached`. See [Sync values](#git-sync). Treat a value you do not know as neutral. |
 | `remote` | `GitRemote \| null` | The upstream's remote, else `origin`, else the only remote. |
 | `changes` | `GitFileChange[]` | At most 200, ordered conflicted, staged, unstaged, untracked. |
 | `change_count` | `number` | The true number of changed files. |
@@ -236,6 +236,7 @@ for the `detail` of `hook_failed`.
 | `in_sync`, `ahead`, `behind`, `diverged` | Compared with the upstream, as of the last fetch. |
 | `no_upstream` | A remote exists but the branch tracks nothing. Also a branch with no commits whose upstream has no commits online, such as a clone of an empty repository. |
 | `upstream_gone` | The branch has commits and an upstream setting, but no online copy was found: it was removed, or it was never fetched. |
+| `upstream_mismatch` | The upstream is not a branch of the same name on a configured remote, such as a branch made with `git checkout -b feature origin/main`, or one that tracks a local branch. `ahead` and `behind` are still reported. `push` refuses it with `409 upstream_mismatch`. |
 | `no_remote` | The repository has no remote. |
 | `detached` | HEAD is detached. |
 
@@ -386,12 +387,12 @@ were.
 ### POST /api/v1/projects/:name/git/push {#post-git-push}
 
 Pushes the current branch to its upstream with an explicit, unforced refspec,
-so a `+` refspec in `remote.<name>.push` never applies. The gateway pushes only
-when the upstream branch has the same name as the local branch. A branch
-created with `git checkout -b feature origin/main` tracks `main`, so the
-response is `409 upstream_mismatch` and nothing is pushed. With no upstream, it
-publishes the branch under the same name with `git push -u <remote> <branch>`
-to the status's `remote`, the same remote `fetch` uses. When several remotes
+so a `+` refspec in `remote.<name>.push` never applies. When `sync` is
+`upstream_mismatch`, the response is `409 upstream_mismatch` and nothing is
+pushed. With no upstream, it publishes the branch under the same name with
+`git push -u <remote> <branch>` to the status's `remote`, the same remote
+`fetch` uses. A `branch.<name>.remote` setting that names a remote that no
+longer exists counts as no upstream. When several remotes
 leave `remote` as `null` (none is the upstream's or is named `origin`), the
 response is `409 no_upstream`.
 When `sync` is `upstream_gone`, the push publishes the branch again to the
@@ -420,7 +421,7 @@ another reason, such as a protected branch or a server hook, gets
 | 409 | `dirty_would_overwrite` | `pull` blocked by local changes. |
 | 409 | `no_remote` | `fetch`, `pull`, or `push` without a remote. |
 | 409 | `no_upstream` | `pull` without an upstream or with one that was deleted on the remote, or `push` without one when the status `remote` is `null` because several remotes exist and none is named `origin`. |
-| 409 | `upstream_mismatch` | `push` on a branch whose upstream has a different branch name, or lives on a remote that is not configured. |
+| 409 | `upstream_mismatch` | `push` when `sync` is `upstream_mismatch`. |
 | 409 | `detached_head` | `commit`, `pull`, or `push` on a detached HEAD. |
 | 409 | `busy` | Another git operation is running on this project. |
 | 409 | `index_locked` | `.git/index.lock` exists, usually from another git process. |

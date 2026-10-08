@@ -84,16 +84,16 @@ describe('parseStatusV2', () => {
 
 describe('deriveSync', () => {
   const table: Array<[string, Parameters<typeof deriveSync>[0], GitSync]> = [
-    ['detached wins over everything', { detached: true, hasCommits: true, upstream: 'origin/main', ahead: 1, behind: 1, upstreamGone: false, hasRemote: true }, 'detached'],
-    ['in sync', { detached: false, hasCommits: true, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, hasRemote: true }, 'in_sync'],
-    ['ahead', { detached: false, hasCommits: true, upstream: 'origin/main', ahead: 2, behind: 0, upstreamGone: false, hasRemote: true }, 'ahead'],
-    ['behind', { detached: false, hasCommits: true, upstream: 'origin/main', ahead: 0, behind: 2, upstreamGone: false, hasRemote: true }, 'behind'],
-    ['diverged', { detached: false, hasCommits: true, upstream: 'origin/main', ahead: 1, behind: 1, upstreamGone: false, hasRemote: true }, 'diverged'],
-    ['no upstream with a remote', { detached: false, hasCommits: true, upstream: null, ahead: 0, behind: 0, upstreamGone: false, hasRemote: true }, 'no_upstream'],
-    ['upstream gone', { detached: false, hasCommits: true, upstream: 'origin/feature', upstreamGone: true, ahead: 0, behind: 0, hasRemote: true }, 'upstream_gone'],
-    ['no remote', { detached: false, hasCommits: true, upstream: null, ahead: 0, behind: 0, upstreamGone: false, hasRemote: false }, 'no_remote'],
-    ['unborn with an upstream and nothing online', { detached: false, hasCommits: false, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, hasRemote: true }, 'no_upstream'],
-    ['unborn with an upstream that has commits', { detached: false, hasCommits: false, upstream: 'origin/main', ahead: 0, behind: 3, upstreamGone: false, hasRemote: true }, 'behind'],
+    ['detached wins over everything', { detached: true, hasCommits: true, upstream: 'origin/main', ahead: 1, behind: 1, upstreamGone: false, upstreamMismatch: false, hasRemote: true }, 'detached'],
+    ['in sync', { detached: false, hasCommits: true, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, upstreamMismatch: false, hasRemote: true }, 'in_sync'],
+    ['ahead', { detached: false, hasCommits: true, upstream: 'origin/main', ahead: 2, behind: 0, upstreamGone: false, upstreamMismatch: false, hasRemote: true }, 'ahead'],
+    ['behind', { detached: false, hasCommits: true, upstream: 'origin/main', ahead: 0, behind: 2, upstreamGone: false, upstreamMismatch: false, hasRemote: true }, 'behind'],
+    ['diverged', { detached: false, hasCommits: true, upstream: 'origin/main', ahead: 1, behind: 1, upstreamGone: false, upstreamMismatch: false, hasRemote: true }, 'diverged'],
+    ['no upstream with a remote', { detached: false, hasCommits: true, upstream: null, ahead: 0, behind: 0, upstreamGone: false, upstreamMismatch: false, hasRemote: true }, 'no_upstream'],
+    ['upstream gone', { detached: false, hasCommits: true, upstream: 'origin/feature', upstreamGone: true, upstreamMismatch: false, ahead: 0, behind: 0, hasRemote: true }, 'upstream_gone'],
+    ['no remote', { detached: false, hasCommits: true, upstream: null, ahead: 0, behind: 0, upstreamGone: false, upstreamMismatch: false, hasRemote: false }, 'no_remote'],
+    ['unborn with an upstream and nothing online', { detached: false, hasCommits: false, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, upstreamMismatch: false, hasRemote: true }, 'no_upstream'],
+    ['unborn with an upstream that has commits', { detached: false, hasCommits: false, upstream: 'origin/main', ahead: 0, behind: 3, upstreamGone: false, upstreamMismatch: false, hasRemote: true }, 'behind'],
   ];
   it.each(table)('%s', (_label, input, expected) => expect(deriveSync(input)).toBe(expected));
 });
@@ -200,6 +200,16 @@ describe('buildStatus', () => {
   it('names an unborn branch, with no commits', () => {
     const s = buildStatus({ parsed: parseStatusV2(z('# branch.oid (initial)', '# branch.head main')), config: noConfig, lastCommit: null, operation: 'none' });
     expect([s.branch, s.detached, s.has_commits]).toEqual(['main', false, false]);
+  });
+
+  it('reports upstream_mismatch when the upstream branch name differs or its remote is not configured', () => {
+    const tracking = parseStatusV2(z(`# branch.oid ${OID}`, '# branch.head feature', '# branch.upstream origin/main', '# branch.ab +1 -2'));
+    const remotes = [{ name: 'origin', url: 'https://github.com/up/r' }];
+    const sync = (branches: RepoConfig['branches']) =>
+      buildStatus({ parsed: tracking, config: { ...noConfig, remotes, branches }, lastCommit: null, operation: 'none' });
+    expect(sync({ feature: { remote: 'origin', merge: 'refs/heads/main' } })).toMatchObject({ sync: 'upstream_mismatch', ahead: 1, behind: 2 });
+    expect(sync({ feature: { remote: '.', merge: 'refs/heads/feature' } }).sync).toBe('upstream_mismatch');
+    expect(sync({ feature: { remote: 'origin', merge: 'refs/heads/feature' } }).sync).toBe('diverged');
   });
 
   it('picks the upstream remote, then origin, then the only remote', () => {

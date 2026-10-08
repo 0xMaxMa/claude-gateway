@@ -632,6 +632,39 @@ describe('POST git/push', () => {
     expect(() => remoteHead('feature')).toThrow();
   });
 
+  it('reports sync upstream_mismatch with ahead and behind before any push is tried', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    git(dir, 'checkout', '-q', '-b', 'feature', 'origin/main');
+    commitLocal(dir, 'f.txt', 'x');
+    expect((await status('app')).body).toMatchObject({ branch: 'feature', upstream: 'origin/main', sync: 'upstream_mismatch', ahead: 1, behind: 0 });
+  });
+
+  it('reports a branch tracking a local branch as upstream_mismatch and refuses to push it', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    git(dir, 'checkout', '-q', '-b', 'feature', '--track', 'main');
+    commitLocal(dir, 'f.txt', 'x');
+    expect((await status('app')).body).toMatchObject({ upstream: 'main', sync: 'upstream_mismatch', ahead: 1 });
+    const res = await post('app', 'push');
+    expect([res.status, res.body.code]).toEqual([409, 'upstream_mismatch']);
+    expect(() => remoteHead('feature')).toThrow();
+  });
+
+  it('publishes to the status remote when branch.<name>.remote names a remote that no longer exists', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    commitLocal(dir, 'f.txt', 'x');
+    git(dir, 'config', 'branch.feature.remote', 'removed');
+    git(dir, 'config', 'branch.feature.merge', 'refs/heads/feature');
+    expect((await status('app')).body).toMatchObject({ upstream: null, sync: 'no_upstream', remote: { name: 'origin' } });
+    const res = await post('app', 'push');
+    expect(res.status).toBe(200);
+    expect(res.body.status).toMatchObject({ upstream: 'origin/feature', sync: 'in_sync' });
+    expect(remoteHead('feature')).toBe(head(dir));
+  });
+
   it('publishes to the status remote when there are several remotes', async () => {
     const dir = makeRepo('app');
     addRemote(dir);

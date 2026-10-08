@@ -2,7 +2,16 @@ import * as path from 'path';
 
 export type GitHost = 'github' | 'gitlab' | 'bitbucket' | 'other';
 
-export type GitSync = 'in_sync' | 'ahead' | 'behind' | 'diverged' | 'no_upstream' | 'upstream_gone' | 'no_remote' | 'detached';
+export type GitSync =
+  | 'in_sync'
+  | 'ahead'
+  | 'behind'
+  | 'diverged'
+  | 'no_upstream'
+  | 'upstream_gone'
+  | 'upstream_mismatch'
+  | 'no_remote'
+  | 'detached';
 
 export type GitChangeKind =
   | 'added'
@@ -195,12 +204,14 @@ export function deriveSync(s: {
   hasCommits: boolean;
   upstream: string | null;
   upstreamGone: boolean;
+  upstreamMismatch: boolean;
   ahead: number;
   behind: number;
   hasRemote: boolean;
 }): GitSync {
   if (s.detached) return 'detached';
   if (s.upstream === null) return s.hasRemote ? 'no_upstream' : 'no_remote';
+  if (s.upstreamMismatch) return 'upstream_mismatch';
   if (s.upstreamGone) return 'upstream_gone';
   // Unborn and nothing online to pull: in sync would claim it is published.
   if (!s.hasCommits && s.behind === 0) return 'no_upstream';
@@ -261,6 +272,16 @@ export function isSensitiveName(file: string): boolean {
   return /^service-account.*\.json$/.test(base);
 }
 
+/**
+ * The upstream is not a same-named branch on a configured remote: `checkout -b feature origin/main`, or a branch
+ * tracking a local one (remote "."). Publishing there would move someone else's branch.
+ */
+function tracksAnotherBranch(config: RepoConfig, head: string | null, upstream: string | null): boolean {
+  if (head === null || upstream === null) return false;
+  const tracking = config.branches[head];
+  return tracking?.merge !== `refs/heads/${head}` || !config.remotes.some((r) => r.name === tracking.remote);
+}
+
 const NEW_PATH_KINDS: ReadonlySet<GitChangeKind | null> = new Set(['added', 'renamed', 'copied']);
 
 /** Whether `git add -A` would commit this path when HEAD does not have it: untracked, added, intent-to-add, or the target of a rename or copy. */
@@ -299,6 +320,7 @@ export function buildStatus(input: {
       hasCommits: parsed.oid !== null,
       upstream: parsed.upstream,
       upstreamGone: parsed.upstreamGone,
+      upstreamMismatch: tracksAnotherBranch(config, parsed.head, parsed.upstream),
       ahead: parsed.ahead,
       behind: parsed.behind,
       hasRemote: config.remotes.length > 0,
