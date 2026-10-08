@@ -78,6 +78,36 @@ function setIdentity(dir: string): void {
 
 const status = (name: string, key = POD) => request(app).get(`/api/v1/projects/${name}/git`).set(key);
 
+const REAL_GIT = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+
+/**
+ * Puts a `git` first on PATH that runs the real one, but sleeps SHIM_SLOW_STATUS seconds before
+ * every `status`, and once a `SHIM_BREAK_AFTER` command succeeds makes every later `status` fail.
+ */
+function shimGit(): void {
+  const bin = path.join(base, 'shim-bin');
+  write(
+    path.join(bin, 'git'),
+    [
+      '#!/bin/sh',
+      `flag="${path.join(base, 'shim-broken')}"`,
+      'for a in "$@"; do',
+      '  if [ "$a" = status ]; then',
+      '    [ -n "$SHIM_SLOW_STATUS" ] && sleep "$SHIM_SLOW_STATUS"',
+      '    [ -e "$flag" ] && exit 1',
+      '  fi',
+      'done',
+      `"${REAL_GIT}" "$@"; code=$?`,
+      'for a in "$@"; do',
+      '  [ $code -eq 0 ] && [ -n "$SHIM_BREAK_AFTER" ] && [ "$a" = "$SHIM_BREAK_AFTER" ] && touch "$flag"',
+      'done',
+      'exit $code',
+    ].join('\n'),
+  );
+  fs.chmodSync(path.join(bin, 'git'), 0o755);
+  process.env.PATH = `${bin}:${process.env.PATH}`;
+}
+
 beforeEach(() => {
   base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'projects-git-')));
   root = path.join(base, 'projects');
@@ -628,5 +658,70 @@ describe('POST git/push', () => {
     const res = await post('app', action);
     expect([res.status, res.body.code]).toEqual([502, 'network']);
     expect(JSON.stringify(res.body)).not.toContain('s3cret');
+  });
+});
+
+describe('mutation reads', () => {
+  it('gives the pre-check a mutation-sized timeout while GET still times out at 3 seconds', async () => {
+    const dir = makeRepo('app');
+    setIdentity(dir);
+    write(path.join(dir, 'new.txt'), 'x');
+    shimGit();
+    process.env.SHIM_SLOW_STATUS = '4';
+    expect([(await status('app')).status, (await status('app')).body.code]).toEqual([504, 'timeout']);
+    const res = await post('app', 'commit', { message: 'slow status' });
+    expect(res.status).toBe(201);
+    expect(git(dir, 'log', '-1', '--format=%s').trim()).toBe('slow status');
+  }, 30_000);
+
+  it('commit answers 201 with status null when only the read after it fails', async () => {
+    const dir = makeRepo('app');
+    setIdentity(dir);
+    write(path.join(dir, 'new.txt'), 'x');
+    shimGit();
+    process.env.SHIM_BREAK_AFTER = 'commit';
+    const res = await post('app', 'commit', { message: 'landed' });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ commit: { sha: head(dir), subject: 'landed', author: 'Dev', committed_at: expect.any(String) }, status: null });
+  });
+
+  it('pull answers 200 with its result and status null when only the read after it fails', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    commitUpstream('up.txt', 'y');
+    shimGit();
+    process.env.SHIM_BREAK_AFTER = 'merge';
+    const res = await post('app', 'pull');
+    expect([res.status, res.body]).toEqual([200, { result: 'fast_forwarded', status: null }]);
+    expect(head(dir)).toBe(remoteHead());
+  });
+
+  it('push answers 200 with status null when only the read after it fails', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    commitLocal(dir, 'l.txt', 'x');
+    shimGit();
+    process.env.SHIM_BREAK_AFTER = 'push';
+    const res = await post('app', 'push');
+    expect([res.status, res.body]).toEqual([200, { status: null }]);
+    expect(remoteHead()).toBe(head(dir));
+  });
+
+  it('fetch answers 200 with a null body when only the read after it fails', async () => {
+    addRemote(makeRepo('app'));
+    shimGit();
+    process.env.SHIM_BREAK_AFTER = 'fetch';
+    const res = await post('app', 'fetch');
+    expect([res.status, res.body]).toEqual([200, null]);
+  });
+});
+
+describe('git-summary counts', () => {
+  it('counts an untracked folder once, while the detail status lists every file in it', async () => {
+    const dir = makeRepo('app');
+    for (const f of ['a', 'b', 'c']) write(path.join(dir, 'build', f), f);
+    const summary = await request(app).get('/api/v1/projects/git-summary').set(POD);
+    expect(summary.body.summaries.app.change_count).toBe(1);
+    expect((await status('app')).body.change_count).toBe(3);
   });
 });

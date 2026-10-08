@@ -78,17 +78,28 @@ export function parseCommitInfo(stdout: string): GitCommitInfo | null {
   return sha && committed_at ? { sha, subject, author, committed_at } : null;
 }
 
-export interface RepoState {
+interface RepoState {
   status: GitStatus;
   config: RepoConfig;
 }
 
+interface ReadOptions {
+  timeoutMs: number;
+  /** `all` lists every file in an untracked folder, which the secret check needs; `normal` lists the folder once. */
+  untracked: 'all' | 'normal';
+}
+
+const DETAIL_READ: ReadOptions = { timeoutMs: GIT_TIMEOUTS.read, untracked: 'all' };
+const SUMMARY_READ: ReadOptions = { timeoutMs: GIT_TIMEOUTS.read, untracked: 'normal' };
+/** A mutation already waits on git for seconds; failing its reads at the GET limit would refuse work that can finish. */
+const MUTATION_READ: ReadOptions = { timeoutMs: GIT_TIMEOUTS.local, untracked: 'all' };
+
 /** Reads never take the project lock: GIT_OPTIONAL_LOCKS=0 keeps them off the index. */
-export async function readRepo(dir: string): Promise<GitResult<RepoState>> {
-  const opts = { timeoutMs: GIT_TIMEOUTS.read, readOnly: true };
+async function readRepo(dir: string, read: ReadOptions): Promise<GitResult<RepoState>> {
+  const opts = { timeoutMs: read.timeoutMs, readOnly: true };
   const runs = await Promise.all([
     runGit(dir, ['rev-parse', '--absolute-git-dir'], opts),
-    runGit(dir, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all'], opts),
+    runGit(dir, ['status', '--porcelain=v2', '--branch', '-z', `--untracked-files=${read.untracked}`], opts),
     runGit(dir, ['config', '-z', '--get-regexp', CONFIG_KEYS], opts),
     runGit(dir, ['log', '-1', '-z', `--format=${COMMIT_FORMAT}`], opts),
   ]);
@@ -115,11 +126,15 @@ export async function projectDir(root: string, name: ProjectName): Promise<GitRe
   return dir.ok ? dir : fail(dir.error);
 }
 
-export async function getStatus(root: string, name: ProjectName): Promise<GitResult<GitStatus>> {
+async function readStatus(root: string, name: ProjectName, read: ReadOptions): Promise<GitResult<GitStatus>> {
   const dir = await projectDir(root, name);
   if (!dir.ok) return dir;
-  const repo = await readRepo(dir.value);
+  const repo = await readRepo(dir.value, read);
   return repo.ok ? ok(repo.value.status) : repo;
+}
+
+export function getStatus(root: string, name: ProjectName): Promise<GitResult<GitStatus>> {
+  return readStatus(root, name, DETAIL_READ);
 }
 
 async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -141,7 +156,7 @@ export async function getSummaries(root: string): Promise<GitResult<{ summaries:
   if (!list.ok) return fail(list.error);
   const repos = list.value.projects.filter((p) => p.is_git);
   const results = await mapLimit(repos, SUMMARY_CONCURRENCY, async (p) => {
-    const status = await getStatus(root, p.name);
+    const status = await readStatus(root, p.name, SUMMARY_READ);
     return status.ok ? toSummary(status.value) : null;
   });
   return ok({ summaries: Object.fromEntries(repos.map((p, i) => [p.name, results[i]])) });
@@ -181,33 +196,34 @@ async function mutate<T>(root: string, name: ProjectName, fn: (dir: string) => P
   return !r.ok && r.error === 'busy' ? fail('busy') : (r as GitResult<T>);
 }
 
-async function statusAfter(dir: string): Promise<GitResult<GitStatus>> {
-  const repo = await readRepo(dir);
-  return repo.ok ? ok(repo.value.status) : repo;
+/** The status after a mutation that succeeded; null when it cannot be read, since failing here would report work that happened as not done. */
+async function statusAfter(dir: string): Promise<GitStatus | null> {
+  const repo = await readRepo(dir, MUTATION_READ);
+  return repo.ok ? repo.value.status : null;
 }
 
-export function initRepo(root: string, name: ProjectName): Promise<GitResult<GitStatus>> {
+export function initRepo(root: string, name: ProjectName): Promise<GitResult<GitStatus | null>> {
   return mutate(root, name, async (dir) => {
-    const probe = await git(dir, ['rev-parse', '--absolute-git-dir'], GIT_TIMEOUTS.read);
+    const probe = await git(dir, ['rev-parse', '--absolute-git-dir'], GIT_TIMEOUTS.local);
     if (!probe.ok) return probe;
     if (probe.value.code === 0) return fail('already_a_git_repo');
     const init = await git(dir, ['init', '-q'], GIT_TIMEOUTS.local);
     if (!init.ok) return init;
     if (init.value.code !== 0) return err(classify(init.value));
-    return statusAfter(dir);
+    return ok(await statusAfter(dir));
   });
 }
 
-export function fetchRemote(root: string, name: ProjectName): Promise<GitResult<GitStatus>> {
+export function fetchRemote(root: string, name: ProjectName): Promise<GitResult<GitStatus | null>> {
   return mutate(root, name, async (dir) => {
-    const repo = await readRepo(dir);
+    const repo = await readRepo(dir, MUTATION_READ);
     if (!repo.ok) return repo;
     const { status, config } = repo.value;
     if (!status.remote) return fail('no_remote');
     const fetch = await git(dir, ['fetch', '--prune', '--', status.remote.name], GIT_TIMEOUTS.network, sshEnv(config));
     if (!fetch.ok) return fetch;
     if (fetch.value.code !== 0) return err(classify(fetch.value));
-    return statusAfter(dir);
+    return ok(await statusAfter(dir));
   });
 }
 
@@ -227,9 +243,9 @@ export function parseIdentity(body: unknown): GitResult<GitIdentity> {
   return ok({ name: n, email: e } as GitIdentity);
 }
 
-export function setIdentity(root: string, name: ProjectName, id: GitIdentity): Promise<GitResult<GitStatus>> {
+export function setIdentity(root: string, name: ProjectName, id: GitIdentity): Promise<GitResult<GitStatus | null>> {
   return mutate(root, name, async (dir) => {
-    const repo = await readRepo(dir);
+    const repo = await readRepo(dir, MUTATION_READ);
     if (!repo.ok) return repo;
     if (repo.value.status.identity_configured) return fail('identity_already_set');
     for (const [key, value] of [['user.name', id.name], ['user.email', id.email]]) {
@@ -237,7 +253,7 @@ export function setIdentity(root: string, name: ProjectName, id: GitIdentity): P
       if (!set.ok) return set;
       if (set.value.code !== 0) return err(classify(set.value));
     }
-    return statusAfter(dir);
+    return ok(await statusAfter(dir));
   });
 }
 
@@ -270,7 +286,7 @@ const HOOK_DETAIL_MAX_BYTES = 2000;
 
 /** Whether a commit hook could have produced the failure; honours core.hooksPath. */
 async function hasCommitHook(dir: string): Promise<boolean> {
-  const paths = await git(dir, ['rev-parse', ...COMMIT_HOOKS.flatMap((h) => ['--git-path', `hooks/${h}`])], GIT_TIMEOUTS.read);
+  const paths = await git(dir, ['rev-parse', ...COMMIT_HOOKS.flatMap((h) => ['--git-path', `hooks/${h}`])], GIT_TIMEOUTS.local);
   if (!paths.ok || paths.value.code !== 0) return false;
   for (const p of paths.value.stdout.split('\n').filter(Boolean)) {
     if (await fsp.access(path.resolve(dir, p), fsConstants.X_OK).then(() => true, () => false)) return true;
@@ -288,9 +304,9 @@ export function commitAll(
   root: string,
   name: ProjectName,
   req: CommitRequest,
-): Promise<GitResult<{ commit: GitCommitInfo; status: GitStatus }>> {
+): Promise<GitResult<{ commit: GitCommitInfo | null; status: GitStatus | null }>> {
   return mutate(root, name, async (dir) => {
-    const repo = await readRepo(dir);
+    const repo = await readRepo(dir, MUTATION_READ);
     if (!repo.ok) return repo;
     const { status } = repo.value;
     const blocked = blockedBy(status);
@@ -311,19 +327,22 @@ export function commitAll(
       return err({ code: 'hook_failed', detail: hookDetail(commit.value) });
     }
 
-    const after = await readRepo(dir);
-    if (!after.ok) return after;
-    const last = after.value.status.last_commit;
-    return last ? ok({ commit: last, status: after.value.status }) : fail('git_failed');
+    const after = await statusAfter(dir);
+    return ok({ commit: after?.last_commit ?? (await lastCommit(dir)), status: after });
   });
+}
+
+async function lastCommit(dir: string): Promise<GitCommitInfo | null> {
+  const log = await git(dir, ['log', '-1', '-z', `--format=${COMMIT_FORMAT}`], GIT_TIMEOUTS.local);
+  return log.ok && log.value.code === 0 ? parseCommitInfo(log.value.stdout) : null;
 }
 
 export type PullResult = 'up_to_date' | 'fast_forwarded';
 
 /** Fetch, then merge --ff-only rather than `git pull`, so pull.rebase and similar config cannot change what runs. */
-export function pullFastForward(root: string, name: ProjectName): Promise<GitResult<{ result: PullResult; status: GitStatus }>> {
+export function pullFastForward(root: string, name: ProjectName): Promise<GitResult<{ result: PullResult; status: GitStatus | null }>> {
   return mutate(root, name, async (dir) => {
-    const repo = await readRepo(dir);
+    const repo = await readRepo(dir, MUTATION_READ);
     if (!repo.ok) return repo;
     const { status, config } = repo.value;
     const blocked = blockedBy(status);
@@ -338,10 +357,9 @@ export function pullFastForward(root: string, name: ProjectName): Promise<GitRes
     if (!merge.ok) return merge;
     if (merge.value.code !== 0) return err(classify(merge.value));
 
-    const after = await readRepo(dir);
-    if (!after.ok) return after;
-    const moved = after.value.status.last_commit?.sha !== status.last_commit?.sha;
-    return ok({ result: moved ? 'fast_forwarded' : 'up_to_date', status: after.value.status });
+    // LC_ALL=C keeps this message stable.
+    const result: PullResult = /^Already up.to.date/m.test(merge.value.stdout) ? 'up_to_date' : 'fast_forwarded';
+    return ok({ result, status: await statusAfter(dir) });
   });
 }
 
@@ -349,9 +367,9 @@ export function pullFastForward(root: string, name: ProjectName): Promise<GitRes
  * Pushes the branch to its same-named upstream, or with no upstream and exactly one remote publishes it with -u.
  * Every refspec is explicit and unforced, so a `+` refspec in remote.<name>.push never applies.
  */
-export function pushBranch(root: string, name: ProjectName): Promise<GitResult<{ status: GitStatus }>> {
+export function pushBranch(root: string, name: ProjectName): Promise<GitResult<{ status: GitStatus | null }>> {
   return mutate(root, name, async (dir) => {
-    const repo = await readRepo(dir);
+    const repo = await readRepo(dir, MUTATION_READ);
     if (!repo.ok) return repo;
     const { status, config } = repo.value;
     const blocked = blockedBy(status);
@@ -374,7 +392,6 @@ export function pushBranch(root: string, name: ProjectName): Promise<GitResult<{
     if (!push.ok) return push;
     if (push.value.code !== 0) return err(classify(push.value));
 
-    const after = await statusAfter(dir);
-    return after.ok ? ok({ status: after.value }) : after;
+    return ok({ status: await statusAfter(dir) });
   });
 }

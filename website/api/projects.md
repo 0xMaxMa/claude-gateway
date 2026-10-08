@@ -198,6 +198,13 @@ one second later.
 Only one mutating git route runs per project at a time. A second one gets
 `409 busy`. Reads never wait for a mutation.
 
+A mutating route reads the status before and after it runs git, with a 10
+second limit for each read. When git succeeded but the status read after it
+fails, the route still returns its success code. The status in the body is
+then `null`: the whole body for `init`, `fetch`, and `identity`, and the
+`status` field for `commit`, `pull`, and `push`. Fetch
+[the status](#get-git) again to show it.
+
 Credentials in a remote URL (`https://user:token@host/x`) are removed from
 every response and log line. Git's own output never reaches the client, except
 for the `detail` of `hook_failed`.
@@ -246,7 +253,8 @@ The match ignores case, so `.ENV` and `ID_RSA` count too.
 A slim status for every project that is a git repository, for project cards.
 Plain folders are left out. A repository whose status takes longer than 3
 seconds or fails maps to `null`. The gateway reads at most 4 repositories at a
-time.
+time. To stay fast, `change_count` counts an untracked folder as one change,
+so it can be lower than the `change_count` of the full status.
 
 ```bash
 curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/git-summary
@@ -296,18 +304,18 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/app/
 ### POST /api/v1/projects/:name/git/init {#post-git-init}
 
 Runs `git init` in a project that is not yet a repository. Returns `201` with
-a [GitStatus](#git-status), or `409 already_a_git_repo`.
+a [GitStatus](#git-status) or `null`, or `409 already_a_git_repo`.
 
 ### POST /api/v1/projects/:name/git/fetch {#post-git-fetch}
 
 Runs `git fetch --prune` from the status's `remote`. Returns `200` with a
-[GitStatus](#git-status), whose `ahead` and `behind` are now current.
+[GitStatus](#git-status), whose `ahead` and `behind` are now current, or `null`.
 
 ### POST /api/v1/projects/:name/git/identity {#post-git-identity}
 
 Writes `user.name` and `user.email` to the repository's own config. Refused
 with `409 identity_already_set` when both already resolve, from any config
-file. Returns `200` with a [GitStatus](#git-status).
+file. Returns `200` with a [GitStatus](#git-status) or `null`.
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -317,8 +325,9 @@ file. Returns `200` with a [GitStatus](#git-status).
 ### POST /api/v1/projects/:name/git/commit {#post-git-commit}
 
 Stages every change (`git add -A`), then commits. Returns `201` with
-`{ commit: GitCommitInfo, status: GitStatus }`. Hooks run, with a 60 second
-limit.
+`{ commit: GitCommitInfo | null, status: GitStatus | null }`. `commit` is
+`null` only when the gateway could not read the new commit back; the commit
+was still made. Hooks run, with a 60 second limit.
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -353,7 +362,7 @@ changes stay staged.
 
 Fetches the upstream's remote, then fast-forwards with
 `git merge --ff-only @{upstream}`. `pull.rebase` and similar settings do not
-apply. Returns `200` with `{ result: "up_to_date" | "fast_forwarded", status: GitStatus }`.
+apply. Returns `200` with `{ result: "up_to_date" | "fast_forwarded", status: GitStatus | null }`.
 A diverged branch gets `409 not_fast_forward`. Local changes that the
 fast-forward would overwrite get `409 dirty_would_overwrite`, and stay as they
 were.
@@ -367,7 +376,7 @@ created with `git checkout -b feature origin/main` tracks `main`, so the
 response is `409 upstream_mismatch` and nothing is pushed. With no upstream and
 exactly one remote, it publishes the branch with `git push -u <remote> <branch>`.
 With no upstream and several remotes, the response is `409 no_upstream`.
-Returns `200` with `{ status: GitStatus }`. A push the remote rejects as
+Returns `200` with `{ status: GitStatus | null }`. A push the remote rejects as
 non-fast-forward gets `409 not_fast_forward`.
 
 ### Git errors {#git-errors}
@@ -396,5 +405,5 @@ non-fast-forward gets `409 not_fast_forward`.
 | 422 | `hook_failed` | A commit hook failed. The body has `detail`, at most 2000 bytes. |
 | 502 | `auth_failed` | The remote refused the credentials, or none were available. |
 | 502 | `network` | The remote could not be reached. |
-| 504 | `timeout` | Git ran past its limit: 3 seconds for reads, 60 seconds for fetch, pull, push, and commit. |
+| 504 | `timeout` | Git ran past its limit: 3 seconds for the `GET` routes, 10 seconds for `init`, `identity`, and the status reads around every mutating route, 60 seconds for fetch, pull, push, and commit. |
 | 500 | `git_failed` | Any other git failure. Git's output is not returned. |
