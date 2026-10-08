@@ -34,6 +34,11 @@ describe('parseStatusV2', () => {
     expect(p.changes).toEqual([{ path: 'a.txt', staged: null, unstaged: 'untracked' }]);
   });
 
+  it('never reads an unborn branch with an upstream as gone: git prints no ahead/behind for it either way', () => {
+    const p = parseStatusV2(z('# branch.oid (initial)', '# branch.head main', '# branch.upstream origin/main'));
+    expect([p.upstream, p.upstreamGone]).toEqual(['origin/main', false]);
+  });
+
   it('reads a detached HEAD', () => {
     const p = parseStatusV2(z(`# branch.oid ${OID}`, '# branch.head (detached)'));
     expect(p.head).toBeNull();
@@ -79,14 +84,16 @@ describe('parseStatusV2', () => {
 
 describe('deriveSync', () => {
   const table: Array<[string, Parameters<typeof deriveSync>[0], GitSync]> = [
-    ['detached wins over everything', { detached: true, upstream: 'origin/main', ahead: 1, behind: 1, upstreamGone: false, hasRemote: true }, 'detached'],
-    ['in sync', { detached: false, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, hasRemote: true }, 'in_sync'],
-    ['ahead', { detached: false, upstream: 'origin/main', ahead: 2, behind: 0, upstreamGone: false, hasRemote: true }, 'ahead'],
-    ['behind', { detached: false, upstream: 'origin/main', ahead: 0, behind: 2, upstreamGone: false, hasRemote: true }, 'behind'],
-    ['diverged', { detached: false, upstream: 'origin/main', ahead: 1, behind: 1, upstreamGone: false, hasRemote: true }, 'diverged'],
-    ['no upstream with a remote', { detached: false, upstream: null, ahead: 0, behind: 0, upstreamGone: false, hasRemote: true }, 'no_upstream'],
-    ['upstream gone', { detached: false, upstream: 'origin/feature', upstreamGone: true, ahead: 0, behind: 0, hasRemote: true }, 'upstream_gone'],
-    ['no remote', { detached: false, upstream: null, ahead: 0, behind: 0, upstreamGone: false, hasRemote: false }, 'no_remote'],
+    ['detached wins over everything', { detached: true, hasCommits: true, upstream: 'origin/main', ahead: 1, behind: 1, upstreamGone: false, hasRemote: true }, 'detached'],
+    ['in sync', { detached: false, hasCommits: true, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, hasRemote: true }, 'in_sync'],
+    ['ahead', { detached: false, hasCommits: true, upstream: 'origin/main', ahead: 2, behind: 0, upstreamGone: false, hasRemote: true }, 'ahead'],
+    ['behind', { detached: false, hasCommits: true, upstream: 'origin/main', ahead: 0, behind: 2, upstreamGone: false, hasRemote: true }, 'behind'],
+    ['diverged', { detached: false, hasCommits: true, upstream: 'origin/main', ahead: 1, behind: 1, upstreamGone: false, hasRemote: true }, 'diverged'],
+    ['no upstream with a remote', { detached: false, hasCommits: true, upstream: null, ahead: 0, behind: 0, upstreamGone: false, hasRemote: true }, 'no_upstream'],
+    ['upstream gone', { detached: false, hasCommits: true, upstream: 'origin/feature', upstreamGone: true, ahead: 0, behind: 0, hasRemote: true }, 'upstream_gone'],
+    ['no remote', { detached: false, hasCommits: true, upstream: null, ahead: 0, behind: 0, upstreamGone: false, hasRemote: false }, 'no_remote'],
+    ['unborn with an upstream and nothing online', { detached: false, hasCommits: false, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, hasRemote: true }, 'no_upstream'],
+    ['unborn with an upstream that has commits', { detached: false, hasCommits: false, upstream: 'origin/main', ahead: 0, behind: 3, upstreamGone: false, hasRemote: true }, 'behind'],
   ];
   it.each(table)('%s', (_label, input, expected) => expect(deriveSync(input)).toBe(expected));
 });

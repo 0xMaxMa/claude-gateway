@@ -216,9 +216,9 @@ for the `detail` of `hook_failed`.
 | `branch` | `string \| null` | Current branch, also before its first commit. `null` only when HEAD is detached. |
 | `detached` | `boolean` | HEAD is detached. |
 | `has_commits` | `boolean` | `false` right after `git init`. |
-| `upstream` | `string \| null` | The upstream, such as `origin/main`. |
-| `ahead`, `behind` | `number` | Commits ahead of and behind the upstream, as of the last fetch. `0` when `sync` is `upstream_gone`. |
-| `sync` | `string` | One of `in_sync`, `ahead`, `behind`, `diverged`, `no_upstream` (a remote exists but the branch tracks nothing), `upstream_gone` (the branch tracks an online branch that was deleted, as of the last fetch), `no_remote`, `detached`. Treat a value you do not know as neutral. |
+| `upstream` | `string \| null` | The upstream setting, such as `origin/main`, even when no online copy was found. |
+| `ahead`, `behind` | `number` | Commits ahead of and behind the upstream, as of the last fetch. `0` when `sync` is `upstream_gone`. Before the first commit, `behind` counts every commit of the upstream. |
+| `sync` | `string` | One of `in_sync`, `ahead`, `behind`, `diverged`, `no_upstream`, `upstream_gone`, `no_remote`, `detached`. See [Sync values](#git-sync). Treat a value you do not know as neutral. |
 | `remote` | `GitRemote \| null` | The upstream's remote, else `origin`, else the only remote. |
 | `changes` | `GitFileChange[]` | At most 200, ordered conflicted, staged, unstaged, untracked. |
 | `change_count` | `number` | The true number of changed files. |
@@ -228,6 +228,19 @@ for the `detail` of `hook_failed`.
 | `operation` | `string` | `none`, `merge`, `rebase`, `cherry_pick`, `revert`, or `bisect`. |
 | `identity_configured` | `boolean` | `user.name` and `user.email` both resolve for this repository. |
 | `sensitive_untracked` | `string[]` | Paths that a commit would newly add and that look like secrets: untracked and not ignored, staged as added, added with `git add -N`, or the new name of a rename or copy. Not capped. The name is kept for compatibility. |
+
+#### Sync values {#git-sync}
+
+| `sync` | Meaning |
+|--------|---------|
+| `in_sync`, `ahead`, `behind`, `diverged` | Compared with the upstream, as of the last fetch. |
+| `no_upstream` | A remote exists but the branch tracks nothing. Also a branch with no commits whose upstream has no commits online, such as a clone of an empty repository. |
+| `upstream_gone` | The branch has commits and an upstream setting, but no online copy was found: it was removed, or it was never fetched. |
+| `no_remote` | The repository has no remote. |
+| `detached` | HEAD is detached. |
+
+A branch with no commits whose upstream has commits online reports `behind`
+with `has_commits: false`, and `pull` fast-forwards it.
 
 `GitFileChange` is `{ path, orig_path?, staged, unstaged }`. `path` is relative
 to the project with forward slashes. `orig_path` is set for renames and copies.

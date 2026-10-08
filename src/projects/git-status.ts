@@ -74,7 +74,10 @@ export interface ParsedStatus {
   /** null when detached. */
   head: string | null;
   upstream: string | null;
-  /** The upstream is configured but its remote-tracking branch is gone: git prints no `branch.ab` then. */
+  /**
+   * The branch has commits and an upstream setting, but no remote-tracking branch: deleted and pruned, or never
+   * fetched, which porcelain cannot tell apart. Never set on an unborn branch, where git prints no `branch.ab` either way.
+   */
   upstreamGone: boolean;
   ahead: number;
   behind: number;
@@ -163,7 +166,7 @@ export function parseStatusV2(raw: string): ParsedStatus {
       // '!' (ignored) is never requested.
     }
   }
-  out.upstreamGone = out.upstream !== null && !sawAheadBehind;
+  out.upstreamGone = out.oid !== null && out.upstream !== null && !sawAheadBehind;
   return out;
 }
 
@@ -189,6 +192,7 @@ export function parseRepoConfig(raw: string): RepoConfig {
 
 export function deriveSync(s: {
   detached: boolean;
+  hasCommits: boolean;
   upstream: string | null;
   upstreamGone: boolean;
   ahead: number;
@@ -198,6 +202,8 @@ export function deriveSync(s: {
   if (s.detached) return 'detached';
   if (s.upstream === null) return s.hasRemote ? 'no_upstream' : 'no_remote';
   if (s.upstreamGone) return 'upstream_gone';
+  // Unborn and nothing online to pull: in sync would claim it is published.
+  if (!s.hasCommits && s.behind === 0) return 'no_upstream';
   if (s.ahead > 0 && s.behind > 0) return 'diverged';
   if (s.ahead > 0) return 'ahead';
   if (s.behind > 0) return 'behind';
@@ -288,7 +294,15 @@ export function buildStatus(input: {
     upstream: parsed.upstream,
     ahead: parsed.ahead,
     behind: parsed.behind,
-    sync: deriveSync({ ...parsed, detached, hasRemote: config.remotes.length > 0 }),
+    sync: deriveSync({
+      detached,
+      hasCommits: parsed.oid !== null,
+      upstream: parsed.upstream,
+      upstreamGone: parsed.upstreamGone,
+      ahead: parsed.ahead,
+      behind: parsed.behind,
+      hasRemote: config.remotes.length > 0,
+    }),
     remote: picked ? describeRemote(picked.name, picked.url) : null,
     changes: sorted.slice(0, CHANGES_LIMIT),
     change_count: sorted.length,

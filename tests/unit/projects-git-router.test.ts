@@ -800,3 +800,40 @@ describe('an upstream branch deleted on the remote', () => {
     expect(remoteHead('feature')).toBe(head(dir));
   });
 });
+
+describe('a clone of an empty remote', () => {
+  function emptyClone(): string {
+    git(base, 'init', '-q', '--bare', '-b', 'main', remote);
+    git(root, 'clone', '-q', remote, 'app');
+    const dir = path.join(root, 'app');
+    setIdentity(dir);
+    return dir;
+  }
+
+  it('reports no_upstream, not upstream_gone, while neither side has commits', async () => {
+    emptyClone();
+    expect((await status('app')).body).toMatchObject({ branch: 'main', has_commits: false, upstream: 'origin/main', sync: 'no_upstream', ahead: 0, behind: 0 });
+  });
+
+  it('reports behind once the remote has commits, and pull fast-forwards the unborn branch', async () => {
+    const dir = emptyClone();
+    commitUpstream('up.txt', 'from upstream');
+    git(dir, 'fetch', '-q');
+    expect((await status('app')).body).toMatchObject({ has_commits: false, sync: 'behind', ahead: 0, behind: 1 });
+
+    const res = await post('app', 'pull');
+    expect([res.status, res.body.result]).toEqual([200, 'fast_forwarded']);
+    expect(res.body.status).toMatchObject({ has_commits: true, sync: 'in_sync', ahead: 0, behind: 0 });
+    expect(head(dir)).toBe(remoteHead());
+  });
+
+  it('reports upstream_gone after a local commit, and push publishes it', async () => {
+    const dir = emptyClone();
+    commitLocal(dir, 'a.txt', 'a');
+    expect((await status('app')).body).toMatchObject({ has_commits: true, upstream: 'origin/main', sync: 'upstream_gone' });
+    const res = await post('app', 'push');
+    expect(res.status).toBe(200);
+    expect(res.body.status).toMatchObject({ sync: 'in_sync' });
+    expect(remoteHead()).toBe(head(dir));
+  });
+});

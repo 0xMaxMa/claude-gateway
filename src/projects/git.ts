@@ -111,6 +111,7 @@ async function readRepo(dir: string, read: ReadOptions): Promise<GitResult<RepoS
   // get-regexp exits 1 when nothing matches, which is an empty config, not a failure.
   const cfg = parseRepoConfig(config.code === 0 ? config.stdout : '');
   const parsed = parseStatusV2(status.stdout);
+  if (parsed.oid === null && parsed.upstream !== null) parsed.behind = await unbornBehind(dir, opts);
   return ok({
     config: cfg,
     status: buildStatus({
@@ -120,6 +121,12 @@ async function readRepo(dir: string, read: ReadOptions): Promise<GitResult<RepoS
       operation: await operationIn(gitDir.stdout.trim()),
     }),
   });
+}
+
+/** git prints no `branch.ab` for an unborn branch, so count what a pull would bring: every commit the tracking branch has, or 0 without one. */
+async function unbornBehind(dir: string, opts: { timeoutMs: number; readOnly: boolean }): Promise<number> {
+  const count = await runGit(dir, ['rev-list', '--count', '@{upstream}', '--'], opts);
+  return count.ok && count.value.code === 0 ? Number(count.value.stdout.trim()) || 0 : 0;
 }
 
 export async function projectDir(root: string, name: ProjectName): Promise<GitResult<string>> {
