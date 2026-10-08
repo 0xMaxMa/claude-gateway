@@ -24,6 +24,7 @@ const explanations: Readonly<Record<string, string>> = {
   PROFILE_INVENTORY_MISMATCH: 'The agent tool configuration does not match the running gateway. Check that the gateway and MCP server use the same deployment.',
   CAPACITY_EXCEEDED: 'The gateway has reached its active-session limit. Wait for current work to finish and try again.',
   CONFLICT: 'This session already has a pending request.',
+  PROJECT_UNAVAILABLE: 'This chat\'s project folder is missing, renamed or outside the projects root. Open the project or start a chat without one.',
   ORCHESTRATION_CLOSING: 'The gateway is shutting down. Try again after it restarts.',
   GATEWAY_SHUTDOWN: 'The gateway shut down before the response completed.',
   TASK_RESULT_TIMEOUT: 'Scheduled work did not produce a final report before its deadline. Check /tasks before retrying.',

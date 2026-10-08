@@ -9,6 +9,9 @@ import supertest from 'supertest';
 import { AgentRunner } from '../../src/agent/runner';
 import { GatewayRouter } from '../../src/api/gateway-router';
 import { AgentConfig, ApiKey, GatewayConfig } from '../../src/types';
+import { waitForCondition } from '../helpers/wait-for';
+
+const MOCK_CLAUDE = path.resolve(__dirname, '../helpers/mock-claude-argv.js');
 
 const KEYS: Record<string, ApiKey> = {
   admin: { key: 'sk-admin', agents: '*', admin: true },
@@ -20,6 +23,7 @@ const KEYS: Record<string, ApiKey> = {
 
 interface Harness {
   base: string;
+  argvLog: string;
   root: string;
   app: ReturnType<GatewayRouter['getApp']>;
   runners: AgentRunner[];
@@ -67,7 +71,34 @@ async function harness(opts: { trusted?: string[]; orchestration?: boolean } = {
     undefined,
     gateway,
   );
-  return { base, root, app: router.getApp(), runners, router };
+  const argvLog = path.join(base, 'argv.jsonl');
+  process.env.MOCK_CLAUDE_ARGV_LOG = argvLog;
+  return { base, argvLog, root, app: router.getApp(), runners, router };
+}
+
+interface Spawn { pid: number; cwd: string; argv: string[] }
+
+function spawns(h: Harness): Spawn[] {
+  if (!fs.existsSync(h.argvLog)) return [];
+  return fs.readFileSync(h.argvLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Spawn);
+}
+
+function flagValue(argv: string[], flag: string): string | undefined {
+  const at = argv.indexOf(flag);
+  return at === -1 ? undefined : argv[at + 1];
+}
+
+function send(h: Harness, sessionId: string, message: string) {
+  return supertest(h.app)
+    .post('/api/v1/agents/alfred/messages')
+    .set('Authorization', `Bearer ${KEYS.admin!.key}`)
+    .send({ message, chat_id: 'web', session_id: sessionId });
+}
+
+async function projectSession(h: Harness): Promise<string> {
+  const res = await create(h, 'alfred', KEYS.admin!, { project: 'site' });
+  expect(res.status).toBe(201);
+  return res.body.sessionId as string;
 }
 
 async function teardown(h: Harness): Promise<void> {
@@ -148,6 +179,111 @@ describe('POST /v1/agents/:id/sessions with project', () => {
     expect(res.status).toBe(409);
     expect(res.body).toMatchObject({ code: 'project_unsupported_agent', reason: 'container' });
   });
+});
+
+describe('a project-bound legacy chat turn', () => {
+  let h: Harness;
+  beforeAll(() => { process.env.CLAUDE_BIN = `node ${MOCK_CLAUDE}`; });
+  afterAll(() => { delete process.env.CLAUDE_BIN; delete process.env.MOCK_CLAUDE_ARGV_LOG; });
+  afterEach(async () => { await teardown(h); });
+
+  it('runs in the project dir with the persona file and user-only settings when untrusted', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    const res = await send(h, sessionId, 'where am I');
+    expect(res.status).toBe(200);
+    const [spawn] = spawns(h);
+    expect(spawn!.cwd).toBe(path.join(h.root, 'site'));
+    expect(flagValue(spawn!.argv, '--setting-sources')).toBe('user');
+    expect(flagValue(spawn!.argv, '--append-system-prompt-file')).toBe(path.join(h.base, 'agents', 'alfred', 'workspace', 'CLAUDE.md'));
+  });
+
+  it('loads project settings when the operator trusts the project', async () => {
+    h = await harness({ trusted: ['site'] });
+    const sessionId = await projectSession(h);
+    expect((await send(h, sessionId, 'hi')).status).toBe(200);
+    const [spawn] = spawns(h);
+    expect(spawn!.cwd).toBe(path.join(h.root, 'site'));
+    expect(spawn!.argv).not.toContain('--setting-sources');
+    expect(spawn!.argv).toContain('--append-system-prompt-file');
+  });
+
+  it('leaves a session without a project in the agent workspace with unchanged flags', async () => {
+    h = await harness();
+    const res = await create(h, 'alfred', KEYS.admin!, {});
+    expect((await send(h, res.body.sessionId, 'hi')).status).toBe(200);
+    const [spawn] = spawns(h);
+    expect(spawn!.cwd).toBe(path.join(h.base, 'agents', 'alfred', 'workspace'));
+    expect(spawn!.argv).not.toContain('--setting-sources');
+    expect(spawn!.argv).not.toContain('--append-system-prompt-file');
+  });
+
+  it('fails the next turn with PROJECT_UNAVAILABLE after a rename and never falls back to the workspace', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    expect((await send(h, sessionId, 'first')).status).toBe(200);
+    fs.renameSync(path.join(h.root, 'site'), path.join(h.root, 'site-renamed'));
+
+    const res = await send(h, sessionId, 'second');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROJECT_UNAVAILABLE');
+    expect(spawns(h).map((s) => s.cwd)).toEqual([path.join(h.root, 'site')]);
+
+    fs.renameSync(path.join(h.root, 'site-renamed'), path.join(h.root, 'site'));
+    expect((await send(h, sessionId, 'third')).status).toBe(200);
+    expect(spawns(h).map((s) => s.cwd)).toEqual([path.join(h.root, 'site'), path.join(h.root, 'site')]);
+  });
+
+  it('refuses a project swapped for a symlink out of the root between turns', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    expect((await send(h, sessionId, 'first')).status).toBe(200);
+    const outside = path.join(h.base, 'outside');
+    fs.mkdirSync(outside);
+    fs.renameSync(path.join(h.root, 'site'), path.join(h.base, 'moved-away'));
+    fs.symlinkSync(outside, path.join(h.root, 'site'));
+
+    const res = await send(h, sessionId, 'second');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROJECT_UNAVAILABLE');
+    expect(spawns(h).some((s) => s.cwd === outside)).toBe(false);
+  });
+
+  it('streams PROJECT_UNAVAILABLE as an error frame', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    fs.rmSync(path.join(h.root, 'site'), { recursive: true });
+    const res = await supertest(h.app)
+      .post('/api/v1/agents/alfred/messages')
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`)
+      .send({ message: 'hi', chat_id: 'web', session_id: sessionId, stream: true });
+    expect(res.text).toMatch(/"type":"error"[^\n]*"code":"PROJECT_UNAVAILABLE"/);
+    expect(spawns(h)).toEqual([]);
+  });
+
+  it('re-resolves the project on a crash restart', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    expect((await send(h, sessionId, 'first')).status).toBe(200);
+    process.kill(spawns(h)[0]!.pid, 'SIGKILL');
+    await waitForCondition(() => spawns(h).length === 2, 15_000);
+    expect(spawns(h)[1]!.cwd).toBe(path.join(h.root, 'site'));
+    expect(flagValue(spawns(h)[1]!.argv, '--setting-sources')).toBe('user');
+  }, 30_000);
+
+  it('does not restart a crashed session in the workspace once its project is gone', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    expect((await send(h, sessionId, 'first')).status).toBe(200);
+    fs.renameSync(path.join(h.root, 'site'), path.join(h.root, 'gone'));
+    process.kill(spawns(h)[0]!.pid, 'SIGKILL');
+    await new Promise((resolve) => setTimeout(resolve, 7_000));
+    expect(spawns(h)).toHaveLength(1);
+    const res = await send(h, sessionId, 'second');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROJECT_UNAVAILABLE');
+    expect(spawns(h)).toHaveLength(1);
+  }, 30_000);
 });
 
 describe('project chat on an orchestrated gateway', () => {

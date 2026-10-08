@@ -35,6 +35,8 @@ import {
   truncateDetail,
 } from '../utils/tool-labels';
 import { resolveEnabledConnectors } from '../connectors/resolve';
+import type { ProjectChatError, ProjectCwd } from '../projects/chat';
+import type { Result } from '../projects/paths';
 import { isReservedConnectorId } from '../connectors/custom';
 
 export const MAX_HISTORY_MESSAGES = 50;
@@ -262,6 +264,11 @@ export class SessionProcess extends EventEmitter {
   /** Backend used to run the subprocess. Set during start(); 'headless' until then. */
   backend: 'pty-shell' | 'headless' = 'headless';
   modelOverride?: string; // per-session model override (set by runner from SessionMeta)
+  /** Set by the runner for a project-bound API session. Run again at every spawn,
+   *  crash restarts included, so a missing or escaped folder fails the turn
+   *  instead of running in the agent workspace. */
+  projectResolver?: () => Promise<Result<ProjectCwd, ProjectChatError>>;
+  private projectCwd?: ProjectCwd;
   // Per-spawn cap on how many history messages buildInitialPrompt re-injects.
   // Defaults to MAX_HISTORY_MESSAGES; the runner lowers it (set before start())
   // when recovering from a repeated request_too_large (32MB) so each retry
@@ -739,6 +746,13 @@ export class SessionProcess extends EventEmitter {
    * directory), named per spawn so stopping one spawn never removes another's.
    * A container CLI reads one that prepareContainerProfile writes in its attempt
    * directory, in the same docker exec as the attempt's mcp.json and ticket. */
+  /** True when the bound project no longer resolves to the directory this process runs in. */
+  async projectMoved(): Promise<boolean> {
+    if (!this.projectResolver || !this.projectCwd) return false;
+    const project = await this.projectResolver();
+    return !project.ok || project.value.dir !== this.projectCwd.dir || project.value.trusted !== this.projectCwd.trusted;
+  }
+
   private writeSystemPromptFile(args: string[], mcpConfigPath: string | null): string[] {
     if (!this.runtimeProfile) return args;
     const file = path.join(path.dirname(mcpConfigPath ?? this.runtimeProfile.mcpConfigPath), `system-prompt-${this.sessionId.replace(/[^\w.-]/g, '_')}-${randomUUID()}.md`);
@@ -1026,6 +1040,14 @@ export class SessionProcess extends EventEmitter {
     // (The old claude.dangerouslySkipPermissions config is gone.)
     args.push('--dangerously-skip-permissions');
 
+    if (this.projectCwd) {
+      // Skipped permissions would otherwise run an untrusted repo's hooks and .mcp.json.
+      if (!this.projectCwd.trusted) args.push('--setting-sources', 'user');
+      // The persona CLAUDE.md is only discovered from cwd, which is now the project.
+      const persona = path.join(this.agentConfig.workspace, 'CLAUDE.md');
+      if (fs.existsSync(persona)) args.push('--append-system-prompt-file', persona);
+    }
+
     // Enforce allow_tools:false as a real boundary. Gated on the SAME condition as
     // writeMcpConfig() (source==='api' && !allow_tools): those sessions get no MCP
     // server, but built-in tools would still run and could exfil owner secrets.
@@ -1060,6 +1082,12 @@ export class SessionProcess extends EventEmitter {
     const { historyPrompt, loadedAtSpawn, archivedCount, messageCountAtSpawn } = await this.buildInitialPrompt();
     if (epoch !== this.spawnEpoch) return false;
     this.spawnContext = { loadedAtSpawn, archivedCount, messageCountAtSpawn };
+    if (this.projectResolver) {
+      const project = await this.projectResolver();
+      if (epoch !== this.spawnEpoch) return false;
+      if (!project.ok) throw projectUnavailable(project.error);
+      this.projectCwd = project.value;
+    }
 
     // Determine if this is a docker-exec app-agent before computing paths
     assertContainerBinding(this.agentConfig, this.runtimeProfile);
@@ -1260,7 +1288,7 @@ export class SessionProcess extends EventEmitter {
         ...(ptyHeartbeatPath ? { PTY_SHELL_HEARTBEAT_PATH: ptyHeartbeatPath } : {}),
         ...(ptyStreamSocketPath ? { PTY_SHELL_STREAM_SOCKET: ptyStreamSocketPath } : {}),
       }, this.gatewayConfig.gateway.jev),
-      cwd: this.agentConfig.workspace,
+      cwd: this.projectCwd?.dir ?? this.agentConfig.workspace,
       ...(this.runtimeProfile?.role === 'worker' && processSupervisorSupported() && workerSpawnDetached() ? { detached: true } : {}),
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -2182,4 +2210,9 @@ export class SessionProcess extends EventEmitter {
     if (this.process === proc) this.process = null;
     removeSessionDir();
   }
+}
+
+function projectUnavailable(error: ProjectChatError): Error {
+  const reason = error.code === 'project_not_found' ? 'not_found' : error.reason;
+  return Object.assign(new Error(`Project folder is unavailable (${reason})`), { code: 'PROJECT_UNAVAILABLE', reason });
 }
