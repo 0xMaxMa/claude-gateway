@@ -93,6 +93,27 @@ test('later and continued tasks in the chat inherit the project', async () => {
   });
 });
 
+test('a follow-up keeps the subfolder its prior task ran in, and a fresh task does not', async () => {
+  await fixture(async ({ projectDir, store, spawn }) => {
+    mkdirSync(join(projectDir, 'src'));
+    const first = await spawn('first', { working_directory: join(projectDir, 'src') });
+    const continued = await spawn('continued', { continue_task_id: first.body.taskId });
+    expect(store.task(continued.body.taskId)).toMatchObject({ project: 'demo', resourceProfile: { projectRoot: join(projectDir, 'src'), mode: 'host' } });
+    const fresh = await spawn('fresh');
+    expect(store.task(fresh.body.taskId)?.resourceProfile?.projectRoot).toBe(projectDir);
+  });
+});
+
+test('a follow-up whose prior folder is gone runs at the project root', async () => {
+  await fixture(async ({ projectDir, store, spawn }) => {
+    mkdirSync(join(projectDir, 'src'));
+    const first = await spawn('first', { working_directory: join(projectDir, 'src') });
+    rmSync(join(projectDir, 'src'), { recursive: true });
+    const continued = await spawn('continued', { continue_task_id: first.body.taskId });
+    expect(store.task(continued.body.taskId)?.resourceProfile?.projectRoot).toBe(projectDir);
+  });
+});
+
 for (const mode of ['isolated-worktree', 'shared-lock'] as const) {
   test(`a project-bound chat cannot queue tasks in ${mode} mode`, async () => {
     await fixture(async ({ store, spawn }) => {

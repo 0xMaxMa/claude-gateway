@@ -143,18 +143,26 @@ export class TaskService {
   configure(config?: OrchestrationConfig): void { this.config = resolveOrchestrationConfig(config); }
 
   /** A project-bound chat's tasks run in its project folder. Resolved before the synchronous spawn transaction. */
-  async projectPin(context: CommandContext, workingDirectory?: unknown): Promise<ProjectPin | undefined> {
+  async projectPin(context: CommandContext, workingDirectory?: unknown, continueTaskId?: unknown): Promise<ProjectPin | undefined> {
     if (this.store.get('SELECT action_id FROM task_commands WHERE action_id=?', context.actionId)) return undefined;
     const conversation = this.store.get('SELECT source,agent_session_id,chat_id FROM conversations WHERE id=?', context.conversationId);
     const project = conversation && await this.sessionProject?.({ source: String(conversation.source) as ConversationScope['source'], agentSessionId: String(conversation.agent_session_id), chatId: String(conversation.chat_id) });
     if (!project) return undefined;
     if (this.config.tasks.workspaceMode !== 'host') throw new OrchestrationError('PROJECT_UNSUPPORTED_AGENT', 'No task was queued: project chats need host workspace mode.');
     if (!project.ok) throw new OrchestrationError('PROJECT_UNAVAILABLE', 'No task was queued: this chat\'s project folder is no longer available.');
-    if (workingDirectory === undefined) return { name: project.value.name, dir: project.value.dir };
+    if (workingDirectory === undefined) return { name: project.value.name, dir: await this.priorProjectDir(context, project.value, continueTaskId) ?? project.value.dir };
     const dir = typeof workingDirectory === 'string' ? await resolveInProject(project.value.dir, workingDirectory) : undefined;
     if (!dir?.ok) throw new OrchestrationError('WORKING_DIRECTORY_OUTSIDE_PROJECT', `No task was queued: working_directory must be an existing folder inside this chat's project folder ${project.value.dir}.`);
     return { name: project.value.name, dir: dir.value };
   }
+  /** A follow-up stays in the folder its prior task ran in, while that folder is still inside the project. */
+  private async priorProjectDir(context: CommandContext, project: ProjectCwd, continueTaskId: unknown): Promise<string | undefined> {
+    const prior = typeof continueTaskId === 'string' ? this.store.task(continueTaskId) : undefined;
+    const dir = prior?.conversationId === context.conversationId && prior.project === project.name ? prior.resourceProfile?.projectRoot : undefined;
+    const inside = dir ? await resolveInProject(project.dir, dir) : undefined;
+    return inside?.ok ? inside.value : undefined;
+  }
+
   /** Admission feedback reaches the agent before a doomed task is committed. */
   async validateSpawnProfile(context: CommandContext, targetProfile: string): Promise<void> {
     // A committed receipt remains replayable even if its original repository disappeared.
