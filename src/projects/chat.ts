@@ -42,13 +42,18 @@ export function resolveInProject(dir: string, requested: string): Promise<Result
   return resolveInside(dir, path.relative(dir, path.resolve(dir, requested)));
 }
 
+/** The part of the project note that never changes during a chat. */
+export function projectLocation(project: ProjectCwd): string {
+  return `You are working in project ${project.name} at ${project.dir}.`;
+}
+
 /**
  * One line telling the agent where it works: the project, its folder and, when git answers
  * within the read timeout, branch, change count and remote host. Never a remote URL, which
  * can carry a token.
  */
 export async function projectContext(config: GatewayConfig, project: ProjectCwd): Promise<string> {
-  const where = `You are working in project ${project.name} at ${project.dir}.`;
+  const where = projectLocation(project);
   const status = await getStatus(resolveProjectsRoot(config), project.name).catch(() => null);
   if (!status?.ok) return where;
   const s = status.value;

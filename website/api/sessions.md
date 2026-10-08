@@ -150,13 +150,23 @@ Check that `capabilities.projects` includes `"chat"` (see
 | `403` | `forbidden_key` | The key cannot write to this agent, or is scoped to specific agents and so cannot reach pod projects |
 | `404` | `project_not_found` | No folder with that name exists under the projects root |
 | `409` | `project_unavailable` | The folder exists but cannot be used, for example a symlink that leaves the root. `reason` holds the projects error code |
-| `409` | `project_unsupported_agent` | The agent cannot run in a project folder. `reason` is `container` for container (app) agents, and `orchestrated` for agents whose API channel is orchestrated |
+| `409` | `project_unsupported_agent` | The agent cannot run in a project folder. `reason` is `container` for container (app) agents |
 
 Each check runs again when the session starts its process. If the folder has
 gone, been renamed or moved out of the root, the message fails with code
 `PROJECT_UNAVAILABLE` (uppercase) and the gateway does not fall back to the
 workspace. A synchronous [`POST /messages`](/api/messages) answers `409`. A
 streaming request gets an SSE `error` frame with that code.
+
+On an orchestrated agent the deciding agent stays in its workspace and is told
+which project the chat is in. Every task it starts runs in the project folder,
+or in a `working_directory` inside it. Task failures use uppercase codes:
+
+| Task `failure.code` or `task_spawn` error | When |
+|--------|------|
+| `PROJECT_UNAVAILABLE` | The project folder is gone, renamed or moved when the task is queued or its worker starts |
+| `WORKING_DIRECTORY_OUTSIDE_PROJECT` | `working_directory` does not resolve, through symlinks, to a folder inside the project |
+| `PROJECT_UNSUPPORTED_AGENT` | Workers do not run in `host` workspace mode, or the task would run on the Codex worker harness |
 
 ---
 
