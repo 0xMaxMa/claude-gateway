@@ -408,10 +408,10 @@ export function pushBranch(root: string, name: ProjectName): Promise<GitResult<{
     const trackingRemote = status.upstream !== null ? config.branches[status.branch]?.remote : undefined;
     let args: string[];
     if (trackingRemote) {
-      args = ['push', '--porcelain', trackingRemote, refspec];
+      args = ['push', '--porcelain', '--', trackingRemote, refspec];
     } else if (status.remote) {
       // The remote fetch uses, so publishing and checking for updates talk to the same place.
-      args = ['push', '--porcelain', '-u', status.remote.name, refspec];
+      args = ['push', '--porcelain', '-u', '--', status.remote.name, refspec];
     } else {
       return fail('no_upstream');
     }

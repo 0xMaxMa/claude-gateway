@@ -392,9 +392,10 @@ Pushes the current branch to its upstream with an explicit, unforced refspec,
 so a `+` refspec in `remote.<name>.push` never applies. When `sync` is
 `upstream_mismatch`, the response is `409 upstream_mismatch` and nothing is
 pushed. With no upstream, it publishes the branch under the same name with
-`git push -u <remote> <branch>` to the status's `remote`, the same remote
+`git push -u -- <remote> <branch>` to the status's `remote`, the same remote
 `fetch` uses. A `branch.<name>.remote` setting that names a remote that no
-longer exists counts as no upstream. When several remotes
+longer exists counts as no upstream. Both pushes pass the remote name after `--`, so a remote
+named like an option, such as `--receive-pack=...`, is never read as one. When several remotes
 leave `remote` as `null` (none is the upstream's or is named `origin`), the
 response is `409 no_upstream`.
 When `sync` is `upstream_gone`, the push publishes the branch again to the

@@ -744,6 +744,16 @@ describe('POST git/push', () => {
     expect(remoteHead()).toBe(before);
   });
 
+  it('passes the remote name after --, so a remote named like an option never runs', async () => {
+    const dir = makeRepo('app');
+    git(base, 'init', '-q', '--bare', '-b', 'main', remote);
+    const marker = path.join(base, 'ran');
+    git(dir, 'config', `remote.--receive-pack=touch ${marker} #.url`, remote);
+    expect((await status('app')).body.remote.name).toBe(`--receive-pack=touch ${marker} #`);
+    await post('app', 'push');
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
   it('409s no_remote and detached_head', async () => {
     const dir = makeRepo('app');
     expect((await post('app', 'push')).body.code).toBe('no_remote');
