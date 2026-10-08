@@ -25,6 +25,7 @@ export type GitErrorCode =
   | 'identity_already_set'
   | 'invalid_identity'
   | 'sensitive_files'
+  | 'invalid_allow_sensitive'
   | 'conflicts_present'
   | 'operation_in_progress'
   | 'not_fast_forward'
@@ -252,14 +253,16 @@ export type CommitMessage = string & { readonly __brand: 'CommitMessage' };
 
 export interface CommitRequest {
   message: CommitMessage;
-  allowSensitive: boolean;
+  /** The secret-looking paths the user confirmed; a path that appears after they looked is not in here. */
+  allowSensitive: ReadonlySet<string>;
 }
 
 export function parseCommitRequest(body: unknown): GitResult<CommitRequest> {
-  const { message, allow_sensitive } = (body ?? {}) as { message?: unknown; allow_sensitive?: unknown };
+  const { message, allow_sensitive = [] } = (body ?? {}) as { message?: unknown; allow_sensitive?: unknown };
   // A NUL cannot be passed in argv; it is never part of a real message.
   if (typeof message !== 'string' || message.trim() === '' || message.includes('\0')) return fail('message_required');
-  return ok({ message: message.trim() as CommitMessage, allowSensitive: allow_sensitive === true });
+  if (!Array.isArray(allow_sensitive) || !allow_sensitive.every((p) => typeof p === 'string')) return fail('invalid_allow_sensitive');
+  return ok({ message: message.trim() as CommitMessage, allowSensitive: new Set(allow_sensitive) });
 }
 
 const COMMIT_HOOKS = ['pre-commit', 'prepare-commit-msg', 'commit-msg'];
@@ -294,9 +297,8 @@ export function commitAll(
     if (blocked) return blocked;
     if (status.change_count === 0) return fail('nothing_to_commit');
     if (!status.identity_configured) return fail('identity_missing');
-    if (status.sensitive_untracked.length > 0 && !req.allowSensitive) {
-      return err({ code: 'sensitive_files', paths: status.sensitive_untracked });
-    }
+    const unconfirmed = status.sensitive_untracked.filter((p) => !req.allowSensitive.has(p));
+    if (unconfirmed.length > 0) return err({ code: 'sensitive_files', paths: unconfirmed });
 
     const add = await git(dir, ['add', '-A'], GIT_TIMEOUTS.commit);
     if (!add.ok) return add;

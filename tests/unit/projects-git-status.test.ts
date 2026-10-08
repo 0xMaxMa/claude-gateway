@@ -157,6 +157,27 @@ describe('buildStatus', () => {
     expect([s.branch, s.sync, s.identity_configured]).toEqual(['main', 'no_remote', false]);
   });
 
+  it('flags only secret paths that HEAD lacks and git add -A would commit', () => {
+    const s = buildStatus({
+      parsed: parseStatusV2(
+        z(
+          `# branch.oid ${OID}`,
+          '# branch.head main',
+          `1 M. N... 100644 100644 100644 ${H} ${H} tracked.pem`,
+          `1 AD N... 000000 100644 000000 ${'0'.repeat(40)} ${H} added-then-deleted.key`,
+          `1 A. N... 000000 100644 100644 ${'0'.repeat(40)} ${H} staged.key`,
+          `1 .A N... 000000 000000 100644 ${'0'.repeat(40)} ${'0'.repeat(40)} ita.key`,
+          `2 R. N... 100644 100644 100644 ${H} ${H} R100 renamed.key`,
+          'notes.txt',
+        ),
+      ),
+      config: noConfig,
+      lastCommit: null,
+      operation: 'none',
+    });
+    expect([...s.sensitive_untracked].sort()).toEqual(['ita.key', 'renamed.key', 'staged.key']);
+  });
+
   it('caps changes but reports the true count', () => {
     const many = parseStatusV2(z(`# branch.oid ${OID}`, '# branch.head main', ...Array.from({ length: 250 }, (_, i) => `? f${i}`)));
     const s = buildStatus({ parsed: many, config: noConfig, lastCommit: null, operation: 'none' });

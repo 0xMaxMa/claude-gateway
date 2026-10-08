@@ -385,7 +385,7 @@ describe('POST git/commit', () => {
     expect(head(dir)).toBe(before);
   });
 
-  it('blocks untracked secrets until allow_sensitive, but not ignored ones', async () => {
+  it('blocks untracked secrets until each is confirmed in allow_sensitive, but not ignored ones', async () => {
     const dir = makeRepo('app');
     setIdentity(dir);
     write(path.join(dir, '.gitignore'), 'ignored.pem\n');
@@ -400,10 +400,56 @@ describe('POST git/commit', () => {
     expect(head(dir)).toBe(before);
     expect(git(dir, 'diff', '--cached', '--name-only')).toBe('');
 
-    const allowed = await post('app', 'commit', { message: 'with secrets', allow_sensitive: true });
+    const allowed = await post('app', 'commit', { message: 'with secrets', allow_sensitive: ['config/.env'] });
     expect(allowed.status).toBe(201);
     expect(git(dir, 'show', '--name-only', '--format=', 'HEAD')).toContain('config/.env');
     expect(git(dir, 'show', '--name-only', '--format=', 'HEAD')).not.toContain('ignored.pem');
+  });
+
+  it('flags staged, intent-to-add and renamed-in secrets, with no cap on the list', async () => {
+    const dir = makeRepo('app');
+    setIdentity(dir);
+    write(path.join(dir, 'notes.txt'), 'n');
+    git(dir, 'add', 'notes.txt');
+    git(dir, 'commit', '-q', '-m', 'notes');
+    write(path.join(dir, '.env'), 'SECRET=1');
+    git(dir, 'add', '.env');
+    write(path.join(dir, 'id_rsa'), 'key');
+    git(dir, 'add', '-N', 'id_rsa');
+    git(dir, 'mv', 'notes.txt', 'server.pem');
+    const many = Array.from({ length: 25 }, (_, i) => `keys/k${String(i).padStart(2, '0')}.key`);
+    for (const f of many) write(path.join(dir, f), 'k');
+    const expected = ['.env', 'id_rsa', 'server.pem', ...many].sort();
+
+    const res = await status('app');
+    expect([...res.body.sensitive_untracked].sort()).toEqual(expected);
+    const blocked = await post('app', 'commit', { message: 'secrets' });
+    expect(blocked.body.code).toBe('sensitive_files');
+    expect([...blocked.body.paths].sort()).toEqual(expected);
+  });
+
+  it('commits only when every current secret is confirmed, and lists the unconfirmed ones', async () => {
+    const dir = makeRepo('app');
+    setIdentity(dir);
+    write(path.join(dir, '.env'), 'A=1');
+    write(path.join(dir, 'deploy.pem'), 'k');
+    const before = head(dir);
+
+    const partial = await post('app', 'commit', { message: 'm', allow_sensitive: ['.env', 'gone.key'] });
+    expect([partial.status, partial.body.code, partial.body.paths]).toEqual([409, 'sensitive_files', ['deploy.pem']]);
+    expect(head(dir)).toBe(before);
+
+    const all = await post('app', 'commit', { message: 'm', allow_sensitive: ['.env', 'deploy.pem'] });
+    expect(all.status).toBe(201);
+  });
+
+  it.each([[true], [false], ['.env'], [[1]], [{ '.env': true }]])('400s invalid_allow_sensitive for %p and stages nothing', async (allow) => {
+    const dir = makeRepo('app');
+    setIdentity(dir);
+    write(path.join(dir, '.env'), 'A=1');
+    const res = await post('app', 'commit', { message: 'm', allow_sensitive: allow });
+    expect([res.status, res.body.code]).toEqual([400, 'invalid_allow_sensitive']);
+    expect(git(dir, 'diff', '--cached', '--name-only')).toBe('');
   });
 
   it('409s conflicts_present during a conflicted merge', async () => {

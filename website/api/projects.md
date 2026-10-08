@@ -220,7 +220,7 @@ for the `detail` of `hook_failed`.
 | `last_commit` | `GitCommitInfo \| null` | The HEAD commit. |
 | `operation` | `string` | `none`, `merge`, `rebase`, `cherry_pick`, `revert`, or `bisect`. |
 | `identity_configured` | `boolean` | `user.name` and `user.email` both resolve for this repository. |
-| `sensitive_untracked` | `string[]` | Untracked, not ignored files that look like secrets, at most 20. |
+| `sensitive_untracked` | `string[]` | Paths that a commit would newly add and that look like secrets: untracked and not ignored, staged as added, added with `git add -N`, or the new name of a rename or copy. Not capped. The name is kept for compatibility. |
 
 `GitFileChange` is `{ path, orig_path?, staged, unstaged }`. `path` is relative
 to the project with forward slashes. `orig_path` is set for renames and copies.
@@ -323,7 +323,7 @@ limit.
 | Field | Required | Description |
 |-------|----------|-------------|
 | `message` | Yes | The commit message. Trimmed. Empty means `400 message_required`. |
-| `allow_sensitive` | No | `true` commits even when `sensitive_untracked` is not empty. Without it the response is `409 sensitive_files` with `paths`. |
+| `allow_sensitive` | No | `string[]`, the secret-looking paths the user confirmed. The commit runs only when every path in the current `sensitive_untracked` is in this list. Otherwise the response is `409 sensitive_files`, whose `paths` lists the current paths that were not confirmed. Paths in the list that are no longer in `sensitive_untracked` are ignored. Any value that is not an array of strings, such as `true`, gets `400 invalid_allow_sensitive`. |
 
 ```bash
 curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
@@ -331,7 +331,15 @@ curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json"
 ```
 
 ```json
-{ "error": "Untracked files look like secrets", "code": "sensitive_files", "paths": [".env"] }
+{ "error": "New files look like secrets", "code": "sensitive_files", "paths": [".env"] }
+```
+
+Send the paths the user saw and confirmed, not a stored list from an earlier
+status. A secret file that appears after the user looked is then refused again.
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"message":"Update readme","allow_sensitive":[".env"]}' http://localhost:10850/api/v1/projects/app/git/commit
 ```
 
 The commit is refused while conflicts exist (`conflicts_present`), during a
@@ -367,13 +375,14 @@ non-fast-forward gets `409 not_fast_forward`.
 | Status | `code` | When |
 |--------|--------|------|
 | 400 | `message_required` | `commit` without a non-empty `message`. |
+| 400 | `invalid_allow_sensitive` | `commit` with an `allow_sensitive` that is not an array of strings. |
 | 400 | `invalid_identity` | `identity` with a missing or invalid `name` or `email`. |
 | 409 | `not_a_git_repo` | The project is not a repository. |
 | 409 | `already_a_git_repo` | `init` on a repository. |
 | 409 | `nothing_to_commit` | `commit` on a clean tree. |
 | 409 | `identity_missing` | `commit` without `user.name` and `user.email`. |
 | 409 | `identity_already_set` | `identity` when both already resolve. |
-| 409 | `sensitive_files` | `commit` with untracked secret-looking files. The body has `paths`. |
+| 409 | `sensitive_files` | `commit` would newly add secret-looking files that `allow_sensitive` does not list. The body has `paths`, the unconfirmed ones. |
 | 409 | `conflicts_present` | `commit`, `pull`, or `push` while files have merge conflicts. |
 | 409 | `operation_in_progress` | `commit`, `pull`, or `push` during a merge, rebase, cherry-pick, revert, or bisect. |
 | 409 | `not_fast_forward` | `pull` on a diverged branch, or `push` rejected as non-fast-forward. |

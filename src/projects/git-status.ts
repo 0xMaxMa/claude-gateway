@@ -90,7 +90,6 @@ export interface RepoConfig {
 }
 
 export const CHANGES_LIMIT = 200;
-export const SENSITIVE_LIMIT = 20;
 
 const KIND_BY_CODE: Record<string, GitChangeKind | null> = {
   '.': null,
@@ -249,6 +248,14 @@ export function isSensitiveName(file: string): boolean {
   return /^service-account.*\.json$/.test(base);
 }
 
+const NEW_PATH_KINDS: ReadonlySet<GitChangeKind | null> = new Set(['added', 'renamed', 'copied']);
+
+/** Whether `git add -A` would commit this path when HEAD does not have it: untracked, added, intent-to-add, or the target of a rename or copy. */
+function wouldBeNewPath(c: GitFileChange): boolean {
+  if (c.unstaged === 'untracked' || NEW_PATH_KINDS.has(c.unstaged)) return true;
+  return NEW_PATH_KINDS.has(c.staged) && c.unstaged !== 'deleted';
+}
+
 /** Sort rank: conflicted, staged, unstaged, untracked. */
 function rank(c: GitFileChange): number {
   if (c.staged === 'conflicted') return 0;
@@ -284,10 +291,7 @@ export function buildStatus(input: {
     last_commit: input.lastCommit,
     operation: input.operation,
     identity_configured: config.userName !== null && config.userEmail !== null,
-    sensitive_untracked: sorted
-      .filter((c) => c.unstaged === 'untracked' && isSensitiveName(c.path))
-      .map((c) => c.path)
-      .slice(0, SENSITIVE_LIMIT),
+    sensitive_untracked: sorted.filter((c) => wouldBeNewPath(c) && isSensitiveName(c.path)).map((c) => c.path),
   };
 }
 
