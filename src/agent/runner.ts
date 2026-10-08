@@ -82,6 +82,8 @@ import { isChatChannel } from '../history/types';
 import type { SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 import { resolveEnabledConnectors } from '../connectors/resolve';
+import { ProjectChatError, ProjectCwd, resolveProjectCwd } from '../projects/chat';
+import { ProjectName, Result } from '../projects/paths';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
@@ -439,8 +441,17 @@ export class AgentRunner extends EventEmitter {
   }
 
   private orchestrationForApi(sessionId: string): boolean {
-    return Boolean((this.orchestration?.ownsSession(sessionId) && !this.orchestration.canReturnToLegacy()) ||
-      (this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes('api')));
+    return Boolean((this.orchestration?.ownsSession(sessionId) && !this.orchestration.canReturnToLegacy()) || this.apiChannelOrchestrated());
+  }
+
+  private apiChannelOrchestrated(): boolean {
+    return Boolean(this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes('api'));
+  }
+
+  async resolveApiProject(name: ProjectName): Promise<Result<ProjectCwd, ProjectChatError>> {
+    if (this.agentConfig.type === 'app-agent') return { ok: false, error: { code: 'project_unsupported_agent', reason: 'container' } };
+    if (this.apiChannelOrchestrated()) return { ok: false, error: { code: 'project_unsupported_agent', reason: 'orchestrated' } };
+    return resolveProjectCwd(this.gatewayConfig, name);
   }
 
   private async sendLinkedOrchestrationChannel(...[binding, text, _id, file]: Parameters<ChannelSender>): ReturnType<ChannelSender> {
@@ -5838,12 +5849,12 @@ export class AgentRunner extends EventEmitter {
     return this.sessionStore.apiSessionExists(this.agentConfig.id, chatId, sessionId);
   }
 
-  async createApiSession(chatId: string, prompt?: string, name?: string): Promise<import('../types').SessionMeta> {
+  async createApiSession(chatId: string, prompt?: string, name?: string, project?: ProjectName): Promise<import('../types').SessionMeta> {
     const sessionName = name ?? (prompt
       ? (prompt.length > 60 ? `${prompt.slice(0, 60)}...` : prompt)
       : undefined);
 
-    const meta = await this.sessionStore.createTelegramSession(this.agentConfig.id, chatId, sessionName, 'api');
+    const meta = await this.sessionStore.createTelegramSession(this.agentConfig.id, chatId, sessionName, 'api', project);
 
     if (!name && prompt) {
       this.generateSessionNameInBackground(chatId, meta.id, prompt);
@@ -5882,6 +5893,7 @@ export class AgentRunner extends EventEmitter {
     return {
       sessionId: meta.id,
       sessionName: meta.name,
+      ...(meta.project ? { project: meta.project } : {}),
       messageCount: meta.messageCount,
       archivedCount: meta.archivedCount ?? 0,
       ...context,

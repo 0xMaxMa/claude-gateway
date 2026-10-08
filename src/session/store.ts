@@ -352,7 +352,7 @@ export class SessionStore {
    * Create a new session for a chat, add it to the index, and return the SessionMeta.
    * If name is not provided, auto-generates "Session N" based on current session count.
    */
-  async createTelegramSession(agentId: string, chatId: string, name?: string, channel: ChatChannelOrApi = 'telegram'): Promise<SessionMeta> {
+  async createTelegramSession(agentId: string, chatId: string, name?: string, channel: ChatChannelOrApi = 'telegram', project?: string): Promise<SessionMeta> {
     const queue = this.getTelegramQueue(agentId, chatId);
     return queue.add(async () => {
       const index = await this.loadOrCreateIndexUnlocked(agentId, chatId, channel);
@@ -367,6 +367,7 @@ export class SessionStore {
         lastActive: now,
         messageCount: 0,
         totalTokensUsed: 0,
+        ...(project ? { project } : {}),
       };
 
       // Write empty messages file

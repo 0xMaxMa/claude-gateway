@@ -16,7 +16,9 @@ import { AgentConfig, ApiKey, ImageParams, ModelConfig, VideoParams } from '../t
 import { isValidConnectorId } from '../connectors/custom';
 import { agentsDirForConfig } from '../config/agent-env';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
-import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
+import { createApiAuthMiddleware, canAccessAgent, canAccessPod, canWriteAgent, isAdmin } from './auth';
+import { PROJECT_CHAT_ERRORS } from '../projects/chat';
+import { parseProjectName, ProjectName } from '../projects/paths';
 import { MediaStore } from '../history/media-store';
 import { HistoryDB, MAX_HISTORY_LIMIT } from '../history/db';
 import { isChatChannel } from '../history/types';
@@ -4545,12 +4547,27 @@ export function createApiRouter(
     const ctx = resolveApiSession(req, res);
     if (!ctx) return;
     const { runner, agentId, chatId } = ctx;
-    const body = req.body as { prompt?: unknown; name?: unknown };
+    const body = req.body as { prompt?: unknown; name?: unknown; project?: unknown };
     const promptText = typeof body.prompt === 'string' ? body.prompt.trim() : undefined;
     const explicitName = typeof body.name === 'string' ? body.name.trim() : undefined;
+    let project: ProjectName | undefined;
+    if (body.project !== undefined) {
+      const apiKey = (req as AuthedRequest).apiKey;
+      if (!canWriteAgent(apiKey, agentId) || !canAccessPod(apiKey)) {
+        res.status(403).json({ error: 'API key not permitted for this operation', code: 'forbidden_key' }); return;
+      }
+      const name = parseProjectName(body.project);
+      if (!name.ok) { res.status(400).json({ error: 'Invalid project name', code: name.error }); return; }
+      const bound = await runner.resolveApiProject(name.value);
+      if (!bound.ok) {
+        const { status, message } = PROJECT_CHAT_ERRORS[bound.error.code];
+        res.status(status).json({ error: message, ...bound.error }); return;
+      }
+      project = name.value;
+    }
     try {
-      const meta = await runner.createApiSession(chatId, promptText, explicitName);
-      res.status(201).json({ sessionId: meta.id, sessionName: meta.name, createdAt: meta.createdAt });
+      const meta = await runner.createApiSession(chatId, promptText, explicitName, project);
+      res.status(201).json({ sessionId: meta.id, sessionName: meta.name, createdAt: meta.createdAt, ...(meta.project ? { project: meta.project } : {}) });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

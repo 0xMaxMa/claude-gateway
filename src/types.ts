@@ -818,6 +818,9 @@ export interface SessionMeta {
   videoConfig?: VideoParams;
   /** Real model from Claude stream, updated per turn (e.g. "claude-opus-4-8"). */
   model?: string;
+  /** Projects folder name this API session is bound to, fixed at creation. The
+   *  directory is re-resolved from the name at every spawn. */
+  project?: string;
 }
 
 export interface SessionIndex {

@@ -3,7 +3,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import request from 'supertest';
-import { createProjectsRouter, resolveProjectsRoot } from '../../src/api/projects-router';
+import { createProjectsRouter } from '../../src/api/projects-router';
+import { resolveProjectsRoot } from '../../src/projects/chat';
 import type { ApiKey, GatewayConfig } from '../../src/types';
 
 const apiKeys: ApiKey[] = [

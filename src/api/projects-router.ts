@@ -1,6 +1,5 @@
 import { NextFunction, Request, Response, Router } from 'express';
-import { ApiKey, GatewayConfig } from '../types';
-import { expandHome } from '../utils/paths';
+import { ApiKey } from '../types';
 import { createApiAuthMiddleware, canAccessPod } from './auth';
 import { defineRoute } from './route-registry';
 import { createProject, listDir, listProjects, readFileContent } from '../projects/fs';
@@ -74,11 +73,6 @@ function handle(fn: (req: Request, res: Response) => Promise<void>) {
   return (req: Request, res: Response): void => {
     fn(req, res).catch(() => fail(res, 'internal'));
   };
-}
-
-/** `gateway.projects.root`, which loadConfig has already validated. */
-export function resolveProjectsRoot(config: GatewayConfig): string {
-  return expandHome(config.gateway.projects?.root ?? '~/projects');
 }
 
 /**
