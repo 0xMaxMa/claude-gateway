@@ -217,8 +217,8 @@ for the `detail` of `hook_failed`.
 | `detached` | `boolean` | HEAD is detached. |
 | `has_commits` | `boolean` | `false` right after `git init`. |
 | `upstream` | `string \| null` | The upstream, such as `origin/main`. |
-| `ahead`, `behind` | `number` | Commits ahead of and behind the upstream, as of the last fetch. |
-| `sync` | `string` | One of `in_sync`, `ahead`, `behind`, `diverged`, `no_upstream` (a remote exists but the branch tracks nothing), `no_remote`, `detached`. |
+| `ahead`, `behind` | `number` | Commits ahead of and behind the upstream, as of the last fetch. `0` when `sync` is `upstream_gone`. |
+| `sync` | `string` | One of `in_sync`, `ahead`, `behind`, `diverged`, `no_upstream` (a remote exists but the branch tracks nothing), `upstream_gone` (the branch tracks an online branch that was deleted, as of the last fetch), `no_remote`, `detached`. Treat a value you do not know as neutral. |
 | `remote` | `GitRemote \| null` | The upstream's remote, else `origin`, else the only remote. |
 | `changes` | `GitFileChange[]` | At most 200, ordered conflicted, staged, unstaged, untracked. |
 | `change_count` | `number` | The true number of changed files. |
@@ -363,7 +363,8 @@ changes stay staged.
 Fetches the upstream's remote, then fast-forwards with
 `git merge --ff-only @{upstream}`. `pull.rebase` and similar settings do not
 apply. Returns `200` with `{ result: "up_to_date" | "fast_forwarded", status: GitStatus | null }`.
-A diverged branch gets `409 not_fast_forward`. Local changes that the
+A diverged branch gets `409 not_fast_forward`. A branch whose upstream was
+deleted on the remote gets `409 no_upstream`. Local changes that the
 fast-forward would overwrite get `409 dirty_would_overwrite`, and stay as they
 were.
 
@@ -378,7 +379,8 @@ publishes the branch under the same name with `git push -u <remote> <branch>`
 to the status's `remote`, the same remote `fetch` uses. When several remotes
 leave `remote` as `null` (none is the upstream's or is named `origin`), the
 response is `409 no_upstream`.
-Returns `200` with `{ status: GitStatus | null }`. A push the remote rejects as
+When `sync` is `upstream_gone`, the push publishes the branch again to the
+same remote. Returns `200` with `{ status: GitStatus | null }`. A push the remote rejects as
 non-fast-forward gets `409 not_fast_forward`.
 
 ### Git errors {#git-errors}
@@ -399,7 +401,7 @@ non-fast-forward gets `409 not_fast_forward`.
 | 409 | `not_fast_forward` | `pull` on a diverged branch, or `push` rejected as non-fast-forward. |
 | 409 | `dirty_would_overwrite` | `pull` blocked by local changes. |
 | 409 | `no_remote` | `fetch`, `pull`, or `push` without a remote. |
-| 409 | `no_upstream` | `pull` without an upstream, or `push` without one when the status `remote` is `null` because several remotes exist and none is named `origin`. |
+| 409 | `no_upstream` | `pull` without an upstream or with one that was deleted on the remote, or `push` without one when the status `remote` is `null` because several remotes exist and none is named `origin`. |
 | 409 | `upstream_mismatch` | `push` on a branch whose upstream has a different branch name, or lives on a remote that is not configured. |
 | 409 | `detached_head` | `commit`, `pull`, or `push` on a detached HEAD. |
 | 409 | `busy` | Another git operation is running on this project. |

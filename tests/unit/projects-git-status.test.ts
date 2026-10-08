@@ -19,7 +19,12 @@ const noConfig: RepoConfig = { remotes: [], userName: null, userEmail: null, ssh
 describe('parseStatusV2', () => {
   it('reads branch headers with upstream and ahead/behind', () => {
     const p = parseStatusV2(z(`# branch.oid ${OID}`, '# branch.head main', '# branch.upstream origin/main', '# branch.ab +2 -3'));
-    expect(p).toEqual({ oid: OID, head: 'main', upstream: 'origin/main', ahead: 2, behind: 3, changes: [] });
+    expect(p).toEqual({ oid: OID, head: 'main', upstream: 'origin/main', upstreamGone: false, ahead: 2, behind: 3, changes: [] });
+  });
+
+  it('reads an upstream without ahead/behind as gone', () => {
+    const p = parseStatusV2(z(`# branch.oid ${OID}`, '# branch.head feature', '# branch.upstream origin/feature'));
+    expect([p.upstream, p.upstreamGone, p.ahead, p.behind]).toEqual(['origin/feature', true, 0, 0]);
   });
 
   it('reads an unborn branch', () => {
@@ -74,13 +79,14 @@ describe('parseStatusV2', () => {
 
 describe('deriveSync', () => {
   const table: Array<[string, Parameters<typeof deriveSync>[0], GitSync]> = [
-    ['detached wins over everything', { detached: true, upstream: 'origin/main', ahead: 1, behind: 1, hasRemote: true }, 'detached'],
-    ['in sync', { detached: false, upstream: 'origin/main', ahead: 0, behind: 0, hasRemote: true }, 'in_sync'],
-    ['ahead', { detached: false, upstream: 'origin/main', ahead: 2, behind: 0, hasRemote: true }, 'ahead'],
-    ['behind', { detached: false, upstream: 'origin/main', ahead: 0, behind: 2, hasRemote: true }, 'behind'],
-    ['diverged', { detached: false, upstream: 'origin/main', ahead: 1, behind: 1, hasRemote: true }, 'diverged'],
-    ['no upstream with a remote', { detached: false, upstream: null, ahead: 0, behind: 0, hasRemote: true }, 'no_upstream'],
-    ['no remote', { detached: false, upstream: null, ahead: 0, behind: 0, hasRemote: false }, 'no_remote'],
+    ['detached wins over everything', { detached: true, upstream: 'origin/main', ahead: 1, behind: 1, upstreamGone: false, hasRemote: true }, 'detached'],
+    ['in sync', { detached: false, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, hasRemote: true }, 'in_sync'],
+    ['ahead', { detached: false, upstream: 'origin/main', ahead: 2, behind: 0, upstreamGone: false, hasRemote: true }, 'ahead'],
+    ['behind', { detached: false, upstream: 'origin/main', ahead: 0, behind: 2, upstreamGone: false, hasRemote: true }, 'behind'],
+    ['diverged', { detached: false, upstream: 'origin/main', ahead: 1, behind: 1, upstreamGone: false, hasRemote: true }, 'diverged'],
+    ['no upstream with a remote', { detached: false, upstream: null, ahead: 0, behind: 0, upstreamGone: false, hasRemote: true }, 'no_upstream'],
+    ['upstream gone', { detached: false, upstream: 'origin/feature', upstreamGone: true, ahead: 0, behind: 0, hasRemote: true }, 'upstream_gone'],
+    ['no remote', { detached: false, upstream: null, ahead: 0, behind: 0, upstreamGone: false, hasRemote: false }, 'no_remote'],
   ];
   it.each(table)('%s', (_label, input, expected) => expect(deriveSync(input)).toBe(expected));
 });

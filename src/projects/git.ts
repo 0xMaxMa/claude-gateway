@@ -355,6 +355,8 @@ export function pullFastForward(root: string, name: ProjectName): Promise<GitRes
     if (fetch.value.code !== 0) return err(classify(fetch.value));
     const merge = await git(dir, ['merge', '--ff-only', '@{upstream}'], GIT_TIMEOUTS.network);
     if (!merge.ok) return merge;
+    // The upstream branch was deleted on the remote, and the fetch above pruned its tracking ref.
+    if (merge.value.code !== 0 && /@\{upstream\} - not something we can merge/.test(merge.value.stderr)) return fail('no_upstream');
     if (merge.value.code !== 0) return err(classify(merge.value));
 
     // LC_ALL=C keeps this message stable.

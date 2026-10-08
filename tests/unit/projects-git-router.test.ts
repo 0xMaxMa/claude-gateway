@@ -742,3 +742,37 @@ describe('git-summary counts', () => {
     expect((await status('app')).body.change_count).toBe(3);
   });
 });
+
+describe('an upstream branch deleted on the remote', () => {
+  function goneFeature(prune: boolean): string {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    commitLocal(dir, 'f.txt', 'x');
+    git(dir, 'push', '-q', '-u', 'origin', 'feature');
+    git(remote, 'branch', '-q', '-D', 'feature');
+    if (prune) git(dir, 'fetch', '-q', '--prune');
+    return dir;
+  }
+
+  it('reports sync upstream_gone once fetch has pruned it', async () => {
+    goneFeature(true);
+    expect((await status('app')).body).toMatchObject({ branch: 'feature', upstream: 'origin/feature', sync: 'upstream_gone', ahead: 0, behind: 0 });
+  });
+
+  it.each([[true], [false]])('pull 409s no_upstream (pruned before: %p)', async (prune) => {
+    const dir = goneFeature(prune);
+    const before = head(dir);
+    const res = await post('app', 'pull');
+    expect([res.status, res.body.code]).toEqual([409, 'no_upstream']);
+    expect(head(dir)).toBe(before);
+  });
+
+  it('push publishes the branch to the same remote again', async () => {
+    const dir = goneFeature(true);
+    const res = await post('app', 'push');
+    expect(res.status).toBe(200);
+    expect(res.body.status).toMatchObject({ upstream: 'origin/feature', sync: 'in_sync' });
+    expect(remoteHead('feature')).toBe(head(dir));
+  });
+});
