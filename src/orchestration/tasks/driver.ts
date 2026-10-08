@@ -29,6 +29,8 @@ import { TaskBridge } from '../bridge';
 import { TaskService } from './service';
 import { TaskWorkspaces } from './workspace';
 import { TaskAttempt, TaskSnapshot, OrchestrationError } from '../types';
+import { resolveInProject, resolveProjectCwd, type ProjectCwd } from '../../projects/chat';
+import type { ProjectName } from '../../projects/paths';
 import { WorkerDriver, WorkerHandle } from './scheduler';
 import { startProcessTurn } from '../process-turn';
 import { randomUUID } from 'crypto';
@@ -54,6 +56,15 @@ function boundedDiffText(text: string): string {
   return result.replace(/[\uD800-\uDBFF]$/, '');
 }
 
+/** The project folder must still be where admission pinned the task; a moved or renamed project never falls back. */
+async function startProject(gateway: GatewayConfig, task: TaskSnapshot): Promise<ProjectCwd | undefined> {
+  if (!task.project) return undefined;
+  const root = task.resourceProfile?.projectRoot ?? '';
+  const project = await resolveProjectCwd(gateway, task.project as ProjectName);
+  const dir = project.ok ? await resolveInProject(project.value.dir, root) : undefined;
+  if (!project.ok || !dir?.ok || dir.value !== root) throw new OrchestrationError('PROJECT_UNAVAILABLE', 'The chat\'s project folder is no longer available. No worker was started.');
+  return project.value;
+}
 export class ClaudeWorkerDriver implements WorkerDriver {
   private readonly instanceId = randomUUID();
   constructor(private readonly agent: AgentConfig, private readonly gateway: GatewayConfig, private readonly tasks: TaskService,
@@ -69,6 +80,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
   release(taskId: string): Promise<void> { return this.workspaces.release(taskId); }
   async start(task: TaskSnapshot, attempt: TaskAttempt, capacityReserved = false, providerPermit?: ProviderPermit): Promise<WorkerHandle> {
     if (!['default-worker', 'media-worker', 'skill-worker'].includes(task.targetProfile) || !task.capabilities.execute) throw new OrchestrationError('EXECUTION_DENIED');
+    const project = await startProject(this.gateway, task);
     if (task.targetProfile === 'default-worker' && task.resourceProfile?.mode === 'shared-lock') {
       const [project, identity] = await Promise.all([realpath(task.resourceProfile.projectRoot), realpath(this.agent.workspace)]);
       if (pathWithin(identity, project) || pathWithin(project, identity)) throw new OrchestrationError('SHARED_PROJECT_MUST_DIFFER_FROM_IDENTITY_WORKSPACE');
