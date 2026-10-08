@@ -662,8 +662,8 @@ export class SessionStore {
   }
 
   /** Get all session metadata (name) for an agent, keyed by sessionId. */
-  async getAllSessionMeta(agentId: string): Promise<Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string }>> {
-    const metaMap = new Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string }>();
+  async getAllSessionMeta(agentId: string): Promise<Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string; project?: string }>> {
+    const metaMap = new Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string; project?: string }>();
     const sessionsDir = path.join(this.agentsBaseDir, agentId, 'sessions');
     let entries: fs.Dirent[];
     try {
@@ -678,7 +678,7 @@ export class SessionStore {
         const chatId = e.name.slice(channel.length + 1);
         const index = await this.loadIndex(agentId, chatId, channel);
         if (index) {
-          for (const s of index.sessions) metaMap.set(s.id, { name: s.name, imageConfig: s.imageConfig, videoConfig: s.videoConfig, model: s.model });
+          for (const s of index.sessions) metaMap.set(s.id, { name: s.name, imageConfig: s.imageConfig, videoConfig: s.videoConfig, model: s.model, project: s.project });
         }
       });
     await Promise.all(reads);

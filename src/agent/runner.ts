@@ -82,7 +82,7 @@ import { isChatChannel } from '../history/types';
 import type { SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 import { resolveEnabledConnectors } from '../connectors/resolve';
-import { ProjectChatError, ProjectCwd, resolveProjectCwd } from '../projects/chat';
+import { ProjectChatError, ProjectCwd, resolveProjectCwd, sessionProjectView, SessionProjectView } from '../projects/chat';
 import { ProjectName, Result } from '../projects/paths';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
@@ -5507,7 +5507,11 @@ export class AgentRunner extends EventEmitter {
     return this.historyDb;
   }
 
-  getAllSessionMeta(): Promise<Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string }>> {
+  sessionProjectView(project: string | undefined): Promise<SessionProjectView> {
+    return sessionProjectView(this.gatewayConfig, project);
+  }
+
+  getAllSessionMeta(): Promise<Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string; project?: string }>> {
     return this.sessionStore.getAllSessionMeta(this.agentConfig.id);
   }
 
@@ -5906,7 +5910,7 @@ export class AgentRunner extends EventEmitter {
     return {
       sessionId: meta.id,
       sessionName: meta.name,
-      ...(meta.project ? { project: meta.project } : {}),
+      ...await this.sessionProjectView(meta.project),
       messageCount: meta.messageCount,
       archivedCount: meta.archivedCount ?? 0,
       ...context,

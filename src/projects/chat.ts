@@ -1,3 +1,4 @@
+import { promises as fsp } from 'fs';
 import * as path from 'path';
 import { GatewayConfig } from '../types';
 import { expandHome } from '../utils/paths';
@@ -34,7 +35,24 @@ export async function resolveProjectCwd(config: GatewayConfig, name: ProjectName
   if (!dir.ok) {
     return err(dir.error === 'not_found' ? { code: 'project_not_found' } : { code: 'project_unavailable', reason: dir.error });
   }
-  return ok({ name, dir: dir.value, trusted: config.gateway.projects?.trusted?.includes(name) ?? false });
+  return ok({ name, dir: dir.value, trusted: await projectTrusted(config, name) });
+}
+
+/** Named in gateway.projects.trusted, and its folder is a real directory, not a symlink. */
+export async function projectTrusted(config: GatewayConfig, name: string): Promise<boolean> {
+  if (!config.gateway.projects?.trusted?.includes(name)) return false;
+  const dir = path.join(resolveProjectsRoot(config), name);
+  return (await fsp.realpath(dir).catch(() => null)) === dir;
+}
+
+/** How every session response reports its project. */
+export interface SessionProjectView {
+  project: string | null;
+  trusted: boolean;
+}
+
+export async function sessionProjectView(config: GatewayConfig, project: string | undefined): Promise<SessionProjectView> {
+  return project ? { project, trusted: await projectTrusted(config, project) } : { project: null, trusted: false };
 }
 
 /** `requested`, relative to or absolute under the project folder, resolved through symlinks; path_escape if it leaves. */

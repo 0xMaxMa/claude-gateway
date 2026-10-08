@@ -1114,10 +1114,10 @@ export function createApiRouter(
         return {
           agentId,
           description: cfg?.description ?? '',
-          sessions: sessions.map((s) => {
+          sessions: await Promise.all(sessions.map(async (s) => {
             const meta = metaMap.get(s.sessionId);
-            return { ...s, sessionName: meta?.name ?? null, imageConfig: meta?.imageConfig ?? null, videoConfig: meta?.videoConfig ?? null, model: meta?.model ?? null };
-          }),
+            return { ...s, sessionName: meta?.name ?? null, imageConfig: meta?.imageConfig ?? null, videoConfig: meta?.videoConfig ?? null, model: meta?.model ?? null, ...await runner.sessionProjectView(meta?.project) };
+          })),
         };
       }),
     );
@@ -4528,10 +4528,11 @@ export function createApiRouter(
       const roleMap = new Map(historySessions.map((s) => [s.sessionId, s.lastMessageRole]));
       const enriched = {
         ...index,
-        sessions: index.sessions.map((s) => {
+        sessions: await Promise.all(index.sessions.map(async (s) => {
           const lastMessageRole = roleMap.get(s.id) ?? undefined;
-          return lastMessageRole !== undefined ? { ...s, lastMessageRole } : s;
-        }),
+          const view = { ...s, ...await runner.sessionProjectView(s.project) };
+          return lastMessageRole !== undefined ? { ...view, lastMessageRole } : view;
+        })),
       };
       res.json(enriched);
     } catch (err) {
@@ -4567,7 +4568,7 @@ export function createApiRouter(
     }
     try {
       const meta = await runner.createApiSession(chatId, promptText, explicitName, project);
-      res.status(201).json({ sessionId: meta.id, sessionName: meta.name, createdAt: meta.createdAt, ...(meta.project ? { project: meta.project } : {}) });
+      res.status(201).json({ sessionId: meta.id, sessionName: meta.name, createdAt: meta.createdAt, ...await runner.sessionProjectView(meta.project) });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

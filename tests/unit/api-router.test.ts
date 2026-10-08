@@ -109,6 +109,10 @@ class MockAgentRunner extends EventEmitter {
   getAllSessionMeta(): Promise<Map<string, { name: string; imageConfig?: unknown; videoConfig?: unknown; model?: string }>> {
     return this.getAllSessionMetaImpl();
   }
+
+  sessionProjectView(project?: string): Promise<{ project: string | null; trusted: boolean }> {
+    return Promise.resolve({ project: project ?? null, trusted: false });
+  }
 }
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────

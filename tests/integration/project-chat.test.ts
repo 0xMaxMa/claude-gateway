@@ -123,21 +123,42 @@ describe('POST /v1/agents/:id/sessions with project', () => {
   it('binds the session to the project and exposes it on create, list and info', async () => {
     const res = await create(h, 'alfred', KEYS.podWriter!, { project: 'site', name: 'Fix the footer' });
     expect(res.status).toBe(201);
-    expect(res.body).toMatchObject({ sessionName: 'Fix the footer', project: 'site' });
+    expect(res.body).toMatchObject({ sessionName: 'Fix the footer', project: 'site', trusted: false });
 
     const list = await supertest(h.app).get('/api/v1/agents/alfred/sessions')
       .set('Authorization', `Bearer ${KEYS.admin!.key}`).query({ chat_id: 'web' });
-    expect(list.body.sessions.find((s: { id: string }) => s.id === res.body.sessionId)).toMatchObject({ project: 'site' });
+    expect(list.body.sessions.find((s: { id: string }) => s.id === res.body.sessionId)).toMatchObject({ project: 'site', trusted: false });
 
     const info = await supertest(h.app).get(`/api/v1/agents/alfred/sessions/${res.body.sessionId}/info`)
       .set('Authorization', `Bearer ${KEYS.admin!.key}`).query({ chat_id: 'web' });
-    expect(info.body).toMatchObject({ sessionId: res.body.sessionId, project: 'site' });
+    expect(info.body).toMatchObject({ sessionId: res.body.sessionId, project: 'site', trusted: false });
   });
 
-  it('leaves a session without a project unchanged', async () => {
+  it('reports a session without a project as project null, untrusted', async () => {
     const res = await create(h, 'alfred', KEYS.podReader!, { name: 'plain' });
     expect(res.status).toBe(201);
-    expect(res.body).not.toHaveProperty('project');
+    expect(res.body).toMatchObject({ project: null, trusted: false });
+    const list = await supertest(h.app).get('/api/v1/agents/alfred/sessions')
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`).query({ chat_id: 'web' });
+    expect(list.body.sessions[0]).toMatchObject({ project: null, trusted: false });
+  });
+
+  it('marks a trusted project trusted on create, list and info', async () => {
+    await teardown(h);
+    h = await harness({ trusted: ['site'] });
+    const res = await create(h, 'alfred', KEYS.admin!, { project: 'site' });
+    expect(res.body).toMatchObject({ project: 'site', trusted: true });
+    const info = await supertest(h.app).get(`/api/v1/agents/alfred/sessions/${res.body.sessionId}/info`)
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`).query({ chat_id: 'web' });
+    expect(info.body).toMatchObject({ project: 'site', trusted: true });
+  });
+
+  it('does not trust a trusted name whose folder is a symlink', async () => {
+    await teardown(h);
+    h = await harness({ trusted: ['alias'] });
+    fs.symlinkSync(path.join(h.root, 'site'), path.join(h.root, 'alias'));
+    const res = await create(h, 'alfred', KEYS.admin!, { project: 'alias' });
+    expect(res.body).toMatchObject({ project: 'alias', trusted: false });
   });
 
   it.each([['..'], [''], ['a/b'], [42], ['.hidden']])('rejects project name %p with 400 invalid_name', async (project) => {
@@ -243,6 +264,20 @@ describe('a project-bound legacy chat turn', () => {
     expect(spawn!.cwd).toBe(path.join(h.base, 'agents', 'alfred', 'workspace'));
     expect(spawn!.argv).not.toContain('--setting-sources');
     expect(spawn!.argv).not.toContain('--append-system-prompt-file');
+  });
+
+  it('carries project and trusted on the admin sidebar list', async () => {
+    h = await harness({ trusted: ['site'] });
+    const bound = await projectSession(h);
+    const plain = (await create(h, 'alfred', KEYS.admin!, {})).body.sessionId as string;
+    expect((await send(h, bound, 'hi')).status).toBe(200);
+    expect((await send(h, plain, 'hi')).status).toBe(200);
+
+    const res = await supertest(h.app).get('/api/v1/agents/sessions').set('Authorization', `Bearer ${KEYS.admin!.key}`);
+    expect(res.status).toBe(200);
+    const sessions = res.body.agents.find((a: { agentId: string }) => a.agentId === 'alfred').sessions as { sessionId: string }[];
+    expect(sessions.find((s) => s.sessionId === bound)).toMatchObject({ project: 'site', trusted: true });
+    expect(sessions.find((s) => s.sessionId === plain)).toMatchObject({ project: null, trusted: false });
   });
 
   it('fails the next turn with PROJECT_UNAVAILABLE after a rename and never falls back to the workspace', async () => {
