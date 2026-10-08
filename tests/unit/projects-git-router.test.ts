@@ -184,7 +184,9 @@ describe('GET /api/v1/projects/:name/git', () => {
     const fresh = path.join(root, 'fresh');
     fs.mkdirSync(fresh);
     git(fresh, 'init', '-q', '-b', 'main');
-    expect((await status('fresh')).body).toMatchObject({ branch: null, detached: false, has_commits: false, last_commit: null });
+    expect((await status('fresh')).body).toMatchObject({ branch: 'main', detached: false, has_commits: false, last_commit: null });
+    git(fresh, 'symbolic-ref', 'HEAD', 'refs/heads/trunk');
+    expect((await status('fresh')).body).toMatchObject({ branch: 'trunk', detached: false, has_commits: false });
 
     const dir = makeRepo('app');
     git(dir, 'checkout', '-q', '--detach');

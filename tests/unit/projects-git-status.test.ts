@@ -190,9 +190,9 @@ describe('buildStatus', () => {
     expect([s.changes.length, s.change_count, s.truncated]).toEqual([CHANGES_LIMIT, 250, true]);
   });
 
-  it('reports an unborn branch as null with no commits', () => {
+  it('names an unborn branch, with no commits', () => {
     const s = buildStatus({ parsed: parseStatusV2(z('# branch.oid (initial)', '# branch.head main')), config: noConfig, lastCommit: null, operation: 'none' });
-    expect([s.branch, s.detached, s.has_commits]).toEqual([null, false, false]);
+    expect([s.branch, s.detached, s.has_commits]).toEqual(['main', false, false]);
   });
 
   it('picks the upstream remote, then origin, then the only remote', () => {

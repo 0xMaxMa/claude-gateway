@@ -213,7 +213,7 @@ for the `detail` of `hook_failed`.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `branch` | `string \| null` | Current branch. `null` when HEAD is detached, or the branch has no commits yet. |
+| `branch` | `string \| null` | Current branch, also before its first commit. `null` only when HEAD is detached. |
 | `detached` | `boolean` | HEAD is detached. |
 | `has_commits` | `boolean` | `false` right after `git init`. |
 | `upstream` | `string \| null` | The upstream, such as `origin/main`. |

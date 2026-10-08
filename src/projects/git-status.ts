@@ -282,8 +282,7 @@ export function buildStatus(input: {
   const picked = pickRemote(config, parsed.head);
   const sorted = [...parsed.changes].sort((a, b) => rank(a) - rank(b) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   return {
-    // The contract reports an unborn branch (no commits yet) as null, like a detached HEAD.
-    branch: parsed.oid === null ? null : parsed.head,
+    branch: parsed.head,
     detached,
     has_commits: parsed.oid !== null,
     upstream: parsed.upstream,
