@@ -39,6 +39,7 @@ Website checks validate JSON syntax only; they do not compare fields or types ag
 | `gateway.workers.containerEnvironment` / `agents[].workers.containerEnvironment` | Separate app-worker environment; does not inherit host settings |
 | `agents[].pstack` | Sets the agent up for the pstack Claude Code plugin, with per-role model IDs; see [pstack](../guide/pstack.md) |
 | `gateway.projects.root` | Pod-wide directory the [Projects API](../api/projects.md) browses, default `~/projects` |
+| `gateway.projects.trusted` | Project names whose own settings load in a [project-bound chat](../api/sessions.md#post-apiv1agentsagentidsessions): the repo's hooks, `.mcp.json` and `CLAUDE.md`. Default empty, so every project is untrusted and none of those load. Operator config only; the gateway never reads trust from the repo and no API sets it. Restart required |
 | `agents[].orchestration.tasks.projectRoot` | Default worker project directory; preserves the Agent identity workspace |
 | `agents[].session` | Legacy idle timeout and concurrency |
 | `gateway.history` / `agents[].history` | Chat/media retention |

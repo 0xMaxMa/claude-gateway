@@ -12,9 +12,11 @@ projects belong to the pod, not to an agent. `POST /api/v1/projects` and every
 `POST .../git/*` route also need `write: true` (or `admin: true`).
 
 **Feature detection.** `GET /api/v1/capabilities` lists
-`"projects": ["list", "create", "read", "git"]`. Show project browsing only when
-the array includes `"list"`, and the git UI only when it includes `"git"`. An
-older gateway omits the key, or lists projects without `"git"`.
+`"projects": ["list", "create", "read", "git", "chat"]`. Show project browsing
+only when the array includes `"list"`, the git UI only when it includes `"git"`,
+and [project-bound chat](/api/sessions#post-apiv1agentsagentidsessions) only when
+it includes `"chat"`. An older gateway omits the key, or lists projects without
+`"git"` or `"chat"`.
 
 **Root.** Projects live in `gateway.projects.root`, which defaults to
 `~/projects`. Every listing returns the root as `root`, resolved through

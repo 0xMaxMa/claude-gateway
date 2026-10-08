@@ -59,7 +59,8 @@
       ]
     },
     "projects": {
-      "root": "~/projects"
+      "root": "~/projects",
+      "trusted": []
     },
     "history": {
       "retentionDays": 60,

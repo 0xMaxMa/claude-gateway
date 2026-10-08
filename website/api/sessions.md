@@ -93,6 +93,10 @@ curl -H "X-Api-Key: my-secret-key-123" \
 }
 ```
 
+A session bound to a project also carries `project`, the project name it was
+created with, here and in the [info](#get-apiv1agentsagentidsessionssessionidinfo)
+response. The field is absent on other sessions.
+
 ---
 
 ## POST /api/v1/agents/:agentId/sessions {#post-apiv1agentsagentidsessions}
@@ -110,6 +114,7 @@ the only way a session comes into existence.
 | `chat_id` | Yes | Caller identity |
 | `prompt` | No | Initial user intent — used to auto-generate a session name |
 | `name` | No | Explicit session name (overrides auto-generated name) |
+| `project` | No | Name of a [project](/api/projects) under `gateway.projects.root`. Binds the session to that project for its whole life |
 
 ```bash
 curl -X POST \
@@ -126,6 +131,32 @@ curl -X POST \
   "createdAt": 1775737709000
 }
 ```
+
+**Project-bound sessions.** With `project`, the agent runs in the project
+folder instead of its workspace. Its persona still loads, and it gets a short
+note naming the project, the folder and the git state. The response then
+includes `"project": "<name>"`. You cannot change the project later.
+
+The project runs untrusted unless the operator lists its name in
+[`gateway.projects.trusted`](/reference/configuration). An untrusted project's
+hooks, `.mcp.json` and `CLAUDE.md` do not load.
+
+Check that `capabilities.projects` includes `"chat"` (see
+[`GET /capabilities`](/api/system)) before you send `project`.
+
+| Status | `code` | When |
+|--------|--------|------|
+| `400` | `invalid_name` | `project` is not a valid project name |
+| `403` | `forbidden_key` | The key cannot write to this agent, or is scoped to specific agents and so cannot reach pod projects |
+| `404` | `project_not_found` | No folder with that name exists under the projects root |
+| `409` | `project_unavailable` | The folder exists but cannot be used, for example a symlink that leaves the root. `reason` holds the projects error code |
+| `409` | `project_unsupported_agent` | The agent cannot run in a project folder. `reason` is `container` for container (app) agents, and `orchestrated` for agents whose API channel is orchestrated |
+
+Each check runs again when the session starts its process. If the folder has
+gone, been renamed or moved out of the root, the message fails with code
+`PROJECT_UNAVAILABLE` (uppercase) and the gateway does not fall back to the
+workspace. A synchronous [`POST /messages`](/api/messages) answers `409`. A
+streaming request gets an SSE `error` frame with that code.
 
 ---
 
