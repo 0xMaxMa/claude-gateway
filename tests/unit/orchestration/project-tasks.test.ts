@@ -1,0 +1,68 @@
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { OrchestrationStore } from '../../../src/orchestration/store';
+import { DecisionService } from '../../../src/orchestration/decisions';
+import { TaskService } from '../../../src/orchestration/tasks/service';
+import { TaskBridge } from '../../../src/orchestration/bridge';
+import { resolveProjectCwd } from '../../../src/projects/chat';
+import type { ProjectName } from '../../../src/projects/paths';
+import type { GatewayConfig } from '../../../src/types';
+
+interface Fixture {
+  root: string;
+  projectDir: string;
+  store: OrchestrationStore;
+  tasks: TaskService;
+  scopes: unknown[];
+  spawn: (action: string, args?: Record<string, unknown>) => Promise<{ status: number; body: any }>;
+}
+
+async function fixture(body: (f: Fixture) => Promise<void>, options: { bound?: boolean; mode?: 'host' | 'isolated-worktree' } = {}): Promise<void> {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'project-tasks-')));
+  const projectDir = join(root, 'projects', 'demo');
+  mkdirSync(projectDir, { recursive: true });
+  const gateway = { gateway: { projects: { root: join(root, 'projects') } } } as GatewayConfig;
+  const scopes: unknown[] = [];
+  const store = new OrchestrationStore(':memory:', 'a');
+  const tasks = new TaskService(store, { tasks: { workspaceMode: options.mode ?? 'host' } } as any, join(root, 'workspace'), async scope => {
+    scopes.push(scope);
+    return options.bound === false ? undefined : resolveProjectCwd(gateway, 'demo' as ProjectName);
+  });
+  const bridge = new TaskBridge(tasks);
+  try {
+    const input = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's1', source: 'api', accountId: 'u', principalId: 'u', chatId: 'c1', threadKey: '' }, text: 'Work in the project' });
+    const decision = new DecisionService(store).begin(input.conversationId, 'u', [input.inputId]);
+    await bridge.start();
+    bridge.issue({ role: 'agent', context: { ...input, ...decision, principalId: 'u', execute: true, writeMemory: false } }, join(root, 'ticket'), root);
+    const ticket = JSON.parse(readFileSync(join(root, 'ticket/ticket.json'), 'utf8'));
+    const spawn = async (action: string, args: Record<string, unknown> = {}) => {
+      const response = await fetch(ticket.url, { method: 'POST', headers: { Authorization: `Bearer ${ticket.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool: 'task_spawn', action_id: action, args: { title: action, instructions: 'Edit the code', target_profile: 'default-worker', ...args } }) });
+      return { status: response.status, body: await response.json() };
+    };
+    await body({ root, projectDir, store, tasks, scopes, spawn });
+  } finally {
+    await bridge.close(); store.close(); rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test('task_spawn asks the host which project the chat session is bound to', async () => {
+  await fixture(async ({ projectDir, store, scopes, spawn }) => {
+    const spawned = await spawn('first');
+    expect(spawned.status).toBe(200);
+    expect(scopes).toEqual([expect.objectContaining({ source: 'api', agentSessionId: 's1', chatId: 'c1' })]);
+    const task = store.task(spawned.body.taskId)!;
+    expect(task.project).toBe('demo');
+    expect(task.resourceProfile).toEqual({ projectRoot: projectDir, mode: 'host' });
+  });
+});
+
+test('a session with no project keeps the configured worker root', async () => {
+  await fixture(async ({ root, store, spawn }) => {
+    const spawned = await spawn('first');
+    const task = store.task(spawned.body.taskId)!;
+    expect(task.project).toBeUndefined();
+    expect(task.resourceProfile?.projectRoot).toBe(join(root, 'workspace'));
+  }, { bound: false });
+});
