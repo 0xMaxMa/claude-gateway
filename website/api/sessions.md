@@ -93,9 +93,11 @@ curl -H "X-Api-Key: my-secret-key-123" \
 }
 ```
 
-A session bound to a project also carries `project`, the project name it was
-created with, here and in the [info](#get-apiv1agentsagentidsessionssessionidinfo)
-response. The field is absent on other sessions.
+Every session response carries `project` and `trusted`: here, on create, in the
+[info](#get-apiv1agentsagentidsessionssessionidinfo) response and on the admin
+list `GET /v1/agents/sessions`. `project` is the project name the session was
+created with, or `null`. `trusted` is `true` only when the session has a
+project and the operator trusts it (see below); it is `false` otherwise.
 
 ---
 
@@ -134,12 +136,25 @@ curl -X POST \
 
 **Project-bound sessions.** With `project`, the agent runs in the project
 folder instead of its workspace. Its persona still loads, and it gets a short
-note naming the project, the folder and the git state. The response then
-includes `"project": "<name>"`. You cannot change the project later.
+note naming the project, the folder and the git state: the branch when its name
+is plain (`[\w./-]`, at most 100 characters), the change count and the remote
+host, never a remote URL. The response then includes `"project": "<name>"` and
+`"trusted"`. You cannot change the project later.
 
 The project runs untrusted unless the operator lists its name in
-[`gateway.projects.trusted`](/reference/configuration). An untrusted project's
-hooks, `.mcp.json` and `CLAUDE.md` do not load.
+[`gateway.projects.trusted`](/reference/configuration) and `<root>/<name>` is
+a real directory, not a symlink. Untrusted means one thing: the repo's own
+hooks, MCP servers (`.mcp.json`), settings and `CLAUDE.md` do not load. It does
+not restrict anything else. The agent still runs with the gateway's normal
+permissions and tools in that folder, so it can read and change the files and
+run commands there, and the repo's content (files, READMEs, commit messages)
+can still prompt-inject it. Treat an untrusted project as a folder the agent
+works in, not as a sandbox.
+
+Trust is decided by name. Anything that can write under the projects root,
+including an agent chatting in another project, can put files into a trusted
+folder, and the next trusted chat loads them. Trusting a project means trusting
+everyone who can write to the root.
 
 Check that `capabilities.projects` includes `"chat"` (see
 [`GET /capabilities`](/api/system)) before you send `project`.
@@ -156,7 +171,10 @@ Each check runs again when the session starts its process. If the folder has
 gone, been renamed or moved out of the root, the message fails with code
 `PROJECT_UNAVAILABLE` (uppercase) and the gateway does not fall back to the
 workspace. A synchronous [`POST /messages`](/api/messages) answers `409`. A
-streaming request gets an SSE `error` frame with that code.
+streaming request gets an SSE `error` frame with that code. The key check runs
+again on every send too: a key that cannot write to the agent, or is scoped to
+specific agents, gets `403` with `code: "forbidden_key"` from
+[`POST /messages`](/api/messages) to a project-bound session.
 
 On an orchestrated agent the deciding agent stays in its workspace and is told
 which project the chat is in. Every task it starts runs in the project folder,
