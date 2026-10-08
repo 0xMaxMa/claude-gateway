@@ -32,6 +32,7 @@ const ERRORS: Record<ProjectsErrorCode | GitErrorCode, { status: number; message
   conflicts_present: { status: 409, message: 'Resolve merge conflicts first' },
   operation_in_progress: { status: 409, message: 'A merge, rebase or similar operation is in progress' },
   not_fast_forward: { status: 409, message: 'Branch has diverged from its upstream' },
+  remote_rejected: { status: 409, message: 'The git remote refused the update' },
   dirty_would_overwrite: { status: 409, message: 'Local changes would be overwritten' },
   no_remote: { status: 409, message: 'No git remote is configured' },
   no_upstream: { status: 409, message: 'Branch has no upstream' },

@@ -29,6 +29,7 @@ export type GitErrorCode =
   | 'conflicts_present'
   | 'operation_in_progress'
   | 'not_fast_forward'
+  | 'remote_rejected'
   | 'dirty_would_overwrite'
   | 'no_remote'
   | 'no_upstream'
@@ -165,6 +166,8 @@ export async function getSummaries(root: string): Promise<GitResult<{ summaries:
 /** Ordered: the first pattern found in git's output names the failure. Raw output never reaches the client. */
 const OUTPUT_CODES: Array<[RegExp, Exclude<GitErrorCode, 'sensitive_files' | 'hook_failed'>]> = [
   [/index\.lock'?: File exists/i, 'index_locked'],
+  // A server hook or branch protection; its message is free text and must not read as a network or auth failure.
+  [/\[remote rejected\]/i, 'remote_rejected'],
   [/Authentication failed|could not read (Username|Password)|terminal prompts disabled|Permission denied \(publickey|error: 40[13]/i, 'auth_failed'],
   [/Could not resolve host|Connection refused|Connection timed out|Network is unreachable|Failed to connect|unable to access|does not appear to be a git repository|Could not read from remote repository/i, 'network'],
   [/\[rejected\]|non-fast-forward|fetch first|Not possible to fast-forward/i, 'not_fast_forward'],
@@ -322,9 +325,9 @@ export function commitAll(
     const commit = await git(dir, ['commit', '-q', '-m', req.message], GIT_TIMEOUTS.commit);
     if (!commit.ok) return commit;
     if (commit.value.code !== 0) {
-      const known = classify(commit.value);
-      if (known.code !== 'git_failed' || !(await hasCommitHook(dir))) return err(known);
-      return err({ code: 'hook_failed', detail: hookDetail(commit.value) });
+      // A hook's output is free text: a lint that prints "Could not resolve host" must not read as a network failure.
+      if (await hasCommitHook(dir)) return err({ code: 'hook_failed', detail: hookDetail(commit.value) });
+      return err(classify(commit.value));
     }
 
     const after = await statusAfter(dir);

@@ -354,8 +354,10 @@ curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json"
 The commit is refused while conflicts exist (`conflicts_present`), during a
 merge or similar (`operation_in_progress`), on a detached HEAD
 (`detached_head`), with nothing to commit (`nothing_to_commit`), or without an
-identity (`identity_missing`). When a hook rejects the commit, the response is
-`422 hook_failed` with the hook's output in `detail`, cut to 2000 bytes. The
+identity (`identity_missing`). When the commit fails and the repository has a
+`pre-commit`, `prepare-commit-msg`, or `commit-msg` hook, the response is
+`422 hook_failed` with the output in `detail`, cut to 2000 bytes, whatever the
+output says. The
 changes stay staged.
 
 ### POST /api/v1/projects/:name/git/pull {#post-git-pull}
@@ -381,7 +383,9 @@ leave `remote` as `null` (none is the upstream's or is named `origin`), the
 response is `409 no_upstream`.
 When `sync` is `upstream_gone`, the push publishes the branch again to the
 same remote. Returns `200` with `{ status: GitStatus | null }`. A push the remote rejects as
-non-fast-forward gets `409 not_fast_forward`.
+non-fast-forward gets `409 not_fast_forward`. A push the remote refuses for
+another reason, such as a protected branch or a server hook, gets
+`409 remote_rejected`.
 
 ### Git errors {#git-errors}
 
@@ -399,6 +403,7 @@ non-fast-forward gets `409 not_fast_forward`.
 | 409 | `conflicts_present` | `commit`, `pull`, or `push` while files have merge conflicts. |
 | 409 | `operation_in_progress` | `commit`, `pull`, or `push` during a merge, rebase, cherry-pick, revert, or bisect. |
 | 409 | `not_fast_forward` | `pull` on a diverged branch, or `push` rejected as non-fast-forward. |
+| 409 | `remote_rejected` | `push` refused by the remote, such as a protected branch or a server hook. |
 | 409 | `dirty_would_overwrite` | `pull` blocked by local changes. |
 | 409 | `no_remote` | `fetch`, `pull`, or `push` without a remote. |
 | 409 | `no_upstream` | `pull` without an upstream or with one that was deleted on the remote, or `push` without one when the status `remote` is `null` because several remotes exist and none is named `origin`. |
@@ -406,7 +411,7 @@ non-fast-forward gets `409 not_fast_forward`.
 | 409 | `detached_head` | `commit`, `pull`, or `push` on a detached HEAD. |
 | 409 | `busy` | Another git operation is running on this project. |
 | 409 | `index_locked` | `.git/index.lock` exists, usually from another git process. |
-| 422 | `hook_failed` | A commit hook failed. The body has `detail`, at most 2000 bytes. |
+| 422 | `hook_failed` | A commit failed in a repository with a commit hook. The body has `detail`, at most 2000 bytes. |
 | 502 | `auth_failed` | The remote refused the credentials, or none were available. |
 | 502 | `network` | The remote could not be reached. |
 | 504 | `timeout` | Git ran past its limit: 3 seconds for the `GET` routes, 10 seconds for `init`, `identity`, and the status reads around every mutating route, 60 seconds for fetch, pull, push, and commit. |

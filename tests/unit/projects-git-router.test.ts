@@ -484,6 +484,16 @@ describe('POST git/commit', () => {
     expect(git(dir, 'diff', '--cached', '--name-only')).toBe('');
   });
 
+  it('422s hook_failed even when the hook prints text that looks like a network or auth error', async () => {
+    const dir = makeRepo('app');
+    setIdentity(dir);
+    hook(dir, 'pre-commit', 'echo "fatal: Could not read from remote repository."\necho "Permission denied (publickey)."\nexit 1');
+    write(path.join(dir, 'new.txt'), 'x');
+    const res = await post('app', 'commit', { message: 'blocked' });
+    expect([res.status, res.body.code]).toEqual([422, 'hook_failed']);
+    expect(res.body.detail).toContain('Could not read from remote repository');
+  });
+
   it('409s conflicts_present during a conflicted merge', async () => {
     const dir = makeRepo('app');
     setIdentity(dir);
@@ -659,6 +669,18 @@ describe('POST git/push', () => {
     const res = await post('app', 'push');
     expect([res.status, res.body.code]).toEqual([409, 'not_fast_forward']);
     expect(remoteHead()).toBe(upstream);
+  });
+
+  it('409s remote_rejected when a server hook refuses the push', async () => {
+    const dir = makeRepo('app');
+    addRemote(dir);
+    write(path.join(remote, 'hooks', 'pre-receive'), '#!/bin/sh\necho "protected branch"\nexit 1\n');
+    fs.chmodSync(path.join(remote, 'hooks', 'pre-receive'), 0o755);
+    const before = remoteHead();
+    commitLocal(dir, 'l.txt', 'x');
+    const res = await post('app', 'push');
+    expect([res.status, res.body.code]).toEqual([409, 'remote_rejected']);
+    expect(remoteHead()).toBe(before);
   });
 
   it('409s no_remote and detached_head', async () => {
