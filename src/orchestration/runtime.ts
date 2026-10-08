@@ -250,7 +250,8 @@ export class AgentOrchestrationRuntime {
         if (agent.claude.extraFlags?.length) throw new OrchestrationError('PROFILE_FLAGS_CONFLICT');
       }
     } catch (error) { store.close(); releaseLock(); throw error; }
-    const tasks = new TaskService(store, agent.orchestration, agent.workspace, host.sessionProject);
+    const tasks = new TaskService(store, agent.orchestration, agent.workspace, host.sessionProject,
+      model => resolveWorkerHarness(agent, gateway, model ?? agent.claude.model).harness);
     const files = new TaskFiles(store, join(agent.workspace, '../..'), agent.type === 'app-agent' ? join(root, 'container-files') : undefined, agent.workspace);
     const safemodeAllowed = () => agent.type !== 'app-agent' && Boolean(gateway.safemode?.allowedAgentIds?.includes(agent.id));
     const gatewayAdapters = new Map<string, GatewayTaskAdapter>(agent.type === 'app-agent' ? [] : [['safemode',new SafemodeTaskAdapter(agent.id, safemodeAllowed)]]);

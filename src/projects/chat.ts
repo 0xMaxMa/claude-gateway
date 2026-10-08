@@ -12,10 +12,19 @@ export function resolveProjectsRoot(config: GatewayConfig): string {
   return expandHome(config.gateway.projects?.root ?? '~/projects');
 }
 
+/** Why an agent cannot chat in a project: its process or its workers would not run in the folder. */
+export type ProjectUnsupportedReason = 'container' | 'workspace_mode' | 'codex';
+
 export type ProjectChatError =
-  | { code: 'project_unsupported_agent'; reason: 'container' }
+  | { code: 'project_unsupported_agent'; reason: ProjectUnsupportedReason }
   | { code: 'project_not_found' }
   | { code: 'project_unavailable'; reason: ProjectsErrorCode };
+
+/** The uppercase send-time form: a turn that cannot run because its project failed to resolve. */
+export function projectUnavailableError(error: ProjectChatError): Error {
+  const reason = error.code === 'project_not_found' ? 'not_found' : error.reason;
+  return Object.assign(new Error(`Project folder is unavailable (${reason})`), { code: 'PROJECT_UNAVAILABLE', reason });
+}
 
 export const PROJECT_CHAT_ERRORS: Record<ProjectChatError['code'], { status: number; message: string }> = {
   project_unsupported_agent: { status: 409, message: 'This agent cannot chat in a project' },

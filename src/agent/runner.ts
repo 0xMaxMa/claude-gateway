@@ -82,7 +82,9 @@ import { isChatChannel } from '../history/types';
 import type { SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 import { resolveEnabledConnectors } from '../connectors/resolve';
-import { ProjectChatError, ProjectCwd, resolveProjectCwd, sessionProjectView, SessionProjectView } from '../projects/chat';
+import { ProjectChatError, ProjectCwd, ProjectUnsupportedReason, projectUnavailableError, resolveProjectCwd, sessionProjectView, SessionProjectView } from '../projects/chat';
+import { resolveOrchestrationConfig } from '../orchestration/config';
+import { resolveWorkerHarness } from '../orchestration/worker-harness';
 import { err, ProjectName, Result } from '../projects/paths';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
@@ -466,8 +468,18 @@ export class AgentRunner extends EventEmitter {
   }
 
   async resolveApiProject(name: ProjectName): Promise<Result<ProjectCwd, ProjectChatError>> {
-    if (this.agentConfig.type === 'app-agent') return { ok: false, error: { code: 'project_unsupported_agent', reason: 'container' } };
+    const reason = this.projectUnsupportedReason();
+    if (reason) return err({ code: 'project_unsupported_agent', reason });
     return resolveProjectCwd(this.gatewayConfig, name);
+  }
+
+  /** Orchestrated chats run their work in tasks, so the agent's default worker setup must be able to run in the folder. */
+  private projectUnsupportedReason(): ProjectUnsupportedReason | undefined {
+    if (this.agentConfig.type === 'app-agent') return 'container';
+    if (!this.apiChannelOrchestrated()) return undefined;
+    if (resolveOrchestrationConfig(this.agentConfig.orchestration).tasks.workspaceMode !== 'host') return 'workspace_mode';
+    if (resolveWorkerHarness(this.agentConfig, this.gatewayConfig, this.agentConfig.claude.model).harness === 'codex') return 'codex';
+    return undefined;
   }
 
   private async sendLinkedOrchestrationChannel(...[binding, text, _id, file]: Parameters<ChannelSender>): ReturnType<ChannelSender> {
@@ -683,6 +695,9 @@ export class AgentRunner extends EventEmitter {
         const prior = orchestration.store.apiReceipt(scope, ingressKey, requestFingerprint);
         if (prior) return { text: '', attachments: [], inputId: prior.inputId };
       }
+      // Fail the turn here, with the code the web shows, instead of leaving a task_spawn error for the model to relay.
+      const project = await this.apiSessionProjectCwd(sessionId);
+      if (project && !project.ok) throw projectUnavailableError(project.error);
       await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId);
       this.apiChatIds.set(sessionId, chatId);
       const media = opts.mediaFiles?.length ? await promoteUiUploads(this.agentsBaseDir, this.agentConfig.id, sessionId, opts.mediaFiles, this.logger, preparationDir) : [];

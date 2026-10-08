@@ -18,7 +18,7 @@ interface Fixture {
   spawn: (action: string, args?: Record<string, unknown>) => Promise<{ status: number; body: any }>;
 }
 
-async function fixture(body: (f: Fixture) => Promise<void>, options: { bound?: boolean; mode?: 'host' | 'isolated-worktree' } = {}): Promise<void> {
+async function fixture(body: (f: Fixture) => Promise<void>, options: { bound?: boolean; mode?: 'host' | 'isolated-worktree'; harness?: 'claude' | 'codex' } = {}): Promise<void> {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'project-tasks-')));
   const projectDir = join(root, 'projects', 'demo');
   mkdirSync(projectDir, { recursive: true });
@@ -28,7 +28,7 @@ async function fixture(body: (f: Fixture) => Promise<void>, options: { bound?: b
   const tasks = new TaskService(store, { tasks: { workspaceMode: options.mode ?? 'host' } } as any, join(root, 'workspace'), async scope => {
     scopes.push(scope);
     return options.bound === false ? undefined : resolveProjectCwd(gateway, 'demo' as ProjectName);
-  });
+  }, () => options.harness ?? 'claude');
   const bridge = new TaskBridge(tasks);
   try {
     const input = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's1', source: 'api', accountId: 'u', principalId: 'u', chatId: 'c1', threadKey: '' }, text: 'Work in the project' });
@@ -123,6 +123,21 @@ for (const mode of ['isolated-worktree', 'shared-lock'] as const) {
     }, { mode: mode as any });
   });
 }
+
+test('a project-bound chat cannot queue a task on the Codex worker harness, and no receipt is committed', async () => {
+  await fixture(async ({ store, spawn }) => {
+    const spawned = await spawn('first');
+    expect(spawned.body.error).toBe('PROJECT_UNSUPPORTED_AGENT');
+    expect(store.all('SELECT id FROM tasks')).toHaveLength(0);
+    expect(store.all('SELECT action_id FROM task_commands')).toHaveLength(0);
+  }, { harness: 'codex' });
+});
+
+test('an unbound chat still queues tasks on the Codex worker harness', async () => {
+  await fixture(async ({ spawn }) => {
+    expect((await spawn('first')).status).toBe(200);
+  }, { bound: false, harness: 'codex' });
+});
 
 test('a retried task_spawn returns the committed task even after the project folder moved', async () => {
   await fixture(async ({ root, projectDir, spawn }) => {

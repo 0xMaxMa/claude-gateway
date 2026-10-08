@@ -139,7 +139,8 @@ function recordAction(task: TaskSnapshot, revision: number, command: string, out
 export class TaskService {
   private config;
   readonly pool: WorkerPool;
-  constructor(readonly store: OrchestrationStore, config?: OrchestrationConfig, private readonly defaultProjectRoot = '', private readonly sessionProject?: SessionProject) { this.config = resolveOrchestrationConfig(config); this.pool = new WorkerPool(store); }
+  constructor(readonly store: OrchestrationStore, config?: OrchestrationConfig, private readonly defaultProjectRoot = '', private readonly sessionProject?: SessionProject,
+    private readonly workerHarness?: (model?: string) => 'claude' | 'codex') { this.config = resolveOrchestrationConfig(config); this.pool = new WorkerPool(store); }
   configure(config?: OrchestrationConfig): void { this.config = resolveOrchestrationConfig(config); }
 
   /** A project-bound chat's tasks run in its project folder. Resolved before the synchronous spawn transaction. */
@@ -149,6 +150,7 @@ export class TaskService {
     const project = conversation && await this.sessionProject?.({ source: String(conversation.source) as ConversationScope['source'], agentSessionId: String(conversation.agent_session_id), chatId: String(conversation.chat_id) });
     if (!project) return undefined;
     if (this.config.tasks.workspaceMode !== 'host') throw new OrchestrationError('PROJECT_UNSUPPORTED_AGENT', 'No task was queued: project chats need host workspace mode.');
+    if (this.workerHarness?.(context.model) === 'codex') throw new OrchestrationError('PROJECT_UNSUPPORTED_AGENT', 'No task was queued: project tasks cannot run on the Codex worker harness.');
     if (!project.ok) throw new OrchestrationError('PROJECT_UNAVAILABLE', 'No task was queued: this chat\'s project folder is no longer available.');
     if (workingDirectory === undefined) return { name: project.value.name, dir: await this.priorProjectDir(context, project.value, continueTaskId) ?? project.value.dir };
     const dir = typeof workingDirectory === 'string' ? await resolveInProject(project.value.dir, workingDirectory) : undefined;

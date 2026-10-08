@@ -150,7 +150,7 @@ Check that `capabilities.projects` includes `"chat"` (see
 | `403` | `forbidden_key` | The key cannot write to this agent, or is scoped to specific agents and so cannot reach pod projects |
 | `404` | `project_not_found` | No folder with that name exists under the projects root |
 | `409` | `project_unavailable` | The folder exists but cannot be used, for example a symlink that leaves the root. `reason` holds the projects error code |
-| `409` | `project_unsupported_agent` | The agent cannot run in a project folder. `reason` is `container` for container (app) agents |
+| `409` | `project_unsupported_agent` | The agent cannot run in a project folder. `reason` is `container` for container (app) agents, `workspace_mode` when an orchestrated agent's `tasks.workspaceMode` is not `host`, or `codex` when its workers would run on the Codex harness |
 
 Each check runs again when the session starts its process. If the folder has
 gone, been renamed or moved out of the root, the message fails with code

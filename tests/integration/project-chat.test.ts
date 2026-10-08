@@ -45,7 +45,7 @@ function agentConfig(base: string, id: string, extra: Partial<AgentConfig> = {})
   };
 }
 
-async function harness(opts: { trusted?: string[]; orchestration?: boolean } = {}): Promise<Harness> {
+async function harness(opts: { trusted?: string[]; orchestration?: boolean; extra?: Record<string, Partial<AgentConfig>> } = {}): Promise<Harness> {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'project-chat-')));
   const root = path.join(base, 'projects');
   fs.mkdirSync(path.join(root, 'site'), { recursive: true });
@@ -63,6 +63,7 @@ async function harness(opts: { trusted?: string[]; orchestration?: boolean } = {
     agentConfig(base, 'alfred'),
     agentConfig(base, 'warrior'),
     agentConfig(base, 'boxed', { type: 'app-agent', container: 'boxed-container' }),
+    ...Object.entries(opts.extra ?? {}).map(([id, extra]) => agentConfig(base, id, extra)),
   ];
   gateway.agents = configs;
   const runners = configs.map((c) => new AgentRunner(c, gateway));
@@ -405,12 +406,31 @@ describe('a project-bound legacy chat turn', () => {
 
 describe('project chat on an orchestrated gateway', () => {
   let h: Harness;
-  beforeEach(async () => { h = await harness({ orchestration: true }); });
+  beforeEach(async () => {
+    h = await harness({ orchestration: true, extra: {
+      locked: { orchestration: { tasks: { workspaceMode: 'shared-lock' } } } as Partial<AgentConfig>,
+      codexy: { workers: { harness: 'codex' } } as Partial<AgentConfig>,
+    } });
+  });
   afterEach(async () => { await teardown(h); });
 
   it('binds the session to the project, since its workers run there', async () => {
     const res = await create(h, 'alfred', KEYS.admin!, { project: 'site' });
     expect(res.status).toBe(201);
     expect(res.body).toMatchObject({ project: 'site' });
+  });
+
+  it.each([['locked', 'workspace_mode'], ['codexy', 'codex']])('refuses %s at create with 409 project_unsupported_agent', async (agent, reason) => {
+    const res = await create(h, agent, KEYS.admin!, { project: 'site' });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'project_unsupported_agent', reason });
+  });
+
+  it('fails a send with 409 PROJECT_UNAVAILABLE once the project folder is gone', async () => {
+    const sessionId = await projectSession(h);
+    fs.rmSync(path.join(h.root, 'site'), { recursive: true });
+    const res = await send(h, sessionId, 'hi');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROJECT_UNAVAILABLE');
   });
 });
