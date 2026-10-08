@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { OrchestrationStore } from '../../../src/orchestration/store';
@@ -79,6 +79,20 @@ test('a model-supplied working directory stays inside the project or the spawn f
     expect(store.all('SELECT id FROM tasks')).toHaveLength(0);
     const inside = await spawn('inside', { working_directory: join(projectDir, 'src') });
     expect(store.task(inside.body.taskId)).toMatchObject({ project: 'demo', resourceProfile: { projectRoot: join(projectDir, 'src') } });
+  });
+});
+
+test('a working directory may be relative to the project folder, and must be a folder', async () => {
+  await fixture(async ({ projectDir, store, spawn }) => {
+    mkdirSync(join(projectDir, 'src'));
+    writeFileSync(join(projectDir, 'README.md'), 'hi');
+    const relative = await spawn('relative', { working_directory: 'src' });
+    expect(store.task(relative.body.taskId)).toMatchObject({ project: 'demo', resourceProfile: { projectRoot: join(projectDir, 'src') } });
+    for (const [action, dir] of [['file', join(projectDir, 'README.md')], ['relative-file', 'README.md'], ['missing', 'nope']]) {
+      const spawned = await spawn(action, { working_directory: dir });
+      expect({ action, error: spawned.body.error }).toEqual({ action, error: 'WORKING_DIRECTORY_OUTSIDE_PROJECT' });
+    }
+    expect(store.all('SELECT id FROM tasks')).toHaveLength(1);
   });
 });
 

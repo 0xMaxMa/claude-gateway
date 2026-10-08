@@ -183,7 +183,7 @@ or in a `working_directory` inside it. Task failures use uppercase codes:
 | Task `failure.code` or `task_spawn` error | When |
 |--------|------|
 | `PROJECT_UNAVAILABLE` | The project folder is gone, renamed or moved when the task is queued or its worker starts |
-| `WORKING_DIRECTORY_OUTSIDE_PROJECT` | `working_directory` does not resolve, through symlinks, to a folder inside the project |
+| `WORKING_DIRECTORY_OUTSIDE_PROJECT` | `working_directory` does not resolve, through symlinks, to an existing folder inside the project. It may be absolute or relative to the project folder |
 | `PROJECT_UNSUPPORTED_AGENT` | Workers do not run in `host` workspace mode, or the task would run on the Codex worker harness |
 
 ---

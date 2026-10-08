@@ -78,6 +78,7 @@ import { HistoryDB } from '../history/db';
 import { RuntimeProfile } from '../session/runtime-profile';
 import { OrchestrationStore, AcceptInput, INTAKE_RECOVERY_PREFIX, channelVoiceKey, payloadHash } from './store';
 import { contextScaledTimeouts, resolveOrchestrationConfig } from './config';
+import { resolveWorkerHarness } from './worker-harness';
 import { SessionProject, mergeContextRefs, TaskService, taskIndexEntry } from './tasks/service';
 import { projectLocation } from '../projects/chat';
 import { DecisionService, DecisionReceipt } from './decisions';
@@ -1402,7 +1403,7 @@ export class AgentOrchestrationRuntime {
       if (input.scope.source === 'telegram') ticket.profile.overlay += '\nTelegram response layout: use short paragraphs and numbered or bulleted lists for summaries, task status and comparisons. Avoid Markdown tables unless the user explicitly requests a table; wide tables are difficult to read on a phone. Keep command names inline and preserve their literal characters. Rewrite worker reports into this layout rather than copying their tables.';
       // Git state changes every turn, so only the project's location belongs in this cached prefix.
       const project = await this.host.sessionProject?.(input.scope);
-      if (project?.ok) ticket.profile.overlay += `\n${projectLocation(project.value)} Every task you start runs in that folder; working_directory may only name a folder inside it.`;
+      if (project?.ok) ticket.profile.overlay += `\n${projectLocation(project.value)} Every task you start runs in that folder; working_directory may only name an existing folder inside it, absolute or relative to it.`;
       if (this.agent.type === 'app-agent') ticket.profile.overlay += '\nContainer execution is mandatory. Workers run only inside this app container. No host tools or host services are available. Use default-worker for app execution. Gateway media/browser/memory tools are unavailable in this container profile.';
       // Stable metadata belongs in the system prefix, not in every resumed user message.
       // A changed catalog intentionally invalidates that prefix so new skills stay visible.

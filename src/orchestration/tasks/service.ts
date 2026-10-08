@@ -6,6 +6,7 @@ import {computerActionText,computerOutcomeText} from '../../automation/computer-
 import {browserOutcomeText} from '../../automation/browser-outcome';
 import {textCommand} from '../../automation/direct-command';
 import { parentVerifiableBrowserResult } from '../../jev/browser-contract';
+import { promises as fsp } from 'fs';
 import { isAbsolute } from 'path';
 import { resolveInProject, type ProjectChatError, type ProjectCwd } from '../../projects/chat';
 import type { Result } from '../../projects/paths';
@@ -154,7 +155,7 @@ export class TaskService {
     if (!project.ok) throw new OrchestrationError('PROJECT_UNAVAILABLE', 'No task was queued: this chat\'s project folder is no longer available.');
     if (workingDirectory === undefined) return { name: project.value.name, dir: await this.priorProjectDir(context, project.value, continueTaskId) ?? project.value.dir };
     const dir = typeof workingDirectory === 'string' ? await resolveInProject(project.value.dir, workingDirectory) : undefined;
-    if (!dir?.ok) throw new OrchestrationError('WORKING_DIRECTORY_OUTSIDE_PROJECT', `No task was queued: working_directory must be an existing folder inside this chat's project folder ${project.value.dir}.`);
+    if (!dir?.ok || !(await fsp.stat(dir.value).catch(() => null))?.isDirectory()) throw new OrchestrationError('WORKING_DIRECTORY_OUTSIDE_PROJECT', `No task was queued: working_directory must be an existing folder inside this chat's project folder ${project.value.dir}, absolute or relative to it.`);
     return { name: project.value.name, dir: dir.value };
   }
   /** A follow-up stays in the folder its prior task ran in, while that folder is still inside the project. */
@@ -313,7 +314,8 @@ export class TaskService {
   }
   spawn(context: CommandContext, command: SpawnTask): TaskSnapshot {
     if(command.computerInputs!==undefined){command.computerInputs=ComputerInputs.parse(command.computerInputs);if(command.gatewayTarget?.adapter!=='computer')throw new OrchestrationError('INVALID_INPUT');}
-    if (command.workingDirectory !== undefined) {
+    // A project pin already validated working_directory and is the root the task runs in; the raw value is only payload.
+    if (command.workingDirectory !== undefined && !command.project) {
       if (this.config.tasks.workspaceMode !== 'host') throw new OrchestrationError('WORKING_DIRECTORY_HOST_ONLY');
       if (typeof command.workingDirectory !== 'string' || !isAbsolute(command.workingDirectory) || /[\r\n\0]/.test(command.workingDirectory) || Buffer.byteLength(command.workingDirectory) > 4096) throw new OrchestrationError('INVALID_WORKING_DIRECTORY');
     }
