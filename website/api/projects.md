@@ -389,7 +389,8 @@ were.
 ### POST /api/v1/projects/:name/git/push {#post-git-push}
 
 Pushes the current branch to its upstream with an explicit, unforced refspec,
-so a `+` refspec in `remote.<name>.push` never applies. When `sync` is
+so a `+` refspec in `remote.<name>.push` never applies. A branch with no
+commits gets `409 no_commits`, with or without an upstream. When `sync` is
 `upstream_mismatch`, the response is `409 upstream_mismatch` and nothing is
 pushed. With no upstream, it publishes the branch under the same name with
 `git push -u -- <remote> <branch>` to the status's `remote`, the same remote
@@ -425,6 +426,7 @@ another reason, such as a protected branch or a server hook, gets
 | 409 | `no_remote` | `fetch`, `pull`, or `push` without a remote. |
 | 409 | `no_upstream` | `pull` without an upstream or with one that was deleted on the remote, or `push` without one when the status `remote` is `null` because several remotes exist and none is named `origin`. |
 | 409 | `upstream_mismatch` | `push` when `sync` is `upstream_mismatch`. |
+| 409 | `no_commits` | `push` on a branch with no commits (`has_commits` is `false`). |
 | 409 | `detached_head` | `commit`, `pull`, or `push` on a detached HEAD. |
 | 409 | `busy` | Another git operation is running on this project. |
 | 409 | `index_locked` | `.git/index.lock` exists, usually from another git process. |

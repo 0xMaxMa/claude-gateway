@@ -744,6 +744,19 @@ describe('POST git/push', () => {
     expect(remoteHead()).toBe(before);
   });
 
+  it('409s no_commits on a branch with no commits, with or without an upstream setting', async () => {
+    const fresh = path.join(root, 'fresh');
+    fs.mkdirSync(fresh);
+    git(fresh, 'init', '-q', '-b', 'main');
+    git(base, 'init', '-q', '--bare', '-b', 'main', remote);
+    git(fresh, 'remote', 'add', 'origin', remote);
+    const res = await post('fresh', 'push');
+    expect([res.status, res.body]).toEqual([409, { error: 'Branch has no commits to publish', code: 'no_commits' }]);
+
+    git(root, 'clone', '-q', remote, 'clone');
+    expect((await post('clone', 'push')).body.code).toBe('no_commits');
+  });
+
   it('passes the remote name after --, so a remote named like an option never runs', async () => {
     const dir = makeRepo('app');
     git(base, 'init', '-q', '--bare', '-b', 'main', remote);

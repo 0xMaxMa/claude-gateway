@@ -34,6 +34,7 @@ export type GitErrorCode =
   | 'no_remote'
   | 'no_upstream'
   | 'upstream_mismatch'
+  | 'no_commits'
   | 'detached_head'
   | 'auth_failed'
   | 'network'
@@ -400,6 +401,7 @@ export function pushBranch(root: string, name: ProjectName): Promise<GitResult<{
     if (blocked) return blocked;
     if (config.remotes.length === 0) return fail('no_remote');
     if (status.branch === null) return fail('detached_head');
+    if (!status.has_commits) return fail('no_commits');
     if (status.sync === 'upstream_mismatch') return fail('upstream_mismatch');
 
     const branchRef = `refs/heads/${status.branch}`;

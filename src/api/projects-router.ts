@@ -37,6 +37,7 @@ const ERRORS: Record<ProjectsErrorCode | GitErrorCode, { status: number; message
   no_remote: { status: 409, message: 'No git remote is configured' },
   no_upstream: { status: 409, message: 'Branch has no upstream' },
   upstream_mismatch: { status: 409, message: 'Branch tracks an upstream with a different name' },
+  no_commits: { status: 409, message: 'Branch has no commits to publish' },
   detached_head: { status: 409, message: 'HEAD is detached' },
   auth_failed: { status: 502, message: 'The git remote refused the credentials' },
   network: { status: 502, message: 'Could not reach the git remote' },
