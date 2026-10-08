@@ -497,6 +497,12 @@ export interface GatewayConfig {
      */
     projects?: {
       root?: string;
+      /**
+       * Project names whose own `.claude/` settings, hooks, `.mcp.json` and
+       * CLAUDE.md load in project-bound chats. Every other project runs with
+       * `--setting-sources user`.
+       */
+      trusted?: string[];
     };
     /**
      * true (default) = headless backend (claude --print + stream-json).

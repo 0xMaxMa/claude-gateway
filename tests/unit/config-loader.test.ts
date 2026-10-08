@@ -689,4 +689,27 @@ describe('config-loader', () => {
       expect(() => loadRoot(configDir)).toThrow(/gateway\.projects\.root .* must not be or contain/);
     });
   });
+
+  describe('gateway.projects.trusted', () => {
+    const loadTrusted = (trusted: unknown) => {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/tmp', projects: { trusted } }, agents: [] }));
+      return loadConfig(configPath);
+    };
+
+    it('accepts a list of project names', () => {
+      expect(loadTrusted(['site', 'api.v2']).gateway.projects?.trusted).toEqual(['site', 'api.v2']);
+      expect(loadTrusted([]).gateway.projects?.trusted).toEqual([]);
+    });
+
+    it('rejects anything but an array of strings', () => {
+      expect(() => loadTrusted('site')).toThrow(/gateway\.projects\.trusted must be an array of project names/);
+      expect(() => loadTrusted([1])).toThrow(/gateway\.projects\.trusted must be an array of project names/);
+    });
+
+    it('rejects an entry that is not a valid project name', () => {
+      expect(() => loadTrusted(['ok', '../etc'])).toThrow(/gateway\.projects\.trusted contains an invalid project name "\.\.\/etc"/);
+      expect(() => loadTrusted([''])).toThrow(/gateway\.projects\.trusted contains an invalid project name ""/);
+    });
+  });
 });

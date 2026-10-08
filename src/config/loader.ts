@@ -7,6 +7,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { GatewayConfig, Logger } from '../types';
 import { expandHome, pathWithin } from '../utils/paths';
+import { parseProjectName } from '../projects/paths';
 import { resolveGatewayPublicUrl } from './public-url';
 import { upgradeAgentWhatsAppAccounts } from './whatsapp-accounts';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../orchestration/config';
@@ -203,6 +204,17 @@ function validateProjectsRoot(raw: unknown, configPath: string): void {
         `gateway.projects.root "${raw}" must not be or contain ${guarded}; the Projects API would expose it`,
       );
     }
+  }
+}
+
+/** Trust is operator config only, so a name the API could never resolve is a typo worth failing on. */
+function validateTrustedProjects(raw: unknown): void {
+  if (!Array.isArray(raw) || raw.some((n) => typeof n !== 'string')) {
+    throw new ConfigValidationError('gateway.projects.trusted must be an array of project names');
+  }
+  const bad = raw.find((n) => !parseProjectName(n).ok);
+  if (bad !== undefined) {
+    throw new ConfigValidationError(`gateway.projects.trusted contains an invalid project name "${bad}"`);
   }
 }
 
@@ -410,6 +422,8 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
     }
     const root = (projects as Record<string, unknown>).root;
     if (root !== undefined) validateProjectsRoot(root, configPath);
+    const trusted = (projects as Record<string, unknown>).trusted;
+    if (trusted !== undefined) validateTrustedProjects(trusted);
   }
 
   // Interpolate each agent individually — skip agents with missing env vars
