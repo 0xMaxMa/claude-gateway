@@ -50,6 +50,8 @@ test('a goal out of steps fails with COMPUTER_STEP_LIMIT and notifies the agent'
   expect(stopped.state).toBe('failed');expect(stopped.failure?.code).toBe('COMPUTER_STEP_LIMIT');
   expect(f.notified()).toBe(1);
   expect(automationSession(stopped)?.status).not.toBe('closed');
+    // The device grant is untouched, so the owner's next command still reaches the Mac.
+    expect(acceptsDirectCommand(stopped)).toBe(true);
  }finally{f.close();}
 });
 

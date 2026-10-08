@@ -49,6 +49,14 @@ test('a goal out of steps fails with a clear code and keeps the session',async()
   const outcome=await f.run(f.task,'r1','make notes');
   expect(outcome.type).toBe('failed');expect(outcome.failure.code).toBe('COMPUTER_STEP_LIMIT');
   expect(outcome.failure.message).toContain(`stopped after 8 desktop actions, the limit for one goal (${COMPUTER_GOAL_MAX_STEPS})`);
+  // Owner-facing sentences first, then a separate agent-only instruction.
+  const [owner,agent]=outcome.failure.message.split(' Agent: ');
+  expect(owner).toMatch(/^Computer goal not finished: stopped after 8 desktop actions/);
+  expect(owner).toContain('the Mac is still under control');
+  expect(owner).toContain('send the next command');
+  expect(owner).not.toContain('task_status');expect(owner).not.toContain('task_update');
+  expect(agent).toContain('task_status computer_evidence=recorded');expect(agent).toContain('task_update');
+  // The device session stays open: end_session is never called for a step-limit stop.
   expect(f.ended()).toHaveLength(0);
  }finally{await f.close();}
 });

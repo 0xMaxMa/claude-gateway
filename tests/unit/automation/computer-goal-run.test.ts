@@ -242,6 +242,55 @@ describe('a yes to a goal step resumes the goal',()=>{
  });
 });
 
+// Evidence is a courtesy for whoever reads the result: a failed read (device
+// offline, access revoked) must never turn a finished goal into an error, or the
+// caller skips releasing the device session.
+describe('goal evidence is best-effort',()=>{
+ const failingObserve=(f:ReturnType<typeof fixture>,from:number,code:string)=>{const call=f.deps.call;let actions=0;
+  f.deps.call=async(...a)=>{if(a[0]==='computer_action')actions++;if(a[0]==='computer_observe'&&actions>=from)throw Error(code);return call(...a);};};
+ test.each(['DEVICE_OFFLINE','ACCESS_DENIED','STALE_OBSERVATION'])('a fast path goal still reaches GOAL_REACHED when the closing read fails with %s',async code=>{
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);failingObserve(f,3,code);
+  const r=await spawn(f,'open YouTube in Chrome');
+  expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:3});
+ });
+ test.each(['DEVICE_OFFLINE','ACCESS_DENIED','STALE_OBSERVATION'])('a goal out of steps still reports STEP_LIMIT when the closing read fails with %s',async code=>{
+  const f=fixture([finder,()=>notes(0),()=>notes(1),()=>notes(2)],[{pick:'open:com.apple.Notes'},{pick:'press:c8'},{pick:'press:c8'}]);failingObserve(f,2,code);
+  const r=await spawn(f,'make notes',{maxSteps:2});
+  expect(r).toMatchObject({status:'blocked',reason:'STEP_LIMIT',steps:2});
+ });
+ test('a failed closing read leaves a trace the agent can read, without the provider error text',async()=>{
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);failingObserve(f,3,'DEVICE_OFFLINE secret-detail');
+  const r=await spawn(f,'open YouTube in Chrome');
+  expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED'});
+  expect(waited(r)).toBe('GOAL_EVIDENCE_UNAVAILABLE');
+  expect(JSON.stringify(r.trace.events)).not.toContain('secret-detail');
+ });
+ test('a good observation is kept when only the closing screenshot fails',async()=>{
+  const withShot=(o:()=>any)=>()=>({...o(),screenshotAvailable:true});
+  const f=fixture([finder,withShot(chrome),withShot(()=>chrome('youtube.com')),withShot(()=>chrome('youtube.com'))]);
+  const seen:any[]=[];f.deps.observation=o=>{seen.push(o);};
+  f.deps.snapshot=async()=>{throw Error('SCREENSHOT_FAILED');};
+  const r=await spawn(f,'open YouTube in Chrome');
+  expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED'});
+  expect(seen.length).toBeGreaterThan(0);
+  expect(r.observation).toMatchObject({application:'com.google.Chrome'});
+ });
+ test('lost authorization during the closing read still stops the run with ACCESS_DENIED',async()=>{
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);
+  let actions=0;const call=f.deps.call;f.deps.call=async(...a)=>{if(a[0]==='computer_action')actions++;return call(...a);};
+  f.deps.authorized=()=>actions<3;
+  const r=await spawn(f,'open YouTube in Chrome');
+  expect(r).toMatchObject({status:'blocked',reason:'ACCESS_DENIED'});
+ });
+ test('an interruption raised during the closing read is reported as interrupted, not swallowed as missing evidence',async()=>{
+  const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);const interrupt=new AbortController();
+  f.deps.interruptSignal=interrupt.signal;
+  const call=f.deps.call;let actions=0;f.deps.call=async(...a)=>{if(a[0]==='computer_action')actions++;if(a[0]==='computer_observe'&&actions>=3){interrupt.abort();throw Error('DEVICE_OFFLINE');}return call(...a);};
+  const r=await spawn(f,'open YouTube in Chrome');
+  expect(r).toMatchObject({status:'cancelled',reason:'REVISION_SUPERSEDED'});
+ });
+});
+
 describe('URL fast path for agent goals',()=>{
  test('"open YouTube in Chrome" from Finder opens Chrome, then types the address: no model call',async()=>{
   const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);

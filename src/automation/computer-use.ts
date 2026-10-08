@@ -577,10 +577,14 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     // This acknowledges dispatch, not verified goal completion. Agent control
     // still gathers fresh evidence; unknown outcomes take reconciliation above.
     const continuing=Boolean(submitAfterType||focusThenType||addressPending||appThenAddress||backspaceLeft>0||labelPresses.length>0);
-    // Fresh evidence for whoever reads the result; a stale read is no reason to fail.
+    // Fresh evidence for whoever reads the result. Best-effort: the goal already ran,
+    // so a failed read (stale, device offline, screenshot) must not fail it and skip the
+    // caller's session release. Cancellation, interruption and lost authorization still
+    // propagate; anything else leaves a trace (code only, never provider text).
     const goalEvidence=async()=>{
-     try{last=ComputerObservation.parse(await call('computer_observe'));check();deps.observation?.(last);await capture();}
-     catch(error){check();if(!(error instanceof Error)||error.message!=='STALE_OBSERVATION')throw error;last=undefined;}
+     let observed=false;
+     try{last=ComputerObservation.parse(await call('computer_observe'));observed=true;check();deps.observation?.(last);await capture();}
+     catch(error){check();checkInterruption(deps.interruptSignal);if(!observed)last=undefined;emit('waiting',{reason:'GOAL_EVIDENCE_UNAVAILABLE'});}
     };
     // A fast path matched the whole goal text: running it to its end reaches the goal.
     if(goalRun&&!continuing&&fastCommand){await goalEvidence();return result('succeeded','GOAL_REACHED');}
