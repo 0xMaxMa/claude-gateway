@@ -364,7 +364,7 @@ export function pullFastForward(root: string, name: ProjectName): Promise<GitRes
 }
 
 /**
- * Pushes the branch to its same-named upstream, or with no upstream and exactly one remote publishes it with -u.
+ * Pushes the branch to its same-named upstream, or with no upstream publishes it with -u to the status remote.
  * Every refspec is explicit and unforced, so a `+` refspec in remote.<name>.push never applies.
  */
 export function pushBranch(root: string, name: ProjectName): Promise<GitResult<{ status: GitStatus | null }>> {
@@ -383,8 +383,9 @@ export function pushBranch(root: string, name: ProjectName): Promise<GitResult<{
       // A branch made with `checkout -b feature origin/main` tracks main; pushing there would move someone else's branch.
       if (tracking.merge !== branchRef || !config.remotes.some((r) => r.name === tracking.remote)) return fail('upstream_mismatch');
       args = ['push', '--porcelain', tracking.remote, `${branchRef}:${branchRef}`];
-    } else if (config.remotes.length === 1 && status.branch) {
-      args = ['push', '--porcelain', '-u', config.remotes[0].name, `${branchRef}:${branchRef}`];
+    } else if (status.remote && status.branch) {
+      // The remote fetch uses, so publishing and checking for updates talk to the same place.
+      args = ['push', '--porcelain', '-u', status.remote.name, `${branchRef}:${branchRef}`];
     } else {
       return fail('no_upstream');
     }

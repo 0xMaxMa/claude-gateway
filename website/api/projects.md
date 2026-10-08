@@ -373,9 +373,11 @@ Pushes the current branch to its upstream with an explicit, unforced refspec,
 so a `+` refspec in `remote.<name>.push` never applies. The gateway pushes only
 when the upstream branch has the same name as the local branch. A branch
 created with `git checkout -b feature origin/main` tracks `main`, so the
-response is `409 upstream_mismatch` and nothing is pushed. With no upstream and
-exactly one remote, it publishes the branch with `git push -u <remote> <branch>`.
-With no upstream and several remotes, the response is `409 no_upstream`.
+response is `409 upstream_mismatch` and nothing is pushed. With no upstream, it
+publishes the branch under the same name with `git push -u <remote> <branch>`
+to the status's `remote`, the same remote `fetch` uses. When several remotes
+leave `remote` as `null` (none is the upstream's or is named `origin`), the
+response is `409 no_upstream`.
 Returns `200` with `{ status: GitStatus | null }`. A push the remote rejects as
 non-fast-forward gets `409 not_fast_forward`.
 
@@ -397,7 +399,7 @@ non-fast-forward gets `409 not_fast_forward`.
 | 409 | `not_fast_forward` | `pull` on a diverged branch, or `push` rejected as non-fast-forward. |
 | 409 | `dirty_would_overwrite` | `pull` blocked by local changes. |
 | 409 | `no_remote` | `fetch`, `pull`, or `push` without a remote. |
-| 409 | `no_upstream` | `pull` without an upstream, or `push` without one and with several remotes. |
+| 409 | `no_upstream` | `pull` without an upstream, or `push` without one when the status `remote` is `null` because several remotes exist and none is named `origin`. |
 | 409 | `upstream_mismatch` | `push` on a branch whose upstream has a different branch name, or lives on a remote that is not configured. |
 | 409 | `detached_head` | `commit`, `pull`, or `push` on a detached HEAD. |
 | 409 | `busy` | Another git operation is running on this project. |

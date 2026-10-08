@@ -620,14 +620,31 @@ describe('POST git/push', () => {
     expect(() => remoteHead('feature')).toThrow();
   });
 
-  it('409s no_upstream with no upstream and more than one remote', async () => {
+  it('publishes to the status remote when there are several remotes', async () => {
     const dir = makeRepo('app');
     addRemote(dir);
-    git(dir, 'remote', 'add', 'second', remote);
+    const fork = path.join(base, 'fork.git');
+    git(base, 'init', '-q', '--bare', fork);
+    git(dir, 'remote', 'add', 'fork', fork);
     git(dir, 'checkout', '-q', '-b', 'feature');
+    commitLocal(dir, 'f.txt', 'x');
+    expect((await status('app')).body.remote.name).toBe('origin');
+    const res = await post('app', 'push');
+    expect(res.status).toBe(200);
+    expect(res.body.status).toMatchObject({ upstream: 'origin/feature', sync: 'in_sync' });
+    expect(remoteHead('feature')).toBe(head(dir));
+    expect(() => git(fork, 'rev-parse', '--verify', 'refs/heads/feature')).toThrow();
+  });
+
+  it('409s no_upstream when several remotes leave no status remote to publish to', async () => {
+    const dir = makeRepo('app');
+    git(base, 'init', '-q', '--bare', remote);
+    git(dir, 'remote', 'add', 'one', remote);
+    git(dir, 'remote', 'add', 'two', remote);
+    expect((await status('app')).body.remote).toBeNull();
     const res = await post('app', 'push');
     expect([res.status, res.body.code]).toEqual([409, 'no_upstream']);
-    expect(() => remoteHead('feature')).toThrow();
+    expect(() => remoteHead()).toThrow();
   });
 
   it('never forces: a non-fast-forward is rejected even with a forcing refspec configured', async () => {
