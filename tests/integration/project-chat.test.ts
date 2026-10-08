@@ -89,11 +89,11 @@ function flagValue(argv: string[], flag: string): string | undefined {
   return at === -1 ? undefined : argv[at + 1];
 }
 
-function send(h: Harness, sessionId: string, message: string) {
+function send(h: Harness, sessionId: string, message: string, key: ApiKey = KEYS.admin!, chatId = 'web') {
   return supertest(h.app)
     .post('/api/v1/agents/alfred/messages')
-    .set('Authorization', `Bearer ${KEYS.admin!.key}`)
-    .send({ message, chat_id: 'web', session_id: sessionId });
+    .set('Authorization', `Bearer ${key.key}`)
+    .send({ message, chat_id: chatId, session_id: sessionId });
 }
 
 async function projectSession(h: Harness): Promise<string> {
@@ -264,6 +264,26 @@ describe('a project-bound legacy chat turn', () => {
     expect(spawn!.cwd).toBe(path.join(h.base, 'agents', 'alfred', 'workspace'));
     expect(spawn!.argv).not.toContain('--setting-sources');
     expect(spawn!.argv).not.toContain('--append-system-prompt-file');
+  });
+
+  it.each([
+    ['a read-only pod key', 'podReader'],
+    ['a write key scoped to this agent only', 'scopedWriter'],
+  ])('refuses %s on send to a project session with 403 forbidden_key', async (_label, key) => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    const res = await send(h, sessionId, 'hi', KEYS[key]!);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('forbidden_key');
+    expect(spawns(h)).toEqual([]);
+  });
+
+  it('lets a pod write key send to a project session, and a read-only key send to a plain one', async () => {
+    h = await harness();
+    const bound = await projectSession(h);
+    expect((await send(h, bound, 'hi', KEYS.podWriter!)).status).toBe(200);
+    const plain = (await create(h, 'alfred', KEYS.podReader!, {})).body.sessionId as string;
+    expect((await send(h, plain, 'hi', KEYS.podReader!)).status).toBe(200);
   });
 
   it('carries project and trusted on the admin sidebar list', async () => {

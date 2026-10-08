@@ -449,7 +449,7 @@ export class AgentRunner extends EventEmitter {
   }
 
   /** apiChatIds must be set before the spawn so the session's index can be found. */
-  private async apiSessionProject(sessionId: string, chatId = this.apiChatIds.get(sessionId)): Promise<ProjectName | undefined> {
+  async apiSessionProject(sessionId: string, chatId = this.apiChatIds.get(sessionId)): Promise<ProjectName | undefined> {
     if (!chatId) return undefined;
     const index = await this.sessionStore.loadIndex(this.agentConfig.id, chatId, 'api');
     return index?.sessions.find((s) => s.id === sessionId)?.project as ProjectName | undefined;

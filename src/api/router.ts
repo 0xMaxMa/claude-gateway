@@ -681,6 +681,11 @@ export function createApiRouter(
       res.status(400).json({ error: 'session_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
       return;
     }
+    if (typeof session_id === 'string' && (!canWriteAgent(apiKey, agentId) || !canAccessPod(apiKey))
+        && await runner.apiSessionProject(session_id, chat_id.trim())) {
+      res.status(403).json({ error: 'API key not permitted to drive a project chat', code: 'forbidden_key' });
+      return;
+    }
 
     // Validate media_files
     let validatedMediaFiles: string[] | undefined;
