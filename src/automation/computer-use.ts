@@ -2,7 +2,7 @@ import {buildComputerCommand,readComputerCommand,labelCommand,labelTarget,standa
 import {eraseCommand,focusedTextField,textFocused} from './computer-safety';
 import {decisionInstructions,readChoice,observedEffect,decisionState,literalTextCandidates} from './computer-policy';
 import {checkInterruption,interruptible} from './interrupt';
-import {randomUUID} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {JevError} from '../jev/types';
 import {COMMAND_DECISION_FAILURES,browserAddressCommand} from './direct-command';
 import {z} from 'zod';
@@ -64,14 +64,18 @@ export interface ComputerUseDependencies {
  beforeMutation:(operationId:string,action:unknown)=>Promise<void>|void;
  progress?:(event:ComputerProgress)=>void;
  verify?:(state:ComputerState,goal:string,signal:AbortSignal)=>Promise<boolean>;
+ /** The user's answer to a confirmation question, read before anything runs. */
+ confirmed?:(reply:'YES'|'NO'|'OTHER')=>void;
 }
 export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'needs_input'|'blocked'|'cancelled'|'needs_reconciliation';reason:string;revision:number;steps:number;evaluations:number;trace:{events:ComputerProgress[];truncated:boolean};operationId?:string;observation?:ComputerState;stepRun?:import('./computer-steps').ComputerStepRun;lastAction?:ComputerLastAction}
 /** The command's own interaction, for the owner's outcome line. Never typed text. */
 export interface ComputerLastAction {kind:string;label?:string;role?:string;key?:string;direction?:string;appId?:string;count?:number;blocked?:boolean;sequence?:string[];planned?:number;
  /** Not run: the agent's command chose a high-impact action and the user was asked to confirm it. */
- confirm?:boolean}
+ confirm?:boolean;
+ /** The asked action and its exact target (window, control, position), hashed: a yes covers only this. */
+ target?:string}
 const PreparedInput=z.object({application:z.string().min(1).max(200),label:z.string().min(1).max(500),text:z.string().max(2000),role:z.string().max(100).optional(),windowTitle:nativeText(500).optional()}).strict();
-const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),runToGoal:z.boolean().default(false),readRequest:z.boolean().default(false),agentCommand:z.boolean().default(false),sessionStart:z.boolean().default(false),confirmation:z.object({command:z.string().min(1).max(2000),label:z.string().max(250)}).strict().optional(),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
+const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),runToGoal:z.boolean().default(false),resumeGoal:z.number().int().min(1).max(100).optional(),readRequest:z.boolean().default(false),agentCommand:z.boolean().default(false),sessionStart:z.boolean().default(false),confirmation:z.object({command:z.string().min(1).max(2000),label:z.string().max(250),target:z.string().regex(/^[0-9a-f]{32}$/).optional()}).strict().optional(),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
 const fingerprint=(s:ComputerState)=>JSON.stringify([s.application,s.windowTitle,s.text,s.supportedActions,s.focusedControl&&{role:s.focusedControl.role,label:s.focusedControl.label},s.controls.map(({ref,...c})=>c),s.scrollAreas?.map(({ref,...area})=>area),s.truncated]);
 /** Jev reads the user's reply to a confirmation question, in any language. */
 async function confirmationReply(label:string,reply:string,deps:ComputerUseDependencies,signal:AbortSignal):Promise<'YES'|'NO'|'OTHER'>{
@@ -91,7 +95,9 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  // The user's reply to "press <label>?" for the agent's high-impact command:
  // Jev reads it in any language. Yes runs that command as the user's own.
  const reply=input.confirmation?await confirmationReply(input.confirmation.label,input.goal,deps,runSignal):undefined;
- if(reply==='YES')input={...input,goal:input.confirmation!.command};
+ if(reply)deps.confirmed?.(reply);
+ // A yes to a goal's high-impact step resumes that goal, with a fresh step budget.
+ if(reply==='YES')input={...input,goal:input.confirmation!.command,...(input.resumeGoal?{runToGoal:true,maxSteps:input.resumeGoal}:{})};
  let goal:GoalRevision={revision:input.revision,goal:input.goal},steps=0,evaluations=reply?1:0,sequence=0,round=0;
  let noProgress=0;
  let lastAction:ComputerLastAction|undefined,erasing:number|undefined;
@@ -417,8 +423,13 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
       if(!(impact.confident&&impact.choice==='ROUTINE')){
        const planned=targets.get(selected.action),control=state.controls.find(c=>c.ref===planned?.ref);
        const label=selected.action.startsWith('quit:')?'Quit '+(state.apps.find(app=>app.id===state.application)?.name??state.application):planned?.kind==='key'?String(planned.key):planned?.kind==='open'?state.apps.find(app=>app.id===planned.app_id)?.name??String(planned.app_id):control?.label??selected.action;
-       lastAction={kind:String(planned?.kind??'press'),label:label.slice(0,200),blocked:true,confirm:true};
-       await capture();return {result:waitForCommand('CONFIRMATION_REQUIRED')};
+       const target=createHash('sha256').update(JSON.stringify([selected.action.split(':')[0],identity(state,planned??{kind:selected.action}),control?.identity,control?.bounds,control?.context])).digest('hex').slice(0,32);
+       // A resumed goal's first step may run only the exact action the user said
+       // yes to: same kind, window, control and position. Anything else asks again.
+       if(!(reply==='YES'&&steps===0&&input.confirmation?.target===target&&label.slice(0,200)===input.confirmation.label)){
+        lastAction={kind:String(planned?.kind??'press'),label:label.slice(0,200),blocked:true,confirm:true,target};
+        await capture();return {result:waitForCommand('CONFIRMATION_REQUIRED')};
+       }
       }
      }
      if(selected.action==='quit:'+STANDARD_QUIT)return requestStandard('app:quit');
@@ -453,7 +464,9 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     if(d.action==='BLOCKED'){await capture();return waitForCommand('NO_SUPPORTED_ACTION');}
     if(d.action==='DONE'){
      emit('verifying');last=ComputerObservation.parse(await call('computer_observe'));check();deps.observation?.(last);await capture();checkInterruption(deps.interruptSignal);update();if(goal.revision!==d.revision)return direct?result('cancelled','REVISION_SUPERSEDED'):undefined;
-     if(last.truncated||!deps.verify)return goalRun&&steps>0?waitForCommand('GOAL_REACHED'):result('needs_verification','COMPLETION_CANDIDATE');
+     // A goal run's confident DONE ends the goal: the agent hears the result and
+     // the session closes. It is the model's judgement from the screen, not a verification.
+     if(last.truncated||!deps.verify)return goalRun&&steps>0?result('succeeded','GOAL_REACHED'):result('needs_verification','COMPLETION_CANDIDATE');
      const verified=await interruptible(verifySignal=>deps.verify!(last!,goal.goal,verifySignal),runSignal,deps.interruptSignal);check();checkInterruption(deps.interruptSignal);update();if(goal.revision!==d.revision)return direct?result('cancelled','REVISION_SUPERSEDED'):undefined;
      if(typeof verified!=='boolean')throw Error('INVALID_VERIFICATION');
      return result(verified?'succeeded':'needs_verification',verified?'VERIFIED':'VERIFICATION_FAILED');
@@ -564,15 +577,21 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
     // This acknowledges dispatch, not verified goal completion. Agent control
     // still gathers fresh evidence; unknown outcomes take reconciliation above.
     const continuing=Boolean(submitAfterType||focusThenType||addressPending||appThenAddress||backspaceLeft>0||labelPresses.length>0);
-    // A goal reached by a fast path was the whole command: it ends as one.
-    if(goalRun&&!continuing&&!fastCommand){
+    // Fresh evidence for whoever reads the result. Best-effort: the goal already ran,
+    // so a failed read (stale, device offline, screenshot) must not fail it and skip the
+    // caller's session release. Cancellation, interruption and lost authorization still
+    // propagate; anything else leaves a trace (code only, never provider text).
+    const goalEvidence=async()=>{
+     let observed=false;
+     try{last=ComputerObservation.parse(await call('computer_observe'));observed=true;check();deps.observation?.(last);await capture();}
+     catch(error){check();checkInterruption(deps.interruptSignal);if(!observed)last=undefined;emit('waiting',{reason:'GOAL_EVIDENCE_UNAVAILABLE'});}
+    };
+    // A fast path matched the whole goal text: running it to its end reaches the goal.
+    if(goalRun&&!continuing&&fastCommand){await goalEvidence();return result('succeeded','GOAL_REACHED');}
+    if(goalRun&&!continuing){
      asIssued=false;redecided=0;
-     if(steps>=input.maxSteps){
-      // Fresh evidence for whoever continues; a stale read is no reason to fail.
-      try{last=ComputerObservation.parse(await call('computer_observe'));check();deps.observation?.(last);await capture();}
-      catch(error){check();if(!(error instanceof Error)||error.message!=='STALE_OBSERVATION')throw error;last=undefined;}
-      return waitForCommand('STEP_LIMIT');
-     }
+     // Out of budget before DONE: a stop the agent hears, not a wait for a command.
+     if(steps>=input.maxSteps){await goalEvidence();return result('blocked','STEP_LIMIT');}
      return;
     }
     if(input.yieldAfterInteraction&&!continuing){last=undefined;return waitForCommand('ACTION_DISPATCHED');}

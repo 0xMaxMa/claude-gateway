@@ -1,7 +1,7 @@
 import {CURRENT_CONTROL_ROUND_SQL} from '../control-notification';
 import {preparedBrowserAnswers} from '../browser-fields';
 import {ComputerInputs} from '../../jev/computer-inputs';
-import {automationSession,pausedForCommand,stoppedForCommand} from './automation-session';
+import {AUTOMATION_IDLE_TIMEOUT_MS,automationSession,pausedForCommand,stoppedForCommand} from './automation-session';
 import {computerActionText,computerOutcomeText} from '../../automation/computer-outcome';
 import {browserOutcomeText} from '../../automation/browser-outcome';
 import {textCommand} from '../../automation/direct-command';
@@ -961,6 +961,9 @@ export class TaskService {
         else if(waitingForCommand){task.state='waiting_input';task.latestProgress={source:'runtime',observedAt:Date.now(),text:task.gatewayTarget?.adapter==='computer'&&outcome.computerReport?computerOutcomeText(outcome.computerReport):task.gatewayTarget?.adapter==='browser'&&outcome.browserReport?browserOutcomeText(outcome.browserReport):'Waiting for your next command.'};}
         else task.state = outcome.type === 'completed' ? 'completed' : 'failed';
         if (task.state === 'completed' && outcome.type === 'completed') task.result = outcome.result;
+        // The device session ended with this round (a reached computer goal): the
+        // task no longer controls anything, so it leaves the owner's composer too.
+        if (task.state === 'completed' && outcome.computerReport?.accessReleased) task.automationSession = {...(automationSession(task) ?? {idleTimeoutMs:AUTOMATION_IDLE_TIMEOUT_MS}), status:'closed', closedAt:Date.now(), closedReason:'agent'};
       }
       // A paused or superseded-revision result skips the failure branch above;
       // a stalled stop still ends failed, so it must carry the stall reason.
