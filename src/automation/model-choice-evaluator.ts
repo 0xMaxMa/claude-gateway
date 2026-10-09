@@ -96,9 +96,17 @@ export function modelRequestBody(request: Request, model: string, content = deci
   return {
     model, max_tokens: Math.min(1024, 128 + 64 * count), temperature: 0, system: MODEL_CHOICE_SYSTEM,
     messages: [{ role: 'user', content }],
-    tools: [answerTool(request)], tool_choice: { type: 'tool', name: 'answer' },
+    tools: [answerTool(request)], ...answerToolChoice(model),
   };
 }
+
+/** Models that reject a forced `tool_choice` (any/tool) with a 400 because their thinking cannot be disabled.
+ * They get `auto` (the system prompt still says to answer only with the tool), room for that thinking and low effort;
+ * a reply without the tool call fails readModelAnswers like any other unusable answer. */
+export const rejectsForcedToolChoice = (model: string): boolean => /(^|[^a-z0-9])claude-(opus-5-5|fable-5-1|mythos-5-1)($|[^a-z0-9])/i.test(model);
+const answerToolChoice = (model: string) => rejectsForcedToolChoice(model)
+  ? { tool_choice: { type: 'auto' as const }, max_tokens: 4096, output_config: { effort: 'low' as const } }
+  : { tool_choice: { type: 'tool' as const, name: 'answer' } };
 
 const statusCode = (status: number): JevErrorCode => status === 401 ? 'AUTHENTICATION_FAILED' : status === 403 ? 'ACCESS_DENIED' : status === 402 ? 'QUOTA_EXCEEDED' : status === 429 ? 'RATE_LIMITED' : status === 404 ? 'MODEL_UNAVAILABLE' : status === 504 ? 'DEADLINE_EXCEEDED' : status === 400 || status === 413 || status === 422 ? 'INVALID_REQUEST' : 'PROVIDER_UNAVAILABLE';
 const invalid = (reason: string) => new JevError('INVALID_RESPONSE', 'The model returned an unusable decision.', { validationReason: reason });
@@ -175,14 +183,21 @@ export async function evaluateWithModel(request: Request, options: ModelChoiceOp
   }
 }
 
-export interface ComputerUseConfig { enabled?: boolean; model?: string; timeoutMs?: number; minConfidence?: number }
+/** `ax` (default) decides over Accessibility controls; `vision` decides from the window screenshot with raw
+ * pointer/keyboard input; `hybrid` is vision plus Accessibility bounds as locator hints. */
+export type ComputerUseMode = 'ax' | 'vision' | 'hybrid';
+export const COMPUTER_USE_MODES: readonly ComputerUseMode[] = ['ax', 'vision', 'hybrid'];
+export interface ComputerUseConfig { enabled?: boolean; model?: string; timeoutMs?: number; minConfidence?: number; mode?: ComputerUseMode; visionModel?: string }
+const validModelId = (model: unknown) => typeof model === 'string' && !!model.trim() && model.length <= 200 && !/[\x00-\x1f\x7f]/.test(model);
 export function validateComputerUseConfig(config: unknown): void {
   if (config === undefined) return;
   const value = config as Record<string, unknown>;
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('gateway.computerUse must be an object.');
-  if (Object.keys(value).some(key => !['enabled', 'model', 'timeoutMs', 'minConfidence'].includes(key))) throw Error('Unknown gateway.computerUse field.');
+  if (Object.keys(value).some(key => !['enabled', 'model', 'timeoutMs', 'minConfidence', 'mode', 'visionModel'].includes(key))) throw Error('Unknown gateway.computerUse field.');
   if (value.enabled !== undefined && typeof value.enabled !== 'boolean') throw Error('gateway.computerUse.enabled must be a boolean.');
   if (value.model !== undefined && (typeof value.model !== 'string' || !value.model.trim() || value.model.length > 200 || /[\x00-\x1f\x7f]/.test(value.model))) throw Error('Invalid gateway.computerUse.model.');
+  if (value.mode !== undefined && !COMPUTER_USE_MODES.includes(value.mode as ComputerUseMode)) throw Error('gateway.computerUse.mode must be ax, vision or hybrid.');
+  if (value.visionModel !== undefined && !validModelId(value.visionModel)) throw Error('Invalid gateway.computerUse.visionModel.');
   if (value.minConfidence !== undefined && (typeof value.minConfidence !== 'number' || !(value.minConfidence >= 0.55 && value.minConfidence <= 1))) throw Error('gateway.computerUse.minConfidence must be between 0.55 and 1.');
   if (value.timeoutMs !== undefined && (!Number.isSafeInteger(value.timeoutMs) || (value.timeoutMs as number) < 1000 || (value.timeoutMs as number) > 120000)) throw Error('Invalid gateway.computerUse.timeoutMs.');
 }

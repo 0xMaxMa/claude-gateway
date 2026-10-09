@@ -4,6 +4,7 @@ import type { ThinkingConfig } from '../../lib/automation/thinking.cjs';
 import type { BrowserTextHelperConfig } from '../jev/browser-contract';
 import { evaluateComputerChoices } from '../automation/computer-choice-ids';
 import { DEFAULT_COMPUTER_MIN_CONFIDENCE, DEFAULT_COMPUTER_MODEL, DEFAULT_COMPUTER_MODEL_TIMEOUT_MS, COMPUTER_MODEL_OAUTH_UNSUPPORTED, evaluateWithModel, messagesEndpoint, messagesBaseUrl, wireAuthScheme, credentialSupported } from '../automation/model-choice-evaluator';
+import { DEFAULT_COMPUTER_VISION_MODEL, DEFAULT_COMPUTER_VISION_TIMEOUT_MS, supportsComputerToolset, visionModelDecider, type VisionDecide } from '../automation/vision-decider';
 import type { JevService } from '../jev/service';
 import type { JevRequest } from '../jev/types';
 import { createLogger } from '../logger';
@@ -57,4 +58,34 @@ export function computerThinking(gateway: GatewayConfig, agent: AgentConfig): Br
     if (!credentialSupported(identity, url)) throw new Error(COMPUTER_MODEL_OAUTH_UNSUPPORTED);
     return { api: 'anthropic-messages', baseUrl: messagesBaseUrl(url), model: computerModel(gateway), apiKey: identity.apiKey, authScheme: wireAuthScheme(identity) };
   } };
+}
+
+/** Vision Computer Use (gateway.computerUse.mode vision|hybrid): the agent's own identity and route, a toolset-capable model.
+ * Undefined keeps the Accessibility path: mode ax (the default), no decision backend, or a model without the computer toolset. */
+export function computerVision(gateway: GatewayConfig, agent: AgentConfig, member: (task: TaskSnapshot) => boolean, fetchImpl?: typeof fetch):
+  () => { mode: 'vision' | 'hybrid'; decide: (task: TaskSnapshot, authorized: () => boolean) => VisionDecide } | undefined {
+  let warned = false;
+  let log: ReturnType<typeof createLogger> | undefined;
+  const logger = () => log ??= createLogger(agent.id, gateway.gateway.logDir);
+  return () => {
+    const mode = gateway.gateway.computerUse?.mode ?? 'ax';
+    if (mode === 'ax' || computerDecisions(gateway, agent) === undefined) return undefined;
+    const model = gateway.gateway.computerUse?.visionModel ?? DEFAULT_COMPUTER_VISION_MODEL;
+    if (!supportsComputerToolset(model)) {
+      if (!warned) { warned = true; console.warn(JSON.stringify({ event: 'computer_vision_model_unsupported', agentId: agent.id, mode })); }
+      return undefined;
+    }
+    return { mode, decide: (task, authorized) => visionModelDecider({
+      model, timeoutMs: DEFAULT_COMPUTER_VISION_TIMEOUT_MS, fetch: fetchImpl,
+      connection: async () => agentIdentity('Computer Use'),
+      // A live switch back to ax (or Computer Use off) revokes an in-flight decision.
+      authorize: () => authorized() && member(task) && (gateway.gateway.computerUse?.mode ?? 'ax') === mode && computerDecisions(gateway, agent) !== undefined,
+      // Codes, sizes and token counts only; never screenshots, screen text or credentials.
+      onDecision: event => {
+        const entry = { agentId: agent.id, taskId: task.taskId, ...event };
+        if (event.outcome === 'failed') console.warn(JSON.stringify({ event: 'computer_vision_decision', ...entry }));
+        else try { logger().debug('computer_vision_decision', entry); } catch { /* computer_model_log_unavailable is reported by the evaluator path. */ }
+      },
+    }) };
+  };
 }

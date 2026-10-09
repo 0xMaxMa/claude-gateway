@@ -2,7 +2,7 @@ jest.mock('../../../src/config/claude-settings', () => ({ claudeSettingsEnv: jes
 import { claudeSettingsEnv } from '../../../src/config/claude-settings';
 import { configureLogging, resetLoggingForTests } from '../../../src/logger';
 import { agentIdentity, computerDecisions } from '../../../src/orchestration/jev-gateway';
-import { computerEvaluator, computerThinking } from '../../../src/orchestration/computer-decisions';
+import { computerEvaluator, computerThinking, computerVision } from '../../../src/orchestration/computer-decisions';
 import { COMPUTER_MODEL_OAUTH_UNSUPPORTED, DEFAULT_COMPUTER_MODEL } from '../../../src/automation/model-choice-evaluator';
 import type { AgentConfig, GatewayConfig } from '../../../src/types';
 
@@ -217,4 +217,40 @@ describe('decision dispatch', () => {
     expect(lines.join('')).not.toContain(TOKEN);
   });
 
+});
+
+describe('computerVision', () => {
+  const vision = (computerUse: boolean | undefined, extra: Record<string, unknown> = {}, fetch?: any) => computerVision(gatewayConfig(undefined, undefined, computerUse, extra), agentConfig(), () => true, fetch)();
+  test('ax mode, no mode, or Computer Use off keeps the Accessibility path', () => {
+    expect(vision(true)).toBeUndefined();
+    expect(vision(true, { mode: 'ax' })).toBeUndefined();
+    expect(vision(undefined)).toBeUndefined();
+    expect(vision(false, { mode: 'vision' })).toBeUndefined();
+  });
+  test('a model without the computer toolset falls back to ax with one warning', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const factory = computerVision(gatewayConfig(undefined, undefined, true, { mode: 'vision', visionModel: 'claude-haiku-4-5-20251001' }), agentConfig(), () => true);
+    expect(factory()).toBeUndefined(); expect(factory()).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('computer_vision_model_unsupported');
+  });
+  test('vision mode defaults to Sonnet 5 through the agent identity, with no temperature or beta header', async () => {
+    const fetch = jest.fn(async (_url: URL, _init: RequestInit) => new Response(JSON.stringify({ content: [], stop_reason: 'end_turn' }), { headers: { 'content-type': 'application/json' } }));
+    const v = vision(true, { mode: 'hybrid' }, fetch)!;
+    expect(v.mode).toBe('hybrid');
+    await v.decide(task, () => true)([], new AbortController().signal);
+    const [url, init] = fetch.mock.calls[0];
+    const body = JSON.parse(String(init.body));
+    expect(String(url)).toBe('https://api.getpod.test/v1/messages');
+    expect(body.model).toBe('claude-sonnet-5'); expect(body).not.toHaveProperty('temperature');
+    expect(Object.keys(init.headers as object).map(h => h.toLowerCase())).not.toContain('anthropic-beta');
+  });
+  test('switching back to ax revokes an in-flight decision', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const config = gatewayConfig(undefined, undefined, true, { mode: 'vision' }), fetch = jest.fn();
+    const v = computerVision(config, agentConfig(), () => true, fetch as any)()!;
+    (config.gateway.computerUse as any).mode = 'ax';
+    await expect(v.decide(task, () => true)([], new AbortController().signal)).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });
