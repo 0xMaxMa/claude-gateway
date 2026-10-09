@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { OrchestrationStore } from '../../../src/orchestration/store';
-import { MAX_CONTEXT_REFS, TaskService } from '../../../src/orchestration/tasks/service';
+import { MAX_CONTEXT_REFS, TaskService, mergeContextRefs } from '../../../src/orchestration/tasks/service';
 import { DecisionService } from '../../../src/orchestration/decisions';
 
 // Issue #574: semantic intake retains up to 100 input IDs and the runtime adds them all as
@@ -25,13 +25,21 @@ test('a full semantic-intake batch of 100 input refs is accepted', () => {
   try {
     expect(t.refs).toHaveLength(100);
     expect(() => t.service.spawn(t.context, { ...t.task, contextRefs: t.refs })).not.toThrow();
-  } finally { t.store.close?.(); rmSync(t.root, { recursive: true, force: true }); }
+  } finally { t.store.close(); rmSync(t.root, { recursive: true, force: true }); }
 });
 
 test('refs beyond the limit fail with an actionable message, not a bare code', () => {
   const t = setup(1);
   try {
     const refs = Array.from({ length: MAX_CONTEXT_REFS + 1 }, (_, i) => `r${i}`);
-    expect(() => t.service.spawn(t.context, { ...t.task, contextRefs: refs })).toThrow(/context_refs has 257 entries; the limit is 256/);
-  } finally { t.store.close?.(); rmSync(t.root, { recursive: true, force: true }); }
+    expect(() => t.service.spawn(t.context, { ...t.task, contextRefs: refs })).toThrow(/context_refs has 257 entries.*the limit is 256/);
+  } finally { t.store.close(); rmSync(t.root, { recursive: true, force: true }); }
+});
+
+test('mergeContextRefs keeps attachments when they fit and drops only them on overflow', () => {
+  const inputs = Array.from({ length: 100 }, (_, i) => `in${i}`), files = Array.from({ length: 8 }, (_, i) => `media/${i}`);
+  expect(mergeContextRefs(['own', 'in0'], files, inputs)).toEqual(['own', 'in0', ...files, ...inputs.slice(1)]);
+  const manyFiles = Array.from({ length: 300 }, (_, i) => `media/m${i}`);
+  expect(mergeContextRefs(['own'], manyFiles, inputs)).toEqual(['own', ...inputs]);
+  expect(mergeContextRefs(undefined, [], [])).toEqual([]);
 });

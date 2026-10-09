@@ -75,7 +75,7 @@ import { HistoryDB } from '../history/db';
 import { RuntimeProfile } from '../session/runtime-profile';
 import { OrchestrationStore, AcceptInput, channelVoiceKey, payloadHash } from './store';
 import { resolveOrchestrationConfig } from './config';
-import { MAX_CONTEXT_REFS, TaskService, taskIndexEntry } from './tasks/service';
+import { mergeContextRefs, TaskService, taskIndexEntry } from './tasks/service';
 import { DecisionService, DecisionReceipt } from './decisions';
 import { TaskBridge } from './bridge';
 import { TaskWorkspaces } from './tasks/workspace';
@@ -1279,12 +1279,7 @@ export class AgentOrchestrationRuntime {
           }
           if (tool === 'task_answer') return;
           if (!intakeChoice || intakeChoice.mode==='wait' || intakeChoice.mode==='resolve' || !acknowledgementReady) throw new OrchestrationError('ACKNOWLEDGEMENT_REQUIRED');
-          if (tool==='task_spawn' && !args.gateway_target && preparedInputs.length) {
-            const supplied = Array.isArray(args.context_refs) ? args.context_refs : [], inputRefs = preparedInputs.map(row=>String(row.id));
-            const full = [...new Set([...supplied,...preparedRefs,...inputRefs])];
-            // Each input ref already carries its attachments (the worker driver expands it), so the explicit attachment refs are redundant when the list would overflow.
-            args.context_refs = full.length > MAX_CONTEXT_REFS ? [...new Set([...supplied,...inputRefs])] : full;
-          }
+          if (tool==='task_spawn' && !args.gateway_target && preparedInputs.length) args.context_refs=mergeContextRefs(args.context_refs,preparedRefs,preparedInputs.map(row=>String(row.id)));
           if (intakeChoice.mode==='update' && (tool==='task_spawn' || args.task_id!==intakeChoice.task_id)) {
             const attempt = attemptedTaskActions.get(actionId);
             if (attempt) attempt.intendedUpdateTaskId = intakeChoice.task_id;
