@@ -19,6 +19,9 @@ Never create work merely to acknowledge material. A complete instruction arrivin
 
 /** Durable preparation is scoped by conversation AND authenticated principal.
  * Source inputs remain canonical; this cache only supplements their full contents. */
+/** Pending inputs one intake may retain. */
+export const MAX_INTAKE_INPUTS = 100;
+
 export class ConversationIntake {
   constructor(private store: OrchestrationStore) {
     store.run(`CREATE TABLE IF NOT EXISTS conversation_intake (
@@ -73,7 +76,7 @@ export class ConversationIntake {
     const previousRow = this.store.get('SELECT binding_id,data_json,mode,decision_id FROM conversation_intake WHERE conversation_id=? AND principal_id=?', context.conversationId, context.principalId);
     const previous = previousRow?.binding_id === input.binding_id ? JSON.parse(String(previousRow.data_json)) : undefined;
     const inputIds: string[] = [...new Set([...(previous?.inputIds ?? []), ...(JSON.parse(String(decision.input_ids_json)) as string[]), context.inputId])];
-    if (inputIds.length > 100) throw new OrchestrationError('INTAKE_TOO_MANY_INPUTS');
+    if (inputIds.length > MAX_INTAKE_INPUTS) throw new OrchestrationError('INTAKE_TOO_MANY_INPUTS');
     const resolution = choice.mode === 'resolve' ? boundedText(choice.resolution ?? '', 2000).trim() : '';
     const ownPreparation = previousRow?.binding_id === input.binding_id && previousRow.decision_id === context.decisionId && ['ready','update'].includes(String(previousRow.mode));
     if (choice.mode === 'resolve' && (!resolution || (!previous?.deferredDispatch && !ownPreparation))) throw new OrchestrationError('INVALID_INPUT');
