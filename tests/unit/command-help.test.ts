@@ -28,3 +28,10 @@ test('API catalog includes help and sessions and excludes channel-only commands'
  expect(names).toEqual(expect.arrayContaining(['/help','/sessions','/restart','/compact']));
  expect(names).not.toContain('/new'); expect(names).not.toContain('/rename');
 });
+
+test('session status labels a context measured on a different model separately (#576)', () => {
+  const text = formatSessionStatus('s', 'N', 'configured-model', { text: '1K / 1M', contextUsedPct: 1, contextModel: 'observed-model' });
+  expect(text).toContain('Model: configured-model');
+  expect(text).toContain('Context measured on: observed-model');
+  expect(formatSessionStatus('s', 'N', 'm', { text: '—', contextUsedPct: null, contextModel: 'm' })).not.toContain('Context measured on');
+});

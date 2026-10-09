@@ -32,6 +32,20 @@ describe('durable conversation/task state', () => {
     const other = store.acceptInput({ scope: { ...scope, agentSessionId: 'another-session', chatId: 'another-chat' }, text: 'First message' });
     expect(modelOf(other.inputId)).toBeUndefined();
   });
+  test('internal recovery snapshots and legacy inherited copies never become a sticky model override (#576)', () => {
+    const modelOf = (id: string) => JSON.parse(String(store.get('SELECT ingress_json FROM conversation_inputs WHERE id=?', id)!.ingress_json)).model;
+    store.acceptInput({ scope, text: 'Recover', storeUserMessage: false, ingressKey: 'intake-recovery:abc', model: 'old-default' });
+    const next = store.acceptInput({ scope, text: 'Ordinary channel turn' });
+    expect(modelOf(next.inputId)).toBeUndefined();
+    const after = store.acceptInput({ scope, text: 'Another turn' });
+    expect(modelOf(after.inputId)).toBeUndefined();
+  });
+  test('legacy rows without an explicit-selection marker are not inherited (#576)', () => {
+    const legacy = store.acceptInput({ scope: { ...scope, agentSessionId: 'legacy-s', chatId: 'legacy-c' }, text: 'x' });
+    store.run('UPDATE conversation_inputs SET ingress_json=? WHERE id=?', JSON.stringify({ model: 'stale-snapshot' }), legacy.inputId);
+    const next = store.acceptInput({ scope: { ...scope, agentSessionId: 'legacy-s', chatId: 'legacy-c' }, text: 'y' });
+    expect(JSON.parse(String(store.get('SELECT ingress_json FROM conversation_inputs WHERE id=?', next.inputId)!.ingress_json)).model).toBeUndefined();
+  });
   test('Agent task status includes recent tools and persisted failure evidence',()=>{
     const task=spawn(),attempt=tasks.claim(task.taskId)!;
     store.transaction(()=>store.appendEvent(ctx.conversationId,'tool.activity',{name:'Bash',type:'tool_result',is_error:true},task.taskId));
