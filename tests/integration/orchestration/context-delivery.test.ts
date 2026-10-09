@@ -270,10 +270,45 @@ test('ready without dispatch gets one recovery; an acknowledgement alone is a vi
     for (let i=0;i<300 && !f.runtime.store.get("SELECT event_id FROM conversation_events WHERE type='response.dispatch_unresolved'");i++) await new Promise(resolve => setTimeout(resolve,10));
     expect(f.failures).toEqual([]);
     const failed = f.runtime.store.get("SELECT generated_text FROM assistant_responses WHERE state='failed'");
-    expect(failed?.generated_text).toContain('not complete');
+    expect(failed?.generated_text).toMatch(/not started/);
+    expect(failed?.generated_text).toMatch(/still saved.*send a short follow-up message to retry or say that you want to cancel it/);
     expect(f.runtime.store.get('SELECT count(*) n FROM tasks')!.n).toBe(0);
     expect(JSON.parse(String(f.runtime.store.get('SELECT data_json FROM conversation_intake')!.data_json)).deferredDispatch).toBe(true);
     expect(f.prompts).toHaveLength(2);
     expect((await f.sessions.loadSession('a','s')).filter(row => row.role==='assistant').some(row => row.content==='Understood.')).toBe(false);
+  } finally { await f.close(); }
+});
+
+// Issue #574: retained intake (60 inputs, 8 of them with an attachment) used to inject 68 refs into every
+// spawn because attachment refs were added on top of the input refs that already carry them.
+test('a spawn after 60 retained inputs with 8 attachments is accepted without duplicating attachment refs', async () => {
+  const f = await fixture(async (call, process, turn) => {
+    if (turn === 1) {
+      await call('conversation_intake', {mode:'ready', acknowledgement:'Working on it.', preparation:'Do the retained work.'});
+      const task = await call('task_spawn', {title:'Retained work', instructions:'Do the retained work.', target_profile:'default-worker'});
+      expect(task.taskId).toBeTruthy();
+    }
+    finish(process);
+  });
+  try {
+    const retained = Array.from({length:59}, (_, i) => f.runtime.store.acceptInput({scope:f.scope, text:`retained ${i}`, attachmentIds: i < 8 ? [`media/c/retained-${i}.png`] : []}));
+    const ids = retained.map(r => r.inputId);
+    const first = retained[0];
+    const seeded = f.runtime.decisions.begin(first.conversationId, 'p', [first.inputId]);
+    f.runtime.decisions.finish(seeded, 'retained', 'completed');
+    f.runtime.store.run("UPDATE conversation_inputs SET status='handled'");
+    f.runtime.store.run(`INSERT INTO conversation_intake (conversation_id,principal_id,binding_id,mode,data_json,latest_input_seq,last_received_at,clarified_seq,decision_id)
+      VALUES(?,?,?,?,?,?,?,?,?)`, first.conversationId, 'p', f.runtime.store.get('SELECT binding_id FROM conversation_inputs WHERE id=?', first.inputId)!.binding_id,
+      'ready', JSON.stringify({mode:'ready', inputIds: ids, deferredDispatch: true, preparation: 'Do the retained work.'}), 0, Date.now(), null, seeded.decisionId);
+    await f.send('Please do it now');
+    for (let i=0;i<300 && !f.runtime.store.get('SELECT id FROM tasks');i++) await new Promise(resolve => setTimeout(resolve,10));
+    expect(f.failures).toEqual([]);
+    const task = f.runtime.store.get('SELECT id FROM tasks')!;
+    const refs = f.runtime.tasks.revision(String(task.id), 1).contextRefs;
+    expect(refs).toHaveLength(60);
+    expect(refs.every(ref => !ref.startsWith('media/'))).toBe(true);
+    // Attachments still reach the worker: each input ref the driver expands keeps its own attachment.
+    for (let i=0;i<8;i++) expect(JSON.parse(String(f.runtime.store.get('SELECT attachment_refs_json FROM conversation_inputs WHERE id=?', ids[i])!.attachment_refs_json))).toEqual([`media/c/retained-${i}.png`]);
+    expect(ids.slice(0,8).every(id => refs.includes(id))).toBe(true);
   } finally { await f.close(); }
 });

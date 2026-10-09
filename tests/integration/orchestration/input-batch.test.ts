@@ -88,7 +88,10 @@ test('text fragments and an image are one durable decision and one task, with on
     expect(JSON.parse(String(decision.input_ids_json))).toEqual([a.inputId,b.inputId,c.inputId]);
     expect(f.runtime.store.get('SELECT count(*) n FROM tasks')!.n).toBe(1);
     const revision=JSON.parse(String(f.runtime.store.get('SELECT payload_json FROM task_revisions')!.payload_json));
-    expect(revision.contextRefs).toEqual(expect.arrayContaining([a.inputId,b.inputId,c.inputId,'media/c/image.png']));
+    // The attachment travels with its input ref (the worker driver expands it), so it is not injected twice.
+    expect(revision.contextRefs).toEqual(expect.arrayContaining([a.inputId,b.inputId,c.inputId]));
+    expect(revision.contextRefs).not.toContain('media/c/image.png');
+    expect(JSON.parse(String(f.runtime.store.get('SELECT attachment_refs_json FROM conversation_inputs WHERE id=?',c.inputId)!.attachment_refs_json))).toContain('media/c/image.png');
     const messages=await f.sessions.loadTelegramSession('a','c','s','telegram');
     expect(messages.filter(row=>row.role==='user').map(row=>row.content)).toEqual(['Inspect repo A','and repo B','(photo)']);
     expect(messages.filter(row=>row.role==='assistant').map(row=>row.content)).toEqual(['Inspecting the two workflows.']);

@@ -18,7 +18,27 @@ import { WorkerPool } from './pool';
 import { createHash, randomUUID } from 'crypto';
 import { OrchestrationStore, boundedText, payloadHash } from '../store';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../config';
+import { MAX_INTAKE_INPUTS } from '../conversation-intake';
 import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode } from '../types';
+
+/** Refs the agent may name itself; the gateway's own additions are bounded separately by MAX_INTAKE_INPUTS. */
+export const MAX_AGENT_CONTEXT_REFS = 64;
+/** Safety net only: an agent list plus a full semantic-intake batch, so normal use cannot reach it. */
+export const MAX_CONTEXT_REFS = MAX_AGENT_CONTEXT_REFS + MAX_INTAKE_INPUTS;
+
+/**
+ * Merge agent-supplied refs with the gateway-added pending input IDs. Attachments are not added:
+ * every input ref already carries its own attachments when the worker context is built.
+ */
+export function assertAgentContextRefs(supplied: unknown): unknown[] {
+  const own = Array.isArray(supplied) ? supplied : [];
+  if (own.length > MAX_AGENT_CONTEXT_REFS) throw new OrchestrationError('INVALID_INPUT', `context_refs has ${own.length} entries; an agent may reference at most ${MAX_AGENT_CONTEXT_REFS}. The gateway adds the pending input IDs itself, so omit them.`);
+  return own;
+}
+
+export function mergeContextRefs(supplied: unknown, inputRefs: string[]): unknown[] {
+  return [...new Set([...assertAgentContextRefs(supplied), ...inputRefs])];
+}
 
 export interface SpawnTask { browserFields?:unknown; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal'; }
 
@@ -219,7 +239,8 @@ export class TaskService {
     const prepared=preparedBrowserAnswers(command.browserFields,context.inputId);
     if(command.browserFields!==undefined&&command.gatewayTarget?.adapter!=='browser')throw new OrchestrationError('INVALID_BROWSER_FIELDS');
     boundedText(command.title, 512); boundedText(command.instructions); boundedText(command.targetProfile, 128);
-    if ((command.contextRefs?.length ?? 0) > 64 || command.contextRefs?.some(ref => typeof ref !== 'string' || ref.length > 1024)) throw new OrchestrationError('INVALID_INPUT');
+    if ((command.contextRefs?.length ?? 0) > MAX_CONTEXT_REFS) throw new OrchestrationError('INVALID_INPUT', `context_refs has ${command.contextRefs!.length} entries (agent refs plus pending input IDs added by the gateway); the limit is ${MAX_CONTEXT_REFS}. Reference fewer materials.`);
+    if (command.contextRefs?.some(ref => typeof ref !== 'string' || ref.length > 1024)) throw new OrchestrationError('INVALID_INPUT', 'Each context_refs entry must be a string of at most 1024 characters.');
     if (!['default-worker', 'media-worker', 'skill-worker', 'gateway-managed'].includes(command.targetProfile)) throw new OrchestrationError('UNKNOWN_WORKER_PROFILE');
     if ((command.targetProfile === 'gateway-managed') !== Boolean(command.gatewayTarget)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
     if (command.gatewayTarget && (command.workingDirectory || command.skill || command.contextRefs?.length)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');

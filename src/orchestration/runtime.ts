@@ -75,7 +75,7 @@ import { HistoryDB } from '../history/db';
 import { RuntimeProfile } from '../session/runtime-profile';
 import { OrchestrationStore, AcceptInput, channelVoiceKey, payloadHash } from './store';
 import { resolveOrchestrationConfig } from './config';
-import { TaskService, taskIndexEntry } from './tasks/service';
+import { mergeContextRefs, TaskService, taskIndexEntry } from './tasks/service';
 import { DecisionService, DecisionReceipt } from './decisions';
 import { TaskBridge } from './bridge';
 import { TaskWorkspaces } from './tasks/workspace';
@@ -1279,7 +1279,7 @@ export class AgentOrchestrationRuntime {
           }
           if (tool === 'task_answer') return;
           if (!intakeChoice || intakeChoice.mode==='wait' || intakeChoice.mode==='resolve' || !acknowledgementReady) throw new OrchestrationError('ACKNOWLEDGEMENT_REQUIRED');
-          if (tool==='task_spawn' && !args.gateway_target && preparedInputs.length) args.context_refs=[...new Set([...(Array.isArray(args.context_refs) ? args.context_refs : []),...preparedRefs,...preparedInputs.map(row=>String(row.id))])];
+          if (tool==='task_spawn' && !args.gateway_target && preparedInputs.length) args.context_refs=mergeContextRefs(args.context_refs,preparedInputs.map(row=>String(row.id)));
           if (intakeChoice.mode==='update' && (tool==='task_spawn' || args.task_id!==intakeChoice.task_id)) {
             const attempt = attemptedTaskActions.get(actionId);
             if (attempt) attempt.intendedUpdateTaskId = intakeChoice.task_id;
@@ -1598,9 +1598,9 @@ export class AgentOrchestrationRuntime {
       const recoveryFailed = Boolean(recoveryInputId && unresolved?.deferredDispatch && unresolved.mode !== 'wait' && !response.interrupted && !active.stopping && !newerInputPending());
       if (recoveryFailed) {
         const thai = /[\u0E00-\u0E7F]/.test(input.text + String(unresolved && unresolved.preparation) + preparedInputs.map(row => row.text).join('') + response.text);
-        surfaces.display = thai
-          ? 'ระบบยังจัดการคำขอค้างไม่สำเร็จ: agent จบการกู้คืนโดยไม่ได้ยืนยันว่างานถูกส่งต่อหรือปิดเรื่องแล้ว คำขอเดิมยังถูกเก็บไว้และยังไม่ถือว่าเสร็จค่ะ'
-          : 'The agent ended recovery without confirming that the pending request was dispatched or resolved. The request is still retained and is not complete.';
+        surfaces.display = dispatchCommitted
+          ? thai ? 'เริ่มงานแล้ว แต่ระบบยังไม่ได้ปิดคำขอที่ค้างอยู่ ส่งข้อความสั้นๆ ตามมาเพื่อให้ตรวจสอบอีกครั้ง หรือบอกว่าต้องการยกเลิกค่ะ' : 'A task was started, but the pending request was not marked as resolved. Send a short follow-up message to have it checked again, or say that you want to cancel it.'
+          : thai ? 'ยังไม่ได้เริ่มงานตามคำขอที่ค้างอยู่ คำขอยังถูกเก็บไว้ ส่งข้อความสั้นๆ ตามมาเพื่อลองอีกครั้ง หรือบอกว่าต้องการยกเลิกค่ะ' : 'The pending request was not started: the recovery attempt ended without starting a task or resolving it. The request is still saved; send a short follow-up message to retry or say that you want to cancel it.';
         surfaces.spoken = '';
         this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.dispatch_unresolved', {responseId:decision.responseId, inputId:receipt.inputId}));
       }
