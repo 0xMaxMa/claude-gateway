@@ -21,6 +21,7 @@ import {
 } from '../connectors/custom';
 import { createCustomConnectorsStore, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
 import { internalSecretKeysOf } from '../connectors/oauth-refresh-sweep';
+import { createGithubAccountLookup } from '../connectors/github-account';
 import type { AgentRunner } from '../agent/runner';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
@@ -35,6 +36,9 @@ type AuthedRequest = Request & { apiKey: ApiKey };
  * Routes (mounted under /api):
  *   GET    /v1/connectors                    — every connector, with connected state
  *   GET    /v1/connectors/:id/status         — connected boolean (for polling)
+ *   GET    /v1/connectors/github/account     — which GitHub account the `github`
+ *                                              connector's token belongs to, asked
+ *                                              live of api.github.com
  *   POST   /v1/connectors/:id/connect        — store a secret (admin) into a
  *                                              single-secret customConnectors entry
  *                                              (e.g. reconnecting a paste-token
@@ -74,10 +78,12 @@ export function createConnectorsRouter(
   configPath?: string,
   agents?: Map<string, AgentRunner>,
   customConnectorsStore?: CustomConnectorsStore,
+  deps?: { fetchGithub?: typeof fetch },
 ): Router {
   const router = Router();
   if (apiKeys?.length) router.use(createApiAuthMiddleware(apiKeys));
   const store = customConnectorsStore ?? createCustomConnectorsStore(configPath);
+  const lookupGithubAccount = createGithubAccountLookup(deps?.fetchGithub);
 
   function requireAdmin(req: Request, res: Response): boolean {
     if (!apiKeys?.length) return true; // no auth configured — allow
@@ -149,10 +155,33 @@ export function createConnectorsRouter(
   // blast radius to the client that asked.
   router.get('/v1/connectors', async (_req: Request, res: Response) => {
     try {
-      res.json({ connectors: listConnectorStatus(await store.read()), capabilities: { perConnectorDefaults: true, connectorResources: true, computerUseTasks: true } });
+      res.json({ connectors: listConnectorStatus(await store.read()), capabilities: { perConnectorDefaults: true, connectorResources: true, computerUseTasks: true, githubAccount: true } });
     } catch (err) {
       console.error(`connectors-router: listing connectors failed: ${(err as Error).message}`);
       res.status(500).json({ error: 'Connector configuration could not be read' });
+    }
+  });
+
+  // Not connected covers both "no entry" and "a secret is missing", the same test
+  // /:id/status applies. The token is never echoed: every body below is built
+  // from GitHub's parsed fields or a fixed literal.
+  router.get('/v1/connectors/github/account', async (_req: Request, res: Response) => {
+    try {
+      const entry = (await store.read()).github;
+      const tokenEnv = readTokenEnv();
+      const connected = !!entry && entry.secretNames.every((name: string) => !!tokenEnv[customSecretKey('github', name)]);
+      const tokenName = entry?.secretNames.includes('access_token')
+        ? 'access_token'
+        : entry?.secretNames.length === 1 ? entry.secretNames[0] : undefined;
+      if (!connected || !tokenName) {
+        res.json({ connected: false });
+        return;
+      }
+      const reply = await lookupGithubAccount(tokenEnv[customSecretKey('github', tokenName)]);
+      res.status(reply.status).json(reply.body);
+    } catch (err) {
+      console.error(`connectors-router: github account lookup failed: ${(err as Error).message}`);
+      res.status(500).json({ error: "Connector 'github' has an unreadable configuration" });
     }
   });
 

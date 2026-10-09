@@ -165,6 +165,50 @@ same `refresh` block documented under `GET /api/v1/connectors` above:
 
 ---
 
+## GET /api/v1/connectors/github/account {#get-apiv1connectorsgithubaccount}
+
+Which GitHub account the `github` connector's token belongs to. The gateway asks
+`GET https://api.github.com/user` with the stored token (5-second timeout), so the
+answer reflects what GitHub says now, not just that a token is stored. The token
+itself is never returned.
+
+```bash
+curl -s -H "X-Api-Key: admin-key-456" \
+  http://localhost:10850/api/v1/connectors/github/account | jq
+```
+
+Connected, and GitHub accepted the token:
+
+```json
+{
+  "connected": true,
+  "valid": true,
+  "account": {
+    "login": "octocat",
+    "name": "The Octocat",
+    "avatarUrl": "https://avatars.githubusercontent.com/u/583231",
+    "htmlUrl": "https://github.com/octocat"
+  }
+}
+```
+
+`name` is `null` when the GitHub profile has none.
+
+| Status | Body | When |
+|--------|------|------|
+| `200` | `{ "connected": false }` | No `github` connector, or one of its secrets is missing. GitHub is not called |
+| `200` | `{ "connected": true, "valid": true, "account": {...} }` | GitHub answered `200` with a user |
+| `200` | `{ "connected": true, "valid": false, "reason": "token_rejected" }` | GitHub answered `401` |
+| `502` | `{ "error": "github_unreachable" }` | Network error, timeout, or any other GitHub status |
+| `500` | `{ "error": "..." }` | The connector configuration could not be read |
+
+Accepted and rejected answers are cached in memory for 60 seconds per token, keyed
+by a hash of the token, so page loads do not call GitHub each time. A `502` is not
+cached. `GET /api/v1/connectors` advertises this route as
+`capabilities.githubAccount: true`; an older gateway without it answers `404`.
+
+---
+
 ## POST /api/v1/connectors/:id/connect {#post-apiv1connectorsidconnect}
 
 Store a pasted token into a connector that declares exactly one secret. **Admin.**

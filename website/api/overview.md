@@ -174,6 +174,7 @@ Boot restore (`gateway.appRestore`): at startup every app stored as `running` is
 |--------|------|------|-------------|
 | `GET` | `/api/v1/connectors` | Key | List every connector with its connected state |
 | `GET` | `/api/v1/connectors/:id/status` | Key | Connected boolean for a single connector (for polling) |
+| `GET` | `/api/v1/connectors/github/account` | Key | GitHub account behind the `github` connector token, checked live against GitHub |
 | `POST` | `/api/v1/connectors/:id/connect` | Admin | Store a pasted token |
 | `POST` | `/api/v1/connectors/:id/oauth/receive` | Admin | Accept an `access_token` + connector shape pushed by an external control plane |
 | `DELETE` | `/api/v1/connectors/:id` | Admin | Disconnect — clears the credential; removes the whole entry for `none`/`external` connectors |
