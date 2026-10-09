@@ -6,7 +6,7 @@ import { MAX_AGENT_CONTEXT_REFS, MAX_CONTEXT_REFS, TaskService, mergeContextRefs
 import { MAX_INTAKE_INPUTS } from '../../../src/orchestration/conversation-intake';
 import { DecisionService } from '../../../src/orchestration/decisions';
 
-// Issue #574: semantic intake retains up to 100 input IDs and the runtime adds them all as
+// Issue #574: semantic intake retains up to MAX_INTAKE_INPUTS input IDs and the runtime adds them all as
 // context_refs; the task service must accept a full batch instead of failing with bare INVALID_INPUT.
 function setup(inputs: number) {
   const root = mkdtempSync(join(tmpdir(), 'context-ref-limit-'));
@@ -21,10 +21,10 @@ function setup(inputs: number) {
   return { root, store, service, context, task, refs: ids.map(i => i.inputId) };
 }
 
-test('a full semantic-intake batch of 100 input refs is accepted', () => {
-  const t = setup(100);
+test('a full semantic-intake batch of input refs is accepted', () => {
+  const t = setup(MAX_INTAKE_INPUTS);
   try {
-    expect(t.refs).toHaveLength(100);
+    expect(t.refs).toHaveLength(MAX_INTAKE_INPUTS);
     expect(() => t.service.spawn(t.context, { ...t.task, contextRefs: t.refs })).not.toThrow();
   } finally { t.store.close(); rmSync(t.root, { recursive: true, force: true }); }
 });
@@ -33,7 +33,7 @@ test('the service cap is a safety net above any gateway-built set; beyond it the
   const t = setup(1);
   try {
     const refs = Array.from({ length: MAX_CONTEXT_REFS + 1 }, (_, i) => `r${i}`);
-    expect(() => t.service.spawn(t.context, { ...t.task, contextRefs: refs })).toThrow(/context_refs has 165 entries.*agent refs plus pending input IDs.*the limit is 164/);
+    expect(() => t.service.spawn(t.context, { ...t.task, contextRefs: refs })).toThrow(new RegExp(`context_refs has ${MAX_CONTEXT_REFS + 1} entries.*agent refs plus pending input IDs.*the limit is ${MAX_CONTEXT_REFS}`));
   } finally { t.store.close(); rmSync(t.root, { recursive: true, force: true }); }
 });
 
@@ -43,5 +43,5 @@ test('mergeContextRefs bounds agent refs and gateway input IDs independently, so
   expect(mergeContextRefs(['own', 'in0'], inputs)).toEqual(['own', ...inputs]);
   expect(mergeContextRefs(undefined, [])).toEqual([]);
   expect(mergeContextRefs(own, inputs)).toHaveLength(MAX_CONTEXT_REFS);
-  expect(() => mergeContextRefs([...own, 'one-more'], inputs)).toThrow(/context_refs has 65 entries; an agent may reference at most 64/);
+  expect(() => mergeContextRefs([...own, 'one-more'], inputs)).toThrow(new RegExp(`context_refs has ${MAX_AGENT_CONTEXT_REFS + 1} entries; an agent may reference at most ${MAX_AGENT_CONTEXT_REFS}`));
 });

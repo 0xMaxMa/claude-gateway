@@ -307,5 +307,8 @@ test('a spawn after 60 retained inputs with 8 attachments is accepted without du
     const refs = f.runtime.tasks.revision(String(task.id), 1).contextRefs;
     expect(refs).toHaveLength(60);
     expect(refs.every(ref => !ref.startsWith('media/'))).toBe(true);
+    // Attachments still reach the worker: each input ref the driver expands keeps its own attachment.
+    for (let i=0;i<8;i++) expect(JSON.parse(String(f.runtime.store.get('SELECT attachment_refs_json FROM conversation_inputs WHERE id=?', ids[i])!.attachment_refs_json))).toEqual([`media/c/retained-${i}.png`]);
+    expect(ids.slice(0,8).every(id => refs.includes(id))).toBe(true);
   } finally { await f.close(); }
 });
