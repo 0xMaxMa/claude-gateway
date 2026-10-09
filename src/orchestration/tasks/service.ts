@@ -30,10 +30,14 @@ export const MAX_CONTEXT_REFS = MAX_AGENT_CONTEXT_REFS + MAX_INTAKE_INPUTS;
  * Merge agent-supplied refs with the gateway-added pending input IDs. Attachments are not added:
  * every input ref already carries its own attachments when the worker context is built.
  */
-export function mergeContextRefs(supplied: unknown, inputRefs: string[]): unknown[] {
+export function assertAgentContextRefs(supplied: unknown): unknown[] {
   const own = Array.isArray(supplied) ? supplied : [];
   if (own.length > MAX_AGENT_CONTEXT_REFS) throw new OrchestrationError('INVALID_INPUT', `context_refs has ${own.length} entries; an agent may reference at most ${MAX_AGENT_CONTEXT_REFS}. The gateway adds the pending input IDs itself, so omit them.`);
-  return [...new Set([...own, ...inputRefs])];
+  return own;
+}
+
+export function mergeContextRefs(supplied: unknown, inputRefs: string[]): unknown[] {
+  return [...new Set([...assertAgentContextRefs(supplied), ...inputRefs])];
 }
 
 export interface SpawnTask { browserFields?:unknown; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal'; }

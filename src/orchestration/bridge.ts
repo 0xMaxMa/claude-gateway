@@ -12,7 +12,7 @@ import { mkdirSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
 import type { AgentConfig } from '../types';
 import { importContainerFile } from './container';
-import { TaskService } from './tasks/service';
+import { TaskService, assertAgentContextRefs } from './tasks/service';
 import { CommandContext, OrchestrationError, ChangeMode } from './types';
 import { AGENT_OVERLAY, RuntimeProfile, WORKER_OVERLAY } from '../session/runtime-profile';
 import { API_SOURCE_RULES, IDENTITY_EDIT_RULES, SECRET_RULES } from './source-policy';
@@ -130,6 +130,8 @@ export class TaskBridge {
           const context: CommandContext = { ...scope.context, actionId: `${scope.context.inputId}:${command.action_id}` };
           const mutation = ['task_spawn','task_update','task_answer'].includes(command.tool);
           try {
+            // Agent-supplied bound on every spawn path (host, container, with or without intake), before the gateway adds input IDs.
+            if (command.tool === 'task_spawn') assertAgentContextRefs(a.context_refs);
             if (mutation) await scope.beforeMutation?.(command.tool, a, context.actionId);
             if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
             switch (command.tool) {
@@ -325,7 +327,7 @@ export class TaskBridge {
         const acknowledgementRecovery = code === 'ACKNOWLEDGEMENT_DELIVERY_PENDING'
           ? { message: 'The acknowledgement has not been confirmed as delivered. Do not retry the task mutation yet; wait for delivery to settle, then retry only if the request is still current.' }
           : undefined;
-        response.end(JSON.stringify({ error: code, ...(code === 'COMPUTER_NOT_ALLOWED' ? { message: COMPUTER_NOT_ALLOWED_MESSAGE, retryable: false } : {}), ...(error instanceof JevError ? {message:error.message,...error.metadata} : {}), ...(inputDetails?.length ? {details:inputDetails} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && (['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) || code.startsWith('NARRATE_')) ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && ['EXECUTION_DENIED', 'USER_INPUT_REQUIRED'].includes(code) && error.message !== code ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...intakeRecovery, ...acknowledgementRecovery, ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED', 'BROWSER_EVIDENCE_REQUIRED', 'LIVE_CONTROL_TARGET_ONLY', 'AUTOMATION_SESSION_EXISTS', 'AUTOMATION_SESSION_CLOSED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        response.end(JSON.stringify({ error: code, ...(code === 'COMPUTER_NOT_ALLOWED' ? { message: COMPUTER_NOT_ALLOWED_MESSAGE, retryable: false } : {}), ...(error instanceof JevError ? {message:error.message,...error.metadata} : {}), ...(inputDetails?.length ? {details:inputDetails} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && (['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) || code.startsWith('NARRATE_')) ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && ['EXECUTION_DENIED', 'USER_INPUT_REQUIRED', 'INVALID_INPUT'].includes(code) && error.message !== code ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...intakeRecovery, ...acknowledgementRecovery, ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED', 'BROWSER_EVIDENCE_REQUIRED', 'LIVE_CONTROL_TARGET_ONLY', 'AUTOMATION_SESSION_EXISTS', 'AUTOMATION_SESSION_CLOSED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;
