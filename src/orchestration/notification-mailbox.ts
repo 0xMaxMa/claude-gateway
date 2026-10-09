@@ -1,6 +1,13 @@
 import { OrchestrationStore } from './store';
 import {CURRENT_CONTROL_ROUND_SQL} from './control-notification';
 
+/** The agent's own goal run (its spawn text, revision 1, no user command yet) ended.
+ * The task is user-controlled, yet the agent started this work and must hear how it
+ * ended. Pod-jinawong 2.0.17: such a failure stayed pending, the agent said nothing
+ * and the user saw the chat hang. Later rounds are the user's own commands. */
+const AGENT_GOAL_ENDED_SQL = `controlled.state IN ('completed','failed') AND controlled.state_version=n.task_state_version
+  AND json_extract(controlled.snapshot_json,'$.revision')=1 AND COALESCE(json_extract(controlled.snapshot_json,'$.executionControl.revision'),0)!=1`;
+
 /** Retry reports, never task execution. Decisions/inputs retain the retry clock
  * across restarts, including failed reports written before this implementation.
  * Prolonged outages back off to one hour instead of retrying every five minutes.
@@ -20,7 +27,8 @@ export function pendingReports(store: OrchestrationStore, activeSessions: string
       ORDER BY d2.epoch DESC LIMIT 1)
     WHERE n.status='pending'
       AND (NOT EXISTS(SELECT 1 FROM tasks newer WHERE newer.id=n.task_id AND json_extract(newer.snapshot_json,'$.gatewayTarget.adapter') IN ('computer','browser') AND newer.state_version!=n.task_state_version) OR ${CURRENT_CONTROL_ROUND_SQL})
-      AND NOT EXISTS(SELECT 1 FROM tasks controlled WHERE controlled.id=n.task_id AND json_extract(controlled.snapshot_json,'$.automationController')='user' AND NOT(controlled.state='cancelled' AND controlled.state_version=n.task_state_version AND json_extract(controlled.snapshot_json,'$.cancellation.requestedBy')='user'))
+      AND NOT EXISTS(SELECT 1 FROM tasks controlled WHERE controlled.id=n.task_id AND json_extract(controlled.snapshot_json,'$.automationController')='user' AND NOT(controlled.state='cancelled' AND controlled.state_version=n.task_state_version AND json_extract(controlled.snapshot_json,'$.cancellation.requestedBy')='user')
+        AND NOT(${AGENT_GOAL_ENDED_SQL}))
       AND c.agent_session_id NOT IN (SELECT value FROM json_each(?))
       AND (? OR c.id IN (SELECT value FROM json_each(?)) OR ${CURRENT_CONTROL_ROUND_SQL} OR EXISTS (SELECT 1 FROM tasks monitored WHERE monitored.id=n.task_id AND ((monitored.state='cancelled' AND json_extract(monitored.snapshot_json,'$.automationController')='user' AND json_extract(monitored.snapshot_json,'$.cancellation.requestedBy')='user') OR (monitored.state='running' AND json_extract(monitored.snapshot_json,'$.supervision.id') IS NOT NULL) OR (monitored.state='waiting_input' AND COALESCE(json_extract(monitored.snapshot_json,'$.automationController'),'agent')='agent' AND COALESCE(json_extract(monitored.snapshot_json,'$.browserReport.reason'),json_extract(monitored.snapshot_json,'$.computerReport.reason')) IN ('COMMAND_WAITING_INPUT','THINKING_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'))) AND monitored.state_version=n.task_state_version))
       AND NOT EXISTS(SELECT 1 FROM conversation_inputs queued WHERE queued.conversation_id=c.id AND queued.status IN ('accepted','assigned'))
