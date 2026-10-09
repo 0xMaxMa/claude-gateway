@@ -20,6 +20,9 @@ import { OrchestrationStore, boundedText, payloadHash } from '../store';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../config';
 import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode } from '../types';
 
+/** Agent-supplied refs (<=64) plus the gateway-added input IDs of a full semantic-intake batch (<=100). */
+export const MAX_CONTEXT_REFS = 256;
+
 export interface SpawnTask { browserFields?:unknown; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal'; }
 
 /** How many finished tasks the per-turn index page keeps. Unfinished tasks are never dropped;
@@ -219,7 +222,8 @@ export class TaskService {
     const prepared=preparedBrowserAnswers(command.browserFields,context.inputId);
     if(command.browserFields!==undefined&&command.gatewayTarget?.adapter!=='browser')throw new OrchestrationError('INVALID_BROWSER_FIELDS');
     boundedText(command.title, 512); boundedText(command.instructions); boundedText(command.targetProfile, 128);
-    if ((command.contextRefs?.length ?? 0) > 64 || command.contextRefs?.some(ref => typeof ref !== 'string' || ref.length > 1024)) throw new OrchestrationError('INVALID_INPUT');
+    if ((command.contextRefs?.length ?? 0) > MAX_CONTEXT_REFS) throw new OrchestrationError('INVALID_INPUT', `context_refs has ${command.contextRefs!.length} entries; the limit is ${MAX_CONTEXT_REFS}. Reference fewer materials.`);
+    if (command.contextRefs?.some(ref => typeof ref !== 'string' || ref.length > 1024)) throw new OrchestrationError('INVALID_INPUT');
     if (!['default-worker', 'media-worker', 'skill-worker', 'gateway-managed'].includes(command.targetProfile)) throw new OrchestrationError('UNKNOWN_WORKER_PROFILE');
     if ((command.targetProfile === 'gateway-managed') !== Boolean(command.gatewayTarget)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
     if (command.gatewayTarget && (command.workingDirectory || command.skill || command.contextRefs?.length)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
