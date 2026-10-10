@@ -11,6 +11,9 @@ import type { ExecutionCapabilities } from './types';
 
 export type Row = Record<string, string | number | null>;
 export interface InputReceipt { inputId: string; conversationId: string; bindingId: string; }
+/** Ingress key prefix of the internal recovery input; its model is a snapshot, never a user selection. */
+export const INTAKE_RECOVERY_PREFIX = 'intake-recovery:';
+
 export interface AcceptInput {
   /** Trusted installed-skill snapshot, retained for mailbox recovery. */
   skill?: import('./skills').TaskSkill;
@@ -289,13 +292,18 @@ export class OrchestrationStore {
       }
       const id = String(conversation.id);
       this.assertMember(id, scope.principalId);
-      // Snapshot the conversation's last selected model for voice and task reports.
-      // Do this after authorization, inside the same admission transaction. The
-      // retry hash above still describes the submitted payload, not later defaults.
+      // Voice and task-report admissions follow the model the user explicitly
+      // selected for this conversation. Only inputs stamped modelSelection=explicit
+      // count: internal recovery snapshots and inherited copies record the model
+      // that happened to be in effect, and must never pin later turns to it.
+      // Legacy rows carry no marker, so they fall back to the agent default.
+      // The retry hash above still describes the submitted payload.
+      const internal = input.ingressKey?.startsWith(INTAKE_RECOVERY_PREFIX) === true;
       const previousModel = input.model ? undefined : this.get(`SELECT json_extract(ingress_json,'$.model') AS model
-        FROM conversation_inputs WHERE conversation_id=? AND json_type(ingress_json,'$.model')='text'
-        AND json_extract(ingress_json,'$.model')<>'' ORDER BY input_seq DESC LIMIT 1`, id)?.model;
-      const admittedInput = previousModel ? { ...input, model: String(previousModel) } : input;
+        FROM conversation_inputs WHERE conversation_id=? AND json_extract(ingress_json,'$.modelSelection')='explicit'
+        AND json_type(ingress_json,'$.model')='text' AND json_extract(ingress_json,'$.model')<>'' ORDER BY input_seq DESC LIMIT 1`, id)?.model;
+      const admittedInput = previousModel ? { ...input, model: String(previousModel), modelSelection: 'inherited' }
+        : input.model ? { ...input, modelSelection: internal ? 'internal' : 'explicit' } : input;
       const pending = Number(this.get("SELECT COUNT(*) AS n FROM conversation_inputs WHERE conversation_id=? AND status IN ('accepted','assigned')", id)!.n);
       if (pending >= maxPending) throw new OrchestrationError('QUEUE_FULL');
       const bindingId = String(this.get('SELECT id FROM conversation_bindings WHERE conversation_id=?', id)!.id);

@@ -153,7 +153,11 @@ test('a deferred batch preserves every original input when another message arriv
       ready();await proceed;
       expect(await call('task_spawn',spawnArgs)).toMatchObject({error:'NEW_INPUT_PENDING'});
     }else{
-      expect(turn).toBe(2);expect(f.prompts[1]).toContain('Original repo A');expect(f.prompts[1]).toContain('Original repo B');
+      expect(turn).toBe(2);
+      // The originals were delivered to this resumed CLI context in turn 1 and are not re-sent (#576);
+      // the unresolved obligation is replayed and the durable inputs still reach the worker via contextRefs.
+      expect(f.prompts[0]).toContain('Original repo A');expect(f.prompts[0]).toContain('Original repo B');
+      expect(f.prompts[1]).not.toContain('Original repo A');expect(f.prompts[1]).toContain('Compare the two repositories.');expect(f.prompts[1]).toContain('Include signing configuration');
       await call('conversation_intake',{mode:'ready',acknowledgement:'Including the signing configuration.'});
       const task=await call('task_spawn',spawnArgs);expect(task.taskId).toBeTruthy();
       await call('conversation_intake',{mode:'resolve',task_id:task.taskId,resolution:'Both original repositories and the latest constraint are queued.'});
