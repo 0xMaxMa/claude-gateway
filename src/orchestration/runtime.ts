@@ -1145,10 +1145,12 @@ export class AgentOrchestrationRuntime {
       }
       // Immutable source IDs remain available to workers. Only the model delivery
       // is incremental; full canonical text and attachment references are retained.
-      // Unresolved execution is an obligation, not optional cached context. Replay
-      // it on follow-up/recovery even when this CLI has seen it before.
+      // Unresolved execution is an obligation, not optional cached context: the small
+      // pending state is replayed on follow-up/recovery. Source materials follow the
+      // delivery checkpoint, which only advances after a completed turn, so a resumed
+      // CLI that already holds them is not fed the same bytes every turn (#576).
       const replayPending = Boolean(prepared?.deferredDispatch || recoveryInputId);
-      const freshPreparedInputs = preparedInputs.filter(row => row.id !== receipt.inputId && (replayPending || !contextPlan.includes('materials',String(row.id))));
+      const freshPreparedInputs = preparedInputs.filter(row => row.id !== receipt.inputId && !contextPlan.includes('materials',String(row.id)));
       for (const row of freshPreparedInputs) contextPlan.mark('materials',String(row.id),true);
       contextPlan.mark('materials',receipt.inputId,true);
       const intakeValue = (value: typeof prepared) => value ? {mode:value.mode,deferredDispatch:value.deferredDispatch,
