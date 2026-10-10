@@ -59,7 +59,7 @@ export class GatewayTaskController {
     return run;
   }
   private async run(): Promise<void> {
-    const rows = this.tasks.store.all("SELECT id FROM tasks WHERE json_type(snapshot_json,'$.gatewayTarget')='object' AND (state IN ('queued','starting','running','interrupting','cancel_requested','needs_reconciliation','waiting_input') OR json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked')) ORDER BY created_at,id");
+    const rows = this.tasks.store.all("SELECT id FROM tasks WHERE json_type(snapshot_json,'$.gatewayTarget')='object' AND (state IN ('queued','starting','running','interrupting','cancel_requested','needs_reconciliation','waiting_input') OR json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked')) ORDER BY created_at,rowid");
     for (const row of rows) {
       if (this.closed) return;
       let task = this.tasks.store.task(String(row.id))!;

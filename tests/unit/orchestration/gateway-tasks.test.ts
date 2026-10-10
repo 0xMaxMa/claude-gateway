@@ -107,6 +107,21 @@ test('independent requests to the same target cannot race before its owner file 
  outcome={type:'completed',result:{summary:'first done',artifactIds:[]}};await controller.tick();expect(adapter.submit).toHaveBeenCalledTimes(2);
 });
 
+test('same-millisecond requests to one target dispatch in submission order', async () => {
+  for (let round = 0; round < 12; round++) {
+    const first = spawn(), second = spawn();
+    store.run('UPDATE tasks SET created_at=? WHERE id IN (?,?)', '2026-01-01T00:00:00.000Z', first.taskId, second.taskId);
+    await controller.tick();
+    expect(store.task(first.taskId)?.gatewayDispatch).toBeDefined();
+    expect(store.task(second.taskId)?.gatewayDispatch).toBeUndefined();
+    outcome = { type: 'completed', result: { summary: 'done', artifactIds: [] } };
+    await controller.tick(); await controller.tick();
+    outcome = 'running';
+    const rest = store.task(second.taskId);
+    if (rest && rest.state !== 'completed') { await controller.tick(); outcome = { type: 'completed', result: { summary: 'done', artifactIds: [] } }; await controller.tick(); await controller.tick(); outcome = 'running'; }
+  }
+});
+
 test('busy targets stay amendable in the queue and leave capacity for an unrelated worker',async()=>{
  tasks.configure({tasks:{workspaceMode:'host',maxConcurrentPerAgent:1,maxConcurrentPerConversation:1}});
  adapter.ready=()=>false;
