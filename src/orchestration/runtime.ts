@@ -73,7 +73,7 @@ import { SessionProcess } from '../session/process';
 import { SessionStore } from '../session/store';
 import { HistoryDB } from '../history/db';
 import { RuntimeProfile } from '../session/runtime-profile';
-import { OrchestrationStore, AcceptInput, channelVoiceKey, payloadHash } from './store';
+import { OrchestrationStore, AcceptInput, INTAKE_RECOVERY_PREFIX, channelVoiceKey, payloadHash } from './store';
 import { resolveOrchestrationConfig } from './config';
 import { mergeContextRefs, TaskService, taskIndexEntry } from './tasks/service';
 import { DecisionService, DecisionReceipt } from './decisions';
@@ -1110,7 +1110,7 @@ export class AgentOrchestrationRuntime {
       input = {...input,metadata:replyMetadata,attachmentIds:[...new Set([...(input.attachmentIds??[]),...(replyMetadata?.repliedAttachmentIds??[])])]};
       const semantic = this.config.conversation.semanticIntake && !active.notification && !liveControl;
       const prepared = semantic ? this.intake.context(receipt.conversationId, input.scope.principalId, String(admitted!.binding_id)) : undefined;
-      const recoveryInputId = input.ingressKey?.startsWith('intake-recovery:') ? input.ingressKey.slice('intake-recovery:'.length) : undefined;
+      const recoveryInputId = input.ingressKey?.startsWith(INTAKE_RECOVERY_PREFIX) ? input.ingressKey.slice(INTAKE_RECOVERY_PREFIX.length) : undefined;
       const preparedInputIds = [...new Set([...(prepared?.inputIds ?? []), ...(!recoveryInputId && (prepared?.inputIds?.length || decision.inputIds.length > 1) ? decision.inputIds : []), ...(recoveryInputId ? [recoveryInputId] : [])])];
       const preparedInputs = preparedInputIds.length ? this.store.all(`SELECT id,text,attachment_refs_json,ingress_json FROM conversation_inputs
         WHERE conversation_id=? AND principal_id=? AND binding_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY input_seq`,
@@ -1647,13 +1647,13 @@ export class AgentOrchestrationRuntime {
       if (semantic && intakeChoice?.mode!=='wait' && (intakeChoice || display.trim()) && !intakeDeferred && !newerInputPending() && !response.interrupted) this.intake.consume(receipt.inputId);
       const pendingDispatch = semantic && this.intake.context(receipt.conversationId, input.scope.principalId, String(admitted!.binding_id));
       if (pendingDispatch?.deferredDispatch && pendingDispatch.mode !== 'wait' && capabilities.execute &&
-          !input.ingressKey?.startsWith('intake-recovery:') && !intakeDeferred && !newerInputPending() &&
+          !input.ingressKey?.startsWith(INTAKE_RECOVERY_PREFIX) && !intakeDeferred && !newerInputPending() &&
           !response.interrupted && !active.stopping) {
         // One bounded reconciliation turn after a direct reply, never an automatic
         // replay of the rejected command. It sees current instructions and uses
         // the same principal, binding and execution permissions as this turn.
         try { this.store.acceptInput({scope:input.scope, storeUserMessage:false,
-          ingressKey:`intake-recovery:${receipt.inputId}`, capabilities, model:options.model,
+          ingressKey:`${INTAKE_RECOVERY_PREFIX}${receipt.inputId}`, capabilities, model:options.model,
           text:'Reconcile the pending deferred dispatch with the latest user instructions. Earlier NEW_INPUT_PENDING was temporary. If still authorized, acknowledge and commit the appropriate task command now. If cancelled, replaced, or already satisfied, use conversation_intake mode=resolve with a concrete resolution. Do not merely repeat a promise or the earlier rejection. If a new decision is necessary, ask a specific question and preserve the pending work.' + '\nLatest user input ID: ' + receipt.inputId}, this.config.conversation.maxPendingInputs);
         } catch (error) {
           if (!(error instanceof OrchestrationError) || error.code !== 'QUEUE_FULL') throw error;

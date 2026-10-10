@@ -11,6 +11,9 @@ import type { ExecutionCapabilities } from './types';
 
 export type Row = Record<string, string | number | null>;
 export interface InputReceipt { inputId: string; conversationId: string; bindingId: string; }
+/** Ingress key prefix of the internal recovery input; its model is a snapshot, never a user selection. */
+export const INTAKE_RECOVERY_PREFIX = 'intake-recovery:';
+
 export interface AcceptInput {
   /** Trusted installed-skill snapshot, retained for mailbox recovery. */
   skill?: import('./skills').TaskSkill;
@@ -295,7 +298,7 @@ export class OrchestrationStore {
       // that happened to be in effect, and must never pin later turns to it.
       // Legacy rows carry no marker, so they fall back to the agent default.
       // The retry hash above still describes the submitted payload.
-      const internal = input.ingressKey?.startsWith('intake-recovery:') === true;
+      const internal = input.ingressKey?.startsWith(INTAKE_RECOVERY_PREFIX) === true;
       const previousModel = input.model ? undefined : this.get(`SELECT json_extract(ingress_json,'$.model') AS model
         FROM conversation_inputs WHERE conversation_id=? AND json_extract(ingress_json,'$.modelSelection')='explicit'
         AND json_type(ingress_json,'$.model')='text' AND json_extract(ingress_json,'$.model')<>'' ORDER BY input_seq DESC LIMIT 1`, id)?.model;
