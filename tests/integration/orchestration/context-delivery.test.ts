@@ -261,7 +261,7 @@ test('resumed deferred recovery replays the pending obligation but not materials
   } finally { release(); await f.close(); }
 });
 
-test('resumed deferred recovery a fresh CLI context after deferred intake still receives the source materials', async () => {
+test('resumed deferred recovery in a fresh CLI context after deferred intake still receives the source materials', async () => {
   let reading!: () => void, release!: () => void;
   const started = new Promise<void>(resolve => { reading = resolve; });
   const proceed = new Promise<void>(resolve => { release = resolve; });

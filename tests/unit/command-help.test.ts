@@ -34,4 +34,6 @@ test('session status labels a context measured on a different model separately (
   expect(text).toContain('Model: configured-model');
   expect(text).toContain('Context measured on: observed-model');
   expect(formatSessionStatus('s', 'N', 'm', { text: '—', contextUsedPct: null, contextModel: 'm' })).not.toContain('Context measured on');
+  // Ids are compared raw on purpose: the [1m] suffix selects a different context window.
+  expect(formatSessionStatus('s', 'N', 'claude-sonnet-5-5[1m]', { text: '—', contextUsedPct: null, contextModel: 'claude-sonnet-5-5' })).toContain('Context measured on: claude-sonnet-5-5');
 });
