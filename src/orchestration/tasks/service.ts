@@ -758,12 +758,17 @@ export class TaskService {
           return undefined;
         }
       }
-      // A subagent's ancestors keep their slots while they wait for it, so counting it against the
-      // same limits can deadlock the tree; like a native subagent it has no outer limit beyond its
-      // depth and the gateway process cap.
+      // A subagent's ancestors hold their slots while they wait for it. They are not counted
+      // against it, so a chain can always extend (no deadlock), while siblings still queue
+      // within the usual limits (no tree takes every worker process).
+      const ancestors: TaskSnapshot[] = [];
+      for (let id = task.parentTaskId; id;) { const parent = this.store.task(id); if (!parent) break; ancestors.push(parent); id = parent.parentTaskId; }
+      // A subagent only runs for a parent that is running; after a restart its parent awaits reconciliation.
+      if (task.parentTaskId && !['starting', 'running', 'interrupting'].includes(ancestors[0]?.state ?? '')) return undefined;
+      const holding = ancestors.filter(parent => parent.activeAttemptId).length;
       const active = this.store.all('SELECT conversation_id,COUNT(*) AS n FROM tasks WHERE active_attempt_id IS NOT NULL GROUP BY conversation_id');
-      if (!task.parentTaskId && (active.reduce((n, row) => n + Number(row.n), 0) >= this.config.tasks.maxConcurrentPerAgent || Number(active.find(row => row.conversation_id === task.conversationId)?.n ?? 0) >= this.config.tasks.maxConcurrentPerConversation)) return undefined;
-      const worker = task.gatewayTarget ? { sessionId: task.gatewayTarget.sessionId, workerId: undefined } : this.pool.acquire(task, task.parentTaskId ? Number.MAX_SAFE_INTEGER : this.config.tasks.maxConcurrentPerAgent, this.config.tasks.workerIdleTtlMs);
+      if (active.reduce((n, row) => n + Number(row.n), 0) - holding >= this.config.tasks.maxConcurrentPerAgent || Number(active.find(row => row.conversation_id === task.conversationId)?.n ?? 0) - holding >= this.config.tasks.maxConcurrentPerConversation) return undefined;
+      const worker = task.gatewayTarget ? { sessionId: task.gatewayTarget.sessionId, workerId: undefined } : this.pool.acquire(task, this.config.tasks.maxConcurrentPerAgent + holding, this.config.tasks.workerIdleTtlMs);
       if (!worker) return undefined;
       task.workerId = worker.workerId;
       if (task.gatewayTarget) delete task.gatewayDispatch;
@@ -1086,7 +1091,7 @@ export class TaskService {
   private cancelSubagents(parent: TaskSnapshot): void {
     for (const row of this.store.all("SELECT snapshot_json FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId')=? AND state NOT IN ('completed','failed','cancelled')", parent.taskId)) {
       const child = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
-      // cancelOwned cascades again below each child, including one that is still stopping.
+      // cancelOwned cascades below each child (at cancel_requested, or via notify once it ends).
       this.cancelOwned(child.conversationId, child.taskId);
     }
   }
@@ -1101,7 +1106,7 @@ export class TaskService {
       const { task: parent } = this.active(attemptId, generation);
       const receipt = this.workerReceipt(attemptId, actionId, 'subagent_spawn', JSON.stringify(spec));
       if (receipt.prior) return receipt.prior as TaskSnapshot;
-      if (parent.state !== 'running') throw new OrchestrationError('STATE_CONFLICT', `This task is ${parent.state}; it cannot start subagents.`);
+      if (!['starting', 'running'].includes(parent.state)) throw new OrchestrationError('STATE_CONFLICT', `This task is ${parent.state}; it cannot start subagents.`);
       const depth = (parent.depth ?? 0) + 1;
       if (depth > SUBAGENT_MAX_DEPTH) throw new OrchestrationError('SUBAGENT_DEPTH_EXCEEDED', `Subagents nest at most ${SUBAGENT_MAX_DEPTH} levels below the root worker. Do this work inline.`);
       const queued = Number(this.store.get("SELECT COUNT(*) n FROM tasks WHERE conversation_id=? AND state='queued'", parent.conversationId)!.n);
@@ -1145,7 +1150,8 @@ export class TaskService {
     if (children.some(child => !TERMINAL_TASK_STATES.has(child.state) && child.state !== 'needs_reconciliation' && !(child.state === 'waiting_input' && child.pendingQuestion))) return undefined;
     return children.map(child => ({ task_id: child.taskId, state: child.state, model: child.model, effort: child.effort,
       ...(child.result ? { result: child.result.summary } : {}), ...(child.failure ? { failure: { code: child.failure.code, message: child.failure.message } } : {}),
-      ...(child.state === 'waiting_input' && child.pendingQuestion ? { question: child.pendingQuestion.text } : {}) }));
+      ...(child.state === 'waiting_input' && child.pendingQuestion ? { question: child.pendingQuestion.text } : {}),
+      ...(child.state === 'needs_reconciliation' ? { note: 'Its process could not be confirmed stopped and may still be running. Cancel it with subagent_cancel before relying on files it touched.' } : {}) }));
   }
   /** subagent_cancel: cancel the calling worker's own subagents and everything below them. */
   cancelSubagentTasks(attemptId: string, generation: number, taskIds: unknown) {

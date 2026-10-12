@@ -221,11 +221,29 @@ describe('review fixes', () => {
     expect((await spawn(attempt, {})).error).toBe('STATE_CONFLICT');
   });
 
-  test('a subagent stuck in needs_reconciliation is reported, not waited on', async () => {
+  test('a subagent stuck in needs_reconciliation is reported, not waited on, with a warning', async () => {
     const { attempt } = rootWorker();
     const child = running(store.task((await spawn(attempt, {})).task_id)!);
     tasks.finish(child.attemptId, child.generation, { type: 'unknown' } as any);
     expect(store.task(child.taskId)!.state).toBe('needs_reconciliation');
-    expect((await call(attempt, 'subagent_wait', { task_ids: [child.taskId] })).results[0]).toMatchObject({ state: 'needs_reconciliation' });
+    expect((await call(attempt, 'subagent_wait', { task_ids: [child.taskId] })).results[0]).toMatchObject({ state: 'needs_reconciliation', note: expect.stringContaining('may still be running') });
+  });
+
+  // Second review of #583: bypassing the limits let one tree take every worker process.
+  test('siblings still queue within the limits; only the waiting ancestors are not counted', async () => {
+    tasks = new TaskService(store, { tasks: { workspaceMode: 'host', maxConcurrentPerAgent: 2, maxConcurrentPerConversation: 2 } }, root);
+    await bridge.close(); bridge = new TaskBridge(tasks); bridge.models = async () => MODELS; await bridge.start();
+    const { attempt } = rootWorker();
+    const [a, b, c] = [(await spawn(attempt, {})).task_id, (await spawn(attempt, {})).task_id, (await spawn(attempt, {})).task_id];
+    expect(tasks.claim(a)).toBeDefined();
+    expect(tasks.claim(b)).toBeDefined();
+    expect(tasks.claim(c)).toBeUndefined();
+  });
+
+  test('after a restart, a subagent of a parent awaiting reconciliation does not start', async () => {
+    const { task: parent, attempt } = rootWorker();
+    const child = (await spawn(attempt, {})).task_id;
+    store.transaction(() => { const t = store.task(parent.taskId)!; t.state = 'needs_reconciliation'; store.saveTask(t, t.stateVersion); });
+    expect(tasks.claim(child)).toBeUndefined();
   });
 });
