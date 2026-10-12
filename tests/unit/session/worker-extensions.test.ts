@@ -99,3 +99,15 @@ test('Claude settings environment resolves MCP placeholders with local precedenc
   file(join(cwd, '.mcp.json'), { mcpServers: { docs: { url: '${MCP_ENDPOINT}' } } });
   expect(readClaudeExtensions(cwd, { HOME: home, MCP_ENDPOINT: 'https://base.example/mcp' }).servers.claude__docs.url).toBe('https://local.example/mcp');
 });
+
+// #582: discovery lists a plugin only when the worker will load it. pstack is
+// enabled host-wide by Claude Code, but only set-up agents' workers load it.
+test('discovery applies the worker plugin overrides, so pstack skills appear only for set-up agents', () => {
+  const path = join(home, '.claude', 'plugins', 'cache', 'pstack-claude', 'pstack', '0.9.82');
+  file(join(home, '.claude', 'settings.json'), { enabledPlugins: { 'pstack@pstack-claude': true } });
+  file(join(home, '.claude', 'plugins', 'installed_plugins.json'), { plugins: { 'pstack@pstack-claude': [{ scope: 'user', installPath: path }] } });
+  file(join(path, '.claude-plugin', 'plugin.json'), { name: 'pstack' });
+  skill(join(path, 'skills', 'how', 'SKILL.md'), 'how');
+  expect(readClaudeExtensions(cwd, { HOME: home }, { 'pstack@pstack-claude': false }).skills).toEqual([]);
+  expect(readClaudeExtensions(cwd, { HOME: home }, { 'pstack@pstack-claude': true }).skills.map(s => s.name)).toEqual(['pstack:how']);
+});
