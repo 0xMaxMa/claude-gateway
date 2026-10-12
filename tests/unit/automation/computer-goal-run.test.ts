@@ -291,6 +291,41 @@ describe('goal evidence is best-effort',()=>{
  });
 });
 
+// Pod-jinawong 2.0.17, task d3f019c3: "play top hits on YouTube". Round 2 chose press
+// on the YouTube search AXTextArea; the helper listed press, then refused it before
+// input (UNSUPPORTED_ACTION). The goal failed after one action and the user saw a hang.
+describe('a refused action in a goal run',()=>{
+ const youtube=(playing=false)=>({application:'com.google.Chrome',windowTitle:playing?'Top Hits - YouTube':'YouTube',truncated:false,apps:APPS,
+  controls:[{ref:'c0',role:'AXTextArea',label:'Search',actions:['press','type']},{ref:'c1',role:'AXLink',label:'Top Hits 2026',actions:['press']}]});
+ const refusing=(f:ReturnType<typeof fixture>,refuse:(args:any)=>boolean)=>{
+  const call=f.deps.call;f.deps.call=async(name,args,s)=>name==='computer_action'&&refuse(args)?(f.calls.push({name,args}),{state:'not_executed',error:'UNSUPPORTED_ACTION'}):call(name,args,s);
+ };
+ test('is dropped and the goal decides afresh instead of failing',async()=>{
+  const f=fixture([youtube,()=>youtube(true)],[{pick:'press:c0'},{pick:'press:c1'},{pick:'DONE'}]);
+  refusing(f,a=>a.kind==='press'&&a.ref==='c0');
+  const r=await spawn(f,'play top hits on YouTube');
+  expect(f.actions()).toEqual([{kind:'press',ref:'c0'},{kind:'press',ref:'c1'}]);
+  expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:1});
+  // The refused press is not offered again; typing into the same field still is.
+  expect(f.requests[1].questions.target_press.criteria['press:c0']).toBeUndefined();
+  expect(f.requests[1].questions.target_type.criteria['type:c0']).toBeDefined();
+ });
+ test('still stops when every re-decision is refused',async()=>{
+  const f=fixture([youtube],[{pick:'press:c0'},{pick:'press:c1'},{pick:'key:enter'}]);
+  refusing(f,()=>true);
+  const r=await spawn(f,'play top hits on YouTube');
+  expect(f.actions()).toEqual([{kind:'press',ref:'c0'},{kind:'press',ref:'c1'},{kind:'key',key:'enter'}]);
+  expect(r).toMatchObject({status:'blocked',reason:'UNSUPPORTED_ACTION',steps:0});
+ });
+ test('a direct user command is not re-decided (no behavior change)',async()=>{
+  const f=fixture([youtube],[{pick:'press:c0'},{pick:'press:c1'}]);
+  refusing(f,a=>a.ref==='c0');
+  const r=await runComputerUse({goal:'click search',yieldAfterInteraction:true,readRequest:true},f.deps,new AbortController().signal);
+  expect(f.actions()).toEqual([{kind:'press',ref:'c0'}]);
+  expect(r).toMatchObject({status:'blocked',reason:'UNSUPPORTED_ACTION'});
+ });
+});
+
 describe('URL fast path for agent goals',()=>{
  test('"open YouTube in Chrome" from Finder opens Chrome, then types the address: no model call',async()=>{
   const f=fixture([finder,()=>chrome(),()=>chrome('youtube.com'),()=>chrome('youtube.com')]);
