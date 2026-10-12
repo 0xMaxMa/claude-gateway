@@ -111,3 +111,13 @@ test('any other reply to a vision question runs as the user\'s own command on Ac
  }finally{await f.close();}
 });
 
+test('RAW_INPUT_DISABLED from the relay reaches the vision loop as that code, not COMPUTER_TOOL_FAILED',async()=>{
+ const f=fixture(()=>({mode:'vision',decide:()=>jest.fn()}));try{
+  f.callTool.mockImplementation(async({name}:{name:string})=>name==='computer_action'?{isError:true,content:[{type:'text',text:JSON.stringify({error:'RAW_INPUT_DISABLED'})}]}:{content:[{type:'text',text:JSON.stringify({state:'approved'})}]});
+  let thrown:unknown;
+  runVisionComputerUse.mockImplementationOnce(async(_i:any,deps:any)=>{try{await deps.call('computer_action',{operation_id:'o'},new AbortController().signal);}catch(e){thrown=e;}return {fallback:'RAW_INPUT_DISABLED',trace:[]};});
+  runComputerUse.mockImplementationOnce(async()=>reached);
+  await f.run('r1','open YouTube');
+  expect((thrown as Error).message).toBe('RAW_INPUT_DISABLED');
+ }finally{await f.close();}
+});

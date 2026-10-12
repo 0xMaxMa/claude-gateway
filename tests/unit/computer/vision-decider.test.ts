@@ -153,7 +153,7 @@ describe('config', () => {
 });
 
 /** A fake Mac: each observe returns a new generation; actions return queued receipts. */
-function device(options: { caps?: unknown; receipts?: Array<Record<string, unknown> | Error>; shotError?: string; controls?: unknown[]; text?: string[]; impact?: (command: string) => 'ROUTINE' | 'HIGH_IMPACT'} = {}) {
+function device(options: { caps?: unknown; receipts?: Array<Record<string, unknown> | Error>; shotError?: string; controls?: unknown[]; text?: string[]; impact?: (command: string) => 'ROUTINE' | 'HIGH_IMPACT'; status?: (args: any) => unknown } = {}) {
   let generation = 0;
   const calls: Array<{ name: string; args: any }> = [], receipts = [...(options.receipts ?? [])], judged: any[] = [];
   const state = (g: number) => ({ generation: 'g' + g, application: 'com.google.Chrome', windowTitle: 'YouTube', controls: options.controls ?? [{ ref: 'r1', role: 'AXTextField', label: 'Search', bounds: { x: 0.25, y: 0.1, width: 0.5, height: 0.05 }, actions: ['type'] }], apps: [], truncated: false, screenshotAvailable: true,
@@ -171,7 +171,7 @@ function device(options: { caps?: unknown; receipts?: Array<Record<string, unkno
       if (name === 'computer_acquire') return { lease_token: 'lease' };
       if (name === 'computer_observe') return state(++generation);
       if (name === 'computer_action') { const next = receipts.shift() ?? { state: 'completed' }; if (next instanceof Error) throw next; return next; }
-      if (name === 'computer_operation_status') return { operation_id: args.operation_id, state: 'unknown' };
+      if (name === 'computer_operation_status') return options.status ? options.status(args) : { operation_id: args.operation_id, state: 'unknown' };
       return {};
     },
     screenshot: async s => options.shotError ? { error: options.shotError } : { generation: s.generation, data: '/9j/' + s.generation, width: 1280, height: 800 },
@@ -405,3 +405,12 @@ describe('vision turn and image bounds', () => {
   });
 });
 
+describe('raw input refused before dispatch', () => {
+  test('RAW_INPUT_DISABLED thrown by the adapter is confirmed against the receipt store, then falls back before the first action', async () => {
+    const first = device({ receipts: [Error('RAW_INPUT_DISABLED')], status: () => ({ state: 'not_found' }) });
+    expect(await runVisionComputerUse({ goal: 'x' }, first.deps(model([{ name: 'left_click', input: { coordinate: [1, 1] } }]).decide), signal())).toMatchObject({ fallback: 'RAW_INPUT_DISABLED' });
+    expect(first.actions()).toHaveLength(1);
+    const later = device({ receipts: [{ state: 'completed' }, Error('RAW_INPUT_DISABLED')], status: () => ({ state: 'not_found' }) });
+    expect(await runVisionComputerUse({ goal: 'x' }, later.deps(model([1, 2].map(() => ({ name: 'left_click', input: { coordinate: [1, 1] } }))).decide), signal())).toMatchObject({ status: 'blocked', reason: 'RAW_INPUT_DISABLED', steps: 1 });
+  });
+});

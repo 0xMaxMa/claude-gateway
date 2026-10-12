@@ -30,7 +30,7 @@ const PRE_DISPATCH_REJECTIONS = new Set(['DEVICE_OFFLINE', 'CONSENT_REQUIRED', '
 /** Helper refusals that leave the desktop unchanged: look again and let the model decide on the new screenshot. */
 const REOBSERVE_REFUSALS = new Set(['STALE_OBSERVATION', 'TARGET_OCCLUDED', 'SCREENSHOT_REQUIRED', 'POINT_OUTSIDE_WINDOW', 'FOCUS_CHANGED', 'FOCUS_REQUIRED', 'CHORD_NOT_ALLOWED', 'INVALID_CHORD', 'SECURE_FIELD', 'INVALID_REQUEST']);
 /** The helper (or getpod-app with its raw-input switch off) cannot take raw input at all. */
-const RAW_UNAVAILABLE = new Set(['RAW_INPUT_DISABLED', 'UNSUPPORTED_ACTION']);
+export const RAW_UNAVAILABLE = new Set(['RAW_INPUT_DISABLED', 'UNSUPPORTED_ACTION']);
 const code = (value: unknown, fallback: string) => typeof value === 'string' && /^[A-Z][A-Z_0-9]{0,79}$/.test(value) ? value : fallback;
 
 /** Raw-input capabilities as the helper advertises them in an observation (getpod-computer-use contract v1, additive keys). */
@@ -460,7 +460,8 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
           pending = operationId; emit('acting', { ...summary, operationId }); const started = Date.now();
           let receipt: z.infer<typeof Receipt>, rejected: string | undefined;
           try { receipt = Receipt.parse(await call('computer_action', { ...action, generation, operation_id: operationId })); }
-          catch (error) { receipt = { state: 'unknown' }; if (error instanceof Error && PRE_DISPATCH_REJECTIONS.has(error.message)) rejected = error.message; }
+          // A refusal before dispatch (raw input switched off included) is confirmed against the receipt store below.
+          catch (error) { receipt = { state: 'unknown' }; if (error instanceof Error && (PRE_DISPATCH_REJECTIONS.has(error.message) || RAW_UNAVAILABLE.has(error.message))) rejected = error.message; }
           if (receipt.state === 'unknown') {
             emit('reconciling', { ...summary, operationId, reason: 'CHECKING_RECORDED_RESULT' });
             // Read receipts only; never resend the action after a transport failure.
@@ -507,7 +508,6 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
       messages.push({ role: 'user', content: results });
     }
   } catch (error) {
-    if (!pending && !steps && error instanceof Error && error.message === 'RAW_INPUT_DISABLED') return fallback('RAW_INPUT_DISABLED');
     return result(pending || (error instanceof Error && error.message === 'COMPUTER_RECONCILIATION_REQUIRED') ? 'needs_reconciliation' : (signal.aborted || deps.interruptSignal?.aborted) ? 'cancelled' : 'blocked',
       pending ? 'OUTCOME_UNKNOWN' : deps.interruptSignal?.aborted ? 'REVISION_SUPERSEDED' : signal.aborted ? 'CANCELLED' : runSignal.aborted ? 'TIMEOUT'
         : error instanceof JevError ? 'JEV_' + error.code : error instanceof Error && /^[A-Z][A-Z_0-9]{0,79}$/.test(error.message) ? error.message : 'COMPUTER_USE_FAILED',
