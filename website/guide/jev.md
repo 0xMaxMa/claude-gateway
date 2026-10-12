@@ -739,8 +739,11 @@ question as on Accessibility, about the concrete action (for example
 `click on "Buy now" (AXButton)`, with the window as evidence). An action that is
 not confidently routine is not run: the user is asked to confirm it. A yes
 resumes the goal in vision mode and covers only that action on that control (or
-position); any other reply runs as the user's own command. An agent-controlled
-task's own command is its authorization, as on Accessibility.
+position); no runs nothing (`CONFIRMATION_DECLINED`), as on Accessibility; any
+other reply runs as the user's own command. If raw input is off and the goal
+falls back to Accessibility before anything ran, a yes to a plain click on a
+control still covers pressing that same control, once; anything else asks again.
+An agent-controlled task's own command is its authorization, as on Accessibility.
 
 Model actions map to the helper's raw input kinds (`pointer`, `scroll`,
 `key_chord`, `type_focused`) and are bound to the generation of the screenshot

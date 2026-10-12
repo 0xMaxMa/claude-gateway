@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { ComputerObservation, type ComputerLastAction, type ComputerProgress, type ComputerState, type ComputerUseDependencies, type ComputerUseResult } from './computer-use';
+import { ComputerObservation, confirmationTarget, type ComputerLastAction, type ComputerProgress, type ComputerState, type ComputerUseDependencies, type ComputerUseResult } from './computer-use';
 import { IMPACT_CRITERIA, IMPACT_QUESTION } from './computer-command';
 import { decisionState, readChoice } from './computer-policy';
 import { checkInterruption, interruptible } from './interrupt';
@@ -288,6 +288,8 @@ export function describeVisionAction(action: VisionAction, state: ComputerState,
       : action.kind === 'key_chord' ? `press ${action.keys.join('+')}${named ? ' in ' + named : ''}`
         : control?.sensitive ? `type text into ${named}` : `type ${JSON.stringify(action.text.slice(0, 200))}${named ? ' into ' + named : ''}`;
   const label = (action.kind === 'key_chord' ? action.keys.join('+') : action.kind === 'type_focused' ? 'Type text' + (control && !control.sensitive ? ' into ' + control.label : '') : control && !control.sensitive && control.label ? control.label : command).slice(0, 200);
+  // A plain click on a control is its press, hashed as runComputerUse does: a yes carries over to the Accessibility fallback.
+  if (control && action.kind === 'pointer' && action.op === 'click' && !action.modifiers?.length) return { command, label, target: confirmationTarget(state, 'press:' + control.ref, { kind: 'press', ref: control.ref }) };
   // Without a control the position (on an 8 px grid) is the target, so a nearby re-decided click still matches.
   const where = control ? [control.identity ?? control.ref, control.bounds, control.context] : action.kind === 'pointer' || action.kind === 'scroll' ? [action.x >> 3, action.y >> 3] : [];
   const target = createHash('sha256').update(JSON.stringify([action.kind, action.kind === 'pointer' ? action.op : undefined, state.application, state.windowTitle, ...where,

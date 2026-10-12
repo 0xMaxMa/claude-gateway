@@ -3,6 +3,7 @@ import {
   type RawCapabilities, type VisionDependencies, type VisionScreenshot, type VisionTurn,
 } from '../../../src/automation/vision-decider';
 import { IMPACT_CRITERIA, IMPACT_QUESTION } from '../../../src/automation/computer-command';
+import { runComputerUse, type ComputerUseDependencies } from '../../../src/automation/computer-use';
 import { modelRequestBody, rejectsForcedToolChoice, validateComputerUseConfig } from '../../../src/automation/model-choice-evaluator';
 
 const CAPS_RAW = { pointer: ['click', 'double_click', 'right_click', 'move', 'drag'], pointerModifiers: ['alt', 'cmd', 'ctrl', 'shift'], scrollAt: true, keyChord: true, typeFocused: true, screenshotGeometry: true };
@@ -355,6 +356,42 @@ describe('vision impact gate (the Accessibility gate, per action)', () => {
     const other = device({ controls: shop, impact: judge });
     expect(await runVisionComputerUse({ goal: 'buy it', confirmedTarget }, other.deps(model([{ name: 'left_click', input: { coordinate: [640, 600] } }]).decide), signal())).toMatchObject({ status: 'needs_input', lastAction: { label: 'Delete account' } });
     expect(other.actions()).toHaveLength(0);
+  });
+
+  // The yes was given in vision; raw input is off on this Mac, so the same goal falls back to Accessibility before anything ran.
+  const fallback = async (click: { name: string; input: unknown }) => {
+    const asked = await runVisionComputerUse({ goal: 'buy it' }, device({ controls: shop, impact: judge }).deps(model([click]).decide), signal()) as any;
+    const off = device({ controls: shop, impact: judge, receipts: [{ state: 'not_executed', error: 'RAW_INPUT_DISABLED' }] });
+    const outcome = await runVisionComputerUse({ goal: 'buy it', confirmedTarget: asked.lastAction.target }, off.deps(model([click]).decide), signal());
+    expect(outcome).toMatchObject({ fallback: 'RAW_INPUT_DISABLED' });
+    // Accessibility on the same window: Jev presses `picks` in order, each judged high-impact.
+    const ax = device({ controls: shop, caps: null }), requests: any[] = [];
+    const answer = (criteria: Record<string, unknown>, choice: string) => ({ choice, confidence: 0.95, probabilities: Object.fromEntries(Object.keys(criteria).map(k => [k, k === choice ? 0.95 : 0.05 / (Object.keys(criteria).length - 1 || 1)])) });
+    const run = (picks: string[]) => {
+      const deps: ComputerUseDependencies = { authorized: () => true, beforeMutation: () => {}, snapshot: async () => {}, call: ax.deps(model([]).decide).call,
+        evaluate: async req => { requests.push(req); const pick = picks.shift() ?? 'DONE'; return { answers: Object.fromEntries(Object.entries(req.questions).map(([name, q]) => [name, answer(q.criteria as Record<string, unknown>, name === 'action' ? pick.split(':')[0] : name.startsWith('target_') ? pick : name === 'impact' ? 'HIGH_IMPACT' : 'BLOCKED')])) } as any; } };
+      return runComputerUse({ goal: 'yes', yieldAfterInteraction: true, readRequest: true, revision: 2, resumeGoal: 8, confirmation: { command: 'buy it', label: asked.lastAction.label, target: asked.lastAction.target, reply: 'YES' } }, deps, signal());
+    };
+    return { ax, requests, run };
+  };
+
+  test('a yes to a vision click carries over to the Accessibility fallback for that control only, once, without reading the reply again', async () => {
+    const f = await fallback(buy);
+    const result = await f.run(['press:b1', 'press:b1']);
+    expect(f.ax.actions().map(({ kind, ref }) => ({ kind, ref }))).toEqual([{ kind: 'press', ref: 'b1' }]);
+    // The second high-impact press, even on the same control, asks again.
+    expect(result).toMatchObject({ status: 'needs_input', steps: 1, lastAction: { label: 'Buy now', confirm: true } });
+    expect(f.requests.some(r => r.questions.reply)).toBe(false);
+    // Delete is another control: the yes to Buy does not cover it.
+    const other = await fallback(buy);
+    expect(await other.run(['press:b2'])).toMatchObject({ steps: 0, lastAction: { label: 'Delete account', confirm: true } });
+    expect(other.ax.actions()).toHaveLength(0);
+  });
+
+  test.each([['a right click', { name: 'right_click', input: { coordinate: [640, 400] } }], ['a cmd-click', { name: 'left_click', input: { coordinate: [640, 400], text: 'cmd' } }]])('a yes to %s is no yes to the Accessibility press: it asks again', async (_name, click) => {
+    const f = await fallback(click);
+    expect(await f.run(['press:b1'])).toMatchObject({ steps: 0, lastAction: { label: 'Buy now', confirm: true } });
+    expect(f.ax.actions()).toHaveLength(0);
   });
 
   test('the agent\'s own command (impact off) runs one action, then control returns to the agent', async () => {
