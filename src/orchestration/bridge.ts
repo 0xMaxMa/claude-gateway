@@ -337,11 +337,13 @@ export class TaskBridge {
             if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
             const wait = (taskIds: unknown) => this.cancelOnDisconnect(response, cancelled.signal, async signal => {
               for (;;) {
+                if (signal.aborted) throw new OrchestrationError('SUBAGENT_WAIT_CANCELLED');
                 const results = this.tasks.subagentResults(scope.attemptId, scope.generation, taskIds);
                 if (results) return results;
                 await new Promise<void>((resolve, reject) => {
-                  const timer = setTimeout(resolve, 1000);
-                  signal.addEventListener('abort', () => { clearTimeout(timer); reject(new OrchestrationError('SUBAGENT_WAIT_CANCELLED')); }, { once: true });
+                  const abort = () => { clearTimeout(timer); reject(new OrchestrationError('SUBAGENT_WAIT_CANCELLED')); };
+                  const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, 1000);
+                  signal.addEventListener('abort', abort, { once: true });
                 });
               }
             });
