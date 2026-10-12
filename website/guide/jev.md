@@ -670,7 +670,10 @@ flight is discarded if the backend changes or access is revoked before it return
 Haiku 4.5 is the default because a step is a closed choice among listed options,
 made once per controller step: latency and per-step cost matter more than open
 reasoning, and the forced answer schema leaves the model nothing else to do.
-Choose a larger model with `model` if your observations need it.
+Choose a larger model with `model` if your observations need it. Only Haiku 4.5
+(`claude-haiku-4-5…` or `claude-haiku-4.5…`) is sent `temperature: 0`; every
+other model gets no `temperature` field, because newer models such as
+`claude-sonnet-5` reject it.
 
 Safety is the same controller as with Jev: choice keys are opaque per request,
 every answer is validated before an action is selected, and a high-impact agent
