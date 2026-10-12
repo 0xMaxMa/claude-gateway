@@ -73,12 +73,14 @@ export interface ComputerLastAction {kind:string;label?:string;role?:string;key?
  /** Not run: the agent's command chose a high-impact action and the user was asked to confirm it. */
  confirm?:boolean;
  /** The asked action and its exact target (window, control, position), hashed: a yes covers only this. */
- target?:string}
+ target?:string;
+ /** Asked by the vision loop: a yes resumes it there, where the target was hashed. */
+ vision?:boolean}
 const PreparedInput=z.object({application:z.string().min(1).max(200),label:z.string().min(1).max(500),text:z.string().max(2000),role:z.string().max(100).optional(),windowTitle:nativeText(500).optional()}).strict();
 const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),runToGoal:z.boolean().default(false),resumeGoal:z.number().int().min(1).max(100).optional(),readRequest:z.boolean().default(false),agentCommand:z.boolean().default(false),sessionStart:z.boolean().default(false),confirmation:z.object({command:z.string().min(1).max(2000),label:z.string().max(250),target:z.string().regex(/^[0-9a-f]{32}$/).optional()}).strict().optional(),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
 const fingerprint=(s:ComputerState)=>JSON.stringify([s.application,s.windowTitle,s.text,s.supportedActions,s.focusedControl&&{role:s.focusedControl.role,label:s.focusedControl.label},s.controls.map(({ref,...c})=>c),s.scrollAreas?.map(({ref,...area})=>area),s.truncated]);
 /** Jev reads the user's reply to a confirmation question, in any language. */
-async function confirmationReply(label:string,reply:string,deps:ComputerUseDependencies,signal:AbortSignal):Promise<'YES'|'NO'|'OTHER'>{
+export async function confirmationReply(label:string,reply:string,deps:ComputerUseDependencies,signal:AbortSignal):Promise<'YES'|'NO'|'OTHER'>{
  const criteria={YES:'The user agrees: do it',NO:'The user declines or wants to stop',OTHER:'The reply is a different command, not an answer to the question'};
  try{
   const answer=await interruptible(s=>deps.evaluate({requestId:randomUUID(),state:{question:`Press ${JSON.stringify(label)}?`,reply},questions:{reply:{type:'choice',instructions:{command:reply,question:'The assistant asked the user the `question` before pressing a high-impact control. Does `reply` answer it?'},criteria}}},s),signal,deps.interruptSignal);

@@ -14,7 +14,7 @@ import {GatewayRequestNotSentError,type GatewayTaskAdapter} from './controller';
 import {OrchestrationError} from '../types';
 /** How long an unanswered owner approval prompt may hold the session. */
 export const COMPUTER_ACCESS_WAIT_MS=5*60*1000;
-const {runComputerUse}=require('../../automation/computer-use') as {runComputerUse:(input:unknown,deps:ComputerUseDependencies,signal:AbortSignal)=>Promise<ComputerUseResult>};
+const {runComputerUse,confirmationReply}=require('../../automation/computer-use') as {runComputerUse:(input:unknown,deps:ComputerUseDependencies,signal:AbortSignal)=>Promise<ComputerUseResult>;confirmationReply:(label:string,reply:string,deps:ComputerUseDependencies,signal:AbortSignal)=>Promise<'YES'|'NO'|'OTHER'>};
 /** Actions an agent-spawned computer goal may take before it stops as failed (COMPUTER_STEP_LIMIT); the device session stays open. */
 export const COMPUTER_GOAL_MAX_STEPS=8;
 interface Receipt {command?:string;revision:number;taskId:string;requestId:string;principal:string;conversation:string;ended:boolean;toolErrors?:Array<{tool:string;code:string;operationId?:string;nativePhase?:string;at:number}>;trace?:ComputerProgress[];verification?:{id:string;at:number;revision:number;connectionHash:string};lastAction?:import('../../automation/computer-use').ComputerLastAction;snapshot?:{observedAt:number;state:any;screenshotError?:string;screenshot?:{type:'image';mimeType:'image/jpeg';data:string;generation:string;capturedAt:number}};operationId?:string;continuationReady?:boolean;outcome?:WorkerOutcome;
@@ -133,12 +133,20 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
      this.options.progress?.(t,{status:'running',reason:e.reason??e.phase,steps:e.steps,evaluations:e.evaluations,phase:e.phase,trace:receipt.trace.slice(-12)});
     }
    };
-   // Vision decides agent goals from the screenshot; the user's own commands, step lists and confirmation replies stay on Accessibility.
-   const vision=!steps&&!asked&&(t.automationController==='agent'||sessionStart||agentHandoff)?this.options.vision?.():undefined;
-   let result:ComputerUseResult|undefined;
-   if(vision&&'goal' in input){
-    const outcome=await runVisionComputerUse({goal:input.goal,revision:t.revision,maxSteps:'maxSteps' in input&&input.maxSteps?input.maxSteps:COMPUTER_GOAL_MAX_STEPS,...(contextNote?{interactionContext:contextNote}:{})},{
-     mode:vision.mode,decide:vision.decide(t,authorized),authorized,interruptSignal:interrupt.signal,call:deps.call,observation:deps.observation,beforeMutation:deps.beforeMutation,progress:deps.progress,
+   // Vision decides agent goals from the screenshot; the user's own commands and step lists stay on Accessibility.
+   // A question the vision loop asked is answered here: yes resumes it there, anything else is the user's own command.
+   const visionAsked=asked&&previousContext!.lastAction?.vision===true;
+   const vision=!steps&&(!asked||visionAsked)&&(t.automationController==='agent'||sessionStart||agentHandoff||visionAsked)?this.options.vision?.():undefined;
+   let result:ComputerUseResult|undefined,axInput:object=input;
+   const reply=vision&&visionAsked?await confirmationReply(asked.label,goal,deps,AbortSignal.any([signal,AbortSignal.timeout(125000)])):undefined;
+   if(reply){deps.confirmed!(reply);if(reply!=='YES'){const {confirmation:_c,resumeGoal:_r,...rest}=input as Record<string,unknown>;axInput=rest;}}
+   if(vision&&'goal' in input&&(!reply||reply==='YES')){
+    const resumed=reply==='YES'&&previousContext!.goalRun===true;
+    const outcome=await runVisionComputerUse({goal:reply==='YES'?asked!.command:input.goal,revision:t.revision,maxSteps:'maxSteps' in input&&input.maxSteps?input.maxSteps:COMPUTER_GOAL_MAX_STEPS,...(contextNote?{interactionContext:contextNote}:{}),
+     // The Accessibility semantics: the agent's own command is its authorization and control returns after each action;
+     // a goal run or a handed-off command judges each action's impact, and only a goal run keeps going.
+     impact:t.automationController!=='agent',yieldAfterAction:!(sessionStart||resumed),...(reply==='YES'&&asked!.target?{confirmedTarget:asked!.target}:{})},{
+     mode:vision.mode,decide:vision.decide(t,authorized),authorized,interruptSignal:interrupt.signal,call:deps.call,evaluate:deps.evaluate,decisionMode:deps.decisionMode,observation:deps.observation,beforeMutation:deps.beforeMutation,progress:deps.progress,
      screenshot:async(state,s)=>{
       if(!authorized())throw Error('ACCESS_DENIED');
       let text:unknown,image:ReturnType<ComputerTaskAdapter['parseScreenshot']>;
@@ -155,7 +163,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
     // No raw input on this Mac (helper or app switch): the same goal runs on Accessibility, nothing has run yet.
     if(!('fallback' in outcome))result=outcome;
    }
-   result??=await (steps?runComputerSteps:runComputerUse)(input,deps,AbortSignal.any([signal,AbortSignal.timeout(125000)]));
+   result??=await (steps?runComputerSteps:runComputerUse)(axInput,deps,AbortSignal.any([signal,AbortSignal.timeout(125000)]));
    // A reached goal ends the device session too: the Mac stops showing it as
    // controlled and the owner's next request asks for access again.
    const accessReleased=result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized()?await this.endSession(client,b.scope):undefined;

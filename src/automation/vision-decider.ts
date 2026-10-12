@@ -1,6 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { ComputerObservation, type ComputerLastAction, type ComputerProgress, type ComputerState, type ComputerUseDependencies, type ComputerUseResult } from './computer-use';
+import { IMPACT_CRITERIA, IMPACT_QUESTION } from './computer-command';
+import { decisionState, readChoice } from './computer-policy';
 import { checkInterruption, interruptible } from './interrupt';
 import { messagesEndpoint, modelAuthHeaders, COMPUTER_MODEL_OAUTH_UNSUPPORTED, type ModelConnection } from './model-choice-evaluator';
 import { JevError, type JevErrorCode } from '../jev/types';
@@ -252,7 +254,7 @@ export function visionModelDecider(options: VisionModelOptions): VisionDecide {
   };
 }
 
-export interface VisionDependencies extends Pick<ComputerUseDependencies, 'interruptSignal' | 'call' | 'observation' | 'authorized' | 'beforeMutation' | 'progress'> {
+export interface VisionDependencies extends Pick<ComputerUseDependencies, 'interruptSignal' | 'call' | 'evaluate' | 'decisionMode' | 'observation' | 'authorized' | 'beforeMutation' | 'progress'> {
   mode: 'vision' | 'hybrid';
   decide: VisionDecide;
   /** The window capture for this observation generation (the helper binds raw input to it), or a refusal code. */
@@ -260,8 +262,36 @@ export interface VisionDependencies extends Pick<ComputerUseDependencies, 'inter
 }
 /** The run stayed on (or returned to) Accessibility before any action: the caller runs runComputerUse instead. */
 export interface VisionFallback { fallback: string; trace: ComputerProgress[] }
-const VisionInput = z.object({ goal: z.string().min(1).max(16000), revision: z.number().int().positive().default(1), maxSteps: z.number().int().min(1).max(100).default(30), timeoutMs: z.number().int().min(1).max(600000).default(COMPUTER_VISION_RUN_TIMEOUT_MS), interactionContext: z.string().max(8000).optional() });
+const VisionInput = z.object({ goal: z.string().min(1).max(16000), revision: z.number().int().positive().default(1), maxSteps: z.number().int().min(1).max(100).default(30), timeoutMs: z.number().int().min(1).max(600000).default(COMPUTER_VISION_RUN_TIMEOUT_MS), interactionContext: z.string().max(8000).optional(),
+  /** As runComputerUse's agentCommand/goal run: every action's impact is judged first, and a high-impact one waits for the user. */
+  impact: z.boolean().default(true),
+  /** As runComputerUse's yieldAfterAction: one completed action, then control returns to the agent. */
+  yieldAfterAction: z.boolean().default(false),
+  /** The target the user said yes to: the resumed run's first action may be only that one. */
+  confirmedTarget: z.string().regex(/^[0-9a-f]{32}$/).optional() });
 const Receipt = z.object({ state: z.enum(['completed', 'not_executed', 'unknown']), error: z.string().optional() });
+/** The Accessibility control under a screenshot point (the smallest box wins), in the window-relative normalized bounds. */
+export function controlAt(state: ComputerState, shot: VisionScreenshot, x: number, y: number) {
+  const px = x / shot.width, py = y / shot.height;
+  return state.controls.filter(c => c.bounds && px >= c.bounds.x && px <= c.bounds.x + c.bounds.width && py >= c.bounds.y && py <= c.bounds.y + c.bounds.height)
+    .sort((a, b) => a.bounds!.width * a.bounds!.height - b.bounds!.width * b.bounds!.height)[0];
+}
+/** The action as the impact question reads it, the label the user is asked about, and its exact target (kind, window,
+ * control and position, hashed as in runComputerUse): a yes covers only this. Sensitive fields contribute no text. */
+export function describeVisionAction(action: VisionAction, state: ComputerState, shot: VisionScreenshot) {
+  const control = action.kind === 'pointer' || action.kind === 'scroll' ? controlAt(state, shot, action.x, action.y) : state.controls.find(c => c.ref === state.focusedControl?.ref) ?? state.controls.find(c => c.focused);
+  const named = control && !control.sensitive ? `${JSON.stringify(control.label.slice(0, 120))} (${control.role})` : control ? `a sensitive ${control.role}` : undefined;
+  const command = action.kind === 'pointer' ? `${action.op.replace('_', ' ')}${action.modifiers ? ' with ' + action.modifiers.join('+') : ''} ${named ? 'on ' + named : `at (${action.x}, ${action.y})`}${action.op === 'drag' ? ` to (${action.to_x}, ${action.to_y})` : ''}`
+    : action.kind === 'scroll' ? `scroll ${action.dy ? (action.dy > 0 ? 'down' : 'up') : (action.dx! > 0 ? 'right' : 'left')} ${named ? 'in ' + named : `at (${action.x}, ${action.y})`}`
+      : action.kind === 'key_chord' ? `press ${action.keys.join('+')}${named ? ' in ' + named : ''}`
+        : control?.sensitive ? `type text into ${named}` : `type ${JSON.stringify(action.text.slice(0, 200))}${named ? ' into ' + named : ''}`;
+  const label = (action.kind === 'key_chord' ? action.keys.join('+') : action.kind === 'type_focused' ? 'Type text' + (control && !control.sensitive ? ' into ' + control.label : '') : control && !control.sensitive && control.label ? control.label : command).slice(0, 200);
+  // Without a control the position (on an 8 px grid) is the target, so a nearby re-decided click still matches.
+  const where = control ? [control.identity ?? control.ref, control.bounds, control.context] : action.kind === 'pointer' || action.kind === 'scroll' ? [action.x >> 3, action.y >> 3] : [];
+  const target = createHash('sha256').update(JSON.stringify([action.kind, action.kind === 'pointer' ? action.op : undefined, state.application, state.windowTitle, ...where,
+    action.kind === 'key_chord' ? action.keys : action.kind === 'type_focused' ? createHash('sha256').update(action.text).digest('hex') : undefined])).digest('hex').slice(0, 32);
+  return { command, label, target };
+}
 const progressAction = (action: VisionAction): ComputerProgress['action'] => action.kind === 'pointer' ? 'press' : action.kind === 'scroll' ? 'scroll' : action.kind === 'key_chord' ? 'key' : 'type';
 type ToolUse = { type: 'tool_use'; id: string; name: string; input?: unknown; toolset_name?: string };
 
@@ -271,6 +301,7 @@ type ToolUse = { type: 'tool_use'; id: string; name: string; input?: unknown; to
  * capabilities, or when the helper turns raw input away before anything ran, the run falls back to Accessibility. */
 export async function runVisionComputerUse(raw: unknown, deps: VisionDependencies, signal: AbortSignal): Promise<ComputerUseResult | VisionFallback> {
   const input = VisionInput.parse(raw);
+  let confirmedTarget = input.confirmedTarget;
   const runSignal = AbortSignal.any([signal, AbortSignal.timeout(input.timeoutMs)]);
   let steps = 0, evaluations = 0, sequence = 0, round = 0, refusals = 0;
   let lease: string | undefined, pending: string | undefined, last: ComputerState | undefined, lastAction: ComputerLastAction | undefined, caps: RawCapabilities | undefined;
@@ -379,6 +410,24 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
           const action = mapped.action, generation = seen.state.generation;
           const summary: Partial<ComputerProgress> = { targetGeneration: generation, application: seen.state.application, action: progressAction(action), ...(action.kind === 'key_chord' ? { key: action.keys.join('+') } : {}) };
           emit('decided', { ...summary, decisionMode: 'model' });
+          // The Accessibility gate (runComputerUse): nobody spelled this action out, so its impact is judged on the
+          // observed window before it runs; anything not confidently routine waits for the user's yes to exactly it.
+          if (input.impact) {
+            const observed = seen.state, described = describeVisionAction(action, observed, seen.shot), requestId = randomUUID();
+            emit('evaluating', { requestId, decisionMode: deps.decisionMode?.() ?? 'jev', targetGeneration: generation });
+            const answer = await interruptible(child => deps.evaluate({ requestId, state: { goal: input.goal, desktop: decisionState(observed) },
+              questions: { impact: { type: 'choice', instructions: { command: described.command, question: IMPACT_QUESTION }, criteria: IMPACT_CRITERIA } } }, child), runSignal, deps.interruptSignal);
+            check(); checkInterruption(deps.interruptSignal); evaluations++;
+            let routine = false;
+            try { const impact = readChoice(answer.answers.impact, IMPACT_CRITERIA); routine = impact.confident && impact.choice === 'ROUTINE'; } catch { /* An unreadable answer is never routine. */ }
+            const confirmed = !routine && steps === 0 && confirmedTarget === described.target;
+            confirmedTarget = undefined;
+            if (!routine && !confirmed) {
+              lastAction = { kind: action.kind === 'pointer' ? 'press' : action.kind, label: described.label, blocked: true, confirm: true, target: described.target, vision: true };
+              emit('waiting', { ...summary, reason: 'CONFIRMATION_REQUIRED' });
+              return result('needs_input', 'COMMAND_WAITING_INPUT');
+            }
+          }
           const operationId = randomUUID();
           await deps.beforeMutation(operationId, { ...action, generation, revision: input.revision });
           check(); checkInterruption(deps.interruptSignal);
@@ -418,9 +467,10 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
             steps++; refusals = 0;
             lastAction = { kind: action.kind, ...(action.kind === 'key_chord' ? { key: action.keys.join('+') } : {}), ...(action.kind === 'scroll' ? { direction: action.dy ? (action.dy > 0 ? 'down' : 'up') : (action.dx! > 0 ? 'right' : 'left') } : {}) };
             emit('acted', { ...summary, operationId, outcome: 'completed', elapsedMs: Date.now() - started });
-            if (steps >= input.maxSteps) {
+            if (steps >= input.maxSteps || input.yieldAfterAction) {
               try { await observe(); await deps.screenshot(last!, runSignal); } catch { check(); checkInterruption(deps.interruptSignal); emit('waiting', { reason: 'GOAL_EVIDENCE_UNAVAILABLE' }); }
-              return result('blocked', 'STEP_LIMIT');
+              // The agent decides the next step on the new screen, as after an Accessibility action.
+              return input.yieldAfterAction ? result('needs_input', 'COMMAND_WAITING_INPUT') : result('blocked', 'STEP_LIMIT');
             }
             const failed = await fresh(use, 'Done. This is the window after the action.', false);
             if (failed) return result('blocked', failed);
