@@ -1,5 +1,5 @@
 import {
-  COMPUTER_TOOLSET, axHints, chordKeys, mapComputerCall, rawCapabilities, runVisionComputerUse, supportsComputerToolset, visionModelDecider, visionRequestBody,
+  COMPUTER_TOOLSET, VISION_MAX_IMAGES, axHints, chordKeys, mapComputerCall, rawCapabilities, runVisionComputerUse, supportsComputerToolset, visionModelDecider, visionRequestBody, withRecentImages,
   type RawCapabilities, type VisionDependencies, type VisionScreenshot, type VisionTurn,
 } from '../../../src/automation/vision-decider';
 import { IMPACT_CRITERIA, IMPACT_QUESTION } from '../../../src/automation/computer-command';
@@ -218,8 +218,9 @@ describe('vision loop', () => {
     // Typed text is never kept in the result.
     expect(JSON.stringify(result.lastAction)).not.toContain('lofi');
     expect(d.released()).toBe(true);
-    // Append-only history: every request extends the previous one unchanged.
-    for (let i = 1; i < m.seen.length; i++) expect(m.seen[i].slice(0, m.seen[i - 1].length)).toEqual(m.seen[i - 1]);
+    // Append-only history: every request extends the previous one; only screenshots beyond the newest few become a note.
+    const noImages = (messages: unknown[]) => JSON.parse(JSON.stringify(messages).replace(/\{"type":"image","source":\{[^}]*\}\}|\{"type":"text","text":"\[earlier screenshot omitted\]"\}/g, '"IMAGE"'));
+    for (let i = 1; i < m.seen.length; i++) expect(noImages(m.seen[i].slice(0, m.seen[i - 1].length))).toEqual(noImages(m.seen[i - 1]));
   });
 
   test.each(['STALE_OBSERVATION', 'TARGET_OCCLUDED'])('%s re-observes and lets the model decide on the new screenshot', async error => {
@@ -363,6 +364,44 @@ describe('vision impact gate (the Accessibility gate, per action)', () => {
     expect(d.actions()).toHaveLength(1);
     expect(m.seen).toHaveLength(1);
     expect(d.judged).toHaveLength(0);
+  });
+});
+
+describe('vision turn and image bounds', () => {
+  test('turns without an action count toward the run budget, and a request carries at most the newest screenshots', async () => {
+    // The probe: a model that only asks for screenshots (61 calls, 41 images in the last request before the fix).
+    const d = device(), m = model(Array.from({ length: 200 }, () => ({ name: 'screenshot' })));
+    const result = await runVisionComputerUse({ goal: 'x', maxSteps: 8 }, d.deps(m.decide), signal());
+    expect(result).toMatchObject({ status: 'blocked', reason: 'LOOP_CYCLE_BUDGET', steps: 0, evaluations: 8 * 3 + 5 });
+    expect(m.seen).toHaveLength(8 * 3 + 5);
+    const images = (messages: unknown[]) => (JSON.stringify(messages).match(/"type":"image"/g) ?? []).length;
+    expect(Math.max(...m.seen.map(images))).toBe(VISION_MAX_IMAGES);
+    expect(d.released()).toBe(true);
+  });
+
+  test.each([
+    ['wait', { name: 'wait', input: { duration: 0 } }],
+    ['finish with bad input', { name: 'finish', input: { outcome: 'maybe' }, toolset: false }],
+    ['an unknown tool', { name: 'search_web', input: {}, toolset: false }],
+  ])('%s turns are bounded too', async (_label, step) => {
+    const m = model(Array.from({ length: 200 }, () => step as any));
+    expect(await runVisionComputerUse({ goal: 'x', maxSteps: 2 }, device().deps(m.decide), signal())).toMatchObject({ status: 'blocked', reason: 'LOOP_CYCLE_BUDGET' });
+    expect(m.seen).toHaveLength(2 * 3 + 5);
+  });
+
+  test('pruning replaces only the oldest screenshots and leaves assistant turns and the history untouched', () => {
+    const img = (n: number) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'i' + n } });
+    const assistant = { role: 'assistant', content: [{ type: 'tool_use', id: 'u', name: 'screenshot', input: {} }] };
+    const messages = [{ role: 'user', content: [{ type: 'text', text: 'goal' }, img(1)] }, assistant,
+      ...[2, 3, 4].flatMap(n => [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'u', content: [{ type: 'text', text: 'n' }, img(n)] }] }, assistant])];
+    const before = structuredClone(messages);
+    const pruned = withRecentImages(messages, 2) as any[];
+    expect(JSON.stringify(pruned)).not.toContain('"i1"');
+    expect(JSON.stringify(pruned)).not.toContain('"i2"');
+    expect(JSON.stringify(pruned)).toContain('"i3"');
+    expect(JSON.stringify(pruned)).toContain('"i4"');
+    expect(pruned[1]).toBe(assistant);
+    expect(messages).toEqual(before);
   });
 });
 

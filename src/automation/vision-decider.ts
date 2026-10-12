@@ -23,6 +23,8 @@ const MAX_REQUEST_BYTES = 8 << 20;
 /** A refused or unusable action is answered with a fresh screenshot; this many in a row ends the run. */
 const MAX_CONSECUTIVE_REFUSALS = 3;
 const POST_ACTION_OBSERVE_ATTEMPTS = 3;
+/** Screenshots kept in one request: older ones are replaced by a placeholder, so a run's request size stays flat. */
+export const VISION_MAX_IMAGES = 3;
 const MAX_HINTS = 60;
 const PRE_DISPATCH_REJECTIONS = new Set(['DEVICE_OFFLINE', 'CONSENT_REQUIRED', 'OBSERVATION_DENIED', 'CONTROL_DENIED', 'APPLICATION_NOT_ALLOWED', 'COMPUTER_BUSY']);
 /** Helper refusals that leave the desktop unchanged: look again and let the model decide on the new screenshot. */
@@ -292,6 +294,27 @@ export function describeVisionAction(action: VisionAction, state: ComputerState,
     action.kind === 'key_chord' ? action.keys : action.kind === 'type_focused' ? createHash('sha256').update(action.text).digest('hex') : undefined])).digest('hex').slice(0, 32);
   return { command, label, target };
 }
+/** The request copy keeps only the newest `max` screenshots; older ones become a short note. Assistant turns are never changed. */
+export function withRecentImages(messages: unknown[], max = VISION_MAX_IMAGES): unknown[] {
+  let kept = 0;
+  const prune = (blocks: unknown[]): unknown[] => {
+    const out = [...blocks];
+    for (let i = out.length - 1; i >= 0; i--) {
+      const block = out[i] as { type?: unknown; content?: unknown };
+      if (block?.type === 'image' && ++kept > max) out[i] = { type: 'text', text: '[earlier screenshot omitted]' };
+      else if (block?.type === 'tool_result' && Array.isArray(block.content)) { const content = prune(block.content); if (content.some((b, j) => b !== (block.content as unknown[])[j])) out[i] = { ...block, content }; }
+    }
+    return out;
+  };
+  const out = [...messages];
+  for (let i = out.length - 1; i >= 0; i--) {
+    const message = out[i] as { role?: unknown; content?: unknown };
+    if (message?.role !== 'user' || !Array.isArray(message.content)) continue;
+    const content = prune(message.content);
+    if (content.some((b, j) => b !== (message.content as unknown[])[j])) out[i] = { ...message, content };
+  }
+  return out;
+}
 const progressAction = (action: VisionAction): ComputerProgress['action'] => action.kind === 'pointer' ? 'press' : action.kind === 'scroll' ? 'scroll' : action.kind === 'key_chord' ? 'key' : 'type';
 type ToolUse = { type: 'tool_use'; id: string; name: string; input?: unknown; toolset_name?: string };
 
@@ -301,6 +324,8 @@ type ToolUse = { type: 'tool_use'; id: string; name: string; input?: unknown; to
  * capabilities, or when the helper turns raw input away before anything ran, the run falls back to Accessibility. */
 export async function runVisionComputerUse(raw: unknown, deps: VisionDependencies, signal: AbortSignal): Promise<ComputerUseResult | VisionFallback> {
   const input = VisionInput.parse(raw);
+  // Every model turn counts, actions or not (screenshot, wait, refusals): the Accessibility loop's cycle budget.
+  const maxTurns = input.maxSteps * 3 + 5;
   let confirmedTarget = input.confirmedTarget;
   const runSignal = AbortSignal.any([signal, AbortSignal.timeout(input.timeoutMs)]);
   let steps = 0, evaluations = 0, sequence = 0, round = 0, refusals = 0;
@@ -356,8 +381,9 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
     let nudged = false;
     for (;;) {
       round++; check(); checkInterruption(deps.interruptSignal);
+      if (round > maxTurns) return result('blocked', 'LOOP_CYCLE_BUDGET');
       emit('evaluating', { decisionMode: 'model', targetGeneration: seen.state.generation });
-      const turn = await interruptible(child => deps.decide(messages, child), runSignal, deps.interruptSignal); evaluations++;
+      const turn = await interruptible(child => deps.decide(withRecentImages(messages), child), runSignal, deps.interruptSignal); evaluations++;
       check();
       // Append-only, as the model returned it: models with preserved thinking require the exact prior content.
       messages.push({ role: 'assistant', content: turn.content });
