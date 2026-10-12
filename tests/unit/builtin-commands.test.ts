@@ -120,7 +120,8 @@ describe('isBuiltinCommand', () => {
     it('every command has at least one channel', () => {
       for (const [cmd, def] of Object.entries(BUILTIN_COMMANDS)) {
         expect(def.channels.length).toBeGreaterThan(0);
-        expect(cmd).toMatch(/^[a-z]+$/);
+        // Bare words; a hyphenated command (pstack-setup) is typed, never a Telegram menu entry.
+        expect(cmd).toMatch(/^[a-z]+(-[a-z]+)*$/);
       }
     });
 
