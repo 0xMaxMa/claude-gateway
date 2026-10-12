@@ -89,6 +89,15 @@ describe('model choice evaluator', () => {
     }
   });
 
+  test('Haiku 4.5 dot-style ids used by some proxies (claude-haiku-4.5) also get temperature 0', () => {
+    const request: Request = { requestId: 'r-dot', state: { goal: 'x' }, questions: { action: { type: 'choice', instructions: { goal: 'pick' }, criteria: { '0': 'press', '1': 'DONE' } } } } as any;
+    for (const model of ['anthropic/claude-haiku-4.5', 'claude-haiku-4.5', 'claude-haiku-4.5-20251001']) {
+      expect(acceptsTemperature(model)).toBe(true);
+      expect(modelRequestBody(request, model)).toMatchObject({ temperature: 0 });
+    }
+    for (const model of ['claude-haiku-4.50', 'claude-haiku-4x5', 'anthropic/claude-haiku-4.6']) expect(acceptsTemperature(model)).toBe(false);
+  });
+
   test('confidence gate: readChoice 0.55 holds, and the model backend reports anything under its stricter gate as unconfident', () => {
     const keys = ['0', '1', '2'], criteria = { '0': 'a', '1': 'b', '2': 'c' };
     expect(DEFAULT_COMPUTER_MIN_CONFIDENCE).toBe(0.7);

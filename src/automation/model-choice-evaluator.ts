@@ -92,9 +92,9 @@ export function decisionData(request: Request): string {
 }
 
 /** Newer models (e.g. claude-sonnet-5) reject `temperature` with a 400, so it is sent only to the
- * model the evaluator was measured on. Everything else gets the provider default: the forced tool and
+ * model the evaluator was measured on (dash or dot form, e.g. `anthropic/claude-haiku-4.5`). Everything else gets the provider default: the forced tool and
  * its enum schema already bound the answer, so omitting it cannot produce an off-list choice. */
-export const acceptsTemperature = (model: string): boolean => /(^|[^a-z0-9])claude-haiku-4-5($|[^a-z0-9])/i.test(model);
+export const acceptsTemperature = (model: string): boolean => /(^|[^a-z0-9])claude-haiku-4[-.]5($|[^a-z0-9])/i.test(model);
 
 export function modelRequestBody(request: Request, model: string, content = decisionData(request)) {
   const count = Object.keys(request.questions).length;
