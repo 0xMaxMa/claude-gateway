@@ -135,7 +135,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
         return {taskId:t.id,sessionId:c.agent_session_id,title:snapshot.title,state:t.state,updatedAt:t.updated_at,providerWaiting:providerWaiting(String(t.id),String(t.state)),
           createdAt:t.created_at, revision:snapshot.revision, appliedRevision:snapshot.appliedRevision, pendingRevision:snapshot.gatewayTarget && t.active_attempt_id && snapshot.revision>1 && snapshot.revision>snapshot.appliedRevision?snapshot.revision:undefined, executionType:snapshot.gatewayTarget?'gateway-managed':'worker',gatewayTarget:snapshot.gatewayTarget,execution:snapshot.execution, workerId:attempt?.workerId, attemptId:attempt?.attemptId,
           workerSessionId:snapshot.gatewayTarget?undefined:attempt?.sessionId,targetSessionId:snapshot.gatewayTarget?.sessionId, resumed:attempt?.resumeSession, workstreamId:snapshot.workstreamId,
-          continueTaskId:snapshot.continueTaskId,hostProcessId:t.active_attempt_id?attempt?.processIdentity?.pid:undefined,
+          continueTaskId:snapshot.continueTaskId,parentTaskId:snapshot.parentTaskId,depth:snapshot.depth,model:snapshot.model,effort:snapshot.effort,harness:attempt?.harness,hostProcessId:t.active_attempt_id?attempt?.processIdentity?.pid:undefined,
           tokenSummary:{totalTokens:metrics.totalTokens,allAttemptsTokens:total.totalTokens},contextTools:metrics.contextTools,loadedTools:metrics.loadedTools,usedTools:metrics.usedTools,
           lastTool:tool?{name:tool.name,type:tool.type,is_error:tool.is_error,at:lastTool!.occurred_at}:undefined};
       });

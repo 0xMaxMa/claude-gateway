@@ -99,7 +99,7 @@ import { workerNarrate } from './narrate';
 import { workerShares } from './worker-shares';
 import { ProviderAdmissionStore, ProviderPermit, ProviderWaiting, providerFailure } from './provider-admission';
 import { resolveProviderScope, resolvedCodexProviderScope } from './provider-scope';
-import { selectableModels } from '../agent/model-registry';
+import { DEFAULT_MODELS, selectableModels } from '../agent/model-registry';
 
 
 /** Stable instructions are carried in the system prefix, not appended to every
@@ -410,7 +410,8 @@ export class AgentOrchestrationRuntime {
       runtime.lineLoading.start();
       runtime.channelActivity = new ChannelActivity(store, () => runtime.agent, () => runtime.config.enabled);
       runtime.channelActivity.start();
-      runtime.telegramToolStatus = new TelegramToolStatus(store, () => runtime.agent, () => runtime.config.enabled && runtime.config.channels.includes('telegram'));
+      runtime.telegramToolStatus = new TelegramToolStatus(store, () => runtime.agent, () => runtime.config.enabled && runtime.config.channels.includes('telegram'), fetch,
+        id => (gateway.gateway.models ?? DEFAULT_MODELS).find(m => m.id === id)?.label ?? id);
       runtime.telegramToolStatus.start();
       runtime.maintenanceTimer = setInterval(() => {
         try { runtime.events.prune(runtime.config.events.retentionDays); } catch { /* retry next maintenance interval */ }

@@ -105,7 +105,7 @@ export { DEFAULT_MODELS } from './model-registry';
 import { DEFAULT_MODELS, availableModels, selectableModels, findModel } from './model-registry';
 import { PSTACK_INSTALL_HINT, pstackModels, pstackPluginInfo } from '../pstack/plugin-info';
 import { PstackConfigError, applySheetLines } from '../pstack/config';
-import { renderPstackSheet } from '../pstack/sheet';
+import { pstackRoleDefault, renderPstackSheet } from '../pstack/sheet';
 import { savePstackConfig } from '../pstack/setup';
 
 const PROTECTED_WORKSPACE_FILES = [
@@ -3026,7 +3026,7 @@ export class AgentRunner extends EventEmitter {
   private async handleCommandPstackSetup(chatId: string, arg: string, meta: Record<string, string> = {}): Promise<void> {
     const plugin = pstackPluginInfo();
     const roles = plugin.installPath ? pstackModels(plugin.installPath) : undefined;
-    const usage = 'Usage: /pstack-setup on | off | <role>: <model-id>[ @<level>] (one per line; "<role>: default" drops an override; "default effort: <level|session>").';
+    const usage = 'Usage: /pstack-setup on | off | <role>: <model-id>[ @<level>] (one per line; "<role>: default" drops an override; "<role> += <model-id>[ @<level>]" / "<role> -= <model-id>" edit a panel list; "default effort: <level|session>").';
     if (!arg) {
       const ids = (await this.availableModels()).map((m) => `${m.id} (${m.label})`).join(', ');
       const state = !roles ? `pstack is not installed for Claude Code on this host. ${PSTACK_INSTALL_HINT}`
@@ -3040,7 +3040,7 @@ export class AgentRunner extends EventEmitter {
       return;
     }
     try {
-      const block = arg === 'off' ? undefined : arg === 'on' ? this.agentConfig.pstack ?? {} : applySheetLines(this.agentConfig.pstack ?? {}, arg);
+      const block = arg === 'off' ? undefined : arg === 'on' ? this.agentConfig.pstack ?? {} : applySheetLines(this.agentConfig.pstack ?? {}, arg, role => roles && pstackRoleDefault(roles, role));
       const saved = await savePstackConfig(this.configPath, this.agentConfig.id, block, await this.selectableModels());
       if (saved) this.agentConfig.pstack = saved; else delete this.agentConfig.pstack;
       this.writeAutoForward(chatId, saved && roles

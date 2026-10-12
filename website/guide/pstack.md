@@ -27,6 +27,8 @@ Set it up in a direct message with the bot:
 | `/pstack-setup why investigators: gpt-6-sol[1m]` | Set one role |
 | `/pstack-setup interrogate reviewers: claude-opus-5-5 @xhigh, gpt-6-astra[1m]`<br>`default effort: high` | Several `pstack-models.md` lines in one message |
 | `/pstack-setup bug-fix: default` | Drop an override, like deleting the line |
+| `/pstack-setup interrogate reviewers += gpt-6-sol[1m] @high` | Add one entry to a panel (an unset panel starts from its skill default) |
+| `/pstack-setup interrogate reviewers -= claude-haiku-5-5` | Remove a model's entries from a panel |
 | `/pstack-setup off` | Remove pstack from the agent |
 
 `/pstack-setup` alone shows the agent's state, its current sheet and the model IDs to choose from. Arguments are lines of pstack's own `pstack-models.md`. Changes apply to the agent's next worker.
@@ -69,6 +71,12 @@ Model values are IDs from `/models`. Aliases such as `opus` or `gpt6sol` are ref
 The worker sees the agent's sheet in its context instead of `~/.claude/pstack-models.md`. Every role is listed, with pstack's default slugs written as IDs (`opus` = `claude-opus-5-5`, `fable` = `claude-fable-5-1`, `sonnet` = `claude-sonnet-5-5`, `haiku` = `claude-haiku-5-5`). The gateway never writes the global sheet.
 
 The plugin's SessionStart hook reads `session hook: on|off` only from the global `~/.claude/pstack-models.md`, so that line applies to every set-up agent alike and has no per-agent setting.
+
+## Panels
+
+A panel role (`arena runners`, `arena cross-judge pool`, `architect runners`, `interrogate reviewers`) is a list, exactly as in pstack: one subagent per entry, so the list length is the number of reviewers, and each entry may carry its own `@level`. Mix providers freely, e.g. `claude-opus-5-5 @xhigh, gpt-6-sol[1m], claude-sonnet-5-5`. The skill combines the results itself (in `interrogate` the parent is the lead), and a failed reviewer is reported to the skill like any subagent result. There is no budget: effort and list length are the only controls, and the provider's quota is the ceiling.
+
+While a panel runs, Telegram's status message gains one line per task, such as `interrogate: 2/4 · ✅ Opus 5.5 · ⏳ GPT 6 Sol · ❌ Haiku 5.5 (worker timeout)`. Subagents never message the chat; the answer arrives once, from the task that ran the skill, and that task's `task_status` lists each subagent's model, harness, effort, state and duration. The dashboard's Tasks view shows subagents under their parent.
 
 ## Subagents
 

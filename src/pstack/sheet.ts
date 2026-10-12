@@ -24,10 +24,14 @@ Per-role model overrides for pstack skills, in the shape of pstack's own pstack-
  * reads that from the global sheet only.
  */
 export function renderPstackSheet(block: AgentPstackConfig, plugin: PstackModels): string {
-  const tier = (name: string) => {
-    const slugs = plugin.tiers[name] ?? plugin.tiers.default ?? 'opus';
-    return (Array.isArray(slugs) ? slugs : [slugs]).map(slug => PSTACK_SLUG_IDS[slug] ?? slug).join(', ');
-  };
-  const lines = plugin.roles.map(({ role, models }) => `${role}: ${block.roles?.[role] ?? tier(models)}`);
+  const lines = plugin.roles.map(({ role }) => `${role}: ${block.roles?.[role] ?? pstackRoleDefault(plugin, role)}`);
   return [HEADER, '', ...lines, '', `default effort: ${block.defaultEffort ?? 'session'}`].join('\n');
+}
+
+/** A role's skill default as model IDs (its models.json tier, slugs mapped). */
+export function pstackRoleDefault(plugin: PstackModels, role: string): string | undefined {
+  const tier = plugin.roles.find(r => r.role === role)?.models;
+  if (!tier) return undefined;
+  const slugs = plugin.tiers[tier] ?? plugin.tiers.default ?? 'opus';
+  return (Array.isArray(slugs) ? slugs : [slugs]).map(slug => PSTACK_SLUG_IDS[slug] ?? slug).join(', ');
 }

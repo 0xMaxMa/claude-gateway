@@ -182,7 +182,14 @@ export class TaskService {
       // A root lists its whole subagent tree; each entry names its parent.
       const subagents = task.parentTaskId ? [] : this.store.all("SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.rootTaskId')=? ORDER BY created_at", task.conversationId, task.taskId)
         .map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot)
-        .map(child => ({ taskId: child.taskId, parentTaskId: child.parentTaskId, title: child.title, state: child.state, model: child.model, effort: child.effort, subagentType: child.subagentType }));
+        .map(child => {
+          const attempt = this.store.get('SELECT payload_json FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', child.taskId);
+          const ran = attempt ? JSON.parse(String(attempt.payload_json)) as TaskAttempt : undefined;
+          // model · harness · effort · state · duration, for the root's final report.
+          return { taskId: child.taskId, parentTaskId: child.parentTaskId, title: child.title, state: child.state, model: child.model, harness: ran?.harness, effort: child.effort, subagentType: child.subagentType,
+            ...(ran?.startedAt ? { durationMs: (TERMINAL_TASK_STATES.has(child.state) ? child.updatedAt : Date.now()) - ran.startedAt } : {}),
+            ...(child.failure ? { failure: child.failure.code } : {}) };
+        });
       return [{ ...this.withRecentTools(task), ...(subagents.length ? { subagents } : {}) }];
     }
     return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN

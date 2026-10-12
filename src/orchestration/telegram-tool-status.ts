@@ -13,7 +13,7 @@ export class TelegramToolStatus {
   private ticking = false;
   private token = '';
   constructor(private store: OrchestrationStore, private agent: () => AgentConfig,
-    private enabled: () => boolean, private request: typeof fetch = fetch) {}
+    private enabled: () => boolean, private request: typeof fetch = fetch, private modelLabel: (id: string) => string = id => id) {}
   start(): void {
     if (this.timer || this.abort.signal.aborted) return;
     this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 2000);
@@ -92,13 +92,14 @@ export class TelegramToolStatus {
         // Same history/current/elapsed layout as main's Telegram typing manager.
         const last=details.slice(-5), current=last.pop()??'🧠 Thinking...';
         if (!status.messageId && !details.length && Date.now()-status.since<5000) continue;
-        const signature=[...last,current].join('\n');
+        const signature=[...last,current,...subagentLines(this.store,id,this.modelLabel)].join('\n');
         if (!move && status.details===signature && Date.now()-status.seenAt<10000) continue;
+        const panels=subagentLines(this.store,id,this.modelLabel);
         const totalSecs=Math.max(0,Math.floor((Date.now()-status.since)/1000));
         const hours=Math.floor(totalSecs/3600),mins=Math.floor((totalSecs%3600)/60),secs=totalSecs%60;
         const elapsed=hours>0?`${hours}h ${mins}m`:mins>0?(secs>0?`${mins}m ${secs}s`:`${mins}m`):`${secs}s`;
         const secrets=Object.entries(process.env).filter(([k,v])=>/TOKEN|SECRET|PASSWORD|API_KEY/i.test(k)&&v&&v.length>=8).map(([,v])=>v!);
-        const text=scrubText([...last.map(d=>`☑️ : ${d}`),last.length?`🕐 : ${current}`:current,`(elapsed: ${elapsed})`].join('\n'),[token,...secrets]).slice(0,3500);
+        const text=scrubText([...last.map(d=>`☑️ : ${d}`),last.length?`🕐 : ${current}`:current,...panels,`(elapsed: ${elapsed})`].join('\n'),[token,...secrets]).slice(0,3500);
         if (!move && status.text===text) continue;
         status.nextAt=Date.now()+4000;status.seenAt=Date.now();
         if (this.statuses.size>=1000 && !this.statuses.has(id)) continue;
@@ -152,4 +153,28 @@ export function telegramToolDetail(name:string,input:Record<string,unknown>):str
   if (name==='mcp__gateway__task_update'||name==='mcp__gateway__task_answer') return '📝 Updating task';
   if (name==='Skill') return `📚 Using skill: ${String(input.skill??'assigned skill').replace(/^orchestration-task:/,'').slice(0,200)}`;
   return extractToolDetail(name,input);
+}
+
+/**
+ * One line per unfinished root task that has subagents (a pstack panel), e.g.
+ * `interrogate: 2/4 · ✅ Opus 5.5 · ⏳ GPT 6 Sol · ❌ Haiku 5.5 (timeout)`.
+ * Subagents never message the chat themselves; this line is how the user sees them.
+ */
+export function subagentLines(store: OrchestrationStore, conversationId: string, modelLabel: (id: string) => string = id => id): string[] {
+  const roots = store.all(`SELECT DISTINCT json_extract(snapshot_json,'$.rootTaskId') AS root FROM tasks WHERE conversation_id=?
+    AND json_extract(snapshot_json,'$.rootTaskId') IN (SELECT id FROM tasks WHERE conversation_id=? AND state NOT IN ('completed','failed','cancelled')) LIMIT 5`, conversationId, conversationId);
+  return roots.map(row => {
+    const root = store.task(String(row.root));
+    const children = store.all("SELECT snapshot_json FROM tasks WHERE json_extract(snapshot_json,'$.rootTaskId')=? ORDER BY created_at LIMIT 32", String(row.root))
+      .map(child => JSON.parse(String(child.snapshot_json)) as import('./types').TaskSnapshot);
+    const done = children.filter(child => ['completed', 'failed', 'cancelled'].includes(child.state)).length;
+    const entries = children.map(child => {
+      const label = child.model ? modelLabel(child.model) : 'subagent';
+      if (child.state === 'completed') return `✅ ${label}`;
+      if (child.state === 'failed' || child.state === 'cancelled') return `❌ ${label} (${child.state === 'cancelled' ? 'cancelled' : (child.failure?.code ?? 'failed').toLowerCase().replace(/_/g, ' ')})`;
+      if (child.state === 'waiting_input') return `❓ ${label}`;
+      return `⏳ ${label}`;
+    });
+    return `${(root?.title ?? 'subagents').slice(0, 80)}: ${done}/${children.length} · ${entries.join(' · ')}`.slice(0, 600);
+  });
 }

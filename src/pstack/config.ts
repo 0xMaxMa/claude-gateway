@@ -85,13 +85,25 @@ export function validatePstack(agentId: string, block: AgentPstackConfig, models
 /**
  * Apply pstack-models.md lines (`<role>: <value>`, `default effort: <level>`)
  * to a block, the way /pstack-setup edits it. `<role>: default` drops the
- * override, like deleting the line from the sheet. A `session hook` line is
+ * override, like deleting the line from the sheet; `<role> += <entry>` and
+ * `<role> -= <model>` edit a panel list one entry at a time. A `session hook` line is
  * skipped: the plugin's hook reads it from the global sheet only.
  */
-export function applySheetLines(block: AgentPstackConfig, text: string): AgentPstackConfig {
+export function applySheetLines(block: AgentPstackConfig, text: string, roleDefault: (role: string) => string | undefined = () => undefined): AgentPstackConfig {
   const roles = { ...block.roles };
   let defaultEffort = block.defaultEffort;
   for (const line of text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'))) {
+    // Panel lists change one entry at a time: `<role> += <entry>` appends, `<role> -= <model>` drops that model's entries.
+    const edit = /^(.+?)\s+([+-])=\s*(.+)$/.exec(line);
+    if (edit) {
+      const [, key, op, value] = edit;
+      // An unset role starts from its skill default, as the sheet shows it.
+      const entries = (roles[key] ?? roleDefault(key) ?? '').split(',').map(e => e.trim()).filter(Boolean);
+      const kept = op === '+' ? [...entries, value] : entries.filter(e => e.replace(/\s+@\S+$/, '') !== value.replace(/\s+@\S+$/, ''));
+      if (op === '-' && kept.length === entries.length) throw new PstackConfigError('INVALID_PSTACK_CONFIG', `"${value}" is not in ${key}.`);
+      if (kept.length) roles[key] = kept.join(', '); else delete roles[key];
+      continue;
+    }
     const colon = line.indexOf(':');
     if (colon < 1) throw new PstackConfigError('INVALID_PSTACK_CONFIG', `"${line}" is not a "<role>: <value>" line.`);
     const key = line.slice(0, colon).trim(), value = line.slice(colon + 1).trim();
