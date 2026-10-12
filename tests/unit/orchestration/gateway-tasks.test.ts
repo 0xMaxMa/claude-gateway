@@ -11,6 +11,7 @@ import { WorkerScheduler } from '../../../src/orchestration/tasks/scheduler';
 import { GatewayRequestNotSentError, GatewayTaskController, GatewayTaskAdapter } from '../../../src/orchestration/gateway-tasks/controller';
 import { SafemodeTaskAdapter } from '../../../src/orchestration/gateway-tasks/safemode';
 import { recoverOrchestration } from '../../../src/orchestration/recovery';
+import { TaskControls } from '../../../src/orchestration/task-controls';
 import { CommandContext, WorkerOutcome } from '../../../src/orchestration/types';
 import { SafemodeStore, atomicJson } from '../../../src/safemode/store';
 
@@ -612,11 +613,15 @@ test.each(['completed','failed'] as const)('ending the session of a %s computer 
  const ended=tasks.cancelByUser(task.conversationId,task.ownerPrincipalId,task.taskId);
  expect(ended).toMatchObject({state,automationSession:{status:'closed',closedReason:'user'}});expect(ended.cancellation).toBeUndefined();
  expect(store.task(task.taskId)).toMatchObject({state,...outcome,computerRevocation:{requestId:'settled-round'}});
+ const controls=new TaskControls(store,tasks),waiting='waiting for the device to confirm access stopped';
+ expect(controls.detail('chat','owner',task.taskId).progress).toContain(waiting);
  await controller.tick();expect(computer.cancel).toHaveBeenCalledWith(expect.objectContaining({taskId:task.taskId}),'settled-round');
  expect(store.task(task.taskId)).toMatchObject({state,...outcome,computerRevocation:{requestId:'settled-round'}});
+ expect(controls.list('chat','owner',0,10,true).tasks[0].progressText).toContain(waiting);
  stopped=true;await controller.tick();
  const after=store.task(task.taskId)!;
  expect(after).toMatchObject({state,...outcome,automationSession:{status:'closed',closedReason:'user'}});expect(after.computerRevocation).toBeUndefined();
+ expect(controls.detail('chat','owner',task.taskId).progress??'').not.toContain(waiting);
  computer.cancel.mockClear();await controller.tick();expect(computer.cancel).not.toHaveBeenCalled();
  expect(store.task(task.taskId)).toMatchObject({state,...outcome});expect(computer.submit).not.toHaveBeenCalled();
 });
