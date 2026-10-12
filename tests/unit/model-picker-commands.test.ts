@@ -157,8 +157,8 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     jest.clearAllMocks();
   });
 
-  async function startRunner(): Promise<number> {
-    runner = new AgentRunner(agentConfig, makeGatewayConfig(path.join(tmpDir, 'logs')));
+  async function startRunner(gatewayConfig = makeGatewayConfig(path.join(tmpDir, 'logs'))): Promise<number> {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
     return callbackPort(runner);
   }
@@ -196,6 +196,31 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
 
     expect(forwardText()).toContain('claude-opus-5');
     expect(persistedModel()).toBe('claude-opus-5');
+  }, 15000);
+
+  // #580: with no gateway.models the runner falls back to DEFAULT_MODELS,
+  // where the bare `haiku` alias now names Haiku 5.5 and Haiku 4.5 is
+  // reachable only by its full id.
+  it('resolves `haiku` to Haiku 5.5 from the built-in registry', async () => {
+    const gatewayConfig = makeGatewayConfig(path.join(tmpDir, 'logs'));
+    delete (gatewayConfig.gateway as { models?: unknown }).models;
+    const port = await startRunner(gatewayConfig);
+
+    await postChannelMessage(port, chatId, '/model haiku', 'discord');
+    await waitForForward();
+
+    expect(persistedModel()).toBe('claude-haiku-5-5');
+  }, 15000);
+
+  it('still selects Haiku 4.5 by its full id', async () => {
+    const gatewayConfig = makeGatewayConfig(path.join(tmpDir, 'logs'));
+    delete (gatewayConfig.gateway as { models?: unknown }).models;
+    const port = await startRunner(gatewayConfig);
+
+    await postChannelMessage(port, chatId, '/model claude-haiku-4-5-20251001', 'discord');
+    await waitForForward();
+
+    expect(persistedModel()).toBe('claude-haiku-4-5-20251001');
   }, 15000);
 
   // #460: config.json carries agent bot tokens and the admin API key.

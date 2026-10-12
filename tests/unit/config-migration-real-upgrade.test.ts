@@ -871,3 +871,148 @@ describe('config migration — Sonnet 5.5 reaches existing installs', () => {
     });
   });
 });
+
+/**
+ * Haiku 5.5 reaches existing installs.
+ *
+ * Same shape as the Sonnet 5.5 block above: the Haiku 5.5 row only merges into
+ * an install's own gateway.models list when the template's configVersion is
+ * ahead of the user's, and the same pass must move the bare `haiku` alias off
+ * the install's own Haiku 4.5 row. Haiku 4.5 has no short alias to fall back
+ * to, so it takes its own id (the live catalog's convention for uncurated
+ * models).
+ *
+ * The pre-Haiku-5.5 fixture pins configVersion 1.0.35, the version immediately
+ * before this change, so the first test fails if the bump is reverted.
+ */
+describe('config migration — Haiku 5.5 reaches existing installs', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'haiku55-upgrade-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** A realistic pre-Haiku-5.5 install: the previous Haiku row carrying a
+   *  user-set multiplier/harness, an agent pinned to Haiku 4.5, plus a custom
+   *  BYOK model. */
+  function writePreHaiku55Config(): string {
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          configVersion: '1.0.35',
+          gateway: {
+            bind: '0.0.0.0',
+            models: [
+              { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', alias: 'sonnet', contextWindow: 200000 },
+              {
+                id: 'claude-haiku-4-5-20251001',
+                label: 'Haiku 4.5',
+                alias: 'haiku',
+                contextWindow: 200000,
+                multiplier: 0.33,
+                workerHarness: 'claude',
+              },
+              { id: 'openrouter/custom-model', label: 'My BYOK', alias: 'mine', contextWindow: 128000 },
+            ],
+          },
+          agents: [{ id: 'alice', claude: { model: 'claude-haiku-4-5-20251001' } }],
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+    return configPath;
+  }
+
+  const byId = (models: Array<{ id: string }>, id: string) => models.find((m) => m.id === id);
+  const byAlias = (models: Array<{ alias: string; id: string }>, alias: string) =>
+    models.find((m) => m.alias === alias);
+
+  it('uses a template version newer than the pre-Haiku-5.5 registry', () => {
+    expect(compareSemver(templateVersion(), '1.0.35')).toBeGreaterThan(0);
+  });
+
+  it('adds Haiku 5.5 with the bare `haiku` alias', () => {
+    const configPath = writePreHaiku55Config();
+
+    const result = runRealUpgrade(configPath);
+
+    expect(result.needed).toBe(true);
+    expect(result.addedFields).toContain('gateway.models[claude-haiku-5-5]');
+    expect(result.addedFields).not.toContain('gateway.models[claude-haiku-4-5-20251001]');
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.configVersion).toBe(templateVersion());
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'claude-haiku-5-5',
+      label: 'Haiku 5.5',
+      alias: 'haiku',
+      contextWindow: 200000,
+    });
+  });
+
+  /**
+   * Without the alias rewrite the migrated config would carry two rows both
+   * claiming `haiku`, and /model haiku would resolve to whichever came first.
+   */
+  it('keeps the Haiku 4.5 row, moves it off `haiku`, and keeps its user fields', () => {
+    const configPath = writePreHaiku55Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const haiku45 = byId(migrated.gateway.models, 'claude-haiku-4-5-20251001');
+    expect(haiku45).toEqual({
+      id: 'claude-haiku-4-5-20251001',
+      label: 'Haiku 4.5',
+      alias: 'claude-haiku-4-5-20251001',
+      contextWindow: 200000,
+      multiplier: 0.33,
+      workerHarness: 'claude',
+    });
+    expect(byAlias(migrated.gateway.models, 'haiku')?.id).toBe('claude-haiku-5-5');
+
+    const aliases = migrated.gateway.models.map((m: { alias: string }) => m.alias);
+    expect(new Set(aliases).size).toBe(aliases.length);
+  });
+
+  it('does not move an agent already on Haiku 4.5', () => {
+    const configPath = writePreHaiku55Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.agents[0].claude.model).toBe('claude-haiku-4-5-20251001');
+  });
+
+  it('preserves a user-owned model that is not in the template', () => {
+    const configPath = writePreHaiku55Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'openrouter/custom-model',
+      label: 'My BYOK',
+      alias: 'mine',
+      contextWindow: 128000,
+    });
+  });
+
+  it('is idempotent: a second boot is a no-op and adds no duplicate rows', () => {
+    const configPath = writePreHaiku55Config();
+    runRealUpgrade(configPath);
+    const once = fs.readFileSync(configPath, 'utf-8');
+
+    const second = runRealUpgrade(configPath);
+
+    expect(second.needed).toBe(false);
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe(once);
+    const ids = JSON.parse(once).gateway.models.map((m: { id: string }) => m.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+});

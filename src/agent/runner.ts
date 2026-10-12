@@ -129,6 +129,11 @@ export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 // `sonnet` / `sonnet[1m]` and Sonnet 5 is demoted to `sonnet5` / `sonnet5[1m]`;
 // Sonnet 4.6 keeps `sonnet46`. An agent already on Sonnet 5 stays on
 // claude-sonnet-5.
+//
+// Haiku 5.5 (`claude-haiku-5-5`) takes the bare `haiku` alias. Haiku 4.5 has no
+// curated short alias left, so it falls back to the alias = id convention the
+// live catalog uses for uncurated models. An agent already on Haiku 4.5 stays
+// on claude-haiku-4-5-20251001.
 export const DEFAULT_MODELS: ModelConfig[] = [
   { id: 'claude-fable-5-1[1m]',      label: 'Fable 5.1 (1M)',   alias: 'fable[1m]',   contextWindow: 1000000 },
   { id: 'claude-fable-5[1m]',        label: 'Fable 5 (1M)',     alias: 'fable5[1m]',  contextWindow: 1000000 },
@@ -146,7 +151,8 @@ export const DEFAULT_MODELS: ModelConfig[] = [
   { id: 'claude-sonnet-5-5',         label: 'Sonnet 5.5',       alias: 'sonnet',      contextWindow: 200000 },
   { id: 'claude-sonnet-5',           label: 'Sonnet 5',         alias: 'sonnet5',     contextWindow: 200000 },
   { id: 'claude-sonnet-4-6',         label: 'Sonnet 4.6',       alias: 'sonnet46',    contextWindow: 200000 },
-  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5',        alias: 'haiku',       contextWindow: 200000 },
+  { id: 'claude-haiku-5-5',          label: 'Haiku 5.5',        alias: 'haiku',       contextWindow: 200000 },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5',        alias: 'claude-haiku-4-5-20251001', contextWindow: 200000 },
   { id: 'gpt-6-sol[1m]',             label: 'GPT 6 Sol',        alias: 'gpt6sol',     contextWindow: 1050000 },
   { id: 'gpt-6-astra[1m]',           label: 'GPT 6 Astra',      alias: 'gpt6astra',   contextWindow: 1050000 },
   { id: 'gpt-6-luna[1m]',            label: 'GPT 6 Luna',       alias: 'gpt6luna',    contextWindow: 1050000 },
