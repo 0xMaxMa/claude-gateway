@@ -81,7 +81,7 @@ A set-up agent's Claude workers do not use Claude Code's own `Agent` tool (it is
 | `subagent_cancel` | Cancels the caller's own subagents |
 
 - Subagents nest at most three levels below the worker, as in Claude Code; the third level gets no subagent tools and works inline.
-- Subagents do not count toward the per-agent and per-conversation task concurrency limits (their parents hold slots while they wait, which would otherwise deadlock a tree); like native subagents, they are bounded by depth and by the gateway's process limit.
+- Subagents use the usual per-agent and per-conversation task limits, except that a subagent's own waiting ancestors are not counted against it, so a chain can always continue while siblings queue.
 - When a task ends, is being cancelled, fails, or needs reconciliation, its unfinished subagents are cancelled with it, and a read-only subagent's own subagents are read-only too.
 - A subagent's question (`task_request_input`) is returned to its parent by `subagent_wait`; it is never asked in the chat.
 - Subagents report to their parent, never to the chat. The agent's task index lists the root task only; `task_status` with its `task_id` lists the subagents.
