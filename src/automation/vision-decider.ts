@@ -443,11 +443,11 @@ export async function runVisionComputerUse(raw: unknown, deps: VisionDependencie
           if (input.impact) {
             const observed = seen.state, described = describeVisionAction(action, observed, seen.shot), requestId = randomUUID();
             emit('evaluating', { requestId, decisionMode: deps.decisionMode?.() ?? 'jev', targetGeneration: generation });
-            const answer = await interruptible(child => deps.evaluate({ requestId, state: { goal: input.goal, desktop: decisionState(observed) },
+            const judged = await interruptible(child => deps.evaluate({ requestId, state: { goal: input.goal, desktop: decisionState(observed) },
               questions: { impact: { type: 'choice', instructions: { command: described.command, question: IMPACT_QUESTION }, criteria: IMPACT_CRITERIA } } }, child), runSignal, deps.interruptSignal);
             check(); checkInterruption(deps.interruptSignal); evaluations++;
             let routine = false;
-            try { const impact = readChoice(answer.answers.impact, IMPACT_CRITERIA); routine = impact.confident && impact.choice === 'ROUTINE'; } catch { /* An unreadable answer is never routine. */ }
+            try { const impact = readChoice(judged.answers.impact, IMPACT_CRITERIA); routine = impact.confident && impact.choice === 'ROUTINE'; } catch { /* An unreadable answer is never routine. */ }
             const confirmed = !routine && steps === 0 && confirmedTarget === described.target;
             confirmedTarget = undefined;
             if (!routine && !confirmed) {
