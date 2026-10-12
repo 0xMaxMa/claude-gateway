@@ -114,3 +114,14 @@ test('a goal run end left pending past its session idle window waits for the use
   expect(f.store.get('SELECT status,decision_id FROM notifications WHERE task_id=?',failed.taskId)).toMatchObject({status:'assigned',decision_id:decision.decisionId});
  }finally{f.close();}
 });
+
+// Without a recorded idle window the bound fails closed: no unprompted turn at any time.
+test('a goal run end without a recorded idle window waits for the user\'s next turn',()=>{
+ const f=fixture();try{
+  const failed=f.finish({type:'failed',failure:{code:'COMPUTER_UNSUPPORTED_ACTION',message:'Computer work stopped: UNSUPPORTED_ACTION.',observedAt:Date.now()},computerReport:{...report,steps:1,status:'blocked',reason:'UNSUPPORTED_ACTION'}});
+  expect(f.delivered()).toBe(1);
+  f.store.run("UPDATE tasks SET snapshot_json=json_remove(snapshot_json,'$.automationSession.idleSince') WHERE id=?",failed.taskId);
+  expect(f.delivered()).toBe(0);
+  expect(f.delivered(Date.now()+365*24*3600_000)).toBe(0);
+ }finally{f.close();}
+});

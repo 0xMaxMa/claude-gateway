@@ -8,9 +8,10 @@ import {agentGoalRunSql} from './tasks/automation-session';
  * ended. Pod-jinawong 2.0.17: such a failure stayed pending, the agent said nothing
  * and the user saw the chat hang. Later rounds are the user's own commands.
  * Unprompted only within the run's automation-session idle window (bound to `now`):
- * an older end, such as one left pending before this rule, joins the user's next turn. */
+ * an older end, such as one left pending before this rule, joins the user's next turn.
+ * A run without a recorded idle window has no unprompted delivery (fails closed). */
 const AGENT_GOAL_ENDED_SQL = `controlled.state IN ('completed','failed','needs_reconciliation') AND controlled.state_version=n.task_state_version AND ${agentGoalRunSql('controlled')}
-  AND json_extract(controlled.snapshot_json,'$.automationSession.idleSince')+json_extract(controlled.snapshot_json,'$.automationSession.idleTimeoutMs')>?`;
+  AND COALESCE(json_extract(controlled.snapshot_json,'$.automationSession.idleSince')+json_extract(controlled.snapshot_json,'$.automationSession.idleTimeoutMs'),0)>?`;
 
 /** Retry reports, never task execution. Decisions/inputs retain the retry clock
  * across restarts, including failed reports written before this implementation.
