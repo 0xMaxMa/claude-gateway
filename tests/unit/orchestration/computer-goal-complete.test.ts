@@ -23,8 +23,8 @@ function fixture(){
   return tasks.finish(attempt.attemptId,attempt.generation,outcome);};
  const notified=()=>store.all('SELECT id FROM notifications WHERE task_id=?',task.taskId).length;
  // Delivered: the mailbox would start an agent turn for it (not just a stored row).
- const delivered=()=>pendingReports(store,[],[],true).filter((row:any)=>store.get('SELECT task_id FROM notifications WHERE id=?',row.notification_id)?.task_id===task.taskId).length;
- return {store,task,tasks,finish,notified,delivered,close:()=>{store.close();rmSync(root,{recursive:true,force:true});}};
+ const delivered=(now=Date.now())=>pendingReports(store,[],[],true,now).filter((row:any)=>store.get('SELECT task_id FROM notifications WHERE id=?',row.notification_id)?.task_id===task.taskId).length;
+ return {store,task,tasks,decisions,accepted,finish,notified,delivered,close:()=>{store.close();rmSync(root,{recursive:true,force:true});}};
 }
 const report={steps:3,evaluations:0,phase:'terminal',lastAction:{kind:'key',key:'enter'}};
 
@@ -95,5 +95,22 @@ test('an agent goal run that ends with an unknown outcome reaches the agent',()=
   const unknown=f.finish({type:'unknown',failure:{code:'COMPUTER_OUTCOME_UNKNOWN',message:'The last action may have run.',observedAt:Date.now()},computerReport:{...report,steps:1,status:'needs_reconciliation',reason:'OUTCOME_UNKNOWN'}});
   expect(unknown.state).toBe('needs_reconciliation');expect(unknown.automationController).toBe('user');
   expect(f.notified()).toBe(1);expect(f.delivered()).toBe(1);
+ }finally{f.close();}
+});
+
+// Unbounded, every goal-run end still pending at deploy (suppressed by the old rule
+// in a conversation idle ever since) would start a turn about long-finished work.
+// Unprompted delivery lasts the run's automation-session idle window; later, the
+// report rides the user's next turn instead.
+test('a goal run end left pending past its session idle window waits for the user\'s next turn',()=>{
+ const f=fixture();try{
+  const failed=f.finish({type:'failed',failure:{code:'COMPUTER_UNSUPPORTED_ACTION',message:'Computer work stopped: UNSUPPORTED_ACTION.',observedAt:Date.now()},computerReport:{...report,steps:1,status:'blocked',reason:'UNSUPPORTED_ACTION'}});
+  const session=f.store.task(failed.taskId)!.automationSession!;
+  const expiry=session.idleSince!+session.idleTimeoutMs;
+  expect(f.delivered(expiry-1)).toBe(1);
+  expect(f.delivered(expiry)).toBe(0);
+  const next=f.store.acceptInput({scope:{agentId:'a',agentSessionId:'s',source:'api',accountId:'u',chatId:'c',threadKey:'',principalId:'u'},text:'ok?',capabilities:{execute:true,writeMemory:false}});
+  const decision=f.decisions.begin(next.conversationId,'u',[next.inputId]);
+  expect(f.store.get('SELECT status,decision_id FROM notifications WHERE task_id=?',failed.taskId)).toMatchObject({status:'assigned',decision_id:decision.decisionId});
  }finally{f.close();}
 });

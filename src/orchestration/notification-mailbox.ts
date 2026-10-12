@@ -6,8 +6,11 @@ import {agentGoalRunSql} from './tasks/automation-session';
  * including an unknown outcome awaiting reconciliation.
  * The task is user-controlled, yet the agent started this work and must hear how it
  * ended. Pod-jinawong 2.0.17: such a failure stayed pending, the agent said nothing
- * and the user saw the chat hang. Later rounds are the user's own commands. */
-const AGENT_GOAL_ENDED_SQL = `controlled.state IN ('completed','failed','needs_reconciliation') AND controlled.state_version=n.task_state_version AND ${agentGoalRunSql('controlled')}`;
+ * and the user saw the chat hang. Later rounds are the user's own commands.
+ * Unprompted only within the run's automation-session idle window (bound to `now`):
+ * an older end, such as one left pending before this rule, joins the user's next turn. */
+const AGENT_GOAL_ENDED_SQL = `controlled.state IN ('completed','failed','needs_reconciliation') AND controlled.state_version=n.task_state_version AND ${agentGoalRunSql('controlled')}
+  AND json_extract(controlled.snapshot_json,'$.automationSession.idleSince')+json_extract(controlled.snapshot_json,'$.automationSession.idleTimeoutMs')>?`;
 
 /** Retry reports, never task execution. Decisions/inputs retain the retry clock
  * across restarts, including failed reports written before this implementation.
@@ -38,5 +41,5 @@ export function pendingReports(store: OrchestrationStore, activeSessions: string
     WHERE decision_state IS NULL OR decision_state='completed' OR (decision_state='failed'
       AND ended_at+MIN(3600000,5000*(1 << MIN(10,attempts-1)))<=?)
   ) SELECT * FROM eligible WHERE position=1 ORDER BY notification_id LIMIT 20`,
-  JSON.stringify(activeSessions), automatic ? 1 : 0, JSON.stringify(scheduled), now);
+  now, JSON.stringify(activeSessions), automatic ? 1 : 0, JSON.stringify(scheduled), now);
 }
