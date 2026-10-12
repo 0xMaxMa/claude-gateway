@@ -223,7 +223,7 @@ Claude Code subprocess exit records include the gateway response ID (agent turns
 
 CLI stderr remains visible and correlated with these records. A model-name warning does not establish provider rejection: check the terminal `inferenceOutcome` and the recorded error. Success means the CLI reported a successful result, not that every earlier request succeeded. Missing terminal evidence remains unconfirmed.
 
-A provider refusal is recorded from the stream's typed `stop_reason: "refusal"` and `stop_details` fields, never from response wording. The turn record lists each refused native message under `providerRefusals` (`messageId`, and the provider's `category`/`explanation` only when supplied), plus the CLI's `safetyStops` count. A turn can be `completed` and still contain a refusal, for example when a fallback answer followed it.
+A provider refusal is recorded from the stream's typed `stop_reason: "refusal"` and `stop_details` fields, never from response wording. The turn record lists each refused native message under `providerRefusals` (`messageId`, the provider's `category`/`explanation` only when supplied, and any `toolCalls` the refused message carried with `result: true` only when a tool result was recorded), plus the CLI's `safetyStops` count. A turn can be `completed` and still contain a refusal, for example when a fallback answer followed it.
 
 ## Terminal appearance
 

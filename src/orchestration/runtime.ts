@@ -1519,6 +1519,8 @@ export class AgentOrchestrationRuntime {
           for (const id of decision.inputIds) this.store.run("UPDATE conversation_inputs SET status='accepted' WHERE id=?", id);
           this.store.appendEvent(receipt.conversationId, 'response.superseded', {responseId:decision.responseId, inputId:decision.inputIds[0], inputIds:decision.inputIds});
         });
+        // Nothing was shown, but the refusal itself happened and stays on record.
+        if (response.providerRefusals?.length) this.reportProviderRefusals(receipt.conversationId, sessionId, decision.responseId!, response.providerRefusals, false);
         // No user-visible answer or task action was committed. Re-read canonical
         // inputs with the newer messages; do not checkpoint discarded context.
         contextPlan.invalidate();

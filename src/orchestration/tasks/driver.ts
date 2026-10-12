@@ -244,13 +244,14 @@ export class ClaudeWorkerDriver implements WorkerDriver {
           }});
       let stopping = false;
       const result: WorkerHandle['result'] = turn.result.then(async answer => {
+        const refused = answer.providerRefusals ? { providerRefusals: answer.providerRefusals } : {};
         if (answer.interrupted || stopping) {
           await process.stop();
-          return { type: process.managedGroupStopped ? 'stopped' as const : 'unknown' as const };
+          return { type: process.managedGroupStopped ? 'stopped' as const : 'unknown' as const, ...refused };
         }
         if (answer.paused) {
           await process.stop();
-          return {type: process.managedGroupStopped ? 'paused' as const : 'unknown' as const};
+          return {type: process.managedGroupStopped ? 'paused' as const : 'unknown' as const, ...refused};
         }
         if (!answer.text.trim()) throw new OrchestrationError('WORKER_RESULT_MISSING', 'The worker ended without a final response. Inspect existing changes before retrying.');
         if (Buffer.byteLength(answer.text) > 262144) throw new OrchestrationError('RESPONSE_TOO_LARGE');
@@ -264,7 +265,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         return { type: 'completed' as const, result: { summary: answer.text, artifactIds: [artifact.resourceId, ...fileIds],
           diff: { text: diff, truncated: diff.length < artifact.diff.length },
           ...(answer.unresolvedBackground ? { unresolvedBackground: answer.unresolvedBackground } : {}),
-          ...(answer.providerRefusals ? { providerRefusals: answer.providerRefusals } : {}) } };
+          ...refused } };
       }).catch(async error => {
         await process.stop();
         const failure = taskFailure(error);

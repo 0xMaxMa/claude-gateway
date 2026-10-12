@@ -41,7 +41,7 @@ export interface TaskFailure { code: string; message: string; observedAt: number
 export interface ComputerTaskReport {status:string;reason:string;steps:number;evaluations?:number;phase?:string;trace?:import('../automation/computer-use').ComputerProgress[];fieldRequest?:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'};stepRun?:import('../automation/computer-steps').ComputerStepRun;lastAction?:import('../automation/computer-use').ComputerLastAction;
  /** The relay confirmed the device session ended with this round (a reached goal). */
  accessReleased?:boolean}
-export type WorkerOutcome = ({type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure}) & {computerReport?:ComputerTaskReport;browserReport?: import('../jev/browser-contract').BrowserTaskReport};
+export type WorkerOutcome = ({type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure; providerRefusals?: import('../session/provider-refusal').ProviderRefusal[]}) & {computerReport?:ComputerTaskReport;browserReport?: import('../jev/browser-contract').BrowserTaskReport};
 export interface TaskResult {
   summary: string;
   artifactIds: string[];

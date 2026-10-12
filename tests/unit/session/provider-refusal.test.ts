@@ -59,7 +59,7 @@ describe('ProviderRefusals (#586)', () => {
       // Without refusedMessageId, a synthetic record still replaces the message being streamed.
       { type: 'assistant', isApiErrorMessage: true, message: { id: 'synthetic-2', stop_reason: 'refusal', stop_details: refusal(), content: [] } },
     ]);
-    expect(ledger.list()).toEqual([{ messageId: 'msg_refused', category: 'cyber', explanation: EXPLANATION }]);
+    expect(ledger.list()).toEqual([{ messageId: 'msg_refused', category: 'cyber', explanation: EXPLANATION, toolCalls: [{ id: 't', name: 'Bash', result: false }] }]);
   });
 
   it('keeps distinct refusals in order and bounds the ledger', () => {
@@ -75,6 +75,29 @@ describe('ProviderRefusals (#586)', () => {
     expect(entry.explanation).toContain('api_key=[redacted]');
     expect(entry.explanation).not.toContain('abc123');
     expect(entry.explanation!.length).toBeLessThanOrEqual(2048);
+  });
+
+  it('keeps tool calls of a refused message distinguishable by whether an execution result was recorded', () => {
+    const toolUse = (id: string, name: string) => ({ type: 'tool_use', id, name, input: {} });
+    const ledger = observe([
+      start('msg_refused'),
+      { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: toolUse('t1', 'Bash') } },
+      { type: 'assistant', message: { id: 'msg_refused', stop_reason: null, content: [toolUse('t1', 'Bash'), toolUse('t2', 'Read')] } },
+      delta('refusal', refusal()),
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't2', content: 'ok' }] } },
+      start('msg_other'),
+      { type: 'assistant', message: { id: 'msg_other', content: [toolUse('t3', 'Grep')] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't3', content: 'ok' }] } },
+    ]);
+    expect(ledger.list()).toEqual([{ messageId: 'msg_refused', category: 'cyber', explanation: EXPLANATION,
+      toolCalls: [{ id: 't1', name: 'Bash', result: false }, { id: 't2', name: 'Read', result: true }] }]);
+  });
+
+  it('keeps a refused message\'s tool calls after many later tool calls in the same turn', () => {
+    const later = Array.from({ length: 400 }, (_, i) => ({ type: 'assistant', message: { id: `m${i}`, content: [{ type: 'tool_use', id: `x${i}`, name: 'Read', input: {} }] } }));
+    const ledger = observe([start('msg_refused'), { type: 'assistant', message: { id: 'msg_refused', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] } },
+      delta('refusal', null), ...later, { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1' }] } }]);
+    expect(ledger.list()).toEqual([{ messageId: 'msg_refused', toolCalls: [{ id: 't1', name: 'Bash', result: true }] }]);
   });
 
   it('reset() drops every refusal and the message correlation', () => {

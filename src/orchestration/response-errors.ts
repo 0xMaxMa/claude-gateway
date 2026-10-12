@@ -84,10 +84,15 @@ export function presentedResponseError(error: unknown): PresentedResponseError {
 /** Attributed provider refusal metadata (#586). Only the provider's own typed fields are shown;
  * the gateway never supplies a cause the provider did not state. */
 export function providerRefusalNotice(refusals: readonly ProviderRefusal[]): string {
-  const entries = [...new Set(refusals.map(refusal => [
-    refusal.category ? `Category: ${refusal.category}` : undefined,
-    refusal.explanation ? `Provider explanation: "${refusal.explanation}"` : 'The provider did not supply a specific explanation.',
-  ].filter(Boolean).join('\n')))];
+  const entries = [...new Set(refusals.map(refusal => {
+    const calls = refusal.toolCalls ?? [], withoutResult = calls.filter(call => !call.result).length;
+    return [
+      refusal.category ? `Category: ${refusal.category}` : undefined,
+      refusal.explanation ? `Provider explanation: "${refusal.explanation}"` : 'The provider did not supply a specific explanation.',
+      withoutResult ? `Tool calls in the refused message with no recorded execution result: ${withoutResult}.` : undefined,
+      calls.length > withoutResult ? `Tool calls in the refused message that returned a result: ${calls.length - withoutResult}.` : undefined,
+    ].filter(Boolean).join('\n');
+  }))];
   return ['Gateway diagnostic: the model provider refused a request during this response.', ...entries,
     'A reply produced after a refusal does not by itself confirm that the refused step was carried out.'].join('\n');
 }

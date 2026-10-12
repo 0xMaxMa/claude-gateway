@@ -79,6 +79,12 @@ describe('providerRefusalNotice (#586)', () => {
     expect(notice).toContain('does not by itself confirm that the refused step was carried out');
   });
 
+  it('states tool calls without an execution result separately from those that returned one', () => {
+    const notice = providerRefusalNotice([{ ...refusal, toolCalls: [{ id: 't1', result: false }, { id: 't2', result: false }, { id: 't3', result: true }] }]);
+    expect(notice).toContain('Tool calls in the refused message with no recorded execution result: 2.');
+    expect(notice).toContain('Tool calls in the refused message that returned a result: 1.');
+  });
+
   it('says no explanation was supplied instead of reconstructing one', () => {
     const notice = providerRefusalNotice([{ messageId: 'm' }]);
     expect(notice).toContain('The provider did not supply a specific explanation.');
@@ -179,4 +185,18 @@ describe('worker refusal evidence (#586)', () => {
         .toEqual([expect.objectContaining({ refusals: [refusal] })]);
     } finally { jest.restoreAllMocks(); await bridge.close(); store.close(); rmSync(root, { recursive: true, force: true }); }
   });
+});
+
+test('a stopped worker attempt keeps refusal evidence without replacing its stop reason (#586)', () => {
+  const store = new OrchestrationStore(':memory:', 'a'), tasks = new TaskService(store);
+  try {
+    const input = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's', source: 'api', accountId: 'u', principalId: 'u', chatId: 's', threadKey: '' }, text: 'Work' });
+    const decision = new DecisionService(store).begin(input.conversationId, 'u', [input.inputId]);
+    const task = tasks.spawn({ ...input, ...decision, principalId: 'u', actionId: 'spawn', execute: true, writeMemory: false }, { title: 'Work', instructions: 'Work', targetProfile: 'default-worker' });
+    const attempt = tasks.claim(task.taskId)!;
+    tasks.started(attempt.attemptId, attempt.generation, { pid: 1, startedAt: Date.now(), instanceId: 'test' });
+    expect(tasks.finish(attempt.attemptId, attempt.generation, { type: 'stopped', providerRefusals: [refusal] })).toMatchObject({ failure: { code: 'WORKER_STOPPED' } });
+    expect(store.all("SELECT payload_json FROM conversation_events WHERE type='task.provider_refusal'").map(row => JSON.parse(String(row.payload_json)).payload))
+      .toEqual([expect.objectContaining({ refusals: [refusal] })]);
+  } finally { store.close(); }
 });

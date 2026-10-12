@@ -959,7 +959,7 @@ export class TaskService {
       if (Buffer.byteLength(JSON.stringify(outcome.result)) > 2 * 1024 * 1024) throw new OrchestrationError('PAYLOAD_TOO_LARGE');
       if (outcome.result.artifactIds.length > 64 || outcome.result.artifactIds.some(id => typeof id !== 'string' || id.length > 1024)) throw new OrchestrationError('INVALID_INPUT');
     }
-    const refusals = outcome.type === 'completed' ? outcome.result.providerRefusals : outcome.failure?.providerRefusals;
+    const refusals = outcome.type === 'completed' ? outcome.result.providerRefusals : outcome.failure?.providerRefusals ?? outcome.providerRefusals;
     return this.store.transaction(() => {
       const { task, attempt } = this.active(attemptId, generation);
       if (task.gatewayTarget?.adapter === 'computer' && outcome.computerReport) task.computerReport=outcome.computerReport;
