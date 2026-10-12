@@ -303,9 +303,12 @@ export class TaskService {
         }
       }
       if (command.skill) task.skill = command.skill;
-      if (command.model) { task.model = command.model; task.requestedModel = command.requestedModel ?? command.model; }
+      // A follow-up keeps the model and effort its predecessor was explicitly given, like its directory and worker session.
+      const requested = command.model ? command : prior?.requestedModel ? { model: prior.model, requestedModel: prior.requestedModel } : undefined;
+      if (requested?.model) { task.model = requested.model; task.requestedModel = requested.requestedModel ?? requested.model; }
       else if (context.model && !command.gatewayTarget) task.model = context.model;
-      if (command.effort) task.effort = command.effort;
+      const effort = command.effort ?? (command.model ? undefined : prior?.effort);
+      if (effort) task.effort = effort;
       const projectRoot = command.workingDirectory || (this.config.tasks.workspaceMode === 'host' && prior?.resourceProfile?.mode === 'host' ? prior.resourceProfile.projectRoot : undefined) || this.config.tasks.projectRoot || this.defaultProjectRoot;
       if (projectRoot && !command.gatewayTarget) task.resourceProfile = { projectRoot, mode: this.config.tasks.workspaceMode };
       this.store.run('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)', task.taskId, task.conversationId, task.state, 1, 1, null, JSON.stringify(task), now, now);

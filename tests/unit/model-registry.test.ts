@@ -59,6 +59,13 @@ describe('resolveModelId — full model IDs only', () => {
     expect(message).toContain('see /models');
   });
 
+  // Review of #581: the resolved id is what reaches `--model`, so it must be the catalog's, not the caller's casing.
+  it('returns the canonical id with a lowercase suffix, and refuses a doubled suffix', () => {
+    expect(resolveModelId(MODELS, 'GPT-6-Astra[1M]').id).toBe('gpt-6-astra[1m]');
+    expect(codeOf(() => resolveModelId(MODELS, 'claude-opus-5-5[1m][1m]'))).toBe('UNKNOWN_MODEL');
+    expect(codeOf(() => resolveModelId(MODELS, 'claude-opus-5-5[1m][200k]'))).toBe('UNKNOWN_MODEL');
+  });
+
   it('does not accept a suffix on an unknown base', () => {
     expect(codeOf(() => resolveModelId(MODELS, 'gpt-7[1m]'))).toBe('UNKNOWN_MODEL');
   });

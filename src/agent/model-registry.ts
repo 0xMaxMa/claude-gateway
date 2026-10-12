@@ -128,8 +128,9 @@ export function resolveModelId(models: ModelConfig[], value: string, where?: str
   const wanted = value.toLowerCase();
   const exact = models.find((m) => m.id.toLowerCase() === wanted);
   if (exact) return exact;
-  const base = models.find((m) => m.id.toLowerCase() === wanted.replace(CONTEXT_SUFFIX, ''));
-  if (base && CONTEXT_SUFFIX.test(value)) return { ...base, id: value };
+  const suffix = CONTEXT_SUFFIX.exec(wanted)?.[0];
+  const base = suffix && models.find((m) => m.id.toLowerCase() === wanted.slice(0, -suffix.length) && !CONTEXT_SUFFIX.test(m.id));
+  if (base) return { ...base, id: base.id + suffix };
   const at = where ? ` at ${where}` : '';
   const valid = `Valid IDs: ${models.map((m) => m.id).join(', ')} — see /models.`;
   const alias = models.find((m) => m.alias.toLowerCase() === wanted);
