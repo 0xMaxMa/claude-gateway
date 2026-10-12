@@ -181,3 +181,51 @@ test('the worker MCP server is told to expose the tools', () => {
     expect(JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')).mcpServers.gateway.env.GATEWAY_SUBAGENTS).toBe(subagents ? 'true' : '');
   }
 });
+
+// Review of #583 findings.
+describe('review fixes', () => {
+  test('waiting parents do not starve their subagents: children are claimable past the concurrency limits', async () => {
+    tasks = new TaskService(store, { tasks: { workspaceMode: 'host', maxConcurrentPerAgent: 1, maxConcurrentPerConversation: 1 } }, root);
+    await bridge.close(); bridge = new TaskBridge(tasks); bridge.models = async () => MODELS; await bridge.start();
+    const { attempt } = rootWorker();
+    const child = store.task((await spawn(attempt, {})).task_id)!;
+    expect(tasks.claim(child.taskId)).toBeDefined();
+    // A second root is still held to the limit.
+    const other = tasks.spawn({ ...context, actionId: 'other-root' }, { title: 'Other', instructions: 'x', targetProfile: 'default-worker' });
+    expect(tasks.claim(other.taskId)).toBeUndefined();
+  });
+
+  test('a read-only subagent\'s own subagents are read-only too', async () => {
+    const { attempt } = rootWorker();
+    const reader = store.task((await spawn(attempt, { readonly: true })).task_id)!;
+    const grandchild = await spawn(running(reader), {});
+    expect(store.task(grandchild.task_id)!.readonly).toBe(true);
+    expect(tasks.revision(grandchild.task_id, 1).instructions).not.toContain(SUBAGENT_READONLY);
+  });
+
+  test('a subagent\'s question never becomes a user question', async () => {
+    const { TaskQuestions } = require('../../../src/orchestration/task-questions');
+    const { attempt } = rootWorker();
+    const child = running(store.task((await spawn(attempt, {})).task_id)!);
+    tasks.requestInput(child.attemptId, child.generation, 'Which base branch?');
+    new TaskQuestions(store).tick?.();
+    expect(store.all('SELECT question_id FROM task_questions')).toHaveLength(0);
+  });
+
+  test('a parent that is stopping cancels its subtree at once and cannot spawn more', async () => {
+    const { task: parent, attempt } = rootWorker();
+    const child = store.task((await spawn(attempt, {})).task_id)!;
+    tasks.cancelByUser(parent.conversationId, 'u', parent.taskId);
+    expect(store.task(parent.taskId)!.state).toBe('cancel_requested');
+    expect(store.task(child.taskId)!.state).toBe('cancelled');
+    expect((await spawn(attempt, {})).error).toBe('STATE_CONFLICT');
+  });
+
+  test('a subagent stuck in needs_reconciliation is reported, not waited on', async () => {
+    const { attempt } = rootWorker();
+    const child = running(store.task((await spawn(attempt, {})).task_id)!);
+    tasks.finish(child.attemptId, child.generation, { type: 'unknown' } as any);
+    expect(store.task(child.taskId)!.state).toBe('needs_reconciliation');
+    expect((await call(attempt, 'subagent_wait', { task_ids: [child.taskId] })).results[0]).toMatchObject({ state: 'needs_reconciliation' });
+  });
+});

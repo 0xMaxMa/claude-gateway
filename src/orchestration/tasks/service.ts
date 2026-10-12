@@ -180,7 +180,7 @@ export class TaskService {
     if (taskId) {
       const task = this.owned(taskId, conversationId); delete task.skill;
       // A root lists its whole subagent tree; each entry names its parent.
-      const subagents = task.parentTaskId ? [] : this.store.all("SELECT snapshot_json FROM tasks WHERE json_extract(snapshot_json,'$.rootTaskId')=? ORDER BY created_at", task.taskId)
+      const subagents = task.parentTaskId ? [] : this.store.all("SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.rootTaskId')=? ORDER BY created_at", task.conversationId, task.taskId)
         .map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot)
         .map(child => ({ taskId: child.taskId, parentTaskId: child.parentTaskId, title: child.title, state: child.state, model: child.model, effort: child.effort, subagentType: child.subagentType }));
       return [{ ...this.withRecentTools(task), ...(subagents.length ? { subagents } : {}) }];
@@ -593,7 +593,7 @@ export class TaskService {
     task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: task.state==='cancel_requested' ? 'Disconnecting; waiting for execution and access to stop.' : 'Session ended. Existing files and prior effects are retained.' };
     this.store.saveTask(task, version);
     if (task.state === 'cancelled') this.notify(task);
-    else this.store.enqueue('interrupt', `cancel:${taskId}:${task.stateVersion}`, { taskId });
+    else { this.store.enqueue('interrupt', `cancel:${taskId}:${task.stateVersion}`, { taskId }); this.cancelSubagents(task); }
     return task;
   }
   /** A settled computer round still owns device access until explicit revocation. */
@@ -758,9 +758,12 @@ export class TaskService {
           return undefined;
         }
       }
+      // A subagent's ancestors keep their slots while they wait for it, so counting it against the
+      // same limits can deadlock the tree; like a native subagent it has no outer limit beyond its
+      // depth and the gateway process cap.
       const active = this.store.all('SELECT conversation_id,COUNT(*) AS n FROM tasks WHERE active_attempt_id IS NOT NULL GROUP BY conversation_id');
-      if (active.reduce((n, row) => n + Number(row.n), 0) >= this.config.tasks.maxConcurrentPerAgent || Number(active.find(row => row.conversation_id === task.conversationId)?.n ?? 0) >= this.config.tasks.maxConcurrentPerConversation) return undefined;
-      const worker = task.gatewayTarget ? { sessionId: task.gatewayTarget.sessionId, workerId: undefined } : this.pool.acquire(task, this.config.tasks.maxConcurrentPerAgent, this.config.tasks.workerIdleTtlMs);
+      if (!task.parentTaskId && (active.reduce((n, row) => n + Number(row.n), 0) >= this.config.tasks.maxConcurrentPerAgent || Number(active.find(row => row.conversation_id === task.conversationId)?.n ?? 0) >= this.config.tasks.maxConcurrentPerConversation)) return undefined;
+      const worker = task.gatewayTarget ? { sessionId: task.gatewayTarget.sessionId, workerId: undefined } : this.pool.acquire(task, task.parentTaskId ? Number.MAX_SAFE_INTEGER : this.config.tasks.maxConcurrentPerAgent, this.config.tasks.workerIdleTtlMs);
       if (!worker) return undefined;
       task.workerId = worker.workerId;
       if (task.gatewayTarget) delete task.gatewayDispatch;
@@ -855,6 +858,7 @@ export class TaskService {
     this.store.saveTask(task, task.stateVersion);
     this.store.appendEvent(task.conversationId, 'task.progress_stalled', { taskId: task.taskId, attemptId: observation.attemptId, quietMs, limitMs: this.config.tasks.progressStaleLimitMs, resultSeenAt: observation.resultSeenAt, pendingBackground: observation.pendingBackground }, task.taskId);
     this.store.enqueue('interrupt', `stalled:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
+    this.cancelSubagents(task);
   }
   /** A supervisor stop is a failure with its evidence, not a user/agent cancellation.
    * An unconfirmed stop keeps the cleanup code every other unconfirmed stop uses. */
@@ -1063,7 +1067,7 @@ export class TaskService {
   }
   private notify(task: TaskSnapshot): void {
     // A native subagent dies with its parent session; a durable child would otherwise be orphaned.
-    if (TERMINAL_TASK_STATES.has(task.state)) this.cancelSubagents(task);
+    if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation') this.cancelSubagents(task);
     // Subagents report to the parent worker (subagent_wait), never to the channel.
     if (task.parentTaskId) return;
     const input = this.store.get('SELECT binding_id FROM conversation_inputs WHERE id=?', task.initiatingInputId)!;
@@ -1075,8 +1079,8 @@ export class TaskService {
   private cancelSubagents(parent: TaskSnapshot): void {
     for (const row of this.store.all("SELECT snapshot_json FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId')=? AND state NOT IN ('completed','failed','cancelled')", parent.taskId)) {
       const child = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
-      // A child still stopping (cancel_requested) must not leave its own subagents to start meanwhile.
-      this.cancelSubagents(this.cancelOwned(child.conversationId, child.taskId));
+      // cancelOwned cascades again below each child, including one that is still stopping.
+      this.cancelOwned(child.conversationId, child.taskId);
     }
   }
   /**
@@ -1090,6 +1094,7 @@ export class TaskService {
       const { task: parent } = this.active(attemptId, generation);
       const receipt = this.workerReceipt(attemptId, actionId, 'subagent_spawn', JSON.stringify(spec));
       if (receipt.prior) return receipt.prior as TaskSnapshot;
+      if (parent.state !== 'running') throw new OrchestrationError('STATE_CONFLICT', `This task is ${parent.state}; it cannot start subagents.`);
       const depth = (parent.depth ?? 0) + 1;
       if (depth > SUBAGENT_MAX_DEPTH) throw new OrchestrationError('SUBAGENT_DEPTH_EXCEEDED', `Subagents nest at most ${SUBAGENT_MAX_DEPTH} levels below the root worker. Do this work inline.`);
       const queued = Number(this.store.get("SELECT COUNT(*) n FROM tasks WHERE conversation_id=? AND state='queued'", parent.conversationId)!.n);
@@ -1100,7 +1105,8 @@ export class TaskService {
         state: 'queued', stateVersion: 1, revision: 1, appliedRevision: 0, timing: { phase: 'queued', since: now, measuredFrom: now, totals: {} },
         capabilities: parent.capabilities, createdAt: now, updatedAt: now,
         parentTaskId: parent.taskId, rootTaskId: parent.rootTaskId ?? parent.taskId, depth,
-        ...(spec.subagentType ? { subagentType: spec.subagentType } : {}), ...(spec.readonly ? { readonly: true } : {}) };
+        // A read-only subagent cannot hand out write access to its own subagents.
+        ...(spec.subagentType ? { subagentType: spec.subagentType } : {}), ...(spec.readonly || parent.readonly ? { readonly: true } : {}) };
       task.workstreamId = task.taskId;
       const model = spec.model ?? parent.model;
       if (model) task.model = model;
@@ -1129,7 +1135,7 @@ export class TaskService {
   /** subagent_wait: results once every listed subagent has finished or asked a question (a question is its result, as a native subagent's would be); undefined while any is still working. */
   subagentResults(attemptId: string, generation: number, taskIds: unknown) {
     const children = this.subagents(attemptId, generation, taskIds);
-    if (children.some(child => !TERMINAL_TASK_STATES.has(child.state) && !(child.state === 'waiting_input' && child.pendingQuestion))) return undefined;
+    if (children.some(child => !TERMINAL_TASK_STATES.has(child.state) && child.state !== 'needs_reconciliation' && !(child.state === 'waiting_input' && child.pendingQuestion))) return undefined;
     return children.map(child => ({ task_id: child.taskId, state: child.state, model: child.model, effort: child.effort,
       ...(child.result ? { result: child.result.summary } : {}), ...(child.failure ? { failure: { code: child.failure.code, message: child.failure.message } } : {}),
       ...(child.state === 'waiting_input' && child.pendingQuestion ? { question: child.pendingQuestion.text } : {}) }));
@@ -1138,7 +1144,6 @@ export class TaskService {
   cancelSubagentTasks(attemptId: string, generation: number, taskIds: unknown) {
     return this.store.transaction(() => this.subagents(attemptId, generation, taskIds).map(child => {
       const task = this.cancelOwned(child.conversationId, child.taskId);
-      this.cancelSubagents(task);
       return { task_id: task.taskId, state: task.state };
     }));
   }
