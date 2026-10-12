@@ -1,4 +1,6 @@
+import * as path from 'path';
 import {
+  argvPaths,
   cwdInProject,
   Listener,
   listRunning,
@@ -74,16 +76,17 @@ describe('cwdInProject', () => {
 
 interface FakeProc extends Partial<ProcInfo> {
   listens?: number;
-  killedBy?: never;
+  argv?: string[];
 }
 
-function makeSys(procs: Record<number, FakeProc>, opts: { selfPid?: number; platform?: string } = {}) {
+function makeSys(procs: Record<number, FakeProc>, opts: { selfPid?: number; platform?: string; links?: Record<string, string> } = {}) {
   const alive = new Set(Object.keys(procs).map(Number));
   const kills: Array<[number, string]> = [];
   const info = (pid: number): ProcInfo | null => {
     const p = procs[pid];
     if (!p || !alive.has(pid)) return null;
-    return { ppid: 1, startTime: '100', uid: 1000, alive: true, comm: 'node', cwd: '/r/api', exe: 'node', ...p };
+    const { listens: _l, argv: _a, ...rest } = p;
+    return { ppid: 1, startTime: '100', uid: 1000, alive: true, comm: 'node', cwd: '/r/api', exe: 'node', ...rest };
   };
   const sys: Sys = {
     platform: opts.platform ?? 'linux',
@@ -101,7 +104,14 @@ function makeSys(procs: Record<number, FakeProc>, opts: { selfPid?: number; plat
       return info(pid);
     },
     async cmdline(pid) {
-      return ['node', `srv${pid}.js`];
+      return procs[pid]?.argv ?? ['node', `srv${pid}.js`];
+    },
+    async realpath(p) {
+      const abs = path.resolve(p);
+      for (const [from, to] of Object.entries(opts.links ?? {})) {
+        if (abs === from || abs.startsWith(from + '/')) return to + abs.slice(from.length);
+      }
+      return abs;
     },
     kill(pid, signal) {
       kills.push([pid, signal]);
@@ -125,8 +135,8 @@ describe('candidate rules', () => {
     expect(res).toEqual({
       supported: true,
       processes: [
-        { port: 3000, pids: [61], command: 'node srv61.js', address: '127.0.0.1' },
-        { port: 4000, pids: [60], command: 'node srv60.js', address: '127.0.0.1' },
+        { port: 3000, pids: [61], command: 'node srv61.js', address: '127.0.0.1', via: 'cwd' },
+        { port: 4000, pids: [60], command: 'node srv60.js', address: '127.0.0.1', via: 'cwd' },
       ],
     });
   });
@@ -295,5 +305,123 @@ describe('StopLimiter', () => {
     expect(l.take('b')).toBe(true);
     t = 1000;
     expect(l.take('a')).toBe(true);
+  });
+});
+
+
+describe('argvPaths', () => {
+  it('keeps absolute paths, strips a leading --flag=, drops relative values and flags', () => {
+    expect(argvPaths(['python3', '-m', 'http.server', '3000', '--directory', '/r/api', '--root=/r/x', './rel', 'rel/p', '--opt=rel', '-C/r/c', 'a/b'])).toEqual(['/r/api', '/r/x']);
+  });
+});
+
+describe('argv-matched listeners', () => {
+  const away = { cwd: '/tmp' };
+  const srv = (argv: string[], extra: FakeProc = {}): FakeProc => ({ listens: 3000, ...away, argv, ...extra });
+
+  it('lists a listener with cwd elsewhere when an absolute argv path is in the project, via=argv', async () => {
+    const { sys } = makeSys({
+      60: srv(['python3', '-m', 'http.server', '3000', '--directory', '/r/api']),
+      61: srv(['node', '/r/api/src/server.js'], { listens: 3001 }),
+      62: srv(['vite', '--root=/r/api'], { listens: 3002 }),
+      63: { listens: 3003 },
+    });
+    const res = await listRunning(sys, '/r/api');
+    expect(res.processes.map((p) => [p.port, p.via])).toEqual([[3000, 'argv'], [3001, 'argv'], [3002, 'argv'], [3003, 'cwd']]);
+  });
+
+  it('stops an argv-matched listener exactly like a cwd-matched one, with its descendants', async () => {
+    const { sys, kills } = makeSys({ 60: srv(['serve', '/r/api']), 61: { ppid: 60, cwd: '/tmp' } });
+    const res = await stopRunning(sys, '/r/api');
+    expect(res).toEqual({ ok: true, value: { stopped: [{ port: 3000, pids: [60] }], remaining: [] } });
+    expect(kills.map((k) => k[0]).sort()).toEqual([60, 61]);
+  });
+
+  it('does not match a sibling sharing the name prefix', async () => {
+    const { sys, kills } = makeSys({ 60: srv(['node', '/r/api-v2/server.js']), 61: srv(['serve', '--directory=/r/api-v2'], { listens: 3001 }) });
+    expect((await listRunning(sys, '/r/api')).processes).toEqual([]);
+    expect(await stopRunning(sys, '/r/api')).toEqual({ ok: false, error: 'nothing_running' });
+    expect(kills).toEqual([]);
+  });
+
+  it('does not match relative paths, project names alone, or substrings', async () => {
+    const { sys } = makeSys({
+      60: srv(['node', 'api/server.js']),
+      61: srv(['node', './server.js', '--directory', 'r/api'], { listens: 3001 }),
+      62: srv(['node', 'x', 'see/r/api/x', '--note=r/api'], { listens: 3002 }),
+      63: srv(['sh', '-c', 'cd /r/api && node s.js'], { listens: 3003 }),
+    });
+    expect((await listRunning(sys, '/r/api')).processes).toEqual([]);
+  });
+
+  it('does not match a path that escapes through .. or a symlink', async () => {
+    const { sys } = makeSys(
+      { 60: srv(['node', '/r/api/../other/s.js']), 61: srv(['serve', '/x/link'], { listens: 3001 }), 62: srv(['serve', '/x/inlink'], { listens: 3002 }) },
+      { links: { '/x/link': '/r/other', '/x/inlink': '/r/api/sub' } },
+    );
+    expect((await listRunning(sys, '/r/api')).processes.map((p) => p.port)).toEqual([3002]);
+  });
+
+  it('ignores a process with the project in argv that does not listen', async () => {
+    const { sys, kills } = makeSys({ 60: { cwd: '/tmp', argv: ['node', '/r/api/agent.js'] }, 61: srv(['serve', '/r/api'], { listens: 3001 }) });
+    await stopRunning(sys, '/r/api');
+    expect(kills.map((k) => k[0])).toEqual([61]);
+  });
+
+  it('never selects claude by exe or comm even when it listens with the path in argv', async () => {
+    const { sys } = makeSys({
+      60: srv(['claude', '--add-dir', '/r/api'], { exe: 'claude' }),
+      61: srv(['x', '/r/api'], { comm: 'claude', listens: 3001 }),
+    });
+    expect((await listRunning(sys, '/r/api')).processes).toEqual([]);
+  });
+
+  it('never selects the gateway, its ancestors or pid 1 even when argv names the project', async () => {
+    const { sys } = makeSys(
+      {
+        1: srv(['init', '/r/api'], { ppid: 0, listens: 1000 }),
+        10: srv(['sup', '/r/api'], { ppid: 1, listens: 1001 }),
+        50: srv(['gw', '/r/api'], { ppid: 10, listens: 1002 }),
+        60: srv(['serve', '/r/api']),
+      },
+      { selfPid: 50 },
+    );
+    expect((await listRunning(sys, '/r/api')).processes.map((p) => p.port)).toEqual([3000]);
+  });
+
+  it('applies the uid rule to argv matches', async () => {
+    const { sys } = makeSys({ 60: srv(['serve', '/r/api'], { uid: 0 }) });
+    expect((await listRunning(sys, '/r/api')).processes).toEqual([]);
+  });
+
+  it('re-verifies before signalling: argv no longer names the project, or it stopped listening, or the start time changed', async () => {
+    for (const mutate of ['argv', 'listen', 'start'] as const) {
+      const { sys, kills } = makeSys({ 60: srv(['serve', '/r/api']) });
+      let scanned = false;
+      const allPids = sys.allPids;
+      sys.allPids = async () => ((scanned = true), allPids());
+      if (mutate === 'argv') {
+        const cmd = sys.cmdline;
+        sys.cmdline = async (pid) => (scanned ? ['serve', '/r/other'] : cmd(pid));
+      } else if (mutate === 'listen') {
+        const l = sys.listeners;
+        let calls = 0;
+        sys.listeners = async () => (++calls === 1 ? l() : []);
+      } else {
+        const pr = sys.proc;
+        sys.proc = async (pid) => {
+          const i = await pr(pid);
+          return i && scanned ? { ...i, startTime: '999' } : i;
+        };
+      }
+      await stopRunning(sys, '/r/api');
+      expect([mutate, kills]).toEqual([mutate, []]);
+    }
+  });
+
+  it('redacts secrets in the command of an argv match', async () => {
+    const { sys } = makeSys({ 60: srv(['serve', '/r/api', '--token', 'hunter2']) });
+    const cmd = (await listRunning(sys, '/r/api')).processes[0].command;
+    expect(cmd).toBe('serve /r/api --token [redacted]');
   });
 });

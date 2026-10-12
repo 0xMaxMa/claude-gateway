@@ -442,8 +442,10 @@ another reason, such as a protected branch or a server hook, gets
 
 ## Running processes {#running}
 
-A project counts as running when a process listens on a TCP port and its working
-directory is inside the project folder. Listening sockets come from `ss -H -ltnp`,
+A project counts as running when a process listens on a TCP port and either its
+working directory is inside the project folder (`via: "cwd"`) or one of its
+arguments is an absolute path inside the project folder (`via: "argv"`, for example
+`python3 -m http.server --directory <project>` started from `/tmp`). Listening sockets come from `ss -H -ltnp`,
 or from `/proc/net/tcp` and `/proc/<pid>/fd` when `ss` is missing. Both routes need
 a key that can see all agents. Stop also needs a write key.
 
@@ -452,10 +454,11 @@ a key that can see all agents. Stop also needs a write key.
 Returns `200` with one entry per port, sorted by port:
 
 ```json
-{ "supported": true, "processes": [ { "port": 3000, "pids": [123, 456], "command": "node server.js", "address": "127.0.0.1" } ] }
+{ "supported": true, "processes": [ { "port": 3000, "pids": [123, 456], "command": "node server.js", "address": "127.0.0.1", "via": "cwd" } ] }
 ```
 
-`command` is the first listener's argument list joined by spaces and cut to 120
+`via` is `"cwd"` or `"argv"` and says how the first listener on that port was tied
+to the project. A client that does not know the field can ignore it. `command` is the first listener's argument list joined by spaces and cut to 120
 characters. The value after any `--token`, `--password`, `--secret` or `--key`
 flag (including flags such as `--api-key` or `--client-secret=...`) is replaced with
 `[redacted]` before the cut. The environment is never returned. On a host that is not
@@ -481,9 +484,10 @@ second is ignored: it returns `200` with `stopped: []` and the current `remainin
 Safety rules the gateway enforces:
 
 - Only processes that own a LISTEN socket and whose working directory resolves (symlinks followed) inside the project folder are candidates. `projects/api` never matches `projects/api-v2`.
+- A listener also qualifies when any argument is an absolute path (after stripping a leading `--flag=`) whose real path is the project folder or inside it. This covers the value after `--directory`, `--dir`, `-C`, `--cwd`, `--prefix` and `--root`. The comparison is the same as for the working directory. Relative paths, paths that leave the project through `..` or a symlink, environment variables, open files and substrings of the command line never count. A non-listening process that mentions the project is never touched.
 - The gateway process, all of its ancestors, pid 1, any process whose executable or name is `claude`, and any process owned by another user are never signalled. A listener that is an ancestor of the gateway is skipped with its whole tree.
 - Signals go to single pids, never to a process group or session.
-- Before each signal the gateway checks the pid again: same start time, same owner, and for a listener still inside the project and still listening. A pid that changed is skipped.
+- Before each signal the gateway checks the pid again: same start time, same owner, and for a listener still inside the project (by working directory or argument) and still listening. A pid that changed is skipped.
 
 Errors: `400 invalid_name`, `400 invalid_port`, `403 forbidden_key`,
 `403 path_escape`, `404 not_found`, `409 nothing_running`.

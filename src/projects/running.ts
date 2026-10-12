@@ -17,12 +17,17 @@ export interface RunningPort {
   address: string;
   pids: number[];
   command: string;
+  via: Via;
   members: Member[];
 }
+
+/** How a listener was tied to the project: its working directory, or an absolute path in its argv. */
+export type Via = 'cwd' | 'argv';
 
 export interface Member {
   pid: number;
   startTime: string;
+  via: Via;
 }
 
 export interface RunningProcess {
@@ -30,6 +35,7 @@ export interface RunningProcess {
   pids: number[];
   command: string;
   address: string;
+  via: Via;
 }
 
 export type RunningList = { supported: true; processes: RunningProcess[] } | { supported: false; processes: [] };
@@ -147,6 +153,24 @@ export function cwdInProject(realProject: string, cwd: string): boolean {
   return c === p || c.startsWith(p.endsWith(path.sep) ? p : p + path.sep);
 }
 
+const FLAG_PREFIX = /^--[^=]+=/;
+const MAX_ARGV_PATHS = 64;
+
+/**
+ * Absolute paths named in argv, in order. A leading `--flag=` is stripped. Relative values never count.
+ * A value token after `--directory`, `--dir`, `-C`, `--cwd`, `--prefix` or `--root` is its own argv
+ * element, so the generic rule already covers it.
+ */
+export function argvPaths(args: string[]): string[] {
+  const out: string[] = [];
+  for (const a of args) {
+    const v = a.replace(FLAG_PREFIX, '');
+    if (v.startsWith('/')) out.push(v);
+    if (out.length >= MAX_ARGV_PATHS) break;
+  }
+  return out;
+}
+
 // --------------------------------------------------------------------- effects
 
 export interface ProcInfo {
@@ -170,6 +194,8 @@ export interface Sys {
   allPids(): Promise<number[]>;
   proc(pid: number): Promise<ProcInfo | null>;
   cmdline(pid: number): Promise<string[]>;
+  /** Symlink-resolved path, or null when it does not exist. */
+  realpath(p: string): Promise<string | null>;
   kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void;
   sleep(ms: number): Promise<void>;
 }
@@ -237,6 +263,7 @@ export function systemSys(over: Partial<Pick<Sys, 'platform' | 'selfPid'>> = {})
       const raw = await fsp.readFile(`/proc/${pid}/cmdline`, 'utf8').catch(() => '');
       return raw.split('\0').filter((s) => s !== '');
     },
+    realpath: (p) => fsp.realpath(p).catch(() => null),
     kill(pid, signal) {
       process.kill(pid, signal);
     },
@@ -264,13 +291,23 @@ function isAgent(info: ProcInfo): boolean {
   return info.exe === 'claude' || info.comm === 'claude';
 }
 
+/** Whether a live, same-uid, non-agent process belongs to the project by cwd, else by an absolute argv path. */
+async function projectVia(sys: Sys, realProject: string, pid: number, info: ProcInfo): Promise<Via | null> {
+  if (info.cwd !== null && cwdInProject(realProject, info.cwd)) return 'cwd';
+  for (const candidatePath of argvPaths(await sys.cmdline(pid))) {
+    const real = await sys.realpath(candidatePath);
+    if (real !== null && cwdInProject(realProject, real)) return 'argv';
+  }
+  return null;
+}
+
 /** Rules 1, 2 and 5 for one listener pid: a member of the project, or null. */
 async function candidate(sys: Sys, realProject: string, protectedSet: Set<number>, pid: number): Promise<Member | null> {
   if (!Number.isInteger(pid) || pid <= 1 || protectedSet.has(pid)) return null;
   const info = await sys.proc(pid);
   if (!info || !info.alive || info.uid !== sys.selfUid || isAgent(info)) return null;
-  if (info.cwd === null || !cwdInProject(realProject, info.cwd)) return null;
-  return { pid, startTime: info.startTime };
+  const via = await projectVia(sys, realProject, pid, info);
+  return via ? { pid, startTime: info.startTime, via } : null;
 }
 
 /** Listening sockets whose owner runs inside the project. Null when this host cannot be scanned. */
@@ -288,7 +325,7 @@ export async function scanProject(sys: Sys, realProject: string): Promise<Runnin
       if (!member) continue;
       let entry = byPort.get(l.port);
       if (!entry) {
-        entry = { port: l.port, address: l.address, pids: [], command: redactCommand(await sys.cmdline(pid)), members: [] };
+        entry = { port: l.port, address: l.address, pids: [], command: redactCommand(await sys.cmdline(pid)), via: member.via, members: [] };
         byPort.set(l.port, entry);
       }
       if (!entry.pids.includes(pid)) {
@@ -307,11 +344,13 @@ export async function listRunning(sys: Sys, realProject: string): Promise<Runnin
   if (!ports) return { supported: false, processes: [] };
   return {
     supported: true,
-    processes: ports.map(({ port, pids, command, address }) => ({ port, pids, command, address })),
+    processes: ports.map(({ port, pids, command, address, via }) => ({ port, pids, command, address, via })),
   };
 }
 
-interface Target extends Member {
+interface Target {
+  pid: number;
+  startTime: string;
   kind: 'listener' | 'descendant';
 }
 
@@ -342,7 +381,7 @@ async function stillSafe(sys: Sys, realProject: string, protectedSet: Set<number
   const info = await sys.proc(t.pid);
   if (!info || !info.alive || info.startTime !== t.startTime || info.uid !== sys.selfUid || isAgent(info)) return false;
   if (t.kind === 'descendant') return true;
-  if (info.cwd === null || !cwdInProject(realProject, info.cwd)) return false;
+  if (!(await projectVia(sys, realProject, t.pid, info))) return false;
   const listeners = await sys.listeners();
   return !!listeners?.some((l) => l.pids.includes(t.pid));
 }
@@ -389,7 +428,7 @@ export async function stopRunning(
   if (matched.length === 0) return err('nothing_running');
 
   const members = new Map(matched.flatMap((p) => p.members).map((m) => [m.pid, m] as const));
-  const listeners: Target[] = [...members.values()].map((m) => ({ ...m, kind: 'listener' }));
+  const listeners: Target[] = [...members.values()].map((m) => ({ pid: m.pid, startTime: m.startTime, kind: 'listener' }));
   const targets = [...listeners, ...(await descendantsOf(sys, listeners.map((l) => l.pid)))];
 
   await signalAll(sys, realProject, targets, 'SIGTERM');

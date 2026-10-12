@@ -1,4 +1,4 @@
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, spawn, spawnSync } from 'child_process';
 import express from 'express';
 import * as fs from 'fs';
 import * as net from 'net';
@@ -95,6 +95,106 @@ const until = async (cond: () => boolean | Promise<boolean>, ms = 4000) => {
   return false;
 };
 
+const hasPython = spawnSync('python3', ['--version']).status === 0;
+const PY = (dir: string) => ['-m', 'http.server', '0', '--bind', '127.0.0.1', '--directory', dir];
+const NODE_ARGV = (extra: string) => ['-e', SERVER, extra];
+
+async function listOf(a: express.Express) {
+  return (await get(a)).body.processes as Array<{ port: number; pids: number[]; via: string; command: string }>;
+}
+
+describe('running routes, argv-matched listeners', () => {
+  it('lists and stops a node server with cwd /tmp that names the project by a plain absolute path', async () => {
+    const dir = path.join(root, 'api');
+    const { child, port } = await start('node', NODE_ARGV(dir), outside);
+    const a = app();
+    const listed = await listOf(a);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({ port, pids: [child.pid], via: 'argv' });
+    const res = await stop(a, { port });
+    expect(res.body).toEqual({ stopped: [{ port, pids: [child.pid] }], remaining: [] });
+    expect(await until(() => !alive(child.pid))).toBe(true);
+    expect(await portOpen(port as number)).toBe(false);
+  });
+
+  (hasPython ? it : it.skip)('lists and stops python -m http.server --directory <project> started from another cwd', async () => {
+    const dir = path.join(root, 'api');
+    const child = spawn('python3', PY(dir), { cwd: outside, stdio: 'ignore' });
+    children.push(child);
+    const a = app();
+    expect(await until(async () => (await listOf(a)).length === 1)).toBe(true);
+    const [entry] = await listOf(a);
+    expect(entry).toMatchObject({ pids: [child.pid], via: 'argv' });
+    expect((await stop(a, { port: entry.port })).body.remaining).toEqual([]);
+    expect(await until(() => !alive(child.pid))).toBe(true);
+  });
+
+  it('does not match a sibling project whose name shares the prefix', async () => {
+    const { child } = await start('node', NODE_ARGV(path.join(root, 'api-v2')), outside);
+    const a = app();
+    expect(await listOf(a)).toEqual([]);
+    expect((await stop(a)).status).toBe(409);
+    expect(alive(child.pid)).toBe(true);
+  });
+
+  it('does not match a relative path or a .. escape', async () => {
+    const rel = await start('node', NODE_ARGV('api/x'), root);
+    const esc = await start('node', NODE_ARGV(path.join(root, 'api', '..', 'api-v2')), outside);
+    const a = app();
+    expect(await listOf(a)).toEqual([]);
+    expect((await stop(a)).status).toBe(409);
+    expect(alive(rel.child.pid) && alive(esc.child.pid)).toBe(true);
+  });
+
+  it('follows a symlink only when its realpath is inside the project', async () => {
+    fs.symlinkSync(path.join(root, 'api'), path.join(outside, 'into'));
+    fs.symlinkSync(outside, path.join(root, 'api', 'out'));
+    const inside = await start('node', NODE_ARGV(path.join(outside, 'into')), outside);
+    const leaving = await start('node', NODE_ARGV(path.join(root, 'api', 'out')), outside);
+    const a = app();
+    expect((await listOf(a)).map((p) => p.pids)).toEqual([[inside.child.pid]]);
+    await stop(a);
+    expect(await until(() => !alive(inside.child.pid))).toBe(true);
+    expect(alive(leaving.child.pid)).toBe(true);
+  });
+
+  it('leaves a non-listening process with the project in argv untouched', async () => {
+    const idle = await start('node', ['-e', IDLE, path.join(root, 'api')], outside);
+    const a = app();
+    expect(await listOf(a)).toEqual([]);
+    expect((await stop(a)).status).toBe(409);
+    expect(alive(idle.child.pid)).toBe(true);
+  });
+
+  it('leaves a listener named claude untouched when argv names the project', async () => {
+    const bin = path.join(base, 'claude');
+    fs.copyFileSync(process.execPath, bin);
+    fs.chmodSync(bin, 0o755);
+    const { child } = await start(bin, NODE_ARGV(path.join(root, 'api')), outside);
+    const a = app();
+    expect(await listOf(a)).toEqual([]);
+    expect((await stop(a)).status).toBe(409);
+    expect(alive(child.pid)).toBe(true);
+  });
+
+  it('never selects the gateway pid when argv names the project', async () => {
+    const { child } = await start('node', NODE_ARGV(path.join(root, 'api')), outside);
+    const a = app(systemSys({ selfPid: child.pid }));
+    expect(await listOf(a)).toEqual([]);
+    expect((await stop(a)).status).toBe(409);
+    expect(alive(child.pid)).toBe(true);
+  });
+
+  it('redacts secrets in the command of an argv match', async () => {
+    const script = path.join(base, 's.js');
+    fs.writeFileSync(script, SERVER);
+    await start('node', [script, path.join(root, 'api'), '--token', 'hunter2'], outside);
+    const [entry] = await listOf(app());
+    expect(entry.command).toContain('--token [redacted]');
+    expect(entry.command).not.toContain('hunter2');
+  });
+});
+
 describe('running routes', () => {
   it('lists a real listener in the project and stop ends it and closes the port', async () => {
     const { child, port } = await start('node', ['-e', SERVER], path.join(root, 'api'));
@@ -102,7 +202,7 @@ describe('running routes', () => {
     const res = await get(a);
     expect(res.status).toBe(200);
     expect(res.body.supported).toBe(true);
-    expect(res.body.processes).toEqual([{ port, pids: [child.pid], command: `node -e ${SERVER}`.slice(0, 120), address: '127.0.0.1' }]);
+    expect(res.body.processes).toEqual([{ port, pids: [child.pid], command: `node -e ${SERVER}`.slice(0, 120), address: '127.0.0.1', via: 'cwd' }]);
 
     const stopped = await stop(a, { port });
     expect(stopped.status).toBe(200);
