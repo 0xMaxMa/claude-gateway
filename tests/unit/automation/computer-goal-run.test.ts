@@ -234,6 +234,21 @@ describe('a yes to a goal step resumes the goal',()=>{
   const r=await yes(f,confirmation);
   expect(f.actions()).toEqual([{kind:'press',ref:'c9'}]);expect(waited(r)).toBe('ACTION_DISPATCHED');
  });
+ // The vision path reads the reply itself and hands it over: it is never read twice.
+ test('a no read by the caller declines: nothing runs and nothing is evaluated',async()=>{
+  const confirmation=await asked(()=>notes(1));
+  const f=fixture([()=>notes(1)],[{pick:'press:c9',impact:'ROUTINE'}]);
+  const r=await yes(f,{...confirmation,reply:'NO'},{goal:'No',resumeGoal:8});
+  expect(f.actions()).toEqual([]);expect(f.requests).toEqual([]);
+  expect(waited(r)).toBe('CONFIRMATION_DECLINED');expect(r).toMatchObject({status:'needs_input',steps:0,evaluations:0});
+ });
+ test('a yes read by the caller runs the confirmed action without reading the reply again',async()=>{
+  const confirmation=await asked(()=>notes(1));
+  const f=fixture([()=>notes(1),()=>notes(0),()=>notes(0)],[{pick:'press:c9',impact:'HIGH_IMPACT'},{pick:'DONE'}]);
+  const r=await yes(f,{...confirmation,reply:'YES'},{resumeGoal:8});
+  expect(f.actions()).toEqual([{kind:'press',ref:'c9'}]);expect(f.requests.some(q=>q.questions.reply)).toBe(false);
+  expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:1});
+ });
  test('a no never resumes the goal',async()=>{
   const confirmation=await asked(()=>notes(1));
   const f=fixture([()=>notes(1)],[]);answering(f,'NO');
