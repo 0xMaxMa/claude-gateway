@@ -59,6 +59,7 @@ test('a browser session that failed before any tab action is replaced by a new s
   const replacement=f.spawn('spawn-2');
   expect(replacement.taskId).not.toBe(f.task.taskId);
   expect(automationSession(f.store.task(f.task.taskId)!)?.status).toBe('closed');
+  expect(f.store.task(f.task.taskId)).toMatchObject({state:'failed',replacedByTaskId:replacement.taskId});
   expect(f.store.all("SELECT seq FROM conversation_events WHERE type='task.session_replaced'")).toHaveLength(1);
  }finally{f.close();}
 });

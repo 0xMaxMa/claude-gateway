@@ -28,6 +28,9 @@ test('a failed session that never acted is replaced by a new spawn',()=>{
   const previous=f.store.task(old.taskId)!;
   expect(previous.replacedByTaskId).toBe(next.taskId);
   expect(automationSession(previous)?.status).toBe('closed');
+  // Replacing a failed round keeps its failure; device access is still revoked.
+  expect(previous).toMatchObject({state:'failed',failure:{code:'COMPUTER_ACCESS_UNAVAILABLE'},computerRevocation:{requestId:previous.gatewayDispatch!.requestId}});
+  expect(previous.cancellation).toBeUndefined();
  }finally{f.close();}
 });
 

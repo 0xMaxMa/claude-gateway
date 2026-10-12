@@ -73,6 +73,8 @@ export interface TaskSnapshot {
   gatewayTarget?: GatewayTaskTarget;
   browserReport?: import('../jev/browser-contract').BrowserTaskReport;
   gatewayDispatch?: { requestId: string; submittedAt: number };
+  /** End session on a settled computer round: device access still to revoke. The round's outcome stays as reported. */
+  computerRevocation?: { requestId: string; requestedAt: number };
 
   continueTaskId?: string;
   continuationPolicy?: 'after_success' | 'after_terminal';
