@@ -2,13 +2,14 @@ import { NextFunction, Request, Response, Router } from 'express';
 import { ApiKey } from '../types';
 import { createApiAuthMiddleware, canAccessPod } from './auth';
 import { defineRoute } from './route-registry';
-import { createProject, listDir, listProjects, readFileContent } from '../projects/fs';
+import { createProject, listDir, resolveProjectDir, listProjects, readFileContent } from '../projects/fs';
 import { commitAll, fetchRemote, getStatus, getSummaries, GitError, GitErrorCode, initRepo, parseCommitRequest, parseIdentity, pullFastForward, pushBranch, setIdentity } from '../projects/git';
+import { listRunning, RunningErrorCode, StopLimiter, stopRunning, Sys, systemSys } from '../projects/running';
 import { parseProjectName, parseRelPath, ProjectName, ProjectsErrorCode, Result } from '../projects/paths';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
-const ERRORS: Record<ProjectsErrorCode | GitErrorCode, { status: number; message: string }> = {
+const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode, { status: number; message: string }> = {
   invalid_name: { status: 400, message: 'Invalid project name' },
   invalid_path: { status: 400, message: 'Invalid path' },
   not_a_directory: { status: 400, message: 'Not a directory' },
@@ -45,15 +46,17 @@ const ERRORS: Record<ProjectsErrorCode | GitErrorCode, { status: number; message
   busy: { status: 409, message: 'Another git operation is running on this project' },
   index_locked: { status: 409, message: 'The git index is locked' },
   git_failed: { status: 500, message: 'Git failed' },
+  nothing_running: { status: 409, message: 'Nothing is running in this project' },
+  invalid_port: { status: 400, message: 'port must be an integer between 1 and 65535' },
 };
 
-function fail(res: Response, error: ProjectsErrorCode | GitError): void {
+function fail(res: Response, error: ProjectsErrorCode | RunningErrorCode | GitError): void {
   const body = typeof error === 'string' ? { code: error } : error;
   const { status, message } = ERRORS[body.code];
   res.status(status).json({ error: message, ...body });
 }
 
-function respond<T>(res: Response, result: Result<T, ProjectsErrorCode | GitError>, status = 200): void {
+function respond<T>(res: Response, result: Result<T, ProjectsErrorCode | RunningErrorCode | GitError>, status = 200): void {
   if (result.ok) res.status(status).json(result.value);
   else fail(res, result.error);
 }
@@ -79,7 +82,16 @@ function handle(fn: (req: Request, res: Response) => Promise<void>) {
  * Pod-wide project browsing under `root`. Every route needs a key that can see
  * all agents, since projects are not agent-scoped.
  */
-export function createProjectsRouter(apiKeys: ApiKey[], root: string): Router {
+export interface RunningDeps {
+  sys: Sys;
+  limiter: StopLimiter;
+}
+
+export function createProjectsRouter(
+  apiKeys: ApiKey[],
+  root: string,
+  running: RunningDeps = { sys: systemSys(), limiter: new StopLimiter() },
+): Router {
   const router = Router();
   const auth = createApiAuthMiddleware(apiKeys);
 
@@ -150,6 +162,42 @@ export function createProjectsRouter(apiKeys: ApiKey[], root: string): Router {
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);
       respond(res, await getStatus(root, name.value));
+    }),
+  );
+
+  defineRoute(
+    router,
+    { method: 'GET', path: '/v1/projects/:name/running', auth: 'key', summary: 'Processes listening on a port from inside a project', cli: null },
+    auth,
+    requirePod,
+    handle(async (req, res) => {
+      const name = parseProjectName(req.params.name);
+      if (!name.ok) return fail(res, name.error);
+      const dir = await resolveProjectDir(root, name.value);
+      if (!dir.ok) return fail(res, dir.error);
+      res.json(await listRunning(running.sys, dir.value));
+    }),
+  );
+
+  defineRoute(
+    router,
+    { method: 'POST', path: '/v1/projects/:name/running/stop', auth: 'key', summary: "Stop the processes listening from inside a project", cli: null },
+    auth,
+    requirePod,
+    requireWrite,
+    handle(async (req, res) => {
+      const name = parseProjectName(req.params.name);
+      if (!name.ok) return fail(res, name.error);
+      const port = (req.body ?? {}).port;
+      if (port !== undefined && !(Number.isInteger(port) && port >= 1 && port <= 65535)) return fail(res, 'invalid_port');
+      const dir = await resolveProjectDir(root, name.value);
+      if (!dir.ok) return fail(res, dir.error);
+      if (!running.limiter.take(name.value)) {
+        const now = await listRunning(running.sys, dir.value);
+        res.json({ stopped: [], remaining: now.processes.map(({ port: p, pids }) => ({ port: p, pids })) });
+        return;
+      }
+      respond(res, await stopRunning(running.sys, dir.value, port));
     }),
   );
 

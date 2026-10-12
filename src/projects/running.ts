@@ -1,0 +1,421 @@
+import { execFile } from 'child_process';
+import { promises as fsp } from 'fs';
+import * as path from 'path';
+import { err, ok, Result } from './paths';
+
+export type RunningErrorCode = 'nothing_running' | 'invalid_port';
+
+export interface Listener {
+  address: string;
+  port: number;
+  pids: number[];
+}
+
+/** One project listener port, as the wire shape plus the identity needed to signal it safely. */
+export interface RunningPort {
+  port: number;
+  address: string;
+  pids: number[];
+  command: string;
+  members: Member[];
+}
+
+export interface Member {
+  pid: number;
+  startTime: string;
+}
+
+export interface RunningProcess {
+  port: number;
+  pids: number[];
+  command: string;
+  address: string;
+}
+
+export type RunningList = { supported: true; processes: RunningProcess[] } | { supported: false; processes: [] };
+
+export interface PortPids {
+  port: number;
+  pids: number[];
+}
+
+export interface StopResult {
+  stopped: PortPids[];
+  remaining: PortPids[];
+}
+
+const COMMAND_LIMIT = 120;
+const TERM_WAIT_MS = 3000;
+const POLL_MS = 100;
+const KILL_WAIT_MS = 1000;
+const MAX_ANCESTOR_DEPTH = 64;
+
+// ---------------------------------------------------------------- pure parsing
+
+const USERS_ENTRY = /\("((?:[^"\\]|\\.)*)",pid=(\d+),fd=\d+\)/g;
+
+function splitHostPort(local: string): { address: string; port: number } | null {
+  const i = local.lastIndexOf(':');
+  if (i < 0) return null;
+  const port = Number(local.slice(i + 1));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  const address = local.slice(0, i).replace(/^\[|\]$/g, '').replace(/%.*$/, '');
+  return { address, port };
+}
+
+/** Parses `ss -H -ltnp` output. Lines that are not a LISTEN row with a valid port are dropped. */
+export function parseSs(output: string): Listener[] {
+  const out: Listener[] = [];
+  for (const line of output.split('\n')) {
+    const cols = line.trim().split(/\s+/);
+    if (cols[0] !== 'LISTEN' || cols.length < 5) continue;
+    const local = splitHostPort(cols[3]);
+    if (!local) continue;
+    const pids = [...line.matchAll(USERS_ENTRY)].map((m) => Number(m[2]));
+    out.push({ ...local, pids: [...new Set(pids)] });
+  }
+  return out;
+}
+
+export interface NetSocket {
+  address: string;
+  port: number;
+  inode: string;
+}
+
+function hexIp4(hex: string): string {
+  const b = hex.match(/../g) ?? [];
+  return b.reverse().map((x) => parseInt(x, 16)).join('.');
+}
+
+function hexIp6(hex: string): string {
+  const words: string[] = [];
+  for (let w = 0; w < 4; w++) {
+    const bytes = (hex.slice(w * 8, w * 8 + 8).match(/../g) ?? []).reverse();
+    words.push(bytes.slice(0, 2).join(''), bytes.slice(2).join(''));
+  }
+  const groups = words.map((g) => parseInt(g, 16).toString(16));
+  const joined = groups.join(':');
+  if (joined === '0:0:0:0:0:0:0:0') return '::';
+  if (joined === '0:0:0:0:0:0:0:1') return '::1';
+  return joined;
+}
+
+/** Parses /proc/net/tcp or tcp6, keeping only LISTEN (0A) sockets. */
+export function parseProcNetTcp(text: string, v6: boolean): NetSocket[] {
+  const out: NetSocket[] = [];
+  for (const line of text.split('\n').slice(1)) {
+    const f = line.trim().split(/\s+/);
+    if (f.length < 10 || f[3] !== '0A') continue;
+    const [ip, portHex] = f[1].split(':');
+    if (!ip || !portHex || ip.length !== (v6 ? 32 : 8)) continue;
+    const port = parseInt(portHex, 16);
+    if (!Number.isInteger(port) || port < 1) continue;
+    out.push({ address: v6 ? hexIp6(ip) : hexIp4(ip), port, inode: f[9] });
+  }
+  return out;
+}
+
+const SECRET_FLAG = /^--[\w-]*(token|password|secret|key)[\w-]*$/i;
+const REDACTED = '[redacted]';
+
+/** Joins argv for display. Secret flag values are replaced before truncation, so a cut never leaks one. */
+export function redactCommand(args: string[]): string {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const eq = a.indexOf('=');
+    if (a.startsWith('--') && eq > 0 && SECRET_FLAG.test(a.slice(0, eq))) {
+      out.push(`${a.slice(0, eq)}=${REDACTED}`);
+    } else if (SECRET_FLAG.test(a)) {
+      out.push(a);
+      if (i + 1 < args.length) {
+        out.push(REDACTED);
+        i++;
+      }
+    } else {
+      out.push(a);
+    }
+  }
+  return out.join(' ').slice(0, COMMAND_LIMIT);
+}
+
+/** True when `cwd` lies at or below `project`. Compared with a trailing separator, so `api` never matches `api-v2`. */
+export function cwdInProject(realProject: string, cwd: string): boolean {
+  const c = path.resolve(cwd);
+  const p = path.resolve(realProject);
+  return c === p || c.startsWith(p.endsWith(path.sep) ? p : p + path.sep);
+}
+
+// --------------------------------------------------------------------- effects
+
+export interface ProcInfo {
+  ppid: number;
+  startTime: string;
+  uid: number;
+  alive: boolean;
+  comm: string;
+  /** Real path of the working directory, or null when unreadable. */
+  cwd: string | null;
+  /** Basename of the executable, or null when unreadable. */
+  exe: string | null;
+}
+
+export interface Sys {
+  platform: string;
+  selfPid: number;
+  selfUid: number;
+  /** Null means this host cannot be scanned. */
+  listeners(): Promise<Listener[] | null>;
+  allPids(): Promise<number[]>;
+  proc(pid: number): Promise<ProcInfo | null>;
+  cmdline(pid: number): Promise<string[]>;
+  kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void;
+  sleep(ms: number): Promise<void>;
+}
+
+function runSs(): Promise<string | null | 'absent'> {
+  return new Promise((resolve) => {
+    execFile('ss', ['-H', '-ltnp'], { timeout: 5000, maxBuffer: 8 * 1024 * 1024 }, (e, stdout) => {
+      if (!e) return resolve(stdout);
+      resolve((e as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : null);
+    });
+  });
+}
+
+async function listenersFromProc(pids: number[]): Promise<Listener[] | null> {
+  const read = (f: string) => fsp.readFile(f, 'utf8').catch(() => '');
+  const sockets = [...parseProcNetTcp(await read('/proc/net/tcp'), false), ...parseProcNetTcp(await read('/proc/net/tcp6'), true)];
+  const byInode = new Map<string, number[]>();
+  for (const pid of pids) {
+    const fds = await fsp.readdir(`/proc/${pid}/fd`).catch(() => [] as string[]);
+    for (const fd of fds) {
+      const link = await fsp.readlink(`/proc/${pid}/fd/${fd}`).catch(() => '');
+      const m = /^socket:\[(\d+)\]$/.exec(link);
+      if (m) byInode.set(m[1], [...(byInode.get(m[1]) ?? []), pid]);
+    }
+  }
+  return sockets.map((s) => ({ address: s.address, port: s.port, pids: [...new Set(byInode.get(s.inode) ?? [])] }));
+}
+
+function parseStat(stat: string): { comm: string; state: string; ppid: number; startTime: string } | null {
+  const open = stat.indexOf('(');
+  const close = stat.lastIndexOf(')');
+  if (open < 0 || close < open) return null;
+  const rest = stat.slice(close + 2).split(' ');
+  const ppid = Number(rest[1]);
+  if (!Number.isInteger(ppid) || !rest[19]) return null;
+  return { comm: stat.slice(open + 1, close), state: rest[0], ppid, startTime: rest[19] };
+}
+
+export function systemSys(over: Partial<Pick<Sys, 'platform' | 'selfPid'>> = {}): Sys {
+  const sys: Sys = {
+    platform: over.platform ?? process.platform,
+    selfPid: over.selfPid ?? process.pid,
+    selfUid: process.getuid?.() ?? -1,
+    async listeners() {
+      if (sys.platform !== 'linux') return null;
+      const pids = await sys.allPids().catch(() => null);
+      if (!pids) return null;
+      const ss = await runSs();
+      if (ss === 'absent') return listenersFromProc(pids);
+      return ss === null ? null : parseSs(ss);
+    },
+    async allPids() {
+      return (await fsp.readdir('/proc')).filter((n) => /^\d+$/.test(n)).map(Number);
+    },
+    async proc(pid) {
+      const stat = await fsp.readFile(`/proc/${pid}/stat`, 'utf8').then(parseStat, () => null);
+      if (!stat) return null;
+      const st = await fsp.stat(`/proc/${pid}`).catch(() => null);
+      if (!st) return null;
+      const cwd = await fsp.realpath(`/proc/${pid}/cwd`).catch(() => null);
+      const exe = await fsp.readlink(`/proc/${pid}/exe`).then((l) => path.basename(l.replace(/ \(deleted\)$/, '')), () => null);
+      return { ppid: stat.ppid, startTime: stat.startTime, uid: st.uid, alive: stat.state !== 'Z' && stat.state !== 'X', comm: stat.comm, cwd, exe };
+    },
+    async cmdline(pid) {
+      const raw = await fsp.readFile(`/proc/${pid}/cmdline`, 'utf8').catch(() => '');
+      return raw.split('\0').filter((s) => s !== '');
+    },
+    kill(pid, signal) {
+      process.kill(pid, signal);
+    },
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  };
+  return sys;
+}
+
+// ----------------------------------------------------------------------- logic
+
+/** The gateway, everything above it, and init. None of these is ever signalled. */
+async function protectedPids(sys: Sys): Promise<Set<number>> {
+  const set = new Set<number>([1, sys.selfPid]);
+  let pid = sys.selfPid;
+  for (let i = 0; i < MAX_ANCESTOR_DEPTH; i++) {
+    const info = await sys.proc(pid);
+    if (!info || info.ppid <= 0) break;
+    set.add(info.ppid);
+    pid = info.ppid;
+  }
+  return set;
+}
+
+function isAgent(info: ProcInfo): boolean {
+  return info.exe === 'claude' || info.comm === 'claude';
+}
+
+/** Rules 1, 2 and 5 for one listener pid: a member of the project, or null. */
+async function candidate(sys: Sys, realProject: string, protectedSet: Set<number>, pid: number): Promise<Member | null> {
+  if (!Number.isInteger(pid) || pid <= 1 || protectedSet.has(pid)) return null;
+  const info = await sys.proc(pid);
+  if (!info || !info.alive || info.uid !== sys.selfUid || isAgent(info)) return null;
+  if (info.cwd === null || !cwdInProject(realProject, info.cwd)) return null;
+  return { pid, startTime: info.startTime };
+}
+
+/** Listening sockets whose owner runs inside the project. Null when this host cannot be scanned. */
+export async function scanProject(sys: Sys, realProject: string): Promise<RunningPort[] | null> {
+  if (sys.platform !== 'linux') return null;
+  const listeners = await sys.listeners();
+  if (!listeners) return null;
+  const protectedSet = await protectedPids(sys);
+  const verdicts = new Map<number, Member | null>();
+  const byPort = new Map<number, RunningPort>();
+  for (const l of listeners) {
+    for (const pid of l.pids) {
+      if (!verdicts.has(pid)) verdicts.set(pid, await candidate(sys, realProject, protectedSet, pid));
+      const member = verdicts.get(pid);
+      if (!member) continue;
+      let entry = byPort.get(l.port);
+      if (!entry) {
+        entry = { port: l.port, address: l.address, pids: [], command: redactCommand(await sys.cmdline(pid)), members: [] };
+        byPort.set(l.port, entry);
+      }
+      if (!entry.pids.includes(pid)) {
+        entry.pids.push(pid);
+        entry.members.push(member);
+      }
+    }
+  }
+  const ports = [...byPort.values()].sort((a, b) => a.port - b.port);
+  for (const p of ports) p.pids.sort((a, b) => a - b);
+  return ports;
+}
+
+export async function listRunning(sys: Sys, realProject: string): Promise<RunningList> {
+  const ports = await scanProject(sys, realProject);
+  if (!ports) return { supported: false, processes: [] };
+  return {
+    supported: true,
+    processes: ports.map(({ port, pids, command, address }) => ({ port, pids, command, address })),
+  };
+}
+
+interface Target extends Member {
+  kind: 'listener' | 'descendant';
+}
+
+async function descendantsOf(sys: Sys, roots: number[]): Promise<Target[]> {
+  const children = new Map<number, Array<{ pid: number; startTime: string }>>();
+  for (const pid of await sys.allPids().catch(() => [] as number[])) {
+    const info = await sys.proc(pid);
+    if (!info?.alive) continue;
+    children.set(info.ppid, [...(children.get(info.ppid) ?? []), { pid, startTime: info.startTime }]);
+  }
+  const out: Target[] = [];
+  const seen = new Set<number>(roots);
+  const queue = [...roots];
+  while (queue.length) {
+    for (const c of children.get(queue.shift() as number) ?? []) {
+      if (seen.has(c.pid)) continue;
+      seen.add(c.pid);
+      out.push({ ...c, kind: 'descendant' });
+      queue.push(c.pid);
+    }
+  }
+  return out;
+}
+
+/** Rule 4: the pid still is the process we scanned, and still qualifies. Sends nothing itself. */
+async function stillSafe(sys: Sys, realProject: string, protectedSet: Set<number>, t: Target): Promise<boolean> {
+  if (t.pid <= 1 || protectedSet.has(t.pid)) return false;
+  const info = await sys.proc(t.pid);
+  if (!info || !info.alive || info.startTime !== t.startTime || info.uid !== sys.selfUid || isAgent(info)) return false;
+  if (t.kind === 'descendant') return true;
+  if (info.cwd === null || !cwdInProject(realProject, info.cwd)) return false;
+  const listeners = await sys.listeners();
+  return !!listeners?.some((l) => l.pids.includes(t.pid));
+}
+
+async function signalAll(sys: Sys, realProject: string, targets: Target[], signal: 'SIGTERM' | 'SIGKILL'): Promise<void> {
+  const protectedSet = await protectedPids(sys);
+  for (const t of targets) {
+    if (!(await stillSafe(sys, realProject, protectedSet, t))) continue;
+    try {
+      sys.kill(t.pid, signal);
+    } catch {
+      // already gone
+    }
+  }
+}
+
+async function anyAlive(sys: Sys, targets: Target[]): Promise<boolean> {
+  for (const t of targets) {
+    const info = await sys.proc(t.pid);
+    if (info?.alive && info.startTime === t.startTime) return true;
+  }
+  return false;
+}
+
+async function waitUntilGone(sys: Sys, targets: Target[], ms: number): Promise<void> {
+  for (let waited = 0; waited < ms && (await anyAlive(sys, targets)); waited += POLL_MS) await sys.sleep(POLL_MS);
+}
+
+function toPortPids(ports: RunningPort[]): PortPids[] {
+  return ports.map((p) => ({ port: p.port, pids: p.pids }));
+}
+
+/**
+ * SIGTERM the project's listeners and their descendants, wait, SIGKILL survivors, rescan.
+ * Signals go to individual pids only, never to a process group or session.
+ */
+export async function stopRunning(
+  sys: Sys,
+  realProject: string,
+  port?: number,
+): Promise<Result<StopResult, RunningErrorCode>> {
+  const scanned = await scanProject(sys, realProject);
+  const matched = (scanned ?? []).filter((p) => port === undefined || p.port === port);
+  if (matched.length === 0) return err('nothing_running');
+
+  const members = new Map(matched.flatMap((p) => p.members).map((m) => [m.pid, m] as const));
+  const listeners: Target[] = [...members.values()].map((m) => ({ ...m, kind: 'listener' }));
+  const targets = [...listeners, ...(await descendantsOf(sys, listeners.map((l) => l.pid)))];
+
+  await signalAll(sys, realProject, targets, 'SIGTERM');
+  await waitUntilGone(sys, targets, TERM_WAIT_MS);
+  await signalAll(sys, realProject, targets, 'SIGKILL');
+  await waitUntilGone(sys, targets, KILL_WAIT_MS);
+
+  const after = ((await scanProject(sys, realProject)) ?? []).filter((p) => port === undefined || p.port === port);
+  const stillListening = new Set(after.flatMap((p) => p.pids.map((pid) => `${p.port}:${pid}`)));
+  const stopped = matched
+    .map((p) => ({ port: p.port, pids: p.pids.filter((pid) => !stillListening.has(`${p.port}:${pid}`)) }))
+    .filter((p) => p.pids.length > 0);
+  return ok({ stopped, remaining: toPortPids(after) });
+}
+
+/** Rule 6: at most one stop per project per window. */
+export class StopLimiter {
+  private last = new Map<string, number>();
+  constructor(private windowMs = 1000, private now: () => number = Date.now) {}
+
+  /** True when the stop may proceed. */
+  take(project: string): boolean {
+    const t = this.now();
+    const prev = this.last.get(project);
+    if (prev !== undefined && t - prev < this.windowMs) return false;
+    this.last.set(project, t);
+    return true;
+  }
+}

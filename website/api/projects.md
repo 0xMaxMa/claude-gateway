@@ -12,11 +12,11 @@ projects belong to the pod, not to an agent. `POST /api/v1/projects` and every
 `POST .../git/*` route also need `write: true` (or `admin: true`).
 
 **Feature detection.** `GET /api/v1/capabilities` lists
-`"projects": ["list", "create", "read", "git", "chat"]`. Show project browsing
+`"projects": ["list", "create", "read", "git", "chat", "run"]`. Show project browsing
 only when the array includes `"list"`, the git UI only when it includes `"git"`,
 and [project-bound chat](/api/sessions#post-apiv1agentsagentidsessions) only when
 it includes `"chat"`. An older gateway omits the key, or lists projects without
-`"git"` or `"chat"`.
+`"git"`, `"chat"` or `"run"`. Show running status and the Stop button only when it includes `"run"`.
 
 **Root.** Projects live in `gateway.projects.root`, which defaults to
 `~/projects`. Every listing returns the root as `root`, resolved through
@@ -439,3 +439,51 @@ another reason, such as a protected branch or a server hook, gets
 | 502 | `network` | The remote could not be reached. |
 | 504 | `timeout` | Git ran past its limit: 3 seconds for the `GET` routes, 10 seconds for `init`, `identity`, and the status reads around every mutating route, 60 seconds for fetch, pull, push, and commit. |
 | 500 | `git_failed` | Any other git failure. Git's output is not returned. |
+
+## Running processes {#running}
+
+A project counts as running when a process listens on a TCP port and its working
+directory is inside the project folder. Listening sockets come from `ss -H -ltnp`,
+or from `/proc/net/tcp` and `/proc/<pid>/fd` when `ss` is missing. Both routes need
+a key that can see all agents. Stop also needs a write key.
+
+### GET /api/v1/projects/:name/running {#get-running}
+
+Returns `200` with one entry per port, sorted by port:
+
+```json
+{ "supported": true, "processes": [ { "port": 3000, "pids": [123, 456], "command": "node server.js", "address": "127.0.0.1" } ] }
+```
+
+`command` is the first listener's argument list joined by spaces and cut to 120
+characters. The value after any `--token`, `--password`, `--secret` or `--key`
+flag (including flags such as `--api-key` or `--client-secret=...`) is replaced with
+`[redacted]` before the cut. The environment is never returned. On a host that is not
+Linux, or where `/proc` cannot be read, the response is
+`{ "supported": false, "processes": [] }`.
+
+### POST /api/v1/projects/:name/running/stop {#post-running-stop}
+
+Body `{}` stops every listener of the project. `{ "port": 3000 }` stops only that
+port. A `port` that is not an integer from 1 to 65535 gets `400 invalid_port`.
+
+The gateway sends SIGTERM to each listener pid and to its descendants, waits up to
+3 seconds, sends SIGKILL to survivors, then scans again. Returns `200` with
+
+```json
+{ "stopped": [ { "port": 3000, "pids": [123] } ], "remaining": [ { "port": 3000, "pids": [123] } ] }
+```
+
+`remaining` lists whatever still listens. When nothing in the project matches, the
+response is `409 nothing_running`. A second stop for the same project within one
+second is ignored: it returns `200` with `stopped: []` and the current `remaining`.
+
+Safety rules the gateway enforces:
+
+- Only processes that own a LISTEN socket and whose working directory resolves (symlinks followed) inside the project folder are candidates. `projects/api` never matches `projects/api-v2`.
+- The gateway process, all of its ancestors, pid 1, any process whose executable or name is `claude`, and any process owned by another user are never signalled. A listener that is an ancestor of the gateway is skipped with its whole tree.
+- Signals go to single pids, never to a process group or session.
+- Before each signal the gateway checks the pid again: same start time, same owner, and for a listener still inside the project and still listening. A pid that changed is skipped.
+
+Errors: `400 invalid_name`, `400 invalid_port`, `403 forbidden_key`,
+`403 path_escape`, `404 not_found`, `409 nothing_running`.
