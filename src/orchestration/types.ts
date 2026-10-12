@@ -85,6 +85,13 @@ export interface TaskSnapshot {
   /** What task_spawn asked for (an id or alias) when it named a model; `model` is the resolved id. */
   requestedModel?: string;
   effort?: import('../agent/model-registry').Effort;
+  /** pstack subagent linkage: set on a child spawned by a worker with subagent_spawn. */
+  parentTaskId?: string;
+  rootTaskId?: string;
+  /** 1 for a root worker's child, up to SUBAGENT_MAX_DEPTH. */
+  depth?: number;
+  subagentType?: string;
+  readonly?: boolean;
   resourceProfile?: { projectRoot: string; mode: 'isolated-worktree' | 'shared-lock' | 'host' | 'container' };
   taskId: string;
   conversationId: string;

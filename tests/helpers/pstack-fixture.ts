@@ -36,6 +36,13 @@ export function pstackClaudeConfig(installed = true): { configDir: string; insta
     tiers: { default: 'opus', strongest: 'fable', panel: ['opus', 'fable', 'sonnet', 'haiku'] },
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'session', roles: PSTACK_ROLES.map(r => ({ ...r, skill: 'x' })),
   }));
+  // Agent definitions as plugin.json declares them (two of pstack's twelve).
+  fs.mkdirSync(path.join(installPath, '.claude-plugin'), { recursive: true });
+  fs.mkdirSync(path.join(installPath, 'effort-agents'), { recursive: true });
+  fs.mkdirSync(path.join(installPath, 'agents'), { recursive: true });
+  fs.writeFileSync(path.join(installPath, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'pstack', agents: ['./agents/comment-sicko.md', './effort-agents/effort-xhigh.md'] }));
+  fs.writeFileSync(path.join(installPath, 'effort-agents', 'effort-xhigh.md'), '---\nname: effort-xhigh\ndescription: pstack subagent at xhigh effort.\neffort: xhigh\n---\n\n# pstack subagent (xhigh effort)\n\nDo the task in your prompt.\n');
+  fs.writeFileSync(path.join(installPath, 'agents', 'comment-sicko.md'), '---\nname: comment-sicko\ndescription: A comment-hater.\n---\n\n# Comment Sicko\n\nDelete comments.\n');
   const entry = { scope: 'user', installPath, version: '0.9.82', installedAt: '2026-10-12T00:00:00.000Z', lastUpdated: '2026-10-12T00:00:00.000Z', gitCommitSha: '1bfdab4219d41c4d0bb28d1e7832de6128373611' };
   fs.writeFileSync(path.join(configDir, 'plugins', 'installed_plugins.json'), JSON.stringify({
     version: 2, plugins: {

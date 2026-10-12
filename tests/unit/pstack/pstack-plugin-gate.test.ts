@@ -39,3 +39,9 @@ test('non-host profiles ignore the overrides and still disable every plugin', ()
   expect(args).toContain('--strict-mcp-config');
   expect(settingsOf(args).enabledPlugins['pstack@pstack-claude']).toBeUndefined();
 });
+
+test('disallowed native tools are removed from a host worker (#583)', () => {
+  const args = runtimeProfileArgs({ ...host, disallowedTools: ['Agent', 'Task'] }, []);
+  expect(args[args.indexOf('--disallowedTools') + 1]).toBe('Agent,Task');
+  expect(runtimeProfileArgs(host, [])).not.toContain('--disallowedTools');
+});

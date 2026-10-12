@@ -7,6 +7,7 @@ import type { McpToolDefinition, McpToolResult } from '../../types';
 const schema = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required, additionalProperties: false });
 const text = { type: 'string' };
 export { AGENT_TASK_TOOLS } from '../../../dist/orchestration/agent-tool-schemas.js';
+export { SUBAGENT_TOOLS } from '../../../dist/orchestration/subagent-tool-schemas.js';
 export const WORKER_REPORT_TOOLS: McpToolDefinition[] = [
   JEV_TOOL,
   { name: 'task_memory_append', description: 'Append an explicitly requested memory note for a channel task. API tasks cannot write memory. Files are restricted to MEMORY.md, USER.md, or memory/<name>.md. Retains existing content and deduplicates retries.', inputSchema: schema({ note: text, path: text }, ['note']) },
@@ -15,7 +16,8 @@ export const WORKER_REPORT_TOOLS: McpToolDefinition[] = [
   { name: 'task_request_input', description: 'Ask the user for information required by your task, then end this turn immediately.', inputSchema: schema({ question: text }, ['question']) },
 ];
 
-const LONG_RUNNING_TOOLS = new Set(['narrate']);
+// subagent_wait (and a foreground subagent_spawn) answers when the subagent finishes, as native `Agent` does.
+const LONG_RUNNING_TOOLS = new Set(['narrate', 'subagent_wait', 'subagent_spawn']);
 export const LONG_RUNNING_MAX_MS = 2 * 60 * 60 * 1000;
 export async function callTaskBridge(tool: string, args: Record<string, unknown>, requestId: string, signal: AbortSignal): Promise<McpToolResult> {
   // Rotated by the gateway at each decision/attempt boundary. A loaded token is

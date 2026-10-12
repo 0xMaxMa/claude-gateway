@@ -459,3 +459,50 @@ describe('pstack plugin gate', () => {
     expect(claudeProfile().context).not.toContain('pstack-models.md');
   });
 });
+
+// #583: a pstack agent's Claude workers dispatch subagents only through the gateway.
+describe('pstack subagent workers', () => {
+  const { pstackClaudeConfig } = require('../../helpers/pstack-fixture');
+  let fixture: { configDir: string; cleanup: () => void }, previous: string | undefined;
+  beforeEach(() => { fixture = pstackClaudeConfig(); previous = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = fixture.configDir; });
+  afterEach(() => { if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous; fixture.cleanup(); });
+  const claudeProfile = () => jest.mocked(SessionProcess).mock.calls[0][6] as any;
+  const mcpEnv = (profile: any) => JSON.parse(readFileSync(profile.mcpConfigPath, 'utf8')).mcpServers.gateway.env;
+
+  test('a set-up agent\'s Claude worker loses native Agent/Task and gets the subagent tools and mapping note', async () => {
+    agent.pstack = {};
+    mockBeforeResult = worker => { expect(mcpEnv(worker.runtimeProfile).GATEWAY_SUBAGENTS).toBe('true'); };
+    await run('claude-sonnet-4-6');
+    expect(claudeProfile().disallowedTools).toEqual(['Agent', 'Task']);
+    expect(claudeProfile().context).toContain('call subagent_spawn instead');
+  });
+
+  test('an agent that is not set up keeps native Agent and gets no subagent tools', async () => {
+    mockBeforeResult = worker => { expect(mcpEnv(worker.runtimeProfile).GATEWAY_SUBAGENTS).toBe(''); };
+    await run('claude-sonnet-4-6');
+    expect(claudeProfile().disallowedTools).toBeUndefined();
+  });
+
+  test('a worker at the depth limit gets no subagent tools and is told to work inline', async () => {
+    agent.pstack = {};
+    mockBeforeResult = worker => { expect(mcpEnv(worker.runtimeProfile).GATEWAY_SUBAGENTS).toBe(''); };
+    const task = spawn('claude-sonnet-4-6');
+    store.transaction(() => { const t = store.task(task.taskId)!; t.depth = 3; t.parentTaskId = 'p'; store.saveTask(t, t.stateVersion); });
+    const attempt = tasks.claim(task.taskId)!;
+    const handle = await driver.start(store.task(task.taskId)!, attempt); await handle.accepted; await handle.result;
+    expect(claudeProfile().context).toContain('Subagent dispatch is unavailable at this depth');
+    expect(claudeProfile().disallowedTools).toEqual(['Agent', 'Task']);
+  });
+
+  test('a read-only Claude subagent gets read tools only; a Codex one keeps its normal tools (readonly is its instruction)', async () => {
+    agent.pstack = {};
+    const readonly = (model: string) => { const t = spawn(model); store.transaction(() => { const s = store.task(t.taskId)!; s.readonly = true; store.saveTask(s, s.stateVersion); }); return store.task(t.taskId)!; };
+    const claudeTask = readonly('claude-sonnet-4-6'), a1 = tasks.claim(claudeTask.taskId)!;
+    let handle = await driver.start(claudeTask, a1); await handle.accepted; await handle.result;
+    expect(claudeProfile().workerTools).toEqual(['Read', 'Glob', 'Grep']);
+    const codexTask = readonly('gpt-6-astra'), a2 = tasks.claim(codexTask.taskId)!;
+    handle = await driver.start(codexTask, a2); await handle.accepted; await handle.result;
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].profile.workerTools).toBeUndefined();
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].profile.disallowedTools).toBeUndefined();
+  });
+});
