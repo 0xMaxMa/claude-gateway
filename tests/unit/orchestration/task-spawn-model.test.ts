@@ -97,3 +97,25 @@ test('task_status index rows show model and effort', async () => {
   const rows = new TaskService(f.store).context(f.context.conversationId, 'u', f.context.decisionId);
   expect(rows[0]).toMatchObject({ model: 'claude-sonnet-5-5', effort: 'high' });
 });
+
+// Review of #581: say why instead of an unexplained INVALID_GATEWAY_TARGET.
+test('gateway-managed tasks get a correctable INVALID_INPUT for model or effort', async () => {
+  const reply = await call(f, { target_profile: 'gateway-managed', gateway_target: { adapter: 'safemode', session_id: 's' }, effort: 'high' });
+  expect(reply.error).toBe('INVALID_INPUT');
+  expect(reply.details).toEqual(expect.arrayContaining([expect.objectContaining({ field: 'effort', reason: 'not_for_gateway_managed' })]));
+  expect(reply.retry_of).toBeDefined();
+});
+
+// Review of #581: continue_task_id reuses the worker session "when compatible"; a follow-up must not drop to the conversation model.
+test('a follow-up inherits the model and effort its predecessor was given', async () => {
+  const first = await call(f, { model: 'gpt6astra', effort: 'xhigh' });
+  const next = await call(f, { continue_task_id: first.taskId });
+  expect(stored(next.taskId)).toMatchObject({ model: 'gpt-6-astra[1m]', requestedModel: 'gpt6astra', effort: 'xhigh' });
+  const overridden = await call(f, { continue_task_id: first.taskId, model: 'sonnet' });
+  expect(stored(overridden.taskId)).toMatchObject({ model: 'claude-sonnet-5-5' });
+  expect(stored(overridden.taskId).effort).toBeUndefined();
+  const plain = await call(f, {});
+  const after = await call(f, { continue_task_id: plain.taskId });
+  expect(stored(after.taskId)).toMatchObject({ model: 'claude-opus-5-5' });
+  expect(stored(after.taskId).requestedModel).toBeUndefined();
+});

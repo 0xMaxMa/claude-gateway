@@ -54,6 +54,7 @@ function taskSpawnInputIssues(args: Record<string, unknown>): InputIssue[] {
     issues.push({field:'target_profile',reason:'skill_fields_require_skill_worker',correction:'Set target_profile to skill-worker when supplying skill_name and skill_args.'});
   }
   if (args.model !== undefined && (typeof args.model !== 'string' || !args.model.trim() || args.model.length > 200 || /[\r\n\0]/.test(args.model))) issues.push({field:'model',reason:'invalid',correction:'Provide a model id or alias from /models, or omit model to use the conversation model.'});
+  if (args.target_profile === 'gateway-managed' && (args.model !== undefined || args.effort !== undefined)) issues.push({field:args.model !== undefined ? 'model' : 'effort',reason:'not_for_gateway_managed',correction:'Omit model and effort for gateway-managed tasks; they apply to worker tasks only.'});
   if (args.effort !== undefined && !isEffort(args.effort)) issues.push({field:'effort',reason:'unsupported',correction:`Choose one of ${EFFORT_LEVELS.join(', ')}, or omit effort.`});
   return issues;
 }
