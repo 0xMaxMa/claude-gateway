@@ -718,13 +718,14 @@ failures return their own `COMPUTER_*` code instead of `INVALID_REQUEST`.
 | Field | Default | Meaning |
 |---|---|---|
 | `mode` | `ax` | `ax`: Accessibility only. `vision`: the model sees the window screenshot and acts with pixel coordinates. `hybrid`: `vision` plus the Accessibility element boxes (in screenshot pixels) as hints. |
-| `visionModel` | `claude-sonnet-5` | Model for vision decisions. It must support the computer toolset (`computer_toolset_20260801`): Opus 5.5, Opus 5, Sonnet 5, Fable 5 / 5.1, Opus 4.8. Any other model (Haiku 4.5 included) keeps the agent on `ax` and logs `computer_vision_model_unsupported` once. |
+| `visionModel` | `claude-sonnet-5` | Model for vision decisions. It must support the computer toolset (`computer_toolset_20260801`): Opus 5.5, Opus 5, Sonnet 5, Fable 5 / 5.1, Opus 4.8, Mythos 5.1. Any other model (Haiku 4.5 included) keeps the agent on `ax` and logs `computer_vision_model_unsupported` once. |
 
 Vision needs a Computer Use decision backend (Jev or the model backend above)
 and applies to goal runs: the first request of a computer session, an agent
-handoff and agent-controlled tasks. Step lists, mid-session user commands and
-yes/no replies stay on Accessibility. An agent-controlled task runs the goal to
-completion instead of yielding after each action. Each step sends one Messages request with the
+handoff and agent-controlled tasks. Step lists and mid-session user commands
+stay on Accessibility. Control is handed back as on Accessibility: an
+agent-controlled task and an agent handoff return after each action, and only
+the session's first request runs on toward its goal. Each step sends one Messages request with the
 goal, a short escaped `<screen_state>` and the screenshot of the current
 observation generation, through the agent's own endpoint and credential. The
 computer toolset is GA, so no `anthropic-beta` header is sent, and the request
@@ -732,14 +733,26 @@ sets neither `temperature` nor a forced `tool_choice`. The model may also call
 `finish` with `done` or `blocked`; it is told never to buy, send, post, delete,
 sign in or accept terms, and stops with `VISION_HIGH_IMPACT_ACTION` instead.
 
+That instruction is not the safety boundary. Before a goal run or an agent
+handoff dispatches any action, the decision backend answers the same impact
+question as on Accessibility, about the concrete action (for example
+`click on "Buy now" (AXButton)`, with the window as evidence). An action that is
+not confidently routine is not run: the user is asked to confirm it. A yes
+resumes the goal in vision mode and covers only that action on that control (or
+position); any other reply runs as the user's own command. An agent-controlled
+task's own command is its authorization, as on Accessibility.
+
 Model actions map to the helper's raw input kinds (`pointer`, `scroll`,
 `key_chord`, `type_focused`) and are bound to the generation of the screenshot
 the model saw. A coordinate outside that screenshot is refused before dispatch.
 Receipts are read and never replayed: an unknown outcome stops with
 `needs_reconciliation`. `STALE_OBSERVATION`, `TARGET_OCCLUDED` and the helper's
 other no-change refusals take a fresh screenshot and let the model decide again;
-three refusals in a row stop the run. A goal is limited to 8 actions and five
-minutes. The log records one `computer_vision_decision` line per step with codes,
+three refusals in a row stop the run. A goal is limited to 8 actions, five
+minutes and 29 model turns (3 × actions + 5, the Accessibility cycle budget):
+turns without an action (`screenshot`, `wait`, a refused or unknown call) count,
+and the run stops with `LOOP_CYCLE_BUDGET`. Each request carries only the three
+newest screenshots; older ones are replaced by a short note. The log records one `computer_vision_decision` line per step with codes,
 sizes, image count and token usage, never screenshots or credentials.
 
 Raw input is used only when the helper advertises it in the observation
