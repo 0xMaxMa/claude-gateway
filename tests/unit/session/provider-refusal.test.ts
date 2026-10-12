@@ -100,6 +100,20 @@ describe('ProviderRefusals (#586)', () => {
     expect(ledger.list()).toEqual([{ messageId: 'msg_refused', toolCalls: [{ id: 't1', name: 'Bash', result: true }] }]);
   });
 
+  it('credits a tool result that arrived before its message\'s refusal was known', () => {
+    const ledger = observe([start('msg_refused'),
+      { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 't1', name: 'Bash', input: {} } } },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ran' }] } },
+      delta('refusal', null)]);
+    expect(ledger.list()).toEqual([{ messageId: 'msg_refused', toolCalls: [{ id: 't1', name: 'Bash', result: true }] }]);
+  });
+
+  it('never attributes an unlinked synthetic refusal to a message that was not refused', () => {
+    const ledger = observe([start('msg_ok'), { type: 'assistant', message: { id: 'msg_ok', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] } }, delta('end_turn', null),
+      { type: 'assistant', isApiErrorMessage: true, message: { id: 'synthetic', stop_reason: 'refusal', stop_details: null, content: [] } }]);
+    expect(ledger.list()).toEqual([{ messageId: 'synthetic' }]);
+  });
+
   it('reset() drops every refusal and the message correlation', () => {
     const ledger = observe([start('m'), delta('refusal', refusal())]);
     ledger.reset();

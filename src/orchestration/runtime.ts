@@ -1652,7 +1652,7 @@ export class AgentOrchestrationRuntime {
       // arrive after any commentary), so the tail correction is no longer speech/review-only.
       if (!silent && display.startsWith(streamedDisplay) && display.length > streamedDisplay.length) options.onText?.(display.slice(streamedDisplay.length));
       if (!silent) this.publishText(sessionId, decision.responseId!, display, true);
-      if (response.providerRefusals?.length) this.reportProviderRefusals(receipt.conversationId, sessionId, decision.responseId!, response.providerRefusals, !silent);
+      if (response.providerRefusals?.length) this.reportProviderRefusals(receipt.conversationId, sessionId, decision.responseId!, response.providerRefusals, !silent && !active.stopping);
       this.questionControls.flushPrompts();
       await this.flushHistory();
       const listener = this.voiceListeners.get(sessionId);
@@ -1727,7 +1727,7 @@ export class AgentOrchestrationRuntime {
         const failed = this.store.get('SELECT generated_text FROM assistant_responses WHERE id=?', active.decision.responseId!);
         if (failed?.generated_text) this.publishText(sessionId, active.decision.responseId!, String(failed.generated_text), true);
         const refusals = (error as { providerRefusals?: ProviderRefusal[] } | null)?.providerRefusals;
-        if (row && refusals?.length) this.reportProviderRefusals(String(row.conversation_id), sessionId, active.decision.responseId!, refusals, row.state === 'running' && !active.notification);
+        if (row && refusals?.length) this.reportProviderRefusals(String(row.conversation_id), sessionId, active.decision.responseId!, refusals, row.state === 'running' && active.stopReason !== 'barge-in' && !active.stopping && !active.notification);
       }
       throw error;
     } finally {

@@ -82,17 +82,24 @@ export function presentedResponseError(error: unknown): PresentedResponseError {
 }
 
 /** Attributed provider refusal metadata (#586). Only the provider's own typed fields are shown;
- * the gateway never supplies a cause the provider did not state. */
+ * the gateway never supplies a cause the provider did not state. Refusals with the same
+ * category and explanation are grouped with their count; none is dropped. */
 export function providerRefusalNotice(refusals: readonly ProviderRefusal[]): string {
-  const entries = [...new Set(refusals.map(refusal => {
-    const calls = refusal.toolCalls ?? [], withoutResult = calls.filter(call => !call.result).length;
-    return [
-      refusal.category ? `Category: ${refusal.category}` : undefined,
-      refusal.explanation ? `Provider explanation: "${refusal.explanation}"` : 'The provider did not supply a specific explanation.',
-      withoutResult ? `Tool calls in the refused message with no recorded execution result: ${withoutResult}.` : undefined,
-      calls.length > withoutResult ? `Tool calls in the refused message that returned a result: ${calls.length - withoutResult}.` : undefined,
-    ].filter(Boolean).join('\n');
-  }))];
+  const groups = new Map<string, { refusal: ProviderRefusal; count: number; withoutResult: number; withResult: number }>();
+  for (const refusal of refusals) {
+    const key = JSON.stringify([refusal.category ?? null, refusal.explanation ?? null]);
+    const group = groups.get(key) ?? { refusal, count: 0, withoutResult: 0, withResult: 0 };
+    const calls = refusal.toolCalls ?? [];
+    group.count++; group.withResult += calls.filter(call => call.result).length; group.withoutResult += calls.filter(call => !call.result).length;
+    groups.set(key, group);
+  }
+  const entries = [...groups.values()].map(({ refusal, count, withoutResult, withResult }) => [
+    count > 1 ? `Refused messages: ${count}` : undefined,
+    refusal.category ? `Category: ${refusal.category}` : undefined,
+    refusal.explanation ? `Provider explanation: "${refusal.explanation}"` : 'The provider did not supply a specific explanation.',
+    withoutResult ? `Tool calls in the refused message with no recorded execution result: ${withoutResult}.` : undefined,
+    withResult ? `Tool calls in the refused message that returned a result: ${withResult}.` : undefined,
+  ].filter(Boolean).join('\n'));
   return ['Gateway diagnostic: the model provider refused a request during this response.', ...entries,
     'A reply produced after a refusal does not by itself confirm that the refused step was carried out.'].join('\n');
 }

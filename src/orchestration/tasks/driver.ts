@@ -37,6 +37,7 @@ import { resolveSharedConfig, sharedVaultDir } from '../../agent/knowledge';
 import { MediaStore } from '../../history/media-store';
 import { providerFailure, ProviderPermit } from '../provider-admission';
 import type { ResolvedCodexProviderIdentity } from '../provider-scope';
+import type { ProviderRefusal } from '../../session/provider-refusal';
 
 function boundedDiffText(text: string): string {
   let result = text.slice(0, 8192);
@@ -243,8 +244,11 @@ export class ClaudeWorkerDriver implements WorkerDriver {
             }).catch(() => { /* Diagnostics must not terminate work. */ }).finally(() => { observing = false; });
           }});
       let stopping = false;
+      // Kept outside the turn result so a failure raised after it (empty or oversized
+      // report, artifact capture) still carries the turn's refusals.
+      let refused: { providerRefusals?: ProviderRefusal[] } = {};
       const result: WorkerHandle['result'] = turn.result.then(async answer => {
-        const refused = answer.providerRefusals ? { providerRefusals: answer.providerRefusals } : {};
+        if (answer.providerRefusals) refused = { providerRefusals: answer.providerRefusals };
         if (answer.interrupted || stopping) {
           await process.stop();
           return { type: process.managedGroupStopped ? 'stopped' as const : 'unknown' as const, ...refused };
@@ -259,7 +263,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         await writeFile(join(directory, 'diff.patch'), artifact.diff, { mode: 0o600 });
         await writeFile(join(directory, 'result.json'), JSON.stringify({ ...artifact, summary: answer.text }, null, 2), { mode: 0o600 });
         await process.stop();
-        if (!process.managedGroupStopped) return { type: 'unknown' as const };
+        if (!process.managedGroupStopped) return { type: 'unknown' as const, ...refused };
         const diff = boundedDiffText(artifact.diff);
         const fileIds = this.tasks.store.all('SELECT id FROM task_files WHERE attempt_id=? ORDER BY created_at,id', attempt.attemptId).map(row => String(row.id));
         return { type: 'completed' as const, result: { summary: answer.text, artifactIds: [artifact.resourceId, ...fileIds],
@@ -270,7 +274,8 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         await process.stop();
         const failure = taskFailure(error);
         failure.provider = providerFailure(error);
-        if (error?.providerRefusals?.length) failure.providerRefusals = error.providerRefusals;
+        const providerRefusals = error?.providerRefusals ?? refused.providerRefusals;
+        if (providerRefusals?.length) failure.providerRefusals = providerRefusals;
         if (error?.timeout) failure.message = `Worker timeout: phase=${error.timeout.phase}, elapsed=${Math.round(error.timeout.elapsedMs / 1000)}s, idle=${Math.round(error.timeout.idleMs / 1000)}s. Inspect existing changes before continuing.`;
         return {type: process.managedGroupStopped ? 'failed' as const : 'unknown' as const, failure};
       }).finally(async () => { observationClosed = true; ticket.revoke(); await process.stop(); });

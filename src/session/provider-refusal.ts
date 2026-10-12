@@ -18,21 +18,27 @@ export class ProviderRefusals {
   private current?: string;
   private readonly entries: (Omit<ProviderRefusal, 'toolCalls'> & { toolCalls: Map<string, RefusedToolCall> })[] = [];
   /** Recent tool_use blocks by id; only those of a refused message are kept beyond this window. */
-  private readonly toolUses = new Map<string, { messageId?: string; name?: string }>();
+  private readonly toolUses = new Map<string, { messageId?: string; name?: string; result?: boolean }>();
   observe(event: Record<string, any>): void {
     const stream = event.type === 'stream_event' ? event.event : undefined;
     if (stream?.type === 'message_start') { this.current = typeof stream.message?.id === 'string' ? stream.message.id : undefined; return; }
     if (stream?.type === 'content_block_start' && stream.content_block?.type === 'tool_use') { this.toolUse(this.current, stream.content_block); return; }
     if (stream?.type === 'message_delta' && stream.delta?.stop_reason === 'refusal') { this.record(this.current, stream.delta.stop_details); return; }
     const blocks: any[] = Array.isArray(event.message?.content) ? event.message.content : [];
-    if (event.type === 'user') for (const block of blocks) if (block?.type === 'tool_result') for (const entry of this.entries) { const call = entry.toolCalls.get(block.tool_use_id); if (call) call.result = true; }
+    // A tool can return before its message's refusal is known (streamed tool execution).
+    if (event.type === 'user') for (const block of blocks) if (block?.type === 'tool_result') {
+      const use = this.toolUses.get(block.tool_use_id);
+      if (use) use.result = true;
+      for (const entry of this.entries) { const call = entry.toolCalls.get(block.tool_use_id); if (call) call.result = true; }
+    }
     if (event.type !== 'assistant') return;
     if (event.isApiErrorMessage !== true) for (const block of blocks) if (block?.type === 'tool_use') this.toolUse(typeof event.message.id === 'string' ? event.message.id : undefined, block);
     if (event.message?.stop_reason !== 'refusal') return;
-    // A synthetic API-error record replaces the message being streamed; it names
-    // that message in refusedMessageId when the CLI provides it.
-    const id = typeof event.refusedMessageId === 'string' ? event.refusedMessageId
-      : event.isApiErrorMessage === true && this.current ? this.current : event.message.id;
+    // A synthetic API-error record names the refused message in refusedMessageId.
+    // Without it, it is folded into the streamed message only when that message's
+    // own refusal was already seen; it is never attributed to an unrefused message.
+    const streamed = event.isApiErrorMessage === true && this.current && this.entries.some(entry => entry.messageId === this.current) ? this.current : undefined;
+    const id = typeof event.refusedMessageId === 'string' ? event.refusedMessageId : streamed ?? event.message.id;
     this.record(typeof id === 'string' ? id : undefined, event.message.stop_details);
   }
   private toolUse(messageId: string | undefined, block: Record<string, unknown>): void {
@@ -45,7 +51,7 @@ export class ProviderRefusals {
     if (refused) this.pin(refused, block.id, use.name);
   }
   private pin(entry: ProviderRefusals['entries'][number], id: string, name?: string): void {
-    if (!entry.toolCalls.has(id) && entry.toolCalls.size < MAX_TOOL_CALLS) entry.toolCalls.set(id, { id, ...(name ? { name } : {}), result: false });
+    if (!entry.toolCalls.has(id) && entry.toolCalls.size < MAX_TOOL_CALLS) entry.toolCalls.set(id, { id, ...(name ? { name } : {}), result: this.toolUses.get(id)?.result === true });
   }
   private record(messageId: string | undefined, details: unknown): void {
     const typed = details && typeof details === 'object' && (details as { type?: unknown }).type === 'refusal' ? details as Record<string, unknown> : {};

@@ -979,6 +979,7 @@ export class TaskService {
       const stalled = task.state === 'cancel_requested' ? this.stalledFailure(task, outcome.type !== 'unknown') : undefined;
       if (outcome.type !== 'completed' && outcome.type !== 'paused') {
         attempt.failure = stalled ?? outcome.failure ?? taskFailure(undefined, outcome.type === 'stopped' ? 'WORKER_STOPPED' : 'WORKER_FAILED');
+        if (refusals?.length && !attempt.failure.providerRefusals) attempt.failure = { ...attempt.failure, providerRefusals: refusals };
         task.failure = attempt.failure;
       } else { delete task.failure; }
       if (outcome.type === 'unknown') { if(task.executionControl?.phase==='pending')task.executionControl.phase='blocked'; attempt.state = 'unknown'; task.state = 'needs_reconciliation'; }

@@ -85,6 +85,13 @@ describe('providerRefusalNotice (#586)', () => {
     expect(notice).toContain('Tool calls in the refused message that returned a result: 1.');
   });
 
+  it('groups refusals with the same provider text without dropping any', () => {
+    const notice = providerRefusalNotice([{ messageId: 'a', toolCalls: [{ id: 't1', result: false }] }, { messageId: 'b', toolCalls: [{ id: 't2', result: false }] }, refusal]);
+    expect(notice).toContain('Refused messages: 2');
+    expect(notice).toContain('Tool calls in the refused message with no recorded execution result: 2.');
+    expect(notice).toContain(`Provider explanation: "${EXPLANATION}"`);
+  });
+
   it('says no explanation was supplied instead of reconstructing one', () => {
     const notice = providerRefusalNotice([{ messageId: 'm' }]);
     expect(notice).toContain('The provider did not supply a specific explanation.');
@@ -149,6 +156,18 @@ describe('orchestration runtime refusal reporting (#586)', () => {
     expect(notices()).toHaveLength(1);
   });
 
+  it('records but does not announce a refusal in a response the user stopped', async () => {
+    const session = randomUUID();
+    script = () => [start('msg_refused'), stop('refusal', details)];
+    const pending = send(session, 'Do the thing');
+    for (let i = 0; i < 100 && !runtime!.isBusy(session); i++) await new Promise(resolve => setTimeout(resolve, 5));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(runtime!.stopResponse(session)).toBe(true);
+    await pending.catch(() => {});
+    expect(events()).toEqual([expect.objectContaining({ refusals: [refusal] })]);
+    expect(notices()).toEqual([]);
+  });
+
   it('records nothing for an ordinary answer', async () => {
     script = () => [start('m'), text('All good.'), stop('end_turn'), { type: 'result', is_error: false, result: 'All good.' }];
     await send(randomUUID(), 'Hello');
@@ -161,7 +180,8 @@ describe('worker refusal evidence (#586)', () => {
   it.each([
     ['completed', () => refusedThenAnswered('Worker report: partial.'), 'completed', 'result'],
     ['failed', () => refusedAsApiError, 'failed', 'failure'],
-  ] as const)('a %s worker turn keeps its refusal on the task and records a task event', async (_label, script, state, field) => {
+    ['artifact-failed', () => refusedThenAnswered('Worker report.'), 'failed', 'failure'],
+  ] as const)('a %s worker turn keeps its refusal on the task and records a task event', async (label, script, state, field) => {
     const root = mkdtempSync(join(tmpdir(), 'worker-refusal-')), workspace = join(root, 'workspace');
     mkdirSync(workspace); writeFileSync(join(workspace, 'CLAUDE.md'), 'Fixture');
     const store = new OrchestrationStore(':memory:', 'a'), tasks = new TaskService(store), bridge = new TaskBridge(tasks);
@@ -170,6 +190,8 @@ describe('worker refusal evidence (#586)', () => {
     jest.spyOn(SessionProcess.prototype, 'start').mockImplementation(async () => {});
     jest.spyOn(SessionProcess.prototype, 'sendMessage').mockImplementation(function (this: SessionProcess) { for (const event of script()) this.emit('output', JSON.stringify(event)); });
     jest.spyOn(SessionProcess.prototype, 'stop').mockImplementation(async function (this: SessionProcess) { this.managedGroupStopped = true; });
+    // A failure raised by the driver after the turn resolved must keep the turn's refusals.
+    if (label === 'artifact-failed') jest.spyOn(TaskWorkspaces.prototype, 'artifact').mockRejectedValue(new Error('artifact capture failed'));
     try {
       await bridge.start();
       const input = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's', source: 'api', accountId: 'u', principalId: 'u', chatId: 's', threadKey: '' }, text: 'Work' });
@@ -195,7 +217,7 @@ test('a stopped worker attempt keeps refusal evidence without replacing its stop
     const task = tasks.spawn({ ...input, ...decision, principalId: 'u', actionId: 'spawn', execute: true, writeMemory: false }, { title: 'Work', instructions: 'Work', targetProfile: 'default-worker' });
     const attempt = tasks.claim(task.taskId)!;
     tasks.started(attempt.attemptId, attempt.generation, { pid: 1, startedAt: Date.now(), instanceId: 'test' });
-    expect(tasks.finish(attempt.attemptId, attempt.generation, { type: 'stopped', providerRefusals: [refusal] })).toMatchObject({ failure: { code: 'WORKER_STOPPED' } });
+    expect(tasks.finish(attempt.attemptId, attempt.generation, { type: 'stopped', providerRefusals: [refusal] })).toMatchObject({ failure: { code: 'WORKER_STOPPED', providerRefusals: [refusal] } });
     expect(store.all("SELECT payload_json FROM conversation_events WHERE type='task.provider_refusal'").map(row => JSON.parse(String(row.payload_json)).payload))
       .toEqual([expect.objectContaining({ refusals: [refusal] })]);
   } finally { store.close(); }
