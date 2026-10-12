@@ -87,3 +87,13 @@ test('a failed round of the user\'s own command stays silent (no behavior change
   expect(f.delivered()).toBe(0);
  }finally{f.close();}
 });
+
+// An action whose result is unknown ends the goal run in needs_reconciliation: the
+// agent hears it like a completion or failure (it was created yet never delivered).
+test('an agent goal run that ends with an unknown outcome reaches the agent',()=>{
+ const f=fixture();try{
+  const unknown=f.finish({type:'unknown',failure:{code:'COMPUTER_OUTCOME_UNKNOWN',message:'The last action may have run.',observedAt:Date.now()},computerReport:{...report,steps:1,status:'needs_reconciliation',reason:'OUTCOME_UNKNOWN'}});
+  expect(unknown.state).toBe('needs_reconciliation');expect(unknown.automationController).toBe('user');
+  expect(f.notified()).toBe(1);expect(f.delivered()).toBe(1);
+ }finally{f.close();}
+});
