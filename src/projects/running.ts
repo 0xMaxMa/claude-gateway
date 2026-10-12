@@ -291,61 +291,132 @@ function isAgent(info: ProcInfo): boolean {
   return info.exe === 'claude' || info.comm === 'claude';
 }
 
-/** Whether a live, same-uid, non-agent process belongs to the project by cwd, else by an absolute argv path. */
-async function projectVia(sys: Sys, realProject: string, pid: number, info: ProcInfo): Promise<Via | null> {
-  if (info.cwd !== null && cwdInProject(realProject, info.cwd)) return 'cwd';
-  for (const candidatePath of argvPaths(await sys.cmdline(pid))) {
-    const real = await sys.realpath(candidatePath);
-    if (real !== null && cwdInProject(realProject, real)) return 'argv';
-  }
-  return null;
+/** A live, same-uid, non-agent, unprotected process, with the paths that can tie it to a project. */
+interface Owner {
+  pid: number;
+  startTime: string;
+  argv: string[];
+  cwd: string | null;
+  /** Real paths of the absolute paths in argv; unresolvable ones are dropped. */
+  argvReals: string[];
 }
 
-/** Rules 1, 2 and 5 for one listener pid: a member of the project, or null. */
-async function candidate(sys: Sys, realProject: string, protectedSet: Set<number>, pid: number): Promise<Member | null> {
+async function argvReals(sys: Sys, argv: string[]): Promise<string[]> {
+  const out: string[] = [];
+  for (const p of argvPaths(argv)) {
+    const real = await sys.realpath(p);
+    if (real !== null) out.push(real);
+  }
+  return out;
+}
+
+/** How the owner belongs to the project: its cwd first, else an absolute argv path. */
+function viaFor(realProject: string, o: Pick<Owner, 'cwd' | 'argvReals'>): Via | null {
+  if (o.cwd !== null && cwdInProject(realProject, o.cwd)) return 'cwd';
+  return o.argvReals.some((r) => cwdInProject(realProject, r)) ? 'argv' : null;
+}
+
+/** Rules 2 and 5 for one listener pid. */
+async function owner(sys: Sys, protectedSet: Set<number>, pid: number): Promise<Owner | null> {
   if (!Number.isInteger(pid) || pid <= 1 || protectedSet.has(pid)) return null;
   const info = await sys.proc(pid);
   if (!info || !info.alive || info.uid !== sys.selfUid || isAgent(info)) return null;
-  const via = await projectVia(sys, realProject, pid, info);
-  return via ? { pid, startTime: info.startTime, via } : null;
+  const argv = await sys.cmdline(pid);
+  return { pid, startTime: info.startTime, argv, cwd: info.cwd, argvReals: await argvReals(sys, argv) };
 }
 
-/** Listening sockets whose owner runs inside the project. Null when this host cannot be scanned. */
-export async function scanProject(sys: Sys, realProject: string): Promise<RunningPort[] | null> {
+/** The deepest project the owner belongs to. Sibling folders never nest, so this only matters defensively. */
+function attribute(realProjects: string[], o: Owner): { project: string; via: Via } | null {
+  let best: { project: string; via: Via } | null = null;
+  for (const project of realProjects) {
+    const via = viaFor(project, o);
+    if (via && (!best || project.length > best.project.length)) best = { project, via };
+  }
+  return best;
+}
+
+/**
+ * Listening sockets grouped by the project their owner runs inside, from one listener scan.
+ * Projects with no listener are absent. Null when this host cannot be scanned.
+ */
+async function scanAll(sys: Sys, realProjects: string[]): Promise<Map<string, RunningPort[]> | null> {
   if (sys.platform !== 'linux') return null;
   const listeners = await sys.listeners();
   if (!listeners) return null;
   const protectedSet = await protectedPids(sys);
-  const verdicts = new Map<number, Member | null>();
-  const byPort = new Map<number, RunningPort>();
+  const owners = new Map<number, { owner: Owner; project: string; via: Via } | null>();
+  const byProject = new Map<string, Map<number, RunningPort>>();
   for (const l of listeners) {
     for (const pid of l.pids) {
-      if (!verdicts.has(pid)) verdicts.set(pid, await candidate(sys, realProject, protectedSet, pid));
-      const member = verdicts.get(pid);
-      if (!member) continue;
-      let entry = byPort.get(l.port);
+      if (!owners.has(pid)) {
+        const o = await owner(sys, protectedSet, pid);
+        const match = o && attribute(realProjects, o);
+        owners.set(pid, o && match ? { owner: o, ...match } : null);
+      }
+      const hit = owners.get(pid);
+      if (!hit) continue;
+      const ports = byProject.get(hit.project) ?? new Map<number, RunningPort>();
+      byProject.set(hit.project, ports);
+      let entry = ports.get(l.port);
       if (!entry) {
-        entry = { port: l.port, address: l.address, pids: [], command: redactCommand(await sys.cmdline(pid)), via: member.via, members: [] };
-        byPort.set(l.port, entry);
+        entry = { port: l.port, address: l.address, pids: [], command: redactCommand(hit.owner.argv), via: hit.via, members: [] };
+        ports.set(l.port, entry);
       }
       if (!entry.pids.includes(pid)) {
         entry.pids.push(pid);
-        entry.members.push(member);
+        entry.members.push({ pid, startTime: hit.owner.startTime, via: hit.via });
       }
     }
   }
-  const ports = [...byPort.values()].sort((a, b) => a.port - b.port);
-  for (const p of ports) p.pids.sort((a, b) => a - b);
-  return ports;
+  const out = new Map<string, RunningPort[]>();
+  for (const [project, ports] of byProject) {
+    const sorted = [...ports.values()].sort((a, b) => a.port - b.port);
+    for (const p of sorted) p.pids.sort((a, b) => a - b);
+    out.set(project, sorted);
+  }
+  return out;
+}
+
+/** Listening sockets whose owner runs inside the project. Null when this host cannot be scanned. */
+export async function scanProject(sys: Sys, realProject: string): Promise<RunningPort[] | null> {
+  const all = await scanAll(sys, [realProject]);
+  return all && (all.get(realProject) ?? []);
+}
+
+function toWire(ports: RunningPort[]): RunningProcess[] {
+  return ports.map(({ port, pids, command, address, via }) => ({ port, pids, command, address, via }));
 }
 
 export async function listRunning(sys: Sys, realProject: string): Promise<RunningList> {
   const ports = await scanProject(sys, realProject);
   if (!ports) return { supported: false, processes: [] };
-  return {
-    supported: true,
-    processes: ports.map(({ port, pids, command, address, via }) => ({ port, pids, command, address, via })),
-  };
+  return { supported: true, processes: toWire(ports) };
+}
+
+export interface ProjectDir {
+  name: string;
+  /** Real path of the project folder. */
+  dir: string;
+}
+
+export type RunningByProject =
+  | { supported: true; projects: Record<string, RunningProcess[]> }
+  | { supported: false; projects: Record<string, never> };
+
+/** Every project's listeners from one scan, keyed by name in name order, projects without a listener left out. Sends no signal. */
+export async function scanProjects(sys: Sys, projects: ProjectDir[]): Promise<RunningByProject> {
+  const all = await scanAll(sys, projects.map((p) => p.dir));
+  if (!all) return { supported: false, projects: {} };
+  const named = [...projects].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  // A symlinked alias shares its target's dir; the listener belongs to the folder itself, else the first name.
+  const nameOf = new Map<string, string>();
+  for (const p of named) if (!nameOf.has(p.dir) || path.basename(p.dir) === p.name) nameOf.set(p.dir, p.name);
+  const out: Record<string, RunningProcess[]> = {};
+  for (const p of named) {
+    const ports = all.get(p.dir);
+    if (ports?.length && nameOf.get(p.dir) === p.name) out[p.name] = toWire(ports);
+  }
+  return { supported: true, projects: out };
 }
 
 interface Target {
@@ -381,7 +452,8 @@ async function stillSafe(sys: Sys, realProject: string, protectedSet: Set<number
   const info = await sys.proc(t.pid);
   if (!info || !info.alive || info.startTime !== t.startTime || info.uid !== sys.selfUid || isAgent(info)) return false;
   if (t.kind === 'descendant') return true;
-  if (!(await projectVia(sys, realProject, t.pid, info))) return false;
+  const argv = await sys.cmdline(t.pid);
+  if (!viaFor(realProject, { cwd: info.cwd, argvReals: await argvReals(sys, argv) })) return false;
   const listeners = await sys.listeners();
   return !!listeners?.some((l) => l.pids.includes(t.pid));
 }

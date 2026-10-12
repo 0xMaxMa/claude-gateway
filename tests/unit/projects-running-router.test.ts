@@ -343,3 +343,94 @@ describe('running routes', () => {
     expect(alive(child.pid)).toBe(true);
   });
 });
+
+describe('GET /api/v1/projects/running', () => {
+  const all = (a: express.Express, key = 'k-read') => request(a).get('/api/v1/projects/running').set(as(key));
+  const cwdEntry = (port: number | null, pid: number | undefined) => ({ port, pids: [pid], command: `node -e ${SERVER}`.slice(0, 120), address: '127.0.0.1', via: 'cwd' });
+
+  beforeEach(() => {
+    for (const d of ['hi-project', 'hi-project-2', 'quiet', 'agent']) fs.mkdirSync(path.join(root, d));
+  });
+
+  it('answers for the whole root: cwd and argv matches under the right name, nothing else', async () => {
+    const cwdSrv = await start('node', ['-e', SERVER], path.join(root, 'hi-project'));
+    const script = path.join(base, 's.js');
+    fs.writeFileSync(script, SERVER);
+    const argvSrv = await start('node', [script, path.join(root, 'hi-project-2'), '--token', 'hunter2'], outside);
+    const idle = await start('node', ['-e', IDLE], path.join(root, 'quiet'));
+    const tar = path.join(root, 'hi-project.tar');
+    fs.writeFileSync(tar, '');
+    const prefixed = await start('node', [script, tar], outside);
+    const away = await start('node', ['-e', SERVER], outside);
+    const bin = path.join(base, 'claude');
+    fs.copyFileSync(process.execPath, bin);
+    fs.chmodSync(bin, 0o755);
+    const agent = await start(bin, ['-e', SERVER], path.join(root, 'agent'));
+
+    const res = await all(app());
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      supported: true,
+      projects: {
+        'hi-project': [cwdEntry(cwdSrv.port, cwdSrv.child.pid)],
+        'hi-project-2': [{ port: argvSrv.port, pids: [argvSrv.child.pid], command: `node ${script} ${path.join(root, 'hi-project-2')} --token [redacted]`, address: '127.0.0.1', via: 'argv' }],
+      },
+    });
+    expect(Object.keys(res.body.projects)).toEqual(['hi-project', 'hi-project-2']);
+    for (const c of [cwdSrv, argvSrv, idle, prefixed, away, agent]) expect(alive(c.child.pid)).toBe(true);
+  });
+
+  it('never returns the environment and redacts secrets', async () => {
+    const script = path.join(base, 's.js');
+    fs.writeFileSync(script, SERVER);
+    const child = spawn('node', [script, '--api-key=sk-live-zzz'], {
+      cwd: path.join(root, 'hi-project'),
+      env: { ...process.env, LEAKY_ENV_SECRET: 'env-value-9f3a' },
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    children.push(child);
+    await new Promise((r) => child.stdout?.once('data', r));
+    expect(fs.readFileSync(`/proc/${child.pid}/environ`, 'utf8')).toContain('env-value-9f3a');
+    const text = (await all(app())).text;
+    expect(text).toContain('--api-key=[redacted]');
+    expect(text).not.toContain('sk-live-zzz');
+    expect(text).not.toContain('env-value-9f3a');
+    expect(text).not.toContain('LEAKY_ENV_SECRET');
+  });
+
+  it('is not shadowed by a project named running, which stays reachable by name', async () => {
+    fs.mkdirSync(path.join(root, 'running'));
+    const srv = await start('node', ['-e', SERVER], path.join(root, 'running'));
+    const a = app();
+    expect((await all(a)).body).toEqual({ supported: true, projects: { running: [cwdEntry(srv.port, srv.child.pid)] } });
+    expect((await get(a, 'running')).body).toEqual({ supported: true, processes: [cwdEntry(srv.port, srv.child.pid)] });
+  });
+
+  it('skips a project that is a symlink out of the root', async () => {
+    fs.symlinkSync(outside, path.join(root, 'sneaky'));
+    await start('node', ['-e', SERVER], outside);
+    expect((await all(app())).body).toEqual({ supported: true, projects: {} });
+  });
+
+  it('looks at no more than 200 projects', async () => {
+    for (let i = 0; i < 200; i++) fs.mkdirSync(path.join(root, `p${String(i).padStart(3, '0')}`));
+    fs.mkdirSync(path.join(root, 'zzz'));
+    const first = await start('node', ['-e', SERVER], path.join(root, 'agent'));
+    await start('node', ['-e', SERVER], path.join(root, 'zzz'));
+    expect((await all(app())).body).toEqual({ supported: true, projects: { agent: [cwdEntry(first.port, first.child.pid)] } });
+  });
+
+  it('reports unsupported on a non-Linux platform', async () => {
+    await start('node', ['-e', SERVER], path.join(root, 'hi-project'));
+    expect((await all(app(systemSys({ platform: 'darwin' })))).body).toEqual({ supported: false, projects: {} });
+  });
+
+  it('applies the same key guards as the per-project route', async () => {
+    const a = app();
+    expect((await all(a, 'k-agent')).body.code).toBe('forbidden_key');
+    expect((await all(a, 'bad')).status).toBe(403);
+    expect((await request(a).get('/api/v1/projects/running')).status).toBe((await request(a).get('/api/v1/projects/api/running')).status);
+    expect((await all(a, 'k-write')).status).toBe(200);
+    expect((await all(a)).body).toEqual({ supported: true, projects: {} });
+  });
+});

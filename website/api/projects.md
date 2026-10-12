@@ -446,7 +446,7 @@ A project counts as running when a process listens on a TCP port and either its
 working directory is inside the project folder (`via: "cwd"`) or one of its
 arguments is an absolute path inside the project folder (`via: "argv"`, for example
 `python3 -m http.server --directory <project>` started from `/tmp`). Listening sockets come from `ss -H -ltnp`,
-or from `/proc/net/tcp` and `/proc/<pid>/fd` when `ss` is missing. Both routes need
+or from `/proc/net/tcp` and `/proc/<pid>/fd` when `ss` is missing. Every route here needs
 a key that can see all agents. Stop also needs a write key.
 
 ### GET /api/v1/projects/:name/running {#get-running}
@@ -464,6 +464,41 @@ flag (including flags such as `--api-key` or `--client-secret=...`) is replaced 
 `[redacted]` before the cut. The environment is never returned. On a host that is not
 Linux, or where `/proc` cannot be read, the response is
 `{ "supported": false, "processes": [] }`.
+
+### GET /api/v1/projects/running {#get-running-all}
+
+Every project's listeners in one answer, for project cards. The gateway scans the
+listening sockets once and ties each one to a project with the same rules, the same
+`via` and the same `command` redaction as
+[`GET /api/v1/projects/:name/running`](#get-running). Projects are the ones
+[`GET /api/v1/projects`](#get-projects) lists: a symlink that leaves the root is
+skipped. Only the first 200 projects, in name order, are looked at. A listener that
+matches more than one project counts only for the deepest project folder. This
+route never stops anything. It needs the same key as the per-project route.
+
+Returns `200`. `projects` holds only the projects with at least one listener, in
+name order, each with one entry per port sorted by port:
+
+```bash
+curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/running
+```
+
+```json
+{
+  "supported": true,
+  "projects": {
+    "api": [ { "port": 3000, "pids": [123], "command": "node server.js", "address": "127.0.0.1", "via": "cwd" } ],
+    "docs": [ { "port": 8000, "pids": [456], "command": "python3 -m http.server 8000 --directory /home/me/projects/docs", "address": "0.0.0.0", "via": "argv" } ]
+  }
+}
+```
+
+On a host that is not Linux, or where `/proc` cannot be read, the response is
+`{ "supported": false, "projects": {} }`. A project named `running` is still
+reached by name at `/api/v1/projects/running/running`.
+
+Errors: `403 forbidden_key`. A projects root that cannot be read gets the same
+error as `GET /api/v1/projects`.
 
 ### POST /api/v1/projects/:name/running/stop {#post-running-stop}
 

@@ -4,10 +4,12 @@ import { createApiAuthMiddleware, canAccessPod } from './auth';
 import { defineRoute } from './route-registry';
 import { createProject, listDir, resolveProjectDir, listProjects, readFileContent } from '../projects/fs';
 import { commitAll, fetchRemote, getStatus, getSummaries, GitError, GitErrorCode, initRepo, parseCommitRequest, parseIdentity, pullFastForward, pushBranch, setIdentity } from '../projects/git';
-import { listRunning, RunningErrorCode, StopLimiter, stopRunning, Sys, systemSys } from '../projects/running';
+import { listRunning, ProjectDir, RunningErrorCode, scanProjects, StopLimiter, stopRunning, Sys, systemSys } from '../projects/running';
 import { parseProjectName, parseRelPath, ProjectName, ProjectsErrorCode, Result } from '../projects/paths';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
+
+const MAX_RUNNING_PROJECTS = 200;
 
 const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode, { status: number; message: string }> = {
   invalid_name: { status: 400, message: 'Invalid project name' },
@@ -151,6 +153,23 @@ export function createProjectsRouter(
     auth,
     requirePod,
     handle(async (_req, res) => respond(res, await getSummaries(root))),
+  );
+
+  defineRoute(
+    router,
+    { method: 'GET', path: '/v1/projects/running', auth: 'key', summary: 'Processes listening from inside each project', cli: null },
+    auth,
+    requirePod,
+    handle(async (_req, res) => {
+      const list = await listProjects(root);
+      if (!list.ok) return fail(res, list.error);
+      const dirs: ProjectDir[] = [];
+      for (const p of list.value.projects.slice(0, MAX_RUNNING_PROJECTS)) {
+        const dir = await resolveProjectDir(root, p.name);
+        if (dir.ok) dirs.push({ name: p.name, dir: dir.value });
+      }
+      res.json(await scanProjects(running.sys, dirs));
+    }),
   );
 
   defineRoute(

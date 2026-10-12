@@ -8,6 +8,7 @@ import {
   parseSs,
   ProcInfo,
   redactCommand,
+  scanProjects,
   StopLimiter,
   stopRunning,
   Sys,
@@ -423,5 +424,113 @@ describe('argv-matched listeners', () => {
     const { sys } = makeSys({ 60: srv(['serve', '/r/api', '--token', 'hunter2']) });
     const cmd = (await listRunning(sys, '/r/api')).processes[0].command;
     expect(cmd).toBe('serve /r/api --token [redacted]');
+  });
+});
+
+describe('scanProjects, every project in one pass', () => {
+  const dirs = [
+    { name: 'api', dir: '/r/api' },
+    { name: 'api-v2', dir: '/r/api-v2' },
+    { name: 'web', dir: '/r/web' },
+    { name: 'idle', dir: '/r/idle' },
+  ];
+
+  it('attributes each listener to its project by cwd or argv, drops projects with none, sorts by name then port', async () => {
+    const { sys } = makeSys({
+      60: { listens: 4000, cwd: '/r/web' },
+      61: { listens: 3000, cwd: '/tmp', argv: ['serve', '/r/api', '--token', 'hunter2'] },
+      62: { listens: 3001, cwd: '/r/api-v2' },
+      63: { listens: 3002, cwd: '/r/web/sub' },
+      64: { listens: 5000, cwd: '/elsewhere' },
+      65: { cwd: '/r/idle' },
+      66: { listens: 5001, cwd: '/r/apixyz' },
+    });
+    const res = await scanProjects(sys, dirs);
+    expect(res).toEqual({
+      supported: true,
+      projects: {
+        api: [{ port: 3000, pids: [61], command: 'serve /r/api --token [redacted]', address: '127.0.0.1', via: 'argv' }],
+        'api-v2': [{ port: 3001, pids: [62], command: 'node srv62.js', address: '127.0.0.1', via: 'cwd' }],
+        web: [
+          { port: 3002, pids: [63], command: 'node srv63.js', address: '127.0.0.1', via: 'cwd' },
+          { port: 4000, pids: [60], command: 'node srv60.js', address: '127.0.0.1', via: 'cwd' },
+        ],
+      },
+    });
+    expect(Object.keys(res.projects)).toEqual(['api', 'api-v2', 'web']);
+  });
+
+  it('applies the per-project exclusions: claude, gateway and ancestors, pid 1, other uid', async () => {
+    const { sys } = makeSys(
+      {
+        1: { listens: 1000, ppid: 0 },
+        20: { listens: 1001, ppid: 1 },
+        50: { listens: 1002, ppid: 20 },
+        60: { listens: 3000, exe: 'claude' },
+        61: { listens: 3001, comm: 'claude' },
+        62: { listens: 3002, uid: 0 },
+        63: { listens: 3003 },
+      },
+      { selfPid: 50 },
+    );
+    expect(await scanProjects(sys, dirs)).toEqual({
+      supported: true,
+      projects: { api: [{ port: 3003, pids: [63], command: 'node srv63.js', address: '127.0.0.1', via: 'cwd' }] },
+    });
+  });
+
+  it('gives a listener matching nested projects to the deepest one only', async () => {
+    const nested = [
+      { name: 'outer', dir: '/r/outer' },
+      { name: 'inner', dir: '/r/outer/inner' },
+    ];
+    const { sys } = makeSys({
+      60: { listens: 3000, cwd: '/r/outer/inner/src' },
+      61: { listens: 3001, cwd: '/tmp', argv: ['serve', '/r/outer/inner'] },
+      62: { listens: 3002, cwd: '/r/outer' },
+    });
+    const res = await scanProjects(sys, nested);
+    expect(Object.fromEntries(Object.entries(res.projects).map(([k, v]) => [k, v.map((p) => p.port)]))).toEqual({
+      inner: [3000, 3001],
+      outer: [3002],
+    });
+  });
+
+  it('scans listeners once and reads each pid once, whatever the number of projects', async () => {
+    const { sys } = makeSys({ 60: { listens: 3000, cwd: '/r/web' }, 61: { listens: 3001, cwd: '/r/api' } });
+    let scans = 0;
+    const procReads = new Map<number, number>();
+    const listeners = sys.listeners;
+    const proc = sys.proc;
+    sys.listeners = async () => (scans++, listeners());
+    sys.proc = async (pid) => (procReads.set(pid, (procReads.get(pid) ?? 0) + 1), proc(pid));
+    await scanProjects(sys, dirs);
+    expect(scans).toBe(1);
+    expect([procReads.get(60), procReads.get(61)]).toEqual([1, 1]);
+  });
+
+  it('reports unsupported off Linux and when the host cannot be scanned', async () => {
+    const mac = makeSys({ 60: { listens: 3000 } }, { platform: 'darwin' });
+    expect(await scanProjects(mac.sys, dirs)).toEqual({ supported: false, projects: {} });
+    const blind = makeSys({ 60: { listens: 3000 } });
+    blind.sys.listeners = async () => null;
+    expect(await scanProjects(blind.sys, dirs)).toEqual({ supported: false, projects: {} });
+  });
+
+  it('never signals anything', async () => {
+    const { sys, kills } = makeSys({ 60: { listens: 3000 } });
+    await scanProjects(sys, dirs);
+    expect(kills).toEqual([]);
+  });
+});
+
+describe('scanProjects, aliases', () => {
+  it('lists a listener once when a symlinked project name aliases a real folder', async () => {
+    const { sys } = makeSys({ 60: { listens: 3000, cwd: '/r/api' } });
+    const res = await scanProjects(sys, [
+      { name: 'alias', dir: '/r/api' },
+      { name: 'api', dir: '/r/api' },
+    ]);
+    expect(Object.keys(res.projects)).toEqual(['api']);
   });
 });
