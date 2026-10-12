@@ -588,16 +588,37 @@ test('closing screenshot is attached once to its own report and never across use
  const files=store.all('SELECT * FROM task_files WHERE response_id=?',response.id);expect(files).toHaveLength(1);expect(files[0].caption).toContain('not a live view');expect(files[0].path).toContain('computer-end-');
 });
 
-test.each(['waiting_input','completed','failed'] as const)('disconnecting a %s computer revokes access before closing without dispatching work',async(state)=>{
+test('disconnecting a waiting_input computer revokes access before cancelling without dispatching work',async()=>{
  let stopped=false;
  const computer={...adapter,name:'computer',cancel:jest.fn(async()=>{}),inspect:jest.fn(async()=>stopped?{type:'stopped' as const}:'pending' as const)};
  await controller.close();controller=new GatewayTaskController(tasks,new Map([['computer',computer]]));
  const task=tasks.spawn({...context,actionId:'idle-disconnect'},{title:'Desktop',instructions:'Wait',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'computer'}});
- const saved=store.task(task.taskId)!;saved.state=state;saved.gatewayDispatch={requestId:'settled-round',submittedAt:Date.now()};saved.automationController='user';saved.automationSession={status:'idle',idleTimeoutMs:1800000,idleSince:Date.now()};store.transaction(()=>store.saveTask(saved,saved.stateVersion));
+ const saved=store.task(task.taskId)!;saved.state='waiting_input';saved.failure={code:'COMPUTER_INPUT_UNAVAILABLE',message:'Needs a value',observedAt:Date.now()};saved.gatewayDispatch={requestId:'settled-round',submittedAt:Date.now()};saved.automationController='user';saved.automationSession={status:'idle',idleTimeoutMs:1800000,idleSince:Date.now()};store.transaction(()=>store.saveTask(saved,saved.stateVersion));
  tasks.cancelByUser(task.conversationId,task.ownerPrincipalId,task.taskId);
- expect(store.task(task.taskId)?.state).toBe('cancel_requested');
+ expect(store.task(task.taskId)).toMatchObject({state:'cancel_requested',cancellation:{requestedBy:'user'}});expect(store.task(task.taskId)?.failure).toBeUndefined();
  await controller.tick();expect(computer.cancel).toHaveBeenCalled();expect(store.task(task.taskId)?.state).toBe('cancel_requested');
- stopped=true;await controller.tick();expect(store.task(task.taskId)?.state).toBe('cancelled');expect(computer.submit).not.toHaveBeenCalled();
+ stopped=true;await controller.tick();expect(store.task(task.taskId)?.state).toBe('cancelled');expect(store.task(task.taskId)?.failure).toBeUndefined();expect(computer.submit).not.toHaveBeenCalled();
+});
+
+test.each(['completed','failed'] as const)('ending the session of a %s computer round revokes access and keeps its outcome',async(state)=>{
+ let stopped=false;
+ const computer={...adapter,name:'computer',cancel:jest.fn(async()=>{}),inspect:jest.fn(async()=>stopped?{type:'stopped' as const}:'pending' as const)};
+ await controller.close();controller=new GatewayTaskController(tasks,new Map([['computer',computer]]));
+ const task=tasks.spawn({...context,actionId:'idle-disconnect'},{title:'Desktop',instructions:'Wait',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'computer'}});
+ const saved=store.task(task.taskId)!;saved.state=state;saved.gatewayDispatch={requestId:'settled-round',submittedAt:Date.now()};saved.automationController='user';saved.automationSession={status:'idle',idleTimeoutMs:1800000,idleSince:Date.now()};
+ if(state==='failed')saved.failure={code:'COMPUTER_ACTION_REJECTED',message:'The device rejected the action.',observedAt:Date.now()};else saved.result={summary:'Opened YouTube',artifactIds:[]};
+ store.transaction(()=>store.saveTask(saved,saved.stateVersion));
+ const outcome=state==='failed'?{failure:saved.failure}:{result:saved.result};
+ const ended=tasks.cancelByUser(task.conversationId,task.ownerPrincipalId,task.taskId);
+ expect(ended).toMatchObject({state,automationSession:{status:'closed',closedReason:'user'}});expect(ended.cancellation).toBeUndefined();
+ expect(store.task(task.taskId)).toMatchObject({state,...outcome,computerRevocation:{requestId:'settled-round'}});
+ await controller.tick();expect(computer.cancel).toHaveBeenCalledWith(expect.objectContaining({taskId:task.taskId}),'settled-round');
+ expect(store.task(task.taskId)).toMatchObject({state,...outcome,computerRevocation:{requestId:'settled-round'}});
+ stopped=true;await controller.tick();
+ const after=store.task(task.taskId)!;
+ expect(after).toMatchObject({state,...outcome,automationSession:{status:'closed',closedReason:'user'}});expect(after.computerRevocation).toBeUndefined();
+ computer.cancel.mockClear();await controller.tick();expect(computer.cancel).not.toHaveBeenCalled();
+ expect(store.task(task.taskId)).toMatchObject({state,...outcome});expect(computer.submit).not.toHaveBeenCalled();
 });
 
 test('settled computer commands await evidence without exhausting a failure recovery budget',()=>{

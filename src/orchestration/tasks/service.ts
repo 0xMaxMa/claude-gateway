@@ -537,9 +537,15 @@ export class TaskService {
       if (replacedByTaskId === taskId) throw new OrchestrationError('INVALID_REPLACEMENT');
       this.owned(replacedByTaskId, conversationId);
     }
-    if (TERMINAL_TASK_STATES.has(task.state) && !(task.gatewayTarget?.adapter==='computer' && task.gatewayDispatch && automationSession(task)?.status!=='closed')) {
+    // The user's End session on a settled round closes it only: the round's
+    // completed/failed outcome is not rewritten as a cancellation.
+    if (TERMINAL_TASK_STATES.has(task.state) && (requestedBy==='user' || !(task.gatewayTarget?.adapter==='computer' && task.gatewayDispatch && automationSession(task)?.status!=='closed'))) {
       const session=automationSession(task);
-      if(session && session.status!=='closed'){task.automationSession={...session,status:'closed',closedAt:Date.now(),closedReason:requestedBy};this.store.saveTask(task,task.stateVersion);}
+      if(session && session.status!=='closed'){
+        task.automationSession={...session,status:'closed',closedAt:Date.now(),closedReason:requestedBy};
+        if(task.gatewayTarget?.adapter==='computer'&&task.gatewayDispatch)task.computerRevocation={requestId:task.gatewayDispatch.requestId,requestedAt:Date.now()};
+        this.store.saveTask(task,task.stateVersion);
+      }
       return task;
     }
     if (task.state === 'cancel_requested') {
@@ -570,7 +576,10 @@ export class TaskService {
   finishIdleComputerCleanup(taskId:string,requestId:string):void {
     this.store.transaction(()=>{
       const task=this.store.task(taskId);
-      if(!task||task.state!=='cancel_requested'||task.activeAttemptId||task.gatewayTarget?.adapter!=='computer'||task.gatewayDispatch?.requestId!==requestId)throw new OrchestrationError('STALE_ATTEMPT');
+      if(!task||task.activeAttemptId||task.gatewayTarget?.adapter!=='computer'||task.gatewayDispatch?.requestId!==requestId)throw new OrchestrationError('STALE_ATTEMPT');
+      // A terminal round keeps its reported outcome; only the pending revocation is settled.
+      if(TERMINAL_TASK_STATES.has(task.state)&&task.computerRevocation?.requestId===requestId){delete task.computerRevocation;this.store.saveTask(task,task.stateVersion);return;}
+      if(task.state!=='cancel_requested')throw new OrchestrationError('STALE_ATTEMPT');
       task.state='cancelled';task.latestProgress={source:'runtime',observedAt:Date.now(),text:'Computer Use disconnected.'};
       this.store.saveTask(task,task.stateVersion);this.notify(task);
     });

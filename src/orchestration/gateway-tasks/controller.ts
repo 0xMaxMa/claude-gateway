@@ -59,7 +59,7 @@ export class GatewayTaskController {
     return run;
   }
   private async run(): Promise<void> {
-    const rows = this.tasks.store.all("SELECT id FROM tasks WHERE json_type(snapshot_json,'$.gatewayTarget')='object' AND (state IN ('queued','starting','running','interrupting','cancel_requested','needs_reconciliation','waiting_input') OR json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked')) ORDER BY created_at,rowid");
+    const rows = this.tasks.store.all("SELECT id FROM tasks WHERE json_type(snapshot_json,'$.gatewayTarget')='object' AND (state IN ('queued','starting','running','interrupting','cancel_requested','needs_reconciliation','waiting_input') OR json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') OR json_type(snapshot_json,'$.computerRevocation')='object') ORDER BY created_at,rowid");
     for (const row of rows) {
       if (this.closed) return;
       let task = this.tasks.store.task(String(row.id))!;
@@ -82,7 +82,7 @@ export class GatewayTaskController {
           }
         }catch(error){this.reportError(error);}
       }
-      if(task.state==='cancel_requested'&&!task.activeAttemptId&&task.gatewayTarget?.adapter==='computer'&&task.gatewayDispatch){
+      if((task.state==='cancel_requested'||(task.computerRevocation&&task.computerRevocation.requestId===task.gatewayDispatch?.requestId))&&!task.activeAttemptId&&task.gatewayTarget?.adapter==='computer'&&task.gatewayDispatch){
         const adapter=this.adapters.get('computer'),requestId=task.gatewayDispatch.requestId;
         if(adapter)try{
           await adapter.cancel(task,requestId);
