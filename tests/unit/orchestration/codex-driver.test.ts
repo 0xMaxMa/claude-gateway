@@ -487,7 +487,7 @@ describe('pstack subagent workers', () => {
     agent.pstack = {};
     mockBeforeResult = worker => { expect(mcpEnv(worker.runtimeProfile).GATEWAY_SUBAGENTS).toBe(''); };
     const task = spawn('claude-sonnet-4-6');
-    store.transaction(() => { const t = store.task(task.taskId)!; t.depth = 3; t.parentTaskId = 'p'; store.saveTask(t, t.stateVersion); });
+    store.transaction(() => { const t = store.task(task.taskId)!; t.depth = 3; store.saveTask(t, t.stateVersion); });
     const attempt = tasks.claim(task.taskId)!;
     const handle = await driver.start(store.task(task.taskId)!, attempt); await handle.accepted; await handle.result;
     expect(claudeProfile().context).toContain('Subagent dispatch is unavailable at this depth');
