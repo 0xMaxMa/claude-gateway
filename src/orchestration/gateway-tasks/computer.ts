@@ -11,6 +11,7 @@ import {ComputerConnectors,withComputerConnection} from '../../jev/computer-conn
 import type {CommandContext,TaskSnapshot,TaskAttempt,TaskRevision,WorkerOutcome,GatewayTaskTarget} from '../types';
 import {GatewayRequestNotSentError,type GatewayTaskAdapter} from './controller';
 import {OrchestrationError} from '../types';
+import {agentGoalRun} from '../tasks/automation-session';
 /** How long an unanswered owner approval prompt may hold the session. */
 export const COMPUTER_ACCESS_WAIT_MS=5*60*1000;
 const {runComputerUse}=require('../../automation/computer-use') as {runComputerUse:(input:unknown,deps:ComputerUseDependencies,signal:AbortSignal)=>Promise<ComputerUseResult>};
@@ -88,7 +89,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    // The agent's command for a handed-off utterance: one command, no step list, no hand-off again; a high-impact action waits for the user's confirmation.
    const agentHandoff=t.automationController==='user'&&t.executionControl?.agentHandoff===true&&t.executionControl.revision===t.revision;
    // The agent's spawn text opens a session the user drives; it is no user command.
-   const sessionStart=t.automationController==='user'&&t.revision===1&&t.executionControl?.revision!==1;
+   const sessionStart=agentGoalRun(t);
    // The user's next command answers that question (Jev reads yes or no).
    const asked=t.automationController==='user'&&!agentHandoff&&previousContext&&previousContext.revision<t.revision&&previousContext.lastAction?.confirm&&previousContext.command?{command:previousContext.command,label:previousContext.lastAction.label??'',...(previousContext.lastAction.target?{target:previousContext.lastAction.target}:{})}:undefined;
    // Asked once: the question stays open until this answer's round ends. A round

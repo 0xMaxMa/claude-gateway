@@ -25,6 +25,14 @@ export function automationSession(task: TaskSnapshot, now = Date.now()): Automat
   if ((task.automationController !== 'user' || task.state === 'failed') && now - idleSince >= idleTimeoutMs) return {status:'closed',idleTimeoutMs,idleSince,closedAt:idleSince+idleTimeoutMs,closedReason:'idle_timeout'};
   return {status,idleTimeoutMs,idleSince};
 }
+/** The agent's own goal run: its spawn text opens a session the user drives
+ * (revision 1, no user command yet). Later revisions are the user's own commands. */
+export function agentGoalRun(task: TaskSnapshot): boolean {
+  return task.automationController==='user'&&task.revision===1&&task.executionControl?.revision!==1;
+}
+/** agentGoalRun as a trusted SQL fragment over a tasks row alias; a parity test keeps them equal. */
+export const agentGoalRunSql=(alias:string)=>`(json_extract(${alias}.snapshot_json,'$.automationController')='user' AND json_extract(${alias}.snapshot_json,'$.revision')=1
+  AND COALESCE(json_extract(${alias}.snapshot_json,'$.executionControl.revision'),0)!=1)`;
 /** The task waits for the owner's next direct command (a settled or paused round). */
 export function pausedForCommand(task: TaskSnapshot): boolean {
   return task.state==='waiting_input'&&!task.activeAttemptId&&(task.executionControl?.phase==='paused'||['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(task.computerReport?.reason??task.browserReport?.reason??''));

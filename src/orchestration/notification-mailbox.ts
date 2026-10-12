@@ -1,12 +1,12 @@
 import { OrchestrationStore } from './store';
 import {CURRENT_CONTROL_ROUND_SQL} from './control-notification';
+import {agentGoalRunSql} from './tasks/automation-session';
 
 /** The agent's own goal run (its spawn text, revision 1, no user command yet) ended.
  * The task is user-controlled, yet the agent started this work and must hear how it
  * ended. Pod-jinawong 2.0.17: such a failure stayed pending, the agent said nothing
  * and the user saw the chat hang. Later rounds are the user's own commands. */
-const AGENT_GOAL_ENDED_SQL = `controlled.state IN ('completed','failed') AND controlled.state_version=n.task_state_version
-  AND json_extract(controlled.snapshot_json,'$.revision')=1 AND COALESCE(json_extract(controlled.snapshot_json,'$.executionControl.revision'),0)!=1`;
+const AGENT_GOAL_ENDED_SQL = `controlled.state IN ('completed','failed') AND controlled.state_version=n.task_state_version AND ${agentGoalRunSql('controlled')}`;
 
 /** Retry reports, never task execution. Decisions/inputs retain the retry clock
  * across restarts, including failed reports written before this implementation.
