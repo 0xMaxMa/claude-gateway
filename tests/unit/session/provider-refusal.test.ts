@@ -114,6 +114,13 @@ describe('ProviderRefusals (#586)', () => {
     expect(ledger.list()).toEqual([{ messageId: 'synthetic' }]);
   });
 
+  it('attributes an unlinked synthetic refusal to a message cut off before its stop', () => {
+    const ledger = observe([start('msg_cut'),
+      { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 't1', name: 'Bash', input: {} } } },
+      { type: 'assistant', isApiErrorMessage: true, message: { id: 'synthetic', stop_reason: 'refusal', stop_details: null, content: [] } }]);
+    expect(ledger.list()).toEqual([{ messageId: 'msg_cut', toolCalls: [{ id: 't1', name: 'Bash', result: false }] }]);
+  });
+
   it('reset() drops every refusal and the message correlation', () => {
     const ledger = observe([start('m'), delta('refusal', refusal())]);
     ledger.reset();

@@ -490,8 +490,13 @@ export class AgentOrchestrationRuntime {
       if (!deliver) return;
       const text = providerRefusalNotice(refusals);
       this.publishText(sessionId, this.decisions.notice(conversationId, text, true), text, true);
+      void this.flushHistory().catch(() => {});
       void this.delivery.tick().catch(() => {});
-    } catch { /* Diagnostics cannot fail a response that already settled. */ }
+    } catch (error) {
+      // Diagnostics cannot fail a response that already settled, but a lost record must be visible.
+      const code = (error as { code?: unknown } | null)?.code;
+      console.warn('[orchestration] provider refusal evidence not recorded', { sessionId, responseId, code: typeof code === 'string' && /^[A-Za-z0-9_]{1,80}$/.test(code) ? code : 'ERROR' });
+    }
   }
   isBusy(sessionId: string): boolean { return this.active.has(sessionId); }
   isCompacting(sessionId: string): boolean { return this.active.get(sessionId)?.maintenance === 'compact'; }
@@ -1039,6 +1044,8 @@ export class AgentOrchestrationRuntime {
     const questionReview = Boolean(input.ingressKey?.startsWith('question-review:'));
     let internalReview = false;
     let streamedDisplay = '';
+    // Refusals of a resolved turn that later post-processing could still fail before reporting.
+    let unreportedRefusals: ProviderRefusal[] | undefined;
     let providerPermit: ProviderPermit | undefined;
     let providerRenewal: ReturnType<typeof setInterval> | undefined;
     try {
@@ -1499,6 +1506,7 @@ export class AgentOrchestrationRuntime {
         } catch { /* Never turn a successful inference into a failed task receipt. */ }
       }).catch(() => {});
       const response = await turn.result;
+      unreportedRefusals = response.providerRefusals;
       if (!response.interrupted && !providerResponded) {
         try {
           if (this.providerAdmission.settle(providerPermit, 'success', this.config.providerAdmission)) this.providerRecovered(providerPermit.scope);
@@ -1521,6 +1529,7 @@ export class AgentOrchestrationRuntime {
         });
         // Nothing was shown, but the refusal itself happened and stays on record.
         if (response.providerRefusals?.length) this.reportProviderRefusals(receipt.conversationId, sessionId, decision.responseId!, response.providerRefusals, false);
+        unreportedRefusals = undefined;
         // No user-visible answer or task action was committed. Re-read canonical
         // inputs with the newer messages; do not checkpoint discarded context.
         contextPlan.invalidate();
@@ -1652,7 +1661,9 @@ export class AgentOrchestrationRuntime {
       // arrive after any commentary), so the tail correction is no longer speech/review-only.
       if (!silent && display.startsWith(streamedDisplay) && display.length > streamedDisplay.length) options.onText?.(display.slice(streamedDisplay.length));
       if (!silent) this.publishText(sessionId, decision.responseId!, display, true);
-      if (response.providerRefusals?.length) this.reportProviderRefusals(receipt.conversationId, sessionId, decision.responseId!, response.providerRefusals, !silent && !active.stopping);
+      // Announced exactly when the response itself is delivered.
+      if (response.providerRefusals?.length) this.reportProviderRefusals(receipt.conversationId, sessionId, decision.responseId!, response.providerRefusals, !active.stopping && !silent);
+      unreportedRefusals = undefined;
       this.questionControls.flushPrompts();
       await this.flushHistory();
       const listener = this.voiceListeners.get(sessionId);
@@ -1726,8 +1737,9 @@ export class AgentOrchestrationRuntime {
         await this.flushHistory();
         const failed = this.store.get('SELECT generated_text FROM assistant_responses WHERE id=?', active.decision.responseId!);
         if (failed?.generated_text) this.publishText(sessionId, active.decision.responseId!, String(failed.generated_text), true);
-        const refusals = (error as { providerRefusals?: ProviderRefusal[] } | null)?.providerRefusals;
-        if (row && refusals?.length) this.reportProviderRefusals(String(row.conversation_id), sessionId, active.decision.responseId!, refusals, row.state === 'running' && active.stopReason !== 'barge-in' && !active.stopping && !active.notification);
+        const refusals = (error as { providerRefusals?: ProviderRefusal[] } | null)?.providerRefusals ?? unreportedRefusals;
+        // The failure text is delivered only for a running, unstopped user turn; the notice follows it.
+        if (row && refusals?.length) this.reportProviderRefusals(String(row.conversation_id), sessionId, active.decision.responseId!, refusals, row.state === 'running' && !active.stopping && !active.notification);
       }
       throw error;
     } finally {

@@ -97,8 +97,8 @@ export function providerRefusalNotice(refusals: readonly ProviderRefusal[]): str
     count > 1 ? `Refused messages: ${count}` : undefined,
     refusal.category ? `Category: ${refusal.category}` : undefined,
     refusal.explanation ? `Provider explanation: "${refusal.explanation}"` : 'The provider did not supply a specific explanation.',
-    withoutResult ? `Tool calls in the refused message with no recorded execution result: ${withoutResult}.` : undefined,
-    withResult ? `Tool calls in the refused message that returned a result: ${withResult}.` : undefined,
+    withoutResult ? `Tool calls in ${count > 1 ? 'these refused messages' : 'the refused message'} with no recorded execution result: ${withoutResult}.` : undefined,
+    withResult ? `Tool calls in ${count > 1 ? 'these refused messages' : 'the refused message'} that returned a result: ${withResult}.` : undefined,
   ].filter(Boolean).join('\n'));
   return ['Gateway diagnostic: the model provider refused a request during this response.', ...entries,
     'A reply produced after a refusal does not by itself confirm that the refused step was carried out.'].join('\n');

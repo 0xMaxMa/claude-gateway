@@ -16,12 +16,15 @@ const text = (value: unknown, max: number): string | undefined =>
  * API-error record; all of them collapse into one entry keyed by the native id. */
 export class ProviderRefusals {
   private current?: string;
+  /** The current message has not reported its stop yet (no message_delta/message_stop). */
+  private open = false;
   private readonly entries: (Omit<ProviderRefusal, 'toolCalls'> & { toolCalls: Map<string, RefusedToolCall> })[] = [];
   /** Recent tool_use blocks by id; only those of a refused message are kept beyond this window. */
   private readonly toolUses = new Map<string, { messageId?: string; name?: string; result?: boolean }>();
   observe(event: Record<string, any>): void {
     const stream = event.type === 'stream_event' ? event.event : undefined;
-    if (stream?.type === 'message_start') { this.current = typeof stream.message?.id === 'string' ? stream.message.id : undefined; return; }
+    if (stream?.type === 'message_start') { this.current = typeof stream.message?.id === 'string' ? stream.message.id : undefined; this.open = true; return; }
+    if (stream?.type === 'message_stop' || stream?.type === 'message_delta') this.open = false;
     if (stream?.type === 'content_block_start' && stream.content_block?.type === 'tool_use') { this.toolUse(this.current, stream.content_block); return; }
     if (stream?.type === 'message_delta' && stream.delta?.stop_reason === 'refusal') { this.record(this.current, stream.delta.stop_details); return; }
     const blocks: any[] = Array.isArray(event.message?.content) ? event.message.content : [];
@@ -35,9 +38,9 @@ export class ProviderRefusals {
     if (event.isApiErrorMessage !== true) for (const block of blocks) if (block?.type === 'tool_use') this.toolUse(typeof event.message.id === 'string' ? event.message.id : undefined, block);
     if (event.message?.stop_reason !== 'refusal') return;
     // A synthetic API-error record names the refused message in refusedMessageId.
-    // Without it, it is folded into the streamed message only when that message's
-    // own refusal was already seen; it is never attributed to an unrefused message.
-    const streamed = event.isApiErrorMessage === true && this.current && this.entries.some(entry => entry.messageId === this.current) ? this.current : undefined;
+    // Without it, it replaces the streamed message only while that message is still
+    // open or already refused; a message that finished normally is never blamed.
+    const streamed = event.isApiErrorMessage === true && this.current && (this.open || this.entries.some(entry => entry.messageId === this.current)) ? this.current : undefined;
     const id = typeof event.refusedMessageId === 'string' ? event.refusedMessageId : streamed ?? event.message.id;
     this.record(typeof id === 'string' ? id : undefined, event.message.stop_details);
   }
@@ -66,5 +69,5 @@ export class ProviderRefusals {
   list(): ProviderRefusal[] {
     return this.entries.map(({ toolCalls, ...entry }) => ({ ...entry, ...(toolCalls.size ? { toolCalls: [...toolCalls.values()].map(call => ({ ...call })) } : {}) }));
   }
-  reset(): void { this.current = undefined; this.entries.length = 0; this.toolUses.clear(); }
+  reset(): void { this.current = undefined; this.open = false; this.entries.length = 0; this.toolUses.clear(); }
 }

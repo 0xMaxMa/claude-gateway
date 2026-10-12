@@ -88,7 +88,7 @@ describe('providerRefusalNotice (#586)', () => {
   it('groups refusals with the same provider text without dropping any', () => {
     const notice = providerRefusalNotice([{ messageId: 'a', toolCalls: [{ id: 't1', result: false }] }, { messageId: 'b', toolCalls: [{ id: 't2', result: false }] }, refusal]);
     expect(notice).toContain('Refused messages: 2');
-    expect(notice).toContain('Tool calls in the refused message with no recorded execution result: 2.');
+    expect(notice).toContain('Tool calls in these refused messages with no recorded execution result: 2.');
     expect(notice).toContain(`Provider explanation: "${EXPLANATION}"`);
   });
 
@@ -158,10 +158,12 @@ describe('orchestration runtime refusal reporting (#586)', () => {
 
   it('records but does not announce a refusal in a response the user stopped', async () => {
     const session = randomUUID();
-    script = () => [start('msg_refused'), stop('refusal', details)];
+    let emitted!: () => void;
+    const refusedSeen = new Promise<void>(resolve => { emitted = resolve; });
+    // No terminal result: the turn stays open until the user stops it.
+    script = () => { emitted(); return [start('msg_refused'), stop('refusal', details)]; };
     const pending = send(session, 'Do the thing');
-    for (let i = 0; i < 100 && !runtime!.isBusy(session); i++) await new Promise(resolve => setTimeout(resolve, 5));
-    await new Promise(resolve => setTimeout(resolve, 20));
+    await refusedSeen; await new Promise(resolve => setImmediate(resolve));
     expect(runtime!.stopResponse(session)).toBe(true);
     await pending.catch(() => {});
     expect(events()).toEqual([expect.objectContaining({ refusals: [refusal] })]);
@@ -221,4 +223,19 @@ test('a stopped worker attempt keeps refusal evidence without replacing its stop
     expect(store.all("SELECT payload_json FROM conversation_events WHERE type='task.provider_refusal'").map(row => JSON.parse(String(row.payload_json)).payload))
       .toEqual([expect.objectContaining({ refusals: [refusal] })]);
   } finally { store.close(); }
+});
+
+test('a stall reason assigned after the outcome does not drop refusals from the task failure (#586)', () => {
+  const store = new OrchestrationStore(':memory:', 'a'), tasks = new TaskService(store);
+  try {
+    const input = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's', source: 'api', accountId: 'u', principalId: 'u', chatId: 's', threadKey: '' }, text: 'Work' });
+    const decision = new DecisionService(store).begin(input.conversationId, 'u', [input.inputId]);
+    const task = tasks.spawn({ ...input, ...decision, principalId: 'u', actionId: 'spawn', execute: true, writeMemory: false }, { title: 'Work', instructions: 'Work', targetProfile: 'default-worker' });
+    const attempt = tasks.claim(task.taskId)!;
+    tasks.started(attempt.attemptId, attempt.generation, { pid: 1, startedAt: Date.now(), instanceId: 'test' });
+    store.transaction(() => { const current = store.task(task.taskId)!; current.state = 'cancel_requested'; store.saveTask(current, current.stateVersion); });
+    jest.spyOn(tasks as any, 'stalledFailure').mockReturnValue({ code: 'PROGRESS_STALLED', message: 'stalled', observedAt: 1 });
+    expect(tasks.finish(attempt.attemptId, attempt.generation, { type: 'stopped', providerRefusals: [refusal] }))
+      .toMatchObject({ state: 'failed', failure: { code: 'PROGRESS_STALLED', providerRefusals: [refusal] } });
+  } finally { jest.restoreAllMocks(); store.close(); }
 });

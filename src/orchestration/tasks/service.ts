@@ -979,7 +979,6 @@ export class TaskService {
       const stalled = task.state === 'cancel_requested' ? this.stalledFailure(task, outcome.type !== 'unknown') : undefined;
       if (outcome.type !== 'completed' && outcome.type !== 'paused') {
         attempt.failure = stalled ?? outcome.failure ?? taskFailure(undefined, outcome.type === 'stopped' ? 'WORKER_STOPPED' : 'WORKER_FAILED');
-        if (refusals?.length && !attempt.failure.providerRefusals) attempt.failure = { ...attempt.failure, providerRefusals: refusals };
         task.failure = attempt.failure;
       } else { delete task.failure; }
       if (outcome.type === 'unknown') { if(task.executionControl?.phase==='pending')task.executionControl.phase='blocked'; attempt.state = 'unknown'; task.state = 'needs_reconciliation'; }
@@ -1001,6 +1000,11 @@ export class TaskService {
       // A paused or superseded-revision result skips the failure branch above;
       // a stalled stop still ends failed, so it must carry the stall reason.
       if (task.state === 'failed' && stalled) { attempt.failure = stalled; task.failure = stalled; task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: stalled.message }; }
+      // After every failure reassignment above, so a stop or stall reason cannot drop them.
+      if (refusals?.length && attempt.failure && !attempt.failure.providerRefusals) {
+        attempt.failure = { ...attempt.failure, providerRefusals: refusals };
+        if (task.failure) task.failure = attempt.failure;
+      }
       if (task.queuedCommands?.length) this.nextQueuedCommand(task, waitingForCommand || outcome.type === 'completed');
       if (task.state === 'cancelled') {
         delete task.failure;
