@@ -70,4 +70,18 @@ The worker sees the agent's sheet in its context instead of `~/.claude/pstack-mo
 
 The plugin's SessionStart hook reads `session hook: on|off` only from the global `~/.claude/pstack-models.md`, so that line applies to every set-up agent alike and has no per-agent setting.
 
-Until subagents run as gateway tasks, Claude Code's own `Agent` tool takes only model families, not IDs, so a skill falls back to its default model for a subagent and says so.
+## Subagents
+
+A set-up agent's Claude workers do not use Claude Code's own `Agent` tool (it is disabled for them). pstack's fan-out goes through three worker tools with the same arguments instead, so every subagent is a gateway task you can see in `/tasks` and cancel, and can run on another provider:
+
+| Tool | Does |
+| --- | --- |
+| `subagent_spawn` | `description`, `prompt`, `subagent_type`, `model`, `readonly`, `run_in_background` — like `Agent`. `model` is a model ID from the sheet (omitted, `inherit-parent` or `auto` = the parent's model); a `pstack:effort-<level>` agent sets the subagent's effort, otherwise it inherits the parent's. In the foreground it waits and returns the result; in the background it returns a `task_id` |
+| `subagent_wait` | Waits for the listed subagents and returns each result, failure, or question |
+| `subagent_cancel` | Cancels the caller's own subagents |
+
+- Subagents nest at most three levels below the worker, as in Claude Code; the third level gets no subagent tools and works inline.
+- When a task ends, is cancelled or fails, its unfinished subagents are cancelled with it.
+- Subagents report to their parent, never to the chat. The agent's task index lists the root task only; `task_status` with its `task_id` lists the subagents.
+- A GPT subagent runs on Codex without the plugin: it gets the agent definition, the prompt and the plugin's path to read files the prompt names. `readonly` is an instruction there, as in pstack's own Codex mapping; a read-only Claude subagent also gets read tools only.
+- `isolation: "worktree"` runs on the host as usual and answers `isolation: "ignored"`. Resuming an earlier subagent is not supported; pstack spawns fresh subagents.

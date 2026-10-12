@@ -13,7 +13,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { gatewayModules } from './modules';
-import { AGENT_TASK_TOOLS, WORKER_REPORT_TOOLS, callTaskBridge } from './tools/tasks/module';
+import { AGENT_TASK_TOOLS, SUBAGENT_TOOLS, WORKER_REPORT_TOOLS, callTaskBridge } from './tools/tasks/module';
 import { createLazyToolCatalog, LAZY_TOOL_DEFINITIONS } from './lazy-tools';
 import { buildChannelInstructions } from './instructions';
 import type { ChannelModule, ToolModule, McpToolDefinition } from './types';
@@ -61,7 +61,7 @@ for (const mod of modules) {
 // mid-session and invalidated the whole cache — the same defect ee800a7 fixed for the response
 // schema. The turn's INTAKE_OVERLAY prompt text, below the cache breakpoint, is what asks for
 // the tool; the bridge refuses the call outright when the feature is not active.
-const taskTools = ORCHESTRATION_ROLE === 'agent' ? AGENT_TASK_TOOLS.filter(tool => (tool.name !== 'jev_evaluate' || process.env.GATEWAY_JEV_ENABLED === 'true')).filter(tool => tool.name !== 'capabilities_list' || process.env.GATEWAY_CAPABILITY_CATALOG === 'true') : ORCHESTRATION_ROLE === 'worker' ? WORKER_REPORT_TOOLS.filter(tool => (tool.name !== 'jev_evaluate' || process.env.GATEWAY_JEV_ENABLED === 'true')).filter(tool => tool.name !== 'task_memory_append' || process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true') : [];
+const taskTools = ORCHESTRATION_ROLE === 'agent' ? AGENT_TASK_TOOLS.filter(tool => (tool.name !== 'jev_evaluate' || process.env.GATEWAY_JEV_ENABLED === 'true')).filter(tool => tool.name !== 'capabilities_list' || process.env.GATEWAY_CAPABILITY_CATALOG === 'true') : ORCHESTRATION_ROLE === 'worker' ? WORKER_REPORT_TOOLS.filter(tool => (tool.name !== 'jev_evaluate' || process.env.GATEWAY_JEV_ENABLED === 'true')).filter(tool => tool.name !== 'task_memory_append' || process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true').concat(process.env.GATEWAY_SUBAGENTS === 'true' ? SUBAGENT_TOOLS : []) : [];
 if (ORCHESTRATION_ROLE && process.env.GATEWAY_ORCHESTRATION_TICKET_FILE) visibleTools.push(...taskTools);
 
 // Preserve the full policy-filtered inventory internally; only schema exposure is lazy.

@@ -51,6 +51,8 @@ export interface RuntimeProfile {
   /** Host workers: per-plugin `enabledPlugins` overrides, merged by Claude Code
    * over the user's own settings key by key, so other plugins are untouched. */
   pluginOverrides?: Record<string, boolean>;
+  /** Host workers: native tools removed from the inventory (`--disallowedTools`). */
+  disallowedTools?: string[];
   /** A trusted container-discovered skill. These paths never refer to host files. */
   containerSkill?: { name: string; filePath: string; resourceRoot: string; content: string };
   checkpointCommand?: string;
@@ -91,6 +93,7 @@ export function runtimeProfileArgs(profile: RuntimeProfile, extraFlags: string[]
       ...(profile.pluginOverrides ? { enabledPlugins: profile.pluginOverrides } : {}) };
     return ['--tools', profile.workerTools === undefined ? 'default' : profile.workerTools.join(','), '--mcp-config', profile.mcpConfigPath,
       ...(Object.keys(settings).length ? ['--settings', JSON.stringify(settings)] : []),
+      ...(profile.disallowedTools?.length ? ['--disallowedTools', profile.disallowedTools.join(',')] : []),
       ...(profile.skillPluginDir ? ['--plugin-dir', profile.skillPluginDir] : []),
       '--append-system-prompt', [profile.context, profile.overlay].filter(Boolean).join('\n\n')];
   }

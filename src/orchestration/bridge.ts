@@ -12,6 +12,10 @@ import { mkdirSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
 import type { AgentConfig, ModelConfig } from '../types';
 import { EFFORT_LEVELS, ModelResolutionError, findModel, isEffort, resolveModelId, selectableModels } from '../agent/model-registry';
+import { SUBAGENT_TOOLS } from './subagent-tool-schemas';
+import { PSTACK_KEYWORDS } from '../pstack/config';
+import { pstackPluginInfo } from '../pstack/plugin-info';
+import { pstackAgentTemplates } from '../pstack/templates';
 import { importContainerFile } from './container';
 import { TaskService, assertAgentContextRefs } from './tasks/service';
 import { CommandContext, OrchestrationError, ChangeMode } from './types';
@@ -24,12 +28,21 @@ import { resolveNamedSkill } from './skills';
 import type { SkillRegistry } from '../skills';
 
 type Scope = { role: 'agent'; compactOnly?: boolean; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; onMutationResult?: (actionId: string, committed: boolean, errorCode?: string) => void; beforeMutation?: (tool: string, args: Record<string, unknown>, actionId: string) => Promise<void> } |
-  { role: 'worker'; attemptId: string; generation: number };
+  { role: 'worker'; attemptId: string; generation: number; /** pstack agents' Claude workers above the depth limit. */ subagents?: boolean };
 
 type InputIssue = { field: string; reason: string; correction: string };
 /** Computer adapter failures are plain Errors with a bounded code; surface the code, not INVALID_REQUEST. */
 export const COMPUTER_ADAPTER_ERROR = /^(?:COMPUTER_[A-Z][A-Z_]{0,60}|INVALID_COMPUTER_GOAL)$/;
 const COMPUTER_NOT_ALLOWED_MESSAGE = 'Computer Use is not enabled for this agent on this gateway. Tell the user it is not available here; do not suggest another app or a workaround.';
+/** Readonly is the spawning skill's choice. Claude children also lose write tools; on Codex, as in pstack's own Codex mapping, it is this instruction. */
+export const SUBAGENT_READONLY = 'Read-only subagent: inspect and report only. Do not edit, create or delete files, and do not run commands that change state.';
+function subagentInputIssues(args: Record<string, unknown>): InputIssue[] {
+  const issues: InputIssue[] = [];
+  for (const field of ['description', 'prompt'] as const) if (typeof args[field] !== 'string' || !(args[field] as string).trim()) issues.push({ field, reason: 'required', correction: `Provide a nonempty ${field}.` });
+  for (const field of ['subagent_type', 'model', 'isolation'] as const) if (args[field] !== undefined && (typeof args[field] !== 'string' || !(args[field] as string).trim() || (args[field] as string).length > 200)) issues.push({ field, reason: 'invalid', correction: `Provide ${field} as a short string, or omit it.` });
+  for (const field of ['readonly', 'run_in_background'] as const) if (args[field] !== undefined && typeof args[field] !== 'boolean') issues.push({ field, reason: 'invalid', correction: `${field} is a boolean.` });
+  return issues;
+}
 function taskSpawnInputIssues(args: Record<string, unknown>): InputIssue[] {
   const issues: InputIssue[] = [];
   for (const field of ['title', 'instructions', 'target_profile'] as const) {
@@ -319,6 +332,48 @@ export class TaskBridge {
             if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
             result = await this.cancelOnDisconnect(response, cancelled.signal, signal => this.narrateCall!(scope.attemptId, scope.generation, command.action_id, a, signal));
           }
+          else if (SUBAGENT_TOOLS.some(tool => tool.name === command.tool) && scope.subagents) {
+            const cancelled = this.cancellations.get(token!);
+            if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
+            const wait = (taskIds: unknown) => this.cancelOnDisconnect(response, cancelled.signal, async signal => {
+              for (;;) {
+                const results = this.tasks.subagentResults(scope.attemptId, scope.generation, taskIds);
+                if (results) return results;
+                await new Promise<void>((resolve, reject) => {
+                  const timer = setTimeout(resolve, 1000);
+                  signal.addEventListener('abort', () => { clearTimeout(timer); reject(new OrchestrationError('SUBAGENT_WAIT_CANCELLED')); }, { once: true });
+                });
+              }
+            });
+            if (command.tool === 'subagent_wait') result = { results: await wait(a.task_ids) };
+            else if (command.tool === 'subagent_cancel') result = { results: this.tasks.cancelSubagentTasks(scope.attemptId, scope.generation, a.task_ids) };
+            else {
+              inputDetails = subagentInputIssues(a);
+              if (inputDetails.length) throw new OrchestrationError('INVALID_INPUT');
+              const keyword = a.model === undefined || PSTACK_KEYWORDS.includes(a.model);
+              let model: string | undefined;
+              if (!keyword) {
+                try { model = resolveModelId(await this.models(), a.model).id; }
+                catch (error) {
+                  if (!(error instanceof ModelResolutionError)) throw error;
+                  inputDetails = [{ field: 'model', reason: error.code === 'UNKNOWN_MODEL' ? 'unknown_model' : 'alias', correction: error.message }];
+                  throw new OrchestrationError(error.code);
+                }
+              }
+              // The agent definition is a native subagent's system prompt; here it leads the task instructions.
+              const { installPath } = pstackPluginInfo();
+              const template = typeof a.subagent_type === 'string' && a.subagent_type.startsWith('pstack:') ? (installPath ? pstackAgentTemplates(installPath) : new Map()).get(a.subagent_type) : undefined;
+              if (typeof a.subagent_type === 'string' && a.subagent_type.startsWith('pstack:') && !template) {
+                inputDetails = [{ field: 'subagent_type', reason: 'unknown', correction: 'Use a pstack agent the installed plugin declares (e.g. pstack:effort-high, pstack:poteto-agent), a built-in type, or omit it.' }];
+                throw new OrchestrationError('INVALID_INPUT');
+              }
+              const instructions = [template?.body, a.readonly ? SUBAGENT_READONLY : '', installPath ? `pstack plugin root: ${installPath}` : '', a.prompt].filter(Boolean).join('\n\n');
+              const task = this.tasks.spawnSubagent(scope.attemptId, scope.generation, command.action_id, { title: a.description, instructions,
+                ...(model ? { model } : {}), ...(template?.effort ? { effort: template.effort } : {}), ...(a.subagent_type ? { subagentType: a.subagent_type } : {}), ...(a.readonly ? { readonly: true } : {}) });
+              const receipt = { task_id: task.taskId, model: task.model, effort: task.effort, state: task.state, ...(a.isolation === 'worktree' ? { isolation: 'ignored' } : {}) };
+              result = a.run_in_background ? receipt : { ...receipt, ...(await wait([task.taskId]))[0] };
+            }
+          }
           else if (CRON_TOOLS.some(tool => tool.name === command.tool) && this.files && this.cronCall) {
             this.files.scope(scope.attemptId, scope.generation);
             const cancelled = this.cancellations.get(token!);
@@ -377,6 +432,7 @@ export class TaskBridge {
       GATEWAY_ORCHESTRATION_MEDIA: worker ? 'true' : '',
       GATEWAY_LAZY_TOOLS: worker ? 'true' : '',
       GATEWAY_ORCHESTRATION_CRON: worker && this.cronCall ? 'true' : '',
+      GATEWAY_SUBAGENTS: scope.role === 'worker' && scope.subagents ? 'true' : '',
       GETPOD_BROWSER_URL: worker ? process.env.GETPOD_BROWSER_URL ?? 'http://127.0.0.1:10880' : '',
       GETPOD_BROWSER_API_KEY: worker ? process.env.GETPOD_BROWSER_API_KEY ?? '' : '',
       GETPOD_BROWSER_DISABLED: worker ? process.env.GETPOD_BROWSER_DISABLED ?? '' : 'true',
