@@ -537,15 +537,16 @@ export class TaskService {
       if (replacedByTaskId === taskId) throw new OrchestrationError('INVALID_REPLACEMENT');
       this.owned(replacedByTaskId, conversationId);
     }
-    // The user's End session on a settled round closes it only: the round's
-    // completed/failed outcome is not rewritten as a cancellation.
-    if (TERMINAL_TASK_STATES.has(task.state) && (requestedBy==='user' || !(task.gatewayTarget?.adapter==='computer' && task.gatewayDispatch && automationSession(task)?.status!=='closed'))) {
-      const session=automationSession(task);
-      if(session && session.status!=='closed'){
-        task.automationSession={...session,status:'closed',closedAt:Date.now(),closedReason:requestedBy};
+    // Ending a settled round, by the user or the agent, closes its session only:
+    // the round's completed/failed outcome is not rewritten as a cancellation.
+    if (TERMINAL_TASK_STATES.has(task.state)) {
+      const session=automationSession(task),closes=Boolean(session&&session.status!=='closed');
+      if(closes){
+        task.automationSession={...session!,status:'closed',closedAt:Date.now(),closedReason:requestedBy};
         if(task.gatewayTarget?.adapter==='computer'&&task.gatewayDispatch)task.computerRevocation={requestId:task.gatewayDispatch.requestId,requestedAt:Date.now()};
-        this.store.saveTask(task,task.stateVersion);
       }
+      if(replacedByTaskId)task.replacedByTaskId=replacedByTaskId;
+      if(closes||replacedByTaskId)this.store.saveTask(task,task.stateVersion);
       return task;
     }
     if (task.state === 'cancel_requested') {

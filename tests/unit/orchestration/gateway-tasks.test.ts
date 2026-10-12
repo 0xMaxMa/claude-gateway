@@ -621,6 +621,23 @@ test.each(['completed','failed'] as const)('ending the session of a %s computer 
  expect(store.task(task.taskId)).toMatchObject({state,...outcome});expect(computer.submit).not.toHaveBeenCalled();
 });
 
+test.each(['completed','failed'] as const)('an agent task_cancel on a %s computer round with an open session keeps its outcome',async(state)=>{
+ let stopped=false;
+ const computer={...adapter,name:'computer',cancel:jest.fn(async()=>{}),inspect:jest.fn(async()=>stopped?{type:'stopped' as const}:'pending' as const)};
+ await controller.close();controller=new GatewayTaskController(tasks,new Map([['computer',computer]]));
+ const task=tasks.spawn({...context,actionId:'agent-end'},{title:'Desktop',instructions:'Wait',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'computer'}});
+ const saved=store.task(task.taskId)!;saved.state=state;saved.gatewayDispatch={requestId:'settled-round',submittedAt:Date.now()};saved.automationSession={status:'idle',idleTimeoutMs:1800000,idleSince:Date.now()};
+ if(state==='failed')saved.failure={code:'COMPUTER_ACTION_REJECTED',message:'The device rejected the action.',observedAt:Date.now()};else saved.result={summary:'Opened YouTube',artifactIds:[]};
+ store.transaction(()=>store.saveTask(saved,saved.stateVersion));
+ const outcome=state==='failed'?{failure:saved.failure}:{result:saved.result};
+ const ended=tasks.cancel({...context,actionId:'agent-cancel'},task.taskId);
+ expect(ended).toMatchObject({state,...outcome,automationSession:{status:'closed',closedReason:'agent'},computerRevocation:{requestId:'settled-round'}});expect(ended.cancellation).toBeUndefined();
+ await controller.tick();expect(computer.cancel).toHaveBeenCalledWith(expect.objectContaining({taskId:task.taskId}),'settled-round');
+ stopped=true;await controller.tick();
+ const after=store.task(task.taskId)!;
+ expect(after).toMatchObject({state,...outcome});expect(after.cancellation).toBeUndefined();expect(after.computerRevocation).toBeUndefined();expect(computer.submit).not.toHaveBeenCalled();
+});
+
 test('settled computer commands await evidence without exhausting a failure recovery budget',()=>{
  let task=tasks.spawn({...context,actionId:'computer-continuous'},{title:'Desktop',instructions:'Open app',targetProfile:'gateway-managed',gatewayTarget:{...target,adapter:'computer'}});
  agentControl(task.taskId);
