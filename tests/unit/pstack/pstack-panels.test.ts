@@ -27,13 +27,14 @@ describe('/pstack-setup panel entries', () => {
     expect(block.roles!['interrogate reviewers']).toBe('claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5');
   });
 
-  it('a list emptied entry by entry drops the override', () => {
-    const block = applySheetLines({ roles: { 'arena runners': 'claude-opus-5-5 @xhigh' } }, 'arena runners -= claude-opus-5-5', defaults);
-    expect(block.roles).toBeUndefined();
+  // Review of #584: emptying a panel used to fall back silently to the skill default.
+  it('refuses to remove the last entry, pointing at "<role>: default"', () => {
+    expect(() => applySheetLines({ roles: { 'arena runners': 'claude-opus-5-5 @xhigh' } }, 'arena runners -= claude-opus-5-5', defaults)).toThrow('arena runners: default');
   });
 
-  it('refuses to remove a model that is not in the list', () => {
+  it('refuses to remove a model that is not in the list, and matches models case-insensitively', () => {
     expect(() => applySheetLines({ roles: { 'arena runners': 'claude-opus-5-5' } }, 'arena runners -= gpt-6-sol[1m]', defaults)).toThrow(PstackConfigError);
+    expect(applySheetLines({ roles: { 'arena runners': 'claude-opus-5-5, GPT-6-SOL[1m] @high' } }, 'arena runners -= gpt-6-sol[1m]', defaults).roles).toEqual({ 'arena runners': 'claude-opus-5-5' });
   });
 });
 
@@ -91,14 +92,15 @@ describe('dashboard task tree', () => {
     return { order: (runInContext('dashboardTaskRows()', context) as Array<{ t: { taskId: string } }>).map(r => r.t.taskId), label: (t: unknown) => runInContext('subagentLabel', context)(t) as string };
   }
 
+  // child-1 updated last but was created first: siblings keep creation order (review of #584).
   it('lists subagents under their parent, oldest first, and roots by recency', () => {
     const { order } = rowsFor([
-      { taskId: 'root-old', updatedAt: 1 },
-      { taskId: 'child-2', parentTaskId: 'root-new', depth: 1, updatedAt: 9 },
-      { taskId: 'root-new', updatedAt: 5 },
-      { taskId: 'grandchild', parentTaskId: 'child-1', depth: 2, updatedAt: 8 },
-      { taskId: 'child-1', parentTaskId: 'root-new', depth: 1, updatedAt: 7 },
-      { taskId: 'orphan', parentTaskId: 'gone', depth: 1, updatedAt: 3 },
+      { taskId: 'root-old', createdAt: 1, updatedAt: 1 },
+      { taskId: 'child-2', parentTaskId: 'root-new', depth: 1, createdAt: 7, updatedAt: 7 },
+      { taskId: 'root-new', createdAt: 4, updatedAt: 5 },
+      { taskId: 'grandchild', parentTaskId: 'child-1', depth: 2, createdAt: 6, updatedAt: 8 },
+      { taskId: 'child-1', parentTaskId: 'root-new', depth: 1, createdAt: 5, updatedAt: 9 },
+      { taskId: 'orphan', parentTaskId: 'gone', depth: 1, createdAt: 3, updatedAt: 3 },
     ]);
     expect(order).toEqual(['root-new', 'child-1', 'grandchild', 'child-2', 'orphan', 'root-old']);
   });
@@ -108,4 +110,19 @@ describe('dashboard task tree', () => {
     expect(label({ parentTaskId: 'p', depth: 2, model: 'gpt-6-sol[1m]', harness: 'codex', effort: 'high' })).toContain('↳ ↳ gpt-6-sol[1m] · Codex · high');
     expect(label({ taskId: 'root' })).toBe('');
   });
+});
+
+// Review of #584: the panel is the root's direct subagents only.
+test('a reviewer\'s own helpers are not counted as panel members', () => {
+  const store = new OrchestrationStore(':memory:', 'a');
+  const tasks = new TaskService(store, { tasks: { workspaceMode: 'host', maxConcurrentPerAgent: 10, maxConcurrentPerConversation: 10 } }, '/tmp');
+  const input = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's', source: 'telegram', accountId: 'u', principalId: 'u', chatId: 'c', threadKey: '' }, text: 'x' });
+  const context = { ...input, ...new DecisionService(store).begin(input.conversationId, 'u', [input.inputId]), principalId: 'u', execute: true, writeMemory: false, actionId: 'root' };
+  const root = tasks.spawn(context, { title: 'interrogate', instructions: 'x', targetProfile: 'default-worker' });
+  const a = tasks.claim(root.taskId)!; tasks.started(a.attemptId, a.generation);
+  const reviewer = tasks.spawnSubagent(a.attemptId, a.generation, 'r1', { title: 'Review', instructions: 'r', model: 'claude-opus-5-5' });
+  const b = tasks.claim(reviewer.taskId)!; tasks.started(b.attemptId, b.generation);
+  tasks.spawnSubagent(b.attemptId, b.generation, 'h1', { title: 'Helper', instructions: 'h', model: 'claude-haiku-5-5' });
+  expect(subagentLines(store, input.conversationId)).toEqual(['interrogate: 0/1 · ⏳ claude-opus-5-5']);
+  store.close();
 });

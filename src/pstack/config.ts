@@ -99,9 +99,11 @@ export function applySheetLines(block: AgentPstackConfig, text: string, roleDefa
       const [, key, op, value] = edit;
       // An unset role starts from its skill default, as the sheet shows it.
       const entries = (roles[key] ?? roleDefault(key) ?? '').split(',').map(e => e.trim()).filter(Boolean);
-      const kept = op === '+' ? [...entries, value] : entries.filter(e => e.replace(/\s+@\S+$/, '') !== value.replace(/\s+@\S+$/, ''));
+      const model = (entry: string) => entry.replace(/\s+@\S+$/, '').toLowerCase();
+      const kept = op === '+' ? [...entries, value] : entries.filter(e => model(e) !== model(value));
       if (op === '-' && kept.length === entries.length) throw new PstackConfigError('INVALID_PSTACK_CONFIG', `"${value}" is not in ${key}.`);
-      if (kept.length) roles[key] = kept.join(', '); else delete roles[key];
+      if (!kept.length) throw new PstackConfigError('INVALID_PSTACK_CONFIG', `A panel needs at least one entry; use "${key}: default" to go back to the skill default.`);
+      roles[key] = kept.join(', ');
       continue;
     }
     const colon = line.indexOf(':');

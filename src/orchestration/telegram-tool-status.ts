@@ -92,9 +92,9 @@ export class TelegramToolStatus {
         // Same history/current/elapsed layout as main's Telegram typing manager.
         const last=details.slice(-5), current=last.pop()??'🧠 Thinking...';
         if (!status.messageId && !details.length && Date.now()-status.since<5000) continue;
-        const signature=[...last,current,...subagentLines(this.store,id,this.modelLabel)].join('\n');
-        if (!move && status.details===signature && Date.now()-status.seenAt<10000) continue;
         const panels=subagentLines(this.store,id,this.modelLabel);
+        const signature=[...last,current,...panels].join('\n');
+        if (!move && status.details===signature && Date.now()-status.seenAt<10000) continue;
         const totalSecs=Math.max(0,Math.floor((Date.now()-status.since)/1000));
         const hours=Math.floor(totalSecs/3600),mins=Math.floor((totalSecs%3600)/60),secs=totalSecs%60;
         const elapsed=hours>0?`${hours}h ${mins}m`:mins>0?(secs>0?`${mins}m ${secs}s`:`${mins}m`):`${secs}s`;
@@ -161,11 +161,12 @@ export function telegramToolDetail(name:string,input:Record<string,unknown>):str
  * Subagents never message the chat themselves; this line is how the user sees them.
  */
 export function subagentLines(store: OrchestrationStore, conversationId: string, modelLabel: (id: string) => string = id => id): string[] {
-  const roots = store.all(`SELECT DISTINCT json_extract(snapshot_json,'$.rootTaskId') AS root FROM tasks WHERE conversation_id=?
-    AND json_extract(snapshot_json,'$.rootTaskId') IN (SELECT id FROM tasks WHERE conversation_id=? AND state NOT IN ('completed','failed','cancelled')) LIMIT 5`, conversationId, conversationId);
-  return roots.map(row => {
-    const root = store.task(String(row.root));
-    const children = store.all("SELECT snapshot_json FROM tasks WHERE json_extract(snapshot_json,'$.rootTaskId')=? ORDER BY created_at LIMIT 32", String(row.root))
+  // Unfinished roots only, found through the indexed parentTaskId of their children.
+  const roots = store.all(`SELECT id,json_extract(snapshot_json,'$.title') AS title FROM tasks t WHERE conversation_id=? AND state NOT IN ('completed','failed','cancelled')
+    AND json_extract(snapshot_json,'$.parentTaskId') IS NULL AND EXISTS(SELECT 1 FROM tasks c WHERE json_extract(c.snapshot_json,'$.parentTaskId')=t.id) ORDER BY created_at LIMIT 5`, conversationId);
+  return roots.map(root => {
+    // The panel is the root's direct subagents; a reviewer's own helpers are not panel members.
+    const children = store.all("SELECT snapshot_json FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId')=? ORDER BY created_at,rowid LIMIT 32", String(root.id))
       .map(child => JSON.parse(String(child.snapshot_json)) as import('./types').TaskSnapshot);
     const done = children.filter(child => ['completed', 'failed', 'cancelled'].includes(child.state)).length;
     const entries = children.map(child => {
@@ -175,6 +176,6 @@ export function subagentLines(store: OrchestrationStore, conversationId: string,
       if (child.state === 'waiting_input') return `❓ ${label}`;
       return `⏳ ${label}`;
     });
-    return `${(root?.title ?? 'subagents').slice(0, 80)}: ${done}/${children.length} · ${entries.join(' · ')}`.slice(0, 600);
+    return `${String(root.title ?? 'subagents').slice(0, 80)}: ${done}/${children.length} · ${entries.join(' · ')}`.slice(0, 600);
   });
 }

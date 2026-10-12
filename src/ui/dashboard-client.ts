@@ -65,7 +65,7 @@ function dashboardTaskRows(){
  const rows=dashboardRows().flatMap(({a,s})=>(s.tasks||[]).map(t=>({a,s,t}))).sort((x,y)=>Number(y.t.updatedAt)-Number(x.t.updatedAt)||x.t.taskId.localeCompare(y.t.taskId));
  // Subagents (pstack) follow their parent as a tree, oldest first; an orphan whose parent fell outside the page stays a root.
  const ids=new Set(rows.map(r=>r.t.taskId)),children=new Map();
- for(const r of rows.slice().reverse())if(r.t.parentTaskId&&ids.has(r.t.parentTaskId))children.set(r.t.parentTaskId,[...(children.get(r.t.parentTaskId)||[]),r]);
+ for(const r of rows.slice().sort((x,y)=>Number(x.t.createdAt)-Number(y.t.createdAt)))if(r.t.parentTaskId&&ids.has(r.t.parentTaskId))children.set(r.t.parentTaskId,[...(children.get(r.t.parentTaskId)||[]),r]);
  const out=[],walk=r=>{out.push(r);for(const c of children.get(r.t.taskId)||[])walk(c);};
  rows.filter(r=>!r.t.parentTaskId||!ids.has(r.t.parentTaskId)).forEach(walk);
  return out;

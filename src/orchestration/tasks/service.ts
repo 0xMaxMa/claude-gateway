@@ -180,7 +180,7 @@ export class TaskService {
     if (taskId) {
       const task = this.owned(taskId, conversationId); delete task.skill;
       // A root lists its whole subagent tree; each entry names its parent.
-      const subagents = task.parentTaskId ? [] : this.store.all("SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.rootTaskId')=? ORDER BY created_at", task.conversationId, task.taskId)
+      const subagents = task.parentTaskId ? [] : this.store.all("SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.rootTaskId')=? ORDER BY created_at,rowid", task.conversationId, task.taskId)
         .map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot)
         .map(child => {
           const attempt = this.store.get('SELECT payload_json FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', child.taskId);
