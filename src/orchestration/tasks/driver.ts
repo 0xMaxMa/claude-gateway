@@ -104,6 +104,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     if (attempt.harness && attempt.harness !== harness.harness) throw new OrchestrationError('WORKER_HARNESS_CHANGED');
     attempt.harness = harness.harness;
     attempt.harnessModel = harness.harness === 'codex' ? harness.config.model : task.model ?? this.agent.claude.model;
+    if (task.effort) attempt.effort = task.effort;
     this.tasks.store.transaction(() => this.tasks.store.saveAttempt(attempt));
     const cliSkill = task.skill?.invocation === 'cli' && harness.harness !== 'codex';
     const invokedSkill = task.skill ? (cliSkill ? task.skill.name : `orchestration-task:${task.skill.name}`) : undefined;
@@ -148,12 +149,12 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const shared = resolveSharedConfig(this.agent.knowledge?.shared, this.gateway.gateway.knowledge?.shared);
     const ticket = this.bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation }, directory, this.agent.workspace, shared.enabled ? sharedVaultDir(shared) : '');
     try {
-      const profile = { ...ticket.profile, hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
+      const profile = { ...ticket.profile, ...(task.effort ? { claudeEffort: task.effort } : {}), hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
       const workerConfig: AgentConfig = { ...this.agent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
         claude: { ...this.agent.claude, model: task.model ?? this.agent.claude.model, extraFlags: [] } };
       const process = harness.harness === 'codex'
         ? new CodexProcess({ agent: workerConfig, gateway: this.gateway, profile, sessionId: attempt.sessionId,
-          stateDirectory: join(this.privateRoot, 'codex-sessions'), config: harness.config, resolvedCredentials,
+          stateDirectory: join(this.privateRoot, 'codex-sessions'), config: task.effort ? { ...harness.config, reasoningEffort: task.effort } : harness.config, resolvedCredentials,
           requestInput: question => { this.tasks.requestInput(attempt.attemptId, attempt.generation, question); },
           checkpoint: async () => {
             const next = this.tasks.checkpoint(attempt.attemptId, attempt.generation, { sessionId: attempt.sessionId });

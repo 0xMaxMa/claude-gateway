@@ -351,3 +351,44 @@ test.each(['answer','cancel'] as const)('%s during question cleanup fences the o
   expect(outcome.type).toBe('paused');
   expect(tasks.finish(attempt.attemptId,attempt.generation,outcome).state).toBe(action==='answer'?'queued':'cancelled');
 });
+
+// #581: per-task model and effort. The command's model picks the harness and
+// its effort reaches whichever harness runs the attempt.
+describe('per-task model and effort', () => {
+  test('a GPT task id runs on Codex with the requested effort as reasoningEffort, recorded on the attempt', async () => {
+    gateway.gateway.workers!.codex = { reasoningEffort: 'low' };
+    const {attempt} = await run('claude-sonnet-4-6', {model:'gpt-6-astra[1m]', effort:'max'});
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].config).toMatchObject({model:'gpt-6-astra', reasoningEffort:'max'});
+    expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'codex', harnessModel:'gpt-6-astra', effort:'max'});
+  });
+
+  test('a Claude task gets the requested effort on its worker profile', async () => {
+    const {attempt} = await run('claude-sonnet-4-6', {model:'claude-sonnet-5-5', effort:'xhigh'});
+    expect(CodexProcess).not.toHaveBeenCalled();
+    expect(jest.mocked(SessionProcess).mock.calls[0][6]).toMatchObject({role:'worker', claudeEffort:'xhigh'});
+    expect(jest.mocked(SessionProcess).mock.calls[0][2].claude.model).toBe('claude-sonnet-5-5');
+    expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'claude', harnessModel:'claude-sonnet-5-5', effort:'xhigh'});
+  });
+
+  test('without effort the worker keeps the harness default', async () => {
+    gateway.gateway.workers!.codex = { reasoningEffort: 'low' };
+    await run('gpt-6-astra');
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].config.reasoningEffort).toBe('low');
+    await run('claude-sonnet-4-6');
+    expect(jest.mocked(SessionProcess).mock.calls[0][6]?.claudeEffort).toBeUndefined();
+  });
+
+  test('when Codex is unavailable the task falls back to Claude, keeps its effort, and status reports the real harness', async () => {
+    jest.mocked(resolveCodexCredentials).mockRejectedValue(new CodexReadinessError('CODEX_UNAVAILABLE','fixture unavailable'));
+    const {task,attempt} = await run('claude-sonnet-4-6', {model:'gpt-6-astra[1m]', effort:'high'});
+    expect(CodexProcess).not.toHaveBeenCalled();
+    expect(jest.mocked(SessionProcess).mock.calls[0][6]).toMatchObject({claudeEffort:'high'});
+    expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'claude', effort:'high'});
+    expect(tasks.status(task.conversationId,'u',task.taskId)[0]).toMatchObject({model:'gpt-6-astra[1m]', effort:'high', harness:'claude'});
+  });
+
+  test('gateway-managed tasks reject a model or effort', () => {
+    for (const extra of [{model:'gpt-6-astra[1m]'},{effort:'max' as const}])
+      expect(() => tasks.spawn({...context,actionId:`gm-${++sequence}`},{title:'T',instructions:'x',targetProfile:'gateway-managed',gatewayTarget:{adapter:'safemode',sessionId:'s'} as any,...extra})).toThrow('INVALID_GATEWAY_TARGET');
+  });
+});

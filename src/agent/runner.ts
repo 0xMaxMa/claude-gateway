@@ -53,7 +53,7 @@ import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../s
 import { isBuiltinCommand } from './builtin-commands';
 import { commandHelp } from './command-help';
 import { SessionConfirmations } from './session-confirmations';
-import { fetchModelCatalog, DEFAULT_CONTEXT_WINDOW } from './model-catalog';
+import { DEFAULT_CONTEXT_WINDOW } from './model-catalog';
 import { SafeModeManager } from './safe-mode';
 import { isValidTimezone } from './skill-learning/config';
 import {
@@ -101,65 +101,8 @@ const TOO_LARGE_HISTORY_LADDER: readonly number[] = [MAX_HISTORY_MESSAGES, 40, 3
 
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
-// Fable 5.1 takes the bare `fable` alias and Fable 5 is demoted to `fable5`,
-// following the "bare alias = newest of the family" convention the rest of this
-// list uses — the same demotion Opus 4.8 took to `opus48` when Opus 5 landed.
-//
-// Note that `fable` therefore points at a model not every provider has
-// entitled yet; ours answers `400 model not supported` for it today, until
-// Crown-Labs/getpod#2538 adds it to the catalog. This only affects someone
-// typing `/model fable` from now on: selection stores the resolved id, not the
-// alias, so an agent already on Fable 5 stays on claude-fable-5 and existing
-// configs have their claude-fable-5 row rewritten to `fable5` by
-// migrateModels(). Nobody is moved onto 5.1 by this change.
-//
-// Both Fable 5.x entries carry the same 200k/1M split as the rest: their CLI
-// catalog entry says `native_1m`, but native 1M only applies when the base URL
-// is api.anthropic.com. Behind a proxy the `[1m]` id suffix and the
-// `context-1m-2025-08-07` beta header are what actually buy the larger window,
-// which is exactly what the paired rows below encode.
-//
-// Opus 5.5 (`claude-opus-5-5`) follows the same convention on its own family:
-// it takes the bare `opus` alias and Opus 5 is demoted to `opus5`, mirroring
-// the Opus 5 -> Opus 4.8 demotion above and the Fable 5.1 -> Fable 5 one.
-// Selection still stores the resolved id, so an agent already on Opus 5 stays
-// on claude-opus-5 — only `/model opus` from now on resolves to 5.5.
-//
-// Sonnet 5.5 (`claude-sonnet-5-5`) does the same on the Sonnet family: it takes
-// `sonnet` / `sonnet[1m]` and Sonnet 5 is demoted to `sonnet5` / `sonnet5[1m]`;
-// Sonnet 4.6 keeps `sonnet46`. An agent already on Sonnet 5 stays on
-// claude-sonnet-5.
-//
-// Haiku 5.5 (`claude-haiku-5-5`) takes the bare `haiku` alias and Haiku 4.5 is
-// demoted to `haiku45`. An agent already on Haiku 4.5 stays on
-// claude-haiku-4-5-20251001.
-export const DEFAULT_MODELS: ModelConfig[] = [
-  { id: 'claude-fable-5-1[1m]',      label: 'Fable 5.1 (1M)',   alias: 'fable[1m]',   contextWindow: 1000000 },
-  { id: 'claude-fable-5[1m]',        label: 'Fable 5 (1M)',     alias: 'fable5[1m]',  contextWindow: 1000000 },
-  { id: 'claude-opus-5-5[1m]',       label: 'Opus 5.5 (1M)',    alias: 'opus[1m]',    contextWindow: 1000000 },
-  { id: 'claude-opus-5[1m]',         label: 'Opus 5 (1M)',      alias: 'opus5[1m]',   contextWindow: 1000000 },
-  { id: 'claude-opus-4-8[1m]',       label: 'Opus 4.8 (1M)',    alias: 'opus48[1m]',  contextWindow: 1000000 },
-  { id: 'claude-sonnet-5-5[1m]',     label: 'Sonnet 5.5 (1M)',  alias: 'sonnet[1m]',  contextWindow: 1000000 },
-  { id: 'claude-sonnet-5[1m]',       label: 'Sonnet 5 (1M)',    alias: 'sonnet5[1m]', contextWindow: 1000000 },
-  { id: 'claude-fable-5-1',          label: 'Fable 5.1',        alias: 'fable',       contextWindow: 200000 },
-  { id: 'claude-fable-5',            label: 'Fable 5',          alias: 'fable5',      contextWindow: 200000 },
-  { id: 'claude-opus-5-5',           label: 'Opus 5.5',         alias: 'opus',        contextWindow: 200000 },
-  { id: 'claude-opus-5',             label: 'Opus 5',           alias: 'opus5',       contextWindow: 200000 },
-  { id: 'claude-opus-4-8',           label: 'Opus 4.8',         alias: 'opus48',      contextWindow: 200000 },
-  { id: 'claude-opus-4-6',           label: 'Opus 4.6',         alias: 'opus46',      contextWindow: 200000 },
-  { id: 'claude-sonnet-5-5',         label: 'Sonnet 5.5',       alias: 'sonnet',      contextWindow: 200000 },
-  { id: 'claude-sonnet-5',           label: 'Sonnet 5',         alias: 'sonnet5',     contextWindow: 200000 },
-  { id: 'claude-sonnet-4-6',         label: 'Sonnet 4.6',       alias: 'sonnet46',    contextWindow: 200000 },
-  { id: 'claude-haiku-5-5',          label: 'Haiku 5.5',        alias: 'haiku',       contextWindow: 200000 },
-  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5',        alias: 'haiku45',     contextWindow: 200000 },
-  { id: 'gpt-6-sol[1m]',             label: 'GPT 6 Sol',        alias: 'gpt6sol',     contextWindow: 1050000 },
-  { id: 'gpt-6-astra[1m]',           label: 'GPT 6 Astra',      alias: 'gpt6astra',   contextWindow: 1050000 },
-  { id: 'gpt-6-luna[1m]',            label: 'GPT 6 Luna',       alias: 'gpt6luna',    contextWindow: 1050000 },
-  { id: 'gpt-5.6-sol[1m]',           label: 'GPT 5.6 Sol',      alias: 'gpt56sol',    contextWindow: 1050000 },
-  { id: 'gpt-5.6-terra[1m]',         label: 'GPT 5.6 Terra',    alias: 'gpt56terra',  contextWindow: 1050000 },
-  { id: 'gpt-5.6-luna[1m]',          label: 'GPT 5.6 Luna',     alias: 'gpt56luna',   contextWindow: 1050000 },
-  { id: 'gpt-5.5[1m]',               label: 'GPT 5.5',          alias: 'gpt55',       contextWindow: 1050000 },
-];
+export { DEFAULT_MODELS } from './model-registry';
+import { DEFAULT_MODELS, availableModels, selectableModels, findModel } from './model-registry';
 
 const PROTECTED_WORKSPACE_FILES = [
   'AGENTS.md', 'SOUL.md', 'MEMORY.md', 'CLAUDE.md',
@@ -3094,9 +3037,7 @@ export class AgentRunner extends EventEmitter {
       );
       return;
     }
-    const models = await this.selectableModels();
-    const wanted = arg.toLowerCase();
-    const match = models.find((m) => m.id.toLowerCase() === wanted || m.alias.toLowerCase() === wanted);
+    const match = findModel(await this.selectableModels(), arg);
     if (!match) {
       this.writeAutoForward(chatId, `Unknown model "${arg}". Use /models to see the list.`);
       return;
@@ -5632,15 +5573,8 @@ export class AgentRunner extends EventEmitter {
     return restartPromises.length > 0;
   }
 
-  /**
-   * The model list this gateway offers: the live catalog when one is reachable,
-   * the configured/static list otherwise (issue #409). Cached upstream, so the
-   * six callers that only want one model's context window pay for at most one
-   * fetch a minute between them.
-   */
-  private async availableModels(): Promise<ModelConfig[]> {
-    const staticModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
-    return (await fetchModelCatalog(staticModels)) ?? staticModels;
+  private availableModels(): Promise<ModelConfig[]> {
+    return availableModels(this.gatewayConfig.gateway.models);
   }
 
   /**
@@ -5662,21 +5596,8 @@ export class AgentRunner extends EventEmitter {
       ?? (requireKnown ? 0 : DEFAULT_CONTEXT_WINDOW);
   }
 
-  /**
-   * Models `/model <arg>` may switch to: what the catalog offers, plus the
-   * configured list.
-   *
-   * The union is only for *resolution*, never for the `/models` listing — the
-   * listing has to reflect what upstream actually offers, or a model removed
-   * upstream would linger in the picker forever, which is the bug this all
-   * started from. Without the union a user who switches to a live-only model
-   * is trapped: their previous configured model is no longer nameable.
-   */
-  private async selectableModels(): Promise<ModelConfig[]> {
-    const live = await this.availableModels();
-    const configured = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
-    const ids = new Set(live.map((m) => m.id));
-    return [...live, ...configured.filter((m) => !ids.has(m.id))];
+  private selectableModels(): Promise<ModelConfig[]> {
+    return selectableModels(this.gatewayConfig.gateway.models);
   }
 
   async setModel(newModel: string): Promise<void> {
