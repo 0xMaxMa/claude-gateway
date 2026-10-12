@@ -102,12 +102,39 @@ test('any other reply to a vision question runs as the user\'s own command on Ac
  const f=fixture(()=>({mode:'vision',decide:()=>jest.fn()}));try{
   runVisionComputerUse.mockImplementationOnce(asks);
   await f.run('r1','buy the blue mug');
-  f.task.revision=2;confirmationReply.mockResolvedValueOnce('NO');
+  f.task.revision=2;confirmationReply.mockResolvedValueOnce('OTHER');
   runComputerUse.mockImplementationOnce(async()=>({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:1}));
   await f.run('r2','no, scroll down instead');
   expect(runVisionComputerUse).toHaveBeenCalledTimes(1);
   expect(runComputerUse.mock.calls[0][0]).toMatchObject({goal:'no, scroll down instead',yieldAfterInteraction:true});
   expect(runComputerUse.mock.calls[0][0]).not.toHaveProperty('confirmation');
+ }finally{await f.close();}
+});
+
+test('a no to a vision question declines it as Accessibility does: the reply as read, never the reply text as a command',async()=>{
+ const f=fixture(()=>({mode:'vision',decide:()=>jest.fn()}));try{
+  runVisionComputerUse.mockImplementationOnce(asks);
+  await f.run('r1','buy the blue mug');
+  f.task.revision=2;confirmationReply.mockResolvedValueOnce('NO');
+  runComputerUse.mockImplementationOnce(async()=>({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0,evaluations:0}));
+  expect((await f.run('r2','No')).type).toBe('paused');
+  expect(confirmationReply).toHaveBeenCalledTimes(1);
+  expect(runVisionComputerUse).toHaveBeenCalledTimes(1);
+  // runComputerUse stops on reply NO (CONFIRMATION_DECLINED) before any decision: computer-goal-run.test.ts.
+  expect(runComputerUse.mock.calls[0][0]).toMatchObject({goal:'No',confirmation:{command:'buy the blue mug',label:'Buy now',target:'a'.repeat(32),reply:'NO'}});
+ }finally{await f.close();}
+});
+
+test('after a yes, a vision fallback hands Accessibility the yes as read, bound to the asked target',async()=>{
+ const f=fixture(()=>({mode:'vision',decide:()=>jest.fn()}));try{
+  runVisionComputerUse.mockImplementationOnce(asks);
+  await f.run('r1','buy the blue mug');
+  f.task.revision=2;confirmationReply.mockResolvedValueOnce('YES');
+  runVisionComputerUse.mockImplementationOnce(async()=>({fallback:'RAW_INPUT_DISABLED',trace:[]}));
+  runComputerUse.mockImplementationOnce(async()=>reached);
+  expect((await f.run('r2','yes')).type).toBe('completed');
+  expect(confirmationReply).toHaveBeenCalledTimes(1);
+  expect(runComputerUse.mock.calls[0][0]).toMatchObject({confirmation:{command:'buy the blue mug',label:'Buy now',target:'a'.repeat(32),reply:'YES'}});
  }finally{await f.close();}
 });
 

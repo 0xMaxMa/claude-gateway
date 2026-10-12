@@ -77,7 +77,7 @@ export interface ComputerLastAction {kind:string;label?:string;role?:string;key?
  /** Asked by the vision loop: a yes resumes it there, where the target was hashed. */
  vision?:boolean}
 const PreparedInput=z.object({application:z.string().min(1).max(200),label:z.string().min(1).max(500),text:z.string().max(2000),role:z.string().max(100).optional(),windowTitle:nativeText(500).optional()}).strict();
-const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),runToGoal:z.boolean().default(false),resumeGoal:z.number().int().min(1).max(100).optional(),readRequest:z.boolean().default(false),agentCommand:z.boolean().default(false),sessionStart:z.boolean().default(false),confirmation:z.object({command:z.string().min(1).max(2000),label:z.string().max(250),target:z.string().regex(/^[0-9a-f]{32}$/).optional()}).strict().optional(),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
+const Input=z.object({interactionContext:z.string().max(8000).optional(),yieldAfterAction:z.boolean().default(false),yieldAfterInteraction:z.boolean().default(false),runToGoal:z.boolean().default(false),resumeGoal:z.number().int().min(1).max(100).optional(),readRequest:z.boolean().default(false),agentCommand:z.boolean().default(false),sessionStart:z.boolean().default(false),confirmation:z.object({command:z.string().min(1).max(2000),label:z.string().max(250),target:z.string().regex(/^[0-9a-f]{32}$/).optional(),reply:z.enum(['YES','NO']).optional()}).strict().optional(),preparedInputs:z.array(PreparedInput).max(30).default([]),goal:z.string().min(1).max(16000),revision:z.number().int().positive().default(1),maxSteps:z.number().int().min(1).max(100).default(30),timeoutMs:z.number().int().min(1).max(600000).default(120000)}).strict();
 const fingerprint=(s:ComputerState)=>JSON.stringify([s.application,s.windowTitle,s.text,s.supportedActions,s.focusedControl&&{role:s.focusedControl.role,label:s.focusedControl.label},s.controls.map(({ref,...c})=>c),s.scrollAreas?.map(({ref,...area})=>area),s.truncated]);
 /** Jev reads the user's reply to a confirmation question, in any language. */
 export async function confirmationReply(label:string,reply:string,deps:ComputerUseDependencies,signal:AbortSignal):Promise<'YES'|'NO'|'OTHER'>{
@@ -96,11 +96,12 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  let input=Input.parse(raw);const runSignal=AbortSignal.any([signal,AbortSignal.timeout(input.timeoutMs)]);
  // The user's reply to "press <label>?" for the agent's high-impact command:
  // Jev reads it in any language. Yes runs that command as the user's own.
- const reply=input.confirmation?await confirmationReply(input.confirmation.label,input.goal,deps,runSignal):undefined;
+ // A reply the caller already read (a vision question) is not read again.
+ const reply=input.confirmation?input.confirmation.reply??await confirmationReply(input.confirmation.label,input.goal,deps,runSignal):undefined;
  if(reply)deps.confirmed?.(reply);
  // A yes to a goal's high-impact step resumes that goal, with a fresh step budget.
  if(reply==='YES')input={...input,goal:input.confirmation!.command,...(input.resumeGoal?{runToGoal:true,maxSteps:input.resumeGoal}:{})};
- let goal:GoalRevision={revision:input.revision,goal:input.goal},steps=0,evaluations=reply?1:0,sequence=0,round=0;
+ let goal:GoalRevision={revision:input.revision,goal:input.goal},steps=0,evaluations=reply&&!input.confirmation?.reply?1:0,sequence=0,round=0;
  let noProgress=0;
  let lastAction:ComputerLastAction|undefined,erasing:number|undefined;
  // Typing refused with FOCUS_REQUIRED focuses the same field once, then types
