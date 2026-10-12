@@ -2,7 +2,7 @@
  * authorization and admission still run before any command can commit. */
 export interface MutationAttempt { actionId: string; tool: string; args: Record<string, unknown>; committed?: boolean; errorCode?: string; intendedUpdateTaskId?: string; }
 export function retryableMutation(tool: string, code?: string): boolean {
-  return tool === 'task_spawn' ? ['INVALID_INPUT','UNKNOWN_SKILL','ACKNOWLEDGEMENT_REQUIRED'].includes(code ?? '')
+  return tool === 'task_spawn' ? ['INVALID_INPUT','UNKNOWN_SKILL','UNKNOWN_MODEL','ACKNOWLEDGEMENT_REQUIRED'].includes(code ?? '')
     : tool === 'task_update' && ['INVALID_INPUT','REVISION_CONFLICT','ACKNOWLEDGEMENT_REQUIRED'].includes(code ?? '');
 }
 function updateIdentity(a: Record<string, unknown>): string | undefined {

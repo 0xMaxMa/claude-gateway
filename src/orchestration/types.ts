@@ -82,6 +82,9 @@ export interface TaskSnapshot {
   workerId?: string;
   skill?: import('./skills').TaskSkill;
   model?: string;
+  /** What task_spawn asked for (an id or alias) when it named a model; `model` is the resolved id. */
+  requestedModel?: string;
+  effort?: import('../agent/model-registry').Effort;
   resourceProfile?: { projectRoot: string; mode: 'isolated-worktree' | 'shared-lock' | 'host' | 'container' };
   taskId: string;
   conversationId: string;
@@ -145,6 +148,7 @@ export interface TaskAttempt {
   /** Immutable execution choice for this attempt; never infer it from today's agent model. */
   harness?: 'claude' | 'codex';
   harnessModel?: string;
+  effort?: import('../agent/model-registry').Effort;
   startedAt?: number;
   workerId?: string;
   resumeSession?: boolean;

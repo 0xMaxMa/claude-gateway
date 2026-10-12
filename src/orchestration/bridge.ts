@@ -10,7 +10,8 @@ import { createServer, Server, ServerResponse } from 'http';
 import { randomBytes } from 'crypto';
 import { mkdirSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
-import type { AgentConfig } from '../types';
+import type { AgentConfig, ModelConfig } from '../types';
+import { EFFORT_LEVELS, ModelResolutionError, findModel, isEffort, resolveModelId, selectableModels } from '../agent/model-registry';
 import { importContainerFile } from './container';
 import { TaskService, assertAgentContextRefs } from './tasks/service';
 import { CommandContext, OrchestrationError, ChangeMode } from './types';
@@ -52,6 +53,8 @@ function taskSpawnInputIssues(args: Record<string, unknown>): InputIssue[] {
   } else if (args.target_profile !== undefined && args.target_profile !== 'skill-worker' && (args.skill_name !== undefined || args.skill_args !== undefined)) {
     issues.push({field:'target_profile',reason:'skill_fields_require_skill_worker',correction:'Set target_profile to skill-worker when supplying skill_name and skill_args.'});
   }
+  if (args.model !== undefined && (typeof args.model !== 'string' || !args.model.trim() || args.model.length > 200 || /[\r\n\0]/.test(args.model))) issues.push({field:'model',reason:'invalid',correction:'Provide a model id or alias from /models, or omit model to use the conversation model.'});
+  if (args.effort !== undefined && !isEffort(args.effort)) issues.push({field:'effort',reason:'unsupported',correction:`Choose one of ${EFFORT_LEVELS.join(', ')}, or omit effort.`});
   return issues;
 }
 
@@ -63,6 +66,8 @@ export class TaskBridge {
   jevEnabled?: () => boolean;
   browserEnabled?: () => boolean;
   computerEnabled?: () => boolean;
+  /** Models task_spawn may name; the runtime supplies the live gateway.models. */
+  models: () => Promise<ModelConfig[]> = () => selectableModels(undefined);
   narrateCall?: (attemptId: string, generation: number, actionId: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
   jevCall?: (scope: Scope, args: Record<string, unknown>, actionId: string, signal: AbortSignal) => Promise<unknown>;
   private readonly scopes = new Map<string, Scope>();
@@ -176,6 +181,16 @@ export class TaskBridge {
                   if (!adapter) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
                   gatewayTarget = adapter.resolve(a.gateway_target, context);
                 }
+                let model: string | undefined;
+                if (a.model !== undefined) {
+                  const models = await this.models();
+                  try { model = (findModel(models, a.model) ?? resolveModelId(models, a.model)).id; }
+                  catch (error) {
+                    if (!(error instanceof ModelResolutionError)) throw error;
+                    inputDetails = [{field:'model',reason:'unknown_model',correction:error.message}];
+                    throw new OrchestrationError('UNKNOWN_MODEL');
+                  }
+                }
                 const skill = resolveNamedSkill(a.skill_name, a.skill_args, this.skills?.());
                 if (a.target_profile === 'skill-worker' && !skill) {
                   inputDetails = [{field:'skill_name',reason:'unknown_or_unavailable',correction:'Use the exact name of an installed, user-invocable skill and provide its arguments in skill_args.'}];
@@ -189,7 +204,7 @@ export class TaskBridge {
                 // readiness immediately before the synchronous task transaction.
                 await scope.beforeMutation?.(command.tool, a, context.actionId);
                 if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
-                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, computerInputs:a.computer_inputs, targetProfile: a.target_profile, gatewayTarget, browserFields:a.browser_fields, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
+                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, computerInputs:a.computer_inputs, targetProfile: a.target_profile, gatewayTarget, browserFields:a.browser_fields, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(model ? { model, requestedModel: a.model } : {}), ...(a.effort ? { effort: a.effort } : {}), ...(skill ? { skill } : {}) });
                 scope.onTaskQueued?.(spoken);
                 const { skill: _workerOnly, ...receipt } = task;
                 result = receipt;

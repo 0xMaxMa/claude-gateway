@@ -20,8 +20,8 @@ export interface RuntimeProfile {
   mcpConfigPath: string;
   overlay: string;
   responseSchema?: Record<string, unknown>;
-  /** Per-process Claude effort for a short control decision; never persisted to settings. */
-  claudeEffort?: 'low';
+  /** Per-process Claude effort (a short control decision, or a task's requested effort); never persisted to settings. */
+  claudeEffort?: import('../agent/model-registry').Effort;
   /** Existing loadWorkspace/CLAUDE.md composition, supplied without rewriting files. */
   context?: string;
   /** Scheduler already holds a gateway-wide process lease for this worker. */

@@ -40,7 +40,9 @@ export function mergeContextRefs(supplied: unknown, inputRefs: string[]): unknow
   return [...new Set([...assertAgentContextRefs(supplied), ...inputRefs])];
 }
 
-export interface SpawnTask { browserFields?:unknown; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal'; }
+export interface SpawnTask { browserFields?:unknown; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal';
+  /** Model id already resolved against the registry by the caller; `requestedModel` is what was asked for. */
+  model?: string; requestedModel?: string; effort?: import('../../agent/model-registry').Effort; }
 
 /** How many finished tasks the per-turn index page keeps. Unfinished tasks are never dropped;
  * older finished ones stay reachable through task_status with an explicit task_id. */
@@ -70,6 +72,7 @@ export function taskIndexEntry(task: TaskSnapshot) {
     pendingQuestion: task.pendingQuestion, failure: task.failure,
     cancellation: task.cancellation, replacedByTaskId: task.replacedByTaskId,
     workstreamId: task.workstreamId, continueTaskId: task.continueTaskId, continuationPolicy: task.continuationPolicy,
+    model: task.model, effort: task.effort,
     resultAvailable: Boolean(task.result),
     actionLog: task.actionLog,
     computerConnection:task.computerConnection, automationController:task.automationController??"agent", gatewayTarget: task.gatewayTarget, automationSession: automationSession(task),
@@ -169,7 +172,7 @@ export class TaskService {
     if (!task || task.conversationId !== conversationId) throw new OrchestrationError('ACCESS_DENIED');
     return task;
   }
-  status(conversationId: string, principalId: string, taskId?: string): Array<TaskSnapshot & { currentInstructions?: string }> {
+  status(conversationId: string, principalId: string, taskId?: string): Array<TaskSnapshot & { currentInstructions?: string; harness?: 'claude' | 'codex' }> {
     this.store.assertMember(conversationId, principalId);
     if (taskId) { const task = this.owned(taskId, conversationId); delete task.skill; return [this.withRecentTools(task)]; }
     return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
@@ -209,7 +212,7 @@ export class TaskService {
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`,
       conversationId, conversationId).map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot);
   }
-  private withRecentTools(task: TaskSnapshot): TaskSnapshot & { currentInstructions?: string } {
+  private withRecentTools(task: TaskSnapshot): TaskSnapshot & { currentInstructions?: string; harness?: 'claude' | 'codex' } {
     task.automationSession = automationSession(task);
     task.recentTools = this.store.all("SELECT payload_json,occurred_at FROM conversation_events WHERE conversation_id=? AND type='tool.activity' AND json_extract(payload_json,'$.task_id')=? ORDER BY seq DESC LIMIT 8", task.conversationId, task.taskId).map(row => {
       const event = JSON.parse(String(row.payload_json)).payload;
@@ -222,6 +225,10 @@ export class TaskService {
         .map(row => String(row.path).slice(0,2048)),
       currentFilesystemVerified: false,
     };
+    // The harness is an attempt's execution choice (Codex can fall back to Claude), so report the latest one.
+    const attempt = this.store.get('SELECT payload_json FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', task.taskId);
+    const harness = attempt ? (JSON.parse(String(attempt.payload_json)) as TaskAttempt).harness : undefined;
+    if (harness) (task as TaskSnapshot & { harness?: string }).harness = harness;
     // Direct corrections bypass the parent inference turn. Hydrated status and
     // notifications must carry the current goal so verification cannot use stale memory.
     return ['browser','computer'].includes(task.gatewayTarget?.adapter ?? '')
@@ -243,7 +250,7 @@ export class TaskService {
     if (command.contextRefs?.some(ref => typeof ref !== 'string' || ref.length > 1024)) throw new OrchestrationError('INVALID_INPUT', 'Each context_refs entry must be a string of at most 1024 characters.');
     if (!['default-worker', 'media-worker', 'skill-worker', 'gateway-managed'].includes(command.targetProfile)) throw new OrchestrationError('UNKNOWN_WORKER_PROFILE');
     if ((command.targetProfile === 'gateway-managed') !== Boolean(command.gatewayTarget)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
-    if (command.gatewayTarget && (command.workingDirectory || command.skill || command.contextRefs?.length)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
+    if (command.gatewayTarget && (command.workingDirectory || command.skill || command.contextRefs?.length || command.model || command.effort)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
     return this.command(context, 'spawn', command, true, () => {
       const conversation = this.store.get('SELECT * FROM conversations WHERE id=?', context.conversationId)!;
       let replaced:TaskSnapshot|undefined;
@@ -296,7 +303,9 @@ export class TaskService {
         }
       }
       if (command.skill) task.skill = command.skill;
-      if (context.model && !command.gatewayTarget) task.model = context.model;
+      if (command.model) { task.model = command.model; task.requestedModel = command.requestedModel ?? command.model; }
+      else if (context.model && !command.gatewayTarget) task.model = context.model;
+      if (command.effort) task.effort = command.effort;
       const projectRoot = command.workingDirectory || (this.config.tasks.workspaceMode === 'host' && prior?.resourceProfile?.mode === 'host' ? prior.resourceProfile.projectRoot : undefined) || this.config.tasks.projectRoot || this.defaultProjectRoot;
       if (projectRoot && !command.gatewayTarget) task.resourceProfile = { projectRoot, mode: this.config.tasks.workspaceMode };
       this.store.run('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)', task.taskId, task.conversationId, task.state, 1, 1, null, JSON.stringify(task), now, now);

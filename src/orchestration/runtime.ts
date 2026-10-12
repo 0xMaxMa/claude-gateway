@@ -98,6 +98,7 @@ import { workerNarrate } from './narrate';
 import { workerShares } from './worker-shares';
 import { ProviderAdmissionStore, ProviderPermit, ProviderWaiting, providerFailure } from './provider-admission';
 import { resolveProviderScope, resolvedCodexProviderScope } from './provider-scope';
+import { selectableModels } from '../agent/model-registry';
 
 
 /** Stable instructions are carried in the system prefix, not appended to every
@@ -305,6 +306,7 @@ export class AgentOrchestrationRuntime {
     bridge.narrateCall = workerNarrate({ files, config: () => voiceConfig().narrate, voiceEnabled: () => voiceConfig().enabled,
       settings: chat => narrateVoices.settings(channelVoiceKey(chat.source, chat.chat_id, chat.thread_key ?? '')) });
     bridge.computerEnabled = computerAllowed;
+    bridge.models = () => selectableModels(gateway.gateway.models);
     bridge.jevEnabled = () => jevAllowed(gateway, agent);
     bridge.browserEnabled = () => Boolean(gateway.gateway.jev?.browser) && jevAllowed(gateway, agent) && gateway.gateway.jev?.features?.browserTasks?.enabled === true;
     bridge.jevCall = async (scope, args, actionId, signal) => {

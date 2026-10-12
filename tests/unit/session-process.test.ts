@@ -242,6 +242,23 @@ describe('SessionProcess', () => {
     } finally { await sp.stop(); process.env=previous; }
   });
 
+  // #581: a task's requested effort reaches its Claude worker the same way a
+  // control decision's does, through the child's CLAUDE_CODE_EFFORT_LEVEL.
+  it('passes a task effort to a worker process only', async () => {
+    const mcp=path.join(tmpDir,'worker-effort-mcp.json');fs.writeFileSync(mcp,'{"mcpServers":{}}');
+    const previous=process.env.CLAUDE_CODE_EFFORT_LEVEL;
+    delete process.env.CLAUDE_CODE_EFFORT_LEVEL;
+    try {
+      const sp=makeSp('worker-effort','api',agentConfig,gatewayConfig,sessionStore,undefined,{
+        role:'worker',mcpConfigPath:mcp,overlay:'',context:'fixture',hostExecution:true,claudeEffort:'max'
+      });
+      await sp.start();
+      expect(spawnMock.mock.calls.at(-1)[2].env.CLAUDE_CODE_EFFORT_LEVEL).toBe('max');
+      expect(process.env.CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+      await sp.stop();
+    } finally {if(previous!==undefined)process.env.CLAUDE_CODE_EFFORT_LEVEL=previous;}
+  });
+
   it.each([false,true])('limits control effort to its child process and restores inherited effort (container=%s)', async container => {
     const previous=process.env.CLAUDE_CODE_EFFORT_LEVEL;
     process.env.CLAUDE_CODE_EFFORT_LEVEL='high';

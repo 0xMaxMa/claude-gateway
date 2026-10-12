@@ -23,8 +23,7 @@ import { isChatChannel } from '../history/types';
 import { wizardStore } from './wizard-state';
 import { getPendingSenders, clearPendingSender } from './pending-senders';
 import { buildGenerationPrompt, parseGeneratedFiles, buildRewriteDescriptionPrompt } from '../agent/create-agent-prompts';
-import { fetchModelCatalog } from '../agent/model-catalog';
-import { DEFAULT_MODELS } from '../agent/runner';
+import { availableModels } from '../agent/model-registry';
 import {
   DEFAULT_WHATSAPP_ACCOUNT_ID,
   WHATSAPP_ACCOUNT_ID_RE,
@@ -969,19 +968,11 @@ export function createApiRouter(
    * into config.json at provisioning time (issue #409).
    */
   router.get('/v1/models', auth, async (_req: Request, res: Response) => {
-    // `?? DEFAULT_MODELS`, not `?? []`, and that is load-bearing rather than
-    // cosmetic. fetchModelCatalog caches one parsed catalog per process, and
-    // the alias/contextWindow/multiplier on it are inherited from whichever
-    // caller's list populated the cache first. AgentRunner passes
-    // `gateway.models ?? DEFAULT_MODELS`; if this route passed `[]` on a
-    // gateway whose config has no `gateway.models`, one request here would
-    // cache a catalog with every alias set to its id and every context window
-    // at the 200k default — and the picker and all six contextWindowFor()
-    // callers would read that degraded list for the next 60 seconds. It also
-    // makes this endpoint agree with the picker on an unconfigured gateway
-    // instead of reporting no models at all.
-    const staticModels = (typeof models==='function'?models():models) ?? DEFAULT_MODELS;
-    const available = (await fetchModelCatalog(staticModels)) ?? staticModels;
+    // availableModels() falls back to DEFAULT_MODELS, never `[]`: the
+    // catalog cache inherits alias/contextWindow/multiplier from whichever
+    // caller's list populated it first, so this route must pass the same list
+    // the runner does or one request here degrades the picker for 60 seconds.
+    const available = await availableModels(typeof models==='function'?models():models);
     res.json({ models: available.map((m) => ({ id: m.id, name: m.label, alias: m.alias, contextWindow: m.contextWindow, multiplier: m.multiplier ?? 1 })) });
   });
 

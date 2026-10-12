@@ -1176,7 +1176,7 @@ export class SessionProcess extends EventEmitter {
     try { containerUid = os.userInfo().uid; } catch { /* use 1000 */ }
 
     const configuredWorkerEnvironment = sanitizeJevChildEnv(this.runtimeProfile?.role === 'worker' ? workerEnvironment(this.agentConfig, this.gatewayConfig) : {}, this.gatewayConfig.gateway.jev);
-    const turnEnvironment: Record<string,string> = this.runtimeProfile?.role === 'agent' && this.runtimeProfile.claudeEffort
+    const turnEnvironment: Record<string,string> = this.runtimeProfile?.claudeEffort
       ? { CLAUDE_CODE_EFFORT_LEVEL: this.runtimeProfile.claudeEffort } : {};
     const containerEnv: Record<string, string> = {
       HOME: os.homedir(),
