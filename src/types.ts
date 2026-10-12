@@ -344,6 +344,9 @@ export interface AgentConfig {
     extraFlags: string[];
   };
   workers?: WorkerHarnessConfig;
+  /** pstack (Claude Code plugin `pstack@pstack-claude`) for this agent's workers.
+   * Present = set up; absent = workers never load the plugin. See src/pstack/. */
+  pstack?: import('./pstack/config').AgentPstackConfig;
   /** Heartbeat / cron settings */
   heartbeat?: {
     rateLimitMinutes?: number; // default 30

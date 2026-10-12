@@ -10,6 +10,7 @@ import { resolveGatewayPublicUrl } from './public-url';
 import { upgradeAgentWhatsAppAccounts } from './whatsapp-accounts';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../orchestration/config';
 import { validateWorkerHarness, validateWorkerModel } from '../orchestration/worker-harness';
+import { validatePstackShape } from '../pstack/config';
 
 export class ConfigValidationError extends Error {
   constructor(message: string) {
@@ -88,6 +89,7 @@ function validateAgent(agent: Record<string, unknown>, index: number, orchestrat
   if (!validEnabledOnly(agent.jev)) return 'Invalid per-agent Jev configuration';
   if (!validEnabledOnly(agent.computerUse)) return 'Invalid per-agent Computer Use configuration';
   try { validateWorkerHarness(agent.workers); } catch (error) { return `agent '${agent.id}': ${(error as Error).message}`; }
+  try { validatePstackShape(agent.pstack); } catch (error) { return `agent '${agent.id}': ${(error as Error).message}`; }
   if (agent.voice !== undefined || agent.orchestration !== undefined || orchestration !== undefined) {
     try { resolveOrchestrationConfig(effectiveOrchestration(agent.orchestration as OrchestrationConfig,orchestration), agent.voice as import('../orchestration/config').AgentVoiceConfig); }
     catch (error) { return `agent '${agent.id}': ${(error as Error).message}`; }

@@ -195,6 +195,34 @@ curl -X DELETE \
 
 ---
 
+## PUT /api/v1/agents/:agentId/pstack {#put-apiv1agentsagentidpstack}
+
+Set up [pstack](../guide/pstack.md) for an agent: its workers load the `pstack@pstack-claude` Claude Code plugin with these role models. Requires **write** access to the agent (an admin key may change any agent). The plugin must already be installed through Claude Code. The body replaces `agents[].pstack`; changes apply to the agent's next worker.
+
+```bash
+curl -X PUT -H "X-Api-Key: write-key" -H "Content-Type: application/json" \
+  -d '{"roles":{"why investigators":"gpt-6-sol[1m]"},"defaultEffort":"high"}' \
+  http://localhost:10850/api/v1/agents/alfred/pstack
+```
+
+```json
+{ "agentId": "alfred", "pstack": { "roles": { "why investigators": "gpt-6-sol[1m]" }, "defaultEffort": "high" } }
+```
+
+Errors are `400` with `error` and `message`: `MODEL_ALIAS_NOT_ALLOWED` (an alias where a model ID is required; the message names the ID), `UNKNOWN_MODEL`, `INVALID_EFFORT`, `UNKNOWN_PSTACK_ROLE`, `INVALID_PSTACK_CONFIG` (an unknown field) or `PSTACK_NOT_INSTALLED`.
+
+CLI: `claude-gateway pstack enable <agentId> [--roles <json>] [--defaultEffort <level>]`.
+
+---
+
+## DELETE /api/v1/agents/:agentId/pstack {#delete-apiv1agentsagentidpstack}
+
+Remove pstack from an agent: its next worker does not load the plugin. Requires **write** access. Returns `{ "agentId": "alfred", "pstack": null }`.
+
+CLI: `claude-gateway pstack disable <agentId>`.
+
+---
+
 ## GET /api/v1/agents/:agentId/avatar {#get-apiv1agentsagentidavatar}
 
 Serve the agent's avatar image. Requires read access to the agent.

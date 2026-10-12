@@ -18,6 +18,7 @@ export const BUILTIN_COMMANDS: Record<string, CommandDef> = {
   stop:     { channels: [...CHAT_CHANNELS, 'api'], wordBoundary: false },
   model:    { channels: ['telegram', 'discord', 'line', 'api'] },
   models:   { channels: ['telegram', 'discord', 'line'] },
+  'pstack-setup': { channels: ['telegram', 'discord', 'line'] },
   restart:  { channels: [...CHAT_CHANNELS, 'api'], wordBoundary: false },
   start:    { channels: ['telegram'] },
   help:     { channels: [...CHAT_CHANNELS, 'api'] },

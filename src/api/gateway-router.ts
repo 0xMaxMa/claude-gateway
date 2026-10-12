@@ -39,6 +39,7 @@ import { cliPairingStore, type CliPairing } from '../cli-viewer/pairing-store';
 import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
 import { normalizePublicUrl } from '../cli-viewer/url';
 import { createApiRouter } from './router';
+import { createPstackRouter } from './pstack-router';
 import { VoiceApi } from './voice-router';
 import { createCronRouter } from './cron-router';
 import { createMetaRouter } from './meta-router';
@@ -787,6 +788,10 @@ export class GatewayRouter {
         () => new Set(this.configs.keys()),
       );
       this.app.use('/api', cronRouter);
+    }
+
+    if (this.gatewayConfig?.gateway?.api?.keys) {
+      this.app.use('/api', createPstackRouter(this.gatewayConfig.gateway.api.keys, this.configs, this.configPath, () => this.gatewayConfig?.gateway.models));
     }
 
     // Mount the route manifest endpoint (GET /api/v1/_meta/routes) — serves the

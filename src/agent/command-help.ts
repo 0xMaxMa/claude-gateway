@@ -7,6 +7,7 @@ const descriptions: Record<string, string> = {
   clear: 'Reset model context; keep chat history and load the latest 50 messages next time',
   compact: 'Compact Claude Code context; keep chat history',
   stop: 'Stop the current reply', model: 'Show the model', models: 'List and select a model',
+  'pstack-setup': 'Set up pstack for this agent: /pstack-setup [on|off|<role>: <model-id>]',
   restart: 'Restart the session process; keep history (does not restart the gateway or app)',
   start: 'Show pairing instructions', status: 'Show pairing status', help: 'Show available commands',
 };

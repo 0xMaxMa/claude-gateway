@@ -37,6 +37,8 @@ import { resolveSharedConfig, sharedVaultDir } from '../../agent/knowledge';
 import { MediaStore } from '../../history/media-store';
 import { providerFailure, ProviderPermit } from '../provider-admission';
 import type { ResolvedCodexProviderIdentity } from '../provider-scope';
+import { PSTACK_PLUGIN_ID, pstackModels, pstackPluginInfo } from '../../pstack/plugin-info';
+import { renderPstackSheet } from '../../pstack/sheet';
 
 function boundedDiffText(text: string): string {
   let result = text.slice(0, 8192);
@@ -140,9 +142,15 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const directive = taskDirective(this.tasks.store, task.conversationId, revision);
     // Snapshot the authorized agent context without modifying either workspace's
     // persona files. Project CLAUDE.md continues to be discovered in the worktree.
-    const context = this.agent.type === 'app-agent'
+    let context = this.agent.type === 'app-agent'
       ? await containerNode(this.agent.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))")
       : await readFile(join(this.agent.workspace, 'CLAUDE.md'), 'utf8');
+    // pstack is installed for Claude Code host-wide; only a set-up agent's
+    // Claude workers load it, with that agent's own model sheet. Codex
+    // children are leaf workers and never get the plugin or the sheet.
+    const plugin = this.agent.pstack && harness.harness === 'claude' ? pstackPluginInfo() : undefined;
+    const pstack = plugin?.installPath ? pstackModels(plugin.installPath) : undefined;
+    if (pstack) context += '\n\n' + renderPstackSheet(this.agent.pstack!, pstack);
     this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway, harness, authFingerprint, toolExposure: 'lazy-connectors-v1' }));
     // Pool expiration/rebinding makes old native transcripts disposable. This
     // bounded maintenance is best effort and never changes task admission.
@@ -150,7 +158,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const shared = resolveSharedConfig(this.agent.knowledge?.shared, this.gateway.gateway.knowledge?.shared);
     const ticket = this.bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation }, directory, this.agent.workspace, shared.enabled ? sharedVaultDir(shared) : '');
     try {
-      const profile = { ...ticket.profile, ...(task.effort ? { claudeEffort: task.effort } : {}), hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
+      const profile = { ...ticket.profile, ...(task.effort ? { claudeEffort: task.effort } : {}), pluginOverrides: { [PSTACK_PLUGIN_ID]: Boolean(this.agent.pstack) }, hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
       const workerConfig: AgentConfig = { ...this.agent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
         claude: { ...this.agent.claude, model: claudeModel, extraFlags: [] } };
       const process = harness.harness === 'codex'

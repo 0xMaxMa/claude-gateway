@@ -48,6 +48,9 @@ export interface RuntimeProfile {
   attemptId?: string;
   /** Gateway-built plugin containing only this task skill and its resources. */
   skillPluginDir?: string;
+  /** Host workers: per-plugin `enabledPlugins` overrides, merged by Claude Code
+   * over the user's own settings key by key, so other plugins are untouched. */
+  pluginOverrides?: Record<string, boolean>;
   /** A trusted container-discovered skill. These paths never refer to host files. */
   containerSkill?: { name: string; filePath: string; resourceRoot: string; content: string };
   checkpointCommand?: string;
@@ -84,8 +87,10 @@ export function runtimeProfileArgs(profile: RuntimeProfile, extraFlags: string[]
   if (profile.role === 'worker' && profile.hostExecution) {
     // Omitted means the complete native inventory (including Bash). An explicit
     // resolved policy must not silently widen back to all tools on the host.
+    const settings = { ...(profile.checkpointCommand ? { hooks: checkpointSettings(profile.checkpointCommand).hooks } : {}),
+      ...(profile.pluginOverrides ? { enabledPlugins: profile.pluginOverrides } : {}) };
     return ['--tools', profile.workerTools === undefined ? 'default' : profile.workerTools.join(','), '--mcp-config', profile.mcpConfigPath,
-      ...(profile.checkpointCommand ? ['--settings', JSON.stringify({hooks:checkpointSettings(profile.checkpointCommand).hooks})] : []),
+      ...(Object.keys(settings).length ? ['--settings', JSON.stringify(settings)] : []),
       ...(profile.skillPluginDir ? ['--plugin-dir', profile.skillPluginDir] : []),
       '--append-system-prompt', [profile.context, profile.overlay].filter(Boolean).join('\n\n')];
   }
