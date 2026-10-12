@@ -205,6 +205,8 @@ export class ConfigWatcher extends EventEmitter {
         { field: 'orchestration', oldVal: oldAgent.orchestration, newVal: newAgent.orchestration },
         { field: 'voice', oldVal: oldAgent.voice, newVal: newAgent.voice },
         { field: 'workers', oldVal: oldAgent.workers, newVal: newAgent.workers },
+        // Whole-block: presence alone sets an agent up, so `{}` vs absent is a change, and removal must not be re-created leaf by leaf.
+        { field: 'pstack', oldVal: oldAgent.pstack, newVal: newAgent.pstack },
         { field: 'claude.model', oldVal: oldAgent.claude.model, newVal: newAgent.claude.model },
         { field: 'claude.extraFlags', oldVal: oldAgent.claude.extraFlags, newVal: newAgent.claude.extraFlags },
         { field: 'session.idleTimeoutMinutes', oldVal: oldAgent.session?.idleTimeoutMinutes, newVal: newAgent.session?.idleTimeoutMinutes },

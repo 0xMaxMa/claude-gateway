@@ -149,7 +149,8 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     // pstack is installed for Claude Code host-wide; only a set-up agent's
     // Claude workers load it, with that agent's own model sheet. Codex
     // children are leaf workers and never get the plugin or the sheet.
-    const plugin = this.agent.pstack && harness.harness === 'claude' ? pstackPluginInfo() : undefined;
+    // Only host workers can load the plugin; isolated and container workers run with every plugin off.
+    const plugin = this.agent.pstack && harness.harness === 'claude' && workspace.baseCommit === 'host' && this.agent.type !== 'app-agent' ? pstackPluginInfo() : undefined;
     const pstack = plugin?.installPath ? pstackModels(plugin.installPath) : undefined;
     if (pstack) context += '\n\n' + renderPstackSheet(this.agent.pstack!, pstack);
     this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway, harness, authFingerprint, toolExposure: 'lazy-connectors-v1' }));

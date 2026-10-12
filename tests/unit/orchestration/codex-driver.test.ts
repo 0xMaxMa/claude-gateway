@@ -431,6 +431,17 @@ describe('pstack plugin gate', () => {
     expect(jest.mocked(CodexProcess).mock.calls[0][0].profile.context).not.toContain('pstack-models.md');
   });
 
+  // Review of #582: isolated/container workers run with every plugin off, so the sheet would describe skills they lack.
+  test('a set-up agent\'s non-host worker gets no sheet', async () => {
+    agent.pstack = {};
+    const prepare = jest.spyOn(TaskWorkspaces.prototype, 'prepare').mockResolvedValue({ path: root, baseCommit: 'abc123' } as any);
+    try {
+      const task = spawn('claude-sonnet-4-6'), attempt = tasks.claim(task.taskId)!;
+      const handle = await driver.start(task, attempt); await handle.accepted; await handle.result.catch(() => undefined);
+      expect(claudeProfile().context).not.toContain('pstack-models.md');
+    } finally { prepare.mockRestore(); }
+  });
+
   test('a set-up agent whose plugin was uninstalled loads no sheet', async () => {
     fixture.cleanup(); fixture = pstackClaudeConfig(false); process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
     agent.pstack = {};

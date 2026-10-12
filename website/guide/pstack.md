@@ -13,11 +13,11 @@ On the gateway host, as the user the gateway runs as:
 
 Update it with `/plugin update` and check the version with `/plugin`. The gateway has no install command, keeps no copy and pins no version: every agent uses the one install Claude Code manages. It only reads `installPath` from `~/.claude/plugins/installed_plugins.json` (or `$CLAUDE_CONFIG_DIR`).
 
-Running Claude Code directly on the host is unaffected: the plugin behaves as any installed plugin does there.
+Running Claude Code directly on the host is unaffected: the plugin behaves as any installed plugin does there. The same goes for an agent without orchestration (a legacy session is a plain Claude Code session): it loads whatever Claude Code has enabled.
 
 ## Set up an agent
 
-An agent that is not set up loads **nothing** from pstack, even when the plugin is enabled globally: every host worker gets `enabledPlugins["pstack@pstack-claude"]` in its `--settings` overlay, `false` unless the agent has an `agents[].pstack` block. Claude Code merges that key over your own settings, so other plugins load as before. Workers of a set-up agent get the plugin and the agent's own model sheet.
+An agent that is not set up loads **nothing** from pstack in its orchestration workers, even when the plugin is enabled globally: every host worker gets `enabledPlugins["pstack@pstack-claude"]` in its `--settings` overlay, `false` unless the agent has an `agents[].pstack` block. Claude Code merges that key over your own settings, so other plugins load as before. Workers of a set-up agent get the plugin and the agent's own model sheet.
 
 Set it up in a direct message with the bot:
 

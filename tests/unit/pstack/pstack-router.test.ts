@@ -106,3 +106,9 @@ test('the routes are in the manifest as `pstack enable|disable <agentId>`', () =
   const routes = collectManifest().filter(r => r.cli?.noun === 'pstack').map(r => `${r.method} ${r.path} ${r.cli!.verb} ${r.cli!.args}`);
   expect(routes.sort()).toEqual(['DELETE /v1/agents/:agentId/pstack disable agentId', 'PUT /v1/agents/:agentId/pstack enable agentId']);
 });
+
+// Review of #582: an agent loaded in memory but missing from config.json is a 404, not a 500.
+test('an agent missing from config.json is 404', async () => {
+  agents.set('carol', { id: 'carol' } as AgentConfig);
+  expect((await request(app()).put('/api/v1/agents/carol/pstack').set('X-Api-Key', 'admin').send({})).status).toBe(404);
+});
