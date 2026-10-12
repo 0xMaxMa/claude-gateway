@@ -215,7 +215,42 @@ export const GENERATED_COMMANDS: GeneratedCommand[] = [
     ],
     "summary": "Update a cron job",
     "auth": "key"
+  },
+  {
+    "noun": "pstack",
+    "verb": "disable",
+    "method": "DELETE",
+    "path": "/v1/agents/:agentId/pstack",
+    "args": [
+      "agentId"
+    ],
+    "flags": [],
+    "summary": "Remove pstack from an agent; its workers stop loading the plugin",
+    "auth": "key"
+  },
+  {
+    "noun": "pstack",
+    "verb": "enable",
+    "method": "PUT",
+    "path": "/v1/agents/:agentId/pstack",
+    "args": [
+      "agentId"
+    ],
+    "flags": [
+      {
+        "name": "roles",
+        "in": "body",
+        "description": "JSON map of pstack role -> \"<model-id>[ @<level>]\" (comma-separated for panel roles)"
+      },
+      {
+        "name": "defaultEffort",
+        "in": "body",
+        "description": "session | low | medium | high | xhigh | max"
+      }
+    ],
+    "summary": "Set up pstack for an agent: its workers load the pstack Claude Code plugin with these role models (full model IDs)",
+    "auth": "key"
   }
 ];
 
-export const GENERATED_NOUNS: string[] = ["crons"];
+export const GENERATED_NOUNS: string[] = ["crons","pstack"];

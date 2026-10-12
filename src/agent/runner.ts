@@ -103,6 +103,10 @@ export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
 export { DEFAULT_MODELS } from './model-registry';
 import { DEFAULT_MODELS, availableModels, selectableModels, findModel } from './model-registry';
+import { PSTACK_INSTALL_HINT, pstackModels, pstackPluginInfo } from '../pstack/plugin-info';
+import { PstackConfigError, applySheetLines } from '../pstack/config';
+import { renderPstackSheet } from '../pstack/sheet';
+import { savePstackConfig } from '../pstack/setup';
 
 const PROTECTED_WORKSPACE_FILES = [
   'AGENTS.md', 'SOUL.md', 'MEMORY.md', 'CLAUDE.md',
@@ -2965,6 +2969,8 @@ export class AgentRunner extends EventEmitter {
     } else if (content.startsWith('/rename')) {
       const name = content.replace('/rename', '').trim();
       await this.handleCommandRename(agentId, chatId, name);
+    } else if (content.startsWith('/pstack-setup')) {
+      await this.handleCommandPstackSetup(chatId, content.replace('/pstack-setup', '').trim(), meta);
     } else if (content.startsWith('/models')) {
       await this.handleCommandModels(chatId);
     } else if (content.startsWith('/model')) {
@@ -3007,6 +3013,43 @@ export class AgentRunner extends EventEmitter {
     }
     lines.push('', 'Switch with /model <id or alias>');
     this.writeAutoForward(chatId, lines.join('\n'));
+  }
+
+  /**
+   * /pstack-setup — the gateway's counterpart of pstack's own setup-pstack:
+   * decides whether this agent's workers load pstack, and with which models.
+   * Arguments are pstack-models.md lines, one per line (`<role>: <model-id>`,
+   * `<role>: default` to drop an override, `default effort: <level>`); `on`
+   * sets the agent up with the skill defaults and `off` removes it. Changes
+   * apply to the next worker. Direct messages only, like /model.
+   */
+  private async handleCommandPstackSetup(chatId: string, arg: string, meta: Record<string, string> = {}): Promise<void> {
+    const plugin = pstackPluginInfo();
+    const roles = plugin.installPath ? pstackModels(plugin.installPath) : undefined;
+    const usage = 'Usage: /pstack-setup on | off | <role>: <model-id>[ @<level>] (one per line; "<role>: default" drops an override; "default effort: <level|session>").';
+    if (!arg) {
+      const ids = (await this.availableModels()).map((m) => `${m.id} (${m.label})`).join(', ');
+      const state = !roles ? `pstack is not installed for Claude Code on this host. ${PSTACK_INSTALL_HINT}`
+        : !this.agentConfig.pstack ? 'pstack is installed but not set up for this agent: its workers do not load it.'
+        : `pstack is set up for this agent. Its workers load it with this sheet:\n\n${renderPstackSheet(this.agentConfig.pstack, roles)}`;
+      this.writeAutoForward(chatId, `${state}\n\n${usage}\nModel IDs: ${ids}`);
+      return;
+    }
+    if (!this.isDirectChat(meta)) {
+      this.writeAutoForward(chatId, 'pstack setup is only available in a direct message with the bot — it changes this agent for every chat.');
+      return;
+    }
+    try {
+      const block = arg === 'off' ? undefined : arg === 'on' ? this.agentConfig.pstack ?? {} : applySheetLines(this.agentConfig.pstack ?? {}, arg);
+      const saved = await savePstackConfig(this.configPath, this.agentConfig.id, block, await this.selectableModels());
+      if (saved) this.agentConfig.pstack = saved; else delete this.agentConfig.pstack;
+      this.writeAutoForward(chatId, saved && roles
+        ? `pstack is set up for this agent. The next worker loads it with this sheet:\n\n${renderPstackSheet(saved, roles)}`
+        : 'pstack is removed from this agent. Its next worker does not load it.');
+    } catch (error) {
+      if (!(error instanceof PstackConfigError)) throw error;
+      this.writeAutoForward(chatId, `${error.code}: ${error.message}`);
+    }
   }
 
   /**

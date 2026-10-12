@@ -22,7 +22,8 @@ export default defineConfig({
         { text: 'Architecture', link: '/reference/architecture' },
         { text: 'Agents & sessions', link: '/guide/agents' },
         { text: 'Orchestration & tasks', link: '/guide/orchestration' },
-        { text: 'Worker harnesses', link: '/guide/worker-harnesses' }
+        { text: 'Worker harnesses', link: '/guide/worker-harnesses' },
+        { text: 'pstack', link: '/guide/pstack' }
       ] },
       { text: 'Connect a channel', link: '/guide/channels', collapsed: false, items: [
         { text: 'Telegram', link: '/channels/telegram' },

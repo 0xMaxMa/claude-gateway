@@ -584,6 +584,20 @@ describe('config-loader', () => {
   });
   });
 
+  // #582: agents[].pstack keeps only roles + defaultEffort; anything else skips the agent like an unknown workers field.
+  it('loads agents[].pstack and skips an agent whose pstack block has an unknown field', () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    const base = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'valid-2-agents.json'), 'utf8'));
+    const pstack = { roles: { 'bug-fix': 'claude-fable-5-1 @xhigh' }, defaultEffort: 'session' };
+    fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], pstack }, base.agents[1]] }));
+    expect(loadConfig(configPath).agents[0].pstack).toEqual(pstack);
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], pstack: { sha: 'abc' } }, base.agents[1]] }));
+      expect(loadConfig(configPath).agents.map(a => a.id)).toEqual([base.agents[1].id]);
+    } finally { warn.mockRestore(); }
+  });
+
   it('validates gateway.computerUse and agents[].computerUse; default stays off', () => {
     const configPath = path.join(tmpDir, 'config.json');
     const base = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'valid-2-agents.json'), 'utf8'));

@@ -223,6 +223,67 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     expect(persistedModel()).toBe('claude-haiku-4-5-20251001');
   }, 15000);
 
+  // #582: /pstack-setup sets agents[].pstack from pstack-models.md lines.
+  describe('/pstack-setup', () => {
+    const { pstackClaudeConfig } = require('../helpers/pstack-fixture');
+    let fixture: { configDir: string; cleanup: () => void };
+    beforeEach(() => { fixture = pstackClaudeConfig(); process.env.CLAUDE_CONFIG_DIR = fixture.configDir; });
+    afterEach(() => fixture.cleanup());
+    const persistedPstack = () => JSON.parse(fs.readFileSync(configPath, 'utf-8')).agents[0].pstack;
+    const gatewayWithIds = () => {
+      const gatewayConfig = makeGatewayConfig(path.join(tmpDir, 'logs'));
+      gatewayConfig.gateway.models = [...STATIC_MODELS, { id: 'gpt-6-sol[1m]', label: 'GPT 6 Sol', alias: 'gpt6sol', contextWindow: 1050000 }];
+      return gatewayConfig;
+    };
+    async function send(port: number, text: string, extraMeta?: Record<string, string>): Promise<string> {
+      fs.rmSync(forwardFile(), { force: true });
+      await postChannelMessage(port, chatId, text, 'discord', extraMeta);
+      await waitForForward();
+      return forwardText();
+    }
+
+    it('shows that pstack is installed but not set up, with the model IDs', async () => {
+      const port = await startRunner(gatewayWithIds());
+      const text = await send(port, '/pstack-setup');
+      expect(text).toContain('not set up for this agent');
+      expect(text).toContain('gpt-6-sol[1m] (GPT 6 Sol)');
+      expect(persistedPstack()).toBeUndefined();
+    }, 15000);
+
+    it('sets roles from sheet lines, shows the sheet, and turns it off', async () => {
+      const port = await startRunner(gatewayWithIds());
+      const set = await send(port, '/pstack-setup bug-fix: gpt-6-sol[1m] @high\ndefault effort: xhigh');
+      expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m] @high' }, defaultEffort: 'xhigh' });
+      expect(set).toContain('bug-fix: gpt-6-sol[1m] @high');
+      expect(set).toContain('default effort: xhigh');
+
+      await send(port, '/pstack-setup off');
+      expect(persistedPstack()).toBeUndefined();
+    }, 15000);
+
+    it('refuses an alias and leaves config unchanged', async () => {
+      const port = await startRunner(gatewayWithIds());
+      const text = await send(port, '/pstack-setup bug-fix: opus');
+      expect(text).toContain('MODEL_ALIAS_NOT_ALLOWED');
+      expect(text).toContain('claude-opus-5');
+      expect(persistedPstack()).toBeUndefined();
+    }, 15000);
+
+    it('is refused outside a direct message', async () => {
+      const port = await startRunner(gatewayWithIds());
+      const text = await send(port, '/pstack-setup on', { chat_type: 'group' });
+      expect(text).toContain('only available in a direct message');
+      expect(persistedPstack()).toBeUndefined();
+    }, 15000);
+
+    it('explains how to install when the plugin is missing', async () => {
+      fixture.cleanup(); fixture = pstackClaudeConfig(false); process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
+      const port = await startRunner(gatewayWithIds());
+      expect(await send(port, '/pstack-setup on')).toContain('PSTACK_NOT_INSTALLED');
+      expect(persistedPstack()).toBeUndefined();
+    }, 15000);
+  });
+
   // #460: config.json carries agent bot tokens and the admin API key.
   // persistModelToConfig()'s tmp-then-rename pattern silently downgraded it
   // from 0600 to the tmp file's default mode (0644) on every model switch.

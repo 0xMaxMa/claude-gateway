@@ -399,3 +399,43 @@ describe('per-task model and effort', () => {
       expect(() => tasks.spawn({...context,actionId:`gm-${++sequence}`},{title:'T',instructions:'x',targetProfile:'gateway-managed',gatewayTarget:{adapter:'safemode',sessionId:'s'} as any,...extra})).toThrow('INVALID_GATEWAY_TARGET');
   });
 });
+
+// #582: pstack plugin gate and per-agent sheet on host workers.
+describe('pstack plugin gate', () => {
+  const { pstackClaudeConfig } = require('../../helpers/pstack-fixture');
+  let fixture: { configDir: string; cleanup: () => void }, previous: string | undefined;
+  beforeEach(() => { fixture = pstackClaudeConfig(); previous = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = fixture.configDir; });
+  afterEach(() => { if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous; fixture.cleanup(); });
+  const claudeProfile = () => jest.mocked(SessionProcess).mock.calls[0][6] as any;
+
+  test('an agent that is not set up gets the plugin turned off and no sheet', async () => {
+    await run('claude-sonnet-4-6');
+    expect(claudeProfile().pluginOverrides).toEqual({'pstack@pstack-claude': false});
+    expect(claudeProfile().context).not.toContain('pstack-models.md');
+  });
+
+  test('a set-up agent gets the plugin turned on and its own sheet, in model IDs', async () => {
+    agent.pstack = {roles:{'bug-fix':'gpt-6-sol[1m]'}, defaultEffort:'high'};
+    await run('claude-sonnet-4-6');
+    expect(claudeProfile().pluginOverrides).toEqual({'pstack@pstack-claude': true});
+    expect(claudeProfile().context).toContain('Agent persona stays Claude.');
+    expect(claudeProfile().context).toContain('# pstack-models.md override sheet for this agent');
+    expect(claudeProfile().context).toContain('\nbug-fix: gpt-6-sol[1m]\n');
+    expect(claudeProfile().context).toContain('\ninterrogate reviewers: claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5, claude-haiku-5-5\n');
+    expect(claudeProfile().context).toContain('\ndefault effort: high');
+  });
+
+  test('a GPT child of a set-up agent is a leaf: no sheet on Codex', async () => {
+    agent.pstack = {};
+    await run('gpt-6-sol[1m]');
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].profile.context).not.toContain('pstack-models.md');
+  });
+
+  test('a set-up agent whose plugin was uninstalled loads no sheet', async () => {
+    fixture.cleanup(); fixture = pstackClaudeConfig(false); process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
+    agent.pstack = {};
+    await run('claude-sonnet-4-6');
+    expect(claudeProfile().pluginOverrides).toEqual({'pstack@pstack-claude': true});
+    expect(claudeProfile().context).not.toContain('pstack-models.md');
+  });
+});
