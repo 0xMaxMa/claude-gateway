@@ -263,11 +263,13 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         const fileIds = this.tasks.store.all('SELECT id FROM task_files WHERE attempt_id=? ORDER BY created_at,id', attempt.attemptId).map(row => String(row.id));
         return { type: 'completed' as const, result: { summary: answer.text, artifactIds: [artifact.resourceId, ...fileIds],
           diff: { text: diff, truncated: diff.length < artifact.diff.length },
-          ...(answer.unresolvedBackground ? { unresolvedBackground: answer.unresolvedBackground } : {}) } };
+          ...(answer.unresolvedBackground ? { unresolvedBackground: answer.unresolvedBackground } : {}),
+          ...(answer.providerRefusals ? { providerRefusals: answer.providerRefusals } : {}) } };
       }).catch(async error => {
         await process.stop();
         const failure = taskFailure(error);
         failure.provider = providerFailure(error);
+        if (error?.providerRefusals?.length) failure.providerRefusals = error.providerRefusals;
         if (error?.timeout) failure.message = `Worker timeout: phase=${error.timeout.phase}, elapsed=${Math.round(error.timeout.elapsedMs / 1000)}s, idle=${Math.round(error.timeout.idleMs / 1000)}s. Inspect existing changes before continuing.`;
         return {type: process.managedGroupStopped ? 'failed' as const : 'unknown' as const, failure};
       }).finally(async () => { observationClosed = true; ticket.revoke(); await process.stop(); });

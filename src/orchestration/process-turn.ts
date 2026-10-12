@@ -12,12 +12,14 @@ import type { SessionProcess } from '../session/process';
 import { OrchestrationError } from './types';
 import { collectEnvSecrets, sanitizeToolName } from './tasks/failure';
 import { providerErrorMetadata, ProviderErrorMetadata } from './provider-error-metadata';
+import { ProviderRefusal, ProviderRefusals } from '../session/provider-refusal';
 
 export interface TurnTimeoutPolicy { pauseRequested?: () => boolean; onUsage?: (metrics: ManagedTurnMetrics) => void; startupTimeoutMs: number; firstResponseTimeoutMs: number; compactionTimeoutMs?: number; idleTimeoutMs: number; acceptToolProgress?: boolean; idleAction?: 'observe'; backgroundGraceMs?: number; onObservation?: (value: TurnObservation) => void; }
 export interface TurnTimeoutDetails { phase: 'startup' | 'first_response' | 'compaction' | 'idle' | 'total'; elapsedMs: number; idleMs: number; }
 /** A final result that background work never released: kept after the grace period, not hidden. */
 export interface UnresolvedBackground { pendingTasks: number; graceMs: number; resultSeenAt: number; }
-export interface ProcessResult { text: string; interrupted: boolean; paused?: boolean; unresolvedBackground?: UnresolvedBackground; }
+/** `providerRefusals` lists messages the provider refused in this turn, even when a later answer completed it. */
+export interface ProcessResult { text: string; interrupted: boolean; paused?: boolean; unresolvedBackground?: UnresolvedBackground; providerRefusals?: ProviderRefusal[]; }
 /** Shared lifecycle contract; each backend normalizes its own native event protocol. */
 export type WorkerProcess = { on(event: string, listener: (...args: any[]) => void): unknown; off(event: string, listener: (...args: any[]) => void): unknown } & Pick<SessionProcess, 'start' | 'sendMessage' | 'interrupt' | 'stop' | 'runtimeProfile' | 'managedProcessId' | 'spawnedAt' | 'managedGroupStopped'> &
   Partial<Pick<SessionProcess, 'isSpawnedConnectorTool' | 'flushToolSchemas' | 'recordTurnOutcome'>>;
@@ -62,6 +64,8 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
   let apiErrorMetadata: ProviderErrorMetadata = {};
   let providerMessage: string | undefined;
   const usageCollector = new TurnUsageCollector();
+  const refusals = new ProviderRefusals();
+  const refused = () => { const providerRefusals = refusals.list(); return providerRefusals.length ? { providerRefusals } : {}; };
   const background = new BackgroundWork();
   let pauseForInput = false;
   const startedAt = Date.now(); const tools = new Set<string>(); let inputTokens = 0, totalTokens = 0, recorded = false;
@@ -118,10 +122,10 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     if (!waitingResult.streamed && !publish(text)) return;
     const unresolvedBackground = { pendingTasks: background.pendingCount, graceMs: policy!.backgroundGraceMs!, resultSeenAt: waitingResult.seenAt };
     process.recordTurnOutcome?.('completed');
-    resolveAccepted(); settled = true; cleanup(); resolveResult({ text, interrupted: false, unresolvedBackground });
+    resolveAccepted(); settled = true; cleanup(); resolveResult({ text, interrupted: false, unresolvedBackground, ...refused() });
   };
   const cleanup = () => { if (!recorded) { recorded = true; try { const measured = usageCollector.snapshot(); onMetrics?.({ toolIds: [...tools], inputTokens: measured.usage ? measured.usage.inputTokens + measured.usage.cacheCreationTokens + measured.usage.cacheReadTokens : inputTokens, totalTokens: measured.usage?.totalTokens ?? totalTokens, startedAt, endedAt: Date.now(), ...measured }); } catch { /* telemetry must not break delivery */ } } clearTimeout(timer); clearTimeout(phaseTimer); clearTimeout(graceTimer); clearInterval(observationTimer); process.off('output', output); process.off('request-tools', schemaOutput); process.off('exit', exit); process.off('startup-error', startupError); };
-  const fail = (error: Error) => { if (settled) return; process.recordTurnOutcome?.((error as OrchestrationError).code === 'TIMEOUT' ? 'timeout' : (error as OrchestrationError).code === 'INTERRUPTED' ? 'cancelled' : 'failed', (error as OrchestrationError).code); settled = true; cleanup(); rejectProvider(error); rejectAccepted(error); rejectResult(error); };
+  const fail = (error: Error) => { if (settled) return; Object.assign(error, refused()); process.recordTurnOutcome?.((error as OrchestrationError).code === 'TIMEOUT' ? 'timeout' : (error as OrchestrationError).code === 'INTERRUPTED' ? 'cancelled' : 'failed', (error as OrchestrationError).code); settled = true; cleanup(); rejectProvider(error); rejectAccepted(error); rejectResult(error); };
   const publish = (chunk: string): boolean => {
     try { onText(chunk); return true; }
     catch { fail(new OrchestrationError('RESPONSE_PERSISTENCE_FAILED')); void process.stop(); return false; }
@@ -129,7 +133,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
   const startupError = (error: Error) => { fail(error); void process.stop(); };
   const exit = () => {
     if (settled || finalCapturePending) return;
-    if (stopped) { settled = true; cleanup(); rejectAccepted(new OrchestrationError('INTERRUPTED')); resolveResult({ text, interrupted: true }); }
+    if (stopped) { settled = true; cleanup(); rejectAccepted(new OrchestrationError('INTERRUPTED')); resolveResult({ text, interrupted: true, ...refused() }); }
     else if (apiErrorText) fail(Object.assign(new OrchestrationError('INFERENCE_FAILED', apiErrorText), { providerOrigin: true, ...apiErrorMetadata, providerCodes: apiErrorCodes, providerMessage }));
     else fail(new OrchestrationError('PROCESS_EXITED'));
   };
@@ -143,6 +147,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
     let event: Record<string, any>;
     if (settled) return;
     try { event = JSON.parse(line); } catch { return; }
+    refusals.observe(event);
     if (process.runtimeProfile?.role === 'worker') background.observe(event);
     if (event.type === 'result' && !event.is_error && process.runtimeProfile?.role === 'worker' && policy?.pauseRequested?.()) pauseForInput = true;
     if (event.type === 'result' && !event.is_error && !stopped && !pauseForInput && process.runtimeProfile?.role === 'worker' && background.pending) {
@@ -327,7 +332,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       }
       if (!streamed && text && !publish(text)) return;
       process.recordTurnOutcome?.(stopped ? 'cancelled' : 'completed');
-      resolveAccepted(); settled = true; cleanup(); resolveResult({ text, interrupted: stopped, ...(pauseForInput ? {paused:true} : {}) });
+      resolveAccepted(); settled = true; cleanup(); resolveResult({ text, interrupted: stopped, ...(pauseForInput ? {paused:true} : {}), ...refused() });
     }
   };
   const stop = (): Promise<void> => {

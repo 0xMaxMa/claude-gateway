@@ -32,7 +32,8 @@ import { WORKER_RESULT_FIDELITY } from './report-fidelity';
 import { canonicalVoiceProvider } from '../voice/providers/model-ref';
 import { CapabilityCatalog, readCapabilityPage } from './capabilities';
 import { browserRouting } from './browser-routing';
-import { responseFailureMessage } from './response-errors';
+import { providerRefusalNotice, responseFailureMessage } from './response-errors';
+import type { ProviderRefusal } from '../session/provider-refusal';
 import { displayPrefix } from './display-stream';
 import { responseHasVoiceOrigin, voiceReplyAllowed } from './voice-reply-policy';
 import { taskReport } from './task-report';
@@ -481,6 +482,16 @@ export class AgentOrchestrationRuntime {
     });
     void this.flushHistory().catch(() => {});
     void this.delivery.tick().catch(() => {});
+  }
+  /** Durable, attributed refusal evidence beside the response; the provider's fields, never a model-written cause. */
+  private reportProviderRefusals(conversationId: string, sessionId: string, responseId: string, refusals: ProviderRefusal[], deliver: boolean): void {
+    try {
+      this.store.transaction(() => this.store.appendEvent(conversationId, 'response.provider_refusal', { responseId, refusals }));
+      if (!deliver) return;
+      const text = providerRefusalNotice(refusals);
+      this.publishText(sessionId, this.decisions.notice(conversationId, text, true), text, true);
+      void this.delivery.tick().catch(() => {});
+    } catch { /* Diagnostics cannot fail a response that already settled. */ }
   }
   isBusy(sessionId: string): boolean { return this.active.has(sessionId); }
   isCompacting(sessionId: string): boolean { return this.active.get(sessionId)?.maintenance === 'compact'; }
@@ -1639,6 +1650,7 @@ export class AgentOrchestrationRuntime {
       // arrive after any commentary), so the tail correction is no longer speech/review-only.
       if (!silent && display.startsWith(streamedDisplay) && display.length > streamedDisplay.length) options.onText?.(display.slice(streamedDisplay.length));
       if (!silent) this.publishText(sessionId, decision.responseId!, display, true);
+      if (response.providerRefusals?.length) this.reportProviderRefusals(receipt.conversationId, sessionId, decision.responseId!, response.providerRefusals, !silent);
       this.questionControls.flushPrompts();
       await this.flushHistory();
       const listener = this.voiceListeners.get(sessionId);
@@ -1712,6 +1724,8 @@ export class AgentOrchestrationRuntime {
         await this.flushHistory();
         const failed = this.store.get('SELECT generated_text FROM assistant_responses WHERE id=?', active.decision.responseId!);
         if (failed?.generated_text) this.publishText(sessionId, active.decision.responseId!, String(failed.generated_text), true);
+        const refusals = (error as { providerRefusals?: ProviderRefusal[] } | null)?.providerRefusals;
+        if (row && refusals?.length) this.reportProviderRefusals(String(row.conversation_id), sessionId, active.decision.responseId!, refusals, row.state === 'running' && !active.notification);
       }
       throw error;
     } finally {
