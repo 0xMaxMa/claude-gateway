@@ -50,7 +50,9 @@ export async function resolveProjectCwd(config: GatewayConfig, name: ProjectName
 /** Named in gateway.projects.trusted, and its folder is a real directory, not a symlink. */
 export async function projectTrusted(config: GatewayConfig, name: string): Promise<boolean> {
   if (!config.gateway.projects?.trusted?.includes(name)) return false;
-  const dir = path.join(resolveProjectsRoot(config), name);
+  const realRoot = await fsp.realpath(resolveProjectsRoot(config)).catch(() => null);
+  if (!realRoot) return false;
+  const dir = path.join(realRoot, name);
   return (await fsp.realpath(dir).catch(() => null)) === dir;
 }
 
