@@ -103,7 +103,7 @@ export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
 export { DEFAULT_MODELS } from './model-registry';
 import { DEFAULT_MODELS, availableModels, selectableModels, findModel } from './model-registry';
-import { PSTACK_INSTALL_HINT, pstackModels, pstackPluginInfo } from '../pstack/plugin-info';
+import { PSTACK_INSTALL_HINT, PSTACK_OFF_SETTINGS, pstackModels, pstackPluginInfo } from '../pstack/plugin-info';
 import { PstackConfigError, applySheetLines } from '../pstack/config';
 import { pstackPanelDefault, renderPstackSheet } from '../pstack/sheet';
 import { savePstackConfig } from '../pstack/setup';
@@ -1245,7 +1245,7 @@ export class AgentRunner extends EventEmitter {
         try { child.kill('SIGKILL'); } catch { /* already gone */ }
         finish({ stdout: '', timedOut: true });
       }, RECOVERY_TRIAGE_TIMEOUT_MS);
-      const child = spawn('claude', ['-p', '--output-format', 'text'], {
+      const child = spawn('claude', ['-p', '--output-format', 'text', '--settings', JSON.stringify(PSTACK_OFF_SETTINGS)], {
         stdio: ['pipe', 'pipe', 'ignore'],
       });
       child.stdout?.on('data', (d) => { out += String(d); });
@@ -5689,7 +5689,7 @@ export class AgentRunner extends EventEmitter {
         const titlePrompt = `Summarise in 3-5 words as a session title (no punctuation, no quotes): ${prompt}`;
         const { stdout } = await execFileAsync(
           'claude',
-          ['-p', titlePrompt, '--output-format', 'text', '--model', 'claude-haiku-4-5-20251001'],
+          ['-p', titlePrompt, '--output-format', 'text', '--model', 'claude-haiku-4-5-20251001', '--settings', JSON.stringify(PSTACK_OFF_SETTINGS)],
           { timeout: 15000, encoding: 'utf-8' },
         );
         const aiName = stdout.trim().slice(0, 60) || undefined;

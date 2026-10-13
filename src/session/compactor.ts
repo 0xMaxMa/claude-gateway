@@ -5,6 +5,7 @@ import { Message } from '../types';
 import type { ChatChannelOrApi } from '../history/types';
 import { SessionStore } from './store';
 import { claudeCommand, pathWithNativeBin } from './claude-bin';
+import { PSTACK_OFF_SETTINGS } from '../pstack/plugin-info';
 
 export interface CompactionResult {
   beforeMessages: number;
@@ -291,7 +292,7 @@ export class SessionCompactor {
     // spawn after the native-installer migration.
     const { command: claudeBin, args: claudeBinArgs } = claudeCommand();
 
-    const result = await this.spawnClaude(claudeBin, [...claudeBinArgs, '--print', '--model', model], prompt);
+    const result = await this.spawnClaude(claudeBin, [...claudeBinArgs, '--print', '--model', model, '--settings', JSON.stringify(PSTACK_OFF_SETTINGS)], prompt);
 
     if (result.error) {
       throw new Error(`claude CLI error: ${result.error.message}`);

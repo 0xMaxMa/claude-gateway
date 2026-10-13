@@ -9,6 +9,9 @@ import { claudeConfigDir } from '../config/claude-settings';
  * the role list in its models.json.
  */
 export const PSTACK_PLUGIN_ID = 'pstack@pstack-claude';
+/** `--settings` for the gateway's own one-shot `claude -p` helpers (titles, summaries,
+ * reviews): they read the host settings like any session but never need pstack. */
+export const PSTACK_OFF_SETTINGS = { enabledPlugins: { [PSTACK_PLUGIN_ID]: false } };
 export const PSTACK_INSTALL_HINT = `Install it in Claude Code on this host with \`/plugin marketplace add michael-denyer/pstack-claude\`, then \`/plugin install ${PSTACK_PLUGIN_ID}\`.`;
 
 export interface PstackPluginInfo { installed: boolean; installPath?: string }

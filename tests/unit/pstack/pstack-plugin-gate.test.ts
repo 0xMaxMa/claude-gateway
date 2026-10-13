@@ -91,3 +91,48 @@ describe('non-orchestration sessions', () => {
     expect(argsFor({}, ['--settings', 'missing.json']).filter(a => a.startsWith('--settings') || a === 'missing.json')).toEqual(['--settings', 'missing.json']);
   });
 });
+
+// Dev e2e of #591: the gateway's own one-shot `claude -p` helpers read the same
+// host settings, so they loaded pstack too; none of them ever needs it.
+describe('gateway utility claude -p processes', () => {
+  const child = require('child_process') as typeof import('child_process');
+  const { EventEmitter } = require('events');
+  const pstackOff = (args: string[]) => expect(settingsOf(args).enabledPlugins).toEqual({ 'pstack@pstack-claude': false });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('session title generation', async () => {
+    const { AgentRunner } = require('../../../src/agent/runner');
+    let args: string[] = [];
+    jest.spyOn(child, 'execFile').mockImplementation(((_: string, a: string[], __: unknown, cb: (e: null, r: { stdout: string }) => void) => { args = a; cb(null, { stdout: '' }); }) as any);
+    const runner = Object.create(AgentRunner.prototype);
+    runner.logger = { warn: jest.fn() };
+    runner.generateSessionNameInBackground('c', 's', 'hello');
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(args).toContain('-p');
+    pstackOff(args);
+  });
+
+  test('session compaction summary', async () => {
+    const { SessionCompactor } = require('../../../src/session/compactor');
+    let args: string[] = [];
+    const compactor = new SessionCompactor({}, async (_: string, a: string[]) => { args = a; return { status: 0, stdout: 'summary', stderr: '' }; });
+    await compactor.callClaudeForSummary('transcript', 'claude-haiku-5-5');
+    expect(args).toContain('--print');
+    pstackOff(args);
+  });
+
+  test('skill-learning reviewer', async () => {
+    const { makeClaudeSpawn } = require('../../../src/agent/skill-learning/reviewer');
+    let args: string[] = [];
+    jest.spyOn(child, 'spawn').mockImplementation(((_: string, a: string[]) => {
+      args = a;
+      const proc = new EventEmitter();
+      proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter();
+      proc.stdin = { write: () => {}, end: () => setImmediate(() => proc.emit('close', 0)), on: () => {} };
+      proc.kill = () => {};
+      return proc;
+    }) as any);
+    await makeClaudeSpawn('claude-haiku-5-5')([], 'prompt');
+    expect(settingsOf(args)).toEqual({ disableAllHooks: true, enabledPlugins: { 'pstack@pstack-claude': false } });
+  });
+});

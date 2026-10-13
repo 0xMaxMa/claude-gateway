@@ -152,7 +152,7 @@ describe('SessionCompactor', () => {
     }
 
     expect(calls[0].bin).toBe('node');
-    expect(calls[0].args).toEqual(['/opt/claude/cli.js', '--print', '--model', 'claude-sonnet-4-6']);
+    expect(calls[0].args).toEqual(['/opt/claude/cli.js', '--print', '--model', 'claude-sonnet-4-6', '--settings', JSON.stringify({ enabledPlugins: { 'pstack@pstack-claude': false } })]);
   });
 
   // -------------------------------------------------------------------------
@@ -179,7 +179,7 @@ describe('SessionCompactor', () => {
 
     expect(typeof calls[0].bin).toBe('string');
     expect(calls[0].bin.length).toBeGreaterThan(0);
-    expect(calls[0].args).toEqual(['--print', '--model', 'claude-sonnet-4-6']);
+    expect(calls[0].args).toEqual(['--print', '--model', 'claude-sonnet-4-6', '--settings', JSON.stringify({ enabledPlugins: { 'pstack@pstack-claude': false } })]);
   });
 
   // -------------------------------------------------------------------------
