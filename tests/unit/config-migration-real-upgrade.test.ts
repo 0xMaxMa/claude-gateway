@@ -971,7 +971,7 @@ describe('config migration — Haiku 5.5 reaches existing installs', () => {
     expect(haiku45).toEqual({
       id: 'claude-haiku-4-5-20251001',
       label: 'Haiku 4.5',
-      alias: 'claude-haiku-4-5-20251001',
+      alias: 'haiku45',
       contextWindow: 200000,
       multiplier: 0.33,
       workerHarness: 'claude',
