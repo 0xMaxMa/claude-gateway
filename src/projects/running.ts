@@ -291,8 +291,11 @@ async function protectedPids(sys: Sys): Promise<Set<number>> {
   return set;
 }
 
+/** The claude CLI, also when the native build is started by its own `claude.exe` path. */
+const AGENT_NAMES = new Set(['claude', 'claude.exe']);
+
 function isAgent(info: ProcInfo): boolean {
-  return info.exe === 'claude' || info.comm === 'claude';
+  return AGENT_NAMES.has(info.exe ?? '') || AGENT_NAMES.has(info.comm);
 }
 
 /** A live, same-uid, non-agent, unprotected process, with the paths that can tie it to a project. */

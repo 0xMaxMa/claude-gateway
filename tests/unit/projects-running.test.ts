@@ -194,6 +194,16 @@ describe('candidate rules', () => {
     expect(kills.map((k) => k[0])).toEqual([62]);
   });
 
+  it('never selects the native claude.exe binary started by its own path', async () => {
+    const { sys, kills } = makeSys({
+      60: { listens: 3000, exe: 'claude.exe', comm: 'claude.exe' },
+      62: { listens: 3002 },
+    });
+    expect((await listRunning(sys, '/r/api')).processes.map((p) => p.port)).toEqual([3002]);
+    await stopRunning(sys, '/r/api');
+    expect(kills.map((k) => k[0])).toEqual([62]);
+  });
+
   it('never selects another uid', async () => {
     const { sys, kills } = makeSys({ 60: { listens: 3000, uid: 0 }, 61: { listens: 3001 } });
     expect((await listRunning(sys, '/r/api')).processes.map((p) => p.port)).toEqual([3001]);
