@@ -38,20 +38,20 @@ describe('CLI skill discovery gates pstack like the worker', () => {
   });
 });
 
-describe('an explicit /pstack: command on an agent that is not set up', () => {
-  async function fixture(pstack?: object) {
-    const root = mkdtempSync(join(tmpdir(), 'pstack-ingress-')), dir = join(root, 'a'), workspace = join(dir, 'workspace');
-    mkdirSync(workspace, { recursive: true }); writeFileSync(join(workspace, 'CLAUDE.md'), 'Identity');
-    const agent = { id: 'a', description: 'fixture', env: '', workspace, claude: { model: 'fixture', extraFlags: [] }, orchestration: {}, ...(pstack ? { pstack } : {}) } as AgentConfig;
-    const gateway = { gateway: { orchestration: true, headless: true }, agents: [agent] } as GatewayConfig;
-    const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a'), sid = randomUUID();
-    await sessions.ensureApiSession('a', 'chat', sid);
-    const createAgentSession = jest.fn(async () => { throw new Error('no model turn in this test'); });
-    const runtime = await AgentOrchestrationRuntime.open(agent, gateway, dir, sessions, history, { createAgentSession, releaseAgentSession: async () => {} });
-    const scope = { agentId: 'a', agentSessionId: sid, source: 'telegram' as const, accountId: 'owner', chatId: 'chat', threadKey: '', principalId: 'owner' };
-    return { runtime, scope, createAgentSession, close: async () => { await runtime.close(); (history as any).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true }); } };
-  }
+async function fixture(pstack?: object) {
+  const root = mkdtempSync(join(tmpdir(), 'pstack-ingress-')), dir = join(root, 'a'), workspace = join(dir, 'workspace');
+  mkdirSync(workspace, { recursive: true }); writeFileSync(join(workspace, 'CLAUDE.md'), 'Identity');
+  const agent = { id: 'a', description: 'fixture', env: '', workspace, claude: { model: 'fixture', extraFlags: [] }, orchestration: {}, ...(pstack ? { pstack } : {}) } as AgentConfig;
+  const gateway = { gateway: { orchestration: true, headless: true }, agents: [agent] } as GatewayConfig;
+  const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a'), sid = randomUUID();
+  await sessions.ensureApiSession('a', 'chat', sid);
+  const createAgentSession = jest.fn(async () => { throw new Error('no model turn in this test'); });
+  const runtime = await AgentOrchestrationRuntime.open(agent, gateway, dir, sessions, history, { createAgentSession, releaseAgentSession: async () => {} });
+  const scope = { agentId: 'a', agentSessionId: sid, source: 'telegram' as const, accountId: 'owner', chatId: 'chat', threadKey: '', principalId: 'owner' };
+  return { runtime, scope, createAgentSession, close: async () => { await runtime.close(); (history as any).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true }); } };
+}
 
+describe('an explicit /pstack: command on an agent that is not set up', () => {
   test.each(['/pstack:why the build is slow', '/pstack:interrogate@claude_bot src/a.ts'])('%s is answered without a model turn or task', async text => {
     const f = await fixture();
     try {
@@ -72,5 +72,42 @@ describe('an explicit /pstack: command on an agent that is not set up', () => {
     expect(pstackNotSetUpReply('/code-review', 'telegram', undefined)).toBeUndefined();
     expect(pstackNotSetUpReply('please run pstack:why', 'telegram', undefined)).toBeUndefined();
     expect(pstackNotSetUpReply('/pstack:why', 'api', undefined)).toContain('/pstack-setup');
+  });
+});
+
+// Dev e2e of #591 (G2): pstack's principle-* skills are `user-invocable: false`.
+// An explicit `/pstack:principle-*` went to the agent's decision turn and once
+// timed out there; like Claude Code, it is not a command, and the gateway says so at once.
+describe('an explicit /pstack: command for a skill that is not user-invocable', () => {
+  const { pstackClaudeConfig } = require('../../helpers/pstack-fixture');
+  let plugin: { configDir: string; installPath: string; cleanup: () => void }, previous: string | undefined;
+  beforeEach(() => {
+    plugin = pstackClaudeConfig(); previous = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = plugin.configDir;
+    for (const [name, invocable] of [['principle-attack-the-premise', false], ['how', true]] as const) {
+      mkdirSync(join(plugin.installPath, 'skills', name), { recursive: true });
+      writeFileSync(join(plugin.installPath, 'skills', name, 'SKILL.md'), `---\nname: ${name}\ndescription: fixture\n${invocable ? '' : 'user-invocable: false\n'}---\n\nBody\n`);
+    }
+  });
+  afterEach(() => { if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous; plugin.cleanup(); });
+
+  test('a set-up agent answers it without a model turn or task', async () => {
+    const f = await fixture({});
+    try {
+      const submitted = f.runtime.submitInput({ scope: f.scope, text: '/pstack:principle-attack-the-premise check this plan', ingressKey: 'm1' }, { execute: true, writeMemory: false });
+      const reply = await Promise.race([submitted.response.catch(() => 'model turn'), new Promise<string>(resolve => setTimeout(() => resolve('no direct reply'), 3000))]);
+      expect(reply).toContain('/pstack:principle-attack-the-premise');
+      expect(reply).toContain('not a command');
+      expect(f.createAgentSession).not.toHaveBeenCalled();
+      expect(f.runtime.store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(0);
+    } finally { await f.close(); }
+  });
+
+  test('user-invocable skills, unknown names and agents that are not set up are left alone', async () => {
+    const { pstackAutomaticSkillReply } = await import('../../../src/pstack/overlay');
+    expect(pstackAutomaticSkillReply('/pstack:how x', 'telegram', {})).toBeUndefined();
+    expect(pstackAutomaticSkillReply('/pstack:nope', 'telegram', {})).toBeUndefined();
+    expect(pstackAutomaticSkillReply('/pstack:../../etc', 'telegram', {})).toBeUndefined();
+    expect(pstackAutomaticSkillReply('/pstack:principle-attack-the-premise', 'telegram', undefined)).toBeUndefined();
+    expect(pstackAutomaticSkillReply('/pstack:principle-attack-the-premise@claude_bot', 'telegram', {})).toContain('not a command');
   });
 });
