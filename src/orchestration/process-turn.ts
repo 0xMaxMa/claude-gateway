@@ -12,7 +12,7 @@ import type { SessionProcess } from '../session/process';
 import { OrchestrationError } from './types';
 import { collectEnvSecrets, sanitizeToolName } from './tasks/failure';
 import { providerErrorMetadata, ProviderErrorMetadata } from './provider-error-metadata';
-import { ProviderRefusal, ProviderRefusals } from '../session/provider-refusal';
+import { isApiErrorRecord, ProviderRefusal, ProviderRefusals } from '../session/provider-refusal';
 
 export interface TurnTimeoutPolicy { pauseRequested?: () => boolean; onUsage?: (metrics: ManagedTurnMetrics) => void; startupTimeoutMs: number; firstResponseTimeoutMs: number; compactionTimeoutMs?: number; idleTimeoutMs: number; acceptToolProgress?: boolean; idleAction?: 'observe'; backgroundGraceMs?: number; onObservation?: (value: TurnObservation) => void; }
 export interface TurnTimeoutDetails { phase: 'startup' | 'first_response' | 'compaction' | 'idle' | 'total'; elapsedMs: number; idleMs: number; }
@@ -178,7 +178,7 @@ export function startProcessTurn(process: WorkerProcess, prompt: string, timeout
       } catch { /* Usage persistence must not terminate inference. */ }
     }
     const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
-    const isProviderError = event.type === 'assistant' && (event.isApiErrorMessage || event.error);
+    const isProviderError = isApiErrorRecord(event) || (event.type === 'assistant' && event.error);
     if (!isProviderError && ((event.type === 'assistant' && blocks.some((b: any) => ['text','thinking','tool_use'].includes(b.type)))
         || (event.type === 'stream_event' && ['text_delta','thinking_delta','input_json_delta'].includes(event.event?.delta?.type))
         || (event.type === 'result' && !event.is_error))) resolveProvider();

@@ -33,3 +33,14 @@ test('a real model response releases recovery independently of a long running to
   process.emit('output',JSON.stringify({type:'result',result:'Done'}));
   await turn.result;
 });
+
+test('a stream-json API-error record is a provider error even without an error kind',async()=>{
+  const process=Object.assign(new EventEmitter(),{start:async()=>{},sendMessage:()=>{},interrupt:()=>{},stop:async()=>{}}) as unknown as SessionProcess;
+  const turn=startProcessTurn(process,'request',10000);
+  const ready=jest.fn(); void turn.providerReady.then(ready).catch(()=>{});
+  // Claude Code stream-json marks the synthetic record with is_api_error_message (snake_case).
+  process.emit('output',JSON.stringify({type:'assistant',parent_tool_use_id:null,session_id:'s',uuid:'u',is_api_error_message:true,message:{id:'4a7060a3-76f2-414b-b0b2-33a1144988ce',model:'<synthetic>',role:'assistant',type:'message',stop_reason:'stop_sequence',content:[{type:'text',text:'API Error: request blocked'}]}}));
+  process.emit('output',JSON.stringify({type:'result',subtype:'success',is_error:true,result:'API Error: request blocked'}));
+  await expect(turn.result).rejects.toMatchObject({code:'INFERENCE_FAILED',providerOrigin:true,providerMessage:'API Error: request blocked'});
+  expect(ready).not.toHaveBeenCalled();
+});
