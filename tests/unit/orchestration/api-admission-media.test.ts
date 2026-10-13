@@ -36,7 +36,7 @@ async function fixture() {
   void foreground.catch(() => {});
   await started;
   const facade = Object.assign(Object.create(AgentRunner.prototype), {
-    agentConfig: agent, sessionStore: sessions, agentsBaseDir: root, apiChatIds: new Map(),
+    agentConfig: agent, sessionStore: sessions, agentsBaseDir: root, apiChatIds: new Map(), boundProjects: new Map(),
     pendingApiSessions: new Set([sid]), logger: { warn: jest.fn() }, getOrchestration: async () => runtime,
   }) as AgentRunner;
   const upload = 'media/ui-upload/fixture.txt';
