@@ -17,7 +17,7 @@ Running Claude Code directly on the host is unaffected: the plugin behaves as an
 
 ## Set up an agent
 
-An agent that is not set up loads **nothing** from pstack, even when the plugin is enabled globally: every host worker gets `enabledPlugins["pstack@pstack-claude"]` in its `--settings` overlay, `false` unless the agent has an `agents[].pstack` block. A session of an agent without orchestration gets the same `false` key; it is merged into a `--settings` you set in `claude.extraFlags` rather than added beside it. Claude Code merges that key over your own settings, so other plugins load as before. Claude workers of a set-up agent get the plugin and the agent's own model sheet. Codex workers never get pstack: no plugin, no sheet and no pstack skills in their catalog.
+An agent that is not set up loads **nothing** from pstack, even when the plugin is enabled globally: every host worker gets `enabledPlugins["pstack@pstack-claude"]` in its `--settings` overlay, `false` unless the agent has an `agents[].pstack` block. A session of an agent without orchestration gets the same `false` key; it is merged into a `--settings` you set in `claude.extraFlags` rather than added beside it. Claude Code merges that key over your own settings, so other plugins load as before. Claude workers of a set-up agent get the plugin and the agent's own model sheet. Codex workers never get pstack: no plugin, no sheet and no pstack skills in their catalog. The agent's own skill catalog lists pstack's skills only once it is set up, and `/pstack:<skill>` sent to an agent that is not set up is answered with a pointer to `/pstack-setup` instead of reaching the agent. The gate decides what Claude Code loads, not what a host worker can read: the plugin's files stay on the host's disk. The gateway's own one-shot `claude -p` helpers (session titles, summaries, skill reviews) always run with pstack off.
 
 Set it up in a direct message with the bot:
 
@@ -74,13 +74,13 @@ The plugin's SessionStart hook reads `session hook: on|off` only from the global
 
 ## Panels
 
-A panel role (`arena runners`, `arena cross-judge pool`, `architect runners`, `interrogate reviewers`) is a list, exactly as in pstack: one subagent per entry (`+=` and `-=` edit panel roles only; other roles take one model), so the list length is the number of reviewers, and each entry may carry its own `@level`. Mix providers freely, e.g. `claude-opus-5-5 @xhigh, gpt-6-sol[1m], claude-sonnet-5-5`. The skill combines the results itself (in `interrogate` the parent is the lead), and a failed reviewer is reported to the skill like any subagent result. There is no budget: effort and list length are the only controls, and the provider's quota is the ceiling.
+A panel role (`arena runners`, `arena cross-judge pool`, `architect runners`, `interrogate reviewers`) is a list, exactly as in pstack: one subagent per entry (`+=` and `-=` edit panel roles only; any other role takes exactly one model, and a list there is refused), so the list length is the number of reviewers, and each entry may carry its own `@level`. Mix providers freely, e.g. `claude-opus-5-5 @xhigh, gpt-6-sol[1m], claude-sonnet-5-5`. The skill combines the results itself (in `interrogate` the parent is the lead), and a failed reviewer is reported to the skill like any subagent result. There is no budget: effort and list length are the only controls, and the provider's quota is the ceiling.
 
 While a panel runs, Telegram's status message gains one line per task, prefixed with that task's title and counting its direct subagents, such as `interrogate: 2/4 · ✅ Opus 5.5 · ⏳ GPT 6 Sol · ❌ Haiku 5.5 (worker timeout)`. Subagents never message the chat; the answer arrives once, from the task that ran the skill, and that task's `task_status` lists each subagent's model, harness, effort, state and duration. The dashboard's Tasks view shows subagents under their parent.
 
 ## Subagents
 
-A set-up agent's Claude workers that load the plugin do not use Claude Code's own `Agent` tool (it is disabled for them). pstack's fan-out goes through three worker tools with the same arguments instead, so every subagent is a gateway task you can see in `/tasks` and cancel, and can run on another provider:
+A set-up agent's Claude workers that load the plugin do not use Claude Code's own `Agent` tool (it is disabled for them). pstack's fan-out goes through three worker tools with the same arguments instead, so every subagent is a gateway task that can run on another provider. `/tasks`, `/stop` and the task list API show only the task that ran the skill; its `task_status` lists the subagents, and stopping it stops them:
 
 | Tool | Does |
 | --- | --- |
