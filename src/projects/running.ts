@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
 import { promises as fsp } from 'fs';
 import * as path from 'path';
+import { redactCredentials } from './git-status';
 import { err, ok, Result } from './paths';
 
 export type RunningErrorCode = 'nothing_running' | 'invalid_port';
@@ -122,14 +123,14 @@ export function parseProcNetTcp(text: string, v6: boolean): NetSocket[] {
   return out;
 }
 
-const SECRET_FLAG = /^--[\w-]*(token|password|secret|key)[\w-]*$/i;
+const SECRET_FLAG = /^(--[\w-]*(token|password|passwd|secret|key|auth|credential|bearer)[\w-]*|-p)$/i;
 const REDACTED = '[redacted]';
 
-/** Joins argv for display. Secret flag values are replaced before truncation, so a cut never leaks one. */
+/** Joins argv for display. Secret flag values and URL userinfo are replaced before truncation, so a cut never leaks one. */
 export function redactCommand(args: string[]): string {
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
-    const a = args[i];
+    const a = redactCredentials(args[i]);
     const eq = a.indexOf('=');
     if (a.startsWith('--') && eq > 0 && SECRET_FLAG.test(a.slice(0, eq))) {
       out.push(`${a.slice(0, eq)}=${REDACTED}`);
@@ -139,6 +140,9 @@ export function redactCommand(args: string[]): string {
         out.push(REDACTED);
         i++;
       }
+    } else if (/^-p./.test(a)) {
+      // mysql-style -p<password>, attached with no space.
+      out.push(`-p${REDACTED}`);
     } else {
       out.push(a);
     }

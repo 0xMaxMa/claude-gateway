@@ -59,6 +59,25 @@ describe('redactCommand', () => {
     expect(long.length).toBe(120);
     expect(long).not.toContain('topsecret');
   });
+
+  it.each([
+    [['app', '--auth', 'sk-live-123'], 'app --auth [redacted]'],
+    [['app', '--auth=sk-live-123'], 'app --auth=[redacted]'],
+    [['app', '--credentials', 'c1'], 'app --credentials [redacted]'],
+    [['app', '--bearer', 'b1'], 'app --bearer [redacted]'],
+    [['mysql', '-u', 'root', '-p', 'pw123'], 'mysql -u root -p [redacted]'],
+    [['mysql', '-ppw123'], 'mysql -p[redacted]'],
+    [['app', 'postgres://u:hunter2@db/x'], 'app postgres://db/x'],
+    [['app', '--db=postgres://u:hunter2@db/x'], 'app --db=postgres://db/x'],
+  ])('redacts %j', (argv, shown) => {
+    expect(redactCommand(argv)).toBe(shown);
+  });
+
+  it('keeps flags that only look like secret flags', () => {
+    expect(redactCommand(['vite', '--port', '5173', '--host', '0.0.0.0', 'https://example.com/a'])).toBe(
+      'vite --port 5173 --host 0.0.0.0 https://example.com/a',
+    );
+  });
 });
 
 describe('cwdInProject', () => {
