@@ -35,8 +35,8 @@ export function validatePstackShape(value: unknown): void {
   for (const key of Object.keys(value)) if (!['roles', 'defaultEffort'].includes(key)) throw new Error(`Unknown pstack field: ${key}`);
   const { roles, defaultEffort } = value as AgentPstackConfig;
   if (defaultEffort !== undefined && defaultEffort !== 'session' && !isEffort(defaultEffort)) throw new Error('Invalid pstack.defaultEffort');
-  if (roles !== undefined && (!roles || typeof roles !== 'object' || Array.isArray(roles) || Object.values(roles).some(v => typeof v !== 'string' || !v.trim()))) {
-    throw new Error('pstack.roles must map role names to model values');
+  if (roles !== undefined && (!roles || typeof roles !== 'object' || Array.isArray(roles) || Object.entries(roles).some(([k, v]) => typeof v !== 'string' || !v.trim() || /[\r\n]/.test(k + v)))) {
+    throw new Error('pstack.roles must map role names to one-line model values');
   }
 }
 
