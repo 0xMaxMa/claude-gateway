@@ -2,6 +2,7 @@ import { codexContextPolicy } from '../../../src/session/codex-context';
 import { workerEnvironment } from '../../../src/session/worker-environment';
 import * as codexAuth from '../../../src/session/codex-auth';
 jest.mock('../../../src/session/worker-extensions', () => ({ discoverWorkerExtensions: jest.fn().mockResolvedValue({ skills: [], servers: {}, notices: [] }) }));
+import { discoverWorkerExtensions } from '../../../src/session/worker-extensions';
 import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
 import { inspectSelectedCodexRuntime } from '../../../src/session/codex-container-runtime';
 jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn() }));
@@ -425,6 +426,15 @@ test('failed Codex preparation removes already written connector secrets', async
   await writeFile(options.profile.mcpConfigPath, JSON.stringify({mcpServers:{gateway:{command:'node',args:[42]}}}));
   await expect(adapter.start()).rejects.toThrow('Codex MCP requires');
   await expect(access(join(directory,'connector-0.json'))).rejects.toMatchObject({code:'ENOENT'});
+});
+
+// Review of #582: Codex workers are leaves; their host discovery excludes pstack.
+test('host Codex discovery asks for the Codex view of extensions', async () => {
+  options.profile.hostExecution = true;
+  options.gateway = { gateway: {} } as any;
+  await writeFile(options.profile.mcpConfigPath, JSON.stringify({mcpServers:{gateway:{command:'node',args:[42]}}}));
+  await expect(adapter.start()).rejects.toThrow('Codex MCP requires');
+  expect(discoverWorkerExtensions).toHaveBeenCalledWith(options.agent, options.gateway, undefined, 'codex');
 });
 
 test('missing configured Codex refuses startup without host or harness fallback', async () => {

@@ -38,6 +38,7 @@ export function createPstackRouter(apiKeys: ApiKey[], agentConfigs: Map<string, 
     } catch (error) {
       if (error instanceof PstackConfigError) { res.status(400).json({ error: error.code, message: error.message }); return; }
       if ((error as { code?: string }).code === 'AGENT_NOT_FOUND') { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+      console.error(`[api] pstack save failed for agent '${agentId}':`, (error as Error).message);
       res.status(500).json({ error: 'Failed to save pstack configuration' });
     }
   }

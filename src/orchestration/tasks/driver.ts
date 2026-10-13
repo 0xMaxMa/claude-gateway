@@ -79,7 +79,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     if (harness.harness === 'codex') {
       try {
         if (task.skill?.invocation === 'cli' && !task.skill.filePath) {
-          const inventory = await discoverWorkerExtensions(this.agent, this.gateway, workspace.path);
+          const inventory = await discoverWorkerExtensions(this.agent, this.gateway, workspace.path, 'codex');
           const installed = inventory.skills.find(skill => skill.name === task.skill!.name || skill.aliases?.includes(task.skill!.name));
           if (installed) task.skill = { ...task.skill, filePath: installed.filePath, resourceRoot: installed.resourceRoot, fileScope: installed.fileScope, content: installed.fileScope === 'container' ? installed.content ?? '' : await readFile(installed.filePath, 'utf8') };
         }

@@ -96,6 +96,8 @@ test('setup requires the plugin to be installed', async () => {
   const res = await request(app()).put('/api/v1/agents/alice/pstack').set('X-Api-Key', 'admin').send({});
   expect(res.body).toMatchObject({ error: 'PSTACK_NOT_INSTALLED' });
   expect(res.body.message).toContain('/plugin install pstack@pstack-claude');
+  // Review of #582: the plugin's marketplace must be added before it can be installed.
+  expect(res.body.message).toContain('/plugin marketplace add michael-denyer/pstack-claude');
 });
 
 test('unknown agents are 404', async () => {
@@ -111,4 +113,15 @@ test('the routes are in the manifest as `pstack enable|disable <agentId>`', () =
 test('an agent missing from config.json is 404', async () => {
   agents.set('carol', { id: 'carol' } as AgentConfig);
   expect((await request(app()).put('/api/v1/agents/carol/pstack').set('X-Api-Key', 'admin').send({})).status).toBe(404);
+});
+
+// Review of #582: an unexpected save failure is still a 500, but its cause is logged, not swallowed.
+test('an unexpected save failure is logged with its cause', async () => {
+  fs.writeFileSync(configPath, '{not json');
+  const log = jest.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const res = await request(app()).delete('/api/v1/agents/alice/pstack').set('X-Api-Key', 'admin');
+    expect(res.status).toBe(500);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('alice'), expect.stringMatching(/JSON/));
+  } finally { log.mockRestore(); }
 });

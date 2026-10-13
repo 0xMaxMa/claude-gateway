@@ -173,12 +173,13 @@ export function addUnambiguousSkillAliases(skills: ExtensionSkill[]): void {
 
 const cache = new Map<string, { until: number; value: Promise<WorkerExtensions> }>();
 let discoveryTail: Promise<unknown> = Promise.resolve();
-export function discoverWorkerExtensions(agent: AgentConfig, gateway?: GatewayConfig, cwd = agent.orchestration?.tasks?.projectRoot || agent.workspace): Promise<WorkerExtensions> {
+/** `harness` is the worker the list is for: a Codex worker is a pstack leaf and never gets pstack's skills. */
+export function discoverWorkerExtensions(agent: AgentConfig, gateway?: GatewayConfig, cwd = agent.orchestration?.tasks?.projectRoot || agent.workspace, harness: 'claude' | 'codex' = 'claude'): Promise<WorkerExtensions> {
   if (agent.allow_tools === false) return Promise.resolve({ skills: [], servers: {}, notices: [] });
   if (agent.type === 'app-agent') return import('./container-extensions').then(module => module.discoverContainerExtensions(agent));
   if (resolveOrchestrationConfig(agent.orchestration).tasks.workspaceMode !== 'host') return Promise.resolve({ skills: [], servers: {}, notices: [] });
   const bin = agent.workers?.codex?.bin ?? gateway?.gateway.workers?.codex?.bin;
-  const plugins = { [PSTACK_PLUGIN_ID]: Boolean(agent.pstack) };
+  const plugins = { [PSTACK_PLUGIN_ID]: harness === 'claude' && Boolean(agent.pstack) };
   const key = JSON.stringify([cwd, bin, process.env.HOME, process.env.CLAUDE_CONFIG_DIR, process.env.CODEX_HOME, plugins]);
   const old = cache.get(key); if (old && old.until > Date.now()) return old.value;
   const value = discoveryTail.catch(() => {}).then(async () => {
