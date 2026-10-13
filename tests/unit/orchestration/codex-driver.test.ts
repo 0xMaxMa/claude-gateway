@@ -2,6 +2,7 @@ import { discoverCliSkills } from '../../../src/orchestration/cli-skills';
 jest.mock('../../../src/session/worker-extensions', () => ({ discoverWorkerExtensions: jest.fn().mockResolvedValue({ skills: [], servers: {}, notices: [] }) }));
 jest.mock('../../../src/orchestration/cli-skills',()=>({discoverCliSkills:jest.fn().mockResolvedValue([{name:'native-only'}])}));
 import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
+import { discoverWorkerExtensions } from '../../../src/session/worker-extensions';
 jest.mock('../../../src/orchestration/container', () => ({ ...jest.requireActual('../../../src/orchestration/container'), validateContainer: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../../../src/session/codex-container-runtime', () => ({ inspectSelectedCodexRuntime: jest.fn().mockResolvedValue('fixture-container') }));
 jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn().mockReturnValue({executable:'codex'}) }));
@@ -159,6 +160,14 @@ test('explicit Codex CLI-only skills fail without starting Claude as fallback', 
   const attempt = tasks.claim(task.taskId)!;
   await expect(driver.start(task,attempt)).rejects.toMatchObject({code:'CODEX_SKILL_UNAVAILABLE'});
   expect(CodexProcess).not.toHaveBeenCalled(); expect(SessionProcess).not.toHaveBeenCalled();
+});
+
+// Review of #582: a Codex worker never gets pstack, so its skill lookup uses the Codex view of extensions.
+test('a Codex CLI skill lookup asks for the Codex view of extensions', async () => {
+  gateway.gateway.workers!.harness='codex';
+  const task = spawn('gpt-5.6-luna',{targetProfile:'skill-worker',skill:{invocation:'cli',name:'native-only',args:'',content:'',filePath:''}});
+  await expect(driver.start(task,tasks.claim(task.taskId)!)).rejects.toMatchObject({code:'CODEX_SKILL_UNAVAILABLE'});
+  expect(discoverWorkerExtensions).toHaveBeenCalledWith(agent, gateway, expect.any(String), 'codex');
 });
 
 test('a Claude plugin file runs through Codex with pinned instructions and plugin-root resources', async () => {

@@ -9,7 +9,7 @@ import { claudeConfigDir } from '../config/claude-settings';
  * the role list in its models.json.
  */
 export const PSTACK_PLUGIN_ID = 'pstack@pstack-claude';
-export const PSTACK_INSTALL_HINT = `Install it with \`/plugin install ${PSTACK_PLUGIN_ID}\` in Claude Code on this host.`;
+export const PSTACK_INSTALL_HINT = `Install it in Claude Code on this host with \`/plugin marketplace add michael-denyer/pstack-claude\`, then \`/plugin install ${PSTACK_PLUGIN_ID}\`.`;
 
 export interface PstackPluginInfo { installed: boolean; installPath?: string }
 

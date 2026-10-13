@@ -17,7 +17,7 @@ Running Claude Code directly on the host is unaffected: the plugin behaves as an
 
 ## Set up an agent
 
-An agent that is not set up loads **nothing** from pstack in its orchestration workers, even when the plugin is enabled globally: every host worker gets `enabledPlugins["pstack@pstack-claude"]` in its `--settings` overlay, `false` unless the agent has an `agents[].pstack` block. Claude Code merges that key over your own settings, so other plugins load as before. Workers of a set-up agent get the plugin and the agent's own model sheet.
+An agent that is not set up loads **nothing** from pstack in its orchestration workers, even when the plugin is enabled globally: every host worker gets `enabledPlugins["pstack@pstack-claude"]` in its `--settings` overlay, `false` unless the agent has an `agents[].pstack` block. Claude Code merges that key over your own settings, so other plugins load as before. Claude workers of a set-up agent get the plugin and the agent's own model sheet. Codex workers never get pstack: no plugin, no sheet and no pstack skills in their catalog.
 
 Set it up in a direct message with the bot:
 

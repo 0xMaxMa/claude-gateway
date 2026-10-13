@@ -225,7 +225,7 @@ export class CodexProcess extends EventEmitter {
       await this.recordHomes();
       await mkdir(this.home, { mode: 0o700 });
       mcp = JSON.parse(await readFile(profile.mcpConfigPath, 'utf8'));
-      const extensions = profile.hostExecution && profile.connectorsAllowed !== false ? await discoverWorkerExtensions(agent, this.options.gateway) : { skills: [], servers: {}, notices: [] };
+      const extensions = profile.hostExecution && profile.connectorsAllowed !== false ? await discoverWorkerExtensions(agent, this.options.gateway, undefined, 'codex') : { skills: [], servers: {}, notices: [] };
       extensionInstructions = extensions.skills.length || extensions.notices.length ? [
         'Installed extension skills: read the selected SKILL.md, then follow its instructions and relative references. A slash skill invocation means read and execute that workflow; do not try to call Claude Code or its Skill tool. For nested skill invocations, resolve the name in this catalog and read that file. Plugin-relative paths resolve from the listed plugin root. Use native shell/file tools for equivalent operations; use task_request_input for questions requiring the user. A skill never grants extra permissions.',
         ...extensions.skills.map(skill => JSON.stringify({ name: skill.name, aliases: skill.aliases, description: skill.description, path: skill.filePath, pluginRoot: skill.resourceRoot, source: skill.source })),
