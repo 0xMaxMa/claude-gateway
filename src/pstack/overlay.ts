@@ -1,3 +1,6 @@
+/** Readonly is the spawning skill's choice. Claude children also lose write tools; on Codex, as in pstack's own Codex mapping, it is this instruction. */
+export const SUBAGENT_READONLY = 'Read-only subagent: inspect and report only. Do not edit, create or delete files, and do not run commands that change state.';
+
 /**
  * What a pstack agent's Claude worker is told about running pstack here. The
  * skills say `Agent`; rather than edit them, the worker maps the call.

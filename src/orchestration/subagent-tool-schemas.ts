@@ -9,5 +9,5 @@ export const SUBAGENT_TOOLS: Array<{ name: string; description: string; inputSch
   { name: 'subagent_wait', description: 'Wait until every listed subagent has finished (or asked a question) and return their results, including failures.', inputSchema: schema({ task_ids: ids }, ['task_ids']) },
   { name: 'subagent_cancel', description: 'Cancel subagents you spawned.', inputSchema: schema({ task_ids: ids }, ['task_ids']) },
 ];
-/** Subagents may nest this deep below the root worker, like Claude Code's default. */
+/** Subagents may nest this deep below the root worker. */
 export const SUBAGENT_MAX_DEPTH = 3;

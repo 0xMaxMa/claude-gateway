@@ -463,6 +463,7 @@ describe('pstack plugin gate', () => {
 // #583: a pstack agent's Claude workers dispatch subagents only through the gateway.
 describe('pstack subagent workers', () => {
   const { pstackClaudeConfig } = require('../../helpers/pstack-fixture');
+  const { SUBAGENT_READONLY } = require('../../../src/pstack/overlay');
   let fixture: { configDir: string; cleanup: () => void }, previous: string | undefined;
   beforeEach(() => { fixture = pstackClaudeConfig(); previous = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = fixture.configDir; });
   afterEach(() => { if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous; fixture.cleanup(); });
@@ -504,5 +505,26 @@ describe('pstack subagent workers', () => {
     handle = await driver.start(codexTask, a2); await handle.accepted; await handle.result;
     expect(jest.mocked(CodexProcess).mock.calls[0][0].profile.workerTools).toBeUndefined();
     expect(jest.mocked(CodexProcess).mock.calls[0][0].profile.disallowedTools).toBeUndefined();
+  });
+
+  // Re-review of #590: readonly inherited from a read-only parent must still reach a Codex child.
+  test('every read-only subagent is told so in its context, whichever harness runs it', async () => {
+    agent.pstack = {};
+    const readonly = (model: string) => { const t = spawn(model); store.transaction(() => { const s = store.task(t.taskId)!; s.readonly = true; store.saveTask(s, s.stateVersion); }); return store.task(t.taskId)!; };
+    const codexTask = readonly('gpt-6-astra'), a1 = tasks.claim(codexTask.taskId)!;
+    let handle = await driver.start(codexTask, a1); await handle.accepted; await handle.result;
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].profile.context).toContain(SUBAGENT_READONLY);
+    const claudeTask = readonly('claude-sonnet-4-6'), a2 = tasks.claim(claudeTask.taskId)!;
+    handle = await driver.start(claudeTask, a2); await handle.accepted; await handle.result;
+    expect(claudeProfile().context).toContain(SUBAGENT_READONLY);
+  });
+
+  // Re-review of #590: without the plugin loaded there are no pstack skills to map Agent for.
+  test('a set-up agent whose plugin is not installed keeps native Agent and gets no subagent tools', async () => {
+    agent.pstack = {};
+    fixture.cleanup(); fixture = pstackClaudeConfig(false); process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
+    mockBeforeResult = worker => { expect(mcpEnv(worker.runtimeProfile).GATEWAY_SUBAGENTS).toBe(''); };
+    await run('claude-sonnet-4-6');
+    expect(claudeProfile().disallowedTools).toBeUndefined();
   });
 });

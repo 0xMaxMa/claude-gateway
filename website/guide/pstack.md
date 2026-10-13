@@ -72,7 +72,7 @@ The plugin's SessionStart hook reads `session hook: on|off` only from the global
 
 ## Subagents
 
-A set-up agent's Claude workers do not use Claude Code's own `Agent` tool (it is disabled for them). pstack's fan-out goes through three worker tools with the same arguments instead, so every subagent is a gateway task you can see in `/tasks` and cancel, and can run on another provider:
+A set-up agent's Claude workers that load the plugin do not use Claude Code's own `Agent` tool (it is disabled for them). pstack's fan-out goes through three worker tools with the same arguments instead, so every subagent is a gateway task you can see in `/tasks` and cancel, and can run on another provider:
 
 | Tool | Does |
 | --- | --- |
@@ -80,10 +80,10 @@ A set-up agent's Claude workers do not use Claude Code's own `Agent` tool (it is
 | `subagent_wait` | Waits for the listed subagents and returns each result, failure, or question |
 | `subagent_cancel` | Cancels the caller's own subagents |
 
-- Subagents nest at most three levels below the worker, as in Claude Code; the third level gets no subagent tools and works inline.
+- Subagents nest at most three levels below the worker; the third level gets no subagent tools and works inline.
 - Subagents use the usual per-agent and per-conversation task limits, except that a subagent's own waiting ancestors are not counted against it, so a chain can always continue while siblings queue.
 - When a task ends, is being cancelled, fails, or needs reconciliation, its unfinished subagents are cancelled with it, and a read-only subagent's own subagents are read-only too.
 - A subagent's question (`task_request_input`) is returned to its parent by `subagent_wait`; it is never asked in the chat.
 - Subagents report to their parent, never to the chat. The agent's task index lists the root task only; `task_status` with its `task_id` lists the subagents.
-- A GPT subagent runs on Codex without the plugin: it gets the agent definition, the prompt and the plugin's path to read files the prompt names. `readonly` is an instruction there, as in pstack's own Codex mapping; a read-only Claude subagent also gets read tools only.
+- A GPT subagent runs on Codex without the plugin: it gets the agent definition, the prompt and the plugin's path to read files the prompt names. `readonly` is an instruction there, as in pstack's own Codex mapping; a read-only Claude subagent also gets read tools only. Either way a read-only subagent, including one that inherited readonly, is told so.
 - `isolation: "worktree"` runs on the host as usual and answers `isolation: "ignored"`. Resuming an earlier subagent is not supported; pstack spawns fresh subagents.

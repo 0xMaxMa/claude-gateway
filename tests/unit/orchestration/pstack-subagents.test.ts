@@ -5,7 +5,7 @@ import { request } from 'http';
 import { OrchestrationStore } from '../../../src/orchestration/store';
 import { DecisionService } from '../../../src/orchestration/decisions';
 import { TaskService } from '../../../src/orchestration/tasks/service';
-import { TaskBridge, SUBAGENT_READONLY } from '../../../src/orchestration/bridge';
+import { TaskBridge } from '../../../src/orchestration/bridge';
 import type { CommandContext, TaskAttempt, TaskSnapshot } from '../../../src/orchestration/types';
 import type { ModelConfig } from '../../../src/types';
 import { pstackClaudeConfig } from '../../helpers/pstack-fixture';
@@ -98,11 +98,10 @@ test('an unknown pstack agent is refused', async () => {
   expect((await spawn(attempt, { subagent_type: 'pstack:nope' })).error).toBe('INVALID_INPUT');
 });
 
-test('readonly is recorded and stated in the instructions', async () => {
+test('readonly is recorded on the task (the driver states it and restricts tools)', async () => {
   const { attempt } = rootWorker();
   const reply = await spawn(attempt, { readonly: true });
   expect(store.task(reply.task_id)!.readonly).toBe(true);
-  expect(tasks.revision(reply.task_id, 1).instructions).toContain(SUBAGENT_READONLY);
 });
 
 test('subagents nest three deep; the fourth level is refused', async () => {
@@ -200,7 +199,6 @@ describe('review fixes', () => {
     const reader = store.task((await spawn(attempt, { readonly: true })).task_id)!;
     const grandchild = await spawn(running(reader), {});
     expect(store.task(grandchild.task_id)!.readonly).toBe(true);
-    expect(tasks.revision(grandchild.task_id, 1).instructions).not.toContain(SUBAGENT_READONLY);
   });
 
   test('a subagent\'s question never becomes a user question', async () => {
