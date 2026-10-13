@@ -143,7 +143,7 @@ host, never a remote URL. The response then includes `"project": "<name>"` and
 
 The project runs untrusted unless the operator lists its name in
 [`gateway.projects.trusted`](/reference/configuration) and `<root>/<name>` is
-a real directory, not a symlink. Untrusted means one thing: the repo's own
+a real directory, not a symlink. The root itself may be a symlink. Untrusted means one thing: the repo's own
 hooks, MCP servers (`.mcp.json`), settings and `CLAUDE.md` do not load. It does
 not restrict anything else. The agent still runs with the gateway's normal
 permissions and tools in that folder, so it can read and change the files and

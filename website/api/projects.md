@@ -54,7 +54,7 @@ codes, listed under [Git errors](#git-errors).
 | 400 | `invalid_path` | The `path` query fails the path rules below, or the filesystem rejects it as too long. |
 | 400 | `not_a_directory` | `tree` was asked for a file, or the root exists but is not a directory. |
 | 400 | `not_a_file` | `file` was asked for a directory or a special file. |
-| 403 | `path_escape` | The real path (after symlinks) leaves the project, or the project leaves the root. |
+| 403 | `path_escape` | The real path (after symlinks) leaves the project, or the project leaves the root or is the root itself (for example a link `all -> .`). |
 | 403 | `permission_denied` | The gateway's user cannot read it. |
 | 403 | `forbidden_key` | The key lacks pod-wide scope, or lacks write for a `POST`. |
 | 404 | `not_found` | The project or path does not exist. |
@@ -459,9 +459,12 @@ Returns `200` with one entry per port, sorted by port:
 
 `via` is `"cwd"` or `"argv"` and says how the first listener on that port was tied
 to the project. A client that does not know the field can ignore it. `command` is the first listener's argument list joined by spaces and cut to 120
-characters. The value after any `--token`, `--password`, `--secret` or `--key`
-flag (including flags such as `--api-key` or `--client-secret=...`) is replaced with
-`[redacted]` before the cut. The environment is never returned. On a host that is not
+characters. The value after any flag whose name contains `token`, `password`,
+`passwd`, `secret`, `key`, `auth`, `credential` or `bearer` (such as `--api-key`,
+`--auth` or `--client-secret=...`) is replaced with `[redacted]`, and so is the value
+after `-p` or attached to it (`-ppw`). A port passed as `-p 3000` is hidden too; the
+entry's `port` still shows it. User and password in a URL (`postgres://user:pw@db/x`)
+are removed. All of this happens before the cut. The environment is never returned. On a host that is not
 Linux, or where `/proc` cannot be read, the response is
 `{ "supported": false, "processes": [] }`.
 
@@ -520,7 +523,7 @@ Safety rules the gateway enforces:
 
 - Only processes that own a LISTEN socket and whose working directory resolves (symlinks followed) inside the project folder are candidates. `projects/api` never matches `projects/api-v2`.
 - A listener also qualifies when any argument is an absolute path (after stripping a leading `--flag=`) whose real path is the project folder or inside it. This covers the value after `--directory`, `--dir`, `-C`, `--cwd`, `--prefix` and `--root`. The comparison is the same as for the working directory. Relative paths, paths that leave the project through `..` or a symlink, environment variables, open files and substrings of the command line never count. A non-listening process that mentions the project is never touched.
-- The gateway process, all of its ancestors, pid 1, any process whose executable or name is `claude`, and any process owned by another user are never signalled. A listener that is an ancestor of the gateway is skipped with its whole tree.
+- The gateway process, all of its ancestors, pid 1, any process whose executable or name is `claude` or `claude.exe`, and any process owned by another user are never signalled. A listener that is an ancestor of the gateway is skipped with its whole tree.
 - Signals go to single pids, never to a process group or session.
 - Before each signal the gateway checks the pid again: same start time, same owner, and for a listener still inside the project (by working directory or argument) and still listening. A pid that changed is skipped.
 
