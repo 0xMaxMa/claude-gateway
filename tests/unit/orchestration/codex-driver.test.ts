@@ -370,6 +370,13 @@ describe('per-task model and effort', () => {
     expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'claude', harnessModel:'claude-sonnet-5-5', effort:'xhigh'});
   });
 
+  // Review of #581: Claude Code only understands a `[1m]` suffix; `[200k]` is its default window.
+  test('a Claude task named with a [200k] suffix launches Claude Code on the base id', async () => {
+    const {attempt} = await run('claude-sonnet-4-6', {model:'claude-sonnet-5-5[200k]'});
+    expect(jest.mocked(SessionProcess).mock.calls[0][2].claude.model).toBe('claude-sonnet-5-5');
+    expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'claude', harnessModel:'claude-sonnet-5-5'});
+  });
+
   test('without effort the worker keeps the harness default', async () => {
     gateway.gateway.workers!.codex = { reasoningEffort: 'low' };
     await run('gpt-6-astra');

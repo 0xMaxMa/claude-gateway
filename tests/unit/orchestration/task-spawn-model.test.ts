@@ -106,6 +106,16 @@ test('gateway-managed tasks get a correctable INVALID_INPUT for model or effort'
   expect(reply.retry_of).toBeDefined();
 });
 
+// Review of #581: report every rejected field at once, so one retry can fix both.
+test('gateway-managed tasks report both model and effort when both are given', async () => {
+  const reply = await call(f, { target_profile: 'gateway-managed', gateway_target: { adapter: 'safemode', session_id: 's' }, model: 'sonnet', effort: 'high' });
+  expect(reply.error).toBe('INVALID_INPUT');
+  expect(reply.details).toEqual(expect.arrayContaining([
+    expect.objectContaining({ field: 'model', reason: 'not_for_gateway_managed' }),
+    expect.objectContaining({ field: 'effort', reason: 'not_for_gateway_managed' }),
+  ]));
+});
+
 // Review of #581: continue_task_id reuses the worker session "when compatible"; a follow-up must not drop to the conversation model.
 test('a follow-up inherits the model and effort its predecessor was given', async () => {
   const first = await call(f, { model: 'gpt6astra', effort: 'xhigh' });
