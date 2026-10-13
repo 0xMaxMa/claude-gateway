@@ -161,14 +161,18 @@ export function telegramToolDetail(name:string,input:Record<string,unknown>):str
  * Subagents never message the chat themselves; this line is how the user sees them.
  */
 export function subagentLines(store: OrchestrationStore, conversationId: string, modelLabel: (id: string) => string = id => id): string[] {
-  // Unfinished roots only, found through the indexed parentTaskId of their children.
-  const roots = store.all(`SELECT id,json_extract(snapshot_json,'$.title') AS title FROM tasks t WHERE conversation_id=? AND state NOT IN ('completed','failed','cancelled')
-    AND json_extract(snapshot_json,'$.parentTaskId') IS NULL AND EXISTS(SELECT 1 FROM tasks c WHERE json_extract(c.snapshot_json,'$.parentTaskId')=t.id) ORDER BY created_at LIMIT 5`, conversationId);
-  return roots.map(root => {
+  // Unfinished roots first, then each one's children through the parentTaskId index
+  // (a correlated EXISTS scans that whole index for every root).
+  const roots = store.all(`SELECT id,json_extract(snapshot_json,'$.title') AS title FROM tasks WHERE conversation_id=? AND state NOT IN ('completed','failed','cancelled')
+    AND json_extract(snapshot_json,'$.parentTaskId') IS NULL ORDER BY created_at LIMIT 50`, conversationId);
+  const lines: string[] = [];
+  for (const root of roots) {
+    if (lines.length >= 5) break;
     // The panel is the root's direct subagents; a reviewer's own helpers are not panel members.
+    const count = store.get("SELECT COUNT(*) AS total,SUM(state IN ('completed','failed','cancelled')) AS done FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId')=?", String(root.id));
+    if (!Number(count?.total)) continue;
     const children = store.all("SELECT snapshot_json FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId')=? ORDER BY created_at,rowid LIMIT 32", String(root.id))
       .map(child => JSON.parse(String(child.snapshot_json)) as import('./types').TaskSnapshot);
-    const done = children.filter(child => ['completed', 'failed', 'cancelled'].includes(child.state)).length;
     const entries = children.map(child => {
       const label = child.model ? modelLabel(child.model) : 'subagent';
       if (child.state === 'completed') return `✅ ${label}`;
@@ -176,6 +180,8 @@ export function subagentLines(store: OrchestrationStore, conversationId: string,
       if (child.state === 'waiting_input') return `❓ ${label}`;
       return `⏳ ${label}`;
     });
-    return `${String(root.title ?? 'subagents').slice(0, 80)}: ${done}/${children.length} · ${entries.join(' · ')}`.slice(0, 600);
-  });
+    const title = String(root.title ?? 'subagents').replace(/\s+/g, ' ').trim().slice(0, 80);
+    lines.push(`${title}: ${Number(count!.done)}/${Number(count!.total)} · ${entries.join(' · ')}`.slice(0, 600));
+  }
+  return lines;
 }

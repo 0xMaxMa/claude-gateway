@@ -89,7 +89,7 @@ export function validatePstack(agentId: string, block: AgentPstackConfig, models
  * `<role> -= <model>` edit a panel list one entry at a time. A `session hook` line is
  * skipped: the plugin's hook reads it from the global sheet only.
  */
-export function applySheetLines(block: AgentPstackConfig, text: string, roleDefault: (role: string) => string | undefined = () => undefined): AgentPstackConfig {
+export function applySheetLines(block: AgentPstackConfig, text: string, panelDefault?: (role: string) => string | undefined): AgentPstackConfig {
   const roles = { ...block.roles };
   let defaultEffort = block.defaultEffort;
   for (const line of text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'))) {
@@ -97,8 +97,12 @@ export function applySheetLines(block: AgentPstackConfig, text: string, roleDefa
     const edit = /^(.+?)\s+([+-])=\s*(.+)$/.exec(line);
     if (edit) {
       const [, key, op, value] = edit;
+      // Without the installed plugin there is no role list; saving reports that.
+      const fallback = panelDefault?.(key);
+      if (panelDefault && fallback === undefined) throw new PstackConfigError('INVALID_PSTACK_CONFIG', `${key} is not a panel role; use "${key}: <model-id>".`);
+      if (op === '+' && value.includes(',')) throw new PstackConfigError('INVALID_PSTACK_CONFIG', `"+=" adds one entry at a time; use one line per model.`);
       // An unset role starts from its skill default, as the sheet shows it.
-      const entries = (roles[key] ?? roleDefault(key) ?? '').split(',').map(e => e.trim()).filter(Boolean);
+      const entries = (roles[key] ?? fallback ?? '').split(',').map(e => e.trim()).filter(Boolean);
       const model = (entry: string) => entry.replace(/\s+@\S+$/, '').toLowerCase();
       const kept = op === '+' ? [...entries, value] : entries.filter(e => model(e) !== model(value));
       if (op === '-' && kept.length === entries.length) throw new PstackConfigError('INVALID_PSTACK_CONFIG', `"${value}" is not in ${key}.`);

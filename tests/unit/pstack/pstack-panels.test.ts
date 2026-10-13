@@ -1,6 +1,6 @@
 import { createContext, runInContext } from 'node:vm';
 import { applySheetLines, PstackConfigError } from '../../../src/pstack/config';
-import { pstackRoleDefault } from '../../../src/pstack/sheet';
+import { pstackPanelDefault } from '../../../src/pstack/sheet';
 import { OrchestrationStore } from '../../../src/orchestration/store';
 import { DecisionService } from '../../../src/orchestration/decisions';
 import { TaskService } from '../../../src/orchestration/tasks/service';
@@ -18,7 +18,7 @@ import { PSTACK_ROLES } from '../../helpers/pstack-fixture';
 const PLUGIN = { roles: PSTACK_ROLES, tiers: { default: 'opus', strongest: 'fable', panel: ['opus', 'fable', 'sonnet', 'haiku'] } };
 
 describe('/pstack-setup panel entries', () => {
-  const defaults = (role: string) => pstackRoleDefault(PLUGIN, role);
+  const defaults = (role: string) => pstackPanelDefault(PLUGIN, role);
 
   it('appends to and removes from a panel, starting from the skill default', () => {
     let block = applySheetLines({}, 'interrogate reviewers += gpt-6-sol[1m] @high', defaults);
@@ -35,6 +35,16 @@ describe('/pstack-setup panel entries', () => {
   it('refuses to remove a model that is not in the list, and matches models case-insensitively', () => {
     expect(() => applySheetLines({ roles: { 'arena runners': 'claude-opus-5-5' } }, 'arena runners -= gpt-6-sol[1m]', defaults)).toThrow(PstackConfigError);
     expect(applySheetLines({ roles: { 'arena runners': 'claude-opus-5-5, GPT-6-SOL[1m] @high' } }, 'arena runners -= gpt-6-sol[1m]', defaults).roles).toEqual({ 'arena runners': 'claude-opus-5-5' });
+  });
+
+  // Re-review of #584: `+=` on a one-model role made a list the skill reads as one model.
+  it('edits panel roles only', () => {
+    expect(() => applySheetLines({}, 'bug-fix += gpt-6-sol[1m]', defaults)).toThrow('bug-fix is not a panel');
+    expect(() => applySheetLines({ roles: { 'bug-fix': 'claude-opus-5-5' } }, 'bug-fix -= claude-opus-5-5', defaults)).toThrow('bug-fix is not a panel');
+  });
+
+  it('adds exactly one entry per "+=" line', () => {
+    expect(() => applySheetLines({}, 'arena runners += claude-opus-5-5, gpt-6-sol[1m]', defaults)).toThrow('one entry');
   });
 });
 
@@ -64,6 +74,29 @@ describe('panel subagents on display', () => {
     expect(subagentLines(store, conversationId, id => LABELS[id] ?? id)).toEqual([
       'interrogate: 2/4 · ✅ Opus 5.5 · ⏳ GPT 6 Sol · ⏳ Opus 5.5 · ❌ Haiku 5.5 (worker timeout)',
     ]);
+  });
+
+  // Re-review of #584: a correlated EXISTS scanned every subagent in the store on each 2 s tick.
+  it('finds panels through indexes only', () => {
+    const statements: string[] = [];
+    const all = store.all.bind(store);
+    jest.spyOn(store, 'all').mockImplementation((sql, ...params) => { statements.push(sql); return all(sql, ...params); });
+    subagentLines(store, conversationId);
+    const plans = statements.flatMap(sql => all(`EXPLAIN QUERY PLAN ${sql}`, 'x').map(row => String(row.detail)));
+    expect(plans.filter(detail => /^SCAN/.test(detail))).toEqual([]);
+  });
+
+  it('counts every subagent of a large panel and keeps a multi-line title on one line', () => {
+    store.run("UPDATE tasks SET snapshot_json=json_set(snapshot_json,'$.title',?) WHERE id=?", 'inter\nrogate', root.taskId);
+    const attempt = store.attempt(store.task(root.taskId)!.activeAttemptId!)!;
+    // Finished one by one, as a long-running root accumulates them; the queue cap bounds only unfinished ones.
+    for (let i = 0; i < 36; i++) {
+      const extra = tasks.spawnSubagent(attempt.attemptId, attempt.generation, `extra${i}`, { title: 'Review', instructions: 'r', model: 'claude-opus-5-5' });
+      const run = tasks.claim(extra.taskId)!; tasks.started(run.attemptId, run.generation);
+      tasks.finish(run.attemptId, run.generation, { type: 'completed', result: { summary: 'ok', artifactIds: [] } });
+    }
+    const [line] = subagentLines(store, conversationId);
+    expect(line.startsWith('inter rogate: 38/40 · ')).toBe(true);
   });
 
   it('a finished root has no line', () => {

@@ -35,3 +35,9 @@ export function pstackRoleDefault(plugin: PstackModels, role: string): string | 
   const slugs = plugin.tiers[tier] ?? plugin.tiers.default ?? 'opus';
   return (Array.isArray(slugs) ? slugs : [slugs]).map(slug => PSTACK_SLUG_IDS[slug] ?? slug).join(', ');
 }
+
+/** A panel role's skill default (its tier is a list, like `panel`); undefined for a one-model role. */
+export function pstackPanelDefault(plugin: PstackModels, role: string): string | undefined {
+  const tier = plugin.roles.find(r => r.role === role)?.models;
+  return tier && Array.isArray(plugin.tiers[tier]) ? pstackRoleDefault(plugin, role) : undefined;
+}

@@ -105,7 +105,7 @@ export { DEFAULT_MODELS } from './model-registry';
 import { DEFAULT_MODELS, availableModels, selectableModels, findModel } from './model-registry';
 import { PSTACK_INSTALL_HINT, pstackModels, pstackPluginInfo } from '../pstack/plugin-info';
 import { PstackConfigError, applySheetLines } from '../pstack/config';
-import { pstackRoleDefault, renderPstackSheet } from '../pstack/sheet';
+import { pstackPanelDefault, renderPstackSheet } from '../pstack/sheet';
 import { savePstackConfig } from '../pstack/setup';
 
 const PROTECTED_WORKSPACE_FILES = [
@@ -3019,7 +3019,8 @@ export class AgentRunner extends EventEmitter {
    * /pstack-setup — the gateway's counterpart of pstack's own setup-pstack:
    * decides whether this agent's workers load pstack, and with which models.
    * Arguments are pstack-models.md lines, one per line (`<role>: <model-id>`,
-   * `<role>: default` to drop an override, `default effort: <level>`); `on`
+   * `<role>: default` to drop an override, `<role> += <model-id>` / `<role> -= <model-id>`
+   * to edit a panel list, `default effort: <level>`); `on`
    * sets the agent up with the skill defaults and `off` removes it. Changes
    * apply to the next worker. Direct messages only, like /model.
    */
@@ -3040,7 +3041,7 @@ export class AgentRunner extends EventEmitter {
       return;
     }
     try {
-      const block = arg === 'off' ? undefined : arg === 'on' ? this.agentConfig.pstack ?? {} : applySheetLines(this.agentConfig.pstack ?? {}, arg, role => roles && pstackRoleDefault(roles, role));
+      const block = arg === 'off' ? undefined : arg === 'on' ? this.agentConfig.pstack ?? {} : applySheetLines(this.agentConfig.pstack ?? {}, arg, roles && (role => pstackPanelDefault(roles, role)));
       const saved = await savePstackConfig(this.configPath, this.agentConfig.id, block, await this.selectableModels());
       if (saved) this.agentConfig.pstack = saved; else delete this.agentConfig.pstack;
       this.writeAutoForward(chatId, saved && roles
