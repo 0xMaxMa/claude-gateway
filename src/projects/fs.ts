@@ -17,8 +17,6 @@ import {
   Result,
 } from './paths';
 
-const execFileAsync = promisify(execFile);
-
 const FILE_SIZE_LIMIT = 1024 * 1024;
 export const TREE_ENTRY_LIMIT = 2000;
 const BINARY_SNIFF_BYTES = 8192;
@@ -151,7 +149,7 @@ export async function createProject(
   let warning: string | undefined;
   if (gitInit) {
     try {
-      await execFileAsync('git', ['init', '-q', '--', dir], { cwd: dir, timeout: GIT_INIT_TIMEOUT_MS, env: gitEnv() });
+      await promisify(execFile)('git', ['init', '-q', '--', dir], { cwd: dir, timeout: GIT_INIT_TIMEOUT_MS, env: gitEnv() });
     } catch (e) {
       warning = gitInitWarning(e as GitInitError);
       console.warn(`projects: git init in ${dir} failed: ${(e as Error).message}`);
