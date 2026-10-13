@@ -37,17 +37,19 @@ export interface CommandContext extends ExecutionCapabilities {
  * `kind` distinguishes a missing inventory (no init tool list), a malformed one (present but not a
  * list), and an unexpected one (a valid list carrying tools outside the resolved profile). */
 export interface InventoryRejection { kind: 'missing' | 'malformed' | 'unexpected'; rejectedTools: string[]; }
-export interface TaskFailure { code: string; message: string; observedAt: number; provider?: import('./provider-admission').ProviderFailure; inventory?: InventoryRejection; }
+export interface TaskFailure { code: string; message: string; observedAt: number; provider?: import('./provider-admission').ProviderFailure; inventory?: InventoryRejection; providerRefusals?: import('../session/provider-refusal').ProviderRefusal[]; }
 export interface ComputerTaskReport {status:string;reason:string;steps:number;evaluations?:number;phase?:string;trace?:import('../automation/computer-use').ComputerProgress[];fieldRequest?:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'};stepRun?:import('../automation/computer-steps').ComputerStepRun;lastAction?:import('../automation/computer-use').ComputerLastAction;
  /** The relay confirmed the device session ended with this round (a reached goal). */
  accessReleased?:boolean}
-export type WorkerOutcome = ({type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure}) & {computerReport?:ComputerTaskReport;browserReport?: import('../jev/browser-contract').BrowserTaskReport};
+export type WorkerOutcome = ({type: 'completed'; result: TaskResult} | {type: 'paused' | 'stopped' | 'failed' | 'unknown'; failure?: TaskFailure; providerRefusals?: import('../session/provider-refusal').ProviderRefusal[]}) & {computerReport?:ComputerTaskReport;browserReport?: import('../jev/browser-contract').BrowserTaskReport};
 export interface TaskResult {
   summary: string;
   artifactIds: string[];
   diff?: { text: string; truncated: boolean };
   /** The worker's final result was accepted after native background work stayed silent past the grace period. */
   unresolvedBackground?: import('./process-turn').UnresolvedBackground;
+  /** Provider refusals in the worker turn; a completed report does not mean the refused step ran. */
+  providerRefusals?: import('../session/provider-refusal').ProviderRefusal[];
 }
 /** A fixed gateway adapter, never an arbitrary command or another model worker. */
 export interface GatewayTaskTarget {

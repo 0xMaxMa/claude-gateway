@@ -179,6 +179,27 @@ describe('SessionProcess', () => {
     expect(warn).toHaveBeenCalledWith('session stderr', expect.objectContaining({stderr:'unrecognized_model: gpt-custom\n',responseId:'response-test'}));
   });
 
+  it('logs a refused message in a turn that later completed, and does not carry it into the next turn (#586)', async () => {
+    const sp = makeSp('chat:111', 'api', agentConfig, gatewayConfig, sessionStore, undefined, {role:'agent', context:'fixture', overlay:'', mcpConfigPath:''});
+    const log = jest.spyOn((sp as any).logger, 'info').mockImplementation(() => {});
+    await sp.start();
+    const emit = (events: object[]) => lastProcess!.stdout!.emit('data', Buffer.from(events.map(event => JSON.stringify(event) + '\n').join('')));
+    const details = {type:'refusal', category:'cyber', explanation:'Provider wording.'};
+    sp.sendMessage('first');
+    emit([
+      {type:'stream_event', event:{type:'message_start', message:{id:'msg_refused', content:[]}}},
+      {type:'stream_event', event:{type:'message_delta', delta:{stop_reason:'refusal', stop_details:details}}},
+      {type:'stream_event', event:{type:'message_start', message:{id:'msg_fallback', content:[]}}},
+      {type:'stream_event', event:{type:'message_delta', delta:{stop_reason:'end_turn', stop_details:null}}},
+      {type:'result', subtype:'success', is_error:false, result:'Fallback', safety_stops:1},
+    ]);
+    expect(log).toHaveBeenLastCalledWith('session turn finished', expect.objectContaining({turnOutcome:'completed', safetyStops:1,
+      providerRefusals:[{messageId:'msg_refused', category:'cyber', explanation:'Provider wording.'}]}));
+    sp.sendMessage('second');
+    emit([{type:'result', subtype:'success', is_error:false, result:'Clean', safety_stops:0}]);
+    expect(log).toHaveBeenLastCalledWith('session turn finished', expect.not.objectContaining({providerRefusals:expect.anything()}));
+  });
+
   it('records an unexplained exit without a terminal result as unexpected', async () => {
     const sp = makeSp('chat:111', 'api', agentConfig, gatewayConfig, sessionStore, undefined, {role:'agent',context:'fixture',overlay:'',mcpConfigPath:''});
     const log = jest.spyOn((sp as any).logger, 'info').mockImplementation(() => {});

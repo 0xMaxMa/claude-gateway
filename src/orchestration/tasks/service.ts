@@ -959,6 +959,7 @@ export class TaskService {
       if (Buffer.byteLength(JSON.stringify(outcome.result)) > 2 * 1024 * 1024) throw new OrchestrationError('PAYLOAD_TOO_LARGE');
       if (outcome.result.artifactIds.length > 64 || outcome.result.artifactIds.some(id => typeof id !== 'string' || id.length > 1024)) throw new OrchestrationError('INVALID_INPUT');
     }
+    const refusals = outcome.type === 'completed' ? outcome.result.providerRefusals : outcome.failure?.providerRefusals ?? outcome.providerRefusals;
     return this.store.transaction(() => {
       const { task, attempt } = this.active(attemptId, generation);
       if (task.gatewayTarget?.adapter === 'computer' && outcome.computerReport) task.computerReport=outcome.computerReport;
@@ -999,6 +1000,11 @@ export class TaskService {
       // A paused or superseded-revision result skips the failure branch above;
       // a stalled stop still ends failed, so it must carry the stall reason.
       if (task.state === 'failed' && stalled) { attempt.failure = stalled; task.failure = stalled; task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: stalled.message }; }
+      // After every failure reassignment above, so a stop or stall reason cannot drop them.
+      if (refusals?.length && attempt.failure && !attempt.failure.providerRefusals) {
+        attempt.failure = { ...attempt.failure, providerRefusals: refusals };
+        if (task.failure) task.failure = attempt.failure;
+      }
       if (task.queuedCommands?.length) this.nextQueuedCommand(task, waitingForCommand || outcome.type === 'completed');
       if (task.state === 'cancelled') {
         delete task.failure;
@@ -1007,6 +1013,7 @@ export class TaskService {
       if (outcome.type === 'completed' && outcome.result.unresolvedBackground) {
         this.store.appendEvent(task.conversationId, 'task.background_unresolved', { attemptId, ...outcome.result.unresolvedBackground }, task.taskId);
       }
+      if (refusals?.length) this.store.appendEvent(task.conversationId, 'task.provider_refusal', { attemptId, refusals }, task.taskId);
       if (outcome.type !== 'unknown') this.pool.release(task.taskId, outcome.type === 'completed' || outcome.type === 'paused');
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
       if (task.state === 'queued') this.store.enqueue('schedule', `schedule:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
