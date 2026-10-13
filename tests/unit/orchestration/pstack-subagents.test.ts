@@ -180,6 +180,18 @@ test('the task list without a task_id lists roots only', async () => {
   expect(tasks.status(context.conversationId, 'u').map(t => t.taskId)).toEqual([parent.taskId]);
 });
 
+// Dev e2e of #591: /tasks, /stop and GET .../tasks read TaskControls.list, which listed every subagent.
+test('the /tasks, /stop and REST task list shows roots only', async () => {
+  const { TaskControls } = await import('../../../src/orchestration/task-controls');
+  const { task: parent, attempt } = rootWorker();
+  const done = (await spawn(attempt, {})).task_id;
+  complete(running(store.task(done)!), 'done');
+  await spawn(attempt, {});
+  const controls = new TaskControls(store, tasks);
+  expect(controls.list('s', 'u')).toMatchObject({ total: 1, tasks: [expect.objectContaining({ taskId: parent.taskId })] });
+  expect(controls.list('s', 'u', 0, 10, true)).toMatchObject({ total: 1, tasks: [expect.objectContaining({ taskId: parent.taskId })] });
+});
+
 // Review of #591: a read-only subagent cannot change anything through gateway tools either.
 test('a read-only worker is refused mutating gateway tools and its MCP server hides them', async () => {
   const { attempt } = rootWorker();

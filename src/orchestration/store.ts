@@ -13,6 +13,8 @@ export type Row = Record<string, string | number | null>;
 export interface InputReceipt { inputId: string; conversationId: string; bindingId: string; }
 /** Ingress key prefix of the internal recovery input; its model is a snapshot, never a user selection. */
 export const INTAKE_RECOVERY_PREFIX = 'intake-recovery:';
+/** Tasks the user sees and controls: subagents belong to their root (its task_status lists them), not to the chat's task list. */
+export const ROOT_TASK_SQL = "json_extract(snapshot_json,'$.parentTaskId') IS NULL";
 
 export interface AcceptInput {
   /** Trusted installed-skill snapshot, retained for mailbox recovery. */

@@ -1,7 +1,7 @@
 import { ControlMenu, ControlScope } from './channel-controls';
 import { DecisionService } from './decisions';
 import { DeliveryControl } from './delivery';
-import { AcceptInput, OrchestrationStore, Row } from './store';
+import { AcceptInput, OrchestrationStore, ROOT_TASK_SQL, Row } from './store';
 import { TaskService } from './tasks/service';
 import { CommandContext, OrchestrationError } from './types';
 
@@ -24,7 +24,7 @@ export class TaskQuestions {
       }
       // A subagent's question is its result to the parent worker (subagent_wait), never the user's.
       for (const row of this.store.all(`SELECT t.*,c.agent_session_id FROM tasks t JOIN conversations c ON c.id=t.conversation_id
-        WHERE t.state='waiting_input' AND c.status='active' AND json_extract(t.snapshot_json,'$.parentTaskId') IS NULL`)) {
+        WHERE t.state='waiting_input' AND c.status='active' AND ${ROOT_TASK_SQL}`)) {
         const task = this.store.task(String(row.id))!, question = task.pendingQuestion;
         if (!question || question.revision !== task.revision) continue;
         let saved = this.store.get('SELECT * FROM task_questions WHERE question_id=?', question.questionId);

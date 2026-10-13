@@ -1,5 +1,5 @@
 import type { AgentConfig } from '../types';
-import { OrchestrationStore } from './store';
+import { OrchestrationStore, ROOT_TASK_SQL } from './store';
 import { scrubText } from '../agent/incident';
 import { extractToolDetail } from '../utils/tool-labels';
 
@@ -164,7 +164,7 @@ export function subagentLines(store: OrchestrationStore, conversationId: string,
   // Unfinished roots first, then each one's children through the parentTaskId index
   // (a correlated EXISTS scans that whole index for every root).
   const roots = store.all(`SELECT id,json_extract(snapshot_json,'$.title') AS title FROM tasks WHERE conversation_id=? AND state NOT IN ('completed','failed','cancelled')
-    AND json_extract(snapshot_json,'$.parentTaskId') IS NULL ORDER BY created_at LIMIT 50`, conversationId);
+    AND ${ROOT_TASK_SQL} ORDER BY created_at LIMIT 50`, conversationId);
   const lines: string[] = [];
   for (const root of roots) {
     if (lines.length >= 5) break;

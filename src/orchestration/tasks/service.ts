@@ -16,7 +16,7 @@ import { promisify } from 'util';
 import { taskFailure } from './failure';
 import { WorkerPool } from './pool';
 import { createHash, randomUUID } from 'crypto';
-import { OrchestrationStore, boundedText, payloadHash } from '../store';
+import { OrchestrationStore, ROOT_TASK_SQL, boundedText, payloadHash } from '../store';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../config';
 import { MAX_INTAKE_INPUTS } from '../conversation-intake';
 import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode } from '../types';
@@ -193,8 +193,8 @@ export class TaskService {
       return [{ ...this.withRecentTools(task), ...(subagents.length ? { subagents } : {}) }];
     }
     // Roots only, as in indexPage: a root's status lists its subagents.
-    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.parentTaskId') IS NULL AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
-      (SELECT id FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.parentTaskId') IS NULL AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT 100))
+    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND ${ROOT_TASK_SQL} AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
+      (SELECT id FROM tasks WHERE conversation_id=? AND ${ROOT_TASK_SQL} AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT 100))
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`, conversationId, conversationId).map(row => {
       const task = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
       const waiting = task.state === 'queued' && this.store.get('SELECT waiting_json FROM provider_waits WHERE entity_id=?', task.taskId);
@@ -226,8 +226,8 @@ export class TaskService {
   /** Bounded recent-task page: every unfinished task, plus only the newest finished ones. */
   private indexPage(conversationId: string): TaskSnapshot[] {
     // Subagents are listed under their root (task_status with the root's task_id), not as separate work.
-    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.parentTaskId') IS NULL AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
-      (SELECT id FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.parentTaskId') IS NULL AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT ${INDEXED_FINISHED_TASKS}))
+    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND ${ROOT_TASK_SQL} AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
+      (SELECT id FROM tasks WHERE conversation_id=? AND ${ROOT_TASK_SQL} AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT ${INDEXED_FINISHED_TASKS}))
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`,
       conversationId, conversationId).map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot);
   }
