@@ -91,6 +91,15 @@ describe('save-time validation', () => {
     expect(message).toContain(`use the model ID "${id}"`);
   });
 
+  // Dev e2e of #591: only a panel role fans out; any other role runs one model.
+  it('refuses a model list on a role that is not a panel', () => {
+    const { code, message } = failure(() => validatePstack('a', { roles: { 'bug-fix': 'claude-opus-5-5, claude-fable-5-1' } }, MODELS, PLUGIN));
+    expect(code).toBe('INVALID_PSTACK_CONFIG');
+    expect(message).toContain('bug-fix');
+    expect(message).toContain('one model');
+    expect(validatePstack('a', { roles: { 'arena runners': 'claude-opus-5-5, claude-fable-5-1' } }, MODELS, PLUGIN).roles).toEqual({ 'arena runners': 'claude-opus-5-5, claude-fable-5-1' });
+  });
+
   it('refuses an unknown model with the valid IDs', () => {
     const { code, message } = failure(() => validatePstack('a', { roles: { 'interrogate reviewers': 'claude-opus-5-5, gpt-7' } }, MODELS, PLUGIN));
     expect(code).toBe('UNKNOWN_MODEL');

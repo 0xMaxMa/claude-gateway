@@ -1,6 +1,7 @@
 import { Effort, isEffort, ModelResolutionError, resolveModelId } from '../agent/model-registry';
 import type { ModelConfig } from '../types';
 import { PSTACK_INSTALL_HINT, PSTACK_PLUGIN_ID, PstackModels } from './plugin-info';
+import { pstackPanelDefault } from './sheet';
 
 /**
  * `agents[].pstack` mirrors pstack's own pstack-models.md sheet: role lines
@@ -67,6 +68,7 @@ export function validatePstack(agentId: string, block: AgentPstackConfig, models
   for (const [role, value] of Object.entries(block.roles ?? {})) {
     if (!known.includes(role)) throw new PstackConfigError('UNKNOWN_PSTACK_ROLE', `Unknown pstack role "${role}" at agents[${agentId}].pstack.roles. Roles: ${known.join('; ')}.`);
     const entries = parseRoleValue(value);
+    if (entries.length > 1 && pstackPanelDefault(plugin, role) === undefined) throw new PstackConfigError('INVALID_PSTACK_CONFIG', `"${role}" is not a panel role; give it one model at agents[${agentId}].pstack.roles.`);
     roles[role] = entries.map(({ model, effort }, i) => {
       let id = model;
       if (!PSTACK_KEYWORDS.includes(model)) {
