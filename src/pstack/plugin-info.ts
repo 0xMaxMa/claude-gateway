@@ -38,9 +38,12 @@ export interface PstackModels {
 export function pstackModels(installPath: string): PstackModels | undefined {
   try {
     const models = JSON.parse(readFileSync(join(installPath, 'models.json'), 'utf8'));
+    // Every role becomes one `<role>: <value>` sheet line, so a role name stays on one line.
     const roles = Array.isArray(models?.roles) ? models.roles.filter((r: unknown) =>
-      typeof (r as { role?: unknown })?.role === 'string' && typeof (r as { models?: unknown }).models === 'string') : [];
-    return roles.length ? { roles: roles.map((r: { role: string; models: string }) => ({ role: r.role, models: r.models })), tiers: models.tiers ?? {} } : undefined;
+      typeof (r as { role?: unknown })?.role === 'string' && !/[\r\n]/.test((r as { role: string }).role) && typeof (r as { models?: unknown }).models === 'string') : [];
+    const tiers = models?.tiers && typeof models.tiers === 'object' && !Array.isArray(models.tiers) ? Object.fromEntries(Object.entries(models.tiers as Record<string, unknown>)
+      .filter(([, slugs]) => typeof slugs === 'string' || (Array.isArray(slugs) && slugs.length > 0 && slugs.every(slug => typeof slug === 'string')))) as PstackModels['tiers'] : {};
+    return roles.length ? { roles: roles.map((r: { role: string; models: string }) => ({ role: r.role, models: r.models })), tiers } : undefined;
   } catch {
     return undefined;
   }
