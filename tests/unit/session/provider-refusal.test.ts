@@ -7,6 +7,13 @@ const EXPLANATION = 'This request triggered restrictions on violative cyber cont
 const start = (id: string) => ({ type: 'stream_event', event: { type: 'message_start', message: { id, model: 'claude-opus-5-5', content: [], stop_reason: null, stop_details: null } } });
 const delta = (stop_reason: string, stop_details: unknown) => ({ type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason, stop_sequence: null, stop_details, container: null } } });
 const refusal = (details: Record<string, unknown> = {}) => ({ type: 'refusal', category: 'cyber', explanation: EXPLANATION, ...details });
+/** The synthetic API-error record as stream-json emits it: snake_case wrapper flag, a uuid
+ * message id, and no field naming the refused message (`refused_message_id` is only on the user nudge). */
+const apiError = (stop_reason: string, stop_details: unknown, id = 'b5a0c1de-3f4e-4a8b-9c2d-7e6f5a4b3c21') => ({
+  type: 'assistant', parent_tool_use_id: null, session_id: 'session', uuid: `${id}-wrapper`, timestamp: '2026-10-13T00:00:00.000Z', error: 'invalid_request', is_api_error_message: true,
+  message: { id, container: null, model: '<synthetic>', role: 'assistant', stop_reason, stop_sequence: '', stop_details, type: 'message', context_management: null, diagnostics: null,
+    content: [{ type: 'text', text: 'API Error: request blocked' }] },
+});
 
 function observe(events: Record<string, unknown>[]): ProviderRefusals {
   const ledger = new ProviderRefusals();
@@ -54,12 +61,20 @@ describe('ProviderRefusals (#586)', () => {
       start('msg_refused'),
       delta('refusal', null),
       { type: 'assistant', message: { id: 'msg_refused', stop_reason: 'refusal', stop_details: refusal(), content: [{ type: 'tool_use', id: 't', name: 'Bash', input: {} }] } },
-      { type: 'assistant', isApiErrorMessage: true, error: 'invalid_request', refusedMessageId: 'msg_refused',
-        message: { id: 'synthetic-1', model: '<synthetic>', stop_reason: 'refusal', stop_details: refusal(), content: [{ type: 'text', text: 'API Error' }] } },
-      // Without refusedMessageId, a synthetic record still replaces the message being streamed.
-      { type: 'assistant', isApiErrorMessage: true, message: { id: 'synthetic-2', stop_reason: 'refusal', stop_details: refusal(), content: [] } },
+      apiError('refusal', refusal()),
     ]);
     expect(ledger.list()).toEqual([{ messageId: 'msg_refused', category: 'cyber', explanation: EXPLANATION, toolCalls: [{ id: 't', name: 'Bash', result: false }] }]);
+  });
+
+  it('records exactly one refusal for the stream-json sequence of a refusal surfaced as an API error', () => {
+    const ledger = observe([start('msg_refused'), delta('refusal', refusal()), { type: 'stream_event', event: { type: 'message_stop' } }, apiError('refusal', refusal())]);
+    expect(ledger.list()).toEqual([{ messageId: 'msg_refused', category: 'cyber', explanation: EXPLANATION }]);
+  });
+
+  it('accepts the camelCase API-error flag of transcripts and the Codex adapter', () => {
+    const { is_api_error_message: _flag, ...record } = apiError('refusal', null);
+    expect(observe([start('msg_refused'), delta('refusal', refusal()), { ...record, isApiErrorMessage: true }]).list())
+      .toEqual([{ messageId: 'msg_refused', category: 'cyber', explanation: EXPLANATION }]);
   });
 
   it('keeps distinct refusals in order and bounds the ledger', () => {
@@ -110,14 +125,14 @@ describe('ProviderRefusals (#586)', () => {
 
   it('never attributes an unlinked synthetic refusal to a message that was not refused', () => {
     const ledger = observe([start('msg_ok'), { type: 'assistant', message: { id: 'msg_ok', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] } }, delta('end_turn', null),
-      { type: 'assistant', isApiErrorMessage: true, message: { id: 'synthetic', stop_reason: 'refusal', stop_details: null, content: [] } }]);
+      apiError('refusal', null, 'synthetic')]);
     expect(ledger.list()).toEqual([{ messageId: 'synthetic' }]);
   });
 
   it('attributes an unlinked synthetic refusal to a message cut off before its stop', () => {
     const ledger = observe([start('msg_cut'),
       { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 't1', name: 'Bash', input: {} } } },
-      { type: 'assistant', isApiErrorMessage: true, message: { id: 'synthetic', stop_reason: 'refusal', stop_details: null, content: [] } }]);
+      apiError('refusal', null)]);
     expect(ledger.list()).toEqual([{ messageId: 'msg_cut', toolCalls: [{ id: 't1', name: 'Bash', result: false }] }]);
   });
 

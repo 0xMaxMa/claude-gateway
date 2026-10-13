@@ -10,6 +10,10 @@ export interface ProviderRefusal { messageId?: string; category?: string; explan
 const MAX_REFUSALS = 16, MAX_TOOL_CALLS = 16, RECENT_TOOL_USES = 256;
 const text = (value: unknown, max: number): string | undefined =>
   typeof value === 'string' ? sanitizeProviderMessage(value)?.slice(0, max) : undefined;
+/** A synthetic assistant record wrapping an API error. stream-json carries
+ * `is_api_error_message`; transcripts and the Codex adapter use `isApiErrorMessage`. */
+export const isApiErrorRecord = (event: Record<string, any>): boolean =>
+  event.type === 'assistant' && (event.is_api_error_message === true || event.isApiErrorMessage === true);
 
 /** Turn-scoped refusal evidence from Claude Code stream-json. One native message
  * can appear as a stream `message_delta`, a final assistant record and a synthetic
@@ -35,13 +39,14 @@ export class ProviderRefusals {
       for (const entry of this.entries) { const call = entry.toolCalls.get(block.tool_use_id); if (call) call.result = true; }
     }
     if (event.type !== 'assistant') return;
-    if (event.isApiErrorMessage !== true) for (const block of blocks) if (block?.type === 'tool_use') this.toolUse(typeof event.message.id === 'string' ? event.message.id : undefined, block);
+    const apiError = isApiErrorRecord(event);
+    if (!apiError) for (const block of blocks) if (block?.type === 'tool_use') this.toolUse(typeof event.message.id === 'string' ? event.message.id : undefined, block);
     if (event.message?.stop_reason !== 'refusal') return;
-    // A synthetic API-error record names the refused message in refusedMessageId.
-    // Without it, it replaces the streamed message only while that message is still
+    // The synthetic API-error record has its own uuid id and names no refused message
+    // on the wire, so it replaces the streamed message while that message is still
     // open or already refused; a message that finished normally is never blamed.
-    const streamed = event.isApiErrorMessage === true && this.current && (this.open || this.entries.some(entry => entry.messageId === this.current)) ? this.current : undefined;
-    const id = typeof event.refusedMessageId === 'string' ? event.refusedMessageId : streamed ?? event.message.id;
+    const streamed = apiError && this.current && (this.open || this.entries.some(entry => entry.messageId === this.current)) ? this.current : undefined;
+    const id = streamed ?? event.message.id;
     this.record(typeof id === 'string' ? id : undefined, event.message.stop_details);
   }
   private toolUse(messageId: string | undefined, block: Record<string, unknown>): void {

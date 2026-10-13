@@ -33,8 +33,9 @@ const refusedThenAnswered = (answer: string, refusalDetails: unknown = details) 
 /** A refusal the CLI surfaces as an API error instead of a fallback answer. */
 const refusedAsApiError = [
   start('msg_refused'), stop('refusal', details),
-  { type: 'assistant', isApiErrorMessage: true, error: 'invalid_request', refusedMessageId: 'msg_refused',
-    message: { id: randomUUID(), model: '<synthetic>', stop_reason: 'refusal', stop_details: details, content: [{ type: 'text', text: 'API Error: request blocked' }] } },
+  // Wire shape of the synthetic record: snake_case flag, uuid message id, no link to msg_refused.
+  { type: 'assistant', parent_tool_use_id: null, session_id: 'session', uuid: randomUUID(), timestamp: '2026-10-13T00:00:00.000Z', error: 'invalid_request', is_api_error_message: true,
+    message: { id: randomUUID(), model: '<synthetic>', role: 'assistant', type: 'message', stop_reason: 'refusal', stop_sequence: '', stop_details: details, content: [{ type: 'text', text: 'API Error: request blocked' }] } },
   { type: 'result', subtype: 'success', is_error: true, result: 'API Error: request blocked' },
 ];
 const refusal = { messageId: 'msg_refused', category: 'cyber', explanation: EXPLANATION };
@@ -53,7 +54,8 @@ describe('startProcessTurn refusal evidence (#586)', () => {
   it('a refusal surfaced as an API error stays on the failure, deduplicated to one native refusal', async () => {
     const turn = startProcessTurn(fakeProcess(() => refusedAsApiError) as any, 'request', 1000);
     const error = await turn.result.catch(failure => failure);
-    expect(error).toMatchObject({ code: 'INFERENCE_FAILED', providerRefusals: [refusal] });
+    expect(error).toMatchObject({ code: 'INFERENCE_FAILED', providerMessage: 'API Error: request blocked' });
+    expect(error.providerRefusals).toEqual([refusal]);
   });
 
   it('a later turn on the same process does not inherit an earlier refusal', async () => {
@@ -143,6 +145,7 @@ describe('orchestration runtime refusal reporting (#586)', () => {
     await expect(send(randomUUID(), 'Do the thing')).rejects.toMatchObject({ code: 'INFERENCE_FAILED' });
     expect(events()).toEqual([expect.objectContaining({ refusals: [refusal] })]);
     expect(notices()).toEqual([providerRefusalNotice([refusal])]);
+    expect(notices()[0]).not.toContain('Refused messages');
   });
 
   it('does not attach one session\'s refusal to another session or a later turn', async () => {
