@@ -50,6 +50,12 @@ describe('resolveModelId — full model IDs only', () => {
     expect(resolveModelId(MODELS, 'claude-haiku-5-5[200k]').id).toBe('claude-haiku-5-5[200k]');
   });
 
+  // Dev e2e of #591: `[1m]` buys a 1M window only where the model has one.
+  it('refuses [1m] on a model without a 1M window', () => {
+    expect(codeOf(() => resolveModelId(MODELS, 'claude-haiku-5-5[1m]'))).toBe('UNKNOWN_MODEL');
+    expect(resolveModelId(MODELS, 'claude-opus-5-5[1m]').id).toBe('claude-opus-5-5[1m]');
+  });
+
   it('rejects an unknown model and lists every valid id, with the config path', () => {
     let message = '';
     try { resolveModelId(MODELS, 'gpt-7', 'agents[a].pstack.roles["interrogate reviewers"][1]'); }

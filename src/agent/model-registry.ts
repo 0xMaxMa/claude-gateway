@@ -119,7 +119,8 @@ const CONTEXT_SUFFIX = /\[(?:1m|200k)\]$/i;
  * one model that never changes when an alias moves (pstack roles,
  * `subagent_spawn`). Matching is exact and case-insensitive. A context suffix
  * (`[1m]`, `[200k]`) on an id the catalog lists without it still resolves:
- * the suffix selects the context window, not a different model.
+ * the suffix selects the context window, not a different model. `[1m]` needs a
+ * model with a 1M window.
  *
  * `where` names the config path in the error, e.g.
  * `agents[a].pstack.roles["bug-fix"]`.
@@ -130,7 +131,8 @@ export function resolveModelId(models: ModelConfig[], value: string, where?: str
   if (exact) return exact;
   const suffix = CONTEXT_SUFFIX.exec(wanted)?.[0];
   const base = suffix && models.find((m) => m.id.toLowerCase() === wanted.slice(0, -suffix.length) && !CONTEXT_SUFFIX.test(m.id));
-  if (base) return { ...base, id: base.id + suffix };
+  // `[1m]` only where the model has a 1M window; a Claude model that does lists its own `[1m]` row.
+  if (base && (suffix !== '[1m]' || base.contextWindow >= 1000000)) return { ...base, id: base.id + suffix };
   const at = where ? ` at ${where}` : '';
   const valid = `Valid IDs: ${models.map((m) => m.id).join(', ')} — see /models.`;
   const alias = models.find((m) => m.alias.toLowerCase() === wanted);
