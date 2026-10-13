@@ -9,6 +9,7 @@ import { TaskBridge } from '../../../src/orchestration/bridge';
 import type { CommandContext, TaskAttempt, TaskSnapshot } from '../../../src/orchestration/types';
 import type { ModelConfig } from '../../../src/types';
 import { pstackClaudeConfig } from '../../helpers/pstack-fixture';
+import { SUBAGENT_READONLY } from '../../../src/pstack/overlay';
 
 /**
  * pstack subagents as gateway tasks (#583). A worker of a set-up agent gets
@@ -51,9 +52,9 @@ function rootWorker(): { task: TaskSnapshot; attempt: TaskAttempt } {
   const task = tasks.spawn({ ...context, model: 'claude-sonnet-5-5', actionId: `root-${++n}` }, { title: 'Root', instructions: 'Use pstack', targetProfile: 'default-worker', effort: 'high' });
   return { task, attempt: running(task) };
 }
-async function call(attempt: TaskAttempt, tool: string, args: Record<string, unknown>, subagents = true): Promise<any> {
+async function call(attempt: TaskAttempt, tool: string, args: Record<string, unknown>, subagents = true, readonly = false): Promise<any> {
   const dir = join(root, `ticket-${++n}`);
-  bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation, subagents }, dir, root);
+  bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation, subagents, readonly }, dir, root);
   const auth = JSON.parse(readFileSync(join(dir, 'ticket.json'), 'utf8'));
   return new Promise((resolve, reject) => {
     const req = request(auth.url, { method: 'POST' }, res => { let b = ''; res.on('data', c => b += c); res.on('end', () => resolve(JSON.parse(b))); });
@@ -102,6 +103,26 @@ test('readonly is recorded on the task (the driver states it and restricts tools
   const { attempt } = rootWorker();
   const reply = await spawn(attempt, { readonly: true });
   expect(store.task(reply.task_id)!.readonly).toBe(true);
+});
+
+// Dev e2e of #591 (G1): a read-only reviewer ran an effort agent whose
+// definition says "You have the full tool set" and kept trying to spawn
+// writers. The read-only statement follows the definition and overrides it.
+test.each([['asked for', true, false], ['inherited from a read-only parent', false, true]])('a read-only effort agent (%s) is told its tools are read-only after the definition', async (_case, asked, parentReadonly) => {
+  const { attempt } = rootWorker();
+  const reply = await call(attempt, 'subagent_spawn', { description: 'Review', prompt: 'Review the diff', run_in_background: true, subagent_type: 'pstack:effort-xhigh', ...(asked ? { readonly: true } : {}) }, true, parentReadonly);
+  const instructions = tasks.revision(reply.task_id, 1).instructions;
+  expect(instructions).toContain(SUBAGENT_READONLY);
+  expect(instructions.indexOf(SUBAGENT_READONLY)).toBeGreaterThan(instructions.indexOf('You have the full tool set.'));
+  expect(instructions.indexOf(SUBAGENT_READONLY)).toBeLessThan(instructions.indexOf('Review the diff'));
+  expect(SUBAGENT_READONLY).toMatch(/full tool set/);
+  expect(SUBAGENT_READONLY).toMatch(/subagents/);
+});
+
+test('a writable effort agent keeps its definition as is', async () => {
+  const { attempt } = rootWorker();
+  const reply = await spawn(attempt, { subagent_type: 'pstack:effort-xhigh' });
+  expect(tasks.revision(reply.task_id, 1).instructions).not.toContain(SUBAGENT_READONLY);
 });
 
 test('subagents nest three deep; the fourth level is refused', async () => {

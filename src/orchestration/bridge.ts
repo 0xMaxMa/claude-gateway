@@ -16,6 +16,7 @@ import { SUBAGENT_TOOLS, readonlyDenied } from './subagent-tool-schemas';
 import { PSTACK_KEYWORDS } from '../pstack/config';
 import { pstackPluginInfo } from '../pstack/plugin-info';
 import { pstackAgentTemplates } from '../pstack/templates';
+import { SUBAGENT_READONLY } from '../pstack/overlay';
 import { importContainerFile } from './container';
 import { TaskService, assertAgentContextRefs } from './tasks/service';
 import { CommandContext, OrchestrationError, ChangeMode } from './types';
@@ -368,8 +369,10 @@ export class TaskBridge {
                 inputDetails = [{ field: 'subagent_type', reason: 'unknown', correction: 'Use a pstack agent the installed plugin declares (e.g. pstack:effort-high, pstack:poteto-agent), a built-in type, or omit it.' }];
                 throw new OrchestrationError('INVALID_INPUT');
               }
-              // readonly (asked for here or inherited) is stated by the driver from the task, on every harness.
-              const instructions = [template?.body, installPath ? `pstack plugin root: ${installPath}` : '', a.prompt].filter(Boolean).join('\n\n');
+              // readonly (asked for here or inherited) is stated by the driver from the task, on every harness,
+              // and right after an agent definition, which may claim the full tool set.
+              const readonly = template && (a.readonly || scope.readonly) ? SUBAGENT_READONLY : '';
+              const instructions = [template?.body, readonly, installPath ? `pstack plugin root: ${installPath}` : '', a.prompt].filter(Boolean).join('\n\n');
               const task = this.tasks.spawnSubagent(scope.attemptId, scope.generation, command.action_id, { title: a.description, instructions,
                 ...(model ? { model } : {}), ...(template?.effort ? { effort: template.effort } : {}), ...(a.subagent_type ? { subagentType: a.subagent_type } : {}), ...(a.readonly ? { readonly: true } : {}) });
               const receipt = { task_id: task.taskId, model: task.model, effort: task.effort, state: task.state, ...(a.isolation === 'worktree' ? { isolation: 'ignored' } : {}) };

@@ -41,7 +41,7 @@ export function pstackClaudeConfig(installed = true): { configDir: string; insta
   fs.mkdirSync(path.join(installPath, 'effort-agents'), { recursive: true });
   fs.mkdirSync(path.join(installPath, 'agents'), { recursive: true });
   fs.writeFileSync(path.join(installPath, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'pstack', agents: ['./agents/comment-sicko.md', './effort-agents/effort-xhigh.md'] }));
-  fs.writeFileSync(path.join(installPath, 'effort-agents', 'effort-xhigh.md'), '---\nname: effort-xhigh\ndescription: pstack subagent at xhigh effort.\neffort: xhigh\n---\n\n# pstack subagent (xhigh effort)\n\nDo the task in your prompt.\n');
+  fs.writeFileSync(path.join(installPath, 'effort-agents', 'effort-xhigh.md'), '---\nname: effort-xhigh\ndescription: pstack subagent at xhigh effort.\neffort: xhigh\n---\n\n# pstack subagent (xhigh effort)\n\nDo the task in your prompt. You have the full tool set. The effort level changes how long you reason, not the task.\n');
   fs.writeFileSync(path.join(installPath, 'agents', 'comment-sicko.md'), '---\nname: comment-sicko\ndescription: A comment-hater.\n---\n\n# Comment Sicko\n\nDelete comments.\n');
   const entry = { scope: 'user', installPath, version: '0.9.82', installedAt: '2026-10-12T00:00:00.000Z', lastUpdated: '2026-10-12T00:00:00.000Z', gitCommitSha: '1bfdab4219d41c4d0bb28d1e7832de6128373611' };
   fs.writeFileSync(path.join(configDir, 'plugins', 'installed_plugins.json'), JSON.stringify({

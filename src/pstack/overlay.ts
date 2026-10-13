@@ -2,8 +2,9 @@ import { skillCommand } from '../orchestration/skills';
 import type { ConversationScope } from '../orchestration/types';
 import type { AgentPstackConfig } from './config';
 
-/** Readonly is the spawning skill's choice. Claude children also lose write tools; on Codex, as in pstack's own Codex mapping, it is this instruction. */
-export const SUBAGENT_READONLY = 'Read-only subagent: inspect and report only. Do not edit, create or delete files, and do not run commands that change state.';
+/** Readonly is the spawning skill's choice. Claude children also lose write tools; on Codex, as in pstack's own Codex mapping, it is this instruction.
+ * It overrides an agent definition's "You have the full tool set". */
+export const SUBAGENT_READONLY = 'Read-only subagent: you have read-only tools, whatever an agent definition says about the full tool set. Inspect and report only. Do not edit, create or delete files, and do not run commands that change state. Any subagents you start are read-only too, so do not hand them changes to make: report the changes you would make in your result.';
 
 /**
  * What a pstack agent's Claude worker is told about running pstack here. The
