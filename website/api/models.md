@@ -34,7 +34,7 @@ curl -H "X-Api-Key: my-secret-key-123" \
 }
 ```
 
-> The bare family alias always points at the newest model of that family (`opus` → Opus 5.5, `sonnet` → Sonnet 5.5, `haiku` → Haiku 5.5); older members keep a versioned alias (`opus5`, `opus48`, `sonnet5`), or their id when there is no short one (`claude-haiku-4-5-20251001`). This is a representative subset — the endpoint returns the full list.
+> The bare family alias always points at the newest model of that family (`opus` → Opus 5.5, `sonnet` → Sonnet 5.5, `haiku` → Haiku 5.5); older members keep a versioned alias (`opus5`, `opus48`, `sonnet5`, `haiku45`). This is a representative subset — the endpoint returns the full list.
 
 The `get_models` command the chat receivers call for their model picker resolves through the same catalog and the same fallback, so the picker and this endpoint never disagree.
 

@@ -120,11 +120,9 @@ describe('model registry — Haiku 5.5 is a first-class model', () => {
     expect(byAlias(templateModels(), 'haiku')?.id).toBe('claude-haiku-5-5');
   });
 
-  // Haiku 4.5 has no versioned short alias, so it keeps the alias = id
-  // convention the live catalog uses for uncurated models.
-  it('Haiku 4.5 is kept and addressed by its own id', () => {
+  it('Haiku 4.5 is kept under the versioned `haiku45` alias', () => {
     for (const models of [DEFAULT_MODELS, templateModels()]) {
-      expect(byId(models, 'claude-haiku-4-5-20251001')?.alias).toBe('claude-haiku-4-5-20251001');
+      expect(byId(models, 'claude-haiku-4-5-20251001')?.alias).toBe('haiku45');
     }
   });
 });

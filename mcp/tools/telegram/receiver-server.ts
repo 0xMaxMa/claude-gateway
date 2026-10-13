@@ -923,7 +923,7 @@ const AVAILABLE_MODELS = [
   { id: 'claude-sonnet-5',           label: 'Sonnet 5',         alias: 'sonnet5' },
   { id: 'claude-sonnet-4-6',         label: 'Sonnet 4.6',       alias: 'sonnet46' },
   { id: 'claude-haiku-5-5',          label: 'Haiku 5.5',        alias: 'haiku' },
-  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5',        alias: 'claude-haiku-4-5-20251001' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5',        alias: 'haiku45' },
   { id: 'gpt-6-sol[1m]',             label: 'GPT 6 Sol',        alias: 'gpt6sol' },
   { id: 'gpt-6-astra[1m]',           label: 'GPT 6 Astra',      alias: 'gpt6astra' },
   { id: 'gpt-6-luna[1m]',            label: 'GPT 6 Luna',       alias: 'gpt6luna' },
