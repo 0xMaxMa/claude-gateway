@@ -40,7 +40,7 @@ import type { ResolvedCodexProviderIdentity } from '../provider-scope';
 import type { ProviderRefusal } from '../../session/provider-refusal';
 import { PSTACK_PLUGIN_ID, pstackModels, pstackPluginInfo } from '../../pstack/plugin-info';
 import { renderPstackSheet } from '../../pstack/sheet';
-import { pstackWorkerNote } from '../../pstack/overlay';
+import { SUBAGENT_READONLY, pstackWorkerNote } from '../../pstack/overlay';
 import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
 
 function boundedDiffText(text: string): string {
@@ -154,8 +154,10 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     // Only host workers can load the plugin; isolated and container workers run with every plugin off.
     const plugin = this.agent.pstack && harness.harness === 'claude' && workspace.baseCommit === 'host' && this.agent.type !== 'app-agent' ? pstackPluginInfo() : undefined;
     const pstack = plugin?.installPath ? pstackModels(plugin.installPath) : undefined;
-    const subagents = Boolean(this.agent.pstack) && harness.harness === 'claude' && (task.depth ?? 0) < SUBAGENT_MAX_DEPTH;
+    // Subagent tools replace Agent only where the plugin's skills are loaded to call it.
+    const subagents = Boolean(pstack) && (task.depth ?? 0) < SUBAGENT_MAX_DEPTH;
     if (pstack) context += '\n\n' + renderPstackSheet(this.agent.pstack!, pstack) + '\n\n' + pstackWorkerNote(subagents);
+    if (task.readonly) context += '\n\n' + SUBAGENT_READONLY;
     this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway, harness, authFingerprint, toolExposure: 'lazy-connectors-v1' }));
     // Pool expiration/rebinding makes old native transcripts disposable. This
     // bounded maintenance is best effort and never changes task admission.
@@ -165,7 +167,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     try {
       const profile = { ...ticket.profile, ...(task.effort ? { claudeEffort: task.effort } : {}), pluginOverrides: { [PSTACK_PLUGIN_ID]: Boolean(this.agent.pstack) },
         // pstack agents dispatch subagents only as gateway tasks (subagent_spawn); a read-only Claude subagent gets read tools only.
-        ...(this.agent.pstack && harness.harness === 'claude' ? { disallowedTools: ['Agent', 'Task'] } : {}),
+        ...(pstack ? { disallowedTools: ['Agent', 'Task'] } : {}),
         ...(task.readonly && harness.harness === 'claude' ? { workerTools: ['Read', 'Glob', 'Grep'] } : {}), hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
       const workerConfig: AgentConfig = { ...this.agent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
         claude: { ...this.agent.claude, model: claudeModel, extraFlags: [] } };

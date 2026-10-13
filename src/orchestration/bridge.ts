@@ -34,8 +34,6 @@ type InputIssue = { field: string; reason: string; correction: string };
 /** Computer adapter failures are plain Errors with a bounded code; surface the code, not INVALID_REQUEST. */
 export const COMPUTER_ADAPTER_ERROR = /^(?:COMPUTER_[A-Z][A-Z_]{0,60}|INVALID_COMPUTER_GOAL)$/;
 const COMPUTER_NOT_ALLOWED_MESSAGE = 'Computer Use is not enabled for this agent on this gateway. Tell the user it is not available here; do not suggest another app or a workaround.';
-/** Readonly is the spawning skill's choice. Claude children also lose write tools; on Codex, as in pstack's own Codex mapping, it is this instruction. */
-export const SUBAGENT_READONLY = 'Read-only subagent: inspect and report only. Do not edit, create or delete files, and do not run commands that change state.';
 function subagentInputIssues(args: Record<string, unknown>): InputIssue[] {
   const issues: InputIssue[] = [];
   for (const field of ['description', 'prompt'] as const) if (typeof args[field] !== 'string' || !(args[field] as string).trim()) issues.push({ field, reason: 'required', correction: `Provide a nonempty ${field}.` });
@@ -369,7 +367,8 @@ export class TaskBridge {
                 inputDetails = [{ field: 'subagent_type', reason: 'unknown', correction: 'Use a pstack agent the installed plugin declares (e.g. pstack:effort-high, pstack:poteto-agent), a built-in type, or omit it.' }];
                 throw new OrchestrationError('INVALID_INPUT');
               }
-              const instructions = [template?.body, a.readonly ? SUBAGENT_READONLY : '', installPath ? `pstack plugin root: ${installPath}` : '', a.prompt].filter(Boolean).join('\n\n');
+              // readonly (asked for here or inherited) is stated by the driver from the task, on every harness.
+              const instructions = [template?.body, installPath ? `pstack plugin root: ${installPath}` : '', a.prompt].filter(Boolean).join('\n\n');
               const task = this.tasks.spawnSubagent(scope.attemptId, scope.generation, command.action_id, { title: a.description, instructions,
                 ...(model ? { model } : {}), ...(template?.effort ? { effort: template.effort } : {}), ...(a.subagent_type ? { subagentType: a.subagent_type } : {}), ...(a.readonly ? { readonly: true } : {}) });
               const receipt = { task_id: task.taskId, model: task.model, effort: task.effort, state: task.state, ...(a.isolation === 'worktree' ? { isolation: 'ignored' } : {}) };
