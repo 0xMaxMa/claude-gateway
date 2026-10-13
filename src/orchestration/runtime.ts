@@ -61,6 +61,7 @@ import { VoiceError } from '../voice/types';
 import { describeVoiceError } from '../voice/errors';
 import { MediaStore } from '../history/media-store';
 import { resolveSkill, skillCatalog } from './skills';
+import { pstackNotSetUpReply } from '../pstack/overlay';
 import type { SkillRegistry } from '../skills';
 import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
 import { SPEECH_OVERLAY, splitSpeechResponse, speechVoiceStyle } from './speech';
@@ -844,14 +845,17 @@ export class AgentOrchestrationRuntime {
       return undefined;
     }
     input = this.questionControls.normalizeReply(input);
-    if (!this.questionControls.matches(input)) return undefined;
+    // A pstack command on an agent that is not set up gets the same direct notice.
+    const pstack = pstackNotSetUpReply(input.text, input.scope.source, this.agent.pstack);
+    if (!pstack && !this.questionControls.matches(input)) return undefined;
     const result = this.store.compose(() => {
       const receipt = this.store.acceptInput({ ...input, capabilities }, this.config.conversation.maxPendingInputs);
       const previous = this.store.get(`SELECT r.id,r.generated_text FROM assistant_responses r JOIN conversation_decisions d ON d.id=r.decision_id
         WHERE d.kind='notice' AND EXISTS(SELECT 1 FROM json_each(d.input_ids_json) WHERE value=?)`, receipt.inputId);
       if (previous) return { inputId: receipt.inputId, responseId: String(previous.id), text: String(previous.generated_text), reused: true };
       let text: string;
-      try {
+      if (pstack) text = pstack;
+      else try {
         const scope = { channel: input.scope.source, chatId: input.scope.chatId, thread: input.scope.threadKey, sessionId: input.scope.agentSessionId, principalId: input.scope.principalId };
         const menu = this.questionControls.handle(scope, input.text, receipt.inputId);
         text = menu?.text ?? 'Use /task_question <question-id> answer <your answer>, snooze, or mute.';

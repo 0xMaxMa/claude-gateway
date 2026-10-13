@@ -12,6 +12,7 @@ import { resolveOrchestrationConfig } from './config';
 import { DEFAULT_WORKER_TOOLS } from '../session/runtime-profile';
 import { validateContainer } from './container';
 import { recordProcessRoot, terminateProbeTree, workerSpawnDetached } from './process-supervisor';
+import { PSTACK_PLUGIN_ID } from '../pstack/plugin-info';
 
 export interface CliSkill { name: string; description: string; argumentHint?: string; aliases?: string[]; filePath?: string; resourceRoot?: string; source?: 'claude' | 'codex'; fileScope?: 'container'; content?: string; }
 const validName = (value: unknown): value is string => typeof value === 'string' && /^[\w:.-]{1,128}$/.test(value);
@@ -69,11 +70,12 @@ export function discoverCliSkills(agent: AgentConfig, cwd = agent.orchestration?
   const host = !container && resolveOrchestrationConfig(agent.orchestration).tasks.workspaceMode === 'host';
   const hostCommand = container ? undefined : claudeCommand();
   const binary = hostCommand ? [hostCommand.command, ...hostCommand.args].join(' ') : agent.claudeBin ?? 'claude';
-  const settings: {disableAllHooks:boolean;enabledPlugins?:Record<string,boolean>} = {disableAllHooks:true};
+  // The catalog lists what the agent's worker loads: pstack only for a set-up agent.
+  const settings: {disableAllHooks:boolean;enabledPlugins:Record<string,boolean>} = {disableAllHooks:true,enabledPlugins:{[PSTACK_PLUGIN_ID]:Boolean(agent.pstack)}};
   if(!host && !container) {
     let enabled: Record<string,boolean> = {};
     try {enabled=JSON.parse(readFileSync(join(homedir(),'.claude','settings.json'),'utf8')).enabledPlugins ?? {};} catch { /* Profile validation remains authoritative at worker startup. */ }
-    settings.enabledPlugins=Object.fromEntries(Object.keys(enabled).map(k=>[k,false]));
+    settings.enabledPlugins={...Object.fromEntries(Object.keys(enabled).map(k=>[k,false])),[PSTACK_PLUGIN_ID]:false};
   }
   const args=['-p','--input-format','stream-json','--output-format','stream-json','--verbose','--strict-mcp-config','--mcp-config','{"mcpServers":{}}',
     '--setting-sources',container?'':host?'user,project,local':'user','--settings',JSON.stringify(settings),'--tools',host?'default':DEFAULT_WORKER_TOOLS.join(',')];

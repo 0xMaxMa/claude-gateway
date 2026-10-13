@@ -1,0 +1,76 @@
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import { randomUUID } from 'crypto';
+import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
+import { SessionStore } from '../../../src/session/store';
+import { HistoryDB } from '../../../src/history/db';
+import type { AgentConfig, GatewayConfig } from '../../../src/types';
+
+/**
+ * Dev e2e of #591: an agent that was not set up still listed pstack's skills in
+ * its decision-turn catalog (the CLI skill probe had no pstack gate), so
+ * `/pstack:why` was accepted and a worker read the plugin's SKILL.md from disk.
+ */
+
+const settingsOf = (args: string[]) => JSON.parse(args[args.indexOf('--settings') + 1]);
+
+describe('CLI skill discovery gates pstack like the worker', () => {
+  const child = require('child_process') as typeof import('child_process');
+  afterEach(() => jest.restoreAllMocks());
+  const probeArgs = async (pstack?: object) => {
+    const { discoverCliSkills } = await import('../../../src/orchestration/cli-skills');
+    const spawn = jest.spyOn(child, 'spawn').mockImplementation(() => { throw new Error('captured'); });
+    const cwd = mkdtempSync(join(tmpdir(), 'pstack-probe-'));
+    try {
+      const agent = { id: 'a', workspace: cwd, claude: { model: 'm' }, orchestration: { tasks: { workspaceMode: 'host' } }, ...(pstack ? { pstack } : {}) } as unknown as AgentConfig;
+      await expect(discoverCliSkills(agent)).rejects.toThrow('captured');
+      return spawn.mock.calls[0][1] as string[];
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  };
+
+  test('an agent that is not set up probes with pstack off', async () => {
+    expect(settingsOf(await probeArgs()).enabledPlugins).toEqual({ 'pstack@pstack-claude': false });
+  });
+
+  test('a set-up agent probes with pstack on', async () => {
+    expect(settingsOf(await probeArgs({})).enabledPlugins).toEqual({ 'pstack@pstack-claude': true });
+  });
+});
+
+describe('an explicit /pstack: command on an agent that is not set up', () => {
+  async function fixture(pstack?: object) {
+    const root = mkdtempSync(join(tmpdir(), 'pstack-ingress-')), dir = join(root, 'a'), workspace = join(dir, 'workspace');
+    mkdirSync(workspace, { recursive: true }); writeFileSync(join(workspace, 'CLAUDE.md'), 'Identity');
+    const agent = { id: 'a', description: 'fixture', env: '', workspace, claude: { model: 'fixture', extraFlags: [] }, orchestration: {}, ...(pstack ? { pstack } : {}) } as AgentConfig;
+    const gateway = { gateway: { orchestration: true, headless: true }, agents: [agent] } as GatewayConfig;
+    const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a'), sid = randomUUID();
+    await sessions.ensureApiSession('a', 'chat', sid);
+    const createAgentSession = jest.fn(async () => { throw new Error('no model turn in this test'); });
+    const runtime = await AgentOrchestrationRuntime.open(agent, gateway, dir, sessions, history, { createAgentSession, releaseAgentSession: async () => {} });
+    const scope = { agentId: 'a', agentSessionId: sid, source: 'telegram' as const, accountId: 'owner', chatId: 'chat', threadKey: '', principalId: 'owner' };
+    return { runtime, scope, createAgentSession, close: async () => { await runtime.close(); (history as any).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true }); } };
+  }
+
+  test.each(['/pstack:why the build is slow', '/pstack:interrogate@claude_bot src/a.ts'])('%s is answered without a model turn or task', async text => {
+    const f = await fixture();
+    try {
+      const submitted = f.runtime.submitInput({ scope: f.scope, text, ingressKey: 'm1' }, { execute: true, writeMemory: false });
+      const reply = await Promise.race([submitted.response.catch(() => 'model turn'), new Promise<string>(resolve => setTimeout(() => resolve('no direct reply'), 3000))]);
+      expect(reply).toContain('pstack is not set up for this agent');
+      expect(reply).toContain('/pstack-setup');
+      expect(f.createAgentSession).not.toHaveBeenCalled();
+      expect(f.runtime.store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(0);
+      expect(f.runtime.store.get("SELECT COUNT(*) n FROM conversation_inputs WHERE status='accepted'")!.n).toBe(0);
+    } finally { await f.close(); }
+  });
+
+  test('a set-up agent and other commands are not intercepted', async () => {
+    const { pstackNotSetUpReply } = await import('../../../src/pstack/overlay');
+    expect(pstackNotSetUpReply('/pstack:why x', 'telegram', {})).toBeUndefined();
+    expect(pstackNotSetUpReply('/pstack-setup on', 'telegram', undefined)).toBeUndefined();
+    expect(pstackNotSetUpReply('/code-review', 'telegram', undefined)).toBeUndefined();
+    expect(pstackNotSetUpReply('please run pstack:why', 'telegram', undefined)).toBeUndefined();
+    expect(pstackNotSetUpReply('/pstack:why', 'api', undefined)).toContain('/pstack-setup');
+  });
+});
