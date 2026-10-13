@@ -13,7 +13,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { gatewayModules } from './modules';
-import { AGENT_TASK_TOOLS, SUBAGENT_TOOLS, WORKER_REPORT_TOOLS, callTaskBridge } from './tools/tasks/module';
+import { AGENT_TASK_TOOLS, SUBAGENT_TOOLS, WORKER_REPORT_TOOLS, callTaskBridge, readonlyDenied } from './tools/tasks/module';
 import { createLazyToolCatalog, LAZY_TOOL_DEFINITIONS } from './lazy-tools';
 import { buildChannelInstructions } from './instructions';
 import type { ChannelModule, ToolModule, McpToolDefinition } from './types';
@@ -63,6 +63,10 @@ for (const mod of modules) {
 // the tool; the bridge refuses the call outright when the feature is not active.
 const taskTools = ORCHESTRATION_ROLE === 'agent' ? AGENT_TASK_TOOLS.filter(tool => (tool.name !== 'jev_evaluate' || process.env.GATEWAY_JEV_ENABLED === 'true')).filter(tool => tool.name !== 'capabilities_list' || process.env.GATEWAY_CAPABILITY_CATALOG === 'true') : ORCHESTRATION_ROLE === 'worker' ? WORKER_REPORT_TOOLS.filter(tool => (tool.name !== 'jev_evaluate' || process.env.GATEWAY_JEV_ENABLED === 'true')).filter(tool => tool.name !== 'task_memory_append' || process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true').concat(process.env.GATEWAY_SUBAGENTS === 'true' ? SUBAGENT_TOOLS : []) : [];
 if (ORCHESTRATION_ROLE && process.env.GATEWAY_ORCHESTRATION_TICKET_FILE) visibleTools.push(...taskTools);
+// A read-only subagent sees only tools that change nothing; the bridge refuses the rest.
+if (ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_READONLY_TASK === 'true') {
+  for (let i = visibleTools.length - 1; i >= 0; i--) if (readonlyDenied(visibleTools[i].name)) { toolMap.delete(visibleTools[i].name); visibleTools.splice(i, 1); }
+}
 
 // Preserve the full policy-filtered inventory internally; only schema exposure is lazy.
 const lazyEnabled = ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_LAZY_TOOLS === 'true';

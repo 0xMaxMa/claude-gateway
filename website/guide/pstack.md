@@ -13,11 +13,11 @@ On the gateway host, as the user the gateway runs as:
 
 Update it with `/plugin update` and check the version with `/plugin`. The gateway has no install command, keeps no copy and pins no version: every agent uses the one install Claude Code manages. It only reads `installPath` from `~/.claude/plugins/installed_plugins.json` (or `$CLAUDE_CONFIG_DIR`).
 
-Running Claude Code directly on the host is unaffected: the plugin behaves as any installed plugin does there. The same goes for an agent without orchestration (a legacy session is a plain Claude Code session): it loads whatever Claude Code has enabled.
+Running Claude Code directly on the host is unaffected: the plugin behaves as any installed plugin does there.
 
 ## Set up an agent
 
-An agent that is not set up loads **nothing** from pstack in its orchestration workers, even when the plugin is enabled globally: every host worker gets `enabledPlugins["pstack@pstack-claude"]` in its `--settings` overlay, `false` unless the agent has an `agents[].pstack` block. Claude Code merges that key over your own settings, so other plugins load as before. Claude workers of a set-up agent get the plugin and the agent's own model sheet. Codex workers never get pstack: no plugin, no sheet and no pstack skills in their catalog.
+An agent that is not set up loads **nothing** from pstack, even when the plugin is enabled globally: every host worker gets `enabledPlugins["pstack@pstack-claude"]` in its `--settings` overlay, `false` unless the agent has an `agents[].pstack` block. A session of an agent without orchestration gets the same `false` key; it is merged into a `--settings` you set in `claude.extraFlags` rather than added beside it. Claude Code merges that key over your own settings, so other plugins load as before. Claude workers of a set-up agent get the plugin and the agent's own model sheet. Codex workers never get pstack: no plugin, no sheet and no pstack skills in their catalog.
 
 Set it up in a direct message with the bot:
 
@@ -93,5 +93,5 @@ A set-up agent's Claude workers that load the plugin do not use Claude Code's ow
 - When a task ends, is being cancelled, fails, or needs reconciliation, its unfinished subagents are cancelled with it, and a read-only subagent's own subagents are read-only too.
 - A subagent's question (`task_request_input`) is returned to its parent by `subagent_wait`; it is never asked in the chat.
 - Subagents report to their parent, never to the chat. The agent's task index lists the root task only; `task_status` with its `task_id` lists the subagents.
-- A GPT subagent runs on Codex without the plugin: it gets the agent definition, the prompt and the plugin's path to read files the prompt names. `readonly` is an instruction there, as in pstack's own Codex mapping; a read-only Claude subagent also gets read tools only. Either way a read-only subagent, including one that inherited readonly, is told so.
+- A GPT subagent runs on Codex without the plugin: it gets the agent definition, the prompt and the plugin's path to read files the prompt names. `readonly` is an instruction there, as in pstack's own Codex mapping; a read-only Claude subagent also gets read tools only. Either way a read-only subagent, including one that inherited readonly, is told so, and its gateway tools exclude those that change something (cron changes, memory writes, file sharing, narration, image/video generation and the browser); the gateway refuses them if called.
 - `isolation: "worktree"` runs on the host as usual and answers `isolation: "ignored"`. Resuming an earlier subagent is not supported; pstack spawns fresh subagents.

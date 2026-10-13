@@ -45,3 +45,49 @@ test('disallowed native tools are removed from a host worker (#583)', () => {
   expect(args[args.indexOf('--disallowedTools') + 1]).toBe('Agent,Task');
   expect(runtimeProfileArgs(host, [])).not.toContain('--disallowedTools');
 });
+
+// Review of #591: sessions outside orchestration read the same host settings, so
+// they need the same gate; it joins an operator's own --settings instead of adding one.
+describe('non-orchestration sessions', () => {
+  const { mkdtempSync, rmSync, writeFileSync } = require('fs');
+  const { tmpdir } = require('os');
+  const { join } = require('path');
+  const { SessionProcess } = require('../../../src/session/process');
+  const { SessionStore } = require('../../../src/session/store');
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'pstack-legacy-')); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  const argsFor = (extra: Record<string, unknown> = {}, extraFlags: string[] = []): string[] => {
+    const agent = { id: 'a', description: '', workspace: dir, env: '', telegram: { botToken: 't' }, claude: { model: 'claude-sonnet-5-5', dangerouslySkipPermissions: false, extraFlags }, ...extra };
+    const sp = new SessionProcess('s', 'telegram', agent, { gateway: { logDir: dir, timezone: 'UTC' }, agents: [] }, new SessionStore(join(dir, 'sessions')), 'c');
+    return (sp as any).buildArgs(null, 'claude-sonnet-5-5');
+  };
+
+  test('an agent that is not set up turns pstack off', () => {
+    const args = argsFor();
+    expect(args.filter(a => a === '--settings')).toHaveLength(1);
+    expect(settingsOf(args)).toEqual({ enabledPlugins: { 'pstack@pstack-claude': false } });
+  });
+
+  test('a set-up agent keeps the host settings as they are', () => {
+    expect(argsFor({ pstack: {} })).not.toContain('--settings');
+  });
+
+  test('the gate joins an inline --settings from claude.extraFlags', () => {
+    const args = argsFor({}, ['--settings', JSON.stringify({ env: { A: '1' }, enabledPlugins: { 'figma@x': true } })]);
+    expect(args.filter(a => a === '--settings')).toHaveLength(1);
+    expect(settingsOf(args)).toEqual({ env: { A: '1' }, enabledPlugins: { 'figma@x': true, 'pstack@pstack-claude': false } });
+  });
+
+  test('the gate joins a --settings file from claude.extraFlags', () => {
+    writeFileSync(join(dir, 'extra.json'), JSON.stringify({ model: 'x' }));
+    const args = argsFor({}, ['--settings=extra.json']);
+    expect(args.filter(a => a.startsWith('--settings'))).toHaveLength(1);
+    const flag = args.find(a => a.startsWith('--settings='))!;
+    expect(JSON.parse(flag.slice('--settings='.length))).toEqual({ model: 'x', enabledPlugins: { 'pstack@pstack-claude': false } });
+  });
+
+  test('an unreadable --settings is left as configured', () => {
+    expect(argsFor({}, ['--settings', 'missing.json']).filter(a => a.startsWith('--settings') || a === 'missing.json')).toEqual(['--settings', 'missing.json']);
+  });
+});

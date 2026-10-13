@@ -172,6 +172,35 @@ test('the agent\'s task index lists roots only; the root\'s status lists its sub
   ]);
 });
 
+// Review of #591: the activity list and the /stop menu list roots only, like the index page.
+test('the task list without a task_id lists roots only', async () => {
+  const { task: parent, attempt } = rootWorker();
+  const child = (await spawn(attempt, {})).task_id;
+  complete(running(store.task(child)!), 'done');
+  expect(tasks.status(context.conversationId, 'u').map(t => t.taskId)).toEqual([parent.taskId]);
+});
+
+// Review of #591: a read-only subagent cannot change anything through gateway tools either.
+test('a read-only worker is refused mutating gateway tools and its MCP server hides them', async () => {
+  const { attempt } = rootWorker();
+  const readonly = async (tool: string, args: Record<string, unknown>) => {
+    const dir = join(root, `readonly-${++n}`);
+    bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation, readonly: true }, dir, root);
+    const auth = JSON.parse(readFileSync(join(dir, 'ticket.json'), 'utf8'));
+    expect(JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')).mcpServers.gateway.env.GATEWAY_READONLY_TASK).toBe('true');
+    return new Promise<any>((resolve, reject) => {
+      const req = request(auth.url, { method: 'POST' }, res => { let b = ''; res.on('data', c => b += c); res.on('end', () => resolve(JSON.parse(b))); });
+      req.setHeader('Authorization', 'Bearer ' + auth.token); req.on('error', reject);
+      req.end(JSON.stringify({ tool, args, action_id: `act-${n}` }));
+    });
+  };
+  for (const tool of ['cron_create', 'cron_delete', 'task_memory_append', 'task_share_call', 'narrate']) expect((await readonly(tool, {})).error).toBe('TOOL_DENIED');
+  expect(await readonly('task_report_progress', { text: 'reading' })).toEqual({ accepted: true });
+  const dir = join(root, 'writer');
+  bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation }, dir, root);
+  expect(JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')).mcpServers.gateway.env.GATEWAY_READONLY_TASK).toBe('');
+});
+
 test('the worker MCP server is told to expose the tools', () => {
   const { attempt } = rootWorker();
   for (const subagents of [true, false]) {

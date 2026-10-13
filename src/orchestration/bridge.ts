@@ -12,7 +12,7 @@ import { mkdirSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
 import type { AgentConfig, ModelConfig } from '../types';
 import { EFFORT_LEVELS, ModelResolutionError, findModel, isEffort, resolveModelId, selectableModels } from '../agent/model-registry';
-import { SUBAGENT_TOOLS } from './subagent-tool-schemas';
+import { SUBAGENT_TOOLS, readonlyDenied } from './subagent-tool-schemas';
 import { PSTACK_KEYWORDS } from '../pstack/config';
 import { pstackPluginInfo } from '../pstack/plugin-info';
 import { pstackAgentTemplates } from '../pstack/templates';
@@ -28,7 +28,7 @@ import { resolveNamedSkill } from './skills';
 import type { SkillRegistry } from '../skills';
 
 type Scope = { role: 'agent'; compactOnly?: boolean; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; onMutationResult?: (actionId: string, committed: boolean, errorCode?: string) => void; beforeMutation?: (tool: string, args: Record<string, unknown>, actionId: string) => Promise<void> } |
-  { role: 'worker'; attemptId: string; generation: number; /** pstack agents' Claude workers above the depth limit. */ subagents?: boolean };
+  { role: 'worker'; attemptId: string; generation: number; /** pstack agents' Claude workers above the depth limit. */ subagents?: boolean; /** A read-only subagent: no mutating gateway tools. */ readonly?: boolean };
 
 type InputIssue = { field: string; reason: string; correction: string };
 /** Computer adapter failures are plain Errors with a bounded code; surface the code, not INVALID_REQUEST. */
@@ -309,6 +309,7 @@ export class TaskBridge {
             throw error;
           }
         } else {
+          if (scope.readonly && readonlyDenied(command.tool)) throw new OrchestrationError('TOOL_DENIED');
           if (command.tool === 'task_checkpoint') result = this.tasks.checkpoint(scope.attemptId, scope.generation, a);
           else if (command.tool === 'task_report_progress') result = this.tasks.progress(scope.attemptId, scope.generation, a.text, command.action_id, a.checkpoint) ?? { accepted: true };
           else if (command.tool === 'task_request_input') result = this.tasks.requestInput(scope.attemptId, scope.generation, a.question, command.action_id);
@@ -434,6 +435,7 @@ export class TaskBridge {
       GATEWAY_LAZY_TOOLS: worker ? 'true' : '',
       GATEWAY_ORCHESTRATION_CRON: worker && this.cronCall ? 'true' : '',
       GATEWAY_SUBAGENTS: scope.role === 'worker' && scope.subagents ? 'true' : '',
+      GATEWAY_READONLY_TASK: scope.role === 'worker' && scope.readonly ? 'true' : '',
       GETPOD_BROWSER_URL: worker ? process.env.GETPOD_BROWSER_URL ?? 'http://127.0.0.1:10880' : '',
       GETPOD_BROWSER_API_KEY: worker ? process.env.GETPOD_BROWSER_API_KEY ?? '' : '',
       GETPOD_BROWSER_DISABLED: worker ? process.env.GETPOD_BROWSER_DISABLED ?? '' : 'true',

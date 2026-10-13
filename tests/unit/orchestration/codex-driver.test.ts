@@ -498,9 +498,12 @@ describe('pstack subagent workers', () => {
   test('a read-only Claude subagent gets read tools only; a Codex one keeps its normal tools (readonly is its instruction)', async () => {
     agent.pstack = {};
     const readonly = (model: string) => { const t = spawn(model); store.transaction(() => { const s = store.task(t.taskId)!; s.readonly = true; store.saveTask(s, s.stateVersion); }); return store.task(t.taskId)!; };
+    let readonlyEnv: string | undefined;
+    mockBeforeResult = worker => { readonlyEnv = mcpEnv(worker.runtimeProfile).GATEWAY_READONLY_TASK; };
     const claudeTask = readonly('claude-sonnet-4-6'), a1 = tasks.claim(claudeTask.taskId)!;
     let handle = await driver.start(claudeTask, a1); await handle.accepted; await handle.result;
     expect(claudeProfile().workerTools).toEqual(['Read', 'Glob', 'Grep']);
+    expect(readonlyEnv).toBe('true');
     const codexTask = readonly('gpt-6-astra'), a2 = tasks.claim(codexTask.taskId)!;
     handle = await driver.start(codexTask, a2); await handle.accepted; await handle.result;
     expect(jest.mocked(CodexProcess).mock.calls[0][0].profile.workerTools).toBeUndefined();

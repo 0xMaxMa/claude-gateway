@@ -163,7 +163,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     // bounded maintenance is best effort and never changes task admission.
     void cleanupCodexSessions({ agent: this.agent, stateDirectory: join(this.privateRoot, 'codex-sessions'), retainedSessionIds: this.tasks.pool.retainedSessionIds() }).catch(() => {});
     const shared = resolveSharedConfig(this.agent.knowledge?.shared, this.gateway.gateway.knowledge?.shared);
-    const ticket = this.bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation, subagents }, directory, this.agent.workspace, shared.enabled ? sharedVaultDir(shared) : '');
+    const ticket = this.bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation, subagents, readonly: Boolean(task.readonly) }, directory, this.agent.workspace, shared.enabled ? sharedVaultDir(shared) : '');
     try {
       const profile = { ...ticket.profile, ...(task.effort ? { claudeEffort: task.effort } : {}), pluginOverrides: { [PSTACK_PLUGIN_ID]: Boolean(this.agent.pstack) },
         // pstack agents dispatch subagents only as gateway tasks (subagent_spawn); a read-only Claude subagent gets read tools only.

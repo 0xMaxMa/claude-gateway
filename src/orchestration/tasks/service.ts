@@ -192,8 +192,9 @@ export class TaskService {
         });
       return [{ ...this.withRecentTools(task), ...(subagents.length ? { subagents } : {}) }];
     }
-    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
-      (SELECT id FROM tasks WHERE conversation_id=? AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT 100))
+    // Roots only, as in indexPage: a root's status lists its subagents.
+    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.parentTaskId') IS NULL AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
+      (SELECT id FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.parentTaskId') IS NULL AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT 100))
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`, conversationId, conversationId).map(row => {
       const task = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
       const waiting = task.state === 'queued' && this.store.get('SELECT waiting_json FROM provider_waits WHERE entity_id=?', task.taskId);

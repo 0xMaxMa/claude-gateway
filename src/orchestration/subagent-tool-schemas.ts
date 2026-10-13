@@ -11,3 +11,8 @@ export const SUBAGENT_TOOLS: Array<{ name: string; description: string; inputSch
 ];
 /** Subagents may nest this deep below the root worker. */
 export const SUBAGENT_MAX_DEPTH = 3;
+/** Gateway tools that change something outside the task; a read-only subagent gets none of them. */
+export const READONLY_DENIED_TOOLS: readonly string[] = ['cron_create', 'cron_update', 'cron_delete', 'cron_run', 'task_memory_append',
+  'memory_shared_create', 'memory_shared_update', 'memory_shared_delete', 'share_file', 'task_share_call', 'narrate', 'generate_image', 'generate_video'];
+/** Browser tools act on live pages, so a read-only subagent gets none of them either. */
+export const readonlyDenied = (tool: string): boolean => READONLY_DENIED_TOOLS.includes(tool) || tool.startsWith('browser_');

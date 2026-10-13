@@ -7,7 +7,7 @@ import type { McpToolDefinition, McpToolResult } from '../../types';
 const schema = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required, additionalProperties: false });
 const text = { type: 'string' };
 export { AGENT_TASK_TOOLS } from '../../../dist/orchestration/agent-tool-schemas.js';
-export { SUBAGENT_TOOLS } from '../../../dist/orchestration/subagent-tool-schemas.js';
+export { SUBAGENT_TOOLS, readonlyDenied } from '../../../dist/orchestration/subagent-tool-schemas.js';
 export const WORKER_REPORT_TOOLS: McpToolDefinition[] = [
   JEV_TOOL,
   { name: 'task_memory_append', description: 'Append an explicitly requested memory note for a channel task. API tasks cannot write memory. Files are restricted to MEMORY.md, USER.md, or memory/<name>.md. Retains existing content and deduplicates retries.', inputSchema: schema({ note: text, path: text }, ['note']) },

@@ -2,7 +2,7 @@ import { AGENT_WORKFLOW_RULES, WORKER_WORKFLOW_RULES } from '../orchestration/wo
 import { checkpointSettings } from '../orchestration/tasks/checkpoint-hook';
 import { readFileSync } from 'fs';
 import { homedir } from 'os';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { OrchestrationError, SessionRole } from '../orchestration/types';
 
 export const DEFAULT_WORKER_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write', 'Skill'];
@@ -111,6 +111,24 @@ export function runtimeProfileArgs(profile: RuntimeProfile, extraFlags: string[]
     '--strict-mcp-config', '--mcp-config', profile.mcpConfigPath,
     '--setting-sources', profile.containerExecution || profile.checkpointCommand ? '' : 'user', '--settings', JSON.stringify({ ...(profile.checkpointCommand ? checkpointSettings(profile.checkpointCommand) : { disableAllHooks: true }), enabledPlugins: disabledPlugins }),
     '--append-system-prompt', [profile.context, profile.overlay].filter(Boolean).join('\n\n')];
+}
+
+/** Sessions outside orchestration get per-plugin `enabledPlugins` overrides too. They join a
+ * `--settings` already in claude.extraFlags (inline JSON or a JSON file, relative to `cwd`)
+ * rather than adding a second one. Undefined when that value is not a JSON object. */
+export function extraFlagsWithPluginOverrides(extraFlags: string[], overrides: Record<string, boolean>, cwd: string): string[] | undefined {
+  const at = extraFlags.findIndex(flag => flag === '--settings' || flag.startsWith('--settings='));
+  if (at < 0) return [...extraFlags, '--settings', JSON.stringify({ enabledPlugins: overrides })];
+  const joined = extraFlags[at] !== '--settings', value = joined ? extraFlags[at].slice('--settings='.length) : extraFlags[at + 1];
+  if (value === undefined) return undefined;
+  let current: unknown;
+  try { current = JSON.parse(value.trimStart().startsWith('{') ? value : readFileSync(resolve(cwd, value), 'utf8')); } catch { return undefined; }
+  if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined;
+  const plugins = (current as { enabledPlugins?: unknown }).enabledPlugins;
+  const settings = JSON.stringify({ ...current, enabledPlugins: { ...(plugins && typeof plugins === 'object' && !Array.isArray(plugins) ? plugins : {}), ...overrides } });
+  const next = [...extraFlags];
+  if (joined) next[at] = '--settings=' + settings; else next[at + 1] = settings;
+  return next;
 }
 
 /**
