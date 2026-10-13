@@ -2,7 +2,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { createProject, listDir, listProjects, readFileContent, TREE_ENTRY_LIMIT } from '../../src/projects/fs';
+import { createProject, listDir, listProjects, readFileContent, resolveProjectDir, TREE_ENTRY_LIMIT } from '../../src/projects/fs';
 import { ProjectName, RelPath } from '../../src/projects/paths';
 
 const name = (s: string) => s as ProjectName;
@@ -225,6 +225,17 @@ describe('listDir', () => {
     fs.symlinkSync(outside, path.join(root, 'evil'));
     expect(await listDir(root, name('evil'), rel(''))).toEqual({ ok: false, error: 'path_escape' });
     expect(await readFileContent(root, name('evil'), rel('secret'))).toEqual({ ok: false, error: 'path_escape' });
+  });
+
+  it('refuses a project that is a symlink back to the projects root', async () => {
+    makeProject('app', { 'a.txt': 'a' });
+    fs.symlinkSync('.', path.join(root, 'all'));
+    expect(await resolveProjectDir(root, name('all'))).toEqual({ ok: false, error: 'path_escape' });
+    expect(await listDir(root, name('all'), rel(''))).toEqual({ ok: false, error: 'path_escape' });
+    expect(await readFileContent(root, name('all'), rel('app/a.txt'))).toEqual({ ok: false, error: 'path_escape' });
+    const listed = await listProjects(root);
+    if (!listed.ok) throw new Error(listed.error);
+    expect(listed.value.projects.map((p) => p.name)).toEqual(['app']);
   });
 
   it('refuses a directory symlink that escapes the project', async () => {

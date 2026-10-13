@@ -83,6 +83,8 @@ export async function resolveProjectDir(root: string, name: ProjectName): Promis
   if (!realRoot.ok) return realRoot;
   const dir = await resolveInside(realRoot.value, name);
   if (!dir.ok) return dir;
+  // A link such as `all -> .` would make one project span every other project.
+  if (dir.value === realRoot.value) return err('path_escape');
   const st = await fsp.stat(dir.value).catch(() => null);
   if (!st) return err('not_found');
   return st.isDirectory() ? dir : err('not_a_directory');
