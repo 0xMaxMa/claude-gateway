@@ -16,10 +16,13 @@ export function normalizeTaskRevisions(rows: TaskRevision[]): TaskRevision {
   return result;
 }
 export function taskDirective(store: OrchestrationStore, conversationId: string, revision: TaskRevision): string {
+  const task=store.task(revision.taskId);
+  // Like a native Claude Code subagent, a subagent's prompt is its whole
+  // assignment: the user's conversation is the root worker's, not its own.
+  if (task?.parentTaskId) return `Subagent task from your parent worker. This prompt is your whole assignment; do only this and report the result to your parent:\n${revision.instructions}`;
   const anchor=store.get('SELECT input_seq FROM conversation_inputs WHERE id=? AND conversation_id=?',revision.originatingInputId,conversationId);
   const messages=anchor ? store.all(`SELECT id,text,input_seq,ingress_json,principal_id FROM conversation_inputs WHERE conversation_id=? AND input_seq<=? AND store_user_message=1 ORDER BY input_seq DESC LIMIT 40`,conversationId,anchor.input_seq).reverse() : [];
   const conversation=store.get('SELECT * FROM conversations WHERE id=?',conversationId)!;
-  const task=store.task(revision.taskId);
   const basis=revision.guidanceBasis;
   const staleAdvice=Boolean(basis && (basis.attemptId!==task?.activeAttemptId || basis.workflowVersion!==(task?.workflow?.version??0) || basis.progressAt!==(task?.latestProgress?.observedAt??0)));
   const latest=revision.answers?.[revision.answers.length-1];

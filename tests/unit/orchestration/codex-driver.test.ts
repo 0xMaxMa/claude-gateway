@@ -531,3 +531,35 @@ describe('pstack subagent workers', () => {
     expect(claudeProfile().disallowedTools).toBeUndefined();
   });
 });
+
+// Dev e2e of #591 (G3): a child inherited the root's input as its own
+// originating request, so a Haiku child told only "Run sleep 300" read the
+// user's request and re-spawned the parent's subagents. Like a native Claude
+// Code subagent, it sees only the prompt its parent wrote.
+describe('a subagent sees only its own prompt', () => {
+  const prompt = (worker: MockWorker) => (worker.sendMessage.mock.calls as unknown as string[][])[0][0];
+  test.each([['claude', 'claude-haiku-5-5'], ['codex', 'gpt-6-astra']])('%s child', async (_harness, model) => {
+    store.acceptInput({scope:{agentId:'a',agentSessionId:'s',source:'api',accountId:'u',principalId:'u',chatId:'c',threadKey:''},text:'Also review the docs afterwards'});
+    const root = spawn('claude-sonnet-4-6'), rootAttempt = tasks.claim(root.taskId)!;
+    tasks.started(rootAttempt.attemptId, rootAttempt.generation);
+    const child = tasks.spawnSubagent(rootAttempt.attemptId, rootAttempt.generation, 'c1', { title: 'Sleep', instructions: 'Run sleep 300', model });
+    // Lineage (owner, binding, membership) still runs through the root input.
+    expect(child.initiatingInputId).toBe(root.initiatingInputId);
+    const attempt = tasks.claim(child.taskId)!;
+    const handle = await driver.start(child, attempt); await handle.accepted; await handle.result;
+    const worker = (model.startsWith('gpt') ? jest.mocked(CodexProcess) : jest.mocked(SessionProcess)).mock.results[0].value as MockWorker;
+    const text = prompt(worker);
+    expect(text).toContain('Run sleep 300');
+    expect(text).not.toContain('Implement the authorized fixture');
+    expect(text).not.toContain('Also review the docs afterwards');
+    expect(text).not.toContain('Originating user request');
+    expect(text).not.toContain('User messages from this conversation');
+  });
+
+  test('a root worker still gets the user request and recent messages', async () => {
+    await run('claude-sonnet-4-6');
+    const text = prompt(jest.mocked(SessionProcess).mock.results[0].value as MockWorker);
+    expect(text).toContain('Originating user request (the assignment must stay within this authorization): "Implement the authorized fixture"');
+    expect(text).toContain('User messages from this conversation');
+  });
+});
