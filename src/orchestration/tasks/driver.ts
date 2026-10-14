@@ -41,6 +41,7 @@ import type { ProviderRefusal } from '../../session/provider-refusal';
 import { PSTACK_PLUGIN_ID, pstackModels, pstackPluginInfo } from '../../pstack/plugin-info';
 import { renderPstackSheet } from '../../pstack/sheet';
 import { SUBAGENT_READONLY, pstackWorkerNote } from '../../pstack/overlay';
+import { chatSessionTranscripts, pstackReflectNote } from '../../pstack/reflect';
 import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
 
 function boundedDiffText(text: string): string {
@@ -227,6 +228,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       }
       // A subagent keeps the root input only as lineage (owner, binding, attachments); its prompt is its parent's.
       if (!task.parentTaskId) prompt += '\nOriginating user request (the assignment must stay within this authorization): ' + JSON.stringify(input.text);
+      if (pstack && task.skill?.name === 'pstack:reflect') prompt += '\n' + pstackReflectNote(chatSessionTranscripts(this.tasks.store, task));
       prompt += '\n' + personaWorkspaceRules(this.agent.workspace, this.agent.type === 'app-agent' ? 'container' : workspace.baseCommit === 'host' ? 'host' : 'isolated');
       if (task.continueTaskId) {
         const prior = this.tasks.store.task(task.continueTaskId);

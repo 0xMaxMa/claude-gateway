@@ -563,3 +563,43 @@ describe('a subagent sees only its own prompt', () => {
     expect(text).toContain('User messages from this conversation');
   });
 });
+
+// Dev e2e of #591: /pstack:reflect runs in a new worker session, so pstack's
+// transcript finder matched that empty session and its reviewers had nothing
+// to review. The worker is given the chat session's own transcripts instead.
+describe('pstack reflect reviews the chat session', () => {
+  const { pstackClaudeConfig } = require('../../helpers/pstack-fixture');
+  const { transcriptPath } = require('../../../src/config/claude-settings');
+  const { AgentCliSessions } = require('../../../src/orchestration/agent-cli-session');
+  let fixture: { configDir: string; cleanup: () => void }, previous: string | undefined;
+  beforeEach(() => { fixture = pstackClaudeConfig(); previous = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = fixture.configDir; agent.pstack = {}; });
+  afterEach(() => { if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous; fixture.cleanup(); });
+  const write = (path: string) => { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, '{"type":"user"}\n'); return path; };
+  const promptOf = (n: number) => ((jest.mocked(SessionProcess).mock.results[n].value as MockWorker).sendMessage.mock.calls as unknown as string[][])[0][0];
+  const skillTask = (name: string) => ({ targetProfile: 'skill-worker' as const, skill: { invocation: 'cli' as const, name, args: '', content: '', filePath: '' } });
+
+  test('the reflect worker gets the decision and earlier task transcripts, oldest first, not its own', async () => {
+    const decision = new AgentCliSessions(store).resolve('s', root);
+    const decisionTranscript = write(transcriptPath(root, decision.id));
+    const work = await run('claude-sonnet-4-6');
+    const workTranscript = write(transcriptPath(root, work.attempt.sessionId));
+    await run('gpt-6-astra'); // a Codex worker leaves no Claude Code transcript
+    jest.mocked(discoverCliSkills).mockResolvedValueOnce([{ name: 'pstack:reflect' }] as any);
+    const reflect = await run('claude-sonnet-4-6', skillTask('pstack:reflect'));
+    const text = promptOf(1);
+    expect(text).toContain(`- ${decisionTranscript}\n- ${workTranscript}\n`);
+    expect(text).not.toContain(reflect.attempt.sessionId);
+    expect(text).toContain('/pstack:reflect');
+  });
+
+  test('other skills and agents that are not set up get no transcript list', async () => {
+    write(transcriptPath(root, new AgentCliSessions(store).resolve('s', root).id));
+    jest.mocked(discoverCliSkills).mockResolvedValueOnce([{ name: 'pstack:why' }] as any);
+    await run('claude-sonnet-4-6', skillTask('pstack:why'));
+    delete agent.pstack;
+    jest.mocked(discoverCliSkills).mockResolvedValueOnce([{ name: 'pstack:reflect' }] as any);
+    await run('claude-sonnet-4-6', skillTask('pstack:reflect'));
+    expect(promptOf(0)).not.toContain('chat session\'s transcripts');
+    expect(promptOf(1)).not.toContain('chat session\'s transcripts');
+  });
+});
