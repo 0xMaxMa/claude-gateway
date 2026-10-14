@@ -289,3 +289,33 @@ test('app_query sent to the helper is capped at 4000 characters without splittin
   expect([...sent]).toHaveLength(4000);expect(sent.endsWith('😀')).toBe(true);expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(sent)).toBe(false);
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
+
+// Pod-jinawong 2.0.20: the frontmost app was protected, the observe call failed with
+// APPLICATION_PROTECTED, and the stop message said only COMPUTER_TOOL_FAILED.
+test('a stop names the device error codes behind it, including APPLICATION_PROTECTED',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-protected-'));
+ const callTool=jest.fn(async({name}:any)=>({isError:name==='computer_observe',content:[{type:'text',text:JSON.stringify(name==='computer_request_access'?{state:'approved'}:{error:'APPLICATION_PROTECTED',reason:'FRONTMOST_PROTECTED'})}]}));
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{await expect(deps.call('computer_observe',{},new AbortController().signal)).rejects.toThrow('COMPUTER_TOOL_FAILED');return {status:'blocked',reason:'COMPUTER_TOOL_FAILED',steps:0,evaluations:0};});
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:{get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})} as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true});
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ try{await adapter.submit(task,'r','Open YouTube');let outcome:any;for(let i=0;i<50;i++){outcome=await adapter.inspect(task,'r');if(typeof outcome==='object')break;await new Promise(setImmediate);}
+  expect(outcome.failure.code).toBe('COMPUTER_TOOL_FAILED');
+  expect(outcome.failure.message).toContain('Device tool errors: computer_observe APPLICATION_PROTECTED (FRONTMOST_PROTECTED).');
+  expect(outcome.failure.message).toContain('This is not a missing macOS permission');
+ }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});
+
+test('a protected frontmost app in the last observation is named in the stop message',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'computer-protected-obs-'));
+ const callTool=jest.fn(async({name}:any)=>({content:[{type:'text',text:JSON.stringify(name==='computer_request_access'?{state:'approved'}:{})}]}));
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{deps.observation({generation:'g',application:'unapproved',frontmostProtected:true});return {status:'blocked',reason:'NO_SUPPORTED_ACTION',steps:0,evaluations:0};});
+ const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:{get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})} as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true});
+ const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
+ try{await adapter.submit(task,'r','Open YouTube');let outcome:any;for(let i=0;i<50;i++){outcome=await adapter.inspect(task,'r');if(typeof outcome==='object')break;await new Promise(setImmediate);}
+  expect(outcome.failure.code).toBe('COMPUTER_NO_SUPPORTED_ACTION');
+  expect(outcome.failure.message).toContain('APPLICATION_PROTECTED: a protected app');
+  expect(outcome.failure.message).not.toContain('Device tool errors');
+ }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
+});

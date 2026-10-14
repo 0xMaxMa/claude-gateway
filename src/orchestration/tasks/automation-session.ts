@@ -33,6 +33,24 @@ export function agentGoalRun(task: TaskSnapshot): boolean {
 /** agentGoalRun as a trusted SQL fragment over a tasks row alias; a parity test keeps them equal. */
 export const agentGoalRunSql=(alias:string)=>`(json_extract(${alias}.snapshot_json,'$.automationController')='user' AND json_extract(${alias}.snapshot_json,'$.revision')=1
   AND COALESCE(json_extract(${alias}.snapshot_json,'$.executionControl.revision'),0)!=1)`;
+/** Step-mode stops of the agent's goal run that ask nothing of the owner: every
+ * parsed step was dispatched, or one had no visible effect. The run is over and
+ * the agent that spawned it owns the next move. A confirmation, a field question
+ * (STEP_NOT_EXECUTED) or a user pause is the owner's to answer and stays silent. */
+const AGENT_STEP_RUN_ENDS=['ALL_STEPS_DONE','STEP_NO_EFFECT'];
+/** The agent's goal run ended in waiting_input after running its steps (see AGENT_STEP_RUN_ENDS).
+ * Pod-jinawong 2.0.20, task 7eebb836: all 4 steps ran and the video played, yet
+ * waiting_input is not notified under user control, so the agent never answered. */
+export function agentStepRunEnded(task: TaskSnapshot): boolean {
+  return agentGoalRun(task)&&task.state==='waiting_input'&&!task.activeAttemptId&&task.executionControl?.phase!=='paused'
+    &&task.computerReport?.reason==='COMMAND_WAITING_INPUT'&&AGENT_STEP_RUN_ENDS.includes(task.computerReport.stepRun?.stopReason??'');
+}
+/** agentStepRunEnded as a trusted SQL fragment over a tasks row alias; a parity test keeps them equal.
+ * Always 0 or 1: a NULL from a missing report field would turn NOT(...) in the mailbox NULL too. */
+export const agentStepRunEndedSql=(alias:string)=>`COALESCE((${agentGoalRunSql(alias)} AND ${alias}.state='waiting_input'
+  AND json_extract(${alias}.snapshot_json,'$.activeAttemptId') IS NULL AND COALESCE(json_extract(${alias}.snapshot_json,'$.executionControl.phase'),'')!='paused'
+  AND json_extract(${alias}.snapshot_json,'$.computerReport.reason')='COMMAND_WAITING_INPUT'
+  AND json_extract(${alias}.snapshot_json,'$.computerReport.stepRun.stopReason') IN (${AGENT_STEP_RUN_ENDS.map(r=>`'${r}'`).join(',')})),0)`;
 /** The task waits for the owner's next direct command (a settled or paused round). */
 export function pausedForCommand(task: TaskSnapshot): boolean {
   return task.state==='waiting_input'&&!task.activeAttemptId&&(task.executionControl?.phase==='paused'||['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(task.computerReport?.reason??task.browserReport?.reason??''));

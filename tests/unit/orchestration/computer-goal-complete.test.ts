@@ -125,3 +125,34 @@ test('a goal run end without a recorded idle window waits for the user\'s next t
   expect(f.delivered(Date.now()+365*24*3600_000)).toBe(0);
  }finally{f.close();}
 });
+
+// Pod-jinawong 2.0.20, task 7eebb836: the agent's goal ran in step mode, all 4 steps
+// ran and the video played, then the task sat in waiting_input (COMMAND_WAITING_INPUT,
+// ALL_STEPS_DONE) with no notification: the agent never answered and the chat hung.
+const stepRun=(stopReason:'ALL_STEPS_DONE'|'STEP_NO_EFFECT'|'STEP_NOT_EXECUTED')=>({...report,steps:4,status:'needs_input' as const,reason:'COMMAND_WAITING_INPUT',
+ stepRun:{total:4,completed:stopReason==='ALL_STEPS_DONE'?4:2,stopReason,remaining:[]}});
+test.each(['ALL_STEPS_DONE','STEP_NO_EFFECT'] as const)('an agent goal step run that stops with %s reaches the agent',stopReason=>{
+ const f=fixture();try{
+  const waiting=f.finish({type:'paused',computerReport:stepRun(stopReason)});
+  expect(waiting.state).toBe('waiting_input');expect(waiting.automationController).toBe('user');
+  expect(f.notified()).toBe(1);expect(f.delivered()).toBe(1);
+  // The device session stays open for the owner's next command.
+  expect(acceptsDirectCommand(f.store.task(f.task.taskId)!)).toBe(true);
+ }finally{f.close();}
+});
+
+test('a step run that waits on a question for the owner stays silent',()=>{
+ const f=fixture();try{
+  expect(f.finish({type:'paused',computerReport:stepRun('STEP_NOT_EXECUTED')}).state).toBe('waiting_input');
+  expect(f.notified()).toBe(0);expect(f.delivered()).toBe(0);
+ }finally{f.close();}
+});
+
+test('the user\'s own step command that finishes all steps stays silent',()=>{
+ const f=fixture();try{
+  f.finish({type:'paused',computerReport:{...report,steps:0,status:'needs_input',reason:'COMMAND_WAITING_INPUT'}});
+  f.tasks.controlByUser(f.task.conversationId,'u',f.task.taskId,{id:'00000000-0000-4000-8000-000000000002',action:'revise',expectedRevision:1,text:'click search'});
+  f.finish({type:'paused',computerReport:stepRun('ALL_STEPS_DONE')});
+  expect(f.notified()).toBe(0);expect(f.delivered()).toBe(0);
+ }finally{f.close();}
+});
