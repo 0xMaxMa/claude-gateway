@@ -26,7 +26,10 @@ export interface TokenTurn extends ManagedTurnMetrics {
   /** How long the input waited between acceptance and its turn starting — or, on a
    *  pending row, how long it has been waiting so far. */
   queuedMs?: number;
+  /** A pstack subagent's place in its task tree, read from the task record. */
+  subagent?: TurnSubagent;
 }
+export interface TurnSubagent { parentTaskId: string; depth?: number; type?: string; effort?: string; readonly?: boolean; }
 const initialized = new WeakSet<OrchestrationStore>();
 /** Latest observed request in the most recent agent turn, including its output.
  * A peak earlier in the turn may predate compaction and is not current context. */
@@ -177,6 +180,11 @@ export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 
           const snapshot = JSON.parse(String(task.snapshot_json));
           const revision = store.get('SELECT payload_json FROM task_revisions WHERE task_id=? AND revision=?', turn.taskId, attempt.revision);
           turn.taskTitle = snapshot.title;
+          // A task started for a skill command runs it through the CLI, not the Skill tool.
+          if (typeof snapshot.skill?.name === 'string' && snapshot.skill.name) turn.usedSkills = [...new Set([...(turn.usedSkills ?? []), snapshot.skill.name])].sort();
+          if (typeof snapshot.parentTaskId === 'string') turn.subagent = {parentTaskId: snapshot.parentTaskId,
+            ...(Number.isSafeInteger(snapshot.depth) ? {depth: snapshot.depth} : {}), ...(typeof snapshot.subagentType === 'string' ? {type: snapshot.subagentType} : {}),
+            ...(typeof snapshot.effort === 'string' ? {effort: snapshot.effort} : {}), ...(snapshot.readonly === true ? {readonly: true} : {})};
           if (revision) {
             const applied = JSON.parse(String(revision.payload_json));
             turn.inputTexts = [`Current applied task revision ${attempt.revision}:\n${applied.instructions}`,
