@@ -160,7 +160,7 @@ test.each([
         }
         const call = () => fetch(ticket.url, { method: 'POST', headers: { Authorization: `Bearer ${ticket.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(command) });
         const response = await call(); expect(response.status).toBe(200);
-        const receipt = await response.json() as any; expect(receipt.skill).toBeUndefined();
+        const receipt = await response.json() as any; expect(receipt.skill).toEqual({ name: 'review', args: '465' });
         expect((await (await call()).json() as any).taskId).toBe(receipt.taskId);
       } else expect(prompt).toContain('Review found an access control bug.');
       session.emit('output', JSON.stringify({ type: 'result', result: calls === 1 ? 'Queued review. You can keep chatting.' : 'Review found an access control bug.' }));

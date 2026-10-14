@@ -128,6 +128,18 @@ export interface TaskSnapshot {
   createdAt: number;
   updatedAt: number;
 }
+/** A task's skill as everything outside its worker sees it. */
+export type PublicTaskSkill = Pick<import('./skills').TaskSkill, 'name' | 'args' | 'invocation'>;
+/** The one projection for every copy of a task that leaves the worker: tool results (replayed
+ * receipts included), task_status and state events. The body and host paths are worker-only
+ * execution context; a pstack playbook is ~25 KB, and a tool result stays in the agent's
+ * context for the rest of its session, so only the name, args and invocation are kept. */
+export function publicTask<T extends { skill?: import('./skills').TaskSkill | PublicTaskSkill }>(task: T): Omit<T, 'skill'> & { skill?: PublicTaskSkill } {
+  if (!task.skill) return task;
+  const { name, args, invocation } = task.skill;
+  return { ...task, skill: { name, args, ...(invocation ? { invocation } : {}) } };
+}
+export type PublicTaskSnapshot = Omit<TaskSnapshot, 'skill'> & { skill?: PublicTaskSkill };
 export interface TaskRevision {
   /** Explicit navigation belongs to one revision; never replay it on an answer/recovery. */
   browserNavigation?: {url:string;revision:number};

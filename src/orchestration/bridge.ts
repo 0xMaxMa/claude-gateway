@@ -19,13 +19,13 @@ import { pstackAgentTemplates } from '../pstack/templates';
 import { SUBAGENT_READONLY } from '../pstack/overlay';
 import { importContainerFile } from './container';
 import { TaskService, assertAgentContextRefs } from './tasks/service';
-import { CommandContext, OrchestrationError, ChangeMode } from './types';
+import { CommandContext, OrchestrationError, ChangeMode, publicTask } from './types';
 import { AGENT_OVERLAY, RuntimeProfile, WORKER_OVERLAY } from '../session/runtime-profile';
 import { API_SOURCE_RULES, IDENTITY_EDIT_RULES, SECRET_RULES } from './source-policy';
 import { TaskFiles } from './task-files';
 
 import type { IntakeChoice } from './conversation-intake';
-import { resolveNamedSkill } from './skills';
+import { resolveNamedSkill, type TaskSkill } from './skills';
 import type { SkillRegistry } from '../skills';
 
 type Scope = { role: 'agent'; compactOnly?: boolean; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; onMutationResult?: (actionId: string, committed: boolean, errorCode?: string) => void; beforeMutation?: (tool: string, args: Record<string, unknown>, actionId: string) => Promise<void> } |
@@ -221,8 +221,7 @@ export class TaskBridge {
                 if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
                 const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, computerInputs:a.computer_inputs, targetProfile: a.target_profile, gatewayTarget, browserFields:a.browser_fields, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(model ? { model, requestedModel: a.model } : {}), ...(a.effort ? { effort: a.effort } : {}), ...(skill ? { skill } : {}) });
                 scope.onTaskQueued?.(spoken);
-                const { skill: _workerOnly, ...receipt } = task;
-                result = receipt;
+                result = task;
                 break;
               }
               case 'task_status': {
@@ -398,7 +397,8 @@ export class TaskBridge {
           }
           else throw new OrchestrationError('TOOL_DENIED');
         }
-        response.end(JSON.stringify(result));
+        // Every task a tool returns, replayed receipts included, leaves without its skill body.
+        response.end(JSON.stringify(result && typeof result === 'object' && 'skill' in result ? publicTask(result as { skill?: TaskSkill }) : result));
       } catch (error) {
         const adapterCode = !(error instanceof JevError) && !(error instanceof OrchestrationError) && error instanceof Error && COMPUTER_ADAPTER_ERROR.test(error.message) ? error.message : undefined;
         const code = error instanceof JevError ? `JEV_${error.code}` : error instanceof OrchestrationError ? error.code : adapterCode ?? 'INVALID_REQUEST';

@@ -6,7 +6,7 @@ import { mkdirSync, chmodSync } from 'fs';
 import { dirname } from 'path';
 import { createHash, randomUUID } from 'crypto';
 import { ORCHESTRATION_SCHEMA_V1 } from './migrations/schema';
-import { ConversationScope, OrchestrationError, OrchestrationEvent, InputModality, TaskSnapshot, TaskAttempt } from './types';
+import { ConversationScope, OrchestrationError, OrchestrationEvent, InputModality, TaskSnapshot, TaskAttempt, publicTask } from './types';
 import type { ExecutionCapabilities } from './types';
 
 export type Row = Record<string, string | number | null>;
@@ -398,9 +398,11 @@ export class OrchestrationStore {
     }
     // State events are notifications, not the result store. Large results remain
     // complete in the snapshot/attempt and are retrieved through task_status.
-    const eventTask = task.result && Buffer.byteLength(JSON.stringify(task)) > 65536
-      ? { ...task, result: undefined, resultAvailable: true, resultRef: { tool: 'task_status', task_id: task.taskId } }
-      : task;
+    // The skill body is worker-only context, so it is dropped before the size check too.
+    const visible = publicTask(task);
+    const eventTask = visible.result && Buffer.byteLength(JSON.stringify(visible)) > 65536
+      ? { ...visible, result: undefined, resultAvailable: true, resultRef: { tool: 'task_status', task_id: task.taskId } }
+      : visible;
     this.appendEvent(task.conversationId, 'task.state_changed', eventTask, task.taskId);
   }
   saveAttempt(attempt: TaskAttempt): void {

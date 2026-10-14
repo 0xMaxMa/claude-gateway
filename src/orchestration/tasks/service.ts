@@ -19,7 +19,7 @@ import { createHash, randomUUID } from 'crypto';
 import { OrchestrationStore, LISTED_TASK_SQL, boundedText, payloadHash } from '../store';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../config';
 import { MAX_INTAKE_INPUTS } from '../conversation-intake';
-import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode } from '../types';
+import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode, PublicTaskSnapshot, publicTask } from '../types';
 import type { Effort } from '../../agent/model-registry';
 import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
 
@@ -192,12 +192,12 @@ export class TaskService {
     if (!task || task.conversationId !== conversationId) throw new OrchestrationError('ACCESS_DENIED');
     return task;
   }
-  status(conversationId: string, principalId: string, taskId?: string): Array<TaskSnapshot & { currentInstructions?: string; harness?: 'claude' | 'codex' }> {
+  status(conversationId: string, principalId: string, taskId?: string): Array<PublicTaskSnapshot & { currentInstructions?: string; harness?: 'claude' | 'codex' }> {
     this.store.assertMember(conversationId, principalId);
     if (taskId) {
-      const task = this.owned(taskId, conversationId), assigned = task.skill?.name; delete task.skill;
+      const task = this.owned(taskId, conversationId), assigned = task.skill?.name;
       // Gateway-managed tasks (browser/computer verification paths) never run pstack: no tree, no evidence.
-      if (task.gatewayTarget) return [this.withRecentTools(task)];
+      if (task.gatewayTarget) return [publicTask(this.withRecentTools(task))];
       // A root lists its whole subagent tree; each entry names its parent.
       const tree = task.parentTaskId ? [] : this.store.all("SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.rootTaskId')=? ORDER BY created_at,rowid", task.conversationId, task.taskId)
         .map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot);
@@ -211,7 +211,7 @@ export class TaskService {
             ...(ran?.startedAt ? { durationMs: (TERMINAL_TASK_STATES.has(child.state) ? child.updatedAt : Date.now()) - ran.startedAt } : {}),
             ...(child.failure ? { failure: child.failure.code } : {}) };
         });
-      return [{ ...this.withRecentTools(task), ...(subagents.length ? { subagents } : {}), ...pstackEvidence(this.store, task, assigned, tree) }];
+      return [publicTask({ ...this.withRecentTools(task), ...(subagents.length ? { subagents } : {}), ...pstackEvidence(this.store, task, assigned, tree) })];
     }
     // As in indexPage: a root's status lists its subagents.
     return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND ${LISTED_TASK_SQL} AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
@@ -221,8 +221,7 @@ export class TaskService {
       const waiting = task.state === 'queued' && this.store.get('SELECT waiting_json FROM provider_waits WHERE entity_id=?', task.taskId);
       if (waiting) task.providerWaiting = JSON.parse(String(waiting.waiting_json));
       else delete task.providerWaiting;
-      delete task.skill; // Installed skill bodies are worker-only execution context.
-      return this.withRecentTools(task);
+      return publicTask(this.withRecentTools(task));
     });
   }
   /** Current reports are lossless. Other tasks are an index, never partial reports.
@@ -238,7 +237,7 @@ export class TaskService {
     ).map(row => String(row.task_id)));
     // Only a reporting task is hydrated. Indexed rows are read straight from the stored
     // snapshot, so they cost no per-task evidence queries and no report bodies either.
-    const rows = new Map<string, TaskSnapshot | TaskIndexEntry>(
+    const rows = new Map<string, PublicTaskSnapshot | TaskIndexEntry>(
       this.indexPage(conversationId).map(task => [task.taskId, taskIndexEntry(task)]));
     // An old task can finish after it has fallen outside the recent-task page.
     for (const id of reporting) rows.set(id, this.status(conversationId, principalId, id)[0]);
