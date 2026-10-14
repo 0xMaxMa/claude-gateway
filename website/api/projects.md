@@ -8,15 +8,15 @@ Open the project in the code editor for that.
 
 **Auth.** Every route needs an API key with pod-wide scope: `admin: true` or
 `agents: "*"`. A key scoped to specific agents gets `403 forbidden_key`, because
-projects belong to the pod, not to an agent. `POST /api/v1/projects` and every
+projects belong to the pod, not to an agent. `POST /api/v1/projects`, `DELETE /api/v1/projects/:name` and every
 `POST .../git/*` route also need `write: true` (or `admin: true`).
 
 **Feature detection.** `GET /api/v1/capabilities` lists
-`"projects": ["list", "create", "read", "git", "chat", "run", "start"]`. Show project browsing
+`"projects": ["list", "create", "read", "git", "chat", "run", "start", "delete"]`. Show project browsing
 only when the array includes `"list"`, the git UI only when it includes `"git"`,
 and [project-bound chat](/api/sessions#post-apiv1agentsagentidsessions) only when
 it includes `"chat"`. An older gateway omits the key, or lists projects without
-`"git"`, `"chat"` or `"run"`. Show running status and the Stop button only when it includes `"run"`, and the Start button only when it includes `"start"`.
+`"git"`, `"chat"` or `"run"`. Show running status and the Stop button only when it includes `"run"`, the Start button only when it includes `"start"`, and the Delete action only when it includes `"delete"`.
 
 **Root.** Projects live in `gateway.projects.root`, which defaults to
 `~/projects`. Every listing returns the root as `root`, resolved through
@@ -58,7 +58,9 @@ codes, listed under [Git errors](#git-errors).
 | 403 | `permission_denied` | The gateway's user cannot read it. |
 | 403 | `forbidden_key` | The key lacks pod-wide scope, or lacks write for a `POST`. |
 | 404 | `not_found` | The project or path does not exist. |
+| 400 | `confirm_mismatch` | `DELETE` did not send `confirm` equal to the project name. |
 | 409 | `project_exists` | `POST` named a project that already exists. |
+| 409 | `project_running` | `DELETE` found a process listening from inside the project. |
 | 500 | `internal` | Anything else. |
 
 **Project name.** Matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. Directories under
@@ -130,6 +132,26 @@ installed). It never includes git's output, which the gateway logs instead.
   "warning": "git init failed (ENOENT)"
 }
 ```
+
+## DELETE /api/v1/projects/:name {#delete-project}
+
+Delete `<root>/<name>` and everything in it. Returns `200` with `{ "name": "demo" }`. This cannot
+be undone, and the gateway keeps no copy.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `confirm` | Yes | The project name again, exactly. Anything else is `400 confirm_mismatch`. |
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"confirm":"demo"}' http://localhost:10850/api/v1/projects/demo
+```
+
+While something listens on a port from inside the project, the response is `409 project_running`
+and nothing is removed. Stop it first with [`running/stop`](#running). Links inside the project
+are removed, never followed, so a link out of the project cannot delete what it points to. A
+project that is itself a link out of the root answers `403 path_escape` and is left alone. Chats
+that were started in the project are kept, and their project no longer resolves.
 
 ## GET /api/v1/projects/:name/tree {#get-tree}
 

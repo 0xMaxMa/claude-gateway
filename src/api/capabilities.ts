@@ -39,9 +39,9 @@ export const CROSS_CHANNEL_MESSAGE_CHANNELS: readonly ChatChannel[] = [...CHAT_C
 
 /**
  * Project operations served by projects-router.ts; clients gate browsing on `includes('list')`
- * the git routes on `includes('git')`, project-bound chat on `includes('chat')`, running status and stop on `includes('run')`, and starting a project on `includes('start')`.
+ * the git routes on `includes('git')`, project-bound chat on `includes('chat')`, running status and stop on `includes('run')`, starting a project on `includes('start')`, and deleting one on `includes('delete')`.
  */
-export const PROJECTS_CAPABILITIES = ['list', 'create', 'read', 'git', 'chat', 'run', 'start'] as const;
+export const PROJECTS_CAPABILITIES = ['list', 'create', 'read', 'git', 'chat', 'run', 'start', 'delete'] as const;
 export type ProjectsCapability = (typeof PROJECTS_CAPABILITIES)[number];
 
 export interface CapabilitiesResponse {
