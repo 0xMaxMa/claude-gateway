@@ -102,12 +102,36 @@ describe('an explicit /pstack: command for a skill that is not user-invocable', 
     } finally { await f.close(); }
   });
 
-  test('user-invocable skills, unknown names and agents that are not set up are left alone', async () => {
-    const { pstackAutomaticSkillReply } = await import('../../../src/pstack/overlay');
-    expect(pstackAutomaticSkillReply('/pstack:how x', 'telegram', {})).toBeUndefined();
-    expect(pstackAutomaticSkillReply('/pstack:nope', 'telegram', {})).toBeUndefined();
-    expect(pstackAutomaticSkillReply('/pstack:../../etc', 'telegram', {})).toBeUndefined();
-    expect(pstackAutomaticSkillReply('/pstack:principle-attack-the-premise', 'telegram', undefined)).toBeUndefined();
-    expect(pstackAutomaticSkillReply('/pstack:principle-attack-the-premise@claude_bot', 'telegram', {})).toContain('not a command');
+  test('user-invocable skills and agents that are not set up are left alone', async () => {
+    const { pstackCommandReply } = await import('../../../src/pstack/overlay');
+    expect(pstackCommandReply('/pstack:how x', 'telegram', {})).toBeUndefined();
+    expect(pstackCommandReply('/pstack:principle-attack-the-premise', 'telegram', undefined)).toBeUndefined();
+    expect(pstackCommandReply('/pstack:nope', 'telegram', undefined)).toBeUndefined();
+    expect(pstackCommandReply('/code-review', 'telegram', {})).toBeUndefined();
+    expect(pstackCommandReply('/pstack:../../etc', 'telegram', {})).toBeUndefined(); // not a command shape
+    expect(pstackCommandReply('/pstack:principle-attack-the-premise@claude_bot', 'telegram', {})).toContain('not a command');
+  });
+
+  // Dev e2e of #591: an unknown `/pstack:<name>` went to the decision turn, which once
+  // spawned a task to search for it. Claude Code rejects an unknown command at once.
+  test('an unknown name is answered without a model turn or task', async () => {
+    const f = await fixture({});
+    try {
+      const submitted = f.runtime.submitInput({ scope: f.scope, text: '/pstack:principle-boring-tech', ingressKey: 'm1' }, { execute: true, writeMemory: false });
+      const reply = await Promise.race([submitted.response.catch(() => 'model turn'), new Promise<string>(resolve => setTimeout(() => resolve('no direct reply'), 3000))]);
+      expect(reply).toContain('/pstack:principle-boring-tech is not a pstack command');
+      expect(f.createAgentSession).not.toHaveBeenCalled();
+      expect(f.runtime.store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(0);
+    } finally { await f.close(); }
+  });
+
+  test('an unknown name suggests close user-invocable commands', async () => {
+    const { pstackCommandReply } = await import('../../../src/pstack/overlay');
+    expect(pstackCommandReply('/pstack:ho', 'telegram', {})).toContain('Did you mean /pstack:how?');
+    expect(pstackCommandReply('/pstack:principle-attack', 'telegram', {})).not.toContain('Did you mean');
+    for (const text of ['/pstack:nope', '/pstack:a:b', '/pstack:', '/pstack:..']) expect(pstackCommandReply(text, 'telegram', {})).toContain('is not a pstack command');
+    // An unreadable skill list proves nothing about the name; the agent decides.
+    rmSync(join(plugin.installPath, 'skills'), { recursive: true, force: true });
+    expect(pstackCommandReply('/pstack:nope', 'telegram', {})).toBeUndefined();
   });
 });

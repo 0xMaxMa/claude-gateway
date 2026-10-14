@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { skillCommand } from '../orchestration/skills';
 import { extractFrontmatter } from '../skills/parser';
@@ -37,19 +37,35 @@ export function pstackNotSetUpReply(text: string, source: ConversationScope['sou
 }
 
 /**
- * The reply to an explicit `/pstack:<skill>` on a set-up agent when that skill
- * is `user-invocable: false` (the principle-* skills). As in Claude Code it is
- * not a command: the worker loads it when a task needs it. Answered here, so it
- * never waits on a decision turn.
+ * The reply to an explicit `/pstack:<skill>` on a set-up agent that Claude Code
+ * would not run as a command: a skill that is `user-invocable: false` (the
+ * principle-* skills, which the worker loads when a task needs them), or a name
+ * the plugin has no skill for. Answered here, so it never waits on a decision turn.
  */
-export function pstackAutomaticSkillReply(text: string, source: ConversationScope['source'], pstack: AgentPstackConfig | undefined): string | undefined {
+export function pstackCommandReply(text: string, source: ConversationScope['source'], pstack: AgentPstackConfig | undefined): string | undefined {
   const command = skillCommand(text, source);
   const skill = command?.name.startsWith('pstack:') ? command.name.slice('pstack:'.length) : undefined;
-  if (!pstack || !skill || !/^[\w-][\w.-]*$/.test(skill)) return undefined;
+  if (!pstack || skill === undefined) return undefined;
   const { installPath } = pstackPluginInfo();
   if (!installPath) return undefined;
-  let content: string;
-  try { content = readFileSync(join(installPath, 'skills', skill, 'SKILL.md'), 'utf8'); } catch { return undefined; }
-  if (extractFrontmatter(content)?.frontmatter['user-invocable'] !== false) return undefined;
-  return `/${command!.name} is not a command: pstack loads this skill by itself while a task needs it, as in Claude Code. Describe the task instead, or start one with a pstack command such as /pstack:poteto-mode.`;
+  const skills = join(installPath, 'skills');
+  const read = (name: string) => readFileSync(join(skills, name, 'SKILL.md'), 'utf8');
+  let names: string[];
+  // Without a readable skill list the gateway cannot tell an unknown name; the agent decides.
+  try { names = readdirSync(skills); } catch { return undefined; }
+  if (/^[\w-][\w.-]*$/.test(skill)) {
+    let content: string | undefined;
+    try { content = read(skill); } catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return undefined;
+    }
+    if (content !== undefined) {
+      if (extractFrontmatter(content)?.frontmatter['user-invocable'] !== false) return undefined;
+      return `/${command!.name} is not a command: pstack loads this skill by itself while a task needs it, as in Claude Code. Describe the task instead, or start one with a pstack command such as /pstack:poteto-mode.`;
+    }
+  }
+  const words = new Set(skill.split(/[^a-z0-9]+/i).filter(word => word.length > 2));
+  const close = !skill ? [] : names.filter(name => name.includes(skill) || skill.includes(name) || name.split('-').some(word => words.has(word))).filter(name => {
+    try { return extractFrontmatter(read(name))?.frontmatter['user-invocable'] !== false; } catch { return false; }
+  }).slice(0, 3);
+  return `/${command!.name} is not a pstack command.${close.length ? ` Did you mean ${close.map(name => `/pstack:${name}`).join(', ')}?` : ''}${names.includes('poteto-help') ? ' Send /pstack:poteto-help with a question to find the right one.' : ''}`;
 }

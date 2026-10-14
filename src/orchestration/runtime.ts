@@ -61,7 +61,7 @@ import { VoiceError } from '../voice/types';
 import { describeVoiceError } from '../voice/errors';
 import { MediaStore } from '../history/media-store';
 import { resolveSkill, skillCatalog } from './skills';
-import { pstackAutomaticSkillReply, pstackNotSetUpReply } from '../pstack/overlay';
+import { pstackCommandReply, pstackNotSetUpReply } from '../pstack/overlay';
 import type { SkillRegistry } from '../skills';
 import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
 import { SPEECH_OVERLAY, splitSpeechResponse, speechVoiceStyle } from './speech';
@@ -847,7 +847,7 @@ export class AgentOrchestrationRuntime {
     input = this.questionControls.normalizeReply(input);
     // A pstack command on an agent that is not set up, or for a skill that is
     // not user-invocable, gets the same direct notice.
-    const pstack = pstackNotSetUpReply(input.text, input.scope.source, this.agent.pstack) ?? pstackAutomaticSkillReply(input.text, input.scope.source, this.agent.pstack);
+    const pstack = pstackNotSetUpReply(input.text, input.scope.source, this.agent.pstack) ?? pstackCommandReply(input.text, input.scope.source, this.agent.pstack);
     if (!pstack && !this.questionControls.matches(input)) return undefined;
     const result = this.store.compose(() => {
       const receipt = this.store.acceptInput({ ...input, capabilities }, this.config.conversation.maxPendingInputs);
