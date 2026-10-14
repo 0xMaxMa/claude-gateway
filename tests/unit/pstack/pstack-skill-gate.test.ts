@@ -129,7 +129,7 @@ describe('an explicit /pstack: command for a skill that is not user-invocable', 
 
   // Dev e2e of #591: a one-letter typo (/pstack:reflct) got no suggestion from substring matching.
   test('a misspelled name suggests the nearest user-invocable commands', async () => {
-    for (const name of ['reflect', 'interrogate', 'why']) {
+    for (const name of ['reflect', 'interrogate', 'why', 'poteto-help', 'poteto-mode']) {
       mkdirSync(join(plugin.installPath, 'skills', name), { recursive: true });
       writeFileSync(join(plugin.installPath, 'skills', name, 'SKILL.md'), `---\nname: ${name}\ndescription: fixture\n---\n\nBody\n`);
     }
@@ -138,6 +138,8 @@ describe('an explicit /pstack: command for a skill that is not user-invocable', 
     expect(pstackCommandReply('/pstack:refelct', 'telegram', {})).toContain('Did you mean /pstack:reflect?');
     expect(pstackCommandReply('/pstack:interogate', 'telegram', {})).toContain('Did you mean /pstack:interrogate?');
     expect(pstackCommandReply('/pstack:hwo', 'telegram', {})).toContain('Did you mean /pstack:how?');
+    // The nearest name comes first, ahead of names that only share a word.
+    expect(pstackCommandReply('/pstack:poteto-mod', 'telegram', {})).toContain('Did you mean /pstack:poteto-mode, /pstack:poteto-help?');
     // Too far from every name, or only near a skill that is not user-invocable: no guess.
     expect(pstackCommandReply('/pstack:deploy', 'telegram', {})).not.toContain('Did you mean');
     expect(pstackCommandReply('/pstack:principle-atack-the-premise', 'telegram', {})).not.toContain('Did you mean');
