@@ -3,7 +3,8 @@
  * Mock claude for API sessions that records how it was spawned. Appends one
  * JSON line {pid, cwd, argv} to $MOCK_CLAUDE_ARGV_LOG, then answers every
  * stream-json user turn with a result, including the history-carrying turn a
- * respawn sends (mock-claude-api.js stays silent on that one).
+ * respawn sends (mock-claude-api.js stays silent on that one). A turn containing
+ * HOLD-TURN never gets a result, so a test can observe a turn in flight.
  */
 const fs = require('fs');
 const readline = require('readline');
@@ -17,6 +18,7 @@ if (process.env.MOCK_CLAUDE_ARGV_LOG) {
 
 readline.createInterface({ input: process.stdin, terminal: false }).on('line', (line) => {
   if (!line.trim()) return;
+  if (line.includes('HOLD-TURN')) return;
   process.stdout.write(JSON.stringify({ type: 'result', result: `[mock-claude-argv] cwd ${process.cwd()}` }) + '\n');
 });
 

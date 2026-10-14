@@ -20,7 +20,7 @@ test('the deciding agent of a project chat is told its project in the stable sys
   const overlays = new Map<string, string[]>(), prompts: string[] = [];
   const runtime = await AgentOrchestrationRuntime.open(agent, gateway, dir, sessions, history, {
     skills: () => ({ skills: new Map(), cliSkills: [] } as any),
-    sessionProject: async scope => scope.agentSessionId === bound ? { ok: true, value: { name: 'demo' as ProjectName, dir: '/srv/projects/demo', trusted: false } } : undefined,
+    sessionProject: async scope => scope.agentSessionId === bound ? { ok: true, value: { name: 'demo' as ProjectName, dir: '/srv/projects/demo', trusted: false, identity: '1:1' } } : undefined,
     createAgentSession: async (id, profile) => Object.assign(new EventEmitter(), {
       start: async () => {}, stop: async () => {},
       sendMessage: function (this: EventEmitter, prompt: string) {

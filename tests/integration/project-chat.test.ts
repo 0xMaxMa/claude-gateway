@@ -393,7 +393,62 @@ describe('a project-bound legacy chat turn', () => {
       .send({ message: 'hi', chat_id: 'web', session_id: sessionId, stream: true });
     expect(res.text).toMatch(/"type":"error"[^\n]*"code":"PROJECT_UNAVAILABLE"/);
     expect(spawns(h)).toEqual([]);
+    expect(h.runners[0]!.hasActiveApiSession(sessionId)).toBe(false);
+    fs.mkdirSync(path.join(h.root, 'site'));
+    expect((await send(h, sessionId, 'after')).status).toBe(200);
   });
+
+  it('restarts in the new folder when the project is deleted and recreated under the same name', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    expect((await send(h, sessionId, 'first')).status).toBe(200);
+    fs.rmSync(path.join(h.root, 'site'), { recursive: true });
+    fs.mkdirSync(path.join(h.root, 'site'));
+
+    expect((await send(h, sessionId, 'second')).status).toBe(200);
+    const all = spawns(h);
+    expect(all).toHaveLength(2);
+    expect(all[1]!.pid).not.toBe(all[0]!.pid);
+    expect(all[1]!.cwd).toBe(path.join(h.root, 'site'));
+  });
+
+  it('reports projectState on list and info: available, then missing once the folder is deleted', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    const plain = (await create(h, 'alfred', KEYS.admin!, {})).body.sessionId as string;
+    const info = () => supertest(h.app).get(`/api/v1/agents/alfred/sessions/${sessionId}/info`)
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`).query({ chat_id: 'web' });
+    const list = () => supertest(h.app).get('/api/v1/agents/alfred/sessions')
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`).query({ chat_id: 'web' });
+    expect((await info()).body).toMatchObject({ project: 'site', trusted: false, projectState: 'available' });
+
+    fs.rmSync(path.join(h.root, 'site'), { recursive: true });
+    expect((await info()).body).toMatchObject({ project: 'site', trusted: false, projectState: 'missing' });
+    const rows = (await list()).body.sessions as { id: string }[];
+    expect(rows.find((s) => s.id === sessionId)).toMatchObject({ project: 'site', projectState: 'missing' });
+    expect(rows.find((s) => s.id === plain)).toMatchObject({ project: null, trusted: false, projectState: null });
+  });
+
+  it('refuses to delete a project with 409 project_running while a chat turn runs in it', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    const held = send(h, sessionId, 'HOLD-TURN').then((r) => r, (e: unknown) => e);
+    await waitForCondition(() => h.runners[0]!.hasActiveApiSession(sessionId), 10_000);
+    const del = () => supertest(h.app).delete('/api/v1/projects/site')
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`).send({ confirm: 'site' });
+
+    const res = await del();
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('project_running');
+    expect(fs.existsSync(path.join(h.root, 'site'))).toBe(true);
+
+    await supertest(h.app).post(`/api/v1/agents/alfred/sessions/${sessionId}/restart`)
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`).query({ chat_id: 'web' });
+    await held;
+    await waitForCondition(() => !h.runners[0]!.hasActiveApiSession(sessionId), 10_000);
+    expect((await del()).status).toBe(200);
+    expect(fs.existsSync(path.join(h.root, 'site'))).toBe(false);
+  }, 30_000);
 
   it('re-resolves the project on a crash restart', async () => {
     h = await harness();
@@ -440,6 +495,17 @@ describe('project chat on an orchestrated gateway', () => {
     const res = await create(h, agent, KEYS.admin!, { project: 'site' });
     expect(res.status).toBe(409);
     expect(res.body).toMatchObject({ code: 'project_unsupported_agent', reason });
+  });
+
+  it('answers messages/accept with 409 PROJECT_UNAVAILABLE once the project folder is gone', async () => {
+    const sessionId = await projectSession(h);
+    fs.rmSync(path.join(h.root, 'site'), { recursive: true });
+    const res = await supertest(h.app)
+      .post('/api/v1/agents/alfred/messages/accept')
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`)
+      .send({ message: 'hi', chat_id: 'web', session_id: sessionId, client_message_id: '00000000-0000-4000-8000-000000000001' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROJECT_UNAVAILABLE');
   });
 
   it('fails a send with 409 PROJECT_UNAVAILABLE once the project folder is gone', async () => {

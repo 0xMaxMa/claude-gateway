@@ -5392,6 +5392,12 @@ export class AgentRunner extends EventEmitter {
     return this.pendingApiSessions.has(sessionId);
   }
 
+  /** A chat bound to `project` has a turn in flight. Every running bound session passed through apiSessionBinding, so boundProjects holds it. */
+  hasActiveProjectTurn(project: string): boolean {
+    for (const [sessionId, bound] of this.boundProjects) if (bound === project && this.pendingApiSessions.has(sessionId)) return true;
+    return false;
+  }
+
   /**
    * Attach a sink to a session's current turn stream (#421) — the server half of
    * "resume a turn on a new connection".

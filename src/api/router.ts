@@ -861,7 +861,7 @@ export function createApiRouter(
         res.status(202).json({ status: 'accepted', input_id: inputId, session_id: sessionId, client_message_id: clientMessageId });
       } catch (error) {
         const code = (error as { code?: string }).code;
-        res.status(code === 'NOT_SUPPORTED' || code === 'IDEMPOTENCY_CONFLICT' ? 409 : code === 'QUEUE_FULL' ? 429 : code === 'ACCESS_DENIED' ? 403 : 503).json({ error: (error as Error).message, code });
+        res.status(code === 'NOT_SUPPORTED' || code === 'IDEMPOTENCY_CONFLICT' || code === 'PROJECT_UNAVAILABLE' ? 409 : code === 'QUEUE_FULL' ? 429 : code === 'ACCESS_DENIED' ? 403 : 503).json({ error: (error as Error).message, code });
       }
       return;
     }

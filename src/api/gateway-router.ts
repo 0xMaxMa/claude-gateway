@@ -47,6 +47,7 @@ import { createCapabilitiesRouter } from './capabilities';
 import { GATEWAY_VERSION } from './gateway-version';
 import { createWorkspaceRouter } from './workspace-router';
 import { createProjectsRouter } from './projects-router';
+import { StopLimiter, systemSys } from '../projects/running';
 import { resolveProjectsRoot } from '../projects/chat';
 import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
@@ -734,7 +735,11 @@ export class GatewayRouter {
 
     // Mount pod-wide project browsing (gateway.projects.root, default ~/projects)
     if (this.gatewayConfig?.gateway?.api?.keys) {
-      this.app.use('/api', createProjectsRouter(this.gatewayConfig.gateway.api.keys, resolveProjectsRoot(this.gatewayConfig)));
+      this.app.use('/api', createProjectsRouter(this.gatewayConfig.gateway.api.keys, resolveProjectsRoot(this.gatewayConfig), {
+        sys: systemSys(),
+        limiter: new StopLimiter(),
+        chatTurnActive: (name) => [...this.agents.values()].some((runner) => runner.hasActiveProjectTurn(name)),
+      }));
     }
 
     // Mount skills routes

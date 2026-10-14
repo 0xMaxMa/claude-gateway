@@ -37,6 +37,8 @@ export interface ProjectCwd {
   name: ProjectName;
   dir: string;
   trusted: boolean;
+  /** `dev:ino` of the folder, so a project deleted and recreated under the same name reads as moved. */
+  identity: string;
 }
 
 export async function resolveProjectCwd(config: GatewayConfig, name: ProjectName): Promise<Result<ProjectCwd, ProjectChatError>> {
@@ -44,7 +46,9 @@ export async function resolveProjectCwd(config: GatewayConfig, name: ProjectName
   if (!dir.ok) {
     return err(dir.error === 'not_found' ? { code: 'project_not_found' } : { code: 'project_unavailable', reason: dir.error });
   }
-  return ok({ name, dir: dir.value, trusted: await projectTrusted(config, name) });
+  const st = await fsp.stat(dir.value).catch(() => null);
+  if (!st) return err({ code: 'project_not_found' });
+  return ok({ name, dir: dir.value, trusted: await projectTrusted(config, name), identity: `${st.dev}:${st.ino}` });
 }
 
 /** Named in gateway.projects.trusted, and its folder is a real directory, not a symlink. */
@@ -56,14 +60,21 @@ export async function projectTrusted(config: GatewayConfig, name: string): Promi
   return (await fsp.realpath(dir).catch(() => null)) === dir;
 }
 
+/** Whether a bound chat's folder still resolves: `missing` when deleted or renamed, `unavailable` when it escapes the root or is not a folder. */
+export type ProjectState = 'available' | 'missing' | 'unavailable';
+
 /** How every session response reports its project. */
 export interface SessionProjectView {
   project: string | null;
   trusted: boolean;
+  projectState: ProjectState | null;
 }
 
 export async function sessionProjectView(config: GatewayConfig, project: string | undefined): Promise<SessionProjectView> {
-  return project ? { project, trusted: await projectTrusted(config, project) } : { project: null, trusted: false };
+  if (!project) return { project: null, trusted: false, projectState: null };
+  const resolved = await resolveProjectCwd(config, project as ProjectName);
+  if (resolved.ok) return { project, trusted: resolved.value.trusted, projectState: 'available' };
+  return { project, trusted: false, projectState: resolved.error.code === 'project_not_found' ? 'missing' : 'unavailable' };
 }
 
 /** `requested`, relative to or absolute under the project folder, resolved through symlinks; path_escape if it leaves. */
