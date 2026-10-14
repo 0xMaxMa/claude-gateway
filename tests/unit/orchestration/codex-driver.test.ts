@@ -495,8 +495,10 @@ describe('pstack subagent workers', () => {
     await run('claude-sonnet-4-6');
     expect(claudeProfile().disallowedTools).toEqual(['Agent', 'Task']);
     expect(claudeProfile().context).toContain('call subagent_spawn instead');
-    // Session 66f2f9db: a poteto-mode worker did the how/why steps itself, with no Skill call and no subagent.
-    expect(claudeProfile().context).toContain('invoke that skill with the Skill tool (pstack:how, pstack:why, pstack:interrogate...)');
+    // Session 66f2f9db, and again on dev at bdd0bc3e: a poteto-mode worker read "Route through the **how** skill"
+    // and wrote how-shaped output itself, with no Skill call and no subagent. The note names the playbook phrasing.
+    expect(claudeProfile().context).toContain('names another skill (route through, run or apply the **how** skill, the **why** skill, the **interrogate** skill...), call the Skill tool with skill pstack:<name>');
+    expect(claudeProfile().context).toContain('Reading its SKILL.md or copying its output format is not running it');
     expect(claudeProfile().context).toContain('start every subagent it calls for with subagent_spawn; do not do their work yourself');
   });
 
@@ -515,7 +517,7 @@ describe('pstack subagent workers', () => {
     const attempt = tasks.claim(task.taskId)!;
     const handle = await driver.start(store.task(task.taskId)!, attempt); await handle.accepted; await handle.result;
     expect(claudeProfile().context).toContain('Subagent dispatch is unavailable at this depth');
-    expect(claudeProfile().context).toContain('invoke that skill with the Skill tool');
+    expect(claudeProfile().context).toContain('call the Skill tool with skill pstack:<name>');
     expect(claudeProfile().context).not.toContain('subagent_spawn');
     expect(claudeProfile().disallowedTools).toEqual(['Agent', 'Task']);
   });
