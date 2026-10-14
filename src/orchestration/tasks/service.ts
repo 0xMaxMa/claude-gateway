@@ -60,6 +60,13 @@ export function handoffCommandId(inputId: string): string {
   return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`;
 }
 
+/** The live execution state an index row carries. The process sample, its timestamps and the
+ * quiet/activity status are refreshed every observation, so including them made an unchanged
+ * task look changed and resent it on every turn; task_status still returns all of them. */
+function indexExecution(execution: NonNullable<TaskSnapshot['execution']>) {
+  const { phase, activeTools, lastTool, lastProgressAt, attemptId } = execution;
+  return { phase, activeTools, lastProgressAt, attemptId, ...(lastTool ? { lastTool: { name: lastTool.name, status: lastTool.status, ...(lastTool.exitCode !== undefined ? { exitCode: lastTool.exitCode } : {}) } } : {}) };
+}
 export type TaskIndexEntry = ReturnType<typeof taskIndexEntry>;
 /** One index row: identity, live state and how to fetch the rest — never a report body.
  * A finished task's progress, execution observation and workflow checkpoint/review history
@@ -73,7 +80,7 @@ export function taskIndexEntry(task: TaskSnapshot) {
     createdAt: task.createdAt, updatedAt: task.updatedAt,
     workflow: terminal ? undefined : task.workflow,
     latestProgress: terminal ? undefined : task.latestProgress,
-    execution: terminal ? undefined : task.execution,
+    execution: terminal || !task.execution ? undefined : indexExecution(task.execution),
     pendingQuestion: task.pendingQuestion, failure: task.failure,
     cancellation: task.cancellation, replacedByTaskId: task.replacedByTaskId,
     workstreamId: task.workstreamId, continueTaskId: task.continueTaskId, continuationPolicy: task.continuationPolicy,
