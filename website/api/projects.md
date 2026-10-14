@@ -12,11 +12,11 @@ projects belong to the pod, not to an agent. `POST /api/v1/projects` and every
 `POST .../git/*` route also need `write: true` (or `admin: true`).
 
 **Feature detection.** `GET /api/v1/capabilities` lists
-`"projects": ["list", "create", "read", "git", "chat", "run"]`. Show project browsing
+`"projects": ["list", "create", "read", "git", "chat", "run", "start"]`. Show project browsing
 only when the array includes `"list"`, the git UI only when it includes `"git"`,
 and [project-bound chat](/api/sessions#post-apiv1agentsagentidsessions) only when
 it includes `"chat"`. An older gateway omits the key, or lists projects without
-`"git"`, `"chat"` or `"run"`. Show running status and the Stop button only when it includes `"run"`.
+`"git"`, `"chat"` or `"run"`. Show running status and the Stop button only when it includes `"run"`, and the Start button only when it includes `"start"`.
 
 **Root.** Projects live in `gateway.projects.root`, which defaults to
 `~/projects`. Every listing returns the root as `root`, resolved through
@@ -529,3 +529,34 @@ Safety rules the gateway enforces:
 
 Errors: `400 invalid_name`, `400 invalid_port`, `403 forbidden_key`,
 `403 path_escape`, `404 not_found`, `409 nothing_running`.
+
+### POST /api/v1/projects/:name/running/start {#post-running-start}
+
+Starts the project without an agent. Body `{}` picks the first free port from 3000
+to 3099. `{ "port": 3005 }` asks for that port and gets `409 port_in_use` when
+something listens on it.
+
+The command is never taken from the request. The gateway builds it from the
+project's own files, and `GET /api/v1/projects/:name/running` answers `start`
+with `{ "command": "..." }` when it can start the project, `null` when it cannot.
+
+- `package.json` with a `dev` script, else a `start` script. The gateway runs it with the lockfile's package manager (`npm`, `pnpm`, `yarn` or `bun`). A script that runs `vite`, `astro` or `next` also gets its port and host flags. Any other script gets the port only as the `PORT` environment variable.
+- `main.py` or `app.py` with a top-level `app = FastAPI(`, and a `.venv` folder: `.venv/bin/uvicorn main:app --host 0.0.0.0 --port N`.
+
+The process runs detached in the project folder with only `PATH`, `HOME`, `USER`,
+`LOGNAME`, `LANG`, `LC_ALL`, `SHELL`, `TMPDIR` and `PORT` in its environment, and
+its output goes to `~/.claude-gateway/logs/projects/<name>.log`. The response waits
+up to 20 seconds for a listener on that port from inside the project, then returns
+`200` with
+
+```json
+{ "port": 3001, "pid": 4242, "command": "PORT=3001 npm run start" }
+```
+
+On failure the body also carries `log`, the last 2000 characters of the output with
+credentials and long tokens masked. A start that never listens is stopped again.
+
+Errors: `400 invalid_name`, `400 invalid_port`, `403 forbidden_key`,
+`403 path_escape`, `404 not_found`, `409 already_running`, `409 port_in_use`,
+`409 no_free_port`, `422 no_start_command`, `502 start_failed`, `504 start_timeout`.
+A second start while one is in flight for the same project gets `409 already_running`.

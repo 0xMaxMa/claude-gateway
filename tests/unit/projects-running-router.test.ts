@@ -315,7 +315,7 @@ describe('running routes', () => {
   it('reports unsupported on a non-Linux platform and does not stop anything', async () => {
     const { child } = await start('node', ['-e', SERVER], path.join(root, 'api'));
     const a = app(systemSys({ platform: 'darwin' }));
-    expect((await get(a)).body).toEqual({ supported: false, processes: [] });
+    expect((await get(a)).body).toEqual({ supported: false, processes: [], start: null });
     expect((await stop(a)).status).toBe(409);
     expect(alive(child.pid)).toBe(true);
   });
@@ -331,7 +331,7 @@ describe('running routes', () => {
     expect((await stop(a, {}, 'nope')).status).toBe(404);
     expect((await stop(a, { port: 'x' })).body.code).toBe('invalid_port');
     expect((await stop(a, { port: 70000 })).status).toBe(400);
-    expect((await get(a, 'api')).body).toEqual({ supported: true, processes: [] });
+    expect((await get(a, 'api')).body).toEqual({ supported: true, processes: [], start: null });
   });
 
   it('refuses a project that is a symlink out of the root', async () => {
@@ -403,7 +403,7 @@ describe('GET /api/v1/projects/running', () => {
     const srv = await start('node', ['-e', SERVER], path.join(root, 'running'));
     const a = app();
     expect((await all(a)).body).toEqual({ supported: true, projects: { running: [cwdEntry(srv.port, srv.child.pid)] } });
-    expect((await get(a, 'running')).body).toEqual({ supported: true, processes: [cwdEntry(srv.port, srv.child.pid)] });
+    expect((await get(a, 'running')).body).toEqual({ supported: true, processes: [cwdEntry(srv.port, srv.child.pid)], start: null });
   });
 
   it('skips a project that is a symlink out of the root', async () => {

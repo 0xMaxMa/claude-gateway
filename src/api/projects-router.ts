@@ -1,3 +1,4 @@
+import * as path from 'path';
 import { NextFunction, Request, Response, Router } from 'express';
 import { ApiKey } from '../types';
 import { createApiAuthMiddleware, canAccessPod } from './auth';
@@ -5,13 +6,14 @@ import { defineRoute } from './route-registry';
 import { createProject, listDir, resolveProjectDir, listProjects, readFileContent } from '../projects/fs';
 import { commitAll, fetchRemote, getStatus, getSummaries, GitError, GitErrorCode, initRepo, parseCommitRequest, parseIdentity, pullFastForward, pushBranch, setIdentity } from '../projects/git';
 import { listRunning, ProjectDir, RunningErrorCode, scanProjects, StopLimiter, stopRunning, Sys, systemSys } from '../projects/running';
+import { planStart, PORT_MIN, readStartFacts, startProject, StartError, StartErrorCode, StartGuard, Launcher, systemLauncher } from '../projects/start';
 import { parseProjectName, parseRelPath, ProjectName, ProjectsErrorCode, Result } from '../projects/paths';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
 const MAX_RUNNING_PROJECTS = 200;
 
-const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode, { status: number; message: string }> = {
+const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode | StartErrorCode, { status: number; message: string }> = {
   invalid_name: { status: 400, message: 'Invalid project name' },
   invalid_path: { status: 400, message: 'Invalid path' },
   not_a_directory: { status: 400, message: 'Not a directory' },
@@ -50,15 +52,21 @@ const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode, { stat
   git_failed: { status: 500, message: 'Git failed' },
   nothing_running: { status: 409, message: 'Nothing is running in this project' },
   invalid_port: { status: 400, message: 'port must be an integer between 1 and 65535' },
+  no_start_command: { status: 422, message: 'The project files do not say how to start it' },
+  already_running: { status: 409, message: 'Something is already running in this project' },
+  port_in_use: { status: 409, message: 'That port is in use' },
+  no_free_port: { status: 409, message: 'No free port between 3000 and 3099' },
+  start_failed: { status: 502, message: 'The project exited before it started listening' },
+  start_timeout: { status: 504, message: 'The project did not start listening in time' },
 };
 
-function fail(res: Response, error: ProjectsErrorCode | RunningErrorCode | GitError): void {
+function fail(res: Response, error: ProjectsErrorCode | RunningErrorCode | GitError | StartError): void {
   const body = typeof error === 'string' ? { code: error } : error;
   const { status, message } = ERRORS[body.code];
   res.status(status).json({ error: message, ...body });
 }
 
-function respond<T>(res: Response, result: Result<T, ProjectsErrorCode | RunningErrorCode | GitError>, status = 200): void {
+function respond<T>(res: Response, result: Result<T, ProjectsErrorCode | RunningErrorCode | GitError | StartError>, status = 200): void {
   if (result.ok) res.status(status).json(result.value);
   else fail(res, result.error);
 }
@@ -87,6 +95,11 @@ function handle(fn: (req: Request, res: Response) => Promise<void>) {
 export interface RunningDeps {
   sys: Sys;
   limiter: StopLimiter;
+  launcher?: Launcher;
+  starts?: StartGuard;
+  /** Where start logs go and how long a start waits; set by tests. */
+  logDir?: string;
+  startWaitMs?: number;
 }
 
 export function createProjectsRouter(
@@ -94,6 +107,8 @@ export function createProjectsRouter(
   root: string,
   running: RunningDeps = { sys: systemSys(), limiter: new StopLimiter() },
 ): Router {
+  const launcher = running.launcher ?? systemLauncher;
+  const starts = running.starts ?? new StartGuard();
   const router = Router();
   const auth = createApiAuthMiddleware(apiKeys);
 
@@ -194,7 +209,8 @@ export function createProjectsRouter(
       if (!name.ok) return fail(res, name.error);
       const dir = await resolveProjectDir(root, name.value);
       if (!dir.ok) return fail(res, dir.error);
-      res.json(await listRunning(running.sys, dir.value));
+      const plan = planStart(await readStartFacts(dir.value));
+      res.json({ ...(await listRunning(running.sys, dir.value)), start: plan ? { command: plan.display(PORT_MIN) } : null });
     }),
   );
 
@@ -217,6 +233,32 @@ export function createProjectsRouter(
         return;
       }
       respond(res, await stopRunning(running.sys, dir.value, port));
+    }),
+  );
+
+  defineRoute(
+    router,
+    { method: 'POST', path: '/v1/projects/:name/running/start', auth: 'key', summary: 'Start a project the way its own files say, on a free port', cli: null },
+    auth,
+    requirePod,
+    requireWrite,
+    handle(async (req, res) => {
+      const name = parseProjectName(req.params.name);
+      if (!name.ok) return fail(res, name.error);
+      const port = (req.body ?? {}).port;
+      const dir = await resolveProjectDir(root, name.value);
+      if (!dir.ok) return fail(res, dir.error);
+      const result = await starts.run(name.value, () =>
+        startProject(running.sys, launcher, {
+          realProject: dir.value,
+          name: name.value,
+          port,
+          waitMs: running.startWaitMs,
+          logPath: running.logDir ? path.join(running.logDir, `${name.value}.log`) : undefined,
+        }),
+      );
+      if (result === null) return fail(res, { code: 'already_running' });
+      respond(res, result);
     }),
   );
 
