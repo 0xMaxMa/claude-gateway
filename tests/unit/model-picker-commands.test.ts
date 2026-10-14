@@ -246,7 +246,7 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     it('shows that pstack is not set up, every role with its current model, and the IDs by family', async () => {
       const port = await startRunner(gatewayWithIds());
       const text = await send(port, '/pstack-setup');
-      expect(text).toContain('⚪ Off: workers do not load pstack');
+      expect(text).toContain('Status: ⚪ Off');
       expect(text).toContain('• bug-fix: claude-fable-5-1');
       expect(text).toContain('• interrogate reviewers: claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5, claude-haiku-5-5');
       expect(text).toContain('Claude: claude-sonnet-4-6, claude-opus-5');
@@ -317,8 +317,10 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
         const port = await startRunner(gatewayWithIds());
         const home = await menu(port, 'ps:h');
         expect(home.status).toBe(200);
-        expect(home.body.text).toContain('• bug-fix: claude-fable-5-1');
+        expect(home.body.text).toContain('Roles: 17 (✏️ 0 changed)');
         expect(home.body.keyboard![0][0]).toEqual({ text: '✅ Turn on', data: 'ps:on' });
+        const singles = await menu(port, 'ps:l:s:0');
+        expect(singles.body.keyboard!.flat()).toContainEqual({ text: 'bug-fix · claude-fable-5-1', data: 'ps:r:1' });
         const changed = await menu(port, 'ps:m:1:gpt-6-sol[1m]');
         expect(changed.body.text).toContain('✅ Saved');
         expect(changed.body.toast).toContain('Saved');

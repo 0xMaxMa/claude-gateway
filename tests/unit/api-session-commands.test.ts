@@ -402,10 +402,16 @@ describe('executeApiCommand session counting (#160)', () => {
     it('returns the Telegram menu buttons as /pstack-setup ps:… actions and walks them', async () => {
       const home = await runner.executeApiCommand(sessionId, chatId, '/pstack-setup', { skipPersist: true });
       expect(home.responseText).toContain('Usage: /pstack-setup');
-      expect(home.actions).toEqual(expect.arrayContaining([{ label: '✅ Turn on', command: '/pstack-setup ps:on' }, { label: 'Close', command: '/pstack-setup ps:x' }]));
+      expect(home.actions).toEqual([{ label: '✅ Turn on', command: '/pstack-setup ps:on' }, { label: 'Effort: session', command: '/pstack-setup ps:de' }, { label: 'Roles ▸', command: '/pstack-setup ps:g' }, { label: 'Reset all', command: '/pstack-setup ps:rs' }, { label: 'Close', command: '/pstack-setup ps:x' }]);
+      expect(home.responseText).toContain('• interrogate reviewers: ');
       const effort = await runner.executeApiCommand(sessionId, chatId, '/pstack-setup ps:de', { skipPersist: true });
       expect(effort.responseText).toContain('Default effort: session');
-      expect(effort.actions).toContainEqual({ label: 'Back', command: '/pstack-setup ps:h' });
+      expect(effort.actions).toContainEqual({ label: '◀ Back', command: '/pstack-setup ps:h' });
+      const roles = await runner.executeApiCommand(sessionId, chatId, '/pstack-setup ps:g', { skipPersist: true });
+      expect(roles.actions).toEqual([{ label: 'Single-model ▸ (13)', command: '/pstack-setup ps:l:s:0' }, { label: 'Panels ▸ (4)', command: '/pstack-setup ps:l:p:0' }, { label: '◀ Back', command: '/pstack-setup ps:h' }]);
+      const panels = await runner.executeApiCommand(sessionId, chatId, '/pstack-setup ps:l:p:0', { skipPersist: true });
+      expect(panels.responseText).toContain('Panel roles');
+      expect(panels.actions).toContainEqual({ label: 'interrogate reviewers · 4 models', command: '/pstack-setup ps:r:16' });
       expect((await runner.executeApiCommand(sessionId, chatId, '/pstack-setup ps:x', { skipPersist: true })).actions).toEqual([]);
     });
 

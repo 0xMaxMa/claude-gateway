@@ -18,16 +18,52 @@ const bugFix = role('bug-fix'), panel = role('interrogate reviewers');
 const buttons = (screen: ReturnType<typeof pstackMenuScreen>) => screen.keyboard.flat();
 
 describe('screens', () => {
-  test('home shows the status, the default effort and every role with its current model', () => {
+  test('home shows the status, the default effort and the role count only, with a Roles button', () => {
     const screen = pstackMenuScreen({ kind: 'home' }, state({ roles: { 'bug-fix': 'gpt-6-sol[1m] @high' } }));
-    expect(screen.text).toContain('Status: ✅ On');
-    expect(screen.text).toContain('Default effort: session');
-    expect(screen.text).toContain('✏️ bug-fix: gpt-6-sol[1m] @high');
-    expect(screen.text).toContain('• perf-issue: claude-fable-5-1');
-    expect(screen.text).toContain('• interrogate reviewers: claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5, claude-haiku-5-5');
-    for (const { role: name } of PSTACK_ROLES) expect(screen.text).toContain(`${name}: `);
-    expect(buttons(screen).map(b => b.data)).toEqual(['ps:off', 'ps:de', ...PSTACK_ROLES.map((_, i) => `ps:r:${i}`), 'ps:rs', 'ps:x']);
-    expect(buttons(screen)[2 + bugFix].text).toBe('✏️ bug-fix');
+    expect(screen.text).toBe('pstack setup\nStatus: 🟢 On\nDefault effort: session\nRoles: 17 (✏️ 1 changed)');
+    expect(screen.keyboard).toEqual([
+      [{ text: 'Turn off', data: 'ps:off' }, { text: 'Effort: session', data: 'ps:de' }],
+      [{ text: 'Roles ▸', data: 'ps:g' }],
+      [{ text: 'Reset all', data: 'ps:rs' }, { text: 'Close', data: 'ps:x' }],
+    ]);
+  });
+
+  test('Roles splits single-model and panel roles, counted from the plugin\'s role list', () => {
+    const screen = pstackMenuScreen({ kind: 'roles' }, state({}));
+    expect(screen.keyboard).toEqual([[{ text: 'Single-model ▸ (13)', data: 'ps:l:s:0' }], [{ text: 'Panels ▸ (4)', data: 'ps:l:p:0' }], [{ text: '◀ Back', data: 'ps:h' }]]);
+    const fewer = { ...plugin, roles: PSTACK_ROLES.filter(r => r.role !== 'arena runners' && r.role !== 'bug-fix') };
+    expect(buttons(pstackMenuScreen({ kind: 'roles' }, { ...state({}), plugin: fewer })).map(b => b.text)).toEqual(['Single-model ▸ (12)', 'Panels ▸ (3)', '◀ Back']);
+  });
+
+  test('a group lists its roles with their current models, 8 a page', () => {
+    const block = { roles: { 'bug-fix': 'gpt-6-sol[1m] @high' } };
+    const first = pstackMenuScreen({ kind: 'list', group: 's', page: 0 }, state(block));
+    const singles = PSTACK_ROLES.map((r, i) => ({ ...r, i })).filter(r => r.models !== 'panel');
+    expect(first.text).toContain('Single-model roles (1/2)');
+    expect(first.text).toContain('✏️ bug-fix: gpt-6-sol[1m] @high');
+    expect(first.text).not.toContain('interrogate reviewers');
+    expect(buttons(first).map(b => b.data)).toEqual([...singles.slice(0, 8).map(r => `ps:r:${r.i}`), 'ps:l:s:1', 'ps:g']);
+    expect(buttons(first).find(b => b.data === `ps:r:${bugFix}`)?.text).toBe('✏️ bug-fix · gpt-6-sol[1m] @high');
+    expect(buttons(first).find(b => b.data === 'ps:r:0')?.text).toBe('feature, refactoring · claude-opus-5-5');
+    expect(buttons(first).find(b => b.data === 'ps:l:s:1')?.text).toBe('Next ▶');
+    const second = pstackMenuScreen({ kind: 'list', group: 's', page: 1 }, state(block));
+    expect(buttons(second).map(b => b.data)).toEqual([...singles.slice(8).map(r => `ps:r:${r.i}`), 'ps:l:s:0', 'ps:g']);
+    expect(buttons(second).find(b => b.data === 'ps:l:s:0')?.text).toBe('◀ Previous');
+    const long = buttons(second).find(b => b.data === `ps:r:${role('reflect judgment, divergent, synthesizer')}`)!.text;
+    expect(long).toMatch(/^reflect judgment.*… · claude-opus-5-5$/);
+    expect(long.length).toBeLessThanOrEqual(40);
+    const panels = pstackMenuScreen({ kind: 'list', group: 'p', page: 0 }, state({}));
+    expect(panels.text).toContain('• interrogate reviewers: claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5, claude-haiku-5-5');
+    expect(buttons(panels).map(b => b.text)).toEqual(['arena runners · 4 models', 'arena cross-judge pool · 4 models', 'architect runners · 4 models', 'interrogate reviewers · 4 models', '◀ Back']);
+    // A stale page past the end shows the last one.
+    expect(pstackMenuScreen({ kind: 'list', group: 'p', page: 5 }, state({})).keyboard).toEqual(panels.keyboard);
+  });
+
+  test('Back on a role returns to the list page it is on', () => {
+    const backOf = (i: number) => buttons(pstackMenuScreen({ kind: 'role', role: i }, state({}))).find(b => b.text === '◀ Back')?.data;
+    expect(backOf(bugFix)).toBe('ps:l:s:0');
+    expect(backOf(role('swarm workers'))).toBe('ps:l:s:1');
+    expect(backOf(panel)).toBe('ps:l:p:0');
   });
 
   test('an agent that is not set up offers Turn on; a missing plugin says how to install', () => {
@@ -42,7 +78,7 @@ describe('screens', () => {
     const screen = pstackMenuScreen({ kind: 'role', role: bugFix }, state({ roles: { 'bug-fix': 'claude-opus-5-5 @high' } }));
     expect(screen.text).toContain('Model: claude-opus-5-5');
     expect(screen.text).toContain('Effort: high');
-    expect(buttons(screen).map(b => b.text)).toEqual(expect.arrayContaining(['Claude models', 'GPT models', '✅ high', 'Default effort', 'Use skill default', 'Back']));
+    expect(buttons(screen).map(b => b.text)).toEqual(expect.arrayContaining(['Claude models', 'GPT models', '✅ high', 'Default effort', 'Use skill default', '◀ Back']));
   });
 
   test('a panel role lists its entries with remove buttons and add buttons per family', () => {
@@ -60,14 +96,15 @@ describe('screens', () => {
     const first = pstackMenuScreen({ kind: 'pick', role: bugFix, add: false, family: 'c', page: 0 }, state({}));
     expect(first.text).toContain('(1/2)');
     expect(buttons(first).find(b => b.data === `ps:m:${bugFix}:claude-fable-5-1`)?.text).toBe('✅ Fable 5.1 · claude-fable-5-1');
-    expect(buttons(first).map(b => b.text)).toEqual(expect.arrayContaining(['Next', 'Back']));
+    expect(buttons(first).map(b => b.text)).toEqual(expect.arrayContaining(['Next ▶', '◀ Back']));
     const second = pstackMenuScreen({ kind: 'pick', role: bugFix, add: false, family: 'c', page: 1 }, state({}));
-    expect(buttons(second).map(b => b.text)).toContain('Previous');
+    expect(buttons(second).map(b => b.text)).toContain('◀ Previous');
   });
 
   test('every button of every screen fits Telegram\'s 64-byte callback_data', () => {
     const block = { roles: { 'bug-fix': 'gpt-6-sol[1m] @xhigh' } };
-    const views = [{ kind: 'home' as const }, { kind: 'effort' as const }, { kind: 'reset' as const },
+    const views = [{ kind: 'home' as const }, { kind: 'effort' as const }, { kind: 'reset' as const }, { kind: 'roles' as const },
+      ...(['s', 'p'] as const).flatMap(group => [0, 1].map(page => ({ kind: 'list' as const, group, page }))),
       ...PSTACK_ROLES.flatMap((_, i) => [{ kind: 'role' as const, role: i }, ...(['c', 'g'] as const).flatMap(family => [0, 1].flatMap(page => [true, false].map(add => ({ kind: 'pick' as const, role: i, add, family, page }))))])];
     for (const view of views) for (const b of buttons(pstackMenuScreen(view, state(block)))) expect(Buffer.byteLength(b.data, 'utf8')).toBeLessThanOrEqual(64);
   });
@@ -75,6 +112,7 @@ describe('screens', () => {
   test('the text form lists roles, the syntax and the model IDs by family, without the duplicates', () => {
     const text = pstackMenuText(state({}), 'Usage: x');
     expect(text).toContain('• bug-fix: claude-fable-5-1');
+    for (const { role: name } of PSTACK_ROLES) expect(text).toContain(`${name}: `);
     expect(text).toContain('Usage: x');
     expect(text).toMatch(/Claude: claude-fable-5-1, /);
     expect(text).toMatch(/GPT: gpt-6-sol\[1m\]/);
@@ -83,11 +121,34 @@ describe('screens', () => {
   });
 });
 
+test('walks main → Roles → group → page → role → Back through callback data alone', () => {
+  const s = state({});
+  const go = (data: string) => pstackMenuScreen(pstackMenuStep(data, s).view, s);
+  const tap = (screen: ReturnType<typeof pstackMenuScreen>, text: string | RegExp) => {
+    const hit = buttons(screen).find(b => (typeof text === 'string' ? b.text === text : text.test(b.text)));
+    if (!hit) throw new Error(`no button ${text} in ${buttons(screen).map(b => b.text).join(' | ')}`);
+    return go(hit.data);
+  };
+  let screen = go('ps:h');
+  screen = tap(screen, 'Roles ▸');
+  screen = tap(screen, /^Single-model ▸/);
+  screen = tap(screen, 'Next ▶');
+  expect(screen.text).toContain('(2/2)');
+  screen = tap(screen, /^swarm workers · /);
+  expect(screen.text).toContain('swarm workers (skill default)');
+  screen = tap(screen, '◀ Back');
+  expect(screen.text).toContain('Single-model roles (2/2)');
+  screen = tap(screen, '◀ Back');
+  expect(buttons(screen).map(b => b.data)).toEqual(['ps:l:s:0', 'ps:l:p:0', 'ps:h']);
+  screen = tap(screen, '◀ Back');
+  expect(screen.text).toContain('pstack setup');
+});
+
 describe('steps', () => {
   const step = (data: string, block: PstackMenuState['block'] = {}) => pstackMenuStep(data, state(block));
 
   test('navigation changes nothing', () => {
-    for (const data of ['ps:h', 'ps:de', 'ps:rs', `ps:r:${bugFix}`, `ps:p:${bugFix}:s:g:1`, `ps:p:${panel}:a:c:0`, 'ps:x']) expect(step(data).next).toBeUndefined();
+    for (const data of ['ps:h', 'ps:de', 'ps:rs', 'ps:g', 'ps:l:s:1', 'ps:l:p:0', `ps:r:${bugFix}`, `ps:p:${bugFix}:s:g:1`, `ps:p:${panel}:a:c:0`, 'ps:x']) expect(step(data).next).toBeUndefined();
   });
 
   test('on, off, reset and default effort', () => {
@@ -113,7 +174,7 @@ describe('steps', () => {
   });
 
   test.each([
-    'ps:nope', 'ps:r:99', 'ps:de:turbo', `ps:m:${bugFix}:grok-4`, `ps:m:${bugFix}:claude-unknown`, `ps:a:${bugFix}:claude-opus-5-5`,
+    'ps:nope', 'ps:r:99', 'ps:l:x:0', 'ps:l:s:', 'ps:l:s:1234', 'ps:de:turbo', `ps:m:${bugFix}:grok-4`, `ps:m:${bugFix}:claude-unknown`, `ps:a:${bugFix}:claude-opus-5-5`,
     `ps:m:${panel}:claude-opus-5-5`, `ps:e:${panel}:high`, `ps:e:${bugFix}:turbo`, `ps:rm:${bugFix}:0`, `ps:rm:${panel}:9`, `ps:p:${bugFix}:a:c:0`, `ps:p:${bugFix}:s:x:0`,
   ])('refuses forged or stale data %s', data => {
     expect(() => step(data)).toThrow(PstackConfigError);

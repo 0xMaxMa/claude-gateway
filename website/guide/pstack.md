@@ -21,8 +21,10 @@ An agent that is not set up loads **nothing** from pstack, even when the plugin 
 
 On Telegram, send `/pstack_setup` (or `/pstack-setup`) alone in a direct message with the bot. It opens a menu that edits itself in place:
 
-- **Main screen:** whether pstack is on, the default effort, and every role with its current model and level (✏️ marks a role you changed, • a skill default). Buttons turn pstack on or off, open the default effort, open a role, reset everything to the skill defaults (after a confirmation), or close the menu.
-- **Role screen:** the role's model and effort. Pick a model from the Claude or GPT list (paged; a `[1m]` ID is listed only when the model has no base ID), set an effort level or go back to the default effort, or drop your change with **Use skill default**.
+- **Main screen:** whether pstack is on, the default effort, and how many roles there are and how many you changed. Buttons turn pstack on or off, open the default effort, open **Roles ▸**, reset everything to the skill defaults (after a confirmation), or close the menu.
+- **Roles screen:** **Single-model ▸** and **Panels ▸**, each with its number of roles in the installed plugin.
+- **Role list:** one button per role with its current model (a panel role shows how many models it runs; ✏️ marks a role you changed), 8 a page.
+- **Role screen:** the role's model and effort. Pick a model from the Claude or GPT list (paged; a `[1m]` ID is listed only when the model has no base ID), set an effort level or go back to the default effort, or drop your change with **Use skill default**. **◀ Back** returns to the list page the role is on.
 - **Panel role screen** (`interrogate reviewers`, `arena runners`…): one ➖ button per entry and ➕ buttons that add one Claude or GPT model. The last entry cannot be removed; use **Use skill default**.
 - **Default effort screen:** `session` or a level.
 
