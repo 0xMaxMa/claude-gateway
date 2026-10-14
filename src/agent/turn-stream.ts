@@ -358,7 +358,8 @@ function terminalError(event: StreamEvent): Error {
  */
 export interface ApiStreamCallbacks {
   onChunk: (event: StreamEvent, seq?: number) => void;
-  onDone: (fullText: string, attachments: ApiAttachment[], seq?: number) => void;
+  /** `extra` adds fields to the result frame (a built-in command's structured reply). */
+  onDone: (fullText: string, attachments: ApiAttachment[], seq?: number, extra?: Record<string, unknown>) => void;
   onError: (err: Error, seq?: number) => void;
   /** Another connection resumed this turn; this one is no longer being written to. */
   onDisplaced?: () => void;

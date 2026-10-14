@@ -10,12 +10,13 @@ const descriptions: Record<string, string> = {
   'pstack-setup': 'Set up pstack for this agent: /pstack-setup [on|off|<role>: <model-id>]',
   restart: 'Restart the session process; keep history (does not restart the gateway or app)',
   start: 'Show pairing instructions', status: 'Show pairing status', help: 'Show available commands',
+  tasks: 'View tasks, progress and cancellation controls',
 };
 
 /** Shared discoverable built-ins for help, session shortcuts and the API picker. */
 export function commandCatalog(channel: CommandChannel): Array<{name: string; description: string}> {
   return Object.entries(BUILTIN_COMMANDS)
-    .filter(([, definition]) => definition.channels.includes(channel))
+    .filter(([, definition]) => definition.channels.includes(channel) && !definition.hidden)
     .map(([name]) => ({name: `/${name}`, description: descriptions[name]}));
 }
 
@@ -24,9 +25,12 @@ export function commandHelp(channel: CommandChannel, orchestration = false, inte
   const lines = commandCatalog(channel).map(command => {
     const name = command.name.slice(1);
     let description = command.description;
-    if (name === 'model' && ['telegram', 'discord', 'line'].includes(channel)) description = 'Show the model; change it in a private chat: /model [model ID]';
+    // Telegram's receiver answers /model itself and only shows it; its /models buttons switch.
+    if (name === 'model' && channel === 'telegram') description = 'Show the current model; switch with /models';
+    if (name === 'model' && ['discord', 'line'].includes(channel)) description = 'Show the model; change it in a private chat: /model [model ID]';
+    if (name === 'new' && channel === 'api') description = 'Create a session: /new [name] (the reply carries its session ID)';
     if (name === 'stop' && orchestration) description = 'Stop the reply and choose a task to cancel';
-    if (name === 'compact' && channel !== 'api') description += '; confirmation required';
+    if (name === 'compact' || (['clear', 'restart'].includes(name) && ['telegram', 'api'].includes(channel))) description += '; confirmation required';
     if (name === 'pstack-setup' && channel === 'telegram') description = 'Set up pstack for this agent with buttons (direct message)';
     if (name === 'pstack-setup' && channel === 'api') description = 'Show the pstack setup; change it with /pstack-setup <role>: <model-id> (needs write access to this agent)';
     // A tapped Telegram command stops at the first character outside [a-z0-9_].
@@ -42,3 +46,6 @@ export function commandHelp(channel: CommandChannel, orchestration = false, inte
   if (channel === 'api') lines.push('', 'REST controls (not slash commands):', 'PUT /api/v1/agents/:agentId/model — Change the model', 'GET/PATCH /api/v1/agents/:agentId/voice-settings — Read or update voice settings', 'GET /api/v1/agents/:agentId/sessions/:sessionId/tasks — List session tasks', 'POST /api/v1/agents/:agentId/sessions/:sessionId/tasks/:taskId/answer or /cancel — Answer or cancel a task');
   return 'Available commands\n\n' + lines.join('\n');
 }
+
+/** A button on an API command reply: send `command` back as the message, to the same session with the same key. */
+export interface CommandAction { label: string; command: string }

@@ -1,4 +1,4 @@
-import { commandCatalog } from '../agent/command-help';
+import { type CommandAction, commandCatalog } from '../agent/command-help';
 import { responseFailureMessage } from '../orchestration/response-errors';
 import { voiceSettingsRouter } from './voice-settings-router';
 import { Router, Request, Response } from 'express';
@@ -114,6 +114,16 @@ export function isValidAgentId(v: unknown): v is string {
 }
 
 /**
+ * The structured part of a built-in command reply, beside its text: `command`
+ * (the base command), `result` (its fields) and `actions` (buttons; each
+ * `command` is sent back as the next message, so it runs with the same key,
+ * session and checks as anything typed).
+ */
+function commandReplyFields(message: string, reply: { result: Record<string, unknown>; actions?: CommandAction[] }): Record<string, unknown> {
+  return { command: message.trim().split(/\s+/)[0], result: reply.result, actions: reply.actions ?? [] };
+}
+
+/**
  * The one place a turn's stream events become SSE frames (#421).
  *
  * All three streaming producers — POST /messages, the cross-channel
@@ -143,7 +153,7 @@ function createSseCallbacks(
     onChunk: (event, seq) => {
       try { res.write(`data: ${JSON.stringify({ ...event, seq })}\n\n`); } catch { /* client gone */ }
     },
-    onDone: (fullText, attachments, seq) => {
+    onDone: (fullText, attachments, seq, extra) => {
       try {
         const frame: Record<string, unknown> = {
           type: 'result',
@@ -151,6 +161,7 @@ function createSseCallbacks(
           seq,
           ...ids(),
           duration_ms: Date.now() - meta.startTime,
+          ...extra,
         };
         if (attachments?.length) frame['attachments'] = attachments;
         res.write(`data: ${JSON.stringify(frame)}\n\n`);
@@ -860,11 +871,11 @@ export function createApiRouter(
         if (isBuiltinCommand) {
           openSseStream(res);
           try {
-            const { responseText } = await runner.executeApiCommand(
+            const reply = await runner.executeApiCommand(
               sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, model: modelStr, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId) },
             );
-            sseCallbacks.onChunk({ type: 'text_delta', text: responseText } as import('../types').StreamEvent);
-            sseCallbacks.onDone(responseText, []);
+            sseCallbacks.onChunk({ type: 'text_delta', text: reply.responseText } as import('../types').StreamEvent);
+            sseCallbacks.onDone(reply.responseText, [], undefined, commandReplyFields(commandMessage, reply));
           } catch (err: unknown) {
             sseCallbacks.onError(err as Error);
           }
@@ -913,11 +924,14 @@ export function createApiRouter(
       try {
         let responseText: string;
         let attachments: import('../types').ApiAttachment[] = [];
+        let commandFields: Record<string, unknown> = {};
         if (isBuiltinCommand) {
-          // Built-in command — answer locally, return the same JSON shape as a normal reply.
-          ({ responseText } = await runner.executeApiCommand(
+          // Built-in command — answer locally, return the same JSON shape as a normal reply plus its structured part.
+          const reply = await runner.executeApiCommand(
             sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId) },
-          ));
+          );
+          responseText = reply.responseText;
+          commandFields = commandReplyFields(commandMessage, reply);
         } else {
           const agentCfgSync = agentConfigs.get(agentId)!;
           const allowToolsSync = agentCfgSync.allow_tools ?? !!apiKey.allow_tools;
@@ -940,6 +954,7 @@ export function createApiRouter(
           response: responseText,
           session_id: sessionId,
           duration_ms: Date.now() - startTime,
+          ...commandFields,
         };
         if (attachments.length) syncResult['attachments'] = attachments;
         res.json(syncResult);
@@ -4605,7 +4620,7 @@ export function createApiRouter(
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
     try {
-      const { result } = await runner.executeApiCommand(sessionId, chatId, '/clear', { skipPersist: true });
+      const { result } = await runner.executeApiCommand(sessionId, chatId, '/clear confirm', { skipPersist: true });
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -4621,7 +4636,7 @@ export function createApiRouter(
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
     try {
-      const { result } = await runner.executeApiCommand(sessionId, chatId, '/compact', { skipPersist: true });
+      const { result } = await runner.executeApiCommand(sessionId, chatId, '/compact confirm', { skipPersist: true });
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -4653,7 +4668,7 @@ export function createApiRouter(
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
     try {
-      const { result } = await runner.executeApiCommand(sessionId, chatId, '/restart', { skipPersist: true });
+      const { result } = await runner.executeApiCommand(sessionId, chatId, '/restart confirm', { skipPersist: true });
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });

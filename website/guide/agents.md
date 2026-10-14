@@ -31,7 +31,7 @@ The gateway assembles workspace files into `CLAUDE.md` on startup and file chang
 
 In a paired Telegram private chat, `/session` shows the current session, `/sessions` switches between sessions, and `/new <name>` starts a new one. `/compact` compacts the native Claude Code context without rewriting chat history. `/stop` interrupts the current turn. `/restart` restarts a session after confirmation.
 
-Use `/help` in any chat channel for the supported commands in that channel and mode. LINE, Discord and Slack show native Yes/No controls before `/compact` or `/restart`; WhatsApp and WeChat show equivalent confirmation action commands. Only the requesting user can confirm, within five minutes and in the same session. API clients execute context commands directly and should provide their own confirmation UI when needed.
+Use `/help` in any chat channel for the supported commands in that channel and mode. LINE, Discord and Slack show native Yes/No controls before `/compact` or `/restart`; WhatsApp and WeChat show equivalent confirmation action commands. Only the requesting user can confirm, within five minutes and in the same session. The Chat API asks too: `/clear`, `/compact` and `/restart` return a prompt with Yes/No actions, and a caller that already confirmed sends `/clear confirm` (see [command replies](/api/messages#command-reply)).
 
 Changing the agent's model affects all its sessions. Use `/models` and confirm the choice in a private chat. Chat history and the model's active context are separate: compacting context does not mean the persistent history database has been erased.
 

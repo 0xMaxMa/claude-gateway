@@ -8,23 +8,30 @@ interface CommandDef {
   wordBoundary?: boolean;
   /** Another spelling, matched like the name but not listed: Telegram command names cannot contain `-`. */
   alias?: string;
+  /** Matched but never listed in help or the command picker (`/orch <token>` comes from a reply's actions). */
+  hidden?: boolean;
 }
 
 export const BUILTIN_COMMANDS: Record<string, CommandDef> = {
   session:  { channels: [...CHAT_CHANNELS, 'api'] },
   sessions: { channels: [...CHAT_CHANNELS, 'api'] },
-  new:      { channels: ['telegram', 'discord'], wordBoundary: false },
-  rename:   { channels: ['telegram'], wordBoundary: false },
+  new:      { channels: ['telegram', 'discord', 'api'], wordBoundary: false },
+  rename:   { channels: ['telegram', 'api'], wordBoundary: false },
   clear:    { channels: [...CHAT_CHANNELS, 'api'] },
   compact:  { channels: [...CHAT_CHANNELS, 'api'] },
   stop:     { channels: [...CHAT_CHANNELS, 'api'], wordBoundary: false },
   model:    { channels: ['telegram', 'discord', 'line', 'api'] },
-  models:   { channels: ['telegram', 'discord', 'line'] },
+  models:   { channels: ['telegram', 'discord', 'line', 'api'] },
   'pstack-setup': { channels: ['telegram', 'discord', 'line', 'api'], alias: 'pstack_setup' },
   restart:  { channels: [...CHAT_CHANNELS, 'api'], wordBoundary: false },
   start:    { channels: ['telegram'] },
   help:     { channels: [...CHAT_CHANNELS, 'api'] },
   status:   { channels: ['telegram'] },
+  // Chat channels route these through their own orchestration controls before this gate.
+  tasks:    { channels: ['api'] },
+  voice:    { channels: ['api'], hidden: true },
+  voices:   { channels: ['api'], hidden: true },
+  orch:     { channels: ['api'], hidden: true },
 };
 
 const _cache = new Map<CommandChannel, RegExp>();

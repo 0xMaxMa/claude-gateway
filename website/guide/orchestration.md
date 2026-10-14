@@ -146,7 +146,7 @@ Installed skill metadata is kept in the stable Agent system prefix, not appended
 
 ### Context commands across channels
 
-`/clear` and `/compact` share the same context handlers in Telegram, Discord, LINE, Slack, WhatsApp, WhatsApp Cloud, WeChat, and the Chat API (including streaming requests and the dedicated session endpoints). They preserve gateway chat history. Telegram adds a confirmation step; this does not change the operation. Discord registers native slash commands when its receiver starts. In Slack, register the slash commands in the Slack app or send them as an app mention; native slash commands cannot be used inside threads. Other chat channels accept the commands as message text. Normal channel access checks still apply.
+`/clear` and `/compact` share the same context handlers in Telegram, Discord, LINE, Slack, WhatsApp, WhatsApp Cloud, WeChat, and the Chat API (including streaming requests and the dedicated session endpoints). They preserve gateway chat history. Telegram and the Chat API add a confirmation step (the API's `/clear confirm` skips it, as do the session endpoints); this does not change the operation. Discord registers native slash commands when its receiver starts. In Slack, register the slash commands in the Slack app or send them as an app mention; native slash commands cannot be used inside threads. Other chat channels accept the commands as message text. Normal channel access checks still apply.
 
 A continuation mistakenly spawned during update intake can also recover: a later committed update must target both the captured intake task and the rejected continuation’s predecessor. Unrelated successes do not clear the warning.
 

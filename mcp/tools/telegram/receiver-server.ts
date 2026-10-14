@@ -50,7 +50,7 @@ import { formatTurnIncident, type TurnIncident } from '../../../dist/agent/turn-
 import { createIncidentStore } from '../../../dist/agent/incident-store.js'
 import type { RecoveryOutcome } from '../../../dist/agent/incident.js'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
-import { normalizeTelegramLineBreaks, resolveTelegramReplyFormat, migrateAccess, telegramDisplayName } from './pure'
+import { normalizeTelegramLineBreaks, resolveTelegramReplyFormat, migrateAccess, telegramDisplayName, groupCommandReply, isGroupCommand, stripCommandTarget } from './pure'
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits'
 
 // Standalone fallback: default state dir to ~/.claude/channels/telegram
@@ -527,6 +527,7 @@ function countPending(access: Access, kind: 'dm' | 'group'): number {
 function isMentioned(ctx: Context, extraPatterns?: string[]): boolean {
   const entities = ctx.message?.entities ?? ctx.message?.caption_entities ?? []
   const text = ctx.message?.text ?? ctx.message?.caption ?? ''
+  if (isGroupCommand(text, botUsername)) return true
   for (const e of entities) {
     if (e.type === 'mention') {
       const mentioned = text.slice(e.offset, e.offset + e.length)
@@ -996,6 +997,7 @@ async function handleInbound(
   const access = result.access
   const from = ctx.from!
   const chat_id = String(ctx.chat!.id)
+  text = stripCommandTarget(text, botUsername)
   const msgId = ctx.message?.message_id
 
   // Permission-reply intercept: if this looks like "yes xxxxx" for a
@@ -1147,10 +1149,16 @@ async function handleInbound(
 
 if (!SEND_ONLY) {
 
-// Commands are DM-only. Responding in groups would: (1) leak pairing codes via
-// /status to other group members, (2) confirm bot presence in non-allowlisted
-// groups, (3) spam channels the operator never approved. Silent drop matches
-// the gate's behavior for unrecognized groups.
+// Commands are DM-only. Answering them in a group would leak pairing codes via
+// /status to other members and act for the whole agent from a shared chat, so
+// an allowed group gets a pointer to the direct message instead; a group the
+// gate does not allow stays silent, so its members learn nothing. /stop, /new,
+// /rename and /pstack_setup are forwarded and answered by the gateway there.
+bot.on('message:text', async (ctx, next) => {
+  const reply = groupCommandReply(loadAccess(), { chatType: ctx.chat.type, chatId: String(ctx.chat.id), fromId: String(ctx.from.id), text: ctx.message.text, botUsername })
+  if (reply === undefined) return next()
+  await ctx.reply(reply, { reply_parameters: { message_id: ctx.message.message_id } }).catch(() => {})
+})
 
 bot.command('start', async ctx => {
   if (ctx.chat?.type !== 'private') return

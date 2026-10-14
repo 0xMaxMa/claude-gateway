@@ -3,14 +3,14 @@ import { BUILTIN_COMMANDS } from '../../src/agent/builtin-commands';
 import { CHAT_CHANNELS } from '../../src/history/types';
 test.each([...CHAT_CHANNELS,'api'] as const)('%s help lists exactly the registered core commands',channel=>{
  const text=commandHelp(channel);
- for(const [command,definition] of Object.entries(BUILTIN_COMMANDS)) expect(text.includes(`/${channel==='telegram'?definition.alias??command:command} —`)).toBe(definition.channels.includes(channel));
+ for(const [command,definition] of Object.entries(BUILTIN_COMMANDS)) expect(text.includes(`/${channel==='telegram'?definition.alias??command:command} —`)).toBe(definition.channels.includes(channel) && !definition.hidden);
  expect(text).not.toContain('undefined');
 });
 test('mode-specific help does not advertise unsupported voice or API slash controls',()=>{
  expect(commandHelp('line',true)).toContain('/voice [on|auto|off]');
  expect(commandHelp('line',false)).not.toContain('/tasks');
  expect(commandHelp('wechat',true)).not.toContain('/voice');
- expect(commandHelp('api',true)).not.toMatch(/^\/tasks(?:\s|$)/m);
+ expect(commandHelp('api',true)).not.toMatch(/^\/(?:voice|voices|orch)\b/m);
  expect(commandHelp('discord',true,true)).not.toContain('/cli');
  expect(commandHelp('telegram',true,true)).toContain('/cli');
 });
@@ -23,10 +23,25 @@ test.each([...CHAT_CHANNELS,'api'] as const)('%s session shortcuts only advertis
  for(const shortcut of shortcuts) expect(commandCatalog(channel).some(c=>c.name===shortcut)).toBe(true);
  expect(shortcuts).toContain('/help');
 });
-test('API catalog includes help and sessions and excludes channel-only commands', () => {
+test('API catalog includes the web commands and hides the ones that only answer or carry a token', () => {
  const names=commandCatalog('api').map(c=>c.name);
- expect(names).toEqual(expect.arrayContaining(['/help','/sessions','/restart','/compact']));
- expect(names).not.toContain('/new'); expect(names).not.toContain('/rename');
+ expect(names).toEqual(expect.arrayContaining(['/help','/sessions','/restart','/compact','/models','/new','/rename','/tasks']));
+ for (const hidden of ['/voice','/voices','/orch','/status','/start']) expect(names).not.toContain(hidden);
+});
+
+// PR #591: Telegram's receiver answers /model itself and ignores an argument; its /models buttons switch.
+test('Telegram help describes /model as view-only and points at /models', () => {
+  const line = commandHelp('telegram').split('\n').find(l => l.startsWith('/model —'))!;
+  expect(line).toBe('/model — Show the current model; switch with /models');
+  expect(commandHelp('discord')).toContain('/model — Show the model; change it in a private chat: /model [model ID]');
+});
+
+test('help says which commands confirm first', () => {
+  for (const name of ['clear', 'compact', 'restart']) {
+    expect(commandHelp('api')).toMatch(new RegExp(`^/${name} — .*; confirmation required$`, 'm'));
+    expect(commandHelp('telegram')).toMatch(new RegExp(`^/${name} — .*; confirmation required$`, 'm'));
+  }
+  expect(commandHelp('discord')).not.toMatch(/^\/clear — .*confirmation/m);
 });
 
 test('session status labels a context measured on a different model separately (#576)', () => {

@@ -51,7 +51,7 @@ import { recordDeniedSender, getPendingSender, generatePairingCode, clearPending
 import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml, containsTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
-import { commandHelp } from './command-help';
+import { type CommandAction, commandHelp } from './command-help';
 import { SessionConfirmations } from './session-confirmations';
 import { DEFAULT_CONTEXT_WINDOW } from './model-catalog';
 import { SafeModeManager } from './safe-mode';
@@ -110,6 +110,7 @@ import { savePstackConfig } from '../pstack/setup';
 import { PstackMenuScreen, PstackMenuState, PstackMenuStep, pstackMenuScreen, pstackMenuStep, pstackMenuText } from '../pstack/menu';
 import type { AgentPstackConfig } from '../pstack/config';
 
+const PSTACK_WRITE_REQUIRED = 'Changing the pstack setup needs an API key with write access to this agent. /pstack-setup without arguments shows it.';
 const PSTACK_SETUP_USAGE = 'Usage: /pstack-setup on | off | <role>: <model-id>[ @<level>] (one per line; "<role>: default" drops an override; "<role> += <model-id>[ @<level>]" / "<role> -= <model-id>" edit a panel list; "default effort: <level|session>").';
 
 const PROTECTED_WORKSPACE_FILES = [
@@ -3007,6 +3008,11 @@ export class AgentRunner extends EventEmitter {
    * exactly that state before this.
    */
   private async handleCommandModels(chatId: string): Promise<void> {
+    this.writeAutoForward(chatId, (await this.modelList('Switch with /model <id or alias>')).text);
+  }
+
+  /** The /models list: configured models, then live-only ones, each marked when current. */
+  private async modelList(switchHint: string): Promise<{ text: string; models: Array<{ id: string; label: string; current: boolean }> }> {
     const models = await this.availableModels();
     const configuredIds = new Set((this.gatewayConfig.gateway.models ?? DEFAULT_MODELS).map(m => m.id));
     const configured = models.filter(m => configuredIds.has(m.id));
@@ -3024,8 +3030,8 @@ export class AgentRunner extends EventEmitter {
         lines.push(`${marker}${m.label} — \`${m.id}\``);
       }
     }
-    lines.push('', 'Switch with /model <id or alias>');
-    this.writeAutoForward(chatId, lines.join('\n'));
+    lines.push('', switchHint);
+    return { text: lines.join('\n'), models: [...configured, ...live].map(m => ({ id: m.id, label: m.label, current: m.id === current })) };
   }
 
   /**
@@ -3080,7 +3086,7 @@ export class AgentRunner extends EventEmitter {
   }
 
   /** One /pstack-setup button (Telegram): apply its change, if any, and render the next screen. */
-  private async pstackMenu(data: string): Promise<PstackMenuScreen & { toast?: string }> {
+  private async pstackMenu(data: string, canWrite = true): Promise<PstackMenuScreen & { toast?: string }> {
     const state = await this.pstackMenuState();
     let step: PstackMenuStep;
     try { step = pstackMenuStep(data, state); } catch (error) {
@@ -3088,6 +3094,7 @@ export class AgentRunner extends EventEmitter {
       return { ...pstackMenuScreen({ kind: 'home' }, state, `⚠️ ${error.message}`), toast: error.message };
     }
     if (step.next === undefined) return pstackMenuScreen(step.view, state);
+    if (!canWrite) return { ...pstackMenuScreen(step.view, state, `⚠️ ${PSTACK_WRITE_REQUIRED}`), toast: PSTACK_WRITE_REQUIRED };
     try { await this.savePstack(step.next ?? undefined); } catch (error) {
       if (!(error instanceof PstackConfigError)) throw error;
       return { ...pstackMenuScreen(step.view, state, `⚠️ ${error.code}: ${error.message}`), toast: error.message };
@@ -5457,7 +5464,7 @@ export class AgentRunner extends EventEmitter {
     chatId: string,
     command: string,
     opts?: { skipPersist?: boolean; model?: string; principalId?: string; displayCommand?: string; clientMessageId?: string; executionTaskId?:string; canWriteAgent?: boolean },
-  ): Promise<{ result: Record<string, unknown>; responseText: string }> {
+  ): Promise<{ result: Record<string, unknown>; responseText: string; actions: CommandAction[] }> {
     const agentId = this.agentConfig.id;
     const storeChatId = chatId;           // sessionStore adds channel prefix internally
     const dbChatId = `api-${chatId}`;    // historyDb uses full channel-chatId key
@@ -5467,6 +5474,7 @@ export class AgentRunner extends EventEmitter {
     // "/stop now") resolve to their base command instead of falling through to the
     // unknown-command branch. The router gate is prefix-based, so these already pass.
     const cmd = command.trim().split(/\s+/)[0] ?? '';
+    const arg = command.trim().slice(cmd.length).trim();
 
     // Validate BEFORE persisting anything. Reuse the same api-channel gate as the router
     // so an unknown command throws with nothing written — no orphan user row is left, and
@@ -5498,16 +5506,82 @@ export class AgentRunner extends EventEmitter {
       this.historyDb.insertMessage({ chatId: dbChatId, sessionId, source: 'api', role, content, ts: Date.now(), ...(role === 'user' && opts?.clientMessageId ? { clientMessageId: opts.clientMessageId } : {}) });
     };
 
-    // Persist the full user command before executing so it appears in history.
-    persist('user', opts?.displayCommand ?? command);
+    // Persist the full user command before executing so it appears in history. A pressed
+    // action (`/orch <token>`, `/pstack-setup ps:…`, `/stop <menu> <n>`) is not something the
+    // user typed, so only its reply is kept.
+    const display = opts?.displayCommand ?? command;
+    if (!/^\/(?:orch \S+|pstack[-_]setup ps:\S+|stop [0-9a-f-]{36} \d+)$/.test(display.trim())) persist('user', display);
 
     let result: Record<string, unknown>;
     let responseText: string;
+    let actions: CommandAction[] = [];
     let forcePersist = false;
+    const apiOrchestration = this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels??['api']).includes('api') ? this.orchestration : undefined;
+    const confirmScope = { channel: 'api', chatId, thread: '', sessionId, principalId: opts?.principalId ?? '' };
+    const contextCommand = async (operation: 'clear' | 'compact' | 'restart'): Promise<{ result: Record<string, unknown>; responseText: string }> => {
+      if (operation === 'clear') {
+        await this.clearContext(sessionId);
+        return { result: { success: true, historyUnchanged: true, historyLimit: 50 }, responseText: 'Claude Code context reset. Chat history is unchanged. Your next message starts a new context with the latest 50 messages.' };
+      }
+      if (operation === 'compact') {
+        await this.compactContext(sessionId, opts?.model);
+        return { result: { success: true, native: true, historyUnchanged: true }, responseText: 'Claude Code context compacted. Chat history is unchanged.' };
+      }
+      await this.restartProcess(sessionId, sessionId);
+      return { result: { restarting: true }, responseText: 'Session is restarting.' };
+    };
     try {
       if (cmd === '/help') {
         responseText = commandHelp('api', !!this.agentConfig.orchestration?.enabled);
         result = {text:responseText};
+      } else if ((cmd === '/clear' || cmd === '/compact' || cmd === '/restart') && arg !== 'confirm') {
+        // Asked first, as in the chat channels: Yes/No are one-use actions for this session and key,
+        // valid for five minutes. A caller that has already confirmed sends `<command> confirm`.
+        const menu = this.sessionConfirmations.open(confirmScope, cmd.slice(1) as 'clear' | 'compact' | 'restart');
+        result = { confirmationRequired: true };
+        responseText = `${menu.text}\n\nOr reply ${cmd} confirm.`;
+        actions = menu.buttons.map(button => ({ label: button.label, command: `/orch ${button.data.replace(/^orch:/, '')}` }));
+      } else if (cmd === '/clear' || cmd === '/compact' || cmd === '/restart') {
+        ({ result, responseText } = await contextCommand(cmd.slice(1) as 'clear' | 'compact' | 'restart'));
+      } else if (cmd === '/orch' && this.sessionConfirmations.owns(command.trim())) {
+        const chosen = (() => { try { return this.sessionConfirmations.choose(confirmScope, command.trim()); } catch (error) { return error as Error; } })();
+        if (chosen instanceof Error) { result = { error: 'CONFIRMATION_UNAVAILABLE' }; responseText = chosen.message; }
+        else if (chosen === 'cancel') { result = { cancelled: true }; responseText = 'Cancelled.'; }
+        else ({ result, responseText } = await contextCommand(chosen));
+      } else if (cmd === '/models') {
+        const list = await this.modelList('Change the model with the model picker or PUT /api/v1/agents/:agentId/model.');
+        result = { model: this.agentConfig.claude.model, models: list.models };
+        responseText = list.text;
+      } else if (cmd === '/new') {
+        // An API client picks its session by session_id, so this creates one and names it; the client opens it.
+        const meta = await this.createApiSession(storeChatId, undefined, arg || undefined);
+        result = { sessionId: meta.id, sessionName: meta.name };
+        responseText = `New session created: "${meta.name}". This conversation stays in the current session; open the new one to continue there.`;
+      } else if (cmd === '/rename') {
+        if (!arg) {
+          result = { error: 'SESSION_NAME_REQUIRED' };
+          responseText = '⚠️ Usage: /rename <new name>\nExample: /rename Design review';
+        } else {
+          result = await this.updateApiSession(storeChatId, sessionId, { sessionName: arg });
+          responseText = `✅ Session renamed to "${arg}"`;
+        }
+      } else if (cmd === '/tasks' || cmd === '/orch') {
+        // The chat channels' task browser; its buttons come back as `/orch <token>`, bound to this session and principal.
+        if (!apiOrchestration || !opts?.principalId) {
+          result = {};
+          responseText = cmd === '/orch' ? 'This action expired or is unavailable. Run the command again.' : 'Task controls require orchestration mode.';
+        } else {
+          apiOrchestration.authorizeSession(sessionId, opts.principalId);
+          let menu: { text: string; buttons: Array<{ label: string; data: string }>; close?: boolean };
+          try { menu = await apiOrchestration.channelControls.handle({ channel: 'api', chatId, thread: '', sessionId, principalId: opts.principalId }, cmd === '/tasks' ? '/tasks' : `/orch ${arg}`); }
+          catch { menu = { text: 'Control unavailable or expired. Please open the command again.', buttons: [] }; }
+          result = { closed: menu.close === true };
+          responseText = menu.text;
+          actions = menu.buttons.map(button => ({ label: button.label, command: `/orch ${button.data.replace(/^orch:/, '')}` }));
+        }
+      } else if (cmd === '/voice' || cmd === '/voices') {
+        result = {};
+        responseText = 'Voice on the web is set in the voice settings, not with a chat command: GET/PATCH /api/v1/agents/:agentId/voice-settings, and GET /api/v1/agents/:agentId/voice-sessions/voices for the voice list.';
       } else if (cmd === '/model') {
         const model = this.agentConfig.claude.model;
         const hasArg = command.trim().includes(' ');
@@ -5526,6 +5600,8 @@ export class AgentRunner extends EventEmitter {
           } else {
             const menu=this.orchestration.stopControls.open(sessionId,opts.principalId);
             responseText=stopMenuText(menu); result={...menu,responseText};
+            // Same choices as Telegram's /stop buttons; a bare number reply still works too.
+            if (menu.tasks.length) actions=[...menu.tasks.map((t,i)=>({label:`${i+1}. ${t.title} (${t.state})`,command:`/stop ${menu.menuId} ${i+1}`})),{label:'Dismiss',command:`/stop ${menu.menuId} 0`}];
           }
           forcePersist=true;
         } else {
@@ -5546,15 +5622,19 @@ export class AgentRunner extends EventEmitter {
         }
       } else if (cmd === '/pstack-setup' || cmd === '/pstack_setup') {
         // Changes need the same access as PUT /api/v1/agents/:agentId/pstack.
-        const arg = command.trim().replace(/^\/pstack[-_]setup/, '').trim();
-        responseText = !arg ? await this.pstackSetupText()
-          : opts?.canWriteAgent ? await this.applyPstackSetup(arg)
-          : 'Changing the pstack setup needs an API key with write access to this agent. /pstack-setup without arguments shows it.';
+        // `ps:…` is a menu button (the Telegram menu's callback data) sent back from the actions.
+        let screen: PstackMenuScreen | undefined;
+        if (!arg) {
+          responseText = await this.pstackSetupText();
+          screen = pstackMenuScreen({ kind: 'home' }, await this.pstackMenuState());
+        } else if (/^ps:\S+$/.test(arg)) {
+          screen = await this.pstackMenu(arg, !!opts?.canWriteAgent);
+          responseText = screen.text;
+        } else {
+          responseText = opts?.canWriteAgent ? await this.applyPstackSetup(arg) : PSTACK_WRITE_REQUIRED;
+        }
         result = { pstack: this.agentConfig.pstack ?? null };
-      } else if (cmd === '/restart') {
-        await this.restartProcess(sessionId, sessionId);
-        result = { restarting: true };
-        responseText = 'Session is restarting.';
+        if (screen && !screen.closed) actions = screen.keyboard.flat().map(button => ({ label: button.text, command: `/pstack-setup ${button.data}` }));
       } else if (cmd === '/session') {
         const index = await this.sessionStore.listSessions(agentId, storeChatId, 'api').catch(() => null);
         const meta = index?.sessions.find((s) => s.id === sessionId);
@@ -5593,14 +5673,6 @@ export class AgentRunner extends EventEmitter {
           });
           responseText = `Sessions (${withCounts.length}):\n${lines.join('\n')}`;
         }
-      } else if (cmd === '/clear') {
-        await this.clearContext(sessionId);
-        result = { success: true, historyUnchanged: true, historyLimit: 50 };
-        responseText = 'Claude Code context reset. Chat history is unchanged. Your next message starts a new context with the latest 50 messages.';
-      } else if (cmd === '/compact') {
-        await this.compactContext(sessionId, opts?.model);
-        result = { success: true, native: true, historyUnchanged: true };
-        responseText = 'Claude Code context compacted. Chat history is unchanged.';
       } else {
         // Passed the gate but has no dispatch branch — BUILTIN_COMMANDS drifted from this
         // table. Throw so the failure surfaces (and ends history with an assistant turn via
@@ -5622,7 +5694,7 @@ export class AgentRunner extends EventEmitter {
     // forcePersist writes it even under skipPersist (set only when /stop cut a turn off).
     persist('assistant', responseText, forcePersist);
 
-    return { result, responseText };
+    return { result, responseText, actions };
   }
 
   /**

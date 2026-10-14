@@ -74,6 +74,8 @@ import { OrchestrationStore } from '../../src/orchestration/store';
 import { TaskService } from '../../src/orchestration/tasks/service';
 import { DecisionService } from '../../src/orchestration/decisions';
 import { StopControls } from '../../src/orchestration/stop-controls';
+import { ChannelControls } from '../../src/orchestration/channel-controls';
+import { TaskControls } from '../../src/orchestration/task-controls';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
 
@@ -146,7 +148,7 @@ describe('executeApiCommand session counting (#160)', () => {
     let finish!: () => void;
     const restart = jest.spyOn(runner as any, 'restartProcess').mockImplementation(() => new Promise<void>(resolve => {finish=resolve;}));
     let settled = false;
-    const response = runner.executeApiCommand(sessionId, chatId, '/restart', {skipPersist:true}).then(result => {settled=true;return result;});
+    const response = runner.executeApiCommand(sessionId, chatId, '/restart confirm', {skipPersist:true}).then(result => {settled=true;return result;});
     while (!finish) await new Promise(resolve => setImmediate(resolve));
     expect(settled).toBe(false);
     finish();
@@ -214,7 +216,7 @@ describe('executeApiCommand session counting (#160)', () => {
       }),stop:async()=>{},
     });
     (runner as any).sessions.set(sessionId,process);
-    const { result, responseText } = await runner.executeApiCommand(sessionId, chatId, '/compact', { skipPersist: true });
+    const { result, responseText } = await runner.executeApiCommand(sessionId, chatId, '/compact confirm', { skipPersist: true });
     expect(result).toEqual({success:true,native:true,historyUnchanged:true});
     expect(process.sendMessage).toHaveBeenCalledWith('/compact',[]);
     expect(process.start).not.toHaveBeenCalled();
@@ -235,7 +237,7 @@ describe('executeApiCommand session counting (#160)', () => {
     const clearSession = jest.spyOn(db, 'clearSession');
     expect(await getSessionStore(runner).loadSession(agentId, sessionId)).toHaveLength(6);
 
-    const { result } = await runner.executeApiCommand(sessionId, chatId, '/clear', { skipPersist: true });
+    const { result } = await runner.executeApiCommand(sessionId, chatId, '/clear confirm', { skipPersist: true });
 
     expect(result.success).toBe(true);
     expect(await getSessionStore(runner).loadSession(agentId, sessionId)).toHaveLength(6);
@@ -279,6 +281,139 @@ describe('executeApiCommand session counting (#160)', () => {
       const result=await runner.executeApiCommand(sessionId,chatId,'/stop',{principalId:'owner'});
       expect(result.responseText).toBe('No active session to stop.');expect(open).not.toHaveBeenCalled();
     }finally{(runner as any).orchestration=undefined;}
+  });
+
+  // PR #591 dev e2e: on the web these ran at once, while the chat channels ask first.
+  describe.each([
+    ['/clear', 'Reset Claude Code context?', 'clearContext'],
+    ['/compact', 'Compact Claude Code context?', 'compactContext'],
+    ['/restart', 'Restart this session process?', 'restartProcess'],
+  ])('%s asks for confirmation on the web', (command, prompt, method) => {
+    const ask = () => runner.executeApiCommand(sessionId, chatId, command, { skipPersist: true, principalId: 'owner' });
+    const press = (action: string, principalId = 'owner') => runner.executeApiCommand(sessionId, chatId, action, { skipPersist: true, principalId });
+    let run: jest.SpyInstance;
+    beforeEach(() => { run = jest.spyOn(runner as any, method).mockResolvedValue(undefined); });
+    afterEach(() => run.mockRestore());
+
+    it('returns the prompt and one-use Yes/No actions without running', async () => {
+      const reply = await ask();
+      expect(reply.responseText).toContain(prompt);
+      expect(reply.responseText).toContain(`${command} confirm`);
+      expect(reply.result).toEqual({ confirmationRequired: true });
+      expect(reply.actions).toEqual([{ label: 'Yes', command: expect.stringMatching(/^\/orch [0-9a-f-]{36}$/) }, { label: 'No', command: expect.stringMatching(/^\/orch [0-9a-f-]{36}$/) }]);
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it('Yes runs it once; a replayed or stale action, or another key, does not', async () => {
+      const [yes, no] = (await ask()).actions;
+      expect((await press(yes!.command, 'intruder')).result).toEqual({ error: 'CONFIRMATION_UNAVAILABLE' });
+      await press(yes!.command);
+      expect(run).toHaveBeenCalledTimes(1);
+      for (const action of [yes!, no!]) expect((await press(action.command)).responseText).toBe('Confirmation expired or unavailable. Run the command again.');
+      expect(run).toHaveBeenCalledTimes(1);
+
+      const stale = (await ask()).actions[0]!;
+      const now = Date.now();
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(now + 300_001);
+      try { expect((await press(stale.command)).result).toEqual({ error: 'CONFIRMATION_UNAVAILABLE' }); } finally { clock.mockRestore(); }
+      expect(run).toHaveBeenCalledTimes(1);
+    });
+
+    it('No cancels, and asking again retires the earlier actions', async () => {
+      const first = (await ask()).actions;
+      const second = (await ask()).actions;
+      expect((await press(first[0]!.command)).result).toEqual({ error: 'CONFIRMATION_UNAVAILABLE' });
+      expect(await press(second[1]!.command)).toMatchObject({ responseText: 'Cancelled.', result: { cancelled: true }, actions: [] });
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it(`${command} confirm runs it directly, for a caller that has already confirmed`, async () => {
+      await runner.executeApiCommand(sessionId, chatId, `${command} confirm`, { skipPersist: true });
+      expect(run).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('/clear confirm runs the reset', async () => {
+    await seedFlatStore(sessionId, 3);
+    const { result } = await runner.executeApiCommand(sessionId, chatId, '/clear confirm', { skipPersist: true });
+    expect(result.success).toBe(true);
+    expect(getSessionStore(runner).getContextReset(agentId, sessionId)).toMatchObject({ historyLimit: 50 });
+  });
+
+  // PR #591 dev e2e: these reached the model on the web.
+  it('/models lists the catalog with the current model and points at the web picker', async () => {
+    const { result, responseText } = await runner.executeApiCommand(sessionId, chatId, '/models', { skipPersist: true });
+    expect(responseText).toContain('Current model: claude-opus-4-6');
+    expect(responseText).toContain('PUT /api/v1/agents/:agentId/model');
+    expect(responseText).not.toContain('/model <id');
+    expect(result.model).toBe('claude-opus-4-6');
+    expect((result.models as Array<{ id: string; current: boolean }>).find(m => m.current)?.id).toBe('claude-opus-4-6');
+  });
+
+  it('/new creates a named API session and returns its ID; /rename renames this one', async () => {
+    const created = await runner.executeApiCommand(sessionId, chatId, '/new Design', { skipPersist: true });
+    const index = await getSessionStore(runner).listSessions(agentId, chatId, 'api');
+    expect(index.sessions.find(s => s.id === created.result.sessionId)?.name).toBe('Design');
+    expect(created.responseText).toContain('"Design"');
+
+    const renamed = await runner.executeApiCommand(sessionId, chatId, '/rename Design review', { skipPersist: true });
+    expect(renamed.responseText).toBe('✅ Session renamed to "Design review"');
+    expect((await getSessionStore(runner).listSessions(agentId, chatId, 'api')).sessions.find(s => s.id === sessionId)?.name).toBe('Design review');
+    expect((await runner.executeApiCommand(sessionId, chatId, '/rename', { skipPersist: true })).responseText).toContain('Usage: /rename');
+  });
+
+  it('/tasks, /voice and /voices answer without orchestration instead of reaching the model', async () => {
+    expect((await runner.executeApiCommand(sessionId, chatId, '/tasks', { skipPersist: true, principalId: 'owner' })).responseText).toBe('Task controls require orchestration mode.');
+    for (const command of ['/voice', '/voice on', '/voices']) {
+      expect((await runner.executeApiCommand(sessionId, chatId, command, { skipPersist: true })).responseText).toContain('/voice-settings');
+    }
+  });
+
+  test('/tasks opens the task browser with /orch actions bound to this session and principal', async () => {
+    const store=new OrchestrationStore(':memory:',agentId),tasks=new TaskService(store),decisions=new DecisionService(store);
+    try{
+      const input=store.acceptInput({scope:{agentId,agentSessionId:sessionId,source:'api',accountId:'owner',chatId,threadKey:'',principalId:'owner'},text:'Work'});
+      const decision=decisions.begin(input.conversationId,'owner',[input.inputId]);
+      tasks.spawn({...input,...decision,principalId:'owner',actionId:'spawn',execute:true,writeMemory:false},{title:'Review PR',instructions:'fixture',targetProfile:'default-worker'});
+      const stop=new StopControls(store,tasks,()=>false);
+      (runner as any).agentConfig.orchestration={enabled:true,channels:['api']};
+      (runner as any).orchestration={stopControls:stop,channelControls:new ChannelControls(store,new TaskControls(store,tasks),stop,{} as any,()=>false),authorizeSession:(_s:string,p:string)=>store.assertMember(input.conversationId,p)};
+      const list=await runner.executeApiCommand(sessionId,chatId,'/tasks',{skipPersist:true,principalId:'owner'});
+      expect(list.responseText).toContain('1. Review PR');
+      const open=list.actions.find(a=>a.label.startsWith('1. Review PR'))!;
+      expect(open.command).toMatch(/^\/orch [0-9a-f-]{36}$/);
+      const detail=await runner.executeApiCommand(sessionId,chatId,open.command,{skipPersist:true,principalId:'owner'});
+      expect(detail.responseText).toContain('Review PR\nStatus:');
+      expect(detail.actions.map(a=>a.label)).toContain('Back');
+      // Another principal cannot use the token.
+      await expect(runner.executeApiCommand(sessionId,chatId,open.command,{skipPersist:true,principalId:'intruder'})).rejects.toThrow();
+
+      const menu=await runner.executeApiCommand(sessionId,chatId,'/stop',{skipPersist:true,principalId:'owner'});
+      expect(menu.actions).toEqual([{label:expect.stringContaining('1. Review PR'),command:expect.stringMatching(/^\/stop [0-9a-f-]{36} 1$/)},{label:'Dismiss',command:expect.stringMatching(/ 0$/)}]);
+    }finally{(runner as any).orchestration=undefined;store.close();}
+  });
+
+  describe('/pstack-setup menu actions', () => {
+    const { pstackClaudeConfig } = require('../helpers/pstack-fixture');
+    let fixture: { configDir: string; cleanup: () => void };
+    beforeEach(() => { fixture = pstackClaudeConfig(); process.env.CLAUDE_CONFIG_DIR = fixture.configDir; });
+    afterEach(() => { fixture.cleanup(); delete process.env.CLAUDE_CONFIG_DIR; });
+
+    it('returns the Telegram menu buttons as /pstack-setup ps:… actions and walks them', async () => {
+      const home = await runner.executeApiCommand(sessionId, chatId, '/pstack-setup', { skipPersist: true });
+      expect(home.responseText).toContain('Usage: /pstack-setup');
+      expect(home.actions).toEqual(expect.arrayContaining([{ label: '✅ Turn on', command: '/pstack-setup ps:on' }, { label: 'Close', command: '/pstack-setup ps:x' }]));
+      const effort = await runner.executeApiCommand(sessionId, chatId, '/pstack-setup ps:de', { skipPersist: true });
+      expect(effort.responseText).toContain('Default effort: session');
+      expect(effort.actions).toContainEqual({ label: 'Back', command: '/pstack-setup ps:h' });
+      expect((await runner.executeApiCommand(sessionId, chatId, '/pstack-setup ps:x', { skipPersist: true })).actions).toEqual([]);
+    });
+
+    it('a change from a button needs write access to the agent', async () => {
+      const refused = await runner.executeApiCommand(sessionId, chatId, '/pstack-setup ps:on', { skipPersist: true });
+      expect(refused.responseText).toContain('needs an API key with write access');
+      expect((runner as any).agentConfig.pstack).toBeUndefined();
+    });
   });
 
   test('command capability hot reload replaces only the receiver and picks up the latest mode',async()=>{

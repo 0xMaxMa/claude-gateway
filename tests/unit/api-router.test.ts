@@ -30,7 +30,7 @@ class MockAgentRunner extends EventEmitter {
     chatId: string,
     command: string,
     opts?: { skipPersist?: boolean },
-  ) => Promise<{ result: Record<string, unknown>; responseText: string }> =
+  ) => Promise<{ result: Record<string, unknown>; responseText: string; actions?: Array<{ label: string; command: string }> }> =
     async (_sid, _cid, command) => ({ result: { command }, responseText: `ran ${command}` });
 
   // Records the args of the last executeApiCommand call so tests can assert wiring.
@@ -46,7 +46,7 @@ class MockAgentRunner extends EventEmitter {
     chatId: string,
     command: string,
     opts?: { skipPersist?: boolean },
-  ): Promise<{ result: Record<string, unknown>; responseText: string }> {
+  ): Promise<{ result: Record<string, unknown>; responseText: string; actions?: Array<{ label: string; command: string }> }> {
     this.lastCommandCall = { sessionId, chatId, command, opts };
     return this.executeApiCommandImpl(sessionId, chatId, command, opts);
   }
@@ -1299,8 +1299,53 @@ test('public command picker includes all API built-ins and no channel-only comma
   const response = await supertest.default(app).get('/api/v1/commands');
   expect(response.status).toBe(200);
   expect(response.body.commands.map((command: {name:string}) => command.name).sort()).toEqual([
-    '/clear','/compact','/help','/model','/pstack-setup','/restart','/session','/sessions','/stop',
+    '/clear','/compact','/help','/model','/models','/new','/pstack-setup','/rename','/restart','/session','/sessions','/stop','/tasks',
   ]);
+});
+
+// PR #591 dev e2e: on the web these reached the model, and command replies lost their buttons.
+describe('web command gaps (#591)', () => {
+  it.each(['/models', '/new Design', '/rename Design review', '/tasks', '/voice', '/voices', '/voice on', '/orch 0b1c', '/clear confirm'])(
+    '%s is answered as a command and never reaches the model', async (message) => {
+      const { app, runner } = buildCommandApp();
+      const res = await supertest.default(app).post(POST_URL).set(AUTH).send({ message, chat_id: 'gap', stream: false });
+      expect(res.status).toBe(200);
+      expect(runner.lastCommandCall?.command).toBe(message);
+      const streamed = buildCommandApp();
+      const { data } = await collectSSE(streamed.app, { message, chat_id: 'gap', stream: true });
+      expect(parseSSE(data).find(e => e.type === 'result')?.text).toBe(`ran ${message}`);
+    });
+
+  const actions = [{ label: 'Yes', command: '/orch 6f1c2a9e-0000-4000-8000-000000000001' }, { label: 'No', command: '/orch 6f1c2a9e-0000-4000-8000-000000000002' }];
+  const reply = async () => ({ result: { confirmationRequired: true }, responseText: 'Reset Claude Code context?', actions });
+
+  it('a sync command reply carries the command, its result and its actions beside the text', async () => {
+    const { app } = buildCommandApp(reply);
+    const res = await supertest.default(app).post(POST_URL).set(AUTH).send({ message: '/clear', chat_id: 'gap', stream: false });
+    expect(res.body).toMatchObject({ response: 'Reset Claude Code context?', command: '/clear', result: { confirmationRequired: true }, actions });
+  });
+
+  it('a streamed command reply carries them on the result frame', async () => {
+    const { app } = buildCommandApp(reply);
+    const { data } = await collectSSE(app, { message: '/clear', chat_id: 'gap', stream: true });
+    expect(parseSSE(data).find(e => e.type === 'result')).toMatchObject({ text: 'Reset Claude Code context?', command: '/clear', result: { confirmationRequired: true }, actions });
+  });
+
+  it('a command without buttons reports an empty actions list; a model reply has none', async () => {
+    const { app } = buildCommandApp(async () => ({ result: { model: 'opus' }, responseText: 'Current model: opus' }));
+    const res = await supertest.default(app).post(POST_URL).set(AUTH).send({ message: '/model', chat_id: 'gap', stream: false });
+    expect(res.body).toMatchObject({ command: '/model', result: { model: 'opus' }, actions: [] });
+    const model = buildApp(async () => ({ text: 'hello', attachments: [] }));
+    const plain = await supertest.default(model).post(POST_URL).set(AUTH).send({ message: 'hi', chat_id: 'gap', stream: false });
+    expect(plain.body).not.toHaveProperty('actions');
+  });
+
+  it.each(['clear', 'compact', 'restart'])('REST POST …/sessions/:id/%s still runs without a confirmation step', async (name) => {
+    const { app, runner } = buildCommandApp(async () => ({ result: { success: true }, responseText: 'done' }));
+    const res = await supertest.default(app).post(`/api/v1/agents/${AGENT_ID}/sessions/s1/${name}?chat_id=gap`).set(AUTH).send({ chat_id: 'gap' });
+    expect(res.status).toBe(200);
+    expect(runner.lastCommandCall?.command).toBe(`/${name} confirm`);
+  });
 });
 
 

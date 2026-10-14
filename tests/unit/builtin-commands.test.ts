@@ -95,13 +95,18 @@ describe('isBuiltinCommand', () => {
       yes('/restart');
     });
 
-    it('does not match telegram-only commands', () => {
-      no('/new');
-      no('/rename');
+    it('matches the web commands but not the Telegram pairing ones', () => {
+      // PR #591: these reached the model on the web; they are answered as commands now.
+      yes('/new');
+      yes('/rename Design');
+      yes('/models');
+      yes('/tasks');
+      yes('/voice on');
+      yes('/voices');
+      yes('/orch 0b1c');
       no('/start');
       yes('/help');
       no('/status');
-      no('/models');
     });
 
     it('does not match app-defined slash commands', () => {

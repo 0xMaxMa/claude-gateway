@@ -339,10 +339,50 @@ export function normalizeTelegramLineBreaks(text: string): string {
   return text.replace(/(?:<|&lt;)br\s*\/?(?:>|&gt;)/gi, '\n')
 }
 
+/** Commands the receiver answers itself, in a direct message only. */
+const DM_ONLY_COMMANDS = ['start', 'help', 'status', 'model', 'models', 'cli', 'clear', 'compact', 'restart', 'session', 'sessions', 'tasks', 'voice', 'voices']
+/** Commands forwarded to the gateway, which answers them in a group as well. */
+const GROUP_COMMANDS = ['stop', 'new', 'rename', 'pstack_setup', 'pstack-setup']
+
+/** The leading `/name` or `/name@<this bot>` of a message, lowercased; undefined when there is none or it names another bot. */
+export function leadingCommand(text: string, botUsername: string): string | undefined {
+  const match = /^\/([a-z0-9_-]+)(?:@(\w+))?(?=\s|$)/i.exec(text.trim())
+  if (!match || (match[2] && match[2].toLowerCase() !== botUsername.toLowerCase())) return undefined
+  return match[1]!.toLowerCase()
+}
+
+/** A gateway command typed in a group is addressed to this bot, the same as a mention. */
+export function isGroupCommand(text: string, botUsername: string): boolean {
+  return GROUP_COMMANDS.includes(leadingCommand(text, botUsername) ?? '')
+}
+
+/** `/name@<this bot> …` → `/name …`, so the gateway matches the command it was sent. */
+export function stripCommandTarget(text: string, botUsername: string): string {
+  const match = /^(\s*\/[a-z0-9_-]+)@(\w+)(?=\s|$)/i.exec(text)
+  return match && botUsername && match[2]!.toLowerCase() === botUsername.toLowerCase() ? match[1] + text.slice(match[0].length) : text
+}
+
+/**
+ * The reply to a direct-message-only command typed in a group, or undefined.
+ * Only a group that passes the access rules gets one (no pairing code is
+ * minted here); others stay silent, as the gate keeps them.
+ */
+export function groupCommandReply(access: Access, input: { chatType?: string; chatId: string; fromId: string; text: string; botUsername: string }): string | undefined {
+  if (input.chatType !== 'group' && input.chatType !== 'supergroup') return undefined
+  const name = leadingCommand(input.text, input.botUsername)
+  if (!name || !DM_ONLY_COMMANDS.includes(name)) return undefined
+  if (access.groupPolicy === 'disabled') return undefined
+  if (access.groupPolicy === 'allowlist' && !access.groupAllowlist.includes(input.chatId)) return undefined
+  const legacyAllowed = access.legacyGroupAllowFrom?.[input.chatId]
+  if (legacyAllowed && legacyAllowed.length > 0 && !legacyAllowed.includes(input.fromId)) return undefined
+  return `/${name} is only available in a direct message with the bot.`
+}
+
 export function isMentionedPure(input: GateInput, extraPatterns?: string[]): boolean {
   const entities = input.messageEntities ?? input.captionEntities ?? []
   const text = input.messageText ?? ''
   const botUsername = input.botUsername ?? ''
+  if (isGroupCommand(text, botUsername)) return true
 
   for (const e of entities) {
     if (e.type === 'mention') {

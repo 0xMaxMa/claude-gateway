@@ -42,7 +42,7 @@ Or type the change in a direct message with the bot:
 
 Outside the Telegram menu, `/pstack-setup` alone shows the agent's state, every role with its current model, the syntax and the Claude and GPT model IDs to choose from. Arguments are lines of pstack's own `pstack-models.md`. Changes apply to the agent's next worker.
 
-In web (API) chat, `/pstack-setup` is a gateway command too: anyone in the chat can see the setup, and only an API key with write access to the agent can change it, as with the API below.
+In web (API) chat, `/pstack-setup` is a gateway command too: anyone in the chat can see the setup, and only an API key with write access to the agent can change it, as with the API below. Its reply carries the same menu as Telegram's buttons in `actions` (see [command replies](../api/messages.md#command-reply)), so a web client can show them as buttons.
 
 Or through the API or CLI (an admin key may change any agent, a write key the agents it can access):
 
