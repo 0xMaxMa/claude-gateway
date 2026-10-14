@@ -84,13 +84,20 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects
   "root": "/home/getpod/projects",
   "exists": true,
   "projects": [
-    { "name": "demo", "path": "/home/getpod/projects/demo", "modified_at": "2026-10-06T07:41:58.706Z", "is_git": true }
+    { "name": "demo", "path": "/home/getpod/projects/demo", "modified_at": "2026-10-06T07:41:58.706Z", "is_git": true, "stack": "nextjs" }
   ]
 }
 ```
 
 `is_git` is true when the project has a `.git` entry (a directory, or the file a
 worktree or submodule uses).
+
+`stack` is a guess from the project's root files, or `null` when nothing marks one. It is one of
+`nextjs`, `astro`, `react`, `vue`, `svelte`, `node`, `python`, `go`, `rust`, `ruby`, `php`, `java`
+or `html`. A `package.json` decides first, by its dependencies (`next`, `astro`, `react`, `vue`,
+`svelte`, else `node`). Without one, `pyproject.toml`, `go.mod`, `Cargo.toml`, `Gemfile`,
+`composer.json`, `pom.xml` and similar files decide, and a lone `index.html` means `html`. Clients
+should treat an unknown value as `null`.
 
 ## POST /api/v1/projects {#post-projects}
 
