@@ -36,7 +36,8 @@ export function commandHelp(channel: CommandChannel, orchestration = false, inte
     if (name === 'model' && ['discord', 'line'].includes(channel)) description = 'Show the model; change it in a private chat: /model [model ID]';
     if (name === 'new' && channel === 'api') description = 'Create a session: /new [name] (the reply carries its session ID)';
     if (name === 'stop' && orchestration) description = 'Stop the reply and choose a task to cancel';
-    if (name === 'compact' || (['clear', 'restart'].includes(name) && ['telegram', 'api'].includes(channel))) description += '; confirmation required';
+    // Every channel asks before /compact and /restart; only Telegram and the web ask before /clear.
+    if (['compact', 'restart'].includes(name) || (name === 'clear' && ['telegram', 'api'].includes(channel))) description += '; confirmation required';
     if (name === 'pstack-setup' && channel === 'telegram') description = 'Set up pstack for this agent with buttons (direct message)';
     if (name === 'pstack-setup' && channel === 'api') description = 'Show the pstack setup; change it with /pstack-setup <role>: <model-id> (needs write access to this agent)';
     // A tapped Telegram command stops at the first character outside [a-z0-9_].

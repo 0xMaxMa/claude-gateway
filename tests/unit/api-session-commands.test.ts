@@ -69,6 +69,7 @@ jest.mock('child_process', () => ({
 // ── Imports ───────────────────────────────────────────────────────────────────
 
 import { AgentRunner } from '../../src/agent/runner';
+import { resetModelCatalogCache, resetSettingsEnvCache } from '../../src/agent/model-catalog';
 import { AgentConfig, GatewayConfig, Message } from '../../src/types';
 import { SessionStore } from '../../src/session/store';
 import { OrchestrationStore } from '../../src/orchestration/store';
@@ -143,6 +144,16 @@ describe('executeApiCommand session counting (#160)', () => {
     expect(result.text).toBe(responseText);
     for(const command of ['/help','/session','/sessions','/clear','/compact','/stop','/restart','/model']) expect(responseText).toContain(command+' —');
     expect(responseText).not.toContain('/voices');
+  });
+
+  // Review of #591 (L2): /tasks was listed whenever orchestration was on, also where the web chat is not orchestrated.
+  it('/help lists /tasks only when the web chat is in orchestration mode', async () => {
+    const config = (runner as unknown as { agentConfig: AgentConfig }).agentConfig;
+    config.orchestration = { enabled: true, channels: ['telegram'] } as AgentConfig['orchestration'];
+    expect((await runner.executeApiCommand(sessionId, chatId, '/help', { skipPersist: true })).responseText).not.toMatch(/^\/tasks — /m);
+    config.orchestration = { enabled: true, channels: ['api'] } as AgentConfig['orchestration'];
+    expect((await runner.executeApiCommand(sessionId, chatId, '/help', { skipPersist: true })).responseText).toMatch(/^\/tasks — /m);
+    delete config.orchestration;
   });
 
   it('/restart awaits the actual stop instead of reporting success early', async () => {
@@ -342,8 +353,22 @@ describe('executeApiCommand session counting (#160)', () => {
   });
 
   // PR #591 dev e2e: these reached the model on the web.
+  // Review of #591 (M5): the catalog is isolated from this host's ~/.claude/settings.json and provider env.
   it('/models lists the catalog with the current model and points at the web picker', async () => {
-    const { result, responseText } = await runner.executeApiCommand(sessionId, chatId, '/models', { skipPersist: true });
+    const keys = ['MODELS_BASE_URL', 'ANTHROPIC_BASE_URL', 'MODELS_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CONFIG_DIR'] as const;
+    const saved = keys.map(key => process.env[key]);
+    for (const key of keys) delete process.env[key];
+    process.env.CLAUDE_CONFIG_DIR = path.join(os.tmpdir(), 'no-claude-config-for-api-session-commands');
+    resetModelCatalogCache(); resetSettingsEnvCache();
+    const fetchSpy = jest.spyOn(global, 'fetch');
+    let reply: Awaited<ReturnType<AgentRunner['executeApiCommand']>>;
+    try { reply = await runner.executeApiCommand(sessionId, chatId, '/models', { skipPersist: true }); } finally {
+      keys.forEach((key, i) => { if (saved[i] === undefined) delete process.env[key]; else process.env[key] = saved[i]; });
+      resetModelCatalogCache(); resetSettingsEnvCache();
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+    const { result, responseText } = reply;
     expect(responseText).toContain('Current model: claude-opus-4-6');
     expect(responseText).toContain('PUT /api/v1/agents/:agentId/model');
     expect(responseText).not.toContain('/model <id');

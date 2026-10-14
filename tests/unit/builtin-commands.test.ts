@@ -109,6 +109,13 @@ describe('isBuiltinCommand', () => {
       no('/status');
     });
 
+    // Review of #591 (L1): `\b` also matched where a name runs on into `-`, so these new web
+    // commands caught messages that only start with their name.
+    it('matches the new web commands as whole words only', () => {
+      for (const text of ['/voice-memo draft', '/voices-of-users', '/tasks-report', '/orch-notes']) no(text);
+      yes('/tasks'); yes('/voice off'); yes('/orch 0b1c');
+    });
+
     it('does not match app-defined slash commands', () => {
       no('/save-note foo');
       no('/search bar');

@@ -84,17 +84,33 @@ function ensure(store: OrchestrationStore): void {
   store.run('CREATE INDEX IF NOT EXISTS token_turns_started ON token_turns(started_at)');
   initialized.add(store);
 }
+/** A worker turn's details that live on its task record: the skill a skill-worker ran and its
+ * place in a subagent tree. Shared by the session report and the task detail page. */
+export function taskTurnDetails(turn: Pick<TokenTurn, 'usedSkills'>, snapshot: any): Pick<TokenTurn, 'usedSkills' | 'subagent'> {
+  const details: Pick<TokenTurn, 'usedSkills' | 'subagent'> = {};
+  // A task started for a skill command runs it through the CLI, not the Skill tool.
+  if (typeof snapshot?.skill?.name === 'string' && snapshot.skill.name) details.usedSkills = [...new Set([...(turn.usedSkills ?? []), snapshot.skill.name])].sort();
+  if (typeof snapshot?.parentTaskId === 'string') details.subagent = {parentTaskId: snapshot.parentTaskId,
+    ...(Number.isSafeInteger(snapshot.depth) ? {depth: snapshot.depth} : {}), ...(typeof snapshot.subagentType === 'string' ? {type: snapshot.subagentType} : {}),
+    ...(typeof snapshot.effort === 'string' ? {effort: snapshot.effort} : {}), ...(snapshot.readonly === true ? {readonly: true} : {})};
+  return details;
+}
+/** What the overview polls: measurements only. Request bodies, texts and the turn's skill and
+ * extension inventory are read for one turn's details, from token_turns. */
+function metricsProjection(turn: TokenTurn): TokenTurn {
+  return {...turn, requests: undefined, inputTexts: undefined, responseText: undefined, extensions: undefined, usedSkills: undefined};
+}
 export function recordTokenTurn(store: OrchestrationStore, turn: TokenTurn): void {
   ensure(store);
   store.compose(() => {
   store.run(`INSERT INTO token_turns VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json`,
     turn.id, turn.sessionId, turn.role, turn.taskId ?? null, turn.startedAt, JSON.stringify(turn));
   store.run(`INSERT INTO token_turn_metrics VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json`,
-    turn.id,turn.sessionId,turn.startedAt,JSON.stringify({...turn,requests:undefined,inputTexts:undefined,responseText:undefined}));
+    turn.id,turn.sessionId,turn.startedAt,JSON.stringify(metricsProjection(turn)));
   });
   const cached = summaries.get(store)?.get(turn.sessionId);
   if (cached) {
-    const projection = {...turn, requests: undefined, inputTexts: undefined, responseText: undefined};
+    const projection = metricsProjection(turn);
     const index = cached.findIndex(previous => previous.id === turn.id);
     if (index < 0) cached.push(projection); else cached[index] = projection;
   }
@@ -180,11 +196,7 @@ export function readTokenReport(store: Pick<OrchestrationStore, 'all' | 'get' | 
           const snapshot = JSON.parse(String(task.snapshot_json));
           const revision = store.get('SELECT payload_json FROM task_revisions WHERE task_id=? AND revision=?', turn.taskId, attempt.revision);
           turn.taskTitle = snapshot.title;
-          // A task started for a skill command runs it through the CLI, not the Skill tool.
-          if (typeof snapshot.skill?.name === 'string' && snapshot.skill.name) turn.usedSkills = [...new Set([...(turn.usedSkills ?? []), snapshot.skill.name])].sort();
-          if (typeof snapshot.parentTaskId === 'string') turn.subagent = {parentTaskId: snapshot.parentTaskId,
-            ...(Number.isSafeInteger(snapshot.depth) ? {depth: snapshot.depth} : {}), ...(typeof snapshot.subagentType === 'string' ? {type: snapshot.subagentType} : {}),
-            ...(typeof snapshot.effort === 'string' ? {effort: snapshot.effort} : {}), ...(snapshot.readonly === true ? {readonly: true} : {})};
+          Object.assign(turn, taskTurnDetails(turn, snapshot));
           if (revision) {
             const applied = JSON.parse(String(revision.payload_json));
             turn.inputTexts = [`Current applied task revision ${attempt.revision}:\n${applied.instructions}`,

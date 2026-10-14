@@ -88,7 +88,8 @@ export function taskIndexEntry(task: TaskSnapshot) {
  * Absent when it used neither, so every other task's status is unchanged. */
 function pstackEvidence(store: OrchestrationStore, task: TaskSnapshot, assigned: string | undefined, tree: TaskSnapshot[]) {
   const skills = new Set(assigned?.startsWith('pstack:') ? [assigned] : []);
-  for (const id of [task.taskId, ...tree.map(child => child.taskId)]) for (const row of store.all("SELECT DISTINCT json_extract(payload_json,'$.payload.input.skill') AS skill FROM conversation_events WHERE conversation_id=? AND type='tool.activity' AND json_extract(payload_json,'$.task_id')=? AND json_extract(payload_json,'$.payload.name')='Skill' AND json_extract(payload_json,'$.payload.type')='tool_use'", task.conversationId, id))
+  // One query for the whole tree, not one per subagent.
+  for (const row of store.all("SELECT DISTINCT json_extract(payload_json,'$.payload.input.skill') AS skill FROM conversation_events WHERE conversation_id=? AND type='tool.activity' AND json_extract(payload_json,'$.task_id') IN (SELECT value FROM json_each(?)) AND json_extract(payload_json,'$.payload.name')='Skill' AND json_extract(payload_json,'$.payload.type')='tool_use'", task.conversationId, JSON.stringify([task.taskId, ...tree.map(child => child.taskId)])))
     if (typeof row.skill === 'string' && row.skill.startsWith('pstack:')) skills.add(row.skill.slice(0, 256));
   const subagentModels: Record<string, number> = {};
   for (const child of tree) { const key = [child.model ?? 'parent model', child.effort].filter(Boolean).join(' '); subagentModels[key] = (subagentModels[key] ?? 0) + 1; }
@@ -192,12 +193,16 @@ export class TaskService {
     this.store.assertMember(conversationId, principalId);
     if (taskId) {
       const task = this.owned(taskId, conversationId), assigned = task.skill?.name; delete task.skill;
+      // Gateway-managed tasks (browser/computer verification paths) never run pstack: no tree, no evidence.
+      if (task.gatewayTarget) return [this.withRecentTools(task)];
       // A root lists its whole subagent tree; each entry names its parent.
       const tree = task.parentTaskId ? [] : this.store.all("SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.rootTaskId')=? ORDER BY created_at,rowid", task.conversationId, task.taskId)
         .map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot);
+      // Each subagent's latest attempt, in one query.
+      const latest = new Map(tree.length ? this.store.all("SELECT a.task_id,a.payload_json FROM task_attempts a WHERE a.task_id IN (SELECT value FROM json_each(?)) AND a.generation=(SELECT MAX(b.generation) FROM task_attempts b WHERE b.task_id=a.task_id)", JSON.stringify(tree.map(child => child.taskId)))
+        .map(row => [String(row.task_id), JSON.parse(String(row.payload_json)) as TaskAttempt]) : []);
       const subagents = tree.map(child => {
-          const attempt = this.store.get('SELECT payload_json FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', child.taskId);
-          const ran = attempt ? JSON.parse(String(attempt.payload_json)) as TaskAttempt : undefined;
+          const ran = latest.get(child.taskId);
           // model · harness · effort · state · duration, for the root's final report.
           return { taskId: child.taskId, parentTaskId: child.parentTaskId, title: child.title, state: child.state, model: child.model, harness: ran?.harness, effort: child.effort, subagentType: child.subagentType,
             ...(ran?.startedAt ? { durationMs: (TERMINAL_TASK_STATES.has(child.state) ? child.updatedAt : Date.now()) - ran.startedAt } : {}),
@@ -1130,8 +1135,13 @@ export class TaskService {
       if (!['starting', 'running'].includes(parent.state)) throw new OrchestrationError('STATE_CONFLICT', `This task is ${parent.state}; it cannot start subagents.`);
       const depth = (parent.depth ?? 0) + 1;
       if (depth > SUBAGENT_MAX_DEPTH) throw new OrchestrationError('SUBAGENT_DEPTH_EXCEEDED', `Subagents nest at most ${SUBAGENT_MAX_DEPTH} levels below the root worker. Do this work inline.`);
-      const queued = Number(this.store.get("SELECT COUNT(*) n FROM tasks WHERE conversation_id=? AND state='queued'", parent.conversationId)!.n);
-      if (queued >= this.config.tasks.maxQueuedPerConversation) throw new OrchestrationError('QUEUE_FULL', `This conversation already has ${queued} queued tasks. Wait for a subagent to finish (subagent_wait) or do this work inline.`);
+      // The same admission as task_spawn: no new work while the conversation drains, and both queue limits.
+      if (this.store.get('SELECT status FROM conversations WHERE id=?', parent.conversationId)?.status !== 'active') throw new OrchestrationError('DRAINING');
+      const queuedRows = this.store.all("SELECT conversation_id,COUNT(*) AS n FROM tasks WHERE state='queued' GROUP BY conversation_id");
+      const queued = Number(queuedRows.find(row => row.conversation_id === parent.conversationId)?.n ?? 0);
+      if (queued >= this.config.tasks.maxQueuedPerConversation || queuedRows.reduce((n, row) => n + Number(row.n), 0) >= this.config.tasks.maxQueuedPerAgent) {
+        throw new OrchestrationError('QUEUE_FULL', `This agent already has the most queued tasks it allows. Wait for a subagent to finish (subagent_wait) or do this work inline.`);
+      }
       const now = Date.now();
       const task: TaskSnapshot = { taskId: randomUUID(), conversationId: parent.conversationId, agentId: parent.agentId, agentSessionId: parent.agentSessionId,
         ownerPrincipalId: parent.ownerPrincipalId, initiatingInputId: parent.initiatingInputId, title: spec.title, targetProfile: 'default-worker',
@@ -1155,6 +1165,12 @@ export class TaskService {
       return task;
     });
   }
+  /** A subagent's parent, grandparent and so on, nearest first; empty for a root task. */
+  ancestorIds(taskId: string): string[] {
+    const ids: string[] = [];
+    for (let id = this.store.task(taskId)?.parentTaskId; id && ids.length <= SUBAGENT_MAX_DEPTH;) { ids.push(id); id = this.store.task(id)?.parentTaskId; }
+    return ids;
+  }
   /** The calling worker's own subagents among `taskIds`; anything else is denied. */
   private subagents(attemptId: string, generation: number, taskIds: unknown): TaskSnapshot[] {
     const { task: parent } = this.active(attemptId, generation);
@@ -1170,9 +1186,16 @@ export class TaskService {
     const children = this.subagents(attemptId, generation, taskIds);
     if (children.some(child => !TERMINAL_TASK_STATES.has(child.state) && child.state !== 'needs_reconciliation' && !(child.state === 'waiting_input' && child.pendingQuestion))) return undefined;
     return children.map(child => ({ task_id: child.taskId, state: child.state, model: child.model, effort: child.effort,
-      ...(child.result ? { result: child.result.summary } : {}), ...(child.failure ? { failure: { code: child.failure.code, message: child.failure.message } } : {}),
+      ...(child.result ? { result: child.result.summary } : {}),
+      // Files it staged are delivered with the root's result; listed so the parent can refer to them.
+      ...this.stagedFiles(child), ...(child.failure ? { failure: { code: child.failure.code, message: child.failure.message } } : {}),
       ...(child.state === 'waiting_input' && child.pendingQuestion ? { question: child.pendingQuestion.text } : {}),
       ...(child.state === 'needs_reconciliation' ? { note: 'Its process could not be confirmed stopped and may still be running. Cancel it with subagent_cancel before relying on files it touched.' } : {}) }));
+  }
+  private stagedFiles(task: TaskSnapshot): { staged_files?: string[] } {
+    if (task.state !== 'completed' || !task.result?.artifactIds.length) return {};
+    const names = this.store.all("SELECT f.name FROM task_files f WHERE f.task_id=? AND f.id IN (SELECT value FROM json_each(?)) ORDER BY f.created_at,f.id", task.taskId, JSON.stringify(task.result.artifactIds)).map(row => String(row.name));
+    return names.length ? { staged_files: names } : {};
   }
   /** subagent_cancel: cancel the calling worker's own subagents and everything below them. */
   cancelSubagentTasks(attemptId: string, generation: number, taskIds: unknown) {

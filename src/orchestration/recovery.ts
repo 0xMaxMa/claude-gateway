@@ -22,6 +22,21 @@ export function recoverOrchestration(store: OrchestrationStore): { inputs: numbe
       task.latestProgress = { source: 'runtime', observedAt: now, text: 'Gateway restarted; process liveness and side effects require reconciliation.' };
       store.saveAttempt(attempt); store.saveTask(task, task.stateVersion);
     }
+    // A subagent that had not started runs only for a running parent; one whose parent now awaits
+    // reconciliation (or has ended) never would, so it is cancelled as the parent's notify would have.
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const row of store.all("SELECT snapshot_json FROM tasks WHERE active_attempt_id IS NULL AND state NOT IN ('completed','failed','cancelled') AND json_extract(snapshot_json,'$.parentTaskId') IS NOT NULL")) {
+        const task = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
+        const parent = store.task(task.parentTaskId!);
+        if (parent && !['needs_reconciliation', 'completed', 'failed', 'cancelled', 'cancel_requested'].includes(parent.state)) continue;
+        task.state = 'cancelled'; task.pendingQuestion = undefined; delete task.queuedCommands;
+        task.cancellation = { requestedBy: 'agent', requestedAt: now, reason: 'Its parent task stopped when the gateway restarted.' };
+        task.latestProgress = { source: 'runtime', observedAt: now, text: 'Cancelled: its parent task stopped when the gateway restarted.' };
+        store.saveTask(task, task.stateVersion);
+        changed = true;
+      }
+    }
     // A send interrupted between provider acceptance and local receipt cannot
     // be retried as if it were known not to have happened.
     store.run("UPDATE outbox SET state='unknown',lease_owner=NULL,lease_expires_at=NULL WHERE state='processing' AND kind='delivery'");

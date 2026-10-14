@@ -2,7 +2,7 @@ import { DecisionService } from '../../../src/orchestration/decisions';
 import { TaskService } from '../../../src/orchestration/tasks/service';
 import { TurnUsageCollector } from '../../../src/orchestration/token-usage';
 import { OrchestrationStore } from '../../../src/orchestration/store';
-import { recordTokenTurn, tokenReport } from '../../../src/orchestration/token-ledger';
+import { measuredTurns, recordTokenTurn, tokenReport } from '../../../src/orchestration/token-ledger';
 import { executionTool } from '../../../src/orchestration/tool-name';
 import { generateTokenReportHtml, TokenReportView } from '../../../src/ui/token-report';
 import { dashboardPresentationClient, turnExtensionsHtml } from '../../../src/ui/dashboard-presentation';
@@ -43,8 +43,10 @@ test('a Skill tool call records the invoked skill name', () => {
   expect(collector.snapshot()).toMatchObject({ usedTools: ['Skill'], usedSkills: ['pstack:how'] });
 });
 
-test('a deferred call naming the full MCP tool keeps one namespace', () => {
-  expect(executionTool({ name: 'mcp__gateway__tool_call', input: { name: 'mcp__gateway__browser_create_session', arguments: {} } }).name).toBe('mcp__gateway__browser_create_session');
+// Review of #591 (L12): tool_call runs only the catalog's bare names and refuses `mcp__gateway__x`,
+// so showing that call as `mcp__gateway__x` made a refused call look like the tool ran.
+test('a deferred call is shown with the name it asked for', () => {
+  expect(executionTool({ name: 'mcp__gateway__tool_call', input: { name: 'mcp__gateway__browser_create_session', arguments: {} } }).name).toBe('mcp__gateway__mcp__gateway__browser_create_session');
   expect(executionTool({ name: 'mcp__gateway__tool_call', input: { name: 'browser_create_session' } }).name).toBe('mcp__gateway__browser_create_session');
   // Another server's prefix is a claim, not a namespace: it stays inside this connector's.
   expect(executionTool({ name: 'mcp__browser__tool_call', input: { name: 'mcp__gateway__memory_write' } }).name).toBe('mcp__browser__mcp__gateway__memory_write');
@@ -87,7 +89,7 @@ test('turn details show used skills, the session inventory, deferred tools and t
   expect(html).toContain('<h3>Agents available</h3><ul class="tool-name-list"><li><code>pstack:how-explorer</code></li></ul>');
   expect(html).toContain('<li><code>browser (failed)</code></li><li><code>gateway</code></li>');
   expect(html).toContain('<h3>Tools at session start</h3><ul class="tool-name-list"><li><code>Read</code></li><li><code>Skill</code></li></ul>');
-  expect(html).toContain('<h3>Deferred tools (loaded through tool search)</h3><ul class="tool-name-list"><li><code>mcp__gateway__cron_list</code></li></ul>');
+  expect(html).toContain('<h3>Deferred tools (not loaded; available through tool search)</h3><ul class="tool-name-list"><li><code>mcp__gateway__cron_list</code></li></ul>');
   expect(html).toContain('Subagent of task <code>task-root</code> · depth 2 · pstack:how-explorer · effort high · read-only');
 });
 
@@ -101,4 +103,37 @@ test('stored inventory cannot inject markup, and the dashboard client gets the s
   const html = turnExtensionsHtml({ usedSkills: [evil], extensions: { plugins: [evil], skills: [], agents: [], mcpServers: [{ name: evil, status: evil }] }, subagent: { parentTaskId: evil, depth: 1, type: evil } });
   expect(html).not.toContain(evil);
   expect(dashboardPresentationClient).toContain('function turnExtensionsHtml(');
+});
+
+// Review of #591 (M3): the list is of tools whose schemas were NOT loaded, and a tool the
+// turn later loaded through tool search was listed as deferred beside its loaded entry.
+test('deferred tools are the ones no request of the turn loaded', () => {
+  const schemas = (loaded: string[], deferred: string[]) => ({ toolSchemas: { loaded, deferred } });
+  const html = turnExtensionsHtml({ usedSkills: [], requests: [schemas(['Read'], ['mcp__gateway__cron_list', 'mcp__gateway__task_spawn']), schemas(['Read', 'mcp__gateway__task_spawn'], ['mcp__gateway__cron_list'])] });
+  expect(html).toContain('<h3>Deferred tools (not loaded; available through tool search)</h3><ul class="tool-name-list"><li><code>mcp__gateway__cron_list</code></li></ul>');
+  expect(html).not.toContain('loaded through tool search');
+  expect(turnExtensionsHtml({ usedSkills: [], requests: [schemas(['Read', 'mcp__gateway__cron_list'], []), schemas(['Read'], ['mcp__gateway__cron_list'])] })).not.toContain('Deferred tools');
+});
+
+// Review of #591 (L14): a queued turn, or one recorded without the skill list, said "Used skills: None".
+test('a turn without a recorded skill list shows no Used skills section', () => {
+  expect(turnExtensionsHtml({})).not.toContain('Used skills');
+  expect(turnExtensionsHtml({ pending: true, usedSkills: [] })).not.toContain('Used skills');
+  expect(turnExtensionsHtml({ usedSkills: [] })).toContain('<h3>Used skills</h3>');
+});
+
+// Review of #591 (M4): the overview polls the projected metrics; the inventory is read for one turn's details only.
+test('the polled metrics leave out the skill and extension inventory', () => {
+  const store = new OrchestrationStore(':memory:', 'agent');
+  try {
+    expect(measuredTurns(store, 'session')).toEqual([]);
+    recordTokenTurn(store, { id: 'turn', sessionId: 'session', role: 'worker', category: 'worker', toolIds: [], inputTokens: 1, totalTokens: 2, startedAt: 1,
+      usage: turn.usage, usedSkills: ['pstack:how'], extensions: turn.extensions });
+    const metrics = JSON.parse(String(store.get('SELECT payload_json FROM token_turn_metrics WHERE id=?', 'turn')!.payload_json));
+    expect(metrics).not.toHaveProperty('extensions');
+    expect(metrics).not.toHaveProperty('usedSkills');
+    expect(metrics.totalTokens).toBe(2);
+    expect(measuredTurns(store, 'session')[0]).toMatchObject({ id: 'turn', extensions: undefined, usedSkills: undefined });
+    expect(tokenReport(store, 'session').turns[0]).toMatchObject({ usedSkills: ['pstack:how'], extensions: turn.extensions });
+  } finally { store.close(); }
 });

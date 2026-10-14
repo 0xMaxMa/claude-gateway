@@ -52,7 +52,7 @@ If `message` starts with one of these commands, the endpoint answers it locally 
 
 Restarting an active response records an intentional interruption, not a process failure. A restart keeps chat history and does not restart the gateway or app container.
 
-Unknown slash commands, including skill commands such as `/pstack:how`, are ordinary messages for the agent.
+Unknown slash commands, including skill commands such as `/pstack:how`, are ordinary messages for the agent. Three `/pstack:*` cases are answered by the gateway instead: on an agent that is not set up for pstack (a pointer to `/pstack-setup`), for a skill that is not user-invocable, and for a name the plugin has no skill for (with close command names when there are any). See [pstack](/guide/pstack).
 
 #### Command reply {#command-reply}
 

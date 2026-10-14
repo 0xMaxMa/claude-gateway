@@ -103,7 +103,7 @@ export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
 export { DEFAULT_MODELS } from './model-registry';
 import { DEFAULT_MODELS, availableModels, selectableModels, findModel } from './model-registry';
-import { PSTACK_INSTALL_HINT, PSTACK_OFF_SETTINGS, pstackModels, pstackPluginInfo } from '../pstack/plugin-info';
+import { PSTACK_INSTALL_HINT, PSTACK_OFF_SETTINGS, PSTACK_PLUGIN_ID, pstackModels, pstackPluginInfo } from '../pstack/plugin-info';
 import { PstackConfigError, applySheetLines } from '../pstack/config';
 import { pstackPanelDefault, renderPstackSheet } from '../pstack/sheet';
 import { updatePstackConfig } from '../pstack/setup';
@@ -2967,7 +2967,7 @@ export class AgentRunner extends EventEmitter {
     const agentId = this.agentConfig.id;
 
     if (content.trim() === '/help') {
-      this.writeAutoForward(chatId, commandHelp(this.channelFor(chatId), !!this.agentConfig.orchestration?.enabled, this.gatewayConfig.gateway.headless === false));
+      this.writeAutoForward(chatId, commandHelp(this.channelFor(chatId), this.requiresDurableChannelIngress(this.channelFor(chatId)), this.gatewayConfig.gateway.headless === false));
     } else if (/^\/restart(?:\s|$)/.test(content)) {
       await this.restartProcess(chatId);
       this.writeAutoForward(chatId, 'Session process restarted. It starts again with your next message.');
@@ -3079,9 +3079,10 @@ export class AgentRunner extends EventEmitter {
     try {
       const { saved } = await this.updatePstack(previous =>
         arg === 'off' ? undefined : arg === 'on' ? previous ?? {} : applySheetLines(previous ?? {}, arg, roles && (role => pstackPanelDefault(roles, role))));
-      return saved && roles
-        ? `pstack is set up for this agent. The next worker loads it with this sheet:\n\n${renderPstackSheet(saved, roles)}`
-        : 'pstack is removed from this agent. Its next worker does not load it.';
+      if (!saved) return 'pstack is removed from this agent. Its next worker does not load it.';
+      // `on` for an agent already set up saves nothing, so a plugin that cannot be read is only noticed here.
+      if (!roles) return `pstack is set up for this agent, but ${PSTACK_PLUGIN_ID} is not installed for Claude Code on this host, so its workers cannot load it. ${PSTACK_INSTALL_HINT}`;
+      return `pstack is set up for this agent. The next worker loads it with this sheet:\n\n${renderPstackSheet(saved, roles)}`;
     } catch (error) {
       if (!(error instanceof PstackConfigError)) throw error;
       return `${error.code}: ${error.message}`;
@@ -5549,7 +5550,8 @@ export class AgentRunner extends EventEmitter {
     };
     try {
       if (cmd === '/help') {
-        responseText = commandHelp('api', !!this.agentConfig.orchestration?.enabled);
+        // /tasks is listed only where the web chat is in orchestration mode (orchestration.channels).
+        responseText = commandHelp('api', this.orchestrationForApi(sessionId));
         result = {text:responseText};
       } else if ((cmd === '/clear' || cmd === '/compact' || cmd === '/restart') && arg !== 'confirm') {
         // Asked first, as in the chat channels: Yes/No are one-use actions for this session and key,

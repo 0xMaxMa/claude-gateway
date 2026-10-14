@@ -355,7 +355,8 @@ export class TaskBridge {
               const keyword = a.model === undefined || PSTACK_KEYWORDS.includes(a.model);
               let model: string | undefined;
               if (!keyword) {
-                try { model = resolveModelId(await this.models(), a.model).id; }
+                // An alias resolves now, as task_spawn's does (a skill may pass `opus` as it would to Agent).
+                try { const models = await this.models(); model = (findModel(models, a.model) ?? resolveModelId(models, a.model)).id; }
                 catch (error) {
                   if (!(error instanceof ModelResolutionError)) throw error;
                   inputDetails = [{ field: 'model', reason: error.code === 'UNKNOWN_MODEL' ? 'unknown_model' : 'alias', correction: error.message }];

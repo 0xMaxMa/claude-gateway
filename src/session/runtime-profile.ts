@@ -33,7 +33,7 @@ export interface RuntimeProfile {
   /** Captured optional evaluation-tool inventory for this process; permissions remain live. */
   jevEnabled?: boolean;
   browserEnabled?: boolean;
-  /** Read-only worker: Codex runs in its read-only sandbox (Claude gets read tools through workerTools). */
+  /** Read-only worker: Codex runs in its read-only sandbox; Claude gets read tools through workerTools and only the gateway MCP config. */
   readOnly?: boolean;
   /** Optional connector restriction for workers. Agent decisions never receive connectors. */
   connectorsAllowed?: boolean;
@@ -93,7 +93,8 @@ export function runtimeProfileArgs(profile: RuntimeProfile, extraFlags: string[]
     // resolved policy must not silently widen back to all tools on the host.
     const settings = { ...(profile.checkpointCommand ? { hooks: checkpointSettings(profile.checkpointCommand).hooks } : {}),
       ...(profile.pluginOverrides ? { enabledPlugins: profile.pluginOverrides } : {}) };
-    return ['--tools', profile.workerTools === undefined ? 'default' : profile.workerTools.join(','), '--mcp-config', profile.mcpConfigPath,
+    // --tools limits built-in tools only; a read-only worker must not load the user's or a plugin's MCP servers either.
+    return ['--tools', profile.workerTools === undefined ? 'default' : profile.workerTools.join(','), ...(profile.readOnly ? ['--strict-mcp-config'] : []), '--mcp-config', profile.mcpConfigPath,
       ...(Object.keys(settings).length ? ['--settings', JSON.stringify(settings)] : []),
       ...(profile.disallowedTools?.length ? ['--disallowedTools', profile.disallowedTools.join(',')] : []),
       ...(profile.skillPluginDir ? ['--plugin-dir', profile.skillPluginDir] : []),

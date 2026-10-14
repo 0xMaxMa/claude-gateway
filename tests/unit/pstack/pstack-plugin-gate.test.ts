@@ -137,3 +137,12 @@ describe('gateway utility claude -p processes', () => {
     expect(settingsOf(args)).toEqual({ disableAllHooks: true, enabledPlugins: { 'pstack@pstack-claude': false } });
   });
 });
+
+// Review of #591 (H1): --tools only limits built-in tools. A read-only host worker must not
+// load the user's or a plugin's MCP servers either, only the gateway's own config.
+test('a read-only host worker loads only the gateway MCP config', () => {
+  const args = runtimeProfileArgs({ ...host, readOnly: true, workerTools: ['Read', 'Glob', 'Grep'] }, []);
+  expect(args).toContain('--strict-mcp-config');
+  expect(args[args.indexOf('--mcp-config') + 1]).toBe('/task/mcp.json');
+  expect(runtimeProfileArgs(host, [])).not.toContain('--strict-mcp-config');
+});

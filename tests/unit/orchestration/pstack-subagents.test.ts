@@ -10,6 +10,7 @@ import type { CommandContext, TaskAttempt, TaskSnapshot } from '../../../src/orc
 import type { ModelConfig } from '../../../src/types';
 import { pstackClaudeConfig } from '../../helpers/pstack-fixture';
 import { SUBAGENT_READONLY } from '../../../src/pstack/overlay';
+import { recoverOrchestration } from '../../../src/orchestration/recovery';
 
 /**
  * pstack subagents as gateway tasks (#583). A worker of a set-up agent gets
@@ -86,10 +87,18 @@ test('no model (or inherit-parent/auto) runs on the parent model and, without an
   }
 });
 
-test.each([['sonnet', 'MODEL_ALIAS_NOT_ALLOWED'], ['gpt-7', 'UNKNOWN_MODEL']])('model %s is refused with %s and spawns nothing', async (model, code) => {
+// Review of #591 (L11): task_spawn takes an alias, so subagent_spawn does too (a skill passes `sonnet` as it would to Agent).
+test('an alias resolves to its model ID, as task_spawn\'s does', async () => {
   const { attempt } = rootWorker();
-  const reply = await spawn(attempt, { model });
-  expect(reply.error).toBe(code);
+  const reply = await spawn(attempt, { model: 'Sonnet' });
+  expect(reply).toMatchObject({ model: 'claude-sonnet-5-5', state: 'queued' });
+  expect(store.task(reply.task_id)!.model).toBe('claude-sonnet-5-5');
+});
+
+test('an unknown model is refused and spawns nothing', async () => {
+  const { attempt } = rootWorker();
+  const reply = await spawn(attempt, { model: 'gpt-7' });
+  expect(reply.error).toBe('UNKNOWN_MODEL');
   expect(reply.details[0].correction).toContain('claude-sonnet-5-5');
   expect(store.all("SELECT id FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId') IS NOT NULL")).toHaveLength(0);
 });
@@ -339,4 +348,60 @@ describe('review fixes', () => {
     store.transaction(() => { const t = store.task(parent.taskId)!; t.state = 'needs_reconciliation'; store.saveTask(t, t.stateVersion); });
     expect(tasks.claim(child)).toBeUndefined();
   });
+});
+
+// Review of #591 (L8): subagent_spawn skipped two checks task_spawn makes.
+test('no subagent starts while the conversation drains, or past the agent-wide queue limit', async () => {
+  const { task: parent, attempt } = rootWorker();
+  store.run("UPDATE conversations SET status='draining' WHERE id=?", parent.conversationId);
+  expect((await spawn(attempt, {})).error).toBe('DRAINING');
+  store.run("UPDATE conversations SET status='active' WHERE id=?", parent.conversationId);
+  const limited = new TaskService(store, { tasks: { workspaceMode: 'host', maxConcurrentPerAgent: 10, maxConcurrentPerConversation: 10, maxQueuedPerAgent: 2, maxQueuedPerConversation: 2 } }, root);
+  // One task queued in another conversation: this one has room (1 of 2), the agent does not (2 of 2).
+  const other = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's2', source: 'api', accountId: 'u', principalId: 'u', chatId: 'c2', threadKey: '' }, text: 'Other' });
+  limited.spawn({ ...other, ...new DecisionService(store).begin(other.conversationId, 'u', [other.inputId]), principalId: 'u', execute: true, writeMemory: false, actionId: 'other' }, { title: 'Other', instructions: 'x', targetProfile: 'default-worker' });
+  limited.spawnSubagent(attempt.attemptId, attempt.generation, 'first', { title: 'One', instructions: 'x' });
+  expect(() => limited.spawnSubagent(attempt.attemptId, attempt.generation, 'second', { title: 'Two', instructions: 'x' })).toThrow(expect.objectContaining({ code: 'QUEUE_FULL' }));
+});
+
+// Review of #591 (L7): a restart left a queued subagent of a parent awaiting reconciliation queued for good.
+test('a gateway restart cancels the subagents that had not started', async () => {
+  const { task: parent, attempt } = rootWorker();
+  const queued = (await spawn(attempt, {})).task_id;
+  const startedChild = (await spawn(attempt, {})).task_id;
+  running(store.task(startedChild)!);
+  recoverOrchestration(store);
+  expect(store.task(parent.taskId)!.state).toBe('needs_reconciliation');
+  expect(store.task(queued)).toMatchObject({ state: 'cancelled', cancellation: expect.objectContaining({ requestedBy: 'agent' }) });
+  expect(store.task(startedChild)!.state).toBe('needs_reconciliation');
+});
+
+// Review of #591 (L9): files a subagent staged were never delivered, and subagent_wait did not mention them.
+test('a completed subagent\'s staged files go out with the root\'s report and are listed to its parent', async () => {
+  const { task: parent, attempt } = rootWorker();
+  const childId = (await spawn(attempt, {})).task_id;
+  const childAttempt = running(store.task(childId)!);
+  store.transaction(() => store.run('INSERT INTO task_files VALUES(?,?,?,?,?,?,?,?,?,?,?)', 'file-1', childId, childAttempt.attemptId, 'stage-1', 'out/report.md', 'report.md', 'document', '', null, Date.now(), 'h'));
+  tasks.finish(childAttempt.attemptId, childAttempt.generation, { type: 'completed', result: { summary: 'done', artifactIds: ['file-1'] } });
+  expect(tasks.subagentResults(attempt.attemptId, attempt.generation, [childId])![0]).toMatchObject({ result: 'done', staged_files: ['report.md'] });
+  complete(attempt, 'Root done');
+  const decisions = new DecisionService(store);
+  decisions.finish(context as unknown as Parameters<DecisionService['finish']>[0], 'Queued');
+  const next = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's', source: 'api', accountId: 'u', principalId: 'u', chatId: 'c', threadKey: '' }, text: 'Any news?' });
+  decisions.finish(decisions.begin(parent.conversationId, 'u', [next.inputId]), 'Report');
+  expect(store.get("SELECT response_id FROM task_files WHERE id='file-1'")!.response_id).toEqual(expect.any(String));
+});
+
+// Review of #591 (L10): status() ran per-subagent queries, also on every verification path.
+test('a root\'s status costs the same queries for one subagent as for five', async () => {
+  const count = async (n: number) => {
+    const { task: parent, attempt } = rootWorker();
+    for (let i = 0; i < n; i++) await spawn(attempt, {});
+    const all = jest.spyOn(store, 'all'), get = jest.spyOn(store, 'get');
+    tasks.status(parent.conversationId, 'u', parent.taskId);
+    const calls = all.mock.calls.length + get.mock.calls.length;
+    all.mockRestore(); get.mockRestore();
+    return calls;
+  };
+  expect(await count(5)).toBe(await count(1));
 });

@@ -50,6 +50,11 @@ test('help says which commands confirm first', () => {
     expect(commandHelp('telegram')).toMatch(new RegExp(`^/${name} — .*; confirmation required$`, 'm'));
   }
   expect(commandHelp('discord')).not.toMatch(/^\/clear — .*confirmation/m);
+  // Review of #591 (L16): Discord, LINE and Slack ask before /restart (and /compact) too.
+  for (const channel of ['discord', 'line', 'slack'] as const) {
+    expect(commandHelp(channel)).toMatch(/^\/restart — .*; confirmation required$/m);
+    expect(commandHelp(channel)).toMatch(/^\/compact — .*; confirmation required$/m);
+  }
 });
 
 test('session status labels a context measured on a different model separately (#576)', () => {

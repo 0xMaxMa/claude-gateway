@@ -64,7 +64,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     if (this.agent.type === 'app-agent') return false;
     return cleanupPersistedProcess(attempt.processIdentity);
   }
-  reserve(taskId: string): (() => void) | undefined { return gatewayCapacity(this.gateway).acquireWorker(this.agent.id, taskId); }
+  reserve(taskId: string): (() => void) | undefined { return gatewayCapacity(this.gateway).acquireWorker(this.agent.id, taskId, true, this.tasks.ancestorIds(taskId)); }
   available(taskId: string): boolean { return this.workspaces.available(taskId); }
   release(taskId: string): Promise<void> { return this.workspaces.release(taskId); }
   async start(task: TaskSnapshot, attempt: TaskAttempt, capacityReserved = false, providerPermit?: ProviderPermit): Promise<WorkerHandle> {

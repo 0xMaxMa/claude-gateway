@@ -4,10 +4,9 @@ export function executionTool(block: { name?: unknown; input?: any }): { name: s
   const name = typeof block.name === 'string' ? block.name : 'tool';
   const input = block.input && typeof block.input === 'object' && !Array.isArray(block.input) ? block.input : {};
   if (/^mcp__[a-zA-Z0-9_-]+__tool_call$/.test(name) && typeof input.name === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(input.name)) {
-    // A target already named with this namespace (`mcp__gateway__x`) is the same tool, not `mcp__gateway__mcp__gateway__x`.
-    const prefix = name.slice(0, -'tool_call'.length);
-    const target = input.name.startsWith(prefix) && input.name.length > prefix.length ? input.name.slice(prefix.length) : input.name;
-    return {name: prefix + target, input: input.arguments && typeof input.arguments === 'object' && !Array.isArray(input.arguments) ? input.arguments : {}};
+    // The name exactly as asked for: tool_call runs only the catalog's bare names, so a target
+    // already carrying the namespace (`mcp__gateway__x`) is refused and must not look like `x` ran.
+    return {name: name.slice(0, -'tool_call'.length) + input.name, input: input.arguments && typeof input.arguments === 'object' && !Array.isArray(input.arguments) ? input.arguments : {}};
   }
   return {name, input};
 }

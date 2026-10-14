@@ -19,6 +19,8 @@ const bugFix = role('bug-fix'), panel = role('interrogate reviewers');
 /** A role in callback data: its index and a tag of its name (review of #591, L2). */
 const ref = (i: number) => `${i}-${createHash('sha256').update(PSTACK_ROLES[i].role).digest('hex').slice(0, 3)}`;
 const B = ref(bugFix), P = ref(panel);
+/** A panel entry in a ➖ button: its index and a tag of the entry (review of #591, M1/L4). */
+const rm = (i: number, entry: string) => `ps:rm:${P}:${i}-${createHash('sha256').update(entry).digest('hex').slice(0, 3)}`;
 const buttons = (screen: ReturnType<typeof pstackMenuScreen>) => screen.keyboard.flat();
 
 describe('screens', () => {
@@ -91,7 +93,7 @@ describe('screens', () => {
   test('a panel role lists its entries with remove buttons and add buttons per family', () => {
     const screen = pstackMenuScreen({ kind: 'role', role: panel }, state({}));
     expect(screen.text).toContain('1. claude-opus-5-5');
-    expect(buttons(screen).map(b => b.data)).toEqual(expect.arrayContaining([`ps:rm:${P}:0`, `ps:rm:${P}:3`, `ps:p:${P}:a:c:0`, `ps:p:${P}:a:g:0`]));
+    expect(buttons(screen).map(b => b.data)).toEqual(expect.arrayContaining([rm(0, 'claude-opus-5-5'), rm(3, 'claude-haiku-5-5'), `ps:p:${P}:a:c:0`, `ps:p:${P}:a:g:0`]));
     expect(buttons(screen).map(b => b.text)).not.toContain('Use skill default');
   });
 
@@ -212,13 +214,36 @@ describe('steps', () => {
 
   test('a panel adds and removes one entry, starting from its skill default', () => {
     expect(step(`ps:a:${P}:gpt-6-sol[1m]`).next).toEqual({ roles: { 'interrogate reviewers': 'claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5, claude-haiku-5-5, gpt-6-sol[1m]' } });
-    expect(step(`ps:rm:${P}:3`).next).toEqual({ roles: { 'interrogate reviewers': 'claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5' } });
-    expect(() => step(`ps:rm:${P}:0`, { roles: { 'interrogate reviewers': 'claude-opus-5-5' } })).toThrow('at least one entry');
+    expect(step(rm(3, 'claude-haiku-5-5')).next).toEqual({ roles: { 'interrogate reviewers': 'claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5' } });
+    expect(() => step(rm(0, 'claude-opus-5-5'), { roles: { 'interrogate reviewers': 'claude-opus-5-5' } })).toThrow('at least one entry');
+  });
+
+  // Review of #591 (M1): ➖ dropped every entry of the tapped model, so of opus@xhigh and
+  // opus@low neither could be removed alone (removing both left the panel empty).
+  test('➖ removes the tapped entry only, even beside another entry of the same model', () => {
+    const block = { roles: { 'interrogate reviewers': 'claude-opus-5-5 @xhigh, claude-opus-5-5 @low' } };
+    expect(step(rm(1, 'claude-opus-5-5 @low'), block).next).toEqual({ roles: { 'interrogate reviewers': 'claude-opus-5-5 @xhigh' } });
+    expect(step(rm(0, 'claude-opus-5-5 @xhigh'), block).next).toEqual({ roles: { 'interrogate reviewers': 'claude-opus-5-5 @low' } });
+  });
+
+  // Review of #591 (L4): a ➖ button names its entry, so after the panel changed elsewhere it
+  // is refused instead of removing whatever entry now has its index.
+  test('a ➖ button from before the panel changed is refused', () => {
+    const changed = { roles: { 'interrogate reviewers': 'claude-fable-5-1, claude-sonnet-5-5' } };
+    expect(() => step(rm(0, 'claude-opus-5-5'), changed)).toThrow('out of date');
+    expect(() => step(`ps:rm:${P}:0`)).toThrow(PstackConfigError);
+  });
+
+  // Review of #591 (M1): ➕ on a model that is already in the panel added the same entry twice.
+  test('➕ refuses an entry the panel already has', () => {
+    expect(() => step(`ps:a:${P}:claude-opus-5-5`)).toThrow('already in interrogate reviewers');
+    expect(step(`ps:a:${P}:claude-opus-5-5`, { roles: { 'interrogate reviewers': 'claude-opus-5-5 @low' } }).next)
+      .toEqual({ roles: { 'interrogate reviewers': 'claude-opus-5-5 @low, claude-opus-5-5' } });
   });
 
   test.each([
     'ps:nope', 'ps:r:99', 'ps:l:x:0', 'ps:l:s:', 'ps:l:s:1234', 'ps:de:turbo', `ps:m:${B}:grok-4`, `ps:m:${B}:claude-unknown`, `ps:a:${B}:claude-opus-5-5`,
-    `ps:m:${P}:claude-opus-5-5`, `ps:e:${P}:high`, `ps:e:${B}:turbo`, `ps:rm:${B}:0`, `ps:rm:${P}:9`, `ps:p:${B}:a:c:0`, `ps:p:${B}:s:x:0`,
+    `ps:m:${P}:claude-opus-5-5`, `ps:e:${P}:high`, `ps:e:${B}:turbo`, `ps:rm:${B}:0-000`, `ps:rm:${P}:9-000`, rm(0, 'claude-fable-5-1'), `ps:p:${B}:a:c:0`, `ps:p:${B}:s:x:0`,
   ])('refuses forged or stale data %s', data => {
     expect(() => step(data)).toThrow(PstackConfigError);
   });

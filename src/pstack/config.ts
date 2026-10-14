@@ -88,14 +88,15 @@ export function validatePstack(agentId: string, block: AgentPstackConfig, models
  * Apply pstack-models.md lines (`<role>: <value>`, `default effort: <level>`)
  * to a block, the way /pstack-setup edits it. `<role>: default` drops the
  * override, like deleting the line from the sheet; `<role> += <entry>` and
- * `<role> -= <model>` edit a panel list one entry at a time. A `session hook` line is
+ * `<role> -= <model>[ @<level>]` edit a panel list one entry at a time. A `session hook` line is
  * skipped: the plugin's hook reads it from the global sheet only.
  */
 export function applySheetLines(block: AgentPstackConfig, text: string, panelDefault?: (role: string) => string | undefined): AgentPstackConfig {
   const roles = { ...block.roles };
   let defaultEffort = block.defaultEffort;
   for (const line of text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'))) {
-    // Panel lists change one entry at a time: `<role> += <entry>` appends, `<role> -= <model>` drops that model's entries.
+    // Panel lists change one entry at a time: `<role> += <entry>` appends, `<role> -= <model>` drops that model's
+    // entries and `<role> -= <model> @<level>` drops that one entry.
     const edit = /^(.+?)\s+([+-])=\s*(.+)$/.exec(line);
     if (edit) {
       const [, key, op, value] = edit;
@@ -106,7 +107,9 @@ export function applySheetLines(block: AgentPstackConfig, text: string, panelDef
       // An unset role starts from its skill default, as the sheet shows it.
       const entries = (roles[key] ?? fallback ?? '').split(',').map(e => e.trim()).filter(Boolean);
       const model = (entry: string) => entry.replace(/\s+@\S+$/, '').toLowerCase();
-      const kept = op === '+' ? [...entries, value] : entries.filter(e => model(e) !== model(value));
+      const same = (entry: string) => entry.replace(/\s+/g, ' ').toLowerCase() === value.replace(/\s+/g, ' ').toLowerCase();
+      if (op === '+' && entries.some(same)) throw new PstackConfigError('INVALID_PSTACK_CONFIG', `"${value}" is already in ${key}.`);
+      const kept = op === '+' ? [...entries, value] : entries.filter(e => /\s@\S+$/.test(value) ? !same(e) : model(e) !== model(value));
       if (op === '-' && kept.length === entries.length) throw new PstackConfigError('INVALID_PSTACK_CONFIG', `"${value}" is not in ${key}.`);
       if (!kept.length) throw new PstackConfigError('INVALID_PSTACK_CONFIG', `A panel needs at least one entry; use "${key}: default" to go back to the skill default.`);
       roles[key] = kept.join(', ');

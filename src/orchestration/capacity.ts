@@ -12,17 +12,23 @@ export class ProcessCapacity {
     if(!Number.isSafeInteger(total)||!Number.isSafeInteger(reservedAgent)||reservedAgent<1||total<=reservedAgent)throw new OrchestrationError('INVALID_PROCESS_LIMITS');
     this.total=total;this.reservedAgent=reservedAgent;
   }
-  acquire(role: SessionRole, enforce = true): (() => void) | undefined {
-    if (enforce && this.active.size >= this.total) return undefined;
-    if (enforce && role !== 'agent' && [...this.active.values()].filter(value => value !== 'agent').length >= this.total - this.reservedAgent) return undefined;
+  /** `allowance` lets the process exceed the limits by that many slots (see acquireWorker). */
+  acquire(role: SessionRole, enforce = true, allowance = 0): (() => void) | undefined {
+    if (enforce && this.active.size >= this.total + allowance) return undefined;
+    if (enforce && role !== 'agent' && [...this.active.values()].filter(value => value !== 'agent').length >= this.total - this.reservedAgent + allowance) return undefined;
     const key = Symbol(role); this.active.set(key, role);
     return () => { this.active.delete(key); };
   }
-  acquireWorker(agentId: string, taskId: string, enforce = true): (() => void) | undefined {
+  /**
+   * A subagent's ancestors hold their slots while they wait for it. As in TaskService.claim, those
+   * slots are not counted against it, so a chain can always extend while siblings still queue.
+   */
+  acquireWorker(agentId: string, taskId: string, enforce = true, ancestorTaskIds: string[] = []): (() => void) | undefined {
     const key = JSON.stringify([agentId, taskId]);
     const existing = this.workers.get(key);
     if (existing) return existing;
-    const releaseSlot = this.acquire('worker', enforce);
+    const holding = ancestorTaskIds.filter(id => this.workers.has(JSON.stringify([agentId, id]))).length;
+    const releaseSlot = this.acquire('worker', enforce, holding);
     if (!releaseSlot) return undefined;
     const release = () => {
       releaseSlot();

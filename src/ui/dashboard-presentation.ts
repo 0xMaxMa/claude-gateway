@@ -51,20 +51,24 @@ export function toolNameList(names: string[] | null | undefined, harness?: strin
  return '<ul class="tool-name-list">'+[...new Set(names)].sort().map(name=>'<li><code>'+dashboardEscape(harness==='codex'&&name==='Bash'?'Shell':name)+'</code></li>').join('')+'</ul>';
 }
 /** Turn details for whatever a turn loaded and used, by name: future tools, skills and plugins appear without code changes. */
-export function turnExtensionsHtml(turn: {harness?: string; usedSkills?: string[]; loadedTools?: string[] | null; requests?: Array<{toolSchemas?: {deferred?: string[]}}>;
+export function turnExtensionsHtml(turn: {harness?: string; pending?: boolean; usedSkills?: string[]; loadedTools?: string[] | null; requests?: Array<{toolSchemas?: {loaded?: string[]; deferred?: string[]}}>;
   extensions?: {plugins?: string[]; skills?: string[]; agents?: string[]; mcpServers?: Array<{name: string; status: string}>}; subagent?: {parentTaskId: string; depth?: number; type?: string; effort?: string; readonly?: boolean}}): string {
  const sub=turn.subagent;
  let html=sub?'<p class="turn-subagent">Subagent of task <code>'+dashboardEscape(sub.parentTaskId)+'</code>'+[sub.depth!=null?'depth '+sub.depth:'',sub.type||'',sub.effort?'effort '+sub.effort:'',sub.readonly?'read-only':''].filter(Boolean).map(part=>' · '+dashboardEscape(part)).join('')+'</p>':'';
- // Codex has no Skill tool, so an empty list there would claim no skill was used.
- html+='<h3>Used skills</h3>'+(turn.harness==='codex'?'<p class="muted">Not recorded for Codex workers</p>':toolNameList(turn.usedSkills));
+ // Codex has no Skill tool, so an empty list there would claim no skill was used; a queued turn,
+ // or one recorded before skills were, has no list to show either.
+ if(turn.harness==='codex')html+='<h3>Used skills</h3><p class="muted">Not recorded for Codex workers</p>';
+ else if(!turn.pending&&Array.isArray(turn.usedSkills))html+='<h3>Used skills</h3>'+toolNameList(turn.usedSkills);
  const ext=turn.extensions;
  if(ext){
   html+='<h3>Plugins</h3>'+toolNameList(ext.plugins||[])+'<h3>Skills available</h3>'+toolNameList(ext.skills||[])+'<h3>Agents available</h3>'+toolNameList(ext.agents||[]);
   html+='<h3>MCP servers</h3>'+toolNameList((ext.mcpServers||[]).map(server=>server.status==='connected'?server.name:server.name+' ('+server.status+')'));
  }
  if(Array.isArray(turn.loadedTools))html+='<h3>Tools at session start</h3>'+toolNameList(turn.loadedTools,turn.harness);
- const deferred=(turn.requests||[]).flatMap(request=>request?.toolSchemas?.deferred||[]);
- if(deferred.length)html+='<h3>Deferred tools (loaded through tool search)</h3>'+toolNameList(deferred);
+ // A deferred tool's schema was not sent; one that any request of the turn loaded (through tool search) is not deferred.
+ const loaded=new Set((turn.requests||[]).flatMap(request=>request?.toolSchemas?.loaded||[]));
+ const deferred=[...new Set((turn.requests||[]).flatMap(request=>request?.toolSchemas?.deferred||[]))].filter(name=>!loaded.has(name));
+ if(deferred.length)html+='<h3>Deferred tools (not loaded; available through tool search)</h3>'+toolNameList(deferred);
  return html;
 }
 export const dashboardPresentationClient = 'const dashboardChartPalette='+JSON.stringify(dashboardChartPalette)+';'+compactNumber.toString()+';'+'const channelIcons='+JSON.stringify(channelIcons)+';'+dashboardEscape.toString()+';'+agentHue.toString()+';'+agentBadge.toString()+';'+channelBadge.toString()+';'+taskStatusBadge.toString()+';'+providerWaitingHtml.toString()+';'+toolNameList.toString()+';'+turnExtensionsHtml.toString()+';';

@@ -417,6 +417,19 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
       expect(await send(port, '/pstack-setup on')).toContain('PSTACK_NOT_INSTALLED');
       expect(persistedPstack()).toBeUndefined();
     }, 15000);
+
+    // Review of #591 (L3): `on` for an agent already set up saves nothing, and with the plugin
+    // gone the reply said "pstack is removed" while the block stayed saved.
+    it('says the plugin is missing, not that pstack is removed, for an agent already set up', async () => {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      config.agents[0].pstack = {}; fs.writeFileSync(configPath, JSON.stringify(config));
+      fixture.cleanup(); fixture = pstackClaudeConfig(false); process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
+      const port = await startRunner(gatewayWithIds());
+      const text = await send(port, '/pstack-setup on');
+      expect(text).not.toContain('removed');
+      expect(text).toContain('not installed for Claude Code on this host');
+      expect(persistedPstack()).toEqual({});
+    }, 15000);
   });
 
   // #460: config.json carries agent bot tokens and the admin API key.

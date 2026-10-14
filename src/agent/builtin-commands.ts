@@ -28,10 +28,11 @@ export const BUILTIN_COMMANDS: Record<string, CommandDef> = {
   help:     { channels: [...CHAT_CHANNELS, 'api'] },
   status:   { channels: ['telegram'] },
   // Chat channels route these through their own orchestration controls before this gate.
-  tasks:    { channels: ['api'] },
-  voice:    { channels: ['api'], hidden: true },
-  voices:   { channels: ['api'], hidden: true },
-  orch:     { channels: ['api'], hidden: true },
+  // Whole words only, so `/voice-memo` or `/tasks-report` still reaches the agent.
+  tasks:    { channels: ['api'], wordBoundary: false },
+  voice:    { channels: ['api'], hidden: true, wordBoundary: false },
+  voices:   { channels: ['api'], hidden: true, wordBoundary: false },
+  orch:     { channels: ['api'], hidden: true, wordBoundary: false },
 };
 
 const _cache = new Map<CommandChannel, RegExp>();

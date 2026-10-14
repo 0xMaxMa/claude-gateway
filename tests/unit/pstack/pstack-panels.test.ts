@@ -6,6 +6,7 @@ import { DecisionService } from '../../../src/orchestration/decisions';
 import { TaskService } from '../../../src/orchestration/tasks/service';
 import { subagentLines } from '../../../src/orchestration/telegram-tool-status';
 import { dashboardClient } from '../../../src/ui/dashboard-client';
+import { dashboardEscape } from '../../../src/ui/dashboard-presentation';
 import type { TaskSnapshot } from '../../../src/orchestration/types';
 import { PSTACK_ROLES } from '../../helpers/pstack-fixture';
 
@@ -35,6 +36,15 @@ describe('/pstack-setup panel entries', () => {
   it('refuses to remove a model that is not in the list, and matches models case-insensitively', () => {
     expect(() => applySheetLines({ roles: { 'arena runners': 'claude-opus-5-5' } }, 'arena runners -= gpt-6-sol[1m]', defaults)).toThrow(PstackConfigError);
     expect(applySheetLines({ roles: { 'arena runners': 'claude-opus-5-5, GPT-6-SOL[1m] @high' } }, 'arena runners -= gpt-6-sol[1m]', defaults).roles).toEqual({ 'arena runners': 'claude-opus-5-5' });
+  });
+
+  // Review of #591 (M1): `-= <model> @<level>` removes that one entry; a bare model still removes all of its entries.
+  it('removes one entry when the line names its level, and refuses a duplicate entry', () => {
+    const both = { roles: { 'arena runners': 'claude-opus-5-5 @xhigh, claude-opus-5-5 @low' } };
+    expect(applySheetLines(both, 'arena runners -= claude-opus-5-5 @low', defaults).roles).toEqual({ 'arena runners': 'claude-opus-5-5 @xhigh' });
+    expect(() => applySheetLines(both, 'arena runners -= claude-opus-5-5 @high', defaults)).toThrow('is not in arena runners');
+    expect(() => applySheetLines(both, 'arena runners -= claude-opus-5-5', defaults)).toThrow('at least one entry');
+    expect(() => applySheetLines(both, 'arena runners += Claude-Opus-5-5 @xhigh', defaults)).toThrow('already in arena runners');
   });
 
   // Re-review of #584: `+=` on a one-model role made a list the skill reads as one model.
@@ -120,7 +130,7 @@ describe('dashboard task tree', () => {
   function rowsFor(tasks: Array<Record<string, unknown>>) {
     const start = dashboardClient.indexOf('function dashboardTaskRows(){');
     const end = dashboardClient.indexOf('function dashText(', start);
-    const context = createContext({ dashboardRows: () => [{ a: { id: 'a' }, s: { sessionId: 's', tasks } }], escHtml: (v: string) => v });
+    const context = createContext({ dashboardRows: () => [{ a: { id: 'a' }, s: { sessionId: 's', tasks } }], escHtml: dashboardEscape });
     runInContext(dashboardClient.slice(start, end) + ';function dashText(v){return escHtml(v==null?"—":String(v));}', context);
     return { order: (runInContext('dashboardTaskRows()', context) as Array<{ t: { taskId: string } }>).map(r => r.t.taskId), label: (t: unknown) => runInContext('subagentLabel', context)(t) as string };
   }
@@ -142,6 +152,13 @@ describe('dashboard task tree', () => {
     const { label } = rowsFor([]);
     expect(label({ parentTaskId: 'p', depth: 2, model: 'gpt-6-sol[1m]', harness: 'codex', effort: 'high' })).toContain('↳ ↳ gpt-6-sol[1m] · Codex · high');
     expect(label({ taskId: 'root' })).toBe('');
+  });
+
+  // Review of #591 (L15): the stand-in escaper escaped nothing, so dropping the escape would have passed.
+  it('escapes a stored model name in the label', () => {
+    const html = rowsFor([]).label({ parentTaskId: 'p', depth: 1, model: '<img src=x onerror=alert(1)>' });
+    expect(html).not.toContain('<img');
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
   });
 });
 

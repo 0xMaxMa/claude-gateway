@@ -54,6 +54,9 @@ export function pstackPickableModels(models: ModelConfig[], wanted: Family): Mod
  */
 const roleTag = (role: string) => createHash('sha256').update(role).digest('hex').slice(0, 3);
 const roleRef = (plugin: PstackModels, index: number) => `${index}-${roleTag(plugin.roles[index].role)}`;
+/** A panel entry in a ➖ button, the same way: its index and a tag of the entry, so a button from before the panel changed is refused. */
+const entryText = (entry: { model: string; effort?: string }) => `${entry.model}${entry.effort ? ` @${entry.effort}` : ''}`;
+const entryRef = (entry: { model: string; effort?: string }, index: number) => `${index}-${roleTag(entryText(entry))}`;
 
 const fits = (data: string) => Buffer.byteLength(data, 'utf8') <= MAX_DATA_BYTES;
 const button = (text: string, data: string): PstackMenuButton => ({ text: text.length > 60 ? text.slice(0, 59) + '…' : text, data });
@@ -153,9 +156,14 @@ export function pstackMenuStep(data: string, state: PstackMenuState): PstackMenu
       return { view: { kind: 'role', role: index }, next: apply(verb === 'a' ? `${role} += ${arg}` : `${role}: ${arg}${level ? ` @${level}` : ''}`) };
     }
     case 'rm': {
-      const entry = entries()[Number(arg)];
-      if (!panel || !entry) invalid();
-      return { view: { kind: 'role', role: index }, next: apply(`${role} -= ${entry.model}`) };
+      // The tapped entry only, not every entry of its model (opus @xhigh beside opus @low).
+      const at = /^(\d{1,3})-([0-9a-f]{3})$/.exec(arg ?? '');
+      const current = panel ? entries() : [];
+      const entry = at ? current[Number(at[1])] : undefined;
+      if (!entry || entryRef(entry, Number(at![1])) !== arg) invalid();
+      const kept = current.filter((_, i) => i !== Number(at![1]));
+      if (!kept.length) throw new PstackConfigError('INVALID_PSTACK_CONFIG', `A panel needs at least one entry; use "${role}: default" to go back to the skill default.`);
+      return { view: { kind: 'role', role: index }, next: apply(`${role}: ${kept.map(entryText).join(', ')}`) };
     }
   }
   return invalid();
@@ -244,7 +252,7 @@ export function pstackMenuScreen(view: PstackMenuView, state: PstackMenuState, n
     return {
       text: `${top}${role} (panel, ${source})\n${entries.map((e, i) => `${i + 1}. ${e.model}${e.effort ? ` @${e.effort}` : ''}`).join('\n')}\n\nTap ➖ to remove an entry or ➕ to add one.`,
       keyboard: [
-        ...entries.map((e, i) => [button(`➖ ${i + 1}. ${e.model}`, `ps:rm:${ref}:${i}`)]),
+        ...entries.map((e, i) => [button(`➖ ${i + 1}. ${entryText(e)}`, `ps:rm:${ref}:${entryRef(e, i)}`)]),
         (['c', 'g'] as Family[]).map(f => button(`➕ ${FAMILIES[f]}`, `ps:p:${ref}:a:${f}:0`)),
         ...useDefault, roleBack,
       ],
