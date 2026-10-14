@@ -1679,6 +1679,21 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // 🔁 Retry on a voice-note transcription failure: orch:vr:<input id> (44 bytes).
+  const voiceRetry=/^orch:vr:([a-f0-9-]{36})$/.exec(data)
+  if(voiceRetry){
+    if(!ORCHESTRATION_ENABLED||ctx.callbackQuery.message?.chat.type!=='private'||!isCallbackAuthorized(ctx)){await ctx.answerCallbackQuery({text:'Not available or not authorized.'}).catch(()=>{});return}
+    try{
+      if(!CALLBACK_URL_BASE)throw Error('not_configured')
+      const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),body:JSON.stringify({command:'telegram_voice_retry',chat_id:String(ctx.callbackQuery.message.chat.id),payload:{user_id:String(ctx.from.id),input_id:voiceRetry[1]}})})
+      const result=await response.json() as {success?:boolean;text?:string;error?:string}
+      await ctx.answerCallbackQuery({text:((response.ok&&result.success?result.text:result.error)??'Voice note cannot be retried.').slice(0,180)}).catch(()=>{})
+      // Any answer settles this button: a retry was queued, or the note cannot be retried.
+      if(response.ok&&result.success)await ctx.editMessageReplyMarkup({reply_markup:undefined}).catch(()=>{})
+    }catch{await ctx.answerCallbackQuery({text:'Voice retry unavailable. Please send the voice note again.'}).catch(()=>{})}
+    return
+  }
+
   const voicePicker=/^(voicepick|voicepage|voicegroup|voicedismiss):([a-f0-9-]{36})(?::(male|female|neutral|unspecified|back))?(?::(\d+))?$/.exec(data)
   if(voicePicker){
     if(!ORCHESTRATION_ENABLED||ctx.callbackQuery.message?.chat.type!=='private'||!isCallbackAuthorized(ctx)){await ctx.answerCallbackQuery({text:'Not available or not authorized.'}).catch(()=>{});return}

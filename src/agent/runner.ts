@@ -1337,6 +1337,19 @@ export class AgentRunner extends EventEmitter {
       return;
     }
 
+    if (command === 'telegram_voice_retry') {
+      // A private chat's id is its user's id; the runtime also checks the note's sender and chat.
+      const chatId=body.chat_id??'', payload=body.payload??{};
+      if (!/^\d+$/.test(chatId) || payload.user_id!==chatId || typeof payload.input_id!=='string' || !/^[a-f0-9-]{36}$/.test(payload.input_id)) { respond({success:false},400); return; }
+      if (!this.agentConfig.orchestration?.enabled || !this.agentConfig.orchestration.channels?.includes('telegram')) { respond({success:false,error:'Voice retry requires orchestration mode.'}); return; }
+      try { respond({success:true,...(await this.getOrchestration()).retryVoiceNote('telegram',chatId,`telegram:${payload.user_id}`,payload.input_id)}); }
+      catch (error) {
+        this.logger.warn('Voice note retry refused', { referenceId: payload.input_id, code: error instanceof Error ? error.message : String(error) });
+        respond({success:false,error:'This voice note cannot be retried here. Please record it again.'});
+      }
+      return;
+    }
+
     if (command === 'telegram_question') {
       const chatId=body.chat_id??'', payload=body.payload??{};
       if (!/^\d+$/.test(chatId) || payload.user_id!==chatId) { respond({success:false},400); return; }

@@ -56,7 +56,8 @@ import { unansweredInputContext } from './unanswered-inputs';
 import { replyContext, storedReplyContext, resolveStoredReply } from './reply-context';
 import { pendingReports } from './notification-mailbox';
 import { toolActivity, ToolActivity } from './tool-activity';
-import { transcribeVoiceNote, voiceNoteFailureMessage } from '../voice/notes';
+import { retryableVoiceNoteFailure, transcribeVoiceNote, voiceNoteFailureMessage, VoiceNoteDiagnostic } from '../voice/notes';
+import { createLogger } from '../logger';
 import { VoiceError } from '../voice/types';
 import { describeVoiceError } from '../voice/errors';
 import { MediaStore } from '../history/media-store';
@@ -68,7 +69,7 @@ import { SPEECH_OVERLAY, SPEECH_REMINDER, splitSpeechResponse, speechVoiceStyle 
 import { join } from 'path';
 import { pathWithin } from '../utils/paths';
 import { randomUUID } from 'crypto';
-import { mkdirSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 import { realpath } from 'fs/promises';
 import type { AgentConfig, GatewayConfig } from '../types';
 import { SessionProcess } from '../session/process';
@@ -91,7 +92,9 @@ import { OrchestrationError, ExecutionCapabilities, ConversationScope, TERMINAL_
 import { acceptsDirectCommand } from './tasks/automation-session';
 import { recoverOrchestration } from './recovery';
 import { acquireInstanceLock } from './instance-lock';
-import { DeliveryOutbox, channelSender, ChannelSender } from './delivery';
+import { DeliveryOutbox, channelSender, ChannelSender, DeliveryControl } from './delivery';
+/** How long a failed voice note can be retried from its kept recording. */
+const VOICE_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
 import { ConversationEvents } from './events';
 import { BoundedQueue } from './bounded-queue';
@@ -204,7 +207,7 @@ export class AgentOrchestrationRuntime {
       // no longer 'pending') still counts itself as part of the group needing quota.
       () => Number(store.get(`SELECT COUNT(*) n FROM outbox o JOIN deliveries d ON d.id=json_extract(o.payload_json,'$.deliveryId') JOIN conversation_bindings b ON b.id=d.binding_id WHERE o.kind='delivery' AND o.state IN ('pending','processing') AND b.channel='line'`)!.n)));
     this.decisions = new DecisionService(store, (response, binding, text) => {
-      this.delivery.enqueue(response, binding, text);
+      this.delivery.enqueue(response, binding, text, this.voiceRetryControls(response, binding));
       const spoken = store.get('SELECT text FROM response_speech WHERE response_id=?', response);
       const destination = store.get('SELECT channel,chat_id,thread_key FROM conversation_bindings WHERE id=?', binding);
       if (spoken?.text && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && destination && ['telegram','discord','line','slack'].includes(String(destination.channel)) && voiceReplyAllowed(store.channelVoiceMode(String(destination.channel),String(destination.chat_id),String(destination.thread_key??'')), responseHasVoiceOrigin(store,response))) {
@@ -911,6 +914,48 @@ export class AgentOrchestrationRuntime {
     void this.delivery.tick().catch(() => {});
     return result.inputId;
   }
+  private voiceLogger?: import('../types').Logger;
+  /** Voice-note diagnostics go to this agent's own log, keyed by the input as reference ID. */
+  private voiceLog(level: 'info' | 'warn', message: string, data: Record<string, unknown>): void {
+    const logDir = this.gateway.gateway.logDir;
+    if (logDir) (this.voiceLogger ??= createLogger(this.agent.id, logDir))[level](message, data);
+    else console.warn(JSON.stringify({ ts: new Date().toISOString(), level, event: message, ...data }));
+  }
+  /** 🔁 Retry for a voice note whose transcription failed for a reason the kept audio can fix.
+   * Only the sender, in the same chat, within a day, once: the audio becomes a new voice-note
+   * input from the same ingress, which is transcribed and answered as usual. */
+  retryVoiceNote(source: ConversationScope['source'], chatId: string, principalId: string, inputId: string): { text: string; retried: boolean } {
+    const row = this.store.get(`SELECT i.*,c.source,c.chat_id,t.state AS transcript_state,t.error_code FROM conversation_inputs i
+      JOIN conversations c ON c.id=i.conversation_id LEFT JOIN voice_note_transcripts t ON t.input_id=i.id WHERE i.id=?`, inputId);
+    if (!row || row.modality !== 'voice_note' || row.principal_id !== principalId || row.source !== source || row.chat_id !== chatId) throw new OrchestrationError('ACCESS_DENIED');
+    if (row.transcript_state === 'completed') return { text: 'This voice note was already transcribed.', retried: false };
+    if (row.transcript_state === 'retried') return { text: 'This voice note is already being retried.', retried: false };
+    if (row.transcript_state !== 'failed' || !retryableVoiceNoteFailure(String(row.error_code ?? ''))) return { text: 'This voice note cannot be retried. Please record it again.', retried: false };
+    if (Date.now() - Number(row.created_at) > VOICE_RETRY_WINDOW_MS) return { text: 'This voice note is too old to retry. Please record it again.', retried: false };
+    const ingress = JSON.parse(String(row.ingress_json)) as AcceptInput & { capabilities?: ExecutionCapabilities };
+    const attachment = (JSON.parse(String(row.attachment_refs_json)) as string[])[0];
+    if (!attachment || !existsSync(MediaStore.resolvePath(join(this.agent.workspace, '../..'), this.agent.id, attachment))) return { text: 'The recording is no longer available. Please record it again.', retried: false };
+    // One transition per failure, so a double tap cannot queue the note twice.
+    if (Number(this.store.run("UPDATE voice_note_transcripts SET state='retried' WHERE input_id=? AND state='failed'", inputId).changes) !== 1) return { text: 'This voice note is already being retried.', retried: false };
+    const { capabilities, ...original } = ingress;
+    try {
+      const accepted = this.submitInput({ ...original, ingressKey: `voice-retry:${inputId}` },
+        capabilities ?? { execute: false, writeMemory: false });
+      void accepted.response.catch(() => { /* The durable decision owns failure delivery. */ });
+    } catch (error) {
+      this.store.run("UPDATE voice_note_transcripts SET state='failed' WHERE input_id=? AND state='retried'", inputId);
+      throw error;
+    }
+    this.voiceLog('info', 'Voice note retry requested', { agentId: this.agent.id, referenceId: inputId, code: row.error_code });
+    return { text: '🔁 Retrying the voice note…', retried: true };
+  }
+  /** The 🔁 Retry button for a Telegram reply that reports a retryable voice-note failure. */
+  private voiceRetryControls(responseId: string, bindingId: string): DeliveryControl[] | undefined {
+    if (this.store.get('SELECT channel FROM conversation_bindings WHERE id=?', bindingId)?.channel !== 'telegram') return;
+    const row = this.store.get(`SELECT t.input_id,t.error_code FROM assistant_responses r JOIN conversation_decisions d ON d.id=r.decision_id
+      JOIN voice_note_transcripts t ON t.input_id=json_extract(d.input_ids_json,'$[0]') WHERE r.id=? AND t.state='failed'`, responseId);
+    return row && retryableVoiceNoteFailure(String(row.error_code ?? '')) ? [{ label: '🔁 Retry', data: `orch:vr:${row.input_id}` }] : undefined;
+  }
   submitInput(input: AcceptInput, capabilities: ExecutionCapabilities, onTool?: (event: ToolActivity) => void): { inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }> } {
     if (this.closing) throw new OrchestrationError('ORCHESTRATION_CLOSING');
     input = this.questionControls.normalizeReply(input);
@@ -1102,18 +1147,25 @@ export class AgentOrchestrationRuntime {
       if (!internalReview) this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.started', { responseId: decision.responseId }));
       if (input.modality === 'voice_note') {
         let transcript = this.store.get('SELECT * FROM voice_note_transcripts WHERE input_id=?', receipt.inputId);
-        if (!transcript) {
-          this.store.run("INSERT INTO voice_note_transcripts VALUES(?,'processing',NULL,NULL)", receipt.inputId);
+        // A failure the kept audio can fix is not final: a rerun of this input transcribes it again.
+        if (!transcript || (transcript.state === 'failed' && retryableVoiceNoteFailure(String(transcript.error_code ?? '')))) {
+          this.store.run("INSERT INTO voice_note_transcripts VALUES(?,'processing',NULL,NULL) ON CONFLICT(input_id) DO UPDATE SET state='processing',text=NULL,error_code=NULL", receipt.inputId);
+          const diagnostics: VoiceNoteDiagnostic[] = [];
+          const trace = { agentId: this.agent.id, sessionId, referenceId: receipt.inputId, provider: this.config.voice.notes.provider, model: this.config.voice.notes.model };
           try {
             if (!(this.config.voice.enabled && this.config.voice.notes.enabled)) throw new OrchestrationError('VOICE_NOTES_DISABLED');
             if (!input.attachmentIds?.[0]) throw new OrchestrationError('VOICE_NOTE_ATTACHMENT_MISSING');
             const path = MediaStore.resolvePath(join(this.agent.workspace, '../..'), this.agent.id, input.attachmentIds[0]);
-            const text = await (this.host.transcribeNote ?? transcribeVoiceNote)(path, { ...this.config.voice.notes, language: this.config.voice.language });
+            const text = await (this.host.transcribeNote ?? transcribeVoiceNote)(path, { ...this.config.voice.notes, language: this.config.voice.language, onDiagnostic: event => {
+              diagnostics.push(event);
+              // Retries and an incomplete credit check that still let the note through are traceable by reference.
+              this.voiceLog('info', 'Voice note diagnostic', { ...trace, ...event });
+            } });
             this.store.run("UPDATE voice_note_transcripts SET state='completed',text=? WHERE input_id=?", text, receipt.inputId);
           } catch (error) {
             const code = error instanceof OrchestrationError || error instanceof VoiceError ? error.code : 'VOICE_NOTE_STT_FAILED';
             this.store.run("UPDATE voice_note_transcripts SET state='failed',error_code=? WHERE input_id=?", code, receipt.inputId);
-            console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Voice note transcription failed', agentId: this.agent.id, sessionId, referenceId: receipt.inputId, code, provider: this.config.voice.notes.provider, model: this.config.voice.notes.model, ...describeVoiceError(code) }));
+            this.voiceLog('warn', 'Voice note transcription failed', { ...trace, code, ...describeVoiceError(code), retryable: retryableVoiceNoteFailure(code), attempts: diagnostics });
           }
           transcript = this.store.get('SELECT * FROM voice_note_transcripts WHERE input_id=?', receipt.inputId)!;
         }

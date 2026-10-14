@@ -201,7 +201,13 @@ The diagnostic payload contains metadata, not transcript text, audio, URLs or pr
 
 Select `managed:elevenlabs` or `managed:paxalabs` with a model from the authenticated provider service’s managed catalog. These routes use its daily voice wallet; direct providers and `upstream:<provider>` BYOK routes keep their own billing. There is no automatic switch between payers.
 
-When managed credits run out, channels quietly skip voice transcription and synthesis while text chat remains available. Saved voice preferences stay unchanged; a subsequent request checks the wallet again after reset. Browser clients should pause voice on `MANAGED_VOICE_QUOTA_EXHAUSTED` until credits become available. An unavailable wallet is a separate retryable error, not evidence that credits are exhausted. See the [Voice API](../api/voice.md#managed-voice-wallet-and-startup-recovery).
+When managed credits run out, channels quietly skip voice transcription and synthesis while text chat remains available. Saved voice preferences stay unchanged; a subsequent request checks the wallet again after reset. Browser clients should pause voice on `MANAGED_VOICE_QUOTA_EXHAUSTED` until credits become available. A wallet check that cannot finish is retried briefly and then does not block the request, because only a definite empty wallet stops voice work. See the [Voice API](../api/voice.md#managed-voice-wallet-and-startup-recovery).
+
+## Voice-message failures and retry
+
+Voice-message transcription retries a provider timeout, connection failure, server error (5xx/408) or plain rate limit (429) twice, after 1 s and 3 s, within two minutes in total. Authentication, payment, quota, format, size and empty-speech failures are final and are not retried.
+
+The recording is kept. If transcription still fails for a reason a retry can fix (provider, connection, timeout, rate limit, credit check or an interrupted run), the Telegram failure reply carries a **🔁 Retry** button. It transcribes the same stored recording again, as a new voice message from the same sender in the same chat, and the agent answers it as usual. Only that sender can use it, within 24 hours, and only once per failure. A note that was already transcribed is never processed again. Final failures have no button. Each failure, retry attempt and incomplete credit check is written to the agent's log (`<logDir>/<agent>.log`) with the reply's reference ID, the code, the HTTP status and the elapsed time. API keys and provider message bodies are not logged.
 
 ## Local audio dependencies
 

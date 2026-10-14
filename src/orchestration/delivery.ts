@@ -96,6 +96,7 @@ export function speechFailureNotice(code: string): string {
     authentication: ['Voice authentication failed', 'Check your API key'],
     permission: ['Voice access denied', 'Check provider permissions'],
     unavailable: ['Voice provider unavailable', 'Try again later'],
+    credit_check: ['Could not check voice credit', 'Try again'],
     timeout: ['Voice request timed out', 'Try again later'],
     network: ['Voice connection failed', 'Try again later'],
     language: ['Voice language not supported', 'Check voice settings'],
