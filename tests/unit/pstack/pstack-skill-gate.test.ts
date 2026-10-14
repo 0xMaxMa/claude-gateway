@@ -58,7 +58,8 @@ describe('an explicit /pstack: command on an agent that is not set up', () => {
       const submitted = f.runtime.submitInput({ scope: f.scope, text, ingressKey: 'm1' }, { execute: true, writeMemory: false });
       const reply = await Promise.race([submitted.response.catch(() => 'model turn'), new Promise<string>(resolve => setTimeout(() => resolve('no direct reply'), 3000))]);
       expect(reply).toContain('pstack is not set up for this agent');
-      expect(reply).toContain('/pstack-setup');
+      // Telegram links a tapped command only up to the first '-', so it names the tappable spelling.
+      expect(reply).toContain('/pstack_setup in a direct message');
       expect(f.createAgentSession).not.toHaveBeenCalled();
       expect(f.runtime.store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(0);
       expect(f.runtime.store.get("SELECT COUNT(*) n FROM conversation_inputs WHERE status='accepted'")!.n).toBe(0);
@@ -71,7 +72,8 @@ describe('an explicit /pstack: command on an agent that is not set up', () => {
     expect(pstackNotSetUpReply('/pstack-setup on', 'telegram', undefined)).toBeUndefined();
     expect(pstackNotSetUpReply('/code-review', 'telegram', undefined)).toBeUndefined();
     expect(pstackNotSetUpReply('please run pstack:why', 'telegram', undefined)).toBeUndefined();
-    expect(pstackNotSetUpReply('/pstack:why', 'api', undefined)).toContain('/pstack-setup');
+    expect(pstackNotSetUpReply('/pstack:why', 'api', undefined)).toContain('/pstack-setup on (needs an API key with write access to this agent) or PUT /api/v1/agents/<agent-id>/pstack');
+    expect(pstackNotSetUpReply('/pstack:why', 'discord', undefined)).toContain('/pstack-setup in a direct message');
   });
 });
 

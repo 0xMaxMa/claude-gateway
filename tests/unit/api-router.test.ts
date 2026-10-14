@@ -1299,7 +1299,7 @@ test('public command picker includes all API built-ins and no channel-only comma
   const response = await supertest.default(app).get('/api/v1/commands');
   expect(response.status).toBe(200);
   expect(response.body.commands.map((command: {name:string}) => command.name).sort()).toEqual([
-    '/clear','/compact','/help','/model','/restart','/session','/sessions','/stop',
+    '/clear','/compact','/help','/model','/pstack-setup','/restart','/session','/sessions','/stop',
   ]);
 });
 

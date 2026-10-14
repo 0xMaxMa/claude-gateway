@@ -29,6 +29,7 @@ import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
 import { confirmSelection, voiceModeConfirmation } from './selection-confirmation'
 import { LiveTaskBrowser, type TaskBrowserMessage } from './task-browser'
+import { PSTACK_MENU_COMMAND, pstackMenuMarkup } from './pstack-menu'
 import { ReceiverSpool } from '../receiver-spool'
 const orchestrationSpool = process.env.GATEWAY_ORCHESTRATION_INGRESS_DIR && process.env.CLAUDE_CHANNEL_CALLBACK
   ? new ReceiverSpool(process.env.GATEWAY_ORCHESTRATION_INGRESS_DIR, process.env.CLAUDE_CHANNEL_CALLBACK, fetch, Math.max(250,Math.min(10000,Number(process.env.GATEWAY_MEDIA_GROUP_WAIT_MS)||2000))) : undefined
@@ -885,6 +886,7 @@ const BOT_COMMANDS = [
   { command: 'restart', description: 'Graceful restart session' },
   { command: 'model', description: 'Show current AI model' },
   { command: 'models', description: 'Switch AI model' },
+  { command: 'pstack_setup', description: 'Set up pstack for this agent' },
   ...(INTERACTIVE_CLI_ENABLED ? [{ command: 'cli', description: 'Open the live terminal viewer' }] : []),
   { command: 'start', description: 'Welcome and setup guide' },
   { command: 'status', description: 'Check your pairing status' },
@@ -1448,6 +1450,24 @@ bot.command('tasks',async ctx=>{
   catch{await ctx.reply('Could not load tasks. Please try /tasks again.')}
 })
 
+// /pstack-setup (Telegram also takes /pstack_setup: command names cannot contain '-').
+// Bare, it opens the button menu the gateway renders; with arguments it falls
+// through to the gateway's text command. Groups fall through too: changes are
+// direct-message only.
+async function pstackMenuRequest(chatId:string,userId:string,data:string) {
+  if(!CALLBACK_URL_BASE)throw Error('not_configured')
+  const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(20000),body:JSON.stringify({command:'telegram_pstack',chat_id:chatId,payload:{user_id:userId,data}})})
+  const result=await response.json() as {success?:boolean}
+  if(!response.ok||!result.success)throw Error('unavailable')
+  return pstackMenuMarkup(result)
+}
+bot.hears(PSTACK_MENU_COMMAND,async (ctx,next)=>{
+  if(ctx.chat?.type!=='private'||!CALLBACK_URL_BASE)return next()
+  if(!isCallbackAuthorized(ctx))return
+  try{const menu=await pstackMenuRequest(String(ctx.chat.id),String(ctx.from!.id),'ps:h');await ctx.reply(menu.text,{reply_markup:menu.reply_markup})}
+  catch{await ctx.reply('pstack setup unavailable. Please try /pstack_setup again.')}
+})
+
 async function taskStopRequest(chatId: string, userId: string, menuId?: string, index?: number) {
   if (!CALLBACK_URL_BASE) throw new Error('not_configured')
   const response=await fetch(CALLBACK_URL_BASE+'/command', {
@@ -1677,6 +1697,17 @@ bot.on('callback_query:data', async ctx => {
       const payload=data==='taskdismiss'?{action:'dismiss'}:taskBrowser[1]?{action:taskBrowser[1]==='taskcancel'?'cancel':'detail',task_id:taskBrowser[2]}:{page:Number(taskBrowser[4])}
       await liveTaskBrowser.navigate(String(ctx.callbackQuery.message.chat.id),String(ctx.from.id),ctx.callbackQuery.message.message_id,payload)
     }catch{await ctx.answerCallbackQuery({text:'Task unavailable. Use /tasks to refresh.'}).catch(()=>{})}
+    return
+  }
+
+  if(data.startsWith('ps:')){
+    if(ctx.callbackQuery.message?.chat.type!=='private'||!isCallbackAuthorized(ctx)){await ctx.answerCallbackQuery({text:'Not authorized.'}).catch(()=>{});return}
+    try{
+      const menu=await pstackMenuRequest(String(ctx.callbackQuery.message.chat.id),String(ctx.from.id),data)
+      await ctx.answerCallbackQuery(menu.toast?{text:menu.toast}:undefined).catch(()=>{})
+      if(menu.closed){await ctx.deleteMessage().catch(()=>{});return}
+      await ctx.editMessageText(menu.text,{reply_markup:menu.reply_markup}).catch(()=>{})
+    }catch{await ctx.answerCallbackQuery({text:'pstack setup unavailable. Use /pstack_setup again.'}).catch(()=>{})}
     return
   }
 

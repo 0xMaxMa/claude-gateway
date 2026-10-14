@@ -242,11 +242,15 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
       return forwardText();
     }
 
-    it('shows that pstack is installed but not set up, with the model IDs', async () => {
+    // Dev e2e of #591: the bare reply listed every model ID and no roles.
+    it('shows that pstack is not set up, every role with its current model, and the IDs by family', async () => {
       const port = await startRunner(gatewayWithIds());
       const text = await send(port, '/pstack-setup');
-      expect(text).toContain('not set up for this agent');
-      expect(text).toContain('gpt-6-sol[1m] (GPT 6 Sol)');
+      expect(text).toContain('⚪ Off: workers do not load pstack');
+      expect(text).toContain('• bug-fix: claude-fable-5-1');
+      expect(text).toContain('• interrogate reviewers: claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5, claude-haiku-5-5');
+      expect(text).toContain('Claude: claude-sonnet-4-6, claude-opus-5');
+      expect(text).toContain('GPT: gpt-6-sol[1m]');
       expect(persistedPstack()).toBeUndefined();
     }, 15000);
 
@@ -275,6 +279,85 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
       expect(text).toContain('only available in a direct message');
       expect(persistedPstack()).toBeUndefined();
     }, 15000);
+
+    // Dev e2e of #591: Telegram reports no chat type, so every change was
+    // refused as "only available in a direct message", even in one.
+    describe('on Telegram', () => {
+      const tgChat = '424242';
+      async function sendTelegram(port: number, text: string, chat = tgChat): Promise<string> {
+        const file = path.join(agentConfig.workspace, '.telegram-state', 'typing', `${chat}.forward`);
+        fs.rmSync(file, { force: true });
+        await fetch(`http://127.0.0.1:${port}/channel`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: text, meta: { chat_id: chat, message_id: '1', user: 'u', user_id: tgChat, source: 'telegram', ts: new Date().toISOString() } }) });
+        await waitFor(() => fs.existsSync(file), 8000);
+        const entries = JSON.parse(fs.readFileSync(file, 'utf8')) as Array<{ text: string }>;
+        return entries[entries.length - 1]!.text;
+      }
+      const menu = async (port: number, data: string, chat = tgChat, user = tgChat) => {
+        const res = await fetch(`http://127.0.0.1:${port}/command`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'telegram_pstack', chat_id: chat, payload: { user_id: user, data } }) });
+        return { status: res.status, body: await res.json() as { success?: boolean; text?: string; toast?: string; keyboard?: Array<Array<{ text: string; data: string }>> } };
+      };
+
+      it('applies sheet lines in a direct message, with either spelling', async () => {
+        const port = await startRunner(gatewayWithIds());
+        expect(await sendTelegram(port, '/pstack-setup bug-fix: gpt-6-sol[1m]')).toContain('bug-fix: gpt-6-sol[1m]');
+        expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
+        await sendTelegram(port, '/pstack_setup@claude_bot off');
+        expect(persistedPstack()).toBeUndefined();
+      }, 15000);
+
+      it('still refuses changes in a group', async () => {
+        const port = await startRunner(gatewayWithIds());
+        expect(await sendTelegram(port, '/pstack-setup on', '-100200')).toContain('only available in a direct message');
+        expect(persistedPstack()).toBeUndefined();
+      }, 15000);
+
+      it('serves the button menu and saves a button\'s change through the same path', async () => {
+        const port = await startRunner(gatewayWithIds());
+        const home = await menu(port, 'ps:h');
+        expect(home.status).toBe(200);
+        expect(home.body.text).toContain('• bug-fix: claude-fable-5-1');
+        expect(home.body.keyboard![0][0]).toEqual({ text: '✅ Turn on', data: 'ps:on' });
+        const changed = await menu(port, 'ps:m:1:gpt-6-sol[1m]');
+        expect(changed.body.text).toContain('✅ Saved');
+        expect(changed.body.toast).toContain('Saved');
+        expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
+        const refused = await menu(port, 'ps:m:1:claude-not-a-model');
+        expect(refused.body.text).toContain('out of date');
+        expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
+        await menu(port, 'ps:off');
+        expect(persistedPstack()).toBeUndefined();
+      }, 15000);
+
+      it('refuses a menu request from a group or another user', async () => {
+        const port = await startRunner(gatewayWithIds());
+        expect((await menu(port, 'ps:on', '-100200', '424242')).status).toBe(400);
+        expect((await menu(port, 'ps:on', '424242', '7')).status).toBe(400);
+        expect((await menu(port, 'model:x')).status).toBe(400);
+        expect(persistedPstack()).toBeUndefined();
+      }, 15000);
+    });
+
+    // Dev e2e of #591: on web /pstack-setup was not a command, so the model answered it.
+    describe('on web (API chat)', () => {
+      it('is a built-in command there', () => {
+        expect(AgentRunner.isApiBuiltinCommand('/pstack-setup')).toBe(true);
+        expect(AgentRunner.isApiBuiltinCommand('/pstack-setup bug-fix: default')).toBe(true);
+      });
+
+      it('shows the setup to anyone and changes it only with write access', async () => {
+        await startRunner(gatewayWithIds());
+        const shown = await runner.executeApiCommand('web-session', 'web-chat', '/pstack-setup');
+        expect(shown.responseText).toContain('• bug-fix: claude-fable-5-1');
+        const refused = await runner.executeApiCommand('web-session', 'web-chat', '/pstack-setup on');
+        expect(refused.responseText).toContain('write access');
+        expect(persistedPstack()).toBeUndefined();
+        const set = await runner.executeApiCommand('web-session', 'web-chat', '/pstack-setup bug-fix: gpt-6-sol[1m]', { canWriteAgent: true });
+        expect(set.responseText).toContain('bug-fix: gpt-6-sol[1m]');
+        expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
+      }, 15000);
+    });
 
     it('explains how to install when the plugin is missing', async () => {
       fixture.cleanup(); fixture = pstackClaudeConfig(false); process.env.CLAUDE_CONFIG_DIR = fixture.configDir;

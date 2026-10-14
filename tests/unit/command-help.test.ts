@@ -3,7 +3,7 @@ import { BUILTIN_COMMANDS } from '../../src/agent/builtin-commands';
 import { CHAT_CHANNELS } from '../../src/history/types';
 test.each([...CHAT_CHANNELS,'api'] as const)('%s help lists exactly the registered core commands',channel=>{
  const text=commandHelp(channel);
- for(const [command,definition] of Object.entries(BUILTIN_COMMANDS)) expect(text.includes(`/${command} —`)).toBe(definition.channels.includes(channel));
+ for(const [command,definition] of Object.entries(BUILTIN_COMMANDS)) expect(text.includes(`/${channel==='telegram'?definition.alias??command:command} —`)).toBe(definition.channels.includes(channel));
  expect(text).not.toContain('undefined');
 });
 test('mode-specific help does not advertise unsupported voice or API slash controls',()=>{
@@ -36,4 +36,12 @@ test('session status labels a context measured on a different model separately (
   expect(formatSessionStatus('s', 'N', 'm', { text: '—', contextUsedPct: null, contextModel: 'm' })).not.toContain('Context measured on');
   // Ids are compared raw on purpose: the [1m] suffix selects a different context window.
   expect(formatSessionStatus('s', 'N', 'claude-sonnet-5-5[1m]', { text: '—', contextUsedPct: null, contextModel: 'claude-sonnet-5-5' })).toContain('Context measured on: claude-sonnet-5-5');
+});
+
+// Dev e2e of #591: Telegram links a tapped /pstack-setup only up to '-', and web did not have it.
+test('pstack setup is listed in its tappable spelling on Telegram and on web', () => {
+  expect(commandHelp('telegram')).toContain('/pstack_setup — Set up pstack for this agent with buttons');
+  expect(commandHelp('telegram')).not.toContain('/pstack-setup');
+  expect(commandHelp('api')).toContain('/pstack-setup — Show the pstack setup');
+  expect(commandCatalog('api').map(c => c.name)).toContain('/pstack-setup');
 });

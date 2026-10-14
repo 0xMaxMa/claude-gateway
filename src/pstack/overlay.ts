@@ -33,7 +33,10 @@ export function pstackWorkerNote(subagents: boolean): string {
 export function pstackNotSetUpReply(text: string, source: ConversationScope['source'], pstack: AgentPstackConfig | undefined): string | undefined {
   const command = skillCommand(text, source);
   if (pstack || !command?.name.startsWith('pstack:')) return undefined;
-  return `pstack is not set up for this agent, so /${command.name} is not available here. Set it up with /pstack-setup in a direct message with the bot (or PUT /v1/agents/<agent-id>/pstack), then send the command again.`;
+  const how = source === 'telegram' ? 'with /pstack_setup in a direct message with the bot'
+    : source === 'api' ? 'with /pstack-setup on (needs an API key with write access to this agent) or PUT /api/v1/agents/<agent-id>/pstack'
+    : 'with /pstack-setup in a direct message with the bot (or PUT /api/v1/agents/<agent-id>/pstack)';
+  return `pstack is not set up for this agent, so /${command.name} is not available here. Set it up ${how}, then send the command again.`;
 }
 
 /**

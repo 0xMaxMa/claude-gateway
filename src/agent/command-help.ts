@@ -27,7 +27,10 @@ export function commandHelp(channel: CommandChannel, orchestration = false, inte
     if (name === 'model' && ['telegram', 'discord', 'line'].includes(channel)) description = 'Show the model; change it in a private chat: /model [model ID]';
     if (name === 'stop' && orchestration) description = 'Stop the reply and choose a task to cancel';
     if (name === 'compact' && channel !== 'api') description += '; confirmation required';
-    return `/${name} — ${description}`;
+    if (name === 'pstack-setup' && channel === 'telegram') description = 'Set up pstack for this agent with buttons (direct message)';
+    if (name === 'pstack-setup' && channel === 'api') description = 'Show the pstack setup; change it with /pstack-setup <role>: <model-id> (needs write access to this agent)';
+    // A tapped Telegram command stops at the first character outside [a-z0-9_].
+    return `/${channel === 'telegram' ? BUILTIN_COMMANDS[name].alias ?? name : name} — ${description}`;
   });
   if (orchestration && channel !== 'api') {
     lines.push('/tasks — View tasks, progress and cancellation controls', '/task_question — Open a pending task question (use the command supplied with the question)');

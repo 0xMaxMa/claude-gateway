@@ -107,6 +107,10 @@ import { PSTACK_INSTALL_HINT, PSTACK_OFF_SETTINGS, pstackModels, pstackPluginInf
 import { PstackConfigError, applySheetLines } from '../pstack/config';
 import { pstackPanelDefault, renderPstackSheet } from '../pstack/sheet';
 import { savePstackConfig } from '../pstack/setup';
+import { PstackMenuScreen, PstackMenuState, PstackMenuStep, pstackMenuScreen, pstackMenuStep, pstackMenuText } from '../pstack/menu';
+import type { AgentPstackConfig } from '../pstack/config';
+
+const PSTACK_SETUP_USAGE = 'Usage: /pstack-setup on | off | <role>: <model-id>[ @<level>] (one per line; "<role>: default" drops an override; "<role> += <model-id>[ @<level>]" / "<role> -= <model-id>" edit a panel list; "default effort: <level|session>").';
 
 const PROTECTED_WORKSPACE_FILES = [
   'AGENTS.md', 'SOUL.md', 'MEMORY.md', 'CLAUDE.md',
@@ -1317,6 +1321,15 @@ export class AgentRunner extends EventEmitter {
         else if(payload.action==='choose'&&typeof payload.menu_id==='string'&&typeof payload.index==='number')respond({success:true,...await voices.choose(chatId,payload.menu_id,payload.index)});
         else respond({success:true,...await voices.menu(chatId,typeof payload.page==='number'?payload.page:0,typeof payload.menu_id==='string'?payload.menu_id:undefined,typeof payload.gender==='string'?payload.gender:undefined)});
       } catch {respond({success:false,error:'Voice list unavailable or provider changed. Use /voices to refresh.'});}
+      return;
+    }
+
+    if (command === 'telegram_pstack') {
+      // A private chat's id is its user's id, as for every Telegram menu here.
+      const chatId=body.chat_id??'', payload=body.payload??{};
+      if (!/^\d+$/.test(chatId) || payload.user_id!==chatId || typeof payload.data!=='string' || !/^ps:[\x21-\x7e]{1,61}$/.test(payload.data)) { respond({success:false},400); return; }
+      try { respond({success:true,...await this.pstackMenu(payload.data)}); }
+      catch { respond({success:false,error:'pstack setup unavailable. Use /pstack_setup again.'}); }
       return;
     }
 
@@ -2969,8 +2982,8 @@ export class AgentRunner extends EventEmitter {
     } else if (content.startsWith('/rename')) {
       const name = content.replace('/rename', '').trim();
       await this.handleCommandRename(agentId, chatId, name);
-    } else if (content.startsWith('/pstack-setup')) {
-      await this.handleCommandPstackSetup(chatId, content.replace('/pstack-setup', '').trim(), meta);
+    } else if (/^\/pstack[-_]setup\b/.test(content)) {
+      await this.handleCommandPstackSetup(chatId, content.replace(/^\/pstack[-_]setup(?:@\w+)?/, '').trim(), meta);
     } else if (content.startsWith('/models')) {
       await this.handleCommandModels(chatId);
     } else if (content.startsWith('/model')) {
@@ -3025,32 +3038,62 @@ export class AgentRunner extends EventEmitter {
    * apply to the next worker. Direct messages only, like /model.
    */
   private async handleCommandPstackSetup(chatId: string, arg: string, meta: Record<string, string> = {}): Promise<void> {
-    const plugin = pstackPluginInfo();
-    const roles = plugin.installPath ? pstackModels(plugin.installPath) : undefined;
-    const usage = 'Usage: /pstack-setup on | off | <role>: <model-id>[ @<level>] (one per line; "<role>: default" drops an override; "<role> += <model-id>[ @<level>]" / "<role> -= <model-id>" edit a panel list; "default effort: <level|session>").';
-    if (!arg) {
-      const ids = (await this.availableModels()).map((m) => `${m.id} (${m.label})`).join(', ');
-      const state = !roles ? `pstack is not installed for Claude Code on this host. ${PSTACK_INSTALL_HINT}`
-        : !this.agentConfig.pstack ? 'pstack is installed but not set up for this agent: its workers do not load it.'
-        : `pstack is set up for this agent. Its workers load it with this sheet:\n\n${renderPstackSheet(this.agentConfig.pstack, roles)}`;
-      this.writeAutoForward(chatId, `${state}\n\n${usage}\nModel IDs: ${ids}`);
-      return;
-    }
+    if (!arg) { this.writeAutoForward(chatId, await this.pstackSetupText()); return; }
     if (!this.isDirectChat(meta)) {
       this.writeAutoForward(chatId, 'pstack setup is only available in a direct message with the bot — it changes this agent for every chat.');
       return;
     }
+    this.writeAutoForward(chatId, await this.applyPstackSetup(arg));
+  }
+
+  /** The bare /pstack-setup reply for channels without buttons: status, every role's current model, the syntax and the model IDs. */
+  private async pstackSetupText(): Promise<string> {
+    return pstackMenuText(await this.pstackMenuState(), PSTACK_SETUP_USAGE);
+  }
+
+  private async pstackMenuState(): Promise<PstackMenuState> {
+    const plugin = pstackPluginInfo();
+    return { block: this.agentConfig.pstack, plugin: plugin.installPath ? pstackModels(plugin.installPath) : undefined, models: await this.availableModels(), installHint: PSTACK_INSTALL_HINT };
+  }
+
+  /** Save a new pstack block (`undefined` removes it) through the same path as the API. */
+  private async savePstack(block: AgentPstackConfig | undefined): Promise<AgentPstackConfig | undefined> {
+    const saved = await savePstackConfig(this.configPath, this.agentConfig.id, block, await this.selectableModels());
+    if (saved) this.agentConfig.pstack = saved; else delete this.agentConfig.pstack;
+    return saved;
+  }
+
+  /** Apply `/pstack-setup <arg>` (on, off, or pstack-models.md lines) and describe the outcome. */
+  private async applyPstackSetup(arg: string): Promise<string> {
+    const plugin = pstackPluginInfo();
+    const roles = plugin.installPath ? pstackModels(plugin.installPath) : undefined;
     try {
       const block = arg === 'off' ? undefined : arg === 'on' ? this.agentConfig.pstack ?? {} : applySheetLines(this.agentConfig.pstack ?? {}, arg, roles && (role => pstackPanelDefault(roles, role)));
-      const saved = await savePstackConfig(this.configPath, this.agentConfig.id, block, await this.selectableModels());
-      if (saved) this.agentConfig.pstack = saved; else delete this.agentConfig.pstack;
-      this.writeAutoForward(chatId, saved && roles
+      const saved = await this.savePstack(block);
+      return saved && roles
         ? `pstack is set up for this agent. The next worker loads it with this sheet:\n\n${renderPstackSheet(saved, roles)}`
-        : 'pstack is removed from this agent. Its next worker does not load it.');
+        : 'pstack is removed from this agent. Its next worker does not load it.';
     } catch (error) {
       if (!(error instanceof PstackConfigError)) throw error;
-      this.writeAutoForward(chatId, `${error.code}: ${error.message}`);
+      return `${error.code}: ${error.message}`;
     }
+  }
+
+  /** One /pstack-setup button (Telegram): apply its change, if any, and render the next screen. */
+  private async pstackMenu(data: string): Promise<PstackMenuScreen & { toast?: string }> {
+    const state = await this.pstackMenuState();
+    let step: PstackMenuStep;
+    try { step = pstackMenuStep(data, state); } catch (error) {
+      if (!(error instanceof PstackConfigError)) throw error;
+      return { ...pstackMenuScreen({ kind: 'home' }, state, `⚠️ ${error.message}`), toast: error.message };
+    }
+    if (step.next === undefined) return pstackMenuScreen(step.view, state);
+    try { await this.savePstack(step.next ?? undefined); } catch (error) {
+      if (!(error instanceof PstackConfigError)) throw error;
+      return { ...pstackMenuScreen(step.view, state, `⚠️ ${error.code}: ${error.message}`), toast: error.message };
+    }
+    const saved = step.next === null ? 'pstack is off. The next worker does not load it.' : 'Saved. The next worker uses it.';
+    return { ...pstackMenuScreen(step.view, await this.pstackMenuState(), `✅ ${saved}`), toast: saved };
   }
 
   /**
@@ -5413,7 +5456,7 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     chatId: string,
     command: string,
-    opts?: { skipPersist?: boolean; model?: string; principalId?: string; displayCommand?: string; clientMessageId?: string; executionTaskId?:string },
+    opts?: { skipPersist?: boolean; model?: string; principalId?: string; displayCommand?: string; clientMessageId?: string; executionTaskId?:string; canWriteAgent?: boolean },
   ): Promise<{ result: Record<string, unknown>; responseText: string }> {
     const agentId = this.agentConfig.id;
     const storeChatId = chatId;           // sessionStore adds channel prefix internally
@@ -5501,6 +5544,13 @@ export class AgentRunner extends EventEmitter {
         forcePersist = stopped;
 
         }
+      } else if (cmd === '/pstack-setup' || cmd === '/pstack_setup') {
+        // Changes need the same access as PUT /api/v1/agents/:agentId/pstack.
+        const arg = command.trim().replace(/^\/pstack[-_]setup/, '').trim();
+        responseText = !arg ? await this.pstackSetupText()
+          : opts?.canWriteAgent ? await this.applyPstackSetup(arg)
+          : 'Changing the pstack setup needs an API key with write access to this agent. /pstack-setup without arguments shows it.';
+        result = { pstack: this.agentConfig.pstack ?? null };
       } else if (cmd === '/restart') {
         await this.restartProcess(sessionId, sessionId);
         result = { restarting: true };
@@ -5594,6 +5644,8 @@ export class AgentRunner extends EventEmitter {
    */
   private isDirectChat(meta: Record<string, string>): boolean {
     const kind = meta['chat_type'] ?? meta['line_chat_type'] ?? meta['slack_chat_type'];
+    // Telegram reports no chat type; a private chat's id is its user's id (groups are negative).
+    if (kind === undefined && this.channelFor(meta['chat_id'] ?? '') === 'telegram') return /^\d+$/.test(meta['chat_id'] ?? '') && meta['chat_id'] === meta['user_id'];
     return kind === 'direct' || kind === 'user';
   }
 

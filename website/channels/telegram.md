@@ -87,6 +87,7 @@ Once paired, use these commands in the bot's private chat:
 | `/restart` | Confirm a graceful session restart |
 | `/model` | Show the current model |
 | `/models` | Open the model picker; selecting restarts sessions, Dismiss cancels |
+| `/pstack_setup` | Set up [pstack](/guide/pstack) for this agent with buttons (direct message); `/pstack_setup <lines>` types the change |
 
 The model list comes from the configured model provider's `/v1/models` catalog when available, with `gateway.models` as fallback. Changing an agent model affects its other chats too.
 

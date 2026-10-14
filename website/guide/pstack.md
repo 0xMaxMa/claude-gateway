@@ -17,9 +17,18 @@ Running Claude Code directly on the host is unaffected: the plugin behaves as an
 
 ## Set up an agent
 
-An agent that is not set up loads **nothing** from pstack, even when the plugin is enabled globally: every host worker gets `enabledPlugins["pstack@pstack-claude"]` in its `--settings` overlay, `false` unless the agent has an `agents[].pstack` block. A session of an agent without orchestration gets the same `false` key; it is merged into a `--settings` you set in `claude.extraFlags` rather than added beside it. Claude Code merges that key over your own settings, so other plugins load as before. Claude workers of a set-up agent get the plugin and the agent's own model sheet. Codex workers never get pstack: no plugin, no sheet and no pstack skills in their catalog. The agent's own skill catalog lists pstack's skills only once it is set up, and `/pstack:<skill>` sent to an agent that is not set up is answered with a pointer to `/pstack-setup` instead of reaching the agent. On a set-up agent, `/pstack:<skill>` for a skill that is not user-invocable (the `principle-*` skills) is answered at once that it is not a command, as in Claude Code; workers load those skills by themselves. A name the plugin has no skill for is answered at once too, with close command names when there are any. `/pstack:reflect` runs in a new worker session, so its worker is given the transcripts of the chat session it reflects on: the agent's turns with the user and each earlier task's Claude worker. The gate decides what Claude Code loads, not what a host worker can read: the plugin's files stay on the host's disk. The gateway's own one-shot `claude -p` helpers (session titles, summaries, skill reviews) always run with pstack off.
+An agent that is not set up loads **nothing** from pstack, even when the plugin is enabled globally: every host worker gets `enabledPlugins["pstack@pstack-claude"]` in its `--settings` overlay, `false` unless the agent has an `agents[].pstack` block. A session of an agent without orchestration gets the same `false` key; it is merged into a `--settings` you set in `claude.extraFlags` rather than added beside it. Claude Code merges that key over your own settings, so other plugins load as before. Claude workers of a set-up agent get the plugin and the agent's own model sheet. Codex workers never get pstack: no plugin, no sheet and no pstack skills in their catalog. The agent's own skill catalog lists pstack's skills only once it is set up, and `/pstack:<skill>` sent to an agent that is not set up is answered with a pointer to the setup command instead of reaching the agent. On a set-up agent, `/pstack:<skill>` for a skill that is not user-invocable (the `principle-*` skills) is answered at once that it is not a command, as in Claude Code; workers load those skills by themselves. A name the plugin has no skill for is answered at once too, with close command names when there are any. `/pstack:reflect` runs in a new worker session, so its worker is given the transcripts of the chat session it reflects on: the agent's turns with the user and each earlier task's Claude worker. The gate decides what Claude Code loads, not what a host worker can read: the plugin's files stay on the host's disk. The gateway's own one-shot `claude -p` helpers (session titles, summaries, skill reviews) always run with pstack off.
 
-Set it up in a direct message with the bot:
+On Telegram, send `/pstack_setup` (or `/pstack-setup`) alone in a direct message with the bot. It opens a menu that edits itself in place:
+
+- **Main screen:** whether pstack is on, the default effort, and every role with its current model and level (✏️ marks a role you changed, • a skill default). Buttons turn pstack on or off, open the default effort, open a role, reset everything to the skill defaults (after a confirmation), or close the menu.
+- **Role screen:** the role's model and effort. Pick a model from the Claude or GPT list (paged; a `[1m]` ID is listed only when the model has no base ID), set an effort level or go back to the default effort, or drop your change with **Use skill default**.
+- **Panel role screen** (`interrogate reviewers`, `arena runners`…): one ➖ button per entry and ➕ buttons that add one Claude or GPT model. The last entry cannot be removed; use **Use skill default**.
+- **Default effort screen:** `session` or a level.
+
+Each tap is saved at once, through the same checks as the text command below, and the menu says whether it worked. Only allowlisted users can use the menu, and only in a direct message. Telegram command names cannot contain `-`, so `/pstack_setup` is the spelling in the bot's command list and in the gateway's replies; both spellings work everywhere.
+
+Or type the change in a direct message with the bot:
 
 | Message | Effect |
 | --- | --- |
@@ -31,7 +40,9 @@ Set it up in a direct message with the bot:
 | `/pstack-setup interrogate reviewers -= claude-haiku-5-5` | Remove a model's entries from a panel role (the last one cannot be removed; use `<role>: default`) |
 | `/pstack-setup off` | Remove pstack from the agent |
 
-`/pstack-setup` alone shows the agent's state, its current sheet and the model IDs to choose from. Arguments are lines of pstack's own `pstack-models.md`. Changes apply to the agent's next worker.
+Outside the Telegram menu, `/pstack-setup` alone shows the agent's state, every role with its current model, the syntax and the Claude and GPT model IDs to choose from. Arguments are lines of pstack's own `pstack-models.md`. Changes apply to the agent's next worker.
+
+In web (API) chat, `/pstack-setup` is a gateway command too: anyone in the chat can see the setup, and only an API key with write access to the agent can change it, as with the API below.
 
 Or through the API or CLI (an admin key may change any agent, a write key the agents it can access):
 

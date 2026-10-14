@@ -861,7 +861,7 @@ export function createApiRouter(
           openSseStream(res);
           try {
             const { responseText } = await runner.executeApiCommand(
-              sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, model: modelStr, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId },
+              sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, model: modelStr, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId) },
             );
             sseCallbacks.onChunk({ type: 'text_delta', text: responseText } as import('../types').StreamEvent);
             sseCallbacks.onDone(responseText, []);
@@ -916,7 +916,7 @@ export function createApiRouter(
         if (isBuiltinCommand) {
           // Built-in command — answer locally, return the same JSON shape as a normal reply.
           ({ responseText } = await runner.executeApiCommand(
-            sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId },
+            sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId) },
           ));
         } else {
           const agentCfgSync = agentConfigs.get(agentId)!;

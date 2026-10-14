@@ -6,6 +6,8 @@ interface CommandDef {
   channels: CommandChannel[];
   /** word-boundary check: true (default) = /^\/cmd\b/, false = /^\/cmd(\s|$)/ */
   wordBoundary?: boolean;
+  /** Another spelling, matched like the name but not listed: Telegram command names cannot contain `-`. */
+  alias?: string;
 }
 
 export const BUILTIN_COMMANDS: Record<string, CommandDef> = {
@@ -18,7 +20,7 @@ export const BUILTIN_COMMANDS: Record<string, CommandDef> = {
   stop:     { channels: [...CHAT_CHANNELS, 'api'], wordBoundary: false },
   model:    { channels: ['telegram', 'discord', 'line', 'api'] },
   models:   { channels: ['telegram', 'discord', 'line'] },
-  'pstack-setup': { channels: ['telegram', 'discord', 'line'] },
+  'pstack-setup': { channels: ['telegram', 'discord', 'line', 'api'], alias: 'pstack_setup' },
   restart:  { channels: [...CHAT_CHANNELS, 'api'], wordBoundary: false },
   start:    { channels: ['telegram'] },
   help:     { channels: [...CHAT_CHANNELS, 'api'] },
@@ -30,9 +32,9 @@ const _cache = new Map<CommandChannel, RegExp>();
 function buildRegex(channel: CommandChannel): RegExp {
   const parts = Object.entries(BUILTIN_COMMANDS)
     .filter(([, def]) => def.channels.includes(channel))
-    .map(([cmd, def]) =>
-      def.wordBoundary === false ? `^\/${cmd}(\\s|$)` : `^\/${cmd}\\b`
-    );
+    .flatMap(([cmd, def]) => [cmd, ...(def.alias ? [def.alias] : [])].map(name =>
+      def.wordBoundary === false ? `^\/${name}(\\s|$)` : `^\/${name}\\b`
+    ));
   // No commands registered for this channel (e.g. 'line') → match nothing.
   // `new RegExp('')` matches EVERY string, which would misroute all messages
   // into the command handler so they'd never reach the agent.
