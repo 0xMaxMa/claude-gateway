@@ -48,8 +48,11 @@ test('the decision overlay names the pstack plugin only while pstack is set up',
     expect(on).toContain('not the Unix');
     expect(on).toContain('target_profile=skill-worker');
     expect(on).toContain('pstack:poteto-mode');
+    // Session 66f2f9db: asked how to set pstack up, the agent pointed at upstream setup-pstack.
+    expect(on).toContain('/pstack-setup (roles, models, effort, on/off)');
+    expect(on).toContain('not pstack\'s setup-pstack');
     // The note is the only difference, so pstack-off agents keep today's overlay byte for byte.
-    const note = on.slice(on.indexOf('\n# pstack'), on.indexOf('\n', on.indexOf('pstack:poteto-mode')));
+    const note = on.slice(on.indexOf('\n# pstack'), on.indexOf('\n', on.indexOf('setup-pstack')));
     expect(on.replace(note, '')).toBe(off);
     expect(note.length).toBeLessThan(600);
 

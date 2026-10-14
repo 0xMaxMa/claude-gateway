@@ -20,6 +20,9 @@ export function pstackWorkerNote(subagents: boolean): string {
     subagents
       ? 'Wherever a pstack skill says to dispatch or spawn a subagent with the Agent tool, call subagent_spawn instead with the same arguments (description, prompt, subagent_type, model, readonly, run_in_background); its model is the model ID from the sheet above. Wait for background subagents with subagent_wait and stop them with subagent_cancel. Each subagent runs as a gateway task, possibly on another provider.'
       : 'Subagent dispatch is unavailable at this depth: do the work a skill would hand to a subagent yourself, inline.',
+    'When a pstack playbook step routes to another pstack skill, invoke that skill with the Skill tool (pstack:how, pstack:why, pstack:interrogate...) and follow it' + (subagents
+      ? ': start every subagent it calls for with subagent_spawn; do not do their work yourself.'
+      : '.'),
     'The setup-pstack skill does not apply here: this agent is configured with /pstack-setup.',
   ].join('\n');
 }
@@ -31,6 +34,7 @@ export function pstackWorkerNote(subagents: boolean): string {
 export const PSTACK_DECISION_NOTE = [
   '# pstack on this agent',
   'pstack here means the installed pstack@pstack-claude Claude Code plugin (the pstack:* skills in the catalog), not the Unix process stack tool. Its skills run only in workers: task_spawn with target_profile=skill-worker and skill_name pstack:<name>. pstack:poteto-mode picks the right pstack playbook (bug fix, feature, review...) by itself.',
+  'Set it up on this gateway with /pstack-setup (roles, models, effort, on/off), not pstack\'s setup-pstack skill.',
 ].join('\n');
 
 /**

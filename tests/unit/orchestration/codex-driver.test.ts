@@ -495,12 +495,16 @@ describe('pstack subagent workers', () => {
     await run('claude-sonnet-4-6');
     expect(claudeProfile().disallowedTools).toEqual(['Agent', 'Task']);
     expect(claudeProfile().context).toContain('call subagent_spawn instead');
+    // Session 66f2f9db: a poteto-mode worker did the how/why steps itself, with no Skill call and no subagent.
+    expect(claudeProfile().context).toContain('invoke that skill with the Skill tool (pstack:how, pstack:why, pstack:interrogate...)');
+    expect(claudeProfile().context).toContain('start every subagent it calls for with subagent_spawn; do not do their work yourself');
   });
 
   test('an agent that is not set up keeps native Agent and gets no subagent tools', async () => {
     mockBeforeResult = worker => { expect(mcpEnv(worker.runtimeProfile).GATEWAY_SUBAGENTS).toBe(''); };
     await run('claude-sonnet-4-6');
     expect(claudeProfile().disallowedTools).toBeUndefined();
+    expect(claudeProfile().context).not.toMatch(/pstack|Skill tool/);
   });
 
   test('a worker at the depth limit gets no subagent tools and is told to work inline', async () => {
@@ -511,6 +515,8 @@ describe('pstack subagent workers', () => {
     const attempt = tasks.claim(task.taskId)!;
     const handle = await driver.start(store.task(task.taskId)!, attempt); await handle.accepted; await handle.result;
     expect(claudeProfile().context).toContain('Subagent dispatch is unavailable at this depth');
+    expect(claudeProfile().context).toContain('invoke that skill with the Skill tool');
+    expect(claudeProfile().context).not.toContain('subagent_spawn');
     expect(claudeProfile().disallowedTools).toEqual(['Agent', 'Task']);
   });
 

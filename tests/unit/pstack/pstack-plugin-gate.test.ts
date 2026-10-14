@@ -37,7 +37,8 @@ test('without overrides a host worker keeps its previous arguments', () => {
 test('non-host profiles ignore the overrides and still disable every plugin', () => {
   const args = runtimeProfileArgs({ role: 'worker', mcpConfigPath: '/m.json', overlay: '', pluginOverrides: { 'pstack@pstack-claude': true } }, []);
   expect(args).toContain('--strict-mcp-config');
-  expect(settingsOf(args).enabledPlugins['pstack@pstack-claude']).toBeUndefined();
+  // Unset, or false where ~/.claude/settings.json enables pstack globally (every enabled plugin is turned off).
+  expect(settingsOf(args).enabledPlugins['pstack@pstack-claude']).not.toBe(true);
 });
 
 test('disallowed native tools are removed from a host worker (#583)', () => {

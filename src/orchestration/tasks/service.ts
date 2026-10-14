@@ -83,6 +83,19 @@ export function taskIndexEntry(task: TaskSnapshot) {
   };
 }
 
+/** What a pstack run actually did, for the decision turn that reports it: the pstack skills its
+ * tree invoked (Skill calls, or the skill a skill-worker was assigned) and its subagents by model.
+ * Absent when it used neither, so every other task's status is unchanged. */
+function pstackEvidence(store: OrchestrationStore, task: TaskSnapshot, assigned: string | undefined, tree: TaskSnapshot[]) {
+  const skills = new Set(assigned?.startsWith('pstack:') ? [assigned] : []);
+  for (const id of [task.taskId, ...tree.map(child => child.taskId)]) for (const row of store.all("SELECT DISTINCT json_extract(payload_json,'$.payload.input.skill') AS skill FROM conversation_events WHERE conversation_id=? AND type='tool.activity' AND json_extract(payload_json,'$.task_id')=? AND json_extract(payload_json,'$.payload.name')='Skill' AND json_extract(payload_json,'$.payload.type')='tool_use'", task.conversationId, id))
+    if (typeof row.skill === 'string' && row.skill.startsWith('pstack:')) skills.add(row.skill.slice(0, 256));
+  const subagentModels: Record<string, number> = {};
+  for (const child of tree) { const key = [child.model ?? 'parent model', child.effort].filter(Boolean).join(' '); subagentModels[key] = (subagentModels[key] ?? 0) + 1; }
+  if (!skills.size && !tree.length) return {};
+  return { pstackEvidence: { ...(skills.size ? { skills: [...skills].sort() } : {}), ...(tree.length ? { subagents: tree.length, subagentModels } : {}) } };
+}
+
 const ACTION_LOG_MAX = 12;
 const CORRECTION_HEAD = 'Latest user correction (apply first; supersedes conflicting earlier requirements):\n';
 /** The round's own command for the log: a correction's latest text, never its preamble, and never typed field text. */
@@ -178,11 +191,11 @@ export class TaskService {
   status(conversationId: string, principalId: string, taskId?: string): Array<TaskSnapshot & { currentInstructions?: string; harness?: 'claude' | 'codex' }> {
     this.store.assertMember(conversationId, principalId);
     if (taskId) {
-      const task = this.owned(taskId, conversationId); delete task.skill;
+      const task = this.owned(taskId, conversationId), assigned = task.skill?.name; delete task.skill;
       // A root lists its whole subagent tree; each entry names its parent.
-      const subagents = task.parentTaskId ? [] : this.store.all("SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.rootTaskId')=? ORDER BY created_at,rowid", task.conversationId, task.taskId)
-        .map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot)
-        .map(child => {
+      const tree = task.parentTaskId ? [] : this.store.all("SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.rootTaskId')=? ORDER BY created_at,rowid", task.conversationId, task.taskId)
+        .map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot);
+      const subagents = tree.map(child => {
           const attempt = this.store.get('SELECT payload_json FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', child.taskId);
           const ran = attempt ? JSON.parse(String(attempt.payload_json)) as TaskAttempt : undefined;
           // model · harness · effort · state · duration, for the root's final report.
@@ -190,7 +203,7 @@ export class TaskService {
             ...(ran?.startedAt ? { durationMs: (TERMINAL_TASK_STATES.has(child.state) ? child.updatedAt : Date.now()) - ran.startedAt } : {}),
             ...(child.failure ? { failure: child.failure.code } : {}) };
         });
-      return [{ ...this.withRecentTools(task), ...(subagents.length ? { subagents } : {}) }];
+      return [{ ...this.withRecentTools(task), ...(subagents.length ? { subagents } : {}), ...pstackEvidence(this.store, task, assigned, tree) }];
     }
     // Roots only, as in indexPage: a root's status lists its subagents.
     return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND ${ROOT_TASK_SQL} AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN

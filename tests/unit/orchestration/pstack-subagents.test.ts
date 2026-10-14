@@ -203,6 +203,29 @@ test('the agent\'s task index lists roots only; the root\'s status lists its sub
   ]);
 });
 
+// Dev e2e of #591 (session 66f2f9db): a decision turn reported a pstack run as done with no sign of the
+// skills or subagents it was meant to use. The status it reads now says which ran; other tasks are unchanged.
+test('a root\'s status names the pstack skills its tree invoked and counts its subagents by model; none when it used neither', async () => {
+  const { task: parent, attempt } = rootWorker();
+  const skill = (taskId: string, name: string, id: string) => store.transaction(() => store.appendEvent(context.conversationId, 'tool.activity',
+    { type: 'tool_use', id, name, input: name === 'Skill' ? { skill: id } : { file_path: 'a.ts' }, taskId, role: 'worker' }, taskId));
+  skill(parent.taskId, 'Read', 'read-1');
+  skill(parent.taskId, 'Skill', 'gateway-code-review');
+  expect(tasks.status(context.conversationId, 'u', parent.taskId)[0]).not.toHaveProperty('pstackEvidence');
+
+  skill(parent.taskId, 'Skill', 'pstack:how');
+  skill(parent.taskId, 'Skill', 'pstack:how');
+  const first = (await spawn(attempt, { model: 'gpt-6-astra[1m]', subagent_type: 'pstack:effort-xhigh' })).task_id;
+  await spawn(attempt, {}); await spawn(attempt, {});
+  skill(first, 'Skill', 'pstack:principle-x');
+  expect((tasks.status(context.conversationId, 'u', parent.taskId)[0] as any).pstackEvidence).toEqual({
+    skills: ['pstack:how', 'pstack:principle-x'], subagents: 3, subagentModels: { 'claude-sonnet-5-5 high': 2, 'gpt-6-astra[1m] xhigh': 1 },
+  });
+  // A task assigned a pstack skill (skill-worker) ran it through the CLI, not the Skill tool.
+  const assigned = tasks.spawn({ ...context, actionId: 'assigned' }, { title: 'Mode', instructions: 'Go', targetProfile: 'default-worker', skill: { name: 'pstack:poteto-mode', content: 'x' } as any });
+  expect((tasks.status(context.conversationId, 'u', assigned.taskId)[0] as any).pstackEvidence).toEqual({ skills: ['pstack:poteto-mode'] });
+});
+
 // Review of #591: the activity list and the /stop menu list roots only, like the index page.
 test('the task list without a task_id lists roots only', async () => {
   const { task: parent, attempt } = rootWorker();
