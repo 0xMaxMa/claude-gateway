@@ -13,17 +13,22 @@ const descriptions: Record<string, string> = {
   tasks: 'View tasks, progress and cancellation controls',
 };
 
-/** Shared discoverable built-ins for help, session shortcuts and the API picker. */
-export function commandCatalog(channel: CommandChannel): Array<{name: string; description: string}> {
+/**
+ * Shared discoverable built-ins for help, session shortcuts and the API picker.
+ * `orchestration` is the agent's mode where one is known; the agent-free API
+ * picker leaves it out and says /tasks needs it.
+ */
+export function commandCatalog(channel: CommandChannel, orchestration?: boolean): Array<{name: string; description: string}> {
   return Object.entries(BUILTIN_COMMANDS)
-    .filter(([, definition]) => definition.channels.includes(channel) && !definition.hidden)
+    .filter(([name, definition]) => definition.channels.includes(channel) && !definition.hidden && !(name === 'tasks' && orchestration === false))
     // The web /models only lists; its model picker or the REST call switches.
-    .map(([name]) => ({name: `/${name}`, description: name === 'models' && channel === 'api' ? 'List the models; switch with the model picker or PUT /api/v1/agents/:agentId/model' : descriptions[name]}));
+    .map(([name]) => ({name: `/${name}`, description: name === 'models' && channel === 'api' ? 'List the models; switch with the model picker or PUT /api/v1/agents/:agentId/model'
+      : name === 'tasks' && orchestration === undefined ? `${descriptions[name]} (agents in orchestration mode)` : descriptions[name]}));
 }
 
 /** Channel-specific help shares the runner command registry instead of a second partial list. */
 export function commandHelp(channel: CommandChannel, orchestration = false, interactive = false): string {
-  const lines = commandCatalog(channel).map(command => {
+  const lines = commandCatalog(channel, orchestration).map(command => {
     const name = command.name.slice(1);
     let description = command.description;
     // Telegram's receiver answers /model itself and only shows it; its /models buttons switch.

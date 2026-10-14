@@ -34,7 +34,7 @@ class MockAgentRunner extends EventEmitter {
     async (_sid, _cid, command) => ({ result: { command }, responseText: `ran ${command}` });
 
   // Records the args of the last executeApiCommand call so tests can assert wiring.
-  lastCommandCall?: { sessionId: string; chatId: string; command: string; opts?: { skipPersist?: boolean } };
+  lastCommandCall?: { sessionId: string; chatId: string; command: string; opts?: { skipPersist?: boolean; implicitSession?: boolean } };
 
   constructor(impl: (sessionId: string, chatId: string, message: string, opts?: { allowTools?: boolean }) => Promise<{ text: string; attachments: import('../../src/types').ApiAttachment[] }>) {
     super();
@@ -45,7 +45,7 @@ class MockAgentRunner extends EventEmitter {
     sessionId: string,
     chatId: string,
     command: string,
-    opts?: { skipPersist?: boolean },
+    opts?: { skipPersist?: boolean; implicitSession?: boolean },
   ): Promise<{ result: Record<string, unknown>; responseText: string; actions?: Array<{ label: string; command: string }> }> {
     this.lastCommandCall = { sessionId, chatId, command, opts };
     return this.executeApiCommandImpl(sessionId, chatId, command, opts);
@@ -1031,6 +1031,17 @@ describe('POST /api/v1/agents/:agentId/messages — builtin commands (#157)', ()
     await collectSSE(app, { message: '/model', chat_id: 'c5', stream: true, store_user_message: false }, 'Bearer sk-test-write');
 
     expect(runner.lastCommandCall?.opts?.skipPersist).toBe(true);
+  });
+
+  // Review of #591 (L5): the runner must know a command without session_id runs in a fresh session.
+  it('C6: a command says whether its session_id was given, streamed or not', async () => {
+    const { app, runner } = buildCommandApp(async () => ({ result: {}, responseText: 'ok' }));
+    await collectSSE(app, { message: '/new Design', chat_id: 'c6', stream: true });
+    expect(runner.lastCommandCall?.opts?.implicitSession).toBe(true);
+    await supertest.default(app).post(POST_URL).set(AUTH).send({ message: '/new Design', chat_id: 'c6' });
+    expect(runner.lastCommandCall?.opts?.implicitSession).toBe(true);
+    await supertest.default(app).post(POST_URL).set(AUTH).send({ message: '/rename X', chat_id: 'c6', session_id: 'known' });
+    expect(runner.lastCommandCall?.opts?.implicitSession).toBe(false);
   });
 
   // ── stream: false (sync) ────────────────────────────────────────────────────

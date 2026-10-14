@@ -21,14 +21,14 @@ An agent that is not set up loads **nothing** from pstack, even when the plugin 
 
 On Telegram, send `/pstack_setup` (or `/pstack-setup`) alone in a direct message with the bot. It opens a menu that edits itself in place:
 
-- **Main screen:** whether pstack is on, the default effort, and how many roles there are and how many you changed. Buttons turn pstack on or off, open the default effort, open **Roles ▸**, reset everything to the skill defaults (after a confirmation), or close the menu.
+- **Main screen:** whether pstack is on, the default effort, and how many roles there are and how many you changed. Buttons turn pstack on or off, open the default effort, open **Roles ▸**, reset everything to the skill defaults (after a confirmation; while pstack is off there is nothing to reset and it stays off), or close the menu.
 - **Roles screen:** **Single-model ▸** and **Panels ▸**, each with its number of roles in the installed plugin.
 - **Role list:** one button per role with its current model (a panel role shows how many models it runs; ✏️ marks a role you changed), 8 a page.
 - **Role screen:** the role's model and effort. Pick a model from the Claude or GPT list (paged; a `[1m]` ID is listed only when the model has no base ID), set an effort level or go back to the default effort, or drop your change with **Use skill default**. **◀ Back** returns to the list page the role is on.
 - **Panel role screen** (`interrogate reviewers`, `arena runners`…): one ➖ button per entry and ➕ buttons that add one Claude or GPT model. The last entry cannot be removed; use **Use skill default**.
 - **Default effort screen:** `session` or a level.
 
-Each tap is saved at once, through the same checks as the text command below, and the menu says whether it worked. Only allowlisted users can use the menu, and only in a direct message. Telegram command names cannot contain `-`, so `/pstack_setup` is the spelling in the bot's command list and in the gateway's replies; both spellings work everywhere.
+Each tap is saved at once, through the same checks as the text command below, and the menu says whether it worked. A change made while pstack is off turns it on, and the menu says so. Each tap applies to the setup as last saved, so a change made meanwhile from the API or CLI is kept. A role whose saved value is not valid (for example, edited by hand in `config.json`) is marked ⚠️ and can be fixed by picking a model or using the skill default. Only allowlisted users can use the menu, and only in a direct message. Telegram command names cannot contain `-`, so `/pstack_setup` is the spelling in the bot's command list and in the gateway's replies; both spellings work everywhere.
 
 Or type the change in a direct message with the bot:
 
@@ -42,7 +42,7 @@ Or type the change in a direct message with the bot:
 | `/pstack-setup interrogate reviewers -= claude-haiku-5-5` | Remove a model's entries from a panel role (the last one cannot be removed; use `<role>: default`) |
 | `/pstack-setup off` | Remove pstack from the agent |
 
-Outside the Telegram menu, `/pstack-setup` alone shows the agent's state, every role with its current model, the syntax and the Claude and GPT model IDs to choose from. Arguments are lines of pstack's own `pstack-models.md`. Changes apply to the agent's next worker.
+Outside the Telegram menu, `/pstack-setup` alone, in a direct message, shows the agent's state, every role with its current model, the syntax and the Claude and GPT model IDs to choose from. Arguments are lines of pstack's own `pstack-models.md`. Changes apply to the agent's next worker. In a group or channel the command, bare or with arguments, only answers that it works in a direct message, so the agent's setup is not posted there.
 
 In web (API) chat, `/pstack-setup` is a gateway command too: anyone in the chat can see the setup, and only an API key with write access to the agent can change it, as with the API below. Its reply carries the same menu as Telegram's buttons in `actions` (see [command replies](../api/messages.md#command-reply)), so a web client can show them as buttons.
 
@@ -97,7 +97,7 @@ A set-up agent's Claude workers that load the plugin do not use Claude Code's ow
 
 | Tool | Does |
 | --- | --- |
-| `subagent_spawn` | `description`, `prompt`, `subagent_type`, `model`, `readonly`, `run_in_background` — like `Agent`. `model` is a model ID from the sheet (omitted, `inherit-parent` or `auto` = the parent's model); a `pstack:effort-<level>` agent sets the subagent's effort, otherwise it inherits the parent's. In the foreground it waits and returns the result; in the background it returns a `task_id` |
+| `subagent_spawn` | `description`, `prompt`, `subagent_type`, `model`, `readonly`, `run_in_background` — like `Agent`. `model` is a model ID from the sheet (omitted, `inherit-parent` or `auto` = the parent's model); a `pstack:effort-<level>` agent sets the subagent's effort, otherwise it inherits the parent's (Codex has no `max`, so a GPT subagent asked for `max` runs at `xhigh`). In the foreground it waits and returns the result; in the background it returns a `task_id` |
 | `subagent_wait` | Waits for the listed subagents and returns each result, failure, or question |
 | `subagent_cancel` | Cancels the caller's own subagents |
 
@@ -107,5 +107,5 @@ A set-up agent's Claude workers that load the plugin do not use Claude Code's ow
 - A subagent's question (`task_request_input`) is returned to its parent by `subagent_wait`; it is never asked in the chat.
 - A subagent's prompt is its whole assignment, as with Claude Code's own subagents: it does not see the user's request or the conversation, only what its parent wrote.
 - Subagents report to their parent, never to the chat. The agent's task index lists the root task only; `task_status` with its `task_id` lists the subagents.
-- A GPT subagent runs on Codex without the plugin: it gets the agent definition, the prompt and the plugin's path to read files the prompt names. `readonly` is an instruction there, as in pstack's own Codex mapping; a read-only Claude subagent also gets read tools only. Either way a read-only subagent, including one that inherited readonly, is told so (right after the agent definition, which may claim the full tool set), and its gateway tools exclude those that change something (cron changes, memory writes, file sharing, narration, image/video generation and the browser); the gateway refuses them if called.
+- A GPT subagent runs on Codex without the plugin: it gets the agent definition, the prompt and the plugin's path to read files the prompt names. A read-only GPT subagent runs in Codex's read-only sandbox; a read-only Claude subagent gets read tools only. Neither loads the agent's connectors (MCP servers), which can change things outside the host. Either way a read-only subagent, including one that inherited readonly, is told so (right after the agent definition, which may claim the full tool set), and its gateway tools exclude those that change something (cron changes, memory writes, file sharing, narration, image/video generation and the browser); the gateway refuses them if called.
 - `isolation: "worktree"` runs on the host as usual and answers `isolation: "ignored"`. Resuming an earlier subagent is not supported; pstack spawns fresh subagents.

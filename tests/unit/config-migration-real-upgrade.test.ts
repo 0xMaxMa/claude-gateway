@@ -878,9 +878,8 @@ describe('config migration — Sonnet 5.5 reaches existing installs', () => {
  * Same shape as the Sonnet 5.5 block above: the Haiku 5.5 row only merges into
  * an install's own gateway.models list when the template's configVersion is
  * ahead of the user's, and the same pass must move the bare `haiku` alias off
- * the install's own Haiku 4.5 row. Haiku 4.5 has no short alias to fall back
- * to, so it takes its own id (the live catalog's convention for uncurated
- * models).
+ * the install's own Haiku 4.5 row, which takes the versioned `haiku45` alias
+ * (as Opus 4.8 has `opus48` and Sonnet 4.6 `sonnet46`).
  *
  * The pre-Haiku-5.5 fixture pins configVersion 1.0.35, the version immediately
  * before this change, so the first test fails if the bump is reverted.

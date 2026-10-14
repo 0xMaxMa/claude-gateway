@@ -87,17 +87,26 @@ test.each([
 ])('rejects %j with %s and writes nothing', async (body, code) => {
   const res = await request(app()).put('/api/v1/agents/alice/pstack').set('X-Api-Key', 'admin').send(body);
   expect(res.status).toBe(400);
-  expect(res.body.error).toBe(code);
+  // Review of #591 (L6): the API's `{ error: <text>, code }` shape, as share and voice errors.
+  expect(res.body.code).toBe(code);
+  expect(typeof res.body.error).toBe('string');
+  expect(res.body.error).not.toBe(code);
   expect(persisted('alice')).toBeUndefined();
+});
+
+test('roles that are not JSON are refused with the same error shape', async () => {
+  const res = await request(app()).put('/api/v1/agents/alice/pstack').set('X-Api-Key', 'admin').send({ roles: '{bug-fix' });
+  expect(res.status).toBe(400);
+  expect(res.body).toEqual({ error: 'roles must be a JSON object', code: 'INVALID_PSTACK_CONFIG' });
 });
 
 test('setup requires the plugin to be installed', async () => {
   fixture.cleanup(); fixture = pstackClaudeConfig(false); process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
   const res = await request(app()).put('/api/v1/agents/alice/pstack').set('X-Api-Key', 'admin').send({});
-  expect(res.body).toMatchObject({ error: 'PSTACK_NOT_INSTALLED' });
-  expect(res.body.message).toContain('/plugin install pstack@pstack-claude');
+  expect(res.body).toMatchObject({ code: 'PSTACK_NOT_INSTALLED' });
+  expect(res.body.error).toContain('/plugin install pstack@pstack-claude');
   // Review of #582: the plugin's marketplace must be added before it can be installed.
-  expect(res.body.message).toContain('/plugin marketplace add michael-denyer/pstack-claude');
+  expect(res.body.error).toContain('/plugin marketplace add michael-denyer/pstack-claude');
 });
 
 test('unknown agents are 404', async () => {

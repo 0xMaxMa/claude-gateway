@@ -29,6 +29,14 @@ test('API catalog includes the web commands and hides the ones that only answer 
  for (const hidden of ['/voice','/voices','/orch','/status','/start']) expect(names).not.toContain(hidden);
 });
 
+// Review of #591 (L7): /tasks was offered to every agent, also those without orchestration, where it only refuses.
+test('API /tasks is listed only for an orchestration agent; the agent-free catalog says it needs one', () => {
+  expect(commandHelp('api', false)).not.toMatch(/^\/tasks —/m);
+  expect(commandHelp('api', true)).toContain('/tasks — View tasks');
+  expect(commandCatalog('api', false).map(c => c.name)).not.toContain('/tasks');
+  expect(commandCatalog('api').find(c => c.name === '/tasks')!.description).toContain('orchestration mode');
+});
+
 // PR #591: Telegram's receiver answers /model itself and ignores an argument; its /models buttons switch.
 test('Telegram help describes /model as view-only and points at /models', () => {
   const line = commandHelp('telegram').split('\n').find(l => l.startsWith('/model —'))!;

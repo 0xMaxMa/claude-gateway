@@ -59,6 +59,10 @@ const cleanupCursors = new Map<string, string>();
 /** Lazy bounded reclamation after the worker pool has expired or replaced logical slots.
  * A durable lease also fences uncertain processes after a gateway crash. Such leases
  * are intentionally retained until process reconciliation can prove they stopped. */
+function codexSandbox(profile: RuntimeProfile, agent: AgentConfig): string {
+  if (profile.readOnly) return 'read-only';
+  return profile.hostExecution || agent.type === 'app-agent' ? 'danger-full-access' : 'workspace-write';
+}
 export function cleanupCodexSessions(options: { agent: AgentConfig; stateDirectory: string; retainedSessionIds: readonly string[]; limit?: number }): Promise<number> {
   const directory = join(options.stateDirectory, 'codex');
   const running = cleanupRuns.get(directory);
@@ -240,7 +244,7 @@ export class CodexProcess extends EventEmitter {
     const commandEnvironment = sanitizeJevChildEnv(workerEnvironment(agent, this.options.gateway), this.options.gateway.gateway?.jev);
     const lines = [
       `model = ${quote(config.model)}`, `model_provider = ${quote(this.credentials.chatgpt ? 'openai' : 'gateway')}`, 'approval_policy = "never"',
-      `sandbox_mode = ${quote(profile.hostExecution || agent.type === 'app-agent' ? 'danger-full-access' : 'workspace-write')}`,
+      `sandbox_mode = ${quote(codexSandbox(profile, agent))}`,
       'web_search = "disabled"', 'project_doc_fallback_filenames = ["CLAUDE.md"]',
       ...(this.contextMeasurement.configured !== null ? [`model_context_window = ${this.contextMeasurement.configured}`] : []),
       `developer_instructions = ${quote([profile.context, profile.overlay, extensionInstructions, profile.skillPluginDir || profile.containerSkill ? `Task skill resources: ${this.containerAttempt ? this.containerAttempt.directory + '/skill-plugin' : profile.skillPluginDir}. Read the assigned SKILL.md (or RESOURCE_ROOT.txt) and resolve its plugin-relative references from its resource root.` : undefined].filter(Boolean).join('\n\n'))}`,
@@ -338,7 +342,7 @@ export class CodexProcess extends EventEmitter {
       try { await this.request('account/login/start', { type: 'chatgptAuthTokens', ...this.credentials!.chatgpt }); }
       catch { throw new Error('CODEX_AUTH_REQUIRED: Codex rejected the native ChatGPT access credential. Check codex login status or update Codex.'); }
     }
-    const parameters = { model: config.model, modelProvider: this.credentials!.chatgpt ? 'openai' : 'gateway', cwd: agent.type === 'app-agent' ? '/workspace' : agent.workspace, approvalPolicy: 'never', sandbox: profile.hostExecution || agent.type === 'app-agent' ? 'danger-full-access' : 'workspace-write' };
+    const parameters = { model: config.model, modelProvider: this.credentials!.chatgpt ? 'openai' : 'gateway', cwd: agent.type === 'app-agent' ? '/workspace' : agent.workspace, approvalPolicy: 'never', sandbox: codexSandbox(profile, agent) };
     const response = await this.request(this.saved ? 'thread/resume' : 'thread/start', { ...parameters, ...(this.saved ? { threadId: this.saved.threadId } : {}) });
     if (!threadPattern.test(response.thread?.id) || (this.saved && response.thread.id !== this.saved.threadId)) throw new Error('Codex thread identity mismatch');
     this.threadId = response.thread.id;

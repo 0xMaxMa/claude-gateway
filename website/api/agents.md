@@ -209,7 +209,14 @@ curl -X PUT -H "X-Api-Key: write-key" -H "Content-Type: application/json" \
 { "agentId": "alfred", "pstack": { "roles": { "why investigators": "gpt-6-sol[1m]" }, "defaultEffort": "high" } }
 ```
 
-Errors are `400` with `error` and `message`: `MODEL_ALIAS_NOT_ALLOWED` (an alias where a model ID is required; the message names the ID), `UNKNOWN_MODEL`, `INVALID_EFFORT`, `UNKNOWN_PSTACK_ROLE`, `INVALID_PSTACK_CONFIG` (an unknown field) or `PSTACK_NOT_INSTALLED`.
+Errors:
+
+| Status | Body | When |
+|--------|------|------|
+| `400` | `{ "error": "<message>", "code": "<CODE>" }` | `code` is `MODEL_ALIAS_NOT_ALLOWED` (an alias where a model ID is required; the message names the ID), `UNKNOWN_MODEL`, `INVALID_EFFORT`, `UNKNOWN_PSTACK_ROLE`, `INVALID_PSTACK_CONFIG` (an unknown field, or `roles` that is not a JSON object) or `PSTACK_NOT_INSTALLED` |
+| `403` | `{ "error": "Write permission required" }` | The key cannot write this agent |
+| `404` | `{ "error": "Agent '<id>' not found" }` | No such agent |
+| `501` | `{ "error": "Agent management not available (no configPath)" }` | The gateway runs without a config file |
 
 CLI: `claude-gateway pstack enable <agentId> [--roles <json>] [--defaultEffort <level>]`.
 
@@ -217,7 +224,7 @@ CLI: `claude-gateway pstack enable <agentId> [--roles <json>] [--defaultEffort <
 
 ## DELETE /api/v1/agents/:agentId/pstack {#delete-apiv1agentsagentidpstack}
 
-Remove pstack from an agent: its next worker does not load the plugin. Requires **write** access. Returns `{ "agentId": "alfred", "pstack": null }`.
+Remove pstack from an agent: its next worker does not load the plugin. Requires **write** access. Returns `{ "agentId": "alfred", "pstack": null }`; `403`, `404` and `501` as for `PUT`.
 
 CLI: `claude-gateway pstack disable <agentId>`.
 

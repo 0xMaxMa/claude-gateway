@@ -35,8 +35,8 @@ If `message` starts with one of these commands, the endpoint answers it locally 
 | `/help` | List supported API slash commands and their behavior |
 | `/session` | Return the current session, selected model and measured context usage |
 | `/sessions` | List sessions in this API chat |
-| `/new [name]` | Create a session in this chat; `result.sessionId` is its ID. The current request stays in its own session; the client opens the new one |
-| `/rename <name>` | Rename the current session |
+| `/new [name]` | Create a session in this chat; `result.sessionId` is its ID. Sent with `session_id`, that session stays current and the client opens the new one; sent without it, the request's own new session is the one created (and named) |
+| `/rename <name>` | Rename the session given by `session_id`; without `session_id` it returns `result: { "error": "SESSION_ID_REQUIRED" }` |
 | `/clear` | Reset model context; keep history and seed the next context with 50 recent messages. Confirmation required |
 | `/compact` | Compact Claude Code context without changing chat history. Confirmation required |
 | `/restart` | Gracefully restart the session. Confirmation required |
@@ -76,6 +76,10 @@ To press a button, send its `command` as the next `message`, with the same `chat
 | `/pstack-setup` | The pstack menu: turn on/off, default effort, a role and its models, reset, close. A change needs write access to the agent |
 
 **Confirmation:** `/clear`, `/compact` and `/restart` first return a prompt with `result: { "confirmationRequired": true }` and Yes/No actions, and do nothing else. Pressing Yes runs the command and returns its normal result. A caller that has already confirmed — an automation, or a client with its own dialog — sends `/clear confirm` (likewise `/compact confirm`, `/restart confirm`) to run it at once. The session endpoints [`POST …/sessions/:sessionId/clear`](/api/sessions#post-apiv1agentsagentidsessionssessionidclear), `/compact` and `/restart` also run without the prompt.
+
+::: warning Upgrading
+Before this confirmation, `/clear`, `/compact` and `/restart` sent as messages ran at once. A script that sends them must now add `confirm` (or call the session endpoints); otherwise it gets the prompt and nothing runs.
+:::
 
 ```json
 {

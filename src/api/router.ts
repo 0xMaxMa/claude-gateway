@@ -872,7 +872,7 @@ export function createApiRouter(
           openSseStream(res);
           try {
             const reply = await runner.executeApiCommand(
-              sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, model: modelStr, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId) },
+              sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, model: modelStr, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId), implicitSession: session_id === undefined },
             );
             sseCallbacks.onChunk({ type: 'text_delta', text: reply.responseText } as import('../types').StreamEvent);
             sseCallbacks.onDone(reply.responseText, [], undefined, commandReplyFields(commandMessage, reply));
@@ -928,7 +928,7 @@ export function createApiRouter(
         if (isBuiltinCommand) {
           // Built-in command — answer locally, return the same JSON shape as a normal reply plus its structured part.
           const reply = await runner.executeApiCommand(
-            sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId) },
+            sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId), implicitSession: session_id === undefined },
           );
           responseText = reply.responseText;
           commandFields = commandReplyFields(commandMessage, reply);

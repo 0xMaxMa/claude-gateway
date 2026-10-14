@@ -106,7 +106,7 @@ import { DEFAULT_MODELS, availableModels, selectableModels, findModel } from './
 import { PSTACK_INSTALL_HINT, PSTACK_OFF_SETTINGS, pstackModels, pstackPluginInfo } from '../pstack/plugin-info';
 import { PstackConfigError, applySheetLines } from '../pstack/config';
 import { pstackPanelDefault, renderPstackSheet } from '../pstack/sheet';
-import { savePstackConfig } from '../pstack/setup';
+import { updatePstackConfig } from '../pstack/setup';
 import { PstackMenuScreen, PstackMenuState, PstackMenuStep, pstackMenuScreen, pstackMenuStep, pstackMenuText } from '../pstack/menu';
 import type { AgentPstackConfig } from '../pstack/config';
 
@@ -1330,7 +1330,10 @@ export class AgentRunner extends EventEmitter {
       const chatId=body.chat_id??'', payload=body.payload??{};
       if (!/^\d+$/.test(chatId) || payload.user_id!==chatId || typeof payload.data!=='string' || !/^ps:[\x21-\x7e]{1,61}$/.test(payload.data)) { respond({success:false},400); return; }
       try { respond({success:true,...await this.pstackMenu(payload.data)}); }
-      catch { respond({success:false,error:'pstack setup unavailable. Use /pstack_setup again.'}); }
+      catch (error) {
+        this.logger.error('pstack setup button failed', { data: payload.data, error: String(error) });
+        respond({success:false,error:'pstack setup unavailable. Use /pstack_setup again.'});
+      }
       return;
     }
 
@@ -3041,15 +3044,15 @@ export class AgentRunner extends EventEmitter {
    * `<role>: default` to drop an override, `<role> += <model-id>` / `<role> -= <model-id>`
    * to edit a panel list, `default effort: <level>`); `on`
    * sets the agent up with the skill defaults and `off` removes it. Changes
-   * apply to the next worker. Direct messages only, like /model.
+   * apply to the next worker. Direct messages only, like /model; the bare
+   * form too, so a group is not shown the agent's setup.
    */
   private async handleCommandPstackSetup(chatId: string, arg: string, meta: Record<string, string> = {}): Promise<void> {
-    if (!arg) { this.writeAutoForward(chatId, await this.pstackSetupText()); return; }
     if (!this.isDirectChat(meta)) {
       this.writeAutoForward(chatId, 'pstack setup is only available in a direct message with the bot — it changes this agent for every chat.');
       return;
     }
-    this.writeAutoForward(chatId, await this.applyPstackSetup(arg));
+    this.writeAutoForward(chatId, arg ? await this.applyPstackSetup(arg) : await this.pstackSetupText());
   }
 
   /** The bare /pstack-setup reply for channels without buttons: status, every role's current model, the syntax and the model IDs. */
@@ -3062,11 +3065,11 @@ export class AgentRunner extends EventEmitter {
     return { block: this.agentConfig.pstack, plugin: plugin.installPath ? pstackModels(plugin.installPath) : undefined, models: await this.availableModels(), installHint: PSTACK_INSTALL_HINT };
   }
 
-  /** Save a new pstack block (`undefined` removes it) through the same path as the API. */
-  private async savePstack(block: AgentPstackConfig | undefined): Promise<AgentPstackConfig | undefined> {
-    const saved = await savePstackConfig(this.configPath, this.agentConfig.id, block, await this.selectableModels());
-    if (saved) this.agentConfig.pstack = saved; else delete this.agentConfig.pstack;
-    return saved;
+  /** Change the saved pstack block (`undefined` removes it) through the same path as the API. */
+  private async updatePstack(update: (previous: AgentPstackConfig | undefined) => AgentPstackConfig | undefined): Promise<{ previous: AgentPstackConfig | undefined; saved: AgentPstackConfig | undefined }> {
+    const result = await updatePstackConfig(this.configPath, this.agentConfig.id, update, await this.selectableModels());
+    if (result.saved) this.agentConfig.pstack = result.saved; else delete this.agentConfig.pstack;
+    return result;
   }
 
   /** Apply `/pstack-setup <arg>` (on, off, or pstack-models.md lines) and describe the outcome. */
@@ -3074,8 +3077,8 @@ export class AgentRunner extends EventEmitter {
     const plugin = pstackPluginInfo();
     const roles = plugin.installPath ? pstackModels(plugin.installPath) : undefined;
     try {
-      const block = arg === 'off' ? undefined : arg === 'on' ? this.agentConfig.pstack ?? {} : applySheetLines(this.agentConfig.pstack ?? {}, arg, roles && (role => pstackPanelDefault(roles, role)));
-      const saved = await this.savePstack(block);
+      const { saved } = await this.updatePstack(previous =>
+        arg === 'off' ? undefined : arg === 'on' ? previous ?? {} : applySheetLines(previous ?? {}, arg, roles && (role => pstackPanelDefault(roles, role))));
       return saved && roles
         ? `pstack is set up for this agent. The next worker loads it with this sheet:\n\n${renderPstackSheet(saved, roles)}`
         : 'pstack is removed from this agent. Its next worker does not load it.';
@@ -3095,11 +3098,19 @@ export class AgentRunner extends EventEmitter {
     }
     if (step.next === undefined) return pstackMenuScreen(step.view, state);
     if (!canWrite) return { ...pstackMenuScreen(step.view, state, `⚠️ ${PSTACK_WRITE_REQUIRED}`), toast: PSTACK_WRITE_REQUIRED };
-    try { await this.savePstack(step.next ?? undefined); } catch (error) {
+    let result: { previous: AgentPstackConfig | undefined; saved: AgentPstackConfig | undefined };
+    try {
+      // Applied again to the saved block, so a change made meanwhile from the API or CLI is kept.
+      result = await this.updatePstack(previous => {
+        const next = pstackMenuStep(data, { ...state, block: previous }).next;
+        return next === undefined ? previous : next ?? undefined;
+      });
+    } catch (error) {
       if (!(error instanceof PstackConfigError)) throw error;
       return { ...pstackMenuScreen(step.view, state, `⚠️ ${error.code}: ${error.message}`), toast: error.message };
     }
-    const saved = step.next === null ? 'pstack is off. The next worker does not load it.' : 'Saved. The next worker uses it.';
+    const saved = !result.saved ? 'pstack is off. The next worker does not load it.'
+      : result.previous ? 'Saved. The next worker uses it.' : 'Saved, and pstack is on now. The next worker uses it.';
     return { ...pstackMenuScreen(step.view, await this.pstackMenuState(), `✅ ${saved}`), toast: saved };
   }
 
@@ -5463,7 +5474,9 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     chatId: string,
     command: string,
-    opts?: { skipPersist?: boolean; model?: string; principalId?: string; displayCommand?: string; clientMessageId?: string; executionTaskId?:string; canWriteAgent?: boolean },
+    opts?: { skipPersist?: boolean; model?: string; principalId?: string; displayCommand?: string; clientMessageId?: string; executionTaskId?:string; canWriteAgent?: boolean;
+      /** The caller sent no session_id: `sessionId` is a fresh one made for this command. */
+      implicitSession?: boolean },
   ): Promise<{ result: Record<string, unknown>; responseText: string; actions: CommandAction[] }> {
     const agentId = this.agentConfig.id;
     const storeChatId = chatId;           // sessionStore adds channel prefix internally
@@ -5485,6 +5498,10 @@ export class AgentRunner extends EventEmitter {
     }
 
     if (cmd === '/stop' && this.agentConfig.orchestration?.enabled && opts?.principalId) this.orchestration?.authorizeSession(sessionId, opts.principalId);
+    // A fresh session has nothing to rename; refused before it is registered, so no empty session is left.
+    if (cmd === '/rename' && opts?.implicitSession) {
+      return { result: { error: 'SESSION_ID_REQUIRED' }, responseText: '⚠️ /rename renames the session given by session_id; send it with the session to rename.', actions: [] };
+    }
 
     // Register session in the api-{chatId} index on first use (same as sendApiMessageStream)
     await this.sessionStore.ensureApiSession(agentId, storeChatId, sessionId).catch((err: unknown) => {
@@ -5552,6 +5569,11 @@ export class AgentRunner extends EventEmitter {
         const list = await this.modelList('Change the model with the model picker or PUT /api/v1/agents/:agentId/model.');
         result = { model: this.agentConfig.claude.model, models: list.models };
         responseText = list.text;
+      } else if (cmd === '/new' && opts?.implicitSession) {
+        // Without session_id the command already runs in a new session: name that one rather than leave it empty beside another.
+        if (arg) await this.updateApiSession(storeChatId, sessionId, { sessionName: arg });
+        result = { sessionId, sessionName: arg || null };
+        responseText = `New session created${arg ? `: "${arg}"` : ''}. Continue in it with session_id ${sessionId}.`;
       } else if (cmd === '/new') {
         // An API client picks its session by session_id, so this creates one and names it; the client opens it.
         const meta = await this.createApiSession(storeChatId, undefined, arg || undefined);

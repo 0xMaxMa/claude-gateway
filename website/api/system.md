@@ -89,7 +89,7 @@ This legacy path is not registered in the current gateway. Use [`GET /dashboard`
 
 ## GET /api/v1/commands {#get-apiv1commands}
 
-List the slash commands available in the chat UI. No auth required.
+List the slash commands available in the chat UI. No auth required. The list does not depend on an agent, so `/tasks` is described as needing orchestration mode; an agent's own `/help` lists it only when that agent is in orchestration mode.
 
 ```bash
 curl http://localhost:10850/api/v1/commands | jq

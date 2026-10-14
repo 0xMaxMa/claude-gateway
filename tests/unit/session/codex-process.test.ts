@@ -77,6 +77,15 @@ test('uses private Responses configuration, MCP ticket env and sandbox without c
   expect(config).toContain('developer_instructions = "agent context\\n\\nworker rules"');
   expect(settings.env.ANTHROPIC_API_KEY).toBeUndefined();
 });
+// Review of #591 (H1): a read-only subagent on Codex must not get the host's full-access sandbox.
+test('a read-only worker runs in the read-only sandbox even on the host', async () => {
+  options.profile = { ...options.profile, hostExecution: true, readOnly: true, connectorsAllowed: false };
+  adapter = new CodexProcess(options); adapter.on('output', line => events.push(JSON.parse(line)));
+  await launch();
+  const config = await readFile(join((spawn as jest.Mock).mock.calls[0][2].env.CODEX_HOME, 'config.toml'), 'utf8');
+  expect(config).toContain('sandbox_mode = "read-only"');
+  expect(rpc.find(r => r.method === 'thread/start').params.sandbox).toBe('read-only');
+});
 test('launch uses the readiness credential snapshot without resolving a different account', async () => {
   const snapshot = Object.freeze({baseUrl:options.config.baseUrl!,key:'readiness-key',fingerprint:'readiness-account'});
   options.resolvedCredentials = snapshot;

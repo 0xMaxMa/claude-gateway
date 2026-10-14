@@ -1118,7 +1118,7 @@ export class TaskService {
       const depth = (parent.depth ?? 0) + 1;
       if (depth > SUBAGENT_MAX_DEPTH) throw new OrchestrationError('SUBAGENT_DEPTH_EXCEEDED', `Subagents nest at most ${SUBAGENT_MAX_DEPTH} levels below the root worker. Do this work inline.`);
       const queued = Number(this.store.get("SELECT COUNT(*) n FROM tasks WHERE conversation_id=? AND state='queued'", parent.conversationId)!.n);
-      if (queued >= this.config.tasks.maxQueuedPerConversation) throw new OrchestrationError('QUEUE_FULL');
+      if (queued >= this.config.tasks.maxQueuedPerConversation) throw new OrchestrationError('QUEUE_FULL', `This conversation already has ${queued} queued tasks. Wait for a subagent to finish (subagent_wait) or do this work inline.`);
       const now = Date.now();
       const task: TaskSnapshot = { taskId: randomUUID(), conversationId: parent.conversationId, agentId: parent.agentId, agentSessionId: parent.agentSessionId,
         ownerPrincipalId: parent.ownerPrincipalId, initiatingInputId: parent.initiatingInputId, title: spec.title, targetProfile: 'default-worker',

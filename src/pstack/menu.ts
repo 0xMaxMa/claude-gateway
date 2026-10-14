@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { EFFORT_LEVELS, isEffort } from '../agent/model-registry';
 import type { ModelConfig } from '../types';
 import { AgentPstackConfig, PstackConfigError, applySheetLines, parseRoleValue } from './config';
@@ -7,11 +8,11 @@ import { pstackPanelDefault, pstackRoleDefault } from './sheet';
 /**
  * The /pstack-setup menu: Telegram buttons over the same pstack-models.md
  * lines the text command takes. Every change is computed with
- * applySheetLines and saved by the caller through savePstackConfig, so the
+ * applySheetLines and saved by the caller through updatePstackConfig, so the
  * buttons, the text command and the API apply the same rules. Callback data
  * (`ps:…`, at most 64 bytes as Telegram requires) names roles by their index
- * in the installed plugin's role list and models by ID; both are checked again
- * here and when saved.
+ * in the installed plugin's role list plus a tag of the role's name, and models
+ * by ID; both are checked again here and when saved.
  */
 
 export interface PstackMenuButton { text: string; data: string }
@@ -46,6 +47,14 @@ export function pstackPickableModels(models: ModelConfig[], wanted: Family): Mod
   return models.filter(m => family(m) === wanted && !(/\[1m\]$/i.test(m.id) && ids.has(m.id.toLowerCase().replace(/\[1m\]$/, ''))));
 }
 
+/**
+ * A role in callback data: its index and a 3-character tag of its name, so a
+ * button from before a plugin update that reorders the roles is refused
+ * rather than changing another role.
+ */
+const roleTag = (role: string) => createHash('sha256').update(role).digest('hex').slice(0, 3);
+const roleRef = (plugin: PstackModels, index: number) => `${index}-${roleTag(plugin.roles[index].role)}`;
+
 const fits = (data: string) => Buffer.byteLength(data, 'utf8') <= MAX_DATA_BYTES;
 const button = (text: string, data: string): PstackMenuButton => ({ text: text.length > 60 ? text.slice(0, 59) + '…' : text, data });
 
@@ -53,6 +62,14 @@ const button = (text: string, data: string): PstackMenuButton => ({ text: text.l
 function roleValue(state: PstackMenuState, role: string): { value: string; override: boolean } {
   const override = state.block?.roles?.[role];
   return { value: override ?? pstackRoleDefault(state.plugin!, role) ?? '', override: override !== undefined };
+}
+
+/** A role's entries, or `undefined` for a value hand-edited into config.json that does not parse. */
+function roleEntries(state: PstackMenuState, role: string): ReturnType<typeof parseRoleValue> | undefined {
+  try { return parseRoleValue(roleValue(state, role).value); } catch (error) {
+    if (error instanceof PstackConfigError) return undefined;
+    throw error;
+  }
 }
 
 const isPanel = (plugin: PstackModels, role: string) => pstackPanelDefault(plugin, role) !== undefined;
@@ -67,6 +84,7 @@ function roleLines(state: PstackMenuState, indexes: number[]): string[] {
   return indexes.map(i => {
     const role = state.plugin!.roles[i].role;
     const { value, override } = roleValue(state, role);
+    if (!roleEntries(state, role)) return `⚠️ ${role}: ${value} (invalid)`;
     return `${override ? '✏️' : '•'} ${role}: ${value}`;
   });
 }
@@ -74,8 +92,8 @@ function roleLines(state: PstackMenuState, indexes: number[]): string[] {
 /** A role button: name and current model (a panel shows its size), the name shortened first so the model stays visible. */
 function roleLabel(state: PstackMenuState, role: string): string {
   const { value, override } = roleValue(state, role);
-  const entries = parseRoleValue(value);
-  const suffix = ` · ${isPanel(state.plugin!, role) ? `${entries.length} model${entries.length === 1 ? '' : 's'}` : value}`;
+  const entries = roleEntries(state, role);
+  const suffix = ` · ${!entries ? '⚠️ invalid' : isPanel(state.plugin!, role) ? `${entries.length} model${entries.length === 1 ? '' : 's'}` : value}`;
   const mark = override ? '✏️ ' : '';
   const room = Math.max(12, MAX_ROLE_LABEL - suffix.length - mark.length);
   return `${mark}${role.length > room ? role.slice(0, room - 1) + '…' : role}${suffix}`;
@@ -97,7 +115,8 @@ export function pstackMenuStep(data: string, state: PstackMenuState): PstackMenu
   if (data === 'ps:off') return { view: { kind: 'home' }, next: null };
   if (data === 'ps:de') return { view: { kind: 'effort' } };
   if (data === 'ps:rs') return { view: { kind: 'reset' } };
-  if (data === 'ps:rs!') return { view: { kind: 'home' }, next: {} };
+  // Off has no saved roles to reset; saving `{}` would turn pstack on.
+  if (data === 'ps:rs!') return { view: { kind: 'home' }, ...(state.block ? { next: {} } : {}) };
   if (data === 'ps:g') return { view: { kind: 'roles' } };
   const list = /^ps:l:([sp]):(\d{1,3})$/.exec(data);
   if (list) return { view: { kind: 'list', group: list[1] as Group, page: Number(list[2]) } };
@@ -106,19 +125,20 @@ export function pstackMenuStep(data: string, state: PstackMenuState): PstackMenu
     if (effort[1] !== 'session' && !isEffort(effort[1])) invalid();
     return { view: { kind: 'home' }, next: apply(`default effort: ${effort[1]}`) };
   }
-  const match = /^ps:(r|d|e|p|m|a|rm):(\d{1,3})(?::(.+))?$/.exec(data);
+  const match = /^ps:(r|d|e|p|m|a|rm):(\d{1,3})-([0-9a-f]{3})(?::(.+))?$/.exec(data);
   const index = match ? Number(match[2]) : -1;
   const role = plugin.roles[index]?.role;
-  if (!match || role === undefined) invalid();
-  const [, verb, , arg] = match;
+  if (!match || role === undefined || roleTag(role) !== match[3]) invalid();
+  const [, verb, , , arg] = match;
   const panel = isPanel(plugin, role);
-  const entries = parseRoleValue(roleValue(state, role).value);
+  // Parsed only where a change needs the current value, so an invalid one can still be opened and replaced.
+  const entries = () => parseRoleValue(roleValue(state, role).value);
   switch (verb) {
     case 'r': return { view: { kind: 'role', role: index } };
     case 'd': return { view: { kind: 'role', role: index }, next: apply(`${role}: default`) };
     case 'e': {
       if (panel || !arg || (arg !== 'none' && !isEffort(arg))) invalid();
-      return { view: { kind: 'role', role: index }, next: apply(`${role}: ${entries[0].model}${arg === 'none' ? '' : ` @${arg}`}`) };
+      return { view: { kind: 'role', role: index }, next: apply(`${role}: ${entries()[0].model}${arg === 'none' ? '' : ` @${arg}`}`) };
     }
     case 'p': {
       const pick = /^([sa]):([cg]):(\d{1,3})$/.exec(arg ?? '');
@@ -129,11 +149,11 @@ export function pstackMenuStep(data: string, state: PstackMenuState): PstackMenu
       if ((verb === 'a') !== panel || !arg) invalid();
       // Only models the picker offers; the save checks them against the catalog again.
       if (!(['c', 'g'] as Family[]).some(f => pstackPickableModels(state.models, f).some(m => m.id === arg))) invalid();
-      const level = entries[0].effort;
+      const level = verb === 'm' ? roleEntries(state, role)?.[0].effort : undefined;
       return { view: { kind: 'role', role: index }, next: apply(verb === 'a' ? `${role} += ${arg}` : `${role}: ${arg}${level ? ` @${level}` : ''}`) };
     }
     case 'rm': {
-      const entry = entries[Number(arg)];
+      const entry = entries()[Number(arg)];
       if (!panel || !entry) invalid();
       return { view: { kind: 'role', role: index }, next: apply(`${role} -= ${entry.model}`) };
     }
@@ -157,6 +177,7 @@ export function pstackMenuScreen(view: PstackMenuView, state: PstackMenuState, n
     };
   }
   if (view.kind === 'reset') {
+    if (!state.block) return { text: `${top}pstack is off, so every role already uses its skill default.`, keyboard: [back('ps:h')] };
     return { text: `${top}Reset every role and the default effort to the skill defaults? pstack stays on.`, keyboard: [[button('✅ Reset', 'ps:rs!'), button('Cancel', 'ps:h')]] };
   }
   if (view.kind === 'home') {
@@ -174,7 +195,7 @@ export function pstackMenuScreen(view: PstackMenuView, state: PstackMenuState, n
   if (view.kind === 'roles') {
     return {
       text: `${top}pstack roles\nA single-model role runs one model. A panel role runs several models side by side, one subagent each.`,
-      keyboard: [...(['s', 'p'] as Group[]).map(g => [button(`${GROUPS[g]} ▸ (${groupRoles(plugin, g).length})`, `ps:l:${g}:0`)]), back('ps:h')],
+      keyboard: [...(['s', 'p'] as Group[]).filter(g => groupRoles(plugin, g).length).map(g => [button(`${GROUPS[g]} ▸ (${groupRoles(plugin, g).length})`, `ps:l:${g}:0`)]), back('ps:h')],
     };
   }
   if (view.kind === 'list') {
@@ -185,38 +206,46 @@ export function pstackMenuScreen(view: PstackMenuView, state: PstackMenuState, n
     const paging = [...(page > 0 ? [button('◀ Previous', nav(page - 1))] : []), ...(page + 1 < pages ? [button('Next ▶', nav(page + 1))] : [])];
     return {
       text: `${top}${view.group === 'p' ? 'Panel roles' : 'Single-model roles'}${pages > 1 ? ` (${page + 1}/${pages})` : ''} (✏️ = changed, • = skill default):\n${roleLines(state, shown).join('\n')}\n\nTap a role to change it.`,
-      keyboard: [...shown.map(i => [button(roleLabel(state, plugin.roles[i].role), `ps:r:${i}`)]), ...(paging.length ? [paging] : []), back('ps:g')],
+      keyboard: [...shown.map(i => [button(roleLabel(state, plugin.roles[i].role), `ps:r:${roleRef(plugin, i)}`)]), ...(paging.length ? [paging] : []), back('ps:g')],
     };
   }
   const role = plugin.roles[view.role]?.role;
   if (role === undefined) return pstackMenuScreen({ kind: 'home' }, state, notice);
   const panel = isPanel(plugin, role);
   const { value, override } = roleValue(state, role);
-  const entries = parseRoleValue(value);
+  const entries = roleEntries(state, role);
   // Back to the list page the role is on, worked out from the role so the button stays short.
   const group: Group = panel ? 'p' : 's';
   const roleBack = back(`ps:l:${group}:${Math.floor(groupRoles(plugin, group).indexOf(view.role) / PAGE_SIZE)}`);
-  const useDefault = override ? [[button('Use skill default', `ps:d:${view.role}`)]] : [];
+  const ref = roleRef(plugin, view.role);
+  const useDefault = override ? [[button('Use skill default', `ps:d:${ref}`)]] : [];
   if (view.kind === 'pick') {
-    const models = pstackPickableModels(state.models, view.family).filter(m => fits(`ps:${view.add ? 'a' : 'm'}:${view.role}:${m.id}`));
+    const models = pstackPickableModels(state.models, view.family).filter(m => fits(`ps:${view.add ? 'a' : 'm'}:${ref}:${m.id}`));
     const pages = Math.max(1, Math.ceil(models.length / PAGE_SIZE)), page = Math.min(view.page, pages - 1);
-    const current = new Set(entries.map(e => e.model.toLowerCase()));
+    const current = new Set((entries ?? []).map(e => e.model.toLowerCase()));
     const rows = models.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
-      .map(m => [button(`${current.has(m.id.toLowerCase()) ? '✅ ' : ''}${m.label} · ${m.id}`, `ps:${view.add ? 'a' : 'm'}:${view.role}:${m.id}`)]);
-    const nav = (p: number) => `ps:p:${view.role}:${view.add ? 'a' : 's'}:${view.family}:${p}`;
+      .map(m => [button(`${current.has(m.id.toLowerCase()) ? '✅ ' : ''}${m.label} · ${m.id}`, `ps:${view.add ? 'a' : 'm'}:${ref}:${m.id}`)]);
+    const nav = (p: number) => `ps:p:${ref}:${view.add ? 'a' : 's'}:${view.family}:${p}`;
     const paging = [...(page > 0 ? [button('◀ Previous', nav(page - 1))] : []), ...(page + 1 < pages ? [button('Next ▶', nav(page + 1))] : [])];
     return {
       text: `${top}${role}: ${view.add ? 'add' : 'choose'} a ${FAMILIES[view.family]} model${pages > 1 ? ` (${page + 1}/${pages})` : ''}`,
-      keyboard: [...rows, ...(paging.length ? [paging] : []), back(`ps:r:${view.role}`)],
+      keyboard: [...rows, ...(paging.length ? [paging] : []), back(`ps:r:${ref}`)],
     };
   }
   const source = override ? 'changed' : 'skill default';
+  const families = (['c', 'g'] as Family[]).map(f => button(`${FAMILIES[f]} models`, `ps:p:${ref}:s:${f}:0`));
+  if (!entries) {
+    return {
+      text: `${top}${role} (${source})\n⚠️ "${value}" is not valid. ${panel ? 'Use the skill default' : 'Pick a model or use the skill default'} to fix it.`,
+      keyboard: [...(panel ? [] : [families]), ...useDefault, roleBack],
+    };
+  }
   if (panel) {
     return {
       text: `${top}${role} (panel, ${source})\n${entries.map((e, i) => `${i + 1}. ${e.model}${e.effort ? ` @${e.effort}` : ''}`).join('\n')}\n\nTap ➖ to remove an entry or ➕ to add one.`,
       keyboard: [
-        ...entries.map((e, i) => [button(`➖ ${i + 1}. ${e.model}`, `ps:rm:${view.role}:${i}`)]),
-        (['c', 'g'] as Family[]).map(f => button(`➕ ${FAMILIES[f]}`, `ps:p:${view.role}:a:${f}:0`)),
+        ...entries.map((e, i) => [button(`➖ ${i + 1}. ${e.model}`, `ps:rm:${ref}:${i}`)]),
+        (['c', 'g'] as Family[]).map(f => button(`➕ ${FAMILIES[f]}`, `ps:p:${ref}:a:${f}:0`)),
         ...useDefault, roleBack,
       ],
     };
@@ -225,9 +254,9 @@ export function pstackMenuScreen(view: PstackMenuView, state: PstackMenuState, n
   return {
     text: `${top}${role} (${source})\nModel: ${entry.model}\nEffort: ${entry.effort ?? `default (${effortLabel})`}`,
     keyboard: [
-      (['c', 'g'] as Family[]).map(f => button(`${FAMILIES[f]} models`, `ps:p:${view.role}:s:${f}:0`)),
-      [...EFFORT_LEVELS.map(level => button(`${entry.effort === level ? '✅ ' : ''}${level}`, `ps:e:${view.role}:${level}`))],
-      [button(`${entry.effort ? '' : '✅ '}Default effort`, `ps:e:${view.role}:none`)],
+      families,
+      [...EFFORT_LEVELS.map(level => button(`${entry.effort === level ? '✅ ' : ''}${level}`, `ps:e:${ref}:${level}`))],
+      [button(`${entry.effort ? '' : '✅ '}Default effort`, `ps:e:${ref}:none`)],
       ...useDefault, roleBack,
     ],
   };

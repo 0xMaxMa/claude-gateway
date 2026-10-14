@@ -66,8 +66,10 @@ afterEach(async () => {await bridge.close();store.close();rmSync(root,{recursive
 function spawn(model: string, extra: Partial<SpawnTask> = {}) {
   return tasks.spawn({...context,model,actionId:`spawn-${++sequence}`},{title:'Fixture',instructions:'Implement fixture',targetProfile:'default-worker',...extra});
 }
-async function run(model: string, extra: Partial<SpawnTask> = {}) {
-  const task = spawn(model,extra), attempt = tasks.claim(task.taskId)!;
+async function run(model: string, extra: Partial<SpawnTask> = {}, readonly = false) {
+  const spawned = spawn(model,extra), attempt = tasks.claim(spawned.taskId)!;
+  // Only subagent_spawn sets readonly; the driver reads it from the task it is handed.
+  const task = readonly ? {...spawned, readonly: true} : spawned;
   const handle = await driver.start(task,attempt);
   await handle.accepted;
   const result = await handle.result;
@@ -366,9 +368,26 @@ test.each(['answer','cancel'] as const)('%s during question cleanup fences the o
 describe('per-task model and effort', () => {
   test('a GPT task id runs on Codex with the requested effort as reasoningEffort, recorded on the attempt', async () => {
     gateway.gateway.workers!.codex = { reasoningEffort: 'low' };
-    const {attempt} = await run('claude-sonnet-4-6', {model:'gpt-6-astra[1m]', effort:'max'});
-    expect(jest.mocked(CodexProcess).mock.calls[0][0].config).toMatchObject({model:'gpt-6-astra', reasoningEffort:'max'});
-    expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'codex', harnessModel:'gpt-6-astra', effort:'max'});
+    const {attempt} = await run('claude-sonnet-4-6', {model:'gpt-6-astra[1m]', effort:'high'});
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].config).toMatchObject({model:'gpt-6-astra', reasoningEffort:'high'});
+    expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'codex', harnessModel:'gpt-6-astra', effort:'high'});
+  });
+
+  // Review of #591 (H2): Codex has no `max`; its highest effort is xhigh.
+  test('effort max runs a Codex worker at xhigh', async () => {
+    await run('claude-sonnet-4-6', {model:'gpt-6-astra[1m]', effort:'max'});
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].config.reasoningEffort).toBe('xhigh');
+  });
+
+  // Review of #591 (H1): read-only is enforced by the harness, not only by the prompt.
+  test('a read-only GPT task runs Codex read-only without connectors', async () => {
+    await run('claude-sonnet-4-6', {model:'gpt-6-astra[1m]'}, true);
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].profile).toMatchObject({readOnly:true, connectorsAllowed:false});
+  });
+
+  test('a read-only Claude task gets read tools and no connectors', async () => {
+    await run('claude-sonnet-4-6', {model:'claude-sonnet-5-5'}, true);
+    expect(jest.mocked(SessionProcess).mock.calls[0][6]).toMatchObject({workerTools:['Read','Glob','Grep'], connectorsAllowed:false});
   });
 
   test('a Claude task gets the requested effort on its worker profile', async () => {

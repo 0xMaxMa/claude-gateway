@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 /**
  * Model picker on channels without an inline keyboard (issue #409).
  *
@@ -280,10 +281,20 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
       expect(persistedPstack()).toBeUndefined();
     }, 15000);
 
+    // Review of #591 (L8): the bare command posted the agent's whole setup into the group.
+    it('does not show the setup outside a direct message either', async () => {
+      const port = await startRunner(gatewayWithIds());
+      const text = await send(port, '/pstack-setup', { chat_type: 'group' });
+      expect(text).toContain('only available in a direct message');
+      expect(text).not.toContain('Roles');
+    }, 15000);
+
     // Dev e2e of #591: Telegram reports no chat type, so every change was
     // refused as "only available in a direct message", even in one.
     describe('on Telegram', () => {
       const tgChat = '424242';
+      // bug-fix is role 1; callback data adds a tag of the role's name.
+      const bugFixRef = `1-${createHash('sha256').update('bug-fix').digest('hex').slice(0, 3)}`;
       async function sendTelegram(port: number, text: string, chat = tgChat): Promise<string> {
         const file = path.join(agentConfig.workspace, '.telegram-state', 'typing', `${chat}.forward`);
         fs.rmSync(file, { force: true });
@@ -309,6 +320,9 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
 
       it('still refuses changes in a group', async () => {
         const port = await startRunner(gatewayWithIds());
+        const bare = await sendTelegram(port, '/pstack_setup', '-100200');
+        expect(bare).toContain('only available in a direct message');
+        expect(bare).not.toContain('Roles');
         expect(await sendTelegram(port, '/pstack-setup on', '-100200')).toContain('only available in a direct message');
         expect(persistedPstack()).toBeUndefined();
       }, 15000);
@@ -320,16 +334,52 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
         expect(home.body.text).toContain('Roles: 17 (✏️ 0 changed)');
         expect(home.body.keyboard![0][0]).toEqual({ text: '✅ Turn on', data: 'ps:on' });
         const singles = await menu(port, 'ps:l:s:0');
-        expect(singles.body.keyboard!.flat()).toContainEqual({ text: 'bug-fix · claude-fable-5-1', data: 'ps:r:1' });
-        const changed = await menu(port, 'ps:m:1:gpt-6-sol[1m]');
+        expect(singles.body.keyboard!.flat()).toContainEqual({ text: 'bug-fix · claude-fable-5-1', data: `ps:r:${bugFixRef}` });
+        const changed = await menu(port, `ps:m:${bugFixRef}:gpt-6-sol[1m]`);
         expect(changed.body.text).toContain('✅ Saved');
         expect(changed.body.toast).toContain('Saved');
         expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
-        const refused = await menu(port, 'ps:m:1:claude-not-a-model');
+        const refused = await menu(port, `ps:m:${bugFixRef}:claude-not-a-model`);
         expect(refused.body.text).toContain('out of date');
         expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
         await menu(port, 'ps:off');
         expect(persistedPstack()).toBeUndefined();
+      }, 15000);
+
+      // Review of #591 (M2): a button computed its change from the runner's copy and
+      // wrote the whole block, dropping a change saved meanwhile by the API or CLI.
+      it('applies a button to the saved config, keeping a change made elsewhere', async () => {
+        const port = await startRunner(gatewayWithIds());
+        await menu(port, 'ps:on');
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        config.agents[0].pstack = { defaultEffort: 'high' };
+        fs.writeFileSync(configPath, JSON.stringify(config));
+        const changed = await menu(port, `ps:m:${bugFixRef}:gpt-6-sol[1m]`);
+        expect(changed.body.text).toContain('Effort: default (high)');
+        expect(persistedPstack()).toEqual({ defaultEffort: 'high', roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
+      }, 15000);
+
+      // Review of #591 (M1): a change while off turns pstack on; the notice says so.
+      it('says pstack is on now when a role change turns it on', async () => {
+        const port = await startRunner(gatewayWithIds());
+        const changed = await menu(port, `ps:m:${bugFixRef}:gpt-6-sol[1m]`);
+        expect(changed.body.toast).toContain('pstack is on now');
+        expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
+        await menu(port, 'ps:rs!');
+        await menu(port, 'ps:off');
+        const reset = await menu(port, 'ps:rs!');
+        expect(reset.body.text).toContain('Status: ⚪ Off');
+        expect(persistedPstack()).toBeUndefined();
+      }, 15000);
+
+      // Review of #591 (L4): an unexpected failure was answered but never logged.
+      it('logs an unexpected menu failure', async () => {
+        const port = await startRunner(gatewayWithIds());
+        const logged = jest.spyOn((runner as unknown as { logger: { error: (m: string, d?: object) => void } }).logger, 'error');
+        fs.writeFileSync(configPath, '{ not json');
+        const res = await menu(port, 'ps:on');
+        expect(res.body).toMatchObject({ success: false, error: expect.stringContaining('unavailable') });
+        expect(logged).toHaveBeenCalledWith('pstack setup button failed', expect.objectContaining({ data: 'ps:on', error: expect.any(String) }));
       }, 15000);
 
       it('refuses a menu request from a group or another user', async () => {

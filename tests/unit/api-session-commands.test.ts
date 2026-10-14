@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 /**
  * Tests for executeApiCommand /session and /sessions message counting (#160).
  *
@@ -362,6 +363,24 @@ describe('executeApiCommand session counting (#160)', () => {
     expect((await runner.executeApiCommand(sessionId, chatId, '/rename', { skipPersist: true })).responseText).toContain('Usage: /rename');
   });
 
+  // Review of #591 (L5): without session_id the API runs a command in a fresh session,
+  // so /new left that one behind empty beside the session it created, and /rename named it.
+  it('without session_id, /new names the fresh session and /rename refuses', async () => {
+    const fresh = 'f0f0f0f0-0000-4000-8000-000000000001';
+    const before = (await getSessionStore(runner).listSessions(agentId, chatId, 'api')).sessions.length;
+    const created = await runner.executeApiCommand(fresh, chatId, '/new Design', { skipPersist: true, implicitSession: true });
+    expect(created.result).toEqual({ sessionId: fresh, sessionName: 'Design' });
+    const after = (await getSessionStore(runner).listSessions(agentId, chatId, 'api')).sessions;
+    expect(after).toHaveLength(before + 1);
+    expect(after.find(s => s.id === fresh)?.name).toBe('Design');
+
+    const other = 'f0f0f0f0-0000-4000-8000-000000000002';
+    const renamed = await runner.executeApiCommand(other, chatId, '/rename Oops', { skipPersist: true, implicitSession: true });
+    expect(renamed.result).toEqual({ error: 'SESSION_ID_REQUIRED' });
+    expect(renamed.responseText).toContain('session_id');
+    expect((await getSessionStore(runner).listSessions(agentId, chatId, 'api')).sessions.find(s => s.id === other)).toBeUndefined();
+  });
+
   it('/tasks, /voice and /voices answer without orchestration instead of reaching the model', async () => {
     expect((await runner.executeApiCommand(sessionId, chatId, '/tasks', { skipPersist: true, principalId: 'owner' })).responseText).toBe('Task controls require orchestration mode.');
     for (const command of ['/voice', '/voice on', '/voices']) {
@@ -411,7 +430,7 @@ describe('executeApiCommand session counting (#160)', () => {
       expect(roles.actions).toEqual([{ label: 'Single-model ▸ (13)', command: '/pstack-setup ps:l:s:0' }, { label: 'Panels ▸ (4)', command: '/pstack-setup ps:l:p:0' }, { label: '◀ Back', command: '/pstack-setup ps:h' }]);
       const panels = await runner.executeApiCommand(sessionId, chatId, '/pstack-setup ps:l:p:0', { skipPersist: true });
       expect(panels.responseText).toContain('Panel roles');
-      expect(panels.actions).toContainEqual({ label: 'interrogate reviewers · 4 models', command: '/pstack-setup ps:r:16' });
+      expect(panels.actions).toContainEqual({ label: 'interrogate reviewers · 4 models', command: `/pstack-setup ps:r:16-${createHash('sha256').update('interrogate reviewers').digest('hex').slice(0, 3)}` });
       expect((await runner.executeApiCommand(sessionId, chatId, '/pstack-setup ps:x', { skipPersist: true })).actions).toEqual([]);
     });
 

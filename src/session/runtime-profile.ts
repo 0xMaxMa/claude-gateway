@@ -33,6 +33,8 @@ export interface RuntimeProfile {
   /** Captured optional evaluation-tool inventory for this process; permissions remain live. */
   jevEnabled?: boolean;
   browserEnabled?: boolean;
+  /** Read-only worker: Codex runs in its read-only sandbox (Claude gets read tools through workerTools). */
+  readOnly?: boolean;
   /** Optional connector restriction for workers. Agent decisions never receive connectors. */
   connectorsAllowed?: boolean;
   originSessionId?: string;

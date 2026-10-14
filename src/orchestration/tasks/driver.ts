@@ -43,6 +43,10 @@ import { renderPstackSheet } from '../../pstack/sheet';
 import { SUBAGENT_READONLY, pstackWorkerNote } from '../../pstack/overlay';
 import { chatSessionTranscripts, pstackReflectNote } from '../../pstack/reflect';
 import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
+import type { Effort } from '../../agent/model-registry';
+
+// Codex accepts low|medium|high|xhigh; Claude's `max` (a pstack template, or inherited) runs at Codex's highest.
+const codexEffort = (effort: Effort): Exclude<Effort, 'max'> => effort === 'max' ? 'xhigh' : effort;
 
 function boundedDiffText(text: string): string {
   let result = text.slice(0, 8192);
@@ -169,12 +173,13 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       const profile = { ...ticket.profile, ...(task.effort ? { claudeEffort: task.effort } : {}), pluginOverrides: { [PSTACK_PLUGIN_ID]: Boolean(this.agent.pstack) },
         // pstack agents dispatch subagents only as gateway tasks (subagent_spawn); a read-only Claude subagent gets read tools only.
         ...(pstack ? { disallowedTools: ['Agent', 'Task'] } : {}),
-        ...(task.readonly && harness.harness === 'claude' ? { workerTools: ['Read', 'Glob', 'Grep'] } : {}), hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
+        // Read-only is enforced by each harness (read tools; Codex's read-only sandbox) and no user connectors, which can write.
+        ...(task.readonly ? { readOnly: true, connectorsAllowed: false, ...(harness.harness === 'claude' ? { workerTools: ['Read', 'Glob', 'Grep'] } : {}) } : {}), hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
       const workerConfig: AgentConfig = { ...this.agent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
         claude: { ...this.agent.claude, model: claudeModel, extraFlags: [] } };
       const process = harness.harness === 'codex'
         ? new CodexProcess({ agent: workerConfig, gateway: this.gateway, profile, sessionId: attempt.sessionId,
-          stateDirectory: join(this.privateRoot, 'codex-sessions'), config: task.effort ? { ...harness.config, reasoningEffort: task.effort } : harness.config, resolvedCredentials,
+          stateDirectory: join(this.privateRoot, 'codex-sessions'), config: task.effort ? { ...harness.config, reasoningEffort: codexEffort(task.effort) } : harness.config, resolvedCredentials,
           requestInput: question => { this.tasks.requestInput(attempt.attemptId, attempt.generation, question); },
           checkpoint: async () => {
             const next = this.tasks.checkpoint(attempt.attemptId, attempt.generation, { sessionId: attempt.sessionId });

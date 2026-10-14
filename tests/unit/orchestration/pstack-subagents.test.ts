@@ -134,6 +134,16 @@ test('subagents nest three deep; the fourth level is refused', async () => {
   }
   const refused = await spawn(attempt, {});
   expect(refused.error).toBe('SUBAGENT_DEPTH_EXCEEDED');
+  // Review of #591 (L3): the worker is told why, not only the code.
+  expect(refused.message).toContain('Do this work inline');
+});
+
+test('a full queue says why the subagent was refused', async () => {
+  const { attempt } = rootWorker();
+  let reply: any;
+  for (let i = 0; i < 100 && !reply?.error; i++) reply = await spawn(attempt, {});
+  expect(reply.error).toBe('QUEUE_FULL');
+  expect(reply.message).toMatch(/queued/);
 });
 
 test('only a worker given subagents may call the tools', async () => {
@@ -278,7 +288,7 @@ describe('review fixes', () => {
     tasks.cancelByUser(parent.conversationId, 'u', parent.taskId);
     expect(store.task(parent.taskId)!.state).toBe('cancel_requested');
     expect(store.task(child.taskId)!.state).toBe('cancelled');
-    expect((await spawn(attempt, {})).error).toBe('STATE_CONFLICT');
+    expect(await spawn(attempt, {})).toMatchObject({ error: 'STATE_CONFLICT', message: expect.stringContaining('cannot start subagents') });
   });
 
   test('a subagent stuck in needs_reconciliation is reported, not waited on, with a warning', async () => {
