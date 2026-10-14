@@ -59,7 +59,7 @@ codes, listed under [Git errors](#git-errors).
 | 403 | `forbidden_key` | The key lacks pod-wide scope, or lacks write for a `POST`. |
 | 404 | `not_found` | The project or path does not exist. |
 | 400 | `confirm_mismatch` | `DELETE` did not send `confirm` equal to the project name. |
-| 409 | `project_exists` | `POST` named a project that already exists. |
+| 409 | `project_exists` | `POST` named a project, file or symlink that already exists, compared case-insensitively (`Site` collides with `site`). |
 | 409 | `project_running` | `DELETE` found a process listening from inside the project. |
 | 500 | `internal` | Anything else. |
 
@@ -120,8 +120,9 @@ curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json"
 { "project": { "name": "demo", "path": "/home/getpod/projects/demo", "modified_at": "2026-10-06T07:41:58.686Z", "is_git": true } }
 ```
 
-If the project already exists the response is `409 project_exists` and the
-existing directory is not touched. If `git init` fails, the directory is kept
+If the name is already taken the response is `409 project_exists` and the
+existing entry is not touched. The create is an atomic `mkdir`, so of several
+concurrent requests for one name exactly one gets `201`. If `git init` fails, the directory is kept
 and the response is still `201`, with a `warning`. The warning names only the
 exit code, the signal, or the spawn error (such as `ENOENT` when git is not
 installed). It never includes git's output, which the gateway logs instead.

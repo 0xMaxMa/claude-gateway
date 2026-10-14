@@ -132,6 +132,42 @@ describe("createProject", () => {
     );
   });
 
+  it("treats a name differing only in case as existing and leaves the first untouched", async () => {
+    const first = await createProject(root, name("Site"), false);
+    if (!first.ok) throw new Error(first.error);
+    expect(await createProject(root, name("site"), false)).toEqual({
+      ok: false,
+      error: "project_exists",
+    });
+    expect(fs.readdirSync(root)).toEqual(["Site"]);
+  });
+
+  it("refuses a name held by a file, a symlink, or a dangling symlink", async () => {
+    fs.mkdirSync(root);
+    fs.writeFileSync(path.join(root, "afile"), "x");
+    fs.symlinkSync(base, path.join(root, "alink"));
+    fs.symlinkSync(path.join(base, "nowhere"), path.join(root, "dangling"));
+    for (const n of ["afile", "alink", "dangling", "AFILE"]) {
+      expect(await createProject(root, name(n), true)).toEqual({
+        ok: false,
+        error: "project_exists",
+      });
+    }
+    expect(fs.readFileSync(path.join(root, "afile"), "utf8")).toBe("x");
+    expect(fs.lstatSync(path.join(root, "alink")).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(path.join(base, ".git"))).toBe(false);
+  });
+
+  it("lets exactly one of many concurrent creates of the same name win", async () => {
+    const results = await Promise.all(
+      Array.from({ length: 12 }, () => createProject(root, name("race"), false)),
+    );
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    for (const r of results.filter((r) => !r.ok)) {
+      expect(r).toEqual({ ok: false, error: "project_exists" });
+    }
+  });
+
   it("reports the same real path that listProjects does when the configured root is a symlink", async () => {
     fs.mkdirSync(root);
     const link = path.join(base, "projects-link");

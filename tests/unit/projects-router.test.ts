@@ -164,6 +164,17 @@ describe("POST /api/v1/projects", () => {
     expect(fs.existsSync(path.join(root, "app", ".git"))).toBe(false);
   });
 
+  it("answers 409 project_exists for a case-only collision", async () => {
+    await request(app).post("/api/v1/projects").set(POD).send({ name: "Site" });
+    const res = await request(app)
+      .post("/api/v1/projects")
+      .set(POD)
+      .send({ name: "site" });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("project_exists");
+    expect(fs.readdirSync(root)).toEqual(["Site"]);
+  });
+
   it("git_init creates a repository", async () => {
     const res = await request(app)
       .post("/api/v1/projects")
@@ -175,7 +186,7 @@ describe("POST /api/v1/projects", () => {
     expect(fs.existsSync(path.join(root, "repo", ".git", "HEAD"))).toBe(true);
   });
 
-  it.each(["../x", "a/b", ".", "a".repeat(65), "", undefined])(
+  it.each(["../x", "a/b", ".", "..", ".git", ".hidden", "a".repeat(65), "", undefined])(
     "rejects name %p with 400 invalid_name",
     async (name) => {
       const res = await request(app)

@@ -196,6 +196,17 @@ export async function createProject(
         : errnoToCode(e),
     );
   }
+  // Case-folding filesystems already answer EEXIST; this makes Linux agree so a
+  // client never gets "Site" and "site" side by side. The atomic mkdir below
+  // stays the authority for exact-name races.
+  try {
+    const lower = name.toLowerCase();
+    if ((await fsp.readdir(root)).some((n) => n.toLowerCase() === lower)) {
+      return err("project_exists");
+    }
+  } catch (e) {
+    return err(errnoToCode(e));
+  }
   try {
     await fsp.mkdir(dir);
   } catch (e) {
