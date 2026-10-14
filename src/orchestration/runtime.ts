@@ -24,7 +24,7 @@ import { startNativeCompact } from './native-compact';
 import { BrowserVoice } from './browser-voice';
 import { MutationAttempt, unresolvedMutations } from './mutation-recovery';
 import { committedCommandContext, communicatedProgressContext } from './decision-context';
-import { latestAgentContextWindow, recordTokenTurn, tokenReport, summarizeTokenTurns, measuredTurns } from './token-ledger';
+import { latestAgentContextTokens, latestAgentContextWindow, recordTokenTurn, tokenReport, summarizeTokenTurns, measuredTurns } from './token-ledger';
 import { TaskQuestions } from './task-questions';
 import { isProgressReview, recentCommunicatedProgress, progressReviewResult, PROGRESS_REVIEW_OVERLAY } from './progress-review';
 import { ORCHESTRATION_RESPONSE_SCHEMA } from './response-schema';
@@ -76,7 +76,9 @@ import { SessionStore } from '../session/store';
 import { HistoryDB } from '../history/db';
 import { RuntimeProfile } from '../session/runtime-profile';
 import { OrchestrationStore, AcceptInput, INTAKE_RECOVERY_PREFIX, channelVoiceKey, payloadHash } from './store';
-import { resolveOrchestrationConfig } from './config';
+import { contextScaledTimeouts, resolveOrchestrationConfig } from './config';
+/** Estimated tokens per attached image (a ~1.15-megapixel image is about 1,600). */
+const IMAGE_TOKEN_ESTIMATE = 1600;
 import { mergeContextRefs, TaskService, taskIndexEntry } from './tasks/service';
 import { DecisionService, DecisionReceipt } from './decisions';
 import { TaskBridge } from './bridge';
@@ -1492,7 +1494,11 @@ export class AgentOrchestrationRuntime {
         this.publishText(sessionId, decision.responseId!, streamedDisplay);
         options.onText?.(chunk);
       };
-      const turn = startProcessTurn(agentSession, unansweredInputContext(this.store, receipt.conversationId, receipt.inputId) + prompt, Math.min(options.timeoutMs, this.config.conversation.maxDecisionDurationMs), text => {
+      const turnPrompt = unansweredInputContext(this.store, receipt.conversationId, receipt.inputId) + prompt;
+      // The previous turn's measured context, plus this turn's text (~4 bytes a token) and images.
+      const contextTokens = latestAgentContextTokens(this.store, sessionId) + Math.ceil(Buffer.byteLength(turnPrompt) / 4) + visualInput.images.length * IMAGE_TOKEN_ESTIMATE;
+      const timeouts = contextScaledTimeouts(this.config.conversation, contextTokens);
+      const turn = startProcessTurn(agentSession, turnPrompt, Math.min(options.timeoutMs, this.config.conversation.maxDecisionDurationMs), text => {
         displayChunk(text);
       }, metrics => {
         recordTokenTurn(this.store, { id: decision.decisionId, sessionId, role: 'agent', category: active.notification ? 'report' : 'input', ...metrics });
@@ -1500,8 +1506,8 @@ export class AgentOrchestrationRuntime {
       }, visualInput.images, {
         onUsage: metrics => recordTokenTurn(this.store, {id: decision.decisionId, sessionId, role: 'agent', category: active.notification ? 'report' : 'input', ...metrics}),
         startupTimeoutMs: this.config.conversation.startupTimeoutMs,
-        firstResponseTimeoutMs: this.config.conversation.firstResponseTimeoutMs, compactionTimeoutMs: this.config.conversation.compactionTimeoutMs,
-        idleTimeoutMs: this.config.conversation.idleTimeoutMs,
+        firstResponseTimeoutMs: timeouts.firstResponseTimeoutMs, compactionTimeoutMs: this.config.conversation.compactionTimeoutMs,
+        idleTimeoutMs: timeouts.idleTimeoutMs,
       }, chunk => {
         // StructuredOutput tool arguments are a separate JSON stream from commentary.
         if (!structuredStarted) { rawDisplay = ""; structuredStarted = true; }

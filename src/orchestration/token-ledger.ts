@@ -49,6 +49,11 @@ export function latestAgentContextWindow(store: Pick<OrchestrationStore, 'get'>,
   if (!best) return null;
   return { used: best.total, total: null, model: typeof turn.model === 'string' ? turn.model : null };
 }
+/** The latest agent context size for a session, or 0 before its first measured turn. */
+export function latestAgentContextTokens(store: OrchestrationStore, sessionId: string): number {
+  ensure(store);
+  return latestAgentContextWindow(store, sessionId)?.used ?? 0;
+}
 // Dashboard polling never reloads full request arrays or conversation text.
 // Cache only projected measurements, invalidate the affected session on writes.
 const summaries = new WeakMap<OrchestrationStore, Map<string, TokenTurn[]>>();
