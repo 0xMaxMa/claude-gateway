@@ -494,12 +494,16 @@ describe('pstack subagent workers', () => {
     mockBeforeResult = worker => { expect(mcpEnv(worker.runtimeProfile).GATEWAY_SUBAGENTS).toBe('true'); };
     await run('claude-sonnet-4-6');
     expect(claudeProfile().disallowedTools).toEqual(['Agent', 'Task']);
-    expect(claudeProfile().context).toContain('call subagent_spawn instead');
-    // Session 66f2f9db, and again on dev at bdd0bc3e: a poteto-mode worker read "Route through the **how** skill"
+        // Session 66f2f9db, and again on dev at bdd0bc3e: a poteto-mode worker read "Route through the **how** skill"
     // and wrote how-shaped output itself, with no Skill call and no subagent. The note names the playbook phrasing.
     expect(claudeProfile().context).toContain('names another skill (route through, run or apply the **how** skill, the **why** skill, the **interrogate** skill...), call the Skill tool with skill pstack:<name>');
     expect(claudeProfile().context).toContain('Reading its SKILL.md or copying its output format is not running it');
-    expect(claudeProfile().context).toContain('start every subagent it calls for with subagent_spawn; do not do their work yourself');
+    expect(claudeProfile().context).toContain('start every subagent it calls for with mcp__gateway__subagent_spawn; do not do their work yourself');
+    // Dev at 8bfd9d4e: a poteto-mode worker ran pstack:how, read "Every spawn is a `Agent` subagent" with Agent
+    // disabled, and spawned nothing in 3 runs. The note names the tools as the worker sees them and says why Agent is off.
+    expect(claudeProfile().context).toContain('call the tool mcp__gateway__subagent_spawn instead');
+    expect(claudeProfile().context).toContain('collect their results with mcp__gateway__subagent_wait');
+    expect(claudeProfile().context).toContain('The built-in Agent tool is disabled here on purpose, so that spawns go through the gateway; it does not mean spawning is disallowed.');
   });
 
   test('an agent that is not set up keeps native Agent and gets no subagent tools', async () => {

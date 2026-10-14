@@ -18,10 +18,10 @@ export function pstackWorkerNote(subagents: boolean): string {
   return [
     '# pstack on this gateway',
     subagents
-      ? 'Wherever a pstack skill says to dispatch or spawn a subagent with the Agent tool, call subagent_spawn instead with the same arguments (description, prompt, subagent_type, model, readonly, run_in_background); its model is the model ID from the sheet above. Wait for background subagents with subagent_wait and stop them with subagent_cancel. Each subagent runs as a gateway task, possibly on another provider.'
+      ? 'Wherever a pstack skill says to dispatch or spawn a subagent or an Agent subagent, call the tool mcp__gateway__subagent_spawn instead with the same arguments (description, prompt, subagent_type, model, readonly, run_in_background); its model is the model ID from the sheet above. Start background subagents the same way and collect their results with mcp__gateway__subagent_wait; stop them with mcp__gateway__subagent_cancel. The built-in Agent tool is disabled here on purpose, so that spawns go through the gateway; it does not mean spawning is disallowed. Each subagent runs as a gateway task, possibly on another provider.'
       : 'Subagent dispatch is unavailable at this depth: do the work a skill would hand to a subagent yourself, inline.',
     'When a pstack playbook step names another skill (route through, run or apply the **how** skill, the **why** skill, the **interrogate** skill...), call the Skill tool with skill pstack:<name> and follow it. Reading its SKILL.md or copying its output format is not running it' + (subagents
-      ? '; start every subagent it calls for with subagent_spawn; do not do their work yourself.'
+      ? '; start every subagent it calls for with mcp__gateway__subagent_spawn; do not do their work yourself.'
       : '.'),
     'The setup-pstack skill does not apply here: this agent is configured with /pstack-setup.',
   ].join('\n');
