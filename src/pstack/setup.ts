@@ -1,24 +1,18 @@
 import { promises as fsp } from 'fs';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
 import type { ModelConfig } from '../types';
-import { AgentPstackConfig, validatePstack } from './config';
+import { AgentPstackConfig, PstackConfigError, validatePstack } from './config';
 import { pstackModels, pstackPluginInfo } from './plugin-info';
 
 /**
- * Set up (or with `undefined`, remove) pstack for one agent: validate against
- * the live models and the installed plugin, then write `agents[].pstack`.
- * Shared by /pstack-setup, the API and the CLI so all three apply the same
- * rules. Returns the saved block (models written as canonical IDs).
- */
-export async function savePstackConfig(configPath: string, agentId: string, block: AgentPstackConfig | undefined, models: ModelConfig[]): Promise<AgentPstackConfig | undefined> {
-  return (await updatePstackConfig(configPath, agentId, () => block, models)).saved;
-}
-
-/**
- * Change pstack from the block saved in config.json, read under the config
- * write lock, so an edit (a sheet line, a menu button) applies to the latest
- * block and never drops one saved meanwhile from another surface. `update`
- * returns the new block, `undefined` to remove it, or `previous` to leave it.
+ * Set up, change or remove pstack for one agent: validate against the live
+ * models and the installed plugin, then write `agents[].pstack` (models as
+ * canonical IDs). Shared by /pstack-setup, the API and the CLI so all three
+ * apply the same rules. The block is read under the config write lock, so an
+ * edit (a sheet line, a menu button) applies to the latest block and never
+ * drops one saved meanwhile from another surface. `update` returns the new
+ * block, `undefined` to remove it, or `previous` to leave it; `saved` is then
+ * `previous` itself, as it is when the new block equals the saved one.
  */
 export async function updatePstackConfig(configPath: string, agentId: string, update: (previous: AgentPstackConfig | undefined) => AgentPstackConfig | undefined, models: ModelConfig[]): Promise<{ previous: AgentPstackConfig | undefined; saved: AgentPstackConfig | undefined }> {
   return withConfigWriteLock(configPath, async () => {
@@ -29,10 +23,14 @@ export async function updatePstackConfig(configPath: string, agentId: string, up
     const block = update(previous);
     if (block === previous) return { previous, saved: previous };
     let saved: AgentPstackConfig | undefined;
+    // Only host workers load the plugin (see the worker driver); an app agent's run in its container.
+    if (block && agent.type === 'app-agent') throw new PstackConfigError('PSTACK_UNSUPPORTED_AGENT', 'pstack runs in host workers only; this app agent\'s workers run in its container and cannot load it.');
     if (block) {
       const plugin = pstackPluginInfo();
       saved = validatePstack(agentId, block, models, plugin.installPath ? pstackModels(plugin.installPath) : undefined);
     }
+    // Nothing to write when the validated block is the one saved (a button pressed twice).
+    if (JSON.stringify(saved) === JSON.stringify(previous)) return { previous, saved: previous };
     if (saved) agent.pstack = saved; else delete agent.pstack;
     await writeConfigAtomic(configPath, config);
     return { previous, saved };

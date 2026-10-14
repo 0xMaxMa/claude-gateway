@@ -10,10 +10,30 @@ const group = (text: string, patch: Partial<Access> = {}, fromId = '7') =>
   groupCommandReply(allowed(patch), { chatType: 'supergroup', chatId: '-100', fromId, text, botUsername: 'agent_bot' })
 
 describe('a direct-message-only command in a group', () => {
-  it.each(['/model', '/models', '/help', '/status', '/clear', '/compact', '/restart', '/sessions', '/session', '/tasks', '/voice on', '/voices', '/start', '/cli'])(
+  it.each(['/model', '/models', '/help', '/status', '/clear', '/compact', '/restart', '/sessions', '/session', '/tasks', '/voice on', '/voices', '/start'])(
     '%s in an allowed group gets a pointer to the direct message', text => {
       expect(group(text)).toBe(`${text.split(' ')[0]} is only available in a direct message with the bot.`)
     })
+
+  // Third review of #591 (L6): /cli got the pointer even where the terminal viewer is off.
+  it('/cli gets the pointer only where the terminal viewer is on', () => {
+    expect(group('/cli')).toBeUndefined()
+    expect(groupCommandReply(allowed(), { chatType: 'group', chatId: '-100', fromId: '7', text: '/cli', botUsername: 'agent_bot', cliEnabled: true }))
+      .toBe('/cli is only available in a direct message with the bot.')
+  })
+
+  // Third review of #591 (L5): a bot turned off (dmPolicy disabled) still answered in groups.
+  it('stays silent when the bot is turned off', () => {
+    expect(group('/model', { dmPolicy: 'disabled' })).toBeUndefined()
+    expect(group('/model', { dmPolicy: 'disabled', groupPolicy: 'open' })).toBeUndefined()
+  })
+
+  // Third review of #591 (L14): the reply follows the gate itself, not a copy of its rules.
+  it('mints no pairing code and saves nothing for a group the gate would pair', () => {
+    const access = allowed({ groupAllowlist: [], pairing: true })
+    expect(groupCommandReply(access, { chatType: 'group', chatId: '-100', fromId: '7', text: '/model', botUsername: 'agent_bot' })).toBeUndefined()
+    expect(access.pending).toEqual({})
+  })
 
   it('answers the command addressed to this bot, and not one addressed to another bot', () => {
     expect(group('/model@Agent_Bot')).toBe('/model is only available in a direct message with the bot.')

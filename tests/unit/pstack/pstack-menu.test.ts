@@ -27,11 +27,23 @@ describe('screens', () => {
   test('home shows the status, the default effort and the role count only, with a Roles button', () => {
     const screen = pstackMenuScreen({ kind: 'home' }, state({ roles: { 'bug-fix': 'gpt-6-sol[1m] @high' } }));
     expect(screen.text).toBe('pstack setup\nStatus: 🟢 On\nDefault effort: session\nRoles: 17 (✏️ 1 changed)');
+    // One button per row, in this order (user request on #591).
     expect(screen.keyboard).toEqual([
-      [{ text: 'Turn off', data: 'ps:off' }, { text: 'Effort: session', data: 'ps:de' }],
+      [{ text: 'Turn off', data: 'ps:off' }],
+      [{ text: 'Effort: session', data: 'ps:de' }],
       [{ text: 'Roles ▸', data: 'ps:g' }],
-      [{ text: 'Reset all', data: 'ps:rs' }, { text: 'Close', data: 'ps:x' }],
+      [{ text: 'Reset all', data: 'ps:rs' }],
+      [{ text: 'Close', data: 'ps:x' }],
     ]);
+  });
+
+  // Third review of #591 (L16): a skill default (fable) is offered even where this gateway's model list lacks it.
+  test('home warns about role models that are not in this gateway\'s model list', () => {
+    const noFable = { ...state(undefined), models: DEFAULT_MODELS.filter(m => !m.id.startsWith('claude-fable')) };
+    expect(pstackMenuScreen({ kind: 'home' }, noFable).text).toContain('⚠️ Not in this gateway\'s model list: claude-fable-5-1.');
+    expect(pstackMenuScreen({ kind: 'home' }, state(undefined)).text).not.toContain('⚠️');
+    // inherit-parent/auto are pstack keywords, not models.
+    expect(pstackMenuScreen({ kind: 'home' }, { ...state({ roles: { 'bug-fix': 'inherit-parent' } }), models: noFable.models, plugin: { ...plugin, tiers: { default: 'opus', strongest: 'opus', panel: ['opus'] } } }).text).not.toContain('⚠️');
   });
 
   test('Roles splits single-model and panel roles, counted from the plugin\'s role list', () => {

@@ -22,8 +22,10 @@ export function chatSessionTranscripts(store: OrchestrationStore, task: TaskSnap
     const cwd = store.get('SELECT worktree_path FROM task_resources WHERE task_id=? ORDER BY rowid LIMIT 1', String(row.id))?.worktree_path;
     if (earlier?.agentSessionId !== task.agentSessionId || earlier.parentTaskId || !cwd) continue;
     for (const attempt of store.all('SELECT payload_json FROM task_attempts WHERE task_id=? ORDER BY generation', String(row.id))) {
-      const { harness, sessionId }: TaskAttempt = JSON.parse(String(attempt.payload_json));
-      if (harness !== 'codex') paths.push(transcriptPath(String(cwd), sessionId));
+      let parsed: TaskAttempt;
+      // One unreadable row costs that transcript, not the whole review.
+      try { parsed = JSON.parse(String(attempt.payload_json)); } catch (error) { console.warn(`[pstack] reflect skips an unreadable attempt of task ${String(row.id)}`, (error as Error).message); continue; }
+      if (parsed.harness !== 'codex' && typeof parsed.sessionId === 'string') paths.push(transcriptPath(String(cwd), parsed.sessionId));
     }
   }
   return [...new Set(paths)].filter(path => existsSync(path));

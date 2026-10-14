@@ -346,6 +346,32 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
         expect(persistedPstack()).toBeUndefined();
       }, 15000);
 
+      // User request on #591: Turn on/off ends the menu like /voice does, with the result and no buttons.
+      it('Turn on and Turn off end the menu with the result and no buttons', async () => {
+        const port = await startRunner(gatewayWithIds());
+        const on = await menu(port, 'ps:on');
+        expect(on.body).toMatchObject({ text: expect.stringMatching(/^✅ pstack is on for \S+\./), keyboard: [], done: true });
+        expect(persistedPstack()).toEqual({});
+        const off = await menu(port, 'ps:off');
+        expect(off.body).toMatchObject({ text: expect.stringMatching(/^✅ pstack is off for \S+\./), keyboard: [], done: true });
+        expect(persistedPstack()).toBeUndefined();
+        // Third review of #591 (L6): a press that changes nothing said "Saved".
+        await menu(port, 'ps:on');
+        const again = await menu(port, 'ps:on');
+        expect(again.body.text).toMatch(/already on/);
+        expect(again.body.text).not.toContain('Saved');
+        await menu(port, 'ps:de:high');
+        const effort = await menu(port, 'ps:de:high');
+        expect(effort.body.toast).toBe('No change.');
+      }, 15000);
+
+      it('on the web, Turn on returns the result with no actions', async () => {
+        await startRunner(gatewayWithIds());
+        const reply = await runner.executeApiCommand('web-session', 'web-chat', '/pstack-setup ps:on', { canWriteAgent: true });
+        expect(reply.responseText).toMatch(/^✅ pstack is on for \S+\./);
+        expect(reply.actions).toEqual([]);
+      }, 15000);
+
       // Review of #591 (M2): a button computed its change from the runner's copy and
       // wrote the whole block, dropping a change saved meanwhile by the API or CLI.
       it('applies a button to the saved config, keeping a change made elsewhere', async () => {
@@ -404,6 +430,10 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
         expect(shown.responseText).toContain('• bug-fix: claude-fable-5-1');
         const refused = await runner.executeApiCommand('web-session', 'web-chat', '/pstack-setup on');
         expect(refused.responseText).toContain('write access');
+        expect(persistedPstack()).toBeUndefined();
+        // Third review of #591 (M9): a menu button is a change too.
+        const button = await runner.executeApiCommand('web-session', 'web-chat', '/pstack-setup ps:on');
+        expect(button.responseText).toContain('write access');
         expect(persistedPstack()).toBeUndefined();
         const set = await runner.executeApiCommand('web-session', 'web-chat', '/pstack-setup bug-fix: gpt-6-sol[1m]', { canWriteAgent: true });
         expect(set.responseText).toContain('bug-fix: gpt-6-sol[1m]');

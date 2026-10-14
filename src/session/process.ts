@@ -1038,8 +1038,9 @@ export class SessionProcess extends EventEmitter {
     // pstack is installed for Claude Code host-wide; an agent that is not set up never loads it.
     const extraFlags = this.agentConfig.claude.extraFlags ?? [];
     const gated = this.agentConfig.pstack ? extraFlags : extraFlagsWithPluginOverrides(extraFlags, { [PSTACK_PLUGIN_ID]: false }, this.agentConfig.workspace);
-    if (!gated) this.logger.warn('claude.extraFlags --settings is not a readable JSON object; the pstack plugin gate is not applied to this session');
-    args.push(...(gated ?? extraFlags));
+    // Claude Code cannot start with it either; refusing here says why instead of loading pstack.
+    if (!gated) throw Object.assign(new Error('claude.extraFlags --settings is not a readable JSON object, so pstack cannot be kept off for this agent. Fix that --settings value.'), { code: 'INVALID_EXTRA_FLAGS' });
+    args.push(...gated);
 
     return args;
     // NOTE: NO --channels flag — messages arrive via stdin injection, not Telegram channels

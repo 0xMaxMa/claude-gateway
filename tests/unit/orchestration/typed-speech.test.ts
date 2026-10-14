@@ -255,3 +255,40 @@ test.each(['api', 'telegram'] as const)('%s automatic report failures remain sil
   expect(runtime.store.all('SELECT * FROM response_speech')).toHaveLength(0);
  }finally{await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
 });
+
+// "pstack on but the bot says the skill does not exist" (agent mona-lisa-jai-kere): with voice replies on,
+// an explicit /skill is left to the decision model (it must speak the acknowledgement), and the model
+// searched the catalog, found nothing and refused. The requested skill is authoritative.
+test.each([true,false])('an explicit /pstack:interrogate with voice replies %s is dispatched as that skill', async voice => {
+ const root=mkdtempSync(join(tmpdir(),'voice-skill-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Identity');
+ // Set up for pstack; with no readable skill list the gateway leaves the command to the agent.
+ const a={id:'a',description:'fixture',env:'',workspace,pstack:{},claude:{model:'fixture',extraFlags:[]},orchestration:{enabled:true,channels:['telegram'],voice:{enabled:true,notes:{enabled:true,replyWithVoice:true},tts:{voiceId:'chosen'}}}} as AgentConfig;
+ const c={gateway:{ orchestration: true,headless:true},agents:[a]} as GatewayConfig,sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a');
+ const sid=randomUUID();const prompts:string[]=[];
+ const configDir=process.env.CLAUDE_CONFIG_DIR;process.env.CLAUDE_CONFIG_DIR=join(root,'no-claude-config');
+ const runtime=await AgentOrchestrationRuntime.open(a,c,dir,sessions,history,{
+  createAgentSession:async(id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter,prompt:string){prompts.push(String(prompt));this.emit('output',JSON.stringify({type:'system',subtype:'init',tools:[]}));this.emit('output',JSON.stringify({type:'result',result:JSON.stringify({display_text:'On it',spoken_text:'On it'})}));}}) as unknown as SessionProcess,
+  releaseAgentSession:async()=>{},
+ });
+ if(voice) runtime.store.setTelegramVoice('chat',true);
+ try {
+  const reply=await runtime.send({scope:{agentId:'a',agentSessionId:sid,source:'telegram',accountId:'bot',chatId:'chat',threadKey:'',principalId:'owner'},text:'/pstack:interrogate PR 591',skill:{name:'pstack:interrogate',args:'PR 591'} as never,requestId:randomUUID()},{execute:true,writeMemory:false},{timeoutMs:1000});
+  const spawned=runtime.store.all("SELECT snapshot_json FROM tasks").map(row=>JSON.parse(String(row.snapshot_json)));
+  if(voice){
+   // The model speaks the acknowledgement, so it dispatches; its instruction leaves no room to search first.
+   expect(spawned).toHaveLength(0);
+   const line=prompts.at(-1)!.split('\n').find(l=>l.startsWith('Requested installed skill'))!;
+   expect(line).toContain('skill_name "pstack:interrogate"');
+   expect(line).toContain('target_profile skill-worker');
+   expect(line).toMatch(/empty .*search .*not evidence/i);
+  } else {
+   // Unchanged: dispatched directly, without a model turn.
+   expect(reply).toBe("I've queued /pstack:interrogate as one of my tasks. I'll report the result when it's ready.");
+   expect(spawned).toEqual([expect.objectContaining({skill:expect.objectContaining({name:'pstack:interrogate'})})]);
+   expect(prompts).toEqual([]);
+  }
+ }finally{
+  if(configDir===undefined)delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR=configDir;
+  await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});
+ }
+});

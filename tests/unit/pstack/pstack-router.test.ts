@@ -21,10 +21,16 @@ const MODELS: ModelConfig[] = [
   { id: 'gpt-6-sol[1m]', label: 'GPT 6 Sol', alias: 'gpt6sol', contextWindow: 1050000 },
 ];
 
+/** Third review of #591 (M8): a host's provider env pointed selectableModels at the real catalog. */
+const CATALOG_ENV = ['MODELS_BASE_URL', 'ANTHROPIC_BASE_URL', 'MODELS_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const;
 let tmp: string, configPath: string, agents: Map<string, AgentConfig>, fixture: ReturnType<typeof pstackClaudeConfig>, previous: string | undefined;
+let savedEnv: Array<string | undefined>, fetchSpy: jest.SpyInstance;
 beforeEach(() => {
   fixture = pstackClaudeConfig();
   previous = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
+  savedEnv = CATALOG_ENV.map(key => process.env[key]);
+  for (const key of CATALOG_ENV) delete process.env[key];
+  fetchSpy = jest.spyOn(global, 'fetch');
   resetModelCatalogCache(); resetSettingsEnvCache();
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pstack-router-'));
   configPath = path.join(tmp, 'config.json');
@@ -32,6 +38,10 @@ beforeEach(() => {
   agents = new Map([['alice', { id: 'alice' } as AgentConfig], ['bob', { id: 'bob' } as AgentConfig]]);
 });
 afterEach(() => {
+  expect(fetchSpy).not.toHaveBeenCalled();
+  fetchSpy.mockRestore();
+  CATALOG_ENV.forEach((key, i) => { if (savedEnv[i] === undefined) delete process.env[key]; else process.env[key] = savedEnv[i]; });
+  resetModelCatalogCache(); resetSettingsEnvCache();
   if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
   fixture.cleanup(); fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -56,6 +66,29 @@ test('the CLI form sends roles as a JSON string', async () => {
   const res = await request(app()).put('/api/v1/agents/alice/pstack').set('X-Api-Key', 'admin').send({ roles: '{"bug-fix":"claude-opus-5-5"}' });
   expect(res.status).toBe(200);
   expect(persisted('alice')).toEqual({ roles: { 'bug-fix': 'claude-opus-5-5' } });
+});
+
+// Third review of #591 (L3): `pstack enable <agent>` for an agent already set up wiped every role it had.
+test('fields a PUT omits keep their saved values; roles {} resets the roles', async () => {
+  const put = (body: object) => request(app()).put('/api/v1/agents/alice/pstack').set('X-Api-Key', 'admin').send(body);
+  await put({ roles: { 'bug-fix': 'claude-opus-5-5' }, defaultEffort: 'high' });
+  expect((await put({})).body.pstack).toEqual({ roles: { 'bug-fix': 'claude-opus-5-5' }, defaultEffort: 'high' });
+  expect((await put({ defaultEffort: 'low' })).body.pstack).toEqual({ roles: { 'bug-fix': 'claude-opus-5-5' }, defaultEffort: 'low' });
+  expect((await put({ roles: {} })).body.pstack).toEqual({ defaultEffort: 'low' });
+  expect(persisted('alice')).toEqual({ defaultEffort: 'low' });
+});
+
+// Third review of #591: an app agent's workers run in a container and never load pstack, so saving it did nothing.
+test('an app agent cannot be set up; removing a stale block still works', async () => {
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  config.agents[0].type = 'app-agent'; fs.writeFileSync(configPath, JSON.stringify(config));
+  const res = await request(app()).put('/api/v1/agents/alice/pstack').set('X-Api-Key', 'admin').send({});
+  expect(res.status).toBe(400);
+  expect(res.body).toMatchObject({ code: 'PSTACK_UNSUPPORTED_AGENT', error: expect.stringContaining('container') });
+  expect(persisted('alice')).toBeUndefined();
+  config.agents[0].pstack = {}; fs.writeFileSync(configPath, JSON.stringify(config));
+  expect((await request(app()).delete('/api/v1/agents/alice/pstack').set('X-Api-Key', 'admin')).status).toBe(200);
+  expect(persisted('alice')).toBeUndefined();
 });
 
 test('DELETE removes the block', async () => {

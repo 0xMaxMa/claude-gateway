@@ -7,6 +7,14 @@ import { SessionStore } from '../../../src/session/store';
 import { HistoryDB } from '../../../src/history/db';
 import type { AgentConfig, GatewayConfig } from '../../../src/types';
 
+/** The direct reply, or a marker once 3 s pass; the timer is cleared either way (third review of #591, L13). */
+async function replyOrTimeout(response: Promise<unknown>): Promise<unknown> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([response.catch(() => 'model turn'), new Promise<string>(resolve => { timer = setTimeout(() => resolve('no direct reply'), 3000); })]);
+  } finally { clearTimeout(timer); }
+}
+
 /**
  * Dev e2e of #591: an agent that was not set up still listed pstack's skills in
  * its decision-turn catalog (the CLI skill probe had no pstack gate), so
@@ -56,7 +64,7 @@ describe('an explicit /pstack: command on an agent that is not set up', () => {
     const f = await fixture();
     try {
       const submitted = f.runtime.submitInput({ scope: f.scope, text, ingressKey: 'm1' }, { execute: true, writeMemory: false });
-      const reply = await Promise.race([submitted.response.catch(() => 'model turn'), new Promise<string>(resolve => setTimeout(() => resolve('no direct reply'), 3000))]);
+      const reply = await replyOrTimeout(submitted.response);
       expect(reply).toContain('pstack is not set up for this agent');
       // Telegram links a tapped command only up to the first '-', so it names the tappable spelling.
       expect(reply).toContain('/pstack_setup in a direct message');
@@ -96,7 +104,7 @@ describe('an explicit /pstack: command for a skill that is not user-invocable', 
     const f = await fixture({});
     try {
       const submitted = f.runtime.submitInput({ scope: f.scope, text: '/pstack:principle-attack-the-premise check this plan', ingressKey: 'm1' }, { execute: true, writeMemory: false });
-      const reply = await Promise.race([submitted.response.catch(() => 'model turn'), new Promise<string>(resolve => setTimeout(() => resolve('no direct reply'), 3000))]);
+      const reply = await replyOrTimeout(submitted.response);
       expect(reply).toContain('/pstack:principle-attack-the-premise');
       expect(reply).toContain('not a command');
       expect(f.createAgentSession).not.toHaveBeenCalled();
@@ -120,7 +128,7 @@ describe('an explicit /pstack: command for a skill that is not user-invocable', 
     const f = await fixture({});
     try {
       const submitted = f.runtime.submitInput({ scope: f.scope, text: '/pstack:principle-boring-tech', ingressKey: 'm1' }, { execute: true, writeMemory: false });
-      const reply = await Promise.race([submitted.response.catch(() => 'model turn'), new Promise<string>(resolve => setTimeout(() => resolve('no direct reply'), 3000))]);
+      const reply = await replyOrTimeout(submitted.response);
       expect(reply).toContain('/pstack:principle-boring-tech is not a pstack command');
       expect(f.createAgentSession).not.toHaveBeenCalled();
       expect(f.runtime.store.get('SELECT COUNT(*) n FROM tasks')!.n).toBe(0);

@@ -339,8 +339,8 @@ export function normalizeTelegramLineBreaks(text: string): string {
   return text.replace(/(?:<|&lt;)br\s*\/?(?:>|&gt;)/gi, '\n')
 }
 
-/** Commands the receiver answers itself, in a direct message only. */
-const DM_ONLY_COMMANDS = ['start', 'help', 'status', 'model', 'models', 'cli', 'clear', 'compact', 'restart', 'session', 'sessions', 'tasks', 'voice', 'voices']
+/** Commands the receiver answers itself, in a direct message only (and `cli` where the terminal viewer is on). */
+const DM_ONLY_COMMANDS = ['start', 'help', 'status', 'model', 'models', 'clear', 'compact', 'restart', 'session', 'sessions', 'tasks', 'voice', 'voices']
 /** Commands forwarded to the gateway, which answers them in a group as well. */
 const GROUP_COMMANDS = ['stop', 'new', 'rename', 'pstack_setup', 'pstack-setup']
 
@@ -364,18 +364,18 @@ export function stripCommandTarget(text: string, botUsername: string): string {
 
 /**
  * The reply to a direct-message-only command typed in a group, or undefined.
- * Only a group that passes the access rules gets one (no pairing code is
- * minted here); others stay silent, as the gate keeps them.
+ * Only a group whose messages the gate delivers gets one; others stay silent,
+ * as the gate keeps them. The gate decides on a copy with pairing off and the
+ * mention rule waived, so no pairing code is minted and nothing is saved.
  */
-export function groupCommandReply(access: Access, input: { chatType?: string; chatId: string; fromId: string; text: string; botUsername: string }): string | undefined {
+export function groupCommandReply(access: Access, input: { chatType?: string; chatId: string; fromId: string; text: string; botUsername: string; cliEnabled?: boolean }): string | undefined {
   if (input.chatType !== 'group' && input.chatType !== 'supergroup') return undefined
   const name = leadingCommand(input.text, input.botUsername)
-  if (!name || !DM_ONLY_COMMANDS.includes(name)) return undefined
-  if (access.groupPolicy === 'disabled') return undefined
-  if (access.groupPolicy === 'allowlist' && !access.groupAllowlist.includes(input.chatId)) return undefined
-  const legacyAllowed = access.legacyGroupAllowFrom?.[input.chatId]
-  if (legacyAllowed && legacyAllowed.length > 0 && !legacyAllowed.includes(input.fromId)) return undefined
-  return `/${name} is only available in a direct message with the bot.`
+  if (!name || !(DM_ONLY_COMMANDS.includes(name) || (name === 'cli' && input.cliEnabled))) return undefined
+  const copy: Access = { ...access, pairing: false, requireMention: false, pending: { ...access.pending } }
+  const verdict = gateLogic({ fromId: input.fromId, chatType: input.chatType, chatId: input.chatId, botUsername: input.botUsername, messageText: input.text },
+    () => copy, () => {}, () => { throw Error('NO_PAIRING_IN_GROUP_COMMAND_REPLY') })
+  return verdict.action === 'deliver' ? `/${name} is only available in a direct message with the bot.` : undefined
 }
 
 export function isMentionedPure(input: GateInput, extraPatterns?: string[]): boolean {

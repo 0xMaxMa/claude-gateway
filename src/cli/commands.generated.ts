@@ -240,12 +240,12 @@ export const GENERATED_COMMANDS: GeneratedCommand[] = [
       {
         "name": "roles",
         "in": "body",
-        "description": "JSON map of pstack role -> \"<model-id>[ @<level>]\" (comma-separated for panel roles)"
+        "description": "JSON map of pstack role -> \"<model-id>[ @<level>]\" (comma-separated for panel roles); replaces the saved roles, {} resets them. Omitted: unchanged"
       },
       {
         "name": "defaultEffort",
         "in": "body",
-        "description": "session | low | medium | high | xhigh | max"
+        "description": "session | low | medium | high | xhigh | max. Omitted: unchanged"
       }
     ],
     "summary": "Set up pstack for an agent: its workers load the pstack Claude Code plugin with these role models (full model IDs)",

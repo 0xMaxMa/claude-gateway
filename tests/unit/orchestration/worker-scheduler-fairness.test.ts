@@ -70,3 +70,36 @@ test('a subagent gets a worker slot while its parent holds one, even with the ga
     expect(capacity.acquireWorker('a', 'sibling', true, [parent.taskId])).toBeUndefined();
   } finally {await scheduler.close();store.close();}
 });
+
+// Third review of #591 (M4): the subagent's allowance also raised the total, so a borrowed
+// slot took one reserved for agents and a new decision turn was refused.
+test('a slot a subagent borrows from its waiting parent never takes an agent-reserved slot', () => {
+  const capacity = new ProcessCapacity(3, 1);
+  capacity.acquireWorker('a', 'parent'); capacity.acquireWorker('a', 'other');
+  expect(capacity.acquireWorker('a', 'child', true, ['parent'])).toBeDefined();
+  expect(capacity.acquire('agent')).toBeDefined();
+  // The reserve is still one agent slot, not an open-ended allowance.
+  expect(capacity.acquire('agent')).toBeUndefined();
+});
+
+// Third review of #591 (M5): a queued subagent that cannot start (its parent is not running)
+// made every tick scan the whole queue instead of stopping at the first refused slot.
+test('a queued subagent of a parent that is not running does not make each tick scan the whole queue', async () => {
+  const store = new OrchestrationStore(':memory:', 'a');
+  const decisions = new DecisionService(store);
+  const tasks = new TaskService(store, {tasks:{workspaceMode:'host',maxConcurrentPerAgent:10,maxConcurrentPerConversation:10,maxQueuedPerAgent:300,maxQueuedPerConversation:300}}, '/tmp');
+  const input = store.acceptInput({scope:{agentId:'a',agentSessionId:'s',source:'api',accountId:'key',chatId:'s',threadKey:'',principalId:'p'},text:'Work'});
+  const context = {...input,...decisions.begin(input.conversationId,'p',[input.inputId]),principalId:'p',execute:true,writeMemory:false};
+  const scheduler = new WorkerScheduler(tasks, { reserve: () => undefined, start: async () => { throw new Error('nothing starts'); } });
+  try {
+    const parent = tasks.spawn({...context,actionId:'parent'}, {title:'Parent',instructions:'Use pstack',targetProfile:'default-worker'});
+    const attempt = tasks.claim(parent.taskId)!; tasks.started(attempt.attemptId, attempt.generation);
+    tasks.spawnSubagent(attempt.attemptId, attempt.generation, 'child', {title:'Review',instructions:'Review it'});
+    store.transaction(() => { const t = store.task(parent.taskId)!; t.state = 'needs_reconciliation'; store.saveTask(t, t.stateVersion); });
+    for (let i = 0; i < 250; i++) tasks.spawn({...context,actionId:`root-${i}`}, {title:'Work',instructions:'x',targetProfile:'default-worker'});
+    decisions.finish(context,'Queued');
+    const all = jest.spyOn(store, 'all');
+    await scheduler.tick();
+    expect(all.mock.calls.filter(([sql]) => String(sql).includes("state='queued' AND rowid<=")).length).toBe(1);
+  } finally {await scheduler.close();store.close();}
+});

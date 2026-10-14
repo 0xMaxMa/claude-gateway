@@ -89,7 +89,7 @@ Once paired, use these commands in the bot's private chat:
 | `/models` | Open the model picker; selecting restarts sessions, Dismiss cancels |
 | `/pstack_setup` | Set up [pstack](/guide/pstack) for this agent with buttons (direct message); `/pstack_setup <lines>` types the change |
 
-In an approved group, `/stop`, `/new`, `/rename` and `/pstack_setup` (which only answers that it works in a direct message, so the agent's setup is not posted in the group) are answered there, typed as `/command` or `/command@<bot>` without a separate mention. The other commands reply in the group that they are only available in a direct message with the bot. A group that is not approved, or a command addressed to another bot, gets no reply.
+In an approved group, `/stop`, `/new`, `/rename` and `/pstack_setup` (which only answers that it works in a direct message, so the agent's setup is not posted in the group) are answered there, typed as `/command` or `/command@<bot>` without a separate mention. The other commands reply in the group that they are only available in a direct message with the bot (`/cli` only where the terminal viewer is on). A group that is not approved, a bot whose `dmPolicy` is `disabled`, or a command addressed to another bot gets no reply.
 
 The model list comes from the configured model provider's `/v1/models` catalog when available, with `gateway.models` as fallback. Changing an agent model affects its other chats too.
 

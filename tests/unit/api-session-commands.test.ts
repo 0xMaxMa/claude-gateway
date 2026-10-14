@@ -156,6 +156,20 @@ describe('executeApiCommand session counting (#160)', () => {
     delete config.orchestration;
   });
 
+  // Third review of #591 (L2): /help and /tasks decided "orchestrated" differently, so a session
+  // orchestration still owns listed /tasks while /tasks said it needs orchestration mode.
+  it('/help and /tasks agree for a session orchestration still owns', async () => {
+    const internals = runner as unknown as { agentConfig: AgentConfig; orchestration: unknown };
+    const saved = internals.orchestration;
+    internals.agentConfig.orchestration = { enabled: true, channels: ['telegram'] } as AgentConfig['orchestration'];
+    internals.orchestration = { ownsSession: () => true, canReturnToLegacy: () => false, authorizeSession: () => {},
+      channelControls: { handle: async () => ({ text: 'Your tasks', buttons: [] }) } };
+    try {
+      expect((await runner.executeApiCommand(sessionId, chatId, '/help', { skipPersist: true })).responseText).toMatch(/^\/tasks — /m);
+      expect((await runner.executeApiCommand(sessionId, chatId, '/tasks', { skipPersist: true, principalId: 'u' })).responseText).toBe('Your tasks');
+    } finally { internals.orchestration = saved; delete internals.agentConfig.orchestration; }
+  });
+
   it('/restart awaits the actual stop instead of reporting success early', async () => {
     let finish!: () => void;
     const restart = jest.spyOn(runner as any, 'restartProcess').mockImplementation(() => new Promise<void>(resolve => {finish=resolve;}));
@@ -421,7 +435,7 @@ describe('executeApiCommand session counting (#160)', () => {
       tasks.spawn({...input,...decision,principalId:'owner',actionId:'spawn',execute:true,writeMemory:false},{title:'Review PR',instructions:'fixture',targetProfile:'default-worker'});
       const stop=new StopControls(store,tasks,()=>false);
       (runner as any).agentConfig.orchestration={enabled:true,channels:['api']};
-      (runner as any).orchestration={stopControls:stop,channelControls:new ChannelControls(store,new TaskControls(store,tasks),stop,{} as any,()=>false),authorizeSession:(_s:string,p:string)=>store.assertMember(input.conversationId,p)};
+      (runner as any).orchestration={ownsSession:()=>false,canReturnToLegacy:()=>true,stopControls:stop,channelControls:new ChannelControls(store,new TaskControls(store,tasks),stop,{} as any,()=>false),authorizeSession:(_s:string,p:string)=>store.assertMember(input.conversationId,p)};
       const list=await runner.executeApiCommand(sessionId,chatId,'/tasks',{skipPersist:true,principalId:'owner'});
       expect(list.responseText).toContain('1. Review PR');
       const open=list.actions.find(a=>a.label.startsWith('1. Review PR'))!;
@@ -440,8 +454,10 @@ describe('executeApiCommand session counting (#160)', () => {
   describe('/pstack-setup menu actions', () => {
     const { pstackClaudeConfig } = require('../helpers/pstack-fixture');
     let fixture: { configDir: string; cleanup: () => void };
-    beforeEach(() => { fixture = pstackClaudeConfig(); process.env.CLAUDE_CONFIG_DIR = fixture.configDir; });
-    afterEach(() => { fixture.cleanup(); delete process.env.CLAUDE_CONFIG_DIR; });
+    // Third review of #591 (L13): restore the earlier value rather than delete it.
+    let previousConfigDir: string | undefined;
+    beforeEach(() => { fixture = pstackClaudeConfig(); previousConfigDir = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = fixture.configDir; });
+    afterEach(() => { fixture.cleanup(); if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previousConfigDir; });
 
     it('returns the Telegram menu buttons as /pstack-setup ps:… actions and walks them', async () => {
       const home = await runner.executeApiCommand(sessionId, chatId, '/pstack-setup', { skipPersist: true });

@@ -64,7 +64,7 @@ In an agent session with the Discord access skill, `/gateway:discord-access dm-p
 
 ## Commands and supported behavior
 
-Use `/help` in a private conversation to discover the receiver's commands. `/model` and `/models` list the available models; `/model <id or alias>` selects a listed model in DMs. Model changes affect the whole agent and restart its sessions, so switching is restricted to direct messages. Guild delivery still requires the bot's permissions and all configured access filters.
+Use `/help` in a private conversation to discover the receiver's commands. `/model` and `/models` list the available models; `/model <id or alias>` selects a listed model in DMs. Model changes affect the whole agent and restart its sessions, so switching is restricted to direct messages. `/pstack-setup` shows and changes the agent's [pstack](../guide/pstack.md) setup as text (Discord has no setup menu or native slash command for it); in a guild channel it only answers that it works in a direct message. Guild delivery still requires the bot's permissions and all configured access filters.
 
 ## Voice notes and task controls
 

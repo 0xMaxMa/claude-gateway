@@ -86,9 +86,9 @@ export class DecisionService {
       this.historyOperation(`response:${responseId}`, String(decision.conversation_id), null, responseId);
       // A completed root reports its completed subagents' files too: a subagent never notifies the channel itself.
       if (state === 'completed' && text.trim()) this.store.run(`UPDATE task_files SET response_id=? WHERE response_id IS NULL AND task_id IN
-        (SELECT t.id FROM tasks t WHERE t.state='completed' AND (t.id IN (SELECT n.task_id FROM notifications n JOIN tasks r ON r.id=n.task_id WHERE n.decision_id=? AND r.state='completed')
+        (SELECT t.id FROM tasks t WHERE t.conversation_id=? AND t.state='completed' AND (t.id IN (SELECT n.task_id FROM notifications n JOIN tasks r ON r.id=n.task_id WHERE n.decision_id=? AND r.state='completed')
           OR json_extract(t.snapshot_json,'$.rootTaskId') IN (SELECT n.task_id FROM notifications n JOIN tasks r ON r.id=n.task_id WHERE n.decision_id=? AND r.state='completed')))
-        AND id IN (SELECT j.value FROM tasks t,json_each(t.snapshot_json,'$.result.artifactIds') j WHERE t.id=task_files.task_id)`, responseId, receipt.decisionId, receipt.decisionId);
+        AND id IN (SELECT j.value FROM tasks t,json_each(t.snapshot_json,'$.result.artifactIds') j WHERE t.id=task_files.task_id)`, responseId, String(decision.conversation_id), receipt.decisionId, receipt.decisionId);
       if (state === 'completed' && spoken) this.store.run('INSERT INTO response_speech VALUES(?,?) ON CONFLICT(response_id) DO UPDATE SET text=excluded.text', responseId, spoken);
       const firstInput = this.store.get('SELECT binding_id FROM conversation_inputs WHERE id=?', receipt.inputIds[0]);
       const binding = firstInput && this.store.get('SELECT channel FROM conversation_bindings WHERE id=?', firstInput.binding_id);

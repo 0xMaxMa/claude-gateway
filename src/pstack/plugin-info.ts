@@ -17,13 +17,15 @@ export const PSTACK_INSTALL_HINT = `Install it in Claude Code on this host with 
 export interface PstackPluginInfo { installed: boolean; installPath?: string }
 
 /** Read `installPath` from Claude Code's plugin registry (installed_plugins.json, v2).
- * A missing or unreadable registry means not installed. */
+ * Only a user-scope install applies to every project a worker runs in; one made for
+ * a single project (scope project/local) does not count. A missing or unreadable
+ * registry means not installed. */
 export function pstackPluginInfo(configDir = claudeConfigDir()): PstackPluginInfo {
   try {
     const registry = JSON.parse(readFileSync(join(configDir, 'plugins', 'installed_plugins.json'), 'utf8'));
     const entries: unknown = registry?.plugins?.[PSTACK_PLUGIN_ID];
     if (!Array.isArray(entries)) return { installed: false };
-    const entry = entries.find(e => e?.scope === 'user') ?? entries[0];
+    const entry = entries.find(e => e?.scope === 'user');
     return typeof entry?.installPath === 'string' && entry.installPath ? { installed: true, installPath: entry.installPath } : { installed: false };
   } catch {
     return { installed: false };

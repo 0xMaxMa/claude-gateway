@@ -1155,7 +1155,7 @@ if (!SEND_ONLY) {
 // gate does not allow stays silent, so its members learn nothing. /stop, /new,
 // /rename and /pstack_setup are forwarded and answered by the gateway there.
 bot.on('message:text', async (ctx, next) => {
-  const reply = groupCommandReply(loadAccess(), { chatType: ctx.chat.type, chatId: String(ctx.chat.id), fromId: String(ctx.from.id), text: ctx.message.text, botUsername })
+  const reply = groupCommandReply(loadAccess(), { chatType: ctx.chat.type, chatId: String(ctx.chat.id), fromId: String(ctx.from.id), text: ctx.message.text, botUsername, cliEnabled: INTERACTIVE_CLI_ENABLED })
   if (reply === undefined) return next()
   await ctx.reply(reply, { reply_parameters: { message_id: ctx.message.message_id } }).catch(() => {})
 })
@@ -1714,6 +1714,8 @@ bot.on('callback_query:data', async ctx => {
       const menu=await pstackMenuRequest(String(ctx.callbackQuery.message.chat.id),String(ctx.from.id),data)
       await ctx.answerCallbackQuery(menu.toast?{text:menu.toast}:undefined).catch(()=>{})
       if(menu.closed){await ctx.deleteMessage().catch(()=>{});return}
+      // Turn on/off ends the menu with its result and no buttons, as a /voice choice does.
+      if(menu.done){await confirmSelection(ctx,menu.text).catch(()=>{});return}
       await ctx.editMessageText(menu.text,{reply_markup:menu.reply_markup}).catch(()=>{})
     }catch{await ctx.answerCallbackQuery({text:'pstack setup unavailable. Use /pstack_setup again.'}).catch(()=>{})}
     return

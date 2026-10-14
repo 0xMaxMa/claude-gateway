@@ -8,3 +8,13 @@ describe('narrate discoverability through tool_search', () => {
     expect(find(query)).toEqual(['narrate']);
   });
 });
+
+// Third review of #591 (L12): tool_call refused `mcp__gateway__x`, the name a model sees the tool by.
+test('tool_call accepts a gateway tool named with its mcp__gateway__ namespace, and nothing else', async () => {
+  const catalog = createLazyToolCatalog([NARRATE_TOOL]);
+  const dispatched: string[] = [];
+  const dispatch = async (name: string) => { dispatched.push(name); return { content: [{ type: 'text' as const, text: 'ok' }] }; };
+  expect((await catalog.call({ name: `mcp__gateway__${NARRATE_TOOL.name}`, arguments: {} }, dispatch)).isError).toBeUndefined();
+  expect((await catalog.call({ name: `mcp__other__${NARRATE_TOOL.name}`, arguments: {} }, dispatch)).isError).toBe(true);
+  expect(dispatched).toEqual([NARRATE_TOOL.name]);
+});

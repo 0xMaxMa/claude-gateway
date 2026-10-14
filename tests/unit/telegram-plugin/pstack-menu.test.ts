@@ -17,3 +17,9 @@ test('both spellings open the menu only without arguments', () => {
   for (const text of ['/pstack-setup', '/pstack_setup', '/pstack_setup@claude_bot', '/pstack-setup  ']) expect(PSTACK_MENU_COMMAND.test(text)).toBe(true);
   for (const text of ['/pstack-setup on', '/pstack_setup bug-fix: claude-opus-5-5', '/pstack', '/pstack:why']) expect(PSTACK_MENU_COMMAND.test(text)).toBe(false);
 });
+
+// User request on #591: a final screen (Turn on/off) is shown as a result without buttons.
+test('passes a final screen through as done', () => {
+  expect(pstackMenuMarkup({ text: '✅ pstack is on for a.', keyboard: [], done: true })).toMatchObject({ done: true, closed: false });
+  expect(pstackMenuMarkup({ text: 'pstack setup', keyboard: [] }).done).toBe(false);
+});

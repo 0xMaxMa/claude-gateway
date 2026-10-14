@@ -235,13 +235,19 @@ export function readCapabilityPage(
         via: 'skill-worker',
       });
   const extensionServers: CapabilityEntry[] = (registry?.extensionServers ?? []).map(name => ({ name, description: 'Installed native CLI MCP server. A worker discovers its tool schemas on demand; availability still depends on its native credentials and dependencies.', server: name, status: 'available', via: 'worker' }));
+  // Words, not one literal phrase: `pstack interrogate`, `pstack:interrogate` and
+  // `pstack-interrogate` all find the skill named pstack:interrogate.
+  const words = (text: string) => text.toLowerCase().split(/[\s:_/-]+/).filter(Boolean);
+  const tokens = words(query);
+  const has = (text: string) => { const haystack = ` ${words(text).join(' ')} `; return tokens.every(token => haystack.includes(token)); };
+  // A query that names an entry ranks it first, then entries whose name has every word.
+  const rank = (e: CapabilityEntry) => !tokens.length ? 0 : words(e.name).join(' ') === tokens.join(' ') ? 0 : has(e.name) ? 1 : 2;
+  // Every word in the name or description; a single word may still match the server, as before.
   const all = [...snapshot.entries, ...skills, ...extensionServers].filter(
-    (e) =>
-      !query ||
-      `${e.name} ${e.description} ${e.server}`.toLowerCase().includes(query)
+    (e) => !tokens.length || has(`${e.name} ${e.description}`) || (tokens.length === 1 && has(e.server))
   );
   all.sort(
-    (a, b) => a.server.localeCompare(b.server) || a.name.localeCompare(b.name)
+    (a, b) => rank(a) - rank(b) || a.server.localeCompare(b.server) || a.name.localeCompare(b.name)
   );
   const version = createHash('sha256')
     .update(

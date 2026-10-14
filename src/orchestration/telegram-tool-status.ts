@@ -2,6 +2,12 @@ import type { AgentConfig } from '../types';
 import { OrchestrationStore, ROOT_TASK_SQL } from './store';
 import { scrubText } from '../agent/incident';
 import { extractToolDetail } from '../utils/tool-labels';
+import { RUNNING_PARENT } from './tasks/service';
+
+/** A task that is working, or will be: not a queued subagent whose parent stopped running (it never
+ * starts, e.g. while the parent waits for the user's answer). */
+const working = (task: string) => `${task}.state IN ('queued','starting','running','interrupting','cancel_requested') AND NOT (${task}.state='queued'
+  AND json_extract(${task}.snapshot_json,'$.parentTaskId') IS NOT NULL AND COALESCE((SELECT p.state FROM tasks p WHERE p.id=json_extract(${task}.snapshot_json,'$.parentTaskId')),'') NOT IN (${RUNNING_PARENT.map(state => `'${state}'`).join(',')}))`;
 
 type Status = {since: number; messageId?: number; text?: string; details?: string; nextAt: number; seenAt: number; sentAt?: number; moveAttemptAt?: number; obsoleteMessageId?: number; cleanupAt?: number};
 /** One editable, best-effort status message per conversation. It never owns task execution. */
@@ -27,7 +33,7 @@ export class TelegramToolStatus {
     this.ticking = true;
     try {
       const rows = this.store.all(`SELECT c.* FROM conversations c WHERE c.source='telegram' AND (
-        EXISTS(SELECT 1 FROM tasks t WHERE t.conversation_id=c.id AND t.state IN ('queued','starting','running','interrupting','cancel_requested')) OR
+        EXISTS(SELECT 1 FROM tasks t WHERE t.conversation_id=c.id AND ${working('t')}) OR
         EXISTS(SELECT 1 FROM conversation_decisions d WHERE d.conversation_id=c.id AND d.state IN ('running','interrupting')) OR
         EXISTS(SELECT 1 FROM conversation_events e WHERE e.conversation_id=c.id AND e.type='tool.activity' AND e.occurred_at>=?)
       ) LIMIT 100`, Math.max(this.startedAt, Date.now()-10000));
@@ -43,11 +49,11 @@ export class TelegramToolStatus {
         if (this.abort.signal.aborted || !this.enabled()) break;
         const id=String(row.id);
         const activeSince=this.statuses.has(id)?undefined:this.store.get(`SELECT MIN(at) AS at FROM (
-          SELECT created_at AS at FROM tasks WHERE conversation_id=? AND state IN ('queued','starting','running','interrupting','cancel_requested')
+          SELECT created_at AS at FROM tasks WHERE conversation_id=? AND ${working('tasks')}
           UNION ALL SELECT started_at AS at FROM conversation_decisions WHERE conversation_id=? AND state IN ('running','interrupting'))`,id,id)?.at;
         const status: Status=this.statuses.get(id) ?? {nextAt:0,seenAt:Date.now(),since:activeSince==null?this.startedAt:Number(activeSince)};
         if (Date.now()<status.nextAt) continue;
-        const busy=Boolean(this.store.get("SELECT id FROM tasks WHERE conversation_id=? AND state IN ('queued','starting','running','interrupting','cancel_requested') LIMIT 1",id)
+        const busy=Boolean(this.store.get(`SELECT id FROM tasks WHERE conversation_id=? AND ${working('tasks')} LIMIT 1`,id)
           ||this.store.get("SELECT id FROM conversation_decisions WHERE conversation_id=? AND state IN ('running','interrupting') LIMIT 1",id));
         // A replacement is sent first. Retry deleting only the known old ID;
         // keep the new status editable and avoid creating further replacements.
@@ -161,27 +167,34 @@ export function telegramToolDetail(name:string,input:Record<string,unknown>):str
  * Subagents never message the chat themselves; this line is how the user sees them.
  */
 export function subagentLines(store: OrchestrationStore, conversationId: string, modelLabel: (id: string) => string = id => id): string[] {
-  // Unfinished roots first, then each one's children through the parentTaskId index
-  // (a correlated EXISTS scans that whole index for every root).
+  // Unfinished roots, then their direct subagents (the panel; a reviewer's own helpers are not
+  // members) through the parentTaskId index: three queries however many roots there are.
   const roots = store.all(`SELECT id,json_extract(snapshot_json,'$.title') AS title FROM tasks WHERE conversation_id=? AND state NOT IN ('completed','failed','cancelled')
     AND ${ROOT_TASK_SQL} ORDER BY created_at LIMIT 50`, conversationId);
-  const lines: string[] = [];
-  for (const root of roots) {
-    if (lines.length >= 5) break;
-    // The panel is the root's direct subagents; a reviewer's own helpers are not panel members.
-    const count = store.get("SELECT COUNT(*) AS total,SUM(state IN ('completed','failed','cancelled')) AS done FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId')=?", String(root.id));
-    if (!Number(count?.total)) continue;
-    const children = store.all("SELECT snapshot_json FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId')=? ORDER BY created_at,rowid LIMIT 32", String(root.id))
-      .map(child => JSON.parse(String(child.snapshot_json)) as import('./types').TaskSnapshot);
-    const entries = children.map(child => {
+  if (!roots.length) return [];
+  const counts = new Map(store.all(`SELECT json_extract(snapshot_json,'$.parentTaskId') AS parent,COUNT(*) AS total,SUM(state IN ('completed','failed','cancelled')) AS done
+    FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId') IN (SELECT value FROM json_each(?)) GROUP BY parent`, JSON.stringify(roots.map(root => String(root.id))))
+    .map(row => [String(row.parent), { total: Number(row.total), done: Number(row.done) }]));
+  const shown = roots.filter(root => counts.get(String(root.id))?.total).slice(0, 5);
+  if (!shown.length) return [];
+  const children = new Map<string, import('./types').TaskSnapshot[]>();
+  for (const row of store.all(`SELECT parent,snapshot_json FROM (SELECT json_extract(snapshot_json,'$.parentTaskId') AS parent,snapshot_json,
+      ROW_NUMBER() OVER (PARTITION BY json_extract(snapshot_json,'$.parentTaskId') ORDER BY created_at,rowid) AS n
+      FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId') IN (SELECT value FROM json_each(?))) WHERE n<=32 ORDER BY parent,n`, JSON.stringify(shown.map(root => String(root.id))))) {
+    const list = children.get(String(row.parent)) ?? [];
+    list.push(JSON.parse(String(row.snapshot_json)));
+    children.set(String(row.parent), list);
+  }
+  return shown.map(root => {
+    const entries = (children.get(String(root.id)) ?? []).map(child => {
       const label = child.model ? modelLabel(child.model) : 'subagent';
       if (child.state === 'completed') return `✅ ${label}`;
       if (child.state === 'failed' || child.state === 'cancelled') return `❌ ${label} (${child.state === 'cancelled' ? 'cancelled' : (child.failure?.code ?? 'failed').toLowerCase().replace(/_/g, ' ')})`;
       if (child.state === 'waiting_input') return `❓ ${label}`;
       return `⏳ ${label}`;
     });
+    const count = counts.get(String(root.id))!;
     const title = String(root.title ?? 'subagents').replace(/\s+/g, ' ').trim().slice(0, 80);
-    lines.push(`${title}: ${Number(count!.done)}/${Number(count!.total)} · ${entries.join(' · ')}`.slice(0, 600));
-  }
-  return lines;
+    return `${title}: ${count.done}/${count.total} · ${entries.join(' · ')}`.slice(0, 600);
+  });
 }

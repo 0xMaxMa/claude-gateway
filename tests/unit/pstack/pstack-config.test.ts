@@ -171,6 +171,42 @@ describe('plugin info (read-only view of Claude Code\'s plugin registry)', () =>
   });
 });
 
+// Third review of #591 (L15): any first entry counted, so a plugin installed for one project only
+// (scope project/local) looked installed for every worker.
+it('counts only a user-scope install, not one made for a single project', () => {
+  const fixture = pstackClaudeConfig();
+  try {
+    const file = `${fixture.configDir}/plugins/installed_plugins.json`;
+    const registry = JSON.parse(require('fs').readFileSync(file, 'utf8'));
+    const [entry] = registry.plugins['pstack@pstack-claude'];
+    registry.plugins['pstack@pstack-claude'] = [{ ...entry, scope: 'project', projectPath: '/srv/other' }];
+    require('fs').writeFileSync(file, JSON.stringify(registry));
+    expect(pstackPluginInfo(fixture.configDir)).toEqual({ installed: false });
+    registry.plugins['pstack@pstack-claude'] = [{ ...entry, scope: 'local', projectPath: '/srv/other' }, entry];
+    require('fs').writeFileSync(file, JSON.stringify(registry));
+    expect(pstackPluginInfo(fixture.configDir)).toEqual({ installed: true, installPath: fixture.installPath });
+  } finally { fixture.cleanup(); }
+});
+
+// Third review of #591 (L4): one unreadable attempt row made /pstack:reflect fail outright.
+it('reflect skips an unreadable attempt row instead of failing', () => {
+  const { OrchestrationStore } = require('../../../src/orchestration/store');
+  const { chatSessionTranscripts } = require('../../../src/pstack/reflect');
+  const store = new OrchestrationStore(':memory:', 'a');
+  const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'reflect-'));
+  try {
+    const task = { taskId: 't2', conversationId: 'c', agentSessionId: 's' };
+    const earlier = { taskId: 't1', conversationId: 'c', agentSessionId: 's', state: 'completed' };
+    store.run('PRAGMA foreign_keys=OFF');
+    store.run('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)', 't1', 'c', 'completed', 1, 1, null, JSON.stringify(earlier), 1, 1);
+    store.run("INSERT INTO task_resources(id,task_id,workspace_id,mode,lifecycle_state,worktree_path) VALUES('r','t1','w','host','active',?)", dir);
+    store.run("INSERT INTO task_attempts(id,task_id,generation,revision,state,payload_json) VALUES('a1','t1',1,1,'ended','{broken')");
+    expect(chatSessionTranscripts(store, task)).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('t1'), expect.anything());
+  } finally { warn.mockRestore(); store.close(); require('fs').rmSync(dir, { recursive: true, force: true }); }
+});
+
 describe('per-agent sheet', () => {
   /** pstack's sheet.awk reading: `key: value` lines whose key starts the line. */
   function readSheet(sheet: string): Map<string, string> {

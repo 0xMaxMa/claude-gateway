@@ -3110,7 +3110,14 @@ export class AgentRunner extends EventEmitter {
       if (!(error instanceof PstackConfigError)) throw error;
       return { ...pstackMenuScreen(step.view, state, `⚠️ ${error.code}: ${error.message}`), toast: error.message };
     }
-    const saved = !result.saved ? 'pstack is off. The next worker does not load it.'
+    const unchanged = result.saved === result.previous;
+    // Turn on/off ends the menu with its result and no buttons, as a /voice or /models choice does.
+    if (data === 'ps:on' || data === 'ps:off') {
+      const text = !result.saved ? `pstack is ${unchanged ? 'already off' : 'off'} for ${this.agentConfig.id}. The next worker does not load it.`
+        : `pstack is ${unchanged ? 'already on' : 'on'} for ${this.agentConfig.id}. The next worker loads it.`;
+      return { text: `✅ ${text}`, keyboard: [], done: true, toast: text };
+    }
+    const saved = unchanged ? 'No change.' : !result.saved ? 'pstack is off. The next worker does not load it.'
       : result.previous ? 'Saved. The next worker uses it.' : 'Saved, and pstack is on now. The next worker uses it.';
     return { ...pstackMenuScreen(step.view, await this.pstackMenuState(), `✅ ${saved}`), toast: saved };
   }
@@ -5526,15 +5533,17 @@ export class AgentRunner extends EventEmitter {
 
     // Persist the full user command before executing so it appears in history. A pressed
     // action (`/orch <token>`, `/pstack-setup ps:…`, `/stop <menu> <n>`) is not something the
-    // user typed, so only its reply is kept.
+    // user typed, so only its reply is kept, except a setup menu page: that is UI, not
+    // conversation, and would push real messages out of the history a new context starts from.
     const display = opts?.displayCommand ?? command;
-    if (!/^\/(?:orch \S+|pstack[-_]setup ps:\S+|stop [0-9a-f-]{36} \d+)$/.test(display.trim())) persist('user', display);
+    const pressed = /^\/(?:orch \S+|pstack[-_]setup ps:\S+|stop [0-9a-f-]{36} \d+)$/.test(display.trim());
+    const menuPage = /^\/pstack[-_]setup ps:\S+$/.test(display.trim());
+    if (!pressed) persist('user', display);
 
     let result: Record<string, unknown>;
     let responseText: string;
     let actions: CommandAction[] = [];
     let forcePersist = false;
-    const apiOrchestration = this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels??['api']).includes('api') ? this.orchestration : undefined;
     const confirmScope = { channel: 'api', chatId, thread: '', sessionId, principalId: opts?.principalId ?? '' };
     const contextCommand = async (operation: 'clear' | 'compact' | 'restart'): Promise<{ result: Record<string, unknown>; responseText: string }> => {
       if (operation === 'clear') {
@@ -5591,6 +5600,8 @@ export class AgentRunner extends EventEmitter {
         }
       } else if (cmd === '/tasks' || cmd === '/orch') {
         // The chat channels' task browser; its buttons come back as `/orch <token>`, bound to this session and principal.
+        // The same test /help and message routing use, so what /help lists is what works.
+        const apiOrchestration = this.orchestrationForApi(sessionId) ? this.orchestration : undefined;
         if (!apiOrchestration || !opts?.principalId) {
           result = {};
           responseText = cmd === '/orch' ? 'This action expired or is unavailable. Run the command again.' : 'Task controls require orchestration mode.';
@@ -5658,7 +5669,7 @@ export class AgentRunner extends EventEmitter {
           responseText = opts?.canWriteAgent ? await this.applyPstackSetup(arg) : PSTACK_WRITE_REQUIRED;
         }
         result = { pstack: this.agentConfig.pstack ?? null };
-        if (screen && !screen.closed) actions = screen.keyboard.flat().map(button => ({ label: button.text, command: `/pstack-setup ${button.data}` }));
+        if (screen && !screen.closed && !screen.done) actions = screen.keyboard.flat().map(button => ({ label: button.text, command: `/pstack-setup ${button.data}` }));
       } else if (cmd === '/session') {
         const index = await this.sessionStore.listSessions(agentId, storeChatId, 'api').catch(() => null);
         const meta = index?.sessions.find((s) => s.id === sessionId);
@@ -5716,7 +5727,7 @@ export class AgentRunner extends EventEmitter {
     // Persist the human-readable response as an assistant turn so the conversation ends with
     // an assistant message (the web's computeIsPendingResponse needs last.role !== 'user').
     // forcePersist writes it even under skipPersist (set only when /stop cut a turn off).
-    persist('assistant', responseText, forcePersist);
+    if (!menuPage) persist('assistant', responseText, forcePersist);
 
     return { result, responseText, actions };
   }

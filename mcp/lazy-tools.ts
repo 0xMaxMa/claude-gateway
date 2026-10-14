@@ -33,9 +33,11 @@ export function createLazyToolCatalog(tools: readonly McpToolDefinition[], exclu
         tools: matches.slice(offset, offset + limit).map(tool => schemas ? tool : { name: tool.name, description: tool.description }) });
     },
     async call(args: Record<string, unknown>, dispatch: (name: string, input: Record<string, unknown>) => Promise<McpToolResult>): Promise<McpToolResult> {
-      if (typeof args.name !== 'string' || !names.has(args.name)) return fail('Unknown or unauthorized gateway tool');
+      // A model knows these tools by their MCP names (`mcp__gateway__x`); the catalog holds the bare `x`.
+      const name = typeof args.name === 'string' ? args.name.replace(/^mcp__gateway__/, '') : undefined;
+      if (!name || !names.has(name)) return fail('Unknown or unauthorized gateway tool');
       if (!args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) return fail('Tool arguments must be an object');
-      return dispatch(args.name, args.arguments as Record<string, unknown>);
+      return dispatch(name, args.arguments as Record<string, unknown>);
     },
   };
 }

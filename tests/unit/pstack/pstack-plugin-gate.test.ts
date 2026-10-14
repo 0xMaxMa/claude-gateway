@@ -35,10 +35,23 @@ test('without overrides a host worker keeps its previous arguments', () => {
 });
 
 test('non-host profiles ignore the overrides and still disable every plugin', () => {
-  const args = runtimeProfileArgs({ role: 'worker', mcpConfigPath: '/m.json', overlay: '', pluginOverrides: { 'pstack@pstack-claude': true } }, []);
-  expect(args).toContain('--strict-mcp-config');
-  // Unset, or false where ~/.claude/settings.json enables pstack globally (every enabled plugin is turned off).
-  expect(settingsOf(args).enabledPlugins['pstack@pstack-claude']).not.toBe(true);
+  // Third review of #591 (L13): a temp HOME, not this machine's ~/.claude/settings.json, and the exact map.
+  const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = require('fs');
+  const os = require('os');
+  const { join } = require('path');
+  const home = mkdtempSync(join(os.tmpdir(), 'pstack-home-'));
+  mkdirSync(join(home, '.claude'));
+  writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { 'pstack@pstack-claude': true, 'figma@x': true } }));
+  const homedir = jest.spyOn(os, 'homedir').mockReturnValue(home);
+  try {
+    const args = runtimeProfileArgs({ role: 'worker', mcpConfigPath: '/m.json', overlay: '', pluginOverrides: { 'pstack@pstack-claude': true } }, []);
+    expect(args).toContain('--strict-mcp-config');
+    // Every plugin the host settings enable is turned off, pstack included.
+    expect(settingsOf(args).enabledPlugins).toEqual({ 'pstack@pstack-claude': false, 'figma@x': false });
+  } finally {
+    homedir.mockRestore();
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('disallowed native tools are removed from a host worker (#583)', () => {
@@ -88,8 +101,11 @@ describe('non-orchestration sessions', () => {
     expect(JSON.parse(flag.slice('--settings='.length))).toEqual({ model: 'x', enabledPlugins: { 'pstack@pstack-claude': false } });
   });
 
-  test('an unreadable --settings is left as configured', () => {
-    expect(argsFor({}, ['--settings', 'missing.json']).filter(a => a.startsWith('--settings') || a === 'missing.json')).toEqual(['--settings', 'missing.json']);
+  // Third review of #591 (L10): it was only logged, and the session started with pstack loaded.
+  test('an unreadable --settings is refused with the reason, for an agent that is not set up', () => {
+    expect(() => argsFor({}, ['--settings', 'missing.json'])).toThrow(expect.objectContaining({ code: 'INVALID_EXTRA_FLAGS', message: expect.stringContaining('--settings') }));
+    expect(() => argsFor({}, ['--settings', '{not json'])).toThrow(expect.objectContaining({ code: 'INVALID_EXTRA_FLAGS' }));
+    expect(argsFor({ pstack: {} }, ['--settings', 'missing.json'])).toEqual(expect.arrayContaining(['--settings', 'missing.json']));
   });
 });
 
@@ -104,11 +120,12 @@ describe('gateway utility claude -p processes', () => {
   test('session title generation', async () => {
     const { AgentRunner } = require('../../../src/agent/runner');
     let args: string[] = [];
-    jest.spyOn(child, 'execFile').mockImplementation(((_: string, a: string[], __: unknown, cb: (e: null, r: { stdout: string }) => void) => { args = a; cb(null, { stdout: '' }); }) as any);
+    // Waits for the call itself rather than a fixed delay (third review of #591, L13).
+    const called = new Promise<void>(resolve => jest.spyOn(child, 'execFile').mockImplementation(((_: string, a: string[], __: unknown, cb: (e: null, r: { stdout: string }) => void) => { args = a; cb(null, { stdout: '' }); resolve(); }) as any));
     const runner = Object.create(AgentRunner.prototype);
     runner.logger = { warn: jest.fn() };
     runner.generateSessionNameInBackground('c', 's', 'hello');
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await called;
     expect(args).toContain('-p');
     pstackOff(args);
   });

@@ -59,14 +59,14 @@ describe('/pstack-setup panel entries', () => {
 });
 
 describe('panel subagents on display', () => {
-  let store: OrchestrationStore, tasks: TaskService, conversationId: string, root: TaskSnapshot;
+  let store: OrchestrationStore, tasks: TaskService, conversationId: string, root: TaskSnapshot, rootContext: Parameters<TaskService['spawn']>[0];
   const LABELS: Record<string, string> = { 'claude-opus-5-5': 'Opus 5.5', 'gpt-6-sol[1m]': 'GPT 6 Sol', 'claude-haiku-5-5': 'Haiku 5.5' };
   beforeEach(() => {
     store = new OrchestrationStore(':memory:', 'a');
     tasks = new TaskService(store, { tasks: { workspaceMode: 'host', maxConcurrentPerAgent: 10, maxConcurrentPerConversation: 10 } }, '/tmp');
     const input = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's', source: 'telegram', accountId: 'u', principalId: 'u', chatId: 'c', threadKey: '' }, text: 'interrogate this' });
     const context = { ...input, ...new DecisionService(store).begin(input.conversationId, 'u', [input.inputId]), principalId: 'u', execute: true, writeMemory: false, actionId: 'root', model: 'claude-opus-5-5' };
-    conversationId = input.conversationId;
+    conversationId = input.conversationId; rootContext = context;
     root = tasks.spawn(context, { title: 'interrogate', instructions: 'Run interrogate', targetProfile: 'default-worker' });
     const attempt = tasks.claim(root.taskId)!; tasks.started(attempt.attemptId, attempt.generation);
     let n = 0;
@@ -93,7 +93,28 @@ describe('panel subagents on display', () => {
     jest.spyOn(store, 'all').mockImplementation((sql, ...params) => { statements.push(sql); return all(sql, ...params); });
     subagentLines(store, conversationId);
     const plans = statements.flatMap(sql => all(`EXPLAIN QUERY PLAN ${sql}`, 'x').map(row => String(row.detail)));
-    expect(plans.filter(detail => /^SCAN/.test(detail))).toEqual([]);
+    // The id list (json_each) and a subquery's own rows are scanned; the tasks table never is.
+    expect(plans.filter(detail => /^SCAN (?!json_each VIRTUAL TABLE|\(subquery-\d+\))/.test(detail))).toEqual([]);
+    expect(plans).toContainEqual(expect.stringMatching(/USING INDEX task_subagents/));
+  });
+
+  // Third review of #591 (L8): two queries per root, on every 2 s tick.
+  it('costs the same queries for one panel as for four', () => {
+    const count = () => {
+      const all = jest.spyOn(store, 'all'), get = jest.spyOn(store, 'get');
+      subagentLines(store, conversationId);
+      const calls = all.mock.calls.length + get.mock.calls.length;
+      all.mockRestore(); get.mockRestore();
+      return calls;
+    };
+    const one = count();
+    for (let i = 0; i < 3; i++) {
+      const other = tasks.spawn({ ...rootContext, actionId: `root-${i}` }, { title: `panel ${i}`, instructions: 'x', targetProfile: 'default-worker' });
+      const attempt = tasks.claim(other.taskId)!; tasks.started(attempt.attemptId, attempt.generation);
+      tasks.spawnSubagent(attempt.attemptId, attempt.generation, `p${i}`, { title: 'Review', instructions: 'r', model: 'claude-opus-5-5' });
+    }
+    expect(subagentLines(store, conversationId)).toHaveLength(4);
+    expect(count()).toBe(one);
   });
 
   it('counts every subagent of a large panel and keeps a multi-line title on one line', () => {

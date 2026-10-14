@@ -105,6 +105,8 @@ export class TaskBridge {
       let retryOf: string | undefined;
       let inputDetails: InputIssue[] | undefined;
       let denialReason: string | undefined;
+      /** A foreground subagent_spawn whose wait was interrupted: its subagent keeps running. */
+      let startedSubagent: string | undefined;
       let toolName = '';
       let commandArgs: Record<string, unknown> = {};
       function deny(reason: string): never { denialReason = reason; throw new OrchestrationError('ACCESS_DENIED'); }
@@ -377,7 +379,15 @@ export class TaskBridge {
               const task = this.tasks.spawnSubagent(scope.attemptId, scope.generation, command.action_id, { title: a.description, instructions,
                 ...(model ? { model } : {}), ...(template?.effort ? { effort: template.effort } : {}), ...(a.subagent_type ? { subagentType: a.subagent_type } : {}), ...(a.readonly ? { readonly: true } : {}) });
               const receipt = { task_id: task.taskId, model: task.model, effort: task.effort, state: task.state, ...(a.isolation === 'worktree' ? { isolation: 'ignored' } : {}) };
-              result = a.run_in_background ? receipt : { ...receipt, ...(await wait([task.taskId]))[0] };
+              if (a.run_in_background) result = receipt;
+              else {
+                startedSubagent = task.taskId;
+                const [finished] = await wait([task.taskId]).catch(error => {
+                  throw error instanceof OrchestrationError && error.code === 'SUBAGENT_WAIT_CANCELLED'
+                    ? new OrchestrationError(error.code, `Stopped waiting for subagent ${task.taskId}; it is still running. Wait for it with subagent_wait or stop it with subagent_cancel. Do not spawn it again.`) : error;
+                });
+                result = { ...receipt, ...finished };
+              }
             }
           }
           else if (CRON_TOOLS.some(tool => tool.name === command.tool) && this.files && this.cronCall) {
@@ -404,7 +414,7 @@ export class TaskBridge {
         const acknowledgementRecovery = code === 'ACKNOWLEDGEMENT_DELIVERY_PENDING'
           ? { message: 'The acknowledgement has not been confirmed as delivered. Do not retry the task mutation yet; wait for delivery to settle, then retry only if the request is still current.' }
           : undefined;
-        response.end(JSON.stringify({ error: code, ...(code === 'COMPUTER_NOT_ALLOWED' ? { message: COMPUTER_NOT_ALLOWED_MESSAGE, retryable: false } : {}), ...(error instanceof JevError ? {message:error.message,...error.metadata} : {}), ...(inputDetails?.length ? {details:inputDetails} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && (['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) || code.startsWith('NARRATE_')) ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && ['EXECUTION_DENIED', 'USER_INPUT_REQUIRED', 'INVALID_INPUT'].includes(code) && error.message !== code ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && toolName.startsWith('subagent_') && error.message !== code ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...intakeRecovery, ...acknowledgementRecovery, ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED', 'BROWSER_EVIDENCE_REQUIRED', 'LIVE_CONTROL_TARGET_ONLY', 'AUTOMATION_SESSION_EXISTS', 'AUTOMATION_SESSION_CLOSED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        response.end(JSON.stringify({ error: code, ...(code === 'COMPUTER_NOT_ALLOWED' ? { message: COMPUTER_NOT_ALLOWED_MESSAGE, retryable: false } : {}), ...(error instanceof JevError ? {message:error.message,...error.metadata} : {}), ...(inputDetails?.length ? {details:inputDetails} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && (['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) || code.startsWith('NARRATE_')) ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && ['EXECUTION_DENIED', 'USER_INPUT_REQUIRED', 'INVALID_INPUT'].includes(code) && error.message !== code ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && toolName.startsWith('subagent_') && error.message !== code ? { message: error.message, retryable: false } : {}), ...(startedSubagent ? { task_id: startedSubagent } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...intakeRecovery, ...acknowledgementRecovery, ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED', 'BROWSER_EVIDENCE_REQUIRED', 'LIVE_CONTROL_TARGET_ONLY', 'AUTOMATION_SESSION_EXISTS', 'AUTOMATION_SESSION_CLOSED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;

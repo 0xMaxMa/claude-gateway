@@ -1,5 +1,5 @@
 import { taskFailure, shutdownFailure } from './failure';
-import { TaskService } from './service';
+import { RUNNING_PARENT, TaskService } from './service';
 import { TaskAttempt, TaskSnapshot, WorkerOutcome } from '../types';
 import { ProviderAdmission, ProviderPermit, ProviderFailure } from '../provider-admission';
 
@@ -91,10 +91,13 @@ export class WorkerScheduler {
           if (queued?.gatewayTarget) continue;
           if (full && !queued?.parentTaskId) continue;
           if (this.starting.has(taskId) || this.active.has(taskId)) continue;
+          // A subagent runs only for a running parent (claim refuses the rest); do not reserve a slot for one that cannot.
+          if (queued?.parentTaskId && !RUNNING_PARENT.includes(this.tasks.store.task(queued.parentTaskId)?.state ?? '')) continue;
           if (this.driver.available && !this.driver.available(taskId)) continue;
           const release = this.driver.reserve?.(taskId);
           if (this.driver.reserve && !release) {
-            if (!queued?.parentTaskId && !this.tasks.store.get("SELECT 1 FROM tasks WHERE state='queued' AND json_extract(snapshot_json,'$.parentTaskId') IS NOT NULL")) break admission;
+            if (!queued?.parentTaskId && !this.tasks.store.get(`SELECT 1 FROM tasks c WHERE c.state='queued' AND json_extract(c.snapshot_json,'$.parentTaskId') IS NOT NULL
+              AND EXISTS(SELECT 1 FROM tasks p WHERE p.id=json_extract(c.snapshot_json,'$.parentTaskId') AND p.state IN (${RUNNING_PARENT.map(state => `'${state}'`).join(',')}))`)) break admission;
             full = true; continue;
           }
           let provider: ProviderAdmission | undefined;

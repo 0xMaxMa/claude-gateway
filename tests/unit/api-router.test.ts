@@ -1315,6 +1315,17 @@ test('public command picker includes all API built-ins and no channel-only comma
 });
 
 // PR #591 dev e2e: on the web these reached the model, and command replies lost their buttons.
+// Third review of #591 (M9): the web /pstack-setup changes config only for a key with write access to the agent.
+describe('/pstack-setup write access on the web', () => {
+  it.each([[false, 'sk-test-app'], [true, 'sk-test-write'], [true, 'sk-test-admin']])('passes canWriteAgent=%s for key %s, sync and streamed', async (allowed, key) => {
+    for (const stream of [false, true]) {
+      const { app, runner } = buildCommandApp();
+      await supertest.default(app).post(POST_URL).set({ Authorization: `Bearer ${key}` }).send({ message: '/pstack-setup ps:on', chat_id: 'ps', stream });
+      expect(runner.lastCommandCall?.opts).toMatchObject({ canWriteAgent: allowed });
+    }
+  });
+});
+
 describe('web command gaps (#591)', () => {
   it.each(['/models', '/new Design', '/rename Design review', '/tasks', '/voice', '/voices', '/voice on', '/orch 0b1c', '/clear confirm'])(
     '%s is answered as a command and never reaches the model', async (message) => {

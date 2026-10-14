@@ -296,3 +296,34 @@ test('skill metadata cannot claim execution when its declared gateway tool is re
   const page=readCapabilityPage(snapshot,registry,{});
   expect(page.entries.find(e=>e.name==='apps:list-apps')).toMatchObject({status:'tool_access_limited',via:'unavailable'});
 });
+
+// "pstack on but the bot says the skill does not exist" (agent mona-lisa-jai-kere): the query was one
+// literal phrase, so "pstack interrogate" found nothing while "pstack" and "interrogate" each did.
+describe('capability search matches words, not one literal phrase', () => {
+  const snapshot = { observedAt: 'now', servers: [], entries: [
+    { name: 'mcp__gateway__task_spawn', description: 'Start a worker task, e.g. to interrogate a change.', server: 'gateway', status: 'available', via: 'agent' },
+  ] };
+  const registry = { skills: new Map(), cliSkills: [
+    { name: 'pstack:interrogate', description: 'Several reviewers question a change.' },
+    { name: 'pstack:poteto-mode', description: 'Pick the playbook for the work.' },
+    { name: 'pstack:why', description: 'Find why something happens.' },
+    { name: 'code-review', description: 'Native review' },
+  ] } as unknown as SkillRegistry;
+  const names = (query: string) => readCapabilityPage(snapshot as never, registry, { query }).entries.map(e => e.name);
+
+  test.each(['pstack interrogate', 'pstack:interrogate', 'pstack-interrogate', 'PSTACK_Interrogate', 'interrogate/pstack'])('"%s" finds pstack:interrogate', query => {
+    expect(names(query)).toEqual(['pstack:interrogate']);
+  });
+
+  test('"poteto mode" and "pstack poteto" find the playbook skill', () => {
+    expect(names('poteto mode')).toEqual(['pstack:poteto-mode']);
+    expect(names('pstack poteto')).toEqual(['pstack:poteto-mode']);
+  });
+
+  test('single words behave as before; a name match ranks before a description match', () => {
+    expect(names('pstack')).toEqual(['pstack:interrogate', 'pstack:poteto-mode', 'pstack:why']);
+    expect(names('interrogate')).toEqual(['pstack:interrogate', 'mcp__gateway__task_spawn']);
+    expect(names('code-review')).toEqual(['code-review']);
+    expect(names('nothing-like-this')).toEqual([]);
+  });
+});

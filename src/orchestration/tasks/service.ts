@@ -16,12 +16,15 @@ import { promisify } from 'util';
 import { taskFailure } from './failure';
 import { WorkerPool } from './pool';
 import { createHash, randomUUID } from 'crypto';
-import { OrchestrationStore, ROOT_TASK_SQL, boundedText, payloadHash } from '../store';
+import { OrchestrationStore, LISTED_TASK_SQL, boundedText, payloadHash } from '../store';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../config';
 import { MAX_INTAKE_INPUTS } from '../conversation-intake';
 import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode } from '../types';
 import type { Effort } from '../../agent/model-registry';
 import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
+
+/** Parent states a subagent runs under; any other parent can neither start nor wait for one. */
+export const RUNNING_PARENT: readonly string[] = ['starting', 'running', 'interrupting'];
 
 /** Refs the agent may name itself; the gateway's own additions are bounded separately by MAX_INTAKE_INPUTS. */
 export const MAX_AGENT_CONTEXT_REFS = 64;
@@ -210,9 +213,9 @@ export class TaskService {
         });
       return [{ ...this.withRecentTools(task), ...(subagents.length ? { subagents } : {}), ...pstackEvidence(this.store, task, assigned, tree) }];
     }
-    // Roots only, as in indexPage: a root's status lists its subagents.
-    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND ${ROOT_TASK_SQL} AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
-      (SELECT id FROM tasks WHERE conversation_id=? AND ${ROOT_TASK_SQL} AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT 100))
+    // As in indexPage: a root's status lists its subagents.
+    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND ${LISTED_TASK_SQL} AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
+      (SELECT id FROM tasks WHERE conversation_id=? AND ${LISTED_TASK_SQL} AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT 100))
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`, conversationId, conversationId).map(row => {
       const task = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
       const waiting = task.state === 'queued' && this.store.get('SELECT waiting_json FROM provider_waits WHERE entity_id=?', task.taskId);
@@ -243,9 +246,10 @@ export class TaskService {
   }
   /** Bounded recent-task page: every unfinished task, plus only the newest finished ones. */
   private indexPage(conversationId: string): TaskSnapshot[] {
-    // Subagents are listed under their root (task_status with the root's task_id), not as separate work.
-    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND ${ROOT_TASK_SQL} AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
-      (SELECT id FROM tasks WHERE conversation_id=? AND ${ROOT_TASK_SQL} AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT ${INDEXED_FINISHED_TASKS}))
+    // Subagents are listed under their root (task_status with the root's task_id), not as separate work,
+    // unless one awaits reconciliation: then it needs its own Retry cleanup.
+    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND ${LISTED_TASK_SQL} AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
+      (SELECT id FROM tasks WHERE conversation_id=? AND ${LISTED_TASK_SQL} AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT ${INDEXED_FINISHED_TASKS}))
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`,
       conversationId, conversationId).map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot);
   }
@@ -596,6 +600,8 @@ export class TaskService {
       }
       if(replacedByTaskId)task.replacedByTaskId=replacedByTaskId;
       if(closes||replacedByTaskId)this.store.saveTask(task,task.stateVersion);
+      // A subagent whose stop was unconfirmed outlives its ended parent; this retries its cleanup.
+      this.cancelSubagents(task);
       return task;
     }
     if (task.state === 'cancel_requested') {
@@ -790,7 +796,7 @@ export class TaskService {
       const ancestors: TaskSnapshot[] = [];
       for (let id = task.parentTaskId; id;) { const parent = this.store.task(id); if (!parent) break; ancestors.push(parent); id = parent.parentTaskId; }
       // A subagent only runs for a parent that is running; after a restart its parent awaits reconciliation.
-      if (task.parentTaskId && !['starting', 'running', 'interrupting'].includes(ancestors[0]?.state ?? '')) return undefined;
+      if (task.parentTaskId && !RUNNING_PARENT.includes(ancestors[0]?.state ?? '')) return undefined;
       const holding = ancestors.filter(parent => parent.activeAttemptId).length;
       const active = this.store.all('SELECT conversation_id,COUNT(*) AS n FROM tasks WHERE active_attempt_id IS NOT NULL GROUP BY conversation_id');
       if (active.reduce((n, row) => n + Number(row.n), 0) - holding >= this.config.tasks.maxConcurrentPerAgent || Number(active.find(row => row.conversation_id === task.conversationId)?.n ?? 0) - holding >= this.config.tasks.maxConcurrentPerConversation) return undefined;
@@ -864,13 +870,15 @@ export class TaskService {
       const startedAt = attempt.startedAt ?? attempt.processIdentity?.startedAt ?? task.createdAt;
       // Reviews alone never end a task (#557): past the limit without a new
       // worker report, stop the attempt through the cancellation path.
-      const reportedAt = Math.max(startedAt, task.latestProgress?.source === 'worker' ? task.latestProgress.observedAt : 0);
+      let reportedAt = Math.max(startedAt, task.latestProgress?.source === 'worker' ? task.latestProgress.observedAt : 0);
       const limit = this.config.tasks.progressStaleLimitMs;
+      // A parent blocked in subagent_wait cannot report; its subagents' reports are its progress.
+      if (limit && task.state === 'running' && observation.observedAt - reportedAt >= limit) reportedAt = Math.max(reportedAt, this.subtreeReportedAt(task.taskId));
       if (limit && task.state === 'running' && observation.observedAt - reportedAt >= limit) {
         this.stopStalled(task, observation.observedAt - reportedAt, observation);
         return;
       }
-      if (observation.observedAt - startedAt >= this.config.tasks.progressStaleMs) {
+      if (observation.observedAt - startedAt >= this.config.tasks.progressStaleMs && observation.observedAt - this.subtreeReportedAt(task.taskId, startedAt) >= this.config.tasks.progressStaleMs) {
         if (observation.resultSeenAt !== undefined) {
           this.supervise(task, 'result_seen_not_terminal', `The worker returned a final result ${Math.max(0, Math.round((observation.observedAt - observation.resultSeenAt) / 1000))}s ago, but ${observation.pendingBackground ?? 0} native background task(s) have not reported completion, so the task is not terminal yet. The result is accepted automatically once the background grace period passes without activity. Report what is still being awaited; stop background work that is no longer needed.`, observation.observedAt);
         } else {
@@ -878,6 +886,14 @@ export class TaskService {
         }
       }
     });
+  }
+  /** The latest worker progress report, or finish, anywhere below a task; `floor` when there is none later. */
+  private subtreeReportedAt(taskId: string, floor = 0): number {
+    const row = this.store.get(`WITH RECURSIVE below(id) AS (SELECT id FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId')=?
+        UNION SELECT t.id FROM tasks t JOIN below b ON json_extract(t.snapshot_json,'$.parentTaskId')=b.id)
+      SELECT MAX(MAX(CASE WHEN json_extract(snapshot_json,'$.latestProgress.source')='worker' THEN json_extract(snapshot_json,'$.latestProgress.observedAt') ELSE 0 END),
+        MAX(CASE WHEN state IN ('completed','failed','cancelled') THEN updated_at ELSE 0 END)) AS at FROM tasks WHERE id IN (SELECT id FROM below)`, taskId);
+    return Math.max(floor, Number(row?.at ?? 0));
   }
   private stopStalled(task: TaskSnapshot, quietMs: number, observation: import('../execution-observation').ExecutionObservation): void {
     const minutes = Math.round(quietMs / 60000);
@@ -999,6 +1015,8 @@ export class TaskService {
       const receipt = this.workerReceipt(attemptId, actionId, 'question', question);
       if (receipt.prior) return receipt.prior as TaskSnapshot;
       if (task.state !== 'running' || task.revision !== attempt.revision) throw new OrchestrationError('SUPERSEDED_QUESTION');
+      // As with a native subagent, only its parent reads its output and nothing could answer it here.
+      if (task.parentTaskId) throw new OrchestrationError('SUBAGENT_INPUT_UNAVAILABLE', 'A subagent cannot ask questions. Finish now and put the open question, with what you found so far, in your final result; your parent decides.');
       if(computerReport&&task.gatewayTarget?.adapter==='computer')task.computerReport=computerReport;
       task.state = 'waiting_input';
       task.pendingQuestion = { questionId: randomUUID(), text: question, revision: attempt.revision };
@@ -1106,8 +1124,9 @@ export class TaskService {
   private notify(task: TaskSnapshot): void {
     // A native subagent dies with its parent session; a durable child would otherwise be orphaned.
     if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation') this.cancelSubagents(task);
-    // Subagents report to the parent worker (subagent_wait), never to the channel.
-    if (task.parentTaskId) return;
+    // Subagents report to the parent worker (subagent_wait), never to the channel, except an
+    // unconfirmed stop no running parent can see: it holds a slot until someone retries its cleanup.
+    if (task.parentTaskId && !(task.state === 'needs_reconciliation' && !RUNNING_PARENT.includes(this.store.task(task.parentTaskId)?.state ?? ''))) return;
     const input = this.store.get('SELECT binding_id FROM conversation_inputs WHERE id=?', task.initiatingInputId)!;
     const notificationId = randomUUID();
     this.store.run(`INSERT INTO notifications(id,conversation_id,task_id,task_state_version,originating_binding_id) VALUES(?,?,?,?,?) ON CONFLICT(task_id,task_state_version) DO NOTHING`,
@@ -1181,15 +1200,14 @@ export class TaskService {
       return child;
     });
   }
-  /** subagent_wait: results once every listed subagent has finished or asked a question (a question is its result, as a native subagent's would be); undefined while any is still working. */
+  /** subagent_wait: results once every listed subagent has finished; undefined while any is still working. */
   subagentResults(attemptId: string, generation: number, taskIds: unknown) {
     const children = this.subagents(attemptId, generation, taskIds);
-    if (children.some(child => !TERMINAL_TASK_STATES.has(child.state) && child.state !== 'needs_reconciliation' && !(child.state === 'waiting_input' && child.pendingQuestion))) return undefined;
+    if (children.some(child => !TERMINAL_TASK_STATES.has(child.state) && child.state !== 'needs_reconciliation')) return undefined;
     return children.map(child => ({ task_id: child.taskId, state: child.state, model: child.model, effort: child.effort,
       ...(child.result ? { result: child.result.summary } : {}),
       // Files it staged are delivered with the root's result; listed so the parent can refer to them.
       ...this.stagedFiles(child), ...(child.failure ? { failure: { code: child.failure.code, message: child.failure.message } } : {}),
-      ...(child.state === 'waiting_input' && child.pendingQuestion ? { question: child.pendingQuestion.text } : {}),
       ...(child.state === 'needs_reconciliation' ? { note: 'Its process could not be confirmed stopped and may still be running. Cancel it with subagent_cancel before relying on files it touched.' } : {}) }));
   }
   private stagedFiles(task: TaskSnapshot): { staged_files?: string[] } {

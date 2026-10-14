@@ -52,6 +52,7 @@ import { AgentRunner } from '../../src/agent/runner';
 import { AgentConfig, GatewayConfig, Message } from '../../src/types';
 import { SessionStore } from '../../src/session/store';
 import { HistoryDB } from '../../src/history/db';
+import { pstackClaudeConfig } from '../helpers/pstack-fixture';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
 
@@ -210,5 +211,22 @@ describe('executeApiCommand persistence + dispatch (#157)', () => {
     jest.spyOn(runner as any, 'restartProcess').mockResolvedValue(undefined);
     await runner.executeApiCommand(sessionId, chatId, asked.actions[1]!.command, { principalId: 'owner' });
     expect(historyRows().map(row => [row.role, row.content])).toEqual([['assistant', 'Cancelled.'], ['assistant', asked.responseText], ['user', '/restart']]);
+  });
+
+  // Third review of #591 (L1): each menu page was saved as an assistant turn, so browsing the
+  // setup menu pushed real conversation out of the latest 50 messages a new context starts from.
+  it('U-P-12: a /pstack-setup menu button stores no menu page in history', async () => {
+    const fixture = pstackClaudeConfig(), previous = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
+    try {
+      await runner.executeApiCommand(sessionId, chatId, '/pstack-setup');
+      const before = historyRows().length;
+      await runner.executeApiCommand(sessionId, chatId, '/pstack-setup ps:h');
+      await runner.executeApiCommand(sessionId, chatId, '/pstack-setup ps:g');
+      expect(historyRows()).toHaveLength(before);
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
+      fixture.cleanup();
+    }
   });
 });

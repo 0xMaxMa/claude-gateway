@@ -46,7 +46,8 @@ test('a Skill tool call records the invoked skill name', () => {
 // Review of #591 (L12): tool_call runs only the catalog's bare names and refuses `mcp__gateway__x`,
 // so showing that call as `mcp__gateway__x` made a refused call look like the tool ran.
 test('a deferred call is shown with the name it asked for', () => {
-  expect(executionTool({ name: 'mcp__gateway__tool_call', input: { name: 'mcp__gateway__browser_create_session', arguments: {} } }).name).toBe('mcp__gateway__mcp__gateway__browser_create_session');
+  // Third review of #591: tool_call now runs a gateway tool named with its own namespace, so it shows as that tool.
+  expect(executionTool({ name: 'mcp__gateway__tool_call', input: { name: 'mcp__gateway__browser_create_session', arguments: {} } }).name).toBe('mcp__gateway__browser_create_session');
   expect(executionTool({ name: 'mcp__gateway__tool_call', input: { name: 'browser_create_session' } }).name).toBe('mcp__gateway__browser_create_session');
   // Another server's prefix is a claim, not a namespace: it stays inside this connector's.
   expect(executionTool({ name: 'mcp__browser__tool_call', input: { name: 'mcp__gateway__memory_write' } }).name).toBe('mcp__browser__mcp__gateway__memory_write');

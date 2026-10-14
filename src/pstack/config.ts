@@ -19,7 +19,7 @@ export interface AgentPstackConfig {
 /** pstack keywords, not model aliases: the role runs on the parent's model. */
 export const PSTACK_KEYWORDS = ['inherit-parent', 'auto'];
 
-export type PstackConfigCode = 'PSTACK_NOT_INSTALLED' | 'UNKNOWN_PSTACK_ROLE' | 'INVALID_EFFORT' | 'UNKNOWN_MODEL' | 'MODEL_ALIAS_NOT_ALLOWED' | 'INVALID_PSTACK_CONFIG';
+export type PstackConfigCode = 'PSTACK_NOT_INSTALLED' | 'PSTACK_UNSUPPORTED_AGENT' | 'UNKNOWN_PSTACK_ROLE' | 'INVALID_EFFORT' | 'UNKNOWN_MODEL' | 'MODEL_ALIAS_NOT_ALLOWED' | 'INVALID_PSTACK_CONFIG';
 export class PstackConfigError extends Error {
   constructor(readonly code: PstackConfigCode, message: string) {
     super(message);

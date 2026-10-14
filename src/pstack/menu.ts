@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { EFFORT_LEVELS, isEffort } from '../agent/model-registry';
 import type { ModelConfig } from '../types';
-import { AgentPstackConfig, PstackConfigError, applySheetLines, parseRoleValue } from './config';
+import { AgentPstackConfig, PSTACK_KEYWORDS, PstackConfigError, applySheetLines, parseRoleValue } from './config';
 import { PstackModels } from './plugin-info';
 import { pstackPanelDefault, pstackRoleDefault } from './sheet';
 
@@ -16,7 +16,8 @@ import { pstackPanelDefault, pstackRoleDefault } from './sheet';
  */
 
 export interface PstackMenuButton { text: string; data: string }
-export interface PstackMenuScreen { text: string; keyboard: PstackMenuButton[][]; closed?: boolean }
+/** `closed`: the menu is gone (Close). `done`: a final result shown in place of the menu, without buttons (Turn on/off). */
+export interface PstackMenuScreen { text: string; keyboard: PstackMenuButton[][]; closed?: boolean; done?: boolean }
 export interface PstackMenuState { block: AgentPstackConfig | undefined; plugin: PstackModels | undefined; models: ModelConfig[]; installHint: string }
 
 type Family = 'c' | 'g';
@@ -191,12 +192,19 @@ export function pstackMenuScreen(view: PstackMenuView, state: PstackMenuState, n
   if (view.kind === 'home') {
     const on = state.block !== undefined;
     const changed = plugin.roles.filter(({ role }) => roleValue(state, role).override).length;
+    // A role (a skill default too) naming a model this gateway does not list fails when that subagent starts.
+    const known = new Set(state.models.map(m => m.id.toLowerCase()));
+    const missing = [...new Set(plugin.roles.flatMap(({ role }) => roleEntries(state, role) ?? []).map(e => e.model)
+      .filter(model => !PSTACK_KEYWORDS.includes(model) && !known.has(model.toLowerCase())))];
+    const warning = missing.length ? `\n⚠️ Not in this gateway's model list: ${missing.join(', ')}. Roles using ${missing.length === 1 ? 'it' : 'them'} fail; choose another model for them.` : '';
     return {
-      text: `${top}pstack setup\nStatus: ${on ? '🟢 On' : '⚪ Off'}\nDefault effort: ${effortLabel}\nRoles: ${plugin.roles.length} (✏️ ${changed} changed)`,
+      text: `${top}pstack setup\nStatus: ${on ? '🟢 On' : '⚪ Off'}\nDefault effort: ${effortLabel}\nRoles: ${plugin.roles.length} (✏️ ${changed} changed)${warning}`,
       keyboard: [
-        [button(on ? 'Turn off' : '✅ Turn on', on ? 'ps:off' : 'ps:on'), button(`Effort: ${effortLabel}`, 'ps:de')],
+        [button(on ? 'Turn off' : '✅ Turn on', on ? 'ps:off' : 'ps:on')],
+        [button(`Effort: ${effortLabel}`, 'ps:de')],
         [button('Roles ▸', 'ps:g')],
-        [button('Reset all', 'ps:rs'), ...close],
+        [button('Reset all', 'ps:rs')],
+        close,
       ],
     };
   }
