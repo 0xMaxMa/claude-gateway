@@ -25,6 +25,15 @@ export function pstackWorkerNote(subagents: boolean): string {
 }
 
 /**
+ * What a pstack agent's decision turn is told: its skill catalog lists the
+ * pstack:* skills, but nothing there says what pstack is.
+ */
+export const PSTACK_DECISION_NOTE = [
+  '# pstack on this agent',
+  'pstack here means the installed pstack@pstack-claude Claude Code plugin (the pstack:* skills in the catalog), not the Unix process stack tool. Its skills run only in workers: task_spawn with target_profile=skill-worker and skill_name pstack:<name>. pstack:poteto-mode picks the right pstack playbook (bug fix, feature, review...) by itself.',
+].join('\n');
+
+/**
  * The reply to an explicit `/pstack:<skill>` on an agent that is not set up.
  * Its workers do not load pstack and its skill catalog does not list it, but a
  * host worker could still find the plugin's files on disk; the command is

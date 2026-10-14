@@ -61,7 +61,7 @@ import { VoiceError } from '../voice/types';
 import { describeVoiceError } from '../voice/errors';
 import { MediaStore } from '../history/media-store';
 import { resolveSkill, skillCatalog } from './skills';
-import { pstackCommandReply, pstackNotSetUpReply } from '../pstack/overlay';
+import { PSTACK_DECISION_NOTE, pstackCommandReply, pstackNotSetUpReply } from '../pstack/overlay';
 import type { SkillRegistry } from '../skills';
 import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
 import { SPEECH_OVERLAY, splitSpeechResponse, speechVoiceStyle } from './speech';
@@ -1345,6 +1345,8 @@ export class AgentOrchestrationRuntime {
       if (this.agent.type === 'app-agent') ticket.profile.overlay += '\nContainer execution is mandatory. Workers run only inside this app container. No host tools or host services are available. Use default-worker for app execution. Gateway media/browser/memory tools are unavailable in this container profile.';
       // Stable metadata belongs in the system prefix, not in every resumed user message.
       // A changed catalog intentionally invalidates that prefix so new skills stay visible.
+      // Same on/off as the worker's plugin override; it changes with the catalog's pstack:* skills, on a toggle.
+      if (this.agent.pstack) ticket.profile.overlay += '\n' + PSTACK_DECISION_NOTE;
       ticket.profile.overlay += '\n' + skillCatalog(this.host.skills?.(), this.config.conversation.skillCatalogBytes);
       let speechDirective = '';
       if (speechEnabled) {
