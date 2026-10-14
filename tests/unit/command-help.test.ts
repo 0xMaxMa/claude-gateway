@@ -60,3 +60,11 @@ test('pstack setup is listed in its tappable spelling on Telegram and on web', (
   expect(commandHelp('api')).toContain('/pstack-setup — Show the pstack setup');
   expect(commandCatalog('api').map(c => c.name)).toContain('/pstack-setup');
 });
+
+// Dev e2e of #591: on the web /models only lists; the model picker or PUT .../model switches.
+test('web help and the API command picker say how /models switches the model', () => {
+  const web = commandHelp('api').split('\n').find(l => l.startsWith('/models —'))!;
+  expect(web).toBe('/models — List the models; switch with the model picker or PUT /api/v1/agents/:agentId/model');
+  expect(commandCatalog('api').find(c => c.name === '/models')!.description).not.toContain('select');
+  expect(commandHelp('telegram')).toContain('/models — List and select a model');
+});

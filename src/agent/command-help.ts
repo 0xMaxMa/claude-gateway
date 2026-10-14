@@ -17,7 +17,8 @@ const descriptions: Record<string, string> = {
 export function commandCatalog(channel: CommandChannel): Array<{name: string; description: string}> {
   return Object.entries(BUILTIN_COMMANDS)
     .filter(([, definition]) => definition.channels.includes(channel) && !definition.hidden)
-    .map(([name]) => ({name: `/${name}`, description: descriptions[name]}));
+    // The web /models only lists; its model picker or the REST call switches.
+    .map(([name]) => ({name: `/${name}`, description: name === 'models' && channel === 'api' ? 'List the models; switch with the model picker or PUT /api/v1/agents/:agentId/model' : descriptions[name]}));
 }
 
 /** Channel-specific help shares the runner command registry instead of a second partial list. */

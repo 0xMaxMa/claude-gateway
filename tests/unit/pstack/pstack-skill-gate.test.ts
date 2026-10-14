@@ -127,6 +127,22 @@ describe('an explicit /pstack: command for a skill that is not user-invocable', 
     } finally { await f.close(); }
   });
 
+  // Dev e2e of #591: a one-letter typo (/pstack:reflct) got no suggestion from substring matching.
+  test('a misspelled name suggests the nearest user-invocable commands', async () => {
+    for (const name of ['reflect', 'interrogate', 'why']) {
+      mkdirSync(join(plugin.installPath, 'skills', name), { recursive: true });
+      writeFileSync(join(plugin.installPath, 'skills', name, 'SKILL.md'), `---\nname: ${name}\ndescription: fixture\n---\n\nBody\n`);
+    }
+    const { pstackCommandReply } = await import('../../../src/pstack/overlay');
+    expect(pstackCommandReply('/pstack:reflct', 'telegram', {})).toContain('Did you mean /pstack:reflect?');
+    expect(pstackCommandReply('/pstack:refelct', 'telegram', {})).toContain('Did you mean /pstack:reflect?');
+    expect(pstackCommandReply('/pstack:interogate', 'telegram', {})).toContain('Did you mean /pstack:interrogate?');
+    expect(pstackCommandReply('/pstack:hwo', 'telegram', {})).toContain('Did you mean /pstack:how?');
+    // Too far from every name, or only near a skill that is not user-invocable: no guess.
+    expect(pstackCommandReply('/pstack:deploy', 'telegram', {})).not.toContain('Did you mean');
+    expect(pstackCommandReply('/pstack:principle-atack-the-premise', 'telegram', {})).not.toContain('Did you mean');
+  });
+
   test('an unknown name suggests close user-invocable commands', async () => {
     const { pstackCommandReply } = await import('../../../src/pstack/overlay');
     expect(pstackCommandReply('/pstack:ho', 'telegram', {})).toContain('Did you mean /pstack:how?');

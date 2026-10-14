@@ -67,8 +67,23 @@ export function pstackCommandReply(text: string, source: ConversationScope['sour
     }
   }
   const words = new Set(skill.split(/[^a-z0-9]+/i).filter(word => word.length > 2));
-  const close = !skill ? [] : names.filter(name => name.includes(skill) || skill.includes(name) || name.split('-').some(word => words.has(word))).filter(name => {
-    try { return extractFrontmatter(read(name))?.frontmatter['user-invocable'] !== false; } catch { return false; }
-  }).slice(0, 3);
+  const invocable = (name: string) => { try { return extractFrontmatter(read(name))?.frontmatter['user-invocable'] !== false; } catch { return false; } };
+  // Shared words first, then typos (`reflct`) by edit distance: about one edit per four letters.
+  const typo = (name: string) => { const distance = editDistance(skill.toLowerCase(), name.toLowerCase()); return distance <= Math.min(3, Math.max(1, Math.floor(name.length / 4))) ? distance : undefined; };
+  const close = !skill ? [] : [
+    ...names.filter(name => name.includes(skill) || skill.includes(name) || name.split('-').some(word => words.has(word))),
+    ...names.map(name => ({ name, distance: typo(name) })).filter(entry => entry.distance !== undefined).sort((a, b) => a.distance! - b.distance!).map(entry => entry.name),
+  ].filter((name, index, all) => all.indexOf(name) === index && invocable(name)).slice(0, 3);
   return `/${command!.name} is not a pstack command.${close.length ? ` Did you mean ${close.map(name => `/pstack:${name}`).join(', ')}?` : ''}${names.includes('poteto-help') ? ' Send /pstack:poteto-help with a question to find the right one.' : ''}`;
+}
+
+/** Optimal string alignment distance: insertions, deletions, substitutions and adjacent swaps. */
+function editDistance(a: string, b: string): number {
+  if (Math.abs(a.length - b.length) > 3) return Infinity;
+  const d = Array.from({ length: a.length + 1 }, (_, i) => Array.from({ length: b.length + 1 }, (_, j) => i ? (j ? 0 : i) : j));
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) {
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+  }
+  return d[a.length][b.length];
 }
