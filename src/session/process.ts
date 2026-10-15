@@ -1263,6 +1263,7 @@ export class SessionProcess extends EventEmitter {
     // minimal PATH that predates the native-installer migration.
     const hardenedPath = pathWithNativeBin();
 
+    if (this.projectCwd && !fs.existsSync(this.projectCwd.dir)) throw projectUnavailableError({ code: 'project_not_found' });
     const capacityEnabled = Boolean(this.runtimeProfile || this.gatewayConfig.gateway.processLimits || this.gatewayConfig.agents?.some(agent => agent.orchestration?.enabled));
     const releaseCapacity = this.runtimeProfile?.capacityReserved ? () => {} : gatewayCapacity(this.gatewayConfig).acquire(this.runtimeProfile?.role ?? 'legacy', capacityEnabled);
     if (!releaseCapacity) throw Object.assign(new Error('Gateway process capacity exceeded'), { code: 'CAPACITY_EXCEEDED' });
@@ -1712,6 +1713,12 @@ export class SessionProcess extends EventEmitter {
       // hint. This is the exact failure the binary-resolution work targets.
       this.lastStderrLine = err.message;
       this.logger.error('session subprocess error', { error: err.message });
+      if (!this.runtimeProfile && !proc.pid && this.projectCwd && (err as NodeJS.ErrnoException).code === 'ENOENT' && !fs.existsSync(this.projectCwd.dir)) {
+        // The folder vanished after the pre-spawn check; no 'exit' follows a failed spawn, so the waiting turn would hang to its timeout.
+        if (this.process === proc) { this.process = null; this._exited = true; }
+        this.emit('startup-error', projectUnavailableError({ code: 'project_not_found' }));
+        return;
+      }
       if (this.runtimeProfile && !proc.pid) {
         // Failed spawn emits 'error' and 'close', but never 'exit'. Clear the
         // nonexistent child before listeners call stop(), or cleanup waits forever.

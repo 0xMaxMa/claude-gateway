@@ -142,4 +142,16 @@ describe('project chat session fixes', () => {
     expect(del.body.code).toBe('project_running');
     expect(fs.existsSync(path.join(h.root, 'site'))).toBe(true);
   }, 30000);
+
+  it('F2 folder removed between resolve and spawn ends as a fast 409 PROJECT_UNAVAILABLE', async () => {
+    h = await harness();
+    const sid = await projectSession(h);
+    const orig = chat.projectContext;
+    jest.spyOn(chat, 'projectContext').mockImplementation(async (...a) => { fs.rmSync(path.join(h.root, 'site'), { recursive: true }); return orig(...a); });
+    const t = Date.now();
+    const res = await send(h, sid, 'a');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROJECT_UNAVAILABLE');
+    expect(Date.now() - t).toBeLessThan(15000);
+  }, 30000);
 });
