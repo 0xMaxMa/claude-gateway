@@ -158,8 +158,7 @@ describe('a project-bound session or chat is admin-only on every route that reve
   it.each(NON_ADMIN.map((k) => [k.key, k] as const))('%s is refused on every session route of a bound session', async (_n, key) => {
     for (const [method, label, url, body] of SESSION_ROUTES) {
       const res = await as(key, method, url(bound), body?.(bound));
-      const readOnlyGreeting = key === KEYS.podRead && label === 'greeting';
-      expect([label, ...forbidden(res)]).toEqual([label, 403, readOnlyGreeting ? undefined : 'forbidden_key']);
+      expect([label, ...forbidden(res)]).toEqual([label, 403, 'forbidden_key']);
     }
     expect(fs.existsSync(path.join(gwBase, 'agents', 'alfred', 'project-bindings', `${bound}.json`))).toBe(true);
   });

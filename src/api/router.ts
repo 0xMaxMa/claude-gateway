@@ -5011,15 +5011,21 @@ export function createApiRouter(
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
 
+    const runner = agentRunners.get(agentId);
+    const body = req.body as { session_id?: unknown; chat_id?: unknown };
     if (!canWriteAgent(apiKey, agentId)) {
+      // A project-bound session answers every non-admin key the same way, a read-only key included.
+      const named = typeof body.session_id === 'string' ? body.session_id.trim() : '';
+      if (runner && canAccessAgent(apiKey, agentId) && await refusesProjectChat(runner, apiKey, named)) {
+        res.status(403).json(PROJECTS_ADMIN_REQUIRED);
+        return;
+      }
       res.status(403).json({ error: `greeting requires write or admin access to agent '${agentId}'` });
       return;
     }
 
-    const runner = agentRunners.get(agentId);
     if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
 
-    const body = req.body as { session_id?: unknown; chat_id?: unknown };
     const sessionId = typeof body.session_id === 'string' ? body.session_id.trim() : '';
     if (!sessionId) {
       res.status(400).json({ error: 'session_id is required' });

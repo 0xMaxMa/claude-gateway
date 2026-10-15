@@ -238,12 +238,9 @@ describe('a project-bound session is admin-only on every path', () => {
     ];
     for (const [label, pending] of calls) {
       const res = await pending;
-      const readOnlyGreeting = name === 'podReader' && label === 'greeting';
       expect([label, res.status]).toEqual([label, 403]);
-      if (!readOnlyGreeting) {
-        expect(res.body.code).toBe('forbidden_key');
-        expect(res.body.error).toMatch(/admin API key is required/);
-      }
+      expect(res.body.code).toBe('forbidden_key');
+      expect(res.body.error).toMatch(/admin API key is required/);
     }
     expect(spawns(h)).toEqual([]);
   });
