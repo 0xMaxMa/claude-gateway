@@ -29,11 +29,22 @@ const PASSTHROUGH_ENV = new Set([
   'SSL_CERT_FILE', 'SSL_CERT_DIR', 'CURL_CA_BUNDLE',
   'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
   // Inputs of the usual credential helpers (`gh auth git-credential`, `git-credential-libsecret`).
-  'GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_HOST', 'GH_CONFIG_DIR',
+  'GH_HOST', 'GH_CONFIG_DIR',
   // Operator-set git settings that are credentials or config sources, not repository selectors.
   'GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_ASKPASS', 'SSH_ASKPASS', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM',
   'GIT_CONFIG_COUNT', 'GIT_SSL_CAINFO',
 ]);
+
+/** Tokens a credential helper reads. Only the subcommands that talk to a remote get them, so a hook that add or commit starts never sees one. */
+const REMOTE_TOKEN_ENV = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'] as const;
+const REMOTE_SUBCOMMANDS = new Set(['fetch', 'pull', 'push', 'ls-remote']);
+
+/** The git subcommand in `args`, past any leading `-c key=value` pairs. */
+export function subcommandOf(args: readonly string[]): string {
+  let i = 0;
+  while (args[i] === '-c') i += 2;
+  return args[i] ?? '';
+}
 
 const passesThrough = (k: string) => PASSTHROUGH_ENV.has(k) || k.startsWith('LC_') || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k);
 
@@ -41,8 +52,8 @@ const passesThrough = (k: string) => PASSTHROUGH_ENV.has(k) || k.startsWith('LC_
  * The environment git and its hooks run with: an allowlist of process.env, and no GIT_DIR/GIT_WORK_TREE that would
  * aim git at another repository. Built from process.env explicitly: jest gives tests a copy that child_process ignores.
  */
-export function gitEnv(): NodeJS.ProcessEnv {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => passesThrough(k)));
+export function gitEnv(subcommand = ''): NodeJS.ProcessEnv {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => passesThrough(k) || (REMOTE_SUBCOMMANDS.has(subcommand) && (REMOTE_TOKEN_ENV as readonly string[]).includes(k))));
   return { ...env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' };
 }
 
@@ -170,11 +181,12 @@ const KILL_GRACE_MS = 1_000;
  * other repository never reads as a repo itself.
  */
 export async function runGit(cwd: string, args: string[], opts: RunOptions): Promise<Result<GitOutput, GitRunFailure>> {
-  const env: NodeJS.ProcessEnv = { ...gitEnv(), GIT_CEILING_DIRECTORIES: path.dirname(cwd), ...opts.env };
+  const sub = subcommandOf(args);
+  const env: NodeJS.ProcessEnv = { ...gitEnv(sub), GIT_CEILING_DIRECTORIES: path.dirname(cwd), ...opts.env };
   if (opts.readOnly) env.GIT_OPTIONAL_LOCKS = '0';
   // core.fsmonitor is a command from the repo's config; add, commit and status all run it.
-  const remoteCapable = !opts.readOnly && !NO_REMOTE_SUBCOMMANDS.has(args[0] ?? '');
-  const filters = NO_FILTER_SUBCOMMANDS.has(args[0] ?? '') ? [] : await repoFilterOverrides(cwd, env);
+  const remoteCapable = !opts.readOnly && !NO_REMOTE_SUBCOMMANDS.has(sub);
+  const filters = NO_FILTER_SUBCOMMANDS.has(sub) ? [] : await repoFilterOverrides(cwd, env);
   if (!filters) return err('git_failed');
   const argv = ['-c', 'core.fsmonitor=false', ...filters, ...(remoteCapable ? await trustedCommandConfig(env) : []), ...args];
   return new Promise((resolve) => {

@@ -10,7 +10,7 @@ import * as http from 'http';
 import { AddressInfo } from 'net';
 import * as os from 'os';
 import * as path from 'path';
-import { GitOutput, resetOperatorConfigCache, runGit, withProjectLock } from '../../src/projects/git-runner';
+import { GitOutput, gitEnv, resetOperatorConfigCache, runGit, withProjectLock } from '../../src/projects/git-runner';
 import { err, ok, Result } from '../../src/projects/paths';
 
 // Names the gateway reads or interpolates for its own keys: config.template.json placeholders and the provider keys in src/.
@@ -251,7 +251,7 @@ describe('runGit', () => {
 
   it('passes the credential-helper inputs and none of the gateway secrets', async () => {
     const saved = { ...process.env };
-    const passes = ['GH_TOKEN', 'GITHUB_TOKEN', 'XDG_RUNTIME_DIR', 'SSH_AGENT_PID', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy', 'LANG'];
+    const passes = ['GH_HOST', 'GH_CONFIG_DIR', 'XDG_RUNTIME_DIR', 'SSH_AGENT_PID', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy', 'LANG'];
     for (const k of passes) process.env[k] = `v-${k}`;
     Object.assign(process.env, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'foo.bar', GIT_CONFIG_VALUE_0: 'baz' });
     for (const k of GATEWAY_SECRET_ENV) process.env[k] = `leak-${k}`;
@@ -265,6 +265,37 @@ describe('runGit', () => {
     } finally {
       process.env = saved;
     }
+  });
+
+  describe('forge tokens', () => {
+    const TOKENS = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'];
+    let saved: NodeJS.ProcessEnv;
+    beforeEach(() => {
+      saved = { ...process.env };
+      for (const k of TOKENS) process.env[k] = `tok-${k}`;
+    });
+    afterEach(() => {
+      process.env = saved;
+    });
+
+    it.each(['fetch', 'pull', 'push'])('reach %s', (sub) => {
+      for (const k of TOKENS) expect(gitEnv(sub)[k]).toBe(`tok-${k}`);
+    });
+    it.each(['add', 'commit', 'status', 'init', 'log', 'merge', 'config', ''])('do not reach %s', (sub) => {
+      for (const k of TOKENS) expect(gitEnv(sub)[k]).toBeUndefined();
+    });
+
+    it('do not reach a commit hook', async () => {
+      const out = path.join(base, 'hook-env');
+      const hook = path.join(repo, '.git', 'hooks', 'pre-commit');
+      fs.writeFileSync(hook, `#!/bin/sh\nenv > ${out}\n`, { mode: 0o755 });
+      fs.writeFileSync(path.join(repo, 'f'), 'x');
+      value(await runGit(repo, ['add', 'f'], { timeoutMs: 5000 }));
+      value(await runGit(repo, ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'x'], { timeoutMs: 5000 }));
+      const env = fs.readFileSync(out, 'utf8');
+      expect(env).toContain('GIT_TERMINAL_PROMPT=0');
+      for (const k of TOKENS) expect(env).not.toContain(`${k}=`);
+    });
   });
 
   it('returns when git exits even if a hook left a background process holding the pipes', async () => {

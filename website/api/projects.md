@@ -257,14 +257,17 @@ gateway's own API keys, bot tokens and provider keys, is dropped.
 | XDG and desktop | `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` |
 | Agents | `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GNUPGHOME`, `GPG_TTY` |
 | TLS and proxy | `SSL_CERT_FILE`, `SSL_CERT_DIR`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and the lower-case forms |
-| Credential helpers | `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GH_HOST`, `GH_CONFIG_DIR` |
+| Credential helpers | `GH_HOST`, `GH_CONFIG_DIR` |
+| Forge tokens, `fetch`, `pull` and `push` only | `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` |
 | Git settings | `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>` |
 
-`GH_TOKEN` and `GITHUB_TOKEN` reach hooks too, because a credential helper
-cannot be told apart from a hook. Do not set them in the gateway's
-environment unless every project's hooks may use them. `GIT_DIR`,
-`GIT_WORK_TREE` and `GIT_TERMINAL_PROMPT` from the gateway's environment are
-never passed.
+The forge tokens reach only the git calls that talk to a remote, `fetch`, `pull`
+and `push`, where a credential helper needs them. `add`, `commit`, `status`,
+`init` and the reads never get them, so a commit hook cannot read them. A hook
+or filter that runs during a fetch or push can still read them. Do not set
+them in the gateway's environment unless every project's hooks may use them.
+`GIT_DIR`, `GIT_WORK_TREE` and `GIT_TERMINAL_PROMPT` from the gateway's
+environment are never passed.
 
 never resets, checks out, or deletes anything.
 
