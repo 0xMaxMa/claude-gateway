@@ -133,7 +133,9 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
         case 'playback.clear': epoch = message.epoch; flushPlayback(); send({ type: 'playback.clear.ack', epoch: epoch }); state(muted ? 'Muted' : 'Listening'); break;
         case 'playback.stopped': epoch = message.epoch; stopping = false; flushPlayback(); break;
         case 'voice.notice': if (message.reconnect) state('Reconnecting…'); break;
-        case 'voice.error': state(message.message || 'Voice error', 'err'); break;
+        case 'voice.error':
+          if (message.code === 'VOICE_SESSION_CHANGED') { fail(new Error('This chat switched sessions. Send /call to talk in the new one.')); break; }
+          state(message.message || 'Voice error', 'err'); break;
       }
     }
     async function connect(){

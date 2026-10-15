@@ -9,13 +9,16 @@ import { ACCESS_TTL_MS, PAIRING_TTL_MS } from '../cli-viewer/pairing-store';
  * pairing and returns a call token, so a forwarded link cannot open a second
  * call; the same page presents the token to reconnect after a 1012 close.
  * Windows reuse the `/cli` pairing lifetimes: the link must be opened within the
- * approval window, and each ticket extends the call by the access lifetime.
+ * approval window, and a call stays reconnectable for the access lifetime after
+ * its last ticket or the last time it was seen connected.
  */
 export interface VoiceCallPairing {
   pairingId: string;
   agentId: string;
   userId: string;
   callToken?: string;
+  /** Voice session of the latest ticket, so a connected call keeps its pairing alive. */
+  voiceSessionId?: string;
   expiresAt: number;
 }
 
@@ -53,9 +56,19 @@ export class VoiceCallPairings {
     return { callToken: pairing.callToken };
   }
 
-  prune(): void {
+  /** Record the voice session a ticket opened for this call. */
+  attach(pairingId: string, voiceSessionId: string): void {
+    const pairing = this.get(pairingId);
+    if (pairing) pairing.voiceSessionId = voiceSessionId;
+  }
+
+  /** Extend calls that are still connected, then drop expired pairings. */
+  prune(connected: (voiceSessionId: string) => boolean = () => false): void {
     const now = Date.now();
-    for (const [id, pairing] of this.pairings) if (pairing.expiresAt <= now) this.pairings.delete(id);
+    for (const [id, pairing] of this.pairings) {
+      if (pairing.voiceSessionId && connected(pairing.voiceSessionId)) pairing.expiresAt = Math.max(pairing.expiresAt, now + ACCESS_TTL_MS);
+      if (pairing.expiresAt <= now) this.pairings.delete(id);
+    }
   }
 }
 

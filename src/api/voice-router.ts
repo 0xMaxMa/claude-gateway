@@ -24,7 +24,7 @@ interface VoiceTicket {
   voiceSessionId: string; expiresAt: number; origin?: string; allowTools: boolean; model?: string;
 }
 /** A minted ticket, or the HTTP status and body that refuse it. */
-export type VoiceTicketResult = { status: 200; body: Record<string, unknown> } | { status: number; body: { error: string; code?: string } };
+export type VoiceTicketResult = { status: 200; body: Record<string, unknown> } | { status: 403 | 409 | 429 | 503; body: { error: string; code?: string } };
 /** Authenticated voice sessions share conversation ownership with text and task controls. */
 export class VoiceApi {
   readonly router = Router();
@@ -335,6 +335,10 @@ export class VoiceApi {
       socket.destroy();
     }
     return true;
+  }
+  /** A voice session is issued or connected. */
+  isLive(voiceSessionId: string): boolean {
+    return this.sessions.has(voiceSessionId) || [...this.tickets.values()].some(ticket => ticket.voiceSessionId === voiceSessionId);
   }
   private releaseLease(ticket: VoiceTicket): void {
     const key = `${ticket.agentId}:${ticket.sessionId}`;

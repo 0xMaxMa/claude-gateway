@@ -32,7 +32,7 @@ function initData(userId: number, authDate = Math.floor(Date.now() / 1000), toke
 
 function fixture(agentPatch: Partial<AgentConfig> = {}) {
   const stateDir = mkdtempSync(join(tmpdir(), 'voice-call-'));
-  const allow = (users: string[]) => writeFileSync(join(stateDir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: users }));
+  const allow = (users: string[], dmPolicy = 'allowlist') => writeFileSync(join(stateDir, 'access.json'), JSON.stringify({ dmPolicy, allowFrom: users }));
   allow(['42']);
   const agent = { id: 'a', telegram: { botToken: BOT_TOKEN }, orchestration: { enabled: true, channels: ['telegram'] },
     voice: { ...ORCHESTRATION_DEFAULTS.voice, enabled: true, tts: { ...ORCHESTRATION_DEFAULTS.voice.tts, voiceId: 'fixture' } }, ...agentPatch } as AgentConfig;
@@ -67,9 +67,16 @@ test('the /call ticket route proves the Telegram user, the pairing owner and the
     expect((await ticket({ initData: initData(7) })).status).toBe(403);
     f.allow([]);
     expect((await ticket({ initData: initData(42) })).status).toBe(403);
+    // Turning DMs off silences the bot's private chats, calls included.
+    f.allow(['42'], 'disabled');
+    expect((await ticket({ initData: initData(42) })).status).toBe(403);
     f.allow(['42']);
+    // A failure after the claim still hands the page its call token, so it can retry.
+    (f.runner.telegramVoiceSession as jest.Mock).mockRejectedValueOnce(new Error('session store unavailable'));
+    const unavailable = await ticket({ initData: initData(42) });
+    expect(unavailable.status).toBe(503);
 
-    const issued = await ticket({ initData: initData(42) });
+    const issued = await ticket({ initData: initData(42), call_token: unavailable.body.call_token });
     expect(issued.status).toBe(200);
     expect(issued.body).toMatchObject({ ticket: expect.stringMatching(/^[0-9a-f]{64}$/), call_token: expect.stringMatching(/^[0-9a-f]{64}$/),
       stream_path: `/api/v1/agents/a/voice-sessions/${issued.body.voice_session_id}/stream`, input_format: { sampleRate: 16000 } });
@@ -147,6 +154,18 @@ test('a Telegram call speaks in the DM scope over the shared voice WebSocket, su
     expect((await request(f.app).post(`/voice-call/${pairingId}/ticket`).set('Origin', ORIGIN).send({ initData: stale, call_token: 'f'.repeat(64) })).status).toBe(409);
     const reconnect = await request(f.app).post(`/voice-call/${pairingId}/ticket`).set('Origin', ORIGIN).send({ initData: stale, call_token: issued.body.call_token });
     expect(reconnect.status).toBe(200);
+    // A call that stays connected keeps its link alive past the 30-minute window.
+    const now = jest.spyOn(Date, 'now'), start = Date.now();
+    try {
+      voiceCallPairings.prune(id => id === reconnect.body.voice_session_id);
+      now.mockReturnValue(start + 29 * 60 * 1000);
+      voiceCallPairings.prune(id => id === reconnect.body.voice_session_id);
+      now.mockReturnValue(start + 45 * 60 * 1000);
+      expect(voiceCallPairings.get(pairingId)).toBeDefined();
+      now.mockReturnValue(start + 90 * 60 * 1000);
+      voiceCallPairings.prune(() => false);
+      expect(voiceCallPairings.get(pairingId)).toBeUndefined();
+    } finally { now.mockRestore(); }
     // Opening a call still needs fresh initData, whatever token is presented.
     const unclaimed = voiceCallPairings.create('a', '42');
     expect((await request(f.app).post(`/voice-call/${unclaimed}/ticket`).set('Origin', ORIGIN).send({ initData: stale, call_token: issued.body.call_token })).status).toBe(401);

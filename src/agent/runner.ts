@@ -72,7 +72,7 @@ import { initialBudget, type BudgetState } from './recovery-policy';
 import { scrubText } from './incident';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { cliPairingStore, isCliChannel, type CliChannel } from '../cli-viewer/pairing-store';
-import { buildCliUrl, buildVoiceCallUrl } from '../cli-viewer/url';
+import { buildCliUrl, buildVoiceCallUrl, normalizePublicUrl } from '../cli-viewer/url';
 import { telegramVoiceCallsEnabled, voiceCallPairings } from '../voice/call-pairing';
 import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
@@ -567,6 +567,8 @@ export class AgentRunner extends EventEmitter {
       // The call joins the DM it was opened from: the same conversation, delivery
       // binding and membership as a message typed in that chat.
       if (!this.agentConfig.orchestration.channels?.includes('telegram')) throw new Error('Voice is disabled');
+      // /new or a session switch moves the chat; the call must not keep talking to the old session.
+      if (await this.telegramVoiceSession(chatId) !== sessionId) throw Object.assign(new Error('Voice session changed'), { code: 'VOICE_SESSION_CHANGED' });
       scope = channelScope(this.agentConfig.id, sessionId, 'telegram', chatId, voiceScope.threadKey, principalId.slice('telegram:'.length));
     } else {
       if (!(await this.apiSessionExists(chatId, sessionId))) throw new Error('Session not found');
@@ -1447,7 +1449,7 @@ export class AgentRunner extends EventEmitter {
       // Private chats only: a DM's chat id is its user id.
       if (!/^\d+$/.test(chatId) || userId !== chatId) { respond({ success: false, error: 'invalid_request' }, 400); return; }
       if (!telegramVoiceCallsEnabled(this.agentConfig)) { respond({ success: false, error: 'voice_not_configured' }); return; }
-      if (!buildVoiceCallUrl(this.gatewayConfig.gateway.publicUrl, 'probe')) { respond({ success: false, error: 'not_configured' }); return; }
+      if (!normalizePublicUrl(this.gatewayConfig.gateway.publicUrl)) { respond({ success: false, error: 'not_configured' }); return; }
       respond({ success: true, url: buildVoiceCallUrl(this.gatewayConfig.gateway.publicUrl, voiceCallPairings.create(this.agentConfig.id, chatId)) });
       return;
     }

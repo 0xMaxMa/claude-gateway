@@ -50,8 +50,9 @@ export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
       ?? (callToken && pairing.callToken ? verifyTelegramInitData(initData, botToken, Number.POSITIVE_INFINITY) : null);
     if (!verified) { res.status(401).json({ error: 'Invalid initData' }); return; }
     if (verified.userId !== pairing.userId) { res.status(403).json({ error: 'User mismatch' }); return; }
-    // The receiver checked allowFrom when it sent the button; access may have changed since.
-    if (!readTelegramAccess(deps.telegramStateDir(pairing.agentId)).allowFrom.includes(verified.userId)) { res.status(403).json({ error: 'Not allowed' }); return; }
+    // The receiver checked access when it sent the button; it may have changed since.
+    const access = readTelegramAccess(deps.telegramStateDir(pairing.agentId));
+    if (access.dmPolicy === 'disabled' || !access.allowFrom.includes(verified.userId)) { res.status(403).json({ error: 'Not allowed' }); return; }
     if (!telegramVoiceCallsEnabled(config)) { res.status(409).json({ error: 'Voice disabled', code: 'VOICE_DISABLED' }); return; }
     const claim = voiceCallPairings.claim(pairing.pairingId, verified.userId, callToken);
     if (claim === 'gone') { res.status(410).json({ error: 'Call link expired', code: 'CALL_LINK_EXPIRED' }); return; }
@@ -59,12 +60,13 @@ export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
     if (claim === 'claimed') { res.status(409).json({ error: 'Call link already used', code: 'CALL_LINK_USED' }); return; }
     // A DM's chat id is the user id; the call speaks in that chat's active session.
     const chatId = verified.userId;
-    let sessionId: string;
-    try { sessionId = await runner.telegramVoiceSession(chatId); }
-    catch { res.status(503).json({ error: 'Session unavailable', call_token: claim.callToken }); return; }
-    const result = await deps.voiceApi.mintTicket(pairing.agentId, sessionId, { kind: 'telegram', principalId: `telegram:${verified.userId}`, chatId, threadKey: '' },
-      req.headers.origin, config.allow_tools !== false);
-    res.status(result.status).json({ ...result.body, call_token: claim.callToken });
+    try {
+      const sessionId = await runner.telegramVoiceSession(chatId);
+      const result = await deps.voiceApi.mintTicket(pairing.agentId, sessionId, { kind: 'telegram', principalId: `telegram:${verified.userId}`, chatId, threadKey: '' },
+        req.headers.origin, config.allow_tools !== false);
+      if (result.status === 200) voiceCallPairings.attach(pairing.pairingId, String(result.body.voice_session_id));
+      res.status(result.status).json({ ...result.body, call_token: claim.callToken });
+    } catch { res.status(503).json({ error: 'Voice call unavailable', call_token: claim.callToken }); }
   });
   return router;
 }

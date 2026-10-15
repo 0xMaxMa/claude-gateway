@@ -48,9 +48,18 @@ test('a reply to a Telegram call turn reaches the chat as text with the transcri
     const call = runtime.store.all("SELECT d.modality,d.delivered_text FROM deliveries d JOIN conversation_bindings b ON b.id=d.binding_id WHERE b.chat_id='42' ORDER BY d.rowid");
     expect(call.filter(row => row.modality === 'speech')).toEqual([]);
     expect(call.filter(row => row.modality === 'text').map(row => row.delivered_text)).toEqual(['🎙 what is the weather\n\nIt is sunny.']);
-    // The chat rule still applies to a typed message in the same chat.
+    // While the same user's call is connected, a typed reply is spoken in the call, not sent as a voice message.
+    const heard: string[] = [];
+    const unsubscribe = runtime.subscribeVoiceResults(sid, 'telegram:42', result => heard.push(result.spoken));
+    await runtime.send({ scope, text: 'and tonight?', trustedChannelMember: true }, { execute: true, writeMemory: false }, { timeoutMs: 2000 });
+    unsubscribe();
+    const during = runtime.store.all("SELECT d.modality,d.delivered_text FROM deliveries d JOIN conversation_bindings b ON b.id=d.binding_id WHERE b.chat_id='42' ORDER BY d.rowid").slice(call.length);
+    expect(during.map(row => row.modality)).toEqual(['text']);
+    expect(heard).toEqual(['It is sunny.']);
+    // The chat rule still applies to a typed message once the call is gone.
+    const before = call.length + during.length;
     await runtime.send({ scope, text: 'and tomorrow?', trustedChannelMember: true }, { execute: true, writeMemory: false }, { timeoutMs: 2000 });
-    const typed = runtime.store.all("SELECT d.modality,d.delivered_text FROM deliveries d JOIN conversation_bindings b ON b.id=d.binding_id WHERE b.chat_id='42' ORDER BY d.rowid").slice(call.length);
+    const typed = runtime.store.all("SELECT d.modality,d.delivered_text FROM deliveries d JOIN conversation_bindings b ON b.id=d.binding_id WHERE b.chat_id='42' ORDER BY d.rowid").slice(before);
     expect(typed.some(row => row.modality === 'speech')).toBe(true);
     expect(typed.find(row => row.modality === 'text')!.delivered_text).toBe('It is sunny.');
   } finally {

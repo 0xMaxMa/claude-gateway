@@ -1627,7 +1627,7 @@ export class GatewayRouter {
           if (rec.resetAt < now) this.loginAttempts.delete(ip);
         }
         cliPairingStore.prune();
-        voiceCallPairings.prune();
+        voiceCallPairings.prune(id => this.voiceApi?.isLive(id) ?? false);
         pendingOAuthStore.prune();
         refreshExpiringOAuthConnectors(this.customConnectorsStore, this.agents).catch((err) => {
           console.error(`oauth-refresh-sweep: ${(err as Error).message}`);

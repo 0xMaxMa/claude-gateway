@@ -1534,8 +1534,8 @@ bot.command('voice', async ctx => {
 // /call — open a live voice call as a Telegram Mini App bound to this DM. The
 // page proves the user again with signed initData before any ticket is issued.
 bot.command('call', async ctx => {
+  if (ctx.chat?.type !== 'private' || !isCallbackAuthorized(ctx) || loadAccess().dmPolicy === 'disabled') return
   if (!ORCHESTRATION_ENABLED) { await ctx.reply('Voice calls require orchestration mode.'); return }
-  if (ctx.chat?.type !== 'private' || !isCallbackAuthorized(ctx)) return
   if (!CALLBACK_URL_BASE) return
   try {
     const response = await fetch(CALLBACK_URL_BASE + '/command', {

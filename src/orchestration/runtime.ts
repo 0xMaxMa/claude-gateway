@@ -174,6 +174,14 @@ export class AgentOrchestrationRuntime {
   private readonly inputResponses = new Map<string, Promise<string>>();
   private readonly inputTools = new Map<string, (event: ToolActivity) => void>();
   private readonly voiceListeners = new Map<string, { principalId: string; receive: (result: { responseId: string; text: string; spoken: string; requestId?: string; speechOnly?: boolean }) => void; gender?: () => string | undefined }>();
+  /** The caller hears this reply in a live call, either as the answer to spoken
+   * words or spoken by the connected listener; never send it again as a chat voice message. */
+  private heardInCall(responseId: string): boolean {
+    if (answersLiveVoice(this.store, responseId)) return true;
+    const row = this.store.get(`SELECT d.session_id,i.principal_id FROM assistant_responses r JOIN conversation_decisions d ON d.id=r.decision_id
+      JOIN conversation_inputs i ON i.id=json_extract(d.input_ids_json,'$[0]') WHERE r.id=?`, responseId);
+    return Boolean(row && this.voiceListeners.get(String(row.session_id))?.principalId === row.principal_id);
+  }
   setBrowserVoice(sessionId: string, principalId: string, enabled: boolean): void {
     this.authorizeSession(sessionId, principalId);
     new BrowserVoice(this.store).set(sessionId, principalId, enabled);
@@ -211,7 +219,7 @@ export class AgentOrchestrationRuntime {
       this.delivery.enqueue(response, binding, withLiveVoiceTranscript(store, response, text), this.voiceRetryControls(response, binding));
       const spoken = store.get('SELECT text FROM response_speech WHERE response_id=?', response);
       const destination = store.get('SELECT channel,chat_id,thread_key FROM conversation_bindings WHERE id=?', binding);
-      if (spoken?.text && !answersLiveVoice(store, response) && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && destination && ['telegram','discord','line','slack'].includes(String(destination.channel)) && voiceReplyAllowed(store.channelVoiceMode(String(destination.channel),String(destination.chat_id),String(destination.thread_key??'')), responseHasVoiceOrigin(store,response))) {
+      if (spoken?.text && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && destination && ['telegram','discord','line','slack'].includes(String(destination.channel)) && voiceReplyAllowed(store.channelVoiceMode(String(destination.channel),String(destination.chat_id),String(destination.thread_key??'')), responseHasVoiceOrigin(store,response)) && !this.heardInCall(response)) {
         this.delivery.enqueueSpeech(response, binding, { ...this.telegramVoices.settings(channelVoiceKey(String(destination.channel),String(destination.chat_id),String(destination.thread_key??''))), text: String(spoken.text), voiceOrigin: responseHasVoiceOrigin(store,response) });
       }
     }); this.config = resolveOrchestrationConfig(agent.orchestration, agent.voice ?? { enabled: false });
@@ -1141,7 +1149,7 @@ export class AgentOrchestrationRuntime {
       const controlStepTasks=active.notification?this.store.all(`SELECT t.id FROM notifications n JOIN tasks t ON t.id=n.task_id WHERE n.decision_id=? AND n.status='assigned' AND ${CURRENT_CONTROL_ROUND_SQL}`,decision.decisionId).map(row=>String(row.id)):[];
       await this.host.refreshSkills?.();
       if (!input.skill) input = {...input, skill: resolveSkill(input.text, input.scope.source, this.host.skills?.())};
-      const channelSpeech = ['telegram','discord','line','slack'].includes(input.scope.source) && !answersLiveVoice(this.store, decision.responseId!) && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && voiceReplyAllowed(this.store.channelVoiceMode(input.scope.source,input.scope.chatId,input.scope.threadKey), responseHasVoiceOrigin(this.store,decision.responseId!));
+      const channelSpeech = ['telegram','discord','line','slack'].includes(input.scope.source) && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && voiceReplyAllowed(this.store.channelVoiceMode(input.scope.source,input.scope.chatId,input.scope.threadKey), responseHasVoiceOrigin(this.store,decision.responseId!)) && !this.heardInCall(decision.responseId!);
       const speechEnabled = channelSpeech || new BrowserVoice(this.store).enabled(sessionId, input.scope.principalId) || input.modality === 'live_voice' || this.voiceListeners.get(sessionId)?.principalId === input.scope.principalId;
       const typedSpeech = speechEnabled && input.modality !== 'live_voice';
 

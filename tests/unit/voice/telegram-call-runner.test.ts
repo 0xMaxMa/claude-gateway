@@ -41,6 +41,7 @@ describe('submitVoiceUtterance scope', () => {
     const orchestration = { submitInput: jest.fn(() => ({ inputId: 'input', response: Promise.resolve('ok') })), flushHistory: jest.fn(async () => {}), responseIdForInput: jest.fn() };
     const runner = runnerWith(agentConfig);
     runner.apiSessionExists = jest.fn(async () => true);
+    runner.telegramVoiceSession = jest.fn(async () => 'session');
     runner.getOrchestration = jest.fn(async () => orchestration);
     return { runner, orchestration };
   }
@@ -66,6 +67,15 @@ describe('submitVoiceUtterance scope', () => {
     }, { execute: false, writeMemory: false });
     runner.apiSessionExists.mockResolvedValueOnce(false);
     await expect(runner.submitVoiceUtterance('gone', { kind: 'api', principalId: 'api:owner', chatId: 'chat' }, 'hello', 'u2', false)).rejects.toThrow('Session not found');
+  });
+
+  test('a call does not follow the chat into another session: after /new its turns are refused', async () => {
+    const { runner, orchestration } = voiceRunner(voiceConfig());
+    runner.telegramVoiceSession.mockResolvedValueOnce('newer-session');
+    await expect(runner.submitVoiceUtterance('session', { kind: 'telegram', principalId: 'telegram:42', chatId: '42', threadKey: '' }, 'hello', 'utterance', true))
+      .rejects.toMatchObject({ code: 'VOICE_SESSION_CHANGED' });
+    expect(runner.telegramVoiceSession).toHaveBeenCalledWith('42');
+    expect(orchestration.submitInput).not.toHaveBeenCalled();
   });
 
   test('a Telegram call stops submitting once the agent no longer serves Telegram', async () => {

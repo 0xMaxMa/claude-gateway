@@ -11,8 +11,9 @@ export function answersLiveVoice(store: OrchestrationStore, responseId: string):
 /**
  * A bot cannot post as the user, so a chat reply to a call quotes what the user
  * said above the answer: one `🎙` line per utterance spoken since the chat last
- * received a reply. A barged-in turn is never delivered, so its words join the
- * next reply to the call that is. History keeps the reply text unchanged.
+ * received any reply. A barged-in turn is never delivered, so its words join the
+ * next reply to the call, unless a reply to a typed message came first: quoting
+ * them after that reply would put them out of order. History keeps the reply text unchanged.
  */
 export function withLiveVoiceTranscript(store: OrchestrationStore, responseId: string, text: string): string {
   // Every channel reply passes through here; only replies to a call look further back.
