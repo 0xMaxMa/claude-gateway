@@ -307,7 +307,8 @@ The match ignores case, so `.ENV` and `ID_RSA` count too.
 A slim status for every project that is a git repository, for project cards.
 Plain folders are left out. A repository whose status takes longer than 3
 seconds or fails maps to `null`. The gateway reads at most 4 repositories at a
-time. To stay fast, `change_count` counts an untracked folder as one change,
+time, and each read runs 2 git processes at once, so one request keeps up to 8
+git processes running. To stay fast, `change_count` counts an untracked folder as one change,
 so it can be lower than the `change_count` of the full status.
 
 ```bash
