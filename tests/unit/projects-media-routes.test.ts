@@ -118,3 +118,28 @@ describe('the /sessions chat command', () => {
     expect(JSON.stringify((await list(KEYS.admin)).body)).toContain(bound);
   });
 });
+
+describe('an unreadable project-bindings folder, for a key that is not an admin key', () => {
+  const dir = () => path.join(base, 'agents', 'alfred', 'project-bindings');
+  beforeEach(() => { fs.chmodSync(dir(), 0o000); });
+  afterEach(() => { fs.chmodSync(dir(), 0o700); });
+  const skip = process.getuid?.() === 0;
+
+  (skip ? it.skip : it).each(NON_ADMIN)('lists answer 503 and routes naming a session answer 403 for $key', async (key) => {
+    const lists = [`${A}/sessions?chat_id=web`, `${A}/chats`];
+    for (const url of lists) {
+      const res = await as(key, 'get', url);
+      expect([url, res.status, res.body.code]).toEqual([url, 503, 'project_bindings_unreadable']);
+    }
+    for (const url of [`${A}/sessions/${plain}/info?chat_id=web`, `${A}/sessions/${plain}/activity`]) {
+      const res = await as(key, 'get', url);
+      expect([url, res.status, res.body.code]).toEqual([url, 403, 'forbidden_key']);
+    }
+    const command = await as(key, 'post', `${A}/messages`, { message: '/sessions', chat_id: 'web', session_id: plain });
+    expect([command.status, command.body.code]).toEqual([403, 'forbidden_key']);
+  });
+
+  (skip ? it.skip : it)('an admin key is not affected', async () => {
+    expect((await as(KEYS.admin, 'get', `${A}/sessions?chat_id=web`)).status).toBe(200);
+  });
+});
