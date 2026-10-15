@@ -1,5 +1,3 @@
-import * as path from 'path';
-
 export type GitHost = 'github' | 'gitlab' | 'bitbucket' | 'other';
 
 export type GitSync =
@@ -61,8 +59,6 @@ export interface GitStatus {
   truncated: boolean;
   last_commit: GitCommitInfo | null;
   operation: GitOperation;
-  identity_configured: boolean;
-  sensitive_untracked: string[];
 }
 
 export interface GitSummary {
@@ -96,9 +92,6 @@ export interface ParsedStatus {
 /** The repo config keys status needs, read in one `git config --get-regexp` call. */
 export interface RepoConfig {
   remotes: Array<{ name: string; url: string }>;
-  userName: string | null;
-  userEmail: string | null;
-  sshCommand: string | null;
   /** `branch.<name>.remote` and `branch.<name>.merge`, keyed by branch name. */
   branches: Record<string, { remote?: string; merge?: string }>;
 }
@@ -180,17 +173,14 @@ export function parseStatusV2(raw: string): ParsedStatus {
 }
 
 export function parseRepoConfig(raw: string): RepoConfig {
-  const cfg: RepoConfig = { remotes: [], userName: null, userEmail: null, sshCommand: null, branches: {} };
+  const cfg: RepoConfig = { remotes: [], branches: {} };
   for (const entry of raw.split('\0')) {
     const nl = entry.indexOf('\n');
     if (nl < 0) continue;
     const key = entry.slice(0, nl);
     const value = entry.slice(nl + 1);
     let m: RegExpExecArray | null;
-    if (key === 'user.name') cfg.userName = value || null;
-    else if (key === 'user.email') cfg.userEmail = value || null;
-    else if (key === 'core.sshcommand') cfg.sshCommand = value || null;
-    else if ((m = /^remote\.(.+)\.url$/.exec(key))) {
+    if ((m = /^remote\.(.+)\.url$/.exec(key))) {
       if (!cfg.remotes.some((r) => r.name === m![1])) cfg.remotes.push({ name: m[1], url: value });
     } else if ((m = /^branch\.(.+)\.(remote|merge)$/.exec(key))) {
       (cfg.branches[m[1]] ??= {})[m[2] as 'remote' | 'merge'] = value;
@@ -268,18 +258,6 @@ export function pickRemote(cfg: RepoConfig, branch: string | null): { name: stri
   );
 }
 
-const SENSITIVE_EXACT = new Set(['.env', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519', '.npmrc', 'credentials.json', '.netrc', '.git-credentials']);
-const ENV_TEMPLATES = new Set(['.env.example', '.env.sample', '.env.template']);
-
-/** By basename and case-insensitive: `.ENV` holds the same secrets, and macOS checkouts fold case. */
-export function isSensitiveName(file: string): boolean {
-  const base = path.posix.basename(file).toLowerCase();
-  if (SENSITIVE_EXACT.has(base)) return true;
-  if (base.startsWith('.env.')) return !ENV_TEMPLATES.has(base);
-  if (/\.(pem|key|p12|pfx)$/.test(base)) return true;
-  return /^service-account.*\.json$/.test(base);
-}
-
 /**
  * The upstream is not a same-named branch on a configured remote: `checkout -b feature origin/main`, or a branch
  * tracking a local one (remote "."). Publishing there would move someone else's branch.
@@ -288,14 +266,6 @@ function tracksAnotherBranch(config: RepoConfig, head: string | null, upstream: 
   if (head === null || upstream === null) return false;
   const tracking = config.branches[head];
   return tracking?.merge !== `refs/heads/${head}` || !config.remotes.some((r) => r.name === tracking.remote);
-}
-
-const NEW_PATH_KINDS: ReadonlySet<GitChangeKind | null> = new Set(['added', 'renamed', 'copied']);
-
-/** Whether `git add -A` would commit this path when HEAD does not have it: untracked, added, intent-to-add, or the target of a rename or copy. */
-function wouldBeNewPath(c: GitFileChange): boolean {
-  if (c.unstaged === 'untracked' || NEW_PATH_KINDS.has(c.unstaged)) return true;
-  return NEW_PATH_KINDS.has(c.staged) && c.unstaged !== 'deleted';
 }
 
 /** Sort rank: conflicted, staged, unstaged, untracked. */
@@ -340,8 +310,6 @@ export function buildStatus(input: {
     truncated: sorted.length > CHANGES_LIMIT,
     last_commit: input.lastCommit,
     operation: input.operation,
-    identity_configured: config.userName !== null && config.userEmail !== null,
-    sensitive_untracked: sorted.filter((c) => wouldBeNewPath(c) && isSensitiveName(c.path)).map((c) => c.path),
   };
 }
 

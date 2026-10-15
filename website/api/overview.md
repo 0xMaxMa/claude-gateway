@@ -94,12 +94,6 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `GET` | `/api/v1/projects/:name/file` | Pod key | Read a file from a project |
 | `GET` | `/api/v1/projects/git-summary` | Pod key | Git sync summary of every project that is a repository |
 | `GET` | `/api/v1/projects/:name/git` | Pod key | Git status of one project |
-| `POST` | `/api/v1/projects/:name/git/init` | Pod key + Write | Run `git init` in a project |
-| `POST` | `/api/v1/projects/:name/git/fetch` | Pod key + Write | Fetch from the upstream remote |
-| `POST` | `/api/v1/projects/:name/git/identity` | Pod key + Write | Set the repository's commit name and email |
-| `POST` | `/api/v1/projects/:name/git/commit` | Pod key + Write | Commit changes |
-| `POST` | `/api/v1/projects/:name/git/pull` | Pod key + Write | Pull from the upstream branch |
-| `POST` | `/api/v1/projects/:name/git/push` | Pod key + Write | Push to the upstream branch |
 | `GET` | `/api/v1/projects/running` | Pod key | Listening processes of every project |
 | `GET` | `/api/v1/projects/:name/running` | Pod key | Listening processes of one project |
 | `POST` | `/api/v1/projects/:name/running/stop` | Pod key + Write | Stop a project's listening processes |

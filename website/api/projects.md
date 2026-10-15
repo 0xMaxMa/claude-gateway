@@ -2,19 +2,18 @@
 
 Browse the project directories under the pod's projects root, `~/projects` by
 default. The web dashboard uses these routes to list projects, create a new one,
-show a read-only file tree and file viewer, and run a small set of git
-operations (status, init, fetch, commit, pull, push). Editing files is out of scope.
-Open the project in the code editor for that.
+show a read-only file tree and file viewer, and read the git status of each
+project. Editing files and changing a repository (commit, push, pull) are out of
+scope. Use the code editor or the git connector for that.
 
 **Auth.** Every route needs an API key with pod-wide scope: `admin: true` or
 `agents: "*"`. A key scoped to specific agents gets `403 forbidden_key`, because
-projects belong to the pod, not to an agent. `POST /api/v1/projects`, `DELETE /api/v1/projects/:name`, every
-`POST .../git/*` route, and `POST .../running/stop` and `POST .../running/start` also need
+projects belong to the pod, not to an agent. `POST /api/v1/projects`, `DELETE /api/v1/projects/:name`, `POST .../running/stop` and `POST .../running/start` also need
 `write: true` (or `admin: true`).
 
 **Feature detection.** `GET /api/v1/capabilities` lists
 `"projects": ["list", "create", "read", "git", "chat", "run", "start", "delete"]`. Show project browsing
-only when the array includes `"list"`, the git UI only when it includes `"git"`,
+only when the array includes `"list"`, the git status view only when it includes `"git"` (read-only: the gateway has no route that changes a repository),
 and [project-bound chat](/api/sessions#post-apiv1agentsagentidsessions) only when
 it includes `"chat"`. An older gateway omits the key, or lists projects without
 `"git"`, `"chat"` or `"run"`. Show running status and the Stop button only when it includes `"run"`, the Start button only when it includes `"start"`, and the Delete action only when it includes `"delete"`.
@@ -226,71 +225,34 @@ symlink whose target is outside the project returns `403 path_escape`.
 
 ## Git {#git}
 
-The git routes act on a project that is a git repository. A project is a
-repository only when its own directory holds the repository. A plain folder
-inside a repository is not one. The gateway runs `git` directly, never through
-a shell, and never prompts for credentials (`GIT_TERMINAL_PROMPT=0`). It
-never forces, never skips hooks, and never resets, checks out, or deletes
-anything.
+The git routes read the status of a project that is a git repository. They
+change nothing. A project is a repository only when its own directory holds the
+repository. A plain folder inside a repository is not one. The gateway runs `git`
+directly, never through a shell, and never prompts for credentials
+(`GIT_TERMINAL_PROMPT=0`). To change a repository (commit, push, pull), use the
+git connector or the code editor. The one write is `git_init` on
+[`POST /api/v1/projects`](#post-projects), which runs `git init -q` in the new,
+empty directory.
 
-The repository's own config cannot choose which command git runs to reach a
-remote. `core.sshCommand` and `core.askPass` in a repository's `.git/config`
-are ignored and `core.fsmonitor` is turned off. Every `filter.<name>.clean`,
-`smudge` and `process` command that the repository's own config defines is
-blanked for every git call that could run one, including the status read
-behind the project list. The operator's own filters, such as `git lfs install`
-in `~/.gitconfig`, still run. A repository that defines its filters locally
-(`git lfs install --local`) therefore commits and checks out the raw file
-instead of the filtered one. A filter name holding `=` cannot be blanked, so
-git calls on that repository fail with `500 git_failed`. The operator's values from
-`/etc/gitconfig`, `~/.gitconfig` and `GIT_CONFIG_*` still apply. When the
-operator sets no `core.sshCommand`, git uses `ssh -o BatchMode=yes`. When the
-operator sets no `core.askPass`, it answers every prompt with an empty
-string. A `GIT_SSH_COMMAND` or `GIT_ASKPASS` in the gateway's environment
-still wins, as it does for git itself. Hooks are the repository's own and
-still run. `credential.helper` set in a repository still runs.
+Git, and every filter it starts, gets only these environment variables from the
+gateway. Everything else, including the gateway's own API keys, bot tokens and
+provider keys, is dropped.
 
-Git, and every hook, filter and credential helper it starts, gets only these
-environment variables from the gateway. Everything else, including the
-gateway's own API keys, bot tokens and provider keys, is dropped.
+| Variables | Why |
+| --------- | --- |
+| `PATH` | Finds `git` and the operator's filter programs, such as `git-lfs`. |
+| `HOME`, `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM` | Select the operator's config files: filters (`git lfs install`), `safe.directory`. |
+| `TMPDIR` | Temporary files. |
 
-| Group | Variables |
-| ----- | --------- |
-| Basics | `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `TERM`, `TZ`, `LANG`, `LANGUAGE`, `LC_*` (git itself runs with `LC_ALL=C`) |
-| XDG and desktop | `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` |
-| Agents | `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GNUPGHOME`, `GPG_TTY` |
-| TLS and proxy | `SSL_CERT_FILE`, `SSL_CERT_DIR`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and the lower-case forms |
-| Credential helpers | `GH_HOST`, `GH_CONFIG_DIR` |
-| Forge tokens, `fetch`, `pull` and `push` only | `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` |
-| Git settings | `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>` |
-
-The forge tokens reach only the git calls that talk to a remote, `fetch`, `pull`
-and `push`, where a credential helper needs them. `add`, `commit`, `status`,
-`init` and the reads never get them, so a commit hook cannot read them. A hook
-or filter that runs during a fetch or push can still read them. Do not set
-them in the gateway's environment unless every project's hooks may use them.
-`GIT_DIR`, `GIT_WORK_TREE` and `GIT_TERMINAL_PROMPT` from the gateway's
-environment are never passed.
-
-Reads run with `core.fsmonitor` turned off, so listing projects never runs a
-command from a repository's config. When git runs past its time limit, the
-gateway stops git and every process git started, such as hooks, filters, and
-ssh. It sends `SIGTERM` first so git removes its lock files, then `SIGKILL`
-one second later.
-
-Only one mutating git route runs per project at a time. A second one gets
-`409 busy`. Reads never wait for a mutation.
-
-A mutating route reads the status before and after it runs git, with a 10
-second limit for each read. When git succeeded but the status read after it
-fails, the route still returns its success code. The status in the body is
-then `null`: the whole body for `init`, `fetch`, and `identity`, and the
-`status` field for `commit`, `pull`, and `push`. Fetch
-[the status](#get-git) again to show it.
+Git itself runs with `LC_ALL=C` and `GIT_OPTIONAL_LOCKS=0`, so a status read
+never takes `.git/index.lock` from a git command you run in the same folder.
+`GIT_DIR` and `GIT_WORK_TREE` from the gateway's environment are never passed.
+When git runs past its time limit, the gateway stops git and every process git
+started, such as filters. It sends `SIGTERM` first so git removes its lock files,
+then `SIGKILL` one second later.
 
 Credentials in a remote URL (`https://user:token@host/x`) are removed from
-every response and log line. Git's own output never reaches the client, except
-for the `detail` of `hook_failed`.
+every response and log line. Git's own output never reaches the client.
 
 ### GitStatus {#git-status}
 
@@ -309,8 +271,6 @@ for the `detail` of `hook_failed`.
 | `truncated` | `boolean` | `changes` was cut at 200. |
 | `last_commit` | `GitCommitInfo \| null` | The HEAD commit. |
 | `operation` | `string` | `none`, `merge`, `rebase`, `cherry_pick`, `revert`, or `bisect`. |
-| `identity_configured` | `boolean` | `user.name` and `user.email` both resolve for this repository. |
-| `sensitive_untracked` | `string[]` | Paths that a commit would newly add and that look like secrets: untracked and not ignored, staged as added, added with `git add -N`, or the new name of a rename or copy. Not capped. The name is kept for compatibility. |
 
 #### Sync values {#git-sync}
 
@@ -319,12 +279,12 @@ for the `detail` of `hook_failed`.
 | `in_sync`, `ahead`, `behind`, `diverged` | Compared with the upstream, as of the last fetch. |
 | `no_upstream` | A remote exists but the branch tracks nothing. Also a branch with no commits whose upstream has no commits online, such as a clone of an empty repository. |
 | `upstream_gone` | The branch has commits and an upstream setting, but no online copy was found: it was removed, or it was never fetched. |
-| `upstream_mismatch` | The upstream is not a branch of the same name on a configured remote, such as a branch made with `git checkout -b feature origin/main`, or one that tracks a local branch. `ahead` and `behind` are still reported. `push` refuses it with `409 upstream_mismatch`. |
+| `upstream_mismatch` | The upstream is not a branch of the same name on a configured remote, such as a branch made with `git checkout -b feature origin/main`, or one that tracks a local branch. `ahead` and `behind` are still reported. |
 | `no_remote` | The repository has no remote. |
 | `detached` | HEAD is detached. |
 
 A branch with no commits whose upstream has commits online reports `behind`
-with `has_commits: false`, and `pull` fast-forwards it.
+with `has_commits: false`.
 
 `GitFileChange` is `{ path, orig_path?, staged, unstaged }`. `path` is relative
 to the project with forward slashes. `orig_path` is set for renames and copies.
@@ -338,12 +298,6 @@ three, else `null`.
 
 `GitCommitInfo` is `{ sha, subject, author, committed_at }`, with
 `committed_at` in ISO 8601.
-
-A file looks like a secret when its name is `.env`, `.env.*` (except
-`.env.example`, `.env.sample`, `.env.template`), `*.pem`, `*.key`, `id_rsa`,
-`id_dsa`, `id_ecdsa`, `id_ed25519`, `*.p12`, `*.pfx`, `.npmrc`,
-`credentials.json`, `service-account*.json`, `.netrc`, or `.git-credentials`.
-The match ignores case, so `.ENV` and `ID_RSA` count too.
 
 ### GET /api/v1/projects/git-summary {#get-git-summary}
 
@@ -393,133 +347,16 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/app/
   "conflicted_count": 0,
   "truncated": false,
   "last_commit": { "sha": "5e67…", "subject": "Update readme", "author": "Ann Dev", "committed_at": "2026-10-07T12:20:33+07:00" },
-  "operation": "none",
-  "identity_configured": true,
-  "sensitive_untracked": [".env"]
+  "operation": "none"
 }
 ```
-
-### POST /api/v1/projects/:name/git/init {#post-git-init}
-
-Runs `git init` in a project that is not yet a repository. Returns `201` with
-a [GitStatus](#git-status) or `null`, or `409 already_a_git_repo`.
-
-### POST /api/v1/projects/:name/git/fetch {#post-git-fetch}
-
-Runs `git fetch --prune` from the status's `remote`. Returns `200` with a
-[GitStatus](#git-status), whose `ahead` and `behind` are now current, or `null`.
-
-### POST /api/v1/projects/:name/git/identity {#post-git-identity}
-
-Writes `user.name` and `user.email` to the repository's own config. Refused
-with `409 identity_already_set` when both already resolve, from any config
-file. Returns `200` with a [GitStatus](#git-status) or `null`.
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | 1 to 100 characters after trimming, with no `<`, `>`, or control characters. |
-| `email` | Yes | One `@`, no whitespace, `<`, or `>`, at most 254 characters. |
-
-### POST /api/v1/projects/:name/git/commit {#post-git-commit}
-
-Stages every change (`git add -A`), then commits. Returns `201` with
-`{ commit: GitCommitInfo | null, status: GitStatus | null }`. `commit` is
-`null` only when the gateway could not read the new commit back; the commit
-was still made. Hooks run, with a 60 second limit.
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `message` | Yes | The commit message. Trimmed. Empty means `400 message_required`. |
-| `allow_sensitive` | No | `string[]`, the secret-looking paths the user confirmed. The commit runs only when every path in the current `sensitive_untracked` is in this list. Otherwise the response is `409 sensitive_files`, whose `paths` lists the current paths that were not confirmed. Paths in the list that are no longer in `sensitive_untracked` are ignored. Any value that is not an array of strings, such as `true`, gets `400 invalid_allow_sensitive`. |
-
-```bash
-curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"message":"Update readme"}' http://localhost:10850/api/v1/projects/app/git/commit
-```
-
-```json
-{ "error": "New files look like secrets", "code": "sensitive_files", "paths": [".env"] }
-```
-
-Send the paths the user saw and confirmed, not a stored list from an earlier
-status. A secret file that appears after the user looked is then refused again.
-
-```bash
-curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"message":"Update readme","allow_sensitive":[".env"]}' http://localhost:10850/api/v1/projects/app/git/commit
-```
-
-The commit is refused while conflicts exist (`conflicts_present`), during a
-merge or similar (`operation_in_progress`), on a detached HEAD
-(`detached_head`), with nothing to commit (`nothing_to_commit`), or without an
-identity (`identity_missing`). When `git commit` itself fails, a locked index
-(`index_locked`), nothing left to commit after staging (`nothing_to_commit`),
-and a timeout (`timeout`) are reported first. Any other failure in a
-repository with a `pre-commit`, `prepare-commit-msg`, or `commit-msg` hook is
-`422 hook_failed`, with the output in `detail` cut to 2000 bytes, even when
-the hook printed text that looks like a network or credential error. The
-changes stay staged.
-
-### POST /api/v1/projects/:name/git/pull {#post-git-pull}
-
-Fetches the upstream's remote, then fast-forwards with
-`git merge --ff-only @{upstream}`. `pull.rebase` and similar settings do not
-apply. Returns `200` with `{ result: "up_to_date" | "fast_forwarded", status: GitStatus | null }`.
-A diverged branch gets `409 not_fast_forward`. A branch whose upstream was
-deleted on the remote gets `409 no_upstream`. A branch with no commits
-fast-forwards to its upstream when the upstream has commits online, and gets
-`409 no_upstream` when it has none. Local changes that the
-fast-forward would overwrite get `409 dirty_would_overwrite`, and stay as they
-were.
-
-### POST /api/v1/projects/:name/git/push {#post-git-push}
-
-Pushes the current branch to its upstream with an explicit, unforced refspec,
-so a `+` refspec in `remote.<name>.push` never applies. A branch with no
-commits gets `409 no_commits`, with or without an upstream. When `sync` is
-`upstream_mismatch`, the response is `409 upstream_mismatch` and nothing is
-pushed. With no upstream, it publishes the branch under the same name with
-`git push -u -- <remote> <branch>` to the status's `remote`, the same remote
-`fetch` uses. A `branch.<name>.remote` setting that names a remote that no
-longer exists counts as no upstream. Both pushes pass the remote name after `--`, so a remote
-named like an option, such as `--receive-pack=...`, is never read as one. When several remotes
-leave `remote` as `null` (none is the upstream's or is named `origin`), the
-response is `409 no_upstream`.
-When `sync` is `upstream_gone`, the push publishes the branch again to the
-same remote. Returns `200` with `{ status: GitStatus | null }`. A push the remote rejects as
-non-fast-forward gets `409 not_fast_forward`. A push the remote refuses for
-another reason, such as a protected branch or a server hook, gets
-`409 remote_rejected`.
 
 ### Git errors {#git-errors}
 
 | Status | `code` | When |
 |--------|--------|------|
-| 400 | `message_required` | `commit` without a non-empty `message`. |
-| 400 | `invalid_allow_sensitive` | `commit` with an `allow_sensitive` that is not an array of strings. |
-| 400 | `invalid_identity` | `identity` with a missing or invalid `name` or `email`. |
 | 409 | `not_a_git_repo` | The project is not a repository. |
-| 409 | `already_a_git_repo` | `init` on a repository. |
-| 409 | `nothing_to_commit` | `commit` on a clean tree. |
-| 409 | `identity_missing` | `commit` without `user.name` and `user.email`. |
-| 409 | `identity_already_set` | `identity` when both already resolve. |
-| 409 | `sensitive_files` | `commit` would newly add secret-looking files that `allow_sensitive` does not list. The body has `paths`, the unconfirmed ones. |
-| 409 | `conflicts_present` | `commit`, `pull`, or `push` while files have merge conflicts. |
-| 409 | `operation_in_progress` | `commit`, `pull`, or `push` during a merge, rebase, cherry-pick, revert, or bisect. |
-| 409 | `not_fast_forward` | `pull` on a diverged branch, or `push` rejected as non-fast-forward. |
-| 409 | `remote_rejected` | `push` refused by the remote, such as a protected branch or a server hook. |
-| 409 | `dirty_would_overwrite` | `pull` blocked by local changes. |
-| 409 | `no_remote` | `fetch`, `pull`, or `push` without a remote. |
-| 409 | `no_upstream` | `pull` without an upstream or with one that was deleted on the remote, or `push` without one when the status `remote` is `null` because several remotes exist and none is named `origin`. |
-| 409 | `upstream_mismatch` | `push` when `sync` is `upstream_mismatch`. |
-| 409 | `no_commits` | `push` on a branch with no commits (`has_commits` is `false`). |
-| 409 | `detached_head` | `commit`, `pull`, or `push` on a detached HEAD. |
-| 409 | `busy` | Another git operation is running on this project. |
-| 409 | `index_locked` | `.git/index.lock` exists, usually from another git process. |
-| 422 | `hook_failed` | A commit failed in a repository with a commit hook, and the failure was not a locked index, nothing to commit, or a timeout. The body has `detail`, at most 2000 bytes. |
-| 502 | `auth_failed` | The remote refused the credentials, or none were available. |
-| 502 | `network` | The remote could not be reached. |
-| 504 | `timeout` | Git ran past its limit: 3 seconds for the `GET` routes, 10 seconds for `init`, `identity`, and the status reads around every mutating route, 60 seconds for fetch, pull, push, and commit. |
+| 504 | `timeout` | Git ran past its limit of 3 seconds. |
 | 500 | `git_failed` | Any other git failure. Git's output is not returned. |
 
 ## Running processes {#running}

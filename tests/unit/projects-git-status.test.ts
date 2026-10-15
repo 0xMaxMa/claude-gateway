@@ -1,11 +1,9 @@
-import { hookDetail } from '../../src/projects/git';
 import {
   buildStatus,
   CHANGES_LIMIT,
   deriveSync,
   describeRemote,
   GitSync,
-  isSensitiveName,
   parseRepoConfig,
   parseStatusV2,
   redactCredentials,
@@ -15,7 +13,7 @@ import {
 const z = (...records: string[]) => records.join('\0') + '\0';
 const OID = 'f07dfbfee2ce06e378dac2f416a12cd82cad3aee';
 const H = '5e6775136ae8952f8f3d416f648e964ef25d68ee';
-const noConfig: RepoConfig = { remotes: [], userName: null, userEmail: null, sshCommand: null, branches: {} };
+const noConfig: RepoConfig = { remotes: [], branches: {} };
 
 describe('parseStatusV2', () => {
   it('reads branch headers with upstream and ahead/behind', () => {
@@ -100,20 +98,14 @@ describe('deriveSync', () => {
 });
 
 describe('parseRepoConfig', () => {
-  it('reads remotes, identity, sshCommand and branch tracking from get-regexp -z output', () => {
+  it('reads remotes and branch tracking from get-regexp -z output', () => {
     const raw = z(
-      'user.email\nme@example.com',
-      'user.name\nMe',
-      'core.sshcommand\nssh -v',
       'remote.My.Remote.url\nhttps://u:p@h/x',
       'branch.feat.x.remote\nMy.Remote',
       'branch.feat.x.merge\nrefs/heads/feat.x',
     );
     expect(parseRepoConfig(raw)).toEqual({
       remotes: [{ name: 'My.Remote', url: 'https://u:p@h/x' }],
-      userName: 'Me',
-      userEmail: 'me@example.com',
-      sshCommand: 'ssh -v',
       branches: { 'feat.x': { remote: 'My.Remote', merge: 'refs/heads/feat.x' } },
     });
   });
@@ -168,51 +160,6 @@ describe('redactCredentials cost', () => {
     redactCredentials('&a'.repeat(50_000));
     expect(Date.now() - t0).toBeLessThan(100);
   });
-
-  it('hookDetail cuts before redacting', () => {
-    const t0 = Date.now();
-    const detail = hookDetail({ code: 1, stdout: 'a.'.repeat(500_000), stderr: '' });
-    expect(Date.now() - t0).toBeLessThan(100);
-    expect(detail.length).toBeLessThanOrEqual(2000);
-  });
-
-  it('hookDetail stays fast and keeps its diagnostics on an adversarial 1 MB output', () => {
-    const shapes = ['a'.repeat(65_535) + ' ' + 'b'.repeat(1_000_000), 'a'.repeat(65_534) + '  ' + 'b'.repeat(1_000_000), 'x'.repeat(1_000_000)];
-    for (const stdout of shapes) {
-      const t0 = Date.now();
-      const detail = hookDetail({ code: 1, stdout, stderr: '' });
-      expect(Date.now() - t0).toBeLessThan(100);
-      expect(detail.length).toBeGreaterThan(0);
-    }
-  });
-
-  it('hookDetail drops an unterminated userinfo at the cut when no whitespace is near', () => {
-    const text = `${'a'.repeat(64 * 1024 - 600)}\nhttps://user:${'S'.repeat(5000)}@host/x`;
-    const detail = hookDetail({ code: 1, stdout: text, stderr: '' });
-    expect(detail).not.toContain('SSS');
-  });
-
-  it('hookDetail leaks no part of a credential that straddles the 64K cut', () => {
-    const cut = 64 * 1024;
-    for (const offset of [1, 3, 8, 12, 20]) {
-      const url = 'https://user:SUPERSECRETTOKEN@host/x';
-      const filler = `://${'a'.repeat(997)}@ `.repeat(Math.ceil(cut / 1000));
-      const text = `${filler.slice(0, cut - offset)}${url}`;
-      const detail = hookDetail({ code: 1, stdout: text, stderr: '' });
-      expect(detail).not.toContain('SUPERSECRET');
-      expect(detail).not.toContain('user:');
-    }
-  });
-});
-
-describe('isSensitiveName', () => {
-  it.each(['.env', '.env.local', 'cfg/.env.production', 'a.pem', 'k.key', 'id_rsa', 'id_ed25519', 'c.p12', 'c.pfx', '.npmrc', 'credentials.json', 'service-account-prod.json', '.netrc', '.ENV', '.Env.Local', 'ID_RSA', 'Server.PEM', 'id_ecdsa', 'id_dsa', '.git-credentials'])(
-    '%s is sensitive',
-    (f) => expect(isSensitiveName(f)).toBe(true),
-  );
-  it.each(['.env.example', '.env.sample', '.env.template', 'env.ts', 'id_rsa.pub', 'keys.json', 'my.envrc'])('%s is not', (f) =>
-    expect(isSensitiveName(f)).toBe(false),
-  );
 });
 
 describe('buildStatus', () => {
@@ -228,33 +175,11 @@ describe('buildStatus', () => {
     ),
   );
 
-  it('sorts conflicted, staged, unstaged, untracked and counts conflicts and secrets', () => {
+  it('sorts conflicted, staged, unstaged, untracked and and counts conflicts', () => {
     const s = buildStatus({ parsed, config: noConfig, lastCommit: null, operation: 'merge' });
     expect(s.changes.map((c) => c.path)).toEqual(['d.txt', 'c.txt', 'b.txt', '.env.example', 'z/.env']);
     expect([s.change_count, s.conflicted_count, s.truncated]).toEqual([5, 1, false]);
-    expect(s.sensitive_untracked).toEqual(['z/.env']);
-    expect([s.branch, s.sync, s.identity_configured]).toEqual(['main', 'no_remote', false]);
-  });
-
-  it('flags only secret paths that HEAD lacks and git add -A would commit', () => {
-    const s = buildStatus({
-      parsed: parseStatusV2(
-        z(
-          `# branch.oid ${OID}`,
-          '# branch.head main',
-          `1 M. N... 100644 100644 100644 ${H} ${H} tracked.pem`,
-          `1 AD N... 000000 100644 000000 ${'0'.repeat(40)} ${H} added-then-deleted.key`,
-          `1 A. N... 000000 100644 100644 ${'0'.repeat(40)} ${H} staged.key`,
-          `1 .A N... 000000 000000 100644 ${'0'.repeat(40)} ${'0'.repeat(40)} ita.key`,
-          `2 R. N... 100644 100644 100644 ${H} ${H} R100 renamed.key`,
-          'notes.txt',
-        ),
-      ),
-      config: noConfig,
-      lastCommit: null,
-      operation: 'none',
-    });
-    expect([...s.sensitive_untracked].sort()).toEqual(['ita.key', 'renamed.key', 'staged.key']);
+    expect([s.branch, s.sync]).toEqual(['main', 'no_remote']);
   });
 
   it('caps changes but reports the true count', () => {

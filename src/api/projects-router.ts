@@ -4,7 +4,7 @@ import { ApiKey } from '../types';
 import { createApiAuthMiddleware, canAccessPod } from './auth';
 import { defineRoute } from './route-registry';
 import { createProject, listDir, resolveProjectDir, listProjects, readFileContent } from '../projects/fs';
-import { commitAll, fetchRemote, getStatus, getSummaries, GitError, GitErrorCode, initRepo, parseCommitRequest, parseIdentity, pullFastForward, pushBranch, setIdentity } from '../projects/git';
+import { getStatus, getSummaries, GitError, GitErrorCode } from '../projects/git';
 import { listRunning, ProjectDir, RunningErrorCode, scanProjects, StopLimiter, stopRunning, Sys, systemSys } from '../projects/running';
 import { planStart, PORT_MIN, readStartFacts, startProject, StartError, StartErrorCode, StartGuard, Launcher, systemLauncher } from '../projects/start';
 import { DeleteErrorCode, removeProject } from '../projects/delete';
@@ -27,30 +27,7 @@ const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode | Start
   project_exists: { status: 409, message: 'Project already exists' },
   internal: { status: 500, message: 'Internal error' },
   not_a_git_repo: { status: 409, message: 'Project is not a git repository' },
-  already_a_git_repo: { status: 409, message: 'Project is already a git repository' },
-  nothing_to_commit: { status: 409, message: 'Nothing to commit' },
-  message_required: { status: 400, message: 'A commit message is required' },
-  identity_missing: { status: 409, message: 'Git user.name and user.email are not set' },
-  identity_already_set: { status: 409, message: 'Git identity is already configured' },
-  invalid_identity: { status: 400, message: 'Invalid git name or email' },
-  sensitive_files: { status: 409, message: 'New files look like secrets' },
-  invalid_allow_sensitive: { status: 400, message: 'allow_sensitive must be an array of paths' },
-  conflicts_present: { status: 409, message: 'Resolve merge conflicts first' },
-  operation_in_progress: { status: 409, message: 'A merge, rebase or similar operation is in progress' },
-  not_fast_forward: { status: 409, message: 'Branch has diverged from its upstream' },
-  remote_rejected: { status: 409, message: 'The git remote refused the update' },
-  dirty_would_overwrite: { status: 409, message: 'Local changes would be overwritten' },
-  no_remote: { status: 409, message: 'No git remote is configured' },
-  no_upstream: { status: 409, message: 'Branch has no upstream' },
-  upstream_mismatch: { status: 409, message: 'Branch tracks an upstream with a different name' },
-  no_commits: { status: 409, message: 'Branch has no commits to publish' },
-  detached_head: { status: 409, message: 'HEAD is detached' },
-  auth_failed: { status: 502, message: 'The git remote refused the credentials' },
-  network: { status: 502, message: 'Could not reach the git remote' },
   timeout: { status: 504, message: 'Git took too long' },
-  hook_failed: { status: 422, message: 'A git hook rejected the commit' },
-  busy: { status: 409, message: 'Another git operation is running on this project' },
-  index_locked: { status: 409, message: 'The git index is locked' },
   git_failed: { status: 500, message: 'Git failed' },
   nothing_running: { status: 409, message: 'Nothing is running in this project' },
   invalid_port: { status: 400, message: 'port must be an integer between 1 and 65535' },
@@ -292,51 +269,6 @@ export function createProjectsRouter(
       respond(res, result);
     }),
   );
-
-  const mutations: Array<{
-    action: string;
-    summary: string;
-    status: number;
-    run: (name: ProjectName, body: unknown) => Promise<Result<unknown, ProjectsErrorCode | GitError>>;
-  }> = [
-    { action: 'init', summary: 'Initialise a git repository in a project', status: 201, run: (name) => initRepo(root, name) },
-    { action: 'fetch', summary: "Fetch and prune the project's git remote", status: 200, run: (name) => fetchRemote(root, name) },
-    {
-      action: 'identity',
-      summary: 'Set the repository-local git user.name and user.email',
-      status: 200,
-      run: async (name, body) => {
-        const id = parseIdentity(body);
-        return id.ok ? setIdentity(root, name, id.value) : id;
-      },
-    },
-    {
-      action: 'commit',
-      summary: 'Stage every change in a project and commit it',
-      status: 201,
-      run: async (name, body) => {
-        const req = parseCommitRequest(body);
-        return req.ok ? commitAll(root, name, req.value) : req;
-      },
-    },
-    { action: 'pull', summary: 'Fast-forward a project to its upstream', status: 200, run: (name) => pullFastForward(root, name) },
-    { action: 'push', summary: 'Push a project branch without force', status: 200, run: (name) => pushBranch(root, name) },
-  ];
-
-  for (const m of mutations) {
-    defineRoute(
-      router,
-      { method: 'POST', path: `/v1/projects/:name/git/${m.action}`, auth: 'key', summary: m.summary, cli: null },
-      auth,
-      requirePod,
-      requireWrite,
-      handle(async (req, res) => {
-        const name = parseProjectName(req.params.name);
-        if (!name.ok) return fail(res, name.error);
-        respond(res, await m.run(name.value, req.body), m.status);
-      }),
-    );
-  }
 
   return router;
 }
