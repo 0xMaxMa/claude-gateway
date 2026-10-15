@@ -276,6 +276,50 @@ describe('filter drivers the repository defines', () => {
     expect(summary).toMatchObject({ ok: true, value: { summaries: { good: expect.objectContaining({ branch: 'main' }), bad: null } } });
   });
 
+  describe('bytes that are not valid UTF-8', () => {
+    const NAMES: Array<[string, Buffer]> = [
+      ['a lone latin-1 byte', Buffer.from('caf\xe9', 'latin1')],
+      ['0xff', Buffer.from([0x61, 0xff, 0x62])],
+      ['a truncated sequence', Buffer.from([0x61, 0xc3])],
+      ['a CESU-8 surrogate', Buffer.from([0x61, 0xed, 0xa0, 0x80])],
+    ];
+    const bytesIn = (dir: string, file: string, parts: Array<string | Buffer>) => {
+      fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+      fs.appendFileSync(path.join(dir, file), Buffer.concat(parts.map((p) => (typeof p === 'string' ? Buffer.from(p) : p))));
+    };
+
+    it.each(NAMES)('runs nothing for a filter driver named with %s, and reports the repository unreadable', async (_label, driver) => {
+      const dir = makeRepo('hostile');
+      bytesIn(dir, '.git/config', ['[filter "', driver, `"]\n\tclean = ${filterScript}\n\tsmudge = ${filterScript}\n`]);
+      bytesIn(dir, '.git/info/attributes', ['* filter=', driver, '\n']);
+      touchAll(dir);
+      expect(await controlRuns(dir)).toBe(true);
+      touchAll(dir);
+      const { ran, detail, summary } = await gatewayRuns('hostile');
+      expect(ran).toBe(false);
+      expect(detail).toEqual({ ok: false, error: { code: 'git_unreadable' } });
+      expect(summary).toMatchObject({ ok: true, value: { summaries: { hostile: null } } });
+    });
+
+    it('still reads a repository whose include path and attribute files hold invalid UTF-8, and blanks its valid-named driver', async () => {
+      const dir = makeRepo('hostile');
+      const odd = Buffer.from('caf\xe9', 'latin1');
+      const included = Buffer.concat([Buffer.from(base + '/inc-'), odd, Buffer.from('.cfg')]);
+      fs.writeFileSync(included, `[filter "evil"]\n\tclean = ${filterScript}\n`);
+      bytesIn(dir, '.git/config', ['[include]\n\tpath = ', included, '\n']);
+      const attrFile = Buffer.concat([Buffer.from(base + '/attr-'), odd]);
+      fs.writeFileSync(attrFile, Buffer.concat([Buffer.from('caf'), Buffer.from([0xe9]), Buffer.from('.txt filter=evil\n*.txt filter=evil\n*.bin filter=evil\n')]));
+      bytesIn(dir, '.git/config', ['[core]\n\tattributesFile = ', attrFile, '\n']);
+      bytesIn(dir, '.git/info/attributes', [Buffer.from([0x63, 0xe9]), '.bin filter=evil\n*.bin filter=evil\n']);
+      touchAll(dir);
+      expect(await controlRuns(dir)).toBe(true);
+      touchAll(dir);
+      const { ran, detail } = await gatewayRuns('hostile');
+      expect(ran).toBe(false);
+      expect(detail.ok).toBe(true);
+    });
+  });
+
   it('refuses a repository that defines more drivers than it blanks', async () => {
     const dir = makeRepo('many');
     for (let i = 0; i < 80; i++) git(dir, 'config', `filter.f${i}.clean`, filterScript);

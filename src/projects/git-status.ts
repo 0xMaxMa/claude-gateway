@@ -181,6 +181,31 @@ export interface ConfigList {
   filterKeys: string[];
 }
 
+/**
+ * True when a repository-scope `filter.*` key in the raw `git config -z` output is not valid UTF-8. Environment values
+ * are UTF-8 strings, so such a key cannot be passed back byte for byte, and a lossy copy would blank a different
+ * driver. The caller refuses the repository instead.
+ */
+export function hasUndecodableFilterKey(raw: Buffer): boolean {
+  const strict = new TextDecoder('utf-8', { fatal: true });
+  const fields: Buffer[] = [];
+  for (let start = 0; start <= raw.length; ) {
+    const end = raw.indexOf(0, start);
+    fields.push(raw.subarray(start, end < 0 ? raw.length : end));
+    if (end < 0) break;
+    start = end + 1;
+  }
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    if (!REPO_SCOPES.has(fields[i].toString('latin1'))) continue;
+    const entry = fields[i + 1];
+    const nl = entry.indexOf(10);
+    const key = nl < 0 ? entry : entry.subarray(0, nl);
+    if (!key.subarray(0, 7).equals(Buffer.from('filter.'))) continue;
+    try { strict.decode(key); } catch { return true; }
+  }
+  return false;
+}
+
 /** What `git config --list -z --show-scope` prints: `scope NUL key NL value NUL` per entry, a valueless key without the NL. */
 export function parseConfigList(raw: string): ConfigList {
   const cfg: RepoConfig = { remotes: [], branches: {} };

@@ -12,6 +12,8 @@ export interface GitOutput {
   /** Exit code; a non-zero exit is data for the caller to classify, not a failure here. */
   code: number;
   stdout: string;
+  /** The bytes behind `stdout`, for output whose text is not guaranteed to be UTF-8. */
+  stdoutBytes: Buffer;
   stderr: string;
 }
 
@@ -136,7 +138,7 @@ export async function runGit(cwd: string, args: string[], opts: RunOptions): Pro
     });
     const finish = (code: number | null) => {
       if (code === null) return settle(err('git_failed'));
-      settle(ok({ code, stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8') }));
+      settle(ok({ code, stdout: Buffer.concat(stdout).toString('utf8'), stdoutBytes: Buffer.concat(stdout), stderr: Buffer.concat(stderr).toString('utf8') }));
     };
     child.on('close', finish);
     // A hook's backgrounded child keeps the pipes open long after git is done; take what arrived and let go.

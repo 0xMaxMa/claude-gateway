@@ -8,6 +8,7 @@ import {
   GitOperation,
   GitStatus,
   GitSummary,
+  hasUndecodableFilterKey,
   parseConfigList,
   parseStatusV2,
   toSummary,
@@ -89,11 +90,12 @@ async function readRepo(dir: string, read: ReadOptions): Promise<GitResult<GitSt
   const listed = await runGit(dir, ['config', '--list', '-z', '--show-scope'], { timeoutMs: read.timeoutMs });
   if (!listed.ok) return fail(listed.error);
   if (listed.value.code !== 0) return err(await readFailure(dir, listed.value));
+  if (hasUndecodableFilterKey(listed.value.stdoutBytes)) return fail('git_unreadable');
   const { config, filterKeys } = parseConfigList(listed.value.stdout);
   if (filterKeys.length > MAX_BLANKED_FILTER_KEYS || filterKeys.some((k) => k.length > MAX_FILTER_KEY)) return fail('git_unreadable');
 
   const opts = { timeoutMs: Math.max(read.timeoutMs - (Date.now() - started), 1), blankFilterKeys: filterKeys };
-  const skipped = Promise.resolve(ok({ code: 0, stdout: '', stderr: '' }));
+  const skipped = Promise.resolve(ok({ code: 0, stdout: '', stdoutBytes: Buffer.alloc(0), stderr: '' }));
   const full = read.commitAndOperation;
   const runs = await Promise.all([
     full ? runGit(dir, ['rev-parse', '--absolute-git-dir'], opts) : skipped,
