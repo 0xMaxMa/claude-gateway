@@ -1,5 +1,5 @@
 import { decodeVoiceFrame } from '../../../src/voice/protocol';
-import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, voiceCallLevel, voiceCallTicketFailure } from '../../../src/ui/voice-call-client';
+import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, voiceCallLevel, voiceCallTicketFailure, voiceCallTheme } from '../../../src/ui/voice-call-client';
 import { generateVoiceCallPage } from '../../../src/ui/voice-call-ui';
 
 const sine = (frequency: number, rate: number, samples: number, amplitude = 0.5) =>
@@ -145,7 +145,7 @@ test('playhead reports monotonic heard samples, never more than received', () =>
 
 describe('page', () => {
   const html = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: '<agent>', basePath: '/gateway', maxUtteranceMs: 60000 });
-  const script = html.match(/<script>([\s\S]*)<\/script>/)![1];
+  const script = inlineScripts(html);
 
   test('the inline script is valid JavaScript with every client function embedded', () => {
     expect(() => new Function(script)).not.toThrow();
@@ -201,9 +201,10 @@ const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(reso
  * `audioNeedsTap` models Telegram's Android WebView, where audio stays suspended
  * until the first touch, and `micNeedsTap` a WebView that grants the microphone only from a tap.
  */
-async function openPage(options: { tickets?: { status: number; body: string }[]; audioNeedsTap?: boolean; micNeedsTap?: boolean; micDenied?: boolean; storage?: Map<string, string> } = {}) {
-  const html = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'agent', basePath: '/gateway', maxUtteranceMs: 60000 });
-  const script = html.match(/<script>([\s\S]*)<\/script>/)![1];
+async function openPage(options: { tickets?: { status: number; body: string }[]; audioNeedsTap?: boolean; micNeedsTap?: boolean; micDenied?: boolean; storage?: Map<string, string>;
+  linkUsed?: boolean; telegramTheme?: { colorScheme: string; themeParams: Record<string, string> }; prefersLight?: boolean } = {}) {
+  const html = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'agent', basePath: '/gateway', maxUtteranceMs: 60000, linkUsed: options.linkUsed });
+  const script = inlineScripts(html);
   type Element = { textContent: string; className: string; hidden: boolean; src?: string; onclick: null | (() => void); onload?: () => void;
     attributes: Record<string, string>; style: Record<string, string> & { setProperty(name: string, value: string): void }; setAttribute(name: string, value: string): void };
   const elements = new Map<string, Element>();
@@ -213,7 +214,11 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
     setAttribute(name: string, value: string) { this.attributes[name] = value; },
   }).get(id)!;
   const noop = () => undefined;
-  const tg = { initData: 'signed', ready: noop, expand: noop, onEvent: noop, enableClosingConfirmation: noop, disableClosingConfirmation: noop, close: noop };
+  const handlers: Record<string, (() => void)[]> = {};
+  const tg = { initData: 'signed', ready: noop, expand: noop, enableClosingConfirmation: noop, disableClosingConfirmation: noop, close: noop,
+    colorScheme: options.telegramTheme?.colorScheme ?? 'light', themeParams: options.telegramTheme?.themeParams ?? {},
+    setHeaderColor: jest.fn(), setBackgroundColor: jest.fn(),
+    onEvent(name: string, handler: () => void) { (handlers[name] ??= []).push(handler); } };
   const track = { enabled: true, stop: noop };
   let touched = false;
   /** Audio nodes record where they connect, so a test can follow reply audio to the speaker. */
@@ -238,8 +243,10 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
   const tickets = [...(options.tickets ?? [TICKET])];
   const fetch = jest.fn(async () => { const next = tickets.shift() ?? TICKET; return { ok: next.status === 200, status: next.status, json: async () => JSON.parse(next.body) }; });
   const location = { protocol: 'https:', host: 'pod.example', reload: jest.fn() };
-  const window = { Telegram: { WebApp: tg }, isSecureContext: true, AudioWorkletNode: FakeWorkletNode };
-  const document = { getElementById: element, addEventListener: noop, visibilityState: 'visible' };
+  const systemTheme = { matches: Boolean(options.prefersLight), listeners: [] as (() => void)[], addEventListener(_: string, listener: () => void) { this.listeners.push(listener); } };
+  const window = { Telegram: { WebApp: tg }, isSecureContext: true, AudioWorkletNode: FakeWorkletNode, matchMedia: (query: string) => { expect(query).toBe('(prefers-color-scheme: light)'); return systemTheme; } };
+  const root = { attributes: {} as Record<string, string>, style: {} as Record<string, string>, setAttribute(name: string, value: string) { this.attributes[name] = value; } };
+  const document = { getElementById: element, addEventListener: noop, visibilityState: 'visible', documentElement: root };
   const getUserMedia = jest.fn(async () => {
     if (options.micDenied || (options.micNeedsTap && !touched)) throw Object.assign(new Error('denied'), { name: 'NotAllowedError' });
     return { getAudioTracks: () => [track], getTracks: () => [track] };
@@ -257,7 +264,15 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
   const tap = async (id: string) => { touched = true; element(id).onclick!(); await settle(); };
   /** The microphone hears `ms` of sound at one level, in the worklet's 40 ms chunks. */
   const hear = (level: number, ms: number) => { for (let t = 0; t < ms; t += 40) worklets.at(-1)!.port.onmessage!({ data: new Float32Array(1920).fill(level) }); };
-  return { element, location, fetch, sockets, getUserMedia, tap, replies, loudness, hear };
+  /** Telegram switches theme, as it does when the user turns on night mode. */
+  const themeChanged = (colorScheme: string, themeParams: Record<string, string>) => { Object.assign(tg, { colorScheme, themeParams }); (handlers.themeChanged ?? []).forEach(handler => handler()); };
+  const systemThemeChanged = (light: boolean) => { systemTheme.matches = light; systemTheme.listeners.forEach(listener => listener()); };
+  return { element, location, fetch, sockets, getUserMedia, tap, replies, loudness, hear, root, tg, themeChanged, systemThemeChanged };
+}
+
+/** Every inline script of a page, in page order, as one script. */
+function inlineScripts(html: string): string {
+  return [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match => match[1]).join(';\n');
 }
 
 describe('page after a refused ticket', () => {
@@ -430,6 +445,46 @@ describe('call page', () => {
     expect(plain).toContain('<div class="avatar" id="avatar" aria-hidden="true">G</div>');
   });
 
+  describe('Thinking as soon as the user stops speaking', () => {
+    const NEXT = { ...LISTENING, utterance_id: '2'.repeat(32) };
+
+    test('the chip turns to Thinking when the words end, holds through the commit and merge window, and gives way to the reply', async () => {
+      const { element, sockets, hear } = await openPage();
+      sockets[0].open(); sockets[0].receive(LISTENING);
+      hear(0.003, 400); hear(0.2, 600);
+      expect(element('call').className).toBe('call listening');
+      hear(0.003, 400);
+      expect(sockets[0].sent).toContainEqual(expect.objectContaining({ type: 'speech.ended' }));
+      expect(element('state').textContent).toBe('Thinking');
+      expect(element('call').className).toBe('call thinking');
+      // The gateway commits the words and opens the next utterance while it waits for more.
+      sockets[0].receive({ type: 'stt.segment', utterance_id: '0'.repeat(32), text: 'Hello', pending_text: 'Hello' });
+      sockets[0].receive(NEXT);
+      expect(element('call').className).toBe('call thinking');
+      sockets[0].receive({ type: 'stt.final', utterance_id: '0'.repeat(32), text: 'Hello' });
+      sockets[0].receive({ type: 'utterance.accepted', utterance_id: '0'.repeat(32), input_id: 'i' });
+      expect(element('call').className).toBe('call thinking');
+      sockets[0].receive({ type: 'playback.start', epoch: 1 });
+      expect(element('call').className).toBe('call speaking');
+    });
+
+    test('speaking again before the answer returns to Listening; sound without words does too', async () => {
+      const { element, sockets, hear } = await openPage();
+      sockets[0].open(); sockets[0].receive(LISTENING);
+      hear(0.003, 400); hear(0.2, 600); hear(0.003, 400);
+      expect(element('state').textContent).toBe('Thinking');
+      sockets[0].receive(NEXT);
+      hear(0.2, 400);
+      expect(element('call').className).toBe('call listening');
+      hear(0.003, 400);
+      expect(element('state').textContent).toBe('Thinking');
+      sockets[0].receive({ type: 'voice.error', code: 'EMPTY_TRANSCRIPT', category: 'no_speech', retryable: true, message: 'No speech was recognized. Please speak again.' });
+      expect(element('call').className).toBe('call listening');
+      sockets[0].receive({ ...NEXT, utterance_id: '3'.repeat(32) });
+      expect(element('call').className).toBe('call listening');
+    });
+  });
+
   describe('Mute sends what was said', () => {
     const frames = (socket: FakeSocket) => socket.sent.filter(data => data instanceof ArrayBuffer).length;
     const mutes = (socket: FakeSocket) => socket.sent.filter(message => message.type === 'voice.mute');
@@ -482,5 +537,90 @@ describe('call page', () => {
       expect(loudness(replies[0])).toBe(1);
       expect(element('mute').attributes['aria-pressed']).toBe('true');
     });
+  });
+});
+
+describe('a used call link', () => {
+  const USED = 'This call link was already used. Send /call again.';
+
+  test('opened again from an old /call button, the page shows only that the link was used: no Starting, no microphone, no ticket, no buttons', async () => {
+    const { element, fetch, getUserMedia, sockets } = await openPage({ linkUsed: true });
+    expect(element('state')).toMatchObject({ textContent: USED, className: 'state err' });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(0);
+    expect(element('controls').hidden).toBe(true);
+    expect(element('start').hidden).toBe(true);
+    expect(element('hint').hidden).toBe(true);
+  });
+
+  test('the page that holds the call token (a reload of the same call) still rejoins it with that token', async () => {
+    const storage = new Map([['voice-call:' + 'a'.repeat(36), 'c'.repeat(64)]]);
+    const { element, fetch, sockets } = await openPage({ linkUsed: true, storage });
+    expect(JSON.parse((fetch.mock.calls[0] as any)[1].body).call_token).toBe('c'.repeat(64));
+    expect(sockets).toHaveLength(1);
+    expect(element('controls').hidden).toBe(false);
+    expect(element('hint').hidden).toBe(false);
+    sockets[0].open();
+    sockets[0].receive({ type: 'voice.state', state: 'listening', utterance_id: '0'.repeat(32), generation: '1'.repeat(32) });
+    expect(element('state')).toMatchObject({ textContent: 'Listening', className: 'state' });
+  });
+});
+
+describe('theme', () => {
+  test("Telegram's colour scheme decides inside Telegram; the system's outside it", () => {
+    expect(voiceCallTheme({ colorScheme: 'light', themeParams: { bg_color: '#ffffff' } }, false)).toBe('light');
+    expect(voiceCallTheme({ colorScheme: 'dark', themeParams: { bg_color: '#212121' } }, true)).toBe('dark');
+    // telegram-web-app.js outside Telegram reports "light" without any theme colours.
+    expect(voiceCallTheme({ colorScheme: 'light', themeParams: {} }, false)).toBe('dark');
+    expect(voiceCallTheme(undefined, true)).toBe('light');
+    expect(voiceCallTheme(undefined, false)).toBe('dark');
+  });
+
+  test("the page follows Telegram's theme as it opens and when it changes, and paints Telegram's header and background to match", async () => {
+    const { root, tg, themeChanged } = await openPage({ telegramTheme: { colorScheme: 'light', themeParams: { bg_color: '#ffffff' } } });
+    expect(root.attributes['data-theme']).toBe('light');
+    expect(root.style.colorScheme).toBe('light');
+    expect(tg.setHeaderColor).toHaveBeenLastCalledWith('bg_color');
+    expect(tg.setBackgroundColor).toHaveBeenLastCalledWith('bg_color');
+    themeChanged('dark', { bg_color: '#212121' });
+    expect(root.attributes['data-theme']).toBe('dark');
+    expect(root.style.colorScheme).toBe('dark');
+    expect(tg.setHeaderColor).toHaveBeenCalledTimes(2);
+  });
+
+  test('without a Telegram theme the page follows the system setting, live', async () => {
+    const { root, systemThemeChanged } = await openPage({ telegramTheme: { colorScheme: 'light', themeParams: {} }, prefersLight: true });
+    expect(root.attributes['data-theme']).toBe('light');
+    systemThemeChanged(false);
+    expect(root.attributes['data-theme']).toBe('dark');
+  });
+
+  test('every colour on the call screen comes from a theme variable, with a light and a dark value for each semantic colour', () => {
+    const html = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'agent', basePath: '/gateway', maxUtteranceMs: 60000 });
+    const style = html.match(/<style>([\s\S]*)<\/style>/)![1];
+    // The call screen's own palette, after the shared page style.
+    const block = (selector: string) => [...style.matchAll(new RegExp(selector.replace(/[[\]"]/g, '\\$&') + ' \\{([^}]*)\\}', 'g'))].at(-1)![1];
+    const dark = block(':root'), light = block(':root[data-theme="light"]');
+    for (const name of ['--vc-end', '--vc-listen', '--vc-think', '--vc-speak', '--vc-muted', '--vc-err']) {
+      expect(dark).toContain(name + ':');
+      expect(light).toContain(name + ':');
+    }
+    // Telegram's own colours lead where it gives them.
+    expect(dark).toContain('var(--tg-theme-bg-color,');
+    expect(style).toMatch(/button\.round\.end \{[^}]*background: var\(--vc-end\)/);
+    expect(style).toMatch(/\.call\.listening \.ring \{[^}]*var\(--vc-listen/);
+    expect(style).toMatch(/\.call\.speaking \.ring \{[^}]*var\(--vc-speak/);
+    expect(style).toMatch(/\.call\.muted \.chip \{[^}]*var\(--vc-muted\)/);
+    expect(style).toMatch(/\.call\.thinking \.chip \{[^}]*var\(--vc-think\)/);
+    // Speaking is orange; Thinking a blue apart from Listening's.
+    for (const palette of [dark, light]) {
+      const value = (name: string) => palette.match(new RegExp(name + ': (#[0-9a-f]{6})'))![1];
+      const [r, g, b] = [1, 3, 5].map(i => parseInt(value('--vc-speak').slice(i, i + 2), 16));
+      expect(r).toBeGreaterThan(g); expect(g).toBeGreaterThan(b); expect(r - b).toBeGreaterThan(120);
+      const blue = (name: string) => [1, 3, 5].map(i => parseInt(value(name).slice(i, i + 2), 16));
+      expect(blue('--vc-think')[2]).toBeGreaterThan(blue('--vc-think')[0]);
+      expect(value('--vc-think')).not.toBe(value('--vc-listen'));
+    }
   });
 });

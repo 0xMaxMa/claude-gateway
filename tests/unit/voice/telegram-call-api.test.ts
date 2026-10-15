@@ -374,3 +374,38 @@ test('an API voice call keeps the configured voice: /voices is a Telegram chat s
     expect(events.find(e => e.type === 'voice.configured').voice_id).toBe('roger');
   } finally { ws?.terminate(); await f.close(); }
 });
+
+test('the call page decides up front: a fresh link opens the call, a used, expired or unknown one shows only how it ended', async () => {
+  const f = fixture();
+  const now = jest.spyOn(Date, 'now');
+  const page = (pairingId: string) => request(f.app).get(`/voice-call/${pairingId}`);
+  const calling = (html: string) => ({ starting: html.includes('id="state">Starting…<'), script: html.includes("api('/ticket')") });
+  try {
+    // Rendering never claims a link: the call still opens after any number of loads.
+    const fresh = voiceCallPairings.create('a', '42');
+    for (let i = 0; i < 2; i++) {
+      const opened = await page(fresh);
+      expect(opened.status).toBe(200);
+      expect(calling(opened.text)).toEqual({ starting: true, script: true });
+      expect(opened.text).toContain('"linkUsed":false');
+    }
+    const claimed = await request(f.app).post(`/voice-call/${fresh}/ticket`).set('Origin', ORIGIN).send({ initData: initData(42) });
+    expect(claimed.status).toBe(200);
+
+    // Used: the page that holds the call token may still rejoin, so the call script stays; nothing else starts.
+    const used = await page(fresh);
+    expect(used.status).toBe(200);
+    expect(used.text).toContain('<span class="state err" id="state">This call link was already used. Send /call again.</span>');
+    expect(used.text).toContain('"linkUsed":true');
+    expect(calling(used.text)).toEqual({ starting: false, script: true });
+
+    const expired = voiceCallPairings.create('a', '42');
+    now.mockReturnValue(Date.now() + 4 * 60 * 1000);
+    for (const gone of [await page(expired), await page('unknown')]) {
+      expect(gone.status).toBe(404);
+      expect(gone.headers['cache-control']).toBe('no-store');
+      expect(gone.text).toContain('This call link has expired. Send /call again.');
+      expect(calling(gone.text)).toEqual({ starting: false, script: false });
+    }
+  } finally { now.mockRestore(); await f.close(); }
+});

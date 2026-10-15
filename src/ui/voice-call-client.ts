@@ -109,11 +109,12 @@ export function createVoiceCallUplink(io: { json(message: Record<string, unknown
     const queued = held; held = []; heldSamples = 0;
     for (const pcm of queued) if (state === 'speaking') send(pcm);
   };
-  const end = () => {
-    if (state !== 'speaking') return;
-    if (sequence) { io.json({ type: 'speech.ended', last_audio_seq: sequence }); state = 'ended'; endedSequence = sequence; }
-    else state = 'ready';
-    utteranceId = state === 'ended' ? undefined : utteranceId;
+  /** True when the gateway was told the utterance ended. */
+  const end = (): boolean => {
+    if (state !== 'speaking') return false;
+    if (!sequence) { state = 'ready'; return false; }
+    io.json({ type: 'speech.ended', last_audio_seq: sequence }); state = 'ended'; endedSequence = sequence; utteranceId = undefined;
+    return true;
   };
   return {
     /** The server opened a new utterance. */
@@ -132,7 +133,12 @@ export function createVoiceCallUplink(io: { json(message: Record<string, unknown
       io.json(playback.playing ? { type: 'speech.started', epoch: playback.epoch + 1 } : { type: 'speech.activity' });
       if (state === 'ready') begin(); else if (state !== 'speaking') { speechPending = true; endPending = false; }
     },
-    speechEnd() { if (state === 'speaking') end(); else if (speechPending) endPending = true; },
+    /** VAD end. True when the gateway is (or will be) told the utterance ended, so it will answer or report no speech. */
+    speechEnd(): boolean {
+      if (state === 'speaking') return end();
+      if (speechPending) endPending = true;
+      return speechPending;
+    },
     /** Words spoken after `speech.ended` wait for the next utterance before they can be sent. */
     holding(): boolean { return speechPending; },
     /** `last_audio_seq` for a commit-on-mute: the utterance still open on the server, if any. */
@@ -189,6 +195,14 @@ export function voiceCallTicketFailure(status: number, body: { error?: unknown; 
   if (status === 429) return refusal('Voice credit is exhausted.');
   // A busy gateway can succeed on retry.
   return refusal('The call could not start right now. Please try again.', status !== 503);
+}
+
+/** The page's palette: Telegram's colour scheme when Telegram supplies a theme, the
+ * system's otherwise. Outside Telegram, telegram-web-app.js still reports "light"
+ * but without any theme colours. */
+export function voiceCallTheme(tg: { colorScheme?: unknown; themeParams?: { bg_color?: unknown } } | undefined, prefersLight: boolean): 'light' | 'dark' {
+  const scheme = tg && tg.themeParams && tg.themeParams.bg_color ? tg.colorScheme : undefined;
+  return scheme === 'light' || scheme === 'dark' ? scheme : prefersLight ? 'light' : 'dark';
 }
 
 /** Call length as a phone shows it: m:ss, then h:mm:ss. */

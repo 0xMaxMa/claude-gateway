@@ -2,8 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { AgentConfig } from '../types';
 import { AgentRunner } from '../agent/runner';
 import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
-import { generateCliMessagePage } from '../ui/cli-viewer-ui';
-import { generateVoiceCallPage } from '../ui/voice-call-ui';
+import { VOICE_CALL_LINK_EXPIRED, generateVoiceCallGonePage, generateVoiceCallPage } from '../ui/voice-call-ui';
 import { telegramVoiceCallsEnabled, voiceCallPairings } from '../voice/call-pairing';
 import { TelegramBotAvatars } from '../voice/telegram-avatar';
 import { readTelegramAccess } from '../telegram/access';
@@ -34,12 +33,12 @@ export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
     res.setHeader('Cache-Control', 'no-store');
     const pairing = voiceCallPairings.get(String(req.params.pairingId));
     const config = pairing && deps.configs.get(pairing.agentId);
-    if (!pairing || !config) { res.status(404).send(generateCliMessagePage('Link expired', 'This call link is invalid or has expired. Send /call again.', 'err')); return; }
+    if (!pairing || !config) { res.status(404).send(generateVoiceCallGonePage(VOICE_CALL_LINK_EXPIRED)); return; }
     const voice = resolveOrchestrationConfig(config.orchestration, config.voice ?? { enabled: false }).voice;
     const token = config.telegram?.botToken;
     const bot = token ? await avatars.refresh(pairing.agentId, token) : { avatar: null };
     res.send(generateVoiceCallPage({ pairingId: pairing.pairingId, agentId: pairing.agentId, basePath: deps.basePath(), maxUtteranceMs: voice.turns.maxUtteranceMs,
-      botName: bot.name, avatarVersion: bot.photoId }));
+      botName: bot.name, avatarVersion: bot.photoId, linkUsed: Boolean(pairing.callToken) }));
   } catch (error) { next(error); } });
 
   // The photo the page was rendered with; its URL carries the photo's id, so a new photo is a new URL.

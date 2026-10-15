@@ -6,7 +6,7 @@
  * `gateway.publicUrl`, and the WebSocket path comes from the ticket response.
  */
 import { BASE_STYLE, TG_WEBAPP_JS, htmlEscape, page } from './cli-viewer-ui';
-import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, formatCallDuration, voiceCallErrorView, voiceCallLevel, voiceCallTicketFailure } from './voice-call-client';
+import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, formatCallDuration, voiceCallErrorView, voiceCallLevel, voiceCallTheme, voiceCallTicketFailure } from './voice-call-client';
 
 export interface VoiceCallPageOpts {
   pairingId: string;
@@ -18,7 +18,14 @@ export interface VoiceCallPageOpts {
   botName?: string;
   /** The bot photo's Telegram `file_unique_id`; without one the page shows the name's initial. */
   avatarVersion?: string;
+  /** The link already holds a call. Only the page holding its call token (a reload of
+   * that call) rejoins; any other open shows the link as used and starts nothing. */
+  linkUsed?: boolean;
 }
+
+/** The page's refusal for a link that was used, or that expired or never existed. */
+export const VOICE_CALL_LINK_USED = voiceCallTicketFailure(409, { error: 'Call link already used', code: 'CALL_LINK_USED' }).message;
+export const VOICE_CALL_LINK_EXPIRED = voiceCallTicketFailure(410, { error: 'Call link expired' }).message;
 
 /** Collects ~40 ms of microphone samples per message at the context rate. */
 const CAPTURE_WORKLET = `class VoiceCallCapture extends AudioWorkletProcessor {
@@ -38,45 +45,92 @@ const CAPTURE_WORKLET = `class VoiceCallCapture extends AudioWorkletProcessor {
 }
 registerProcessor('voice-call-capture', VoiceCallCapture);`;
 
+/**
+ * Light and dark palettes. Telegram's theme colours lead where it gives them (it
+ * sets `--tg-theme-*` on the page); the fallbacks serve a page outside Telegram.
+ * The semantic colours keep their meaning in both: red ends or mutes, blue
+ * listens, a brighter blue with a pulsing dot thinks, orange speaks.
+ */
 const STYLE = `${BASE_STYLE}
+  :root { color-scheme: dark;
+    --vc-bg: var(--tg-theme-bg-color, #0b0e14); --vc-text: var(--tg-theme-text-color, #e4e9ff); --vc-hint: var(--tg-theme-hint-color, #8f9bb3);
+    --vc-surface: var(--tg-theme-secondary-bg-color, #232a3b); --vc-pressed: #e4e9ff; --vc-on-pressed: #0b0e14;
+    --vc-button: #c3e88d; --vc-on-button: #0b0e14;
+    --vc-listen: #82aaff; --vc-listen-ring: rgba(130,170,255,.35); --vc-listen-glow: rgba(130,170,255,.08); --vc-think: #5cc8ff;
+    --vc-speak: #ffa94d; --vc-speak-ring: rgba(255,169,77,.75); --vc-speak-glow: rgba(255,169,77,.14); --vc-speak-halo: rgba(255,169,77,.06);
+    --vc-muted: #ff8d95; --vc-end: #ff5c67; --vc-err: #ff757f; }
+  :root[data-theme="light"] { color-scheme: light;
+    --vc-bg: var(--tg-theme-bg-color, #ffffff); --vc-text: var(--tg-theme-text-color, #1c2333); --vc-hint: var(--tg-theme-hint-color, #6b7486);
+    --vc-surface: var(--tg-theme-secondary-bg-color, #eef0f5); --vc-pressed: #1c2333; --vc-on-pressed: #ffffff;
+    --vc-button: #23863f; --vc-on-button: #ffffff;
+    --vc-listen: #2560c8; --vc-listen-ring: rgba(37,96,200,.45); --vc-listen-glow: rgba(37,96,200,.10); --vc-think: #0868a6;
+    --vc-speak: #a84b06; --vc-speak-ring: rgba(240,128,30,.80); --vc-speak-glow: rgba(240,128,30,.18); --vc-speak-halo: rgba(240,128,30,.07);
+    --vc-muted: #c22631; --vc-end: #e5484d; --vc-err: #c4202b; }
+  body { background: var(--vc-bg); color: var(--vc-text); }
+  .muted { color: var(--vc-hint); }
+  .err { color: var(--vc-err); }
   .call { flex: 1; width: 100%; display: flex; flex-direction: column; align-items: center; text-align: center; padding: 48px 24px calc(28px + env(safe-area-inset-bottom)); }
+  .call.gone { justify-content: center; }
   .avatar-wrap { position: relative; width: 132px; height: 132px; display: grid; place-items: center; }
   .ring { position: absolute; inset: 0; border-radius: 50%; border: 2px solid transparent; transition: border-color .2s, box-shadow .2s; }
   .avatar { width: 112px; height: 112px; border-radius: 50%; display: grid; place-items: center; font-size: 46px; font-weight: 600; color: #fff;
     position: relative; background: linear-gradient(135deg, #8ea2ff 0%, #6b7cff 55%, #5a5fd8 100%); box-shadow: 0 8px 30px rgba(107,124,255,.25); }
   .avatar img { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
-  .name { margin-top: 20px; font-size: 24px; font-weight: 600; color: #e4e9ff; word-break: break-word; }
-  .timer { min-height: 22px; margin-top: 6px; font-size: 17px; color: #8f9bb3; font-variant-numeric: tabular-nums; letter-spacing: .5px; }
-  .chip { margin-top: 18px; max-width: 100%; display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: 16px; background: #161b27; color: #8f9bb3; }
+  .name { margin-top: 20px; font-size: 24px; font-weight: 600; color: var(--vc-text); word-break: break-word; }
+  .timer { min-height: 22px; margin-top: 6px; font-size: 17px; color: var(--vc-hint); font-variant-numeric: tabular-nums; letter-spacing: .5px; }
+  .chip { margin-top: 18px; max-width: 100%; display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: 16px; background: var(--vc-surface); color: var(--vc-hint); }
   .chip .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
   .chip .bars { display: none; gap: 3px; align-items: center; height: 14px; }
   .chip .bars b { width: 3px; height: 14px; border-radius: 2px; background: currentColor; transform: scaleY(calc(var(--h) * (0.3 + 0.7 * var(--level, 0)))); transition: transform .1s linear; }
+  .chip:has(.state.err) .dot { display: none; }
   .state { font-size: 14px; font-weight: 600; }
-  .call.listening .ring { border-color: rgba(130,170,255,.35); box-shadow: 0 0 0 8px rgba(130,170,255,.08); }
-  .call.listening .chip { color: #82aaff; }
-  .call.speaking .ring { border-color: rgba(195,232,141,.75); box-shadow: 0 0 0 9px rgba(195,232,141,.14), 0 0 0 20px rgba(195,232,141,.06); }
-  .call.speaking .chip { color: #c3e88d; }
+  .call.listening .ring { border-color: var(--vc-listen-ring); box-shadow: 0 0 0 8px var(--vc-listen-glow); }
+  .call.listening .chip { color: var(--vc-listen); }
+  .call.speaking .ring { border-color: var(--vc-speak-ring); box-shadow: 0 0 0 9px var(--vc-speak-glow), 0 0 0 20px var(--vc-speak-halo); }
+  .call.speaking .chip { color: var(--vc-speak); }
   .call.speaking .dot { display: none; }
   .call.speaking .bars { display: inline-flex; }
-  .call.muted .chip { color: #ff8d95; }
+  .call.thinking .chip { color: var(--vc-think); }
+  .call.thinking .dot { animation: think 1s ease-in-out infinite alternate; }
+  @keyframes think { from { opacity: .25; transform: scale(.7); } }
+  .call.muted .chip { color: var(--vc-muted); }
   .lines { margin-top: 28px; width: 100%; max-width: 340px; min-height: 96px; }
-  .line { min-height: 20px; font-size: 15px; line-height: 1.5; color: #c8d3f5; word-break: break-word; }
-  .you { color: #82aaff; }
+  .line { min-height: 20px; font-size: 15px; line-height: 1.5; color: var(--vc-text); word-break: break-word; }
+  .you { color: var(--vc-listen); }
   .hint { margin-top: auto; }
-  button { font: inherit; font-size: 15px; border: 0; border-radius: 22px; padding: 11px 20px; cursor: pointer; color: #0b0e14; background: #c3e88d; }
-  button:focus-visible { outline: 2px solid #82aaff; outline-offset: 3px; }
+  .hint[hidden] { display: none; }
+  button { font: inherit; font-size: 15px; border: 0; border-radius: 22px; padding: 11px 20px; cursor: pointer; color: var(--vc-on-button); background: var(--vc-button); }
+  button:focus-visible { outline: 2px solid var(--vc-listen); outline-offset: 3px; }
   button[hidden], .controls[hidden] { display: none; }
   #start { margin-top: 14px; }
   .controls { margin-top: 22px; display: flex; gap: 30px; justify-content: center; }
-  .ctl { display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 12px; color: #8f9bb3; }
-  button.round { width: 66px; height: 66px; padding: 0; border-radius: 50%; display: grid; place-items: center; background: #232a3b; color: #e4e9ff; }
+  .ctl { display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 12px; color: var(--vc-hint); }
+  button.round { width: 66px; height: 66px; padding: 0; border-radius: 50%; display: grid; place-items: center; background: var(--vc-surface); color: var(--vc-text); }
   button.round svg { width: 28px; height: 28px; pointer-events: none; }
-  button.round[aria-pressed="true"] { background: #e4e9ff; color: #0b0e14; }
-  button.round.end { background: #ff5c67; color: #fff; }
+  button.round[aria-pressed="true"] { background: var(--vc-pressed); color: var(--vc-on-pressed); }
+  button.round.end { background: var(--vc-end); color: #fff; }
   button.round .off { display: none; }
   #speaker[aria-pressed="false"] .on, #mute[aria-pressed="true"] .on { display: none; }
   #speaker[aria-pressed="false"] .off, #mute[aria-pressed="true"] .off { display: block; }
 `;
+
+/** Sets the palette before the page paints and follows Telegram's (or the system's)
+ * theme changes. Telegram's header and the area around the page take the page background. */
+const THEME_SCRIPT = `<script>
+  (function(){
+    ${voiceCallTheme.toString()};
+    var tg = window.Telegram && window.Telegram.WebApp, root = document.documentElement;
+    var system = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)');
+    function apply(){
+      var theme = voiceCallTheme(tg, Boolean(system && system.matches));
+      root.setAttribute('data-theme', theme); root.style.colorScheme = theme;
+      if (tg) { try { if (tg.setHeaderColor) tg.setHeaderColor('bg_color'); if (tg.setBackgroundColor) tg.setBackgroundColor('bg_color'); } catch (e) {} }
+    }
+    apply();
+    if (tg && tg.onEvent) tg.onEvent('themeChanged', apply);
+    if (system && system.addEventListener) system.addEventListener('change', apply);
+  })();
+  </script>`;
 
 const icon = (cls: string, paths: string) => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
 const SPEAKER = '<path d="M11 5L6 9H3v6h3l5 4V5z"/>';
@@ -89,19 +143,20 @@ const ICONS = {
 };
 
 export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
-  const cfg = JSON.stringify({ pairingId: opts.pairingId, basePath: opts.basePath, maxUtteranceMs: opts.maxUtteranceMs, vad: VOICE_CALL_VAD }).replace(/</g, '\\u003c');
+  const cfg = JSON.stringify({ pairingId: opts.pairingId, basePath: opts.basePath, maxUtteranceMs: opts.maxUtteranceMs, vad: VOICE_CALL_VAD, linkUsed: Boolean(opts.linkUsed) }).replace(/</g, '\\u003c');
   const client = [createResampler, encodeVoiceCallFrame, voiceCallLevel, createVoiceCallVad, createVoiceCallUplink, createVoiceCallPlayhead, voiceCallTicketFailure, formatCallDuration, voiceCallErrorView].map(fn => fn.toString()).join(';\n');
   const name = opts.botName ?? opts.agentId;
   const initial = Array.from(name.trim())[0]?.toUpperCase() ?? '?';
   const photo = opts.avatarVersion ? `${opts.basePath}/voice-call/${encodeURIComponent(opts.pairingId)}/avatar?v=${encodeURIComponent(opts.avatarVersion)}` : '';
-  const body = `
+  const used = Boolean(opts.linkUsed);
+  const body = `${THEME_SCRIPT}
   <div class="call" id="call">
     <div class="avatar-wrap"><div class="ring"></div><div class="avatar" id="avatar" aria-hidden="true">${htmlEscape(initial)}${photo ? `<img id="photo" alt="" src="${htmlEscape(photo)}">` : ''}</div></div>
     <div class="name">${htmlEscape(name)}</div>
     <div class="timer" id="timer"></div>
-    <div class="chip" role="status"><span class="dot"></span><span class="bars"><b style="--h:.45"></b><b style="--h:.85"></b><b style="--h:.65"></b><b style="--h:1"></b><b style="--h:.5"></b></span><span class="state" id="state">Starting…</span></div>
+    <div class="chip" role="status"><span class="dot"></span><span class="bars"><b style="--h:.45"></b><b style="--h:.85"></b><b style="--h:.65"></b><b style="--h:1"></b><b style="--h:.5"></b></span>${used ? `<span class="state err" id="state">${htmlEscape(VOICE_CALL_LINK_USED)}</span>` : '<span class="state" id="state">Starting…</span>'}</div>
     <div class="lines"><div class="line you" id="you"></div><div class="line" id="reply"></div></div>
-    <p class="muted hint" id="hint">Your words and the replies also appear in the chat.</p>
+    <p class="muted hint" id="hint"${used ? ' hidden' : ''}>Your words and the replies also appear in the chat.</p>
     <button type="button" id="start" hidden>Start call</button>
     <div class="controls" id="controls" hidden>
       <div class="ctl"><button type="button" class="round" id="speaker" aria-label="Speaker" aria-pressed="true">${ICONS.speakerOn}${ICONS.speakerOff}</button><span aria-hidden="true">speaker</span></div>
@@ -121,11 +176,14 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     var playhead = createVoiceCallPlayhead(), sources = [];
     var callToken, generation, epoch = 0, reportedPlayed = 0, stopRequest = 0, stopping = false;
     var muted = false, paused = false, ended = false, attempts = 0, speakerOn = true, shownLevel, muteOnListening = false;
+    // The user stopped speaking: show Thinking at once, through the gateway's commit and
+    // merge window, until it answers, reports no speech, or the user speaks again.
+    var awaitingReply = false;
     // The call clock: set when a socket first listens, from the server's elapsed time
     // on a rejoin, so it keeps counting across reconnects like a phone call.
     var callStart, offeredElapsed = 0, joined = false;
-    // The ring and chip follow the call: listening, the agent speaking, or muted.
-    var SCENES = { Listening: 'listening', Speaking: 'speaking', Muted: 'muted' };
+    // The ring and chip follow the call: listening, thinking, the agent speaking, or muted.
+    var SCENES = { Listening: 'listening', Thinking: 'thinking', Speaking: 'speaking', Muted: 'muted' };
     function state(text, tone){
       var s = $('state'); s.textContent = text; s.className = 'state' + (tone ? ' ' + tone : '');
       $('call').className = 'call' + (!tone && SCENES[text] ? ' ' + SCENES[text] : '');
@@ -169,21 +227,22 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
             attempts = 0; if (message.utterance_id) uplink.listening(message.utterance_id);
             // Words held for this utterance are sent now; muting then commits them.
             if (muteOnListening) { muteOnListening = false; sendMute(true); }
-            if (!sources.length) state(muted ? 'Muted' : 'Listening');
+            if (!sources.length && !awaitingReply) state(muted ? 'Muted' : 'Listening');
           }
-          if (message.state === 'muted') { uplink.reset(); state('Muted'); }
+          if (message.state === 'muted') { uplink.reset(); awaitingReply = false; state('Muted'); }
           break;
         case 'stt.partial': case 'stt.segment': $('you').textContent = message.pending_text || message.text || ''; break;
-        case 'stt.final': $('you').textContent = message.text; state('Thinking'); break;
+        case 'stt.final': $('you').textContent = message.text; awaitingReply = false; state('Thinking'); break;
         case 'utterance.accepted': state('Thinking'); break;
         case 'response.text': if (message.text) $('reply').textContent = message.text; break;
-        case 'playback.start': if (!stopping) { epoch = message.epoch; flushPlayback(); state('Speaking'); } break;
+        case 'playback.start': if (!stopping) { epoch = message.epoch; flushPlayback(); awaitingReply = false; state('Speaking'); } break;
         case 'playback.end': break;
-        case 'playback.clear': epoch = message.epoch; flushPlayback(); send({ type: 'playback.clear.ack', epoch: epoch }); state(muted ? 'Muted' : 'Listening'); break;
+        case 'playback.clear': epoch = message.epoch; flushPlayback(); send({ type: 'playback.clear.ack', epoch: epoch }); if (!awaitingReply) state(muted ? 'Muted' : 'Listening'); break;
         case 'playback.stopped': epoch = message.epoch; stopping = false; flushPlayback(); break;
         case 'voice.notice': if (message.reconnect) state('Reconnecting…'); break;
         case 'voice.error': {
           var view = voiceCallErrorView(message);
+          awaitingReply = false;
           if (view.kind === 'ended') fail(new Error(view.message));
           else if (view.kind === 'listening') { $('you').textContent = ''; if (!sources.length) state(muted ? 'Muted' : 'Listening'); }
           else state(view.message, 'err');
@@ -198,7 +257,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       if (ended || paused) return;
       var socket = new WebSocket(scheme + '//' + location.host + CFG.basePath + issued.stream_path + '?ticket=' + encodeURIComponent(issued.ticket));
       // A new socket starts with the page's mute state; nothing waits on the old utterance.
-      ws = socket; joined = false; muteOnListening = false;
+      ws = socket; joined = false; muteOnListening = false; awaitingReply = false;
       socket.binaryType = 'arraybuffer';
       socket.onopen = function(){ send({ type: 'voice.start', muted: muted }); };
       socket.onmessage = function(event){ if (socket !== ws) return; if (typeof event.data === 'string') control(JSON.parse(event.data)); else playAudio(event.data); };
@@ -261,7 +320,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     }
     function setMuted(value){
       if (muted === value) return;
-      muted = value;
+      muted = value; awaitingReply = false;
       // Words spoken while the last utterance commits are held for the next one: mute once they are sent.
       if (value && uplink.holding()) muteOnListening = true;
       else if (!value && muteOnListening) muteOnListening = false;
@@ -350,9 +409,12 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
         // Audible reply audio raises the bar for speech, so speaker echo does not interrupt it.
         var playing = playhead.playing(ctx.currentTime);
         var samples = event.data, edge = vad(voiceCallLevel(samples), samples.length / ctx.sampleRate * 1000, playing), pcm = resample(samples);
-        if (edge === 'start') uplink.speechStart({ playing: playing, epoch: epoch });
+        if (edge === 'start') {
+          uplink.speechStart({ playing: playing, epoch: epoch });
+          if (awaitingReply) { awaitingReply = false; if (!sources.length) state('Listening'); }
+        }
         uplink.audio(pcm);
-        if (edge === 'end') uplink.speechEnd();
+        if (edge === 'end' && uplink.speechEnd() && !sources.length) { awaitingReply = true; state('Thinking'); }
       };
       if (!speaker) {
         level = ctx.createAnalyser(); level.fftSize = 512; levelSamples = new Float32Array(level.fftSize);
@@ -369,8 +431,24 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     $('mute').onclick = function(){ setMuted(!muted); };
     $('speaker').onclick = function(){ setSpeaker(!speakerOn); };
     $('hangup').onclick = function(){ hangup(false); };
+    // A used link opened from an old /call button stays as rendered: nothing starts.
+    // The page holding its call token is a reload of that call, and rejoins it.
+    var stored; try { stored = sessionStorage.getItem('voice-call:' + CFG.pairingId); } catch (e) {}
+    if (CFG.linkUsed && !stored) {
+      state(voiceCallTicketFailure(409, { error: 'Call link already used', code: 'CALL_LINK_USED' }).message, 'err');
+      $('controls').hidden = true; $('start').hidden = true; $('hint').hidden = true;
+      return;
+    }
+    $('hint').hidden = false;
     start(false);
   })();
   </script>`;
+  return page('Voice call', STYLE, body, `<script src="${TG_WEBAPP_JS}"></script>`);
+}
+
+/** A link that expired or never existed: only how it ended, in the call screen's theme. */
+export function generateVoiceCallGonePage(message: string): string {
+  const body = `${THEME_SCRIPT}
+  <div class="call gone"><div class="chip" role="status"><span class="state err">${htmlEscape(message)}</span></div></div>`;
   return page('Voice call', STYLE, body, `<script src="${TG_WEBAPP_JS}"></script>`);
 }
