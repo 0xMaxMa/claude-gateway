@@ -723,6 +723,13 @@ export class SessionStore {
     }
   }
 
+  /** True when `name` is a session id in some index or a chat id with a session folder: the two things media/api-<name>/ is named for. */
+  async apiMediaOwnerKnown(agentId: string, name: string): Promise<boolean> {
+    if (!SESSION_ID_RE.test(name)) return false;
+    if (fs.existsSync(path.join(this.agentsBaseDir, agentId, 'sessions', `api-${name}`))) return true;
+    return (await this.getAllSessionMeta(agentId)).has(name);
+  }
+
   /** Get all session metadata (name) for an agent, keyed by sessionId. */
   async getAllSessionMeta(agentId: string): Promise<Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string; project?: string }>> {
     const metaMap = new Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string; project?: string }>();

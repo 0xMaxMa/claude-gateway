@@ -419,7 +419,7 @@ export class AgentRunner extends EventEmitter {
    * and boundProjects entry stay until that work ends, so what the turn still writes stays hidden from non-admin keys;
    * `reapRetiredBindings` then purges it and drops the binding.
    */
-  private readonly retiredBindings = new Map<string, string>();
+  private readonly retiredBindings = new Map<string, { chatId: string; bound: boolean }>();
 
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
@@ -490,10 +490,11 @@ export class AgentRunner extends EventEmitter {
 
   /** Finishes the delete of every retired session whose work has ended: purge what it wrote, then drop the binding. */
   private async reapRetiredBindings(): Promise<void> {
-    for (const [id, chatId] of [...this.retiredBindings]) {
+    for (const [id, { chatId, bound }] of [...this.retiredBindings]) {
       if (this.isApiSessionLive(id)) continue;
       this.retiredBindings.delete(id);
       this.purgeApiSessionHistory(chatId, id);
+      if (bound) this.removeApiSessionMedia(id);
       await this.sessionStore.deleteProjectBinding(this.agentConfig.id, id).catch((err: unknown) => {
         this.logger.warn('Failed to remove the binding of a deleted project session', { sessionId: id, error: (err as Error).message });
       });
@@ -504,6 +505,20 @@ export class AgentRunner extends EventEmitter {
   private purgeApiSessionHistory(chatId: string, sessionId: string): void {
     const mediaPaths = this.historyDb.clearSession(`api-${chatId}`, sessionId);
     MediaStore.deleteMediaFiles(this.agentsBaseDir, this.agentConfig.id, mediaPaths);
+  }
+
+  /** Everything under media/api-<id>/ of a deleted project chat, not only the files its history named. */
+  private removeApiSessionMedia(sessionId: string): void {
+    try {
+      fs.rmSync(MediaStore.mediaDir(this.agentsBaseDir, this.agentConfig.id, `api-${sessionId}`), { recursive: true, force: true });
+    } catch (err) {
+      this.logger.warn('Failed to remove the media folder of a deleted project session', { sessionId, error: (err as Error).message });
+    }
+  }
+
+  /** True when media/api-<name>/ belongs to a session or a chat this agent knows. A folder nobody owns is not served to non-admin keys. */
+  apiMediaOwnerKnown(name: string): Promise<boolean> {
+    return this.sessionStore.apiMediaOwnerKnown(this.agentConfig.id, name);
   }
 
   /** Throws PROJECT_UNAVAILABLE when the session's project no longer resolves; a no-op for unbound sessions. */
@@ -6048,6 +6063,7 @@ export class AgentRunner extends EventEmitter {
 
   async deleteApiSession(chatId: string, sessionId: string): Promise<void> {
     let inChat = true;
+    const wasBound = (await this.apiSessionBinding(sessionId)).kind !== 'unbound';
     await this.sessionStore.deleteTelegramSession(this.agentConfig.id, chatId, sessionId, 'api').catch((err: unknown) => {
       // Legacy sessions (stored only in SQLite, no file index entry) are treated as already deleted
       if (err instanceof SessionNotInIndexError) { inChat = false; return; }
@@ -6059,9 +6075,10 @@ export class AgentRunner extends EventEmitter {
     if (!inChat) return;
     // Live work keeps the binding, and in boundProjects the project guard reads it, until it ends.
     if (this.isApiSessionLive(sessionId)) {
-      this.retiredBindings.set(sessionId, chatId);
+      this.retiredBindings.set(sessionId, { chatId, bound: wasBound });
       return;
     }
+    if (wasBound) this.removeApiSessionMedia(sessionId);
     await this.sessionStore.deleteProjectBinding(this.agentConfig.id, sessionId);
     this.boundProjects.delete(sessionId);
   }
