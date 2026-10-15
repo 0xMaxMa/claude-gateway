@@ -16,7 +16,7 @@ const notes=(count:number)=>({application:'com.apple.Notes',windowTitle:`Notes (
  controls:[{ref:'c8',role:'AXButton',label:'New Note',actions:['press']},{ref:'c9',role:'AXButton',label:'Delete',actions:['press']},{ref:'c10',role:'AXButton',label:'Share',actions:['press']}]});
 
 const choice=(criteria:Record<string,unknown>,chosen:string,confidence:number)=>({choice:chosen,confidence,probabilities:Object.fromEntries(Object.keys(criteria).map(k=>[k,k===chosen?confidence:(1-confidence)/(Object.keys(criteria).length-1||1)]))});
-type Step={pick:string;confidence?:number;impact?:'ROUTINE'|'HIGH_IMPACT'};
+type Step={pick:string;confidence?:number;impact?:'ROUTINE'|'HIGH_IMPACT';text?:string};
 /** A desktop that shows `screens[i]` after i completed actions, and a model that answers `plan` in order. */
 function fixture(screens:Array<()=>any>,plan:Step[]=[]){
  let shown=0,asked=0;const calls:any[]=[],requests:any[]=[];
@@ -31,7 +31,7 @@ function fixture(screens:Array<()=>any>,plan:Step[]=[]){
   evaluate:async req=>{
    requests.push(req);const step=plan[asked++]??{pick:'DONE'};const kind=step.pick.includes(':')?step.pick.split(':')[0]:step.pick;
    return {answers:Object.fromEntries(Object.entries(req.questions).map(([name,q])=>[name,choice(q.criteria as any,
-    name==='action'?kind:name==='target_'+kind?step.pick:name==='impact'?step.impact??'ROUTINE':name==='text'?'NONE':'BLOCKED',name==='impact'?0.95:step.confidence??0.95)]))};
+    name==='action'?kind:name==='target_'+kind?step.pick:name==='impact'?step.impact??'ROUTINE':name==='text'?step.text??'NONE':'BLOCKED',name==='impact'?0.95:step.confidence??0.95)]))};
   }};
  return {deps,calls,requests,actions:()=>calls.filter(c=>c.name==='computer_action').map(({args:{lease_token,operation_id,generation,...rest}})=>rest)};
 }
@@ -393,5 +393,47 @@ describe('decision trace label',()=>{
   const labels=r.trace.events.filter(e=>e.decisionMode).map(e=>e.decisionMode);
   expect(labels.length).toBeGreaterThanOrEqual(2);
   expect(new Set(labels)).toEqual(new Set([label]));
+ });
+});
+
+// Pod 2.0.20 (computer-requests/8ca56615): the goal opened Terminal, then round 2
+// was offered READ_REQUEST beside typing into the focused shell, picked it, and the
+// run stopped as needs_input without typing `which htop`. Only the user's own
+// request (a run's first decision) can be a question about the screen.
+describe('a goal run offers READ_REQUEST only before it has acted',()=>{
+ const TERMINAL={id:'com.apple.Terminal',name:'Terminal'};
+ const desktop=()=>({...finder(),apps:[...APPS,TERMINAL]});
+ const terminal=()=>({application:TERMINAL.id,windowTitle:'jisack — -zsh — 80×24',truncated:false,apps:[...APPS,TERMINAL],
+  focusedControl:{ref:'t0',role:'AXTextArea',label:'shell'},
+  controls:[{ref:'t0',identity:'22222222-2222-4222-8222-222222222222',role:'AXTextArea',label:'shell',value:'',focused:true,actions:['type']}]});
+ const offered=(req:any)=>Object.keys(req.questions.action.criteria);
+ test('later decisions are not offered READ_REQUEST or UNCLEAR, and the run keeps acting',async()=>{
+  const f=fixture([desktop,terminal,terminal],[{pick:'open:'+TERMINAL.id},{pick:'type:t0',text:'TEXT:4'},{pick:'DONE'}]);
+  const r=await spawn(f,'open Terminal and run which htop');
+  expect(offered(f.requests[0])).toEqual(expect.arrayContaining(['READ_REQUEST','UNCLEAR']));
+  for(const req of f.requests.slice(1)){expect(offered(req)).not.toContain('READ_REQUEST');expect(offered(req)).not.toContain('UNCLEAR');}
+  expect(f.actions()).toEqual([{kind:'open',app_id:TERMINAL.id},{kind:'type',ref:'t0',text:'which htop'}]);
+  expect(r.trace.events.some(e=>e.reason==='READ_REQUEST')).toBe(false);
+ });
+ test('a later READ_REQUEST answer is rejected as invalid, never taken as a read request',async()=>{
+  const f=fixture([desktop,terminal],[{pick:'open:'+TERMINAL.id},{pick:'READ_REQUEST'}]);
+  const r=await spawn(f,'open Terminal and run which htop');
+  expect(f.actions()).toEqual([{kind:'open',app_id:TERMINAL.id}]);
+  expect(r.trace.events.some(e=>e.reason==='READ_REQUEST')).toBe(false);
+  expect(waited(r)).toBe('INVALID_DECISION');
+ });
+ test('the first decision still reads the screen: READ_REQUEST ends the run with nothing pressed',async()=>{
+  const f=fixture([terminal],[{pick:'READ_REQUEST'}]);
+  const r=await spawn(f,'what does the terminal say?');
+  expect(offered(f.requests[0])).toContain('READ_REQUEST');
+  expect(f.actions()).toEqual([]);
+  expect(r).toMatchObject({status:'needs_input',reason:'COMMAND_WAITING_INPUT',steps:0});
+ });
+ test('a user-issued direct command (no goal run) is still offered READ_REQUEST and ends on it',async()=>{
+  const f=fixture([terminal],[{pick:'READ_REQUEST'}]);
+  const r=await runComputerUse({goal:'what does the terminal say?',yieldAfterInteraction:true,readRequest:true},f.deps,new AbortController().signal);
+  expect(offered(f.requests[0])).toContain('READ_REQUEST');
+  expect(f.actions()).toEqual([]);
+  expect(waited(r)).toBe('READ_REQUEST');
  });
 });

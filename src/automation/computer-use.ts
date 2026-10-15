@@ -398,7 +398,10 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      const done=goalRun&&history.length?historyText():'';
      const kept=input.interactionContext?tail(input.interactionContext,8000-done.length-2):'';
      const context=done?[kept,done].filter(Boolean).join('\n\n'):input.interactionContext;
-     const command=buildComputerCommand(state,goal.goal,targets,criteria,context,input.yieldAfterInteraction,input.yieldAfterInteraction&&input.readRequest,input.agentCommand||goalRun,goalRun);
+     // Once a goal run has acted, nobody asked to read this screen: it is the next step's
+     // screen, so READ_REQUEST/UNCLEAR are not offered (as browser-use, after a confirmed action).
+     const readRequest=input.yieldAfterInteraction&&input.readRequest&&!(goalRun&&steps>0);
+     const command=buildComputerCommand(state,goal.goal,targets,criteria,context,input.yieldAfterInteraction,readRequest,input.agentCommand||goalRun,goalRun);
      const answer=await interruptible(s=>deps.evaluate({requestId,...command.request},s),runSignal,deps.interruptSignal);
      check();checkInterruption(deps.interruptSignal);evaluations++;
      const selected=readComputerCommand(command,answer.answers);
