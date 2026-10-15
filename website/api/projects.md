@@ -8,8 +8,9 @@ Open the project in the code editor for that.
 
 **Auth.** Every route needs an API key with pod-wide scope: `admin: true` or
 `agents: "*"`. A key scoped to specific agents gets `403 forbidden_key`, because
-projects belong to the pod, not to an agent. `POST /api/v1/projects`, `DELETE /api/v1/projects/:name` and every
-`POST .../git/*` route also need `write: true` (or `admin: true`).
+projects belong to the pod, not to an agent. `POST /api/v1/projects`, `DELETE /api/v1/projects/:name`, every
+`POST .../git/*` route, and `POST .../running/stop` and `POST .../running/start` also need
+`write: true` (or `admin: true`).
 
 **Feature detection.** `GET /api/v1/capabilities` lists
 `"projects": ["list", "create", "read", "git", "chat", "run", "start", "delete"]`. Show project browsing
@@ -484,7 +485,7 @@ working directory is inside the project folder (`via: "cwd"`) or one of its
 arguments is an absolute path inside the project folder (`via: "argv"`, for example
 `python3 -m http.server --directory <project>` started from `/tmp`). Listening sockets come from `ss -H -ltnp`,
 or from `/proc/net/tcp` and `/proc/<pid>/fd` when `ss` is missing. Every route here needs
-a key that can see all agents. Stop also needs a write key.
+a key that can see all agents. Stop and start also need a write key.
 
 ### GET /api/v1/projects/:name/running {#get-running}
 
