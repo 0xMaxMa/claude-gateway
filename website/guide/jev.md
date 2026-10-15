@@ -838,6 +838,13 @@ completed steps, `stopReason` and remaining steps, when:
 - the 120-second run limit is reached (`TIMEOUT`), or all steps are done
   (`ALL_STEPS_DONE`)
 
+When the agent's own goal run (the first revision of a task it spawned) stops in
+`waiting_input` with `ALL_STEPS_DONE` or `STEP_NO_EFFECT`, the agent is notified
+and owns the next move; `ALL_STEPS_DONE` does not by itself confirm the goal.
+Other `waiting_input` stops stay silent to the agent, as before: a confirmation
+question, a field question (`STEP_NOT_EXECUTED`), a user pause, and the user's own
+later step commands are the owner's to answer.
+
 1. Call `capabilities_list` with `scope: "computer"` to discover ready devices.
 2. Submit `task_spawn` with `target_profile: "gateway-managed"` and
    `gateway_target: { "adapter": "computer", "session_id": "<discovered ID>" }`.
@@ -857,8 +864,13 @@ well as interactive controls. These are untrusted application content and do
 not authorize further actions. `NO_SUPPORTED_ACTION` means no offered next action
 was selected; it must not be described as an account or provider rejection.
 Known native tool error codes are preserved in task failures instead of being
-replaced with a generic tool failure. Action counts represent desktop commands,
-not screenshots or proof that the goal was achieved.
+replaced with a generic tool failure. An unknown code still fails as
+`COMPUTER_TOOL_FAILED`, but the stop message names the device errors behind it
+(`Device tool errors: <tool> <CODE> (<REASON>)`, the last five distinct ones).
+When the code or reason is `APPLICATION_PROTECTED`, the message also says that a
+protected app (such as GetPod, System Settings or a password manager) was
+frontmost and that this is not a missing macOS permission. Action counts represent
+desktop commands, not screenshots or proof that the goal was achieved.
 
 Computer field requests include their application, window and field identity before
 question notifications are emitted. The agent can answer an assigned missing-field
