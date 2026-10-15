@@ -80,3 +80,9 @@ test('the union response schema reaches the CLI for Agent profiles only, and nev
  expect(splitSpeechResponse('ได้เลยค่ะ **กำลังตรวจให้**')).toEqual({display:'ได้เลยค่ะ **กำลังตรวจให้**',spoken:'ได้เลยค่ะ กำลังตรวจให้',outcome:'plain'});
  for(const text of ['https://example.com','```code```','a'.repeat(601)])expect(splitSpeechResponse(text).spoken).toBe('');
 });
+
+test('ElevenLabs audio tags are stripped instead of silencing the reply', () => {
+  expect(splitSpeechResponse('[laughs] Sure, I can do that.')).toEqual({ display: '[laughs] Sure, I can do that.', spoken: 'Sure, I can do that.', outcome: 'plain' });
+  expect(splitSpeechResponse('ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ [Sighs]').spoken).toBe('ได้เลยค่ะ เดี๋ยวดูให้นะคะ');
+  for (const text of ['[laughs]', 'use items[0] here', 'see [docs](https://example.com)', '[unknown tag] hello']) expect(splitSpeechResponse(text).spoken).toBe('');
+});

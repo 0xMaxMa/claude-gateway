@@ -216,6 +216,8 @@ export function voiceSettingsRouter(
             models = [
               ['eleven_v3_conversational','Eleven v3 Conversational'],
               ['eleven_v3','Eleven v3'],
+              ['eleven_v4_turbo','Eleven v4 Turbo'],
+              ['eleven_v4','Eleven v4'],
               ['eleven_multilingual_v2','Eleven Multilingual v2'],
               ['eleven_flash_v2_5','Eleven Flash v2.5'],
               ['eleven_turbo_v2_5','Eleven Turbo v2.5'],

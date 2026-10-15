@@ -53,6 +53,10 @@ function objectEnd(text: string, start: number): number {
  * at most followed by one short sign-off sentence. A reply that explains the format writes it
  * into a sentence, or keeps writing after it, and must be published exactly as written. */
 const TRAILING_SIGN_OFF_LIMIT = 120;
+// ElevenLabs v3/v4 audio tags. Other providers would read them aloud and any other
+// bracket still fails the speakable check, so known tags are stripped rather than
+// silencing the whole reply.
+const AUDIO_TAG = /[ \t]*\[(?:laughs?|laughing|chuckles|giggles|sighs?|whispers?|gasps?|sarcastic|excited|curious|crying|exhales|inhales|clears throat|short pause|long pause)\][ \t]*/gi;
 
 /** The span of the turn text that is an attempt to emit the declared payload, if any.
  * `body` is the JSON to parse and [start,end) is everything to remove when it turns out to
@@ -87,7 +91,7 @@ export function splitSpeechResponse(raw: string): { display: string; spoken: str
   // wording; never truncate reports or read code/URLs/JSON aloud. Applied to whatever text
   // we are about to display, so a stripped payload cannot be spoken either.
   const speakable = (source: string): string => {
-    const plain = source.replace(/\*\*([^*]+)\*\*/g, '$1');
+    const plain = source.replace(/\*\*([^*]+)\*\*/g, '$1').replace(AUDIO_TAG, ' ').trim();
     return plain && plain.length <= SPOKEN_TEXT_LIMIT && !/[{}\[\]`|]|https?:\/\/|^\s*#/m.test(plain) ? plain : '';
   };
   const payload = payloadSpan(text);

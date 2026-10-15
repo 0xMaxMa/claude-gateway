@@ -123,3 +123,64 @@ test('ElevenLabs classic models use the selected voice stream and flush the fina
   ]);
   expect(fixture.close).toHaveBeenCalledTimes(1);
 });
+
+test.each(['eleven_v4_turbo', 'eleven_v4', 'eleven_v3_conversational', 'eleven_v3'])('ElevenLabs %s streams through the Text-to-Dialogue socket', async model => {
+  const fixture = socketFixture();
+  const result = new ElevenLabsTts('fixture', model, fixture.connect).synthesizeFile({ text: 'สวัสดี', voiceId: 'chosen', signal: new AbortController().signal });
+  fixture.messages.push({ audio: Buffer.from('dialogue-audio').toString('base64') });
+  fixture.messages.push({ is_final: true });
+  expect((await result).bytes).toEqual(Buffer.from('dialogue-audio'));
+  const url = new URL(fixture.connect.mock.calls[0][0]);
+  expect(url.pathname).toBe('/v1/text-to-dialogue/stream-input');
+  expect(url.searchParams.get('model_id')).toBe(model);
+  expect(fixture.send.mock.calls.map(([message]) => message)).toEqual([
+    { voices: ['chosen'], voice_settings: { stability: 1 } },
+    { inputs: [{ text: 'สวัสดี', voice_id: 'chosen' }] },
+    { close_socket: true },
+  ]);
+});
+
+test('ElevenLabs keeps a stalled dialogue socket alive and stops after close_socket', async () => {
+  jest.useFakeTimers();
+  try {
+    const fixture = socketFixture();
+    let release!: () => void;
+    const stalled = new Promise<void>(resolve => { release = resolve; });
+    async function* text() { yield 'first'; await stalled; yield 'second'; }
+    const iterator = new ElevenLabsTts('fixture', 'eleven_v4_turbo', fixture.connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: new AbortController().signal })[Symbol.asyncIterator]();
+    const done = iterator.next();
+    await jest.advanceTimersByTimeAsync(25000);
+    const sent = () => fixture.send.mock.calls.map(([message]) => message);
+    expect(sent()).toEqual([
+      { voices: ['voice'], voice_settings: { stability: 1 } },
+      { inputs: [{ text: 'first', voice_id: 'voice' }] },
+      { keep_alive: true },
+      { keep_alive: true },
+    ]);
+    release();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(sent().slice(-2)).toEqual([{ inputs: [{ text: 'second', voice_id: 'voice' }] }, { close_socket: true }]);
+    const count = fixture.send.mock.calls.length;
+    await jest.advanceTimersByTimeAsync(30000);
+    expect(fixture.send).toHaveBeenCalledTimes(count);
+    fixture.messages.push({ is_final: true });
+    expect((await done).done).toBe(true);
+  } finally { jest.useRealTimers(); }
+});
+
+test('ElevenLabs classic models never receive dialogue keep-alive messages', async () => {
+  jest.useFakeTimers();
+  try {
+    const fixture = socketFixture();
+    let release!: () => void;
+    const stalled = new Promise<void>(resolve => { release = resolve; });
+    async function* text() { yield 'first'; await stalled; }
+    const iterator = new ElevenLabsTts('fixture', 'eleven_flash_v2_5', fixture.connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: new AbortController().signal })[Symbol.asyncIterator]();
+    const done = iterator.next();
+    await jest.advanceTimersByTimeAsync(25000);
+    expect(fixture.send.mock.calls.map(([message]) => message)).not.toContainEqual({ keep_alive: true });
+    release(); await jest.advanceTimersByTimeAsync(0);
+    fixture.messages.push({ isFinal: true });
+    expect((await done).done).toBe(true);
+  } finally { jest.useRealTimers(); }
+});
