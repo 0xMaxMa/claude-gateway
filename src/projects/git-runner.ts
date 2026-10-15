@@ -1,4 +1,5 @@
-import { spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
+import * as os from 'os';
 import * as path from 'path';
 import { err, ok, Result } from './paths';
 import { redactCredentials } from './git-status';
@@ -16,34 +17,63 @@ export interface GitOutput {
 
 export type GitRunFailure = 'timeout' | 'git_failed';
 
+/**
+ * What git, credential helpers and hooks may inherit. Anything not named here is dropped, so the gateway's own
+ * API keys, bot tokens and provider keys never reach a hook.
+ */
 const PASSTHROUGH_ENV = new Set([
-  'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TZ', 'TMPDIR', 'TERM',
-  'XDG_CONFIG_HOME', 'SSH_AUTH_SOCK', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+  'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LANGUAGE', 'TZ', 'TMPDIR', 'TERM',
+  'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS',
+  'SSH_AUTH_SOCK', 'SSH_AGENT_PID', 'GNUPGHOME', 'GPG_TTY',
+  'SSL_CERT_FILE', 'SSL_CERT_DIR', 'CURL_CA_BUNDLE',
   'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+  // Inputs of the usual credential helpers (`gh auth git-credential`, `git-credential-libsecret`).
+  'GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_HOST', 'GH_CONFIG_DIR',
+  // Operator-set git settings that are credentials or config sources, not repository selectors.
+  'GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_ASKPASS', 'SSH_ASKPASS', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM',
+  'GIT_CONFIG_COUNT', 'GIT_SSL_CAINFO',
 ]);
 
-/** Operator-set git settings that are credentials or config sources, not repository selectors. */
-const OPERATOR_GIT_ENV = new Set([
-  'GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_ASKPASS', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM', 'GIT_SSL_CAINFO',
-]);
+const passesThrough = (k: string) => PASSTHROUGH_ENV.has(k) || k.startsWith('LC_') || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k);
 
 /**
- * The environment git and its hooks run with: an allowlist of process.env, so a hook never sees the gateway's secrets,
- * and no GIT_DIR/GIT_WORK_TREE that would aim git at another repository. Built from process.env explicitly: jest gives
- * tests a copy that child_process ignores. GIT_SSH_COMMAND and GIT_ASKPASS always end up set: they outrank the repo's
- * core.sshCommand and core.askPass, which are commands from a possibly untrusted config.
+ * The environment git and its hooks run with: an allowlist of process.env, and no GIT_DIR/GIT_WORK_TREE that would
+ * aim git at another repository. Built from process.env explicitly: jest gives tests a copy that child_process ignores.
  */
 export function gitEnv(): NodeJS.ProcessEnv {
-  const env = Object.fromEntries(
-    Object.entries(process.env).filter(([k]) => PASSTHROUGH_ENV.has(k) || OPERATOR_GIT_ENV.has(k) || k.startsWith('LC_')),
-  );
-  return {
-    GIT_SSH_COMMAND: 'ssh -o BatchMode=yes',
-    GIT_ASKPASS: 'true',
-    ...env,
-    GIT_TERMINAL_PROMPT: '0',
-    LC_ALL: 'C',
-  };
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => passesThrough(k)));
+  return { ...env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' };
+}
+
+const NON_INTERACTIVE_SSH = 'ssh -o BatchMode=yes';
+const USER_CONFIG_TIMEOUT_MS = 3_000;
+
+/**
+ * `-c` overrides that put the operator's core.sshCommand and core.askPass (system, global, GIT_CONFIG_*) back on top of
+ * the repository's. Both keys run a command from config, and a cloned repo can set them. A command-line value outranks
+ * every config file, and unlike GIT_SSH_COMMAND or GIT_ASKPASS it leaves the operator's value in charge. With none set,
+ * ssh gets BatchMode and askpass answers empty, so neither can wait for input. Git's own environment variables still
+ * outrank these; they come only from the operator's environment.
+ */
+async function trustedCommandConfig(env: NodeJS.ProcessEnv): Promise<string[]> {
+  const found = await new Promise<string>((resolve) => {
+    // A git dir that does not exist keeps the repository's config out of the lookup.
+    execFile(
+      'git',
+      ['--git-dir=/nonexistent/none', 'config', '-z', '--get-regexp', '^core\\.(sshcommand|askpass)$'],
+      { cwd: os.tmpdir(), env, timeout: USER_CONFIG_TIMEOUT_MS },
+      (e, stdout) => resolve(e ? '' : stdout),
+    );
+  });
+  const values: Record<string, string> = {};
+  for (const entry of found.split('\0')) {
+    const nl = entry.indexOf('\n');
+    if (nl > 0 && entry.length > nl + 1) values[entry.slice(0, nl)] = entry.slice(nl + 1);
+  }
+  return [
+    '-c', `core.sshCommand=${values['core.sshcommand'] ?? NON_INTERACTIVE_SSH}`,
+    '-c', `core.askPass=${values['core.askpass'] ?? 'true'}`,
+  ];
 }
 
 export interface RunOptions {
@@ -63,11 +93,11 @@ const KILL_GRACE_MS = 1_000;
  * Runs git in the project dir `cwd`. Discovery stops at `cwd`, so a folder inside some
  * other repository never reads as a repo itself.
  */
-export function runGit(cwd: string, args: string[], opts: RunOptions): Promise<Result<GitOutput, GitRunFailure>> {
+export async function runGit(cwd: string, args: string[], opts: RunOptions): Promise<Result<GitOutput, GitRunFailure>> {
   const env: NodeJS.ProcessEnv = { ...gitEnv(), GIT_CEILING_DIRECTORIES: path.dirname(cwd), ...opts.env };
   if (opts.readOnly) env.GIT_OPTIONAL_LOCKS = '0';
   // core.fsmonitor is a command from the repo's config; add, commit and status all run it.
-  const argv = ['-c', 'core.fsmonitor=false', ...args];
+  const argv = ['-c', 'core.fsmonitor=false', ...(await trustedCommandConfig(env)), ...args];
   return new Promise((resolve) => {
     // Its own process group, so a timeout also reaches the hooks, filters and ssh that git started.
     const child = spawn('git', argv, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });

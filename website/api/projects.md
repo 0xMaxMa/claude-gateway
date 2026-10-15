@@ -226,9 +226,39 @@ symlink whose target is outside the project returns `403 path_escape`.
 The git routes act on a project that is a git repository. A project is a
 repository only when its own directory holds the repository. A plain folder
 inside a repository is not one. The gateway runs `git` directly, never through
-a shell, without any `GIT_*` variable from its own environment, and never
-prompts for credentials. For ssh it uses `ssh -o BatchMode=yes` unless the
-repository sets `core.sshCommand`. It never forces, never skips hooks, and
+a shell, and never prompts for credentials (`GIT_TERMINAL_PROMPT=0`). It
+never forces, never skips hooks, and never resets, checks out, or deletes
+anything.
+
+The repository's own config cannot choose which command git runs to reach a
+remote. `core.sshCommand` and `core.askPass` in a repository's `.git/config`
+are ignored and `core.fsmonitor` is turned off. The operator's values from
+`/etc/gitconfig`, `~/.gitconfig` and `GIT_CONFIG_*` still apply. When the
+operator sets no `core.sshCommand`, git uses `ssh -o BatchMode=yes`. When the
+operator sets no `core.askPass`, it answers every prompt with an empty
+string. A `GIT_SSH_COMMAND` or `GIT_ASKPASS` in the gateway's environment
+still wins, as it does for git itself. Hooks are the repository's own and
+still run. `credential.helper` set in a repository still runs.
+
+Git, and every hook, filter and credential helper it starts, gets only these
+environment variables from the gateway. Everything else, including the
+gateway's own API keys, bot tokens and provider keys, is dropped.
+
+| Group | Variables |
+| ----- | --------- |
+| Basics | `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `TERM`, `TZ`, `LANG`, `LANGUAGE`, `LC_*` (git itself runs with `LC_ALL=C`) |
+| XDG and desktop | `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` |
+| Agents | `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GNUPGHOME`, `GPG_TTY` |
+| TLS and proxy | `SSL_CERT_FILE`, `SSL_CERT_DIR`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and the lower-case forms |
+| Credential helpers | `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GH_HOST`, `GH_CONFIG_DIR` |
+| Git settings | `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>` |
+
+`GH_TOKEN` and `GITHUB_TOKEN` reach hooks too, because a credential helper
+cannot be told apart from a hook. Do not set them in the gateway's
+environment unless every project's hooks may use them. `GIT_DIR`,
+`GIT_WORK_TREE` and `GIT_TERMINAL_PROMPT` from the gateway's environment are
+never passed.
+
 never resets, checks out, or deletes anything.
 
 Reads run with `core.fsmonitor` turned off, so listing projects never runs a
