@@ -532,9 +532,11 @@ Returns `200` with one entry per port, sorted by port:
 to the project. A client that does not know the field can ignore it. `command` is the first listener's argument list joined by spaces and cut to 120
 characters. The value after any flag whose name contains `token`, `password`,
 `passwd`, `secret`, `key`, `auth`, `credential` or `bearer` (such as `--api-key`,
-`--auth` or `--client-secret=...`) is replaced with `[redacted]`, and so is the value
-after `-p` or attached to it (`-ppw`). A port passed as `-p 3000` is hidden too; the
-entry's `port` still shows it. User and password in a URL (`postgres://user:pw@db/x`)
+`--auth` or `--client-secret=...`) is replaced with `[redacted]`. `-p` is redacted by program. For `sshpass`, both
+`-p pw` and `-ppw` are. For `mysql`, `mysqldump`, `mysqladmin`, `mariadb` and
+`mariadb-dump`, the attached `-ppw` is, even when it is all digits; a bare `-p` is
+left alone, since the next argument is a database name. For any other program only a
+non-numeric `-ppw` is, so a port such as `-p 3000` or `-p3000` stays visible. User and password in a URL (`postgres://user:pw@db/x`)
 are removed. All of this happens before the cut. The environment is never returned. On a host that is not
 Linux, or where `/proc` cannot be read, the response is
 `{ "supported": false, "processes": [] }`.

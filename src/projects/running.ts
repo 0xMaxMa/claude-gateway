@@ -155,6 +155,10 @@ const isSecretFlag = (a: string) => /^--[\w-]+$/.test(a) && SECRET_WORD.test(a);
 /** Joins argv for display. Secret values and URL credentials are replaced before truncation, so a cut never leaks one. */
 export function redactCommand(args: string[]): string {
   const out: string[] = [];
+  const program = path.basename(args[0] ?? '');
+  // `-p` is a port for most programs, so only these two shapes count. In the mysql family a bare `-p` prompts and the next arg is a database.
+  const sshpass = program === 'sshpass';
+  const mysqlFamily = /^(mysql|mysqldump|mysqladmin|mariadb|mariadb-dump)$/.test(program);
   for (let i = 0; i < args.length; i++) {
     const a = redactCredentials(args[i]);
     const redacted = redactHeader(a) ?? redactAssignment(a);
@@ -166,8 +170,10 @@ export function redactCommand(args: string[]): string {
         out.push(REDACTED);
         i++;
       }
-    } else if (/^-p(?!\d+$)./.test(a)) {
-      // mysql-style -p<password>, attached with no space.
+    } else if (sshpass && a === '-p' && i + 1 < args.length) {
+      out.push(a, REDACTED);
+      i++;
+    } else if ((sshpass || mysqlFamily ? /^-p./ : /^-p(?!\d+$)./).test(a)) {
       out.push(`-p${REDACTED}`);
     } else {
       out.push(a);
