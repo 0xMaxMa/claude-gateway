@@ -154,6 +154,11 @@ are removed, never followed, so a link out of the project cannot delete what it 
 project that is itself a link out of the root answers `403 path_escape` and is left alone. Chats
 that were started in the project are kept, and their project no longer resolves.
 
+The folder is first moved to a hidden `<root>/.deleting-<name>-<id>` folder, so the project leaves
+the list in one step and its name is free at once. If some files there cannot be removed, for
+example a subfolder without write permission, the response is still `200` and adds a `warning`
+naming the hidden folder that holds them. A project is never left listed with part of its files gone.
+
 ## GET /api/v1/projects/:name/tree {#get-tree}
 
 List one directory level. Query `path` selects the directory (default: the

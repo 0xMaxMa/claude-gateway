@@ -120,6 +120,34 @@ describe('DELETE /api/v1/projects/:name', () => {
     expect(fs.readFileSync(path.join(outside, 'precious.txt'), 'utf8')).toBe('keep me');
   });
 
+  (process.getuid?.() === 0 ? it.skip : it)('never leaves a half-deleted project listed when a subfolder cannot be emptied', async () => {
+    fs.writeFileSync(path.join(root, 'api', 'a.txt'), 'a');
+    const locked = path.join(root, 'api', 'locked');
+    fs.mkdirSync(locked);
+    fs.writeFileSync(path.join(locked, 'b.txt'), 'b');
+    fs.chmodSync(locked, 0o500);
+    try {
+      const res = await del();
+      const list = await request(app()).get('/api/v1/projects').set(as('k-read'));
+      const names = list.body.projects.map((p: { name: string }) => p.name);
+      if (res.status === 200) {
+        expect(names).toEqual(['keep']);
+        expect(exists('api')).toBe(false);
+        expect(res.body).toEqual({ name: 'api', warning: expect.stringContaining('could not be removed') });
+      } else {
+        expect(names).toEqual(['api', 'keep']);
+        expect(exists('api', 'a.txt')).toBe(true);
+        expect(exists('api', 'src', 'index.js')).toBe(true);
+        expect(exists('api', 'locked', 'b.txt')).toBe(true);
+      }
+    } finally {
+      for (const e of fs.readdirSync(root)) {
+        const sub = path.join(root, e, 'locked');
+        if (fs.existsSync(sub)) fs.chmodSync(sub, 0o700);
+      }
+    }
+  });
+
   it('will not follow a project that is a link out of the root', async () => {
     fs.symlinkSync(outside, path.join(root, 'escape'));
     const res = await del('escape');
