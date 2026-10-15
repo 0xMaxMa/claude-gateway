@@ -47,18 +47,24 @@ const ROUTES: Route[] = [
   ['post', `${A}/messages/accept`, true],
   ['post', `${A}/greeting`, true],
   ['get', '/api/v1/agents/sessions', false],
+  ['post', `${A}/sessions/{sid}/attachments`, true],
+  ['post', '/api/v1/shares', true],
+  ['post', '/api/v1/image-artifacts', true],
+  ['get', '/api/v1/image-catalog', false],
+  ['get', '/api/v1/video-catalog', false],
 ];
 
 const QUERIES = [
   'session_id=a&session_id=b', 'session_id[]=x', 'session_id[a]=b', 'q=a&q=b', 'q[a]=b', 'q[]=x',
   'limit=1&limit=2', 'limit[]=1', 'before[x]=1', 'after_id[]=1', 'order[]=asc', 'chat_id=a&chat_id=b', 'chat_id[x]=1',
-  'page[]=1', 'after_seq[]=1', `session_id=${HUGE}`, `q=${HUGE}`, 'session_id=%00', 'q=%00', 'session_id=%2F..%2F', 'from[]=1&to[]=2&tz_offset[]=1',
+  'page[]=1', 'after_seq[]=1', `session_id=${HUGE}`, `q=${HUGE}`, 'session_id=%00', 'q=%00', 'session_id=%2F..%2F', 'from[]=1&to[]=2&tz_offset[]=1', 'agent_id[]=alfred&session_id[]=x', 'agent_id=alfred&session_id=%2e%2e%2fx',
 ];
 const PATH_VALUES = ['x%2F..%2F{bound}', '%2e%2e', '..%2f..%2f', '%252e%252e', '%00', '%5c..%5c', HUGE];
 const BODIES: unknown[] = [
   [], { session_id: ['a', 'b'] }, { session_id: { a: 1 }, chat_id: { x: 1 }, message: { x: 1 } }, { project: ['site'] }, { project: { a: 1 } },
   { session_name: { a: 1 }, name: ['n'], prompt: { p: 1 } }, { message: HUGE, content: HUGE, chat_id: HUGE, session_id: HUGE },
   { session_id: 'a\u0000b', chat_id: 'web\u0000', message: 'x' }, { questionId: [1], answer: { a: 1 }, id: [], action: {} },
+  { agent_id: ['alfred'], session_id: { a: 1 }, refs: [{ path: ['x'] }, null, 5], files: [{}, 1] }, { files: [HUGE], refs: [{ path: '../../etc/passwd' }, { path: 'a\u0000' }] },
 ];
 
 let gwBase: string;

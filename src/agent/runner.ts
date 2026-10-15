@@ -5604,6 +5604,8 @@ export class AgentRunner extends EventEmitter {
     chatId: string,
     command: string,
     opts?: { skipPersist?: boolean; model?: string; principalId?: string; displayCommand?: string; clientMessageId?: string; executionTaskId?:string; canWriteAgent?: boolean;
+      /** An admin caller; anyone else must not be shown a project-bound session. */
+      canSeeProjects?: boolean;
       /** The caller sent no session_id: `sessionId` is a fresh one made for this command. */
       implicitSession?: boolean },
   ): Promise<{ result: Record<string, unknown>; responseText: string; actions: CommandAction[] }> {
@@ -5807,7 +5809,8 @@ export class AgentRunner extends EventEmitter {
         // Advertised for the api channel (BUILTIN_COMMANDS), so handle it here — mirrors the
         // telegram /sessions list. Marks the session this command runs in as (current).
         const index = await this.sessionStore.listSessions(agentId, storeChatId, 'api').catch(() => null);
-        const list = index?.sessions ?? [];
+        const hiddenFromCaller = opts?.canSeeProjects ? new Set<string>() : await this.sessionStore.listBoundSessionIds(agentId).catch(() => null);
+        const list = (index?.sessions ?? []).filter((s) => opts?.canSeeProjects || (hiddenFromCaller !== null && !s.project && !hiddenFromCaller.has(s.id)));
         // Count each session's flat store directly — the api append path doesn't keep the
         // index messageCount in sync.
         const withCounts = await Promise.all(

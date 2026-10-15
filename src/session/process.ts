@@ -1,4 +1,5 @@
 import { sanitizeJevChildEnv, jevCredentialEnvNames } from '../jev/child-env';
+import { mintAgentSessionToken } from '../api/agent-credential';
 import { workerEnvironment } from './worker-environment';
 import { ProcessDiagnostics, TurnOutcome } from './process-diagnostics';
 import { prepareManagedConnectors } from './managed-connectors';
@@ -915,6 +916,8 @@ export class SessionProcess extends EventEmitter {
             // collected when the agent actually runs the GC.
             GATEWAY_RECORD_RETRIEVALS: this.resolveRecordRetrievals(),
             GATEWAY_SESSION_ID: this.sessionId,
+            // Proves to the gateway that the share and attachment tools run for this very session; see api/agent-credential.
+            GATEWAY_SESSION_TOKEN: mintAgentSessionToken(this.agentConfig.id, this.sessionId),
             // For API sessions: absolute path to session media dir so browser screenshots land there
             GATEWAY_SESSION_MEDIA_DIR: this.source === 'api'
               ? path.resolve(this.agentConfig.workspace, '..', 'media', `api-${this.sessionId}`)

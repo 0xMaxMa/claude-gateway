@@ -3,6 +3,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createApiAuthMiddleware, canAccessAgent } from './auth';
 import { isValidAgentId, isValidSessionId } from './router';
+import { guardAsyncRoutes } from './async-guard';
+import { presentedSessionToken, ProjectGate } from './project-gate';
+import { PROJECTS_ADMIN_REQUIRED } from './auth';
 import { MediaStore } from '../history/media-store';
 import { ApiKey } from '../types';
 import {
@@ -268,9 +271,15 @@ export function createSharesPrivateRouter(
   agentsBaseDir: string,
   publicBaseUrl?: string | (() => string | undefined),
   limitsOverride?: ShareLimits,
+  gate?: ProjectGate,
 ): Router {
-  const router = Router();
+  const router = guardAsyncRoutes(Router());
   const auth = createApiAuthMiddleware(apiKeys);
+  /** Refuses a non-admin caller that is not the agent of `sessionId` when that session is bound to a project. */
+  const refusedSession = (req: Request, agentId: string, sessionId: string): Promise<boolean> =>
+    gate ? gate.refusesSession((req as AuthedRequest).apiKey, agentId, sessionId, presentedSessionToken(req)) : Promise.resolve(false);
+  const refusedMedia = (req: Request, agentId: string, relativePath: string): Promise<boolean> =>
+    gate ? gate.refusesMedia((req as AuthedRequest).apiKey, agentId, relativePath, presentedSessionToken(req)) : Promise.resolve(false);
   const limits = limitsOverride ?? shareLimitsFromEnv();
   const defaultTtl = (() => {
     const n = Number(shareEnv('CODEX_TTL_SECONDS'));
@@ -287,7 +296,7 @@ export function createSharesPrivateRouter(
    * `allow_documents` widens the allowlist to PDF for THIS request only and is
    * recorded on each minted row (#444); without it a PDF is still 415.
    */
-  router.post('/v1/shares', auth, (req: Request, res: Response) => {
+  router.post('/v1/shares', auth, async (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
     const body = req.body as {
       agent_id?: unknown;
@@ -305,6 +314,10 @@ export function createSharesPrivateRouter(
     }
     if (!canAccessAgent(apiKey, agentId)) {
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    if (await refusedSession(req, agentId, sessionId)) {
+      res.status(403).json(PROJECTS_ADMIN_REQUIRED);
       return;
     }
     const purpose = body.purpose === undefined ? 'codex_ref' : (typeof body.purpose === 'string' ? body.purpose : '');
@@ -378,6 +391,10 @@ export function createSharesPrivateRouter(
         dedupeRef = ''; // filled after validation with the canonical relative path
       } else {
         res.status(400).json({ error: 'each ref must carry artifact_id or path' });
+        return;
+      }
+      if (await refusedMedia(req, agentId, candidatePath)) {
+        res.status(403).json(PROJECTS_ADMIN_REQUIRED);
         return;
       }
       let validated;
@@ -481,7 +498,7 @@ export function createSharesPrivateRouter(
    * artifacts (§8). Body: { agent_id, session_id, provider, model, task_id?, prompt?, files: [path] }.
    * Registration never makes a file public — shares are minted separately.
    */
-  router.post('/v1/image-artifacts', auth, (req: Request, res: Response) => {
+  router.post('/v1/image-artifacts', auth, async (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
     const body = req.body as {
       agent_id?: unknown;
@@ -500,6 +517,10 @@ export function createSharesPrivateRouter(
     }
     if (!canAccessAgent(apiKey, agentId)) {
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    if (await refusedSession(req, agentId, sessionId)) {
+      res.status(403).json(PROJECTS_ADMIN_REQUIRED);
       return;
     }
     const files = body.files;
@@ -524,6 +545,10 @@ export function createSharesPrivateRouter(
     const items: Array<{ artifact_id: string; artifact_ref: string; index: number; path: string }> = [];
     for (let index = 0; index < (files as string[]).length; index++) {
       const file = (files as string[])[index]!;
+      if (await refusedMedia(req, agentId, file)) {
+        res.status(403).json(PROJECTS_ADMIN_REQUIRED);
+        return;
+      }
       let validated;
       try {
         // Deliberately NOT widened by #444: this registry feeds the session
@@ -560,7 +585,7 @@ export function createSharesPrivateRouter(
    * image N" never widens the share surface. Same trust model as the mint
    * endpoint (caller holds a gateway key scoped to the agent).
    */
-  router.get('/v1/image-catalog', auth, (req: Request, res: Response) => {
+  router.get('/v1/image-catalog', auth, async (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
     const agentId = typeof req.query.agent_id === 'string' ? req.query.agent_id.trim() : '';
     const sessionId = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
@@ -570,6 +595,10 @@ export function createSharesPrivateRouter(
     }
     if (!canAccessAgent(apiKey, agentId)) {
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    if (await refusedSession(req, agentId, sessionId)) {
+      res.status(403).json(PROJECTS_ADMIN_REQUIRED);
       return;
     }
     const items = computeSessionImageCatalog({ agentsBaseDir, store, agentId, sessionId });
@@ -584,7 +613,7 @@ export function createSharesPrivateRouter(
    * The video analogue of /v1/image-catalog, kept separate so clips never leak
    * into the image-reference surface. Read-only: mints nothing, returns no token.
    */
-  router.get('/v1/video-catalog', auth, (req: Request, res: Response) => {
+  router.get('/v1/video-catalog', auth, async (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
     const agentId = typeof req.query.agent_id === 'string' ? req.query.agent_id.trim() : '';
     const sessionId = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
@@ -594,6 +623,10 @@ export function createSharesPrivateRouter(
     }
     if (!canAccessAgent(apiKey, agentId)) {
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    if (await refusedSession(req, agentId, sessionId)) {
+      res.status(403).json(PROJECTS_ADMIN_REQUIRED);
       return;
     }
     const items = computeSessionVideoCatalog({ agentsBaseDir, agentId, sessionId });

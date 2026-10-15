@@ -9,6 +9,7 @@ import { ShareFileModule } from '../../../mcp/tools/share-file/module';
 import { TaskFiles } from '../../../src/orchestration/task-files';
 import { TaskWorkspaces } from '../../../src/orchestration/tasks/workspace';
 import { DeliveryOutbox, channelSender } from '../../../src/orchestration/delivery';
+import { mintAgentSessionToken } from '../../../src/api/agent-credential';
 import { workerShares } from '../../../src/orchestration/worker-shares';
 import { AgentConfig, GatewayConfig } from '../../../src/types';
 import { receiveChannelMedia } from '../../../src/orchestration/channel-media';
@@ -111,6 +112,7 @@ test('worker share bridge pins agent identity, rejects general routes, and keeps
     await proxy(a.attemptId, a.generation, { method: 'POST', pathname: '/api/v1/image-artifacts', body: { agent_id: 'other', session_id: 'other', files: [f.path] } });
     const init = (request.mock.calls as unknown as [string, RequestInit][])[0][1];
     expect(JSON.parse(String(init.body))).toMatchObject({ agent_id: 'agent', session_id: agent });
+    expect((init.headers as Record<string, string>)['x-gateway-session-token']).toBe(mintAgentSessionToken('agent', agent));
     await expect(proxy(a.attemptId, a.generation, { method: 'POST', pathname: '/api/v1/agents/other/messages', body: {} })).rejects.toThrow('SHARE_SCOPE_DENIED');
     expect(request).toHaveBeenCalledTimes(1);
   } finally { f.close(); }

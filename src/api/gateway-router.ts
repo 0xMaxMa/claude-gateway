@@ -48,6 +48,7 @@ import { createCapabilitiesRouter } from './capabilities';
 import { GATEWAY_VERSION } from './gateway-version';
 import { createWorkspaceRouter } from './workspace-router';
 import { createProjectsRouter } from './projects-router';
+import { projectGateFor } from './project-gate';
 import { StopLimiter, systemSys } from '../projects/running';
 import { projectsEnabled, resolveProjectsRoot } from '../projects/chat';
 import { createSkillsRouter } from './skills-router';
@@ -670,6 +671,8 @@ export class GatewayRouter {
             this.gatewayConfig.gateway.api.keys,
             this.agentsRoot(),
             publicUrl,
+            undefined,
+            projectGateFor(this.agents),
           ),
         );
       }

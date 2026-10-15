@@ -1,3 +1,4 @@
+import { AGENT_SESSION_TOKEN_HEADER, mintAgentSessionToken } from '../api/agent-credential';
 import { AgentConfig, GatewayConfig } from '../types';
 import { OrchestrationError } from './types';
 import { TaskFiles } from './task-files';
@@ -31,7 +32,7 @@ export function workerShares(files: TaskFiles, agent: AgentConfig, gateway: Gate
     } else if (method === 'DELETE' && /^\/api\/v1\/shares\/[A-Za-z0-9_-]+$/.test(pathname) && minted.get(pathname.split('/').at(-1)!) === task.taskId) target = pathname;
     else throw new OrchestrationError('SHARE_SCOPE_DENIED');
     const base = (process.env.GATEWAY_API_URL ?? `http://127.0.0.1:${process.env.PORT ?? '10850'}`).replace(/\/+$/, '');
-    const response = await request(`${base}${target}`, { method: String(method), headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+    const response = await request(`${base}${target}`, { method: String(method), headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}`, [AGENT_SESSION_TOKEN_HEADER]: mintAgentSessionToken(agent.id, task.agentSessionId) },
       body: method === 'POST' ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(15000) });
     const json = await response.json() as Record<string, unknown>;
     if (target === '/api/v1/shares' && response.status === 201 && Array.isArray(json.items)) for (const item of json.items) {

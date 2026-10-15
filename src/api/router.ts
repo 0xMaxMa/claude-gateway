@@ -18,7 +18,7 @@ import { agentsDirForConfig } from '../config/agent-env';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin, PROJECTS_ADMIN_REQUIRED } from './auth';
 import { guardAsyncRoutes } from './async-guard';
-import { hiddenSessions, historyExclusions, refusesProjectChat } from './project-gate';
+import { hiddenSessions, historyExclusions, presentedSessionToken, refusesProjectChat, refusesProjectMedia, refusesProjectSession } from './project-gate';
 import { PROJECT_CHAT_ERRORS } from '../projects/chat';
 import { parseProjectName, ProjectName } from '../projects/paths';
 import { MediaStore } from '../history/media-store';
@@ -704,6 +704,7 @@ export function createApiRouter(
           res.status(400).json({ error: `Invalid media path: ${f}` });
           return;
         }
+        if (await refusesProjectMedia(runner, apiKey, f)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       }
       validatedMediaFiles = media_files as string[];
     }
@@ -880,7 +881,7 @@ export function createApiRouter(
           openSseStream(res);
           try {
             const reply = await runner.executeApiCommand(
-              sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, model: modelStr, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId), implicitSession: session_id === undefined },
+              sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, model: modelStr, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId), canSeeProjects: isAdmin(apiKey), implicitSession: session_id === undefined },
             );
             sseCallbacks.onChunk({ type: 'text_delta', text: reply.responseText } as import('../types').StreamEvent);
             sseCallbacks.onDone(reply.responseText, [], undefined, commandReplyFields(commandMessage, reply));
@@ -936,7 +937,7 @@ export function createApiRouter(
         if (isBuiltinCommand) {
           // Built-in command — answer locally, return the same JSON shape as a normal reply plus its structured part.
           const reply = await runner.executeApiCommand(
-            sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId), implicitSession: session_id === undefined },
+            sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId), canSeeProjects: isAdmin(apiKey), implicitSession: session_id === undefined },
           );
           responseText = reply.responseText;
           commandFields = commandReplyFields(commandMessage, reply);
@@ -4114,7 +4115,7 @@ export function createApiRouter(
   router.post(
     '/v1/agents/:agentId/sessions/:sessionId/attachments',
     auth,
-    (req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
       const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
       const apiKey = (req as AuthedRequest).apiKey;
       if (!canAccessAgent(apiKey, agentId)) {
@@ -4126,6 +4127,7 @@ export function createApiRouter(
         res.status(404).json({ error: `Agent '${agentId}' not found` });
         return;
       }
+      if (await refusesProjectSession(runner, apiKey, sessionId, presentedSessionToken(req))) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       const body = req.body as Record<string, unknown>;
       const files = body['files'];
       if (!Array.isArray(files) || files.some((f) => typeof f !== 'string')) {
@@ -4280,12 +4282,8 @@ export function createApiRouter(
       res.status(400).json({ error: 'Invalid path' });
       return;
     }
-    // Gate the path the file system will open, not the spelling the client sent: dot segments and encoded
-    // separators are already folded away here.
-    let mediaRoot = MediaStore.agentMediaRoot(agentsBaseDir, agentId);
-    try { mediaRoot = fs.realpathSync(mediaRoot); } catch { /* no media folder yet */ }
-    const mediaSession = /^api-([a-zA-Z0-9_-]{1,64})(?:\/|$)/i.exec(path.relative(mediaRoot, absPath))?.[1];
-    if (mediaSession && await refusesProjectChat(runner, apiKey, mediaSession)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
+    // Gate the path the file system will open, not the spelling the client sent.
+    if (await refusesProjectMedia(runner, apiKey, wildcardParam)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     if (!fs.existsSync(absPath)) {
       res.status(404).json({ error: 'Not found' });
       return;
