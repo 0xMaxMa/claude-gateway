@@ -107,7 +107,7 @@ A connected, same-principal voice session can speak typed chat responses while i
 | `GET` | `/voice-call/:pairingId` | The call page (`Cache-Control: no-store`); `404` once the link expired |
 | `POST` | `/voice-call/:pairingId/ticket` | Body `{ "initData": "<Telegram.WebApp.initData>", "call_token": "<optional>" }`; returns the ticket fields above plus `call_token` |
 
-The pairing id in the link is not a credential. Each ticket request verifies the initData signature with the agent's bot token (at most one hour old), requires the user the link was sent to, and re-checks that the user is still in the receiver's `allowFrom`. The first ticket claims the link and returns `call_token`; later tickets for the same call, such as a reconnect after close code `1012`, must present it. A link opened elsewhere gets `409` with `code: CALL_LINK_USED`. Unclaimed links expire after three minutes; a claimed call can take new tickets for 30 minutes after the last one.
+The pairing id in the link is not a credential. Each ticket request verifies the initData signature with the agent's bot token, requires the user the link was sent to, and re-checks that the user is still in the receiver's `allowFrom`. The first ticket claims the link and returns `call_token`; later tickets for the same call, such as a reconnect after close code `1012`, must present it. Opening a call needs initData at most one hour old; a claimed call that presents its `call_token` may reconnect with older initData, because Telegram does not refresh it during a session. A link opened elsewhere gets `409` with `code: CALL_LINK_USED`. Unclaimed links expire after three minutes; a claimed call can take new tickets for 30 minutes after the last one.
 
 | Status | Meaning |
 |---|---|

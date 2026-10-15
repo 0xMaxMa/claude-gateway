@@ -19,6 +19,11 @@ export interface VoiceCallPairing {
   expiresAt: number;
 }
 
+/** A Telegram DM can hold a call: orchestration serves Telegram and the agent has voice. */
+export function telegramVoiceCallsEnabled(config: { orchestration?: { enabled?: boolean; channels?: string[] }; voice?: { enabled?: boolean } } | undefined): boolean {
+  return Boolean(config?.orchestration?.enabled && config.orchestration.channels?.includes('telegram') && config.voice?.enabled);
+}
+
 export type VoiceCallClaim = { callToken: string } | 'gone' | 'mismatch' | 'claimed';
 
 export class VoiceCallPairings {

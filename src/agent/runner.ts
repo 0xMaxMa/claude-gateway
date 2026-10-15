@@ -73,7 +73,7 @@ import { scrubText } from './incident';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { cliPairingStore, isCliChannel, type CliChannel } from '../cli-viewer/pairing-store';
 import { buildCliUrl, buildVoiceCallUrl } from '../cli-viewer/url';
-import { voiceCallPairings } from '../voice/call-pairing';
+import { telegramVoiceCallsEnabled, voiceCallPairings } from '../voice/call-pairing';
 import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
@@ -1446,9 +1446,7 @@ export class AgentRunner extends EventEmitter {
       const chatId = body.chat_id ?? '', userId = body.payload?.user_id;
       // Private chats only: a DM's chat id is its user id.
       if (!/^\d+$/.test(chatId) || userId !== chatId) { respond({ success: false, error: 'invalid_request' }, 400); return; }
-      if (!this.agentConfig.orchestration?.enabled || !this.agentConfig.orchestration.channels?.includes('telegram') || !this.agentConfig.voice?.enabled) {
-        respond({ success: false, error: 'voice_not_configured' }); return;
-      }
+      if (!telegramVoiceCallsEnabled(this.agentConfig)) { respond({ success: false, error: 'voice_not_configured' }); return; }
       if (!buildVoiceCallUrl(this.gatewayConfig.gateway.publicUrl, 'probe')) { respond({ success: false, error: 'not_configured' }); return; }
       respond({ success: true, url: buildVoiceCallUrl(this.gatewayConfig.gateway.publicUrl, voiceCallPairings.create(this.agentConfig.id, chatId)) });
       return;

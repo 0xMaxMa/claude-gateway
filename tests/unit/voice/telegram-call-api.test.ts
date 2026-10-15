@@ -140,8 +140,16 @@ test('a Telegram call speaks in the DM scope over the shared voice WebSocket, su
     stt.sessions[0].emit({ type: 'error', code: 'STT_CONNECTION_CLOSED', retryable: true });
     const [code] = await once(ws, 'close');
     expect(code).toBe(1012);
-    const reconnect = await request(f.app).post(`/voice-call/${pairingId}/ticket`).set('Origin', ORIGIN).send({ initData: initData(42), call_token: issued.body.call_token });
+    // Telegram never refreshes initData: a call older than its one-hour limit reconnects with its call token,
+    // while stale initData alone, or with a wrong token, cannot.
+    const stale = initData(42, Math.floor(Date.now() / 1000) - 2 * 60 * 60);
+    expect((await request(f.app).post(`/voice-call/${pairingId}/ticket`).set('Origin', ORIGIN).send({ initData: stale })).status).toBe(401);
+    expect((await request(f.app).post(`/voice-call/${pairingId}/ticket`).set('Origin', ORIGIN).send({ initData: stale, call_token: 'f'.repeat(64) })).status).toBe(409);
+    const reconnect = await request(f.app).post(`/voice-call/${pairingId}/ticket`).set('Origin', ORIGIN).send({ initData: stale, call_token: issued.body.call_token });
     expect(reconnect.status).toBe(200);
+    // Opening a call still needs fresh initData, whatever token is presented.
+    const unclaimed = voiceCallPairings.create('a', '42');
+    expect((await request(f.app).post(`/voice-call/${unclaimed}/ticket`).set('Origin', ORIGIN).send({ initData: stale, call_token: issued.body.call_token })).status).toBe(401);
   } finally { ws?.terminate(); await f.close(); }
 });
 

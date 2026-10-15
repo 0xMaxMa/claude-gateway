@@ -90,7 +90,8 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     }
     async function ticket(){
       var response = await fetch(api('/ticket'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
-        body: JSON.stringify({ initData: tg.initData, call_token: callToken }) });
+        body: JSON.stringify({ initData: tg.initData, call_token: callToken }) })
+        .catch(function(){ var offline = new Error('The network is unavailable.'); offline.fatal = false; throw offline; });
       var body = await response.json().catch(function(){ return {}; });
       if (body.call_token) callToken = body.call_token;
       if (!response.ok) {
@@ -146,10 +147,17 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
         uplink.reset(); flushPlayback(); stopping = false;
         if (ended) return;
         // 1012: the recognizer restarted; 1006: the network dropped. Take a fresh ticket.
-        if ((event.code === 1012 || event.code === 1006) && attempts < 5) { attempts++; state('Reconnecting…'); setTimeout(function(){ connect().catch(fail); }, 500 * attempts); return; }
+        if (event.code === 1012 || event.code === 1006) { reconnect(); return; }
         if (event.code === 1008) fail(new Error('Access changed. Send /call again.'));
         else { var lost = new Error('The call was disconnected.'); lost.fatal = false; fail(lost); }
       };
+    }
+    // A dropped socket's lease can take a moment to clear: retry transient ticket errors with backoff.
+    function reconnect(){
+      if (ended) return;
+      if (attempts >= 5) { var lost = new Error('The call was disconnected.'); lost.fatal = false; fail(lost); return; }
+      attempts++; state('Reconnecting…');
+      setTimeout(function(){ connect().catch(function(error){ if (error.fatal === false) reconnect(); else fail(error); }); }, 500 * attempts);
     }
     function fail(error){
       state(error.message || 'The call could not continue.', 'err');
@@ -170,7 +178,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     }
     // A hidden Mini App cannot hear or be heard reliably (iOS cuts the mic): mute and drop queued audio.
     function suspend(){
-      if (!media || ended || document.visibilityState === 'visible' && (!tg || tg.isActive !== false)) return;
+      if (!media || ended) return;
       if (!muted) { autoMuted = true; setMuted(true); }
       if (playhead.playing(ctx.currentTime)) { stopping = true; send({ type: 'playback.stop', epoch: epoch, request_id: ++stopRequest }); }
       flushPlayback();
@@ -223,7 +231,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       try { await connect(); } catch (error) { fail(error); }
     }
     if (tg) { try { tg.ready(); tg.expand(); if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); tg.onEvent && tg.onEvent('deactivated', suspend); tg.onEvent && tg.onEvent('activated', resume); } catch (e) {} }
-    document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'hidden') suspend(); else resume(); });
+    document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'hidden') suspend(); else if (!tg || tg.isActive !== false) resume(); });
     $('start').onclick = function(){ start(); };
     $('mute').onclick = function(){ autoMuted = false; setMuted(!muted); };
     $('hangup').onclick = function(){ hangup(false); };

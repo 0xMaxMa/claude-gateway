@@ -4,7 +4,7 @@ import { AgentRunner } from '../agent/runner';
 import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
 import { generateCliMessagePage } from '../ui/cli-viewer-ui';
 import { generateVoiceCallPage } from '../ui/voice-call-ui';
-import { voiceCallPairings } from '../voice/call-pairing';
+import { telegramVoiceCallsEnabled, voiceCallPairings } from '../voice/call-pairing';
 import { readTelegramAccess } from '../telegram/access';
 import { resolveOrchestrationConfig } from '../orchestration/config';
 import type { VoiceApi } from './voice-router';
@@ -16,10 +16,6 @@ export interface VoiceCallRouterDeps {
   /** Path of `gateway.publicUrl` ("" at the origin root). */
   basePath(): string;
   telegramStateDir(agentId: string): string;
-}
-
-function telegramVoiceEnabled(config: AgentConfig | undefined): config is AgentConfig {
-  return Boolean(config?.orchestration?.enabled && config.orchestration.channels?.includes('telegram') && config.voice?.enabled);
 }
 
 /**
@@ -45,13 +41,18 @@ export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
     const config = pairing && deps.configs.get(pairing.agentId), runner = pairing && deps.agents.get(pairing.agentId);
     if (!pairing || !config || !runner) { res.status(410).json({ error: 'Call link expired', code: 'CALL_LINK_EXPIRED' }); return; }
     const initData = typeof req.body?.initData === 'string' ? req.body.initData : '';
-    const verified = verifyTelegramInitData(initData, config.telegram?.botToken ?? '');
+    const callToken = typeof req.body?.call_token === 'string' ? req.body.call_token : undefined;
+    const botToken = config.telegram?.botToken ?? '';
+    // Telegram never refreshes a Mini App's initData, so a call outliving its age
+    // limit reconnects on the signature plus the call token checked by claim().
+    // Opening a call always needs fresh initData.
+    const verified = verifyTelegramInitData(initData, botToken)
+      ?? (callToken && pairing.callToken ? verifyTelegramInitData(initData, botToken, Number.POSITIVE_INFINITY) : null);
     if (!verified) { res.status(401).json({ error: 'Invalid initData' }); return; }
     if (verified.userId !== pairing.userId) { res.status(403).json({ error: 'User mismatch' }); return; }
     // The receiver checked allowFrom when it sent the button; access may have changed since.
     if (!readTelegramAccess(deps.telegramStateDir(pairing.agentId)).allowFrom.includes(verified.userId)) { res.status(403).json({ error: 'Not allowed' }); return; }
-    if (!telegramVoiceEnabled(config)) { res.status(409).json({ error: 'Voice disabled', code: 'VOICE_DISABLED' }); return; }
-    const callToken = typeof req.body?.call_token === 'string' ? req.body.call_token : undefined;
+    if (!telegramVoiceCallsEnabled(config)) { res.status(409).json({ error: 'Voice disabled', code: 'VOICE_DISABLED' }); return; }
     const claim = voiceCallPairings.claim(pairing.pairingId, verified.userId, callToken);
     if (claim === 'gone') { res.status(410).json({ error: 'Call link expired', code: 'CALL_LINK_EXPIRED' }); return; }
     if (claim === 'mismatch') { res.status(403).json({ error: 'User mismatch' }); return; }
