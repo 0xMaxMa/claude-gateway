@@ -190,7 +190,12 @@ workspace. A synchronous [`POST /messages`](/api/messages) answers `409`. A
 streaming request gets an SSE `error` frame with that code. The key check runs
 again on every request that drives or watches the session: a key that is not an admin
 key gets `403` with `code: "forbidden_key"` from [`POST /messages`](/api/messages),
-`POST /messages/accept`, `POST /greeting` and the session's message, activity and event streams.
+`POST /messages/accept`, `POST /greeting` (a read-only key too) and the session's message, activity and event streams.
+The same answer comes from every other route that takes the session's id: info, rename, delete, clear, compact,
+stop, restart, tasks (list, show, answer, control, cancel), voice, and its media folder; and from the chat history
+routes (`/chats/:chatId/messages`, `/messages/search`, `/messages/active-days`) when the request names the session
+with `session_id`. For a key that is not an admin key, `GET /sessions`, `GET /chats` and the unfiltered history routes
+leave the session out, its messages included, and carry no project name.
 
 On an orchestrated agent the deciding agent stays in its workspace and is told
 which project the chat is in. Every task it starts runs in the project folder,
