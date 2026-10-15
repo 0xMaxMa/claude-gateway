@@ -5,6 +5,7 @@ import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
 import { generateCliMessagePage } from '../ui/cli-viewer-ui';
 import { generateVoiceCallPage } from '../ui/voice-call-ui';
 import { telegramVoiceCallsEnabled, voiceCallPairings } from '../voice/call-pairing';
+import { TelegramBotAvatars } from '../voice/telegram-avatar';
 import { readTelegramAccess } from '../telegram/access';
 import { resolveOrchestrationConfig } from '../orchestration/config';
 import type { VoiceApi } from './voice-router';
@@ -16,6 +17,7 @@ export interface VoiceCallRouterDeps {
   /** Path of `gateway.publicUrl` ("" at the origin root). */
   basePath(): string;
   telegramStateDir(agentId: string): string;
+  avatars?: TelegramBotAvatars;
 }
 
 /**
@@ -33,6 +35,19 @@ export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
     if (!pairing || !config) { res.status(404).send(generateCliMessagePage('Link expired', 'This call link is invalid or has expired. Send /call again.', 'err')); return; }
     const voice = resolveOrchestrationConfig(config.orchestration, config.voice ?? { enabled: false }).voice;
     res.send(generateVoiceCallPage({ pairingId: pairing.pairingId, agentId: pairing.agentId, basePath: deps.basePath(), maxUtteranceMs: voice.turns.maxUtteranceMs }));
+  });
+
+  // The bot's profile photo for the call screen; 404 leaves the page on its initial letter.
+  const avatars = deps.avatars ?? new TelegramBotAvatars();
+  router.get('/:pairingId/avatar', async (req: Request, res: Response) => {
+    const pairing = voiceCallPairings.get(String(req.params.pairingId));
+    const token = pairing && deps.configs.get(pairing.agentId)?.telegram?.botToken;
+    const avatar = token ? await avatars.get(pairing.agentId, token) : null;
+    if (!avatar) { res.setHeader('Cache-Control', 'no-store'); res.status(404).end(); return; }
+    res.setHeader('Content-Type', avatar.contentType);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.send(avatar.bytes);
   });
 
   router.post('/:pairingId/ticket', async (req: Request, res: Response) => {
