@@ -104,7 +104,8 @@ should treat an unknown value as `null`.
 ## POST /api/v1/projects {#post-projects}
 
 Create `<root>/<name>`, creating the root first if needed. Returns
-`201`.
+`201` with the new project in the same shape [the list](#get-projects) uses. Its `stack` is
+`null`, since a new directory has no files to mark one.
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -117,7 +118,7 @@ curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json"
 ```
 
 ```json
-{ "project": { "name": "demo", "path": "/home/getpod/projects/demo", "modified_at": "2026-10-06T07:41:58.686Z", "is_git": true } }
+{ "project": { "name": "demo", "path": "/home/getpod/projects/demo", "modified_at": "2026-10-06T07:41:58.686Z", "is_git": true, "stack": null } }
 ```
 
 If the name is already taken the response is `409 project_exists` and the
@@ -129,7 +130,7 @@ installed). It never includes git's output, which the gateway logs instead.
 
 ```json
 {
-  "project": { "name": "nogit", "path": "/home/getpod/projects/nogit", "modified_at": "2026-10-06T07:41:58.698Z", "is_git": false },
+  "project": { "name": "nogit", "path": "/home/getpod/projects/nogit", "modified_at": "2026-10-06T07:41:58.698Z", "is_git": false, "stack": null },
   "warning": "git init failed (ENOENT)"
 }
 ```
