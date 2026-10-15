@@ -15,9 +15,9 @@ export function answersLiveVoice(store: OrchestrationStore, responseId: string):
  * next reply to the call, unless a reply to a typed message came first: quoting
  * them after that reply would put them out of order. History keeps the reply text unchanged.
  */
-export function withLiveVoiceTranscript(store: OrchestrationStore, responseId: string, text: string): string {
+export function withLiveVoiceTranscript(store: OrchestrationStore, responseId: string, text: string, live = answersLiveVoice(store, responseId)): string {
   // Every channel reply passes through here; only replies to a call look further back.
-  if (!answersLiveVoice(store, responseId)) return text;
+  if (!live) return text;
   const rows = store.all(`WITH answered AS (
       SELECT r.conversation_id, MAX(i.input_seq) AS seq FROM assistant_responses r JOIN conversation_decisions d ON d.id=r.decision_id
         JOIN json_each(d.input_ids_json) j JOIN conversation_inputs i ON i.id=j.value AND i.conversation_id=d.conversation_id WHERE r.id=?),

@@ -51,6 +51,19 @@ describe('VAD', () => {
     expect(feed(quiet, 400)).toEqual(['end']);
   });
 
+  test('while the agent is audible, echo below the barge-in level never starts speech; a clear voice does', () => {
+    const vad = createVoiceCallVad(VOICE_CALL_VAD);
+    for (let i = 0; i < 10; i++) vad(quiet, 40);
+    const echo: (string | undefined)[] = [];
+    for (let i = 0; i < 25; i++) echo.push(vad(0.02, 40, true)); // above the normal threshold, below twice it
+    expect(echo.filter(Boolean)).toEqual([]);
+    expect(vad(0.02, 200, false)).toBe('start'); // the same level counts once playback stops
+    const barge = createVoiceCallVad(VOICE_CALL_VAD);
+    const edges: (string | undefined)[] = [];
+    for (let i = 0; i < 7; i++) edges.push(barge(loud, 40, true));
+    expect(edges.indexOf('start')).toBe(6); // 7 × 40 ms ≥ bargeInMs
+  });
+
   test('learns a noisy room so steady background noise does not start speech', () => {
     const vad = createVoiceCallVad(VOICE_CALL_VAD);
     const edges: (string | undefined)[] = [];

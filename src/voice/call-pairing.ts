@@ -16,6 +16,8 @@ export interface VoiceCallPairing {
   pairingId: string;
   agentId: string;
   userId: string;
+  /** Topic of the private chat `/call` was sent in; '' for the main chat. */
+  threadKey: string;
   callToken?: string;
   /** Voice session of the latest ticket, so a connected call keeps its pairing alive. */
   voiceSessionId?: string;
@@ -32,9 +34,9 @@ export type VoiceCallClaim = { callToken: string } | 'gone' | 'mismatch' | 'clai
 export class VoiceCallPairings {
   private readonly pairings = new Map<string, VoiceCallPairing>();
 
-  create(agentId: string, userId: string): string {
+  create(agentId: string, userId: string, threadKey = ''): string {
     const pairingId = crypto.randomBytes(18).toString('hex');
-    this.pairings.set(pairingId, { pairingId, agentId, userId, expiresAt: Date.now() + PAIRING_TTL_MS });
+    this.pairings.set(pairingId, { pairingId, agentId, userId, threadKey, expiresAt: Date.now() + PAIRING_TTL_MS });
     return pairingId;
   }
 
@@ -43,7 +45,8 @@ export class VoiceCallPairings {
     return pairing && pairing.expiresAt > Date.now() ? pairing : undefined;
   }
 
-  /** Claim an unclaimed pairing, or continue the call that holds `callToken`. */
+  /** Claim an unclaimed pairing, or continue the call that holds `callToken`.
+   * The page proposes its token on the first claim, so a lost response can be retried. */
   claim(pairingId: string, userId: string, callToken?: string): VoiceCallClaim {
     const pairing = this.get(pairingId);
     if (!pairing) return 'gone';
@@ -51,7 +54,7 @@ export class VoiceCallPairings {
     if (pairing.callToken) {
       const presented = Buffer.from(callToken ?? ''), expected = Buffer.from(pairing.callToken);
       if (presented.length !== expected.length || !crypto.timingSafeEqual(presented, expected)) return 'claimed';
-    } else pairing.callToken = crypto.randomBytes(32).toString('hex');
+    } else pairing.callToken = callToken && /^[0-9a-f]{64}$/.test(callToken) ? callToken : crypto.randomBytes(32).toString('hex');
     pairing.expiresAt = Date.now() + ACCESS_TTL_MS;
     return { callToken: pairing.callToken };
   }

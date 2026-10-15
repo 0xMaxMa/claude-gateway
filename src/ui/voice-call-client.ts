@@ -8,7 +8,7 @@
  * not protocol timing: the server still waits `voice.turns.silenceCommitMs`
  * after `speech.ended` before it commits an utterance. Levels are RMS of
  * float samples in [-1, 1]. */
-export const VOICE_CALL_VAD = { startMs: 120, endMs: 350, ratio: 3, minLevel: 0.012, initialNoise: 0.004, noiseAdapt: 0.05 };
+export const VOICE_CALL_VAD = { startMs: 120, endMs: 350, ratio: 3, minLevel: 0.012, initialNoise: 0.004, noiseAdapt: 0.05, bargeInRatio: 2, bargeInMs: 250 };
 
 /**
  * Streaming resampler from the AudioContext rate to 16 kHz PCM16. A one-pole
@@ -60,14 +60,19 @@ export function voiceCallLevel(samples: Float32Array): number {
 /**
  * Energy endpointing with an adaptive noise floor. Feed one level per chunk with
  * its duration; it reports `start` after `startMs` above the threshold and `end`
- * after `endMs` below it. The floor only learns from non-speech chunks.
+ * after `endMs` below it. The floor only learns from non-speech chunks. While the
+ * agent is audible, starting needs `bargeInRatio` times the level for `bargeInMs`,
+ * so echo the canceller leaves behind does not interrupt the reply.
  */
-export function createVoiceCallVad(options: { startMs: number; endMs: number; ratio: number; minLevel: number; initialNoise: number; noiseAdapt: number }): (level: number, ms: number) => 'start' | 'end' | undefined {
+export function createVoiceCallVad(options: { startMs: number; endMs: number; ratio: number; minLevel: number; initialNoise: number; noiseAdapt: number; bargeInRatio: number; bargeInMs: number }): (level: number, ms: number, playing?: boolean) => 'start' | 'end' | undefined {
   let noise = options.initialNoise, speaking = false, above = 0, below = 0;
-  return (level, ms) => {
-    const loud = level > Math.max(options.minLevel, noise * options.ratio);
+  return (level, ms, playing = false) => {
+    const threshold = Math.max(options.minLevel, noise * options.ratio);
+    const loud = level > threshold;
     if (!speaking) {
-      if (loud) { above += ms; if (above >= options.startMs) { speaking = true; below = 0; return 'start'; } }
+      const start = playing ? level > threshold * options.bargeInRatio : loud;
+      if (start) { above += ms; if (above >= (playing ? options.bargeInMs : options.startMs)) { speaking = true; below = 0; return 'start'; } }
+      else if (loud) above = 0;
       else { above = 0; noise += (level - noise) * options.noiseAdapt; }
       return undefined;
     }

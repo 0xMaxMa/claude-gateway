@@ -23,7 +23,10 @@ describe('voice_call_pair (/call)', () => {
     expect(status).toBe(200);
     const pairingId = String(data.url).match(/^https:\/\/host\.example\/gateway\/voice-call\/([0-9a-f]{36})$/)?.[1];
     expect(pairingId).toBeDefined();
-    expect(voiceCallPairings.get(pairingId!)).toMatchObject({ agentId: 'agent', userId: '42' });
+    expect(voiceCallPairings.get(pairingId!)).toMatchObject({ agentId: 'agent', userId: '42', threadKey: '' });
+    // Sent in a private-chat topic, the call joins that topic.
+    const topic = await command(runnerWith(voiceConfig(), 'https://host.example/gateway'), { command: 'voice_call_pair', chat_id: '42', payload: { user_id: '42', thread_id: '7' } });
+    expect(voiceCallPairings.get(String(topic.data.url).split('/').pop()!)).toMatchObject({ threadKey: '7' });
   });
 
   test('refuses group chats, disabled voice, agents without Telegram orchestration, and a missing public URL', async () => {
@@ -33,6 +36,9 @@ describe('voice_call_pair (/call)', () => {
     expect((await command(runnerWith(voiceConfig(false), 'https://host.example/gateway'), pair)).data).toEqual({ success: false, error: 'voice_not_configured' });
     expect((await command(runnerWith({ ...voiceConfig(), orchestration: { enabled: true, channels: ['api'] } }, 'https://host.example/gateway'), pair)).data).toEqual({ success: false, error: 'voice_not_configured' });
     expect((await command(runnerWith(voiceConfig()), pair)).data).toEqual({ success: false, error: 'not_configured' });
+    // Telegram opens web_app buttons over HTTPS only.
+    expect((await command(runnerWith(voiceConfig(), 'http://localhost:3000'), pair)).data).toEqual({ success: false, error: 'not_configured' });
+    expect((await command(runnerWith(voiceConfig(), 'https://host.example'), { ...pair, payload: { user_id: '42', thread_id: 'x' } })).status).toBe(400);
   });
 });
 

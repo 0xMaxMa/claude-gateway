@@ -1540,16 +1540,16 @@ bot.command('call', async ctx => {
   try {
     const response = await fetch(CALLBACK_URL_BASE + '/command', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(10000),
-      body: JSON.stringify({ command: 'voice_call_pair', chat_id: String(ctx.chat.id), payload: { user_id: String(ctx.from!.id) } }),
+      body: JSON.stringify({ command: 'voice_call_pair', chat_id: String(ctx.chat.id), payload: { user_id: String(ctx.from!.id), ...(ctx.message?.message_thread_id ? { thread_id: String(ctx.message.message_thread_id) } : {}) } }),
     })
     const data = (await response.json()) as { success?: boolean; url?: string; error?: string }
     if (!data.success || !data.url) {
-      await ctx.reply(data.error === 'not_configured' ? 'Voice calls are not configured. Set gateway.publicUrl in config.json first.'
+      await ctx.reply(data.error === 'not_configured' ? 'Voice calls are not configured. Set an HTTPS gateway.publicUrl in config.json first.'
         : data.error === 'voice_not_configured' ? 'Voice calls need voice enabled for this agent.' : 'Could not start a voice call right now.')
       return
     }
     // web_app buttons open the Mini App with signed initData; Telegram requires HTTPS.
-    await ctx.reply('Tap to start a voice call. Your words and the replies also appear here.', { reply_markup: new InlineKeyboard().webApp('\u{1F399} Start voice call', data.url) })
+    await ctx.reply('Tap to start a voice call. Your words and the replies also appear here.', { ...(ctx.message?.message_thread_id ? { message_thread_id: ctx.message.message_thread_id } : {}), reply_markup: new InlineKeyboard().webApp('\u{1F399} Start voice call', data.url) })
   } catch { await ctx.reply('Could not start a voice call right now.') }
 })
 

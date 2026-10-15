@@ -2,4 +2,4 @@
  * API calls keep their own `api` conversation; a Telegram call joins the DM. */
 export type VoiceScope =
   | { kind: 'api'; principalId: string; chatId: string }
-  | { kind: 'telegram'; principalId: `telegram:${string}`; chatId: string; threadKey: '' };
+  | { kind: 'telegram'; principalId: `telegram:${string}`; chatId: string; threadKey: string };

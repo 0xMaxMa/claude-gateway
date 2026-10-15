@@ -20,7 +20,7 @@ import { PCM16 } from '../voice/types';
 import type { VoiceScope } from '../voice/scope';
 
 interface VoiceTicket {
-  agentId: string; sessionId: string; scope: VoiceScope; principalId: string;
+  agentId: string; sessionId: string; scope: VoiceScope;
   voiceSessionId: string; expiresAt: number; origin?: string; allowTools: boolean; model?: string;
 }
 /** A minted ticket, or the HTTP status and body that refuse it. */
@@ -127,7 +127,7 @@ export class VoiceApi {
       const active = this.sessions.get(id);
       const ticketEntry = [...this.tickets].find(([, value]) => value.voiceSessionId === id);
       const owner = active?.ticket ?? ticketEntry?.[1];
-      if (!owner || owner.agentId !== req.params.agentId || owner.sessionId !== req.params.sessionId || owner.principalId !== apiPrincipal(key) || !canAccessAgent(key, owner.agentId)) { res.status(404).json({ error: 'Voice session not found' }); return; }
+      if (!owner || owner.agentId !== req.params.agentId || owner.sessionId !== req.params.sessionId || owner.scope.principalId !== apiPrincipal(key) || !canAccessAgent(key, owner.agentId)) { res.status(404).json({ error: 'Voice session not found' }); return; }
       if (ticketEntry) this.tickets.delete(ticketEntry[0]);
       active?.socket.close(); await active?.session.close(); this.sessions.delete(id); this.releaseLease(owner);
       res.status(204).end();
@@ -165,7 +165,7 @@ export class VoiceApi {
         return { status: 403, body: { error: 'Session access denied' } };
       }
     }
-    const value: VoiceTicket = { agentId, sessionId, scope, principalId: scope.principalId, voiceSessionId, expiresAt: Date.now() + 30000, origin, allowTools };
+    const value: VoiceTicket = { agentId, sessionId, scope, voiceSessionId, expiresAt: Date.now() + 30000, origin, allowTools };
     this.tickets.set(ticket, value);
     return { status: 200, body: { voice_session_id: voiceSessionId, ticket, expires_at: value.expiresAt, input_format: PCM16, output_format: PCM16,
       capabilities: { full_duplex: true, playback_clear: true, playback_progress: true },
@@ -194,7 +194,7 @@ export class VoiceApi {
       let speechTarget:{taskId?:string; pause?:Promise<string|undefined>}|undefined;
       // The pause on first words is provisional: speech that yields no command resumes the task.
       const release=(target:typeof speechTarget)=>{
-        if(target?.taskId&&target.pause)void target.pause.then(pauseId=>pauseId?runner.releaseVoicePause(ticket.sessionId,ticket.principalId,target.taskId!,pauseId):undefined)
+        if(target?.taskId&&target.pause)void target.pause.then(pauseId=>pauseId?runner.releaseVoicePause(ticket.sessionId,ticket.scope.principalId,target.taskId!,pauseId):undefined)
           .catch(error=>console.warn(JSON.stringify({ts:new Date().toISOString(),level:'warn',event:'Voice pause release failed',agentId:ticket.agentId,sessionId:ticket.sessionId,code:error?.code??'ERROR'})));
       };
       const discardSpeech=()=>{const target=speechTarget;speechTarget=undefined;release(target);};
@@ -204,7 +204,7 @@ export class VoiceApi {
         // chosen destination stable for all segments of this spoken message.
         if(['stt.partial','stt.segment','stt.final'].includes(String(message.type))&&typeof message.text==='string'&&message.text.trim()&&!speechTarget){
           speechTarget={taskId:executionTaskId};
-          if(executionTaskId&&ticket.allowTools)speechTarget.pause=runner.pauseVoiceExecution(ticket.sessionId,ticket.principalId,executionTaskId).catch(()=>undefined);
+          if(executionTaskId&&ticket.allowTools)speechTarget.pause=runner.pauseVoiceExecution(ticket.sessionId,ticket.scope.principalId,executionTaskId).catch(()=>undefined);
         }
         // The utterance was lost before admission (empty transcript, STT failure or recognizer reconnect).
         if(message.type==='voice.error'&&speechTarget&&(message.reconnect===true||/^(?:STT_|EMPTY_TRANSCRIPT$|TRANSCRIPTION_INCOMPLETE$|AUDIO_BOUNDARY_MISMATCH$|UTTERANCE_TOO_LONG$|TRANSCRIPT_TOO_LARGE$)/.test(String(message.code))))discardSpeech();
@@ -240,8 +240,8 @@ export class VoiceApi {
             return accepted;
           },
           () => runner.stopVoiceResponse(ticket.sessionId), { ...voice.turns, maxBufferedAudioMs: voice.playback.maxBufferedAudioMs, language: voice.language },
-          (responseId, progress, state) => runner.recordVoicePlayback(responseId, ticket.principalId, progress, state),
-          (responseId, audio) => runner.saveVoiceReplay(ticket.sessionId, ticket.principalId, responseId, audio),
+          (responseId, progress, state) => runner.recordVoicePlayback(responseId, ticket.scope.principalId, progress, state),
+          (responseId, audio) => runner.saveVoiceReplay(ticket.sessionId, ticket.scope.principalId, responseId, audio),
           event => console.info(JSON.stringify({ ts: new Date().toISOString(), level: 'info', event: 'Voice timing', agentId: ticket.agentId, sessionId: ticket.sessionId, voiceSessionId: ticket.voiceSessionId, ...event, ...(event.operation === 'turn' ? {} : { provider: voice[event.operation].provider, model: voice[event.operation].model }) })));
       } catch { send({ type: 'voice.error', code: 'PROVIDER_CONFIGURATION_ERROR' }); ws.close(); this.releaseLease(ticket); return; }
       this.sessions.set(ticket.voiceSessionId, { session, socket: ws, ticket });
@@ -254,7 +254,7 @@ export class VoiceApi {
         if (!playbackReady || catchingUp || ws.readyState !== WebSocket.OPEN) return;
         catchingUp = true;
         try {
-          const pending = await runner.pendingVoiceSpeech(ticket.sessionId, ticket.principalId, session.speechClaims());
+          const pending = await runner.pendingVoiceSpeech(ticket.sessionId, ticket.scope.principalId, session.speechClaims());
           if (ws.readyState === WebSocket.OPEN) for (const result of pending) session.notifyResult(result);
           resumeFailed = false;
         } catch {
@@ -298,7 +298,7 @@ export class VoiceApi {
                   send({ type: 'voice.configured', voice_id: voiceId });
                 } catch { send({ type: 'voice.error', code: 'TTS_UNAVAILABLE' }); }
               }
-              unsubscribe = await runner.subscribeVoiceResults(ticket.sessionId, ticket.principalId, result => session.notifyResult(result), () => selectedGender);
+              unsubscribe = await runner.subscribeVoiceResults(ticket.sessionId, ticket.scope.principalId, result => session.notifyResult(result), () => selectedGender);
               if (ws.readyState !== WebSocket.OPEN) { unsubscribe(); break; }
               if (control.muted === true) await session.mute(true, 'discard');
               else await session.start();
@@ -336,9 +336,9 @@ export class VoiceApi {
     }
     return true;
   }
-  /** A voice session is issued or connected. */
-  isLive(voiceSessionId: string): boolean {
-    return this.sessions.has(voiceSessionId) || [...this.tickets.values()].some(ticket => ticket.voiceSessionId === voiceSessionId);
+  /** Voice sessions that are connected or hold an unused ticket. */
+  liveSessionIds(): Set<string> {
+    return new Set([...this.sessions.keys(), ...[...this.tickets.values()].map(ticket => ticket.voiceSessionId)]);
   }
   private releaseLease(ticket: VoiceTicket): void {
     const key = `${ticket.agentId}:${ticket.sessionId}`;

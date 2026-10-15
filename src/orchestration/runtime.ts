@@ -176,8 +176,8 @@ export class AgentOrchestrationRuntime {
   private readonly voiceListeners = new Map<string, { principalId: string; receive: (result: { responseId: string; text: string; spoken: string; requestId?: string; speechOnly?: boolean }) => void; gender?: () => string | undefined }>();
   /** The caller hears this reply in a live call, either as the answer to spoken
    * words or spoken by the connected listener; never send it again as a chat voice message. */
-  private heardInCall(responseId: string): boolean {
-    if (answersLiveVoice(this.store, responseId)) return true;
+  private heardInCall(responseId: string, live = answersLiveVoice(this.store, responseId)): boolean {
+    if (live) return true;
     const row = this.store.get(`SELECT d.session_id,i.principal_id FROM assistant_responses r JOIN conversation_decisions d ON d.id=r.decision_id
       JOIN conversation_inputs i ON i.id=json_extract(d.input_ids_json,'$[0]') WHERE r.id=?`, responseId);
     return Boolean(row && this.voiceListeners.get(String(row.session_id))?.principalId === row.principal_id);
@@ -216,10 +216,11 @@ export class AgentOrchestrationRuntime {
       // no longer 'pending') still counts itself as part of the group needing quota.
       () => Number(store.get(`SELECT COUNT(*) n FROM outbox o JOIN deliveries d ON d.id=json_extract(o.payload_json,'$.deliveryId') JOIN conversation_bindings b ON b.id=d.binding_id WHERE o.kind='delivery' AND o.state IN ('pending','processing') AND b.channel='line'`)!.n)));
     this.decisions = new DecisionService(store, (response, binding, text) => {
-      this.delivery.enqueue(response, binding, withLiveVoiceTranscript(store, response, text), this.voiceRetryControls(response, binding));
+      const live = answersLiveVoice(store, response);
+      this.delivery.enqueue(response, binding, withLiveVoiceTranscript(store, response, text, live), this.voiceRetryControls(response, binding));
       const spoken = store.get('SELECT text FROM response_speech WHERE response_id=?', response);
       const destination = store.get('SELECT channel,chat_id,thread_key FROM conversation_bindings WHERE id=?', binding);
-      if (spoken?.text && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && destination && ['telegram','discord','line','slack'].includes(String(destination.channel)) && voiceReplyAllowed(store.channelVoiceMode(String(destination.channel),String(destination.chat_id),String(destination.thread_key??'')), responseHasVoiceOrigin(store,response)) && !this.heardInCall(response)) {
+      if (spoken?.text && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && destination && ['telegram','discord','line','slack'].includes(String(destination.channel)) && voiceReplyAllowed(store.channelVoiceMode(String(destination.channel),String(destination.chat_id),String(destination.thread_key??'')), responseHasVoiceOrigin(store,response)) && !this.heardInCall(response, live)) {
         this.delivery.enqueueSpeech(response, binding, { ...this.telegramVoices.settings(channelVoiceKey(String(destination.channel),String(destination.chat_id),String(destination.thread_key??''))), text: String(spoken.text), voiceOrigin: responseHasVoiceOrigin(store,response) });
       }
     }); this.config = resolveOrchestrationConfig(agent.orchestration, agent.voice ?? { enabled: false });

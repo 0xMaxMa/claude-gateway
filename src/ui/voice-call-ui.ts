@@ -74,7 +74,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     var ctx, media, capture, ws, uplink, vad, resample, progressTimer;
     var playhead = createVoiceCallPlayhead(), sources = [];
     var callToken, generation, epoch = 0, reportedPlayed = 0, stopRequest = 0, stopping = false;
-    var muted = false, autoMuted = false, ended = false, attempts = 0;
+    var muted = false, paused = false, ended = false, attempts = 0;
     function state(text, tone){ var s = $('state'); s.textContent = text; s.className = 'state' + (tone ? ' ' + tone : ''); }
     function api(path){ return CFG.basePath + '/voice-call/' + CFG.pairingId + path; }
     function send(message){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(message)); }
@@ -141,13 +141,17 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     async function connect(){
       var issued = await ticket();
       var scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(scheme + '//' + location.host + CFG.basePath + issued.stream_path + '?ticket=' + encodeURIComponent(issued.ticket));
-      ws.binaryType = 'arraybuffer';
-      ws.onopen = function(){ send({ type: 'voice.start', muted: muted }); };
-      ws.onmessage = function(event){ if (typeof event.data === 'string') control(JSON.parse(event.data)); else playAudio(event.data); };
-      ws.onclose = function(event){
+      if (ended || paused) return;
+      var socket = new WebSocket(scheme + '//' + location.host + CFG.basePath + issued.stream_path + '?ticket=' + encodeURIComponent(issued.ticket));
+      ws = socket;
+      socket.binaryType = 'arraybuffer';
+      socket.onopen = function(){ send({ type: 'voice.start', muted: muted }); };
+      socket.onmessage = function(event){ if (socket !== ws) return; if (typeof event.data === 'string') control(JSON.parse(event.data)); else playAudio(event.data); };
+      socket.onclose = function(event){
+        // A socket replaced by a reconnect no longer owns the call state.
+        if (socket !== ws) return;
         uplink.reset(); flushPlayback(); stopping = false;
-        if (ended) return;
+        if (ended || paused) return;
         // 1012: the recognizer restarted; 1006: the network dropped. Take a fresh ticket.
         if (event.code === 1012 || event.code === 1006) { reconnect(); return; }
         if (event.code === 1008) fail(new Error('Access changed. Send /call again.'));
@@ -178,14 +182,22 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       $('mute').textContent = value ? 'Unmute' : 'Mute';
       state(value ? 'Muted' : 'Listening');
     }
-    // A hidden Mini App cannot hear or be heard reliably (iOS cuts the mic): mute and drop queued audio.
+    // A hidden Mini App cannot hear or be heard reliably (iOS cuts the mic). Leave the
+    // call while hidden, so replies reach the chat as they would without a call, and
+    // rejoin with the call token on return.
     function suspend(){
-      if (!media || ended) return;
-      if (!muted) { autoMuted = true; setMuted(true); }
-      if (playhead.playing(ctx.currentTime)) { stopping = true; send({ type: 'playback.stop', epoch: epoch, request_id: ++stopRequest }); }
-      flushPlayback();
+      if (!media || ended || paused) return;
+      paused = true; uplink.reset(); flushPlayback();
+      media.getAudioTracks().forEach(function(track){ track.enabled = false; });
+      if (ws) { send({ type: 'voice.stop' }); ws.close(); }
+      state('Paused');
     }
-    function resume(){ if (media && !ended && autoMuted && document.visibilityState === 'visible') { autoMuted = false; setMuted(false); } }
+    function resume(){
+      if (!paused || ended || document.visibilityState !== 'visible') return;
+      paused = false; attempts = 0; vad = createVoiceCallVad(CFG.vad);
+      media.getAudioTracks().forEach(function(track){ track.enabled = !muted; });
+      state('Reconnecting…'); connect().catch(fail);
+    }
     function hangup(silent){
       if (ended) return;
       ended = true; clearInterval(progressTimer);
@@ -203,6 +215,8 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
         state('This Telegram app cannot use the microphone here. Update Telegram or try another device.', 'err'); return;
       }
       state('Starting…');
+      // The page proposes its call token, so a ticket response lost on the network can be retried.
+      callToken = Array.prototype.map.call(crypto.getRandomValues(new Uint8Array(32)), function(byte){ return ('0' + byte.toString(16)).slice(-2); }).join('');
       try {
         ctx = new AudioContext();
         // One microphone request per call: some Telegram clients prompt on every getUserMedia.
@@ -221,9 +235,11 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       var sink = ctx.createGain(); sink.gain.value = 0;
       ctx.createMediaStreamSource(media).connect(capture); capture.connect(sink); sink.connect(ctx.destination);
       capture.port.onmessage = function(event){
-        if (muted || ended) return;
-        var samples = event.data, edge = vad(voiceCallLevel(samples), samples.length / ctx.sampleRate * 1000), pcm = resample(samples);
-        if (edge === 'start') uplink.speechStart({ playing: playhead.playing(ctx.currentTime), epoch: epoch });
+        if (muted || paused || ended) return;
+        // Audible reply audio raises the bar for speech, so speaker echo does not interrupt it.
+        var playing = playhead.playing(ctx.currentTime);
+        var samples = event.data, edge = vad(voiceCallLevel(samples), samples.length / ctx.sampleRate * 1000, playing), pcm = resample(samples);
+        if (edge === 'start') uplink.speechStart({ playing: playing, epoch: epoch });
         uplink.audio(pcm);
         if (edge === 'end') uplink.speechEnd();
       };
@@ -235,7 +251,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     if (tg) { try { tg.ready(); tg.expand(); if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); tg.onEvent && tg.onEvent('deactivated', suspend); tg.onEvent && tg.onEvent('activated', resume); } catch (e) {} }
     document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'hidden') suspend(); else if (!tg || tg.isActive !== false) resume(); });
     $('start').onclick = function(){ start(); };
-    $('mute').onclick = function(){ autoMuted = false; setMuted(!muted); };
+    $('mute').onclick = function(){ setMuted(!muted); };
     $('hangup').onclick = function(){ hangup(false); };
   })();
   </script>`;

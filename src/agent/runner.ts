@@ -566,7 +566,7 @@ export class AgentRunner extends EventEmitter {
     if (voiceScope.kind === 'telegram') {
       // The call joins the DM it was opened from: the same conversation, delivery
       // binding and membership as a message typed in that chat.
-      if (!this.agentConfig.orchestration.channels?.includes('telegram')) throw new Error('Voice is disabled');
+      if (!telegramVoiceCallsEnabled(this.agentConfig)) throw new Error('Voice is disabled');
       // /new or a session switch moves the chat; the call must not keep talking to the old session.
       if (await this.telegramVoiceSession(chatId) !== sessionId) throw Object.assign(new Error('Voice session changed'), { code: 'VOICE_SESSION_CHANGED' });
       scope = channelScope(this.agentConfig.id, sessionId, 'telegram', chatId, voiceScope.threadKey, principalId.slice('telegram:'.length));
@@ -1445,12 +1445,13 @@ export class AgentRunner extends EventEmitter {
     // Mint a voice-call pairing for that user; the Mini App proves the same user
     // again with signed initData before any ticket is issued.
     if (command === 'voice_call_pair') {
-      const chatId = body.chat_id ?? '', userId = body.payload?.user_id;
+      const chatId = body.chat_id ?? '', userId = body.payload?.user_id, threadId = body.payload?.thread_id;
       // Private chats only: a DM's chat id is its user id.
-      if (!/^\d+$/.test(chatId) || userId !== chatId) { respond({ success: false, error: 'invalid_request' }, 400); return; }
+      if (!/^\d+$/.test(chatId) || userId !== chatId || (threadId !== undefined && (typeof threadId !== 'string' || !/^\d+$/.test(threadId)))) { respond({ success: false, error: 'invalid_request' }, 400); return; }
       if (!telegramVoiceCallsEnabled(this.agentConfig)) { respond({ success: false, error: 'voice_not_configured' }); return; }
-      if (!normalizePublicUrl(this.gatewayConfig.gateway.publicUrl)) { respond({ success: false, error: 'not_configured' }); return; }
-      respond({ success: true, url: buildVoiceCallUrl(this.gatewayConfig.gateway.publicUrl, voiceCallPairings.create(this.agentConfig.id, chatId)) });
+      // Telegram opens Mini Apps over HTTPS only.
+      if (!normalizePublicUrl(this.gatewayConfig.gateway.publicUrl)?.startsWith('https://')) { respond({ success: false, error: 'not_configured' }); return; }
+      respond({ success: true, url: buildVoiceCallUrl(this.gatewayConfig.gateway.publicUrl, voiceCallPairings.create(this.agentConfig.id, chatId, threadId ?? '')) });
       return;
     }
 

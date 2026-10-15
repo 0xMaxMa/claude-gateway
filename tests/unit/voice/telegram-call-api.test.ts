@@ -84,6 +84,14 @@ test('the /call ticket route proves the Telegram user, the pairing owner and the
     expect(f.runner.authorizeVoiceSession).toHaveBeenCalledWith('tg-session', 'telegram:42');
     // A Telegram chat has no "voice off" control, so no persistent browser-voice intent is saved.
     expect(f.runner.setBrowserVoice).not.toHaveBeenCalled();
+    // A ticket in a private-chat topic speaks in that topic.
+    const topic = voiceCallPairings.create('a', '42', '7'), mint = jest.spyOn(f.api, 'mintTicket');
+    const proposed = 'c'.repeat(64);
+    const topical = await request(f.app).post(`/voice-call/${topic}/ticket`).set('Origin', ORIGIN).send({ initData: initData(42), call_token: proposed });
+    expect(mint).toHaveBeenLastCalledWith('a', 'tg-session', { kind: 'telegram', principalId: 'telegram:42', chatId: '42', threadKey: '7' }, ORIGIN, true);
+    // The page's proposed token is kept, so retrying after a lost response still works.
+    expect(topical.body.call_token).toBe(proposed);
+    expect((await request(f.app).post(`/voice-call/${topic}/ticket`).set('Origin', ORIGIN).send({ initData: initData(42), call_token: proposed })).body.call_token).toBe(proposed);
     // A forwarded link cannot open a second call; the page's own token can, once the lease is free.
     expect((await ticket({ initData: initData(42) })).body).toMatchObject({ code: 'CALL_LINK_USED' });
     expect((await ticket({ initData: initData(42) })).status).toBe(409);
