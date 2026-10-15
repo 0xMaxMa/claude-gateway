@@ -48,25 +48,30 @@ export function projectsEnabled(config: GatewayConfig): boolean {
   return config.gateway.projects?.enabled !== false;
 }
 
-const deletingProjects = new Set<string>();
+const deletingFolders = new Set<string>();
 
 /**
- * Marks `name` as being deleted, so no chat turn or worker starts in it between the delete guard and the rename.
- * Returns the release function, or null when another delete already holds the name.
+ * Marks the real folder `dir` as being deleted, so no chat turn, worker or start begins in it between the
+ * delete guard and the rename. Keyed by folder, so a symlink alias of the project is held too.
+ * Returns the release function, or null when another delete already holds the folder.
  */
-export function markProjectDeleting(name: ProjectName): (() => void) | null {
-  if (deletingProjects.has(name)) return null;
-  deletingProjects.add(name);
-  return () => void deletingProjects.delete(name);
+export function markProjectDeleting(dir: string): (() => void) | null {
+  if (deletingFolders.has(dir)) return null;
+  deletingFolders.add(dir);
+  return () => void deletingFolders.delete(dir);
+}
+
+export function isProjectDeleting(dir: string): boolean {
+  return deletingFolders.has(dir);
 }
 
 export async function resolveProjectCwd(config: GatewayConfig, name: ProjectName): Promise<Result<ProjectCwd, ProjectChatError>> {
   if (!projectsEnabled(config)) return err({ code: 'projects_disabled' });
-  if (deletingProjects.has(name)) return err({ code: 'project_unavailable', reason: 'project_deleting' });
   const dir = await resolveProjectDir(resolveProjectsRoot(config), name);
   if (!dir.ok) {
     return err(dir.error === 'not_found' ? { code: 'project_not_found' } : { code: 'project_unavailable', reason: dir.error });
   }
+  if (isProjectDeleting(dir.value)) return err({ code: 'project_unavailable', reason: 'project_deleting' });
   const st = await fsp.stat(dir.value).catch(() => null);
   if (!st) return err({ code: 'project_not_found' });
   return ok({ name, dir: dir.value, trusted: await projectTrusted(config, name), identity: `${st.dev}:${st.ino}` });

@@ -238,7 +238,11 @@ export async function startProject(
 export class StartGuard {
   private busy = new Set<string>();
 
-  /** Runs `fn` unless a start for `project` is in flight; null when it is. */
+  has(project: string): boolean {
+    return this.busy.has(project);
+  }
+
+  /** Runs `fn` unless a start for `project` (its real folder) is in flight; null when it is. */
   async run<T>(project: string, fn: () => Promise<T>): Promise<T | null> {
     if (this.busy.has(project)) return null;
     this.busy.add(project);

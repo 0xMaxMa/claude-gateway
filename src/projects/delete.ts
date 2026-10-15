@@ -3,7 +3,7 @@ import { promises as fsp } from 'fs';
 import * as path from 'path';
 import { err, errnoToCode, ok, ProjectName, ProjectsErrorCode, Result } from './paths';
 
-export type DeleteErrorCode = 'confirm_mismatch' | 'project_running';
+export type DeleteErrorCode = 'confirm_mismatch' | 'project_running' | 'project_deleting';
 
 export interface RemovedProject {
   name: ProjectName;

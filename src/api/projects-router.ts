@@ -8,7 +8,7 @@ import { getStatus, getSummaries, GitError, GitErrorCode } from '../projects/git
 import { listRunning, ProjectDir, RunningErrorCode, scanProjects, StopLimiter, stopRunning, Sys, systemSys } from '../projects/running';
 import { planStart, PORT_MIN, readStartFacts, startProject, StartError, StartErrorCode, StartGuard, Launcher, systemLauncher } from '../projects/start';
 import { DeleteErrorCode, removeProject } from '../projects/delete';
-import { markProjectDeleting } from '../projects/chat';
+import { isProjectDeleting, markProjectDeleting } from '../projects/chat';
 import { parseProjectName, parseRelPath, ProjectName, ProjectsErrorCode, Result } from '../projects/paths';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
@@ -41,6 +41,7 @@ const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode | Start
   start_timeout: { status: 504, message: 'The project did not start listening in time' },
   confirm_mismatch: { status: 400, message: 'confirm must be the exact project name' },
   project_running: { status: 409, message: 'Stop what is running in this project first' },
+  project_deleting: { status: 409, message: 'The project is being deleted' },
 };
 
 function fail(res: Response, error: ProjectsErrorCode | RunningErrorCode | DeleteErrorCode | GitError | StartError): void {
@@ -121,13 +122,16 @@ export function createProjectsRouter(
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);
       if ((req.body ?? {}).confirm !== name.value) return fail(res, 'confirm_mismatch');
-      const release = markProjectDeleting(name.value);
+      const dir = await resolveProjectDir(root, name.value);
+      if (!dir.ok) return fail(res, dir.error);
+      const busy = async () =>
+        (await listRunning(running.sys, dir.value)).processes.length > 0 || starts.has(dir.value) || Boolean(await running.chatTurnActive?.(name.value));
+      // Checked before the mark, so a turn that began earlier is seen here and never refused by the mark.
+      if (await busy()) return fail(res, 'project_running');
+      const release = markProjectDeleting(dir.value);
       if (!release) return fail(res, 'project_running');
       try {
-        const dir = await resolveProjectDir(root, name.value);
-        if (!dir.ok) return fail(res, dir.error);
-        const listening = await listRunning(running.sys, dir.value);
-        if (listening.processes.length > 0 || (await running.chatTurnActive?.(name.value))) return fail(res, 'project_running');
+        if (await busy()) return fail(res, 'project_running');
         respond(res, await removeProject(root, name.value));
       } finally {
         release();
@@ -248,7 +252,8 @@ export function createProjectsRouter(
       const port = (req.body ?? {}).port;
       const dir = await resolveProjectDir(root, name.value);
       if (!dir.ok) return fail(res, dir.error);
-      const result = await starts.run(name.value, () =>
+      if (isProjectDeleting(dir.value)) return fail(res, 'project_deleting');
+      const result = await starts.run(dir.value, () =>
         startProject(running.sys, launcher, {
           realProject: dir.value,
           name: name.value,

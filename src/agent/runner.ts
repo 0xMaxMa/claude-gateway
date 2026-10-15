@@ -82,7 +82,8 @@ import { isChatChannel } from '../history/types';
 import type { SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 import { resolveEnabledConnectors } from '../connectors/resolve';
-import { ProjectChatError, ProjectCwd, ProjectUnsupportedReason, projectUnavailableError, resolveProjectCwd, sessionProjectView, SessionProjectView } from '../projects/chat';
+import { ProjectChatError, ProjectCwd, ProjectUnsupportedReason, projectUnavailableError, resolveProjectCwd, resolveProjectsRoot, sessionProjectView, SessionProjectView } from '../projects/chat';
+import { resolveProjectDir } from '../projects/fs';
 import { resolveOrchestrationConfig } from '../orchestration/config';
 import { resolveWorkerHarness } from '../orchestration/worker-harness';
 import { err, ProjectName, Result } from '../projects/paths';
@@ -412,6 +413,8 @@ export class AgentRunner extends EventEmitter {
   // keyed by sessionId so the dashboard can show the actual chat id.
   private readonly apiChatIds = new Map<string, string>();
   private readonly boundProjects = new Map<string, string>();
+  /** Sessions deleted while orchestrated work was live: they stay in boundProjects until that work ends. */
+  private readonly retiredBindings = new Set<string>();
 
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
@@ -5412,12 +5415,32 @@ export class AgentRunner extends EventEmitter {
     return this.pendingApiSessions.has(sessionId);
   }
 
-  /** A chat bound to `project` has a live turn, a process still spawning, an accepted input not yet handled, or an unfinished task. Keyed on live sessions, not on the session record, so deleting a session mid-turn does not unlock the project. An unreadable binding on a live session counts as active. */
+  /**
+   * A chat or task works in the folder `project` names, through any name or symlink alias: a live turn, a process
+   * still spawning, an accepted input not yet handled, or an unfinished task. Keyed on live work and on the
+   * folder, not on the session record, so deleting a session mid-turn does not unlock the project. An
+   * unreadable binding on a live session counts as active.
+   */
   async hasActiveProjectTurn(project: string): Promise<boolean> {
-    const live = new Set([...this.pendingApiSessions, ...this.sessionSpawnLocks.keys(), ...(this.orchestration?.liveSessionIds() ?? [])]);
-    for (const sessionId of live) {
+    const orchestratedLive = this.orchestration?.liveSessionIds() ?? new Set<string>();
+    for (const id of [...this.retiredBindings]) {
+      if (orchestratedLive.has(id) || this.pendingApiSessions.has(id) || this.sessionSpawnLocks.has(id)) continue;
+      this.retiredBindings.delete(id);
+      this.boundProjects.delete(id);
+    }
+    const names = new Set<string>(this.orchestration?.activeTaskProjects() ?? []);
+    for (const sessionId of new Set([...this.pendingApiSessions, ...this.sessionSpawnLocks.keys(), ...orchestratedLive])) {
       const binding = await this.apiSessionBinding(sessionId);
-      if (binding.kind === 'unreadable' || (binding.kind === 'bound' && binding.project === project)) return true;
+      if (binding.kind === 'unreadable') return true;
+      if (binding.kind === 'bound') names.add(binding.project);
+    }
+    if (names.has(project)) return true;
+    const root = resolveProjectsRoot(this.gatewayConfig);
+    const target = await resolveProjectDir(root, project as ProjectName);
+    if (!target.ok) return false;
+    for (const name of names) {
+      const dir = await resolveProjectDir(root, name as ProjectName);
+      if (dir.ok && dir.value === target.value) return true;
     }
     return false;
   }
@@ -5987,10 +6010,11 @@ export class AgentRunner extends EventEmitter {
       if (err instanceof SessionNotInIndexError) return;
       throw err;
     });
-    // Stay in boundProjects while a turn is live: the project guard reads it.
-    const live = this.pendingApiSessions.has(sessionId) || this.sessionSpawnLocks.has(sessionId);
+    // Stay in boundProjects while a turn or orchestrated work is live: the project guard reads it.
+    const live = this.pendingApiSessions.has(sessionId) || this.sessionSpawnLocks.has(sessionId) || Boolean(this.orchestration?.liveSessionIds().has(sessionId));
     await this.sessionStore.deleteProjectBinding(this.agentConfig.id, sessionId);
-    if (!live) this.boundProjects.delete(sessionId);
+    if (live) this.retiredBindings.add(sessionId);
+    else this.boundProjects.delete(sessionId);
     // Purge from SQLite so the session no longer appears in listSessions()
     const mediaPaths = this.historyDb.clearSession(`api-${chatId}`, sessionId);
     MediaStore.deleteMediaFiles(this.agentsBaseDir, this.agentConfig.id, mediaPaths);

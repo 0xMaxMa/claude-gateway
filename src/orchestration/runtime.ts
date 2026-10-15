@@ -1876,6 +1876,11 @@ export class AgentOrchestrationRuntime {
       OR EXISTS (SELECT 1 FROM tasks t WHERE t.conversation_id=c.id AND t.state NOT IN ('completed','failed','cancelled')))`)) ids.add(String(row.id));
     return ids;
   }
+  /** Project names that unfinished tasks are pinned to, whatever became of the session that queued them. */
+  activeTaskProjects(): string[] {
+    return this.store.all("SELECT DISTINCT json_extract(snapshot_json,'$.project') AS project FROM tasks WHERE state NOT IN ('completed','failed','cancelled') AND json_extract(snapshot_json,'$.project') IS NOT NULL")
+      .map(row => String(row.project));
+  }
   hasPendingWork(): boolean {
     return !!(this.active.size || this.pending.size || this.store.get("SELECT id FROM conversation_inputs WHERE status IN ('accepted','assigned') LIMIT 1") || this.store.get("SELECT id FROM tasks WHERE state NOT IN ('completed','failed','cancelled') LIMIT 1"));
   }

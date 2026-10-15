@@ -8,6 +8,7 @@ import * as os from 'os';
 import * as path from 'path';
 import supertest from 'supertest';
 import { AgentRunner } from '../../src/agent/runner';
+import * as chat from '../../src/projects/chat';
 import { GatewayRouter } from '../../src/api/gateway-router';
 import { AgentConfig, ApiKey, GatewayConfig } from '../../src/types';
 import { waitForCondition } from '../helpers/wait-for';
@@ -746,4 +747,96 @@ describe('project delete after a failed spawn', () => {
       .set('Authorization', `Bearer ${KEYS.admin!.key}`).send({ confirm: 'site' });
     expect(res.status).toBe(200);
   }, 30_000);
+});
+
+describe('the project delete guard follows the folder and the work, not the session record', () => {
+  let h: Harness;
+  beforeAll(() => { process.env.CLAUDE_BIN = `node ${MOCK_CLAUDE}`; });
+  afterAll(() => { delete process.env.CLAUDE_BIN; delete process.env.MOCK_CLAUDE_ARGV_LOG; });
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    await teardown(h);
+  });
+  const del = (name = 'site') => supertest(h.app).delete(`/api/v1/projects/${name}`).set('Authorization', `Bearer ${KEYS.admin!.key}`).send({ confirm: name });
+  const admin = () => ({ Authorization: `Bearer ${KEYS.admin!.key}` });
+  const deleteSession = (sessionId: string) => supertest(h.app).delete(`/api/v1/agents/alfred/sessions/${sessionId}`).set(admin()).query({ chat_id: 'web' });
+  const accept = (sessionId: string, message: string, id: string) => supertest(h.app)
+    .post('/api/v1/agents/alfred/messages/accept').set(admin())
+    .send({ message, chat_id: 'web', session_id: sessionId, client_message_id: id });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const runtime = (): any => (h.runners[0] as any).orchestration;
+
+  it('keeps refusing the delete after the session is deleted while an orchestrated turn is live', async () => {
+    h = await harness({ orchestration: true });
+    const sessionId = await projectSession(h);
+    expect((await accept(sessionId, 'HOLD-TURN', '00000000-0000-4000-8000-0000000000a1')).status).toBe(202);
+    await waitForCondition(() => spawns(h).length > 0, 15_000);
+    expect((await del()).status).toBe(409);
+    expect((await deleteSession(sessionId)).status).toBe(204);
+    expect(runtime().liveSessionIds().has(sessionId)).toBe(true);
+    const res = await del();
+    expect([res.status, res.body.code]).toEqual([409, 'project_running']);
+    expect(fs.existsSync(path.join(h.root, 'site'))).toBe(true);
+  }, 40_000);
+
+  it('keeps refusing the delete while a task pinned to the project is unfinished, with no session left', async () => {
+    h = await harness({ orchestration: true });
+    const sessionId = await projectSession(h);
+    expect((await accept(sessionId, 'hello', '00000000-0000-4000-8000-0000000000b1')).status).toBe(202);
+    await waitForCondition(() => !!runtime() && runtime().liveSessionIds().size === 0, 20_000);
+    const conv = runtime().store.get('SELECT id FROM conversations WHERE agent_session_id=?', sessionId);
+    const now = Date.now();
+    runtime().store.run('INSERT INTO tasks(id,conversation_id,state,state_version,revision,active_attempt_id,snapshot_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
+      'task-pinned', conv.id, 'running', 1, 1, null, JSON.stringify({ project: 'site' }), now, now);
+    expect((await deleteSession(sessionId)).status).toBe(204);
+    for (const state of ['running', 'waiting_input', 'needs_reconciliation', 'recovering', 'queued']) {
+      runtime().store.run('UPDATE tasks SET state=? WHERE id=?', state, 'task-pinned');
+      expect([state, (await del()).status]).toEqual([state, 409]);
+    }
+    runtime().store.run("UPDATE tasks SET state='completed' WHERE id=?", 'task-pinned');
+    expect((await del()).status).toBe(200);
+  }, 40_000);
+
+  it('sees a chat bound to a symlink alias of the project', async () => {
+    h = await harness();
+    fs.symlinkSync('site', path.join(h.root, 'alias'));
+    const created = await create(h, 'alfred', KEYS.admin!, { project: 'alias' });
+    expect(created.status).toBe(201);
+    void send(h, created.body.sessionId as string, 'HOLD-TURN').then((r) => r, (e: unknown) => e);
+    await waitForCondition(() => spawns(h).length > 0, 15_000);
+    const res = await del('site');
+    expect([res.status, res.body.code]).toEqual([409, 'project_running']);
+    expect(fs.existsSync(path.join(h.root, 'site'))).toBe(true);
+  }, 40_000);
+
+  it('does not refuse a turn that had already started when the delete began', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    const realResolve = chat.resolveProjectCwd;
+    let armed = false;
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => { open = resolve; });
+    jest.spyOn(chat, 'resolveProjectCwd').mockImplementation(async (...a) => {
+      if (armed) await gate;
+      return realResolve(...a);
+    });
+    armed = true;
+    const held = send(h, sessionId, 'HOLD-TURN').then((r) => r, (e: unknown) => e);
+    await waitForCondition(() => h.runners[0]!.hasActiveApiSession(sessionId), 10_000);
+    const original = h.runners[0]!.hasActiveProjectTurn.bind(h.runners[0]!);
+    jest.spyOn(h.runners[0]!, 'hasActiveProjectTurn').mockImplementation(async (name) => {
+      open();
+      await Promise.race([
+        waitForCondition(() => !h.runners[0]!.hasActiveApiSession(sessionId), 3_000).catch(() => undefined),
+        new Promise((resolve) => setTimeout(resolve, 1_500)),
+      ]);
+      return original(name);
+    });
+    const res = await del();
+    expect([res.status, res.body.code]).toEqual([409, 'project_running']);
+    expect(fs.existsSync(path.join(h.root, 'site'))).toBe(true);
+    await waitForCondition(() => spawns(h).length > 0, 15_000);
+    await h.runners[0]!.stop();
+    await held;
+  }, 40_000);
 });

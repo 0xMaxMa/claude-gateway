@@ -47,6 +47,7 @@ whose root is `/`, your home directory, `~/.claude-gateway`, the directory holdi
 `config.json`, or any directory that contains one of them. Changing the root
 takes effect after a gateway restart.
 
+
 ## Errors {#errors}
 
 Every error has the shape `{ "error": string, "code": string }`. Branch on
@@ -65,7 +66,8 @@ codes, listed under [Git errors](#git-errors).
 | 404 | `not_found` | The project or path does not exist. |
 | 400 | `confirm_mismatch` | `DELETE` did not send `confirm` equal to the project name. |
 | 409 | `project_exists` | `POST` named a project, file or symlink that already exists, compared case-insensitively (`Site` collides with `site`). |
-| 409 | `project_running` | `DELETE` found a process listening from inside the project, a chat turn running in it (a turn still starting, an accepted message not yet handled, or a task that has not finished), or another `DELETE` of the same project in progress. |
+| 409 | `project_running` | `DELETE` found a process listening from inside the project, a chat turn running in it (a turn still starting, an accepted message not yet handled, or a task that has not finished), a `running/start` still waiting for its listener, a chat or task that works in the folder through a symlink alias, or another `DELETE` of the same project in progress. Deleting the chat session does not release it while its turn, accepted message or task is still live. |
+| 409 | `project_deleting` | `running/start` arrived while the project is being deleted. |
 | 500 | `internal` | Anything else. |
 
 **Project name.** Matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. Directories under
@@ -510,5 +512,5 @@ credentials and long tokens masked. A start that never listens is stopped again.
 
 Errors: `400 invalid_name`, `400 invalid_port`, `403 forbidden_key`,
 `403 path_escape`, `404 not_found`, `409 already_running`, `409 port_in_use`,
-`409 no_free_port`, `422 no_start_command`, `502 start_failed`, `504 start_timeout`.
+`409 no_free_port`, `409 project_deleting`, `422 no_start_command`, `502 start_failed`, `504 start_timeout`.
 A second start while one is in flight for the same project gets `409 already_running`.
