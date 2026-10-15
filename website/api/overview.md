@@ -89,6 +89,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 |--------|------|------|-------------|
 | `GET` | `/api/v1/projects` | Pod key | List projects under the projects root (default `~/projects`) |
 | `POST` | `/api/v1/projects` | Pod key + Write | Create a project directory, optionally with `git init` |
+| `DELETE` | `/api/v1/projects/:name` | Pod key + Write | Delete a project directory and everything in it |
 | `GET` | `/api/v1/projects/:name/tree` | Pod key | List one directory level of a project |
 | `GET` | `/api/v1/projects/:name/file` | Pod key | Read a file from a project |
 | `GET` | `/api/v1/projects/git-summary` | Pod key | Git sync summary of every project that is a repository |
@@ -102,6 +103,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `GET` | `/api/v1/projects/running` | Pod key | Listening processes of every project |
 | `GET` | `/api/v1/projects/:name/running` | Pod key | Listening processes of one project |
 | `POST` | `/api/v1/projects/:name/running/stop` | Pod key + Write | Stop a project's listening processes |
+| `POST` | `/api/v1/projects/:name/running/start` | Pod key + Write | Start a project without an agent |
 
 ## Telegram Channel API {#telegram-channel-api}
 
