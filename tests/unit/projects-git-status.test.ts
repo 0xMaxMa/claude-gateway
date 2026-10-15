@@ -113,17 +113,18 @@ describe('parseConfigList', () => {
     });
   });
 
-  it('names the filter drivers of the repository scopes only, whole, with odd characters kept', () => {
+  it('keys every filter.* entry of the repository scopes only, whole, with odd characters and empty names kept', () => {
     const raw = entries(
       ['global', 'filter.lfs.clean\ngit-lfs clean'],
       ['system', 'filter.sys.smudge\nx'],
       ['local', 'filter.a=b.clean\nx'],
       ['local', 'filter.we"ird.name.smudge\nx'],
       ['worktree', 'filter.wt.process\nx'],
-      ['local', 'filter.noname\ntrue'],
+      ['local', 'filter..clean\nx'],
+      ['local', 'filter.a.b.smudge\nx'],
       ['local', 'core.bare'],
     );
-    expect(parseConfigList(raw).filterNames).toEqual(['a=b', 'we"ird.name', 'wt']);
+    expect(parseConfigList(raw).filterKeys).toEqual(['filter.a=b.clean', 'filter.we"ird.name.smudge', 'filter.wt.process', 'filter..clean', 'filter.a.b.smudge']);
   });
 });
 

@@ -58,7 +58,7 @@ describe('runGit', () => {
     }
   });
 
-  describe('blankFilters', () => {
+  describe('blankFilterKeys', () => {
     const run = async (names: string[], key = 'evil') => {
       const marker = path.join(base, 'filter-ran');
       const script = path.join(base, 'filter.sh');
@@ -72,7 +72,7 @@ describe('runGit', () => {
       // Same size, new mtime: status has to run the clean filter to learn whether the content changed.
       fs.writeFileSync(path.join(repo, 'a.txt'), 'two\n');
       fs.utimesSync(path.join(repo, 'a.txt'), new Date('2001-01-01'), new Date('2001-01-01'));
-      const r = value(await runGit(repo, ['status', '--porcelain=v2'], { timeoutMs: 5000, blankFilters: names }));
+      const r = value(await runGit(repo, ['status', '--porcelain=v2'], { timeoutMs: 5000, blankFilterKeys: names }));
       return { ran: fs.existsSync(marker), code: r.code };
     };
 
@@ -81,11 +81,19 @@ describe('runGit', () => {
     });
 
     it('stops a named driver from running, and from failing a read when it is required', async () => {
-      expect(await run(['evil'])).toEqual({ ran: false, code: 0 });
+      expect(await run(['filter.evil.clean', 'filter.evil.required'])).toEqual({ ran: false, code: 0 });
     });
 
     it('blanks a driver whose name holds "=" or quotes, which -c cannot express', async () => {
-      expect(await run(['a=b'], 'a=b')).toEqual({ ran: false, code: 0 });
+      expect(await run(['filter.a=b.clean', 'filter.a=b.required'], 'a=b')).toEqual({ ran: false, code: 0 });
+    });
+
+    it('blanks a driver with an empty name, whole', async () => {
+      expect(await run(['filter..clean', 'filter..required'], '')).toEqual({ ran: false, code: 0 });
+    });
+
+    it('blanks a driver with dots in its name, whole', async () => {
+      expect(await run(['filter.a.b.clean', 'filter.a.b.required'], 'a.b')).toEqual({ ran: false, code: 0 });
     });
   });
 

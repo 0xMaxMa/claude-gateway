@@ -177,8 +177,8 @@ const REPO_SCOPES = new Set(['local', 'worktree']);
 
 export interface ConfigList {
   config: RepoConfig;
-  /** Filter driver names the repository's own config defines, directly or through an include. */
-  filterNames: string[];
+  /** Every `filter.*` key the repository's own config defines, directly or through an include, as git printed it. */
+  filterKeys: string[];
 }
 
 /** What `git config --list -z --show-scope` prints: `scope NUL key NL value NUL` per entry, a valueless key without the NL. */
@@ -197,11 +197,11 @@ export function parseConfigList(raw: string): ConfigList {
       if (!cfg.remotes.some((r) => r.name === m![1])) cfg.remotes.push({ name: m[1], url: value });
     } else if ((m = /^branch\.(.+)\.(remote|merge)$/.exec(key))) {
       (cfg.branches[m[1]] ??= {})[m[2] as 'remote' | 'merge'] = value;
-    } else if (REPO_SCOPES.has(scope) && key.startsWith('filter.') && key.lastIndexOf('.') > 'filter.'.length) {
-      filters.add(key.slice('filter.'.length, key.lastIndexOf('.')));
+    } else if (REPO_SCOPES.has(scope) && key.startsWith('filter.')) {
+      filters.add(key);
     }
   }
-  return { config: cfg, filterNames: [...filters] };
+  return { config: cfg, filterKeys: [...filters] };
 }
 
 export function deriveSync(s: {

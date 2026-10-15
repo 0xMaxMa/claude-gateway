@@ -1,7 +1,7 @@
 import { promises as fsp } from 'fs';
 import * as path from 'path';
 import { listProjects, mapLimit, resolveProjectDir } from './fs';
-import { GIT_READ_TIMEOUT_MS, GitOutput, MAX_BLANKED_FILTERS, MAX_FILTER_NAME, runGit } from './git-runner';
+import { GIT_READ_TIMEOUT_MS, GitOutput, MAX_BLANKED_FILTER_KEYS, MAX_FILTER_KEY, runGit } from './git-runner';
 import {
   buildStatus,
   GitCommitInfo,
@@ -87,10 +87,10 @@ async function readRepo(dir: string, read: ReadOptions): Promise<GitResult<GitSt
   const listed = await runGit(dir, ['config', '--list', '-z', '--show-scope'], { timeoutMs: read.timeoutMs });
   if (!listed.ok) return fail(listed.error);
   if (listed.value.code !== 0) return err(await readFailure(dir, listed.value));
-  const { config, filterNames } = parseConfigList(listed.value.stdout);
-  if (filterNames.length > MAX_BLANKED_FILTERS || filterNames.some((n) => n.length > MAX_FILTER_NAME)) return fail('git_unreadable');
+  const { config, filterKeys } = parseConfigList(listed.value.stdout);
+  if (filterKeys.length > MAX_BLANKED_FILTER_KEYS || filterKeys.some((k) => k.length > MAX_FILTER_KEY)) return fail('git_unreadable');
 
-  const opts = { timeoutMs: Math.max(read.timeoutMs - (Date.now() - started), 1), blankFilters: filterNames };
+  const opts = { timeoutMs: Math.max(read.timeoutMs - (Date.now() - started), 1), blankFilterKeys: filterKeys };
   const skipped = Promise.resolve(ok({ code: 0, stdout: '', stderr: '' }));
   const full = read.commitAndOperation;
   const runs = await Promise.all([

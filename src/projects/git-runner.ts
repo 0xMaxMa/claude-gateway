@@ -38,23 +38,21 @@ export function gitEnv(): NodeJS.ProcessEnv {
   return { ...env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', GIT_ALLOW_PROTOCOL: '', GIT_NO_LAZY_FETCH: '1' };
 }
 
-/** Filter drivers a status read may blank; more than this, or a longer name, and the repository is refused. */
-export const MAX_BLANKED_FILTERS = 64;
-export const MAX_FILTER_NAME = 1024;
+/** `filter.*` keys a status read may blank; more than this, or a longer key, and the repository is refused. */
+export const MAX_BLANKED_FILTER_KEYS = 64;
+export const MAX_FILTER_KEY = 1024;
 
 /**
- * `GIT_CONFIG_COUNT/KEY_n/VALUE_n` entries that blank each named filter driver. Unlike `-c name=value` they take the
- * key whole, so a driver name holding `=` can be blanked too. They rank as command-line config, above every file.
+ * `GIT_CONFIG_COUNT/KEY_n/VALUE_n` entries that empty each named `filter.*` key. Every key is taken whole as git
+ * printed it, never split into driver name and variable, so no name (empty, dotted, holding `=`) can slip past a
+ * parser. Unlike `-c name=value` they take the key whole, and they rank as command-line config, above every file.
+ * An empty clean, smudge or process command runs nothing, and an empty `required` is false.
  */
-function blankFilterEnv(names: readonly string[]): NodeJS.ProcessEnv {
-  const pairs = names.flatMap((name) => [
-    ...['clean', 'smudge', 'process'].map((key) => [`filter.${name}.${key}`, ''] as const),
-    [`filter.${name}.required`, 'false'] as const,
-  ]);
-  const env: NodeJS.ProcessEnv = { GIT_CONFIG_COUNT: String(pairs.length) };
-  pairs.forEach(([key, value], i) => {
+function blankFilterEnv(keys: readonly string[]): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { GIT_CONFIG_COUNT: String(keys.length) };
+  keys.forEach((key, i) => {
     env[`GIT_CONFIG_KEY_${i}`] = key;
-    env[`GIT_CONFIG_VALUE_${i}`] = value;
+    env[`GIT_CONFIG_VALUE_${i}`] = '';
   });
   return env;
 }
@@ -62,19 +60,19 @@ function blankFilterEnv(names: readonly string[]): NodeJS.ProcessEnv {
 /**
  * The command line and environment every git call of the gateway uses, reads and `git init` alike. `core.fsmonitor`
  * is a command from the repository's config, so it is turned off for every call. A call that can run a clean filter
- * (status) names the repository's filter drivers in `blankFilters` so none of them runs.
+ * (status) names the repository's `filter.*` keys in `blankFilterKeys` so no driver runs.
  */
-export function hardenedGit(cwd: string, args: string[], blankFilters: readonly string[] = []): { argv: string[]; env: NodeJS.ProcessEnv } {
+export function hardenedGit(cwd: string, args: string[], blankFilterKeys: readonly string[] = []): { argv: string[]; env: NodeJS.ProcessEnv } {
   return {
     argv: ['--no-optional-locks', '-c', 'core.fsmonitor=false', ...args],
-    env: { ...gitEnv(), GIT_CEILING_DIRECTORIES: path.dirname(cwd), ...blankFilterEnv(blankFilters) },
+    env: { ...gitEnv(), GIT_CEILING_DIRECTORIES: path.dirname(cwd), ...blankFilterEnv(blankFilterKeys) },
   };
 }
 
 export interface RunOptions {
   timeoutMs: number;
-  /** The repository's own filter driver names, to blank for this call. */
-  blankFilters?: readonly string[];
+  /** The repository's own `filter.*` keys, to blank for this call. */
+  blankFilterKeys?: readonly string[];
 }
 
 /** How long a timed-out git gets to clean up its lock files after SIGTERM before the group is killed. */
@@ -88,7 +86,7 @@ const KILL_GRACE_MS = 1_000;
  * other repository never reads as a repo itself.
  */
 export async function runGit(cwd: string, args: string[], opts: RunOptions): Promise<Result<GitOutput, GitRunFailure>> {
-  const { argv, env } = hardenedGit(cwd, args, opts.blankFilters);
+  const { argv, env } = hardenedGit(cwd, args, opts.blankFilterKeys);
   return new Promise((resolve) => {
     // Its own process group, so a timeout also reaches the hooks, filters and ssh that git started.
     const child = spawn('git', argv, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });

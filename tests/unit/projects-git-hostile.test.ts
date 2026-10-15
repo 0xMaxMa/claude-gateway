@@ -197,6 +197,18 @@ describe('filter drivers the repository defines', () => {
     }],
     ['a driver name holding "="', (dir) => { filterConfig(dir, 'a=b'); attributes(dir, 'a=b'); }],
     ['a driver name holding quotes and dots', (dir) => { filterConfig(dir, 'we"ird.x'); attributes(dir, 'we"ird.x'); }],
+    ['a driver with an empty name (config "filter..clean", attribute "filter=")', (dir) => {
+      for (const key of ['clean', 'smudge', 'process']) git(dir, 'config', `filter..${key}`, filterScript);
+      write(path.join(dir, '.git', 'info', 'attributes'), '* filter=\n');
+    }],
+    ['an empty-named [filter ""] section written by hand', (dir) => {
+      fs.appendFileSync(path.join(dir, '.git', 'config'), `[filter ""]\n\tclean = ${filterScript}\n`);
+      write(path.join(dir, '.git', 'info', 'attributes'), '* filter=\n');
+    }],
+    ['a driver name holding dots (filter.a.b.clean and filter.a.b.smudge)', (dir) => {
+      filterConfig(dir, 'a.b');
+      attributes(dir, 'a.b');
+    }],
     ['a .git file that points to another git dir', (dir) => {
       const moved = path.join(base, 'moved-git');
       fs.renameSync(path.join(dir, '.git'), moved);
