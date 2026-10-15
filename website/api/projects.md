@@ -548,12 +548,13 @@ listening sockets once and ties each one to a project with the same rules, the s
 `via` and the same `command` redaction as
 [`GET /api/v1/projects/:name/running`](#get-running). Projects are the ones
 [`GET /api/v1/projects`](#get-projects) lists: a symlink that leaves the root is
-skipped. Only the first 200 projects, in name order, are looked at. A listener that
+skipped. Only the first 200 projects, in name order, are looked at, and `truncated` says whether more existed. A client must not read a missing project as "not running" when `truncated` is `true`; ask [`GET /api/v1/projects/:name/running`](#get-running) for it. A listener that
 matches more than one project counts only for the deepest project folder. This
 route never stops anything. It needs the same key as the per-project route.
 
 Returns `200`. `projects` holds only the projects with at least one listener, in
-name order, each with one entry per port sorted by port:
+name order, each with one entry per port sorted by port. `truncated` is `true` when
+the root holds more than 200 projects and the rest were not scanned:
 
 ```bash
 curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/running
@@ -565,12 +566,13 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/runn
   "projects": {
     "api": [ { "port": 3000, "pids": [123], "command": "node server.js", "address": "127.0.0.1", "via": "cwd" } ],
     "docs": [ { "port": 8000, "pids": [456], "command": "python3 -m http.server 8000 --directory /home/me/projects/docs", "address": "0.0.0.0", "via": "argv" } ]
-  }
+  },
+  "truncated": false
 }
 ```
 
 On a host that is not Linux, or where `/proc` cannot be read, the response is
-`{ "supported": false, "projects": {} }`. A project named `running` is still
+`{ "supported": false, "projects": {}, "truncated": false }`. A project named `running` is still
 reached by name at `/api/v1/projects/running/running`.
 
 Errors: `403 forbidden_key`. A projects root that cannot be read gets the same

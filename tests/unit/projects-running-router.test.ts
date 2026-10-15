@@ -375,6 +375,7 @@ describe('GET /api/v1/projects/running', () => {
         'hi-project': [cwdEntry(cwdSrv.port, cwdSrv.child.pid)],
         'hi-project-2': [{ port: argvSrv.port, pids: [argvSrv.child.pid], command: `node ${script} ${path.join(root, 'hi-project-2')} --token [redacted]`, address: '127.0.0.1', via: 'argv' }],
       },
+      truncated: false,
     });
     expect(Object.keys(res.body.projects)).toEqual(['hi-project', 'hi-project-2']);
     for (const c of [cwdSrv, argvSrv, idle, prefixed, away, agent]) expect(alive(c.child.pid)).toBe(true);
@@ -402,14 +403,14 @@ describe('GET /api/v1/projects/running', () => {
     fs.mkdirSync(path.join(root, 'running'));
     const srv = await start('node', ['-e', SERVER], path.join(root, 'running'));
     const a = app();
-    expect((await all(a)).body).toEqual({ supported: true, projects: { running: [cwdEntry(srv.port, srv.child.pid)] } });
+    expect((await all(a)).body).toEqual({ supported: true, projects: { running: [cwdEntry(srv.port, srv.child.pid)] } , truncated: false });
     expect((await get(a, 'running')).body).toEqual({ supported: true, processes: [cwdEntry(srv.port, srv.child.pid)], start: null });
   });
 
   it('skips a project that is a symlink out of the root', async () => {
     fs.symlinkSync(outside, path.join(root, 'sneaky'));
     await start('node', ['-e', SERVER], outside);
-    expect((await all(app())).body).toEqual({ supported: true, projects: {} });
+    expect((await all(app())).body).toEqual({ supported: true, projects: {} , truncated: false });
   });
 
   it('looks at no more than 200 projects', async () => {
@@ -417,12 +418,12 @@ describe('GET /api/v1/projects/running', () => {
     fs.mkdirSync(path.join(root, 'zzz'));
     const first = await start('node', ['-e', SERVER], path.join(root, 'agent'));
     await start('node', ['-e', SERVER], path.join(root, 'zzz'));
-    expect((await all(app())).body).toEqual({ supported: true, projects: { agent: [cwdEntry(first.port, first.child.pid)] } });
+    expect((await all(app())).body).toEqual({ supported: true, projects: { agent: [cwdEntry(first.port, first.child.pid)] }, truncated: true });
   });
 
   it('reports unsupported on a non-Linux platform', async () => {
     await start('node', ['-e', SERVER], path.join(root, 'hi-project'));
-    expect((await all(app(systemSys({ platform: 'darwin' })))).body).toEqual({ supported: false, projects: {} });
+    expect((await all(app(systemSys({ platform: 'darwin' })))).body).toEqual({ supported: false, projects: {} , truncated: false });
   });
 
   it('applies the same key guards as the per-project route', async () => {
@@ -431,6 +432,6 @@ describe('GET /api/v1/projects/running', () => {
     expect((await all(a, 'bad')).status).toBe(403);
     expect((await request(a).get('/api/v1/projects/running')).status).toBe((await request(a).get('/api/v1/projects/api/running')).status);
     expect((await all(a, 'k-write')).status).toBe(200);
-    expect((await all(a)).body).toEqual({ supported: true, projects: {} });
+    expect((await all(a)).body).toEqual({ supported: true, projects: {} , truncated: false });
   });
 });

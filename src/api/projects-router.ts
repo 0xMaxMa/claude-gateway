@@ -202,11 +202,12 @@ export function createProjectsRouter(
       const list = await listProjects(root);
       if (!list.ok) return fail(res, list.error);
       const dirs: ProjectDir[] = [];
+      const truncated = list.value.projects.length > MAX_RUNNING_PROJECTS;
       for (const p of list.value.projects.slice(0, MAX_RUNNING_PROJECTS)) {
         const dir = await resolveProjectDir(root, p.name);
         if (dir.ok) dirs.push({ name: p.name, dir: dir.value });
       }
-      res.json(await scanProjects(running.sys, dirs));
+      res.json({ ...(await scanProjects(running.sys, dirs)), truncated });
     }),
   );
 
