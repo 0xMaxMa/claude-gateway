@@ -208,16 +208,34 @@ describe('client-split long messages without semantic intake (#593)',()=>{
     }finally{store.close();}
   });
 
-  test('a queued row that cannot join ends the wait instead of blocking the session',()=>{
+  test('a same-user row that cannot join ends the wait instead of blocking the session',()=>{
     const store=new OrchestrationStore(':memory:','a');
     try{
-      const a=store.acceptInput({...base,text:long(4064)});
-      store.run("INSERT INTO conversation_members VALUES(?,?,'member')",a.conversationId,'other');
-      const b=store.acceptInput({...base,scope:{...scope,principalId:'other'},text:'group question'});
+      const a=store.acceptInput({...base,text:long(4064)}),b=store.acceptInput({...base,text:'/review-pr 567'});
       at(store,a.inputId,1000);at(store,b.inputId,1100);
       const batch=inputBatch(store,row(store,a.inputId),1500,8000,[],true);
       expect(batch.inputIds).toEqual([a.inputId]);
       expect(batch.readyAt).toBe(0);
+    }finally{store.close();}
+  });
+
+  test.each([
+    ['another group member', (store:OrchestrationStore,conversationId:string)=>{
+      store.run("INSERT INTO conversation_members VALUES(?,?,'member')",conversationId,'other');
+      return store.acceptInput({...base,scope:{...scope,principalId:'other'},text:'group question'});
+    }],
+    ['a task report', (store:OrchestrationStore)=>store.acceptInput({...base,text:'Report task progress.',storeUserMessage:false,ingressKey:'notification:n1'})],
+  ])('%s between split parts keeps its own turn without breaking the split',(_label,interleave)=>{
+    const store=new OrchestrationStore(':memory:','a');
+    try{
+      const a=store.acceptInput({...base,text:long(3100)});
+      const other=interleave(store,a.conversationId);
+      const c=store.acceptInput({...base,text:long(1500)});
+      at(store,a.inputId,1000);at(store,other.inputId,1100);at(store,c.inputId,1400);
+      const batch=inputBatch(store,row(store,a.inputId),1500,8000,[],true);
+      expect(batch.inputIds).toEqual([a.inputId,c.inputId]);
+      expect(batch.readyAt).toBe(0);
+      expect(store.get('SELECT status FROM conversation_inputs WHERE id=?',other.inputId)!.status).toBe('accepted');
     }finally{store.close();}
   });
 });

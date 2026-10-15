@@ -40,6 +40,8 @@ export function inputBatch(store: OrchestrationStore, first: Row, debounceMs: nu
     let bytes = Buffer.byteLength(String(first.ingress_json));
     for (const row of store.all("SELECT * FROM conversation_inputs WHERE conversation_id=? AND (status='accepted' OR id IN (SELECT value FROM json_each(?))) AND input_seq>? ORDER BY input_seq LIMIT 99", first.conversation_id, JSON.stringify(inflight), first.input_seq)) {
       const input: AcceptInput = JSON.parse(String(row.ingress_json));
+      // Another member's message or a system report between parts does not end the split; it keeps its own turn.
+      if (splitOnly && (row.principal_id !== first.principal_id || input.storeUserMessage === false)) continue;
       const continuation = splitPart(inputs[inputs.length - 1]) && Number(row.created_at) - Number(rows[rows.length - 1].created_at) <= debounceMs;
       bytes += Buffer.byteLength(String(row.ingress_json));
       const attachmentCount = new Set([...inputs.flatMap(item => item.attachmentIds ?? []), ...(input.attachmentIds ?? [])]).size;
