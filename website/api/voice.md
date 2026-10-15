@@ -39,7 +39,7 @@ The gateway synthesizes MP3 and submits Telegram `sendVoice` to the original bou
 
 `/voices` uses the same provider-neutral catalog as web Voice controls. ElevenLabs and Cartesia adapters list real provider voices; Cartesia pages through its [voice catalog API](https://docs.cartesia.ai/api-reference/voices/list). Each chat’s choice is stored in `telegram_tts_voices`, scoped to the provider. Telegram menus first select a gender category, then show paginated voice names with ✅ on the selected voice and Back/Dismiss controls. Menus are bound to the chat/provider for five minutes. Selection does not enable auto voice replies. Changed providers require a new selection if the chat had explicitly selected an old provider’s voice. Missing catalogs report unavailable rather than inventing voices. Speech file output supports native MP3 through ElevenLabs and Cartesia; other providers need a catalog and file-synthesis adapter.
 
-Telegram registers `/tasks`, `/voice` and `/voices` only with orchestration enabled for Telegram. `/cli` is registered only with `gateway.headless: false`, and is hidden for app-agents and orchestration agents. Help and callback handling follow the same capability checks. Hot-reloading orchestration/headless mode refreshes receiver command registration without stopping Agent/Worker tasks.
+Telegram registers `/tasks`, `/voice`, `/voices` and `/call` only with orchestration enabled for Telegram. `/cli` is registered only with `gateway.headless: false`, and is hidden for app-agents and orchestration agents. Help and callback handling follow the same capability checks. Hot-reloading orchestration/headless mode refreshes receiver command registration without stopping Agent/Worker tasks.
 
 Telegram `/tasks` is a direct gateway control for the active chat session. Its paginated list and detail callbacks check conversation membership; cancellation checks the task ID against the current session before calling the same user-cancellation service as `/stop`. Viewing/refreshing tasks does not interrupt Agent responses. Old task buttons cannot cancel work after switching to another session. Progress is the latest worker/runtime report, not an inferred percentage.
 
@@ -58,7 +58,7 @@ For direct and upstream provider values, API-key locations, and per-Agent exampl
 | `GET` (WebSocket upgrade) | `/api/v1/agents/:agentId/voice-sessions/:voiceSessionId/stream?ticket=<ticket>` | Duplex audio/control stream |
 | `DELETE` | `/api/v1/agents/:agentId/sessions/:sessionId/voice-sessions/:voiceSessionId` | Close the owned voice lease; returns `204` |
 
-HTTP endpoints require an authorized API key. Voice must be enabled at `agents[].voice.enabled`, with gateway orchestration enabled. Ticket creation verifies the existing chat/session pair and principal. Only one voice lease is allowed per conversation. Tickets expire after 30 seconds and are consumed at upgrade; the WebSocket must use the same Origin as ticket creation. No public URL or `voice.allowedOrigins` setup is required. Direct browser requests use API-key authentication with non-credentialed CORS; cookie-authenticated products must enforce session ownership and credentialed CORS at their trusted proxy. The legacy `allowedOrigins` field is ignored. Disabled voice or an occupied lease returns `409`; ownership/origin errors are rejected. Do not send the API key in the WebSocket URL.
+These HTTP endpoints require an authorized API key; [Telegram voice calls](#telegram-voice-calls) authenticate with Telegram initData instead. Voice must be enabled at `agents[].voice.enabled`, with gateway orchestration enabled. Ticket creation verifies the existing chat/session pair and principal. Only one voice lease is allowed per conversation. Tickets expire after 30 seconds and are consumed at upgrade; the WebSocket must use the same Origin as ticket creation. No public URL or `voice.allowedOrigins` setup is required. Direct browser requests use API-key authentication with non-credentialed CORS; cookie-authenticated products must enforce session ownership and credentialed CORS at their trusted proxy. The legacy `allowedOrigins` field is ignored. Disabled voice or an occupied lease returns `409`; ownership/origin errors are rejected. Do not send the API key in the WebSocket URL.
 
 Creation returns `voice_session_id`, `ticket`, `expires_at` (Unix milliseconds), `stream_path`, input/output formats and duplex/playback capabilities. Both audio directions currently use mono 16 kHz PCM signed 16-bit little-endian.
 
@@ -97,6 +97,31 @@ Voice errors include a safe `message`, `category`, `retryable`, optional `httpSt
 
 A connected, same-principal voice session can speak typed chat responses while its microphone is muted, including a task acknowledgement and the later worker result. The chosen voice remains the vocal identity. Spoken summaries follow the response language unless the user explicitly requests different chat/audio languages.
 
+
+## Telegram voice calls {#telegram-voice-calls}
+
+`/call` in a bot's private chat opens a Telegram Mini App that uses the same WebSocket protocol. It needs gateway orchestration serving `telegram`, `agents[].voice.enabled`, and an HTTPS `gateway.publicUrl`; it works without `gateway.api.keys`. Routes are relative to the `gateway.publicUrl` path:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/voice-call/:pairingId` | The call page (`Cache-Control: no-store`); `404` once the link expired |
+| `POST` | `/voice-call/:pairingId/ticket` | Body `{ "initData": "<Telegram.WebApp.initData>", "call_token": "<optional>" }`; returns the ticket fields above plus `call_token` |
+
+The pairing id in the link is not a credential. Each ticket request verifies the initData signature with the agent's bot token (at most one hour old), requires the user the link was sent to, and re-checks that the user is still in the receiver's `allowFrom`. The first ticket claims the link and returns `call_token`; later tickets for the same call, such as a reconnect after close code `1012`, must present it. A link opened elsewhere gets `409` with `code: CALL_LINK_USED`. Unclaimed links expire after three minutes; a claimed call can take new tickets for 30 minutes after the last one.
+
+| Status | Meaning |
+|---|---|
+| `401` | Missing, forged or expired initData |
+| `403` | Another user's initData, or the user is no longer in `allowFrom` |
+| `409` | `code: VOICE_DISABLED`; `code: CALL_LINK_USED`; or, without a code, another voice session holds this conversation |
+| `410` | `code: CALL_LINK_EXPIRED` |
+| `429` / `503` | Managed voice credit, as for API tickets |
+
+Tickets keep the API rules: 30-second lifetime, single use, bound to the request `Origin`. The page builds the WebSocket URL from the public URL path and `stream_path`. Each utterance is submitted with the Telegram scope of the private chat (`source: telegram`, the chat's active session, principal `telegram:<userId>`), so replies are delivered to that chat. Execution follows the Telegram rule (`allow_tools !== false`); live voice never writes memory. A Telegram call does not save browser voice intent. API-key reloads close API voice sessions with `1008` but leave Telegram calls open.
+
+A text reply delivered to a channel for live-voice input starts with one `🎙 <transcript>` line for each utterance spoken since the chat last received a reply, so a turn interrupted by barge-in is quoted with the next reply. Conversation history stores the reply without these lines. Channel voice replies (`/voice on` or `auto`) are never sent for live-voice turns, because the caller already hears them.
+
+The page captures with an `AudioWorklet`, resamples to 16 kHz PCM16, and detects speech with an energy threshold over an adaptive noise floor. It sends `speech.activity` when speech starts, or `speech.started` with the next epoch while reply audio is audible, then `speech.ended`; the gateway commits after `turns.silenceCommitMs`. Words spoken before the next utterance opens are held and sent first. On Telegram `deactivated` or a hidden page it sends `voice.mute` with `policy: "commit"` and `playback.stop`, and unmutes on return. It calls `getUserMedia` once per call.
 
 ## PaxaLabs speech providers {#paxalabs-speech-providers}
 

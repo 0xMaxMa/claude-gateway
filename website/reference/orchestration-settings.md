@@ -112,7 +112,7 @@ With the defaults, a 400k-token context waits 240 s for its first response and b
 
 The agent and worker system prompt (workspace `CLAUDE.md`, orchestration rules and the skill catalog) is always passed to Claude Code as a private `0600` file through `--append-system-prompt-file`, never as a command-line argument. Linux limits a single argument to 128 KiB and Windows limits the whole command line to 32767 characters, and command lines are readable by other local users. Host sessions write the file beside the attempt's MCP configuration and remove it when the session stops. App-agents write it over `docker exec` standard input into the container's own attempt directory, in the same exec that writes the attempt's MCP configuration and ticket, and it is removed with the ticket when that attempt stops, including a stop during startup, or when the attempt fails to start. If a spawn still exceeds an operating-system argument limit, the turn fails with `PROCESS_ARGS_TOO_LARGE` and the agent log records the argument count and sizes, never their content.
 
-`intakeWaitMs` measures received material, not microphone silence or an upload in progress. Voice turn detection has its own `turns.silenceCommitMs`. See [intake behavior](../guide/orchestration.md#conversation-intake).
+`intakeWaitMs` measures received material, not microphone silence or an upload in progress. Voice turn detection has its own `turns.silenceCommitMs` and `turns.mergeWindowMs`. See [intake behavior](../guide/orchestration.md#conversation-intake).
 
 ## Worker pool and queue
 

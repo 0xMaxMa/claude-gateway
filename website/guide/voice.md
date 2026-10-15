@@ -173,6 +173,7 @@ Runs of symbols with nothing to pronounce (for example a line of `=` characters)
 | `turns.silenceCommitMs` | 650 ms | Pause before committing a microphone segment |
 | `turns.finalizationTimeoutMs` | 5000 ms | Base finalization budget; batch providers may require a longer provider-specific budget |
 | `turns.maxUtteranceMs` | 60000 ms | Bound a single utterance |
+| `turns.mergeWindowMs` | 1200 ms | After a segment is committed, wait this long for a continuation before submitting the combined turn; `0` submits each segment at once |
 | `playback.maxBufferedAudioMs` | 1500 ms | Bound unacknowledged playback audio |
 | `playback.bargeIn` | true | Allow speech interruption behavior |
 | `maxActiveSessionsPerConversation` | 1 | Limit concurrent live voice connections for a conversation |
@@ -183,12 +184,14 @@ A shorter pause commits sooner and may cut a natural pause into separate segment
 
 Start with the text result, the selected route and the error reference. Authentication failures, exhausted quota and temporary provider unavailability require different actions; switching voices does not fix a missing API key or exhausted quota. Auto voice selection requires a readable voice catalog. For a catalog failure, check credentials/model access instead of overwriting the saved selection with an invented voice.
 
-Live voice logs `Voice timing` events with operation `stt` or `tts`, an operation ID, session/response identifiers and phase timestamps. Subtract elapsed times between phases:
+Live voice logs `Voice timing` events with operation `stt`, `tts` or `turn`, an operation ID, session identifiers, the `utteranceId`, `inputId` and `responseId` known so far, and phase timestamps. Subtract elapsed times between phases:
 
 1. `speech_ready` → `synthesis_started`: queue wait before TTS.
 2. `provider_request_started` → `provider_headers_received`: HTTP provider/proxy wait.
 3. `provider_body_received` → `first_provider_audio`: complete-body processing for the Gemini adapter.
 4. `first_audio_sent` → `first_playback_progress`: first positive browser playback receipt.
+
+A `turn` operation follows one user turn end to end, measured at the gateway: `speech_ended` (the client's `speech.ended` arrived; an explicit commit without it logs `commit_received`), `transcript_ready`, `turn_admitted`, `agent_first_spoken` (the agent's first approved spoken text) and `e2e_first_audio` (the first playback receipt for that reply). The `e2e_first_audio` elapsed time is the gateway's view of end of speech to first heard audio; it excludes microphone and network time before `speech.ended` arrives.
 
 HTTP phases apply to adapters using the shared HTTP helper. They do not identify whether an upstream wait is internal queueing or work inside the final provider; that needs upstream diagnostics. A playback receipt is not an exact audio-device start timestamp. `audio_sent_complete` includes browser backpressure, so it must not be used as time to first sound.
 
@@ -196,6 +199,10 @@ The current Gemini adapter waits for the full provider JSON/audio result before 
 
 The diagnostic payload contains metadata, not transcript text, audio, URLs or provider credentials. See [voice API](../api/voice.md) for error fields, ticket authentication, replay and client reconnect behavior. Static `allowedOrigins` configuration is obsolete; live voice uses authenticated tickets bound to the initiating origin.
 
+
+## Telegram voice calls
+
+With orchestration serving Telegram, voice enabled and an HTTPS `gateway.publicUrl`, a paired user can send `/call` in the bot's private chat to talk with the agent live. The call uses the same STT, TTS and turn settings as browser live voice, joins the chat's active session, and posts the user's words (`🎙 …`) and the agent's text replies in that chat. Tool permissions follow the Telegram channel (`allow_tools`); live voice never writes memory. See [Telegram setup](../channels/telegram.md#live-voice-calls).
 
 ## Managed voice credits
 

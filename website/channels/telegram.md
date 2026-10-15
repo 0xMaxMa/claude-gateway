@@ -88,6 +88,7 @@ Once paired, use these commands in the bot's private chat:
 | `/model` | Show the current model (view only; an argument is ignored). Switch with `/models` |
 | `/models` | Open the model picker; selecting restarts sessions, Dismiss cancels |
 | `/pstack_setup` | Set up [pstack](/guide/pstack) for this agent with buttons (direct message); `/pstack_setup <lines>` types the change |
+| `/call` | Start a live voice call in a Mini App (orchestration and agent voice required); see [live voice calls](#live-voice-calls) |
 
 In an approved group, `/stop`, `/new`, `/rename` and `/pstack_setup` (which only answers that it works in a direct message, so the agent's setup is not posted in the group) are answered there, typed as `/command` or `/command@<bot>` without a separate mention. The other commands reply in the group that they are only available in a direct message with the bot (`/cli` only where the terminal viewer is on). A group that is not approved, a bot whose `dmPolicy` is `disabled`, or a command addressed to another bot gets no reply.
 
@@ -103,6 +104,12 @@ With `gateway.orchestration: true`, Telegram voice notes and audio attachments c
 
 If a voice note cannot be transcribed for a temporary reason, the failure reply in a private chat has a **🔁 Retry** button that transcribes the kept recording again. See [Voice-message failures and retry](../guide/voice.md#voice-message-failures-and-retry).
 
+### Live voice calls (`/call`) {#live-voice-calls}
+
+In a paired private chat, `/call` sends a **🎙 Start voice call** button that opens a Telegram Mini App. Tap **Start call** and allow the microphone; you then talk with the agent and can interrupt it by speaking. The call joins this chat's active session: each thing you say is shown in the chat as a `🎙 <your words>` line above the agent's text reply, and tools work as they do for typed messages. A reply you heard in the call is not sent again as a voice message, even with `/voice on`. Typing in the chat during a call interrupts the spoken reply, and the typed reply is spoken in the call.
+
+`/call` needs `gateway.orchestration: true` with `telegram` among the agent's orchestration channels, `agents[].voice.enabled` with STT/TTS providers, and an HTTPS `gateway.publicUrl` (Telegram opens Mini Apps only over HTTPS). It works only in a private chat; in a group the bot answers that it is only available in a direct message. Group calls are not supported yet. The link works for about three minutes; once a call starts it can reconnect for 30 minutes after its last connection. Hiding the Mini App mutes the microphone and stops queued audio; returning resumes the call. See [Telegram voice calls](../api/voice.md#telegram-voice-calls) for the protocol.
+
 In a paired private chat, `/voice` opens Always / Only reply voice message / Off buttons. `/voice on`, `/voice auto` and `/voice off` also set the mode directly. Every chat starts Off, and its choice persists across session switches and gateway restarts. `auto` adds audio to replies originating from voice input and their task results; a later typed instruction makes that turn text-only. `/voices` selects a voice through a paginated provider catalog. Agent voice must be enabled and `voice.notes.replyWithVoice` must permit spoken replies. Voice capability and chat preference are separate settings.
 
 `/tasks` opens the current session's pending work, ten tasks per page. Open a task for status, progress, a pending question or task-specific stop. The browser refreshes automatically; Back and Dismiss do not cancel work or call a model. `/session` shows the selected model and measured context usage. Its message refreshes every three seconds when values change. Calling `/session` again replaces the previous status message at the bottom of the chat; switching sessions retires the old status message. `/session` and `/sessions` also act as direct gateway controls in orchestration mode. Typing reflects queued inputs, active agent work and workers, stopping when only user-input/reconciliation waits remain. See [orchestration](/guide/orchestration).
@@ -116,6 +123,8 @@ In a paired private chat, `/voice` opens Always / Only reply voice message / Off
 | No private reply | Bot was started, request approved, DM policy enabled, agent execution working |
 | Private chat works, group silent | Privacy Mode/admin status, remove/re-add after privacy changes, group approval, mention gate |
 | A command in a group only says to use a direct message | Expected: these commands work in the bot's private chat. In a group that is not approved yet the bot stays silent; pair it with a plain group message |
+| `/call` says voice calls are not configured | Set an HTTPS `gateway.publicUrl`; enable `agents[].voice` and Telegram orchestration |
+| Voice call page cannot use the microphone | Update Telegram; allow microphone access for Telegram in the system settings; some desktop clients deny it without a prompt |
 | Missing environment variable at startup | Token variable must exist in the gateway service environment |
 
 Implementation references: [receiver](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/telegram/receiver.ts), [configuration types](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/types.ts), and [access/API handling](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/api/router.ts).
