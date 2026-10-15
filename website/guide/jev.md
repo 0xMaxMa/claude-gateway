@@ -829,8 +829,9 @@ the run stops.
 The run stops and returns control, with `computerReport.stepRun` giving the
 completed steps, `stopReason` and remaining steps, when:
 
-- a Jev decision is below the confidence threshold, is ambiguous, or needs text
-  (`STEP_NOT_EXECUTED`)
+- a step is not executed (`STEP_NOT_EXECUTED`, with the cause in `detail`): the Jev
+  decision is below the confidence threshold, unclear or ambiguous, finds no
+  supported action or no text to enter, or the device rejects the action
 - an action produces no observable change (`STEP_NO_EFFECT`). Up to three
   boundary scrolls in a row are tolerated and listed in `unverifiedSteps`
 - an action outcome is unknown (`OUTCOME_UNKNOWN`). This uses normal
@@ -838,12 +839,17 @@ completed steps, `stopReason` and remaining steps, when:
 - the 120-second run limit is reached (`TIMEOUT`), or all steps are done
   (`ALL_STEPS_DONE`)
 
-When the agent's own goal run (the first revision of a task it spawned) stops in
-`waiting_input` with `ALL_STEPS_DONE` or `STEP_NO_EFFECT`, the agent is notified
-and owns the next move; `ALL_STEPS_DONE` does not by itself confirm the goal.
-Other `waiting_input` stops stay silent to the agent, as before: a confirmation
-question, a field question (`STEP_NOT_EXECUTED`), a user pause, and the user's own
-later step commands are the owner's to answer.
+When the agent's own goal run (the first revision of a task it spawned) ends its
+step run in `waiting_input` (`COMMAND_WAITING_INPUT`) with no question pending for
+the owner, the agent is notified and owns the next move, whatever the
+`stopReason`: `ALL_STEPS_DONE`, `STEP_NO_EFFECT` or `STEP_NOT_EXECUTED` alike.
+This is decided from the task, not from a list of stop reasons, and applies to a
+Remote Browser goal run (`browserReport.stepRun`) the same way. `ALL_STEPS_DONE`
+does not by itself confirm the goal. The run stays silent to the agent, as
+before, while the owner has a question to answer: a pending task question, a
+missing field value (`fieldRequest`), or a high-impact action awaiting yes or no
+(`computerReport.lastAction.confirm`). A user pause and the user's own later step
+commands are also the owner's to answer.
 
 1. Call `capabilities_list` with `scope: "computer"` to discover ready devices.
 2. Submit `task_spawn` with `target_profile: "gateway-managed"` and
@@ -864,13 +870,21 @@ well as interactive controls. These are untrusted application content and do
 not authorize further actions. `NO_SUPPORTED_ACTION` means no offered next action
 was selected; it must not be described as an account or provider rejection.
 Known native tool error codes are preserved in task failures instead of being
-replaced with a generic tool failure. An unknown code still fails as
-`COMPUTER_TOOL_FAILED`, but the stop message names the device errors behind it
-(`Device tool errors: <tool> <CODE> (<REASON>)`, the last five distinct ones).
-When the code or reason is `APPLICATION_PROTECTED`, the message also says that a
-protected app (such as GetPod, System Settings or a password manager) was
-frontmost and that this is not a missing macOS permission. Action counts represent
-desktop commands, not screenshots or proof that the goal was achieved.
+replaced with a generic tool failure; `APPLICATION_PROTECTED` stops as
+`COMPUTER_APPLICATION_PROTECTED`. An unknown code still fails as
+`COMPUTER_TOOL_FAILED`. Either way the stop message names the device errors
+behind it (`Device tool errors (most recent first): <tool> <CODE> (<REASON>)`):
+codes and reasons of capital letters, digits and underscores, the last five
+distinct ones, most recent first. An error is left out once a later call of the
+same tool succeeded (it was retried and did not stop the run); so is a failed
+release, which runs after the stop. `task_status` with `computer_trace_offset=0`
+still lists every recorded error (`toolErrors`), marking those `recovered: true`.
+When a named error's code or reason is `APPLICATION_PROTECTED`, the message also
+says that a protected app (such as GetPod, System Settings or a password manager)
+was frontmost and that this is not a missing macOS permission. The message asks
+the agent to read `computer_evidence=recorded`, then `computer_trace_offset=0`, as
+two `task_status` calls. Action counts represent desktop commands, not screenshots
+or proof that the goal was achieved.
 
 Computer field requests include their application, window and field identity before
 question notifications are emitted. The agent can answer an assigned missing-field
@@ -1141,7 +1155,10 @@ words, not a user command, and are often just "open a session and wait". If Jev
 finds no action in them (`BLOCKED`, `UNCLEAR`, `READ_REQUEST`; on Computer Use
 also low confidence), the round ends ready (`SESSION_READY`, outcome `Ready: the session
 is open and waits for the next command.`), never `Not done`, and nothing is
-spoken or handed off. A concrete first command still runs.
+spoken or handed off. A concrete first command still runs. Only that first
+decision of the agent's goal run is offered `READ_REQUEST` and `UNCLEAR`: once the
+run has acted, later decisions are not, and neither is a goal resumed by the
+user's yes to its high-impact step, from its first decision on.
 
 **The next command always runs.** A Computer Use direct command has no
 confidence bar: Jev's best choice runs, as on Remote Browser (agent-driven runs
