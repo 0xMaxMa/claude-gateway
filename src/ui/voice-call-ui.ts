@@ -6,7 +6,7 @@
  * `gateway.publicUrl`, and the WebSocket path comes from the ticket response.
  */
 import { BASE_STYLE, TG_WEBAPP_JS, htmlEscape, page } from './cli-viewer-ui';
-import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, voiceCallLevel } from './voice-call-client';
+import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, voiceCallLevel, voiceCallTicketFailure } from './voice-call-client';
 
 export interface VoiceCallPageOpts {
   pairingId: string;
@@ -48,7 +48,7 @@ const STYLE = `${BASE_STYLE}
 
 export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
   const cfg = JSON.stringify({ pairingId: opts.pairingId, basePath: opts.basePath, maxUtteranceMs: opts.maxUtteranceMs, vad: VOICE_CALL_VAD }).replace(/</g, '\\u003c');
-  const client = [createResampler, encodeVoiceCallFrame, voiceCallLevel, createVoiceCallVad, createVoiceCallUplink, createVoiceCallPlayhead].map(fn => fn.toString()).join(';\n');
+  const client = [createResampler, encodeVoiceCallFrame, voiceCallLevel, createVoiceCallVad, createVoiceCallUplink, createVoiceCallPlayhead, voiceCallTicketFailure].map(fn => fn.toString()).join(';\n');
   const body = `
   <div class="center"><div class="card call">
     <h1>Voice call</h1>
@@ -78,16 +78,6 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     function state(text, tone){ var s = $('state'); s.textContent = text; s.className = 'state' + (tone ? ' ' + tone : ''); }
     function api(path){ return CFG.basePath + '/voice-call/' + CFG.pairingId + path; }
     function send(message){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(message)); }
-    function ticketError(status, body){
-      if (status === 401) return 'Telegram could not verify you. Reopen the call from the /call button.';
-      if (status === 403) return 'You are not allowed to call this agent.';
-      if (status === 409 && body.code === 'CALL_LINK_USED') return 'This call link was already used. Send /call again.';
-      if (status === 409 && body.code === 'VOICE_DISABLED') return 'Voice calls are turned off for this agent.';
-      if (status === 409) return 'A call is already open in this chat. Hang up there first.';
-      if (status === 410 || status === 404) return 'This call link has expired. Send /call again.';
-      if (status === 429) return 'Voice credit is exhausted.';
-      return 'The call could not start right now. Please try again.';
-    }
     async function ticket(){
       var response = await fetch(api('/ticket'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
         body: JSON.stringify({ initData: tg.initData, call_token: callToken }) })
@@ -95,9 +85,8 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       var body = await response.json().catch(function(){ return {}; });
       if (body.call_token) callToken = body.call_token;
       if (!response.ok) {
-        var error = new Error(ticketError(response.status, body));
-        // A busy gateway or a lease still being released can succeed on retry.
-        error.fatal = response.status !== 503 && !(response.status === 409 && !body.code);
+        var failure = voiceCallTicketFailure(response.status, body), error = new Error(failure.message);
+        error.fatal = failure.fatal; error.signIn = failure.signIn;
         throw error;
       }
       return body;
@@ -167,6 +156,14 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     }
     function fail(error){
       state(error.message || 'The call could not continue.', 'err');
+      if (error.signIn) {
+        // Reloading lets the proxy redirect to its login page and back to this URL,
+        // as the first open did; the fragment keeps Telegram's initData.
+        hangup(true);
+        var signIn = $('start'); signIn.textContent = 'Sign in again'; signIn.hidden = false;
+        signIn.onclick = function(){ location.reload(); };
+        return;
+      }
       if (error.fatal !== false) { hangup(true); return; }
       // Keep the microphone grant; retry with the same call token.
       var retry = $('start'); retry.textContent = 'Retry'; retry.hidden = false;

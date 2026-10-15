@@ -1,5 +1,5 @@
 import { decodeVoiceFrame } from '../../../src/voice/protocol';
-import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, voiceCallLevel } from '../../../src/ui/voice-call-client';
+import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, voiceCallLevel, voiceCallTicketFailure } from '../../../src/ui/voice-call-client';
 import { generateVoiceCallPage } from '../../../src/ui/voice-call-ui';
 
 const sine = (frequency: number, rate: number, samples: number, amplitude = 0.5) =>
@@ -149,7 +149,7 @@ describe('page', () => {
 
   test('the inline script is valid JavaScript with every client function embedded', () => {
     expect(() => new Function(script)).not.toThrow();
-    for (const name of ['createResampler', 'encodeVoiceCallFrame', 'createVoiceCallVad', 'createVoiceCallUplink', 'createVoiceCallPlayhead', 'voiceCallLevel']) expect(script).toContain(`function ${name}(`);
+    for (const name of ['createResampler', 'encodeVoiceCallFrame', 'createVoiceCallVad', 'createVoiceCallUplink', 'createVoiceCallPlayhead', 'voiceCallLevel', 'voiceCallTicketFailure']) expect(script).toContain(`function ${name}(`);
   });
 
   test('URLs derive from the base path and the agent id is escaped', () => {
@@ -159,5 +159,72 @@ describe('page', () => {
     expect(html).toContain('&lt;agent&gt;');
     expect(html).not.toContain('<agent>');
     expect(html).toContain('https://telegram.org/js/telegram-web-app.js');
+  });
+});
+
+describe('ticket refusals', () => {
+  test('a 401 or 403 without a gateway error came from a proxy and needs a fresh sign-in', () => {
+    const signIn = { message: 'You need to sign in again to continue the call.', fatal: true, signIn: true };
+    expect(voiceCallTicketFailure(401, {})).toEqual(signIn);
+    expect(voiceCallTicketFailure(403, {})).toEqual(signIn);
+  });
+
+  test("the gateway's own refusals keep their meaning", () => {
+    expect(voiceCallTicketFailure(401, { error: 'Invalid initData' })).toEqual({ message: 'Telegram could not verify you. Reopen the call from the /call button.', fatal: true, signIn: false });
+    expect(voiceCallTicketFailure(403, { error: 'Not allowed' })).toEqual({ message: 'You are not allowed to call this agent.', fatal: true, signIn: false });
+    expect(voiceCallTicketFailure(409, { error: 'Voice session already active' })).toMatchObject({ fatal: false, signIn: false });
+    expect(voiceCallTicketFailure(409, { error: 'Call link already used', code: 'CALL_LINK_USED' })).toMatchObject({ fatal: true, message: 'This call link was already used. Send /call again.' });
+    expect(voiceCallTicketFailure(503, { error: 'Voice call unavailable' })).toMatchObject({ fatal: false, signIn: false });
+    expect(voiceCallTicketFailure(410, { error: 'Call link expired' })).toMatchObject({ fatal: true, message: 'This call link has expired. Send /call again.' });
+  });
+});
+
+describe('page after a refused ticket', () => {
+  const html = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'agent', basePath: '/gateway', maxUtteranceMs: 60000 });
+  const script = html.match(/<script>([\s\S]*)<\/script>/)![1];
+
+  /** Run the real inline script against a stub browser, press Start, and let the ticket request settle. */
+  async function pressStart(response: { status: number; body: string }) {
+    const elements = new Map<string, { textContent: string; className: string; hidden: boolean; onclick: null | (() => void) }>();
+    const element = (id: string) => elements.get(id) ?? elements.set(id, { textContent: '', className: '', hidden: false, onclick: null }).get(id)!;
+    const noop = () => undefined;
+    const tg = { initData: 'signed', ready: noop, expand: noop, onEvent: noop, enableClosingConfirmation: noop, disableClosingConfirmation: noop, close: noop };
+    const track = { enabled: true, stop: noop };
+    class FakeAudioContext {
+      sampleRate = 48000; currentTime = 0; destination = {};
+      audioWorklet = { addModule: async () => undefined };
+      resume = async () => undefined; close = async () => undefined;
+      createGain() { return { gain: { value: 1 }, connect: noop }; }
+      createMediaStreamSource() { return { connect: noop }; }
+    }
+    class FakeWorkletNode { port = {}; connect = noop; }
+    const fetch = jest.fn(async () => ({ ok: false, status: response.status, json: async () => JSON.parse(response.body) }));
+    const location = { protocol: 'https:', host: 'pod.example', reload: jest.fn() };
+    const window = { Telegram: { WebApp: tg }, isSecureContext: true, AudioWorkletNode: FakeWorkletNode };
+    const document = { getElementById: element, addEventListener: noop, visibilityState: 'visible' };
+    const navigator = { mediaDevices: { getUserMedia: async () => ({ getAudioTracks: () => [track], getTracks: () => [track] }) } };
+    const URL = { createObjectURL: () => 'blob:worklet' };
+    new Function('window', 'document', 'navigator', 'AudioContext', 'AudioWorkletNode', 'fetch', 'location', 'URL', script)(
+      window, document, navigator, FakeAudioContext, FakeWorkletNode, fetch, location, URL);
+    element('start').onclick!();
+    for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+    expect(fetch).toHaveBeenCalledWith('/gateway/voice-call/' + 'a'.repeat(36) + '/ticket', expect.objectContaining({ method: 'POST', credentials: 'same-origin' }));
+    return { element, location };
+  }
+
+  test('a proxy 401 offers to sign in again, and signing in reloads the page into the login redirect', async () => {
+    const { element, location } = await pressStart({ status: 401, body: 'unauthorized' });
+    expect(element('state').textContent).toBe('You need to sign in again to continue the call.');
+    expect(element('start')).toMatchObject({ hidden: false, textContent: 'Sign in again' });
+    expect(location.reload).not.toHaveBeenCalled();
+    element('start').onclick!();
+    expect(location.reload).toHaveBeenCalledTimes(1);
+  });
+
+  test("the gateway's initData refusal still ends the call without a sign-in offer", async () => {
+    const { element, location } = await pressStart({ status: 401, body: JSON.stringify({ error: 'Invalid initData' }) });
+    expect(element('state').textContent).toBe('Telegram could not verify you. Reopen the call from the /call button.');
+    expect(element('start').hidden).toBe(true);
+    expect(location.reload).not.toHaveBeenCalled();
   });
 });

@@ -161,3 +161,30 @@ export function createVoiceCallPlayhead() {
     playing(now: number): boolean { return endTime > now; },
   };
 }
+
+/** How the page reacts to a refused `/ticket` request. */
+export interface VoiceCallTicketFailure { message: string; fatal: boolean; signIn: boolean }
+
+/**
+ * Map a refused `/ticket` response to the page's reaction. Every refusal from the
+ * gateway carries a JSON `error`; a 401 or 403 without one came from a proxy in
+ * front of it (a GetPod pod's sign-in expired, or another account is signed in).
+ * Only a page navigation can recover from that: the proxy answers it with the
+ * login redirect that brought `/cli` and `/call` here in the first place.
+ */
+export function voiceCallTicketFailure(status: number, body: { error?: unknown; code?: unknown }): VoiceCallTicketFailure {
+  const refusal = (message: string, fatal = true) => ({ message, fatal, signIn: false });
+  if ((status === 401 || status === 403) && typeof body.error !== 'string') {
+    return { message: 'You need to sign in again to continue the call.', fatal: true, signIn: true };
+  }
+  if (status === 401) return refusal('Telegram could not verify you. Reopen the call from the /call button.');
+  if (status === 403) return refusal('You are not allowed to call this agent.');
+  if (status === 409 && body.code === 'CALL_LINK_USED') return refusal('This call link was already used. Send /call again.');
+  if (status === 409 && body.code === 'VOICE_DISABLED') return refusal('Voice calls are turned off for this agent.');
+  // A lease still being released can succeed on retry.
+  if (status === 409) return refusal('A call is already open in this chat. Hang up there first.', Boolean(body.code));
+  if (status === 410 || status === 404) return refusal('This call link has expired. Send /call again.');
+  if (status === 429) return refusal('Voice credit is exhausted.');
+  // A busy gateway can succeed on retry.
+  return refusal('The call could not start right now. Please try again.', status !== 503);
+}
