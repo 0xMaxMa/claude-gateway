@@ -82,3 +82,25 @@ it('releases the deleting mark when the guard throws', async () => {
   expect((await request(app).delete('/api/v1/projects/site').set(H).send({ confirm: 'site' })).status).toBe(500);
   expect((await request(app).delete('/api/v1/projects/site').set(H).send({ confirm: 'site' })).status).toBe(200);
 });
+
+it('answers project_deleting, not project_running, to a second delete of the folder, by its name or through a symlink alias', async () => {
+  fs.symlinkSync(path.join(root, 'site'), path.join(root, 'alias'));
+  const app = appWith(async () => ({ pid: 999999, exitCode: () => 1 }), 50);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let reached!: () => void;
+  const atRename = new Promise<void>((resolve) => { reached = resolve; });
+  const realRename = fs.promises.rename.bind(fs.promises);
+  jest.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+    if (path.basename(String(to)).startsWith('.deleting-')) { reached(); await gate; }
+    return realRename(from, to);
+  });
+  const first = Promise.resolve(request(app).delete('/api/v1/projects/site').set(H).send({ confirm: 'site' }));
+  await atRename;
+  const again = await request(app).delete('/api/v1/projects/site').set(H).send({ confirm: 'site' });
+  const viaAlias = await request(app).delete('/api/v1/projects/alias').set(H).send({ confirm: 'alias' });
+  release();
+  expect([again.status, again.body.code]).toEqual([409, 'project_deleting']);
+  expect([viaAlias.status, viaAlias.body.code]).toEqual([409, 'project_deleting']);
+  expect((await first).status).toBe(200);
+});

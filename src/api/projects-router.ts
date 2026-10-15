@@ -124,12 +124,13 @@ export function createProjectsRouter(
       if ((req.body ?? {}).confirm !== name.value) return fail(res, 'confirm_mismatch');
       const dir = await resolveProjectDir(root, name.value);
       if (!dir.ok) return fail(res, dir.error);
+      if (isProjectDeleting(dir.value)) return fail(res, 'project_deleting');
       const busy = async () =>
         (await listRunning(running.sys, dir.value)).processes.length > 0 || starts.has(dir.value) || Boolean(await running.chatTurnActive?.(name.value));
       // Checked before the mark, so a turn that began earlier is seen here and never refused by the mark.
       if (await busy()) return fail(res, 'project_running');
       const release = markProjectDeleting(dir.value);
-      if (!release) return fail(res, 'project_running');
+      if (!release) return fail(res, 'project_deleting');
       try {
         if (await busy()) return fail(res, 'project_running');
         respond(res, await removeProject(root, name.value));
