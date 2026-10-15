@@ -26,7 +26,7 @@ export function inputBatch(store: OrchestrationStore, first: Row, debounceMs: nu
   const initial: AcceptInput = JSON.parse(String(first.ingress_json));
   const rows = [first];
   const inputs = [initial];
-  if (debounceMs && batchableInput(initial)) {
+  if (debounceMs && batchableInput(initial) && (!splitOnly || splitPart(initial))) {
     // Stop at any scope/authority/control boundary. Never absorb a different
     // user's message or elevate a read-only request with another input's grant.
     // Only the first split part carries the reply, so its continuation may omit it.

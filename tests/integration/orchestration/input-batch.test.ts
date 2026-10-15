@@ -271,7 +271,7 @@ describe('client-split long messages without semantic intake (#593)',()=>{
       await a.response;
       const decisions=f.runtime.store.all("SELECT input_ids_json FROM conversation_decisions WHERE kind='user'").map(row=>JSON.parse(String(row.input_ids_json)));
       expect(decisions[0]).toEqual([a.inputId]);
-      expect(decisions.flat()).not.toEqual(expect.arrayContaining([[a.inputId,b.inputId]]));
+      expect(decisions.some(ids=>ids.includes(b.inputId)&&ids.includes(a.inputId))).toBe(false);
     }finally{await f.close();}
   });
 
