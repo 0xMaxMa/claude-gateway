@@ -168,7 +168,7 @@ test('ElevenLabs keeps a stalled dialogue socket alive and stops after close_soc
   } finally { jest.useRealTimers(); }
 });
 
-test('ElevenLabs classic models never receive dialogue keep-alive messages', async () => {
+test('ElevenLabs keeps a stalled classic socket alive with a single space', async () => {
   jest.useFakeTimers();
   try {
     const fixture = socketFixture();
@@ -178,10 +178,29 @@ test('ElevenLabs classic models never receive dialogue keep-alive messages', asy
     const iterator = new ElevenLabsTts('fixture', 'eleven_flash_v2_5', fixture.connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: new AbortController().signal })[Symbol.asyncIterator]();
     const done = iterator.next();
     await jest.advanceTimersByTimeAsync(25000);
-    expect(fixture.send.mock.calls.map(([message]) => message)).not.toContainEqual({ keep_alive: true });
+    const sent = fixture.send.mock.calls.map(([message]) => message);
+    expect(sent.slice(1)).toEqual([{ text: 'first', try_trigger_generation: true }, { text: ' ' }, { text: ' ' }]);
+    expect(sent).not.toContainEqual({ keep_alive: true });
     release(); await jest.advanceTimersByTimeAsync(0);
+    expect(fixture.send).toHaveBeenLastCalledWith({ text: '' });
     fixture.messages.push({ isFinal: true });
     expect((await done).done).toBe(true);
+  } finally { jest.useRealTimers(); }
+});
+
+test('ElevenLabs reports a failed keep-alive while the reply text is still stalled', async () => {
+  jest.useFakeTimers();
+  try {
+    const fixture = socketFixture();
+    async function* text() { yield 'first'; await new Promise(() => {}); }
+    const iterator = new ElevenLabsTts('fixture', 'eleven_v4_turbo', fixture.connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: new AbortController().signal })[Symbol.asyncIterator]();
+    const done = iterator.next();
+    done.catch(() => {});
+    await jest.advanceTimersByTimeAsync(0);
+    fixture.send.mockRejectedValueOnce(Object.assign(new Error('closed'), { code: 'PROVIDER_CONNECTION_CLOSED' }));
+    await jest.advanceTimersByTimeAsync(10000);
+    await expect(done).rejects.toMatchObject({ code: 'PROVIDER_CONNECTION_CLOSED' });
+    expect(fixture.close).toHaveBeenCalled();
   } finally { jest.useRealTimers(); }
 });
 

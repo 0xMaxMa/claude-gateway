@@ -5,8 +5,8 @@ import { openProviderSocket, SocketFactory } from './socket';
 // v3 and v4 models are only served by the Text-to-Dialogue socket; the classic
 // stream-input socket rejects v4 with HTTP 400.
 export const isElevenLabsDialogueModel = (model: string): boolean => /^eleven_v[34](_|$)/.test(model);
-// The dialogue socket closes with 1008 input_timeout_exceeded after 20s without a message.
-const DIALOGUE_KEEP_ALIVE_MS = 10000;
+// Both sockets close after 20s without a message (1008 input_timeout_exceeded on dialogue).
+const KEEP_ALIVE_MS = 10000;
 
 export class ElevenLabsTts implements TtsProvider {
   readonly capabilities = { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] };
@@ -37,11 +37,13 @@ export class ElevenLabsTts implements TtsProvider {
     let sendError: unknown, finished = false, closing = false, keepAlive: NodeJS.Timeout | undefined;
     const fail = (error: unknown) => { sendError ??= error; socket.close(); };
     // Re-armed after every send, so a keep-alive only goes out while the reply text stalls.
+    // A single space is the classic socket's documented keep-alive.
+    const live = () => !closing && !options.signal.aborted;
     const send = async (message: unknown) => {
       clearTimeout(keepAlive);
       await socket.send(message);
       clearTimeout(keepAlive);
-      if (dialogue && !closing && !options.signal.aborted) (keepAlive = setTimeout(() => send({ keep_alive: true }).catch(fail), DIALOGUE_KEEP_ALIVE_MS)).unref();
+      if (live()) (keepAlive = setTimeout(() => { if (live()) send(dialogue ? { keep_alive: true } : { text: ' ' }).catch(fail); }, KEEP_ALIVE_MS)).unref();
     };
     const sending = (async () => {
       await send(dialogue ? { voices: [options.voiceId], voice_settings: { stability: 1 } } : { text: ' ', voice_settings: { stability: 0.5 }, generation_config: { chunk_length_schedule: [50,120,160,290] } });
@@ -59,7 +61,8 @@ export class ElevenLabsTts implements TtsProvider {
         if (typeof message.audio === 'string') yield Buffer.from(message.audio, 'base64');
         if (message.is_final === true || message.isFinal === true) { finished = true; break; }
       }
-      await sending;
+      // Without a terminal event, report now: `sending` may still be waiting on stalled text.
+      if (finished) await sending;
       if (sendError) throw sendError;
       if (!finished && !options.signal.aborted) throw new VoiceError('TTS_INCOMPLETE');
     } finally { closing = true; clearTimeout(keepAlive); socket.close(); }
