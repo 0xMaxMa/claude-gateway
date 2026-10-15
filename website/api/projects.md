@@ -24,8 +24,8 @@ absent when Projects is usable. An older gateway omits the key, or lists project
 **On by default.** The routes are on for every install, with the root `~/projects`, and
 need no configuration. Every key with `admin: true` can list, read, run, start and delete whatever sits under
 that folder, and nothing else changes for keys without it. To switch Projects off, set
-`gateway.projects.enabled` to `false` (a boolean, not the string `"false"`, which the gateway warns about and
-ignores) and restart:
+`gateway.projects.enabled` to `false` and restart. Only a boolean counts: the string `"false"`, `0` or `null` is
+ignored with a warning in `gateway.log`, and Projects keeps its default, which is on:
 
 ```json
 { "gateway": { "projects": { "enabled": false } } }
@@ -38,7 +38,8 @@ On a host-mode orchestrated agent, `task_spawn` accepts any absolute `working_di
 inside a project folder without a project-bound chat. This predates Projects and is unchanged. What the gate does
 guarantee: a key without `admin` gets `403 forbidden_key` on every `/v1/projects` route and on every route that
 reveals or controls a project-bound session (its info, messages, history, search, streams, tasks, voice, media,
-rename, delete, clear, compact, stop and restart). Lists leave bound sessions out for such a key, project name
+attachments, shares, catalogs, rename, delete, clear, compact, stop and restart). [Sessions](/api/sessions#post-apiv1agentsagentidsessions)
+lists the few routes that are not refused and why. Lists leave bound sessions out for such a key, project name
 included. The check reads the session's binding file, so it also covers sessions bound before the gate existed.
 Treat an admin key as full access to the pod, and give the others no more than they need.
 
@@ -50,7 +51,7 @@ project (for a path inside it). Hardlinks are not detected: a hardlinked file re
 because the API is a view of what the gateway's user can already read, not a
 sandbox.
 
-**Disabled.** When the default root would expose your home or config directory, the gateway logs a warning and does not mount these routes: they answer `404`, `capabilities.projects` is empty, and `POST /sessions` with `project` answers `409 projects_disabled`. Sessions already bound to a project fail with `409 PROJECT_UNAVAILABLE`. Set `gateway.projects.root` to a folder that holds only projects to re-enable. A `root` that is spelled exactly like the default (`config.template.json` ships `"~/projects"`, and the config migration copies it into old configs) counts as unset, so it warns and disables the routes instead of stopping the gateway. Any other unsafe `root` stops the gateway from loading.
+**Disabled.** When the default root would expose your home or config directory, the gateway logs a warning and does not mount these routes: they answer `404`, `capabilities.projects` is empty, and `POST /sessions` with `project` answers `409 projects_disabled`. Sessions already bound to a project fail with `409 PROJECT_UNAVAILABLE`. Set `gateway.projects.root` to a folder that holds only projects to re-enable. A `root` that is spelled like the default, spaces and trailing slashes aside (`config.template.json` ships `"~/projects"`, and the config migration copies it into old configs) counts as unset, so it warns and disables the routes instead of stopping the gateway. Any other unsafe `root` stops the gateway from loading.
 
 **Configuring the root.** Set `gateway.projects.root` in `config.json` to an
 absolute path or a path starting with `~/`:
@@ -144,7 +145,7 @@ why a folder is missing. Both are absent when empty, and `projects` is not affec
 - `skipped` holds `{ "name", "reason" }` for each folder or link that is not a project, sorted by
   name, at most 50. `reason` is `invalid_name` (the [name rules](#errors) reject it: a space,
   non-ASCII letters, a leading dot or dash, or more than 64 characters), `symlink_outside_root` (a
-  link whose target is outside the root) or `not_a_directory` (a link to a file). Loose files and
+  link whose target is outside the root, or is the root itself) or `not_a_directory` (a link to a file). Loose files and
   broken links are not reported.
 - `leftovers` holds the names of hidden `.deleting-*` folders in the root, sorted, at most 50. They
   are what a [`DELETE`](#delete-project) could not remove. The gateway never sweeps them.
@@ -316,19 +317,22 @@ repository's own config names. Every read (`status`, `rev-parse`, `log`,
 | `GIT_ALLOW_PROTOCOL` set empty | Every transport: ssh, http(s), git, file and `ext::`. A repository cannot undo it: `protocol.<name>.allow=always` in its config does not outrank the environment, though it does beat a global `protocol.allow=never`. Git can start a fetch during a read, to get an object a partial clone left out, so this is what keeps `core.sshCommand`, `core.askPass`, `remote.<name>.uploadpack`, `ext::` URLs and `credential.helper` from running. Such a read fails and the project reads as `null` in the list. `credential.helper` and `core.sshCommand` in the repository are never reached, because no connection is opened. |
 | `GIT_NO_LAZY_FETCH=1` | Git 2.44 and later do not try the lazy fetch at all. Older git tries it and the line above stops it. |
 | `core.fsmonitor=false` | The command named by `core.fsmonitor`. |
-| `filter.<name>.clean`, `smudge`, `process` blanked and `required` set to `false` | The filter drivers that the repository's own config defines. `status` runs a driver's clean command on any file whose timestamp changed, so it would run it. The gateway asks git for the drivers (`git config --list --show-scope`) and blanks those in the `local` and `worktree` scopes, which covers `.git/config`, `config.worktree`, files they include (also nested, and `includeIf`), a `.git` file that points elsewhere, and the config of a linked worktree's main repository. It does not parse config text. The driver is found whichever way `.gitattributes`, `.git/info/attributes` or `core.attributesFile` names it. The operator's own drivers in `~/.gitconfig` or `/etc/gitconfig` still run, such as `git lfs install`. A repository that defines `git lfs` locally (`git lfs install --local`) reads its LFS files as the raw pointer, so they can show as modified. |
+| Every `filter.*` key the repository defines set to empty | The filter drivers that the repository's own config defines. `status` runs a driver's clean command on any file whose timestamp changed, so it would run it. The gateway asks git for the drivers (`git config --list --show-scope`) and blanks those in the `local` and `worktree` scopes, which covers `.git/config`, `config.worktree`, files they include (also nested, and `includeIf`), a `.git` file that points elsewhere, and the config of a linked worktree's main repository. It does not parse config text. The driver is found whichever way `.gitattributes`, `.git/info/attributes` or `core.attributesFile` names it. The operator's own drivers in `~/.gitconfig` or `/etc/gitconfig` still run, such as `git lfs install`. A repository that defines `git lfs` locally (`git lfs install --local`) reads its LFS files as the raw pointer, so they can show as modified. |
 | `--ignore-submodules=dirty` | `status` does not enter a submodule's worktree, where its own config and filters would apply. Only a changed submodule commit shows. |
 | `--no-show-signature` on `log` | `log.showSignature` would run the repository's `gpg.program`. |
 | `--no-optional-locks` | `status` never takes `.git/index.lock` from a git command you run in the same folder. |
 
-A repository that defines more than 64 filter drivers, or one with a name longer
-than 1024 characters, is not read: it answers `409 git_unreadable`, and
-`git-summary` shows `null` for it.
+The keys are passed to git whole, in its environment, which can carry only valid UTF-8. A repository is therefore
+not read, and answers `409 git_unreadable` (`git-summary` shows `null` for it), when it defines more than 64
+`filter.*` keys (a driver with `clean`, `smudge`, `process` and `required` counts 4, so about 16 drivers), a key
+longer than 1024 characters, or a `filter.*` key that is not valid UTF-8.
 
 Not neutralized, and not reachable from a read: hooks (`status`, `log` and
 `rev-parse` run none), `diff` and `merge` drivers and textconv (not used by a
 status), `core.pager`, `core.editor`. The operator's config is trusted: a
-filter, `safe.directory` or `GIT_CONFIG_*` set there applies.
+filter or `safe.directory` set in `~/.gitconfig` or `/etc/gitconfig` applies, and so do `HOME`, `XDG_CONFIG_HOME`,
+`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM` from the gateway's environment. Its
+`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>` and `GIT_CONFIG_PARAMETERS` are dropped.
 
 Credentials in a remote URL (`https://user:token@host/x`) are removed from
 every response and log line. Git's own output never reaches the client.
@@ -384,7 +388,7 @@ A slim status for every project that is a git repository, for project cards.
 Plain folders are left out. A repository whose status takes longer than 3
 seconds or fails maps to `null`. The gateway reads at most 4 repositories at a
 time, and each read runs 2 git processes one after the other (the config, then the status), so one request keeps up to 4
-git processes running and spawns 2 per repository (measured: 400 for 200 repositories). `GET /api/v1/projects`
+git processes running and spawns 2 per repository, 3 for an unborn branch that has an upstream (measured: 400 for 200 repositories with commits). `GET /api/v1/projects`
 spawns none, since it only looks at the filesystem. To stay fast, `change_count` counts an untracked folder as one change,
 so it can be lower than the `change_count` of the full status.
 

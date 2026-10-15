@@ -138,7 +138,7 @@ curl -X POST \
 |--------|------|
 | 400 | Empty or too-long message, or missing `chat_id` |
 | 401 | Missing API key |
-| 403 | Invalid key or key has no access to that agent. Also, with `code: "forbidden_key"`, a key without write access to the agent or without pod access sending to a [project-bound session](/api/sessions#post-apiv1agentsagentidsessions) |
+| 403 | Invalid key or key has no access to that agent. Also, with `code: "forbidden_key"`, any key that is not an admin key (a read-only key and a pod-wide write key included) sending to a [project-bound session](/api/sessions#post-apiv1agentsagentidsessions), or naming a file of one in `media_files` |
 | 404 | Agent ID not found, or `session_id` names no session in this `chat_id` (`code: "SESSION_NOT_FOUND"`) |
 | 409 | Session is busy processing another request, or, with `code: "PROJECT_UNAVAILABLE"`, the session's project folder is gone, renamed or outside the projects root |
 | 504 | Agent did not respond within timeout (default 60s) — **sync mode only** |

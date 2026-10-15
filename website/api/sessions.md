@@ -192,10 +192,31 @@ again on every request that drives or watches the session: a key that is not an 
 key gets `403` with `code: "forbidden_key"` from [`POST /messages`](/api/messages),
 `POST /messages/accept`, `POST /greeting` (a read-only key too) and the session's message, activity and event streams.
 The same answer comes from every other route that takes the session's id: info, rename, delete, clear, compact,
-stop, restart, tasks (list, show, answer, control, cancel), voice, and its media folder; and from the chat history
-routes (`/chats/:chatId/messages`, `/messages/search`, `/messages/active-days`) when the request names the session
-with `session_id`. For a key that is not an admin key, `GET /sessions`, `GET /chats` and the unfiltered history routes
-leave the session out, its messages included, and carry no project name.
+stop, restart, `GET /sessions/:id/activity`, tasks (list, show, answer, control, cancel), voice,
+`POST /chats/:chatId/sessions/:sessionId/messages`, attachments, and its media folder; from
+`GET /v1/image-catalog`, `GET /v1/video-catalog`, `POST /v1/shares` and `POST /v1/image-artifacts` when `session_id`
+names the session or a path names a file in its media folder; from `media_files` in a message that names such a
+file; and from the chat history routes (`/chats/:chatId/messages`, `/messages/search`, `/messages/active-days`) when
+the request names the session with `session_id`. A session id that is not a plain id (`[A-Za-z0-9_-]`, 1 to 64
+characters) is refused the same way for a key that is not an admin key, and the media path is checked after dot
+segments, `%2e` and double slashes are resolved. For a key that is not an admin key, `GET /sessions`, `GET /chats`,
+the unfiltered history routes and the `/sessions` chat command leave the session out, its messages included, and
+carry no project name. When the gateway cannot read its `project-bindings` folder, those reads answer
+`503 project_bindings_unreadable` for a key that is not an admin key, and log the reason once.
+
+**Routes that are not refused, and why.** `GET /v1/agents/sessions`, the `/dashboard/*` routes and
+`GET /api/v1/sessions/:id/screen` need an admin key or a dashboard login for every session, so they never reach a
+bound session through a key that is not an admin key. `GET /chats/:chatId/sessions` lists the sessions of
+Telegram, Discord and the other channel chats, which are never project-bound. `POST /v1/agents/:agentId/media`
+(upload) takes no session id. `DELETE /v1/shares/:shareId` takes a share id and answers only for a key with access
+to the owning agent. `GET /shared/:token` is public: the token is the capability, and it can only be minted through
+the refused `POST /v1/shares`.
+
+**The agent of a project chat.** The attachment tool (`api_reply`), `share_file` and the image tools call the share,
+catalog, artifact and attachment routes with the API key the gateway handed the agent, which can be a key that is not
+an admin key. The gateway also hands each agent process a token for its own session, and the routes accept a call
+for that session, and only that one, with the token. It lives in the process's environment, dies with the gateway
+process, and opens no other session.
 
 On an orchestrated agent the deciding agent stays in its workspace and is told
 which project the chat is in. Every task it starts runs in the project folder,
