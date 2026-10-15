@@ -72,14 +72,14 @@ const variants = (id: string) => [
 ];
 
 describe('GET /media is gated on the normalized path', () => {
-  it.each(Object.values(KEYS).filter((k) => !k.admin))('$key never returns a bound session file, however the path is spelled', async (key) => {
+  it.each(Object.values(KEYS).filter((k) => !(k as ApiKey).admin))('$key never returns a bound session file, however the path is spelled', async (key) => {
     for (const v of variants(bound)) {
       const res = await get(`${A}/media/${v}`, key.key);
       expect([v, res.status === 200, res.body.includes('BOUND-PIXELS')]).toEqual([v, false, false]);
     }
   });
 
-  it.each(Object.values(KEYS).filter((k) => !k.admin))('$key still reads an unbound session file through the same spellings', async (key) => {
+  it.each(Object.values(KEYS).filter((k) => !(k as ApiKey).admin))('$key still reads an unbound session file through the same spellings', async (key) => {
     for (const v of [`api-${plain}/f.png`, `media/api-${plain}/f.png`, `./api-${plain}/f.png`, `x/../api-${plain}/f.png`, `%2e/api-${plain}/f.png`]) {
       const res = await get(`${A}/media/${v}`, key.key);
       expect([v, res.status, res.body]).toEqual([v, 200, 'PLAIN-PIXELS']);

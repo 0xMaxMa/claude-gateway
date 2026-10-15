@@ -45,7 +45,7 @@ const ESCAPES = (id: string) => [
 ];
 
 describe('a path-shaped session id never reaches a binding file', () => {
-  it.each(Object.values(KEYS).filter((k) => !k.admin))('%s cannot unbind a session by DELETE with an escaped id', async (key) => {
+  it.each(Object.values(KEYS).filter((k) => !(k as ApiKey).admin))('%s cannot unbind a session by DELETE with an escaped id', async (key) => {
     for (const bad of ESCAPES(bound)) {
       const res = await request(gw).delete(`${A}/sessions/${bad}?chat_id=web`).set('Authorization', `Bearer ${key.key}`);
       expect([bad, res.status === 204, fs.existsSync(bindingFile())]).toEqual([bad, false, true]);
