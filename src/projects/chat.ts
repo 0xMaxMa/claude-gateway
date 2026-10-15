@@ -5,11 +5,11 @@ import { expandHome } from '../utils/paths';
 import { resolveProjectDir } from './fs';
 import { getStatusSummary } from './git';
 import { remoteHostname } from './git-status';
-import { err, ok, ProjectName, ProjectsErrorCode, resolveInside, Result } from './paths';
+import { DEFAULT_PROJECTS_ROOT, err, ok, ProjectName, ProjectsErrorCode, resolveInside, Result } from './paths';
 
 /** `gateway.projects.root`, which loadConfig has already validated. */
 export function resolveProjectsRoot(config: GatewayConfig): string {
-  return expandHome(config.gateway.projects?.root ?? '~/projects');
+  return expandHome(config.gateway.projects?.root ?? DEFAULT_PROJECTS_ROOT);
 }
 
 /** Why an agent cannot chat in a project: its process or its workers would not run in the folder. */

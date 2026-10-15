@@ -7,7 +7,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { GatewayConfig, Logger } from '../types';
 import { expandHome, pathWithin } from '../utils/paths';
-import { parseProjectName } from '../projects/paths';
+import { DEFAULT_PROJECTS_ROOT, parseProjectName } from '../projects/paths';
 import { resolveGatewayPublicUrl } from './public-url';
 import { upgradeAgentWhatsAppAccounts } from './whatsapp-accounts';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../orchestration/config';
@@ -176,10 +176,6 @@ export function logSkippedAgents(
   }
 }
 
-/**
- * The Projects API serves every file under its root with no denylist, so a root
- * at or above HOME or the config dir would expose ~/.ssh and config.json.
- */
 function validateProjectsRoot(raw: unknown, configPath: string): void {
   if (typeof raw !== 'string' || !raw.trim()) {
     throw new ConfigValidationError('gateway.projects.root must be a non-empty string');
@@ -188,6 +184,20 @@ function validateProjectsRoot(raw: unknown, configPath: string): void {
   if (!path.isAbsolute(root)) {
     throw new ConfigValidationError(`gateway.projects.root must be an absolute path or start with ~/ (got "${raw}")`);
   }
+  const exposed = exposedByProjectsRoot(root, configPath);
+  if (exposed !== null) {
+    throw new ConfigValidationError(
+      `gateway.projects.root "${raw}" must not be or contain ${exposed}; the Projects API would expose it`,
+    );
+  }
+}
+
+/**
+ * The Projects API serves every file under its root with no denylist, so a root
+ * at or above HOME or the config dir would expose ~/.ssh and config.json.
+ * Returns the guarded directory the root contains, or null.
+ */
+function exposedByProjectsRoot(root: string, configPath: string): string | null {
   // realpath when the path exists, so a symlink to HOME is caught too.
   const real = (p: string) => {
     try {
@@ -198,13 +208,8 @@ function validateProjectsRoot(raw: unknown, configPath: string): void {
   };
   const resolved = real(root);
   const home = os.homedir();
-  for (const guarded of [home, path.join(home, '.claude-gateway'), path.dirname(path.resolve(configPath))]) {
-    if (pathWithin(resolved, real(guarded))) {
-      throw new ConfigValidationError(
-        `gateway.projects.root "${raw}" must not be or contain ${guarded}; the Projects API would expose it`,
-      );
-    }
-  }
+  const guards = [home, path.join(home, '.claude-gateway'), path.dirname(path.resolve(configPath))];
+  return guards.find((guarded) => pathWithin(resolved, real(guarded))) ?? null;
 }
 
 /** Trust is operator config only, so a name the API could never resolve is a typo worth failing on. */
@@ -424,6 +429,17 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
     if (root !== undefined) validateProjectsRoot(root, configPath);
     const trusted = (projects as Record<string, unknown>).trusted;
     if (trusted !== undefined) validateTrustedProjects(trusted);
+  }
+  // An operator who never chose a root gets a warning, not a gateway that refuses to start.
+  if ((projects as { root?: unknown } | undefined)?.root === undefined) {
+    const exposed = exposedByProjectsRoot(expandHome(DEFAULT_PROJECTS_ROOT), configPath);
+    if (exposed !== null) {
+      console.warn(
+        `[gateway] The default projects root ${DEFAULT_PROJECTS_ROOT} is or contains ${exposed}, so the Projects API is disabled.\n` +
+        '          Set gateway.projects.root to a folder that holds only projects.',
+      );
+      interpolatedGateway.projects = { ...(projects as object | undefined), enabled: false };
+    }
   }
 
   // Interpolate each agent individually — skip agents with missing env vars

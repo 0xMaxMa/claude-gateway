@@ -688,6 +688,38 @@ describe('config-loader', () => {
       expect(() => loadRoot('~/.claude-gateway')).toThrow(/gateway\.projects\.root .* must not be or contain/);
       expect(() => loadRoot(configDir)).toThrow(/gateway\.projects\.root .* must not be or contain/);
     });
+
+    describe('default root ~/projects', () => {
+      let warn: jest.SpyInstance;
+      beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); });
+      afterEach(() => warn.mockRestore());
+      const projectsWarnings = () => warn.mock.calls.filter(([m]) => String(m).includes('~/projects'));
+
+      it('disables projects with a warning when the loaded config lives under it', () => {
+        const nested = path.join(home, 'projects', 'gw');
+        fs.mkdirSync(nested, { recursive: true });
+        const configPath = path.join(nested, 'config.json');
+        fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/tmp', projects: { trusted: ['a'] } }, agents: [] }));
+        expect(loadConfig(configPath).gateway.projects).toEqual({ trusted: ['a'], enabled: false });
+        expect(projectsWarnings()).toHaveLength(1);
+      });
+
+      it('disables projects with a warning when ~/projects is a symlink to HOME', () => {
+        fs.symlinkSync(home, path.join(home, 'projects'));
+        expect(load({}).gateway.projects).toEqual({ enabled: false });
+        expect(projectsWarnings()).toHaveLength(1);
+      });
+
+      it('leaves projects enabled and silent when ~/projects is safe', () => {
+        expect(load({}).gateway.projects).toBeUndefined();
+        expect(projectsWarnings()).toHaveLength(0);
+      });
+
+      it('still throws when the same root is set explicitly', () => {
+        fs.symlinkSync(home, path.join(home, 'projects'));
+        expect(() => loadRoot('~/projects')).toThrow(/gateway\.projects\.root .* must not be or contain/);
+      });
+    });
   });
 
   describe('gateway.projects.trusted', () => {

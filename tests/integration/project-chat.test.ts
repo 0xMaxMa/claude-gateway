@@ -45,7 +45,7 @@ function agentConfig(base: string, id: string, extra: Partial<AgentConfig> = {})
   };
 }
 
-async function harness(opts: { trusted?: string[]; orchestration?: boolean; extra?: Record<string, Partial<AgentConfig>> } = {}): Promise<Harness> {
+async function harness(opts: { trusted?: string[]; orchestration?: boolean; enabled?: false; extra?: Record<string, Partial<AgentConfig>> } = {}): Promise<Harness> {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'project-chat-')));
   const root = path.join(base, 'projects');
   fs.mkdirSync(path.join(root, 'site'), { recursive: true });
@@ -55,7 +55,7 @@ async function harness(opts: { trusted?: string[]; orchestration?: boolean; extr
       timezone: 'UTC',
       orchestration: opts.orchestration ?? false,
       api: { keys: Object.values(KEYS) },
-      projects: { root, ...(opts.trusted ? { trusted: opts.trusted } : {}) },
+      projects: { root, ...(opts.trusted ? { trusted: opts.trusted } : {}), ...(opts.enabled === false ? { enabled: false } : {}) },
     },
     agents: [],
   };
@@ -520,5 +520,18 @@ describe('project chat on an orchestrated gateway', () => {
     const res = await send(h, sessionId, 'hi');
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('PROJECT_UNAVAILABLE');
+  });
+});
+
+describe('projects disabled by the config loader', () => {
+  it('does not mount the Projects API', async () => {
+    const h = await harness({ enabled: false });
+    try {
+      const res = await supertest(h.app).get('/api/v1/projects').set('Authorization', `Bearer ${KEYS.admin!.key}`);
+      expect(res.status).toBe(404);
+      expect(res.body.projects).toBeUndefined();
+    } finally {
+      await teardown(h);
+    }
   });
 });

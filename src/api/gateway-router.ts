@@ -734,7 +734,7 @@ export class GatewayRouter {
     }
 
     // Mount pod-wide project browsing (gateway.projects.root, default ~/projects)
-    if (this.gatewayConfig?.gateway?.api?.keys) {
+    if (this.gatewayConfig?.gateway?.api?.keys && this.gatewayConfig.gateway.projects?.enabled !== false) {
       this.app.use('/api', createProjectsRouter(this.gatewayConfig.gateway.api.keys, resolveProjectsRoot(this.gatewayConfig), {
         sys: systemSys(),
         limiter: new StopLimiter(),

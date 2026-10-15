@@ -1,6 +1,9 @@
 import { promises as fsp } from 'fs';
 import * as path from 'path';
 
+/** The projects root when gateway.projects.root is not set. */
+export const DEFAULT_PROJECTS_ROOT = '~/projects';
+
 export type ProjectName = string & { readonly __brand: 'ProjectName' };
 /** POSIX path relative to a project dir; `""` is the project dir itself. */
 export type RelPath = string & { readonly __brand: 'RelPath' };

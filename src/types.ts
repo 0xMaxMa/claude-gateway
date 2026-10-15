@@ -497,6 +497,8 @@ export interface GatewayConfig {
      */
     projects?: {
       root?: string;
+      /** false leaves the Projects API unmounted; loadConfig sets it when the default root would expose HOME or the config dir. */
+      enabled?: boolean;
       /**
        * Project names whose own `.claude/` settings, hooks, `.mcp.json` and
        * CLAUDE.md load in project-bound chats. Every other project runs with
