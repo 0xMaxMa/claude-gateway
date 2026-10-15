@@ -208,7 +208,7 @@ curl -X DELETE \
 
 ## POST /api/v1/agents/:agentId/sessions/:sessionId/clear {#post-apiv1agentsagentidsessionssessionidclear}
 
-Reset the Claude Code context for this session without deleting chat history or attachments. The next message starts a new CLI session and loads up to the latest 50 history messages once; subsequent managed turns resume the new CLI session. Existing tasks remain unchanged. An active response or compaction must finish before clearing. The reset survives a gateway restart.
+Reset the Claude Code context for this session without deleting chat history or attachments. The next message starts a new CLI session and loads up to the latest 50 history messages once; subsequent managed turns resume the new CLI session. Existing tasks remain unchanged. An active response or compaction must finish before clearing. The reset survives a gateway restart. This endpoint runs at once; the `/clear` chat command asks for [confirmation](/api/messages#command-reply) first.
 
 **Request body:** `{ "chat_id": "myapp" }`
 
@@ -228,7 +228,7 @@ curl -X POST \
 
 ## POST /api/v1/agents/:agentId/sessions/:sessionId/compact {#post-apiv1agentsagentidsessionssessionidcompact}
 
-Run native Claude Code `/compact` on the existing CLI session. Gateway chat history stays unchanged; recent messages are not appended again. A busy response must finish first. Missing transcripts and unconfirmed CLI compaction fail explicitly, without falling back to history summarization.
+Run native Claude Code `/compact` on the existing CLI session. Gateway chat history stays unchanged; recent messages are not appended again. A busy response must finish first. Missing transcripts and unconfirmed CLI compaction fail explicitly, without falling back to history summarization. This endpoint runs at once; the `/compact` chat command asks for [confirmation](/api/messages#command-reply) first.
 
 **Request body:** `{ "chat_id": "myapp" }`
 
@@ -268,7 +268,7 @@ curl -X POST \
 
 ## POST /api/v1/agents/:agentId/sessions/:sessionId/restart {#post-apiv1agentsagentidsessionssessionidrestart}
 
-Gracefully restart the session (kills the subprocess and notifies when back online).
+Gracefully restart the session (kills the subprocess and notifies when back online). This endpoint runs at once; the `/restart` chat command asks for [confirmation](/api/messages#command-reply) first.
 
 **Request body:** `{ "chat_id": "myapp" }`
 

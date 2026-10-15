@@ -22,19 +22,22 @@ test('only explicit managed exhaustion suppresses audio failure notifications',(
  expect(speechSynthesisFailure(providerVoiceError('TTS',429,{}))).toMatchObject({speechSynthesisFailed:true});
  expect(speechSynthesisFailure(new VoiceError('TTS_PROVIDER_ERROR_HTTP_503'))).toMatchObject({speechSynthesisFailed:true});
 });
-test('unavailable or malformed wallet does not masquerade as exhausted credit',async()=>{
+test('unavailable or malformed wallet does not masquerade as exhausted credit, and does not block the request',async()=>{
+ const sleep=async()=>{};
  for(const response of [new Response('{}'),new Response('null'),new Response('not JSON'),new Response('{}',{status:503})]) {
- await expect(requireManagedVoiceCredit('managed:elevenlabs',async()=>response)).rejects.toMatchObject({code:'MANAGED_VOICE_USAGE_UNAVAILABLE'});
+ const diagnostics:any[]=[];
+ await expect(requireManagedVoiceCredit('managed:elevenlabs',async()=>response.clone(),undefined,{sleep,onDiagnostic:event=>diagnostics.push(event)})).resolves.toBeUndefined();
+ expect(diagnostics[0]).toMatchObject({outcome:'indeterminate',code:expect.stringMatching(/^MANAGED_VOICE_USAGE_(INVALID_BODY|HTTP_503)$/)});
  }
 });
 
-test('wallet network failure is retryable unavailability, never exhausted credit', async () => {
+test('wallet network failure is an incomplete check, never exhausted credit', async () => {
  const {describeVoiceError}=await import('../../../src/voice/errors');
- let failure: unknown;
- try { await requireManagedVoiceCredit('managed:elevenlabs',async()=>{throw Error('private upstream diagnostic')}); }
- catch(error){failure=error;}
- expect(failure).toMatchObject({code:'MANAGED_VOICE_USAGE_UNAVAILABLE'});
- expect(describeVoiceError(failure)).toMatchObject({category:'unavailable',retryable:true});
+ const diagnostics:any[]=[];
+ await expect(requireManagedVoiceCredit('managed:elevenlabs',async()=>{throw Error('private upstream diagnostic')},undefined,{sleep:async()=>{},onDiagnostic:event=>diagnostics.push(event)})).resolves.toBeUndefined();
+ expect(diagnostics[0]).toMatchObject({code:'MANAGED_VOICE_USAGE_NETWORK'});
+ expect(JSON.stringify(diagnostics)).not.toContain('private upstream diagnostic');
+ expect(describeVoiceError(diagnostics[0].code)).toMatchObject({category:'credit_check',retryable:true});
 });
 
 test('stopping playback cancels the pending wallet check before synthesis', async () => {

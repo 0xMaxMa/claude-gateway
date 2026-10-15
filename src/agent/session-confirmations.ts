@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import type { ControlMenu, ControlScope } from '../orchestration/channel-controls';
-type Operation = 'compact' | 'restart';
+type Operation = 'clear' | 'compact' | 'restart';
 type Entry = { scope: string; expires: number; operation: Operation; yes: boolean; consumed: boolean; group: string };
 /** One-use confirmation, bound to the originating person, chat, thread and active session. */
 export class SessionConfirmations {
@@ -20,7 +20,9 @@ export class SessionConfirmations {
       this.entries.set(id, {scope:key, expires:Date.now()+300000, operation, yes, consumed:false, group});
       return {label:yes?'Yes':'No', data:`orch:${id}`};
     });
-    return {text:operation === 'compact'
+    return {text:operation === 'clear'
+      ? 'Reset Claude Code context? Chat history stays unchanged; your next message starts a new context with the latest 50 messages. Choose Yes or No.'
+      : operation === 'compact'
       ? 'Compact Claude Code context? Chat history stays unchanged. Choose Yes or No.'
       : 'Restart this session process? Chat history stays unchanged. This does not restart the gateway or app. Choose Yes or No.', buttons};
   }

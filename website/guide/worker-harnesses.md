@@ -53,6 +53,16 @@ Existing model entries in `gateway.models` can declare worker routing and provid
 
 `workerHarness` affects automatic routing. `workerModel` maps a gateway selection to the native provider model. Without an explicit mapping, native model names drop only Claude context suffixes such as `[1m]`; provider namespaces such as `chatgpt/` are preserved so BYOK routing cannot silently switch to a managed pool. Available reasoning settings are `low`, `medium`, `high`, and `xhigh`; support depends on the chosen model/provider. `codex.bin` may specify an executable path, not a shell command with arguments.
 
+### Per-task model and effort
+
+A task normally runs on the conversation's model. The agent can choose another one for a single task with `task_spawn`'s optional `model` (an id or alias from `/models`) and `effort` (`low`, `medium`, `high`, `xhigh` or `max`):
+
+```json
+{ "title": "Review", "instructions": "…", "target_profile": "default-worker", "model": "gpt-6-astra[1m]", "effort": "high" }
+```
+
+The model picks the harness through the same routing as above, so a GPT model runs on Codex and falls back to Claude Code under the usual auto rules. The effort reaches whichever harness runs the attempt: Claude Code workers get it as their effort level, Codex workers as `reasoningEffort` (overriding `workers.codex.reasoningEffort` for that task). Codex has no `max`, so a Codex attempt asked for `max` runs at `xhigh`, its highest level; other levels pass through unchanged. An unknown model is rejected with `UNKNOWN_MODEL` and the list of valid ids, and so is `[1m]` on a model without a 1M window (such as `claude-haiku-5-5[1m]`). `task_status` shows the task's `model` and `effort`, and the detailed view adds the attempt's actual `harness`. Gateway-managed tasks do not take a model or effort.
+
 ### Context windows
 
 Context suffixes express a request, not a guarantee: `[1m]` requests 1,000,000

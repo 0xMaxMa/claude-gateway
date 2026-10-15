@@ -99,10 +99,14 @@ Withheld inputs do not create failed token turns or fabricated zero-usage rows.
 | `startupTimeoutMs` | `120000` | Startup budget |
 | `firstResponseTimeoutMs` | `120000` | Budget for first response activity |
 | `compactionTimeoutMs` | `300000` | Per-compaction deadline for agents and workers; independent of first-response and idle budgets. Any configured total deadline still applies. |
+| `contextTimeoutScaleTokens` | `200000` | Context size above which a decision turn's `firstResponseTimeoutMs` and `idleTimeoutMs` grow in proportion. The size is the previous turn's measured context, when the turn resumes that CLI context, plus this turn's text and images. At or below it both budgets are unchanged; at twice it they double. Between `1000` and `10000000` |
+| `maxContextTimeoutMs` | `300000` | Cap for those scaled budgets. When set, it must be at least `firstResponseTimeoutMs` and `idleTimeoutMs` and at most `maxDecisionDurationMs`, which still bounds the whole turn. When unset, the `300000` default is lowered to `maxDecisionDurationMs` and raised to the larger of `firstResponseTimeoutMs` and `idleTimeoutMs`, so an existing config keeps loading |
 | `maxDecisionDurationMs` | `600000` | Total decision budget; separate from worker task runtime |
 | `preemptionGraceMs` | `250` | Accepted configuration field; currently not consumed by runtime preemption |
 | `maxPendingInputs` | `100` | Bound queued conversation input |
 | `skillCatalogBytes` | `65536` | UTF-8 byte budget for the installed skill catalog in the agent system prompt. Over the budget, every skill name stays listed and each description, `readWhen` and keyword is shortened to one shared cap; a catalog within the budget is unchanged. With hundreds of skills the names alone can fill the budget and descriptions are dropped; raise it if skill selection suffers (`capabilities_list` always has full descriptions) |
+
+With the defaults, a 400k-token context waits 240 s for its first response and between progress events, and an 826k-token context waits the 300 s cap. Worker tasks keep their own budgets. A timed-out turn is not retried automatically.
 
 `decisionTimeoutMs` is a compatibility alias for `idleTimeoutMs`. Its original template value `15000` is normalized to the modern default. Set `idleTimeoutMs` explicitly for new configurations.
 

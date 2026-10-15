@@ -149,3 +149,18 @@ test('counts delivered replies but excludes synthetic inputs from relocation',as
   expect(f.request.mock.calls.slice(-2).map(([url])=>String(url).split('/').pop())).toEqual(['sendMessage','deleteMessage']);
  }finally{f.status.close();f.store.close();}
 });
+// Third review of #591 (L9): a queued subagent of a parent that asked the user a question cannot start
+// (it runs only for a running parent), yet it kept the status message up as if work were going on.
+test('a parent waiting for the user ends the status even with a subagent still queued',async()=>{
+ jest.useFakeTimers();const f=fixture();
+ try{
+  const {task,tool}=f.add();
+  const attempt=f.tasks.claim(task.taskId)!;f.tasks.started(attempt.attemptId,attempt.generation);
+  f.tasks.spawnSubagent(attempt.attemptId,attempt.generation,'child',{title:'Review',instructions:'r'});
+  tool();await f.status.tick();
+  expect(String(f.request.mock.calls[0][0])).toContain('/sendMessage');
+  f.tasks.requestInput(attempt.attemptId,attempt.generation,'Which branch?');
+  await jest.advanceTimersByTimeAsync(4001);await f.status.tick();
+  expect(f.request.mock.calls.map(([url])=>String(url)).some(url=>url.includes('/deleteMessage'))).toBe(true);
+ }finally{f.status.close();f.store.close();}
+});

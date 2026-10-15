@@ -10,25 +10,38 @@ import { createServer, Server, ServerResponse } from 'http';
 import { randomBytes } from 'crypto';
 import { mkdirSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
-import type { AgentConfig } from '../types';
+import type { AgentConfig, ModelConfig } from '../types';
+import { EFFORT_LEVELS, ModelResolutionError, findModel, isEffort, resolveModelId, selectableModels } from '../agent/model-registry';
+import { SUBAGENT_TOOLS, readonlyDenied } from './subagent-tool-schemas';
+import { PSTACK_KEYWORDS } from '../pstack/config';
+import { pstackPluginInfo } from '../pstack/plugin-info';
+import { pstackAgentTemplates } from '../pstack/templates';
+import { SUBAGENT_READONLY } from '../pstack/overlay';
 import { importContainerFile } from './container';
 import { TaskService, assertAgentContextRefs } from './tasks/service';
-import { CommandContext, OrchestrationError, ChangeMode } from './types';
+import { CommandContext, OrchestrationError, ChangeMode, publicTask } from './types';
 import { AGENT_OVERLAY, RuntimeProfile, WORKER_OVERLAY } from '../session/runtime-profile';
 import { API_SOURCE_RULES, IDENTITY_EDIT_RULES, SECRET_RULES } from './source-policy';
 import { TaskFiles } from './task-files';
 
 import type { IntakeChoice } from './conversation-intake';
-import { resolveNamedSkill } from './skills';
+import { resolveNamedSkill, type TaskSkill } from './skills';
 import type { SkillRegistry } from '../skills';
 
 type Scope = { role: 'agent'; compactOnly?: boolean; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; onMutationResult?: (actionId: string, committed: boolean, errorCode?: string) => void; beforeMutation?: (tool: string, args: Record<string, unknown>, actionId: string) => Promise<void> } |
-  { role: 'worker'; attemptId: string; generation: number };
+  { role: 'worker'; attemptId: string; generation: number; /** pstack agents' Claude workers above the depth limit. */ subagents?: boolean; /** A read-only subagent: no mutating gateway tools. */ readonly?: boolean };
 
 type InputIssue = { field: string; reason: string; correction: string };
 /** Computer adapter failures are plain Errors with a bounded code; surface the code, not INVALID_REQUEST. */
 export const COMPUTER_ADAPTER_ERROR = /^(?:COMPUTER_[A-Z][A-Z_]{0,60}|INVALID_COMPUTER_GOAL)$/;
 const COMPUTER_NOT_ALLOWED_MESSAGE = 'Computer Use is not enabled for this agent on this gateway. Tell the user it is not available here; do not suggest another app or a workaround.';
+function subagentInputIssues(args: Record<string, unknown>): InputIssue[] {
+  const issues: InputIssue[] = [];
+  for (const field of ['description', 'prompt'] as const) if (typeof args[field] !== 'string' || !(args[field] as string).trim()) issues.push({ field, reason: 'required', correction: `Provide a nonempty ${field}.` });
+  for (const field of ['subagent_type', 'model', 'isolation'] as const) if (args[field] !== undefined && (typeof args[field] !== 'string' || !(args[field] as string).trim() || (args[field] as string).length > 200)) issues.push({ field, reason: 'invalid', correction: `Provide ${field} as a short string, or omit it.` });
+  for (const field of ['readonly', 'run_in_background'] as const) if (args[field] !== undefined && typeof args[field] !== 'boolean') issues.push({ field, reason: 'invalid', correction: `${field} is a boolean.` });
+  return issues;
+}
 function taskSpawnInputIssues(args: Record<string, unknown>): InputIssue[] {
   const issues: InputIssue[] = [];
   for (const field of ['title', 'instructions', 'target_profile'] as const) {
@@ -52,6 +65,9 @@ function taskSpawnInputIssues(args: Record<string, unknown>): InputIssue[] {
   } else if (args.target_profile !== undefined && args.target_profile !== 'skill-worker' && (args.skill_name !== undefined || args.skill_args !== undefined)) {
     issues.push({field:'target_profile',reason:'skill_fields_require_skill_worker',correction:'Set target_profile to skill-worker when supplying skill_name and skill_args.'});
   }
+  if (args.model !== undefined && (typeof args.model !== 'string' || !args.model.trim() || args.model.length > 200 || /[\r\n\0]/.test(args.model))) issues.push({field:'model',reason:'invalid',correction:'Provide a model id or alias from /models, or omit model to use the conversation model.'});
+  if (args.target_profile === 'gateway-managed') for (const field of ['model', 'effort'] as const) if (args[field] !== undefined) issues.push({field,reason:'not_for_gateway_managed',correction:'Omit model and effort for gateway-managed tasks; they apply to worker tasks only.'});
+  if (args.effort !== undefined && !isEffort(args.effort)) issues.push({field:'effort',reason:'unsupported',correction:`Choose one of ${EFFORT_LEVELS.join(', ')}, or omit effort.`});
   return issues;
 }
 
@@ -63,6 +79,8 @@ export class TaskBridge {
   jevEnabled?: () => boolean;
   browserEnabled?: () => boolean;
   computerEnabled?: () => boolean;
+  /** Models task_spawn may name; the runtime supplies the live gateway.models. */
+  models: () => Promise<ModelConfig[]> = () => selectableModels(undefined);
   narrateCall?: (attemptId: string, generation: number, actionId: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
   jevCall?: (scope: Scope, args: Record<string, unknown>, actionId: string, signal: AbortSignal) => Promise<unknown>;
   private readonly scopes = new Map<string, Scope>();
@@ -87,6 +105,8 @@ export class TaskBridge {
       let retryOf: string | undefined;
       let inputDetails: InputIssue[] | undefined;
       let denialReason: string | undefined;
+      /** A foreground subagent_spawn whose wait was interrupted: its subagent keeps running. */
+      let startedSubagent: string | undefined;
       let toolName = '';
       let commandArgs: Record<string, unknown> = {};
       function deny(reason: string): never { denialReason = reason; throw new OrchestrationError('ACCESS_DENIED'); }
@@ -176,6 +196,16 @@ export class TaskBridge {
                   if (!adapter) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
                   gatewayTarget = adapter.resolve(a.gateway_target, context);
                 }
+                let model: string | undefined;
+                if (a.model !== undefined) {
+                  const models = await this.models();
+                  try { model = (findModel(models, a.model) ?? resolveModelId(models, a.model)).id; }
+                  catch (error) {
+                    if (!(error instanceof ModelResolutionError)) throw error;
+                    inputDetails = [{field:'model',reason:'unknown_model',correction:error.message}];
+                    throw new OrchestrationError('UNKNOWN_MODEL');
+                  }
+                }
                 const skill = resolveNamedSkill(a.skill_name, a.skill_args, this.skills?.());
                 if (a.target_profile === 'skill-worker' && !skill) {
                   inputDetails = [{field:'skill_name',reason:'unknown_or_unavailable',correction:'Use the exact name of an installed, user-invocable skill and provide its arguments in skill_args.'}];
@@ -189,10 +219,9 @@ export class TaskBridge {
                 // readiness immediately before the synchronous task transaction.
                 await scope.beforeMutation?.(command.tool, a, context.actionId);
                 if(this.scopes.get(token!)!==scope)deny('TICKET_INVALID_OR_REVOKED');
-                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, computerInputs:a.computer_inputs, targetProfile: a.target_profile, gatewayTarget, browserFields:a.browser_fields, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(skill ? { skill } : {}) });
+                const task = this.tasks.spawn(context, { title: a.title, instructions: a.instructions, computerInputs:a.computer_inputs, targetProfile: a.target_profile, gatewayTarget, browserFields:a.browser_fields, workingDirectory: a.working_directory, contextRefs: a.context_refs, continueTaskId: a.continue_task_id, continuationPolicy: a.continuation_policy, ...(model ? { model, requestedModel: a.model } : {}), ...(a.effort ? { effort: a.effort } : {}), ...(skill ? { skill } : {}) });
                 scope.onTaskQueued?.(spoken);
-                const { skill: _workerOnly, ...receipt } = task;
-                result = receipt;
+                result = task;
                 break;
               }
               case 'task_status': {
@@ -282,6 +311,7 @@ export class TaskBridge {
             throw error;
           }
         } else {
+          if (scope.readonly && readonlyDenied(command.tool)) throw new OrchestrationError('TOOL_DENIED');
           if (command.tool === 'task_checkpoint') result = this.tasks.checkpoint(scope.attemptId, scope.generation, a);
           else if (command.tool === 'task_report_progress') result = this.tasks.progress(scope.attemptId, scope.generation, a.text, command.action_id, a.checkpoint) ?? { accepted: true };
           else if (command.tool === 'task_request_input') result = this.tasks.requestInput(scope.attemptId, scope.generation, a.question, command.action_id);
@@ -303,6 +333,62 @@ export class TaskBridge {
             if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
             result = await this.cancelOnDisconnect(response, cancelled.signal, signal => this.narrateCall!(scope.attemptId, scope.generation, command.action_id, a, signal));
           }
+          else if (SUBAGENT_TOOLS.some(tool => tool.name === command.tool) && scope.subagents) {
+            const cancelled = this.cancellations.get(token!);
+            if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
+            const wait = (taskIds: unknown) => this.cancelOnDisconnect(response, cancelled.signal, async signal => {
+              for (;;) {
+                if (signal.aborted) throw new OrchestrationError('SUBAGENT_WAIT_CANCELLED');
+                const results = this.tasks.subagentResults(scope.attemptId, scope.generation, taskIds);
+                if (results) return results;
+                await new Promise<void>((resolve, reject) => {
+                  const abort = () => { clearTimeout(timer); reject(new OrchestrationError('SUBAGENT_WAIT_CANCELLED')); };
+                  const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, 1000);
+                  signal.addEventListener('abort', abort, { once: true });
+                });
+              }
+            });
+            if (command.tool === 'subagent_wait') result = { results: await wait(a.task_ids) };
+            else if (command.tool === 'subagent_cancel') result = { results: this.tasks.cancelSubagentTasks(scope.attemptId, scope.generation, a.task_ids) };
+            else {
+              inputDetails = subagentInputIssues(a);
+              if (inputDetails.length) throw new OrchestrationError('INVALID_INPUT');
+              const keyword = a.model === undefined || PSTACK_KEYWORDS.includes(a.model);
+              let model: string | undefined;
+              if (!keyword) {
+                // An alias resolves now, as task_spawn's does (a skill may pass `opus` as it would to Agent).
+                try { const models = await this.models(); model = (findModel(models, a.model) ?? resolveModelId(models, a.model)).id; }
+                catch (error) {
+                  if (!(error instanceof ModelResolutionError)) throw error;
+                  inputDetails = [{ field: 'model', reason: error.code === 'UNKNOWN_MODEL' ? 'unknown_model' : 'alias', correction: error.message }];
+                  throw new OrchestrationError(error.code);
+                }
+              }
+              // The agent definition is a native subagent's system prompt; here it leads the task instructions.
+              const { installPath } = pstackPluginInfo();
+              const template = typeof a.subagent_type === 'string' && a.subagent_type.startsWith('pstack:') ? (installPath ? pstackAgentTemplates(installPath) : new Map()).get(a.subagent_type) : undefined;
+              if (typeof a.subagent_type === 'string' && a.subagent_type.startsWith('pstack:') && !template) {
+                inputDetails = [{ field: 'subagent_type', reason: 'unknown', correction: 'Use a pstack agent the installed plugin declares (e.g. pstack:effort-high, pstack:poteto-agent), a built-in type, or omit it.' }];
+                throw new OrchestrationError('INVALID_INPUT');
+              }
+              // readonly (asked for here or inherited) is stated by the driver from the task, on every harness,
+              // and right after an agent definition, which may claim the full tool set.
+              const readonly = template && (a.readonly || scope.readonly) ? SUBAGENT_READONLY : '';
+              const instructions = [template?.body, readonly, installPath ? `pstack plugin root: ${installPath}` : '', a.prompt].filter(Boolean).join('\n\n');
+              const task = this.tasks.spawnSubagent(scope.attemptId, scope.generation, command.action_id, { title: a.description, instructions,
+                ...(model ? { model } : {}), ...(template?.effort ? { effort: template.effort } : {}), ...(a.subagent_type ? { subagentType: a.subagent_type } : {}), ...(a.readonly ? { readonly: true } : {}) });
+              const receipt = { task_id: task.taskId, model: task.model, effort: task.effort, state: task.state, ...(a.isolation === 'worktree' ? { isolation: 'ignored' } : {}) };
+              if (a.run_in_background) result = receipt;
+              else {
+                startedSubagent = task.taskId;
+                const [finished] = await wait([task.taskId]).catch(error => {
+                  throw error instanceof OrchestrationError && error.code === 'SUBAGENT_WAIT_CANCELLED'
+                    ? new OrchestrationError(error.code, `Stopped waiting for subagent ${task.taskId}; it is still running. Wait for it with subagent_wait or stop it with subagent_cancel. Do not spawn it again.`) : error;
+                });
+                result = { ...receipt, ...finished };
+              }
+            }
+          }
           else if (CRON_TOOLS.some(tool => tool.name === command.tool) && this.files && this.cronCall) {
             this.files.scope(scope.attemptId, scope.generation);
             const cancelled = this.cancellations.get(token!);
@@ -311,7 +397,8 @@ export class TaskBridge {
           }
           else throw new OrchestrationError('TOOL_DENIED');
         }
-        response.end(JSON.stringify(result));
+        // Every task a tool returns, replayed receipts included, leaves without its skill body.
+        response.end(JSON.stringify(result && typeof result === 'object' && 'skill' in result ? publicTask(result as { skill?: TaskSkill }) : result));
       } catch (error) {
         const adapterCode = !(error instanceof JevError) && !(error instanceof OrchestrationError) && error instanceof Error && COMPUTER_ADAPTER_ERROR.test(error.message) ? error.message : undefined;
         const code = error instanceof JevError ? `JEV_${error.code}` : error instanceof OrchestrationError ? error.code : adapterCode ?? 'INVALID_REQUEST';
@@ -327,7 +414,7 @@ export class TaskBridge {
         const acknowledgementRecovery = code === 'ACKNOWLEDGEMENT_DELIVERY_PENDING'
           ? { message: 'The acknowledgement has not been confirmed as delivered. Do not retry the task mutation yet; wait for delivery to settle, then retry only if the request is still current.' }
           : undefined;
-        response.end(JSON.stringify({ error: code, ...(code === 'COMPUTER_NOT_ALLOWED' ? { message: COMPUTER_NOT_ALLOWED_MESSAGE, retryable: false } : {}), ...(error instanceof JevError ? {message:error.message,...error.metadata} : {}), ...(inputDetails?.length ? {details:inputDetails} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && (['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) || code.startsWith('NARRATE_')) ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && ['EXECUTION_DENIED', 'USER_INPUT_REQUIRED', 'INVALID_INPUT'].includes(code) && error.message !== code ? { message: error.message, retryable: false } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...intakeRecovery, ...acknowledgementRecovery, ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED', 'BROWSER_EVIDENCE_REQUIRED', 'LIVE_CONTROL_TARGET_ONLY', 'AUTOMATION_SESSION_EXISTS', 'AUTOMATION_SESSION_CLOSED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
+        response.end(JSON.stringify({ error: code, ...(code === 'COMPUTER_NOT_ALLOWED' ? { message: COMPUTER_NOT_ALLOWED_MESSAGE, retryable: false } : {}), ...(error instanceof JevError ? {message:error.message,...error.metadata} : {}), ...(inputDetails?.length ? {details:inputDetails} : {}), ...(code === 'ACCESS_DENIED' && denialReason ? { reason: denialReason } : {}), ...(error instanceof OrchestrationError && (['CRON_API_ERROR', 'CRON_OUTCOME_UNKNOWN'].includes(code) || code.startsWith('NARRATE_')) ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && ['EXECUTION_DENIED', 'USER_INPUT_REQUIRED', 'INVALID_INPUT'].includes(code) && error.message !== code ? { message: error.message, retryable: false } : {}), ...(error instanceof OrchestrationError && toolName.startsWith('subagent_') && error.message !== code ? { message: error.message, retryable: false } : {}), ...(startedSubagent ? { task_id: startedSubagent } : {}), ...(retryOf ? {retry_of:retryOf} : {}), ...intakeRecovery, ...acknowledgementRecovery, ...(error instanceof OrchestrationError && ['WORKER_GIT_PROJECT_REQUIRED', 'ARTIFACT_FILE_NOT_FOUND', 'ARTIFACT_PATH_DENIED', 'MCP_IMAGE_NOT_CAPTURED', 'BROWSER_EVIDENCE_REQUIRED', 'LIVE_CONTROL_TARGET_ONLY', 'AUTOMATION_SESSION_EXISTS', 'AUTOMATION_SESSION_CLOSED'].includes(code) ? { message: error.message, retryable: true } : {}) }));
       }
     });
     server.requestTimeout = 10000; server.headersTimeout = 5000;
@@ -361,6 +448,8 @@ export class TaskBridge {
       GATEWAY_ORCHESTRATION_MEDIA: worker ? 'true' : '',
       GATEWAY_LAZY_TOOLS: worker ? 'true' : '',
       GATEWAY_ORCHESTRATION_CRON: worker && this.cronCall ? 'true' : '',
+      GATEWAY_SUBAGENTS: scope.role === 'worker' && scope.subagents ? 'true' : '',
+      GATEWAY_READONLY_TASK: scope.role === 'worker' && scope.readonly ? 'true' : '',
       GETPOD_BROWSER_URL: worker ? process.env.GETPOD_BROWSER_URL ?? 'http://127.0.0.1:10880' : '',
       GETPOD_BROWSER_API_KEY: worker ? process.env.GETPOD_BROWSER_API_KEY ?? '' : '',
       GETPOD_BROWSER_DISABLED: worker ? process.env.GETPOD_BROWSER_DISABLED ?? '' : 'true',

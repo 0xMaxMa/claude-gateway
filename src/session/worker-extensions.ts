@@ -9,6 +9,7 @@ import { extractFrontmatter } from '../skills/parser';
 import { inspectCodexExtensions, NativeCodexExtensions } from './codex-extension-discovery';
 import { resolveCodexRuntime } from './codex-runtime';
 import { resolveOrchestrationConfig } from '../orchestration/config';
+import { PSTACK_PLUGIN_ID } from '../pstack/plugin-info';
 
 export interface ExtensionSkill extends CliSkill { filePath: string; resourceRoot: string; source: 'claude' | 'codex'; }
 export interface WorkerExtensions { skills: ExtensionSkill[]; servers: Record<string, any>; notices: string[]; }
@@ -90,13 +91,15 @@ function pluginComponents(result: WorkerExtensions, root: string, name: string, 
 
 /** Filesystem discovery is restricted to the already-authorized host profile.
  * Container discovery must run inside the container, never against the host home. */
-export function readClaudeExtensions(cwd: string, env: NodeJS.ProcessEnv = process.env): WorkerExtensions {
+/** `pluginOverrides` mirrors the worker's own `--settings` enabledPlugins overlay, so
+ * discovery lists exactly what the worker will load (e.g. pstack only for set-up agents). */
+export function readClaudeExtensions(cwd: string, env: NodeJS.ProcessEnv = process.env, pluginOverrides: Record<string, boolean> = {}): WorkerExtensions {
   const home = env.HOME ?? homedir(), claude = env.CLAUDE_CONFIG_DIR ?? join(home, '.claude');
   const result: WorkerExtensions = { skills: [], servers: {}, notices: [] };
   const user = json(join(claude, 'settings.json'));
   const project = json(join(cwd, '.claude', 'settings.json'));
   const local = json(join(cwd, '.claude', 'settings.local.json'));
-  const settings = { ...user, ...project, ...local, enabledPlugins: { ...user.enabledPlugins, ...project.enabledPlugins, ...local.enabledPlugins } };
+  const settings = { ...user, ...project, ...local, enabledPlugins: { ...user.enabledPlugins, ...project.enabledPlugins, ...local.enabledPlugins, ...pluginOverrides } };
   const cliEnv = { ...env, ...user.env, ...project.env, ...local.env };
   const installed = json(join(claude, 'plugins', 'installed_plugins.json')).plugins ?? {};
   for (const [id, entries] of Object.entries(installed) as [string, any][]) {
@@ -170,15 +173,17 @@ export function addUnambiguousSkillAliases(skills: ExtensionSkill[]): void {
 
 const cache = new Map<string, { until: number; value: Promise<WorkerExtensions> }>();
 let discoveryTail: Promise<unknown> = Promise.resolve();
-export function discoverWorkerExtensions(agent: AgentConfig, gateway?: GatewayConfig, cwd = agent.orchestration?.tasks?.projectRoot || agent.workspace): Promise<WorkerExtensions> {
+/** `harness` is the worker the list is for: a Codex worker is a pstack leaf and never gets pstack's skills. */
+export function discoverWorkerExtensions(agent: AgentConfig, gateway?: GatewayConfig, cwd = agent.orchestration?.tasks?.projectRoot || agent.workspace, harness: 'claude' | 'codex' = 'claude'): Promise<WorkerExtensions> {
   if (agent.allow_tools === false) return Promise.resolve({ skills: [], servers: {}, notices: [] });
   if (agent.type === 'app-agent') return import('./container-extensions').then(module => module.discoverContainerExtensions(agent));
   if (resolveOrchestrationConfig(agent.orchestration).tasks.workspaceMode !== 'host') return Promise.resolve({ skills: [], servers: {}, notices: [] });
   const bin = agent.workers?.codex?.bin ?? gateway?.gateway.workers?.codex?.bin;
-  const key = JSON.stringify([cwd, bin, process.env.HOME, process.env.CLAUDE_CONFIG_DIR, process.env.CODEX_HOME]);
+  const plugins = { [PSTACK_PLUGIN_ID]: harness === 'claude' && Boolean(agent.pstack) };
+  const key = JSON.stringify([cwd, bin, process.env.HOME, process.env.CLAUDE_CONFIG_DIR, process.env.CODEX_HOME, plugins]);
   const old = cache.get(key); if (old && old.until > Date.now()) return old.value;
   const value = discoveryTail.catch(() => {}).then(async () => {
-    const result = readClaudeExtensions(cwd);
+    const result = readClaudeExtensions(cwd, process.env, plugins);
     try {
       const executable = resolveCodexRuntime(bin, cwd).executable;
       const native = await inspectCodexExtensions(executable, cwd);

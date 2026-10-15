@@ -2,6 +2,7 @@ import { discoverCliSkills } from '../../../src/orchestration/cli-skills';
 jest.mock('../../../src/session/worker-extensions', () => ({ discoverWorkerExtensions: jest.fn().mockResolvedValue({ skills: [], servers: {}, notices: [] }) }));
 jest.mock('../../../src/orchestration/cli-skills',()=>({discoverCliSkills:jest.fn().mockResolvedValue([{name:'native-only'}])}));
 import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
+import { discoverWorkerExtensions } from '../../../src/session/worker-extensions';
 jest.mock('../../../src/orchestration/container', () => ({ ...jest.requireActual('../../../src/orchestration/container'), validateContainer: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../../../src/session/codex-container-runtime', () => ({ inspectSelectedCodexRuntime: jest.fn().mockResolvedValue('fixture-container') }));
 jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn().mockReturnValue({executable:'codex'}) }));
@@ -65,8 +66,10 @@ afterEach(async () => {await bridge.close();store.close();rmSync(root,{recursive
 function spawn(model: string, extra: Partial<SpawnTask> = {}) {
   return tasks.spawn({...context,model,actionId:`spawn-${++sequence}`},{title:'Fixture',instructions:'Implement fixture',targetProfile:'default-worker',...extra});
 }
-async function run(model: string, extra: Partial<SpawnTask> = {}) {
-  const task = spawn(model,extra), attempt = tasks.claim(task.taskId)!;
+async function run(model: string, extra: Partial<SpawnTask> = {}, readonly = false) {
+  const spawned = spawn(model,extra), attempt = tasks.claim(spawned.taskId)!;
+  // Only subagent_spawn sets readonly; the driver reads it from the task it is handed.
+  const task = readonly ? {...spawned, readonly: true} : spawned;
   const handle = await driver.start(task,attempt);
   await handle.accepted;
   const result = await handle.result;
@@ -159,6 +162,14 @@ test('explicit Codex CLI-only skills fail without starting Claude as fallback', 
   const attempt = tasks.claim(task.taskId)!;
   await expect(driver.start(task,attempt)).rejects.toMatchObject({code:'CODEX_SKILL_UNAVAILABLE'});
   expect(CodexProcess).not.toHaveBeenCalled(); expect(SessionProcess).not.toHaveBeenCalled();
+});
+
+// Review of #582: a Codex worker never gets pstack, so its skill lookup uses the Codex view of extensions.
+test('a Codex CLI skill lookup asks for the Codex view of extensions', async () => {
+  gateway.gateway.workers!.harness='codex';
+  const task = spawn('gpt-5.6-luna',{targetProfile:'skill-worker',skill:{invocation:'cli',name:'native-only',args:'',content:'',filePath:''}});
+  await expect(driver.start(task,tasks.claim(task.taskId)!)).rejects.toMatchObject({code:'CODEX_SKILL_UNAVAILABLE'});
+  expect(discoverWorkerExtensions).toHaveBeenCalledWith(agent, gateway, expect.any(String), 'codex');
 });
 
 test('a Claude plugin file runs through Codex with pinned instructions and plugin-root resources', async () => {
@@ -350,4 +361,276 @@ test.each(['answer','cancel'] as const)('%s during question cleanup fences the o
   const handle=await driver.start(task,attempt),outcome=await handle.result;
   expect(outcome.type).toBe('paused');
   expect(tasks.finish(attempt.attemptId,attempt.generation,outcome).state).toBe(action==='answer'?'queued':'cancelled');
+});
+
+// #581: per-task model and effort. The command's model picks the harness and
+// its effort reaches whichever harness runs the attempt.
+describe('per-task model and effort', () => {
+  test('a GPT task id runs on Codex with the requested effort as reasoningEffort, recorded on the attempt', async () => {
+    gateway.gateway.workers!.codex = { reasoningEffort: 'low' };
+    const {attempt} = await run('claude-sonnet-4-6', {model:'gpt-6-astra[1m]', effort:'high'});
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].config).toMatchObject({model:'gpt-6-astra', reasoningEffort:'high'});
+    expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'codex', harnessModel:'gpt-6-astra', effort:'high'});
+  });
+
+  // Review of #591 (H2): Codex has no `max`; its highest effort is xhigh.
+  test('effort max runs a Codex worker at xhigh', async () => {
+    await run('claude-sonnet-4-6', {model:'gpt-6-astra[1m]', effort:'max'});
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].config.reasoningEffort).toBe('xhigh');
+  });
+
+  // Review of #591 (H1): read-only is enforced by the harness, not only by the prompt.
+  test('a read-only GPT task runs Codex read-only without connectors', async () => {
+    await run('claude-sonnet-4-6', {model:'gpt-6-astra[1m]'}, true);
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].profile).toMatchObject({readOnly:true, connectorsAllowed:false});
+  });
+
+  test('a read-only Claude task gets read tools and no connectors', async () => {
+    await run('claude-sonnet-4-6', {model:'claude-sonnet-5-5'}, true);
+    expect(jest.mocked(SessionProcess).mock.calls[0][6]).toMatchObject({workerTools:['Read','Glob','Grep'], connectorsAllowed:false});
+  });
+
+  test('a Claude task gets the requested effort on its worker profile', async () => {
+    const {attempt} = await run('claude-sonnet-4-6', {model:'claude-sonnet-5-5', effort:'xhigh'});
+    expect(CodexProcess).not.toHaveBeenCalled();
+    expect(jest.mocked(SessionProcess).mock.calls[0][6]).toMatchObject({role:'worker', claudeEffort:'xhigh'});
+    expect(jest.mocked(SessionProcess).mock.calls[0][2].claude.model).toBe('claude-sonnet-5-5');
+    expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'claude', harnessModel:'claude-sonnet-5-5', effort:'xhigh'});
+  });
+
+  // Review of #581: Claude Code only understands a `[1m]` suffix; `[200k]` is its default window.
+  test('a Claude task named with a [200k] suffix launches Claude Code on the base id', async () => {
+    const {attempt} = await run('claude-sonnet-4-6', {model:'claude-sonnet-5-5[200k]'});
+    expect(jest.mocked(SessionProcess).mock.calls[0][2].claude.model).toBe('claude-sonnet-5-5');
+    expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'claude', harnessModel:'claude-sonnet-5-5'});
+  });
+
+  test('without effort the worker keeps the harness default', async () => {
+    gateway.gateway.workers!.codex = { reasoningEffort: 'low' };
+    await run('gpt-6-astra');
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].config.reasoningEffort).toBe('low');
+    await run('claude-sonnet-4-6');
+    expect(jest.mocked(SessionProcess).mock.calls[0][6]?.claudeEffort).toBeUndefined();
+  });
+
+  test('when Codex is unavailable the task falls back to Claude, keeps its effort, and status reports the real harness', async () => {
+    jest.mocked(resolveCodexCredentials).mockRejectedValue(new CodexReadinessError('CODEX_UNAVAILABLE','fixture unavailable'));
+    const {task,attempt} = await run('claude-sonnet-4-6', {model:'gpt-6-astra[1m]', effort:'high'});
+    expect(CodexProcess).not.toHaveBeenCalled();
+    expect(jest.mocked(SessionProcess).mock.calls[0][6]).toMatchObject({claudeEffort:'high'});
+    expect(store.attempt(attempt.attemptId)).toMatchObject({harness:'claude', effort:'high'});
+    expect(tasks.status(task.conversationId,'u',task.taskId)[0]).toMatchObject({model:'gpt-6-astra[1m]', effort:'high', harness:'claude'});
+  });
+
+  test('gateway-managed tasks reject a model or effort', () => {
+    for (const extra of [{model:'gpt-6-astra[1m]'},{effort:'max' as const}])
+      expect(() => tasks.spawn({...context,actionId:`gm-${++sequence}`},{title:'T',instructions:'x',targetProfile:'gateway-managed',gatewayTarget:{adapter:'safemode',sessionId:'s'} as any,...extra})).toThrow('INVALID_GATEWAY_TARGET');
+  });
+});
+
+// #582: pstack plugin gate and per-agent sheet on host workers.
+describe('pstack plugin gate', () => {
+  const { pstackClaudeConfig } = require('../../helpers/pstack-fixture');
+  let fixture: { configDir: string; cleanup: () => void }, previous: string | undefined;
+  beforeEach(() => { fixture = pstackClaudeConfig(); previous = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = fixture.configDir; });
+  afterEach(() => { if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous; fixture.cleanup(); });
+  const claudeProfile = () => jest.mocked(SessionProcess).mock.calls[0][6] as any;
+
+  test('an agent that is not set up gets the plugin turned off and no sheet', async () => {
+    await run('claude-sonnet-4-6');
+    expect(claudeProfile().pluginOverrides).toEqual({'pstack@pstack-claude': false});
+    expect(claudeProfile().context).not.toContain('pstack-models.md');
+  });
+
+  test('a set-up agent gets the plugin turned on and its own sheet, in model IDs', async () => {
+    agent.pstack = {roles:{'bug-fix':'gpt-6-sol[1m]'}, defaultEffort:'high'};
+    await run('claude-sonnet-4-6');
+    expect(claudeProfile().pluginOverrides).toEqual({'pstack@pstack-claude': true});
+    expect(claudeProfile().context).toContain('Agent persona stays Claude.');
+    expect(claudeProfile().context).toContain('# pstack-models.md override sheet for this agent');
+    expect(claudeProfile().context).toContain('\nbug-fix: gpt-6-sol[1m]\n');
+    expect(claudeProfile().context).toContain('\ninterrogate reviewers: claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5, claude-haiku-5-5\n');
+    expect(claudeProfile().context).toContain('\ndefault effort: high');
+  });
+
+  test('a GPT child of a set-up agent is a leaf: no sheet on Codex', async () => {
+    agent.pstack = {};
+    await run('gpt-6-sol[1m]');
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].profile.context).not.toContain('pstack-models.md');
+  });
+
+  // Review of #582: isolated/container workers run with every plugin off, so the sheet would describe skills they lack.
+  test('a set-up agent\'s non-host worker gets no sheet', async () => {
+    agent.pstack = {};
+    const prepare = jest.spyOn(TaskWorkspaces.prototype, 'prepare').mockResolvedValue({ path: root, baseCommit: 'abc123' } as any);
+    try {
+      const task = spawn('claude-sonnet-4-6'), attempt = tasks.claim(task.taskId)!;
+      const handle = await driver.start(task, attempt); await handle.accepted; await handle.result.catch(() => undefined);
+      expect(claudeProfile().context).not.toContain('pstack-models.md');
+    } finally { prepare.mockRestore(); }
+  });
+
+  test('a set-up agent whose plugin was uninstalled loads no sheet', async () => {
+    fixture.cleanup(); fixture = pstackClaudeConfig(false); process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
+    agent.pstack = {};
+    await run('claude-sonnet-4-6');
+    expect(claudeProfile().pluginOverrides).toEqual({'pstack@pstack-claude': true});
+    expect(claudeProfile().context).not.toContain('pstack-models.md');
+  });
+});
+
+// #583: a pstack agent's Claude workers dispatch subagents only through the gateway.
+describe('pstack subagent workers', () => {
+  const { pstackClaudeConfig } = require('../../helpers/pstack-fixture');
+  const { SUBAGENT_READONLY } = require('../../../src/pstack/overlay');
+  let fixture: { configDir: string; cleanup: () => void }, previous: string | undefined;
+  beforeEach(() => { fixture = pstackClaudeConfig(); previous = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = fixture.configDir; });
+  afterEach(() => { if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous; fixture.cleanup(); });
+  const claudeProfile = () => jest.mocked(SessionProcess).mock.calls[0][6] as any;
+  const mcpEnv = (profile: any) => JSON.parse(readFileSync(profile.mcpConfigPath, 'utf8')).mcpServers.gateway.env;
+
+  test('a set-up agent\'s Claude worker loses native Agent/Task and gets the subagent tools and mapping note', async () => {
+    agent.pstack = {};
+    mockBeforeResult = worker => { expect(mcpEnv(worker.runtimeProfile).GATEWAY_SUBAGENTS).toBe('true'); };
+    await run('claude-sonnet-4-6');
+    expect(claudeProfile().disallowedTools).toEqual(['Agent', 'Task']);
+        // Session 66f2f9db, and again on dev at bdd0bc3e: a poteto-mode worker read "Route through the **how** skill"
+    // and wrote how-shaped output itself, with no Skill call and no subagent. The note names the playbook phrasing.
+    expect(claudeProfile().context).toContain('names another skill (route through, run or apply the **how** skill, the **why** skill, the **interrogate** skill...), call the Skill tool with skill pstack:<name>');
+    expect(claudeProfile().context).toContain('Reading its SKILL.md or copying its output format is not running it');
+    expect(claudeProfile().context).toContain('start every subagent it calls for with mcp__gateway__subagent_spawn; do not do their work yourself');
+    // Dev at 8bfd9d4e: a poteto-mode worker ran pstack:how, read "Every spawn is a `Agent` subagent" with Agent
+    // disabled, and spawned nothing in 3 runs. The note names the tools as the worker sees them and says why Agent is off.
+    expect(claudeProfile().context).toContain('call the tool mcp__gateway__subagent_spawn instead');
+    expect(claudeProfile().context).toContain('collect their results with mcp__gateway__subagent_wait');
+    expect(claudeProfile().context).toContain('The built-in Agent tool is disabled here on purpose, so that spawns go through the gateway; it does not mean spawning is disallowed.');
+  });
+
+  test('an agent that is not set up keeps native Agent and gets no subagent tools', async () => {
+    mockBeforeResult = worker => { expect(mcpEnv(worker.runtimeProfile).GATEWAY_SUBAGENTS).toBe(''); };
+    await run('claude-sonnet-4-6');
+    expect(claudeProfile().disallowedTools).toBeUndefined();
+    expect(claudeProfile().context).not.toMatch(/pstack|Skill tool/);
+  });
+
+  test('a worker at the depth limit gets no subagent tools and is told to work inline', async () => {
+    agent.pstack = {};
+    mockBeforeResult = worker => { expect(mcpEnv(worker.runtimeProfile).GATEWAY_SUBAGENTS).toBe(''); };
+    const task = spawn('claude-sonnet-4-6');
+    store.transaction(() => { const t = store.task(task.taskId)!; t.depth = 3; store.saveTask(t, t.stateVersion); });
+    const attempt = tasks.claim(task.taskId)!;
+    const handle = await driver.start(store.task(task.taskId)!, attempt); await handle.accepted; await handle.result;
+    expect(claudeProfile().context).toContain('Subagent dispatch is unavailable at this depth');
+    expect(claudeProfile().context).toContain('call the Skill tool with skill pstack:<name>');
+    expect(claudeProfile().context).not.toContain('subagent_spawn');
+    expect(claudeProfile().disallowedTools).toEqual(['Agent', 'Task']);
+  });
+
+  test('a read-only Claude subagent gets read tools only; a Codex one keeps its normal tools (readonly is its instruction)', async () => {
+    agent.pstack = {};
+    const readonly = (model: string) => { const t = spawn(model); store.transaction(() => { const s = store.task(t.taskId)!; s.readonly = true; store.saveTask(s, s.stateVersion); }); return store.task(t.taskId)!; };
+    let readonlyEnv: string | undefined;
+    mockBeforeResult = worker => { readonlyEnv = mcpEnv(worker.runtimeProfile).GATEWAY_READONLY_TASK; };
+    const claudeTask = readonly('claude-sonnet-4-6'), a1 = tasks.claim(claudeTask.taskId)!;
+    let handle = await driver.start(claudeTask, a1); await handle.accepted; await handle.result;
+    expect(claudeProfile().workerTools).toEqual(['Read', 'Glob', 'Grep']);
+    expect(readonlyEnv).toBe('true');
+    const codexTask = readonly('gpt-6-astra'), a2 = tasks.claim(codexTask.taskId)!;
+    handle = await driver.start(codexTask, a2); await handle.accepted; await handle.result;
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].profile.workerTools).toBeUndefined();
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].profile.disallowedTools).toBeUndefined();
+  });
+
+  // Re-review of #590: readonly inherited from a read-only parent must still reach a Codex child.
+  test('every read-only subagent is told so in its context, whichever harness runs it', async () => {
+    agent.pstack = {};
+    const readonly = (model: string) => { const t = spawn(model); store.transaction(() => { const s = store.task(t.taskId)!; s.readonly = true; store.saveTask(s, s.stateVersion); }); return store.task(t.taskId)!; };
+    const codexTask = readonly('gpt-6-astra'), a1 = tasks.claim(codexTask.taskId)!;
+    let handle = await driver.start(codexTask, a1); await handle.accepted; await handle.result;
+    expect(jest.mocked(CodexProcess).mock.calls[0][0].profile.context).toContain(SUBAGENT_READONLY);
+    const claudeTask = readonly('claude-sonnet-4-6'), a2 = tasks.claim(claudeTask.taskId)!;
+    handle = await driver.start(claudeTask, a2); await handle.accepted; await handle.result;
+    expect(claudeProfile().context).toContain(SUBAGENT_READONLY);
+  });
+
+  // Re-review of #590: without the plugin loaded there are no pstack skills to map Agent for.
+  test('a set-up agent whose plugin is not installed keeps native Agent and gets no subagent tools', async () => {
+    agent.pstack = {};
+    fixture.cleanup(); fixture = pstackClaudeConfig(false); process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
+    mockBeforeResult = worker => { expect(mcpEnv(worker.runtimeProfile).GATEWAY_SUBAGENTS).toBe(''); };
+    await run('claude-sonnet-4-6');
+    expect(claudeProfile().disallowedTools).toBeUndefined();
+  });
+});
+
+// Dev e2e of #591 (G3): a child inherited the root's input as its own
+// originating request, so a Haiku child told only "Run sleep 300" read the
+// user's request and re-spawned the parent's subagents. Like a native Claude
+// Code subagent, it sees only the prompt its parent wrote.
+describe('a subagent sees only its own prompt', () => {
+  const prompt = (worker: MockWorker) => (worker.sendMessage.mock.calls as unknown as string[][])[0][0];
+  test.each([['claude', 'claude-haiku-5-5'], ['codex', 'gpt-6-astra']])('%s child', async (_harness, model) => {
+    store.acceptInput({scope:{agentId:'a',agentSessionId:'s',source:'api',accountId:'u',principalId:'u',chatId:'c',threadKey:''},text:'Also review the docs afterwards'});
+    const root = spawn('claude-sonnet-4-6'), rootAttempt = tasks.claim(root.taskId)!;
+    tasks.started(rootAttempt.attemptId, rootAttempt.generation);
+    const child = tasks.spawnSubagent(rootAttempt.attemptId, rootAttempt.generation, 'c1', { title: 'Sleep', instructions: 'Run sleep 300', model });
+    // Lineage (owner, binding, membership) still runs through the root input.
+    expect(child.initiatingInputId).toBe(root.initiatingInputId);
+    const attempt = tasks.claim(child.taskId)!;
+    const handle = await driver.start(child, attempt); await handle.accepted; await handle.result;
+    const worker = (model.startsWith('gpt') ? jest.mocked(CodexProcess) : jest.mocked(SessionProcess)).mock.results[0].value as MockWorker;
+    const text = prompt(worker);
+    expect(text).toContain('Run sleep 300');
+    expect(text).not.toContain('Implement the authorized fixture');
+    expect(text).not.toContain('Also review the docs afterwards');
+    expect(text).not.toContain('Originating user request');
+    expect(text).not.toContain('User messages from this conversation');
+  });
+
+  test('a root worker still gets the user request and recent messages', async () => {
+    await run('claude-sonnet-4-6');
+    const text = prompt(jest.mocked(SessionProcess).mock.results[0].value as MockWorker);
+    expect(text).toContain('Originating user request (the assignment must stay within this authorization): "Implement the authorized fixture"');
+    expect(text).toContain('User messages from this conversation');
+  });
+});
+
+// Dev e2e of #591: /pstack:reflect runs in a new worker session, so pstack's
+// transcript finder matched that empty session and its reviewers had nothing
+// to review. The worker is given the chat session's own transcripts instead.
+describe('pstack reflect reviews the chat session', () => {
+  const { pstackClaudeConfig } = require('../../helpers/pstack-fixture');
+  const { transcriptPath } = require('../../../src/config/claude-settings');
+  const { AgentCliSessions } = require('../../../src/orchestration/agent-cli-session');
+  let fixture: { configDir: string; cleanup: () => void }, previous: string | undefined;
+  beforeEach(() => { fixture = pstackClaudeConfig(); previous = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = fixture.configDir; agent.pstack = {}; });
+  afterEach(() => { if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous; fixture.cleanup(); });
+  const write = (path: string) => { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, '{"type":"user"}\n'); return path; };
+  const promptOf = (n: number) => ((jest.mocked(SessionProcess).mock.results[n].value as MockWorker).sendMessage.mock.calls as unknown as string[][])[0][0];
+  const skillTask = (name: string) => ({ targetProfile: 'skill-worker' as const, skill: { invocation: 'cli' as const, name, args: '', content: '', filePath: '' } });
+
+  test('the reflect worker gets the decision and earlier task transcripts, oldest first, not its own', async () => {
+    const decision = new AgentCliSessions(store).resolve('s', root);
+    const decisionTranscript = write(transcriptPath(root, decision.id));
+    const work = await run('claude-sonnet-4-6');
+    const workTranscript = write(transcriptPath(root, work.attempt.sessionId));
+    await run('gpt-6-astra'); // a Codex worker leaves no Claude Code transcript
+    jest.mocked(discoverCliSkills).mockResolvedValueOnce([{ name: 'pstack:reflect' }] as any);
+    const reflect = await run('claude-sonnet-4-6', skillTask('pstack:reflect'));
+    const text = promptOf(1);
+    expect(text).toContain(`- ${decisionTranscript}\n- ${workTranscript}\n`);
+    expect(text).not.toContain(reflect.attempt.sessionId);
+    expect(text).toContain('/pstack:reflect');
+  });
+
+  test('other skills and agents that are not set up get no transcript list', async () => {
+    write(transcriptPath(root, new AgentCliSessions(store).resolve('s', root).id));
+    jest.mocked(discoverCliSkills).mockResolvedValueOnce([{ name: 'pstack:why' }] as any);
+    await run('claude-sonnet-4-6', skillTask('pstack:why'));
+    delete agent.pstack;
+    jest.mocked(discoverCliSkills).mockResolvedValueOnce([{ name: 'pstack:reflect' }] as any);
+    await run('claude-sonnet-4-6', skillTask('pstack:reflect'));
+    expect(promptOf(0)).not.toContain('chat session\'s transcripts');
+    expect(promptOf(1)).not.toContain('chat session\'s transcripts');
+  });
 });

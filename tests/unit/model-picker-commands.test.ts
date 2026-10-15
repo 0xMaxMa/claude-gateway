@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 /**
  * Model picker on channels without an inline keyboard (issue #409).
  *
@@ -157,8 +158,8 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     jest.clearAllMocks();
   });
 
-  async function startRunner(): Promise<number> {
-    runner = new AgentRunner(agentConfig, makeGatewayConfig(path.join(tmpDir, 'logs')));
+  async function startRunner(gatewayConfig = makeGatewayConfig(path.join(tmpDir, 'logs'))): Promise<number> {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
     return callbackPort(runner);
   }
@@ -197,6 +198,269 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     expect(forwardText()).toContain('claude-opus-5');
     expect(persistedModel()).toBe('claude-opus-5');
   }, 15000);
+
+  // #580: with no gateway.models the runner falls back to DEFAULT_MODELS,
+  // where the bare `haiku` alias now names Haiku 5.5 and Haiku 4.5 is
+  // reachable only by its full id.
+  it('resolves `haiku` to Haiku 5.5 from the built-in registry', async () => {
+    const gatewayConfig = makeGatewayConfig(path.join(tmpDir, 'logs'));
+    delete (gatewayConfig.gateway as { models?: unknown }).models;
+    const port = await startRunner(gatewayConfig);
+
+    await postChannelMessage(port, chatId, '/model haiku', 'discord');
+    await waitForForward();
+
+    expect(persistedModel()).toBe('claude-haiku-5-5');
+  }, 15000);
+
+  it('still selects Haiku 4.5 by its full id', async () => {
+    const gatewayConfig = makeGatewayConfig(path.join(tmpDir, 'logs'));
+    delete (gatewayConfig.gateway as { models?: unknown }).models;
+    const port = await startRunner(gatewayConfig);
+
+    await postChannelMessage(port, chatId, '/model claude-haiku-4-5-20251001', 'discord');
+    await waitForForward();
+
+    expect(persistedModel()).toBe('claude-haiku-4-5-20251001');
+  }, 15000);
+
+  // #582: /pstack-setup sets agents[].pstack from pstack-models.md lines.
+  describe('/pstack-setup', () => {
+    const { pstackClaudeConfig } = require('../helpers/pstack-fixture');
+    let fixture: { configDir: string; cleanup: () => void };
+    beforeEach(() => { fixture = pstackClaudeConfig(); process.env.CLAUDE_CONFIG_DIR = fixture.configDir; });
+    afterEach(() => fixture.cleanup());
+    const persistedPstack = () => JSON.parse(fs.readFileSync(configPath, 'utf-8')).agents[0].pstack;
+    const gatewayWithIds = () => {
+      const gatewayConfig = makeGatewayConfig(path.join(tmpDir, 'logs'));
+      gatewayConfig.gateway.models = [...STATIC_MODELS, { id: 'gpt-6-sol[1m]', label: 'GPT 6 Sol', alias: 'gpt6sol', contextWindow: 1050000 }];
+      return gatewayConfig;
+    };
+    async function send(port: number, text: string, extraMeta?: Record<string, string>): Promise<string> {
+      fs.rmSync(forwardFile(), { force: true });
+      await postChannelMessage(port, chatId, text, 'discord', extraMeta);
+      await waitForForward();
+      return forwardText();
+    }
+
+    // Dev e2e of #591: the bare reply listed every model ID and no roles.
+    it('shows that pstack is not set up, every role with its current model, and the IDs by family', async () => {
+      const port = await startRunner(gatewayWithIds());
+      const text = await send(port, '/pstack-setup');
+      expect(text).toContain('Status: ⚪ Off');
+      expect(text).toContain('• bug-fix: claude-fable-5-1');
+      expect(text).toContain('• interrogate reviewers: claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5, claude-haiku-5-5');
+      expect(text).toContain('Claude: claude-sonnet-4-6, claude-opus-5');
+      expect(text).toContain('GPT: gpt-6-sol[1m]');
+      expect(persistedPstack()).toBeUndefined();
+    }, 15000);
+
+    it('sets roles from sheet lines, shows the sheet, and turns it off', async () => {
+      const port = await startRunner(gatewayWithIds());
+      const set = await send(port, '/pstack-setup bug-fix: gpt-6-sol[1m] @high\ndefault effort: xhigh');
+      expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m] @high' }, defaultEffort: 'xhigh' });
+      expect(set).toContain('bug-fix: gpt-6-sol[1m] @high');
+      expect(set).toContain('default effort: xhigh');
+
+      await send(port, '/pstack-setup off');
+      expect(persistedPstack()).toBeUndefined();
+    }, 15000);
+
+    it('refuses an alias and leaves config unchanged', async () => {
+      const port = await startRunner(gatewayWithIds());
+      const text = await send(port, '/pstack-setup bug-fix: opus');
+      expect(text).toContain('MODEL_ALIAS_NOT_ALLOWED');
+      expect(text).toContain('claude-opus-5');
+      expect(persistedPstack()).toBeUndefined();
+    }, 15000);
+
+    it('is refused outside a direct message', async () => {
+      const port = await startRunner(gatewayWithIds());
+      const text = await send(port, '/pstack-setup on', { chat_type: 'group' });
+      expect(text).toContain('only available in a direct message');
+      expect(persistedPstack()).toBeUndefined();
+    }, 15000);
+
+    // Review of #591 (L8): the bare command posted the agent's whole setup into the group.
+    it('does not show the setup outside a direct message either', async () => {
+      const port = await startRunner(gatewayWithIds());
+      const text = await send(port, '/pstack-setup', { chat_type: 'group' });
+      expect(text).toContain('only available in a direct message');
+      expect(text).not.toContain('Roles');
+    }, 15000);
+
+    // Dev e2e of #591: Telegram reports no chat type, so every change was
+    // refused as "only available in a direct message", even in one.
+    describe('on Telegram', () => {
+      const tgChat = '424242';
+      // bug-fix is role 1; callback data adds a tag of the role's name.
+      const bugFixRef = `1-${createHash('sha256').update('bug-fix').digest('hex').slice(0, 3)}`;
+      async function sendTelegram(port: number, text: string, chat = tgChat): Promise<string> {
+        const file = path.join(agentConfig.workspace, '.telegram-state', 'typing', `${chat}.forward`);
+        fs.rmSync(file, { force: true });
+        await fetch(`http://127.0.0.1:${port}/channel`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: text, meta: { chat_id: chat, message_id: '1', user: 'u', user_id: tgChat, source: 'telegram', ts: new Date().toISOString() } }) });
+        await waitFor(() => fs.existsSync(file), 8000);
+        const entries = JSON.parse(fs.readFileSync(file, 'utf8')) as Array<{ text: string }>;
+        return entries[entries.length - 1]!.text;
+      }
+      const menu = async (port: number, data: string, chat = tgChat, user = tgChat) => {
+        const res = await fetch(`http://127.0.0.1:${port}/command`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'telegram_pstack', chat_id: chat, payload: { user_id: user, data } }) });
+        return { status: res.status, body: await res.json() as { success?: boolean; text?: string; toast?: string; keyboard?: Array<Array<{ text: string; data: string }>> } };
+      };
+
+      it('applies sheet lines in a direct message, with either spelling', async () => {
+        const port = await startRunner(gatewayWithIds());
+        expect(await sendTelegram(port, '/pstack-setup bug-fix: gpt-6-sol[1m]')).toContain('bug-fix: gpt-6-sol[1m]');
+        expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
+        await sendTelegram(port, '/pstack_setup@claude_bot off');
+        expect(persistedPstack()).toBeUndefined();
+      }, 15000);
+
+      it('still refuses changes in a group', async () => {
+        const port = await startRunner(gatewayWithIds());
+        const bare = await sendTelegram(port, '/pstack_setup', '-100200');
+        expect(bare).toContain('only available in a direct message');
+        expect(bare).not.toContain('Roles');
+        expect(await sendTelegram(port, '/pstack-setup on', '-100200')).toContain('only available in a direct message');
+        expect(persistedPstack()).toBeUndefined();
+      }, 15000);
+
+      it('serves the button menu and saves a button\'s change through the same path', async () => {
+        const port = await startRunner(gatewayWithIds());
+        const home = await menu(port, 'ps:h');
+        expect(home.status).toBe(200);
+        expect(home.body.text).toContain('Roles: 17 (✏️ 0 changed)');
+        expect(home.body.keyboard![0][0]).toEqual({ text: '✅ Turn on', data: 'ps:on' });
+        const singles = await menu(port, 'ps:l:s:0');
+        expect(singles.body.keyboard!.flat()).toContainEqual({ text: 'bug-fix · claude-fable-5-1', data: `ps:r:${bugFixRef}` });
+        const changed = await menu(port, `ps:m:${bugFixRef}:gpt-6-sol[1m]`);
+        expect(changed.body.text).toContain('✅ Saved');
+        expect(changed.body.toast).toContain('Saved');
+        expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
+        const refused = await menu(port, `ps:m:${bugFixRef}:claude-not-a-model`);
+        expect(refused.body.text).toContain('out of date');
+        expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
+        await menu(port, 'ps:off');
+        expect(persistedPstack()).toBeUndefined();
+      }, 15000);
+
+      // User request on #591: Turn on/off ends the menu like /voice does, with the result and no buttons.
+      it('Turn on and Turn off end the menu with the result and no buttons', async () => {
+        const port = await startRunner(gatewayWithIds());
+        const on = await menu(port, 'ps:on');
+        expect(on.body).toMatchObject({ text: expect.stringMatching(/^✅ pstack is on for \S+\./), keyboard: [], done: true });
+        expect(persistedPstack()).toEqual({});
+        const off = await menu(port, 'ps:off');
+        expect(off.body).toMatchObject({ text: expect.stringMatching(/^✅ pstack is off for \S+\./), keyboard: [], done: true });
+        expect(persistedPstack()).toBeUndefined();
+        // Third review of #591 (L6): a press that changes nothing said "Saved".
+        await menu(port, 'ps:on');
+        const again = await menu(port, 'ps:on');
+        expect(again.body.text).toMatch(/already on/);
+        expect(again.body.text).not.toContain('Saved');
+        await menu(port, 'ps:de:high');
+        const effort = await menu(port, 'ps:de:high');
+        expect(effort.body.toast).toBe('No change.');
+      }, 15000);
+
+      it('on the web, Turn on returns the result with no actions', async () => {
+        await startRunner(gatewayWithIds());
+        const reply = await runner.executeApiCommand('web-session', 'web-chat', '/pstack-setup ps:on', { canWriteAgent: true });
+        expect(reply.responseText).toMatch(/^✅ pstack is on for \S+\./);
+        expect(reply.actions).toEqual([]);
+      }, 15000);
+
+      // Review of #591 (M2): a button computed its change from the runner's copy and
+      // wrote the whole block, dropping a change saved meanwhile by the API or CLI.
+      it('applies a button to the saved config, keeping a change made elsewhere', async () => {
+        const port = await startRunner(gatewayWithIds());
+        await menu(port, 'ps:on');
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        config.agents[0].pstack = { defaultEffort: 'high' };
+        fs.writeFileSync(configPath, JSON.stringify(config));
+        const changed = await menu(port, `ps:m:${bugFixRef}:gpt-6-sol[1m]`);
+        expect(changed.body.text).toContain('Effort: default (high)');
+        expect(persistedPstack()).toEqual({ defaultEffort: 'high', roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
+      }, 15000);
+
+      // Review of #591 (M1): a change while off turns pstack on; the notice says so.
+      it('says pstack is on now when a role change turns it on', async () => {
+        const port = await startRunner(gatewayWithIds());
+        const changed = await menu(port, `ps:m:${bugFixRef}:gpt-6-sol[1m]`);
+        expect(changed.body.toast).toContain('pstack is on now');
+        expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
+        await menu(port, 'ps:rs!');
+        await menu(port, 'ps:off');
+        const reset = await menu(port, 'ps:rs!');
+        expect(reset.body.text).toContain('Status: ⚪ Off');
+        expect(persistedPstack()).toBeUndefined();
+      }, 15000);
+
+      // Review of #591 (L4): an unexpected failure was answered but never logged.
+      it('logs an unexpected menu failure', async () => {
+        const port = await startRunner(gatewayWithIds());
+        const logged = jest.spyOn((runner as unknown as { logger: { error: (m: string, d?: object) => void } }).logger, 'error');
+        fs.writeFileSync(configPath, '{ not json');
+        const res = await menu(port, 'ps:on');
+        expect(res.body).toMatchObject({ success: false, error: expect.stringContaining('unavailable') });
+        expect(logged).toHaveBeenCalledWith('pstack setup button failed', expect.objectContaining({ data: 'ps:on', error: expect.any(String) }));
+      }, 15000);
+
+      it('refuses a menu request from a group or another user', async () => {
+        const port = await startRunner(gatewayWithIds());
+        expect((await menu(port, 'ps:on', '-100200', '424242')).status).toBe(400);
+        expect((await menu(port, 'ps:on', '424242', '7')).status).toBe(400);
+        expect((await menu(port, 'model:x')).status).toBe(400);
+        expect(persistedPstack()).toBeUndefined();
+      }, 15000);
+    });
+
+    // Dev e2e of #591: on web /pstack-setup was not a command, so the model answered it.
+    describe('on web (API chat)', () => {
+      it('is a built-in command there', () => {
+        expect(AgentRunner.isApiBuiltinCommand('/pstack-setup')).toBe(true);
+        expect(AgentRunner.isApiBuiltinCommand('/pstack-setup bug-fix: default')).toBe(true);
+      });
+
+      it('shows the setup to anyone and changes it only with write access', async () => {
+        await startRunner(gatewayWithIds());
+        const shown = await runner.executeApiCommand('web-session', 'web-chat', '/pstack-setup');
+        expect(shown.responseText).toContain('• bug-fix: claude-fable-5-1');
+        const refused = await runner.executeApiCommand('web-session', 'web-chat', '/pstack-setup on');
+        expect(refused.responseText).toContain('write access');
+        expect(persistedPstack()).toBeUndefined();
+        // Third review of #591 (M9): a menu button is a change too.
+        const button = await runner.executeApiCommand('web-session', 'web-chat', '/pstack-setup ps:on');
+        expect(button.responseText).toContain('write access');
+        expect(persistedPstack()).toBeUndefined();
+        const set = await runner.executeApiCommand('web-session', 'web-chat', '/pstack-setup bug-fix: gpt-6-sol[1m]', { canWriteAgent: true });
+        expect(set.responseText).toContain('bug-fix: gpt-6-sol[1m]');
+        expect(persistedPstack()).toEqual({ roles: { 'bug-fix': 'gpt-6-sol[1m]' } });
+      }, 15000);
+    });
+
+    it('explains how to install when the plugin is missing', async () => {
+      fixture.cleanup(); fixture = pstackClaudeConfig(false); process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
+      const port = await startRunner(gatewayWithIds());
+      expect(await send(port, '/pstack-setup on')).toContain('PSTACK_NOT_INSTALLED');
+      expect(persistedPstack()).toBeUndefined();
+    }, 15000);
+
+    // Review of #591 (L3): `on` for an agent already set up saves nothing, and with the plugin
+    // gone the reply said "pstack is removed" while the block stayed saved.
+    it('says the plugin is missing, not that pstack is removed, for an agent already set up', async () => {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      config.agents[0].pstack = {}; fs.writeFileSync(configPath, JSON.stringify(config));
+      fixture.cleanup(); fixture = pstackClaudeConfig(false); process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
+      const port = await startRunner(gatewayWithIds());
+      const text = await send(port, '/pstack-setup on');
+      expect(text).not.toContain('removed');
+      expect(text).toContain('not installed for Claude Code on this host');
+      expect(persistedPstack()).toEqual({});
+    }, 15000);
+  });
 
   // #460: config.json carries agent bot tokens and the admin API key.
   // persistModelToConfig()'s tmp-then-rename pattern silently downgraded it

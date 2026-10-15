@@ -1,5 +1,5 @@
 import {automationSession} from '../tasks/automation-session';
-import { GatewayTaskTarget, TaskSnapshot, WorkerOutcome, CommandContext, TaskAttempt } from '../types';
+import { GatewayTaskTarget, PublicTaskSnapshot, TaskSnapshot, WorkerOutcome, CommandContext, TaskAttempt } from '../types';
 import { TaskService } from '../tasks/service';
 import { taskFailure } from '../tasks/failure';
 
@@ -13,12 +13,12 @@ export interface GatewayTaskAdapter {
   close?(): Promise<void>;
   deviceStatus?(task:TaskSnapshot):Promise<{status:import('../types').ComputerConnectionStatus;ownerStopped:boolean}>;
   ownerStopped?(task:TaskSnapshot):Promise<boolean>;
-  computerEvidence?(task:TaskSnapshot,mode:'recorded'|'fresh'|'screenshot',signal?:AbortSignal):Promise<any>;
-  diagnostics?(task:TaskSnapshot,offset?:number):Promise<unknown>;
-  evidence?(task:TaskSnapshot, refresh?:boolean, signal?:AbortSignal, screenshot?:boolean):Promise<import('../../jev/browser-contract').BrowserEvidence>;
+  computerEvidence?(task:PublicTaskSnapshot,mode:'recorded'|'fresh'|'screenshot',signal?:AbortSignal):Promise<any>;
+  diagnostics?(task:PublicTaskSnapshot,offset?:number):Promise<unknown>;
+  evidence?(task:PublicTaskSnapshot, refresh?:boolean, signal?:AbortSignal, screenshot?:boolean):Promise<import('../../jev/browser-contract').BrowserEvidence>;
   recover?(task:TaskSnapshot,requestId:string):Promise<{state:'queued'|'cancelled'|'waiting_input';evidence:string}|undefined>;
-  reconcileEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):string;
-  verifyEvidence?(task:TaskSnapshot,requestId:string,evidenceId:string):void;
+  reconcileEvidence?(task:PublicTaskSnapshot,requestId:string,evidenceId:string):string;
+  verifyEvidence?(task:PublicTaskSnapshot,requestId:string,evidenceId:string):void;
   ready?(task: TaskSnapshot): boolean;
   validateInput?(instructions:string,answers?:import('../types').TaskRevision['answers']):void;
   submit(task: TaskSnapshot, requestId: string, instructions: string, answers?: import('../types').TaskRevision['answers'], requestConsent?:boolean,computerInputs?:import('../types').TaskRevision['computerInputs'],startUrl?:string): Promise<void>;

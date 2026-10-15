@@ -95,7 +95,12 @@ Source: [cron orchestration integration](https://github.com/0xMaxMa/claude-gatew
 The skill catalog describes installed instructions, not an authorization grant.
 It is bounded by `orchestration.conversation.skillCatalogBytes` (64 KiB by default):
 with many installed skills every name stays listed with shortened descriptions, and
-`capabilities_list` still returns the complete descriptions.
+`capabilities_list` still returns the complete descriptions. Its `query` matches words, not
+one literal phrase: `:`, `-`, `_`, `/` and spaces all separate words, an entry matches when
+its name or description has every word (`pstack interrogate`, `pstack:interrogate` and
+`pstack-interrogate` all find `pstack:interrogate`), and entries named by the query come
+first. An explicit `/skill` command names an installed skill already: the agent dispatches
+it without searching first.
 `capabilities_list` marks skills with known unavailable declared gateway tools as
 `tool_access_limited`. For example, app installation/management and agent creation
 are administrative capabilities, not automatically granted to orchestration workers.

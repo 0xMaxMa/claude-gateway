@@ -30,9 +30,12 @@ export function validateWorkerModel(model: ModelConfig): void {
 export function resolveWorkerHarness(agent: AgentConfig, gateway: GatewayConfig, model: string) {
   validateWorkerHarness(gateway.gateway.workers); validateWorkerHarness(agent.workers);
   const settings = { ...gateway.gateway.workers, ...agent.workers };
-  const metadata = gateway.gateway.models?.find(m => m.id === model || m.alias === model);
+  const named = gateway.gateway.models?.find(m => m.id === model || m.alias === model);
+  // A context suffix on a configured id (task_spawn resolves `custom[1m]`) keeps that row's routing.
+  const base = model.replace(/\[(?:1m|200k)\]$/i, '');
+  const metadata = named ?? (base !== model ? gateway.gateway.models?.find(m => m.id === base) : undefined);
   if (metadata) validateWorkerModel(metadata);
-  const canonical = metadata?.id ?? model;
+  const canonical = named?.id ?? model;
   const selector = settings.harness ?? 'auto';
   const harness = selector === 'auto'
     ? metadata?.workerHarness ?? (/^(?:(?:openai|chatgpt)\/)?gpt-[a-z0-9]/i.test(canonical) ? 'codex' : 'claude')

@@ -5,7 +5,7 @@ import { contextFootprint } from './context-footprint';
 import { parentPort } from 'worker_threads';
 import { DatabaseSync } from 'node:sqlite';
 import { existsSync } from 'fs';
-import { readTokenReport, summarizeTokenTurns, pendingInputTurns, TokenTurn } from './token-ledger';
+import { readTokenReport, summarizeTokenTurns, pendingInputTurns, taskTurnDetails, TokenTurn } from './token-ledger';
 import { normalizeTaskRevisions } from './tasks/task-directive';
 import type { TaskAttempt, TaskRevision } from './types';
 import { readDashboardProviderWait } from './dashboard-provider-wait';
@@ -111,7 +111,9 @@ function read(filename: string, operation: string, options: Record<string, any>)
         const attempt = JSON.parse(r.payload_json);
         const metrics = exists('token_turns') ? get('SELECT payload_json FROM token_turns WHERE id=? AND session_id=?', attempt.attemptId, options.sessionId) : undefined;
         const events = all('SELECT type,payload_json,occurred_at FROM worker_events WHERE attempt_id=? ORDER BY local_seq DESC LIMIT 30', attempt.attemptId).map(e=>({type:e.type,at:e.occurred_at,payload:JSON.parse(e.payload_json)}));
-        return {...attempt, metrics: metrics ? JSON.parse(metrics.payload_json) : null, events};
+        // The same task-record details as the session report (skill-worker skill, subagent line).
+        const turn = metrics ? JSON.parse(metrics.payload_json) : null;
+        return {...attempt, metrics: turn ? {...turn, ...taskTurnDetails(turn, snapshot)} : null, events};
       });
       return {snapshot, instructions, attempts, totalAttempts:Number(get("SELECT COUNT(*) n FROM task_attempts WHERE task_id=? AND COALESCE(json_extract(payload_json,'$.startedAt'),json_extract(payload_json,'$.createdAt'),0)>=?", options.taskId,since)!.n), offset};
     }
@@ -119,7 +121,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
     const conversations = all('SELECT c.* FROM conversations c WHERE c.updated_at>=? ORDER BY c.updated_at DESC,c.id DESC LIMIT ? OFFSET ?', since, limit, offset);
     const sessions = conversations.map(c => {
       const turns: TokenTurn[] = exists('token_turn_metrics')
-        ? all("SELECT COALESCE(m.payload_json,json_remove(t.payload_json,'$.requests','$.inputTexts','$.responseText')) payload_json FROM token_turns t LEFT JOIN token_turn_metrics m ON m.id=t.id WHERE t.session_id=? AND t.started_at>=? ORDER BY t.started_at,t.id", c.agent_session_id,since).map(r=>JSON.parse(r.payload_json))
+        ? all("SELECT COALESCE(m.payload_json,json_remove(t.payload_json,'$.requests','$.inputTexts','$.responseText','$.extensions','$.usedSkills')) payload_json FROM token_turns t LEFT JOIN token_turn_metrics m ON m.id=t.id WHERE t.session_id=? AND t.started_at>=? ORDER BY t.started_at,t.id", c.agent_session_id,since).map(r=>JSON.parse(r.payload_json))
         : exists('token_turns') ? all(`SELECT id,role,task_id,started_at,json_extract(payload_json,'$.usage') usage,
           json_extract(payload_json,'$.loadedTools') loadedTools,json_extract(payload_json,'$.usedTools') usedTools,
           json_extract(payload_json,'$.model') model FROM token_turns WHERE session_id=? AND started_at>=? ORDER BY started_at,id`, c.agent_session_id,since).map(r=>({...r,taskId:r.task_id,startedAt:r.started_at,sessionId:c.agent_session_id,usage:r.usage?JSON.parse(r.usage):null,loadedTools:r.loadedTools?JSON.parse(r.loadedTools):null,usedTools:r.usedTools?JSON.parse(r.usedTools):[]} as TokenTurn)) : [];
@@ -135,7 +137,7 @@ function read(filename: string, operation: string, options: Record<string, any>)
         return {taskId:t.id,sessionId:c.agent_session_id,title:snapshot.title,state:t.state,updatedAt:t.updated_at,providerWaiting:providerWaiting(String(t.id),String(t.state)),
           createdAt:t.created_at, revision:snapshot.revision, appliedRevision:snapshot.appliedRevision, pendingRevision:snapshot.gatewayTarget && t.active_attempt_id && snapshot.revision>1 && snapshot.revision>snapshot.appliedRevision?snapshot.revision:undefined, executionType:snapshot.gatewayTarget?'gateway-managed':'worker',gatewayTarget:snapshot.gatewayTarget,execution:snapshot.execution, workerId:attempt?.workerId, attemptId:attempt?.attemptId,
           workerSessionId:snapshot.gatewayTarget?undefined:attempt?.sessionId,targetSessionId:snapshot.gatewayTarget?.sessionId, resumed:attempt?.resumeSession, workstreamId:snapshot.workstreamId,
-          continueTaskId:snapshot.continueTaskId,hostProcessId:t.active_attempt_id?attempt?.processIdentity?.pid:undefined,
+          continueTaskId:snapshot.continueTaskId,parentTaskId:snapshot.parentTaskId,depth:snapshot.depth,model:snapshot.model,effort:snapshot.effort,harness:attempt?.harness,hostProcessId:t.active_attempt_id?attempt?.processIdentity?.pid:undefined,
           tokenSummary:{totalTokens:metrics.totalTokens,allAttemptsTokens:total.totalTokens},contextTools:metrics.contextTools,loadedTools:metrics.loadedTools,usedTools:metrics.usedTools,
           lastTool:tool?{name:tool.name,type:tool.type,is_error:tool.is_error,at:lastTool!.occurred_at}:undefined};
       });

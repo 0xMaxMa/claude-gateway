@@ -29,6 +29,7 @@ import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
 import { confirmSelection, voiceModeConfirmation } from './selection-confirmation'
 import { LiveTaskBrowser, type TaskBrowserMessage } from './task-browser'
+import { PSTACK_MENU_COMMAND, pstackMenuMarkup } from './pstack-menu'
 import { ReceiverSpool } from '../receiver-spool'
 const orchestrationSpool = process.env.GATEWAY_ORCHESTRATION_INGRESS_DIR && process.env.CLAUDE_CHANNEL_CALLBACK
   ? new ReceiverSpool(process.env.GATEWAY_ORCHESTRATION_INGRESS_DIR, process.env.CLAUDE_CHANNEL_CALLBACK, fetch, Math.max(250,Math.min(10000,Number(process.env.GATEWAY_MEDIA_GROUP_WAIT_MS)||2000))) : undefined
@@ -49,7 +50,7 @@ import { formatTurnIncident, type TurnIncident } from '../../../dist/agent/turn-
 import { createIncidentStore } from '../../../dist/agent/incident-store.js'
 import type { RecoveryOutcome } from '../../../dist/agent/incident.js'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
-import { normalizeTelegramLineBreaks, resolveTelegramReplyFormat, migrateAccess, telegramDisplayName } from './pure'
+import { normalizeTelegramLineBreaks, resolveTelegramReplyFormat, migrateAccess, telegramDisplayName, groupCommandReply, isGroupCommand, stripCommandTarget } from './pure'
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits'
 
 // Standalone fallback: default state dir to ~/.claude/channels/telegram
@@ -526,6 +527,7 @@ function countPending(access: Access, kind: 'dm' | 'group'): number {
 function isMentioned(ctx: Context, extraPatterns?: string[]): boolean {
   const entities = ctx.message?.entities ?? ctx.message?.caption_entities ?? []
   const text = ctx.message?.text ?? ctx.message?.caption ?? ''
+  if (isGroupCommand(text, botUsername)) return true
   for (const e of entities) {
     if (e.type === 'mention') {
       const mentioned = text.slice(e.offset, e.offset + e.length)
@@ -885,6 +887,7 @@ const BOT_COMMANDS = [
   { command: 'restart', description: 'Graceful restart session' },
   { command: 'model', description: 'Show current AI model' },
   { command: 'models', description: 'Switch AI model' },
+  { command: 'pstack_setup', description: 'Set up pstack for this agent' },
   ...(INTERACTIVE_CLI_ENABLED ? [{ command: 'cli', description: 'Open the live terminal viewer' }] : []),
   { command: 'start', description: 'Welcome and setup guide' },
   { command: 'status', description: 'Check your pairing status' },
@@ -922,7 +925,8 @@ const AVAILABLE_MODELS = [
   { id: 'claude-sonnet-5-5',         label: 'Sonnet 5.5',       alias: 'sonnet' },
   { id: 'claude-sonnet-5',           label: 'Sonnet 5',         alias: 'sonnet5' },
   { id: 'claude-sonnet-4-6',         label: 'Sonnet 4.6',       alias: 'sonnet46' },
-  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5',        alias: 'haiku' },
+  { id: 'claude-haiku-5-5',          label: 'Haiku 5.5',        alias: 'haiku' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5',        alias: 'haiku45' },
   { id: 'gpt-6-sol[1m]',             label: 'GPT 6 Sol',        alias: 'gpt6sol' },
   { id: 'gpt-6-astra[1m]',           label: 'GPT 6 Astra',      alias: 'gpt6astra' },
   { id: 'gpt-6-luna[1m]',            label: 'GPT 6 Luna',       alias: 'gpt6luna' },
@@ -993,6 +997,7 @@ async function handleInbound(
   const access = result.access
   const from = ctx.from!
   const chat_id = String(ctx.chat!.id)
+  text = stripCommandTarget(text, botUsername)
   const msgId = ctx.message?.message_id
 
   // Permission-reply intercept: if this looks like "yes xxxxx" for a
@@ -1144,10 +1149,16 @@ async function handleInbound(
 
 if (!SEND_ONLY) {
 
-// Commands are DM-only. Responding in groups would: (1) leak pairing codes via
-// /status to other group members, (2) confirm bot presence in non-allowlisted
-// groups, (3) spam channels the operator never approved. Silent drop matches
-// the gate's behavior for unrecognized groups.
+// Commands are DM-only. Answering them in a group would leak pairing codes via
+// /status to other members and act for the whole agent from a shared chat, so
+// an allowed group gets a pointer to the direct message instead; a group the
+// gate does not allow stays silent, so its members learn nothing. /stop, /new,
+// /rename and /pstack_setup are forwarded and answered by the gateway there.
+bot.on('message:text', async (ctx, next) => {
+  const reply = groupCommandReply(loadAccess(), { chatType: ctx.chat.type, chatId: String(ctx.chat.id), fromId: String(ctx.from.id), text: ctx.message.text, botUsername, cliEnabled: INTERACTIVE_CLI_ENABLED })
+  if (reply === undefined) return next()
+  await ctx.reply(reply, { reply_parameters: { message_id: ctx.message.message_id } }).catch(() => {})
+})
 
 bot.command('start', async ctx => {
   if (ctx.chat?.type !== 'private') return
@@ -1447,6 +1458,24 @@ bot.command('tasks',async ctx=>{
   catch{await ctx.reply('Could not load tasks. Please try /tasks again.')}
 })
 
+// /pstack-setup (Telegram also takes /pstack_setup: command names cannot contain '-').
+// Bare, it opens the button menu the gateway renders; with arguments it falls
+// through to the gateway's text command. Groups fall through too: changes are
+// direct-message only.
+async function pstackMenuRequest(chatId:string,userId:string,data:string) {
+  if(!CALLBACK_URL_BASE)throw Error('not_configured')
+  const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(20000),body:JSON.stringify({command:'telegram_pstack',chat_id:chatId,payload:{user_id:userId,data}})})
+  const result=await response.json() as {success?:boolean}
+  if(!response.ok||!result.success)throw Error('unavailable')
+  return pstackMenuMarkup(result)
+}
+bot.hears(PSTACK_MENU_COMMAND,async (ctx,next)=>{
+  if(ctx.chat?.type!=='private'||!CALLBACK_URL_BASE)return next()
+  if(!isCallbackAuthorized(ctx))return
+  try{const menu=await pstackMenuRequest(String(ctx.chat.id),String(ctx.from!.id),'ps:h');await ctx.reply(menu.text,{reply_markup:menu.reply_markup})}
+  catch{await ctx.reply('pstack setup unavailable. Please try /pstack_setup again.')}
+})
+
 async function taskStopRequest(chatId: string, userId: string, menuId?: string, index?: number) {
   if (!CALLBACK_URL_BASE) throw new Error('not_configured')
   const response=await fetch(CALLBACK_URL_BASE+'/command', {
@@ -1650,6 +1679,21 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // 🔁 Retry on a voice-note transcription failure: orch:vr:<input id> (44 bytes).
+  const voiceRetry=/^orch:vr:([a-f0-9-]{36})$/.exec(data)
+  if(voiceRetry){
+    if(!ORCHESTRATION_ENABLED||ctx.callbackQuery.message?.chat.type!=='private'||!isCallbackAuthorized(ctx)){await ctx.answerCallbackQuery({text:'Not available or not authorized.'}).catch(()=>{});return}
+    try{
+      if(!CALLBACK_URL_BASE)throw Error('not_configured')
+      const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),body:JSON.stringify({command:'telegram_voice_retry',chat_id:String(ctx.callbackQuery.message.chat.id),payload:{user_id:String(ctx.from.id),input_id:voiceRetry[1]}})})
+      const result=await response.json() as {success?:boolean;text?:string;error?:string}
+      await ctx.answerCallbackQuery({text:((response.ok&&result.success?result.text:result.error)??'Voice note cannot be retried.').slice(0,180)}).catch(()=>{})
+      // Any answer settles this button: a retry was queued, or the note cannot be retried.
+      if(response.ok&&result.success)await ctx.editMessageReplyMarkup({reply_markup:undefined}).catch(()=>{})
+    }catch{await ctx.answerCallbackQuery({text:'Voice retry unavailable. Please send the voice note again.'}).catch(()=>{})}
+    return
+  }
+
   const voicePicker=/^(voicepick|voicepage|voicegroup|voicedismiss):([a-f0-9-]{36})(?::(male|female|neutral|unspecified|back))?(?::(\d+))?$/.exec(data)
   if(voicePicker){
     if(!ORCHESTRATION_ENABLED||ctx.callbackQuery.message?.chat.type!=='private'||!isCallbackAuthorized(ctx)){await ctx.answerCallbackQuery({text:'Not available or not authorized.'}).catch(()=>{});return}
@@ -1676,6 +1720,19 @@ bot.on('callback_query:data', async ctx => {
       const payload=data==='taskdismiss'?{action:'dismiss'}:taskBrowser[1]?{action:taskBrowser[1]==='taskcancel'?'cancel':'detail',task_id:taskBrowser[2]}:{page:Number(taskBrowser[4])}
       await liveTaskBrowser.navigate(String(ctx.callbackQuery.message.chat.id),String(ctx.from.id),ctx.callbackQuery.message.message_id,payload)
     }catch{await ctx.answerCallbackQuery({text:'Task unavailable. Use /tasks to refresh.'}).catch(()=>{})}
+    return
+  }
+
+  if(data.startsWith('ps:')){
+    if(ctx.callbackQuery.message?.chat.type!=='private'||!isCallbackAuthorized(ctx)){await ctx.answerCallbackQuery({text:'Not authorized.'}).catch(()=>{});return}
+    try{
+      const menu=await pstackMenuRequest(String(ctx.callbackQuery.message.chat.id),String(ctx.from.id),data)
+      await ctx.answerCallbackQuery(menu.toast?{text:menu.toast}:undefined).catch(()=>{})
+      if(menu.closed){await ctx.deleteMessage().catch(()=>{});return}
+      // Turn on/off ends the menu with its result and no buttons, as a /voice choice does.
+      if(menu.done){await confirmSelection(ctx,menu.text).catch(()=>{});return}
+      await ctx.editMessageText(menu.text,{reply_markup:menu.reply_markup}).catch(()=>{})
+    }catch{await ctx.answerCallbackQuery({text:'pstack setup unavailable. Use /pstack_setup again.'}).catch(()=>{})}
     return
   }
 

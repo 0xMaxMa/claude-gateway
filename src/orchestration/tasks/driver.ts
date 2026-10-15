@@ -38,6 +38,15 @@ import { MediaStore } from '../../history/media-store';
 import { providerFailure, ProviderPermit } from '../provider-admission';
 import type { ResolvedCodexProviderIdentity } from '../provider-scope';
 import type { ProviderRefusal } from '../../session/provider-refusal';
+import { PSTACK_PLUGIN_ID, pstackModels, pstackPluginInfo } from '../../pstack/plugin-info';
+import { renderPstackSheet } from '../../pstack/sheet';
+import { SUBAGENT_READONLY, pstackWorkerNote } from '../../pstack/overlay';
+import { chatSessionTranscripts, pstackReflectNote } from '../../pstack/reflect';
+import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
+import type { Effort } from '../../agent/model-registry';
+
+// Codex accepts low|medium|high|xhigh; Claude's `max` (a pstack template, or inherited) runs at Codex's highest.
+const codexEffort = (effort: Effort): Exclude<Effort, 'max'> => effort === 'max' ? 'xhigh' : effort;
 
 function boundedDiffText(text: string): string {
   let result = text.slice(0, 8192);
@@ -55,7 +64,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     if (this.agent.type === 'app-agent') return false;
     return cleanupPersistedProcess(attempt.processIdentity);
   }
-  reserve(taskId: string): (() => void) | undefined { return gatewayCapacity(this.gateway).acquireWorker(this.agent.id, taskId); }
+  reserve(taskId: string): (() => void) | undefined { return gatewayCapacity(this.gateway).acquireWorker(this.agent.id, taskId, true, this.tasks.ancestorIds(taskId)); }
   available(taskId: string): boolean { return this.workspaces.available(taskId); }
   release(taskId: string): Promise<void> { return this.workspaces.release(taskId); }
   async start(task: TaskSnapshot, attempt: TaskAttempt, capacityReserved = false, providerPermit?: ProviderPermit): Promise<WorkerHandle> {
@@ -78,7 +87,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     if (harness.harness === 'codex') {
       try {
         if (task.skill?.invocation === 'cli' && !task.skill.filePath) {
-          const inventory = await discoverWorkerExtensions(this.agent, this.gateway, workspace.path);
+          const inventory = await discoverWorkerExtensions(this.agent, this.gateway, workspace.path, 'codex');
           const installed = inventory.skills.find(skill => skill.name === task.skill!.name || skill.aliases?.includes(task.skill!.name));
           if (installed) task.skill = { ...task.skill, filePath: installed.filePath, resourceRoot: installed.resourceRoot, fileScope: installed.fileScope, content: installed.fileScope === 'container' ? installed.content ?? '' : await readFile(installed.filePath, 'utf8') };
         }
@@ -103,7 +112,10 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     // Persist the actual execution choice; pool fingerprints prevent cross-harness resume.
     if (attempt.harness && attempt.harness !== harness.harness) throw new OrchestrationError('WORKER_HARNESS_CHANGED');
     attempt.harness = harness.harness;
-    attempt.harnessModel = harness.harness === 'codex' ? harness.config.model : task.model ?? this.agent.claude.model;
+    // Claude Code only understands a `[1m]` suffix; `[200k]` is its default window.
+    const claudeModel = (task.model ?? this.agent.claude.model).replace(/\[200k\]$/i, '');
+    attempt.harnessModel = harness.harness === 'codex' ? harness.config.model : claudeModel;
+    if (task.effort) attempt.effort = task.effort;
     this.tasks.store.transaction(() => this.tasks.store.saveAttempt(attempt));
     const cliSkill = task.skill?.invocation === 'cli' && harness.harness !== 'codex';
     const invokedSkill = task.skill ? (cliSkill ? task.skill.name : `orchestration-task:${task.skill.name}`) : undefined;
@@ -138,22 +150,36 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const directive = taskDirective(this.tasks.store, task.conversationId, revision);
     // Snapshot the authorized agent context without modifying either workspace's
     // persona files. Project CLAUDE.md continues to be discovered in the worktree.
-    const context = this.agent.type === 'app-agent'
+    let context = this.agent.type === 'app-agent'
       ? await containerNode(this.agent.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))")
       : await readFile(join(this.agent.workspace, 'CLAUDE.md'), 'utf8');
+    // pstack is installed for Claude Code host-wide; only a set-up agent's
+    // Claude workers load it, with that agent's own model sheet. Codex
+    // children are leaf workers and never get the plugin or the sheet.
+    // Only host workers can load the plugin; isolated and container workers run with every plugin off.
+    const plugin = this.agent.pstack && harness.harness === 'claude' && workspace.baseCommit === 'host' && this.agent.type !== 'app-agent' ? pstackPluginInfo() : undefined;
+    const pstack = plugin?.installPath ? pstackModels(plugin.installPath) : undefined;
+    // Subagent tools replace Agent only where the plugin's skills are loaded to call it.
+    const subagents = Boolean(pstack) && (task.depth ?? 0) < SUBAGENT_MAX_DEPTH;
+    if (pstack) context += '\n\n' + renderPstackSheet(this.agent.pstack!, pstack) + '\n\n' + pstackWorkerNote(subagents);
+    if (task.readonly) context += '\n\n' + SUBAGENT_READONLY;
     this.tasks.pool.bind(attempt, payloadHash({ context, workspace: workspace.path, agent: this.agent, gateway: this.gateway, harness, authFingerprint, toolExposure: 'lazy-connectors-v1' }));
     // Pool expiration/rebinding makes old native transcripts disposable. This
     // bounded maintenance is best effort and never changes task admission.
     void cleanupCodexSessions({ agent: this.agent, stateDirectory: join(this.privateRoot, 'codex-sessions'), retainedSessionIds: this.tasks.pool.retainedSessionIds() }).catch(() => {});
     const shared = resolveSharedConfig(this.agent.knowledge?.shared, this.gateway.gateway.knowledge?.shared);
-    const ticket = this.bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation }, directory, this.agent.workspace, shared.enabled ? sharedVaultDir(shared) : '');
+    const ticket = this.bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation, subagents, readonly: Boolean(task.readonly) }, directory, this.agent.workspace, shared.enabled ? sharedVaultDir(shared) : '');
     try {
-      const profile = { ...ticket.profile, hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
+      const profile = { ...ticket.profile, ...(task.effort ? { claudeEffort: task.effort } : {}), pluginOverrides: { [PSTACK_PLUGIN_ID]: Boolean(this.agent.pstack) },
+        // pstack agents dispatch subagents only as gateway tasks (subagent_spawn); a read-only Claude subagent gets read tools only.
+        ...(pstack ? { disallowedTools: ['Agent', 'Task'] } : {}),
+        // Read-only is enforced by each harness (read tools; Codex's read-only sandbox) and no user connectors, which can write.
+        ...(task.readonly ? { readOnly: true, connectorsAllowed: false, ...(harness.harness === 'claude' ? { workerTools: ['Read', 'Glob', 'Grep'] } : {}) } : {}), hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
       const workerConfig: AgentConfig = { ...this.agent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
-        claude: { ...this.agent.claude, model: task.model ?? this.agent.claude.model, extraFlags: [] } };
+        claude: { ...this.agent.claude, model: claudeModel, extraFlags: [] } };
       const process = harness.harness === 'codex'
         ? new CodexProcess({ agent: workerConfig, gateway: this.gateway, profile, sessionId: attempt.sessionId,
-          stateDirectory: join(this.privateRoot, 'codex-sessions'), config: harness.config, resolvedCredentials,
+          stateDirectory: join(this.privateRoot, 'codex-sessions'), config: task.effort ? { ...harness.config, reasoningEffort: codexEffort(task.effort) } : harness.config, resolvedCredentials,
           requestInput: question => { this.tasks.requestInput(attempt.attemptId, attempt.generation, question); },
           checkpoint: async () => {
             const next = this.tasks.checkpoint(attempt.attemptId, attempt.generation, { sessionId: attempt.sessionId });
@@ -196,7 +222,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       const contextFile = join(directory, 'context.json');
       await writeFile(contextFile, JSON.stringify({ references, attachments }, null, 2), { mode: 0o600 });
       const browserContext = browserRouting(this.agent, this.gateway, workspace.baseCommit === 'host');
-      let prompt = `${browserContext}\n\nTask ${task.taskId}, attempt ${attempt.attemptId}, revision ${attempt.revision}.\n${directive}${task.skill ? `\nThe registered CLI skill name is ${invokedSkill}; invoke that exact name via Skill with arguments ${JSON.stringify(task.skill.args)}.` : ''}\n\nAuthorized read-only context and attachment paths: ${contextFile}. Read this file when the task requires its references.\nComposer options: ${JSON.parse(String(input.ingress_json ?? '{}')).metadata?.promptContext ?? ''}\n${workspace.baseCommit === 'host' ? 'Host execution: you run directly on the same machine and OS account as the original Agent, with its filesystem, shell, network, tools and credentials. Your starting directory is ' + workspace.path + '. You may change directories and operate on user-authorized paths and host services (including tmux and GitHub). No Git worktree is required. Do not claim isolation or missing access without an actual tool error. Coordinate changes to shared files; preserve unrelated work.' : 'Write only in ' + workspace.path + '.'} ${task.skill && workspace.baseCommit !== 'host' ? `Skill reference workspace (read only): ${task.resourceProfile?.projectRoot}. Place any generated files or artifacts in the scratch directory; never edit the source project.` : ''} Base: ${workspace.baseCommit}.\nAgent memory writes permitted: ${task.capabilities.writeMemory}. ${workspace.baseCommit === 'host' ? 'Ordinary task files may be written in the authorized working directory; follow the persona policy for explicit user requests and retain other memory rules.' : 'Never change agent workspace files.'} Report the actual outcome, relevant verification evidence, any artifacts produced, and remaining limitations. Choose verification appropriate to the task; diffs and tests apply only when relevant.`;
+      let prompt = `${browserContext}\n\nTask ${task.taskId}, attempt ${attempt.attemptId}, revision ${attempt.revision}.\n${directive}${task.skill ? `\nThe registered CLI skill name is ${invokedSkill}; invoke that exact name via Skill with arguments ${JSON.stringify(task.skill.args)}.` : ''}\n\nAuthorized read-only context and attachment paths: ${contextFile}. Read this file when the task requires its references.\n${task.parentTaskId ? '' : `Composer options: ${JSON.parse(String(input.ingress_json ?? '{}')).metadata?.promptContext ?? ''}\n`}${workspace.baseCommit === 'host' ? 'Host execution: you run directly on the same machine and OS account as the original Agent, with its filesystem, shell, network, tools and credentials. Your starting directory is ' + workspace.path + '. You may change directories and operate on user-authorized paths and host services (including tmux and GitHub). No Git worktree is required. Do not claim isolation or missing access without an actual tool error. Coordinate changes to shared files; preserve unrelated work.' : 'Write only in ' + workspace.path + '.'} ${task.skill && workspace.baseCommit !== 'host' ? `Skill reference workspace (read only): ${task.resourceProfile?.projectRoot}. Place any generated files or artifacts in the scratch directory; never edit the source project.` : ''} Base: ${workspace.baseCommit}.\nAgent memory writes permitted: ${task.capabilities.writeMemory}. ${workspace.baseCommit === 'host' ? 'Ordinary task files may be written in the authorized working directory; follow the persona policy for explicit user requests and retain other memory rules.' : 'Never change agent workspace files.'} Report the actual outcome, relevant verification evidence, any artifacts produced, and remaining limitations. Choose verification appropriate to the task; diffs and tests apply only when relevant.`;
       if (this.agent.type === 'app-agent') {
         prompt = `Task ${task.taskId}, attempt ${attempt.attemptId}, revision ${attempt.revision}.\n${directive}\nYou run ONLY inside this app container. Work in /workspace or /tmp. No host filesystem, host tools or host fallback. Native CLI tools execute here; gateway media/browser/memory tools are unavailable. To return files call task_stage_file with their container paths.\nAuthorized context: ${JSON.stringify({ references, attachments })}${task.skill ? `\nInvoke Skill ${invokedSkill} with arguments: ${task.skill.args}` : ''}`;
       }
@@ -205,7 +231,9 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         prompt = prompt.replace(/The registered CLI skill name is [^\n]+/g, '').replace(/Invoke Skill [^\n]+/g, '');
         prompt += `\nAssigned skill ${task.skill.name}; arguments: ${JSON.stringify(task.skill.args)}. Read and follow the assigned SKILL.md and its relative resources in the worker skill directory.\n${extractFrontmatter(task.skill.content)?.body ?? task.skill.content}`;
       }
-      prompt += '\nOriginating user request (the assignment must stay within this authorization): ' + JSON.stringify(input.text);
+      // A subagent keeps the root input only as lineage (owner, binding, attachments); its prompt is its parent's.
+      if (!task.parentTaskId) prompt += '\nOriginating user request (the assignment must stay within this authorization): ' + JSON.stringify(input.text);
+      if (pstack && task.skill?.name === 'pstack:reflect') prompt += '\n' + pstackReflectNote(chatSessionTranscripts(this.tasks.store, task));
       prompt += '\n' + personaWorkspaceRules(this.agent.workspace, this.agent.type === 'app-agent' ? 'container' : workspace.baseCommit === 'host' ? 'host' : 'isolated');
       if (task.continueTaskId) {
         const prior = this.tasks.store.task(task.continueTaskId);

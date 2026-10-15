@@ -11,7 +11,8 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { appendSystemPromptViaFile, RuntimeProfile, runtimeProfileArgs } from './runtime-profile';
+import { appendSystemPromptViaFile, extraFlagsWithPluginOverrides, RuntimeProfile, runtimeProfileArgs } from './runtime-profile';
+import { PSTACK_PLUGIN_ID } from '../pstack/plugin-info';
 import { StringDecoder } from 'string_decoder';
 import { processSupervisorSupported, recordProcessRoot, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
 import { gatewayCapacity } from '../orchestration/capacity';
@@ -1034,9 +1035,12 @@ export class SessionProcess extends EventEmitter {
       args.push('--disallowedTools', NO_TOOLS_DISALLOWED);
     }
 
-    for (const flag of this.agentConfig.claude.extraFlags ?? []) {
-      args.push(flag);
-    }
+    // pstack is installed for Claude Code host-wide; an agent that is not set up never loads it.
+    const extraFlags = this.agentConfig.claude.extraFlags ?? [];
+    const gated = this.agentConfig.pstack ? extraFlags : extraFlagsWithPluginOverrides(extraFlags, { [PSTACK_PLUGIN_ID]: false }, this.agentConfig.workspace);
+    // Claude Code cannot start with it either; refusing here says why instead of loading pstack.
+    if (!gated) throw Object.assign(new Error('claude.extraFlags --settings is not a readable JSON object, so pstack cannot be kept off for this agent. Fix that --settings value.'), { code: 'INVALID_EXTRA_FLAGS' });
+    args.push(...gated);
 
     return args;
     // NOTE: NO --channels flag — messages arrive via stdin injection, not Telegram channels
@@ -1176,7 +1180,7 @@ export class SessionProcess extends EventEmitter {
     try { containerUid = os.userInfo().uid; } catch { /* use 1000 */ }
 
     const configuredWorkerEnvironment = sanitizeJevChildEnv(this.runtimeProfile?.role === 'worker' ? workerEnvironment(this.agentConfig, this.gatewayConfig) : {}, this.gatewayConfig.gateway.jev);
-    const turnEnvironment: Record<string,string> = this.runtimeProfile?.role === 'agent' && this.runtimeProfile.claudeEffort
+    const turnEnvironment: Record<string,string> = this.runtimeProfile?.claudeEffort
       ? { CLAUDE_CODE_EFFORT_LEVEL: this.runtimeProfile.claudeEffort } : {};
     const containerEnv: Record<string, string> = {
       HOME: os.homedir(),

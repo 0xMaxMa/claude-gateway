@@ -15,7 +15,7 @@ import type { ModelConfig } from '../../src/types';
  *
  * If they drift, some install paths see a model the others don't. These tests
  * pin each current family head as a first-class model, and guard the "bare alias = newest"
- * convention so `opus`/`sonnet`/`fable` always resolve to the latest of each
+ * convention so `opus`/`sonnet`/`fable`/`haiku` always resolve to the latest of each
  * family. They read the REAL template so a hand-edit that updates one file but
  * not the other goes red here.
  */
@@ -106,6 +106,24 @@ describe('model registry — Sonnet 5.5 is a first-class model', () => {
     expect(byAlias(templateModels(), 'sonnet5[1m]')?.id).toBe('claude-sonnet-5[1m]');
     expect(byAlias(DEFAULT_MODELS, 'sonnet46')?.id).toBe('claude-sonnet-4-6');
     expect(byAlias(templateModels(), 'sonnet46')?.id).toBe('claude-sonnet-4-6');
+  });
+});
+
+describe('model registry — Haiku 5.5 is a first-class model', () => {
+  it('DEFAULT_MODELS and the template include Haiku 5.5 with a 200k window', () => {
+    expect(byId(DEFAULT_MODELS, 'claude-haiku-5-5')?.contextWindow).toBe(200000);
+    expect(byId(templateModels(), 'claude-haiku-5-5')?.contextWindow).toBe(200000);
+  });
+
+  it('the bare `haiku` alias resolves to Haiku 5.5 in both registries', () => {
+    expect(byAlias(DEFAULT_MODELS, 'haiku')?.id).toBe('claude-haiku-5-5');
+    expect(byAlias(templateModels(), 'haiku')?.id).toBe('claude-haiku-5-5');
+  });
+
+  it('Haiku 4.5 is kept under the versioned `haiku45` alias', () => {
+    for (const models of [DEFAULT_MODELS, templateModels()]) {
+      expect(byId(models, 'claude-haiku-4-5-20251001')?.alias).toBe('haiku45');
+    }
   });
 });
 
@@ -229,7 +247,7 @@ describe('model registry — Telegram fallback list stays in sync', () => {
     expect(telegramIds).toEqual(codeIds);
   });
 
-  it('maps each alias identically to DEFAULT_MODELS (incl. opus -> Opus 5.5, sonnet -> Sonnet 5.5)', () => {
+  it('maps each alias identically to DEFAULT_MODELS (incl. opus -> Opus 5.5, sonnet -> Sonnet 5.5, haiku -> Haiku 5.5)', () => {
     const codeMap = new Map(DEFAULT_MODELS.map((m) => [m.id, m.alias]));
     for (const m of telegramFallbackModels()) {
       expect(m.alias).toBe(codeMap.get(m.id));
@@ -239,5 +257,7 @@ describe('model registry — Telegram fallback list stays in sync', () => {
     expect(opus?.id).toBe('claude-opus-5-5');
     const sonnet = telegramFallbackModels().find((m) => m.alias === 'sonnet');
     expect(sonnet?.id).toBe('claude-sonnet-5-5');
+    const haiku = telegramFallbackModels().find((m) => m.alias === 'haiku');
+    expect(haiku?.id).toBe('claude-haiku-5-5');
   });
 });

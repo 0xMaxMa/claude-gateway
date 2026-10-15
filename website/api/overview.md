@@ -50,6 +50,8 @@ See [Terminal viewer (`/cli`)](/api/terminal).
 | `POST` | `/api/v1/agents/:agentId/greeting` | Write | Stream a proactive welcome from `GREETING.md` into an existing session (SSE); returns 204 if file absent |
 | `GET` | `/api/v1/models` | Key | List available models — live catalog when configured, `gateway.models` otherwise |
 | `PUT` | `/api/v1/agents/:agentId/model` | Admin | Set the active model for an agent |
+| `PUT` | `/api/v1/agents/:agentId/pstack` | Write | [Set up pstack](/api/agents#put-apiv1agentsagentidpstack) for an agent: which role models its workers load |
+| `DELETE` | `/api/v1/agents/:agentId/pstack` | Write | Remove pstack from an agent; its workers stop loading the plugin |
 
 ## Orchestration and voice {#orchestration-and-voice}
 

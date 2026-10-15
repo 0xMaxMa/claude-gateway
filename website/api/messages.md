@@ -28,36 +28,72 @@ Send a message to an agent. Returns a JSON response or SSE stream.
 
 ### Slash command dispatch {#slash-command-dispatch}
 
-If `message` starts with `/`, the endpoint executes the command instead of forwarding to Claude:
+If `message` starts with one of these commands, the endpoint answers it locally instead of forwarding to Claude. It never reaches the model:
 
 | Command | Description |
 |---------|-------------|
 | `/help` | List supported API slash commands and their behavior |
 | `/session` | Return the current session, selected model and measured context usage |
 | `/sessions` | List sessions in this API chat |
-| `/clear` | Reset model context; keep history and seed the next context with 50 recent messages |
-| `/compact` | Compact Claude Code context without changing chat history |
-| `/stop` | Interrupt the in-flight turn |
-| `/restart` | Gracefully restart the session |
+| `/new [name]` | Create a session in this chat; `result.sessionId` is its ID. Sent with `session_id`, that session stays current and the client opens the new one; sent without it, the request's own new session is the one created (and named) |
+| `/rename <name>` | Rename the session given by `session_id`; without `session_id` it returns `result: { "error": "SESSION_ID_REQUIRED" }` |
+| `/clear` | Reset model context; keep history and seed the next context with 50 recent messages. Confirmation required |
+| `/compact` | Compact Claude Code context without changing chat history. Confirmation required |
+| `/restart` | Gracefully restart the session. Confirmation required |
+| `/stop` | Interrupt the in-flight turn; with orchestration, also choose a task to cancel |
+| `/tasks` | With orchestration: browse this session's tasks, open one, stop it |
 | `/model` | Return the current model for this agent |
+| `/models` | List the available models with the current one marked. Change the model with `PUT /api/v1/agents/:agentId/model` |
+| `/pstack-setup` | Show the [pstack](/guide/pstack) setup and its menu; changes need write access to the agent |
 
-`GET /api/v1/commands` returns the supported API slash commands (including `/help` and `/sessions`) for client command pickers. Channel-specific commands such as `/new` and `/rename` are not advertised by this endpoint.
+`/voice` and `/voices` are answered too, with a pointer to the [voice settings](/api/voice) endpoints: web voice is not a chat command.
+
+`GET /api/v1/commands` returns these commands (name and description) for client command pickers.
 
 Restarting an active response records an intentional interruption, not a process failure. A restart keeps chat history and does not restart the gateway or app container.
 
-Commands execute directly; API clients provide any desired Yes/No confirmation before submission. Voice settings and task operations have dedicated REST endpoints rather than `/voice` or `/tasks` slash dispatch. Unknown slash commands can still be application-defined messages.
+Unknown slash commands, including skill commands such as `/pstack:how`, are ordinary messages for the agent. In orchestration mode (for web chat, `orchestration.channels` must include `api`), three `/pstack:*` cases are answered by the gateway instead: on an agent that is not set up for pstack (a pointer to `/pstack-setup`), for a skill that is not user-invocable, and for a name the plugin has no skill for (with close command names when there are any). Without orchestration mode they reach the agent like any other message. See [pstack](/guide/pstack).
 
-**Command response:**
+#### Command reply {#command-reply}
+
+A command reply has the normal reply shape — `response` (sync) or the `text_delta` and `result` frames (stream) — plus its structured part:
+
+| Field | Description |
+|-------|-------------|
+| `command` | The command that ran, e.g. `"/stop"` |
+| `result` | The command's fields, e.g. `sessions` for `/sessions`, `tasks` and `menuId` for `/stop`, `sessionId` for `/new` |
+| `actions` | Buttons, in display order; `[]` when there are none. Each is `{ "label": string, "command": string }` |
+
+In a stream, the three fields are on the `result` frame. Replies from the model have none of them.
+
+To press a button, send its `command` as the next `message`, with the same `chat_id`, `session_id` and API key. It goes through the same checks as a typed command; menu actions (`/orch …`, `/stop <menu> <n>`) are bound to the session and key that opened them and expire, after which the reply says to run the command again. The reply to a pressed button is another command reply: show its `response`, replace the earlier buttons with its `actions`, and close the menu when `actions` is empty. History keeps the replies; the buttons and a pressed action's command are not stored.
+
+| Command | Actions |
+|---------|---------|
+| `/clear`, `/compact`, `/restart` | `Yes` runs it, `No` cancels. One use each, for five minutes |
+| `/stop` (orchestration) | One per running task, then `Dismiss`. A bare number reply still works |
+| `/tasks` | Task list, Previous/Next, Refresh, task detail with Stop task and Back, Dismiss |
+| `/pstack-setup` | The pstack menu: turn on/off, default effort, a role and its models, reset, close. A change needs write access to the agent |
+
+**Confirmation:** `/clear`, `/compact` and `/restart` first return a prompt with `result: { "confirmationRequired": true }` and Yes/No actions, and do nothing else. Pressing Yes runs the command and returns its normal result. A caller that has already confirmed — an automation, or a client with its own dialog — sends `/clear confirm` (likewise `/compact confirm`, `/restart confirm`) to run it at once. The session endpoints [`POST …/sessions/:sessionId/clear`](/api/sessions#post-apiv1agentsagentidsessionssessionidclear), `/compact` and `/restart` also run without the prompt.
+
+::: warning Upgrading
+Before this confirmation, `/clear`, `/compact` and `/restart` sent as messages ran at once. A script that sends them must now add `confirm` (or call the session endpoints); otherwise it gets the prompt and nothing runs.
+:::
 
 ```json
 {
-  "command": "/session",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000",
+  "agent_id": "alfred",
+  "response": "Reset Claude Code context? Chat history stays unchanged; your next message starts a new context with the latest 50 messages. Choose Yes or No.\n\nOr reply /clear confirm.",
   "session_id": "da19d84a-6a36-4f57-b419-d322d82c4db8",
-  "result": {
-    "name": "My Project Discussion",
-    "messageCount": 42,
-    "contextPercent": 18
-  }
+  "duration_ms": 3,
+  "command": "/clear",
+  "result": { "confirmationRequired": true },
+  "actions": [
+    { "label": "Yes", "command": "/orch 0f6a3c1e-7d0b-4c52-9a43-5a1b2c3d4e5f" },
+    { "label": "No", "command": "/orch 9b2e4d10-1c3a-4f6e-8d7b-6c5d4e3f2a1b" }
+  ]
 }
 ```
 

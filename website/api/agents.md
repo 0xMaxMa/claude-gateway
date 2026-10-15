@@ -195,6 +195,42 @@ curl -X DELETE \
 
 ---
 
+## PUT /api/v1/agents/:agentId/pstack {#put-apiv1agentsagentidpstack}
+
+Set up [pstack](../guide/pstack.md) for an agent: its workers load the `pstack@pstack-claude` Claude Code plugin with these role models. Requires **write** access to the agent (an admin key may change any agent). The plugin must already be installed through Claude Code. A field in the body replaces that field of `agents[].pstack` and a field left out keeps its saved value (`"roles": {}` resets every role to its skill default); changes apply to the agent's next worker.
+
+```bash
+curl -X PUT -H "X-Api-Key: write-key" -H "Content-Type: application/json" \
+  -d '{"roles":{"why investigators":"gpt-6-sol[1m]"},"defaultEffort":"high"}' \
+  http://localhost:10850/api/v1/agents/alfred/pstack
+```
+
+```json
+{ "agentId": "alfred", "pstack": { "roles": { "why investigators": "gpt-6-sol[1m]" }, "defaultEffort": "high" } }
+```
+
+Errors:
+
+| Status | Body | When |
+|--------|------|------|
+| `400` | `{ "error": "<message>", "code": "<CODE>" }` | `code` is `MODEL_ALIAS_NOT_ALLOWED` (an alias where a model ID is required; the message names the ID), `UNKNOWN_MODEL`, `INVALID_EFFORT` (an `@<level>` on a role value that is not a level), `UNKNOWN_PSTACK_ROLE`, `INVALID_PSTACK_CONFIG` (an unknown field, `roles` that is not a JSON object, a `defaultEffort` that is not `session` or a level, or a list of models on a role that is not a panel), `PSTACK_NOT_INSTALLED` or `PSTACK_UNSUPPORTED_AGENT` (an app agent, whose workers run in its container) |
+| `403` | `{ "error": "Write permission required" }` | The key cannot write this agent; checked first, so a write key that is not an admin key gets `403` for an agent that does not exist |
+| `404` | `{ "error": "Agent '<id>' not found" }` | No such agent |
+| `500` | `{ "error": "Failed to save pstack configuration" }` | `config.json` could not be read or written; the cause is logged |
+| `501` | `{ "error": "Agent management not available (no configPath)" }` | The gateway runs without a config file |
+
+CLI: `claude-gateway pstack enable <agentId> [--roles <json>] [--defaultEffort <level>]`.
+
+---
+
+## DELETE /api/v1/agents/:agentId/pstack {#delete-apiv1agentsagentidpstack}
+
+Remove pstack from an agent: its next worker does not load the plugin. Requires **write** access. Returns `{ "agentId": "alfred", "pstack": null }`; `403`, `404` and `501` as for `PUT`.
+
+CLI: `claude-gateway pstack disable <agentId>`.
+
+---
+
 ## GET /api/v1/agents/:agentId/avatar {#get-apiv1agentsagentidavatar}
 
 Serve the agent's avatar image. Requires read access to the agent.

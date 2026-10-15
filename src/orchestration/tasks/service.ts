@@ -16,10 +16,15 @@ import { promisify } from 'util';
 import { taskFailure } from './failure';
 import { WorkerPool } from './pool';
 import { createHash, randomUUID } from 'crypto';
-import { OrchestrationStore, boundedText, payloadHash } from '../store';
+import { OrchestrationStore, LISTED_TASK_SQL, boundedText, payloadHash } from '../store';
 import { resolveOrchestrationConfig, OrchestrationConfig } from '../config';
 import { MAX_INTAKE_INPUTS } from '../conversation-intake';
-import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode } from '../types';
+import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode, PublicTaskSnapshot, publicTask } from '../types';
+import type { Effort } from '../../agent/model-registry';
+import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
+
+/** Parent states a subagent runs under; any other parent can neither start nor wait for one. */
+export const RUNNING_PARENT: readonly string[] = ['starting', 'running', 'interrupting'];
 
 /** Refs the agent may name itself; the gateway's own additions are bounded separately by MAX_INTAKE_INPUTS. */
 export const MAX_AGENT_CONTEXT_REFS = 64;
@@ -40,7 +45,9 @@ export function mergeContextRefs(supplied: unknown, inputRefs: string[]): unknow
   return [...new Set([...assertAgentContextRefs(supplied), ...inputRefs])];
 }
 
-export interface SpawnTask { browserFields?:unknown; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal'; }
+export interface SpawnTask { browserFields?:unknown; computerInputs?:TaskRevision["computerInputs"]; gatewayTarget?: import("../types").GatewayTaskTarget; workingDirectory?: string; title: string; instructions: string; targetProfile: string; skill?: import('../skills').TaskSkill; contextRefs?: string[]; continueTaskId?: string; continuationPolicy?: 'after_success' | 'after_terminal';
+  /** Model id already resolved against the registry by the caller; `requestedModel` is what was asked for. */
+  model?: string; requestedModel?: string; effort?: import('../../agent/model-registry').Effort; }
 
 /** How many finished tasks the per-turn index page keeps. Unfinished tasks are never dropped;
  * older finished ones stay reachable through task_status with an explicit task_id. */
@@ -53,6 +60,13 @@ export function handoffCommandId(inputId: string): string {
   return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`;
 }
 
+/** The live execution state an index row carries. The process sample, its timestamps and the
+ * quiet/activity status are refreshed every observation, so including them made an unchanged
+ * task look changed and resent it on every turn; task_status still returns all of them. */
+function indexExecution(execution: NonNullable<TaskSnapshot['execution']>) {
+  const { phase, activeTools, lastTool, lastProgressAt, attemptId } = execution;
+  return { phase, activeTools, lastProgressAt, attemptId, ...(lastTool ? { lastTool: { name: lastTool.name, status: lastTool.status, ...(lastTool.exitCode !== undefined ? { exitCode: lastTool.exitCode } : {}) } } : {}) };
+}
 export type TaskIndexEntry = ReturnType<typeof taskIndexEntry>;
 /** One index row: identity, live state and how to fetch the rest — never a report body.
  * A finished task's progress, execution observation and workflow checkpoint/review history
@@ -66,15 +80,31 @@ export function taskIndexEntry(task: TaskSnapshot) {
     createdAt: task.createdAt, updatedAt: task.updatedAt,
     workflow: terminal ? undefined : task.workflow,
     latestProgress: terminal ? undefined : task.latestProgress,
-    execution: terminal ? undefined : task.execution,
+    execution: terminal || !task.execution ? undefined : indexExecution(task.execution),
     pendingQuestion: task.pendingQuestion, failure: task.failure,
     cancellation: task.cancellation, replacedByTaskId: task.replacedByTaskId,
     workstreamId: task.workstreamId, continueTaskId: task.continueTaskId, continuationPolicy: task.continuationPolicy,
+    model: task.model, effort: task.effort,
+    ...(task.parentTaskId ? { parentTaskId: task.parentTaskId, rootTaskId: task.rootTaskId } : {}),
     resultAvailable: Boolean(task.result),
     actionLog: task.actionLog,
     computerConnection:task.computerConnection, automationController:task.automationController??"agent", gatewayTarget: task.gatewayTarget, automationSession: automationSession(task),
     details: { tool: 'task_status', task_id: task.taskId },
   };
+}
+
+/** What a pstack run actually did, for the decision turn that reports it: the pstack skills its
+ * tree invoked (Skill calls, or the skill a skill-worker was assigned) and its subagents by model.
+ * Absent when it used neither, so every other task's status is unchanged. */
+function pstackEvidence(store: OrchestrationStore, task: TaskSnapshot, assigned: string | undefined, tree: TaskSnapshot[]) {
+  const skills = new Set(assigned?.startsWith('pstack:') ? [assigned] : []);
+  // One query for the whole tree, not one per subagent.
+  for (const row of store.all("SELECT DISTINCT json_extract(payload_json,'$.payload.input.skill') AS skill FROM conversation_events WHERE conversation_id=? AND type='tool.activity' AND json_extract(payload_json,'$.task_id') IN (SELECT value FROM json_each(?)) AND json_extract(payload_json,'$.payload.name')='Skill' AND json_extract(payload_json,'$.payload.type')='tool_use'", task.conversationId, JSON.stringify([task.taskId, ...tree.map(child => child.taskId)])))
+    if (typeof row.skill === 'string' && row.skill.startsWith('pstack:')) skills.add(row.skill.slice(0, 256));
+  const subagentModels: Record<string, number> = {};
+  for (const child of tree) { const key = [child.model ?? 'parent model', child.effort].filter(Boolean).join(' '); subagentModels[key] = (subagentModels[key] ?? 0) + 1; }
+  if (!skills.size && !tree.length) return {};
+  return { pstackEvidence: { ...(skills.size ? { skills: [...skills].sort() } : {}), ...(tree.length ? { subagents: tree.length, subagentModels } : {}) } };
 }
 
 const ACTION_LOG_MAX = 12;
@@ -169,18 +199,36 @@ export class TaskService {
     if (!task || task.conversationId !== conversationId) throw new OrchestrationError('ACCESS_DENIED');
     return task;
   }
-  status(conversationId: string, principalId: string, taskId?: string): Array<TaskSnapshot & { currentInstructions?: string }> {
+  status(conversationId: string, principalId: string, taskId?: string): Array<PublicTaskSnapshot & { currentInstructions?: string; harness?: 'claude' | 'codex' }> {
     this.store.assertMember(conversationId, principalId);
-    if (taskId) { const task = this.owned(taskId, conversationId); delete task.skill; return [this.withRecentTools(task)]; }
-    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
-      (SELECT id FROM tasks WHERE conversation_id=? AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT 100))
+    if (taskId) {
+      const task = this.owned(taskId, conversationId), assigned = task.skill?.name;
+      // Gateway-managed tasks (browser/computer verification paths) never run pstack: no tree, no evidence.
+      if (task.gatewayTarget) return [publicTask(this.withRecentTools(task))];
+      // A root lists its whole subagent tree; each entry names its parent.
+      const tree = task.parentTaskId ? [] : this.store.all("SELECT snapshot_json FROM tasks WHERE conversation_id=? AND json_extract(snapshot_json,'$.rootTaskId')=? ORDER BY created_at,rowid", task.conversationId, task.taskId)
+        .map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot);
+      // Each subagent's latest attempt, in one query.
+      const latest = new Map(tree.length ? this.store.all("SELECT a.task_id,a.payload_json FROM task_attempts a WHERE a.task_id IN (SELECT value FROM json_each(?)) AND a.generation=(SELECT MAX(b.generation) FROM task_attempts b WHERE b.task_id=a.task_id)", JSON.stringify(tree.map(child => child.taskId)))
+        .map(row => [String(row.task_id), JSON.parse(String(row.payload_json)) as TaskAttempt]) : []);
+      const subagents = tree.map(child => {
+          const ran = latest.get(child.taskId);
+          // model · harness · effort · state · duration, for the root's final report.
+          return { taskId: child.taskId, parentTaskId: child.parentTaskId, title: child.title, state: child.state, model: child.model, harness: ran?.harness, effort: child.effort, subagentType: child.subagentType,
+            ...(ran?.startedAt ? { durationMs: (TERMINAL_TASK_STATES.has(child.state) ? child.updatedAt : Date.now()) - ran.startedAt } : {}),
+            ...(child.failure ? { failure: child.failure.code } : {}) };
+        });
+      return [publicTask({ ...this.withRecentTools(task), ...(subagents.length ? { subagents } : {}), ...pstackEvidence(this.store, task, assigned, tree) })];
+    }
+    // As in indexPage: a root's status lists its subagents.
+    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND ${LISTED_TASK_SQL} AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
+      (SELECT id FROM tasks WHERE conversation_id=? AND ${LISTED_TASK_SQL} AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT 100))
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`, conversationId, conversationId).map(row => {
       const task = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
       const waiting = task.state === 'queued' && this.store.get('SELECT waiting_json FROM provider_waits WHERE entity_id=?', task.taskId);
       if (waiting) task.providerWaiting = JSON.parse(String(waiting.waiting_json));
       else delete task.providerWaiting;
-      delete task.skill; // Installed skill bodies are worker-only execution context.
-      return this.withRecentTools(task);
+      return publicTask(this.withRecentTools(task));
     });
   }
   /** Current reports are lossless. Other tasks are an index, never partial reports.
@@ -196,7 +244,7 @@ export class TaskService {
     ).map(row => String(row.task_id)));
     // Only a reporting task is hydrated. Indexed rows are read straight from the stored
     // snapshot, so they cost no per-task evidence queries and no report bodies either.
-    const rows = new Map<string, TaskSnapshot | TaskIndexEntry>(
+    const rows = new Map<string, PublicTaskSnapshot | TaskIndexEntry>(
       this.indexPage(conversationId).map(task => [task.taskId, taskIndexEntry(task)]));
     // An old task can finish after it has fallen outside the recent-task page.
     for (const id of reporting) rows.set(id, this.status(conversationId, principalId, id)[0]);
@@ -204,12 +252,14 @@ export class TaskService {
   }
   /** Bounded recent-task page: every unfinished task, plus only the newest finished ones. */
   private indexPage(conversationId: string): TaskSnapshot[] {
-    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
-      (SELECT id FROM tasks WHERE conversation_id=? AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT ${INDEXED_FINISHED_TASKS}))
+    // Subagents are listed under their root (task_status with the root's task_id), not as separate work,
+    // unless one awaits reconciliation: then it needs its own Retry cleanup.
+    return this.store.all(`SELECT snapshot_json FROM tasks WHERE conversation_id=? AND ${LISTED_TASK_SQL} AND (state NOT IN ('completed','failed','cancelled') OR (json_extract(snapshot_json,'$.automationSession.status') IN ('idle','blocked') AND json_extract(snapshot_json,'$.automationSession.idleSince')+json_extract(snapshot_json,'$.automationSession.idleTimeoutMs')>${Date.now()}) OR id IN
+      (SELECT id FROM tasks WHERE conversation_id=? AND ${LISTED_TASK_SQL} AND state IN ('completed','failed','cancelled') ORDER BY created_at DESC,id DESC LIMIT ${INDEXED_FINISHED_TASKS}))
       ORDER BY CASE WHEN state IN ('completed','failed','cancelled') THEN 1 ELSE 0 END,created_at DESC,id DESC`,
       conversationId, conversationId).map(row => JSON.parse(String(row.snapshot_json)) as TaskSnapshot);
   }
-  private withRecentTools(task: TaskSnapshot): TaskSnapshot & { currentInstructions?: string } {
+  private withRecentTools(task: TaskSnapshot): TaskSnapshot & { currentInstructions?: string; harness?: 'claude' | 'codex' } {
     task.automationSession = automationSession(task);
     task.recentTools = this.store.all("SELECT payload_json,occurred_at FROM conversation_events WHERE conversation_id=? AND type='tool.activity' AND json_extract(payload_json,'$.task_id')=? ORDER BY seq DESC LIMIT 8", task.conversationId, task.taskId).map(row => {
       const event = JSON.parse(String(row.payload_json)).payload;
@@ -222,6 +272,10 @@ export class TaskService {
         .map(row => String(row.path).slice(0,2048)),
       currentFilesystemVerified: false,
     };
+    // The harness is an attempt's execution choice (Codex can fall back to Claude), so report the latest one.
+    const attempt = this.store.get('SELECT payload_json FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', task.taskId);
+    const harness = attempt ? (JSON.parse(String(attempt.payload_json)) as TaskAttempt).harness : undefined;
+    if (harness) (task as TaskSnapshot & { harness?: string }).harness = harness;
     // Direct corrections bypass the parent inference turn. Hydrated status and
     // notifications must carry the current goal so verification cannot use stale memory.
     return ['browser','computer'].includes(task.gatewayTarget?.adapter ?? '')
@@ -243,7 +297,7 @@ export class TaskService {
     if (command.contextRefs?.some(ref => typeof ref !== 'string' || ref.length > 1024)) throw new OrchestrationError('INVALID_INPUT', 'Each context_refs entry must be a string of at most 1024 characters.');
     if (!['default-worker', 'media-worker', 'skill-worker', 'gateway-managed'].includes(command.targetProfile)) throw new OrchestrationError('UNKNOWN_WORKER_PROFILE');
     if ((command.targetProfile === 'gateway-managed') !== Boolean(command.gatewayTarget)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
-    if (command.gatewayTarget && (command.workingDirectory || command.skill || command.contextRefs?.length)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
+    if (command.gatewayTarget && (command.workingDirectory || command.skill || command.contextRefs?.length || command.model || command.effort)) throw new OrchestrationError('INVALID_GATEWAY_TARGET');
     return this.command(context, 'spawn', command, true, () => {
       const conversation = this.store.get('SELECT * FROM conversations WHERE id=?', context.conversationId)!;
       let replaced:TaskSnapshot|undefined;
@@ -296,7 +350,12 @@ export class TaskService {
         }
       }
       if (command.skill) task.skill = command.skill;
-      if (context.model && !command.gatewayTarget) task.model = context.model;
+      // A follow-up keeps the model and effort its predecessor was explicitly given, like its directory and worker session.
+      const requested = command.model ? command : prior?.requestedModel ? { model: prior.model, requestedModel: prior.requestedModel } : undefined;
+      if (requested?.model) { task.model = requested.model; task.requestedModel = requested.requestedModel ?? requested.model; }
+      else if (context.model && !command.gatewayTarget) task.model = context.model;
+      const effort = command.effort ?? (command.model ? undefined : prior?.effort);
+      if (effort) task.effort = effort;
       const projectRoot = command.workingDirectory || (this.config.tasks.workspaceMode === 'host' && prior?.resourceProfile?.mode === 'host' ? prior.resourceProfile.projectRoot : undefined) || this.config.tasks.projectRoot || this.defaultProjectRoot;
       if (projectRoot && !command.gatewayTarget) task.resourceProfile = { projectRoot, mode: this.config.tasks.workspaceMode };
       this.store.run('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)', task.taskId, task.conversationId, task.state, 1, 1, null, JSON.stringify(task), now, now);
@@ -547,6 +606,8 @@ export class TaskService {
       }
       if(replacedByTaskId)task.replacedByTaskId=replacedByTaskId;
       if(closes||replacedByTaskId)this.store.saveTask(task,task.stateVersion);
+      // A subagent whose stop was unconfirmed outlives its ended parent; this retries its cleanup.
+      this.cancelSubagents(task);
       return task;
     }
     if (task.state === 'cancel_requested') {
@@ -570,7 +631,7 @@ export class TaskService {
     task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: task.state==='cancel_requested' ? 'Disconnecting; waiting for execution and access to stop.' : 'Session ended. Existing files and prior effects are retained.' };
     this.store.saveTask(task, version);
     if (task.state === 'cancelled') this.notify(task);
-    else this.store.enqueue('interrupt', `cancel:${taskId}:${task.stateVersion}`, { taskId });
+    else { this.store.enqueue('interrupt', `cancel:${taskId}:${task.stateVersion}`, { taskId }); this.cancelSubagents(task); }
     return task;
   }
   /** A settled computer round still owns device access until explicit revocation. */
@@ -735,9 +796,17 @@ export class TaskService {
           return undefined;
         }
       }
+      // A subagent's ancestors hold their slots while they wait for it. They are not counted
+      // against it, so a chain can always extend (no deadlock), while siblings still queue
+      // within the usual limits (no tree takes every worker process).
+      const ancestors: TaskSnapshot[] = [];
+      for (let id = task.parentTaskId; id;) { const parent = this.store.task(id); if (!parent) break; ancestors.push(parent); id = parent.parentTaskId; }
+      // A subagent only runs for a parent that is running; after a restart its parent awaits reconciliation.
+      if (task.parentTaskId && !RUNNING_PARENT.includes(ancestors[0]?.state ?? '')) return undefined;
+      const holding = ancestors.filter(parent => parent.activeAttemptId).length;
       const active = this.store.all('SELECT conversation_id,COUNT(*) AS n FROM tasks WHERE active_attempt_id IS NOT NULL GROUP BY conversation_id');
-      if (active.reduce((n, row) => n + Number(row.n), 0) >= this.config.tasks.maxConcurrentPerAgent || Number(active.find(row => row.conversation_id === task.conversationId)?.n ?? 0) >= this.config.tasks.maxConcurrentPerConversation) return undefined;
-      const worker = task.gatewayTarget ? { sessionId: task.gatewayTarget.sessionId, workerId: undefined } : this.pool.acquire(task, this.config.tasks.maxConcurrentPerAgent, this.config.tasks.workerIdleTtlMs);
+      if (active.reduce((n, row) => n + Number(row.n), 0) - holding >= this.config.tasks.maxConcurrentPerAgent || Number(active.find(row => row.conversation_id === task.conversationId)?.n ?? 0) - holding >= this.config.tasks.maxConcurrentPerConversation) return undefined;
+      const worker = task.gatewayTarget ? { sessionId: task.gatewayTarget.sessionId, workerId: undefined } : this.pool.acquire(task, this.config.tasks.maxConcurrentPerAgent + holding, this.config.tasks.workerIdleTtlMs);
       if (!worker) return undefined;
       task.workerId = worker.workerId;
       if (task.gatewayTarget) delete task.gatewayDispatch;
@@ -807,13 +876,15 @@ export class TaskService {
       const startedAt = attempt.startedAt ?? attempt.processIdentity?.startedAt ?? task.createdAt;
       // Reviews alone never end a task (#557): past the limit without a new
       // worker report, stop the attempt through the cancellation path.
-      const reportedAt = Math.max(startedAt, task.latestProgress?.source === 'worker' ? task.latestProgress.observedAt : 0);
+      let reportedAt = Math.max(startedAt, task.latestProgress?.source === 'worker' ? task.latestProgress.observedAt : 0);
       const limit = this.config.tasks.progressStaleLimitMs;
+      // A parent blocked in subagent_wait cannot report; its subagents' reports are its progress.
+      if (limit && task.state === 'running' && observation.observedAt - reportedAt >= limit) reportedAt = Math.max(reportedAt, this.subtreeReportedAt(task.taskId));
       if (limit && task.state === 'running' && observation.observedAt - reportedAt >= limit) {
         this.stopStalled(task, observation.observedAt - reportedAt, observation);
         return;
       }
-      if (observation.observedAt - startedAt >= this.config.tasks.progressStaleMs) {
+      if (observation.observedAt - startedAt >= this.config.tasks.progressStaleMs && observation.observedAt - this.subtreeReportedAt(task.taskId, startedAt) >= this.config.tasks.progressStaleMs) {
         if (observation.resultSeenAt !== undefined) {
           this.supervise(task, 'result_seen_not_terminal', `The worker returned a final result ${Math.max(0, Math.round((observation.observedAt - observation.resultSeenAt) / 1000))}s ago, but ${observation.pendingBackground ?? 0} native background task(s) have not reported completion, so the task is not terminal yet. The result is accepted automatically once the background grace period passes without activity. Report what is still being awaited; stop background work that is no longer needed.`, observation.observedAt);
         } else {
@@ -821,6 +892,14 @@ export class TaskService {
         }
       }
     });
+  }
+  /** The latest worker progress report, or finish, anywhere below a task; `floor` when there is none later. */
+  private subtreeReportedAt(taskId: string, floor = 0): number {
+    const row = this.store.get(`WITH RECURSIVE below(id) AS (SELECT id FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId')=?
+        UNION SELECT t.id FROM tasks t JOIN below b ON json_extract(t.snapshot_json,'$.parentTaskId')=b.id)
+      SELECT MAX(MAX(CASE WHEN json_extract(snapshot_json,'$.latestProgress.source')='worker' THEN json_extract(snapshot_json,'$.latestProgress.observedAt') ELSE 0 END),
+        MAX(CASE WHEN state IN ('completed','failed','cancelled') THEN updated_at ELSE 0 END)) AS at FROM tasks WHERE id IN (SELECT id FROM below)`, taskId);
+    return Math.max(floor, Number(row?.at ?? 0));
   }
   private stopStalled(task: TaskSnapshot, quietMs: number, observation: import('../execution-observation').ExecutionObservation): void {
     const minutes = Math.round(quietMs / 60000);
@@ -832,6 +911,7 @@ export class TaskService {
     this.store.saveTask(task, task.stateVersion);
     this.store.appendEvent(task.conversationId, 'task.progress_stalled', { taskId: task.taskId, attemptId: observation.attemptId, quietMs, limitMs: this.config.tasks.progressStaleLimitMs, resultSeenAt: observation.resultSeenAt, pendingBackground: observation.pendingBackground }, task.taskId);
     this.store.enqueue('interrupt', `stalled:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
+    this.cancelSubagents(task);
   }
   /** A supervisor stop is a failure with its evidence, not a user/agent cancellation.
    * An unconfirmed stop keeps the cleanup code every other unconfirmed stop uses. */
@@ -941,6 +1021,8 @@ export class TaskService {
       const receipt = this.workerReceipt(attemptId, actionId, 'question', question);
       if (receipt.prior) return receipt.prior as TaskSnapshot;
       if (task.state !== 'running' || task.revision !== attempt.revision) throw new OrchestrationError('SUPERSEDED_QUESTION');
+      // As with a native subagent, only its parent reads its output and nothing could answer it here.
+      if (task.parentTaskId) throw new OrchestrationError('SUBAGENT_INPUT_UNAVAILABLE', 'A subagent cannot ask questions. Finish now and put the open question, with what you found so far, in your final result; your parent decides.');
       if(computerReport&&task.gatewayTarget?.adapter==='computer')task.computerReport=computerReport;
       task.state = 'waiting_input';
       task.pendingQuestion = { questionId: randomUUID(), text: question, revision: attempt.revision };
@@ -1046,11 +1128,105 @@ export class TaskService {
     task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: [done, `Running queued command: ${JSON.stringify(next.text.slice(0, 120))}${rest.length ? ` (${rest.length} more waiting)` : ''}.`].filter(Boolean).join('\n').slice(0, 4096) };
   }
   private notify(task: TaskSnapshot): void {
+    // A native subagent dies with its parent session; a durable child would otherwise be orphaned.
+    if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation') this.cancelSubagents(task);
+    // Subagents report to the parent worker (subagent_wait), never to the channel, except an
+    // unconfirmed stop no running parent can see: it holds a slot until someone retries its cleanup.
+    if (task.parentTaskId && !(task.state === 'needs_reconciliation' && !RUNNING_PARENT.includes(this.store.task(task.parentTaskId)?.state ?? ''))) return;
     const input = this.store.get('SELECT binding_id FROM conversation_inputs WHERE id=?', task.initiatingInputId)!;
     const notificationId = randomUUID();
     this.store.run(`INSERT INTO notifications(id,conversation_id,task_id,task_state_version,originating_binding_id) VALUES(?,?,?,?,?) ON CONFLICT(task_id,task_state_version) DO NOTHING`,
       notificationId, task.conversationId, task.taskId, task.stateVersion, input.binding_id);
     this.store.enqueue('notification', `notification:${task.taskId}:${task.stateVersion}`, { conversationId: task.conversationId, taskId: task.taskId, notificationId });
+  }
+  private cancelSubagents(parent: TaskSnapshot): void {
+    for (const row of this.store.all("SELECT snapshot_json FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId')=? AND state NOT IN ('completed','failed','cancelled')", parent.taskId)) {
+      const child = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
+      // cancelOwned cascades below each child (at cancel_requested, or via notify once it ends).
+      this.cancelOwned(child.conversationId, child.taskId);
+    }
+  }
+  /**
+   * subagent_spawn: a worker's subagent becomes a task in the same
+   * conversation, with the worker's owner, capabilities and project, linked to
+   * its parent. It is scheduled and admitted like any other task.
+   */
+  spawnSubagent(attemptId: string, generation: number, actionId: string, spec: { title: string; instructions: string; model?: string; effort?: Effort; subagentType?: string; readonly?: boolean }): TaskSnapshot {
+    boundedText(spec.title, 512); boundedText(spec.instructions);
+    return this.store.transaction(() => {
+      const { task: parent } = this.active(attemptId, generation);
+      const receipt = this.workerReceipt(attemptId, actionId, 'subagent_spawn', JSON.stringify(spec));
+      if (receipt.prior) return receipt.prior as TaskSnapshot;
+      if (!['starting', 'running'].includes(parent.state)) throw new OrchestrationError('STATE_CONFLICT', `This task is ${parent.state}; it cannot start subagents.`);
+      const depth = (parent.depth ?? 0) + 1;
+      if (depth > SUBAGENT_MAX_DEPTH) throw new OrchestrationError('SUBAGENT_DEPTH_EXCEEDED', `Subagents nest at most ${SUBAGENT_MAX_DEPTH} levels below the root worker. Do this work inline.`);
+      // The same admission as task_spawn: no new work while the conversation drains, and both queue limits.
+      if (this.store.get('SELECT status FROM conversations WHERE id=?', parent.conversationId)?.status !== 'active') throw new OrchestrationError('DRAINING');
+      const queuedRows = this.store.all("SELECT conversation_id,COUNT(*) AS n FROM tasks WHERE state='queued' GROUP BY conversation_id");
+      const queued = Number(queuedRows.find(row => row.conversation_id === parent.conversationId)?.n ?? 0);
+      if (queued >= this.config.tasks.maxQueuedPerConversation || queuedRows.reduce((n, row) => n + Number(row.n), 0) >= this.config.tasks.maxQueuedPerAgent) {
+        throw new OrchestrationError('QUEUE_FULL', `This agent already has the most queued tasks it allows. Wait for a subagent to finish (subagent_wait) or do this work inline.`);
+      }
+      const now = Date.now();
+      const task: TaskSnapshot = { taskId: randomUUID(), conversationId: parent.conversationId, agentId: parent.agentId, agentSessionId: parent.agentSessionId,
+        ownerPrincipalId: parent.ownerPrincipalId, initiatingInputId: parent.initiatingInputId, title: spec.title, targetProfile: 'default-worker',
+        state: 'queued', stateVersion: 1, revision: 1, appliedRevision: 0, timing: { phase: 'queued', since: now, measuredFrom: now, totals: {} },
+        capabilities: parent.capabilities, createdAt: now, updatedAt: now,
+        parentTaskId: parent.taskId, rootTaskId: parent.rootTaskId ?? parent.taskId, depth,
+        // A read-only subagent cannot hand out write access to its own subagents.
+        ...(spec.subagentType ? { subagentType: spec.subagentType } : {}), ...(spec.readonly || parent.readonly ? { readonly: true } : {}) };
+      task.workstreamId = task.taskId;
+      const model = spec.model ?? parent.model;
+      if (model) task.model = model;
+      const effort = spec.effort ?? parent.effort;
+      if (effort) task.effort = effort;
+      if (parent.resourceProfile) task.resourceProfile = parent.resourceProfile;
+      this.store.run('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)', task.taskId, task.conversationId, task.state, 1, 1, null, JSON.stringify(task), now, now);
+      const revision: TaskRevision = { taskId: task.taskId, revision: 1, instructions: spec.instructions, contextRefs: [], mode: 'when_ready', originatingInputId: parent.initiatingInputId };
+      this.store.run('INSERT INTO task_revisions VALUES(?,?,?)', task.taskId, 1, JSON.stringify(revision));
+      this.store.appendEvent(task.conversationId, 'task.created', task, task.taskId);
+      this.store.enqueue('schedule', `schedule:${task.taskId}:1`, { taskId: task.taskId });
+      this.saveWorkerReceipt(attemptId, actionId, 'subagent_spawn', receipt.hash, task);
+      return task;
+    });
+  }
+  /** A subagent's parent, grandparent and so on, nearest first; empty for a root task. */
+  ancestorIds(taskId: string): string[] {
+    const ids: string[] = [];
+    for (let id = this.store.task(taskId)?.parentTaskId; id && ids.length <= SUBAGENT_MAX_DEPTH;) { ids.push(id); id = this.store.task(id)?.parentTaskId; }
+    return ids;
+  }
+  /** The calling worker's own subagents among `taskIds`; anything else is denied. */
+  private subagents(attemptId: string, generation: number, taskIds: unknown): TaskSnapshot[] {
+    const { task: parent } = this.active(attemptId, generation);
+    if (!Array.isArray(taskIds) || !taskIds.length || taskIds.length > 32 || taskIds.some(id => typeof id !== 'string')) throw new OrchestrationError('INVALID_INPUT');
+    return taskIds.map(id => {
+      const child = this.store.task(id as string);
+      if (!child || child.parentTaskId !== parent.taskId) throw new OrchestrationError('ACCESS_DENIED');
+      return child;
+    });
+  }
+  /** subagent_wait: results once every listed subagent has finished; undefined while any is still working. */
+  subagentResults(attemptId: string, generation: number, taskIds: unknown) {
+    const children = this.subagents(attemptId, generation, taskIds);
+    if (children.some(child => !TERMINAL_TASK_STATES.has(child.state) && child.state !== 'needs_reconciliation')) return undefined;
+    return children.map(child => ({ task_id: child.taskId, state: child.state, model: child.model, effort: child.effort,
+      ...(child.result ? { result: child.result.summary } : {}),
+      // Files it staged are delivered with the root's result; listed so the parent can refer to them.
+      ...this.stagedFiles(child), ...(child.failure ? { failure: { code: child.failure.code, message: child.failure.message } } : {}),
+      ...(child.state === 'needs_reconciliation' ? { note: 'Its process could not be confirmed stopped and may still be running. Cancel it with subagent_cancel before relying on files it touched.' } : {}) }));
+  }
+  private stagedFiles(task: TaskSnapshot): { staged_files?: string[] } {
+    if (task.state !== 'completed' || !task.result?.artifactIds.length) return {};
+    const names = this.store.all("SELECT f.name FROM task_files f WHERE f.task_id=? AND f.id IN (SELECT value FROM json_each(?)) ORDER BY f.created_at,f.id", task.taskId, JSON.stringify(task.result.artifactIds)).map(row => String(row.name));
+    return names.length ? { staged_files: names } : {};
+  }
+  /** subagent_cancel: cancel the calling worker's own subagents and everything below them. */
+  cancelSubagentTasks(attemptId: string, generation: number, taskIds: unknown) {
+    return this.store.transaction(() => this.subagents(attemptId, generation, taskIds).map(child => {
+      const task = this.cancelOwned(child.conversationId, child.taskId);
+      return { task_id: task.taskId, state: task.state };
+    }));
   }
   /** Parent independently checks a fresh, scoped browser observation. Never clears an uncertain mutation. */
   verifyBrowser(context:CommandContext,taskId:string,revision:number,requestId:string,evidenceId:string,evidence:string,check:()=>void):TaskSnapshot {

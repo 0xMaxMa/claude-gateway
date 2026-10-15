@@ -2,7 +2,7 @@ import { AGENT_WORKFLOW_RULES, WORKER_WORKFLOW_RULES } from '../orchestration/wo
 import { checkpointSettings } from '../orchestration/tasks/checkpoint-hook';
 import { readFileSync } from 'fs';
 import { homedir } from 'os';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { OrchestrationError, SessionRole } from '../orchestration/types';
 
 export const DEFAULT_WORKER_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write', 'Skill'];
@@ -20,8 +20,8 @@ export interface RuntimeProfile {
   mcpConfigPath: string;
   overlay: string;
   responseSchema?: Record<string, unknown>;
-  /** Per-process Claude effort for a short control decision; never persisted to settings. */
-  claudeEffort?: 'low';
+  /** Per-process Claude effort (a short control decision, or a task's requested effort); never persisted to settings. */
+  claudeEffort?: import('../agent/model-registry').Effort;
   /** Existing loadWorkspace/CLAUDE.md composition, supplied without rewriting files. */
   context?: string;
   /** Scheduler already holds a gateway-wide process lease for this worker. */
@@ -33,6 +33,8 @@ export interface RuntimeProfile {
   /** Captured optional evaluation-tool inventory for this process; permissions remain live. */
   jevEnabled?: boolean;
   browserEnabled?: boolean;
+  /** Read-only worker: Codex runs in its read-only sandbox; Claude gets read tools through workerTools and only the gateway MCP config. */
+  readOnly?: boolean;
   /** Optional connector restriction for workers. Agent decisions never receive connectors. */
   connectorsAllowed?: boolean;
   originSessionId?: string;
@@ -48,6 +50,11 @@ export interface RuntimeProfile {
   attemptId?: string;
   /** Gateway-built plugin containing only this task skill and its resources. */
   skillPluginDir?: string;
+  /** Host workers: per-plugin `enabledPlugins` overrides, merged by Claude Code
+   * over the user's own settings key by key, so other plugins are untouched. */
+  pluginOverrides?: Record<string, boolean>;
+  /** Host workers: native tools removed from the inventory (`--disallowedTools`). */
+  disallowedTools?: string[];
   /** A trusted container-discovered skill. These paths never refer to host files. */
   containerSkill?: { name: string; filePath: string; resourceRoot: string; content: string };
   checkpointCommand?: string;
@@ -84,8 +91,12 @@ export function runtimeProfileArgs(profile: RuntimeProfile, extraFlags: string[]
   if (profile.role === 'worker' && profile.hostExecution) {
     // Omitted means the complete native inventory (including Bash). An explicit
     // resolved policy must not silently widen back to all tools on the host.
-    return ['--tools', profile.workerTools === undefined ? 'default' : profile.workerTools.join(','), '--mcp-config', profile.mcpConfigPath,
-      ...(profile.checkpointCommand ? ['--settings', JSON.stringify({hooks:checkpointSettings(profile.checkpointCommand).hooks})] : []),
+    const settings = { ...(profile.checkpointCommand ? { hooks: checkpointSettings(profile.checkpointCommand).hooks } : {}),
+      ...(profile.pluginOverrides ? { enabledPlugins: profile.pluginOverrides } : {}) };
+    // --tools limits built-in tools only; a read-only worker must not load the user's or a plugin's MCP servers either.
+    return ['--tools', profile.workerTools === undefined ? 'default' : profile.workerTools.join(','), ...(profile.readOnly ? ['--strict-mcp-config'] : []), '--mcp-config', profile.mcpConfigPath,
+      ...(Object.keys(settings).length ? ['--settings', JSON.stringify(settings)] : []),
+      ...(profile.disallowedTools?.length ? ['--disallowedTools', profile.disallowedTools.join(',')] : []),
       ...(profile.skillPluginDir ? ['--plugin-dir', profile.skillPluginDir] : []),
       '--append-system-prompt', [profile.context, profile.overlay].filter(Boolean).join('\n\n')];
   }
@@ -103,6 +114,24 @@ export function runtimeProfileArgs(profile: RuntimeProfile, extraFlags: string[]
     '--strict-mcp-config', '--mcp-config', profile.mcpConfigPath,
     '--setting-sources', profile.containerExecution || profile.checkpointCommand ? '' : 'user', '--settings', JSON.stringify({ ...(profile.checkpointCommand ? checkpointSettings(profile.checkpointCommand) : { disableAllHooks: true }), enabledPlugins: disabledPlugins }),
     '--append-system-prompt', [profile.context, profile.overlay].filter(Boolean).join('\n\n')];
+}
+
+/** Sessions outside orchestration get per-plugin `enabledPlugins` overrides too. They join a
+ * `--settings` already in claude.extraFlags (inline JSON or a JSON file, relative to `cwd`)
+ * rather than adding a second one. Undefined when that value is not a JSON object. */
+export function extraFlagsWithPluginOverrides(extraFlags: string[], overrides: Record<string, boolean>, cwd: string): string[] | undefined {
+  const at = extraFlags.findIndex(flag => flag === '--settings' || flag.startsWith('--settings='));
+  if (at < 0) return [...extraFlags, '--settings', JSON.stringify({ enabledPlugins: overrides })];
+  const joined = extraFlags[at] !== '--settings', value = joined ? extraFlags[at].slice('--settings='.length) : extraFlags[at + 1];
+  if (value === undefined) return undefined;
+  let current: unknown;
+  try { current = JSON.parse(value.trimStart().startsWith('{') ? value : readFileSync(resolve(cwd, value), 'utf8')); } catch { return undefined; }
+  if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined;
+  const plugins = (current as { enabledPlugins?: unknown }).enabledPlugins;
+  const settings = JSON.stringify({ ...current, enabledPlugins: { ...(plugins && typeof plugins === 'object' && !Array.isArray(plugins) ? plugins : {}), ...overrides } });
+  const next = [...extraFlags];
+  if (joined) next[at] = '--settings=' + settings; else next[at + 1] = settings;
+  return next;
 }
 
 /**

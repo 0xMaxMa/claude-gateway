@@ -1,5 +1,6 @@
 import { resetRegisteredRoutes, getRegisteredRoutes, RouteDef } from './route-registry';
 import { createCronRouter } from './cron-router';
+import { createPstackRouter } from './pstack-router';
 
 /**
  * Populate the route manifest by instantiating every CONVERTED router with
@@ -16,6 +17,8 @@ export function collectManifest(): RouteDef[] {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   createCronRouter(undefined as any);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  createPstackRouter(undefined as any, new Map(), undefined, () => undefined);
 
   return getRegisteredRoutes();
 }

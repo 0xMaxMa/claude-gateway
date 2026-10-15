@@ -84,6 +84,16 @@ export interface TaskSnapshot {
   workerId?: string;
   skill?: import('./skills').TaskSkill;
   model?: string;
+  /** What task_spawn asked for (an id or alias) when it named a model; `model` is the resolved id. */
+  requestedModel?: string;
+  effort?: import('../agent/model-registry').Effort;
+  /** pstack subagent linkage: set on a child spawned by a worker with subagent_spawn. */
+  parentTaskId?: string;
+  rootTaskId?: string;
+  /** 1 for a root worker's child, up to SUBAGENT_MAX_DEPTH. */
+  depth?: number;
+  subagentType?: string;
+  readonly?: boolean;
   resourceProfile?: { projectRoot: string; mode: 'isolated-worktree' | 'shared-lock' | 'host' | 'container' };
   taskId: string;
   conversationId: string;
@@ -118,6 +128,18 @@ export interface TaskSnapshot {
   createdAt: number;
   updatedAt: number;
 }
+/** A task's skill as everything outside its worker sees it. */
+export type PublicTaskSkill = Pick<import('./skills').TaskSkill, 'name' | 'args' | 'invocation'>;
+/** The one projection for every copy of a task that leaves the worker: tool results (replayed
+ * receipts included), task_status and state events. The body and host paths are worker-only
+ * execution context; a pstack playbook is ~25 KB, and a tool result stays in the agent's
+ * context for the rest of its session, so only the name, args and invocation are kept. */
+export function publicTask<T extends { skill?: import('./skills').TaskSkill | PublicTaskSkill }>(task: T): Omit<T, 'skill'> & { skill?: PublicTaskSkill } {
+  if (!task.skill) return task;
+  const { name, args, invocation } = task.skill;
+  return { ...task, skill: { name, args, ...(invocation ? { invocation } : {}) } };
+}
+export type PublicTaskSnapshot = Omit<TaskSnapshot, 'skill'> & { skill?: PublicTaskSkill };
 export interface TaskRevision {
   /** Explicit navigation belongs to one revision; never replay it on an answer/recovery. */
   browserNavigation?: {url:string;revision:number};
@@ -147,6 +169,7 @@ export interface TaskAttempt {
   /** Immutable execution choice for this attempt; never infer it from today's agent model. */
   harness?: 'claude' | 'codex';
   harnessModel?: string;
+  effort?: import('../agent/model-registry').Effort;
   startedAt?: number;
   workerId?: string;
   resumeSession?: boolean;

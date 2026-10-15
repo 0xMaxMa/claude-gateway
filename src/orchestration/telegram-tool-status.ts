@@ -1,7 +1,13 @@
 import type { AgentConfig } from '../types';
-import { OrchestrationStore } from './store';
+import { OrchestrationStore, ROOT_TASK_SQL } from './store';
 import { scrubText } from '../agent/incident';
 import { extractToolDetail } from '../utils/tool-labels';
+import { RUNNING_PARENT } from './tasks/service';
+
+/** A task that is working, or will be: not a queued subagent whose parent stopped running (it never
+ * starts, e.g. while the parent waits for the user's answer). */
+const working = (task: string) => `${task}.state IN ('queued','starting','running','interrupting','cancel_requested') AND NOT (${task}.state='queued'
+  AND json_extract(${task}.snapshot_json,'$.parentTaskId') IS NOT NULL AND COALESCE((SELECT p.state FROM tasks p WHERE p.id=json_extract(${task}.snapshot_json,'$.parentTaskId')),'') NOT IN (${RUNNING_PARENT.map(state => `'${state}'`).join(',')}))`;
 
 type Status = {since: number; messageId?: number; text?: string; details?: string; nextAt: number; seenAt: number; sentAt?: number; moveAttemptAt?: number; obsoleteMessageId?: number; cleanupAt?: number};
 /** One editable, best-effort status message per conversation. It never owns task execution. */
@@ -13,7 +19,7 @@ export class TelegramToolStatus {
   private ticking = false;
   private token = '';
   constructor(private store: OrchestrationStore, private agent: () => AgentConfig,
-    private enabled: () => boolean, private request: typeof fetch = fetch) {}
+    private enabled: () => boolean, private request: typeof fetch = fetch, private modelLabel: (id: string) => string = id => id) {}
   start(): void {
     if (this.timer || this.abort.signal.aborted) return;
     this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 2000);
@@ -27,7 +33,7 @@ export class TelegramToolStatus {
     this.ticking = true;
     try {
       const rows = this.store.all(`SELECT c.* FROM conversations c WHERE c.source='telegram' AND (
-        EXISTS(SELECT 1 FROM tasks t WHERE t.conversation_id=c.id AND t.state IN ('queued','starting','running','interrupting','cancel_requested')) OR
+        EXISTS(SELECT 1 FROM tasks t WHERE t.conversation_id=c.id AND ${working('t')}) OR
         EXISTS(SELECT 1 FROM conversation_decisions d WHERE d.conversation_id=c.id AND d.state IN ('running','interrupting')) OR
         EXISTS(SELECT 1 FROM conversation_events e WHERE e.conversation_id=c.id AND e.type='tool.activity' AND e.occurred_at>=?)
       ) LIMIT 100`, Math.max(this.startedAt, Date.now()-10000));
@@ -43,11 +49,11 @@ export class TelegramToolStatus {
         if (this.abort.signal.aborted || !this.enabled()) break;
         const id=String(row.id);
         const activeSince=this.statuses.has(id)?undefined:this.store.get(`SELECT MIN(at) AS at FROM (
-          SELECT created_at AS at FROM tasks WHERE conversation_id=? AND state IN ('queued','starting','running','interrupting','cancel_requested')
+          SELECT created_at AS at FROM tasks WHERE conversation_id=? AND ${working('tasks')}
           UNION ALL SELECT started_at AS at FROM conversation_decisions WHERE conversation_id=? AND state IN ('running','interrupting'))`,id,id)?.at;
         const status: Status=this.statuses.get(id) ?? {nextAt:0,seenAt:Date.now(),since:activeSince==null?this.startedAt:Number(activeSince)};
         if (Date.now()<status.nextAt) continue;
-        const busy=Boolean(this.store.get("SELECT id FROM tasks WHERE conversation_id=? AND state IN ('queued','starting','running','interrupting','cancel_requested') LIMIT 1",id)
+        const busy=Boolean(this.store.get(`SELECT id FROM tasks WHERE conversation_id=? AND ${working('tasks')} LIMIT 1`,id)
           ||this.store.get("SELECT id FROM conversation_decisions WHERE conversation_id=? AND state IN ('running','interrupting') LIMIT 1",id));
         // A replacement is sent first. Retry deleting only the known old ID;
         // keep the new status editable and avoid creating further replacements.
@@ -92,13 +98,14 @@ export class TelegramToolStatus {
         // Same history/current/elapsed layout as main's Telegram typing manager.
         const last=details.slice(-5), current=last.pop()??'🧠 Thinking...';
         if (!status.messageId && !details.length && Date.now()-status.since<5000) continue;
-        const signature=[...last,current].join('\n');
+        const panels=subagentLines(this.store,id,this.modelLabel);
+        const signature=[...last,current,...panels].join('\n');
         if (!move && status.details===signature && Date.now()-status.seenAt<10000) continue;
         const totalSecs=Math.max(0,Math.floor((Date.now()-status.since)/1000));
         const hours=Math.floor(totalSecs/3600),mins=Math.floor((totalSecs%3600)/60),secs=totalSecs%60;
         const elapsed=hours>0?`${hours}h ${mins}m`:mins>0?(secs>0?`${mins}m ${secs}s`:`${mins}m`):`${secs}s`;
         const secrets=Object.entries(process.env).filter(([k,v])=>/TOKEN|SECRET|PASSWORD|API_KEY/i.test(k)&&v&&v.length>=8).map(([,v])=>v!);
-        const text=scrubText([...last.map(d=>`☑️ : ${d}`),last.length?`🕐 : ${current}`:current,`(elapsed: ${elapsed})`].join('\n'),[token,...secrets]).slice(0,3500);
+        const text=scrubText([...last.map(d=>`☑️ : ${d}`),last.length?`🕐 : ${current}`:current,...panels,`(elapsed: ${elapsed})`].join('\n'),[token,...secrets]).slice(0,3500);
         if (!move && status.text===text) continue;
         status.nextAt=Date.now()+4000;status.seenAt=Date.now();
         if (this.statuses.size>=1000 && !this.statuses.has(id)) continue;
@@ -152,4 +159,42 @@ export function telegramToolDetail(name:string,input:Record<string,unknown>):str
   if (name==='mcp__gateway__task_update'||name==='mcp__gateway__task_answer') return '📝 Updating task';
   if (name==='Skill') return `📚 Using skill: ${String(input.skill??'assigned skill').replace(/^orchestration-task:/,'').slice(0,200)}`;
   return extractToolDetail(name,input);
+}
+
+/**
+ * One line per unfinished root task that has subagents (a pstack panel), e.g.
+ * `interrogate: 2/4 · ✅ Opus 5.5 · ⏳ GPT 6 Sol · ❌ Haiku 5.5 (timeout)`.
+ * Subagents never message the chat themselves; this line is how the user sees them.
+ */
+export function subagentLines(store: OrchestrationStore, conversationId: string, modelLabel: (id: string) => string = id => id): string[] {
+  // Unfinished roots, then their direct subagents (the panel; a reviewer's own helpers are not
+  // members) through the parentTaskId index: three queries however many roots there are.
+  const roots = store.all(`SELECT id,json_extract(snapshot_json,'$.title') AS title FROM tasks WHERE conversation_id=? AND state NOT IN ('completed','failed','cancelled')
+    AND ${ROOT_TASK_SQL} ORDER BY created_at LIMIT 50`, conversationId);
+  if (!roots.length) return [];
+  const counts = new Map(store.all(`SELECT json_extract(snapshot_json,'$.parentTaskId') AS parent,COUNT(*) AS total,SUM(state IN ('completed','failed','cancelled')) AS done
+    FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId') IN (SELECT value FROM json_each(?)) GROUP BY parent`, JSON.stringify(roots.map(root => String(root.id))))
+    .map(row => [String(row.parent), { total: Number(row.total), done: Number(row.done) }]));
+  const shown = roots.filter(root => counts.get(String(root.id))?.total).slice(0, 5);
+  if (!shown.length) return [];
+  const children = new Map<string, import('./types').TaskSnapshot[]>();
+  for (const row of store.all(`SELECT parent,snapshot_json FROM (SELECT json_extract(snapshot_json,'$.parentTaskId') AS parent,snapshot_json,
+      ROW_NUMBER() OVER (PARTITION BY json_extract(snapshot_json,'$.parentTaskId') ORDER BY created_at,rowid) AS n
+      FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId') IN (SELECT value FROM json_each(?))) WHERE n<=32 ORDER BY parent,n`, JSON.stringify(shown.map(root => String(root.id))))) {
+    const list = children.get(String(row.parent)) ?? [];
+    list.push(JSON.parse(String(row.snapshot_json)));
+    children.set(String(row.parent), list);
+  }
+  return shown.map(root => {
+    const entries = (children.get(String(root.id)) ?? []).map(child => {
+      const label = child.model ? modelLabel(child.model) : 'subagent';
+      if (child.state === 'completed') return `✅ ${label}`;
+      if (child.state === 'failed' || child.state === 'cancelled') return `❌ ${label} (${child.state === 'cancelled' ? 'cancelled' : (child.failure?.code ?? 'failed').toLowerCase().replace(/_/g, ' ')})`;
+      if (child.state === 'waiting_input') return `❓ ${label}`;
+      return `⏳ ${label}`;
+    });
+    const count = counts.get(String(root.id))!;
+    const title = String(root.title ?? 'subagents').replace(/\s+/g, ' ').trim().slice(0, 80);
+    return `${title}: ${count.done}/${count.total} · ${entries.join(' · ')}`.slice(0, 600);
+  });
 }

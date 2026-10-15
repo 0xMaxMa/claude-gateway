@@ -36,6 +36,7 @@ These are lifecycle categories, not a promise that every configuration field sup
 | `gateway.api.keys` | API authentication reads the updated key list. Changing keys invalidates outstanding PTY/voice tickets and closes those authenticated sockets; clients must authenticate again |
 | `gateway.models` | The model catalog and subsequent model selection read the new list |
 | `gateway.workers`, `agents[].workers` | Future worker launches use the new harness/environment policy. Existing native processes retain their launch settings |
+| `agents[].pstack` | The agent's next worker loads (or stops loading) the pstack plugin with the new sheet. Running workers keep theirs |
 | `gateway.processLimits` | Admission limits update without killing existing processes. Lowering limits below current usage blocks new admissions until leases drain |
 | `agents[].session` | Idle timeout and concurrency checks read the current settings |
 | `agents[].heartbeat`, `agents[].allow_tools`, agent display metadata | Subsequent checks and display reads use the new values. An existing issued tool ticket retains its scoped permissions except for the additional live safemode authorization check |

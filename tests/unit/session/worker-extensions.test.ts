@@ -99,3 +99,35 @@ test('Claude settings environment resolves MCP placeholders with local precedenc
   file(join(cwd, '.mcp.json'), { mcpServers: { docs: { url: '${MCP_ENDPOINT}' } } });
   expect(readClaudeExtensions(cwd, { HOME: home, MCP_ENDPOINT: 'https://base.example/mcp' }).servers.claude__docs.url).toBe('https://local.example/mcp');
 });
+
+// #582: discovery lists a plugin only when the worker will load it. pstack is
+// enabled host-wide by Claude Code, but only set-up agents' workers load it.
+test('discovery applies the worker plugin overrides, so pstack skills appear only for set-up agents', () => {
+  const path = join(home, '.claude', 'plugins', 'cache', 'pstack-claude', 'pstack', '0.9.82');
+  file(join(home, '.claude', 'settings.json'), { enabledPlugins: { 'pstack@pstack-claude': true } });
+  file(join(home, '.claude', 'plugins', 'installed_plugins.json'), { plugins: { 'pstack@pstack-claude': [{ scope: 'user', installPath: path }] } });
+  file(join(path, '.claude-plugin', 'plugin.json'), { name: 'pstack' });
+  skill(join(path, 'skills', 'how', 'SKILL.md'), 'how');
+  expect(readClaudeExtensions(cwd, { HOME: home }, { 'pstack@pstack-claude': false }).skills).toEqual([]);
+  expect(readClaudeExtensions(cwd, { HOME: home }, { 'pstack@pstack-claude': true }).skills.map(s => s.name)).toEqual(['pstack:how']);
+});
+
+// Review of #582: a Codex worker is a leaf (no pstack plugin, sheet or skills),
+// so a set-up agent's Codex discovery must not list pstack's skills either.
+test('Codex discovery never lists pstack skills, even for a set-up agent', async () => {
+  const path = join(home, '.claude', 'plugins', 'cache', 'pstack-claude', 'pstack', '0.9.82');
+  file(join(home, '.claude', 'settings.json'), { enabledPlugins: { 'pstack@pstack-claude': true } });
+  file(join(home, '.claude', 'plugins', 'installed_plugins.json'), { plugins: { 'pstack@pstack-claude': [{ scope: 'user', installPath: path }] } });
+  file(join(path, '.claude-plugin', 'plugin.json'), { name: 'pstack' });
+  skill(join(path, 'skills', 'how', 'SKILL.md'), 'how');
+  const env = { HOME: process.env.HOME, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR };
+  process.env.HOME = home; delete process.env.CLAUDE_CONFIG_DIR;
+  try {
+    const agent = { id: 'a', workspace: cwd, pstack: {}, orchestration: { tasks: { workspaceMode: 'host' } } } as any;
+    const gateway = { gateway: { workers: { codex: { bin: join(root, 'missing-codex') } } } } as any;
+    expect((await discoverWorkerExtensions(agent, gateway, undefined, 'claude')).skills.map(s => s.name)).toEqual(['pstack:how']);
+    expect((await discoverWorkerExtensions(agent, gateway, undefined, 'codex')).skills).toEqual([]);
+  } finally {
+    for (const [name, value] of Object.entries(env)) if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
+});

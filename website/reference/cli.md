@@ -245,6 +245,13 @@ SQLite database directly. Legacy mode returns `ORCHESTRATION_DISABLED`.
 | `claude-gateway crons status` | GET | `/v1/crons/status` | key | Cron scheduler status |
 | `claude-gateway crons update <id> [--name <v>] [--type <v>] [--schedule <v>] [--scheduleKind <v>] [--scheduleAt <v>] [--timezone <v>] [--command <v>] [--prompt <v>] [--telegram <v>] [--discord <v>] [--timeoutMs <v>] [--deleteAfterRun] [--enabled]` | PUT | `/v1/crons/:id` | key | Update a cron job |
 
+### `pstack`
+
+| Command | Method | Path | Auth | Description |
+|---------|--------|------|------|-------------|
+| `claude-gateway pstack disable <agentId>` | DELETE | `/v1/agents/:agentId/pstack` | key | Remove pstack from an agent; its workers stop loading the plugin |
+| `claude-gateway pstack enable <agentId> [--roles <v>] [--defaultEffort <v>]` | PUT | `/v1/agents/:agentId/pstack` | key | Set up pstack for an agent: its workers load the pstack Claude Code plugin with these role models (full model IDs) |
+
 
 ## Doctor and local repairs
 

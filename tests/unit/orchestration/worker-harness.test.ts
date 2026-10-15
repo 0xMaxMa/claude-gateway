@@ -15,6 +15,12 @@ describe('worker harness selection', () => {
     expect(resolveWorkerHarness(agent,g,'claude-example').harness).toBe('claude');
     expect(resolveWorkerHarness(agent,g,'unknown/gpt-example').harness).toBe('claude');
   });
+  // Review of #581: task_spawn resolves `opaque-alias[1m]` to a suffixed id no row lists verbatim.
+  it('keeps a configured row\'s routing when its id carries a context suffix', () => {
+    const g: GatewayConfig = {...gateway, gateway: {...gateway.gateway,workers: {harness:'auto'}, models:[{id:'opaque-alias',alias:'fast',label:'Example',contextWindow:1000,workerHarness:'codex',workerModel:'gpt-native'}]}};
+    expect(resolveWorkerHarness(agent,g,'opaque-alias[1m]')).toEqual({harness:'codex',config:{model:'gpt-native',contextWindow:1000000}});
+    expect(resolveWorkerHarness(agent,g,'opaque-alias[200k]')).toEqual({harness:'codex',config:{model:'gpt-native',contextWindow:200000}});
+  });
   it('lets agents explicitly stay on Claude and merges provider settings by field', () => {
     const g: GatewayConfig = {...gateway,gateway:{...gateway.gateway,workers:{harness:'auto',codex:{baseUrl:'https://provider.example/v1',apiKeyEnv:'VOICELESS_KEY'}}}};
     expect(resolveWorkerHarness({...agent,workers:{harness:'claude'}},g,agent.claude.model).harness).toBe('claude');

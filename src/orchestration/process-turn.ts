@@ -5,7 +5,7 @@ import { DEFAULT_WORKER_TOOLS, nativeCompanionTools } from '../session/runtime-p
 import type { RequestToolSchemas } from '../session/request-tool-capture';
 import { structuredProviderMessage } from './provider-message';
 import { executionTool } from './tool-name';
-import { TurnUsageCollector, TokenUsage, RequestUsage } from './token-usage';
+import { TurnUsageCollector, TokenUsage, RequestUsage, TurnExtensions } from './token-usage';
 import { toolOutcome, TurnObservation, ToolOutcome } from './execution-observation';
 import type { InputImage } from '../session/input-image';
 import type { SessionProcess } from '../session/process';
@@ -31,7 +31,7 @@ export interface ProcessTurn {
 }
 /** Reuses the existing process/history lifecycle; a turn ends on a terminal
  * event or confirmed process exit. The owner decides task recovery policy. */
-export interface ManagedTurnMetrics { contextWindow?: CodexContextMeasurement; toolIds: string[]; inputTokens: number; totalTokens: number; startedAt: number; endedAt?: number; usage?: TokenUsage | null; requests?: RequestUsage[]; loadedTools?: string[] | null; usedTools?: string[]; contextTools?: string[] | null; schemaCoverage?: {measured:number;total:number}; model?: string; }
+export interface ManagedTurnMetrics { contextWindow?: CodexContextMeasurement; toolIds: string[]; inputTokens: number; totalTokens: number; startedAt: number; endedAt?: number; usage?: TokenUsage | null; requests?: RequestUsage[]; loadedTools?: string[] | null; usedTools?: string[]; usedSkills?: string[]; extensions?: TurnExtensions; contextTools?: string[] | null; schemaCoverage?: {measured:number;total:number}; model?: string; }
 function providerErrorText(value: unknown, codes: string[], depth = 0, budget = { nodes: 256 }): string {
   if (depth >= 8 || --budget.nodes < 0) return '';
   if (typeof value === 'string') return value.slice(0, 4096);

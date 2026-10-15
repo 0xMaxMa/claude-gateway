@@ -47,7 +47,7 @@ Send a second message and confirm that the agent answers. This tests both delive
 4. Inspect the pending request and approve the code using the CLI above. A group request adds the group ID to `groupAllowlist`.
 5. Mention the bot's username or reply to one of its messages to trigger a response when `requireMention` is true.
 
-A message filtered by Telegram cannot initiate pairing. Gateway bot commands are DM-only and are dropped in groups, so use a plain message after configuring delivery. Turning `requireMention` off only helps if Telegram actually delivers all group messages.
+A message filtered by Telegram cannot initiate pairing, and neither can a command: use a plain message after configuring delivery. Turning `requireMention` off only helps if Telegram actually delivers all group messages.
 
 ## Access configuration
 
@@ -85,14 +85,19 @@ Once paired, use these commands in the bot's private chat:
 | `/compact` | Compact Claude Code context; keep chat history unchanged |
 | `/stop` | Interrupt the active turn |
 | `/restart` | Confirm a graceful session restart |
-| `/model` | Show the current model |
+| `/model` | Show the current model (view only; an argument is ignored). Switch with `/models` |
 | `/models` | Open the model picker; selecting restarts sessions, Dismiss cancels |
+| `/pstack_setup` | Set up [pstack](/guide/pstack) for this agent with buttons (direct message); `/pstack_setup <lines>` types the change |
+
+In an approved group, `/stop`, `/new`, `/rename` and `/pstack_setup` (which only answers that it works in a direct message, so the agent's setup is not posted in the group) are answered there, typed as `/command` or `/command@<bot>` without a separate mention. The other commands reply in the group that they are only available in a direct message with the bot (`/cli` only where the terminal viewer is on). A group that is not approved, a bot whose `dmPolicy` is `disabled`, or a command addressed to another bot gets no reply.
 
 The model list comes from the configured model provider's `/v1/models` catalog when available, with `gateway.models` as fallback. Changing an agent model affects its other chats too.
 
 ## Voice notes and background tasks
 
 With `gateway.orchestration: true`, Telegram voice notes and audio attachments can use the agent's configured speech-to-text provider. Enable `agents[].voice` and its `notes` settings first; see [voice setup](/guide/voice) for provider keys, models and prerequisites. Photos and file attachments keep their normal access checks.
+
+If a voice note cannot be transcribed for a temporary reason, the failure reply in a private chat has a **🔁 Retry** button that transcribes the kept recording again. See [Voice-message failures and retry](../guide/voice.md#voice-message-failures-and-retry).
 
 In a paired private chat, `/voice` opens Always / Only reply voice message / Off buttons. `/voice on`, `/voice auto` and `/voice off` also set the mode directly. Every chat starts Off, and its choice persists across session switches and gateway restarts. `auto` adds audio to replies originating from voice input and their task results; a later typed instruction makes that turn text-only. `/voices` selects a voice through a paginated provider catalog. Agent voice must be enabled and `voice.notes.replyWithVoice` must permit spoken replies. Voice capability and chat preference are separate settings.
 
@@ -106,7 +111,7 @@ In a paired private chat, `/voice` opens Always / Only reply voice message / Off
 | `409 Conflict` | Another gateway, development process or old deployment is polling the same token; keep one receiver |
 | No private reply | Bot was started, request approved, DM policy enabled, agent execution working |
 | Private chat works, group silent | Privacy Mode/admin status, remove/re-add after privacy changes, group approval, mention gate |
-| `/start` does nothing in a group | Commands are DM-only; pair using a normal delivered group message |
+| A command in a group only says to use a direct message | Expected: these commands work in the bot's private chat. In a group that is not approved yet the bot stays silent; pair it with a plain group message |
 | Missing environment variable at startup | Token variable must exist in the gateway service environment |
 
 Implementation references: [receiver](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/telegram/receiver.ts), [configuration types](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/types.ts), and [access/API handling](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/api/router.ts).

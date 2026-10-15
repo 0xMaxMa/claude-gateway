@@ -344,6 +344,9 @@ export interface AgentConfig {
     extraFlags: string[];
   };
   workers?: WorkerHarnessConfig;
+  /** pstack (Claude Code plugin `pstack@pstack-claude`) for this agent's workers.
+   * Present = set up; absent = workers never load the plugin. See src/pstack/. */
+  pstack?: import('./pstack/config').AgentPstackConfig;
   /** Heartbeat / cron settings */
   heartbeat?: {
     rateLimitMinutes?: number; // default 30
@@ -573,7 +576,7 @@ export interface GatewayConfig {
       enabled?: boolean;         // default true — reviewer + writer + curator active
       mode?: 'propose' | 'auto'; // propose = review queue, auto = live write. default "auto"
       minToolCalls?: number;     // gating threshold, default 5
-      reviewModel?: string;      // cheap model for the reviewer, default haiku
+      reviewModel?: string;      // cheap model for the reviewer, default claude-haiku-4-5-20251001
       maxAutoSkills?: number;    // curator cap per agent, default 50 (0 = unbounded)
       maxAgeDays?: number;       // prune auto-skills unused this long, default 30 (0 = disabled)
       minUsesToKeep?: number;    // an auto-skill must load >= N times or it's pruned, default 2
@@ -619,7 +622,7 @@ export interface GatewayConfig {
       quietMinutes?: number;        // skip if a session was active within this window, default 30
       lookbackDays?: number;        // how far back to scan sessions, default 3
       maxChangesPerRun?: number;    // cap on proposed ops, default 3 (0 = disabled)
-      reviewModel?: string;         // cheap model for the reviewer, default haiku
+      reviewModel?: string;         // cheap model for the reviewer, default claude-haiku-4-5-20251001
       promotionThreshold?: number;  // min candidate score to promote, default 0.6
       minRecallCount?: number;      // a fact must recur >= N times to promote, default 2
       // planning-67: auto-drain an over-budget MEMORY.md by routing episodic

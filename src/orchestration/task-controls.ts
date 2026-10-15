@@ -1,7 +1,7 @@
 import {automationSession} from './tasks/automation-session';
 import { timingTotals } from './tasks/timing';
 import { executionDescription, executionDetails } from './execution-observation';
-import { OrchestrationStore } from './store';
+import { OrchestrationStore, LISTED_TASK_SQL } from './store';
 import { TaskService } from './tasks/service';
 import { OrchestrationError, TaskSnapshot } from './types';
 
@@ -31,7 +31,7 @@ export class TaskControls {
   list(sessionId: string, principalId: string, page = 0, pageSize = 10, includeFinished = false) {
     if (!Number.isSafeInteger(page) || page < 0 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new OrchestrationError('INVALID_TASK_PAGE');
     for (const row of this.store.all('SELECT id FROM conversations WHERE agent_session_id=?',sessionId)) this.store.assertMember(String(row.id),principalId);
-    const scope = "FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE c.agent_session_id=?" + (includeFinished ? "" : " AND t.state NOT IN ('completed','failed','cancelled')");
+    const scope = `FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE c.agent_session_id=? AND ${LISTED_TASK_SQL}` + (includeFinished ? "" : " AND t.state NOT IN ('completed','failed','cancelled')");
     const total=Number(this.store.get(`SELECT COUNT(*) AS total ${scope}`,sessionId)!.total);
     const pages=Math.max(1,Math.ceil(total/pageSize));page=Math.min(page,pages-1);
     const tasks=this.store.all(`SELECT t.snapshot_json ${scope} ORDER BY t.created_at,t.id LIMIT ? OFFSET ?`,sessionId,pageSize,page*pageSize)

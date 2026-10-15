@@ -6,13 +6,18 @@ import { mkdirSync, chmodSync } from 'fs';
 import { dirname } from 'path';
 import { createHash, randomUUID } from 'crypto';
 import { ORCHESTRATION_SCHEMA_V1 } from './migrations/schema';
-import { ConversationScope, OrchestrationError, OrchestrationEvent, InputModality, TaskSnapshot, TaskAttempt } from './types';
+import { ConversationScope, OrchestrationError, OrchestrationEvent, InputModality, TaskSnapshot, TaskAttempt, publicTask } from './types';
 import type { ExecutionCapabilities } from './types';
 
 export type Row = Record<string, string | number | null>;
 export interface InputReceipt { inputId: string; conversationId: string; bindingId: string; }
 /** Ingress key prefix of the internal recovery input; its model is a snapshot, never a user selection. */
 export const INTAKE_RECOVERY_PREFIX = 'intake-recovery:';
+/** Root tasks: subagents belong to their root (its task_status lists them), not to the chat's task list. */
+export const ROOT_TASK_SQL = "json_extract(snapshot_json,'$.parentTaskId') IS NULL";
+/** Tasks the user sees and controls: the roots, plus any subagent whose stop could not be confirmed
+ * (its process may still be running and it holds a slot until someone retries its cleanup). */
+export const LISTED_TASK_SQL = `(${ROOT_TASK_SQL} OR state='needs_reconciliation')`;
 
 export interface AcceptInput {
   /** Trusted installed-skill snapshot, retained for mailbox recovery. */
@@ -107,7 +112,8 @@ export class OrchestrationStore {
           question_ids_json TEXT NOT NULL, text TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending');`);
         this.db.exec(`CREATE INDEX IF NOT EXISTS conversations_session ON conversations(agent_session_id);
           CREATE INDEX IF NOT EXISTS response_voice_resume ON assistant_responses(conversation_id,created_at,id) WHERE state='completed';
-          CREATE INDEX IF NOT EXISTS delivery_voice_resume ON deliveries(response_id,state) WHERE modality='audio';`);
+          CREATE INDEX IF NOT EXISTS delivery_voice_resume ON deliveries(response_id,state) WHERE modality='audio';
+          CREATE INDEX IF NOT EXISTS task_subagents ON tasks(json_extract(snapshot_json,'$.parentTaskId')) WHERE json_extract(snapshot_json,'$.parentTaskId') IS NOT NULL;`);
         this.db.exec('CREATE TABLE IF NOT EXISTS browser_voice(session_id TEXT NOT NULL, principal_id TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), since INTEGER NOT NULL, PRIMARY KEY(session_id,principal_id))');
         this.db.exec('CREATE TABLE IF NOT EXISTS response_audio(response_id TEXT PRIMARY KEY REFERENCES assistant_responses(id),audio BLOB NOT NULL,created_at INTEGER NOT NULL)');
         this.db.exec('CREATE TABLE IF NOT EXISTS telegram_tts_voices(chat_id TEXT PRIMARY KEY, provider TEXT NOT NULL, voice_id TEXT NOT NULL)');
@@ -392,9 +398,11 @@ export class OrchestrationStore {
     }
     // State events are notifications, not the result store. Large results remain
     // complete in the snapshot/attempt and are retrieved through task_status.
-    const eventTask = task.result && Buffer.byteLength(JSON.stringify(task)) > 65536
-      ? { ...task, result: undefined, resultAvailable: true, resultRef: { tool: 'task_status', task_id: task.taskId } }
-      : task;
+    // The skill body is worker-only context, so it is dropped before the size check too.
+    const visible = publicTask(task);
+    const eventTask = visible.result && Buffer.byteLength(JSON.stringify(visible)) > 65536
+      ? { ...visible, result: undefined, resultAvailable: true, resultRef: { tool: 'task_status', task_id: task.taskId } }
+      : visible;
     this.appendEvent(task.conversationId, 'task.state_changed', eventTask, task.taskId);
   }
   saveAttempt(attempt: TaskAttempt): void {

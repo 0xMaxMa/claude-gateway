@@ -14,6 +14,7 @@
  */
 
 import { claudeCommand, pathWithNativeBin } from '../../session/claude-bin';
+import { PSTACK_OFF_SETTINGS } from '../../pstack/plugin-info';
 import type { ReviewProposal, ResolvedSkillLearningCfg } from './types';
 
 /** Hard ceiling on a reviewer spawn — it must never wedge. */
@@ -94,7 +95,7 @@ export function makeClaudeSpawn(reviewModel: string): ClaudeSpawnFn {
     const { command: claudeBin, args: binArgs } = claudeCommand();
     const args = [...binArgs, '-p', '--output-format', 'json', '--model', reviewModel, ...extraArgs,
       '--tools', '', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: {} }),
-      '--settings', JSON.stringify({ disableAllHooks: true })];
+      '--settings', JSON.stringify({ disableAllHooks: true, ...PSTACK_OFF_SETTINGS })];
 
     return new Promise((resolve) => {
       let done = false;

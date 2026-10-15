@@ -1,0 +1,492 @@
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { request } from 'http';
+import { OrchestrationStore } from '../../../src/orchestration/store';
+import { DecisionService } from '../../../src/orchestration/decisions';
+import { TaskService } from '../../../src/orchestration/tasks/service';
+import { TaskBridge } from '../../../src/orchestration/bridge';
+import type { CommandContext, TaskAttempt, TaskSnapshot } from '../../../src/orchestration/types';
+import type { ModelConfig } from '../../../src/types';
+import { pstackClaudeConfig } from '../../helpers/pstack-fixture';
+import { SUBAGENT_READONLY } from '../../../src/pstack/overlay';
+import { recoverOrchestration } from '../../../src/orchestration/recovery';
+
+/**
+ * pstack subagents as gateway tasks (#583). A worker of a set-up agent gets
+ * subagent_spawn/subagent_wait/subagent_cancel in place of Claude Code's
+ * native Agent; each subagent is a child task linked to its parent, ends with
+ * it, and reports to it rather than to the channel.
+ */
+
+const MODELS: ModelConfig[] = [
+  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', alias: 'sonnet', contextWindow: 200000 },
+  { id: 'gpt-6-astra[1m]', label: 'GPT 6 Astra', alias: 'gpt6astra', contextWindow: 1050000 },
+];
+
+let root: string, store: OrchestrationStore, tasks: TaskService, bridge: TaskBridge, context: CommandContext;
+let fixture: ReturnType<typeof pstackClaudeConfig>, previous: string | undefined, n = 0;
+beforeEach(async () => {
+  fixture = pstackClaudeConfig();
+  previous = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
+  root = mkdtempSync(join(tmpdir(), 'pstack-subagents-'));
+  store = new OrchestrationStore(':memory:', 'a');
+  tasks = new TaskService(store, { tasks: { workspaceMode: 'host', maxConcurrentPerAgent: 10, maxConcurrentPerConversation: 10 } }, root);
+  bridge = new TaskBridge(tasks); bridge.models = async () => MODELS; await bridge.start();
+  const input = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's', source: 'api', accountId: 'u', principalId: 'u', chatId: 'c', threadKey: '' }, text: 'Review the change' });
+  context = { ...input, ...new DecisionService(store).begin(input.conversationId, 'u', [input.inputId]), principalId: 'u', execute: true, writeMemory: false, actionId: '' };
+  jest.spyOn(console, 'warn').mockImplementation(() => {});
+});
+afterEach(async () => {
+  await bridge.close(); store.close(); rmSync(root, { recursive: true, force: true }); fixture.cleanup();
+  if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
+  jest.restoreAllMocks();
+});
+
+/** A running worker attempt for a task. */
+function running(task: TaskSnapshot): TaskAttempt {
+  const attempt = tasks.claim(task.taskId)!;
+  tasks.started(attempt.attemptId, attempt.generation);
+  return attempt;
+}
+function rootWorker(): { task: TaskSnapshot; attempt: TaskAttempt } {
+  const task = tasks.spawn({ ...context, model: 'claude-sonnet-5-5', actionId: `root-${++n}` }, { title: 'Root', instructions: 'Use pstack', targetProfile: 'default-worker', effort: 'high' });
+  return { task, attempt: running(task) };
+}
+async function call(attempt: TaskAttempt, tool: string, args: Record<string, unknown>, subagents = true, readonly = false): Promise<any> {
+  const dir = join(root, `ticket-${++n}`);
+  bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation, subagents, readonly }, dir, root);
+  const auth = JSON.parse(readFileSync(join(dir, 'ticket.json'), 'utf8'));
+  return new Promise((resolve, reject) => {
+    const req = request(auth.url, { method: 'POST' }, res => { let b = ''; res.on('data', c => b += c); res.on('end', () => resolve(JSON.parse(b))); });
+    req.setHeader('Authorization', 'Bearer ' + auth.token); req.on('error', reject);
+    req.end(JSON.stringify({ tool, args, action_id: `act-${n}` }));
+  });
+}
+const spawn = (attempt: TaskAttempt, args: Record<string, unknown>) => call(attempt, 'subagent_spawn', { description: 'Review', prompt: 'Review the diff', run_in_background: true, ...args });
+const complete = (attempt: TaskAttempt, summary: string) => tasks.finish(attempt.attemptId, attempt.generation, { type: 'completed', result: { summary, artifactIds: [] } });
+
+test('a subagent becomes a linked child task with the agent definition, model and effort it names', async () => {
+  const { task: parent, attempt } = rootWorker();
+  const reply = await spawn(attempt, { subagent_type: 'pstack:effort-xhigh', model: 'gpt-6-astra[1m]', isolation: 'worktree' });
+  expect(reply).toMatchObject({ model: 'gpt-6-astra[1m]', effort: 'xhigh', state: 'queued', isolation: 'ignored' });
+  const child = store.task(reply.task_id)!;
+  expect(child).toMatchObject({ parentTaskId: parent.taskId, rootTaskId: parent.taskId, depth: 1, subagentType: 'pstack:effort-xhigh',
+    conversationId: parent.conversationId, ownerPrincipalId: 'u', targetProfile: 'default-worker', capabilities: parent.capabilities });
+  const instructions = tasks.revision(child.taskId, 1).instructions;
+  expect(instructions).toContain('Do the task in your prompt.');
+  expect(instructions).toContain(`pstack plugin root: ${fixture.installPath}`);
+  expect(instructions.endsWith('Review the diff')).toBe(true);
+});
+
+test('no model (or inherit-parent/auto) runs on the parent model and, without an effort agent, the parent effort', async () => {
+  const { attempt } = rootWorker();
+  for (const model of [undefined, 'inherit-parent', 'auto']) {
+    const reply = await spawn(attempt, model ? { model } : {});
+    expect(store.task(reply.task_id)).toMatchObject({ model: 'claude-sonnet-5-5', effort: 'high' });
+  }
+});
+
+// Review of #591 (L11): task_spawn takes an alias, so subagent_spawn does too (a skill passes `sonnet` as it would to Agent).
+test('an alias resolves to its model ID, as task_spawn\'s does', async () => {
+  const { attempt } = rootWorker();
+  const reply = await spawn(attempt, { model: 'Sonnet' });
+  expect(reply).toMatchObject({ model: 'claude-sonnet-5-5', state: 'queued' });
+  expect(store.task(reply.task_id)!.model).toBe('claude-sonnet-5-5');
+});
+
+test('an unknown model is refused and spawns nothing', async () => {
+  const { attempt } = rootWorker();
+  const reply = await spawn(attempt, { model: 'gpt-7' });
+  expect(reply.error).toBe('UNKNOWN_MODEL');
+  expect(reply.details[0].correction).toContain('claude-sonnet-5-5');
+  expect(store.all("SELECT id FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId') IS NOT NULL")).toHaveLength(0);
+});
+
+test('an unknown pstack agent is refused', async () => {
+  const { attempt } = rootWorker();
+  expect((await spawn(attempt, { subagent_type: 'pstack:nope' })).error).toBe('INVALID_INPUT');
+});
+
+test('readonly is recorded on the task (the driver states it and restricts tools)', async () => {
+  const { attempt } = rootWorker();
+  const reply = await spawn(attempt, { readonly: true });
+  expect(store.task(reply.task_id)!.readonly).toBe(true);
+});
+
+// Dev e2e of #591 (G1): a read-only reviewer ran an effort agent whose
+// definition says "You have the full tool set" and kept trying to spawn
+// writers. The read-only statement follows the definition and overrides it.
+test.each([['asked for', true, false], ['inherited from a read-only parent', false, true]])('a read-only effort agent (%s) is told its tools are read-only after the definition', async (_case, asked, parentReadonly) => {
+  const { attempt } = rootWorker();
+  const reply = await call(attempt, 'subagent_spawn', { description: 'Review', prompt: 'Review the diff', run_in_background: true, subagent_type: 'pstack:effort-xhigh', ...(asked ? { readonly: true } : {}) }, true, parentReadonly);
+  const instructions = tasks.revision(reply.task_id, 1).instructions;
+  expect(instructions).toContain(SUBAGENT_READONLY);
+  expect(instructions.indexOf(SUBAGENT_READONLY)).toBeGreaterThan(instructions.indexOf('You have the full tool set.'));
+  expect(instructions.indexOf(SUBAGENT_READONLY)).toBeLessThan(instructions.indexOf('Review the diff'));
+  expect(SUBAGENT_READONLY).toMatch(/full tool set/);
+  expect(SUBAGENT_READONLY).toMatch(/subagents/);
+});
+
+test('a writable effort agent keeps its definition as is', async () => {
+  const { attempt } = rootWorker();
+  const reply = await spawn(attempt, { subagent_type: 'pstack:effort-xhigh' });
+  expect(tasks.revision(reply.task_id, 1).instructions).not.toContain(SUBAGENT_READONLY);
+});
+
+test('subagents nest three deep; the fourth level is refused', async () => {
+  let { attempt } = rootWorker();
+  for (const depth of [1, 2, 3]) {
+    const reply = await spawn(attempt, {});
+    expect(store.task(reply.task_id)!.depth).toBe(depth);
+    attempt = running(store.task(reply.task_id)!);
+  }
+  const refused = await spawn(attempt, {});
+  expect(refused.error).toBe('SUBAGENT_DEPTH_EXCEEDED');
+  // Review of #591 (L3): the worker is told why, not only the code.
+  expect(refused.message).toContain('Do this work inline');
+});
+
+test('a full queue says why the subagent was refused', async () => {
+  const { attempt } = rootWorker();
+  let reply: any;
+  for (let i = 0; i < 100 && !reply?.error; i++) reply = await spawn(attempt, {});
+  expect(reply.error).toBe('QUEUE_FULL');
+  expect(reply.message).toMatch(/queued/);
+});
+
+test('only a worker given subagents may call the tools', async () => {
+  const { attempt } = rootWorker();
+  expect((await call(attempt, 'subagent_spawn', { description: 'x', prompt: 'y' }, false)).error).toBe('TOOL_DENIED');
+});
+
+test('subagent_wait returns every result once all finish, including a failure', async () => {
+  const { attempt } = rootWorker();
+  const a = (await spawn(attempt, {})).task_id, b = (await spawn(attempt, {})).task_id;
+  const waiting = call(attempt, 'subagent_wait', { task_ids: [a, b] });
+  await new Promise(r => setTimeout(r, 300));
+  complete(running(store.task(a)!), 'Found two issues');
+  const childB = running(store.task(b)!);
+  tasks.finish(childB.attemptId, childB.generation, { type: 'failed', failure: { code: 'WORKER_FAILED', message: 'No base branch', observedAt: Date.now() } } as any);
+  const { results } = await waiting;
+  expect(results).toEqual([
+    expect.objectContaining({ task_id: a, state: 'completed', result: 'Found two issues' }),
+    expect.objectContaining({ task_id: b, state: 'failed', failure: expect.objectContaining({ message: 'No base branch' }) }),
+  ]);
+});
+
+test('a foreground subagent_spawn waits and returns the result, like Agent', async () => {
+  const { attempt } = rootWorker();
+  const pending = call(attempt, 'subagent_spawn', { description: 'Review', prompt: 'p' });
+  let child: TaskSnapshot | undefined;
+  for (let i = 0; i < 50 && !child; i++) { await new Promise(r => setTimeout(r, 50)); child = store.all("SELECT snapshot_json FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId') IS NOT NULL").map(r => JSON.parse(String(r.snapshot_json)))[0]; }
+  complete(running(child!), 'LGTM');
+  expect(await pending).toMatchObject({ task_id: child!.taskId, state: 'completed', result: 'LGTM' });
+});
+
+test('subagents never notify the channel; a parent that ends cancels its whole subtree', async () => {
+  const { task: parent, attempt } = rootWorker();
+  const child = store.task((await spawn(attempt, {})).task_id)!;
+  const childAttempt = running(child);
+  const grandchild = store.task((await spawn(childAttempt, {})).task_id)!;
+  complete(attempt, 'Root done');
+  expect(store.task(child.taskId)!.state).toBe('cancel_requested');
+  expect(store.task(grandchild.taskId)!.state).toBe('cancelled');
+  expect(store.all('SELECT task_id FROM notifications').map(r => r.task_id)).toEqual([parent.taskId]);
+});
+
+test('subagent_cancel cancels only the caller\'s own subagents', async () => {
+  const { attempt } = rootWorker();
+  const mine = (await spawn(attempt, {})).task_id;
+  const other = rootWorker();
+  expect((await call(other.attempt, 'subagent_cancel', { task_ids: [mine] })).error).toBe('ACCESS_DENIED');
+  expect((await call(attempt, 'subagent_cancel', { task_ids: [mine] })).results).toEqual([{ task_id: mine, state: 'cancelled' }]);
+});
+
+test('the agent\'s task index lists roots only; the root\'s status lists its subagents', async () => {
+  const { task: parent, attempt } = rootWorker();
+  const child = (await spawn(attempt, { model: 'gpt-6-astra[1m]' })).task_id;
+  expect(tasks.context(context.conversationId, 'u', context.decisionId).map(t => t.taskId)).toEqual([parent.taskId]);
+  expect((tasks.status(context.conversationId, 'u', parent.taskId)[0] as any).subagents).toEqual([
+    expect.objectContaining({ taskId: child, parentTaskId: parent.taskId, model: 'gpt-6-astra[1m]', state: 'queued' }),
+  ]);
+});
+
+// Dev e2e of #591 (session 66f2f9db): a decision turn reported a pstack run as done with no sign of the
+// skills or subagents it was meant to use. The status it reads now says which ran; other tasks are unchanged.
+test('a root\'s status names the pstack skills its tree invoked and counts its subagents by model; none when it used neither', async () => {
+  const { task: parent, attempt } = rootWorker();
+  const skill = (taskId: string, name: string, id: string) => store.transaction(() => store.appendEvent(context.conversationId, 'tool.activity',
+    { type: 'tool_use', id, name, input: name === 'Skill' ? { skill: id } : { file_path: 'a.ts' }, taskId, role: 'worker' }, taskId));
+  skill(parent.taskId, 'Read', 'read-1');
+  skill(parent.taskId, 'Skill', 'gateway-code-review');
+  expect(tasks.status(context.conversationId, 'u', parent.taskId)[0]).not.toHaveProperty('pstackEvidence');
+
+  skill(parent.taskId, 'Skill', 'pstack:how');
+  skill(parent.taskId, 'Skill', 'pstack:how');
+  const first = (await spawn(attempt, { model: 'gpt-6-astra[1m]', subagent_type: 'pstack:effort-xhigh' })).task_id;
+  await spawn(attempt, {}); await spawn(attempt, {});
+  skill(first, 'Skill', 'pstack:principle-x');
+  expect((tasks.status(context.conversationId, 'u', parent.taskId)[0] as any).pstackEvidence).toEqual({
+    skills: ['pstack:how', 'pstack:principle-x'], subagents: 3, subagentModels: { 'claude-sonnet-5-5 high': 2, 'gpt-6-astra[1m] xhigh': 1 },
+  });
+  // A task assigned a pstack skill (skill-worker) ran it through the CLI, not the Skill tool.
+  const assigned = tasks.spawn({ ...context, actionId: 'assigned' }, { title: 'Mode', instructions: 'Go', targetProfile: 'default-worker', skill: { name: 'pstack:poteto-mode', content: 'x' } as any });
+  expect((tasks.status(context.conversationId, 'u', assigned.taskId)[0] as any).pstackEvidence).toEqual({ skills: ['pstack:poteto-mode'] });
+});
+
+// Review of #591: the activity list and the /stop menu list roots only, like the index page.
+test('the task list without a task_id lists roots only', async () => {
+  const { task: parent, attempt } = rootWorker();
+  const child = (await spawn(attempt, {})).task_id;
+  complete(running(store.task(child)!), 'done');
+  expect(tasks.status(context.conversationId, 'u').map(t => t.taskId)).toEqual([parent.taskId]);
+});
+
+// Dev e2e of #591: /tasks, /stop and GET .../tasks read TaskControls.list, which listed every subagent.
+test('the /tasks, /stop and REST task list shows roots only', async () => {
+  const { TaskControls } = await import('../../../src/orchestration/task-controls');
+  const { task: parent, attempt } = rootWorker();
+  const done = (await spawn(attempt, {})).task_id;
+  complete(running(store.task(done)!), 'done');
+  await spawn(attempt, {});
+  const controls = new TaskControls(store, tasks);
+  expect(controls.list('s', 'u')).toMatchObject({ total: 1, tasks: [expect.objectContaining({ taskId: parent.taskId })] });
+  expect(controls.list('s', 'u', 0, 10, true)).toMatchObject({ total: 1, tasks: [expect.objectContaining({ taskId: parent.taskId })] });
+});
+
+// Review of #591: a read-only subagent cannot change anything through gateway tools either.
+test('a read-only worker is refused mutating gateway tools and its MCP server hides them', async () => {
+  const { attempt } = rootWorker();
+  const readonly = async (tool: string, args: Record<string, unknown>) => {
+    const dir = join(root, `readonly-${++n}`);
+    bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation, readonly: true }, dir, root);
+    const auth = JSON.parse(readFileSync(join(dir, 'ticket.json'), 'utf8'));
+    expect(JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')).mcpServers.gateway.env.GATEWAY_READONLY_TASK).toBe('true');
+    return new Promise<any>((resolve, reject) => {
+      const req = request(auth.url, { method: 'POST' }, res => { let b = ''; res.on('data', c => b += c); res.on('end', () => resolve(JSON.parse(b))); });
+      req.setHeader('Authorization', 'Bearer ' + auth.token); req.on('error', reject);
+      req.end(JSON.stringify({ tool, args, action_id: `act-${n}` }));
+    });
+  };
+  for (const tool of ['cron_create', 'cron_delete', 'task_memory_append', 'task_share_call', 'narrate']) expect((await readonly(tool, {})).error).toBe('TOOL_DENIED');
+  expect(await readonly('task_report_progress', { text: 'reading' })).toEqual({ accepted: true });
+  const dir = join(root, 'writer');
+  bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation }, dir, root);
+  expect(JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')).mcpServers.gateway.env.GATEWAY_READONLY_TASK).toBe('');
+});
+
+test('the worker MCP server is told to expose the tools', () => {
+  const { attempt } = rootWorker();
+  for (const subagents of [true, false]) {
+    const dir = join(root, `mcp-${subagents}`);
+    bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation, subagents }, dir, root);
+    expect(JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')).mcpServers.gateway.env.GATEWAY_SUBAGENTS).toBe(subagents ? 'true' : '');
+  }
+});
+
+// Review of #583 findings.
+describe('review fixes', () => {
+  test('waiting parents do not starve their subagents: children are claimable past the concurrency limits', async () => {
+    tasks = new TaskService(store, { tasks: { workspaceMode: 'host', maxConcurrentPerAgent: 1, maxConcurrentPerConversation: 1 } }, root);
+    await bridge.close(); bridge = new TaskBridge(tasks); bridge.models = async () => MODELS; await bridge.start();
+    const { attempt } = rootWorker();
+    const child = store.task((await spawn(attempt, {})).task_id)!;
+    expect(tasks.claim(child.taskId)).toBeDefined();
+    // A second root is still held to the limit.
+    const other = tasks.spawn({ ...context, actionId: 'other-root' }, { title: 'Other', instructions: 'x', targetProfile: 'default-worker' });
+    expect(tasks.claim(other.taskId)).toBeUndefined();
+  });
+
+  test('a read-only subagent\'s own subagents are read-only too', async () => {
+    const { attempt } = rootWorker();
+    const reader = store.task((await spawn(attempt, { readonly: true })).task_id)!;
+    const grandchild = await spawn(running(reader), {});
+    expect(store.task(grandchild.task_id)!.readonly).toBe(true);
+  });
+
+  test('a subagent\'s question never becomes a user question', async () => {
+    const { TaskQuestions } = require('../../../src/orchestration/task-questions');
+    const { attempt } = rootWorker();
+    const child = running(store.task((await spawn(attempt, {})).task_id)!);
+    expect(() => tasks.requestInput(child.attemptId, child.generation, 'Which base branch?')).toThrow();
+    new TaskQuestions(store).tick?.();
+    expect(store.all('SELECT question_id FROM task_questions')).toHaveLength(0);
+  });
+
+  test('a parent that is stopping cancels its subtree at once and cannot spawn more', async () => {
+    const { task: parent, attempt } = rootWorker();
+    const child = store.task((await spawn(attempt, {})).task_id)!;
+    tasks.cancelByUser(parent.conversationId, 'u', parent.taskId);
+    expect(store.task(parent.taskId)!.state).toBe('cancel_requested');
+    expect(store.task(child.taskId)!.state).toBe('cancelled');
+    expect(await spawn(attempt, {})).toMatchObject({ error: 'STATE_CONFLICT', message: expect.stringContaining('cannot start subagents') });
+  });
+
+  test('a subagent stuck in needs_reconciliation is reported, not waited on, with a warning', async () => {
+    const { attempt } = rootWorker();
+    const child = running(store.task((await spawn(attempt, {})).task_id)!);
+    tasks.finish(child.attemptId, child.generation, { type: 'unknown' } as any);
+    expect(store.task(child.taskId)!.state).toBe('needs_reconciliation');
+    expect((await call(attempt, 'subagent_wait', { task_ids: [child.taskId] })).results[0]).toMatchObject({ state: 'needs_reconciliation', note: expect.stringContaining('may still be running') });
+  });
+
+  // Second review of #583: bypassing the limits let one tree take every worker process.
+  test('siblings still queue within the limits; only the waiting ancestors are not counted', async () => {
+    tasks = new TaskService(store, { tasks: { workspaceMode: 'host', maxConcurrentPerAgent: 2, maxConcurrentPerConversation: 2 } }, root);
+    await bridge.close(); bridge = new TaskBridge(tasks); bridge.models = async () => MODELS; await bridge.start();
+    const { attempt } = rootWorker();
+    const [a, b, c] = [(await spawn(attempt, {})).task_id, (await spawn(attempt, {})).task_id, (await spawn(attempt, {})).task_id];
+    expect(tasks.claim(a)).toBeDefined();
+    expect(tasks.claim(b)).toBeDefined();
+    expect(tasks.claim(c)).toBeUndefined();
+  });
+
+  test('after a restart, a subagent of a parent awaiting reconciliation does not start', async () => {
+    const { task: parent, attempt } = rootWorker();
+    const child = (await spawn(attempt, {})).task_id;
+    store.transaction(() => { const t = store.task(parent.taskId)!; t.state = 'needs_reconciliation'; store.saveTask(t, t.stateVersion); });
+    expect(tasks.claim(child)).toBeUndefined();
+  });
+});
+
+// Review of #591 (L8): subagent_spawn skipped two checks task_spawn makes.
+test('no subagent starts while the conversation drains, or past the agent-wide queue limit', async () => {
+  const { task: parent, attempt } = rootWorker();
+  store.run("UPDATE conversations SET status='draining' WHERE id=?", parent.conversationId);
+  expect((await spawn(attempt, {})).error).toBe('DRAINING');
+  store.run("UPDATE conversations SET status='active' WHERE id=?", parent.conversationId);
+  const limited = new TaskService(store, { tasks: { workspaceMode: 'host', maxConcurrentPerAgent: 10, maxConcurrentPerConversation: 10, maxQueuedPerAgent: 2, maxQueuedPerConversation: 2 } }, root);
+  // One task queued in another conversation: this one has room (1 of 2), the agent does not (2 of 2).
+  const other = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's2', source: 'api', accountId: 'u', principalId: 'u', chatId: 'c2', threadKey: '' }, text: 'Other' });
+  limited.spawn({ ...other, ...new DecisionService(store).begin(other.conversationId, 'u', [other.inputId]), principalId: 'u', execute: true, writeMemory: false, actionId: 'other' }, { title: 'Other', instructions: 'x', targetProfile: 'default-worker' });
+  limited.spawnSubagent(attempt.attemptId, attempt.generation, 'first', { title: 'One', instructions: 'x' });
+  expect(() => limited.spawnSubagent(attempt.attemptId, attempt.generation, 'second', { title: 'Two', instructions: 'x' })).toThrow(expect.objectContaining({ code: 'QUEUE_FULL' }));
+});
+
+// Review of #591 (L7): a restart left a queued subagent of a parent awaiting reconciliation queued for good.
+test('a gateway restart cancels the subagents that had not started', async () => {
+  const { task: parent, attempt } = rootWorker();
+  const queued = (await spawn(attempt, {})).task_id;
+  const startedChild = (await spawn(attempt, {})).task_id;
+  running(store.task(startedChild)!);
+  recoverOrchestration(store);
+  expect(store.task(parent.taskId)!.state).toBe('needs_reconciliation');
+  expect(store.task(queued)).toMatchObject({ state: 'cancelled', cancellation: expect.objectContaining({ requestedBy: 'agent' }) });
+  expect(store.task(startedChild)!.state).toBe('needs_reconciliation');
+});
+
+// Review of #591 (L9): files a subagent staged were never delivered, and subagent_wait did not mention them.
+test('a completed subagent\'s staged files go out with the root\'s report and are listed to its parent', async () => {
+  const { task: parent, attempt } = rootWorker();
+  const childId = (await spawn(attempt, {})).task_id;
+  const childAttempt = running(store.task(childId)!);
+  store.transaction(() => store.run('INSERT INTO task_files VALUES(?,?,?,?,?,?,?,?,?,?,?)', 'file-1', childId, childAttempt.attemptId, 'stage-1', 'out/report.md', 'report.md', 'document', '', null, Date.now(), 'h'));
+  tasks.finish(childAttempt.attemptId, childAttempt.generation, { type: 'completed', result: { summary: 'done', artifactIds: ['file-1'] } });
+  expect(tasks.subagentResults(attempt.attemptId, attempt.generation, [childId])![0]).toMatchObject({ result: 'done', staged_files: ['report.md'] });
+  complete(attempt, 'Root done');
+  const decisions = new DecisionService(store);
+  decisions.finish(context as unknown as Parameters<DecisionService['finish']>[0], 'Queued');
+  const next = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's', source: 'api', accountId: 'u', principalId: 'u', chatId: 'c', threadKey: '' }, text: 'Any news?' });
+  decisions.finish(decisions.begin(parent.conversationId, 'u', [next.inputId]), 'Report');
+  expect(store.get("SELECT response_id FROM task_files WHERE id='file-1'")!.response_id).toEqual(expect.any(String));
+});
+
+// Review of #591 (L10): status() ran per-subagent queries, also on every verification path.
+test('a root\'s status costs the same queries for one subagent as for five', async () => {
+  const count = async (n: number) => {
+    const { task: parent, attempt } = rootWorker();
+    for (let i = 0; i < n; i++) await spawn(attempt, {});
+    const all = jest.spyOn(store, 'all'), get = jest.spyOn(store, 'get');
+    tasks.status(parent.conversationId, 'u', parent.taskId);
+    const calls = all.mock.calls.length + get.mock.calls.length;
+    all.mockRestore(); get.mockRestore();
+    return calls;
+  };
+  expect(await count(5)).toBe(await count(1));
+});
+
+// Third review of #591.
+describe('third review fixes', () => {
+  /** A root that has finished while its subagent's stop could not be confirmed. */
+  async function orphan() {
+    const { task: parent, attempt } = rootWorker();
+    const child = running(store.task((await spawn(attempt, {})).task_id)!);
+    complete(attempt, 'Root done');
+    expect(store.task(child.taskId)!.state).toBe('cancel_requested');
+    tasks.finishCleanup(child.attemptId, child.generation, false);
+    expect(store.task(child.taskId)!.state).toBe('needs_reconciliation');
+    return { parent, child };
+  }
+
+  // H1: nobody heard about it, nothing listed it and it held a conversation slot for good.
+  test('a subagent left unconfirmed after its root ended is reported to the channel and listed', async () => {
+    const { parent, child } = await orphan();
+    expect(store.all('SELECT task_id FROM notifications WHERE task_id=?', child.taskId)).toHaveLength(1);
+    expect(tasks.status(parent.conversationId, 'u').map(task => task.taskId)).toContain(child.taskId);
+  });
+
+  test('cancelling the finished root retries the cleanup of its unconfirmed subagents', async () => {
+    const { parent, child } = await orphan();
+    tasks.cancelByUser(parent.conversationId, 'u', parent.taskId);
+    expect(store.task(parent.taskId)!.state).toBe('completed');
+    expect(store.task(child.taskId)!.state).toBe('cancel_requested');
+  });
+
+  test('a subagent its running parent can still see is not reported to the channel', async () => {
+    const { attempt } = rootWorker();
+    const child = running(store.task((await spawn(attempt, {})).task_id)!);
+    tasks.finish(child.attemptId, child.generation, { type: 'unknown' } as any);
+    expect(store.all('SELECT task_id FROM notifications WHERE task_id=?', child.taskId)).toHaveLength(0);
+  });
+
+  // M1: a parent blocked in subagent_wait cannot report progress, so its subagents' reports count for it.
+  test('a parent waiting on subagents that report progress is not stopped as stalled', async () => {
+    tasks = new TaskService(store, { tasks: { workspaceMode: 'host', maxConcurrentPerAgent: 10, maxConcurrentPerConversation: 10, progressStaleMs: 30_000, progressStaleLimitMs: 60_000 } }, root);
+    await bridge.close(); bridge = new TaskBridge(tasks); bridge.models = async () => MODELS; await bridge.start();
+    const { task: parent, attempt } = rootWorker();
+    const child = running(store.task((await spawn(attempt, {})).task_id)!);
+    const other = rootWorker();
+    const later = Date.now() + 120_000;
+    jest.spyOn(Date, 'now').mockReturnValue(later - 1000);
+    tasks.progress(child.attemptId, child.generation, 'Reviewed 3 of 5 files');
+    tasks.observeExecution(attempt.attemptId, attempt.generation, { attemptId: attempt.attemptId, observedAt: later, activeTools: ['mcp__gateway__subagent_wait'] } as any);
+    expect(store.task(parent.taskId)!.state).toBe('running');
+    // Without that report the same quiet period stops it.
+    tasks.observeExecution(other.attempt.attemptId, other.attempt.generation, { attemptId: other.attempt.attemptId, observedAt: later, activeTools: [] } as any);
+    expect(store.task(other.task.taskId)!.state).toBe('cancel_requested');
+  });
+
+  // M2: the parent had no way to answer a subagent's question, so it waited for good.
+  test('a subagent cannot ask the user a question; it is told to return the question as its result', async () => {
+    const { attempt } = rootWorker();
+    const child = running(store.task((await spawn(attempt, {})).task_id)!);
+    expect(() => tasks.requestInput(child.attemptId, child.generation, 'Which base branch?')).toThrow(expect.objectContaining({ code: 'SUBAGENT_INPUT_UNAVAILABLE', message: expect.stringContaining('final result') }));
+    expect(store.task(child.taskId)!.state).toBe('running');
+  });
+
+  // M3: an interrupted foreground wait dropped the task_id of a subagent that keeps running.
+  test('an interrupted foreground subagent_spawn still names the subagent it started', async () => {
+    const { attempt } = rootWorker();
+    const reply = call(attempt, 'subagent_spawn', { description: 'Review', prompt: 'Review the diff' });
+    for (let i = 0; i < 50 && !store.get("SELECT 1 FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId') IS NOT NULL"); i++) await new Promise(resolve => setTimeout(resolve, 20));
+    const child = String(store.get("SELECT id FROM tasks WHERE json_extract(snapshot_json,'$.parentTaskId') IS NOT NULL")!.id);
+    for (const controller of (bridge as any).cancellations.values()) controller.abort();
+    const result = await reply;
+    expect(result).toMatchObject({ error: 'SUBAGENT_WAIT_CANCELLED', task_id: child, message: expect.stringContaining(child) });
+  });
+});
+
+// Third review of #591 (L7): delivering a subagent's files scanned every finished task of every conversation.
+test('delivering a root\'s subagent files reads only this conversation\'s tasks', async () => {
+  const { attempt } = rootWorker();
+  complete(attempt, 'Root done');
+  const run = jest.spyOn(store, 'run');
+  new DecisionService(store).finish(context as unknown as Parameters<DecisionService['finish']>[0], 'Done');
+  const [sql, ...params] = run.mock.calls.find(([text]) => String(text).includes('UPDATE task_files SET response_id'))!;
+  run.mockRestore();
+  const plan = store.all(`EXPLAIN QUERY PLAN ${sql}`, ...(params as never[])).map(row => String(row.detail));
+  // Not every completed task of the agent (task_queue by state): this conversation's (conversation_tasks).
+  expect(plan.filter(detail => /^(?:SCAN t\b|SEARCH t USING INDEX task_queue)/.test(detail))).toEqual([]);
+  expect(plan).toContainEqual(expect.stringMatching(/^SEARCH t USING (?:COVERING )?INDEX conversation_tasks/));
+});

@@ -19,7 +19,7 @@ test('uploaded voice notes use batch STT multipart and retain Thai transcripts',
     await expect(transcribeVoiceNote(path, { provider: 'elevenlabs', model: 'scribe_v2', language: 'th' }, fetcher as any)).resolves.toBe('ช่วยรีวิวโค้ดให้หน่อย');
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(fetcher.mock.calls[0][0]).toBe('https://api.elevenlabs.io/v1/speech-to-text');
-    await expect(transcribeVoiceNote(path, { provider: 'elevenlabs', model: 'scribe_v2' }, (async () => new Response('{}', { status: 429 })) as any)).rejects.toThrow('STT_PROVIDER_ERROR_HTTP_429');
+    await expect(transcribeVoiceNote(path, { provider: 'elevenlabs', model: 'scribe_v2', sleep: async () => {} }, (async () => new Response('{}', { status: 429 })) as any)).rejects.toThrow('STT_PROVIDER_ERROR_HTTP_429');
     await expect(transcribeVoiceNote(path, { provider: 'elevenlabs', model: 'scribe_v2' }, (async () => new Response('{"text":""}')) as any)).rejects.toThrow('VOICE_NOTE_NO_TRANSCRIPT');
     delete process.env.ELEVENLABS_API_KEY;
     await expect(transcribeVoiceNote(path, { provider: 'elevenlabs', model: 'scribe_v2' }, fetcher as any)).rejects.toThrow('STT_CREDENTIALS_MISSING');
@@ -40,10 +40,11 @@ test.each(['elevenlabs', 'gemini', 'paxalabs'])('%s voice notes preserve provide
     const path = join(root, 'voice.ogg'); writeFileSync(path, Buffer.from('OggSfixture'));
     for (const status of [402, 429, 503]) {
       const request = jest.fn(async () => new Response(JSON.stringify({ error: 'private upstream message' }), { status }));
-      await expect(transcribeVoiceNote(path, { provider, model: 'fixture', language: 'th' }, request)).rejects.toMatchObject({ code: expect.stringContaining(`_PROVIDER_ERROR_HTTP_${status}`) });
-      expect(request).toHaveBeenCalledTimes(1);
+      await expect(transcribeVoiceNote(path, { provider, model: 'fixture', language: 'th', sleep: async () => {} }, request)).rejects.toMatchObject({ code: expect.stringContaining(`_PROVIDER_ERROR_HTTP_${status}`) });
+      // Payment is final; a rate limit and a server error get two more attempts.
+      expect(request).toHaveBeenCalledTimes(status === 402 ? 1 : 3);
     }
-    await expect(transcribeVoiceNote(path, { provider, model: 'fixture' }, async () => { throw new Error('private network details'); })).rejects.toMatchObject({ code: 'PROVIDER_CONNECTION_FAILED' });
+    await expect(transcribeVoiceNote(path, { provider, model: 'fixture', sleep: async () => {} }, async () => { throw new Error('private network details'); })).rejects.toMatchObject({ code: 'PROVIDER_CONNECTION_FAILED' });
   } finally {
     for (const key of keys) if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key];
     rmSync(root, { recursive: true, force: true });

@@ -1,5 +1,5 @@
 import { taskFailure, shutdownFailure } from './failure';
-import { TaskService } from './service';
+import { RUNNING_PARENT, TaskService } from './service';
 import { TaskAttempt, TaskSnapshot, WorkerOutcome } from '../types';
 import { ProviderAdmission, ProviderPermit, ProviderFailure } from '../provider-admission';
 
@@ -77,6 +77,8 @@ export class WorkerScheduler {
       if (this.closed) return;
       const ceiling = Number(this.tasks.store.get('SELECT COALESCE(MAX(rowid),0) n FROM tasks')!.n);
       let cursor: {createdAt: number; id: string} | undefined;
+      // Once a slot is refused only subagents can still start: their ancestors' slots are not counted against them.
+      let full = false;
       admission: while (!this.closed) {
         const rows = this.tasks.store.all(`SELECT id,created_at FROM tasks WHERE state='queued' AND rowid<=?
           ${cursor ? 'AND (created_at>? OR (created_at=? AND id>?))' : ''}
@@ -85,11 +87,19 @@ export class WorkerScheduler {
         for (const row of rows) {
           cursor = {createdAt:Number(row.created_at),id:String(row.id)};
           const taskId = String(row.id);
-          if (this.tasks.store.task(taskId)?.gatewayTarget) continue;
+          const queued = this.tasks.store.task(taskId);
+          if (queued?.gatewayTarget) continue;
+          if (full && !queued?.parentTaskId) continue;
           if (this.starting.has(taskId) || this.active.has(taskId)) continue;
+          // A subagent runs only for a running parent (claim refuses the rest); do not reserve a slot for one that cannot.
+          if (queued?.parentTaskId && !RUNNING_PARENT.includes(this.tasks.store.task(queued.parentTaskId)?.state ?? '')) continue;
           if (this.driver.available && !this.driver.available(taskId)) continue;
           const release = this.driver.reserve?.(taskId);
-          if (this.driver.reserve && !release) break admission;
+          if (this.driver.reserve && !release) {
+            if (!queued?.parentTaskId && !this.tasks.store.get(`SELECT 1 FROM tasks c WHERE c.state='queued' AND json_extract(c.snapshot_json,'$.parentTaskId') IS NOT NULL
+              AND EXISTS(SELECT 1 FROM tasks p WHERE p.id=json_extract(c.snapshot_json,'$.parentTaskId') AND p.state IN (${RUNNING_PARENT.map(state => `'${state}'`).join(',')}))`)) break admission;
+            full = true; continue;
+          }
           let provider: ProviderAdmission | undefined;
           let attempt: TaskAttempt | undefined;
           try {

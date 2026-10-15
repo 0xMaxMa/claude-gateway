@@ -339,10 +339,50 @@ export function normalizeTelegramLineBreaks(text: string): string {
   return text.replace(/(?:<|&lt;)br\s*\/?(?:>|&gt;)/gi, '\n')
 }
 
+/** Commands the receiver answers itself, in a direct message only (and `cli` where the terminal viewer is on). */
+const DM_ONLY_COMMANDS = ['start', 'help', 'status', 'model', 'models', 'clear', 'compact', 'restart', 'session', 'sessions', 'tasks', 'voice', 'voices']
+/** Commands forwarded to the gateway, which answers them in a group as well. */
+const GROUP_COMMANDS = ['stop', 'new', 'rename', 'pstack_setup', 'pstack-setup']
+
+/** The leading `/name` or `/name@<this bot>` of a message, lowercased; undefined when there is none or it names another bot. */
+export function leadingCommand(text: string, botUsername: string): string | undefined {
+  const match = /^\/([a-z0-9_-]+)(?:@(\w+))?(?=\s|$)/i.exec(text.trim())
+  if (!match || (match[2] && match[2].toLowerCase() !== botUsername.toLowerCase())) return undefined
+  return match[1]!.toLowerCase()
+}
+
+/** A gateway command typed in a group is addressed to this bot, the same as a mention. */
+export function isGroupCommand(text: string, botUsername: string): boolean {
+  return GROUP_COMMANDS.includes(leadingCommand(text, botUsername) ?? '')
+}
+
+/** `/name@<this bot> …` → `/name …`, so the gateway matches the command it was sent. */
+export function stripCommandTarget(text: string, botUsername: string): string {
+  const match = /^(\s*\/[a-z0-9_-]+)@(\w+)(?=\s|$)/i.exec(text)
+  return match && botUsername && match[2]!.toLowerCase() === botUsername.toLowerCase() ? match[1] + text.slice(match[0].length) : text
+}
+
+/**
+ * The reply to a direct-message-only command typed in a group, or undefined.
+ * Only a group whose messages the gate delivers gets one; others stay silent,
+ * as the gate keeps them. The gate decides on a copy with pairing off and the
+ * mention rule waived, so no pairing code is minted and nothing is saved.
+ */
+export function groupCommandReply(access: Access, input: { chatType?: string; chatId: string; fromId: string; text: string; botUsername: string; cliEnabled?: boolean }): string | undefined {
+  if (input.chatType !== 'group' && input.chatType !== 'supergroup') return undefined
+  const name = leadingCommand(input.text, input.botUsername)
+  if (!name || !(DM_ONLY_COMMANDS.includes(name) || (name === 'cli' && input.cliEnabled))) return undefined
+  const copy: Access = { ...access, pairing: false, requireMention: false, pending: { ...access.pending } }
+  const verdict = gateLogic({ fromId: input.fromId, chatType: input.chatType, chatId: input.chatId, botUsername: input.botUsername, messageText: input.text },
+    () => copy, () => {}, () => { throw Error('NO_PAIRING_IN_GROUP_COMMAND_REPLY') })
+  return verdict.action === 'deliver' ? `/${name} is only available in a direct message with the bot.` : undefined
+}
+
 export function isMentionedPure(input: GateInput, extraPatterns?: string[]): boolean {
   const entities = input.messageEntities ?? input.captionEntities ?? []
   const text = input.messageText ?? ''
   const botUsername = input.botUsername ?? ''
+  if (isGroupCommand(text, botUsername)) return true
 
   for (const e of entities) {
     if (e.type === 'mention') {

@@ -1,9 +1,10 @@
 import { voiceTiming } from './diagnostics';
 import { VoiceError } from './types';
 
-type Category = 'local_dependency' | 'payment' | 'authentication' | 'permission' | 'quota' | 'daily_quota' | 'rate_limit' | 'unavailable' | 'language' | 'model' | 'timeout' | 'network' | 'cancelled' | 'invalid_response' | 'invalid_request' | 'unknown';
+type Category = 'local_dependency' | 'credit_check' | 'payment' | 'authentication' | 'permission' | 'quota' | 'daily_quota' | 'rate_limit' | 'unavailable' | 'language' | 'model' | 'timeout' | 'network' | 'cancelled' | 'invalid_response' | 'invalid_request' | 'unknown';
 const descriptions: Record<Category, [string, boolean]> = {
   local_dependency: ['A local audio dependency (ffmpeg or ffprobe) is missing or cannot run. Run claude-gateway doctor, then claude-gateway doctor fix on the gateway machine.', false],
+  credit_check: ['Could not check the voice credit balance with the provider. This is not a missing-credit error; please try again.', true],
   payment: ['The voice provider requires payment. Check provider credits or billing before trying again.', false],
   authentication: ['No API key is configured or the voice provider rejected it. Check the connected API key.', false],
   permission: ['The voice provider denied access. Check API key permissions and model access.', false],
@@ -70,6 +71,12 @@ export function describeVoiceError(error: unknown) {
   const httpStatus = Number(code.match(/_HTTP_(\d{3})/)?.[1]) || undefined;
   const explicit = code.match(/_REASON_([A-Z_]+)$/)?.[1]?.toLowerCase() as Category | undefined;
   let category: Category = explicit && Object.prototype.hasOwnProperty.call(descriptions, explicit) ? explicit : 'unknown';
+  // The wallet check, not the voice provider: its HTTP status describes that check only.
+  if (category === 'unknown' && code.startsWith('MANAGED_VOICE_USAGE_')) {
+    const detail = code === 'MANAGED_VOICE_USAGE_TIMEOUT' ? ' (timed out)' : code === 'MANAGED_VOICE_USAGE_NETWORK' ? ' (no connection)'
+      : code === 'MANAGED_VOICE_USAGE_INVALID_BODY' ? ' (unreadable answer)' : httpStatus ? ` (HTTP ${httpStatus})` : '';
+    return { category: 'credit_check', message: descriptions.credit_check[0].replace('provider.', `provider${detail}.`), retryable: true };
+  }
   if (category === 'unknown') {
     if (/^(?:TTS_DECODER_UNAVAILABLE|VOICE_DEPENDENCY_(?:FFMPEG|FFPROBE)_UNAVAILABLE)$/.test(code)) category = 'local_dependency';
     else if (httpStatus === 402) category = 'payment';
@@ -78,7 +85,7 @@ export function describeVoiceError(error: unknown) {
     // A bare 429 cannot reliably distinguish an exhausted quota from a rate limit.
     else if (httpStatus === 429) return { category: 'quota_or_rate_limit', message: 'The voice provider rate limit or quota was reached (HTTP 429). Check provider usage before retrying.', retryable: false, httpStatus };
     else if (httpStatus === 408 || httpStatus === 504 || /TIMEOUT|TimeoutError/.test(code)) category = 'timeout';
-    else if ((httpStatus && httpStatus >= 500) || code === 'MANAGED_VOICE_USAGE_UNAVAILABLE') category = 'unavailable';
+    else if (httpStatus && httpStatus >= 500) category = 'unavailable';
     else if (/LANGUAGE_UNSUPPORTED|UNSUPPORTED_LANGUAGE/.test(code)) category = 'language';
     else if (/INVALID_VOICE_MODEL|UNKNOWN_TTS_PROVIDER|UNKNOWN_STT_PROVIDER|TTS_FILE_UNSUPPORTED/.test(code)) category = 'model';
     else if (httpStatus && httpStatus >= 400) category = 'invalid_request';

@@ -30,6 +30,10 @@ export interface OrchestrationConfig {
     firstResponseTimeoutMs?: number;
     /** Per-compaction deadline for agents and workers, independent of first-token wait. */
     compactionTimeoutMs?: number;
+    /** Context size, in tokens, above which the first-response and idle timeouts grow in proportion. */
+    contextTimeoutScaleTokens?: number;
+    /** Upper bound for those scaled timeouts; never below either configured base. */
+    maxContextTimeoutMs?: number;
     maxDecisionDurationMs?: number;
     preemptionGraceMs?: number;
     maxPendingInputs?: number;
@@ -91,7 +95,7 @@ export const ORCHESTRATION_DEFAULTS = {
   enabled: false,
   channels: ['api'],
   conversation: { backend: 'inherit' as const, semanticIntake: false, intakeWaitMs: 2000, inputDebounceMs: 1500, inputMaxWaitMs: 8000, maxActiveSessions: 2, notificationPolicy: 'existing_receive_path' as const,
-    decisionTimeoutMs: 120000, idleTimeoutMs: 120000, startupTimeoutMs: 120000, firstResponseTimeoutMs: 120000, compactionTimeoutMs: 300000, maxDecisionDurationMs: 600000, preemptionGraceMs: 250, maxPendingInputs: 100, skillCatalogBytes: SKILL_CATALOG_BUDGET_BYTES },
+    decisionTimeoutMs: 120000, idleTimeoutMs: 120000, startupTimeoutMs: 120000, firstResponseTimeoutMs: 120000, compactionTimeoutMs: 300000, contextTimeoutScaleTokens: 200000, maxContextTimeoutMs: 300000, maxDecisionDurationMs: 600000, preemptionGraceMs: 250, maxPendingInputs: 100, skillCatalogBytes: SKILL_CATALOG_BUDGET_BYTES },
   tasks: { automationIdleTimeoutMs: 1800000, maxConcurrentPerAgent: 10, maxConcurrentPerConversation: 10, workerIdleTtlMs: 600000, maxQueuedPerConversation: 20,
     maxQueuedPerAgent: 100, defaultTimeoutMs: 1800000, idleTimeoutMs: 300000, maxDurationMs: 0, backgroundGraceMs: 900000, questionReminderMs: 600000, progressStaleMs: 180000, progressNotifyCooldownMs: 300000, progressStaleLimitMs: 7200000, repeatedToolThreshold: 6, interruptAckTimeoutMs: 5000, workspaceMode: 'host' as const, projectRoot: '', resourceRetentionDays: 7 },
   events: { retentionDays: 7, maxSubscriberBufferBytes: 1048576 },
@@ -165,6 +169,14 @@ export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVo
   if (config?.tasks?.progressStaleLimitMs === undefined) result.tasks.progressStaleLimitMs = Math.max(result.tasks.progressStaleLimitMs, result.tasks.progressStaleMs + result.tasks.progressNotifyCooldownMs);
   if (config?.tasks?.progressStaleLimitMs && result.tasks.progressStaleLimitMs < result.tasks.progressStaleMs) throw new OrchestrationError('INVALID_CONFIG', 'tasks.progressStaleLimitMs must be zero or at least tasks.progressStaleMs');
   if (result.tasks.repeatedToolThreshold > 64) throw new OrchestrationError('INVALID_CONFIG', 'tasks.repeatedToolThreshold must be between 1 and 64');
+  const conversation = result.conversation;
+  if (conversation.contextTimeoutScaleTokens < 1000 || conversation.contextTimeoutScaleTokens > 10_000_000)
+    throw new OrchestrationError('INVALID_CONFIG', 'conversation.contextTimeoutScaleTokens must be between 1000 and 10000000');
+  // The default cap follows the configured budgets, so a config valid before scaling still loads.
+  const contextTimeoutBase = Math.max(conversation.firstResponseTimeoutMs, conversation.idleTimeoutMs);
+  if (config?.conversation?.maxContextTimeoutMs === undefined) conversation.maxContextTimeoutMs = Math.max(contextTimeoutBase, Math.min(conversation.maxContextTimeoutMs, conversation.maxDecisionDurationMs));
+  else if (conversation.maxContextTimeoutMs < contextTimeoutBase || conversation.maxContextTimeoutMs > conversation.maxDecisionDurationMs)
+    throw new OrchestrationError('INVALID_CONFIG', 'conversation.maxContextTimeoutMs must be at least firstResponseTimeoutMs and idleTimeoutMs, and at most maxDecisionDurationMs');
   if (!['next_user_turn', 'existing_receive_path'].includes(result.conversation.notificationPolicy)) throw new OrchestrationError('INVALID_CONFIG', 'Invalid notification policy');
   if (result.tasks.maxConcurrentPerConversation > result.tasks.maxConcurrentPerAgent || result.tasks.maxQueuedPerConversation > result.tasks.maxQueuedPerAgent) throw new OrchestrationError('INVALID_CONFIG', 'Conversation task limits exceed agent limits');
   if (result.tasks.projectRoot && (!isAbsolute(result.tasks.projectRoot) || result.tasks.projectRoot.includes('\0') || Buffer.byteLength(result.tasks.projectRoot) > 4096)) throw new OrchestrationError('INVALID_CONFIG', 'tasks.projectRoot must be an absolute bounded filesystem path');
@@ -179,4 +191,15 @@ export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVo
   if (result.voice.enabled && result.voice.notes.replyWithVoice && !['elevenlabs','cartesia','upstream:elevenlabs','paxalabs','upstream:paxalabs','managed:paxalabs','managed:elevenlabs','gemini','upstream:gemini','openrouter','upstream:openrouter'].includes(result.voice.tts.provider)) throw new OrchestrationError('INVALID_CONFIG', 'Voice replies require a supported TTS provider');
   if (result.voice.enabled && (!result.voice.tts.model.trim() || !result.voice.stt.model.trim() || (result.voice.notes.enabled && (!result.voice.notes.provider.trim() || !result.voice.notes.model.trim())))) throw new OrchestrationError('INVALID_CONFIG', 'Choose TTS and STT models before enabling voice');
   return result;
+}
+
+/** A decision turn's first-response and idle budgets for its context size. Up to
+ * `contextTimeoutScaleTokens` the configured values apply unchanged; above it each grows in
+ * proportion to the context (twice the scale point, twice the budget), capped at
+ * `maxContextTimeoutMs`. Reading a large cached context, and writing a new image into it,
+ * takes longer before the first token and before the next request after a tool result. */
+export function contextScaledTimeouts(conversation: Pick<ResolvedOrchestrationConfig['conversation'], 'firstResponseTimeoutMs' | 'idleTimeoutMs' | 'contextTimeoutScaleTokens' | 'maxContextTimeoutMs'>, contextTokens: number) {
+  const factor = Number.isFinite(contextTokens) ? Math.max(1, contextTokens / conversation.contextTimeoutScaleTokens) : 1;
+  const scale = (base: number) => Math.max(base, Math.min(conversation.maxContextTimeoutMs, Math.round(base * factor)));
+  return { firstResponseTimeoutMs: scale(conversation.firstResponseTimeoutMs), idleTimeoutMs: scale(conversation.idleTimeoutMs) };
 }

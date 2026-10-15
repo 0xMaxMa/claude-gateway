@@ -132,3 +132,23 @@ test('Gateway-managed tasks retain target type across summary, session and reque
   expect((await reader.read('report',file,{sessionId:'session'})).turns.filter((t:any)=>t.role==='worker')).toEqual([]);
  }finally{await reader.close();store.close();rmSync(root,{recursive:true,force:true});}
 });
+
+// Review of #591 (L13): the task detail page showed neither the subagent line nor a skill-worker's skill;
+// only the session report added them.
+test('task detail metrics carry the subagent line and the skill a skill-worker ran',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'dashboard-subagent-')),file=join(root,'db');
+ const store=new OrchestrationStore(file,'a'),reader=new DashboardReader(join(process.cwd(),'dist/orchestration/dashboard-reader-worker.js'));
+ try{
+  const scope={agentId:'a',agentSessionId:'session',source:'api' as const,accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'};
+  const input=store.acceptInput({scope,text:'work'}),d=new DecisionService(store).begin(input.conversationId,'owner',[input.inputId]);
+  const service=new TaskService(store,{tasks:{workspaceMode:'host'}},root);
+  const parent=service.spawn({...input,...d,principalId:'owner',actionId:'root',execute:true,writeMemory:false},{title:'Root',instructions:'x',targetProfile:'default-worker'});
+  const rootAttempt=service.claim(parent.taskId)!;service.started(rootAttempt.attemptId,rootAttempt.generation);
+  const child=service.spawnSubagent(rootAttempt.attemptId,rootAttempt.generation,'c1',{title:'Explorer',instructions:'y',effort:'high',subagentType:'pstack:how-explorer',readonly:true});
+  store.run(`UPDATE tasks SET snapshot_json=json_set(snapshot_json,'$.skill',json('{"name":"pstack:how","args":""}')) WHERE id=?`,child.taskId);
+  const attempt=service.claim(child.taskId)!;
+  recordTokenTurn(store,{id:attempt.attemptId,taskId:child.taskId,sessionId:'session',role:'worker',category:'worker',startedAt:2,toolIds:[],inputTokens:1,totalTokens:1,usage:usage(1),usedSkills:[]});
+  const detail=await reader.read('task',file,{taskId:child.taskId,sessionId:'session'});
+  expect(detail.attempts[0].metrics).toMatchObject({usedSkills:['pstack:how'],subagent:{parentTaskId:parent.taskId,depth:1,type:'pstack:how-explorer',effort:'high',readonly:true}});
+ }finally{await reader.close();store.close();rmSync(root,{recursive:true,force:true});}
+});

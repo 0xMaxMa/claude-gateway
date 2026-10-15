@@ -2,6 +2,7 @@ import { codexContextPolicy } from '../../../src/session/codex-context';
 import { workerEnvironment } from '../../../src/session/worker-environment';
 import * as codexAuth from '../../../src/session/codex-auth';
 jest.mock('../../../src/session/worker-extensions', () => ({ discoverWorkerExtensions: jest.fn().mockResolvedValue({ skills: [], servers: {}, notices: [] }) }));
+import { discoverWorkerExtensions } from '../../../src/session/worker-extensions';
 import { resolveCodexRuntime } from '../../../src/session/codex-runtime';
 import { inspectSelectedCodexRuntime } from '../../../src/session/codex-container-runtime';
 jest.mock('../../../src/session/codex-runtime', () => ({ resolveCodexRuntime: jest.fn() }));
@@ -75,6 +76,15 @@ test('uses private Responses configuration, MCP ticket env and sandbox without c
   expect(config).toContain('"TICKET" = "secret-ticket"');
   expect(config).toContain('developer_instructions = "agent context\\n\\nworker rules"');
   expect(settings.env.ANTHROPIC_API_KEY).toBeUndefined();
+});
+// Review of #591 (H1): a read-only subagent on Codex must not get the host's full-access sandbox.
+test('a read-only worker runs in the read-only sandbox even on the host', async () => {
+  options.profile = { ...options.profile, hostExecution: true, readOnly: true, connectorsAllowed: false };
+  adapter = new CodexProcess(options); adapter.on('output', line => events.push(JSON.parse(line)));
+  await launch();
+  const config = await readFile(join((spawn as jest.Mock).mock.calls[0][2].env.CODEX_HOME, 'config.toml'), 'utf8');
+  expect(config).toContain('sandbox_mode = "read-only"');
+  expect(rpc.find(r => r.method === 'thread/start').params.sandbox).toBe('read-only');
 });
 test('launch uses the readiness credential snapshot without resolving a different account', async () => {
   const snapshot = Object.freeze({baseUrl:options.config.baseUrl!,key:'readiness-key',fingerprint:'readiness-account'});
@@ -425,6 +435,15 @@ test('failed Codex preparation removes already written connector secrets', async
   await writeFile(options.profile.mcpConfigPath, JSON.stringify({mcpServers:{gateway:{command:'node',args:[42]}}}));
   await expect(adapter.start()).rejects.toThrow('Codex MCP requires');
   await expect(access(join(directory,'connector-0.json'))).rejects.toMatchObject({code:'ENOENT'});
+});
+
+// Review of #582: Codex workers are leaves; their host discovery excludes pstack.
+test('host Codex discovery asks for the Codex view of extensions', async () => {
+  options.profile.hostExecution = true;
+  options.gateway = { gateway: {} } as any;
+  await writeFile(options.profile.mcpConfigPath, JSON.stringify({mcpServers:{gateway:{command:'node',args:[42]}}}));
+  await expect(adapter.start()).rejects.toThrow('Codex MCP requires');
+  expect(discoverWorkerExtensions).toHaveBeenCalledWith(options.agent, options.gateway, undefined, 'codex');
 });
 
 test('missing configured Codex refuses startup without host or harness fallback', async () => {

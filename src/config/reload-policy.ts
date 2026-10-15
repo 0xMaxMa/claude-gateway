@@ -18,7 +18,7 @@ const gateway: Record<string, ReloadMode> = {
   'gateway.appHousekeeping': 'component', 'gateway.appBackup': 'component', 'gateway.appRestore': 'component',
 };
 const agent: Record<string, ReloadMode> = {
-  jev: 'live', computerUse: 'live', orchestration: 'component', voice: 'component', workers: 'next-process',
+  jev: 'live', computerUse: 'live', orchestration: 'component', voice: 'component', workers: 'next-process', pstack: 'next-process',
   'claude.model': 'next-process', 'claude.extraFlags': 'next-process',
   'claude.dangerouslySkipPermissions': 'ignored', claudeBin: 'next-process',
   session: 'live', heartbeat: 'live', connectors: 'next-process', allow_tools: 'live',

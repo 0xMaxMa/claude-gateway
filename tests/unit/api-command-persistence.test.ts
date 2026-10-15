@@ -52,6 +52,7 @@ import { AgentRunner } from '../../src/agent/runner';
 import { AgentConfig, GatewayConfig, Message } from '../../src/types';
 import { SessionStore } from '../../src/session/store';
 import { HistoryDB } from '../../src/history/db';
+import { pstackClaudeConfig } from '../helpers/pstack-fixture';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
 
@@ -160,7 +161,7 @@ describe('executeApiCommand persistence + dispatch (#157)', () => {
   it('U-P-06: a failing command still ends history with a "Command failed" assistant turn', async () => {
     // /compact on a fresh session has too few messages → throws inside dispatch.
     await expect(
-      runner.executeApiCommand(sessionId, chatId, '/compact'),
+      runner.executeApiCommand(sessionId, chatId, '/compact confirm'),
     ).rejects.toThrow();
 
     const rows = historyRows();
@@ -168,7 +169,7 @@ describe('executeApiCommand persistence + dispatch (#157)', () => {
     expect(rows[0].role).toBe('assistant');
     expect(rows[0].content).toContain('Command failed:');
     // The user command row is still present too.
-    expect(rows.some((r) => r.role === 'user' && r.content === '/compact')).toBe(true);
+    expect(rows.some((r) => r.role === 'user' && r.content === '/compact confirm')).toBe(true);
     // Nothing leaked into the model context.
     expect(await getSessionStore(runner).loadSession(agentId, sessionId)).toEqual([]);
   });
@@ -180,17 +181,17 @@ describe('executeApiCommand persistence + dispatch (#157)', () => {
 
   it('U-P-08: skipPersist also suppresses the failure-path assistant row', async () => {
     await expect(
-      runner.executeApiCommand(sessionId, chatId, '/compact', { skipPersist: true }),
+      runner.executeApiCommand(sessionId, chatId, '/compact confirm', { skipPersist: true }),
     ).rejects.toThrow();
     expect(historyRows()).toHaveLength(0);
   });
 
   it('U-P-09: /clear retains previous history and records the command and confirmation', async () => {
     runner.getHistoryDb().insertMessage({ chatId: dbChatId, sessionId, source: 'api', role: 'user', content: 'earlier', ts: Date.now() });
-    const { responseText } = await runner.executeApiCommand(sessionId, chatId, '/clear');
+    const { responseText } = await runner.executeApiCommand(sessionId, chatId, '/clear confirm');
     const rows = historyRows();
     expect(rows).toHaveLength(3);
-    expect(rows.map(row => row.content)).toEqual([responseText,'/clear','earlier']);
+    expect(rows.map(row => row.content)).toEqual([responseText,'/clear confirm','earlier']);
     expect(rows[0].role).toBe('assistant');
     expect(responseText).toContain('Chat history is unchanged');
   });
@@ -203,5 +204,29 @@ describe('executeApiCommand persistence + dispatch (#157)', () => {
     // Role-based assertion — independent of ts ordering, which can be the same millisecond.
     expect(rows.filter((r) => r.role === 'user')).toHaveLength(1);
     expect(rows.filter((r) => r.role === 'assistant')).toHaveLength(1);
+  });
+
+  it('U-P-11: a pressed action keeps its reply but not its token as user text (#591)', async () => {
+    const asked = await runner.executeApiCommand(sessionId, chatId, '/restart', { principalId: 'owner' });
+    jest.spyOn(runner as any, 'restartProcess').mockResolvedValue(undefined);
+    await runner.executeApiCommand(sessionId, chatId, asked.actions[1]!.command, { principalId: 'owner' });
+    expect(historyRows().map(row => [row.role, row.content])).toEqual([['assistant', 'Cancelled.'], ['assistant', asked.responseText], ['user', '/restart']]);
+  });
+
+  // Third review of #591 (L1): each menu page was saved as an assistant turn, so browsing the
+  // setup menu pushed real conversation out of the latest 50 messages a new context starts from.
+  it('U-P-12: a /pstack-setup menu button stores no menu page in history', async () => {
+    const fixture = pstackClaudeConfig(), previous = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = fixture.configDir;
+    try {
+      await runner.executeApiCommand(sessionId, chatId, '/pstack-setup');
+      const before = historyRows().length;
+      await runner.executeApiCommand(sessionId, chatId, '/pstack-setup ps:h');
+      await runner.executeApiCommand(sessionId, chatId, '/pstack-setup ps:g');
+      expect(historyRows()).toHaveLength(before);
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
+      fixture.cleanup();
+    }
   });
 });

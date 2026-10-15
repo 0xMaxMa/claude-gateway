@@ -11,6 +11,16 @@ export interface TokenUsage {
   cacheCreation5mTokens?: number;
   cacheCreation1hTokens?: number;
 }
+/** What the Claude CLI loaded for a turn, by name only: plugin install paths are host details. */
+export interface TurnExtensions { plugins: string[]; skills: string[]; agents: string[]; mcpServers: Array<{name: string; status: string}>; }
+const names = (value: unknown): string[] => Array.isArray(value) ? [...new Set(value.filter((name): name is string => typeof name === 'string' && name.length > 0 && name.length <= 256))].sort() : [];
+function extensions(event: any): TurnExtensions | undefined {
+  if (![event.plugins, event.skills, event.agents, event.mcp_servers].some(Array.isArray)) return undefined;
+  const plugins = Array.isArray(event.plugins) ? event.plugins.map((plugin: any) => typeof plugin === 'string' ? plugin : typeof plugin?.source === 'string' ? plugin.source : plugin?.name) : [];
+  const servers = Array.isArray(event.mcp_servers) ? event.mcp_servers.filter((server: any) => typeof server?.name === 'string' && server.name && server.name.length <= 256) : [];
+  return { plugins: names(plugins), skills: names(event.skills), agents: names(event.agents),
+    mcpServers: servers.map((server: any) => ({name: server.name, status: typeof server.status === 'string' ? server.status.slice(0, 64) : 'unknown'})).sort((a: any, b: any) => a.name.localeCompare(b.name)) };
+}
 export interface RequestUsage { id: string; model?: string; usage: TokenUsage; toolSchemas?: RequestToolSchemas; }
 const fields = ['inputTokens', 'cacheCreationTokens', 'cacheReadTokens', 'outputTokens', 'cacheCreation5mTokens', 'cacheCreation1hTokens'] as const;
 export function emptyUsage(): TokenUsage {
@@ -47,6 +57,8 @@ export class TurnUsageCollector {
   private aggregate: TokenUsage | null = null;
   loadedTools: string[] | null = null;
   readonly usedTools = new Set<string>();
+  readonly usedSkills = new Set<string>();
+  extensions?: TurnExtensions;
   model?: string;
   contextWindow?: CodexContextMeasurement;
   observe(event: any): void {
@@ -56,6 +68,7 @@ export class TurnUsageCollector {
     if (event.type === 'system' && event.subtype === 'init') {
       if (Array.isArray(event.tools) && event.tools.every((name: unknown) => typeof name === 'string')) this.loadedTools = [...new Set<string>(event.tools)].sort();
       if (typeof event.model === 'string') this.model = event.model;
+      this.extensions = extensions(event) ?? this.extensions;
     }
     if (event.type === 'system' && ['native_init', 'native_usage'].includes(event.subtype) && event.contextWindow) this.contextWindow = event.contextWindow;
     const stream = event.type === 'stream_event' ? event.event : undefined;
@@ -68,7 +81,10 @@ export class TurnUsageCollector {
     if (event.type === 'result' && event.usage && typeof event.usage === 'object') this.aggregate = normalize(event.usage);
     if (event.type === 'system' && event.subtype === 'native_usage' && event.usage && typeof event.usage === 'object') this.aggregate = normalize(event.usage);
     const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
-    for (const block of [...blocks, stream?.content_block]) if (block?.type === 'tool_use' && typeof block.name === 'string' && !(/^mcp__[a-zA-Z0-9_-]+__tool_call$/.test(block.name) && !block.input?.name)) this.usedTools.add(executionTool(block).name);
+    for (const block of [...blocks, stream?.content_block]) if (block?.type === 'tool_use' && typeof block.name === 'string' && !(/^mcp__[a-zA-Z0-9_-]+__tool_call$/.test(block.name) && !block.input?.name)) {
+      this.usedTools.add(executionTool(block).name);
+      if (block.name === 'Skill' && typeof block.input?.skill === 'string' && block.input.skill && block.input.skill.length <= 256) this.usedSkills.add(block.input.skill);
+    }
   }
   private merge(id: string, raw: any, model?: unknown): void {
     const next = normalize(raw), previous = this.messages.get(id);
@@ -76,7 +92,7 @@ export class TurnUsageCollector {
     next.totalTokens = next.inputTokens + next.cacheCreationTokens + next.cacheReadTokens + next.outputTokens;
     this.messages.set(id, {id, model: typeof model === 'string' ? model : previous?.model, usage: next, toolSchemas:this.schemas.get(id)});
   }
-  snapshot(): { usage: TokenUsage | null; requests: RequestUsage[]; loadedTools: string[] | null; usedTools: string[]; contextTools: string[] | null; schemaCoverage: {measured:number;total:number}; model?: string; contextWindow?: CodexContextMeasurement } {
+  snapshot(): { usage: TokenUsage | null; requests: RequestUsage[]; loadedTools: string[] | null; usedTools: string[]; usedSkills: string[]; extensions?: TurnExtensions; contextTools: string[] | null; schemaCoverage: {measured:number;total:number}; model?: string; contextWindow?: CodexContextMeasurement } {
     const requests = [...this.messages.values()];
     // The CLI aggregate includes otherwise unreported subcalls. It is a fallback
     // and reconciliation source, not an extra request or fabricated request ID.
@@ -90,6 +106,6 @@ export class TurnUsageCollector {
     // has a private per-attempt trace that includes in-flight requests here.
     const captures=[...this.schemas.values()].filter(s=>s.source==='codex-request-body'||this.messages.has(s.messageId));
     const contextTools=captures.length?[...new Set(captures.flatMap(s=>s.loaded))].sort():null;
-    return {usage, requests, contextTools, schemaCoverage:{measured:captures.length,total:new Set([...this.messages.keys(),...captures.map(s=>s.messageId)]).size}, loadedTools: this.loadedTools, usedTools: [...this.usedTools].sort(), model: this.model, ...(this.contextWindow ? { contextWindow: this.contextWindow } : {})};
+    return {usage, requests, contextTools, schemaCoverage:{measured:captures.length,total:new Set([...this.messages.keys(),...captures.map(s=>s.messageId)]).size}, loadedTools: this.loadedTools, usedTools: [...this.usedTools].sort(), usedSkills: [...this.usedSkills].sort(), ...(this.extensions ? { extensions: this.extensions } : {}), model: this.model, ...(this.contextWindow ? { contextWindow: this.contextWindow } : {})};
   }
 }

@@ -11,6 +11,9 @@ export function recoverOrchestration(store: OrchestrationStore): { inputs: numbe
     store.run("UPDATE assistant_responses SET state='interrupted',completed_at=? WHERE state='generating'", now);
     const inputs = Number(store.run("UPDATE conversation_inputs SET status='accepted' WHERE status='assigned'").changes);
     store.run("UPDATE notifications SET status='pending',decision_id=NULL WHERE status='assigned'");
+    // A transcription in flight when the process stopped did not fail on its own: the rerun of its
+    // input, or the 🔁 Retry button, transcribes the kept recording again.
+    store.run("UPDATE voice_note_transcripts SET state='failed',error_code='VOICE_NOTE_INTERRUPTED' WHERE state='processing'");
     let uncertainTasks = 0;
     const rows = store.all('SELECT snapshot_json FROM tasks WHERE active_attempt_id IS NOT NULL');
     for (const row of rows) {
@@ -21,6 +24,21 @@ export function recoverOrchestration(store: OrchestrationStore): { inputs: numbe
       attempt.state = 'unknown'; task.state = 'needs_reconciliation';
       task.latestProgress = { source: 'runtime', observedAt: now, text: 'Gateway restarted; process liveness and side effects require reconciliation.' };
       store.saveAttempt(attempt); store.saveTask(task, task.stateVersion);
+    }
+    // A subagent that had not started runs only for a running parent; one whose parent now awaits
+    // reconciliation (or has ended) never would, so it is cancelled as the parent's notify would have.
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const row of store.all("SELECT snapshot_json FROM tasks WHERE active_attempt_id IS NULL AND state NOT IN ('completed','failed','cancelled') AND json_extract(snapshot_json,'$.parentTaskId') IS NOT NULL")) {
+        const task = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
+        const parent = store.task(task.parentTaskId!);
+        if (parent && !['needs_reconciliation', 'completed', 'failed', 'cancelled', 'cancel_requested'].includes(parent.state)) continue;
+        task.state = 'cancelled'; task.pendingQuestion = undefined; delete task.queuedCommands;
+        task.cancellation = { requestedBy: 'agent', requestedAt: now, reason: 'Its parent task stopped when the gateway restarted.' };
+        task.latestProgress = { source: 'runtime', observedAt: now, text: 'Cancelled: its parent task stopped when the gateway restarted.' };
+        store.saveTask(task, task.stateVersion);
+        changed = true;
+      }
     }
     // A send interrupted between provider acceptance and local receipt cannot
     // be retried as if it were known not to have happened.

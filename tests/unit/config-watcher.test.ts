@@ -279,6 +279,40 @@ describe('config-watcher', () => {
     watcher.stop();
   });
 
+  // Review of #582: the generic diff reported pstack leaf by leaf, and applying
+  // `pstack.roles.<role> = undefined` re-created `{roles:{}}` — a truthy block —
+  // so disabling pstack never took effect until restart; `{}` vs absent was missed.
+  it('reports agents[].pstack as one whole-block change, including {} and removal', () => {
+    const { setConfigValue } = require('../../src/config/reload-policy');
+    const configPath = path.join(tmpDir, 'config.json');
+    const withPstack = (pstack?: Record<string, unknown>) => {
+      const raw = rawConfig() as { agents: Array<Record<string, unknown>> };
+      if (pstack) raw.agents[0].pstack = pstack;
+      return raw;
+    };
+    const set = { roles: { 'bug-fix': 'claude-fable-5-1' }, defaultEffort: 'high' };
+    writeConfigFile(configPath, withPstack(set));
+    const live = loadConfig(configPath);
+    const watcher = new ConfigWatcher(configPath, live, logger);
+    const changeSpy = jest.fn();
+    watcher.on('changes', changeSpy);
+    const apply = () => {
+      for (const change of changeSpy.mock.calls.at(-1)[0] as ConfigChange[]) if (change.agentId === 'alfred') setConfigValue(live.agents[0], change.field, change.newValue);
+    };
+
+    writeConfigFile(configPath, withPstack());
+    watcher.reload();
+    expect((changeSpy.mock.calls.at(-1)[0] as ConfigChange[]).filter(c => c.field.startsWith('pstack')).map(c => c.field)).toEqual(['pstack']);
+    apply();
+    expect(live.agents[0].pstack).toBeUndefined();
+
+    writeConfigFile(configPath, withPstack({}));
+    watcher.reload();
+    apply();
+    expect(live.agents[0].pstack).toEqual({});
+    watcher.stop();
+  });
+
   it('emits changes with hotReloadable=true when gateway.customConnectors changes', () => {
     const configPath = path.join(tmpDir, 'config.json');
     writeConfigFile(configPath, rawConfig());
