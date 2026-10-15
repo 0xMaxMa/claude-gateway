@@ -167,18 +167,57 @@ describe('client-split long messages without semantic intake (#593)',()=>{
     }finally{store.close();}
   });
 
-  test.each([true,false])('a reply-first split keeps the reply, but different replies stay apart (splitOnly=%s)',splitOnly=>{
+  test('a reply-first split keeps the reply, but different replies stay apart',()=>{
     const store=new OrchestrationStore(':memory:','a');
     try{
       const replied={repliedMessageId:'m1',repliedText:'quoted',repliedSender:'bot'};
       const a=store.acceptInput({...base,text:long(4064),metadata:replied}),b=store.acceptInput({...base,text:long(277)});
       at(store,a.inputId,1000);at(store,b.inputId,1200);
-      const batch=inputBatch(store,row(store,a.inputId),1500,8000,[],splitOnly);
+      const batch=inputBatch(store,row(store,a.inputId),1500,8000,[],true);
       expect(batch.inputIds).toEqual([a.inputId,b.inputId]);
       expect(batch.input.metadata).toMatchObject(replied);
+      // Semantic intake keeps its reply boundary unchanged.
+      expect(inputBatch(store,row(store,a.inputId),1500,8000).inputIds).toEqual([a.inputId]);
       const c=store.acceptInput({...base,text:long(4064),metadata:replied}),d=store.acceptInput({...base,text:'tail',metadata:{repliedMessageId:'m2'}});
       at(store,c.inputId,5000);at(store,d.inputId,5100);
-      expect(inputBatch(store,row(store,c.inputId),1500,8000,[],splitOnly).inputIds).toEqual([c.inputId]);
+      expect(inputBatch(store,row(store,c.inputId),1500,8000,[],true).inputIds).toEqual([c.inputId]);
+    }finally{store.close();}
+  });
+
+  test('a part cut at a paragraph break past half the limit is still a split part',()=>{
+    const store=new OrchestrationStore(':memory:','a');
+    try{
+      // Observed live: 2957 chars, continuation 482 ms later.
+      const a=store.acceptInput({...base,text:long(2957)}),b=store.acceptInput({...base,text:long(1814)});
+      at(store,a.inputId,1000);at(store,b.inputId,1482);
+      expect(inputBatch(store,row(store,a.inputId),1500,8000,[],true).inputIds).toEqual([a.inputId,b.inputId]);
+      const c=store.acceptInput({...base,text:long(1900)});at(store,c.inputId,9000);
+      expect(inputBatch(store,row(store,c.inputId),1500,8000,[],true).readyAt).toBe(0);
+    }finally{store.close();}
+  });
+
+  test.each(['line','slack','discord','whatsapp'] as const)('%s does not split messages, so a long one neither waits nor merges',source=>{
+    const store=new OrchestrationStore(':memory:','a');
+    try{
+      const other={...base,scope:{...scope,source}};
+      const a=store.acceptInput({...other,text:long(4064)}),b=store.acceptInput({...other,text:'next'});
+      at(store,a.inputId,1000);at(store,b.inputId,1200);
+      const batch=inputBatch(store,row(store,a.inputId),1500,8000,[],true);
+      expect(batch.inputIds).toEqual([a.inputId]);
+      expect(batch.readyAt).toBe(0);
+    }finally{store.close();}
+  });
+
+  test('a queued row that cannot join ends the wait instead of blocking the session',()=>{
+    const store=new OrchestrationStore(':memory:','a');
+    try{
+      const a=store.acceptInput({...base,text:long(4064)});
+      store.run("INSERT INTO conversation_members VALUES(?,?,'member')",a.conversationId,'other');
+      const b=store.acceptInput({...base,scope:{...scope,principalId:'other'},text:'group question'});
+      at(store,a.inputId,1000);at(store,b.inputId,1100);
+      const batch=inputBatch(store,row(store,a.inputId),1500,8000,[],true);
+      expect(batch.inputIds).toEqual([a.inputId]);
+      expect(batch.readyAt).toBe(0);
     }finally{store.close();}
   });
 });

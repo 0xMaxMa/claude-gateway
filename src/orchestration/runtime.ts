@@ -1593,7 +1593,7 @@ export class AgentOrchestrationRuntime {
       // batch; an incompatible follow-up gets its own turn without re-inference.
       const batchGrows = () => {
         const first = this.store.get('SELECT * FROM conversation_inputs WHERE id=?', decision.inputIds[0]);
-        return !!first && inputBatch(this.store, first, this.config.conversation.inputDebounceMs, this.config.conversation.inputMaxWaitMs, decision.inputIds)
+        return !!first && inputBatch(this.store, first, this.config.conversation.inputDebounceMs, this.config.conversation.inputMaxWaitMs, decision.inputIds, !this.config.conversation.semanticIntake)
           .inputIds.some(id => !decision.inputIds.includes(id));
       };
       if (bufferChat && newerInputPending() && batchGrows() && !response.interrupted && !active.stopping && !acknowledgementId && !committedAction && !unsafeToReplay && supersededCount < 2) {

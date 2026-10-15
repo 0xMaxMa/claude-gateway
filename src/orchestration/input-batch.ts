@@ -1,6 +1,7 @@
 import { AcceptInput, OrchestrationStore, Row, payloadHash } from './store';
 import { isChatChannel } from '../history/types';
 import { skillCommand } from './skills';
+import { TELEGRAM_MAX_CHARS } from '../telegram/chunks';
 
 /** Only human text/photo bursts on chat channels. Skill-shaped commands stay alone
  * even when unresolved at ingress (registry refreshing, skill installed later) so the
@@ -13,10 +14,11 @@ export function batchableInput(input: AcceptInput): boolean {
     && !input.metadata?.executionTaskId && !input.metadata?.recoveryBatch;
 }
 
-/** Chat clients split text over Telegram's 4096 UTF-16 unit limit into parts that
- * fill it up to a word boundary (observed 3979-4096); a shorter part ends the message. */
-export const SPLIT_PART_MIN_CHARS = 3500;
-const splitPart = (input: AcceptInput) => input.text.length >= SPLIT_PART_MIN_CHARS;
+/** Telegram clients split text over the limit at the best break past its half
+ * (lib_ui CutPart), so every non-final part is longer than 2048 (observed 2957-4096).
+ * The slack covers whitespace trimmed at the cut. Other channels do not split. */
+export const SPLIT_PART_MIN_CHARS = TELEGRAM_MAX_CHARS / 2 - 64;
+const splitPart = (input: AcceptInput) => input.scope.source === 'telegram' && input.text.length >= SPLIT_PART_MIN_CHARS;
 
 /** `inflight` re-admits the running batch's own (assigned) inputs so the caller
  * can ask whether newer mail would join them under the same rules. `splitOnly`
@@ -26,6 +28,7 @@ export function inputBatch(store: OrchestrationStore, first: Row, debounceMs: nu
   const initial: AcceptInput = JSON.parse(String(first.ingress_json));
   const rows = [first];
   const inputs = [initial];
+  let stopped = false;
   if (debounceMs && batchableInput(initial) && (!splitOnly || splitPart(initial))) {
     // Stop at any scope/authority/control boundary. Never absorb a different
     // user's message or elevate a read-only request with another input's grant.
@@ -33,7 +36,7 @@ export function inputBatch(store: OrchestrationStore, first: Row, debounceMs: nu
     const compatible = (row: Row, input: AcceptInput, continuation: boolean) => row.principal_id === first.principal_id
       && row.binding_id === first.binding_id && batchableInput(input)
       && payloadHash([input.model, input.capabilities]) === payloadHash([initial.model, initial.capabilities])
-      && (input.metadata?.repliedMessageId === initial.metadata?.repliedMessageId || (continuation && !input.metadata?.repliedMessageId));
+      && (input.metadata?.repliedMessageId === initial.metadata?.repliedMessageId || (splitOnly && continuation && !input.metadata?.repliedMessageId));
     let bytes = Buffer.byteLength(String(first.ingress_json));
     for (const row of store.all("SELECT * FROM conversation_inputs WHERE conversation_id=? AND (status='accepted' OR id IN (SELECT value FROM json_each(?))) AND input_seq>? ORDER BY input_seq LIMIT 99", first.conversation_id, JSON.stringify(inflight), first.input_seq)) {
       const input: AcceptInput = JSON.parse(String(row.ingress_json));
@@ -41,14 +44,15 @@ export function inputBatch(store: OrchestrationStore, first: Row, debounceMs: nu
       bytes += Buffer.byteLength(String(row.ingress_json));
       const attachmentCount = new Set([...inputs.flatMap(item => item.attachmentIds ?? []), ...(input.attachmentIds ?? [])]).size;
       // task_spawn's context references include the immutable input IDs and files.
-      if ((splitOnly && !continuation) || !compatible(row, input, continuation) || bytes > 131072 || rows.length + 1 + attachmentCount > 64) break;
+      if ((splitOnly && !continuation) || !compatible(row, input, continuation) || bytes > 131072 || rows.length + 1 + attachmentCount > 64) { stopped = true; break; }
       rows.push(row); inputs.push(input);
     }
   }
   const last = rows[rows.length - 1];
   const latest = inputs[inputs.length - 1];
   const reply = inputs.find(item => item.metadata?.repliedMessageId)?.metadata;
-  const readyAt = debounceMs && batchableInput(initial) && (!splitOnly || splitPart(latest))
+  // A queued row that cannot join ends a split; waiting would only delay the session.
+  const readyAt = debounceMs && batchableInput(initial) && (!splitOnly || (splitPart(latest) && !stopped))
     ? Math.min(Number(last.created_at) + debounceMs, Number(first.created_at) + maxWaitMs) : 0;
   const input: AcceptInput = inputs.length === 1 ? initial : {
     ...latest,
