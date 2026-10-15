@@ -4556,7 +4556,8 @@ export function createApiRouter(
     const promptText = typeof body.prompt === 'string' ? body.prompt.trim() : undefined;
     const explicitName = typeof body.name === 'string' ? body.name.trim() : undefined;
     let project: ProjectName | undefined;
-    if (body.project !== undefined) {
+    // Clients serialize an unset optional field as null.
+    if (body.project !== undefined && body.project !== null) {
       const apiKey = (req as AuthedRequest).apiKey;
       if (!canWriteAgent(apiKey, agentId) || !canAccessPod(apiKey)) {
         res.status(403).json({ error: 'API key not permitted for this operation', code: 'forbidden_key' }); return;

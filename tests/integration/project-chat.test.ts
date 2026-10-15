@@ -144,6 +144,12 @@ describe('POST /v1/agents/:id/sessions with project', () => {
     expect(list.body.sessions[0]).toMatchObject({ project: null, trusted: false });
   });
 
+  it.each([['podReader'], ['scopedWriter'], ['admin']])('treats project: null from %s as no project', async (key) => {
+    const res = await create(h, 'alfred', KEYS[key]!, { project: null });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ project: null, trusted: false, projectState: null });
+  });
+
   it('marks a trusted project trusted on create, list and info', async () => {
     await teardown(h);
     h = await harness({ trusted: ['site'] });

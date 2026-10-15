@@ -126,7 +126,7 @@ the only way a session comes into existence.
 | `chat_id` | Yes | Caller identity |
 | `prompt` | No | Initial user intent — used to auto-generate a session name |
 | `name` | No | Explicit session name (overrides auto-generated name) |
-| `project` | No | Name of a [project](/api/projects) under `gateway.projects.root`. Binds the session to that project for its whole life |
+| `project` | No | Name of a [project](/api/projects) under `gateway.projects.root`. Binds the session to that project for its whole life. `null` is the same as omitting it |
 
 ```bash
 curl -X POST \
