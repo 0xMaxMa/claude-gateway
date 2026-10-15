@@ -892,7 +892,8 @@ export class HistoryDB {
 /** `column NOT IN (...)` for the sessions a caller must not see, or an empty condition when there are none. */
 function excludeSessions(column: string, ids: readonly string[] | undefined): { condition: string; params: string[] } {
   if (!ids?.length) return { condition: '', params: [] };
-  return { condition: `${column} NOT IN (${ids.map(() => '?').join(',')})`, params: [...ids] };
+  // One JSON array bound once: a bind per id hits SQLite's variable limit (32766) once thousands of sessions are bound.
+  return { condition: `${column} NOT IN (SELECT value FROM json_each(?))`, params: [JSON.stringify(ids)] };
 }
 
 const and = (condition: string): string => (condition ? ` AND ${condition}` : '');
