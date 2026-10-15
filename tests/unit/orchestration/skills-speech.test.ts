@@ -86,5 +86,6 @@ test('ElevenLabs audio tags are stripped instead of silencing the reply', () => 
   expect(splitSpeechResponse('ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ [Sighs]').spoken).toBe('ได้เลยค่ะ เดี๋ยวดูให้นะคะ');
   expect(splitSpeechResponse('Sure thing [laughs]. ok[sighs], fine').spoken).toBe('Sure thing. ok, fine');
   expect(splitSpeechResponse('ได้เลย[laughs]ค่ะ').spoken).toBe('ได้เลยค่ะ');
+  expect(splitSpeechResponse('ok[sighs] fine, [pause] ไปต่อ[clears throat]ค่ะ').spoken).toBe('ok fine, ไปต่อค่ะ');
   for (const text of ['[laughs]', 'use items[0] here', 'see [docs](https://example.com)', '[unknown tag] hello']) expect(splitSpeechResponse(text).spoken).toBe('');
 });

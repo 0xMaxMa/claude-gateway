@@ -44,7 +44,7 @@ Merge this **partial configuration** into your existing configuration. Retain th
 
 An empty `voiceId` selects Auto; select a specific voice from the catalog if desired. Browser realtime STT and uploaded-file STT use different model IDs.
 
-ElevenLabs v3 and v4 TTS models (`eleven_v3_conversational`, `eleven_v3`, `eleven_v4_turbo`, `eleven_v4`) stream through the Text-to-Dialogue socket; other models use the classic stream-input socket. While a reply's text stalls, the gateway sends a keep-alive every 10 seconds (`keep_alive` on the dialogue socket, a single space on the classic socket) so neither socket closes after its 20-second idle limit. `eleven_v4_turbo` has low first-audio latency; `eleven_v4` is slower and costs about twice as much per character, so it is not recommended for live conversation. Known audio tags such as `[laughs]` or `[whispers]` are removed from plain spoken replies rather than read aloud.
+ElevenLabs v3 and v4 TTS models (`eleven_v3_conversational`, `eleven_v3`, `eleven_v4_turbo`, `eleven_v4`) stream through the Text-to-Dialogue socket; other models use the classic stream-input socket. Both sockets close after 20 seconds without input by default. While a reply's text stalls, the gateway keeps them open for up to 180 seconds: it sends `keep_alive` every 10 seconds on the dialogue socket, and it sets `inactivity_timeout` on the classic socket. `eleven_v4_turbo` has low first-audio latency; `eleven_v4` is slower and costs about twice as much per character, so it is not recommended for live conversation. Known audio tags such as `[laughs]` or `[whispers]` are removed from plain spoken replies rather than read aloud.
 
 ### Upstream ElevenLabs example
 

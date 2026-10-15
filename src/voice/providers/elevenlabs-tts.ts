@@ -5,8 +5,10 @@ import { openProviderSocket, SocketFactory } from './socket';
 // v3 and v4 models are only served by the Text-to-Dialogue socket; the classic
 // stream-input socket rejects v4 with HTTP 400.
 export const isElevenLabsDialogueModel = (model: string): boolean => /^eleven_v[34](_|$)/.test(model);
-// Both sockets close after 20s without a message (1008 input_timeout_exceeded on dialogue).
-const KEEP_ALIVE_MS = 10000;
+// Both sockets close after 20s without a message. The classic socket accepts a longer
+// inactivity_timeout; the dialogue socket ignores it and needs keep_alive messages
+// (1008 input_timeout_exceeded otherwise). Either way a stalled reply is bounded.
+const MAX_IDLE_SECONDS = 180, KEEP_ALIVE_MS = 10000;
 
 export class ElevenLabsTts implements TtsProvider {
   readonly capabilities = { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] };
@@ -33,17 +35,22 @@ export class ElevenLabsTts implements TtsProvider {
     url.searchParams.set('seed', '42');
     url.searchParams.set('model_id', this.model); url.searchParams.set('output_format', format);
     if (options.language) url.searchParams.set('language_code', options.language);
+    if (!dialogue) url.searchParams.set('inactivity_timeout', String(MAX_IDLE_SECONDS));
     const socket = await this.connect(url.toString(), { 'xi-api-key': this.key }, options.signal);
     let sendError: unknown, finished = false, closing = false, keepAlive: NodeJS.Timeout | undefined;
     const fail = (error: unknown) => { sendError ??= error; socket.close(); };
-    // Re-armed after every send, so a keep-alive only goes out while the reply text stalls.
-    // A single space is the classic socket's documented keep-alive.
+    // Re-armed after every send, so keep-alives only go out while the reply text stalls,
+    // and stop after MAX_IDLE_SECONDS so the provider closes an abandoned stream.
     const live = () => !closing && !options.signal.aborted;
-    const send = async (message: unknown) => {
+    let idleSince = 0;
+    const send = async (message: unknown, idle = false) => {
       clearTimeout(keepAlive);
+      if (!idle) idleSince = Date.now();
       await socket.send(message);
       clearTimeout(keepAlive);
-      if (live()) (keepAlive = setTimeout(() => { if (live()) send(dialogue ? { keep_alive: true } : { text: ' ' }).catch(fail); }, KEEP_ALIVE_MS)).unref();
+      if (dialogue && live() && Date.now() - idleSince < MAX_IDLE_SECONDS * 1000) (keepAlive = setTimeout(() => {
+        if (live()) send({ keep_alive: true }, true).catch(error => { if (live()) fail(error); });
+      }, KEEP_ALIVE_MS)).unref();
     };
     const sending = (async () => {
       await send(dialogue ? { voices: [options.voiceId], voice_settings: { stability: 1 } } : { text: ' ', voice_settings: { stability: 0.5 }, generation_config: { chunk_length_schedule: [50,120,160,290] } });
@@ -59,7 +66,7 @@ export class ElevenLabsTts implements TtsProvider {
         if (options.signal.aborted) return;
         if (message.error) throw providerVoiceError('TTS', undefined, message);
         if (typeof message.audio === 'string') yield Buffer.from(message.audio, 'base64');
-        if (message.is_final === true || message.isFinal === true) { finished = true; break; }
+        if (message.is_final === true || message.isFinal === true) { finished = closing = true; break; }
       }
       // Without a terminal event, report now: `sending` may still be waiting on stalled text.
       if (finished) await sending;

@@ -168,7 +168,7 @@ test('ElevenLabs keeps a stalled dialogue socket alive and stops after close_soc
   } finally { jest.useRealTimers(); }
 });
 
-test('ElevenLabs keeps a stalled classic socket alive with a single space', async () => {
+test('ElevenLabs classic socket extends its idle limit instead of injecting keep-alive text', async () => {
   jest.useFakeTimers();
   try {
     const fixture = socketFixture();
@@ -178,13 +178,29 @@ test('ElevenLabs keeps a stalled classic socket alive with a single space', asyn
     const iterator = new ElevenLabsTts('fixture', 'eleven_flash_v2_5', fixture.connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: new AbortController().signal })[Symbol.asyncIterator]();
     const done = iterator.next();
     await jest.advanceTimersByTimeAsync(25000);
-    const sent = fixture.send.mock.calls.map(([message]) => message);
-    expect(sent.slice(1)).toEqual([{ text: 'first', try_trigger_generation: true }, { text: ' ' }, { text: ' ' }]);
-    expect(sent).not.toContainEqual({ keep_alive: true });
+    expect(new URL(fixture.connect.mock.calls[0][0]).searchParams.get('inactivity_timeout')).toBe('180');
+    expect(fixture.send.mock.calls.map(([message]) => message).slice(1)).toEqual([{ text: 'first', try_trigger_generation: true }]);
     release(); await jest.advanceTimersByTimeAsync(0);
     expect(fixture.send).toHaveBeenLastCalledWith({ text: '' });
     fixture.messages.push({ isFinal: true });
     expect((await done).done).toBe(true);
+  } finally { jest.useRealTimers(); }
+});
+
+test('ElevenLabs stops dialogue keep-alive after the idle limit so an abandoned stream is closed', async () => {
+  jest.useFakeTimers();
+  try {
+    const fixture = socketFixture();
+    async function* text() { yield 'first'; await new Promise(() => {}); }
+    const iterator = new ElevenLabsTts('fixture', 'eleven_v4_turbo', fixture.connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: new AbortController().signal })[Symbol.asyncIterator]();
+    const done = iterator.next();
+    done.catch(() => {});
+    await jest.advanceTimersByTimeAsync(600000);
+    const keepAlives = fixture.send.mock.calls.filter(([message]) => JSON.stringify(message) === '{"keep_alive":true}').length;
+    expect(keepAlives).toBe(18);
+    expect(new URL(fixture.connect.mock.calls[0][0]).searchParams.get('inactivity_timeout')).toBeNull();
+    fixture.messages.close();
+    await expect(done).rejects.toMatchObject({ code: 'TTS_INCOMPLETE' });
   } finally { jest.useRealTimers(); }
 });
 
