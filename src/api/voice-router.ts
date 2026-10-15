@@ -7,7 +7,8 @@ import { randomBytes, randomUUID } from 'crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { AgentConfig, ApiKey } from '../types';
 import { AgentRunner } from '../agent/runner';
-import { createApiAuthMiddleware, canAccessAgent } from './auth';
+import { createApiAuthMiddleware, canAccessAgent, PROJECTS_ADMIN_REQUIRED } from './auth';
+import { refusesProjectChat } from './project-gate';
 import { apiPrincipal } from '../orchestration/identity';
 import { resolveOrchestrationConfig } from '../orchestration/config';
 import { sttProvider, ttsProvider } from '../voice/providers/registry';
@@ -60,6 +61,7 @@ export class VoiceApi {
       const key = (req as Request & { apiKey: ApiKey }).apiKey, runner = this.agents.get(agentId);
       if (!runner || !canAccessAgent(key, agentId)) { res.status(403).end(); return; }
       if (responseId && !/^[a-f0-9-]{36}$/i.test(responseId)) { res.status(400).end(); return; }
+      if (await refusesProjectChat(runner, key, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       try {
         const result = await runner.voiceReplay(sessionId, apiPrincipal(key), responseId);
         res.setHeader('Cache-Control', 'private, no-store');
@@ -74,6 +76,7 @@ export class VoiceApi {
       const runner = this.agents.get(agentId), config = this.configs.get(agentId);
       if (!runner || !canAccessAgent(key, agentId)) { res.status(403).end(); return; }
       if (!/^[a-f0-9-]{36}$/i.test(responseId)) { res.status(400).end(); return; }
+      if (await refusesProjectChat(runner, key, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       let audio: Buffer | string[] | undefined, spoken: string | undefined;
       try {
         audio = await runner.voiceReplay(sessionId, principal, responseId);
@@ -101,6 +104,7 @@ export class VoiceApi {
       const agentId = String(req.params.agentId), sessionId = String(req.params.sessionId);
       const key = (req as Request & { apiKey: ApiKey }).apiKey, runner = this.agents.get(agentId);
       if (!runner || !canAccessAgent(key, agentId)) { res.status(403).end(); return; }
+      if (await refusesProjectChat(runner, key, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       // Enabling requires the normal ticket/credit checks; this endpoint only stops intent.
       if (req.body?.enabled !== false) { res.status(400).json({ error: 'Expected enabled=false' }); return; }
       try { await runner.setBrowserVoice(sessionId, apiPrincipal(key), false); res.status(204).end(); }
@@ -111,6 +115,7 @@ export class VoiceApi {
       const key = (req as Request & { apiKey: ApiKey }).apiKey;
       const config = this.configs.get(agentId), runner = this.agents.get(agentId);
       if (!config || !runner || !canAccessAgent(key, agentId)) { res.status(403).json({ error: 'Access denied' }); return; }
+      if (await refusesProjectChat(runner, key, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       if (!config.orchestration?.enabled || !config.voice?.enabled) { res.status(409).json({ error: 'Voice disabled' }); return; }
       const voice = resolveOrchestrationConfig(config.orchestration, config.voice ?? { enabled: false }).voice;
       const origin = req.headers.origin;
@@ -151,6 +156,8 @@ export class VoiceApi {
       const ticketEntry = [...this.tickets].find(([, value]) => value.voiceSessionId === id);
       const owner = active?.ticket ?? ticketEntry?.[1];
       if (!owner || owner.agentId !== req.params.agentId || owner.sessionId !== req.params.sessionId || owner.principalId !== apiPrincipal(key) || !canAccessAgent(key, owner.agentId)) { res.status(404).json({ error: 'Voice session not found' }); return; }
+      const ownerRunner = this.agents.get(owner.agentId);
+      if (ownerRunner && await refusesProjectChat(ownerRunner, key, owner.sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       if (ticketEntry) this.tickets.delete(ticketEntry[0]);
       active?.socket.close(); await active?.session.close(); this.sessions.delete(id); this.releaseLease(owner);
       res.status(204).end();

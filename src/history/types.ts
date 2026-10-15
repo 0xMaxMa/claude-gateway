@@ -123,12 +123,15 @@ export interface PaginationOpts {
   beforeId?: number;
   afterId?: number;
   sessionId?: string;
+  /** Sessions whose messages are left out. */
+  excludeSessionIds?: readonly string[];
   order?: 'asc' | 'desc'; // default 'desc' (reverse-chronological)
 }
 
 export interface SearchOpts {
   limit?: number;
   offset?: number;
+  excludeSessionIds?: readonly string[];
 }
 
 export interface ActiveDaysOpts {
@@ -136,6 +139,7 @@ export interface ActiveDaysOpts {
   to: number; // UTC ms, exclusive (ts < to)
   tzOffset?: number; // minutes EAST of UTC (local = UTC + offset); Bangkok = +420; default 0 (UTC)
   sessionId?: string;
+  excludeSessionIds?: readonly string[];
 }
 
 export interface SessionSummary {

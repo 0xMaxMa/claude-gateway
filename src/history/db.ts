@@ -512,7 +512,9 @@ export class HistoryDB {
     return removed;
   }
 
-  listChats(): ChatSummary[] {
+  listChats(opts: { excludeSessionIds?: readonly string[] } = {}): ChatSummary[] {
+    const skip = excludeSessions('m.session_id', opts.excludeSessionIds);
+    const skip2 = excludeSessions('m2.session_id', opts.excludeSessionIds);
     const rows = this.db.prepare(`
       SELECT
         m.chat_id,
@@ -523,14 +525,15 @@ export class HistoryDB {
         (
           SELECT SUBSTR(m2.content, 1, ${PREVIEW_LENGTH})
           FROM messages m2
-          WHERE m2.chat_id = m.chat_id
+          WHERE m2.chat_id = m.chat_id${and(skip2.condition)}
           ORDER BY m2.ts DESC
           LIMIT 1
         ) AS last_preview
       FROM messages m
+      WHERE 1=1${and(skip.condition)}
       GROUP BY m.chat_id
       ORDER BY last_active DESC
-    `).all() as Array<{
+    `).all(...skip2.params, ...skip.params) as Array<{
       chat_id: string;
       source: string;
       display_name: string | null;
@@ -569,6 +572,11 @@ export class HistoryDB {
     if (opts.sessionId) {
       conditions.push('session_id = ?');
       params.push(opts.sessionId);
+    }
+    const skipped = excludeSessions('session_id', opts.excludeSessionIds);
+    if (skipped.condition) {
+      conditions.push(skipped.condition);
+      params.push(...skipped.params);
     }
     // Composite (ts, id) cursor: when the caller pairs before/after with its id component,
     // match the boundary as a tuple so a page edge landing between equal-ts rows doesn't
@@ -638,14 +646,15 @@ export class HistoryDB {
       return { results: [], total: 0, hasMore: false };
     }
 
+    const skip = excludeSessions('messages.session_id', opts.excludeSessionIds);
     try {
       const countStmt = this.db.prepare(`
         SELECT COUNT(*) as cnt
         FROM messages_fts
         JOIN messages ON messages.id = messages_fts.rowid
-        WHERE messages.chat_id = ? AND messages_fts MATCH ?
+        WHERE messages.chat_id = ? AND messages_fts MATCH ?${and(skip.condition)}
       `);
-      const countRow = countStmt.get(chatId, sanitizedQuery) as { cnt: number };
+      const countRow = countStmt.get(chatId, sanitizedQuery, ...skip.params) as { cnt: number };
       const total = countRow?.cnt ?? 0;
 
       const stmt = this.db.prepare(`
@@ -658,12 +667,12 @@ export class HistoryDB {
           snippet(messages_fts, 0, '<b>', '</b>', '...', 32) AS snippet
         FROM messages_fts
         JOIN messages ON messages.id = messages_fts.rowid
-        WHERE messages.chat_id = ? AND messages_fts MATCH ?
+        WHERE messages.chat_id = ? AND messages_fts MATCH ?${and(skip.condition)}
         ORDER BY messages.ts DESC
         LIMIT ? OFFSET ?
       `);
 
-      const rows = stmt.all(chatId, sanitizedQuery, limit, offset) as Array<Record<string, unknown>>;
+      const rows = stmt.all(chatId, sanitizedQuery, ...skip.params, limit, offset) as Array<Record<string, unknown>>;
       const results: SearchResult[] = rows.map((r) => ({
         ...this._rowToMessage(r),
         snippet: (r['snippet'] as string | null) ?? '',
@@ -697,6 +706,11 @@ export class HistoryDB {
     if (opts.sessionId) {
       conditions.push('session_id = ?');
       params.push(opts.sessionId);
+    }
+    const skipped = excludeSessions('session_id', opts.excludeSessionIds);
+    if (skipped.condition) {
+      conditions.push(skipped.condition);
+      params.push(...skipped.params);
     }
 
     // offsetMs is bound FIRST because it appears first in the SQL text; keep ? order and bind
@@ -874,6 +888,14 @@ export class HistoryDB {
 }
 
 // ---- Skill-learning row mappers (module scope) --------------------------------
+
+/** `column NOT IN (...)` for the sessions a caller must not see, or an empty condition when there are none. */
+function excludeSessions(column: string, ids: readonly string[] | undefined): { condition: string; params: string[] } {
+  if (!ids?.length) return { condition: '', params: [] };
+  return { condition: `${column} NOT IN (${ids.map(() => '?').join(',')})`, params: [...ids] };
+}
+
+const and = (condition: string): string => (condition ? ` AND ${condition}` : '');
 
 function mapTurnMetricRow(r: Record<string, unknown>): TurnMetricRow {
   return {

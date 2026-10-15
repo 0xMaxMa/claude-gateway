@@ -463,6 +463,11 @@ export class AgentRunner extends EventEmitter {
     return binding;
   }
 
+  /** Ids of every project-bound session of this agent, from the binding files. Throws when they cannot be listed. */
+  boundSessionIds(): Promise<Set<string>> {
+    return this.sessionStore.listBoundSessionIds(this.agentConfig.id);
+  }
+
   /** Throws PROJECT_UNAVAILABLE when the session's project no longer resolves; a no-op for unbound sessions. */
   async assertApiProjectAvailable(sessionId: string): Promise<void> {
     const project = await this.apiSessionProjectCwd(sessionId);

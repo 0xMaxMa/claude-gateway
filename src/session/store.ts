@@ -687,6 +687,18 @@ export class SessionStore {
     await fs.promises.rm(this.projectBindingPath(agentId, sessionId), { force: true });
   }
 
+  /** Every session with a binding file, readable or not: a file that cannot be parsed still means the session is bound. */
+  async listBoundSessionIds(agentId: string): Promise<Set<string>> {
+    let names: string[];
+    try {
+      names = await fs.promises.readdir(path.dirname(this.projectBindingPath(agentId, 'x')));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return new Set();
+      throw e;
+    }
+    return new Set(names.filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -'.json'.length)));
+  }
+
   /** No file means the session was never bound. A file that cannot be read is not the same thing. */
   async loadProjectBinding(agentId: string, sessionId: string): Promise<ProjectBinding> {
     let raw: string;
