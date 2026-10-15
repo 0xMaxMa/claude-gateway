@@ -202,7 +202,7 @@ The diagnostic payload contains metadata, not transcript text, audio, URLs or pr
 
 ## Telegram voice calls
 
-With orchestration serving Telegram, voice enabled and an HTTPS `gateway.publicUrl`, a paired user can send `/call` in the bot's private chat to talk with the agent live. The call uses the same STT, TTS and turn settings as browser live voice, joins the chat's active session, and posts the user's words (`🎙 …`) and the agent's text replies in that chat. Tool permissions follow the Telegram channel (`allow_tools`); live voice never writes memory. See [Telegram setup](../channels/telegram.md#live-voice-calls).
+With orchestration serving Telegram, voice enabled and an HTTPS `gateway.publicUrl`, a paired user can send `/call` in the bot's private chat to talk with the agent live. The call uses the same STT, TTS and turn settings as browser live voice, joins the chat's active session, and posts the user's words (`🎙 …`) and the agent's text replies in that chat. Tool permissions follow the Telegram channel (`allow_tools`); live voice never writes memory. Behind a proxy with its own sign-in, such as a GetPod pod, the call page uses the same login redirect as `/cli`. See [Telegram setup](../channels/telegram.md#live-voice-calls).
 
 ## Managed voice credits
 
