@@ -104,7 +104,7 @@ A connected, same-principal voice session can speak typed chat responses while i
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/voice-call/:pairingId` | The call page (`Cache-Control: no-store`); `404` once the link expired |
+| `GET` | `/voice-call/:pairingId` | The call page (`Cache-Control: no-store`). Loading it never claims the link. Once a ticket claimed it, the page renders "This call link was already used" and starts nothing unless it holds that call's token (a reload of the same call, which then rejoins). `404` with "This call link has expired" for an expired or unknown link |
 | `GET` | `/voice-call/:pairingId/avatar?v=<file_unique_id>` | The bot's profile photo (`image/jpeg`, `image/png` or `image/webp`, `Cache-Control: private, max-age=3600`); `404` (`no-store`) when the bot has no photo or the link expired. The page links it only when the bot has a photo, versioned by Telegram's `file_unique_id` |
 | `POST` | `/voice-call/:pairingId/ticket` | Body `{ "initData": "<Telegram.WebApp.initData>", "call_token": "<optional>" }`; returns the ticket fields above plus `call_token`, and `call_elapsed_ms` when this call is already in progress |
 
