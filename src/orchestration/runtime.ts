@@ -1056,7 +1056,7 @@ export class AgentOrchestrationRuntime {
       if (!head.scope || !head.capabilities || this.active.has(head.scope.agentSessionId)) continue;
       if (visitedSessions.has(head.scope.agentSessionId)) continue;
       visitedSessions.add(head.scope.agentSessionId);
-      const batch = inputBatch(this.store, row, this.batchDebounceMs(), this.config.conversation.inputMaxWaitMs);
+      const batch = inputBatch(this.store, row, this.config.conversation.inputDebounceMs, this.config.conversation.inputMaxWaitMs, [], !this.config.conversation.semanticIntake);
       const input = batch.input;
       if (Date.now() < batch.readyAt) continue;
       const scope = resolveProviderScope(this.agent, this.gateway, input.model, 'agent');
@@ -1084,10 +1084,6 @@ export class AgentOrchestrationRuntime {
     if (this.active.size >= this.config.conversation.maxActiveSessions) break mailbox;
     }
   }
-  private batchDebounceMs(): number {
-    return this.config.conversation.semanticIntake ? this.config.conversation.inputDebounceMs : 0;
-  }
-
   private async run(input: AcceptInput, capabilities: ExecutionCapabilities, options: { timeoutMs: number; model?: string; onText?: (text: string) => void; onTool?: (event: ToolActivity) => void; inputIds?: string[] }): Promise<string> {
     const sessionId = input.scope.agentSessionId;
     const channelTts = this.telegramVoices.settings(channelVoiceKey(input.scope.source,input.scope.chatId,input.scope.threadKey));
@@ -1597,7 +1593,7 @@ export class AgentOrchestrationRuntime {
       // batch; an incompatible follow-up gets its own turn without re-inference.
       const batchGrows = () => {
         const first = this.store.get('SELECT * FROM conversation_inputs WHERE id=?', decision.inputIds[0]);
-        return !!first && inputBatch(this.store, first, this.batchDebounceMs(), this.config.conversation.inputMaxWaitMs, decision.inputIds)
+        return !!first && inputBatch(this.store, first, this.config.conversation.inputDebounceMs, this.config.conversation.inputMaxWaitMs, decision.inputIds)
           .inputIds.some(id => !decision.inputIds.includes(id));
       };
       if (bufferChat && newerInputPending() && batchGrows() && !response.interrupted && !active.stopping && !acknowledgementId && !committedAction && !unsafeToReplay && supersededCount < 2) {

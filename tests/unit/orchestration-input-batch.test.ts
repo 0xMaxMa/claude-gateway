@@ -103,3 +103,82 @@ test('a skill-shaped command unresolved at ingress stays alone so the turn can s
     expect(resolveSkill(batch.input.text,'telegram',registry)?.name).toBe('review-pr');
   }finally{store.close();}
 });
+
+describe('client-split long messages without semantic intake (#593)',()=>{
+  const long=(n:number)=>'x'.repeat(n);
+  const at=(store:OrchestrationStore,id:string,ms:number)=>store.run('UPDATE conversation_inputs SET created_at=? WHERE id=?',ms,id);
+  const row=(store:OrchestrationStore,id:string)=>store.get('SELECT * FROM conversation_inputs WHERE id=?',id)!;
+
+  test('a near-limit part and its continuation 200 ms later form one batch after the quiet window',()=>{
+    const store=new OrchestrationStore(':memory:','a');
+    try{
+      const a=store.acceptInput({...base,text:long(4064)}),b=store.acceptInput({...base,text:long(277)});
+      at(store,a.inputId,1000);at(store,b.inputId,1200);
+      const batch=inputBatch(store,row(store,a.inputId),1500,8000,[],true);
+      expect(batch.inputIds).toEqual([a.inputId,b.inputId]);
+      // The short final part ends the message, so nothing more is awaited.
+      expect(batch.readyAt).toBe(0);
+      expect(batch.input.text).toContain(long(277));
+    }finally{store.close();}
+  });
+
+  test('a lone near-limit part waits for a continuation, bounded by the maximum wait',()=>{
+    const store=new OrchestrationStore(':memory:','a');
+    try{
+      const a=store.acceptInput({...base,text:long(4090)});
+      at(store,a.inputId,1000);
+      expect(inputBatch(store,row(store,a.inputId),1500,8000,[],true).readyAt).toBe(2500);
+      const b=store.acceptInput({...base,text:long(4019)});at(store,b.inputId,2400);
+      expect(inputBatch(store,row(store,a.inputId),1500,8000,[],true).readyAt).toBe(3900);
+      expect(inputBatch(store,row(store,a.inputId),1500,2000,[],true).readyAt).toBe(3000);
+    }finally{store.close();}
+  });
+
+  test('short messages are never delayed or merged',()=>{
+    const store=new OrchestrationStore(':memory:','a');
+    try{
+      const a=store.acceptInput(base),b=store.acceptInput({...base,text:'second'});
+      at(store,a.inputId,1000);at(store,b.inputId,1100);
+      const batch=inputBatch(store,row(store,a.inputId),1500,8000,[],true);
+      expect(batch.inputIds).toEqual([a.inputId]);
+      expect(batch.readyAt).toBe(0);
+    }finally{store.close();}
+  });
+
+  test('a message long after a near-limit part is not treated as its continuation',()=>{
+    const store=new OrchestrationStore(':memory:','a');
+    try{
+      const a=store.acceptInput({...base,text:long(4000)}),b=store.acceptInput({...base,text:'later'});
+      at(store,a.inputId,1000);at(store,b.inputId,60000);
+      expect(inputBatch(store,row(store,a.inputId),1500,8000,[],true).inputIds).toEqual([a.inputId]);
+    }finally{store.close();}
+  });
+
+  test.each([
+    ['a skill-shaped command', {text:'/review-pr 567'}],
+    ['a recorded voice note', {modality:'voice_note' as const}],
+    ['an API request', {requestId:'request'}],
+  ])('%s right after a long part is not merged',(_label,change)=>{
+    const store=new OrchestrationStore(':memory:','a');
+    try{
+      const a=store.acceptInput({...base,text:long(4064)}),b=store.acceptInput({...base,text:'short',...change});
+      at(store,a.inputId,1000);at(store,b.inputId,1100);
+      expect(inputBatch(store,row(store,a.inputId),1500,8000,[],true).inputIds).toEqual([a.inputId]);
+    }finally{store.close();}
+  });
+
+  test.each([true,false])('a reply-first split keeps the reply, but different replies stay apart (splitOnly=%s)',splitOnly=>{
+    const store=new OrchestrationStore(':memory:','a');
+    try{
+      const replied={repliedMessageId:'m1',repliedText:'quoted',repliedSender:'bot'};
+      const a=store.acceptInput({...base,text:long(4064),metadata:replied}),b=store.acceptInput({...base,text:long(277)});
+      at(store,a.inputId,1000);at(store,b.inputId,1200);
+      const batch=inputBatch(store,row(store,a.inputId),1500,8000,[],splitOnly);
+      expect(batch.inputIds).toEqual([a.inputId,b.inputId]);
+      expect(batch.input.metadata).toMatchObject(replied);
+      const c=store.acceptInput({...base,text:long(4064),metadata:replied}),d=store.acceptInput({...base,text:'tail',metadata:{repliedMessageId:'m2'}});
+      at(store,c.inputId,5000);at(store,d.inputId,5100);
+      expect(inputBatch(store,row(store,c.inputId),1500,8000,[],splitOnly).inputIds).toEqual([c.inputId]);
+    }finally{store.close();}
+  });
+});

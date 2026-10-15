@@ -13,32 +13,42 @@ export function batchableInput(input: AcceptInput): boolean {
     && !input.metadata?.executionTaskId && !input.metadata?.recoveryBatch;
 }
 
+/** Chat clients split text over Telegram's 4096 UTF-16 unit limit into parts that
+ * fill it up to a word boundary (observed 3979-4096); a shorter part ends the message. */
+export const SPLIT_PART_MIN_CHARS = 3500;
+const splitPart = (input: AcceptInput) => input.text.length >= SPLIT_PART_MIN_CHARS;
+
 /** `inflight` re-admits the running batch's own (assigned) inputs so the caller
- * can ask whether newer mail would join them under the same rules. */
-export function inputBatch(store: OrchestrationStore, first: Row, debounceMs: number, maxWaitMs: number, inflight: string[] = []) {
+ * can ask whether newer mail would join them under the same rules. `splitOnly`
+ * joins only client-split continuations and waits only after a near-limit part,
+ * so other messages keep zero added latency. */
+export function inputBatch(store: OrchestrationStore, first: Row, debounceMs: number, maxWaitMs: number, inflight: string[] = [], splitOnly = false) {
   const initial: AcceptInput = JSON.parse(String(first.ingress_json));
   const rows = [first];
   const inputs = [initial];
   if (debounceMs && batchableInput(initial)) {
     // Stop at any scope/authority/control boundary. Never absorb a different
     // user's message or elevate a read-only request with another input's grant.
-    const compatible = (row: Row, input: AcceptInput) => row.principal_id === first.principal_id
+    // Only the first split part carries the reply, so its continuation may omit it.
+    const compatible = (row: Row, input: AcceptInput, continuation: boolean) => row.principal_id === first.principal_id
       && row.binding_id === first.binding_id && batchableInput(input)
-      && payloadHash([input.model, input.capabilities, input.metadata?.repliedMessageId])
-        === payloadHash([initial.model, initial.capabilities, initial.metadata?.repliedMessageId]);
+      && payloadHash([input.model, input.capabilities]) === payloadHash([initial.model, initial.capabilities])
+      && (input.metadata?.repliedMessageId === initial.metadata?.repliedMessageId || (continuation && !input.metadata?.repliedMessageId));
     let bytes = Buffer.byteLength(String(first.ingress_json));
     for (const row of store.all("SELECT * FROM conversation_inputs WHERE conversation_id=? AND (status='accepted' OR id IN (SELECT value FROM json_each(?))) AND input_seq>? ORDER BY input_seq LIMIT 99", first.conversation_id, JSON.stringify(inflight), first.input_seq)) {
       const input: AcceptInput = JSON.parse(String(row.ingress_json));
+      const continuation = splitPart(inputs[inputs.length - 1]) && Number(row.created_at) - Number(rows[rows.length - 1].created_at) <= debounceMs;
       bytes += Buffer.byteLength(String(row.ingress_json));
       const attachmentCount = new Set([...inputs.flatMap(item => item.attachmentIds ?? []), ...(input.attachmentIds ?? [])]).size;
       // task_spawn's context references include the immutable input IDs and files.
-      if (!compatible(row, input) || bytes > 131072 || rows.length + 1 + attachmentCount > 64) break;
+      if ((splitOnly && !continuation) || !compatible(row, input, continuation) || bytes > 131072 || rows.length + 1 + attachmentCount > 64) break;
       rows.push(row); inputs.push(input);
     }
   }
   const last = rows[rows.length - 1];
   const latest = inputs[inputs.length - 1];
-  const readyAt = debounceMs && batchableInput(initial)
+  const reply = inputs.find(item => item.metadata?.repliedMessageId)?.metadata;
+  const readyAt = debounceMs && batchableInput(initial) && (!splitOnly || splitPart(latest))
     ? Math.min(Number(last.created_at) + debounceMs, Number(first.created_at) + maxWaitMs) : 0;
   const input: AcceptInput = inputs.length === 1 ? initial : {
     ...latest,
@@ -46,6 +56,7 @@ export function inputBatch(store: OrchestrationStore, first: Row, debounceMs: nu
       + JSON.stringify(inputs.map((item, index) => ({ inputId: String(rows[index].id), text: item.text, attachmentIds: item.attachmentIds ?? [], metadata: item.metadata ?? {} }))),
     attachmentIds: [...new Set(inputs.flatMap(item => item.attachmentIds ?? []))],
     metadata: { ...latest.metadata,
+      ...(reply && { repliedMessageId: reply.repliedMessageId, repliedText: reply.repliedText, repliedSender: reply.repliedSender, repliedAttachmentIds: reply.repliedAttachmentIds }),
       attachmentDetails: inputs.flatMap(item => item.metadata?.attachmentDetails ?? []),
       unavailableAttachments: inputs.flatMap(item => item.metadata?.unavailableAttachments ?? []),
     },
