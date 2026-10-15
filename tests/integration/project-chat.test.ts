@@ -226,19 +226,20 @@ describe('a project-bound session is admin-only on every path', () => {
     const key = KEYS[name]!;
     const base = '/api/v1/agents/alfred';
     const body = { session_id: sid, chat_id: 'web', message: 'hi' };
-    const calls = [
-      supertest(h.app).post(`${base}/messages`).set(bearer(key)).send(body),
-      supertest(h.app).post(`${base}/messages/accept`).set(bearer(key)).send(body),
-      supertest(h.app).post(`${base}/greeting`).set(bearer(key)).send(body),
-      supertest(h.app).get(`${base}/sessions/${sid}/messages/stream`).set(bearer(key)),
-      supertest(h.app).get(`${base}/sessions/${sid}/activity/stream`).set(bearer(key)),
-      supertest(h.app).get(`${base}/sessions/${sid}/activity`).set(bearer(key)),
-      supertest(h.app).get(`${base}/sessions/${sid}/stream`).set(bearer(key)),
-      create(h, 'alfred', key, { project: 'site' }),
+    const calls: Array<[string, Promise<supertest.Response>]> = [
+      ['messages', supertest(h.app).post(`${base}/messages`).set(bearer(key)).send(body)],
+      ['messages/accept', supertest(h.app).post(`${base}/messages/accept`).set(bearer(key)).send(body)],
+      ['greeting', supertest(h.app).post(`${base}/greeting`).set(bearer(key)).send(body)],
+      ['messages/stream', supertest(h.app).get(`${base}/sessions/${sid}/messages/stream`).set(bearer(key))],
+      ['activity/stream', supertest(h.app).get(`${base}/sessions/${sid}/activity/stream`).set(bearer(key))],
+      ['activity', supertest(h.app).get(`${base}/sessions/${sid}/activity`).set(bearer(key))],
+      ['stream', supertest(h.app).get(`${base}/sessions/${sid}/stream`).set(bearer(key))],
+      ['create', create(h, 'alfred', key, { project: 'site' })],
     ];
-    for (const res of await Promise.all(calls)) {
-      const readOnlyGreeting = name === 'podReader' && res.req.path.endsWith('/greeting');
-      expect([res.req.path, res.status]).toEqual([res.req.path, 403]);
+    for (const [label, pending] of calls) {
+      const res = await pending;
+      const readOnlyGreeting = name === 'podReader' && label === 'greeting';
+      expect([label, res.status]).toEqual([label, 403]);
       if (!readOnlyGreeting) {
         expect(res.body.code).toBe('forbidden_key');
         expect(res.body.error).toMatch(/admin API key is required/);

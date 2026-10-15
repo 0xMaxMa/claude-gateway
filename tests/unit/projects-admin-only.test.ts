@@ -82,7 +82,7 @@ describe('a project-bound session or chat is admin-only on every route that reve
   const UUID = '11111111-2222-3333-4444-555555555555';
   let gwBase: string;
   let runner: AgentRunner;
-  let gw: express.Express;
+  let gw: ReturnType<GatewayRouter['getApp']>;
   let bound: string;
   let plain: string;
 
@@ -119,7 +119,8 @@ describe('a project-bound session or chat is admin-only on every route that reve
     (request(gw) as unknown as Record<string, (u: string) => request.Test>)[method]!(url).set('Authorization', `Bearer ${key.key}`).send(body ?? {});
 
   /** Every route that takes a session id (or a chat id that holds one) and can reveal or control the session. */
-  const SESSION_ROUTES: Array<[string, string, (sid: string) => string, object?]> = [
+  type Body = (sid: string) => object;
+  const SESSION_ROUTES: Array<[string, string, (sid: string) => string, Body?]> = [
     ['get', 'info', (s) => `${A}/sessions/${s}/info?chat_id=web`],
     ['patch', 'rename', (s) => `${A}/sessions/${s}?chat_id=web`, () => ({ session_name: 'x' })],
     ['delete', 'delete', (s) => `${A}/sessions/${s}?chat_id=web`],
