@@ -12,6 +12,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { expandHome } from '../utils/paths';
 import { Server } from 'http';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import { AgentRunner } from '../agent/runner';
@@ -738,6 +739,7 @@ export class GatewayRouter {
       this.app.use('/api', createProjectsRouter(this.gatewayConfig.gateway.api.keys, resolveProjectsRoot(this.gatewayConfig), {
         sys: systemSys(),
         limiter: new StopLimiter(),
+        logDir: this.gatewayConfig.gateway.logDir ? path.join(expandHome(this.gatewayConfig.gateway.logDir), 'projects') : undefined,
         chatTurnActive: async (name) => (await Promise.all([...this.agents.values()].map((runner) => runner.hasActiveProjectTurn(name)))).some(Boolean),
       }));
     }

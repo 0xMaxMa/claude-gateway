@@ -21,6 +21,14 @@ calling key is not an admin key, and `"disabled"` means the gateway serves no Pr
 absent when Projects is usable. An older gateway omits the key, or lists projects without
 `"git"`, `"chat"` or `"run"`. Show running status and the Stop button only when it includes `"run"`, the Start button only when it includes `"start"`, and the Delete action only when it includes `"delete"`.
 
+**On by default.** The routes are on for every install, with the root `~/projects`, and
+need no configuration. Admin keys can list, read, run, start and delete whatever sits under
+that folder. To switch Projects off, set `gateway.projects.enabled` to `false` and restart:
+
+```json
+{ "gateway": { "projects": { "enabled": false } } }
+```
+
 **Root.** Projects live in `gateway.projects.root`, which defaults to
 `~/projects`. Every listing returns the root as `root`, resolved through
 symlinks when it exists, so a client never has to rebuild it. The gateway follows symlinks with `realpath` and refuses any project, directory, or
@@ -29,7 +37,7 @@ project (for a path inside it). Hardlinks are not detected: a hardlinked file re
 because the API is a view of what the gateway's user can already read, not a
 sandbox.
 
-**Disabled.** When the default root would expose your home or config directory, the gateway logs a warning and does not mount these routes: they answer `404`, `capabilities.projects` is empty, and `POST /sessions` with `project` answers `409 projects_disabled`. Sessions already bound to a project fail with `409 PROJECT_UNAVAILABLE`. Set `gateway.projects.root` to re-enable.
+**Disabled.** When the default root would expose your home or config directory, the gateway logs a warning and does not mount these routes: they answer `404`, `capabilities.projects` is empty, and `POST /sessions` with `project` answers `409 projects_disabled`. Sessions already bound to a project fail with `409 PROJECT_UNAVAILABLE`. Set `gateway.projects.root` to a folder that holds only projects to re-enable. A `root` that is spelled exactly like the default (`config.template.json` ships `"~/projects"`, and the config migration copies it into old configs) counts as unset, so it warns and disables the routes instead of stopping the gateway. Any other unsafe `root` stops the gateway from loading.
 
 **Configuring the root.** Set `gateway.projects.root` in `config.json` to an
 absolute path or a path starting with `~/`:
@@ -45,8 +53,25 @@ absolute path or a path starting with `~/`:
 The API has no denylist inside the root, so the gateway rejects a configuration
 whose root is `/`, your home directory, `~/.claude-gateway`, the directory holding
 `config.json`, or any directory that contains one of them. Changing the root
-takes effect after a gateway restart.
+takes effect after a gateway restart. Keys other than `root`, `trusted` and `enabled`
+inside `gateway.projects` are ignored, and the gateway logs a warning that names them.
 
+**Requirements and files.** Projects needs `git` 2.26 or newer on the pod. The read calls
+(`git status --porcelain=v2`, `rev-parse --absolute-git-dir`, `log`, `rev-list`) work from 2.13,
+but the check that blanks a repository's own filter commands uses `git config --show-scope`
+(2.26). On an older git that check finds nothing, and the filter protection below does not apply. Projects also uses
+`ss`, or `/proc` when `ss` is missing, to find listeners, and writes these files:
+
+| Path | Holds |
+| ---- | ----- |
+| `<agent dir>/project-bindings/<sessionId>.json` | Which project a chat is bound to. Written only for project chats and deleted with the session |
+| `<gateway.logDir>/projects/<name>.log` | Output of a project started with `running/start`. With the default `logDir` this is `~/.claude-gateway/logs/projects/` |
+| `<root>/.deleting-<name>-<id>` | What a `DELETE` could not remove. Safe to delete by hand |
+
+**Downgrading.** Gateways without Projects ignore the `projects` block. A project chat opened
+on this version then runs in the agent workspace, and a project task still queued at the time runs
+without the untrusted-settings guard. Let queued project tasks finish, or cancel them, before you
+downgrade.
 
 ## Errors {#errors}
 
@@ -499,7 +524,7 @@ with `{ "command": "..." }` when it can start the project, `null` when it cannot
 
 The process runs detached in the project folder with only `PATH`, `HOME`, `USER`,
 `LOGNAME`, `LANG`, `LC_ALL`, `SHELL`, `TMPDIR` and `PORT` in its environment, and
-its output goes to `~/.claude-gateway/logs/projects/<name>.log`. The response waits
+its output goes to `<gateway.logDir>/projects/<name>.log` (`~/.claude-gateway/logs/projects/<name>.log` by default). The response waits
 up to 20 seconds for a listener on that port from inside the project, then returns
 `200` with
 

@@ -715,9 +715,42 @@ describe('config-loader', () => {
         expect(projectsWarnings()).toHaveLength(0);
       });
 
-      it('still throws when the same root is set explicitly', () => {
+      it('treats an explicit root equal to the default like an unset one: warns and disables when ~/projects is a symlink to HOME', () => {
         fs.symlinkSync(home, path.join(home, 'projects'));
-        expect(() => loadRoot('~/projects')).toThrow(/gateway\.projects\.root .* must not be or contain/);
+        expect(loadRoot('~/projects').gateway.projects).toEqual({ root: '~/projects', enabled: false });
+        expect(projectsWarnings()).toHaveLength(1);
+      });
+
+      it('treats the default spelled as an absolute path the same way, and keeps the config under ~/projects loadable on every start', () => {
+        const nested = path.join(home, 'projects', 'gw');
+        fs.mkdirSync(nested, { recursive: true });
+        const configPath = path.join(nested, 'config.json');
+        fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/tmp', projects: { root: path.join(home, 'projects'), trusted: [] } }, agents: [] }));
+        for (let start = 0; start < 2; start++) {
+          expect(loadConfig(configPath).gateway.projects).toMatchObject({ enabled: false });
+        }
+        expect(projectsWarnings()).toHaveLength(2);
+      });
+
+      it('leaves an explicit default root enabled when ~/projects is safe', () => {
+        expect(loadRoot('~/projects').gateway.projects).toEqual({ root: '~/projects' });
+        expect(projectsWarnings()).toHaveLength(0);
+      });
+
+      it('still throws for an explicit unsafe root other than the default', () => {
+        fs.symlinkSync(home, path.join(home, 'projects'));
+        expect(() => loadRoot('~')).toThrow(/gateway\.projects\.root .* must not be or contain/);
+        expect(() => loadRoot(configDir)).toThrow(/gateway\.projects\.root .* must not be or contain/);
+      });
+
+      it('warns about unknown keys inside gateway.projects and still loads', () => {
+        const unknownWarnings = () => warn.mock.calls.filter(([m]) => String(m).includes('unknown gateway.projects keys'));
+        expect(load({ projects: { rooot: '/srv/p', enabled: true } }).gateway.projects).toMatchObject({ enabled: true });
+        expect(unknownWarnings()).toHaveLength(1);
+        expect(String(unknownWarnings()[0]![0])).toContain('rooot');
+        warn.mockClear();
+        load({ projects: { root: '~/x', trusted: [], enabled: true } });
+        expect(unknownWarnings()).toHaveLength(0);
       });
     });
   });

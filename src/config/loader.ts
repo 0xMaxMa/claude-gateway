@@ -176,6 +176,13 @@ export function logSkippedAgents(
   }
 }
 
+const PROJECTS_KEYS = ['root', 'trusted', 'enabled'];
+
+/** Unset, or spelled exactly like the default (config.template.json ships it): both mean "the operator chose nothing". */
+function isDefaultProjectsRoot(raw: unknown): boolean {
+  return raw === undefined || (typeof raw === 'string' && expandHome(raw.trim()) === expandHome(DEFAULT_PROJECTS_ROOT));
+}
+
 function validateProjectsRoot(raw: unknown, configPath: string): void {
   if (typeof raw !== 'string' || !raw.trim()) {
     throw new ConfigValidationError('gateway.projects.root must be a non-empty string');
@@ -426,12 +433,16 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
       throw new ConfigValidationError('gateway.projects must be an object');
     }
     const root = (projects as Record<string, unknown>).root;
-    if (root !== undefined) validateProjectsRoot(root, configPath);
+    if (root !== undefined && !isDefaultProjectsRoot(root)) validateProjectsRoot(root, configPath);
     const trusted = (projects as Record<string, unknown>).trusted;
     if (trusted !== undefined) validateTrustedProjects(trusted);
+    const unknown = Object.keys(projects).filter((key) => !PROJECTS_KEYS.includes(key));
+    if (unknown.length > 0) {
+      console.warn(`[gateway] Ignoring unknown gateway.projects keys: ${unknown.join(', ')}. Known keys: ${PROJECTS_KEYS.join(', ')}.`);
+    }
   }
-  // An operator who never chose a root gets a warning, not a gateway that refuses to start.
-  if ((projects as { root?: unknown } | undefined)?.root === undefined) {
+  // An operator who never chose a root, or whose config.json only carries the template's default, gets a warning, not a gateway that refuses to start.
+  if (isDefaultProjectsRoot((projects as { root?: unknown } | undefined)?.root)) {
     const exposed = exposedByProjectsRoot(expandHome(DEFAULT_PROJECTS_ROOT), configPath);
     if (exposed !== null) {
       console.warn(
