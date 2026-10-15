@@ -73,3 +73,34 @@ test.each([
     HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('barge-in after the reply finished, while its turn is still cleaning up, is a no-op instead of STALE_DECISION', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'voice-interruption-'));
+  const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a');
+  const agent: AgentConfig = { id: 'a', workspace: join(root, 'a/workspace'), description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] } };
+  const gateway = { gateway: { orchestration: true, headless: true, logDir: join(root, 'logs'), timezone: 'UTC' }, agents: [agent] } as GatewayConfig;
+  let runtime: AgentOrchestrationRuntime;
+  // A call is still playing the reply when the next words arrive: the voice session stops it.
+  let stopped: boolean | Error | undefined;
+  const host: AgentOrchestrationHost = {
+    createAgentSession: async () => {
+      const process = new EventEmitter() as SessionProcess;
+      process.start = async () => {}; process.interrupt = () => true; process.stop = async () => { process.emit('exit', 0); };
+      process.sendMessage = () => { process.emit('output', JSON.stringify({ type: 'result', result: JSON.stringify({ display_text: 'Answer.', spoken_text: 'Answer.' }) })); };
+      return process;
+    },
+    releaseAgentSession: async () => { if (stopped === undefined) { try { stopped = runtime.stopResponse('voice-session', 'barge-in'); } catch (error) { stopped = error as Error; } } },
+  };
+  runtime = await AgentOrchestrationRuntime.open(agent, gateway, root, sessions, history, host, { start: jest.fn() });
+  const input = { scope: { agentId: 'a', agentSessionId: 'voice-session', source: 'api' as const, accountId: 'key', chatId: 'chat', threadKey: '', principalId: 'p' }, text: 'Question', modality: 'live_voice' as const };
+  try {
+    expect(await runtime.send(input, { execute: true, writeMemory: false }, { timeoutMs: 1000 })).toBe('Answer.');
+    expect(stopped).toBe(false);
+    expect(runtime.store.get('SELECT state FROM assistant_responses')!.state).toBe('completed');
+    expect(await runtime.send({ ...input, text: 'Next question' }, { execute: true, writeMemory: false }, { timeoutMs: 1000 })).toBe('Answer.');
+  } finally {
+    await runtime.close();
+    (history as unknown as { db: { close(): void } }).db.close();
+    HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true });
+  }
+});

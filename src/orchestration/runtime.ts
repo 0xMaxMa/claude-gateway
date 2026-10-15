@@ -1868,10 +1868,18 @@ export class AgentOrchestrationRuntime {
       return stopped;
     }
     if (active.stopping) return false;
+    if (active.decision && active.turn) {
+      try { this.decisions.interrupt(active.decision); }
+      catch (error) {
+        // A finished reply stays registered while its turn cleans up (history, session
+        // release), and a call may still be playing it. There is nothing left to stop.
+        if (error instanceof OrchestrationError && error.code === 'STALE_DECISION') return false;
+        throw error;
+      }
+    }
     active.stopping = true;
     active.stopReason = reason;
     active.evidenceAbort?.abort(new OrchestrationError('INTERRUPTED'));
-    if (active.decision && active.turn) this.decisions.interrupt(active.decision);
     if (active.turn) void active.turn.stop();
     return true;
   }
