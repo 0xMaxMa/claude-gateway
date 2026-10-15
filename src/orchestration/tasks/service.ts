@@ -393,7 +393,9 @@ export class TaskService {
         // Jev gave up on this utterance and handed it to the agent: exactly one
         // command, as the user's own next direct command (user keeps control).
         const handoff=this.agentHandoff(context,task,expectedRevision,mode,browserFields,computerInputs,startUrl);
-        if(handoff)return this.applyDirectControl(context.conversationId,taskId,task,{id:handoffCommandId(context.inputId),action:'revise',text:instruction},undefined,context.inputId);
+        // Likewise the agent's own goal run that parked and woke the agent (agentGoalRunParked).
+        if(handoff||this.parkedGoalRunCommand(context,task,expectedRevision,mode,browserFields,computerInputs,startUrl))
+          return this.applyDirectControl(context.conversationId,taskId,task,{id:handoffCommandId(context.inputId),action:'revise',text:instruction},undefined,context.inputId);
         throw new OrchestrationError('USER_CONTROLS_AUTOMATION');
       }
       const agentControl = !context.execute &&
@@ -512,6 +514,28 @@ export class TaskService {
     if(mode!=='when_ready'||browserFields!==undefined||computerInputs!==undefined||startUrl!==undefined)throw new OrchestrationError('INVALID_INPUT','A handed-off command is one plain next command: mode=when_ready, no fields, inputs or start_url.');
     if(expectedRevision!==receipt.revision||task.revision!==receipt.revision)throw new OrchestrationError('REVISION_CONFLICT','The user has given a newer command since this utterance; do not act on it.');
     if(task.activeAttemptId||!(pausedForCommand(task)||stoppedForCommand(task)))throw new OrchestrationError('STATE_CONFLICT');
+    return true;
+  }
+  /**
+   * The agent turn for the notification that its own goal run parked
+   * (agentGoalRunParked: this task, this state_version) may send one next
+   * command, like a hand-off: nothing else continues that run. The turn itself
+   * cannot execute, so the task's own execute capability and owner authorize it.
+   * Pod-jinawong, task c449e48d: the notified agent's task_update to press Enter
+   * was refused with USER_CONTROLS_AUTOMATION and the run dead-ended.
+   */
+  private parkedGoalRunCommand(context:CommandContext,task:TaskSnapshot,expectedRevision:number,mode:ChangeMode,browserFields:unknown,computerInputs:unknown,startUrl:unknown):boolean {
+    const notice=this.store.get(`SELECT n.task_state_version FROM conversation_inputs i JOIN notifications n ON n.conversation_id=i.conversation_id AND n.task_id=?
+      AND (json_extract(i.ingress_json,'$.ingressKey')='notification:'||n.id OR json_extract(i.ingress_json,'$.ingressKey') LIKE 'notification:'||n.id||':retry:%')
+      WHERE i.id=? AND i.conversation_id=? LIMIT 1`,task.taskId,context.inputId,context.conversationId);
+    if(!notice)return false;
+    if(!task.capabilities.execute||task.ownerPrincipalId!==context.principalId)throw new OrchestrationError('EXECUTION_DENIED');
+    if(this.store.get("SELECT 1 FROM task_revisions WHERE task_id=? AND json_extract(payload_json,'$.agentHandoffInputId')=?",task.taskId,context.inputId))
+      throw new OrchestrationError('AGENT_HANDOFF_USED','The one command for this parked run was already sent. Report its outcome; do not send another.');
+    if(Number(notice.task_state_version)!==task.stateVersion||!agentGoalRunParked(task))
+      throw new OrchestrationError('STATE_CONFLICT','The run changed since this notice (a newer command, question or pause). Read task_status; do not act on this notice.');
+    if(mode!=='when_ready'||browserFields!==undefined||computerInputs!==undefined||startUrl!==undefined)throw new OrchestrationError('INVALID_INPUT','The command for a parked run is one plain next command: mode=when_ready, no fields, inputs or start_url.');
+    if(expectedRevision!==task.revision)throw new OrchestrationError('REVISION_CONFLICT');
     return true;
   }
   /** The latest live-control receipt of an input (live-execution-input.ts liveControlReceipt). */
