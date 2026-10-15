@@ -63,7 +63,7 @@ codes, listed under [Git errors](#git-errors).
 | 404 | `not_found` | The project or path does not exist. |
 | 400 | `confirm_mismatch` | `DELETE` did not send `confirm` equal to the project name. |
 | 409 | `project_exists` | `POST` named a project, file or symlink that already exists, compared case-insensitively (`Site` collides with `site`). |
-| 409 | `project_running` | `DELETE` found a process listening from inside the project. |
+| 409 | `project_running` | `DELETE` found a process listening from inside the project, a chat turn running in it (a turn still starting, an accepted message not yet handled, or a task that has not finished), or another `DELETE` of the same project in progress. |
 | 500 | `internal` | Anything else. |
 
 **Project name.** Matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. Directories under
@@ -152,8 +152,11 @@ curl -X DELETE -H "Authorization: Bearer $KEY" -H "Content-Type: application/jso
   -d '{"confirm":"demo"}' http://localhost:10850/api/v1/projects/demo
 ```
 
-While something listens on a port from inside the project, the response is `409 project_running`
-and nothing is removed. Stop it first with [`running/stop`](#running). Links inside the project
+While something listens on a port from inside the project, or a chat bound to the project has a
+turn in flight, the response is `409 project_running` and nothing is removed. Stop the listener
+with [`running/stop`](#running), or wait for or stop the chat turn. While a delete is in progress,
+a message or task start in the project fails with `409 PROJECT_UNAVAILABLE` (`reason`
+`project_deleting`), and a second `DELETE` answers `409 project_running`. Links inside the project
 are removed, never followed, so a link out of the project cannot delete what it points to. A
 project that is itself a link out of the root answers `403 path_escape` and is left alone. Chats
 that were started in the project are kept, and their project no longer resolves.
@@ -268,8 +271,6 @@ or filter that runs during a fetch or push can still read them. Do not set
 them in the gateway's environment unless every project's hooks may use them.
 `GIT_DIR`, `GIT_WORK_TREE` and `GIT_TERMINAL_PROMPT` from the gateway's
 environment are never passed.
-
-never resets, checks out, or deletes anything.
 
 Reads run with `core.fsmonitor` turned off, so listing projects never runs a
 command from a repository's config. When git runs past its time limit, the
@@ -541,8 +542,9 @@ Returns `200` with one entry per port, sorted by port:
 `via` is `"cwd"` or `"argv"` and says how the first listener on that port was tied
 to the project. A client that does not know the field can ignore it. `command` is the first listener's argument list joined by spaces and cut to 120
 characters. The value after any flag whose name contains `token`, `password`,
-`passwd`, `secret`, `key`, `auth`, `credential` or `bearer` (such as `--api-key`,
-`--auth` or `--client-secret=...`) is replaced with `[redacted]`. `-p` is redacted by program. For `sshpass`, both
+`passwd`, `pass` (as a word of its own, so `--requirepass` but not `--passWithNoTests`), `secret`, `key`,
+`auth`, `credential` or `bearer` (such as `--api-key`, `--auth`, `-passwd` or `--client-secret=...`)
+is replaced with `[redacted]`. For `ttyd`, `-c user:pw` is too. `-p` is redacted by program. For `sshpass`, both
 `-p pw` and `-ppw` are. For `mysql`, `mysqldump`, `mysqladmin`, `mariadb` and
 `mariadb-dump`, the attached `-ppw` is, even when it is all digits; a bare `-p` is
 left alone, since the next argument is a database name. For any other program only a

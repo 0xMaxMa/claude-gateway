@@ -166,8 +166,13 @@ including an agent chatting in another project, can put files into a trusted
 folder, and the next trusted chat loads them. Trusting a project means trusting
 everyone who can write to the root.
 
-Check that `capabilities.projects` includes `"chat"`, which a gateway without orchestration or with the Projects API disabled omits, (see
-[`GET /capabilities`](/api/system)) before you send `project`.
+Check that `capabilities.projects` includes `"chat"` (see [`GET /capabilities`](/api/system))
+before you send `project`. A gateway with orchestration off, or with the Projects API disabled,
+does not advertise it. With the Projects API disabled, the create call answers `409 projects_disabled`.
+With orchestration off, the gateway still creates the session (`201`) and a message sent with
+[`POST /messages`](/api/messages) still runs in the project folder, but
+[`POST /messages/accept`](/api/messages), which the web uses, answers `409 NOT_SUPPORTED`.
+Do not rely on the first behaviour; it is not advertised.
 
 | Status | `code` | When |
 |--------|--------|------|
