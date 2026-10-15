@@ -89,21 +89,25 @@ interface ReadOptions {
   timeoutMs: number;
   /** `all` lists every file in an untracked folder, which the secret check needs; `normal` lists the folder once. */
   untracked: 'all' | 'normal';
+  /** Without it `last_commit` is null and `operation` is `none`, and the read spawns two git processes instead of four. */
+  commitAndOperation: boolean;
 }
 
-const DETAIL_READ: ReadOptions = { timeoutMs: GIT_TIMEOUTS.read, untracked: 'all' };
-const SUMMARY_READ: ReadOptions = { timeoutMs: GIT_TIMEOUTS.read, untracked: 'normal' };
+const DETAIL_READ: ReadOptions = { timeoutMs: GIT_TIMEOUTS.read, untracked: 'all', commitAndOperation: true };
+const SUMMARY_READ: ReadOptions = { timeoutMs: GIT_TIMEOUTS.read, untracked: 'normal', commitAndOperation: false };
 /** A mutation already waits on git for seconds; failing its reads at the GET limit would refuse work that can finish. */
-const MUTATION_READ: ReadOptions = { timeoutMs: GIT_TIMEOUTS.local, untracked: 'all' };
+const MUTATION_READ: ReadOptions = { timeoutMs: GIT_TIMEOUTS.local, untracked: 'all', commitAndOperation: true };
 
 /** Reads never take the project lock: GIT_OPTIONAL_LOCKS=0 keeps them off the index. */
 async function readRepo(dir: string, read: ReadOptions): Promise<GitResult<RepoState>> {
   const opts = { timeoutMs: read.timeoutMs, readOnly: true };
+  const skipped = Promise.resolve(ok({ code: 0, stdout: '', stderr: '' }));
+  const full = read.commitAndOperation;
   const runs = await Promise.all([
-    runGit(dir, ['rev-parse', '--absolute-git-dir'], opts),
+    full ? runGit(dir, ['rev-parse', '--absolute-git-dir'], opts) : skipped,
     runGit(dir, ['status', '--porcelain=v2', '--branch', '-z', `--untracked-files=${read.untracked}`], opts),
     runGit(dir, ['config', '-z', '--get-regexp', CONFIG_KEYS], opts),
-    runGit(dir, ['log', '-1', '-z', `--format=${COMMIT_FORMAT}`], opts),
+    full ? runGit(dir, ['log', '-1', '-z', `--format=${COMMIT_FORMAT}`], opts) : skipped,
   ]);
   for (const r of runs) if (!r.ok) return fail(r.error);
   const [gitDir, status, config, log] = runs.map((r) => (r.ok ? r.value : null!));
@@ -118,8 +122,8 @@ async function readRepo(dir: string, read: ReadOptions): Promise<GitResult<RepoS
     status: buildStatus({
       parsed,
       config: cfg,
-      lastCommit: log.code === 0 ? parseCommitInfo(log.stdout) : null,
-      operation: await operationIn(gitDir.stdout.trim()),
+      lastCommit: full && log.code === 0 ? parseCommitInfo(log.stdout) : null,
+      operation: full ? await operationIn(gitDir.stdout.trim()) : 'none',
     }),
   });
 }
@@ -146,7 +150,7 @@ export function getStatus(root: string, name: ProjectName): Promise<GitResult<Gi
   return readStatus(root, name, DETAIL_READ);
 }
 
-/** The cheaper read for a chat's context note: an untracked folder counts once, and no secret check needs its files. */
+/** The cheaper read for a chat's context note: an untracked folder counts once, no secret check needs its files, and no last commit or operation. */
 export function getStatusSummary(root: string, name: ProjectName): Promise<GitResult<GitStatus>> {
   return readStatus(root, name, SUMMARY_READ);
 }
