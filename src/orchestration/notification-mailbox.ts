@@ -3,8 +3,8 @@ import {CURRENT_CONTROL_ROUND_SQL} from './control-notification';
 import {agentGoalRunSql,agentStepRunEndedSql} from './tasks/automation-session';
 
 /** The agent's own goal run (its spawn text, revision 1, no user command yet) ended,
- * including an unknown outcome awaiting reconciliation and a step run that stopped
- * without a question for the owner (agentStepRunEnded).
+ * including an unknown outcome awaiting reconciliation and a step run, on either
+ * surface, that stopped without a question for the owner (agentStepRunEnded).
  * The task is user-controlled, yet the agent started this work and must hear how it
  * ended. Pod-jinawong 2.0.17: such a failure stayed pending, the agent said nothing
  * and the user saw the chat hang. Later rounds are the user's own commands.
