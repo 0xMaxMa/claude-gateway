@@ -44,6 +44,8 @@ Merge this **partial configuration** into your existing configuration. Retain th
 
 An empty `voiceId` selects Auto; select a specific voice from the catalog if desired. Browser realtime STT and uploaded-file STT use different model IDs.
 
+ElevenLabs v3 and v4 TTS models (`eleven_v3_conversational`, `eleven_v3`, `eleven_v4_turbo`, `eleven_v4`) stream through the Text-to-Dialogue socket; other models use the classic stream-input socket. Both sockets close after 20 seconds without input by default. While a reply's text stalls, the gateway keeps them open for up to 180 seconds: it sends `keep_alive` every 10 seconds on the dialogue socket, and it sets `inactivity_timeout` on the classic socket. `eleven_v4_turbo` has low first-audio latency; `eleven_v4` is slower and costs about twice as much per character, so it is not recommended for live conversation. A reply that contains known audio tags such as `[laughs]` or `[whispers]` is still spoken. The ElevenLabs v3/v4 models and Gemini 3.1 Flash TTS (`gemini-3.1-flash-tts-preview`, natively or through OpenRouter) receive the tags and perform them. Every other TTS model, including Gemini 2.5 TTS and Gemini 3.8 TTS (which documents `<angle>` tags instead), receives the text without them, so it never reads a tag aloud. A spoken text that holds only tags is not spoken. On a turn that is spoken, the chat copy omits the tags, both while it streams and in the final message. On a text-only turn the chat keeps them, since there a tag may be part of the answer.
+
 ### Upstream ElevenLabs example
 
 Use the voice relay at the **origin of `ANTHROPIC_BASE_URL`**. For example, set the following in your gateway environment file when no higher-priority Claude settings identity is configured:

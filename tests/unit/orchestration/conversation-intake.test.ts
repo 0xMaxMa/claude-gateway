@@ -103,3 +103,17 @@ test('compaction timeout defaults independently and rejects unbounded values',()
  expect(resolveOrchestrationConfig({conversation:{firstResponseTimeoutMs:1000,compactionTimeoutMs:600000}}).conversation.compactionTimeoutMs).toBe(600000);
  for(const compactionTimeoutMs of [0,-1,Infinity,NaN])expect(()=>resolveOrchestrationConfig({conversation:{compactionTimeoutMs}})).toThrow();
 });
+
+// Issue #595: audio tags alone say nothing to the user, in chat or in speech.
+test('an acknowledgement of audio tags alone is no acknowledgement',()=>{
+ const store=new OrchestrationStore(':memory:','a');
+ const intake=new ConversationIntake(store),decisions=new DecisionService(store);
+ const scope={agentId:'a',agentSessionId:'s',source:'api' as const,accountId:'key',chatId:'c',threadKey:'',principalId:'p'};
+ try{
+  const input=store.acceptInput({scope,text:'Review this'});
+  const decision=decisions.begin(input.conversationId,'p',[input.inputId]);
+  const context={...input,...decision,principalId:'p',execute:true,writeMemory:false,actionId:'intake'};
+  expect(()=>intake.choose(context,{mode:'ready',acknowledgement:'[laughs] [sighs]'})).toThrow('INTAKE_MESSAGE_REQUIRED');
+  expect(()=>intake.choose(context,{mode:'ready',acknowledgement:'[laughs] Reviewing.'})).not.toThrow();
+ }finally{store.close();}
+});

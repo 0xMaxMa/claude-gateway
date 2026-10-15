@@ -27,6 +27,7 @@ import { TaskFiles } from './task-files';
 import type { IntakeChoice } from './conversation-intake';
 import { resolveNamedSkill, type TaskSkill } from './skills';
 import type { SkillRegistry } from '../skills';
+import { stripAudioTags } from '../voice/audio-tags';
 
 type Scope = { role: 'agent'; compactOnly?: boolean; capabilities?: (args: Record<string, unknown>) => Promise<unknown>; onQuestion?: (context: CommandContext, args: Record<string, unknown>) => unknown; context: Omit<CommandContext, 'actionId'>; onTaskQueued?: (spoken: string) => void; onIntake?: (choice: IntakeChoice) => Promise<unknown>; onMutationResult?: (actionId: string, committed: boolean, errorCode?: string) => void; beforeMutation?: (tool: string, args: Record<string, unknown>, actionId: string) => Promise<void> } |
   { role: 'worker'; attemptId: string; generation: number; /** pstack agents' Claude workers above the depth limit. */ subagents?: boolean; /** A read-only subagent: no mutating gateway tools. */ readonly?: boolean };
@@ -213,7 +214,7 @@ export class TaskBridge {
                 }
                 if (a.target_profile !== 'skill-worker' && (a.skill_name !== undefined || a.skill_args !== undefined)) throw new OrchestrationError('INVALID_INPUT');
                 const spoken = typeof a.spoken_acknowledgement === 'string' ? a.spoken_acknowledgement.trim() : '';
-                if (scope.onTaskQueued && (!spoken || spoken.length > 600 || spoken.includes('```'))) throw new OrchestrationError('VOICE_ACKNOWLEDGEMENT_REQUIRED');
+                if (scope.onTaskQueued && (!stripAudioTags(spoken).trim() || spoken.length > 600 || spoken.includes('```'))) throw new OrchestrationError('VOICE_ACKNOWLEDGEMENT_REQUIRED');
                 await this.tasks.validateSpawnProfile(context, a.target_profile);
                 // Profile resolution may yield while another input arrives. Recheck
                 // readiness immediately before the synchronous task transaction.

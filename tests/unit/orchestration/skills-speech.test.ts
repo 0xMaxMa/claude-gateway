@@ -80,3 +80,19 @@ test('the union response schema reaches the CLI for Agent profiles only, and nev
  expect(splitSpeechResponse('ได้เลยค่ะ **กำลังตรวจให้**')).toEqual({display:'ได้เลยค่ะ **กำลังตรวจให้**',spoken:'ได้เลยค่ะ กำลังตรวจให้',outcome:'plain'});
  for(const text of ['https://example.com','```code```','a'.repeat(601)])expect(splitSpeechResponse(text).spoken).toBe('');
 });
+
+test('a reply with audio tags is spoken, and the tags are left for the TTS layer to perform or strip', () => {
+  expect(splitSpeechResponse('[laughs] Sure, I can do that.')).toEqual({ display: '[laughs] Sure, I can do that.', spoken: '[laughs] Sure, I can do that.', outcome: 'plain' });
+  expect(splitSpeechResponse('ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ [Sighs]').spoken).toBe('ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ [Sighs]');
+  for (const text of ['[laughs]', '[laughs] [sighs]', 'use items[0] here', 'see [docs](https://example.com)', '[unknown tag] hello']) expect(splitSpeechResponse(text).spoken).toBe('');
+  // Tags alone are no speech: no TTS model should be asked to synthesize nothing.
+  expect(splitSpeechResponse('{"display_text":"Done.","spoken_text":"[laughs]"}').spoken).toBe('');
+  expect(splitSpeechResponse('{"display_text":"Done.","spoken_text":"[laughs] Done."}').spoken).toBe('[laughs] Done.');
+});
+
+test('the parsed display keeps audio tags; only the runtime removes them, and only on voice turns', () => {
+  for (const text of ['ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ', 'Add [laughs] to the text.']) expect(splitSpeechResponse(text).display).toBe(text);
+  expect(splitSpeechResponse('Prose [pause] first.\n{"display_text":"","spoken_text":"x"}').display).toBe('Prose [pause] first.');
+  const long = `Use [laughs] in ElevenLabs v3 prompts.\n\`\`\`\nexample\n\`\`\``;
+  expect(splitSpeechResponse(long)).toMatchObject({ display: long, spoken: '' });
+});
