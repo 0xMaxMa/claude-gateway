@@ -149,10 +149,10 @@ const RECOVERY_TRIAGE_TIMEOUT_MS = 15_000;
 // budget map from growing unbounded over a long-lived runner (Epic #195, 3b).
 const RECOVERY_BUDGET_TTL_MS = 10 * 60_000;
 
-// Trailing-edge window for coalescing channel messages that carry an image (or that
-// arrive while an image is already buffered) into a single turn. Reset on every new
-// related update, so an album burst or a client-split photo+caption is gathered
-// whole. Plain text with no pending buffer bypasses this entirely (zero added latency).
+// Trailing-edge window for coalescing consecutive channel messages (text, images,
+// client-split long text, photo+caption) into a single turn. Reset on every new
+// update, so an album burst or a client-split message is gathered whole. Every
+// non-command message waits this window before its turn starts.
 export const CHANNEL_COALESCE_WINDOW_MS = 1200;
 
 /**

@@ -16,11 +16,11 @@ const finish = (process: SessionProcess, result = '') => process.emit('output', 
 const snapshots = (prompt: string): any[] => JSON.parse(prompt.split('Recent committed command receipts')[0].trim().split('\n').slice(-1)[0]);
 const receipts = (prompt: string): any[] => JSON.parse(prompt.split('Recent committed command receipts (do not repeat their originating work): ')[1].split('\n')[0]);
 
-async function fixture(script: Script = async (_call, process) => { finish(process); }) {
+async function fixture(script: Script = async (_call, process) => { finish(process); }, conversation: Record<string, unknown> = {}) {
   const root = mkdtempSync(join(tmpdir(), 'context-delivery-flow-'));
   const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a');
   const agent: AgentConfig = { id: 'a', workspace: join(root, 'a/workspace'), description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] },
-    orchestration: { conversation: { semanticIntake: true, inputDebounceMs: 100, inputMaxWaitMs: 500, intakeWaitMs: 60000, notificationPolicy: 'next_user_turn' } } };
+    orchestration: { conversation: { semanticIntake: true, inputDebounceMs: 100, inputMaxWaitMs: 500, intakeWaitMs: 60000, notificationPolicy: 'next_user_turn', ...conversation } } };
   const gateway = { gateway: { orchestration: true, headless: true, logDir: join(root, 'logs'), timezone: 'UTC' }, agents: [agent] } as GatewayConfig;
   mkdirSync(join(root, 'a/media/c'), { recursive: true });
   writeFileSync(join(root, 'a/media/c/image.png'), png);
@@ -222,4 +222,84 @@ test('the mailbox admits a session before scanning its queued rows for a batch',
     (f.runtime as any).pumpMailbox();
     expect(batching).toHaveBeenCalledTimes(1);
   }finally{batching.mockRestore();await f.close();}
+});
+
+describe('client-split long messages without semantic intake (#593)',()=>{
+  const plain={semanticIntake:false,inputDebounceMs:400,inputMaxWaitMs:2000};
+  const long=(n:number,c='x')=>c.repeat(n);
+  const sleep=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
+
+  test('a 4064 + 277 char split arriving 200 ms apart is answered in one turn',async()=>{
+    const f=await fixture(async(_call,process)=>{finish(process,'One answer.');},plain);
+    try{
+      const a=submit(f,long(4064,'a'));await sleep(200);const b=submit(f,long(277,'b'));
+      expect(await Promise.all([a.response,b.response])).toEqual(['One answer.','One answer.']);
+      expect(f.failures).toEqual([]);expect(f.prompts).toHaveLength(1);
+      expect(f.prompts[0]).toContain(long(4064,'a'));expect(f.prompts[0]).toContain(long(277,'b'));
+      expect(JSON.parse(String(f.runtime.store.get("SELECT input_ids_json FROM conversation_decisions WHERE kind='user'")!.input_ids_json))).toEqual([a.inputId,b.inputId]);
+      const messages=await f.sessions.loadTelegramSession('a','c','s','telegram');
+      expect(messages.filter(row=>row.role==='user')).toHaveLength(2);
+    }finally{await f.close();}
+  });
+
+  test('a short message is dispatched immediately and streams its reply',async()=>{
+    const f=await fixture(async(_call,process)=>{
+      process.emit('output',JSON.stringify({type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text:'Streamed '}}}));
+      finish(process,'Streamed answer.');
+    },plain);
+    try{
+      const published=jest.spyOn(f.runtime as any,'publishText');
+      const started=Date.now();const a=submit(f,'quick question');
+      // submitInput pumps the mailbox synchronously: the turn starts with no quiet window.
+      expect((f.runtime as any).active.has('s')).toBe(true);
+      expect(await a.response).toBe('Streamed answer.');
+      expect(Date.now()-started).toBeLessThan(400);
+      // Non-intake replies still stream before the final answer.
+      expect(published.mock.calls.some(call=>call[2]==='Streamed ' && !call[3])).toBe(true);
+    }finally{await f.close();}
+  });
+
+  test.each([
+    ['a recorded voice note', {modality:'voice_note' as const}],
+    ['a skill-shaped command', {text:'/review-pr 567'}],
+  ])('%s right after a long message gets its own turn',async(_label,change)=>{
+    const f=await fixture(async(_call,process,turn)=>{finish(process,`Answer ${turn}.`);},plain);
+    try{
+      const a=submit(f,long(4064,'a'));
+      const b=f.runtime.submitInput({scope:f.scope,text:'follow-up',...change},{execute:true,writeMemory:false});
+      void b.response.catch(()=>{});
+      await a.response;
+      const decisions=f.runtime.store.all("SELECT input_ids_json FROM conversation_decisions WHERE kind='user'").map(row=>JSON.parse(String(row.input_ids_json)));
+      expect(decisions[0]).toEqual([a.inputId]);
+      expect(decisions.some(ids=>ids.includes(b.inputId)&&ids.includes(a.inputId))).toBe(false);
+    }finally{await f.close();}
+  });
+
+  test('a reply-first split is merged and keeps the reply context',async()=>{
+    const f=await fixture(async(_call,process)=>{finish(process,'Replied once.');},plain);
+    try{
+      const a=f.runtime.submitInput({scope:f.scope,text:long(4064,'a'),metadata:{repliedMessageId:'m1',repliedText:'QUOTED-ORIGINAL',repliedSender:'bot'}},{execute:true,writeMemory:false});
+      await sleep(200);const b=submit(f,long(277,'b'));
+      expect(await Promise.all([a.response,b.response])).toEqual(['Replied once.','Replied once.']);
+      expect(f.prompts).toHaveLength(1);
+      expect(f.prompts[0]).toContain('QUOTED-ORIGINAL');
+    }finally{await f.close();}
+  });
+
+  test('a running turn is not interrupted; split parts queued behind it are coalesced into the next turn',async()=>{
+    let ready!:()=>void,release!:()=>void;
+    const started=new Promise<void>(resolve=>{ready=resolve;});const proceed=new Promise<void>(resolve=>{release=resolve;});
+    const f=await fixture(async(_call,process,turn)=>{
+      if(turn===1){ready();await proceed;finish(process,'First answer.');}
+      else finish(process,'Second answer.');
+    },plain);
+    try{
+      const first=submit(f,'earlier question');await started;
+      const a=submit(f,long(4064,'a')),b=submit(f,long(277,'b'));release();
+      expect(await first.response).toBe('First answer.');
+      expect(await Promise.all([a.response,b.response])).toEqual(['Second answer.','Second answer.']);
+      expect(f.prompts).toHaveLength(2);
+      expect(f.runtime.store.get("SELECT count(*) n FROM conversation_events WHERE type='response.superseded'")!.n).toBe(0);
+    }finally{release();await f.close();}
+  });
 });

@@ -93,6 +93,10 @@ In an approved group, `/stop`, `/new`, `/rename` and `/pstack_setup` (which only
 
 The model list comes from the configured model provider's `/v1/models` catalog when available, with `gateway.models` as fallback. Changing an agent model affects its other chats too.
 
+## Long messages
+
+Telegram splits a text longer than 4096 characters into several messages. With `gateway.orchestration: true`, the agent answers them as one message. Without `conversation.semanticIntake`, Telegram cuts each part after at least half the limit, so after a part of 1984 or more characters the gateway waits up to `conversation.inputDebounceMs` (default 1500 ms) for the next part, and at most `inputMaxWaitMs` from the first one. Shorter messages start immediately. Only the first part carries a reply, so a continuation without one joins it; parts replying to different messages stay separate. With `semanticIntake`, consecutive messages are combined as described in [orchestration](../guide/orchestration.md), and parts must reply to the same message. Commands and voice notes are never combined. See [conversation processing settings](../reference/orchestration-settings.md#conversation-processing).
+
 ## Voice notes and background tasks
 
 With `gateway.orchestration: true`, Telegram voice notes and audio attachments can use the agent's configured speech-to-text provider. Enable `agents[].voice` and its `notes` settings first; see [voice setup](/guide/voice) for provider keys, models and prerequisites. Photos and file attachments keep their normal access checks.
