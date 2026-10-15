@@ -9,6 +9,12 @@ import { AGENT_SESSION_TOKEN_HEADER, isAgentSessionToken } from './agent-credent
 import { isAdmin, PROJECTS_ADMIN_REQUIRED } from './auth';
 
 
+/** What a non-admin read gets when the binding files cannot be listed: the gateway cannot tell which sessions to hide. */
+export const BINDINGS_UNREADABLE = {
+  error: 'Project bindings cannot be read on this gateway, so history and sessions are unavailable to this key. An operator should check the gateway log.',
+  code: 'project_bindings_unreadable',
+} as const;
+
 /**
  * Only an admin key may reveal or control a project-bound session. True when `apiKey` is not admin and the session
  * is bound, its binding cannot be read, or the id is malformed (a path, a dot segment, an encoded separator).
@@ -34,8 +40,8 @@ export async function hiddenSessions(runner: AgentRunner, apiKey: ApiKey): Promi
 }
 
 /**
- * The sessions a history read of one chat must leave out for `apiKey`. Asking for a bound session by name, or a
- * binding list that cannot be read, is answered 403 here and returns `null`.
+ * The sessions a history read of one chat must leave out for `apiKey`. Asking for a bound session by name is
+ * answered 403 here, and a binding list that cannot be read 503; both return `null`.
  */
 export async function historyExclusions(runner: AgentRunner, apiKey: ApiKey, requestedSession: unknown, res: Response): Promise<string[] | null> {
   if (requestedSession !== undefined && typeof requestedSession !== 'string') {
@@ -43,7 +49,11 @@ export async function historyExclusions(runner: AgentRunner, apiKey: ApiKey, req
     return null;
   }
   const hidden = await hiddenSessions(runner, apiKey);
-  if (!hidden || (typeof requestedSession === 'string' && hidden.includes(requestedSession))) {
+  if (!hidden) {
+    res.status(503).json(BINDINGS_UNREADABLE);
+    return null;
+  }
+  if (typeof requestedSession === 'string' && hidden.includes(requestedSession)) {
     res.status(403).json(PROJECTS_ADMIN_REQUIRED);
     return null;
   }

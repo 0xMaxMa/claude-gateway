@@ -1,4 +1,5 @@
 import { execFile } from "child_process";
+import { projectsWarn } from './log';
 import { constants as fsConstants, Dirent, promises as fsp } from "fs";
 import * as path from "path";
 import { promisify } from "util";
@@ -307,7 +308,7 @@ export async function createProject(
       });
     } catch (e) {
       warning = gitInitWarning(e as GitInitError);
-      console.warn(
+      projectsWarn(
         `projects: git init in ${dir} failed: ${(e as Error).message}`,
       );
     }

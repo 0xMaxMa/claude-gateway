@@ -18,7 +18,7 @@ import { agentsDirForConfig } from '../config/agent-env';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin, PROJECTS_ADMIN_REQUIRED } from './auth';
 import { guardAsyncRoutes } from './async-guard';
-import { hiddenSessions, historyExclusions, presentedSessionToken, refusesProjectChat, refusesProjectMedia, refusesProjectSession } from './project-gate';
+import { BINDINGS_UNREADABLE, hiddenSessions, historyExclusions, presentedSessionToken, refusesProjectChat, refusesProjectMedia, refusesProjectSession } from './project-gate';
 import { PROJECT_CHAT_ERRORS } from '../projects/chat';
 import { parseProjectName, ProjectName } from '../projects/paths';
 import { MediaStore } from '../history/media-store';
@@ -3836,7 +3836,7 @@ export function createApiRouter(
       return;
     }
     const hidden = await hiddenSessions(runner, apiKey);
-    if (!hidden) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
+    if (!hidden) { res.status(503).json(BINDINGS_UNREADABLE); return; }
     res.json({ chats: runner.getHistoryDb().listChats({ excludeSessionIds: hidden }) });
   });
 
@@ -4547,7 +4547,7 @@ export function createApiRouter(
     try {
       const apiKey = (req as AuthedRequest).apiKey;
       const hidden = await hiddenSessions(runner, apiKey);
-      if (!hidden) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
+      if (!hidden) { res.status(503).json(BINDINGS_UNREADABLE); return; }
       const listed = await runner.listApiSessions(chatId);
       const shown = isAdmin(apiKey) ? listed.sessions : listed.sessions.filter((s) => !hidden.includes(s.id) && !s.project);
       const index = { ...listed, sessions: shown, activeSessionId: shown.some((s) => s.id === listed.activeSessionId) ? listed.activeSessionId : (shown[0]?.id ?? '') };

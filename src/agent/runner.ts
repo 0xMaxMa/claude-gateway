@@ -1,4 +1,5 @@
 import { formatSessionStatus } from './session-status';
+import { projectsWarn } from '../projects/log';
 import { SessionCompactionScheduler } from './session-compaction-scheduler';
 import { resolveSessionCompaction } from '../orchestration/session-compaction';
 import { resolveDreamingConfig } from './dreaming/config';
@@ -470,8 +471,18 @@ export class AgentRunner extends EventEmitter {
   /** Ids of every project-bound session of this agent, from the binding files. Throws when they cannot be listed. */
   async boundSessionIds(): Promise<Set<string>> {
     await this.reapRetiredBindings();
-    return this.sessionStore.listBoundSessionIds(this.agentConfig.id);
+    try {
+      return await this.sessionStore.listBoundSessionIds(this.agentConfig.id);
+    } catch (err) {
+      if (!this.warnedBindingsUnreadable) {
+        this.warnedBindingsUnreadable = true;
+        projectsWarn(`projects: the project-bindings folder of agent '${this.agentConfig.id}' cannot be read (${(err as Error).message}), so non-admin keys are refused every history and session read until it can be`);
+      }
+      throw err;
+    }
   }
+
+  private warnedBindingsUnreadable = false;
 
   private isApiSessionLive(sessionId: string, orchestratedLive = this.orchestration?.liveSessionIds() ?? new Set<string>()): boolean {
     return orchestratedLive.has(sessionId) || this.pendingApiSessions.has(sessionId) || this.sessionSpawnLocks.has(sessionId);

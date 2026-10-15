@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { projectsWarn } from './log';
 import { closeSync, openSync, promises as fsp } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -221,8 +222,9 @@ export async function startProject(
   try {
     launched = await launch(plan.command(port), input.realProject, logPath);
   } catch (e) {
-    console.warn(`[projects] start ${input.name} failed before the process ran: ${(e as Error).message}`);
     const code = (e as NodeJS.ErrnoException).code;
+    // The response carries only a bare code. The message and errno stay here, in the gateway log.
+    projectsWarn(`[projects] start ${input.name} failed before the process ran: ${(e as Error).message}`, { code: typeof code === 'string' ? code : undefined });
     return err({ code: 'start_failed', reason: typeof code === 'string' && /^E[A-Z]+$/.test(code) ? code : 'spawn_failed' });
   }
 

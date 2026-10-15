@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { projectsWarn } from './log';
 import { existsSync } from 'fs';
 import * as path from 'path';
 import { err, ok, Result } from './paths';
@@ -129,11 +130,11 @@ export async function runGit(cwd: string, args: string[], opts: RunOptions): Pro
       if ((e as NodeJS.ErrnoException).code === 'ENOENT' && existsSync(cwd)) {
         if (!warnedGitMissing) {
           warnedGitMissing = true;
-          console.warn('projects: git is not installed or not on PATH, so project git status is unavailable');
+          projectsWarn('projects: git is not installed or not on PATH, so project git status is unavailable');
         }
         return settle(err('git_unavailable'));
       }
-      console.warn(`projects: git ${args[0]} in ${cwd} failed: ${redactCredentials(e.message)}`);
+      projectsWarn(`projects: git ${args[0]} in ${cwd} failed: ${redactCredentials(e.message)}`);
       settle(err('git_failed'));
     });
     const finish = (code: number | null) => {

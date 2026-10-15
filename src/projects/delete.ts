@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { projectsWarn } from './log';
 import { promises as fsp } from 'fs';
 import * as path from 'path';
 import { err, errnoToCode, ok, ProjectName, ProjectsErrorCode, Result } from './paths';
@@ -39,7 +40,7 @@ export async function removeProject(root: string, name: ProjectName): Promise<Re
     await fsp.rm(trash, { recursive: true, force: false });
     return ok({ name });
   } catch (e) {
-    console.warn(`projects: removing ${trash} failed: ${(e as Error).message}`);
+    projectsWarn(`projects: removing ${trash} failed: ${(e as Error).message}`);
     return ok({ name, warning: `Some files could not be removed and remain in ${trash}. Remove that folder by hand: rm -rf ${trash}` });
   }
 }
