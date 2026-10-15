@@ -71,15 +71,14 @@ export function presentedSessionToken(req: Request): string | undefined {
  * catalogs). The agent running session `sessionId` proves itself with the token it was spawned with, so a project
  * chat can still attach media and mint shares for itself while no outside non-admin key can.
  */
-export async function refusesProjectSession(runner: AgentRunner, apiKey: ApiKey, sessionId: string, token?: string): Promise<boolean> {
-  if (isAgentSessionToken(token, runner.getAgentConfig().id, sessionId)) return false;
+export async function refusesProjectSession(runner: AgentRunner, agentId: string, apiKey: ApiKey, sessionId: string, token?: string): Promise<boolean> {
+  if (isAgentSessionToken(token, agentId, sessionId)) return false;
   return refusesProjectChat(runner, apiKey, sessionId);
 }
 
 /** The session a media path (relative to the agent's media folder, or prefixed `media/`) belongs to, after resolving dot segments and links. */
-function mediaPathSession(runner: AgentRunner, relativePath: string): string | undefined {
+function mediaPathSession(runner: AgentRunner, agentId: string, relativePath: string): string | undefined {
   const base = runner.getAgentsBaseDir();
-  const agentId = runner.getAgentConfig().id;
   let abs: string;
   try {
     abs = MediaStore.resolvePath(base, agentId, relativePath);
@@ -93,9 +92,9 @@ function mediaPathSession(runner: AgentRunner, relativePath: string): string | u
 }
 
 /** True when `relativePath` names a file of a project-bound session that `apiKey` (or the token's agent) may not reach. */
-export async function refusesProjectMedia(runner: AgentRunner, apiKey: ApiKey, relativePath: string, token?: string): Promise<boolean> {
-  const session = mediaPathSession(runner, relativePath);
-  return session !== undefined && await refusesProjectSession(runner, apiKey, session, token);
+export async function refusesProjectMedia(runner: AgentRunner, agentId: string, apiKey: ApiKey, relativePath: string, token?: string): Promise<boolean> {
+  const session = mediaPathSession(runner, agentId, relativePath);
+  return session !== undefined && await refusesProjectSession(runner, agentId, apiKey, session, token);
 }
 
 /** What the share router asks, without holding the runners. */
@@ -108,11 +107,11 @@ export function projectGateFor(runners: ReadonlyMap<string, AgentRunner>): Proje
   return {
     async refusesSession(apiKey, agentId, sessionId, token) {
       const runner = runners.get(agentId);
-      return runner ? refusesProjectSession(runner, apiKey, sessionId, token) : false;
+      return runner ? refusesProjectSession(runner, agentId, apiKey, sessionId, token) : false;
     },
     async refusesMedia(apiKey, agentId, relativePath, token) {
       const runner = runners.get(agentId);
-      return runner ? refusesProjectMedia(runner, apiKey, relativePath, token) : false;
+      return runner ? refusesProjectMedia(runner, agentId, apiKey, relativePath, token) : false;
     },
   };
 }

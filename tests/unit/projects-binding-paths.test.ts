@@ -52,14 +52,14 @@ describe('a path-shaped session id never reaches a binding file', () => {
     }
   });
 
-  it('refuses a non-admin key on a malformed id before any handler runs, on every session route', async () => {
+  it('answers 400 to a malformed id before any handler runs, on every session route, for a non-admin key', async () => {
     for (const bad of ESCAPES(bound)) {
       for (const [method, url] of [
         ['delete', `${A}/sessions/${bad}?chat_id=web`], ['patch', `${A}/sessions/${bad}?chat_id=web`],
         ['get', `${A}/sessions/${bad}/info?chat_id=web`], ['post', `${A}/sessions/${bad}/stop?chat_id=web`],
       ] as const) {
         const res = await request(gw)[method](url).set('Authorization', 'Bearer k-ro').send({});
-        expect([method, bad, res.status]).toEqual([method, bad, 403]);
+        expect([method, bad, res.status]).toEqual([method, bad, 400]);
       }
     }
   });
@@ -67,7 +67,7 @@ describe('a path-shaped session id never reaches a binding file', () => {
   it('an admin key gets 400 on a malformed id and the binding survives', async () => {
     for (const bad of ESCAPES(bound)) {
       const res = await request(gw).delete(`${A}/sessions/${bad}?chat_id=web`).set('Authorization', 'Bearer k-admin');
-      expect([bad, res.status === 400 || res.status === 404, fs.existsSync(bindingFile())]).toEqual([bad, true, true]);
+      expect([bad, res.status, fs.existsSync(bindingFile())]).toEqual([bad, 400, true]);
     }
   });
 

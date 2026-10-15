@@ -198,8 +198,8 @@ stop, restart, `GET /sessions/:id/activity`, tasks (list, show, answer, control,
 names the session or a path names a file in its media folder; from `media_files` in a message that names such a
 file; and from the chat history routes (`/chats/:chatId/messages`, `/messages/search`, `/messages/active-days`) when
 the request names the session with `session_id`. A session id that is not a plain id (`[A-Za-z0-9_-]`, 1 to 64
-characters) is refused the same way for a key that is not an admin key, and the media path is checked after dot
-segments, `%2e` and double slashes are resolved. For a key that is not an admin key, `GET /sessions`, `GET /chats`,
+characters) in a route path answers `400 INVALID_INPUT` for every key before the route runs, and the media path is
+checked after dot segments, `%2e` and double slashes are resolved. For a key that is not an admin key, `GET /sessions`, `GET /chats`,
 the unfiltered history routes and the `/sessions` chat command leave the session out, its messages included, and
 carry no project name. When the gateway cannot read its `project-bindings` folder, those reads answer
 `503 project_bindings_unreadable` for a key that is not an admin key, and log the reason once.

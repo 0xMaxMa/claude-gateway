@@ -578,6 +578,12 @@ export function createApiRouter(
 ): Router {
   const router = guardAsyncRoutes(Router());
   const auth = createApiAuthMiddleware(apiKeys);
+  // A session id becomes a file name (bindings, media, history) and a lookup key. Anything but a plain id names no
+  // session, so every route with :sessionId answers 400 before its handler runs, whoever the caller is.
+  router.param('sessionId', (_req, res, next, value) => {
+    if (isValidSessionId(value)) next();
+    else res.status(400).json({ error: 'Invalid session id', code: 'INVALID_INPUT' });
+  });
   router.use(voiceSettingsRouter(agentConfigs, agentRunners, apiKeys, configPath));
 
   async function writeAgentsToConfigImpl(
@@ -704,7 +710,7 @@ export function createApiRouter(
           res.status(400).json({ error: `Invalid media path: ${f}` });
           return;
         }
-        if (await refusesProjectMedia(runner, apiKey, f)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
+        if (await refusesProjectMedia(runner, agentId, apiKey, f)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       }
       validatedMediaFiles = media_files as string[];
     }
@@ -4127,7 +4133,7 @@ export function createApiRouter(
         res.status(404).json({ error: `Agent '${agentId}' not found` });
         return;
       }
-      if (await refusesProjectSession(runner, apiKey, sessionId, presentedSessionToken(req))) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
+      if (await refusesProjectSession(runner, agentId, apiKey, sessionId, presentedSessionToken(req))) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       const body = req.body as Record<string, unknown>;
       const files = body['files'];
       if (!Array.isArray(files) || files.some((f) => typeof f !== 'string')) {
@@ -4283,7 +4289,7 @@ export function createApiRouter(
       return;
     }
     // Gate the path the file system will open, not the spelling the client sent.
-    if (await refusesProjectMedia(runner, apiKey, wildcardParam)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
+    if (await refusesProjectMedia(runner, agentId, apiKey, wildcardParam)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     if (!fs.existsSync(absPath)) {
       res.status(404).json({ error: 'Not found' });
       return;
@@ -4650,7 +4656,6 @@ export function createApiRouter(
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
     if (await refusesProjectChat(runner, (req as AuthedRequest).apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
-    if (!isValidSessionId(sessionId)) { res.status(400).json({ error: 'Invalid session id' }); return; }
     try {
       await runner.deleteApiSession(chatId, sessionId);
       res.status(204).send();
