@@ -2,6 +2,8 @@ import { ElevenLabsTts, isElevenLabsDialogueModel } from '../../../src/voice/pro
 import { ttsProvider } from '../../../src/voice/providers/registry';
 import { withoutAudioTags } from '../../../src/voice/audio-tags';
 import { voicePreviewLanguages, VOICE_PREVIEW_TEXT } from '../../../src/voice/preview';
+import { GeminiTts } from '../../../src/voice/providers/gemini';
+import { OpenRouterTts } from '../../../src/voice/providers/openrouter';
 import { PCM16 } from '../../../src/voice/types';
 
 async function collect(chunks: string[]): Promise<string> {
@@ -56,4 +58,34 @@ describe('structured spoken_text audio tags at the TTS layer', () => {
   test('reach the ElevenLabs dialogue models that perform them', async () => {
     expect(await speak('eleven_v3_conversational')).toBe('[laughs] Sure, |okay [whispers] secret|[sighs] Fine.');
   });
+});
+
+test('Gemini TTS keeps audio tags, which it performs, natively and through OpenRouter', async () => {
+  const texts: string[] = [];
+  const spies = [GeminiTts.prototype, OpenRouterTts.prototype].flatMap(prototype => [
+    jest.spyOn(prototype, 'synthesize').mockImplementation(async function* (options) { for await (const text of options.text) texts.push(text); }),
+    jest.spyOn(prototype, 'synthesizeFile').mockImplementation(async options => { texts.push(options.text); return { bytes: Buffer.from('mp3'), mime: 'audio/mpeg', name: 'reply.mp3' }; }),
+  ]);
+  const speak = async (provider: string, model: string) => {
+    texts.length = 0;
+    const tts = ttsProvider({ provider, model });
+    for await (const _ of tts.synthesize({ text: (async function* () { yield '[laughs] Sure'; })(), voiceId: 'v', outputFormat: PCM16, signal: new AbortController().signal })) { /* drain */ }
+    await tts.synthesizeFile!({ text: '[sighs] Fine.', voiceId: 'v', signal: new AbortController().signal });
+    return texts.join('|');
+  };
+  try {
+    expect(await speak('gemini', 'gemini-3.1-flash-tts-preview')).toBe('[laughs] Sure|[sighs] Fine.');
+    expect(await speak('upstream:gemini', 'gemini-2.5-pro-preview-tts')).toBe('[laughs] Sure|[sighs] Fine.');
+    expect(await speak('openrouter', 'google/gemini-3.1-flash-tts-preview')).toBe('[laughs] Sure|[sighs] Fine.');
+    expect(await speak('openrouter', 'openai/gpt-4o-mini-tts')).toBe('Sure|Fine.');
+  } finally { for (const spy of spies) spy.mockRestore(); }
+});
+
+test('the streamed tag filter releases a stalled source as soon as it is closed', async () => {
+  const release = jest.fn(async () => ({ done: true as const, value: undefined }));
+  const source: AsyncIterable<string> = { [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<string>>(() => {}), return: release }) };
+  const iterator = withoutAudioTags(source)[Symbol.asyncIterator]();
+  void iterator.next();
+  await Promise.race([iterator.return!(), new Promise(resolve => setTimeout(resolve, 50))]);
+  expect(release).toHaveBeenCalled();
 });

@@ -1,7 +1,7 @@
 import { requireManagedVoiceCredit } from '../managed-quota';
 import { OpenRouterStt, OpenRouterTts } from './openrouter';
 import { canonicalVoiceProvider, nativeVoiceModel } from './model-ref';
-import { GeminiStt, GeminiTts } from './gemini';
+import { GeminiStt, GeminiTts, isGeminiTtsModel } from './gemini';
 import { GeminiLiveStt } from './gemini-live-stt';
 import { PaxaLabsStt } from './paxalabs-stt';
 import { PaxaLabsLiveStt, isPaxaRealtimeSttModel } from './paxalabs-live-stt';
@@ -45,10 +45,15 @@ export function sttProvider(config: { provider: string; model: string }): SttPro
     return provider.open(options);
   }};
 }
-/** Audio tags reach TTS through structured spoken_text. Only the ElevenLabs dialogue models
- * perform them; every other model would read the tag word aloud. */
+/** Audio tags reach TTS through structured spoken_text. The ElevenLabs dialogue models and
+ * Gemini TTS perform them; every other model would read the tag word aloud. */
+function performsAudioTags(config: { provider: string; model: string }): boolean {
+  const provider = canonicalVoiceProvider(config.provider), model = nativeVoiceModel(config.provider, config.model);
+  if (provider.endsWith('elevenlabs')) return isElevenLabsDialogueModel(model);
+  return (provider.endsWith('gemini') || provider.endsWith('openrouter')) && isGeminiTtsModel(model);
+}
 function withAudioTagSupport(config: { provider: string; model: string }, provider: TtsProvider): TtsProvider {
-  if (canonicalVoiceProvider(config.provider).endsWith('elevenlabs') && isElevenLabsDialogueModel(nativeVoiceModel(config.provider, config.model))) return provider;
+  if (performsAudioTags(config)) return provider;
   return { id: provider.id, capabilities: provider.capabilities,
     synthesizeFile: provider.synthesizeFile ? options => provider.synthesizeFile!({ ...options, text: stripAudioTags(options.text).trim() }) : undefined,
     synthesize: options => provider.synthesize({ ...options, text: withoutAudioTags(options.text) }),
