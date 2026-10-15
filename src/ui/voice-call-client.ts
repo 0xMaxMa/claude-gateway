@@ -188,3 +188,21 @@ export function voiceCallTicketFailure(status: number, body: { error?: unknown; 
   // A busy gateway can succeed on retry.
   return refusal('The call could not start right now. Please try again.', status !== 503);
 }
+
+/** Call length as a phone shows it: m:ss, then h:mm:ss. */
+export function formatCallDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000)), hours = Math.floor(total / 3600), minutes = Math.floor(total / 60) % 60, seconds = total % 60;
+  const pad = (value: number) => (value < 10 ? '0' : '') + value;
+  return hours ? hours + ':' + pad(minutes) + ':' + pad(seconds) : minutes + ':' + pad(seconds);
+}
+
+/**
+ * How the page shows a `voice.error`. `no_speech` means the recognizer heard
+ * sound but no words (a cough, the room, the microphone opening); the call is
+ * still listening, so it is not an error to the caller. The server log keeps it.
+ */
+export function voiceCallErrorView(error: { code?: unknown; category?: unknown; message?: unknown }): { kind: 'listening' } | { kind: 'ended' | 'error'; message: string } {
+  if (error.category === 'no_speech') return { kind: 'listening' };
+  if (error.code === 'VOICE_SESSION_CHANGED') return { kind: 'ended', message: 'This chat switched sessions. Send /call to talk in the new one.' };
+  return { kind: 'error', message: typeof error.message === 'string' && error.message ? error.message : 'Voice error' };
+}

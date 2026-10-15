@@ -6,7 +6,7 @@
  * `gateway.publicUrl`, and the WebSocket path comes from the ticket response.
  */
 import { BASE_STYLE, TG_WEBAPP_JS, htmlEscape, page } from './cli-viewer-ui';
-import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, voiceCallLevel, voiceCallTicketFailure } from './voice-call-client';
+import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, formatCallDuration, voiceCallErrorView, voiceCallLevel, voiceCallTicketFailure } from './voice-call-client';
 
 export interface VoiceCallPageOpts {
   pairingId: string;
@@ -37,6 +37,7 @@ registerProcessor('voice-call-capture', VoiceCallCapture);`;
 const STYLE = `${BASE_STYLE}
   .call { gap: 14px; display: flex; flex-direction: column; align-items: center; }
   .state { font-size: 15px; font-weight: 600; margin-top: 4px; }
+  .timer { min-height: 20px; font-size: 15px; color: #8f9bb3; font-variant-numeric: tabular-nums; }
   .line { min-height: 20px; font-size: 14px; line-height: 1.5; color: #c8d3f5; word-break: break-word; }
   .you { color: #82aaff; }
   .row { display: flex; gap: 10px; justify-content: center; margin-top: 8px; }
@@ -48,17 +49,18 @@ const STYLE = `${BASE_STYLE}
 
 export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
   const cfg = JSON.stringify({ pairingId: opts.pairingId, basePath: opts.basePath, maxUtteranceMs: opts.maxUtteranceMs, vad: VOICE_CALL_VAD }).replace(/</g, '\\u003c');
-  const client = [createResampler, encodeVoiceCallFrame, voiceCallLevel, createVoiceCallVad, createVoiceCallUplink, createVoiceCallPlayhead, voiceCallTicketFailure].map(fn => fn.toString()).join(';\n');
+  const client = [createResampler, encodeVoiceCallFrame, voiceCallLevel, createVoiceCallVad, createVoiceCallUplink, createVoiceCallPlayhead, voiceCallTicketFailure, formatCallDuration, voiceCallErrorView].map(fn => fn.toString()).join(';\n');
   const body = `
   <div class="center"><div class="card call">
     <h1>Voice call</h1>
     <p class="muted">Agent <span class="agent">${htmlEscape(opts.agentId)}</span></p>
-    <div class="state" id="state">Ready</div>
+    <div class="timer" id="timer"></div>
+    <div class="state" id="state">Starting…</div>
     <div class="line you" id="you"></div>
     <div class="line" id="reply"></div>
     <p class="muted" id="hint">Your words and the replies also appear in the chat.</p>
     <div class="row">
-      <button id="start">Start call</button>
+      <button id="start" hidden>Start call</button>
       <button id="mute" class="secondary" hidden>Mute</button>
       <button id="hangup" class="danger" hidden>Hang up</button>
     </div>
@@ -75,6 +77,9 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     var playhead = createVoiceCallPlayhead(), sources = [];
     var callToken, generation, epoch = 0, reportedPlayed = 0, stopRequest = 0, stopping = false;
     var muted = false, paused = false, ended = false, attempts = 0;
+    // The call clock: set when a socket first listens, from the server's elapsed time
+    // on a rejoin, so it keeps counting across reconnects like a phone call.
+    var callStart, offeredElapsed = 0, joined = false;
     function state(text, tone){ var s = $('state'); s.textContent = text; s.className = 'state' + (tone ? ' ' + tone : ''); }
     function api(path){ return CFG.basePath + '/voice-call/' + CFG.pairingId + path; }
     function send(message){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(message)); }
@@ -110,6 +115,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       switch (message.type) {
         case 'voice.state':
           if (message.generation) generation = message.generation;
+          if ((message.state === 'listening' || message.state === 'muted') && !joined) { joined = true; callStart = Date.now() - offeredElapsed; showDuration(); }
           if (message.state === 'listening') { attempts = 0; if (message.utterance_id) uplink.listening(message.utterance_id); if (!sources.length) state(muted ? 'Muted' : 'Listening'); }
           if (message.state === 'muted') { uplink.reset(); state('Muted'); }
           break;
@@ -122,17 +128,22 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
         case 'playback.clear': epoch = message.epoch; flushPlayback(); send({ type: 'playback.clear.ack', epoch: epoch }); state(muted ? 'Muted' : 'Listening'); break;
         case 'playback.stopped': epoch = message.epoch; stopping = false; flushPlayback(); break;
         case 'voice.notice': if (message.reconnect) state('Reconnecting…'); break;
-        case 'voice.error':
-          if (message.code === 'VOICE_SESSION_CHANGED') { fail(new Error('This chat switched sessions. Send /call to talk in the new one.')); break; }
-          state(message.message || 'Voice error', 'err'); break;
+        case 'voice.error': {
+          var view = voiceCallErrorView(message);
+          if (view.kind === 'ended') fail(new Error(view.message));
+          else if (view.kind === 'listening') { $('you').textContent = ''; if (!sources.length) state(muted ? 'Muted' : 'Listening'); }
+          else state(view.message, 'err');
+          break;
+        }
       }
     }
     async function connect(){
       var issued = await ticket();
+      offeredElapsed = typeof issued.call_elapsed_ms === 'number' ? issued.call_elapsed_ms : 0;
       var scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
       if (ended || paused) return;
       var socket = new WebSocket(scheme + '//' + location.host + CFG.basePath + issued.stream_path + '?ticket=' + encodeURIComponent(issued.ticket));
-      ws = socket;
+      ws = socket; joined = false;
       socket.binaryType = 'arraybuffer';
       socket.onopen = function(){ send({ type: 'voice.start', muted: muted }); };
       socket.onmessage = function(event){ if (socket !== ws) return; if (typeof event.data === 'string') control(JSON.parse(event.data)); else playAudio(event.data); };
@@ -169,6 +180,11 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       var retry = $('start'); retry.textContent = 'Retry'; retry.hidden = false;
       retry.onclick = function(){ retry.hidden = true; attempts = 0; state('Reconnecting…'); connect().catch(fail); };
     }
+    function showDuration(){
+      if (callStart === undefined) return;
+      var text = formatCallDuration(Date.now() - callStart), timer = $('timer');
+      if (timer.textContent !== text) timer.textContent = text;
+    }
     function setMuted(value){
       if (muted === value) return;
       muted = value;
@@ -197,15 +213,29 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     }
     function hangup(silent){
       if (ended) return;
-      ended = true; clearInterval(progressTimer);
-      send({ type: 'voice.stop' }); if (ws) ws.close();
+      showDuration(); ended = true; clearInterval(progressTimer);
+      // hangup ends the call for the server too; a plain stop (the app hidden) may rejoin.
+      send({ type: 'voice.stop', hangup: true }); if (ws) ws.close();
       if (media) media.getTracks().forEach(function(track){ track.stop(); });
       if (ctx) ctx.close().catch(function(){});
       if (tg && tg.disableClosingConfirmation) tg.disableClosingConfirmation();
       $('mute').hidden = true; $('hangup').hidden = true;
       if (!silent) { state('Call ended'); if (tg && tg.close) setTimeout(function(){ tg.close(); }, 600); }
     }
-    async function start(){
+    // Telegram's Android WebView needs a tap before audio can play or be captured
+    // (setMediaPlaybackRequiresUserGesture until the first touch); iOS does not.
+    function askTap(){
+      state('Tap Start call to begin.');
+      var button = $('start'); button.textContent = 'Start call'; button.hidden = false;
+      button.onclick = function(){ if (ctx) ctx.resume().catch(function(){}); start(true); };
+    }
+    // AudioContext.resume() stays pending while audio is blocked.
+    function audioRunning(){
+      return Promise.race([ctx.resume().catch(function(){}), new Promise(function(resolve){ setTimeout(resolve, 800); })])
+        .then(function(){ return ctx.state === 'running'; });
+    }
+    // The page starts the call as it opens; gesture is a retry from the Start button.
+    async function start(gesture){
       $('start').hidden = true;
       if (!tg || !tg.initData) { state('Open this page from the /call button in Telegram.', 'err'); return; }
       if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.AudioWorkletNode) {
@@ -213,14 +243,22 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       }
       state('Starting…');
       // The page proposes its call token, so a ticket response lost on the network can be retried.
-      callToken = Array.prototype.map.call(crypto.getRandomValues(new Uint8Array(32)), function(byte){ return ('0' + byte.toString(16)).slice(-2); }).join('');
+      // It survives the reload of Sign in again, which would otherwise find its own link already used.
+      var key = 'voice-call:' + CFG.pairingId;
+      try { callToken = callToken || sessionStorage.getItem(key) || undefined; } catch (e) {}
+      if (!callToken) callToken = Array.prototype.map.call(crypto.getRandomValues(new Uint8Array(32)), function(byte){ return ('0' + byte.toString(16)).slice(-2); }).join('');
+      try { sessionStorage.setItem(key, callToken); } catch (e) {}
       try {
-        ctx = new AudioContext();
+        if (!ctx) ctx = new AudioContext();
         // One microphone request per call: some Telegram clients prompt on every getUserMedia.
-        media = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-        await ctx.resume();
-        await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' })));
-      } catch (error) { state('Microphone access was denied.', 'err'); hangup(true); return; }
+        if (!media) media = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      } catch (error) {
+        if (!gesture) { askTap(); return; }
+        state('Microphone access was denied.', 'err'); hangup(true); return;
+      }
+      if (!(await audioRunning())) { askTap(); return; }
+      try { await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }))); }
+      catch (error) { state('This Telegram app cannot use the microphone here. Update Telegram or try another device.', 'err'); hangup(true); return; }
       resample = createResampler(ctx.sampleRate, 16000);
       vad = createVoiceCallVad(CFG.vad);
       var utteranceSamples = Math.floor(CFG.maxUtteranceMs * 16);
@@ -240,16 +278,16 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
         uplink.audio(pcm);
         if (edge === 'end') uplink.speechEnd();
       };
-      progressTimer = setInterval(reportProgress, 100);
+      progressTimer = setInterval(function(){ reportProgress(); showDuration(); }, 100);
       if (tg.enableClosingConfirmation) tg.enableClosingConfirmation();
       $('mute').hidden = false; $('hangup').hidden = false;
       try { await connect(); } catch (error) { fail(error); }
     }
     if (tg) { try { tg.ready(); tg.expand(); if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); tg.onEvent && tg.onEvent('deactivated', suspend); tg.onEvent && tg.onEvent('activated', resume); } catch (e) {} }
     document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'hidden') suspend(); else if (!tg || tg.isActive !== false) resume(); });
-    $('start').onclick = function(){ start(); };
     $('mute').onclick = function(){ setMuted(!muted); };
     $('hangup').onclick = function(){ hangup(false); };
+    start(false);
   })();
   </script>`;
   return page('Voice call', STYLE, body, `<script src="${TG_WEBAPP_JS}"></script>`);

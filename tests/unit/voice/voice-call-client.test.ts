@@ -149,7 +149,7 @@ describe('page', () => {
 
   test('the inline script is valid JavaScript with every client function embedded', () => {
     expect(() => new Function(script)).not.toThrow();
-    for (const name of ['createResampler', 'encodeVoiceCallFrame', 'createVoiceCallVad', 'createVoiceCallUplink', 'createVoiceCallPlayhead', 'voiceCallLevel', 'voiceCallTicketFailure']) expect(script).toContain(`function ${name}(`);
+    for (const name of ['createResampler', 'encodeVoiceCallFrame', 'createVoiceCallVad', 'createVoiceCallUplink', 'createVoiceCallPlayhead', 'voiceCallLevel', 'voiceCallTicketFailure', 'formatCallDuration', 'voiceCallErrorView']) expect(script).toContain(`function ${name}(`);
   });
 
   test('URLs derive from the base path and the agent id is escaped', () => {
@@ -179,41 +179,77 @@ describe('ticket refusals', () => {
   });
 });
 
-describe('page after a refused ticket', () => {
+/** A stub WebSocket the test drives as the gateway. */
+class FakeSocket {
+  readyState = 0; binaryType = ''; sent: any[] = [];
+  onopen: null | (() => void) = null; onmessage: null | ((event: { data: unknown }) => void) = null; onclose: null | ((event: { code: number }) => void) = null;
+  constructor(readonly url: string, readonly list: FakeSocket[]) { list.push(this); }
+  send(data: unknown) { this.sent.push(typeof data === 'string' ? JSON.parse(data) : data); }
+  close() { this.readyState = 3; }
+  open() { this.readyState = 1; this.onopen?.(); }
+  receive(message: object) { this.onmessage?.({ data: JSON.stringify(message) }); }
+  drop(code: number) { this.readyState = 3; this.onclose?.({ code }); }
+}
+
+const TICKET = { status: 200, body: JSON.stringify({ ticket: 't', stream_path: '/api/v1/agents/agent/voice-sessions/v/stream', call_token: 'c'.repeat(64) }) };
+const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve)); };
+
+/**
+ * Open the real page against a stub browser. The page starts the call by itself;
+ * `audioNeedsTap` models Telegram's Android WebView, where audio stays suspended
+ * until the first touch, and `micNeedsTap` a WebView that grants the microphone only from a tap.
+ */
+async function openPage(options: { tickets?: { status: number; body: string }[]; audioNeedsTap?: boolean; micNeedsTap?: boolean; micDenied?: boolean; storage?: Map<string, string> } = {}) {
   const html = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'agent', basePath: '/gateway', maxUtteranceMs: 60000 });
   const script = html.match(/<script>([\s\S]*)<\/script>/)![1];
+  const elements = new Map<string, { textContent: string; className: string; hidden: boolean; onclick: null | (() => void) }>();
+  const element = (id: string) => elements.get(id) ?? elements.set(id, { textContent: '', className: '', hidden: false, onclick: null }).get(id)!;
+  const noop = () => undefined;
+  const tg = { initData: 'signed', ready: noop, expand: noop, onEvent: noop, enableClosingConfirmation: noop, disableClosingConfirmation: noop, close: noop };
+  const track = { enabled: true, stop: noop };
+  let touched = false;
+  class FakeAudioContext {
+    sampleRate = 48000; currentTime = 0; destination = {}; state = 'suspended';
+    audioWorklet = { addModule: async () => undefined };
+    resume = () => { if (options.audioNeedsTap && !touched) return new Promise<void>(noop); this.state = 'running'; return Promise.resolve(); };
+    close = async () => undefined;
+    createGain() { return { gain: { value: 1 }, connect: noop }; }
+    createMediaStreamSource() { return { connect: noop }; }
+    createBuffer() { return { getChannelData: () => new Float32Array(1) }; }
+  }
+  class FakeWorkletNode { port = {}; connect = noop; }
+  const tickets = [...(options.tickets ?? [TICKET])];
+  const fetch = jest.fn(async () => { const next = tickets.shift() ?? TICKET; return { ok: next.status === 200, status: next.status, json: async () => JSON.parse(next.body) }; });
+  const location = { protocol: 'https:', host: 'pod.example', reload: jest.fn() };
+  const window = { Telegram: { WebApp: tg }, isSecureContext: true, AudioWorkletNode: FakeWorkletNode };
+  const document = { getElementById: element, addEventListener: noop, visibilityState: 'visible' };
+  const getUserMedia = jest.fn(async () => {
+    if (options.micDenied || (options.micNeedsTap && !touched)) throw Object.assign(new Error('denied'), { name: 'NotAllowedError' });
+    return { getAudioTracks: () => [track], getTracks: () => [track] };
+  });
+  const navigator = { mediaDevices: { getUserMedia } };
+  const URL = { createObjectURL: () => 'blob:worklet' };
+  const sockets: FakeSocket[] = [];
+  const WebSocket = function(url: string) { return new FakeSocket(url, sockets); };
+  const stored = options.storage ?? new Map<string, string>();
+  const sessionStorage = { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { stored.set(key, value); } };
+  new Function('window', 'document', 'navigator', 'AudioContext', 'AudioWorkletNode', 'fetch', 'location', 'URL', 'WebSocket', 'sessionStorage', script)(
+    window, document, navigator, FakeAudioContext, FakeWorkletNode, fetch, location, URL, WebSocket, sessionStorage);
+  await settle();
+  /** A tap on a page button, which also counts as the WebView's first touch. */
+  const tap = async (id: string) => { touched = true; element(id).onclick!(); await settle(); };
+  return { element, location, fetch, sockets, getUserMedia, tap };
+}
 
-  /** Run the real inline script against a stub browser, press Start, and let the ticket request settle. */
-  async function pressStart(response: { status: number; body: string }) {
-    const elements = new Map<string, { textContent: string; className: string; hidden: boolean; onclick: null | (() => void) }>();
-    const element = (id: string) => elements.get(id) ?? elements.set(id, { textContent: '', className: '', hidden: false, onclick: null }).get(id)!;
-    const noop = () => undefined;
-    const tg = { initData: 'signed', ready: noop, expand: noop, onEvent: noop, enableClosingConfirmation: noop, disableClosingConfirmation: noop, close: noop };
-    const track = { enabled: true, stop: noop };
-    class FakeAudioContext {
-      sampleRate = 48000; currentTime = 0; destination = {};
-      audioWorklet = { addModule: async () => undefined };
-      resume = async () => undefined; close = async () => undefined;
-      createGain() { return { gain: { value: 1 }, connect: noop }; }
-      createMediaStreamSource() { return { connect: noop }; }
-    }
-    class FakeWorkletNode { port = {}; connect = noop; }
-    const fetch = jest.fn(async () => ({ ok: false, status: response.status, json: async () => JSON.parse(response.body) }));
-    const location = { protocol: 'https:', host: 'pod.example', reload: jest.fn() };
-    const window = { Telegram: { WebApp: tg }, isSecureContext: true, AudioWorkletNode: FakeWorkletNode };
-    const document = { getElementById: element, addEventListener: noop, visibilityState: 'visible' };
-    const navigator = { mediaDevices: { getUserMedia: async () => ({ getAudioTracks: () => [track], getTracks: () => [track] }) } };
-    const URL = { createObjectURL: () => 'blob:worklet' };
-    new Function('window', 'document', 'navigator', 'AudioContext', 'AudioWorkletNode', 'fetch', 'location', 'URL', script)(
-      window, document, navigator, FakeAudioContext, FakeWorkletNode, fetch, location, URL);
-    element('start').onclick!();
-    for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
-    expect(fetch).toHaveBeenCalledWith('/gateway/voice-call/' + 'a'.repeat(36) + '/ticket', expect.objectContaining({ method: 'POST', credentials: 'same-origin' }));
-    return { element, location };
+describe('page after a refused ticket', () => {
+  async function opened(response: { status: number; body: string }) {
+    const page = await openPage({ tickets: [response] });
+    expect(page.fetch).toHaveBeenCalledWith('/gateway/voice-call/' + 'a'.repeat(36) + '/ticket', expect.objectContaining({ method: 'POST', credentials: 'same-origin' }));
+    return page;
   }
 
   test('a proxy 401 offers to sign in again, and signing in reloads the page into the login redirect', async () => {
-    const { element, location } = await pressStart({ status: 401, body: 'unauthorized' });
+    const { element, location } = await opened({ status: 401, body: 'unauthorized' });
     expect(element('state').textContent).toBe('You need to sign in again to continue the call.');
     expect(element('start')).toMatchObject({ hidden: false, textContent: 'Sign in again' });
     expect(location.reload).not.toHaveBeenCalled();
@@ -221,10 +257,96 @@ describe('page after a refused ticket', () => {
     expect(location.reload).toHaveBeenCalledTimes(1);
   });
 
+  test('the call token survives the sign-in reload, so the reloaded page continues its own call', async () => {
+    const storage = new Map<string, string>();
+    const first = await openPage({ tickets: [{ status: 401, body: 'unauthorized' }], storage });
+    const reloaded = await openPage({ storage });
+    const token = (fetch: jest.Mock) => JSON.parse((fetch.mock.calls[0] as any)[1].body).call_token;
+    expect(token(first.fetch)).toMatch(/^[0-9a-f]{64}$/);
+    expect(token(reloaded.fetch)).toBe(token(first.fetch));
+  });
+
   test("the gateway's initData refusal still ends the call without a sign-in offer", async () => {
-    const { element, location } = await pressStart({ status: 401, body: JSON.stringify({ error: 'Invalid initData' }) });
+    const { element, location } = await opened({ status: 401, body: JSON.stringify({ error: 'Invalid initData' }) });
     expect(element('state').textContent).toBe('Telegram could not verify you. Reopen the call from the /call button.');
     expect(element('start').hidden).toBe(true);
     expect(location.reload).not.toHaveBeenCalled();
+  });
+});
+
+describe('call page', () => {
+  beforeEach(() => { jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] }); jest.setSystemTime(1_000_000); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  test('opens straight into the call: no Start press, and it listens once the gateway does', async () => {
+    const { element, fetch, sockets } = await openPage();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(element('start').hidden).toBe(true);
+    sockets[0].open();
+    expect(sockets[0].sent[0]).toEqual({ type: 'voice.start', muted: false });
+    sockets[0].receive({ type: 'voice.state', state: 'listening', utterance_id: '0'.repeat(32), generation: '1'.repeat(32) });
+    expect(element('state')).toMatchObject({ textContent: 'Listening', className: 'state' });
+  });
+
+  test('sound without words leaves the call calmly listening; a real error still shows', async () => {
+    const { element, sockets } = await openPage();
+    sockets[0].open();
+    sockets[0].receive({ type: 'voice.state', state: 'listening', utterance_id: '0'.repeat(32), generation: '1'.repeat(32) });
+    // As the gateway sends it for EMPTY_TRANSCRIPT: after the next listening state.
+    sockets[0].receive({ type: 'voice.error', code: 'EMPTY_TRANSCRIPT', category: 'no_speech', retryable: true, message: 'No speech was recognized. Please speak again.', referenceId: 'r' });
+    expect(element('state')).toMatchObject({ textContent: 'Listening', className: 'state' });
+    sockets[0].receive({ type: 'voice.error', code: 'TTS_UNAVAILABLE', category: 'unavailable', message: 'The voice provider is temporarily unavailable. Please try again later.' });
+    expect(element('state')).toMatchObject({ textContent: 'The voice provider is temporarily unavailable. Please try again later.', className: 'state err' });
+  });
+
+  test('the call clock starts on connect, keeps the call time across a reconnect, and stops at hang-up', async () => {
+    const elapsed = { status: 200, body: JSON.stringify({ ...JSON.parse(TICKET.body), call_elapsed_ms: 66_000 }) };
+    const { element, sockets, tap } = await openPage({ tickets: [TICKET, elapsed] });
+    expect(element('timer').textContent).toBe('');
+    sockets[0].open();
+    sockets[0].receive({ type: 'voice.state', state: 'listening', utterance_id: '0'.repeat(32), generation: '1'.repeat(32) });
+    expect(element('timer').textContent).toBe('0:00');
+    await jest.advanceTimersByTimeAsync(65_000);
+    expect(element('timer').textContent).toBe('1:05');
+    sockets[0].drop(1006);
+    await jest.advanceTimersByTimeAsync(600); await settle();
+    expect(sockets).toHaveLength(2);
+    sockets[1].open();
+    sockets[1].receive({ type: 'voice.state', state: 'listening', utterance_id: '0'.repeat(32), generation: '1'.repeat(32) });
+    // The gateway's clock for this call wins over the page's own.
+    expect(element('timer').textContent).toBe('1:06');
+    await jest.advanceTimersByTimeAsync(3_600_000);
+    expect(element('timer').textContent).toBe('1:01:06');
+    await tap('hangup');
+    expect(sockets[1].sent).toContainEqual({ type: 'voice.stop', hangup: true });
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(element('timer').textContent).toBe('1:01:06');
+    expect(element('state').textContent).toBe('Call ended');
+  });
+
+  test('where audio needs a first touch, one Start tap resumes it and starts the call', async () => {
+    const { element, fetch, sockets, tap } = await openPage({ audioNeedsTap: true });
+    await jest.advanceTimersByTimeAsync(800); await settle();
+    expect(element('state').textContent).toBe('Tap Start call to begin.');
+    expect(element('start')).toMatchObject({ hidden: false, textContent: 'Start call' });
+    expect(fetch).not.toHaveBeenCalled();
+    await tap('start');
+    expect(element('start').hidden).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(sockets).toHaveLength(1);
+  });
+
+  test('a microphone refused before any tap asks for one; refused again from a tap, the call ends', async () => {
+    const tapped = await openPage({ micNeedsTap: true });
+    expect(tapped.element('start')).toMatchObject({ hidden: false, textContent: 'Start call' });
+    await tapped.tap('start');
+    expect(tapped.getUserMedia).toHaveBeenCalledTimes(2);
+    expect(tapped.sockets).toHaveLength(1);
+
+    const denied = await openPage({ micDenied: true });
+    await denied.tap('start');
+    expect(denied.element('state')).toMatchObject({ textContent: 'Microphone access was denied.', className: 'state err' });
+    expect(denied.element('start').hidden).toBe(true);
+    expect(denied.fetch).not.toHaveBeenCalled();
   });
 });
