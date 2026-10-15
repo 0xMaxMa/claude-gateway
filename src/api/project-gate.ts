@@ -1,16 +1,18 @@
 import type { Response } from 'express';
 import type { AgentRunner } from '../agent/runner';
 import type { ApiKey } from '../types';
+import { SESSION_ID_RE } from '../session/store';
 import { isAdmin, PROJECTS_ADMIN_REQUIRED } from './auth';
 
-const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
 /**
  * Only an admin key may reveal or control a project-bound session. True when `apiKey` is not admin and the session
- * is bound, or its binding cannot be read. A malformed id names no session, so it is not refused here.
+ * is bound, its binding cannot be read, or the id is malformed (a path, a dot segment, an encoded separator).
+ * An empty id names nothing and is left to the handler's own 400.
  */
 export async function refusesProjectChat(runner: AgentRunner, apiKey: ApiKey, sessionId: string): Promise<boolean> {
-  if (isAdmin(apiKey) || !SESSION_ID_RE.test(sessionId)) return false;
+  if (isAdmin(apiKey) || sessionId === '') return false;
+  if (!SESSION_ID_RE.test(sessionId)) return true;
   return (await runner.apiSessionBinding(sessionId)).kind !== 'unbound';
 }
 

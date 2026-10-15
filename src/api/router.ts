@@ -4648,6 +4648,7 @@ export function createApiRouter(
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
     if (await refusesProjectChat(runner, (req as AuthedRequest).apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
+    if (!isValidSessionId(sessionId)) { res.status(400).json({ error: 'Invalid session id' }); return; }
     try {
       await runner.deleteApiSession(chatId, sessionId);
       res.status(204).send();

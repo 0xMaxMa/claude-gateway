@@ -17,6 +17,9 @@ export class SessionNotInIndexError extends Error {
   }
 }
 
+/** The only shape of session id that may name a binding file; anything else names no session. */
+export const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
 export type ProjectBinding = { kind: 'unbound' } | { kind: 'bound'; project: string } | { kind: 'unreadable' };
 
 export class SessionStore {
@@ -672,7 +675,11 @@ export class SessionStore {
   }
 
   private projectBindingPath(agentId: string, sessionId: string): string {
-    return path.join(this.agentsBaseDir, agentId, 'project-bindings', `${sessionId}.json`);
+    if (!SESSION_ID_RE.test(sessionId)) throw new Error('Invalid session id');
+    const dir = path.resolve(this.agentsBaseDir, agentId, 'project-bindings');
+    const file = path.resolve(dir, `${sessionId}.json`);
+    if (path.dirname(file) !== dir) throw new Error('Invalid session id');
+    return file;
   }
 
   /** Written once when a project chat is created; looked up by session id alone, whichever chat asks. */
@@ -701,6 +708,7 @@ export class SessionStore {
 
   /** No file means the session was never bound. A file that cannot be read is not the same thing. */
   async loadProjectBinding(agentId: string, sessionId: string): Promise<ProjectBinding> {
+    if (!SESSION_ID_RE.test(sessionId)) return { kind: 'unbound' };
     let raw: string;
     try {
       raw = await fs.promises.readFile(this.projectBindingPath(agentId, sessionId), 'utf-8');
