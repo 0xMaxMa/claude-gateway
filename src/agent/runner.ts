@@ -5412,9 +5412,9 @@ export class AgentRunner extends EventEmitter {
     return this.pendingApiSessions.has(sessionId);
   }
 
-  /** A chat bound to `project` has a live turn or a process still spawning. Keyed on live sessions, not on the session record, so deleting a session mid-turn does not unlock the project. An unreadable binding on a live session counts as active. */
+  /** A chat bound to `project` has a live turn, a process still spawning, an accepted input not yet handled, or an unfinished task. Keyed on live sessions, not on the session record, so deleting a session mid-turn does not unlock the project. An unreadable binding on a live session counts as active. */
   async hasActiveProjectTurn(project: string): Promise<boolean> {
-    const live = new Set([...this.pendingApiSessions, ...this.sessionSpawnLocks.keys()]);
+    const live = new Set([...this.pendingApiSessions, ...this.sessionSpawnLocks.keys(), ...(this.orchestration?.liveSessionIds() ?? [])]);
     for (const sessionId of live) {
       const binding = await this.apiSessionBinding(sessionId);
       if (binding.kind === 'unreadable' || (binding.kind === 'bound' && binding.project === project)) return true;

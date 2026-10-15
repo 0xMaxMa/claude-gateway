@@ -19,7 +19,7 @@ export type ProjectChatError =
   | { code: 'project_unsupported_agent'; reason: ProjectUnsupportedReason }
   | { code: 'project_not_found' }
   | { code: 'projects_disabled' }
-  | { code: 'project_unavailable'; reason: ProjectsErrorCode };
+  | { code: 'project_unavailable'; reason: ProjectsErrorCode | 'project_deleting' };
 
 /** The uppercase send-time form: a turn that cannot run because its project failed to resolve. */
 export function projectUnavailableError(error: ProjectChatError): Error {
@@ -48,8 +48,21 @@ export function projectsEnabled(config: GatewayConfig): boolean {
   return config.gateway.projects?.enabled !== false;
 }
 
+const deletingProjects = new Set<string>();
+
+/**
+ * Marks `name` as being deleted, so no chat turn or worker starts in it between the delete guard and the rename.
+ * Returns the release function, or null when another delete already holds the name.
+ */
+export function markProjectDeleting(name: ProjectName): (() => void) | null {
+  if (deletingProjects.has(name)) return null;
+  deletingProjects.add(name);
+  return () => void deletingProjects.delete(name);
+}
+
 export async function resolveProjectCwd(config: GatewayConfig, name: ProjectName): Promise<Result<ProjectCwd, ProjectChatError>> {
   if (!projectsEnabled(config)) return err({ code: 'projects_disabled' });
+  if (deletingProjects.has(name)) return err({ code: 'project_unavailable', reason: 'project_deleting' });
   const dir = await resolveProjectDir(resolveProjectsRoot(config), name);
   if (!dir.ok) {
     return err(dir.error === 'not_found' ? { code: 'project_not_found' } : { code: 'project_unavailable', reason: dir.error });

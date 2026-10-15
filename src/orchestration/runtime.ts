@@ -1868,6 +1868,14 @@ export class AgentOrchestrationRuntime {
   async flushHistory(): Promise<void> {
     for (const row of this.store.all("SELECT operation_id FROM history_operations WHERE state='pending' ORDER BY updated_at LIMIT 200")) await this.history.write(String(row.operation_id));
   }
+  /** API sessions with a turn in flight, an accepted input not yet handled, or a task that has not finished. */
+  liveSessionIds(): Set<string> {
+    const ids = new Set(this.active.keys());
+    for (const row of this.store.all(`SELECT c.agent_session_id AS id FROM conversations c WHERE c.source='api' AND (
+      EXISTS (SELECT 1 FROM conversation_inputs i WHERE i.conversation_id=c.id AND i.status IN ('accepted','assigned'))
+      OR EXISTS (SELECT 1 FROM tasks t WHERE t.conversation_id=c.id AND t.state NOT IN ('completed','failed','cancelled')))`)) ids.add(String(row.id));
+    return ids;
+  }
   hasPendingWork(): boolean {
     return !!(this.active.size || this.pending.size || this.store.get("SELECT id FROM conversation_inputs WHERE status IN ('accepted','assigned') LIMIT 1") || this.store.get("SELECT id FROM tasks WHERE state NOT IN ('completed','failed','cancelled') LIMIT 1"));
   }

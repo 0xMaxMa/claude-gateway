@@ -617,3 +617,60 @@ describe('capabilities follow orchestration', () => {
     }
   });
 });
+
+describe('project delete against accepted turns and the rename window', () => {
+  let h: Harness;
+  beforeAll(() => { process.env.CLAUDE_BIN = `node ${MOCK_CLAUDE}`; });
+  afterAll(() => { delete process.env.CLAUDE_BIN; delete process.env.MOCK_CLAUDE_ARGV_LOG; });
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    await teardown(h);
+  });
+  const del = () => supertest(h.app).delete('/api/v1/projects/site').set('Authorization', `Bearer ${KEYS.admin!.key}`).send({ confirm: 'site' });
+  const accept = (sessionId: string, message: string, id: string) => supertest(h.app)
+    .post('/api/v1/agents/alfred/messages/accept')
+    .set('Authorization', `Bearer ${KEYS.admin!.key}`)
+    .send({ message, chat_id: 'web', session_id: sessionId, client_message_id: id });
+
+  it('answers 409 project_running while an orchestrated accepted turn is live', async () => {
+    h = await harness({ orchestration: true });
+    const sessionId = await projectSession(h);
+    const accepted = await accept(sessionId, 'HOLD-TURN', '00000000-0000-4000-8000-000000000002');
+    expect(accepted.status).toBe(202);
+    expect(h.runners[0]!.hasActiveApiSession(sessionId)).toBe(false);
+    await waitForCondition(() => spawns(h).length > 0, 10_000);
+
+    const res = await del();
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('project_running');
+    expect(fs.existsSync(path.join(h.root, 'site'))).toBe(true);
+  }, 30_000);
+
+  it('refuses a turn that starts while the delete is mid-rename, then deletes', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let reached!: () => void;
+    const atRename = new Promise<void>((resolve) => { reached = resolve; });
+    const realRename = fs.promises.rename.bind(fs.promises);
+    jest.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      if (!path.basename(String(to)).startsWith('.deleting-')) return realRename(from, to);
+      reached();
+      await gate;
+      return realRename(from, to);
+    });
+
+    const deleting = Promise.resolve(del());
+    await atRename;
+    const turn = await send(h, sessionId, 'HOLD-TURN');
+    expect(turn.status).toBe(409);
+    expect(turn.body.code).toBe('PROJECT_UNAVAILABLE');
+    expect(spawns(h)).toHaveLength(0);
+    expect((await del()).status).toBe(409);
+
+    release();
+    expect((await deleting).status).toBe(200);
+    expect(fs.existsSync(path.join(h.root, 'site'))).toBe(false);
+  }, 30_000);
+});

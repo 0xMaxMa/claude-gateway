@@ -8,6 +8,7 @@ import { commitAll, fetchRemote, getStatus, getSummaries, GitError, GitErrorCode
 import { listRunning, ProjectDir, RunningErrorCode, scanProjects, StopLimiter, stopRunning, Sys, systemSys } from '../projects/running';
 import { planStart, PORT_MIN, readStartFacts, startProject, StartError, StartErrorCode, StartGuard, Launcher, systemLauncher } from '../projects/start';
 import { DeleteErrorCode, removeProject } from '../projects/delete';
+import { markProjectDeleting } from '../projects/chat';
 import { parseProjectName, parseRelPath, ProjectName, ProjectsErrorCode, Result } from '../projects/paths';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
@@ -149,11 +150,17 @@ export function createProjectsRouter(
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);
       if ((req.body ?? {}).confirm !== name.value) return fail(res, 'confirm_mismatch');
-      const dir = await resolveProjectDir(root, name.value);
-      if (!dir.ok) return fail(res, dir.error);
-      const listening = await listRunning(running.sys, dir.value);
-      if (listening.processes.length > 0 || (await running.chatTurnActive?.(name.value))) return fail(res, 'project_running');
-      respond(res, await removeProject(root, name.value));
+      const release = markProjectDeleting(name.value);
+      if (!release) return fail(res, 'project_running');
+      try {
+        const dir = await resolveProjectDir(root, name.value);
+        if (!dir.ok) return fail(res, dir.error);
+        const listening = await listRunning(running.sys, dir.value);
+        if (listening.processes.length > 0 || (await running.chatTurnActive?.(name.value))) return fail(res, 'project_running');
+        respond(res, await removeProject(root, name.value));
+      } finally {
+        release();
+      }
     }),
   );
 
