@@ -36,11 +36,26 @@ export function decisionState(state:ComputerState) {
   return {...state, controls:state.controls.filter(c=>!c.sensitive)};
 }
 
-/** Literal values only; do not invent domains or parse language-specific commands. */
+// A verb that hands over text, with up to three filler words ("run the command `ls`").
+const TEXT_VERB_BEFORE=/(?:^|[^\p{L}\p{N}])(?:type|run|enter|execute|paste|input|write|search(?:\s+for)?|พิมพ์|รัน|ป้อน|ค้นหา)(?:\s+(?:the|a|this|following|command|text|query|in|out)){0,3}\s*:?\s*$/iu;
+/**
+ * Literal values only; do not invent domains or parse language-specific commands.
+ * Quoted ("…", “…”) and code (`…`, ```…```) spans come first, a span right after a
+ * verb that hands over text, then code, ranked ahead of names ("Terminal"); URLs last.
+ */
 export function literalTextCandidates(goal:string):string[] {
+ const spans:Array<{value:string;rank:number}>=[];
+ for(const match of goal.matchAll(/```([\s\S]*?)```|`([^`\n]+)`|"([^"\n]+)"|“([^”\n]+)”/g)){
+  const code=match[1]!==undefined||match[2]!==undefined;
+  // A fence may open with a language tag line ("```sh").
+  const value=match[1]!==undefined?match[1].replace(/^[\w+-]*\n/,'').trim():match[2]??match[3]??match[4];
+  const verb=TEXT_VERB_BEFORE.test(goal.slice(Math.max(0,match.index!-60),match.index));
+  spans.push({value,rank:(verb?0:2)+(code?0:1)});
+ }
  const values:string[]=[];
  const add=(value:string)=>{if(value.length>0&&value.length<=2000&&!values.includes(value)&&values.length<16)values.push(value);};
- for(const match of goal.matchAll(/"([^"\n]+)"|“([^”\n]+)”/g))add(match[1]??match[2]);
- for(const match of goal.matchAll(/https?:\/\/[^\s"<>]+|(?<![A-Za-z0-9@._-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}(?:\/[^\s"<>]*)?/gi))add(match[0]);
+ // Array.prototype.sort is stable: equal ranks keep their order in the goal.
+ for(const span of spans.sort((a,b)=>a.rank-b.rank))add(span.value);
+ for(const match of goal.matchAll(/https?:\/\/[^\s"<>`]+|(?<![A-Za-z0-9@._-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}(?:\/[^\s"<>`]*)?/gi))add(match[0]);
  return values;
 }

@@ -507,6 +507,15 @@ for(const mode of ['settles','continuous','revoked'])test('post-action stale scr
  else{assert.equal(r.reason,'COMMAND_WAITING_INPUT');assert.equal(captures,mode==='settles'?2:3);assert.equal(Boolean(r.observation),mode==='settles');assert(r.trace.events.some(e=>e.reason==='POST_ACTION_EVIDENCE_STALE'));}
 });
 
+// Pod-jinawong 2.0.21 (fa17f432): the command came in backticks and was never offered.
+test('literal text candidates include code spans, the span after a text verb first',()=>{
+ assert.deepEqual(literalTextCandidates('Open Terminal.app on this Mac (use Spotlight search with Cmd+Space, type "Terminal", press Enter if needed) and run the command `which htop` (or `command -v htop`) to check if htop is installed.'),
+  ['which htop','Terminal','command -v htop','Terminal.app']);
+ assert.deepEqual(literalTextCandidates('run:\n```sh\nls -la\n```'),['ls -la']);
+ assert.deepEqual(literalTextCandidates('```\necho hi\n```'),['echo hi']);
+ assert.deepEqual(literalTextCandidates('พิมพ์`ls`ใน Terminal'),['ls']);
+ assert.deepEqual(literalTextCandidates('open `Notes` then type "hello"'),['hello','Notes']);
+});
 test('literal text candidates preserve exact quoted content and never invent domains',()=>{
  assert.deepEqual(literalTextCandidates('พิมพ์ "New  York"'),['New  York']);
  assert.deepEqual(literalTextCandidates('เข้า google.com'),['google.com']);

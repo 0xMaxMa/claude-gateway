@@ -16,7 +16,8 @@ const notes=(count:number)=>({application:'com.apple.Notes',windowTitle:`Notes (
  controls:[{ref:'c8',role:'AXButton',label:'New Note',actions:['press']},{ref:'c9',role:'AXButton',label:'Delete',actions:['press']},{ref:'c10',role:'AXButton',label:'Share',actions:['press']}]});
 
 const choice=(criteria:Record<string,unknown>,chosen:string,confidence:number)=>({choice:chosen,confidence,probabilities:Object.fromEntries(Object.keys(criteria).map(k=>[k,k===chosen?confidence:(1-confidence)/(Object.keys(criteria).length-1||1)]))});
-type Step={pick:string;confidence?:number;impact?:'ROUTINE'|'HIGH_IMPACT';text?:string};
+// `text` may pick by value: it gets the offered TEXT criteria and returns a choice.
+type Step={pick:string;confidence?:number;impact?:'ROUTINE'|'HIGH_IMPACT';text?:string|((criteria:Record<string,string>)=>string)};
 /** A desktop that shows `screens[i]` after i completed actions, and a model that answers `plan` in order. */
 function fixture(screens:Array<()=>any>,plan:Step[]=[]){
  let shown=0,asked=0;const calls:any[]=[],requests:any[]=[];
@@ -31,7 +32,7 @@ function fixture(screens:Array<()=>any>,plan:Step[]=[]){
   evaluate:async req=>{
    requests.push(req);const step=plan[asked++]??{pick:'DONE'};const kind=step.pick.includes(':')?step.pick.split(':')[0]:step.pick;
    return {answers:Object.fromEntries(Object.entries(req.questions).map(([name,q])=>[name,choice(q.criteria as any,
-    name==='action'?kind:name==='target_'+kind?step.pick:name==='impact'?step.impact??'ROUTINE':name==='text'?step.text??'NONE':'BLOCKED',name==='impact'?0.95:step.confidence??0.95)]))};
+    name==='action'?kind:name==='target_'+kind?step.pick:name==='impact'?step.impact??'ROUTINE':name==='text'?(typeof step.text==='function'?step.text(q.criteria as any):step.text??'NONE'):'BLOCKED',name==='impact'?0.95:step.confidence??0.95)]))};
   }};
  return {deps,calls,requests,actions:()=>calls.filter(c=>c.name==='computer_action').map(({args:{lease_token,operation_id,generation,...rest}})=>rest)};
 }
@@ -460,5 +461,43 @@ describe('a goal run offers READ_REQUEST only before it has acted',()=>{
   expect(offered(f.requests[0])).toContain('READ_REQUEST');
   expect(f.actions()).toEqual([]);
   expect(waited(r)).toBe('READ_REQUEST');
+ });
+});
+
+// Pod-jinawong 2.0.21, computer-requests/fa17f432: the agent's goal named the command
+// in backticks. Round 1 opened Terminal; round 2 chose to type into the focused shell,
+// but the only text candidates were "Terminal" and "Terminal.app", so the model said
+// NONE and the run stopped as COMMAND_WAITING_INPUT with nothing typed and nobody asked.
+describe('an agent goal run types the command it was given in backticks',()=>{
+ const FA17F432='Open Terminal.app on this Mac (use Spotlight search with Cmd+Space, type "Terminal", press Enter if needed) and run the command `which htop` (or `command -v htop`) to check if htop is installed. Report back whether it\'s installed and the output of the command.';
+ const TERMINAL={id:'com.apple.Terminal',name:'Terminal'};
+ const desktop=()=>({...finder(),apps:[...APPS,TERMINAL]});
+ const terminal=()=>({application:TERMINAL.id,windowTitle:'jisack — -zsh — 80×24',truncated:false,apps:[...APPS,TERMINAL],
+  focusedControl:{ref:'t0',role:'AXTextArea',label:'shell'},
+  controls:[{ref:'t0',identity:'22222222-2222-4222-8222-222222222222',role:'AXTextArea',label:'shell',value:'',focused:true,actions:['type']}]});
+ // The model picks the offered candidate equal to the command, or NONE when it is not offered.
+ const command=(criteria:Record<string,string>)=>Object.entries(criteria).find(([k,v])=>k.startsWith('TEXT:')&&JSON.parse(v).text==='which htop')?.[0]??'NONE';
+ test('round 2 types `which htop` into the focused shell AXTextArea',async()=>{
+  const f=fixture([desktop,terminal,terminal],[{pick:'open:'+TERMINAL.id},{pick:'type:t0',text:command},{pick:'DONE'}]);
+  const r=await spawn(f,FA17F432);
+  expect(f.actions()).toEqual([{kind:'open',app_id:TERMINAL.id},{kind:'type',ref:'t0',text:'which htop'}]);
+  // The command the goal says to run is offered first, ahead of the app name.
+  expect(JSON.parse(f.requests[1].questions.text.criteria['TEXT:0']).text).toBe('which htop');
+  expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:2});
+ });
+ test('without a literal text the run stops as FIELD_TEXT_REQUIRED naming the field, not a bare wait',async()=>{
+  const f=fixture([desktop,terminal],[{pick:'open:'+TERMINAL.id},{pick:'type:t0'}]);
+  const r=await spawn(f,'Open Terminal.app on this Mac and check whether htop is installed, then report back what you find there.');
+  expect(f.actions()).toEqual([{kind:'open',app_id:TERMINAL.id}]);
+  expect(r).toMatchObject({status:'needs_input',reason:'FIELD_TEXT_REQUIRED',steps:1,
+   fieldRequest:{label:'shell',application:TERMINAL.id,windowTitle:'jisack — -zsh — 80×24',role:'AXTextArea',reason:'missing'}});
+  expect(waited(r)).toBeUndefined();
+ });
+ test('a user-issued direct command without the text still waits for the next command (no behavior change)',async()=>{
+  const f=fixture([terminal],[{pick:'type:t0'}]);
+  const r=await runComputerUse({goal:'check whether htop is installed in this terminal please now',yieldAfterInteraction:true,readRequest:true},f.deps,new AbortController().signal);
+  expect(f.actions()).toEqual([]);
+  expect(r).toMatchObject({status:'needs_input',reason:'COMMAND_WAITING_INPUT'});expect(r.fieldRequest).toBeUndefined();
+  expect(waited(r)).toBe('FIELD_TEXT_REQUIRED');
  });
 });

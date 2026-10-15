@@ -189,7 +189,7 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
    // A reached goal ends the device session too: the Mac stops showing it as
    // controlled and the owner's next request asks for access again.
    const accessReleased=result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized()?await this.endSession(client,b.scope):undefined;
-   const report={...(accessReleased?{accessReleased}:{}),status:result.status,reason:result.reason,steps:result.steps,evaluations:result.evaluations,phase:'terminal',trace:receipt.trace?.slice(-12),...(fieldRequest?{fieldRequest}:{}),...(result.stepRun?{stepRun:result.stepRun}:{}),...(result.lastAction?{lastAction:result.lastAction}:{})};
+   const report={...(accessReleased?{accessReleased}:{}),status:result.status,reason:result.reason,steps:result.steps,evaluations:result.evaluations,phase:'terminal',trace:receipt.trace?.slice(-12),...(fieldRequest??result.fieldRequest?{fieldRequest:fieldRequest??result.fieldRequest}:{}),...(result.stepRun?{stepRun:result.stepRun}:{}),...(result.lastAction?{lastAction:result.lastAction}:{})};
    let outcome:WorkerOutcome;
    const validation=[...(result.trace?.events??[])].reverse().find(e=>e.validationReason)?.validationReason;
    if(result.status==='succeeded'&&result.reason==='GOAL_REACHED'&&!receipt.operationId&&authorized())outcome={type:'completed',result:{summary:`Computer goal reached: ${computerOutcomeText(report)} Judged from the screen by the decision model, not independently verified. ${accessReleased?'Computer access was released.':'Computer access could not be released; the owner can stop it on the Mac.'}`,artifactIds:[]}};

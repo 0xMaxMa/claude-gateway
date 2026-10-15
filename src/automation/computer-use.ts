@@ -67,7 +67,9 @@ export interface ComputerUseDependencies {
  /** The user's answer to a confirmation question, read before anything runs. */
  confirmed?:(reply:'YES'|'NO'|'OTHER')=>void;
 }
-export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'needs_input'|'blocked'|'cancelled'|'needs_reconciliation';reason:string;revision:number;steps:number;evaluations:number;trace:{events:ComputerProgress[];truncated:boolean};operationId?:string;observation?:ComputerState;stepRun?:import('./computer-steps').ComputerStepRun;lastAction?:ComputerLastAction}
+export interface ComputerUseResult {status:'succeeded'|'needs_verification'|'needs_input'|'blocked'|'cancelled'|'needs_reconciliation';reason:string;revision:number;steps:number;evaluations:number;trace:{events:ComputerProgress[];truncated:boolean};operationId?:string;observation?:ComputerState;stepRun?:import('./computer-steps').ComputerStepRun;lastAction?:ComputerLastAction;
+ /** A goal run stopped at a field it has no literal value for: the agent is asked for it. */
+ fieldRequest?:{label:string;application?:string;windowTitle?:string;role?:string;reason:'missing'}}
 /** The command's own interaction, for the owner's outcome line. Never typed text. */
 export interface ComputerLastAction {kind:string;label?:string;role?:string;key?:string;direction?:string;appId?:string;count?:number;blocked?:boolean;sequence?:string[];planned?:number;
  /** Not run: the agent's command chose a high-impact action and the user was asked to confirm it. */
@@ -504,6 +506,10 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      }
      // Direct voice/text commands follow jev-voice-browser's candidate-only
      // executor. Never invoke a generative writer or capture an image to do so.
+     // Pod-jinawong 2.0.21 (fa17f432): an agent goal run reached the shell with no
+     // text to type. As a bare COMMAND_WAITING_INPUT nobody was asked for it; name
+     // the field so the agent is asked for the value (gateway-tasks/computer.ts inspect).
+     if(goalRun&&prepared.length!==1&&literal===undefined&&target){await capture();return {...result('needs_input','FIELD_TEXT_REQUIRED'),fieldRequest:{label:target.label.slice(0,250)||'the selected field',...(last?.application?{application:last.application}:{}),...(last?.windowTitle?{windowTitle:last.windowTitle}:{}),role:target.role,reason:'missing'}};}
      if(direct&&prepared.length!==1&&literal===undefined)return waitForCommand('FIELD_TEXT_REQUIRED');
      if(prepared.length!==1&&literal===undefined&&!deps.thinking){await capture();return result('needs_input','FIELD_TEXT_REQUIRED');}
      if(prepared.length!==1&&literal===undefined){await capture();checkInterruption(deps.interruptSignal);emit('thinking',summary(action));}

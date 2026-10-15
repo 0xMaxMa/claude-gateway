@@ -182,9 +182,72 @@ test('a browser step run that waits on a missing field value stays silent',()=>{
 
 test('the user\'s own step command that finishes all steps stays silent',()=>{
  const f=fixture();try{
+  // The agent's goal run parks first: the agent hears that (one notification).
   f.finish({type:'paused',computerReport:{...report,steps:0,status:'needs_input',reason:'COMMAND_WAITING_INPUT'}});
+  expect(f.notified()).toBe(1);
   f.tasks.controlByUser(f.task.conversationId,'u',f.task.taskId,{id:'00000000-0000-4000-8000-000000000002',action:'revise',expectedRevision:1,text:'click search'});
   f.finish({type:'paused',computerReport:stepRun('ALL_STEPS_DONE')});
+  expect(f.notified()).toBe(1);expect(f.delivered()).toBe(0);
+ }finally{f.close();}
+});
+
+// Pod-jinawong 2.0.21, task fa17f432: the agent's goal loop (no step run) opened
+// Terminal, then parked in waiting_input (COMMAND_WAITING_INPUT) without typing.
+// PR #592 notified only step runs (report.stepRun), so the agent never heard and
+// the chat hung until the user asked again.
+const goalLoop=(reason:string,extra:object={})=>({...report,steps:1,status:'needs_input' as const,reason,lastAction:{kind:'open',appId:'com.apple.Terminal'},...extra});
+test.each(['COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'])('an agent goal loop that parks with %s and no step run reaches the agent',reason=>{
+ const f=fixture();try{
+  const waiting=f.finish({type:'paused',computerReport:goalLoop(reason,{trace:[{phase:'waiting',reason:'LOW_CONFIDENCE',sequence:1,round:2,at:1,revision:1,steps:1,evaluations:2}]})});
+  expect(waiting.state).toBe('waiting_input');expect(waiting.automationController).toBe('user');
+  expect(f.notified()).toBe(1);expect(f.delivered()).toBe(1);
+  expect(acceptsDirectCommand(f.store.task(f.task.taskId)!)).toBe(true);
+ }finally{f.close();}
+});
+
+test('an agent browser goal loop that parks with no step run reaches the agent',()=>{
+ const f=fixture('browser');try{
+  f.finish({type:'paused',browserReport:{status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:2,evaluations:2}});
+  expect(f.notified()).toBe(1);expect(f.delivered()).toBe(1);
+ }finally{f.close();}
+});
+
+test.each([
+ ['a high-impact action awaiting yes or no',{lastAction:{kind:'press',label:'Delete',blocked:true,confirm:true}}],
+ ['a confirmation recorded only in the trace',{trace:[{phase:'waiting',reason:'CONFIRMATION_REQUIRED',sequence:1,round:2,at:1,revision:1,steps:1,evaluations:2}]}],
+ ['a missing field value',{fieldRequest:{label:'shell',application:'com.apple.Terminal',role:'AXTextArea',reason:'missing' as const}}],
+])('an agent goal loop that waits on a question for the owner (%s) stays silent',(_name,question)=>{
+ const f=fixture();try{
+  f.finish({type:'paused',computerReport:goalLoop('COMMAND_WAITING_INPUT',question)});
   expect(f.notified()).toBe(0);expect(f.delivered()).toBe(0);
+ }finally{f.close();}
+});
+
+test('an agent browser goal loop that waits on a confirmation stays silent',()=>{
+ const f=fixture('browser');try{
+  f.finish({type:'paused',browserReport:{status:'needs_verification',reason:'COMMAND_WAITING_INPUT',steps:1,evaluations:1,commandOutcome:{done:false,reason:'CONFIRMATION_REQUIRED'}}});
+  expect(f.notified()).toBe(0);expect(f.delivered()).toBe(0);
+ }finally{f.close();}
+});
+
+test('a user pause of the agent goal loop stays silent',()=>{
+ const f=fixture();try{
+  const attempt=f.tasks.claim(f.task.taskId)!;f.tasks.started(attempt.attemptId,attempt.generation);
+  const current=f.store.task(f.task.taskId)!;current.gatewayDispatch={requestId:'task-'+attempt.attemptId,submittedAt:Date.now()};
+  current.executionControl={id:'00000000-0000-4000-8000-000000000003',action:'pause',revision:2,phase:'paused',requestedAt:Date.now()} as any;
+  f.store.transaction(()=>f.store.saveTask(current,current.stateVersion));
+  f.tasks.finish(attempt.attemptId,attempt.generation,{type:'paused',computerReport:goalLoop('COMMAND_WAITING_INPUT')});
+  expect(f.notified()).toBe(0);expect(f.delivered()).toBe(0);
+ }finally{f.close();}
+});
+
+test('the user\'s own revision-2 goal command that parks stays silent',()=>{
+ const f=fixture();try{
+  f.finish({type:'failed',failure:{code:'COMPUTER_UNSUPPORTED_ACTION',message:'stopped',observedAt:Date.now()},computerReport:{...report,steps:1,status:'blocked',reason:'UNSUPPORTED_ACTION'}});
+  const before=f.notified();
+  f.tasks.controlByUser(f.task.conversationId,'u',f.task.taskId,{id:'00000000-0000-4000-8000-000000000004',action:'revise',expectedRevision:1,text:'run which htop'});
+  expect(f.store.task(f.task.taskId)!.revision).toBe(2);
+  f.finish({type:'paused',computerReport:goalLoop('COMMAND_WAITING_INPUT')});
+  expect(f.notified()).toBe(before);expect(f.delivered()).toBe(0);
  }finally{f.close();}
 });
