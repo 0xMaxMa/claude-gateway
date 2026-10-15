@@ -104,7 +104,7 @@ export interface RunningDeps {
   logDir?: string;
   startWaitMs?: number;
   /** A chat bound to the project has a turn running, whose agent process works inside the folder. */
-  chatTurnActive?: (name: ProjectName) => boolean;
+  chatTurnActive?: (name: ProjectName) => boolean | Promise<boolean>;
 }
 
 export function createProjectsRouter(
@@ -152,7 +152,7 @@ export function createProjectsRouter(
       const dir = await resolveProjectDir(root, name.value);
       if (!dir.ok) return fail(res, dir.error);
       const listening = await listRunning(running.sys, dir.value);
-      if (listening.processes.length > 0 || running.chatTurnActive?.(name.value)) return fail(res, 'project_running');
+      if (listening.processes.length > 0 || (await running.chatTurnActive?.(name.value))) return fail(res, 'project_running');
       respond(res, await removeProject(root, name.value));
     }),
   );

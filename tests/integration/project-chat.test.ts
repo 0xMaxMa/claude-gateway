@@ -456,6 +456,50 @@ describe('a project-bound legacy chat turn', () => {
     expect(fs.existsSync(path.join(h.root, 'site'))).toBe(false);
   }, 30_000);
 
+  it('keeps refusing the project delete after the session record is deleted mid-turn', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    const held = send(h, sessionId, 'HOLD-TURN').then((r) => r, (e: unknown) => e);
+    await waitForCondition(() => h.runners[0]!.hasActiveApiSession(sessionId), 10_000);
+    const del = () => supertest(h.app).delete('/api/v1/projects/site')
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`).send({ confirm: 'site' });
+
+    const gone = await supertest(h.app).delete(`/api/v1/agents/alfred/sessions/${sessionId}`)
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`).query({ chat_id: 'web' });
+    expect(gone.status).toBe(204);
+    expect(h.runners[0]!.hasActiveApiSession(sessionId)).toBe(true);
+    expect((await del()).status).toBe(409);
+    expect(fs.existsSync(path.join(h.root, 'site'))).toBe(true);
+
+    await h.runners[0]!.stop();
+    await held;
+  }, 30_000);
+
+  it('refuses the project delete while a turn is between spawn and send', async () => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    await send(h, sessionId, 'warm');
+    const store = (h.runners[0] as unknown as { sessionStore: { appendMessage: (...a: unknown[]) => Promise<unknown> } }).sessionStore;
+    const original = store.appendMessage.bind(store);
+    let entered!: () => void;
+    const inGap = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    jest.spyOn(store, 'appendMessage').mockImplementation(async (...a: unknown[]) => {
+      if ((a[2] as { role?: string; content?: string } | undefined)?.content === 'gap') { entered(); await gate; }
+      return original(...a);
+    });
+    const turn = send(h, sessionId, 'gap').then((r) => r, (e: unknown) => e);
+    await inGap;
+    const res = await supertest(h.app).delete('/api/v1/projects/site')
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`).send({ confirm: 'site' });
+    release();
+    await turn;
+    jest.restoreAllMocks();
+    expect(res.status).toBe(409);
+    expect(fs.existsSync(path.join(h.root, 'site'))).toBe(true);
+  }, 30_000);
+
   it('re-resolves the project on a crash restart', async () => {
     h = await harness();
     const sessionId = await projectSession(h);

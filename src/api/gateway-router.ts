@@ -738,7 +738,7 @@ export class GatewayRouter {
       this.app.use('/api', createProjectsRouter(this.gatewayConfig.gateway.api.keys, resolveProjectsRoot(this.gatewayConfig), {
         sys: systemSys(),
         limiter: new StopLimiter(),
-        chatTurnActive: (name) => [...this.agents.values()].some((runner) => runner.hasActiveProjectTurn(name)),
+        chatTurnActive: async (name) => (await Promise.all([...this.agents.values()].map((runner) => runner.hasActiveProjectTurn(name)))).some(Boolean),
       }));
     }
 

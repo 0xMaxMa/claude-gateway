@@ -4731,6 +4731,8 @@ export class AgentRunner extends EventEmitter {
       throw err;
     }
 
+    this.pendingApiSessions.add(sessionId); // reserved before the first await so a project delete sees the turn while it is still preparing
+    const { session, imageParams, videoParams, imagePaths } = await (async () => {
     // Register session in api-{chatId} index.json on first use (store adds channel prefix internally)
     await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId).catch((err: unknown) => {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
@@ -4782,7 +4784,8 @@ export class AgentRunner extends EventEmitter {
       });
     }
 
-    this.pendingApiSessions.add(sessionId);
+    return { session, imageParams, videoParams, imagePaths };
+    })().catch((error: unknown) => { this.pendingApiSessions.delete(sessionId); throw error; });
     // A previous turn that died (hard timeout, crash) may have left attachments
     // buffered under this session — they belong to THAT turn; never let them
     // ride along on this one (#75).
@@ -5064,6 +5067,8 @@ export class AgentRunner extends EventEmitter {
       throw err;
     }
 
+    this.pendingApiSessions.add(sessionId); // reserved before the first await so a project delete sees the turn while it is still preparing
+    const { session, imageParams: imageParamsStream, videoParams: videoParamsStream, imagePaths: imagePathsStream } = await (async () => {
     // Register session in api-{chatId} index.json on first use (store adds channel prefix internally)
     await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId).catch((err: unknown) => {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
@@ -5110,7 +5115,8 @@ export class AgentRunner extends EventEmitter {
       });
     }
 
-    this.pendingApiSessions.add(sessionId);
+    return { session, imageParams: imageParamsStream, videoParams: videoParamsStream, imagePaths: imagePathsStream };
+    })().catch((error: unknown) => { this.pendingApiSessions.delete(sessionId); throw error; });
     // A previous turn that died (hard timeout, crash) may have left attachments
     // buffered under this session — they belong to THAT turn; never let them
     // ride along on this one (#75).
@@ -5406,9 +5412,13 @@ export class AgentRunner extends EventEmitter {
     return this.pendingApiSessions.has(sessionId);
   }
 
-  /** A chat bound to `project` has a turn in flight, or its process is still spawning (pending is only set after the spawn). Every running bound session passed through apiSessionBinding, so boundProjects holds it. */
-  hasActiveProjectTurn(project: string): boolean {
-    for (const [sessionId, bound] of this.boundProjects) if (bound === project && (this.pendingApiSessions.has(sessionId) || this.sessionSpawnLocks.has(sessionId))) return true;
+  /** A chat bound to `project` has a live turn or a process still spawning. Keyed on live sessions, not on the session record, so deleting a session mid-turn does not unlock the project. An unreadable binding on a live session counts as active. */
+  async hasActiveProjectTurn(project: string): Promise<boolean> {
+    const live = new Set([...this.pendingApiSessions, ...this.sessionSpawnLocks.keys()]);
+    for (const sessionId of live) {
+      const binding = await this.apiSessionBinding(sessionId);
+      if (binding.kind === 'unreadable' || (binding.kind === 'bound' && binding.project === project)) return true;
+    }
     return false;
   }
 
@@ -5977,8 +5987,10 @@ export class AgentRunner extends EventEmitter {
       if (err instanceof SessionNotInIndexError) return;
       throw err;
     });
+    // Stay in boundProjects while a turn is live: the project guard reads it.
+    const live = this.pendingApiSessions.has(sessionId) || this.sessionSpawnLocks.has(sessionId);
     await this.sessionStore.deleteProjectBinding(this.agentConfig.id, sessionId);
-    this.boundProjects.delete(sessionId);
+    if (!live) this.boundProjects.delete(sessionId);
     // Purge from SQLite so the session no longer appears in listSessions()
     const mediaPaths = this.historyDb.clearSession(`api-${chatId}`, sessionId);
     MediaStore.deleteMediaFiles(this.agentsBaseDir, this.agentConfig.id, mediaPaths);
