@@ -34,6 +34,12 @@ class MockGreetingRunner extends EventEmitter {
     return this.sessionExists;
   }
 
+  async apiSessionBinding(_sessionId: string): Promise<{ kind: 'unbound' }> {
+    return { kind: 'unbound' };
+  }
+
+  async assertApiProjectAvailable(_sessionId: string): Promise<void> {}
+
   constructor(workspacePath: string) {
     super();
     this._workspacePath = workspacePath;
