@@ -221,9 +221,11 @@ export function deriveSync(s: {
   return 'in_sync';
 }
 
-/** `https://user:token@host/x` becomes `https://host/x`, anywhere in `text`. */
+const SECRET_PARAM = /([?&#;](?:[\w.-]*(?:token|password|passwd|secret|sig|signature|auth|credential)|api[_-]?key|key)=)[^&#\s'"]+/gi;
+
+/** `https://user:token@host/x?token=s` becomes `https://host/x?token=[redacted]`, anywhere in `text`. */
 export function redactCredentials(text: string): string {
-  return text.replace(/:\/\/[^\s/]*@/g, '://');
+  return text.replace(/:\/\/[^\s/]*@/g, '://').replace(SECRET_PARAM, '$1[redacted]');
 }
 
 const KNOWN_HOSTS: Record<string, GitHost> = {
@@ -251,7 +253,7 @@ export function describeRemote(name: string, rawUrl: string): GitRemote {
   const url = redactCredentials(rawUrl);
   const parsed = hostAndPath(url);
   const host = (parsed && KNOWN_HOSTS[parsed.host]) ?? 'other';
-  const repoPath = parsed?.repoPath.replace(/\.git$/, '').replace(/\/+$/, '');
+  const repoPath = parsed?.repoPath.replace(/[?#].*$/, '').replace(/\.git$/, '').replace(/\/+$/, '');
   const web_url = host !== 'other' && repoPath ? `https://${parsed!.host}/${repoPath}` : null;
   return { name, url, host, web_url };
 }

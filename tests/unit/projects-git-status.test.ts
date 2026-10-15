@@ -140,11 +140,32 @@ describe('describeRemote and redactCredentials', () => {
   });
 });
 
+describe('secrets in remote query strings', () => {
+  it.each([
+    'https://github.com/a/b.git?token=SECRETVAL',
+    'https://github.com/a/b.git?x=1&access_token=SECRETVAL',
+    'https://github.com/a/b.git?key=SECRETVAL#frag',
+    'https://github.com/a/b.git#access_token=SECRETVAL',
+    'https://u:SECRETVAL@github.com/a/b.git?sig=SECRETVAL',
+    'git@github.com:a/b.git?password=SECRETVAL',
+  ])('%s', (raw) => {
+    const r = describeRemote('origin', raw);
+    expect(JSON.stringify(r)).not.toContain('SECRETVAL');
+    expect(r.web_url).toBe('https://github.com/a/b');
+  });
+
+  it('keeps harmless query parameters in free text', () => {
+    expect(redactCredentials('https://h/x?page=2&secret=abc')).toBe('https://h/x?page=2&secret=[redacted]');
+  });
+});
+
 describe('redactCredentials cost', () => {
   it('stays linear on adversarial dotted text', () => {
     const t0 = Date.now();
     redactCredentials('a.'.repeat(50_000));
     redactCredentials('a://'.repeat(25_000));
+    redactCredentials('?' + 'a.'.repeat(50_000));
+    redactCredentials('&a'.repeat(50_000));
     expect(Date.now() - t0).toBeLessThan(100);
   });
 
