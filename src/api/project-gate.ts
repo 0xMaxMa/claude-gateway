@@ -91,14 +91,15 @@ function mediaPathSession(runner: AgentRunner, agentId: string, relativePath: st
   return /^api-/i.test(first) ? first.slice(4) : undefined;
 }
 
-/** True when `relativePath` names a file of a project-bound session that `apiKey` (or the token's agent) may not reach. */
+/**
+ * True when `relativePath` names a file of a project-bound session that `apiKey` (or the token's agent) may not reach.
+ * Only the one binding file of that session decides, so a folder of any other session (a legacy one that lives only in
+ * the history database, one in an unreadable index, a deleted unbound one) is answered as it is without projects.
+ */
 export async function refusesProjectMedia(runner: AgentRunner, agentId: string, apiKey: ApiKey, relativePath: string, token?: string): Promise<boolean> {
   const session = mediaPathSession(runner, agentId, relativePath);
   if (session === undefined) return false;
-  if (await refusesProjectSession(runner, agentId, apiKey, session, token)) return true;
-  if (isAdmin(apiKey) || isAgentSessionToken(token, agentId, session)) return false;
-  // A folder nobody owns may be what a deleted project chat left behind, now that its binding is gone.
-  return !(await runner.apiMediaOwnerKnown(session));
+  return refusesProjectSession(runner, agentId, apiKey, session, token);
 }
 
 /** What the share router asks, without holding the runners. */

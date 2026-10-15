@@ -734,17 +734,16 @@ export class SessionStore {
       if (bound.size === 0) return 0;
       const known = new Set<string>();
       const sessionsDir = path.join(this.agentsBaseDir, agentId, 'sessions');
-      let dirs: fs.Dirent[] = [];
-      try {
-        dirs = await fs.promises.readdir(sessionsDir, { withFileTypes: true });
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return 0;
-      }
-      for (const dir of dirs.filter((d) => d.isDirectory())) {
-        const names = await fs.promises.readdir(path.join(sessionsDir, dir.name));
+      // A missing, dangling or unreadable sessions folder tells nothing about which sessions exist: keep every binding.
+      const entries = await fs.promises.readdir(sessionsDir);
+      for (const entry of entries) {
+        const dir = path.join(sessionsDir, entry);
+        // stat follows a link, so a chat folder that is a symlink still counts; one that cannot be read keeps all bindings.
+        if (!(await fs.promises.stat(dir)).isDirectory()) continue;
+        const names = await fs.promises.readdir(dir);
         for (const name of names) if (name.endsWith('.json') && name !== 'index.json') known.add(name.slice(0, -'.json'.length));
         if (!names.includes('index.json')) continue;
-        const index = JSON.parse(await fs.promises.readFile(path.join(sessionsDir, dir.name, 'index.json'), 'utf-8')) as SessionIndex;
+        const index = JSON.parse(await fs.promises.readFile(path.join(dir, 'index.json'), 'utf-8')) as SessionIndex;
         for (const session of index.sessions) known.add(session.id);
       }
       let removed = 0;
@@ -757,13 +756,6 @@ export class SessionStore {
     } catch {
       return 0;
     }
-  }
-
-  /** True when `name` is a session id in some index or a chat id with a session folder: the two things media/api-<name>/ is named for. */
-  async apiMediaOwnerKnown(agentId: string, name: string): Promise<boolean> {
-    if (!SESSION_ID_RE.test(name)) return false;
-    if (fs.existsSync(path.join(this.agentsBaseDir, agentId, 'sessions', `api-${name}`))) return true;
-    return (await this.getAllSessionMeta(agentId)).has(name);
   }
 
   /** Get all session metadata (name) for an agent, keyed by sessionId. */

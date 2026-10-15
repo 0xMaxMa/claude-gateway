@@ -516,11 +516,6 @@ export class AgentRunner extends EventEmitter {
     }
   }
 
-  /** True when media/api-<name>/ belongs to a session or a chat this agent knows. A folder nobody owns is not served to non-admin keys. */
-  apiMediaOwnerKnown(name: string): Promise<boolean> {
-    return this.sessionStore.apiMediaOwnerKnown(this.agentConfig.id, name);
-  }
-
   /** Throws PROJECT_UNAVAILABLE when the session's project no longer resolves; a no-op for unbound sessions. */
   async assertApiProjectAvailable(sessionId: string): Promise<void> {
     const project = await this.apiSessionProjectCwd(sessionId);

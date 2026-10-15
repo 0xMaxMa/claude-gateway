@@ -67,4 +67,51 @@ describe('the binding sweep at gateway start', () => {
     runner = new AgentRunner(cfg, gateway);
     await expect(runner.start()).resolves.toBeUndefined();
   });
+
+  describe('keeps every binding when the sessions folder tells nothing', () => {
+    async function bindOne() {
+      const store = new SessionStore(path.join(base, 'agents'));
+      const live = await store.createTelegramSession('alfred', 'web', 'live', 'api', 'site');
+      return live.id;
+    }
+    async function start() {
+      const [cfg, gateway] = config();
+      runner = new AgentRunner(cfg, gateway);
+      await runner.start();
+    }
+    const sessionsDir = () => path.join(base, 'agents', 'alfred', 'sessions');
+
+    it('when sessions/ is missing', async () => {
+      const id = await bindOne();
+      fs.rmSync(sessionsDir(), { recursive: true });
+      await start();
+      expect(bindingFiles()).toEqual([`${id}.json`]);
+    });
+
+    it('when sessions/ is a dangling symlink', async () => {
+      const id = await bindOne();
+      fs.rmSync(sessionsDir(), { recursive: true });
+      fs.symlinkSync(path.join(base, 'not-mounted'), sessionsDir());
+      await start();
+      expect(bindingFiles()).toEqual([`${id}.json`]);
+    });
+
+    it('when sessions/ cannot be read', async () => {
+      if (process.getuid?.() === 0) return;
+      const id = await bindOne();
+      fs.chmodSync(sessionsDir(), 0o000);
+      try { await start(); } finally { fs.chmodSync(sessionsDir(), 0o755); }
+      expect(bindingFiles()).toEqual([`${id}.json`]);
+    });
+
+    it('when the chat folder holding the session is a symlink', async () => {
+      const id = await bindOne();
+      const real = path.join(base, 'elsewhere');
+      fs.renameSync(path.join(sessionsDir(), 'api-web'), real);
+      fs.symlinkSync(real, path.join(sessionsDir(), 'api-web'));
+      fs.writeFileSync(path.join(bindings(), 'stray-session.json'), '{"project":"site"}\n');
+      await start();
+      expect(bindingFiles()).toEqual([`${id}.json`]);
+    });
+  });
 });

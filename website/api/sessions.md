@@ -229,7 +229,8 @@ gateway restarts, and opens no other session. It does not make a share URL priva
 
 **When the chat is deleted.** Deleting a project chat removes its whole media folder (`media/api-<sessionId>/`), not only
 the files its messages name, once its last turn has ended. A read of a media folder named `api-<name>` by a key that is not
-an admin key answers `403 forbidden_key` when `<name>` is neither a session nor a chat of the agent.
+an admin key answers `403 forbidden_key` only when `<name>` is a session bound to a project; every other folder is answered
+as it is on a gateway without projects, including the leftovers of a deleted session that was never bound.
 
 On an orchestrated agent the deciding agent stays in its workspace and is told
 which project the chat is in. Every task it starts runs in the project folder,
