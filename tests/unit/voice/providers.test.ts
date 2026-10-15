@@ -184,3 +184,21 @@ test('ElevenLabs classic models never receive dialogue keep-alive messages', asy
     expect((await done).done).toBe(true);
   } finally { jest.useRealTimers(); }
 });
+
+test('ElevenLabs stops dialogue keep-alive once synthesis is aborted', async () => {
+  jest.useFakeTimers();
+  try {
+    const fixture = socketFixture(), controller = new AbortController();
+    async function* text() { yield 'first'; await new Promise(() => {}); }
+    const iterator = new ElevenLabsTts('fixture', 'eleven_v4_turbo', fixture.connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: controller.signal })[Symbol.asyncIterator]();
+    const done = iterator.next();
+    await jest.advanceTimersByTimeAsync(10000);
+    expect(fixture.send).toHaveBeenLastCalledWith({ keep_alive: true });
+    const count = fixture.send.mock.calls.length;
+    controller.abort(); fixture.messages.push({ audio: Buffer.alloc(320).toString('base64') });
+    expect((await done).done).toBe(true);
+    await jest.advanceTimersByTimeAsync(30000);
+    expect(fixture.send).toHaveBeenCalledTimes(count);
+    expect(fixture.close).toHaveBeenCalled();
+  } finally { jest.useRealTimers(); }
+});

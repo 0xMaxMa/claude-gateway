@@ -41,7 +41,7 @@ export class ElevenLabsTts implements TtsProvider {
       clearTimeout(keepAlive);
       await socket.send(message);
       clearTimeout(keepAlive);
-      if (dialogue && !closing && !options.signal.aborted) keepAlive = setTimeout(() => send({ keep_alive: true }).catch(fail), DIALOGUE_KEEP_ALIVE_MS);
+      if (dialogue && !closing && !options.signal.aborted) (keepAlive = setTimeout(() => send({ keep_alive: true }).catch(fail), DIALOGUE_KEEP_ALIVE_MS)).unref();
     };
     const sending = (async () => {
       await send(dialogue ? { voices: [options.voiceId], voice_settings: { stability: 1 } } : { text: ' ', voice_settings: { stability: 0.5 }, generation_config: { chunk_length_schedule: [50,120,160,290] } });
