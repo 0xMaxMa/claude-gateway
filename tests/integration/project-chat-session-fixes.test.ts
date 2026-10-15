@@ -183,4 +183,21 @@ describe('project chat session fixes', () => {
     expect(spawns(h)).toHaveLength(2);
     expect(flagValue(spawns(h)[1]!.argv, '--setting-sources')).toBe('user');
   }, 30000);
+
+  it('F5 a failed index write leaves no binding or session file, and a retry creates exactly one session', async () => {
+    h = await harness();
+    const store = (h.runners[0] as any).sessionStore;
+    await create(h, 'alfred', KEYS.admin!, {});
+    const dir = path.join(h.base, 'agents', 'alfred');
+    const before = walk(dir).filter((f) => !f.includes('workspace'));
+    const spy = jest.spyOn(store, 'saveIndex').mockRejectedValueOnce(new Error('disk full'));
+    const res = await create(h, 'alfred', KEYS.admin!, { project: 'site' });
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    spy.mockRestore();
+    expect(walk(dir).filter((f) => !f.includes('workspace'))).toEqual(before);
+    const retry = await create(h, 'alfred', KEYS.admin!, { project: 'site' });
+    expect(retry.status).toBe(201);
+    const list = await supertest(h.app).get('/api/v1/agents/alfred/sessions').set(auth(KEYS.admin!)).query({ chat_id: 'web' });
+    expect(list.body.sessions.filter((s: any) => s.project === 'site')).toHaveLength(1);
+  }, 30000);
 });

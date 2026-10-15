@@ -381,7 +381,14 @@ export class SessionStore {
 
       // Update index
       index.sessions.push(meta);
-      await this.saveIndex(agentId, chatId, index, channel);
+      try {
+        await this.saveIndex(agentId, chatId, index, channel);
+      } catch (error) {
+        index.sessions.pop();
+        fs.rmSync(sessionPath, { force: true });
+        if (project) fs.rmSync(this.projectBindingPath(agentId, newId), { force: true });
+        throw error;
+      }
 
       return meta;
     }) as Promise<SessionMeta>;
