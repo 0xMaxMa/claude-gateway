@@ -59,7 +59,36 @@ test('provider closing without a terminal event is not a successful synthesis', 
   async function* text() { yield 'hello'; }
   const iterator = new ElevenLabsTts('fixture', undefined, fixture.connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: new AbortController().signal })[Symbol.asyncIterator]();
   const result = iterator.next(); fixture.messages.close();
-  await expect(result).rejects.toMatchObject({ code: 'TTS_INCOMPLETE' });
+  await expect(result).rejects.toMatchObject({ code: 'PROVIDER_CONNECTION_CLOSED' });
+});
+
+test('ElevenLabs reports the cause of a send rejected just after the provider closed', async () => {
+  const fixture = socketFixture();
+  fixture.send.mockImplementation(async (message: unknown) => {
+    if (!(message as { close_socket?: boolean }).close_socket) return;
+    fixture.messages.close();
+    await new Promise(resolve => setImmediate(resolve));
+    throw Object.assign(new Error('send failed'), { code: 'PROVIDER_SEND_FAILED' });
+  });
+  async function* text() { yield 'hello'; }
+  const iterator = new ElevenLabsTts('fixture', 'eleven_v4_turbo', fixture.connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: new AbortController().signal })[Symbol.asyncIterator]();
+  await expect(iterator.next()).rejects.toMatchObject({ code: 'PROVIDER_SEND_FAILED' });
+});
+
+test('ElevenLabs releases a stalled reply text source when the provider closes', async () => {
+  const fixture = socketFixture();
+  const release = jest.fn(async () => ({ done: true as const, value: undefined }));
+  let calls = 0;
+  const text: AsyncIterable<string> = { [Symbol.asyncIterator]: () => ({
+    next: () => calls++ ? new Promise<IteratorResult<string>>(() => {}) : Promise.resolve({ done: false, value: 'first' }),
+    return: release,
+  }) };
+  const iterator = new ElevenLabsTts('fixture', 'eleven_v4_turbo', fixture.connect).synthesize({ text, voiceId: 'voice', outputFormat: PCM16, signal: new AbortController().signal })[Symbol.asyncIterator]();
+  const result = iterator.next();
+  await new Promise(resolve => setImmediate(resolve));
+  fixture.messages.close();
+  await expect(result).rejects.toMatchObject({ code: 'PROVIDER_CONNECTION_CLOSED' });
+  expect(release).toHaveBeenCalled();
 });
 
 test('ElevenLabs keeps idle STT alive with silence without committing, and stops on close', async () => {
@@ -200,7 +229,8 @@ test('ElevenLabs stops dialogue keep-alive after the idle limit so an abandoned 
     expect(keepAlives).toBe(18);
     expect(new URL(fixture.connect.mock.calls[0][0]).searchParams.get('inactivity_timeout')).toBeNull();
     fixture.messages.close();
-    await expect(done).rejects.toMatchObject({ code: 'TTS_INCOMPLETE' });
+    await jest.advanceTimersByTimeAsync(1000);
+    await expect(done).rejects.toMatchObject({ code: 'PROVIDER_CONNECTION_CLOSED' });
   } finally { jest.useRealTimers(); }
 });
 

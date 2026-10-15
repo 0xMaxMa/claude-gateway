@@ -3,12 +3,16 @@ import { PCM16, TtsProvider, VoiceError, TtsAudioChunk, validateAudioFormat } fr
 import { openProviderSocket, SocketFactory } from './socket';
 
 // v3 and v4 models are only served by the Text-to-Dialogue socket; the classic
-// stream-input socket rejects v4 with HTTP 400.
-export const isElevenLabsDialogueModel = (model: string): boolean => /^eleven_v[34](_|$)/.test(model);
+// stream-input socket rejects v4 with HTTP 400. An explicit list, so an unknown future
+// variant fails on the socket it was documented for rather than on a guessed one.
+const DIALOGUE_MODELS = new Set(['eleven_v3_conversational', 'eleven_v3', 'eleven_v4_turbo', 'eleven_v4']);
+export const isElevenLabsDialogueModel = (model: string): boolean => DIALOGUE_MODELS.has(model);
 // Both sockets close after 20s without a message. The classic socket accepts a longer
 // inactivity_timeout; the dialogue socket ignores it and needs keep_alive messages
 // (1008 input_timeout_exceeded otherwise). Either way a stalled reply is bounded.
 const MAX_IDLE_SECONDS = 180, KEEP_ALIVE_MS = 10000;
+// How long a send rejected by the same close may take to report its own cause.
+const SEND_SETTLE_MS = 250;
 
 export class ElevenLabsTts implements TtsProvider {
   readonly capabilities = { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] };
@@ -52,13 +56,16 @@ export class ElevenLabsTts implements TtsProvider {
         if (live()) send({ keep_alive: true }, true).catch(error => { if (live()) fail(error); });
       }, KEEP_ALIVE_MS)).unref();
     };
+    // Held so teardown can release the reply text source while it is stalled.
+    const reply = options.text[Symbol.asyncIterator]();
+    let textDone = false;
     const sending = (async () => {
       await send(dialogue ? { voices: [options.voiceId], voice_settings: { stability: 1 } } : { text: ' ', voice_settings: { stability: 0.5 }, generation_config: { chunk_length_schedule: [50,120,160,290] } });
-      for await (const text of options.text) {
+      for await (const text of { [Symbol.asyncIterator]: () => reply }) {
         if (options.signal.aborted) return;
         await send(dialogue ? { inputs: [{ text, voice_id: options.voiceId }] } : { text, try_trigger_generation: true });
       }
-      closing = true;
+      textDone = closing = true;
       await send(dialogue ? { close_socket: true } : { text: '' });
     })().catch(fail).finally(() => { closing = true; clearTimeout(keepAlive); });
     try {
@@ -68,10 +75,19 @@ export class ElevenLabsTts implements TtsProvider {
         if (typeof message.audio === 'string') yield Buffer.from(message.audio, 'base64');
         if (message.is_final === true || message.isFinal === true) { finished = closing = true; break; }
       }
-      // Without a terminal event, report now: `sending` may still be waiting on stalled text.
       if (finished) await sending;
+      else if (!options.signal.aborted) {
+        // The provider closed without a terminal event. Report now, since `sending` may be waiting
+        // on stalled text, but give a send rejected by that close a moment to report its cause.
+        let settle: NodeJS.Timeout | undefined;
+        if (!sendError) await Promise.race([sending, new Promise(resolve => { settle = setTimeout(resolve, SEND_SETTLE_MS); })]);
+        clearTimeout(settle);
+        throw sendError ?? new VoiceError('PROVIDER_CONNECTION_CLOSED');
+      }
       if (sendError) throw sendError;
-      if (!finished && !options.signal.aborted) throw new VoiceError('TTS_INCOMPLETE');
-    } finally { closing = true; clearTimeout(keepAlive); socket.close(); }
+    } finally {
+      closing = true; clearTimeout(keepAlive); socket.close();
+      if (!textDone) void Promise.resolve(reply.return?.()).catch(() => {});
+    }
   }
 }

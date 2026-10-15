@@ -1,5 +1,6 @@
 import { SPOKEN_TEXT_LIMIT } from './response-schema';
 import { fenceAdjusted } from './display-stream';
+import { stripAudioTags } from '../voice/audio-tags';
 
 /** Both surfaces are generated in one inference. The field contract itself lives in the
  * invariant ORCHESTRATION_RESPONSE_SCHEMA declared on every turn; this overlay is the
@@ -53,16 +54,6 @@ function objectEnd(text: string, start: number): number {
  * at most followed by one short sign-off sentence. A reply that explains the format writes it
  * into a sentence, or keeps writing after it, and must be published exactly as written. */
 const TRAILING_SIGN_OFF_LIMIT = 120;
-// ElevenLabs v3/v4 audio tags. Other providers would read them aloud and any other
-// bracket still fails the speakable check, so known tags are stripped rather than
-// silencing the whole reply.
-const AUDIO_TAG = /[ \t]*\[(?:laughs?|laughing|chuckles|giggles|sighs?|whispers?|gasps?|sarcastic|excited|curious|crying|happy|sad|angry|surprised|nervous|exhales|inhales|clears throat|pause|short pause|long pause)\][ \t]*/gi;
-// Keep a word break between two words, but none before punctuation or inside unspaced text.
-const joinAroundTag = (tag: string, offset: number, text: string): string => {
-  const before = text[offset - 1], after = text[offset + tag.length];
-  return before && after && /^\s|\s$/.test(tag) && !/[\s.,!?;:)\]}]/.test(after) ? ' ' : '';
-};
-
 /** The span of the turn text that is an attempt to emit the declared payload, if any.
  * `body` is the JSON to parse and [start,end) is everything to remove when it turns out to
  * be unusable — the object plus the fence that wraps it. Prose before it is tolerated on its
@@ -96,11 +87,18 @@ export function splitSpeechResponse(raw: string): { display: string; spoken: str
   // wording; never truncate reports or read code/URLs/JSON aloud. Applied to whatever text
   // we are about to display, so a stripped payload cannot be spoken either.
   const speakable = (source: string): string => {
-    const plain = source.replace(/\*\*([^*]+)\*\*/g, '$1').replace(AUDIO_TAG, joinAroundTag).trim();
+    // Known audio tags are stripped (issue #595 Option A); any other bracket still fails the check.
+    const plain = stripAudioTags(source.replace(/\*\*([^*]+)\*\*/g, '$1')).trim();
     return plain && plain.length <= SPOKEN_TEXT_LIMIT && !/[{}\[\]`|]|https?:\/\/|^\s*#/m.test(plain) ? plain : '';
   };
+  // Tags in a short spoken reply are stage directions, so the chat copy drops them too. Longer
+  // text is never spoken from here, and a tag in it may be part of the answer itself.
+  const shown = (source: string, spoken: string): string => {
+    const stripped = stripAudioTags(source);
+    return spoken && stripped !== source ? stripped.trim() : source;
+  };
   const payload = payloadSpan(text);
-  if (!payload) return { display: raw, spoken: speakable(text), outcome: 'plain' };
+  if (!payload) { const spoken = speakable(text); return { display: shown(raw, spoken), spoken, outcome: 'plain' }; }
   let value: unknown;
   try { value = JSON.parse(payload.body); } catch { /* Truncated or invalid; degrade below. */ }
   const fields = (value && typeof value === 'object' ? value : {}) as { display_text?: unknown; spoken_text?: unknown };
@@ -116,7 +114,8 @@ export function splitSpeechResponse(raw: string): { display: string; spoken: str
   // runtime.ts's response.schema_unstructured event, which records it for every turn kind.
   const remainder = `${text.slice(0, payload.start)}\n${text.slice(payload.end)}`;
   const display = /[\p{L}\p{N}]/u.test(remainder) ? remainder.trim() : UNREADABLE_DISPLAY_NOTICE;
-  return { display, spoken: speakable(display), outcome: value ? 'empty_display' : 'unreadable' };
+  const spoken = speakable(display);
+  return { display: shown(display, spoken), spoken, outcome: value ? 'empty_display' : 'unreadable' };
 }
 
 

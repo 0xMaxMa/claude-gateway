@@ -82,10 +82,18 @@ test('the union response schema reaches the CLI for Agent profiles only, and nev
 });
 
 test('ElevenLabs audio tags are stripped instead of silencing the reply', () => {
-  expect(splitSpeechResponse('[laughs] Sure, I can do that.')).toEqual({ display: '[laughs] Sure, I can do that.', spoken: 'Sure, I can do that.', outcome: 'plain' });
+  expect(splitSpeechResponse('[laughs] Sure, I can do that.')).toEqual({ display: 'Sure, I can do that.', spoken: 'Sure, I can do that.', outcome: 'plain' });
   expect(splitSpeechResponse('ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ [Sighs]').spoken).toBe('ได้เลยค่ะ เดี๋ยวดูให้นะคะ');
   expect(splitSpeechResponse('Sure thing [laughs]. ok[sighs], fine').spoken).toBe('Sure thing. ok, fine');
   expect(splitSpeechResponse('ได้เลย[laughs]ค่ะ').spoken).toBe('ได้เลยค่ะ');
   expect(splitSpeechResponse('ok[sighs] fine, [pause] ไปต่อ[clears throat]ค่ะ').spoken).toBe('ok fine, ไปต่อค่ะ');
   for (const text of ['[laughs]', 'use items[0] here', 'see [docs](https://example.com)', '[unknown tag] hello']) expect(splitSpeechResponse(text).spoken).toBe('');
+});
+
+test('the chat copy drops audio tags only from a reply that is spoken', () => {
+  expect(splitSpeechResponse('ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ').display).toBe('ได้เลยค่ะ เดี๋ยวดูให้นะคะ');
+  expect(splitSpeechResponse('Prose first.\n{"display_text":"","spoken_text":"x"}').display).toBe('Prose first.');
+  const long = `Use [laughs] in ElevenLabs v3 prompts.\n\`\`\`\nexample\n\`\`\``;
+  expect(splitSpeechResponse(long)).toMatchObject({ display: long, spoken: '' });
+  expect(splitSpeechResponse('No tags here.').display).toBe('No tags here.');
 });

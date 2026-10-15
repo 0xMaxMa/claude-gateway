@@ -9,7 +9,8 @@ import { PaxaLabsTts, paxaConnection } from './paxalabs-tts';
 import { upstreamVoiceConnection, upstreamVoiceSocket, managedVoiceSocket } from './upstream';
 import { SttProvider, TtsProvider, VoiceError } from '../types';
 import { ElevenLabsStt } from './elevenlabs-stt';
-import { ElevenLabsTts } from './elevenlabs-tts';
+import { ElevenLabsTts, isElevenLabsDialogueModel } from './elevenlabs-tts';
+import { stripAudioTags, withoutAudioTags } from '../audio-tags';
 import { DeepgramStt } from './deepgram-stt';
 import { CartesiaTts } from './cartesia-tts';
 
@@ -44,8 +45,17 @@ export function sttProvider(config: { provider: string; model: string }): SttPro
     return provider.open(options);
   }};
 }
+/** Audio tags reach TTS through structured spoken_text. Only the ElevenLabs dialogue models
+ * perform them; every other model would read the tag word aloud. */
+function withAudioTagSupport(config: { provider: string; model: string }, provider: TtsProvider): TtsProvider {
+  if (canonicalVoiceProvider(config.provider).endsWith('elevenlabs') && isElevenLabsDialogueModel(nativeVoiceModel(config.provider, config.model))) return provider;
+  return { id: provider.id, capabilities: provider.capabilities,
+    synthesizeFile: provider.synthesizeFile ? options => provider.synthesizeFile!({ ...options, text: stripAudioTags(options.text).trim() }) : undefined,
+    synthesize: options => provider.synthesize({ ...options, text: withoutAudioTags(options.text) }),
+  };
+}
 export function ttsProvider(config: { provider: string; model: string }): TtsProvider {
-  const provider = makeTtsProvider(config);
+  const provider = withAudioTagSupport(config, makeTtsProvider(config));
   if (!config.provider.startsWith('managed:')) return provider;
   return { id: provider.id, capabilities: provider.capabilities,
     synthesizeFile: provider.synthesizeFile ? async options => {
