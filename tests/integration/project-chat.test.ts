@@ -674,3 +674,28 @@ describe('project delete against accepted turns and the rename window', () => {
     expect(fs.existsSync(path.join(h.root, 'site'))).toBe(false);
   }, 30_000);
 });
+
+describe('project delete after a failed spawn', () => {
+  let h: Harness;
+  beforeAll(() => { process.env.CLAUDE_BIN = path.join(os.tmpdir(), 'no-such-claude-binary'); });
+  afterAll(() => { delete process.env.CLAUDE_BIN; });
+  afterEach(async () => { await teardown(h); });
+
+  it.each(['send', 'stream'])('releases the project when the claude binary cannot start (%s)', async (mode) => {
+    h = await harness();
+    const sessionId = await projectSession(h);
+    if (mode === 'send') {
+      const res = await send(h, sessionId, 'hello');
+      expect(res.status).toBeGreaterThanOrEqual(400);
+    } else {
+      await supertest(h.app).post('/api/v1/agents/alfred/messages/stream')
+        .set('Authorization', `Bearer ${KEYS.admin!.key}`)
+        .send({ message: 'hello', chat_id: 'web', session_id: sessionId }).catch(() => undefined);
+    }
+    await waitForCondition(() => !h.runners[0]!.hasActiveApiSession(sessionId), 10_000);
+    expect(await h.runners[0]!.hasActiveProjectTurn('site')).toBe(false);
+    const res = await supertest(h.app).delete('/api/v1/projects/site')
+      .set('Authorization', `Bearer ${KEYS.admin!.key}`).send({ confirm: 'site' });
+    expect(res.status).toBe(200);
+  }, 30_000);
+});

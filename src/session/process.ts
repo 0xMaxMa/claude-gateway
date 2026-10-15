@@ -1719,9 +1719,10 @@ export class SessionProcess extends EventEmitter {
         this.emit('startup-error', projectUnavailableError({ code: 'project_not_found' }));
         return;
       }
-      if (this.runtimeProfile && !proc.pid) {
+      if (!proc.pid) {
         // Failed spawn emits 'error' and 'close', but never 'exit'. Clear the
         // nonexistent child before listeners call stop(), or cleanup waits forever.
+        // Legacy sessions need the event too: the waiting turn holds its project until it hears of the failure.
         if (this.process === proc) { this.process = null; this._exited = true; }
         const cause = (err as NodeJS.ErrnoException).code;
         const missingWorkspace = cause === 'ENOENT' && !fs.existsSync(this.agentConfig.workspace);
