@@ -100,6 +100,15 @@ test('Gemini 3.1 Flash TTS performs square-bracket tags, natively and through Op
   } finally { for (const spy of spies) spy.mockRestore(); }
 });
 
+test('a tag at the start of a line leaves no stray space, whole or streamed', async () => {
+  expect(stripAudioTags('Done.\n[laughs] Next')).toBe('Done.\nNext');
+  expect(stripAudioTags('Done.\n\n[sighs] ได้เลยค่ะ')).toBe('Done.\n\nได้เลยค่ะ');
+  for (let at = 1; at < 'Done.\n[laughs] Next'.length; at++) {
+    const text = 'Done.\n[laughs] Next';
+    expect(await collect([text.slice(0, at), text.slice(at)])).toBe('Done.\nNext');
+  }
+});
+
 test('a markdown link whose text looks like a tag is not a tag', () => {
   expect(stripAudioTags('Read [sad](https://example.com) first')).toBe('Read [sad](https://example.com) first');
 });

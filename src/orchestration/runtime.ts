@@ -1286,7 +1286,7 @@ export class AgentOrchestrationRuntime {
         const alreadyPublished = !!acknowledgementId;
         // Speech performs the acknowledgement's audio tags; on a voice turn the chat copy omits them.
         const spokenAcknowledgement = intakeChoice!.acknowledgement!;
-        acknowledgement = speechEnabled ? stripAudioTags(spokenAcknowledgement).trim() || spokenAcknowledgement : spokenAcknowledgement;
+        acknowledgement = speechEnabled ? stripAudioTags(spokenAcknowledgement).trim() : spokenAcknowledgement;
         acknowledgementId = this.decisions.acknowledge(decision, acknowledgement, speechEnabled ? spokenAcknowledgement : undefined);
         // Capture only the original acknowledgement chunks, before asynchronous delivery
         // can enqueue optional speech-failure notices under the same response.
@@ -1375,7 +1375,9 @@ export class AgentOrchestrationRuntime {
         onTaskQueued: !semantic && speechEnabled && !active.notification ? spoken => {
         if (taskSpeech) return; // A turn may delegate several tasks, but has one initial reply.
         taskSpeech = spoken;
-        this.publishText(sessionId, decision.responseId!, spoken);
+        // Speech performs the acknowledgement's audio tags; the chat copy omits them.
+        const shown = stripAudioTags(spoken).trim();
+        this.publishText(sessionId, decision.responseId!, shown);
         this.store.transaction(() => {
           this.store.run('INSERT INTO response_speech VALUES(?,?)', decision.responseId!, spoken);
           // Channel speech is enqueued with the committed text in DecisionService.finish.
@@ -1385,7 +1387,7 @@ export class AgentOrchestrationRuntime {
         stream?.push({ responseId: decision.responseId!, text: spoken });
         if (typedSpeech) {
           const listener = this.voiceListeners.get(sessionId);
-          if (listener?.principalId === input.scope.principalId) listener.receive({ responseId: decision.responseId!, text: spoken, spoken, requestId: input.requestId, speechOnly: true });
+          if (listener?.principalId === input.scope.principalId) listener.receive({ responseId: decision.responseId!, text: shown, spoken, requestId: input.requestId, speechOnly: true });
         }
         stream?.close(); // Flush TTS now, without waiting for the Agent terminal response.
       } : undefined, context: { ...capabilities, ...receipt, ...decision, ...(questionReview ? {questionReviewIds:this.questionControls.context(receipt.conversationId,input.scope.principalId).map(q=>q.questionId)} : {}), model: options.model ?? this.agent.claude.model, principalId: input.scope.principalId } },

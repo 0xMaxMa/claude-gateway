@@ -4,10 +4,10 @@
 const AUDIO_TAG = /[ \t]*\[(?:laughs?|laughing|chuckles|giggles|sighs?|whispers?|gasps?|sarcastic|excited|curious|crying|happy|sad|angry|surprised|nervous|exhales|inhales|clears throat|pause|short pause|long pause)\](?!\()[ \t]*/gi;
 // Longest known tag plus slack; a longer unclosed bracket is not a tag split across chunks.
 const MAX_TAG_LENGTH = 24;
-// Keep a word break between two words, but none before punctuation or inside unspaced text.
+// Keep a word break between two words, but none before punctuation, at a line start or inside unspaced text.
 const joinAroundTag = (tag: string, offset: number, text: string): string => {
   const before = text[offset - 1], after = text[offset + tag.length];
-  return before && after && /^\s|\s$/.test(tag) && !/[\s.,!?;:)\]}]/.test(after) ? ' ' : '';
+  return before && after && !/\s/.test(before) && /^\s|\s$/.test(tag) && !/[\s.,!?;:)\]}]/.test(after) ? ' ' : '';
 };
 
 export const stripAudioTags = (text: string): string => text.replace(AUDIO_TAG, joinAroundTag);

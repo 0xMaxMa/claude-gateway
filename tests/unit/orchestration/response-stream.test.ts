@@ -112,6 +112,34 @@ test.each([
  }finally{unsub();await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
 });
 
+// Issue #595: the spoken task acknowledgement of a voice turn performs its tags; the chat shows it without them.
+test('a voice turn task acknowledgement keeps its audio tags for speech and drops them from chat',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'response-ack-tags-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Fixture');
+ const a={id:'a',description:'fixture',env:'',workspace,claude:{model:'fixture',extraFlags:[]}} as AgentConfig;
+ const config={gateway:{orchestration:true,headless:true},agents:[a]} as GatewayConfig,sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a');
+ const sid=randomUUID();await sessions.ensureApiSession('a','web-client',sid);
+ let scope:any;
+ const runtime=await AgentOrchestrationRuntime.open(a,config,dir,sessions,history,{
+  createAgentSession:async(_id,profile)=>Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},interrupt:()=>{},stop:async()=>{},sendMessage:function(this:EventEmitter){
+   scope.onTaskQueued('[laughs] On it.');
+   this.emit('output',JSON.stringify({type:'result',result:JSON.stringify({display_text:'Working on it.',spoken_text:'Working on it.'})}));
+  }}) as unknown as SessionProcess,releaseAgentSession:async()=>{},
+ });
+ const issue=runtime.bridge.issue.bind(runtime.bridge);
+ jest.spyOn(runtime.bridge,'issue').mockImplementation((value,...args)=>{scope=value;return issue(value,...args);});
+ const updates=jest.fn(),spoken=jest.fn();
+ const unsub=runtime.subscribeText(sid,'owner',updates);
+ runtime.subscribeVoiceResults(sid,'owner',spoken);
+ try{
+  await expect(runtime.send({scope:{agentId:'a',agentSessionId:sid,source:'api',accountId:'owner',chatId:'web-client',threadKey:'',principalId:'owner'},text:'Run it'},{execute:true,writeMemory:false},{timeoutMs:5000})).resolves.toBe('Working on it.');
+  const texts=updates.mock.calls.map(c=>c[0].text as string);
+  expect(texts).toContain('On it.');
+  for(const text of texts) expect(text).not.toContain('[laughs]');
+  expect(spoken).toHaveBeenCalledWith(expect.objectContaining({text:'On it.',spoken:'[laughs] On it.'}));
+  expect(runtime.store.all('SELECT text FROM response_speech').map(r=>r.text)).toEqual(['[laughs] On it.']);
+ }finally{unsub();await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
+});
+
 test('stop during agent startup completes the interrupted response without a second channel delivery', async () => {
  const root=mkdtempSync(join(tmpdir(),'response-stop-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Fixture');
  const a={id:'a',description:'fixture',env:'',workspace,claude:{model:'fixture',extraFlags:[]}} as AgentConfig;
