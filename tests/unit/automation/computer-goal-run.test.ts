@@ -228,6 +228,31 @@ describe('a yes to a goal step resumes the goal',()=>{
   const r=await yes(f,confirmation,{resumeGoal:8});
   expect(f.actions()).toEqual([{kind:'press',ref:'c9'}]);expect(waited(r)).toBe('CONFIRMATION_REQUIRED');
  });
+ // Reviewed PR #592: the resumed goal restarts its step count at 0, yet it already reached
+ // an action. The user's yes is not a question about the screen.
+ test('the resumed goal is not offered READ_REQUEST or UNCLEAR, from its first decision on',async()=>{
+  const confirmation=await asked(()=>notes(1));
+  const f=fixture([()=>notes(1),()=>notes(0),()=>notes(0)],[{pick:'press:c9',impact:'HIGH_IMPACT'},{pick:'DONE'}]);answering(f,'YES');
+  const r=await yes(f,confirmation,{resumeGoal:8});
+  const decisions=f.requests.filter(req=>req.questions.action);
+  expect(decisions.length).toBeGreaterThan(0);
+  for(const req of decisions){expect(Object.keys(req.questions.action.criteria)).not.toContain('READ_REQUEST');expect(Object.keys(req.questions.action.criteria)).not.toContain('UNCLEAR');}
+  expect(r).toMatchObject({status:'succeeded',reason:'GOAL_REACHED',steps:1});
+ });
+ test('a READ_REQUEST answer to the resumed goal is invalid, never a read request',async()=>{
+  const confirmation=await asked(()=>notes(1));
+  const f=fixture([()=>notes(1)],[{pick:'READ_REQUEST'}]);answering(f,'YES');
+  const r=await yes(f,confirmation,{resumeGoal:8});
+  expect(f.actions()).toEqual([]);
+  expect(r.trace.events.some(e=>e.reason==='READ_REQUEST')).toBe(false);
+  expect(waited(r)).toBe('INVALID_DECISION');
+ });
+ test('a yes without resumeGoal (one confirmed command) is still offered READ_REQUEST, as before',async()=>{
+  const confirmation=await asked(()=>notes(1));
+  const f=fixture([()=>notes(1),()=>notes(0)],[{pick:'press:c9',impact:'HIGH_IMPACT'}]);answering(f,'YES');
+  await yes(f,confirmation);
+  expect(Object.keys(f.requests.find(req=>req.questions.action)!.questions.action.criteria)).toContain('READ_REQUEST');
+ });
  test('without resumeGoal a yes stays one action (no behavior change)',async()=>{
   const confirmation=await asked(()=>notes(1));
   const f=fixture([()=>notes(1),()=>notes(0)],[{pick:'press:c9',impact:'HIGH_IMPACT'},{pick:'DONE'}]);answering(f,'YES');

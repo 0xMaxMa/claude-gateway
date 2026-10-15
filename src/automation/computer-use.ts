@@ -105,6 +105,9 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
  if(reply)deps.confirmed?.(reply);
  // A yes to a goal's high-impact step resumes that goal, with a fresh step budget.
  if(reply==='YES')input={...input,goal:input.confirmation!.command,...(input.resumeGoal?{runToGoal:true,maxSteps:input.resumeGoal}:{})};
+ // The resumed goal continues a run that already reached an action (the confirmed one):
+ // its step count restarts here, but it is past its first decision.
+ const resumed=reply==='YES'&&input.resumeGoal!==undefined;
  let goal:GoalRevision={revision:input.revision,goal:input.goal},steps=0,evaluations=reply&&!input.confirmation?.reply?1:0,sequence=0,round=0;
  let noProgress=0;
  let lastAction:ComputerLastAction|undefined,erasing:number|undefined;
@@ -398,9 +401,10 @@ export async function runComputerUse(raw:unknown,deps:ComputerUseDependencies,si
      const done=goalRun&&history.length?historyText():'';
      const kept=input.interactionContext?tail(input.interactionContext,8000-done.length-2):'';
      const context=done?[kept,done].filter(Boolean).join('\n\n'):input.interactionContext;
-     // Once a goal run has acted, nobody asked to read this screen: it is the next step's
-     // screen, so READ_REQUEST/UNCLEAR are not offered (as browser-use, after a confirmed action).
-     const readRequest=input.yieldAfterInteraction&&input.readRequest&&!(goalRun&&steps>0);
+     // Once a goal run has acted, here or before a yes resumed it, nobody asked to read this
+     // screen: it is the next step's screen, so READ_REQUEST/UNCLEAR are not offered (as
+     // browser-use, after a confirmed action).
+     const readRequest=input.yieldAfterInteraction&&input.readRequest&&!(goalRun&&(steps>0||resumed));
      const command=buildComputerCommand(state,goal.goal,targets,criteria,context,input.yieldAfterInteraction,readRequest,input.agentCommand||goalRun,goalRun);
      const answer=await interruptible(s=>deps.evaluate({requestId,...command.request},s),runSignal,deps.interruptSignal);
      check();checkInterruption(deps.interruptSignal);evaluations++;
