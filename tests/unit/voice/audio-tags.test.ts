@@ -1,6 +1,6 @@
 import { ElevenLabsTts, isElevenLabsDialogueModel } from '../../../src/voice/providers/elevenlabs-tts';
 import { ttsProvider } from '../../../src/voice/providers/registry';
-import { withoutAudioTags } from '../../../src/voice/audio-tags';
+import { stripAudioTags, withoutAudioTags } from '../../../src/voice/audio-tags';
 import { voicePreviewLanguages, VOICE_PREVIEW_TEXT } from '../../../src/voice/preview';
 import { GeminiTts } from '../../../src/voice/providers/gemini';
 import { OpenRouterTts } from '../../../src/voice/providers/openrouter';
@@ -19,6 +19,22 @@ test('streamed reply text loses audio tags split across chunks and keeps its wor
   expect(await collect(['Sure ', '[laughs] okay'])).toBe('Sure okay');
   expect(await collect(['use items[0] here'])).toBe('use items[0] here');
   expect(await collect(['[laughs]'])).toBe('');
+});
+
+test('stripped tags keep the word break between two words and none before punctuation', () => {
+  expect(stripAudioTags('ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ [Sighs]').trim()).toBe('ได้เลยค่ะ เดี๋ยวดูให้นะคะ');
+  expect(stripAudioTags('Sure thing [laughs]. ok[sighs], fine')).toBe('Sure thing. ok, fine');
+  expect(stripAudioTags('ได้เลย[laughs]ค่ะ')).toBe('ได้เลยค่ะ');
+  expect(stripAudioTags('ok[sighs] fine, [pause] ไปต่อ[clears throat]ค่ะ')).toBe('ok fine, ไปต่อค่ะ');
+});
+
+test('streamed text loses tags exactly as the whole text does, wherever the chunks split', async () => {
+  expect(await collect(['word', ' ', '[laughs].'])).toBe('word.');
+  for (const text of ['word [laughs]. ok[sighs] fine, [pause] next', 'Sure [laughs] okay [whispers] secret', 'ได้เลย [laughs] ค่ะ [sighs].']) {
+    const whole = stripAudioTags(text).trim();
+    expect((await collect([...text])).trim()).toBe(whole);
+    for (let at = 1; at < text.length; at++) expect((await collect([text.slice(0, at), text.slice(at)])).trim()).toBe(whole);
+  }
 });
 
 test('only the ElevenLabs dialogue models are listed for the Text-to-Dialogue socket', () => {
@@ -52,7 +68,7 @@ describe('structured spoken_text audio tags at the TTS layer', () => {
   };
 
   test('are stripped for a model that would read them aloud', async () => {
-    expect(await speak('eleven_flash_v2_5')).toBe('Sure, |okay secret|Fine.');
+    expect(await speak('eleven_flash_v2_5')).toBe('Sure,| okay secret|Fine.');
   });
 
   test('reach the ElevenLabs dialogue models that perform them', async () => {
@@ -60,7 +76,7 @@ describe('structured spoken_text audio tags at the TTS layer', () => {
   });
 });
 
-test('Gemini TTS keeps audio tags, which it performs, natively and through OpenRouter', async () => {
+test('Gemini TTS gets text without square-bracket tags, which it does not document, natively and through OpenRouter', async () => {
   const texts: string[] = [];
   const spies = [GeminiTts.prototype, OpenRouterTts.prototype].flatMap(prototype => [
     jest.spyOn(prototype, 'synthesize').mockImplementation(async function* (options) { for await (const text of options.text) texts.push(text); }),
@@ -74,9 +90,9 @@ test('Gemini TTS keeps audio tags, which it performs, natively and through OpenR
     return texts.join('|');
   };
   try {
-    expect(await speak('gemini', 'gemini-3.1-flash-tts-preview')).toBe('[laughs] Sure|[sighs] Fine.');
-    expect(await speak('upstream:gemini', 'gemini-2.5-pro-preview-tts')).toBe('[laughs] Sure|[sighs] Fine.');
-    expect(await speak('openrouter', 'google/gemini-3.1-flash-tts-preview')).toBe('[laughs] Sure|[sighs] Fine.');
+    expect(await speak('gemini', 'gemini-3.1-flash-tts-preview')).toBe('Sure|Fine.');
+    expect(await speak('upstream:gemini', 'gemini-2.5-pro-preview-tts')).toBe('Sure|Fine.');
+    expect(await speak('openrouter', 'google/gemini-3.1-flash-tts-preview')).toBe('Sure|Fine.');
     expect(await speak('openrouter', 'openai/gpt-4o-mini-tts')).toBe('Sure|Fine.');
   } finally { for (const spy of spies) spy.mockRestore(); }
 });
@@ -88,4 +104,17 @@ test('the streamed tag filter releases a stalled source as soon as it is closed'
   void iterator.next();
   await Promise.race([iterator.return!(), new Promise(resolve => setTimeout(resolve, 50))]);
   expect(release).toHaveBeenCalled();
+});
+
+test('the streamed tag filter stops reading its source once it is closed', async () => {
+  let resolve!: (result: IteratorResult<string>) => void;
+  const next = jest.fn(() => new Promise<IteratorResult<string>>(done => { resolve = done; }));
+  const source: AsyncIterable<string> = { [Symbol.asyncIterator]: () => ({ next, return: async () => ({ done: true as const, value: undefined }) }) };
+  const iterator = withoutAudioTags(source)[Symbol.asyncIterator]();
+  const pending = iterator.next();
+  await new Promise(setImmediate);
+  await iterator.return!();
+  resolve({ done: false, value: 'late text' });
+  expect(await pending).toEqual({ done: true, value: undefined });
+  expect(next).toHaveBeenCalledTimes(1);
 });

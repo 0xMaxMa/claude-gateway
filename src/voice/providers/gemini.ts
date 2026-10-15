@@ -41,8 +41,7 @@ export class GeminiStt extends RecordedStt {
     super(provider, model, request, transcribeGemini, () => { if (!geminiConnection(provider).key) throw new VoiceError('STT_CREDENTIALS_MISSING'); });
   }
 }
-// Gemini TTS model IDs, bare or under OpenRouter's `google/` namespace.
-export const isGeminiTtsModel = (model: string): boolean => /^(?:google\/)?gemini-[\d.]+-(?:flash|pro)-(?:preview-tts|tts-preview)$/.test(model);
+export const isGeminiTtsModel = (model: string): boolean => /^gemini-[\d.]+-(?:flash|pro)-(?:preview-tts|tts-preview)$/.test(model);
 export class GeminiTts implements TtsProvider {
   readonly capabilities = { textStreaming: false, wordAlignment: false, outputFormats: [PCM16] };
   constructor(readonly id: string, private readonly model: string, private readonly request: typeof fetch = fetch) {}

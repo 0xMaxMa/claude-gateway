@@ -59,7 +59,7 @@ test('provider closing without a terminal event is not a successful synthesis', 
   async function* text() { yield 'hello'; }
   const iterator = new ElevenLabsTts('fixture', undefined, fixture.connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal: new AbortController().signal })[Symbol.asyncIterator]();
   const result = iterator.next(); fixture.messages.close();
-  await expect(result).rejects.toMatchObject({ code: 'PROVIDER_CONNECTION_CLOSED' });
+  await expect(result).rejects.toMatchObject({ code: 'TTS_INCOMPLETE' });
 });
 
 test('ElevenLabs reports the cause of a send rejected just after the provider closed', async () => {
@@ -87,7 +87,7 @@ test('ElevenLabs releases a stalled reply text source when the provider closes',
   const result = iterator.next();
   await new Promise(resolve => setImmediate(resolve));
   fixture.messages.close();
-  await expect(result).rejects.toMatchObject({ code: 'PROVIDER_CONNECTION_CLOSED' });
+  await expect(result).rejects.toMatchObject({ code: 'TTS_INCOMPLETE' });
   expect(release).toHaveBeenCalled();
 });
 
@@ -230,7 +230,8 @@ test('ElevenLabs stops dialogue keep-alive after the idle limit so an abandoned 
     expect(new URL(fixture.connect.mock.calls[0][0]).searchParams.get('inactivity_timeout')).toBeNull();
     fixture.messages.close();
     await jest.advanceTimersByTimeAsync(1000);
-    await expect(done).rejects.toMatchObject({ code: 'PROVIDER_CONNECTION_CLOSED' });
+    // The provider ended the stream without its terminal event: incomplete audio, not a network fault.
+    await expect(done).rejects.toMatchObject({ code: 'TTS_INCOMPLETE' });
   } finally { jest.useRealTimers(); }
 });
 

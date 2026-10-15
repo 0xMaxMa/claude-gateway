@@ -87,25 +87,22 @@ export function splitSpeechResponse(raw: string): { display: string; spoken: str
   // wording; never truncate reports or read code/URLs/JSON aloud. Applied to whatever text
   // we are about to display, so a stripped payload cannot be spoken either.
   const speakable = (source: string): string => {
-    // Known audio tags are stripped (issue #595 Option A); any other bracket still fails the check.
-    const plain = stripAudioTags(source.replace(/\*\*([^*]+)\*\*/g, '$1')).trim();
-    return plain && plain.length <= SPOKEN_TEXT_LIMIT && !/[{}\[\]`|]|https?:\/\/|^\s*#/m.test(plain) ? plain : '';
-  };
-  // Tags in a short spoken reply are stage directions, so the chat copy drops them too. Longer
-  // text is never spoken from here, and a tag in it may be part of the answer itself.
-  const shown = (source: string, spoken: string): string => {
-    const stripped = stripAudioTags(source);
-    return spoken && stripped !== source ? stripped.trim() : source;
+    // Known audio tags pass the check (issue #595) and stay in the text: the TTS layer performs
+    // them or strips them per model. Any other bracket still fails it.
+    const plain = source.replace(/\*\*([^*]+)\*\*/g, '$1').trim();
+    const words = stripAudioTags(plain).trim();
+    return words && plain.length <= SPOKEN_TEXT_LIMIT && !/[{}\[\]`|]|https?:\/\/|^\s*#/m.test(words) ? plain : '';
   };
   const payload = payloadSpan(text);
-  if (!payload) { const spoken = speakable(text); return { display: shown(raw, spoken), spoken, outcome: 'plain' }; }
+  if (!payload) return { display: raw, spoken: speakable(text), outcome: 'plain' };
   let value: unknown;
   try { value = JSON.parse(payload.body); } catch { /* Truncated or invalid; degrade below. */ }
   const fields = (value && typeof value === 'object' ? value : {}) as { display_text?: unknown; spoken_text?: unknown };
   if (typeof fields.display_text === 'string' && fields.display_text.trim()) {
     const spoken = typeof fields.spoken_text === 'string' ? fields.spoken_text.trim() : '';
-    // Fail closed for malformed/over-budget speech, rather than reading the full report.
-    return { display: fields.display_text, spoken: spoken.length <= SPOKEN_TEXT_LIMIT && !/```/.test(spoken) ? spoken : '', outcome: 'structured' };
+    // Fail closed for malformed/over-budget speech, rather than reading the full report, and for
+    // audio tags alone, which leave a model that does not perform them nothing to say.
+    return { display: fields.display_text, spoken: spoken.length <= SPOKEN_TEXT_LIMIT && !/```/.test(spoken) && stripAudioTags(spoken).trim() ? spoken : '', outcome: 'structured' };
   }
   // No usable display_text. Publishing `raw` here is what used to put the JSON object itself
   // into the user's chat, so publish the prose around it instead, and an explicit notice when
@@ -114,8 +111,7 @@ export function splitSpeechResponse(raw: string): { display: string; spoken: str
   // runtime.ts's response.schema_unstructured event, which records it for every turn kind.
   const remainder = `${text.slice(0, payload.start)}\n${text.slice(payload.end)}`;
   const display = /[\p{L}\p{N}]/u.test(remainder) ? remainder.trim() : UNREADABLE_DISPLAY_NOTICE;
-  const spoken = speakable(display);
-  return { display: shown(display, spoken), spoken, outcome: value ? 'empty_display' : 'unreadable' };
+  return { display, spoken: speakable(display), outcome: value ? 'empty_display' : 'unreadable' };
 }
 
 

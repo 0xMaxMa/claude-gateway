@@ -81,19 +81,18 @@ test('the union response schema reaches the CLI for Agent profiles only, and nev
  for(const text of ['https://example.com','```code```','a'.repeat(601)])expect(splitSpeechResponse(text).spoken).toBe('');
 });
 
-test('ElevenLabs audio tags are stripped instead of silencing the reply', () => {
-  expect(splitSpeechResponse('[laughs] Sure, I can do that.')).toEqual({ display: 'Sure, I can do that.', spoken: 'Sure, I can do that.', outcome: 'plain' });
-  expect(splitSpeechResponse('ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ [Sighs]').spoken).toBe('ได้เลยค่ะ เดี๋ยวดูให้นะคะ');
-  expect(splitSpeechResponse('Sure thing [laughs]. ok[sighs], fine').spoken).toBe('Sure thing. ok, fine');
-  expect(splitSpeechResponse('ได้เลย[laughs]ค่ะ').spoken).toBe('ได้เลยค่ะ');
-  expect(splitSpeechResponse('ok[sighs] fine, [pause] ไปต่อ[clears throat]ค่ะ').spoken).toBe('ok fine, ไปต่อค่ะ');
-  for (const text of ['[laughs]', 'use items[0] here', 'see [docs](https://example.com)', '[unknown tag] hello']) expect(splitSpeechResponse(text).spoken).toBe('');
+test('a reply with audio tags is spoken, and the tags are left for the TTS layer to perform or strip', () => {
+  expect(splitSpeechResponse('[laughs] Sure, I can do that.')).toEqual({ display: '[laughs] Sure, I can do that.', spoken: '[laughs] Sure, I can do that.', outcome: 'plain' });
+  expect(splitSpeechResponse('ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ [Sighs]').spoken).toBe('ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ [Sighs]');
+  for (const text of ['[laughs]', '[laughs] [sighs]', 'use items[0] here', 'see [docs](https://example.com)', '[unknown tag] hello']) expect(splitSpeechResponse(text).spoken).toBe('');
+  // Tags alone are no speech: no TTS model should be asked to synthesize nothing.
+  expect(splitSpeechResponse('{"display_text":"Done.","spoken_text":"[laughs]"}').spoken).toBe('');
+  expect(splitSpeechResponse('{"display_text":"Done.","spoken_text":"[laughs] Done."}').spoken).toBe('[laughs] Done.');
 });
 
-test('the chat copy drops audio tags only from a reply that is spoken', () => {
-  expect(splitSpeechResponse('ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ').display).toBe('ได้เลยค่ะ เดี๋ยวดูให้นะคะ');
-  expect(splitSpeechResponse('Prose first.\n{"display_text":"","spoken_text":"x"}').display).toBe('Prose first.');
+test('the chat copy keeps audio tags, so it matches the text already streamed', () => {
+  for (const text of ['ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ', 'Add [laughs] to the text.']) expect(splitSpeechResponse(text).display).toBe(text);
+  expect(splitSpeechResponse('Prose [pause] first.\n{"display_text":"","spoken_text":"x"}').display).toBe('Prose [pause] first.');
   const long = `Use [laughs] in ElevenLabs v3 prompts.\n\`\`\`\nexample\n\`\`\``;
   expect(splitSpeechResponse(long)).toMatchObject({ display: long, spoken: '' });
-  expect(splitSpeechResponse('No tags here.').display).toBe('No tags here.');
 });

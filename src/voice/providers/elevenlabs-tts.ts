@@ -82,7 +82,7 @@ export class ElevenLabsTts implements TtsProvider {
         let settle: NodeJS.Timeout | undefined;
         if (!sendError) await Promise.race([sending, new Promise(resolve => { settle = setTimeout(resolve, SEND_SETTLE_MS); })]);
         clearTimeout(settle);
-        throw sendError ?? new VoiceError('PROVIDER_CONNECTION_CLOSED');
+        throw sendError ?? new VoiceError('TTS_INCOMPLETE');
       }
       if (sendError) throw sendError;
     } finally {

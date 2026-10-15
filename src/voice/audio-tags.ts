@@ -14,27 +14,28 @@ export const stripAudioTags = (text: string): string => text.replace(AUDIO_TAG, 
 /** Streaming form: holds back a trailing tag until the text after it shows how to join it. */
 export function withoutAudioTags(text: AsyncIterable<string>): AsyncIterable<string> {
   const source = text[Symbol.asyncIterator]();
-  const stripped = strippedChunks({ [Symbol.asyncIterator]: () => source });
+  let closed = false;
+  const stripped = strippedChunks({ [Symbol.asyncIterator]: () => source }, () => closed);
   // An async generator queues return() behind a pending next(), so a stalled source would never
-  // hear it. Forward it directly, as the TTS providers' teardown expects.
+  // hear it. Forward it directly, as the TTS providers' teardown expects, and stop reading.
   return { [Symbol.asyncIterator]: () => ({
     next: () => stripped.next(),
-    return: async () => { await source.return?.(); return { done: true as const, value: undefined }; },
+    return: async () => { closed = true; await source.return?.(); return { done: true as const, value: undefined }; },
   }) };
 }
-async function* strippedChunks(text: AsyncIterable<string>): AsyncGenerator<string> {
+async function* strippedChunks(text: AsyncIterable<string>, closed: () => boolean): AsyncGenerator<string> {
   let pending = '', previous = '';
   // The last character already sent decides whether a tag at the start of this text sat between words.
   const strip = (segment: string) => stripAudioTags(previous + segment).slice(previous.length);
   for await (const chunk of text) {
+    if (closed()) return;
     pending += chunk;
     const open = pending.lastIndexOf('[');
     const close = open < 0 ? -1 : pending.indexOf(']', open);
     let cut = pending.length;
-    if (open >= 0 && (close < 0 ? pending.length - open <= MAX_TAG_LENGTH : !pending.slice(close + 1).trim())) {
-      cut = open;
-      while (cut > 0 && /[ \t]/.test(pending[cut - 1])) cut--;
-    }
+    if (open >= 0 && (close < 0 ? pending.length - open <= MAX_TAG_LENGTH : !pending.slice(close + 1).trim())) cut = open;
+    // Trailing spaces wait as well: a tag in the next chunk may absorb them.
+    while (cut > 0 && /[ \t]/.test(pending[cut - 1])) cut--;
     const ready = strip(pending.slice(0, cut));
     if (!ready) continue;
     pending = pending.slice(cut);
