@@ -93,11 +93,21 @@ curl -H "X-Api-Key: my-secret-key-123" \
 }
 ```
 
-Every session response carries `project` and `trusted`: here, on create, in the
+Every session response carries `project`, `trusted` and `projectState`: here, on create, in the
 [info](#get-apiv1agentsagentidsessionssessionidinfo) response and on the admin
 list `GET /v1/agents/sessions`. `project` is the project name the session was
 created with, or `null`. `trusted` is `true` only when the session has a
-project and the operator trusts it (see below); it is `false` otherwise.
+project, its folder is `available`, and the operator trusts it (see below); it is `false` otherwise.
+`projectState` is `null` when `project` is `null`. Otherwise it says whether the folder still
+resolves when the response is built:
+
+| `projectState` | Meaning |
+|----------------|---------|
+| `available` | The folder exists under the projects root. |
+| `missing` | No folder with that name exists, for example after it was deleted or renamed. |
+| `unavailable` | The folder exists but cannot be used, for example a symlink that leaves the root or a file in place of a folder. |
+
+A session whose `projectState` is `missing` or `unavailable` cannot run, and a message to it fails with `409 PROJECT_UNAVAILABLE`.
 
 ---
 
@@ -138,8 +148,8 @@ curl -X POST \
 folder instead of its workspace. Its persona still loads, and it gets a short
 note naming the project, the folder and the git state: the branch when its name
 is plain (`[\w./-]`, at most 100 characters), the change count and the remote
-host, never a remote URL. The response then includes `"project": "<name>"` and
-`"trusted"`. You cannot change the project later.
+host, never a remote URL. The response then includes `"project": "<name>"`,
+`"trusted"` and `"projectState"`. You cannot change the project later.
 
 The project runs untrusted unless the operator lists its name in
 [`gateway.projects.trusted`](/reference/configuration) and `<root>/<name>` is
