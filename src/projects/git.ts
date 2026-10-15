@@ -320,8 +320,10 @@ async function hasCommitHook(dir: string): Promise<boolean> {
   return false;
 }
 
-function hookDetail(out: GitOutput): string {
-  const text = redactCredentials(`${out.stdout}${out.stderr}`.trim());
+const HOOK_DETAIL_SCAN_CHARS = 64 * 1024;
+
+export function hookDetail(out: GitOutput): string {
+  const text = redactCredentials(`${out.stdout}${out.stderr}`.trim().slice(0, HOOK_DETAIL_SCAN_CHARS));
   // A cut through a multi-byte character decodes to U+FFFD, which would push past the byte cap.
   return Buffer.from(text).subarray(0, HOOK_DETAIL_MAX_BYTES).toString().replace(/\uFFFD$/, '');
 }

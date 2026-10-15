@@ -1,3 +1,4 @@
+import { hookDetail } from '../../src/projects/git';
 import {
   buildStatus,
   CHANGES_LIMIT,
@@ -136,6 +137,22 @@ describe('describeRemote and redactCredentials', () => {
 
   it('strips a password that contains an unencoded @', () => {
     expect(redactCredentials('https://bob:p@ss@h.example/x.git')).toBe('https://h.example/x.git');
+  });
+});
+
+describe('redactCredentials cost', () => {
+  it('stays linear on adversarial dotted text', () => {
+    const t0 = Date.now();
+    redactCredentials('a.'.repeat(50_000));
+    redactCredentials('a://'.repeat(25_000));
+    expect(Date.now() - t0).toBeLessThan(100);
+  });
+
+  it('hookDetail cuts before redacting', () => {
+    const t0 = Date.now();
+    const detail = hookDetail({ code: 1, stdout: 'a.'.repeat(500_000), stderr: '' });
+    expect(Date.now() - t0).toBeLessThan(100);
+    expect(detail.length).toBeLessThanOrEqual(2000);
   });
 });
 

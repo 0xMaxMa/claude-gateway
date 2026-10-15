@@ -223,7 +223,7 @@ export function deriveSync(s: {
 
 /** `https://user:token@host/x` becomes `https://host/x`, anywhere in `text`. */
 export function redactCredentials(text: string): string {
-  return text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/]*@/gi, '$1');
+  return text.replace(/:\/\/[^\s/]*@/g, '://');
 }
 
 const KNOWN_HOSTS: Record<string, GitHost> = {
