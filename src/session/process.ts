@@ -739,11 +739,11 @@ export class SessionProcess extends EventEmitter {
   /** `.sessions/<id>`, once a spawn without a runtime profile has written its mcp-config.json there. */
   private sessionDirPath?: string;
 
-  /** True when the bound project no longer resolves to the directory this process runs in, including one recreated at the same path. */
+  /** True when the bound project no longer resolves to the directory this process runs in, including one recreated at the same path, or when its trust changed (setting sources are fixed at spawn). */
   async projectMoved(): Promise<boolean> {
     if (!this.projectResolver || !this.projectCwd) return false;
     const project = await this.projectResolver();
-    return !project.ok || project.value.dir !== this.projectCwd.dir || project.value.identity !== this.projectCwd.identity;
+    return !project.ok || project.value.dir !== this.projectCwd.dir || project.value.identity !== this.projectCwd.identity || project.value.trusted !== this.projectCwd.trusted;
   }
 
   /** The appended system prompt never travels on the command line: Windows caps a

@@ -172,4 +172,15 @@ describe('project chat session fixes', () => {
     expect(gone.body.code).toBe('PROJECT_UNAVAILABLE');
     expect(fs.existsSync(greeting)).toBe(true);
   }, 30000);
+
+  it('F4 revoking trust respawns the live session with --setting-sources user', async () => {
+    h = await harness({ trusted: ['site'] });
+    const sid = await projectSession(h);
+    await send(h, sid, 'a');
+    expect(flagValue(spawns(h)[0]!.argv, '--setting-sources')).toBeUndefined();
+    (h.runners[0] as any).gatewayConfig.gateway.projects.trusted = [];
+    await send(h, sid, 'b');
+    expect(spawns(h)).toHaveLength(2);
+    expect(flagValue(spawns(h)[1]!.argv, '--setting-sources')).toBe('user');
+  }, 30000);
 });
