@@ -88,17 +88,46 @@ test('the /call ticket route proves the Telegram user, the pairing owner and the
     const topic = voiceCallPairings.create('a', '42', '7'), mint = jest.spyOn(f.api, 'mintTicket');
     const proposed = 'c'.repeat(64);
     const topical = await request(f.app).post(`/voice-call/${topic}/ticket`).set('Origin', ORIGIN).send({ initData: initData(42), call_token: proposed });
-    expect(mint).toHaveBeenLastCalledWith('a', 'tg-session', { kind: 'telegram', principalId: 'telegram:42', chatId: '42', threadKey: '7' }, ORIGIN, true);
+    expect(mint).toHaveBeenLastCalledWith('a', 'tg-session', { kind: 'telegram', principalId: 'telegram:42', chatId: '42', threadKey: '7' }, ORIGIN, true, undefined);
     // The page's proposed token is kept, so retrying after a lost response still works.
     expect(topical.body.call_token).toBe(proposed);
     expect((await request(f.app).post(`/voice-call/${topic}/ticket`).set('Origin', ORIGIN).send({ initData: initData(42), call_token: proposed })).body.call_token).toBe(proposed);
-    // A forwarded link cannot open a second call; the page's own token can, once the lease is free.
+    // A forwarded link cannot open a second call.
     expect((await ticket({ initData: initData(42) })).body).toMatchObject({ code: 'CALL_LINK_USED' });
     expect((await ticket({ initData: initData(42) })).status).toBe(409);
-    const busy = await ticket({ initData: initData(42), call_token: issued.body.call_token });
-    expect(busy.status).toBe(409);
-    expect(busy.body).toMatchObject({ error: 'Voice session already active', call_token: issued.body.call_token });
+    // The page closed before connecting: the same call asking again replaces its own unused ticket at once.
+    const again = await ticket({ initData: initData(42), call_token: issued.body.call_token });
+    expect(again.status).toBe(200);
+    expect(f.api.liveSessionIds()).toEqual(new Set([again.body.voice_session_id]));
+    // Another call in the same chat session still waits for the lease.
+    const other = await request(f.app).post(`/voice-call/${topic}/ticket`).set('Origin', ORIGIN).send({ initData: initData(42), call_token: proposed });
+    expect(other.status).toBe(409);
+    expect(other.body).toMatchObject({ error: 'Voice session already active', call_token: proposed });
   } finally { await f.close(); }
+});
+
+test('a connected call keeps its lease: its own token cannot take it over, and the replaced ticket no longer opens', async () => {
+  const f = fixture();
+  f.server.listen(0, '127.0.0.1'); await once(f.server, 'listening');
+  const port = (f.server.address() as { port: number }).port;
+  const sockets: WebSocket[] = [];
+  const connect = (body: { stream_path: string; ticket: string }) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${body.stream_path}?ticket=${body.ticket}`, { origin: ORIGIN }); sockets.push(ws);
+    return new Promise<'open' | string>(resolve => { ws.once('open', () => resolve('open')); ws.once('error', error => resolve(error.message)); });
+  };
+  try {
+    const pairingId = voiceCallPairings.create('a', '42');
+    const ticket = (body: object) => request(f.app).post(`/voice-call/${pairingId}/ticket`).set('Origin', ORIGIN).send(body);
+    const stale = await ticket({ initData: initData(42) });
+    const fresh = await ticket({ initData: initData(42), call_token: stale.body.call_token });
+    expect(fresh.status).toBe(200);
+    expect(await connect(stale.body)).toContain('403');
+    expect(await connect(fresh.body)).toBe('open');
+    const busy = await ticket({ initData: initData(42), call_token: stale.body.call_token });
+    expect(busy.status).toBe(409);
+    expect(busy.body).toMatchObject({ error: 'Voice session already active' });
+    expect(sockets[1].readyState).toBe(WebSocket.OPEN);
+  } finally { sockets.forEach(ws => ws.terminate()); await f.close(); }
 });
 
 test('voice disabled or an expired link refuses a ticket', async () => {

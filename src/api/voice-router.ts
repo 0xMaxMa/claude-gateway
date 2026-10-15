@@ -135,8 +135,11 @@ export class VoiceApi {
     });
   }
   /** Reserve the conversation's voice lease and issue a single-use, origin-bound
-   * ticket. Callers authenticate the principal and resolve the session first. */
-  async mintTicket(agentId: string, sessionId: string, scope: VoiceScope, origin: string | undefined, allowTools: boolean): Promise<VoiceTicketResult> {
+   * ticket. Callers authenticate the principal and resolve the session first.
+   * `replaces` names this caller's previous voice session: if only its unused
+   * ticket holds the lease (the page closed before connecting), that ticket is
+   * revoked instead of blocking the caller until it expires. */
+  async mintTicket(agentId: string, sessionId: string, scope: VoiceScope, origin: string | undefined, allowTools: boolean, replaces?: string): Promise<VoiceTicketResult> {
     const config = this.configs.get(agentId), runner = this.agents.get(agentId);
     if (!config || !runner) return { status: 403, body: { error: 'Access denied' } };
     if (!config.orchestration?.enabled || !config.voice?.enabled) return { status: 409, body: { error: 'Voice disabled' } };
@@ -152,6 +155,7 @@ export class VoiceApi {
     }
     this.prune();
     const leaseKey = `${agentId}:${sessionId}`;
+    if (replaces && this.leases.get(leaseKey) === replaces) this.revokeUnusedTicket(replaces);
     if (this.leases.has(leaseKey)) return { status: 409, body: { error: 'Voice session already active' } };
     if (this.leases.size >= 100) return { status: 503, body: { error: 'Voice capacity exceeded' } };
     const ticket = randomBytes(32).toString('hex'), voiceSessionId = randomUUID();
@@ -350,6 +354,10 @@ export class VoiceApi {
   private releaseLease(ticket: VoiceTicket): void {
     const key = `${ticket.agentId}:${ticket.sessionId}`;
     if (this.leases.get(key) === ticket.voiceSessionId) this.leases.delete(key);
+  }
+  /** A connected session has no ticket left, so this never ends a live call. */
+  private revokeUnusedTicket(voiceSessionId: string): void {
+    for (const [token, ticket] of this.tickets) if (ticket.voiceSessionId === voiceSessionId) { this.tickets.delete(token); this.releaseLease(ticket); }
   }
   private prune(): void {
     for (const [key, ticket] of this.tickets) if (ticket.expiresAt < Date.now()) { this.tickets.delete(key); this.releaseLease(ticket); }

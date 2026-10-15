@@ -63,7 +63,7 @@ export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
     try {
       const sessionId = await runner.telegramVoiceSession(chatId);
       const result = await deps.voiceApi.mintTicket(pairing.agentId, sessionId, { kind: 'telegram', principalId: `telegram:${verified.userId}`, chatId, threadKey: pairing.threadKey },
-        req.headers.origin, config.allow_tools !== false);
+        req.headers.origin, config.allow_tools !== false, pairing.voiceSessionId);
       if (result.status === 200) voiceCallPairings.attach(pairing.pairingId, String(result.body.voice_session_id));
       // A page rejoining a call in progress keeps its clock.
       const elapsed = result.status === 200 ? voiceCallPairings.elapsed(pairing.pairingId) : undefined;
