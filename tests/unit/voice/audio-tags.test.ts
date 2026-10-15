@@ -1,6 +1,6 @@
 import { ElevenLabsTts, isElevenLabsDialogueModel } from '../../../src/voice/providers/elevenlabs-tts';
 import { ttsProvider } from '../../../src/voice/providers/registry';
-import { stripAudioTags, withoutAudioTags } from '../../../src/voice/audio-tags';
+import { audioTagFreePrefix, stripAudioTags, withoutAudioTags } from '../../../src/voice/audio-tags';
 import { voicePreviewLanguages, VOICE_PREVIEW_TEXT } from '../../../src/voice/preview';
 import { GeminiTts } from '../../../src/voice/providers/gemini';
 import { OpenRouterTts } from '../../../src/voice/providers/openrouter';
@@ -76,7 +76,7 @@ describe('structured spoken_text audio tags at the TTS layer', () => {
   });
 });
 
-test('Gemini TTS gets text without square-bracket tags, which it does not document, natively and through OpenRouter', async () => {
+test('Gemini 3.1 Flash TTS performs square-bracket tags, natively and through OpenRouter; other Gemini and OpenRouter TTS models do not get them', async () => {
   const texts: string[] = [];
   const spies = [GeminiTts.prototype, OpenRouterTts.prototype].flatMap(prototype => [
     jest.spyOn(prototype, 'synthesize').mockImplementation(async function* (options) { for await (const text of options.text) texts.push(text); }),
@@ -90,11 +90,31 @@ test('Gemini TTS gets text without square-bracket tags, which it does not docume
     return texts.join('|');
   };
   try {
-    expect(await speak('gemini', 'gemini-3.1-flash-tts-preview')).toBe('Sure|Fine.');
+    expect(await speak('gemini', 'gemini-3.1-flash-tts-preview')).toBe('[laughs] Sure|[sighs] Fine.');
+    expect(await speak('upstream:gemini', 'gemini-3.1-flash-tts-preview')).toBe('[laughs] Sure|[sighs] Fine.');
+    expect(await speak('openrouter', 'google/gemini-3.1-flash-tts-preview')).toBe('[laughs] Sure|[sighs] Fine.');
+    // 2.5 documents no inline tags and 3.8 documents <angle> tags only.
     expect(await speak('upstream:gemini', 'gemini-2.5-pro-preview-tts')).toBe('Sure|Fine.');
-    expect(await speak('openrouter', 'google/gemini-3.1-flash-tts-preview')).toBe('Sure|Fine.');
+    expect(await speak('gemini', 'gemini-3.8-flash-tts')).toBe('Sure|Fine.');
     expect(await speak('openrouter', 'openai/gpt-4o-mini-tts')).toBe('Sure|Fine.');
   } finally { for (const spy of spies) spy.mockRestore(); }
+});
+
+test('a markdown link whose text looks like a tag is not a tag', () => {
+  expect(stripAudioTags('Read [sad](https://example.com) first')).toBe('Read [sad](https://example.com) first');
+});
+
+test('the chat prefix without tags only ever grows, and ends at the whole text without tags', () => {
+  for (const text of ['word [laughs]. ok[sighs] fine, [pause] next', 'Sure [laughs] okay [whispers] secret', 'ได้เลย [laughs] ค่ะ [sighs].', 'Read [sad](https://example.com) first', 'use items[0] here']) {
+    let shown = '';
+    for (let at = 1; at <= text.length; at++) {
+      const next = audioTagFreePrefix(text.slice(0, at));
+      expect(next.startsWith(shown)).toBe(true);
+      expect(next).not.toMatch(/\[(?:laughs|sighs|pause|whispers)\]/);
+      shown = next;
+    }
+    expect(stripAudioTags(text).startsWith(shown)).toBe(true);
+  }
 });
 
 test('the streamed tag filter releases a stalled source as soon as it is closed', async () => {

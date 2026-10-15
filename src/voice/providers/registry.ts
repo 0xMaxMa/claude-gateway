@@ -1,7 +1,7 @@
 import { requireManagedVoiceCredit } from '../managed-quota';
 import { OpenRouterStt, OpenRouterTts } from './openrouter';
 import { canonicalVoiceProvider, nativeVoiceModel } from './model-ref';
-import { GeminiStt, GeminiTts } from './gemini';
+import { GeminiStt, GeminiTts, performsGeminiAudioTags } from './gemini';
 import { GeminiLiveStt } from './gemini-live-stt';
 import { PaxaLabsStt } from './paxalabs-stt';
 import { PaxaLabsLiveStt, isPaxaRealtimeSttModel } from './paxalabs-live-stt';
@@ -45,10 +45,12 @@ export function sttProvider(config: { provider: string; model: string }): SttPro
     return provider.open(options);
   }};
 }
-/** Audio tags reach TTS in spoken text. Only the ElevenLabs dialogue models perform them;
- * every other model, Gemini TTS included (it documents <angle> tags), could read the word aloud. */
+/** Audio tags reach TTS in spoken text. Only the ElevenLabs dialogue models and Gemini 3.1 Flash TTS
+ * (natively or through OpenRouter) perform them; every other model could read the word aloud. */
 function performsAudioTags(config: { provider: string; model: string }): boolean {
-  return canonicalVoiceProvider(config.provider).endsWith('elevenlabs') && isElevenLabsDialogueModel(nativeVoiceModel(config.provider, config.model));
+  const provider = canonicalVoiceProvider(config.provider), model = nativeVoiceModel(config.provider, config.model);
+  if (provider.endsWith('elevenlabs')) return isElevenLabsDialogueModel(model);
+  return /(?:^|:)(?:gemini|openrouter)$/.test(provider) && performsGeminiAudioTags(model);
 }
 function withAudioTagSupport(config: { provider: string; model: string }, provider: TtsProvider): TtsProvider {
   if (performsAudioTags(config)) return provider;

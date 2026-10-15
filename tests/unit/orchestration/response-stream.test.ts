@@ -74,6 +74,44 @@ test.each([false,true])('real runtime publishes incremental response text before
 });
 
 
+// Issue #595: a voice turn's chat copy must not show the performance tags its speech performs,
+// and the streamed text must stay a prefix of the final text. A text-only turn keeps them:
+// there a tag may be the subject of the answer.
+test.each([
+ [true,['Sure ','[lau','ghs] that ','works'],'Sure [laughs] that works','Sure that works'],
+ [true,['{"display_text":"Ha [la','ughs]. Done","spoken_text":"[laughs] Done"}'],JSON.stringify({display_text:'Ha [laughs]. Done',spoken_text:'[laughs] Done'}),'Ha. Done'],
+ [true,['Read [sad](https://example.com)',' first'],'Read [sad](https://example.com) first','Read [sad](https://example.com) first'],
+ [false,['Sure ','[lau','ghs] that ','works'],'Sure [laughs] that works','Sure [laughs] that works'],
+ [false,['Add [laughs] ','to the text.'],'Add [laughs] to the text.','Add [laughs] to the text.'],
+] as const)('voice=%s chat text shows audio tags only on text turns, streamed and final alike (%#)',async (voice,chunks,result,expected)=>{
+ const root=mkdtempSync(join(tmpdir(),'response-tags-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Fixture');
+ const a={id:'a',description:'fixture',env:'',workspace,claude:{model:'fixture',extraFlags:[]}} as AgentConfig;
+ const config={gateway:{orchestration:true,headless:true},agents:[a]} as GatewayConfig,sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a');
+ const sid=randomUUID();await sessions.ensureApiSession('a','web-client',sid);
+ let process:EventEmitter;let ready!:()=>void;const started=new Promise<void>(resolve=>{ready=resolve;});
+ const runtime=await AgentOrchestrationRuntime.open(a,config,dir,sessions,history,{
+  createAgentSession:async(id,profile)=>{
+   process=Object.assign(new EventEmitter(),{runtimeProfile:profile,start:async()=>{},interrupt:()=>{},stop:async()=>{},sendMessage:()=>ready()});return process as SessionProcess;
+  },releaseAgentSession:async()=>{},
+ });
+ const updates=jest.fn(),foreground=jest.fn(),spoken=jest.fn();
+ const unsub=runtime.subscribeText(sid,'owner',updates);
+ if(voice) runtime.subscribeVoiceResults(sid,'owner',spoken);
+ const reply=runtime.send({scope:{agentId:'a',agentSessionId:sid,source:'api',accountId:'owner',chatId:'web-client',threadKey:'',principalId:'owner'},text:'Explain'}, {execute:false,writeMemory:false},{timeoutMs:5000,onText:foreground});
+ void reply.catch(()=>{});
+ try{
+  await started;
+  const emit=(event:unknown)=>process.emit('output',JSON.stringify(event));
+  for(const text of chunks) emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text}}});
+  emit({type:'result',result});
+  await expect(reply).resolves.toBe(expected);
+  expect(foreground.mock.calls.map(c=>c[0]).join('')).toBe(expected);
+  const texts=updates.mock.calls.map(c=>c[0].text as string);
+  for(const text of texts) expect(expected.startsWith(text)).toBe(true);
+  expect(updates).toHaveBeenLastCalledWith(expect.objectContaining({text:expected,final:true}));
+ }finally{unsub();await runtime.close();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
+});
+
 test('stop during agent startup completes the interrupted response without a second channel delivery', async () => {
  const root=mkdtempSync(join(tmpdir(),'response-stop-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Fixture');
  const a={id:'a',description:'fixture',env:'',workspace,claude:{model:'fixture',extraFlags:[]}} as AgentConfig;

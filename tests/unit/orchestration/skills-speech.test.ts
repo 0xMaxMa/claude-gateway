@@ -90,7 +90,7 @@ test('a reply with audio tags is spoken, and the tags are left for the TTS layer
   expect(splitSpeechResponse('{"display_text":"Done.","spoken_text":"[laughs] Done."}').spoken).toBe('[laughs] Done.');
 });
 
-test('the chat copy keeps audio tags, so it matches the text already streamed', () => {
+test('the parsed display keeps audio tags; only the runtime removes them, and only on voice turns', () => {
   for (const text of ['ได้เลยค่ะ [whispers] เดี๋ยวดูให้นะคะ', 'Add [laughs] to the text.']) expect(splitSpeechResponse(text).display).toBe(text);
   expect(splitSpeechResponse('Prose [pause] first.\n{"display_text":"","spoken_text":"x"}').display).toBe('Prose [pause] first.');
   const long = `Use [laughs] in ElevenLabs v3 prompts.\n\`\`\`\nexample\n\`\`\``;

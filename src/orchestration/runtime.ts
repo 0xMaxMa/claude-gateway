@@ -35,6 +35,7 @@ import { browserRouting } from './browser-routing';
 import { providerRefusalNotice, responseFailureMessage } from './response-errors';
 import type { ProviderRefusal } from '../session/provider-refusal';
 import { displayPrefix } from './display-stream';
+import { audioTagFreePrefix, stripAudioTags } from '../voice/audio-tags';
 import { responseHasVoiceOrigin, voiceReplyAllowed } from './voice-reply-policy';
 import { taskReport } from './task-report';
 import { TelegramToolStatus } from './telegram-tool-status';
@@ -1283,8 +1284,10 @@ export class AgentOrchestrationRuntime {
         }
         if (choice.mode === 'wait') return {waiting:true, prepared:true};
         const alreadyPublished = !!acknowledgementId;
-        acknowledgement = intakeChoice!.acknowledgement!;
-        acknowledgementId = this.decisions.acknowledge(decision, acknowledgement, speechEnabled ? acknowledgement : undefined);
+        // Speech performs the acknowledgement's audio tags; on a voice turn the chat copy omits them.
+        const spokenAcknowledgement = intakeChoice!.acknowledgement!;
+        acknowledgement = speechEnabled ? stripAudioTags(spokenAcknowledgement).trim() || spokenAcknowledgement : spokenAcknowledgement;
+        acknowledgementId = this.decisions.acknowledge(decision, acknowledgement, speechEnabled ? spokenAcknowledgement : undefined);
         // Capture only the original acknowledgement chunks, before asynchronous delivery
         // can enqueue optional speech-failure notices under the same response.
         if (!alreadyPublished) acknowledgementTextIds = this.store.all("SELECT id FROM deliveries WHERE response_id=? AND modality='text'", acknowledgementId).map(row => String(row.id));
@@ -1294,10 +1297,10 @@ export class AgentOrchestrationRuntime {
         if (!alreadyPublished && speechEnabled && !channelSpeech) {
           try {
             const listener = this.voiceListeners.get(sessionId);
-            if (listener?.principalId === input.scope.principalId) listener.receive({responseId:acknowledgementId,text:acknowledgement,spoken:acknowledgement,requestId:input.requestId,speechOnly:true});
+            if (listener?.principalId === input.scope.principalId) listener.receive({responseId:acknowledgementId,text:acknowledgement,spoken:spokenAcknowledgement,requestId:input.requestId,speechOnly:true});
             else {
               const stream=this.inputStreams.get(receipt.inputId);
-              stream?.push({responseId:acknowledgementId,text:acknowledgement});stream?.close();
+              stream?.push({responseId:acknowledgementId,text:spokenAcknowledgement});stream?.close();
             }
           } catch {
             this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.speech_failed', { responseId: acknowledgementId, code: 'VOICE_PLAYBACK_UNAVAILABLE' }));
@@ -1544,7 +1547,8 @@ export class AgentOrchestrationRuntime {
         // answer (the CLI never forces the tool call) still streams through unchanged.
         rawDisplay += chunk;
         if (Buffer.byteLength(rawDisplay) > 262144) throw new OrchestrationError('RESPONSE_TOO_LARGE');
-        const next = displayPrefix(rawDisplay);
+        // A voice turn performs its audio tags, so its chat copy shows them neither streamed nor final.
+        const next = speechEnabled ? audioTagFreePrefix(displayPrefix(rawDisplay)) : displayPrefix(rawDisplay);
         if (!next || !next.startsWith(streamedDisplay)) return;
         chunk = next.slice(streamedDisplay.length);
         streamedDisplay = next;
@@ -1655,7 +1659,7 @@ export class AgentOrchestrationRuntime {
       const userTookControl=controlStepTasks.length>0&&controlStepTasks.every(taskId=>this.store.task(taskId)?.automationController==='user')&&
         [...attemptedTaskActions.values()].every(attempt=>attempt.committed||attempt.errorCode==='USER_CONTROLS_AUTOMATION');
       const controlSilent=userTookControl&&!response.interrupted&&(emptyControlReply||failedTaskActions)||!response.interrupted&&!failedTaskActions&&emptyControlReply&&(userControlCommand||controlStepTasks.some(taskId=>this.store.get("SELECT action_id FROM task_commands WHERE decision_id=? AND conversation_id=? AND task_id=? AND command_type='update' LIMIT 1",decision.decisionId,receipt.conversationId,taskId)));
-      const surfaces = review ?? { display: parsed.display, spoken: speechEnabled ? parsed.spoken : '' };
+      const surfaces = review ?? { display: speechEnabled ? stripAudioTags(parsed.display) : parsed.display, spoken: speechEnabled ? parsed.spoken : '' };
       // No silent failures. A plain-text reply loses nothing (the fallback IS the reply), so
       // an ordinary turn that answered in prose is still not an anomaly; but a turn that DID
       // emit the declared payload and left it unusable (no display_text, or JSON we could not
