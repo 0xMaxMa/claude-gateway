@@ -40,6 +40,6 @@ export async function removeProject(root: string, name: ProjectName): Promise<Re
     return ok({ name });
   } catch (e) {
     console.warn(`projects: removing ${trash} failed: ${(e as Error).message}`);
-    return ok({ name, warning: `Some files could not be removed and remain in ${trash}` });
+    return ok({ name, warning: `Some files could not be removed and remain in ${trash}. Remove that folder by hand: rm -rf ${trash}` });
   }
 }

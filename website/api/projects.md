@@ -123,6 +123,17 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects
 }
 ```
 
+Folders the list leaves out are reported in two optional arrays, so a client can tell the user
+why a folder is missing. Both are absent when empty, and `projects` is not affected by them.
+
+- `skipped` holds `{ "name", "reason" }` for each folder or link that is not a project, sorted by
+  name, at most 50. `reason` is `invalid_name` (the [name rules](#errors) reject it: a space,
+  non-ASCII letters, a leading dot or dash, or more than 64 characters), `symlink_outside_root` (a
+  link whose target is outside the root) or `not_a_directory` (a link to a file). Loose files and
+  broken links are not reported.
+- `leftovers` holds the names of hidden `.deleting-*` folders in the root, sorted, at most 50. They
+  are what a [`DELETE`](#delete-project) could not remove. The gateway never sweeps them.
+
 `is_git` is true when the project has a `.git` entry (a directory, or the file a
 worktree or submodule uses).
 
@@ -193,7 +204,7 @@ that were started in the project are kept, and their project no longer resolves.
 The folder is first moved to a hidden `<root>/.deleting-<name>-<id>` folder, so the project leaves
 the list in one step and its name is free at once. If some files there cannot be removed, for
 example a subfolder without write permission, the response is still `200` and adds a `warning`
-naming the hidden folder that holds them. A project is never left listed with part of its files gone.
+naming the exact folder to remove by hand (`rm -rf <root>/.deleting-<name>-<id>`). The folder is also listed in `leftovers` of [`GET /api/v1/projects`](#get-projects). A project is never left listed with part of its files gone.
 
 ## GET /api/v1/projects/:name/tree {#get-tree}
 

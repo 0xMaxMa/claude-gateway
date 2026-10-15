@@ -69,11 +69,27 @@ export type FileContent =
       limit: number;
     };
 
+/** Why a folder under the root is not a project. */
+export type SkipReason = 'invalid_name' | 'symlink_outside_root' | 'not_a_directory';
+
+export interface SkippedEntry {
+  name: string;
+  reason: SkipReason;
+}
+
 export interface ProjectList {
   root: string;
   exists: boolean;
   projects: Project[];
+  /** Folders and links the list left out, at most SKIPPED_LIMIT, sorted by name. Absent when there are none. */
+  skipped?: SkippedEntry[];
+  /** Hidden `.deleting-*` folders a failed delete left behind, at most SKIPPED_LIMIT, sorted. Absent when there are none. */
+  leftovers?: string[];
 }
+
+export const SKIPPED_LIMIT = 50;
+
+const DELETING_LEFTOVER_RE = /^\.deleting-/;
 
 export interface DirListing {
   path: RelPath;
@@ -171,21 +187,41 @@ export async function listProjects(
   const described = await mapLimit(
     dirents,
     LIST_CONCURRENCY,
-    async (d): Promise<Project | null> => {
+    async (d): Promise<{ project: Project } | { skipped: SkippedEntry } | { leftover: string } | null> => {
+      if (!(d.isDirectory() || d.isSymbolicLink())) return null;
+      if (d.isDirectory() && DELETING_LEFTOVER_RE.test(d.name)) return { leftover: d.name };
       // Names the other routes would reject are hidden so every listed project can be opened.
       const name = parseProjectName(d.name);
-      if (!name.ok || !(d.isDirectory() || d.isSymbolicLink())) return null;
+      if (!name.ok) return { skipped: { name: d.name, reason: "invalid_name" } };
       const dir = await resolveProjectDir(root, name.value);
-      if (!dir.ok) return null;
+      if (!dir.ok) {
+        const reason = dir.error === "path_escape" ? "symlink_outside_root" : dir.error === "not_a_directory" ? "not_a_directory" : null;
+        return reason ? { skipped: { name: d.name, reason } } : null;
+      }
       // Vanished or unreadable between readdir and stat: not listable.
-      return describeProject(realRoot.value, dir.value, name.value).catch(
-        () => null,
-      );
+      const project = await describeProject(realRoot.value, dir.value, name.value).catch(() => null);
+      return project ? { project } : null;
     },
   );
-  const projects = described.filter((p): p is Project => p !== null);
-  projects.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  return ok({ root: realRoot.value, exists: true, projects });
+  const projects: Project[] = [];
+  const skipped: SkippedEntry[] = [];
+  const leftovers: string[] = [];
+  for (const item of described) {
+    if (item && "project" in item) projects.push(item.project);
+    else if (item && "skipped" in item) skipped.push(item.skipped);
+    else if (item) leftovers.push(item.leftover);
+  }
+  const byName = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  projects.sort((a, b) => byName(a.name, b.name));
+  skipped.sort((a, b) => byName(a.name, b.name));
+  leftovers.sort(byName);
+  return ok({
+    root: realRoot.value,
+    exists: true,
+    projects,
+    ...(skipped.length > 0 ? { skipped: skipped.slice(0, SKIPPED_LIMIT) } : {}),
+    ...(leftovers.length > 0 ? { leftovers: leftovers.slice(0, SKIPPED_LIMIT) } : {}),
+  });
 }
 
 /** execFile rejects with a numeric exit code, or an errno string when git could not be spawned. */
