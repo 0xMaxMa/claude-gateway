@@ -168,6 +168,26 @@ describe("createProject", () => {
     }
   });
 
+  it("lets exactly one of concurrent creates differing only in case win", async () => {
+    for (let trial = 0; trial < 100; trial++) {
+      const trialRoot = path.join(base, `case-race-${trial}`);
+      fs.mkdirSync(trialRoot);
+      fs.mkdirSync(path.join(trialRoot, "other"));
+      const results = await Promise.all(
+        ["Foo", "foo", "FOO", "fOo"].map((n) =>
+          createProject(trialRoot, name(n), false),
+        ),
+      );
+      expect(results.filter((r) => r.ok)).toHaveLength(1);
+      for (const r of results.filter((r) => !r.ok)) {
+        expect(r).toEqual({ ok: false, error: "project_exists" });
+      }
+      expect(
+        fs.readdirSync(trialRoot).filter((n) => n.toLowerCase() === "foo"),
+      ).toHaveLength(1);
+    }
+  });
+
   it("reports the same real path that listProjects does when the configured root is a symlink", async () => {
     fs.mkdirSync(root);
     const link = path.join(base, "projects-link");

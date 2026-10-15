@@ -180,12 +180,25 @@ function gitInitWarning(e: GitInitError): string {
   return "git init failed";
 }
 
-export async function createProject(
+/** Tail of the create chain per root; the gateway is the only process creating projects there. */
+const createQueues = new Map<string, Promise<unknown>>();
+
+function serializeCreate<T>(root: string, fn: () => Promise<T>): Promise<T> {
+  const key = path.resolve(root);
+  const run = (createQueues.get(key) ?? Promise.resolve()).then(fn);
+  const tail = run.catch(() => undefined);
+  createQueues.set(key, tail);
+  void tail.then(() => {
+    if (createQueues.get(key) === tail) createQueues.delete(key);
+  });
+  return run;
+}
+
+async function makeProjectDir(
   root: string,
+  dir: string,
   name: ProjectName,
-  gitInit: boolean,
-): Promise<FsResult<CreatedProject>> {
-  const dir = path.join(root, name);
+): Promise<FsResult<void>> {
   try {
     await fsp.mkdir(root, { recursive: true });
   } catch (e) {
@@ -197,21 +210,31 @@ export async function createProject(
     );
   }
   // Case-folding filesystems already answer EEXIST; this makes Linux agree so a
-  // client never gets "Site" and "site" side by side. The atomic mkdir below
-  // stays the authority for exact-name races.
+  // client never gets "Site" and "site" side by side. The check and mkdir run
+  // serialized per root so concurrent case variants cannot both pass the check;
+  // the atomic mkdir stays the authority for exact-name races.
   try {
     const lower = name.toLowerCase();
     if ((await fsp.readdir(root)).some((n) => n.toLowerCase() === lower)) {
       return err("project_exists");
     }
-  } catch (e) {
-    return err(errnoToCode(e));
-  }
-  try {
     await fsp.mkdir(dir);
+    return ok(undefined);
   } catch (e) {
     return err(errnoToCode(e));
   }
+}
+
+export async function createProject(
+  root: string,
+  name: ProjectName,
+  gitInit: boolean,
+): Promise<FsResult<CreatedProject>> {
+  const dir = path.join(root, name);
+  const made = await serializeCreate(root, () =>
+    makeProjectDir(root, dir, name),
+  );
+  if (!made.ok) return made;
 
   let warning: string | undefined;
   if (gitInit) {
