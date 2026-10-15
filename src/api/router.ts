@@ -17,6 +17,7 @@ import { isValidConnectorId } from '../connectors/custom';
 import { agentsDirForConfig } from '../config/agent-env';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin, PROJECTS_ADMIN_REQUIRED } from './auth';
+import { guardAsyncRoutes } from './async-guard';
 import { hiddenSessions, historyExclusions, refusesProjectChat } from './project-gate';
 import { PROJECT_CHAT_ERRORS } from '../projects/chat';
 import { parseProjectName, ProjectName } from '../projects/paths';
@@ -575,7 +576,7 @@ export function createApiRouter(
   configPath?: string,
   models?: ModelConfig[] | (() => ModelConfig[] | undefined),
 ): Router {
-  const router = Router();
+  const router = guardAsyncRoutes(Router());
   const auth = createApiAuthMiddleware(apiKeys);
   router.use(voiceSettingsRouter(agentConfigs, agentRunners, apiKeys, configPath));
 
@@ -3961,6 +3962,10 @@ export function createApiRouter(
     const excludeSessionIds = await historyExclusions(runner, apiKey, req.query['session_id'], res);
     if (!excludeSessionIds) return;
     const query = req.query as Record<string, string>;
+    if (query['q'] !== undefined && typeof query['q'] !== 'string') {
+      res.status(400).json({ error: 'q must be a single string', code: 'INVALID_INPUT' });
+      return;
+    }
     const q = (query['q'] ?? '').trim();
     if (!q) {
       res.status(400).json({ error: 'q is required' });

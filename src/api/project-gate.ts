@@ -32,6 +32,10 @@ export async function hiddenSessions(runner: AgentRunner, apiKey: ApiKey): Promi
  * binding list that cannot be read, is answered 403 here and returns `null`.
  */
 export async function historyExclusions(runner: AgentRunner, apiKey: ApiKey, requestedSession: unknown, res: Response): Promise<string[] | null> {
+  if (requestedSession !== undefined && typeof requestedSession !== 'string') {
+    res.status(400).json({ error: 'session_id must be a single string', code: 'INVALID_INPUT' });
+    return null;
+  }
   const hidden = await hiddenSessions(runner, apiKey);
   if (!hidden || (typeof requestedSession === 'string' && hidden.includes(requestedSession))) {
     res.status(403).json(PROJECTS_ADMIN_REQUIRED);
