@@ -22,12 +22,25 @@ absent when Projects is usable. An older gateway omits the key, or lists project
 `"git"`, `"chat"` or `"run"`. Show running status and the Stop button only when it includes `"run"`, the Start button only when it includes `"start"`, and the Delete action only when it includes `"delete"`.
 
 **On by default.** The routes are on for every install, with the root `~/projects`, and
-need no configuration. Admin keys can list, read, run, start and delete whatever sits under
-that folder. To switch Projects off, set `gateway.projects.enabled` to `false` and restart:
+need no configuration. Every key with `admin: true` can list, read, run, start and delete whatever sits under
+that folder, and nothing else changes for keys without it. To switch Projects off, set
+`gateway.projects.enabled` to `false` (a boolean, not the string `"false"`, which the gateway warns about and
+ignores) and restart:
 
 ```json
 { "gateway": { "projects": { "enabled": false } } }
 ```
+
+**Security model.** The admin key gate decides who may use the Projects API and who may bind a chat to a
+project. It is not a filesystem boundary. Agents run with `--dangerously-skip-permissions`, so any key that can
+send an agent a message can ask it to read or change any file the gateway's user can reach, `~/projects` included.
+On a host-mode orchestrated agent, `task_spawn` accepts any absolute `working_directory`, so a worker can run
+inside a project folder without a project-bound chat. This predates Projects and is unchanged. What the gate does
+guarantee: a key without `admin` gets `403 forbidden_key` on every `/v1/projects` route and on every route that
+reveals or controls a project-bound session (its info, messages, history, search, streams, tasks, voice, media,
+rename, delete, clear, compact, stop and restart). Lists leave bound sessions out for such a key, project name
+included. The check reads the session's binding file, so it also covers sessions bound before the gate existed.
+Treat an admin key as full access to the pod, and give the others no more than they need.
 
 **Root.** Projects live in `gateway.projects.root`, which defaults to
 `~/projects`. Every listing returns the root as `root`, resolved through
@@ -53,7 +66,9 @@ absolute path or a path starting with `~/`:
 The API has no denylist inside the root, so the gateway rejects a configuration
 whose root is `/`, your home directory, `~/.claude-gateway`, the directory holding
 `config.json`, or any directory that contains one of them. Changing the root
-takes effect after a gateway restart. Keys other than `root`, `trusted` and `enabled`
+takes effect after a gateway restart. The gateway trims the root and strips trailing slashes before it checks and
+uses it, so `" ~/projects/ "` and `~/projects` are one root. A root holding `:` is not supported, because git's
+discovery fence is a `:`-separated list: the gateway logs a warning and disables Projects. Keys other than `root`, `trusted` and `enabled`
 inside `gateway.projects` are ignored, and the gateway logs a warning that names them.
 
 **Requirements and files.** Projects needs `git` 2.26 or newer on the pod. The read calls
@@ -369,7 +384,8 @@ A slim status for every project that is a git repository, for project cards.
 Plain folders are left out. A repository whose status takes longer than 3
 seconds or fails maps to `null`. The gateway reads at most 4 repositories at a
 time, and each read runs 2 git processes one after the other (the config, then the status), so one request keeps up to 4
-git processes running and spawns 2 per repository. To stay fast, `change_count` counts an untracked folder as one change,
+git processes running and spawns 2 per repository (measured: 400 for 200 repositories). `GET /api/v1/projects`
+spawns none, since it only looks at the filesystem. To stay fast, `change_count` counts an untracked folder as one change,
 so it can be lower than the `change_count` of the full status.
 
 ```bash
@@ -387,7 +403,7 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/git-
 
 ### GET /api/v1/projects/:name/git {#get-git}
 
-Returns `200` with a [GitStatus](#git-status). A read spawns 4 git processes: the config first, then `rev-parse`, `status` and `log` at once. The 3 second limit covers the whole read.
+Returns `200` with a [GitStatus](#git-status). A read spawns 4 git processes (5 for an unborn branch that has an upstream, which also counts the commits to pull): the config first, then `rev-parse`, `status` and `log` at once. The 3 second limit covers the whole read.
 
 ```bash
 curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/app/git
