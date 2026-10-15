@@ -18,17 +18,19 @@ export type ProjectUnsupportedReason = 'container' | 'workspace_mode' | 'codex';
 export type ProjectChatError =
   | { code: 'project_unsupported_agent'; reason: ProjectUnsupportedReason }
   | { code: 'project_not_found' }
+  | { code: 'projects_disabled' }
   | { code: 'project_unavailable'; reason: ProjectsErrorCode };
 
 /** The uppercase send-time form: a turn that cannot run because its project failed to resolve. */
 export function projectUnavailableError(error: ProjectChatError): Error {
-  const reason = error.code === 'project_not_found' ? 'not_found' : error.reason;
+  const reason = error.code === 'project_not_found' ? 'not_found' : error.code === 'projects_disabled' ? 'projects_disabled' : error.reason;
   return Object.assign(new Error(`Project folder is unavailable (${reason})`), { code: 'PROJECT_UNAVAILABLE', reason });
 }
 
 export const PROJECT_CHAT_ERRORS: Record<ProjectChatError['code'], { status: number; message: string }> = {
   project_unsupported_agent: { status: 409, message: 'This agent cannot chat in a project' },
   project_not_found: { status: 404, message: 'Project not found' },
+  projects_disabled: { status: 409, message: 'Projects are disabled on this gateway' },
   project_unavailable: { status: 409, message: 'Project folder is no longer available' },
 };
 
@@ -41,7 +43,13 @@ export interface ProjectCwd {
   identity: string;
 }
 
+/** loadConfig sets `enabled: false` when the default root would expose HOME or the config dir. */
+export function projectsEnabled(config: GatewayConfig): boolean {
+  return config.gateway.projects?.enabled !== false;
+}
+
 export async function resolveProjectCwd(config: GatewayConfig, name: ProjectName): Promise<Result<ProjectCwd, ProjectChatError>> {
+  if (!projectsEnabled(config)) return err({ code: 'projects_disabled' });
   const dir = await resolveProjectDir(resolveProjectsRoot(config), name);
   if (!dir.ok) {
     return err(dir.error === 'not_found' ? { code: 'project_not_found' } : { code: 'project_unavailable', reason: dir.error });

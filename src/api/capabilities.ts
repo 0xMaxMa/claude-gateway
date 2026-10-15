@@ -3,6 +3,9 @@ import { ApiKey } from '../types';
 import { CHAT_CHANNELS, type ChatChannel } from '../history/types';
 import { createApiAuthMiddleware } from './auth';
 import { GATEWAY_VERSION } from './gateway-version';
+import { gatewayOrchestrationEnabled } from '../orchestration/gateway-config';
+import { projectsEnabled } from '../projects/chat';
+import type { GatewayConfig } from '../types';
 
 /**
  * Capability manifest — the single place that declares which optional features
@@ -53,12 +56,24 @@ export interface CapabilitiesResponse {
   };
 }
 
-export function buildCapabilitiesResponse(version: string = GATEWAY_VERSION): CapabilitiesResponse {
+/**
+ * Project-bound chat is accepted through the queued-admission path, which needs orchestration,
+ * so a gateway with orchestration off does not advertise `chat`. A gateway whose Projects API is
+ * disabled advertises no projects token at all.
+ */
+export function projectsCapabilities(config?: GatewayConfig): ProjectsCapability[] {
+  if (!config) return [...PROJECTS_CAPABILITIES];
+  if (!projectsEnabled(config)) return [];
+  const orchestrated = gatewayOrchestrationEnabled(config.gateway.orchestration);
+  return PROJECTS_CAPABILITIES.filter((c) => c !== 'chat' || orchestrated);
+}
+
+export function buildCapabilitiesResponse(version: string = GATEWAY_VERSION, config?: GatewayConfig): CapabilitiesResponse {
   return {
     version,
     capabilities: {
       cross_channel_message: [...CROSS_CHANNEL_MESSAGE_CHANNELS],
-      projects: [...PROJECTS_CAPABILITIES],
+      projects: projectsCapabilities(config),
     },
   };
 }
@@ -72,11 +87,11 @@ export function buildCapabilitiesResponse(version: string = GATEWAY_VERSION): Ca
  * endpoint 404s rather than serving open access. `apiKeys` is therefore always
  * the configured, non-empty key set.
  */
-export function createCapabilitiesRouter(apiKeys: ApiKey[]): Router {
+export function createCapabilitiesRouter(apiKeys: ApiKey[], config?: GatewayConfig): Router {
   const router = Router();
   router.use(createApiAuthMiddleware(apiKeys));
   router.get('/v1/capabilities', (_req: Request, res: Response) => {
-    res.json(buildCapabilitiesResponse());
+    res.json(buildCapabilitiesResponse(GATEWAY_VERSION, config));
   });
   return router;
 }

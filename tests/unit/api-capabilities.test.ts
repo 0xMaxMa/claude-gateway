@@ -68,6 +68,13 @@ describe('GET /api/v1/capabilities', () => {
     expect(res.body.capabilities.projects).toEqual(['list', 'create', 'read', 'git', 'chat', 'run', 'start', 'delete']);
   });
 
+  it('drops chat without orchestration and everything when the Projects API is disabled', () => {
+    const gw = (g: Record<string, unknown>) => ({ gateway: g, agents: [] }) as never;
+    expect(buildCapabilitiesResponse('1', gw({ orchestration: false })).capabilities.projects).not.toContain('chat');
+    expect(buildCapabilitiesResponse('1', gw({ orchestration: true })).capabilities.projects).toContain('chat');
+    expect(buildCapabilitiesResponse('1', gw({ orchestration: true, projects: { enabled: false } })).capabilities.projects).toEqual([]);
+  });
+
   it('only advertises channel identifiers the gateway itself uses', () => {
     // Every advertised channel must be a real ChatChannel string — the same value
     // a session reports as its channel — so a client's `includes(channel)` check

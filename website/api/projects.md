@@ -27,6 +27,8 @@ project (for a path inside it). Hardlinks are not detected: a hardlinked file re
 because the API is a view of what the gateway's user can already read, not a
 sandbox.
 
+**Disabled.** When the default root would expose your home or config directory, the gateway logs a warning and does not mount these routes: they answer `404`, `capabilities.projects` is empty, and `POST /sessions` with `project` answers `409 projects_disabled`. Sessions already bound to a project fail with `409 PROJECT_UNAVAILABLE`. Set `gateway.projects.root` to re-enable.
+
 **Configuring the root.** Set `gateway.projects.root` in `config.json` to an
 absolute path or a path starting with `~/`:
 

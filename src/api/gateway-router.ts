@@ -48,7 +48,7 @@ import { GATEWAY_VERSION } from './gateway-version';
 import { createWorkspaceRouter } from './workspace-router';
 import { createProjectsRouter } from './projects-router';
 import { StopLimiter, systemSys } from '../projects/running';
-import { resolveProjectsRoot } from '../projects/chat';
+import { projectsEnabled, resolveProjectsRoot } from '../projects/chat';
 import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
 import { createWebhooksRouter } from './webhooks-router';
@@ -734,7 +734,7 @@ export class GatewayRouter {
     }
 
     // Mount pod-wide project browsing (gateway.projects.root, default ~/projects)
-    if (this.gatewayConfig?.gateway?.api?.keys && this.gatewayConfig.gateway.projects?.enabled !== false) {
+    if (this.gatewayConfig?.gateway?.api?.keys && projectsEnabled(this.gatewayConfig)) {
       this.app.use('/api', createProjectsRouter(this.gatewayConfig.gateway.api.keys, resolveProjectsRoot(this.gatewayConfig), {
         sys: systemSys(),
         limiter: new StopLimiter(),
@@ -816,7 +816,7 @@ export class GatewayRouter {
     // Mount the capability manifest (GET /api/v1/capabilities) so clients can
     // feature-detect this build instead of pinning to a version number.
     if (this.gatewayConfig?.gateway?.api?.keys?.length) {
-      this.app.use('/api', createCapabilitiesRouter(this.gatewayConfig.gateway.api.keys));
+      this.app.use('/api', createCapabilitiesRouter(this.gatewayConfig.gateway.api.keys, this.gatewayConfig));
     }
 
     // Mount apps router (admin routes for installing/managing apps)

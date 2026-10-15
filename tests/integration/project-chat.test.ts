@@ -578,4 +578,42 @@ describe('projects disabled by the config loader', () => {
       await teardown(h);
     }
   });
+
+  it('advertises no projects tokens', async () => {
+    const h = await harness({ enabled: false });
+    try {
+      const res = await supertest(h.app).get('/api/v1/capabilities').set('Authorization', `Bearer ${KEYS.admin!.key}`);
+      expect(res.body.capabilities.projects).toEqual([]);
+    } finally {
+      await teardown(h);
+    }
+  });
+
+  it('refuses a project session with 409 projects_disabled and leaves no session or binding behind', async () => {
+    const h = await harness({ enabled: false });
+    try {
+      const res = await create(h, 'alfred', KEYS.admin!, { project: 'site' });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('projects_disabled');
+      const list = await supertest(h.app).get('/api/v1/agents/alfred/sessions').set('Authorization', `Bearer ${KEYS.admin!.key}`).query({ chat_id: 'web' });
+      expect(JSON.stringify(list.body)).not.toContain('"site"');
+      expect(fs.existsSync(path.join(h.base, 'agents', 'alfred', 'project-bindings'))).toBe(false);
+    } finally {
+      await teardown(h);
+    }
+  });
+});
+
+describe('capabilities follow orchestration', () => {
+  it.each([[false, false], [true, true]])('orchestration=%s advertises chat=%s', async (orchestration, chat) => {
+    const h = await harness({ orchestration });
+    try {
+      const res = await supertest(h.app).get('/api/v1/capabilities').set('Authorization', `Bearer ${KEYS.admin!.key}`);
+      const projects = res.body.capabilities.projects as string[];
+      expect(projects.includes('chat')).toBe(chat);
+      expect(projects).toEqual(expect.arrayContaining(['list', 'create', 'read', 'git', 'run', 'start', 'delete']));
+    } finally {
+      await teardown(h);
+    }
+  });
 });
