@@ -1,7 +1,7 @@
 import {CURRENT_CONTROL_ROUND_SQL} from '../control-notification';
 import {preparedBrowserAnswers} from '../browser-fields';
 import {ComputerInputs} from '../../jev/computer-inputs';
-import {AUTOMATION_IDLE_TIMEOUT_MS,automationSession,pausedForCommand,stoppedForCommand} from './automation-session';
+import {AUTOMATION_IDLE_TIMEOUT_MS,agentStepRunEnded,automationSession,pausedForCommand,stoppedForCommand} from './automation-session';
 import {computerActionText,computerOutcomeText} from '../../automation/computer-outcome';
 import {browserOutcomeText} from '../../automation/browser-outcome';
 import {textCommand} from '../../automation/direct-command';
@@ -1099,7 +1099,7 @@ export class TaskService {
       if (outcome.type !== 'unknown') this.pool.release(task.taskId, outcome.type === 'completed' || outcome.type === 'paused');
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
       if (task.state === 'queued') this.store.enqueue('schedule', `schedule:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
-      else if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation' || (waitingForCommand&&task.state==='waiting_input'&&task.automationController!=='user'&&task.executionControl?.phase!=='paused')) this.notify(task);
+      else if (TERMINAL_TASK_STATES.has(task.state) || task.state === 'needs_reconciliation' || (waitingForCommand&&task.state==='waiting_input'&&task.automationController!=='user'&&task.executionControl?.phase!=='paused') || (waitingForCommand&&agentStepRunEnded(task))) this.notify(task);
       return task;
     });
   }

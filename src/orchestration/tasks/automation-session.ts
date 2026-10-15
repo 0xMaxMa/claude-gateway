@@ -33,6 +33,29 @@ export function agentGoalRun(task: TaskSnapshot): boolean {
 /** agentGoalRun as a trusted SQL fragment over a tasks row alias; a parity test keeps them equal. */
 export const agentGoalRunSql=(alias:string)=>`(json_extract(${alias}.snapshot_json,'$.automationController')='user' AND json_extract(${alias}.snapshot_json,'$.revision')=1
   AND COALESCE(json_extract(${alias}.snapshot_json,'$.executionControl.revision'),0)!=1)`;
+/** The agent's goal run ended in waiting_input after its step run, with no question
+ * pending for the owner: every step ran, one had no visible effect, or one was not
+ * executed (low confidence, unclear, an ambiguous or rejected target). The run is over
+ * and the agent that spawned it owns the next move. A question the owner answers is
+ * recorded on the task (a worker question, a missing field value, a high-impact
+ * action awaiting yes or no); that and a user pause stay silent.
+ * Pod-jinawong 2.0.20, task 7eebb836: all 4 steps ran and the video played, yet
+ * waiting_input is not notified under user control, so the agent never answered. */
+export function agentStepRunEnded(task: TaskSnapshot): boolean {
+  const report=task.computerReport??task.browserReport;
+  return agentGoalRun(task)&&task.state==='waiting_input'&&!task.activeAttemptId&&!task.pendingQuestion&&task.executionControl?.phase!=='paused'
+    &&report?.reason==='COMMAND_WAITING_INPUT'&&!!report.stepRun&&!report.fieldRequest&&!task.computerReport?.lastAction?.confirm;
+}
+/** agentStepRunEnded as a trusted SQL fragment over a tasks row alias; a parity test keeps them equal.
+ * Always 0 or 1: a NULL from a missing report field would turn NOT(...) in the mailbox NULL too. */
+export const agentStepRunEndedSql=(alias:string)=>{
+  const field=(path:string)=>`json_extract(${alias}.snapshot_json,'${path}')`;
+  const report=`COALESCE(${field('$.computerReport')},${field('$.browserReport')})`;
+  return `COALESCE((${agentGoalRunSql(alias)} AND ${alias}.state='waiting_input'
+  AND ${field('$.activeAttemptId')} IS NULL AND ${field('$.pendingQuestion')} IS NULL AND COALESCE(${field('$.executionControl.phase')},'')!='paused'
+  AND json_extract(${report},'$.reason')='COMMAND_WAITING_INPUT' AND json_extract(${report},'$.stepRun') IS NOT NULL
+  AND json_extract(${report},'$.fieldRequest') IS NULL AND NOT COALESCE(${field('$.computerReport.lastAction.confirm')},0)),0)`;
+};
 /** The task waits for the owner's next direct command (a settled or paused round). */
 export function pausedForCommand(task: TaskSnapshot): boolean {
   return task.state==='waiting_input'&&!task.activeAttemptId&&(task.executionControl?.phase==='paused'||['THINKING_WAITING_INPUT','COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED'].includes(task.computerReport?.reason??task.browserReport?.reason??''));

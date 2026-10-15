@@ -11,11 +11,11 @@ import {pendingReports} from '../../../src/orchestration/notification-mailbox';
 // Pod 2.0.16: the agent spawned "open YouTube in Chrome"; Chrome showed YouTube,
 // yet the task sat in waiting_input as "Controlling" with the Mac "Being controlled",
 // and the agent never heard back (waiting_input is not notified for user control).
-function fixture(){
+function fixture(adapter:'computer'|'browser'='computer'){
  const root=mkdtempSync(join(tmpdir(),'computer-goal-')),store=new OrchestrationStore(join(root,'db'),'a'),tasks=new TaskService(store);
  const accepted=store.acceptInput({scope:{agentId:'a',agentSessionId:'s',source:'api',accountId:'u',chatId:'c',threadKey:'',principalId:'u'},text:'เปิด youtube',capabilities:{execute:true,writeMemory:false}});
  const decisions=new DecisionService(store),decision=decisions.begin(accepted.conversationId,'u',[accepted.inputId]);
- const task=tasks.spawn({...accepted,...decision,principalId:'u',execute:true,writeMemory:false,actionId:'spawn'},{title:'YouTube',instructions:'open YouTube in Chrome',targetProfile:'gateway-managed',gatewayTarget:{adapter:'computer',sessionId:'mac',name:'Mac'}});
+ const task=tasks.spawn({...accepted,...decision,principalId:'u',execute:true,writeMemory:false,actionId:'spawn'},{title:'YouTube',instructions:'open YouTube in Chrome',targetProfile:'gateway-managed',gatewayTarget:{adapter,sessionId:'mac',name:'Mac'}});
  // The agent's spawning turn ends; its task runs on.
  decisions.finish(decision,'Opening YouTube.');
  const finish=(outcome:WorkerOutcome)=>{const attempt=tasks.claim(task.taskId)!;tasks.started(attempt.attemptId,attempt.generation);
@@ -123,5 +123,68 @@ test('a goal run end without a recorded idle window waits for the user\'s next t
   f.store.run("UPDATE tasks SET snapshot_json=json_remove(snapshot_json,'$.automationSession.idleSince') WHERE id=?",failed.taskId);
   expect(f.delivered()).toBe(0);
   expect(f.delivered(Date.now()+365*24*3600_000)).toBe(0);
+ }finally{f.close();}
+});
+
+// Pod-jinawong 2.0.20, task 7eebb836: the agent's goal ran in step mode, all 4 steps
+// ran and the video played, then the task sat in waiting_input (COMMAND_WAITING_INPUT,
+// ALL_STEPS_DONE) with no notification: the agent never answered and the chat hung.
+const stepRun=(stopReason:'ALL_STEPS_DONE'|'STEP_NO_EFFECT'|'STEP_NOT_EXECUTED')=>({...report,steps:4,status:'needs_input' as const,reason:'COMMAND_WAITING_INPUT',
+ stepRun:{total:4,completed:stopReason==='ALL_STEPS_DONE'?4:2,stopReason,remaining:[]}});
+test.each(['ALL_STEPS_DONE','STEP_NO_EFFECT'] as const)('an agent goal step run that stops with %s reaches the agent',stopReason=>{
+ const f=fixture();try{
+  const waiting=f.finish({type:'paused',computerReport:stepRun(stopReason)});
+  expect(waiting.state).toBe('waiting_input');expect(waiting.automationController).toBe('user');
+  expect(f.notified()).toBe(1);expect(f.delivered()).toBe(1);
+  // The device session stays open for the owner's next command.
+  expect(acceptsDirectCommand(f.store.task(f.task.taskId)!)).toBe(true);
+ }finally{f.close();}
+});
+
+// Reviewed PR #592: STEP_NOT_EXECUTED also ends a run that asks the owner nothing
+// (LOW_CONFIDENCE, UNCLEAR, an ambiguous or rejected target). It left the chat hanging.
+test.each(['LOW_CONFIDENCE','UNCLEAR','NO_SUPPORTED_ACTION'])('an agent goal step run not executed (%s) with no question reaches the agent',detail=>{
+ const f=fixture();try{
+  const waiting=f.finish({type:'paused',computerReport:{...stepRun('STEP_NOT_EXECUTED'),stepRun:{...stepRun('STEP_NOT_EXECUTED').stepRun,detail}}});
+  expect(waiting.state).toBe('waiting_input');
+  expect(f.notified()).toBe(1);expect(f.delivered()).toBe(1);
+ }finally{f.close();}
+});
+
+test.each([
+ ['a high-impact action awaiting yes or no',{lastAction:{kind:'press',label:'Delete',blocked:true,confirm:true}}],
+ ['a missing field value',{fieldRequest:{label:'Name',reason:'missing' as const}}],
+])('a step run that waits on a question for the owner (%s) stays silent',(_name,question)=>{
+ const f=fixture();try{
+  expect(f.finish({type:'paused',computerReport:{...stepRun('STEP_NOT_EXECUTED'),...question}}).state).toBe('waiting_input');
+  expect(f.notified()).toBe(0);expect(f.delivered()).toBe(0);
+ }finally{f.close();}
+});
+
+// Reviewed PR #592: the agent's browser goal runs its steps the same way (browserReport.stepRun).
+const browserStepRun=(stopReason:'ALL_STEPS_DONE'|'STEP_NO_EFFECT'|'STEP_NOT_EXECUTED')=>({status:'needs_verification' as const,reason:'COMMAND_WAITING_INPUT',steps:3,evaluations:3,
+ stepRun:{total:3,completed:stopReason==='ALL_STEPS_DONE'?3:1,stopReason,remaining:[],...(stopReason==='STEP_NOT_EXECUTED'?{detail:'LOW_TARGET_CONFIDENCE'}:{})}});
+test.each(['ALL_STEPS_DONE','STEP_NO_EFFECT','STEP_NOT_EXECUTED'] as const)('an agent browser goal step run that stops with %s reaches the agent',stopReason=>{
+ const f=fixture('browser');try{
+  const waiting=f.finish({type:'paused',browserReport:browserStepRun(stopReason)});
+  expect(waiting.state).toBe('waiting_input');expect(waiting.automationController).toBe('user');
+  expect(f.notified()).toBe(1);expect(f.delivered()).toBe(1);
+  expect(acceptsDirectCommand(f.store.task(f.task.taskId)!)).toBe(true);
+ }finally{f.close();}
+});
+
+test('a browser step run that waits on a missing field value stays silent',()=>{
+ const f=fixture('browser');try{
+  f.finish({type:'paused',browserReport:{...browserStepRun('STEP_NOT_EXECUTED'),fieldRequest:{ref:'e1',label:'Name',reason:'missing'}}});
+  expect(f.notified()).toBe(0);expect(f.delivered()).toBe(0);
+ }finally{f.close();}
+});
+
+test('the user\'s own step command that finishes all steps stays silent',()=>{
+ const f=fixture();try{
+  f.finish({type:'paused',computerReport:{...report,steps:0,status:'needs_input',reason:'COMMAND_WAITING_INPUT'}});
+  f.tasks.controlByUser(f.task.conversationId,'u',f.task.taskId,{id:'00000000-0000-4000-8000-000000000002',action:'revise',expectedRevision:1,text:'click search'});
+  f.finish({type:'paused',computerReport:stepRun('ALL_STEPS_DONE')});
+  expect(f.notified()).toBe(0);expect(f.delivered()).toBe(0);
  }finally{f.close();}
 });
