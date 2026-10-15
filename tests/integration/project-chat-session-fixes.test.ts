@@ -200,4 +200,15 @@ describe('project chat session fixes', () => {
     const list = await supertest(h.app).get('/api/v1/agents/alfred/sessions').set(auth(KEYS.admin!)).query({ chat_id: 'web' });
     expect(list.body.sessions.filter((s: any) => s.project === 'site')).toHaveLength(1);
   }, 30000);
+
+  it('F6 deleting a session removes its binding file and boundProjects entry', async () => {
+    h = await harness();
+    const sid = await projectSession(h);
+    await create(h, 'alfred', KEYS.admin!, {});
+    await send(h, sid, 'a');
+    const del = await supertest(h.app).delete(`/api/v1/agents/alfred/sessions/${sid}`).set(auth(KEYS.admin!)).query({ chat_id: 'web' });
+    expect(del.status).toBeLessThan(300);
+    expect(fs.existsSync(path.join(h.base, 'agents', 'alfred', 'project-bindings', `${sid}.json`))).toBe(false);
+    expect((h.runners[0] as any).boundProjects.has(sid)).toBe(false);
+  }, 30000);
 });

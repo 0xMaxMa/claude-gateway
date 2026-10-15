@@ -683,6 +683,10 @@ export class SessionStore {
     fs.renameSync(`${file}.tmp`, file);
   }
 
+  async deleteProjectBinding(agentId: string, sessionId: string): Promise<void> {
+    await fs.promises.rm(this.projectBindingPath(agentId, sessionId), { force: true });
+  }
+
   /** No file means the session was never bound. A file that cannot be read is not the same thing. */
   async loadProjectBinding(agentId: string, sessionId: string): Promise<ProjectBinding> {
     let raw: string;

@@ -5977,6 +5977,8 @@ export class AgentRunner extends EventEmitter {
       if (err instanceof SessionNotInIndexError) return;
       throw err;
     });
+    await this.sessionStore.deleteProjectBinding(this.agentConfig.id, sessionId);
+    this.boundProjects.delete(sessionId);
     // Purge from SQLite so the session no longer appears in listSessions()
     const mediaPaths = this.historyDb.clearSession(`api-${chatId}`, sessionId);
     MediaStore.deleteMediaFiles(this.agentsBaseDir, this.agentConfig.id, mediaPaths);
