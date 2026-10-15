@@ -4272,8 +4272,6 @@ export function createApiRouter(
     }
 
     const wildcardParam = (req.params as Record<string, string>)['0'] ?? '';
-    const mediaSession = /^(?:media\/)?api-([a-zA-Z0-9_-]{1,64})(?:\/|$)/.exec(wildcardParam)?.[1];
-    if (mediaSession && await refusesProjectChat(runner, apiKey, mediaSession)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     const agentsBaseDir = runner.getAgentsBaseDir();
     let absPath: string;
     try {
@@ -4282,6 +4280,12 @@ export function createApiRouter(
       res.status(400).json({ error: 'Invalid path' });
       return;
     }
+    // Gate the path the file system will open, not the spelling the client sent: dot segments and encoded
+    // separators are already folded away here.
+    let mediaRoot = MediaStore.agentMediaRoot(agentsBaseDir, agentId);
+    try { mediaRoot = fs.realpathSync(mediaRoot); } catch { /* no media folder yet */ }
+    const mediaSession = /^api-([a-zA-Z0-9_-]{1,64})(?:\/|$)/i.exec(path.relative(mediaRoot, absPath))?.[1];
+    if (mediaSession && await refusesProjectChat(runner, apiKey, mediaSession)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     if (!fs.existsSync(absPath)) {
       res.status(404).json({ error: 'Not found' });
       return;
