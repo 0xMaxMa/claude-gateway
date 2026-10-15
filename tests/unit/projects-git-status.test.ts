@@ -176,6 +176,22 @@ describe('redactCredentials cost', () => {
     expect(detail.length).toBeLessThanOrEqual(2000);
   });
 
+  it('hookDetail stays fast and keeps its diagnostics on an adversarial 1 MB output', () => {
+    const shapes = ['a'.repeat(65_535) + ' ' + 'b'.repeat(1_000_000), 'a'.repeat(65_534) + '  ' + 'b'.repeat(1_000_000), 'x'.repeat(1_000_000)];
+    for (const stdout of shapes) {
+      const t0 = Date.now();
+      const detail = hookDetail({ code: 1, stdout, stderr: '' });
+      expect(Date.now() - t0).toBeLessThan(100);
+      expect(detail.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('hookDetail drops an unterminated userinfo at the cut when no whitespace is near', () => {
+    const text = `${'a'.repeat(64 * 1024 - 600)}\nhttps://user:${'S'.repeat(5000)}@host/x`;
+    const detail = hookDetail({ code: 1, stdout: text, stderr: '' });
+    expect(detail).not.toContain('SSS');
+  });
+
   it('hookDetail leaks no part of a credential that straddles the 64K cut', () => {
     const cut = 64 * 1024;
     for (const offset of [1, 3, 8, 12, 20]) {

@@ -307,12 +307,25 @@ async function hasCommitHook(dir: string): Promise<boolean> {
 }
 
 const HOOK_DETAIL_SCAN_CHARS = 64 * 1024;
+const HOOK_DETAIL_LOOKBACK = 256;
+
+/** `raw` cut at the last whitespace within a bounded lookback, else at the limit. A regex here backtracks quadratically on a long unbroken run. */
+function cutAtWhitespace(raw: string): string {
+  if (raw.length <= HOOK_DETAIL_SCAN_CHARS) return raw;
+  const floor = HOOK_DETAIL_SCAN_CHARS - HOOK_DETAIL_LOOKBACK;
+  for (let i = HOOK_DETAIL_SCAN_CHARS; i > floor; i--) {
+    if (/\s/.test(raw[i - 1])) return raw.slice(0, i - 1);
+  }
+  // No whitespace nearby: cut at the limit, but not inside a `://userinfo` still waiting for its `@`.
+  const head = raw.slice(0, HOOK_DETAIL_SCAN_CHARS);
+  const scheme = head.lastIndexOf('://');
+  return scheme >= 0 && !/[\s/]/.test(head.slice(scheme + 3)) ? head.slice(0, scheme) : head;
+}
 
 export function hookDetail(out: GitOutput): string {
   const raw = `${out.stdout}${out.stderr}`.trim();
   // A userinfo credential holds no whitespace, so a cut at whitespace never leaves half of one for the regexes to miss.
-  const scanned = raw.length > HOOK_DETAIL_SCAN_CHARS ? raw.slice(0, HOOK_DETAIL_SCAN_CHARS).replace(/\S*$/, '') : raw;
-  const text = redactCredentials(scanned);
+  const text = redactCredentials(cutAtWhitespace(raw));
   // A cut through a multi-byte character decodes to U+FFFD, which would push past the byte cap.
   return Buffer.from(text).subarray(0, HOOK_DETAIL_MAX_BYTES).toString().replace(/\uFFFD$/, '');
 }
