@@ -723,6 +723,42 @@ export class SessionStore {
     }
   }
 
+  /**
+   * Removes the binding files of sessions that no index or session file names, which a crash between a delete and the
+   * reap, or between the binding and the index write, leaves behind. Returns how many it removed. It removes nothing
+   * unless every session folder was read cleanly, since a session wrongly taken for gone would turn unbound.
+   */
+  async sweepOrphanBindings(agentId: string): Promise<number> {
+    try {
+      const bound = await this.listBoundSessionIds(agentId);
+      if (bound.size === 0) return 0;
+      const known = new Set<string>();
+      const sessionsDir = path.join(this.agentsBaseDir, agentId, 'sessions');
+      let dirs: fs.Dirent[] = [];
+      try {
+        dirs = await fs.promises.readdir(sessionsDir, { withFileTypes: true });
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return 0;
+      }
+      for (const dir of dirs.filter((d) => d.isDirectory())) {
+        const names = await fs.promises.readdir(path.join(sessionsDir, dir.name));
+        for (const name of names) if (name.endsWith('.json') && name !== 'index.json') known.add(name.slice(0, -'.json'.length));
+        if (!names.includes('index.json')) continue;
+        const index = JSON.parse(await fs.promises.readFile(path.join(sessionsDir, dir.name, 'index.json'), 'utf-8')) as SessionIndex;
+        for (const session of index.sessions) known.add(session.id);
+      }
+      let removed = 0;
+      for (const id of bound) {
+        if (known.has(id)) continue;
+        await this.deleteProjectBinding(agentId, id);
+        removed++;
+      }
+      return removed;
+    } catch {
+      return 0;
+    }
+  }
+
   /** True when `name` is a session id in some index or a chat id with a session folder: the two things media/api-<name>/ is named for. */
   async apiMediaOwnerKnown(agentId: string, name: string): Promise<boolean> {
     if (!SESSION_ID_RE.test(name)) return false;

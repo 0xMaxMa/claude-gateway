@@ -4026,6 +4026,8 @@ export class AgentRunner extends EventEmitter {
     if (this.agentConfig.orchestration?.enabled || fs.existsSync(path.join(this.agentDir, 'orchestration.db'))) await this.getOrchestration();
     this.stopping = false;
     await this.sweepStaleSessionDirs();
+    const orphans = await this.sessionStore.sweepOrphanBindings(this.agentConfig.id);
+    if (orphans > 0) this.logger.info('Removed project bindings whose session no longer exists', { agentId: this.agentConfig.id, count: orphans });
     await this.startCallbackServer();
     if (this.agentConfig.telegram?.botToken) {
       this.receiver = new TelegramReceiver(
