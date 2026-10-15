@@ -1,7 +1,7 @@
 import { type CommandAction, commandCatalog } from '../agent/command-help';
 import { responseFailureMessage } from '../orchestration/response-errors';
 import { voiceSettingsRouter } from './voice-settings-router';
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { apiPrincipal } from '../orchestration/identity';
 import { OrchestrationError } from '../orchestration/types';
 import { randomUUID, createHash } from 'crypto';
@@ -107,6 +107,12 @@ const TASK_CONTROL_ERROR_STATUS: Record<string, number> = {
 };
 export function isValidSessionId(v: unknown): v is string {
   return typeof v === 'string' && SESSION_ID_RE.test(v);
+}
+
+/** `router.param('sessionId', requireValidSessionId)`: a malformed id gets 400 before auth or any handler. */
+export function requireValidSessionId(_req: Request, res: Response, next: NextFunction, value: string): void {
+  if (isValidSessionId(value)) next();
+  else res.status(400).json({ error: 'Invalid session id', code: 'INVALID_INPUT' });
 }
 
 // agent_id likewise becomes a filesystem key (agents/<id>/media/…), so any
@@ -580,10 +586,7 @@ export function createApiRouter(
   const auth = createApiAuthMiddleware(apiKeys);
   // A session id becomes a file name (bindings, media, history) and a lookup key. Anything but a plain id names no
   // session, so every route with :sessionId answers 400 before its handler runs, whoever the caller is.
-  router.param('sessionId', (_req, res, next, value) => {
-    if (isValidSessionId(value)) next();
-    else res.status(400).json({ error: 'Invalid session id', code: 'INVALID_INPUT' });
-  });
+  router.param('sessionId', requireValidSessionId);
   router.use(voiceSettingsRouter(agentConfigs, agentRunners, apiKeys, configPath));
 
   async function writeAgentsToConfigImpl(
