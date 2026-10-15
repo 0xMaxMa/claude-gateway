@@ -154,6 +154,11 @@ export interface LoadConfigOptions {
    * diagnosable there too — see issue #472.
    */
   onPublicUrlUnset?: () => void;
+  /**
+   * Called with the text of each Projects warning (an unusable root, a malformed `enabled`, unknown keys). Same
+   * rationale as the callbacks above: the `console.warn` alone never reaches `logs/gateway.log`.
+   */
+  onWarning?: (message: string) => void;
 }
 
 /**
@@ -187,6 +192,17 @@ function cleanProjectsRoot(raw: string): string {
 /** Unset, or spelled like the default in any clean or unclean way (config.template.json ships it): both mean "the operator chose nothing". */
 function isDefaultProjectsRoot(raw: unknown): boolean {
   return raw === undefined || (typeof raw === 'string' && expandHome(cleanProjectsRoot(raw)) === expandHome(DEFAULT_PROJECTS_ROOT));
+}
+
+/** The folder a root resolves to when that path (not the spelling) holds ":", else null. A link into `a:b` breaks the fence like a typed `a:b`. */
+function colonRealRoot(root: unknown): string | null {
+  if (typeof root !== 'string') return null;
+  try {
+    const real = fs.realpathSync(expandHome(root));
+    return real.includes(':') ? real : null;
+  } catch {
+    return null;
+  }
 }
 
 function validateProjectsRoot(raw: unknown, configPath: string): void {
@@ -253,6 +269,11 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
     console.warn(`[gateway] Skipping agent "${id}": ${reason}`);
     skippedAgents.push(id);
     options?.onSkippedAgent?.({ id, reason, ...(missingVar ? { missingVar } : {}) });
+  };
+
+  const warnProjects = (message: string): void => {
+    console.warn(message);
+    options?.onWarning?.(message);
   };
 
   let raw: string;
@@ -442,33 +463,43 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
     if (typeof projectsConfig.root === 'string' && projectsConfig.root.trim()) projectsConfig.root = cleanProjectsRoot(projectsConfig.root);
     const root = projectsConfig.root;
     if (root !== undefined && !isDefaultProjectsRoot(root)) validateProjectsRoot(root, configPath);
-    if (typeof root === 'string' && root.includes(':')) {
-      console.warn(
-        `[gateway] gateway.projects.root "${root}" holds ":", which git's discovery fence (GIT_CEILING_DIRECTORIES) cannot express, so the Projects API is disabled.\n` +
+    const colonRoot = typeof root === 'string' && root.includes(':') ? root : colonRealRoot(root ?? DEFAULT_PROJECTS_ROOT);
+    if (colonRoot !== null && projectsConfig.enabled !== false) {
+      warnProjects(
+        `[gateway] gateway.projects.root "${colonRoot}" holds ":", which git's discovery fence (GIT_CEILING_DIRECTORIES) cannot express, so the Projects API is disabled.\n` +
         '          Set gateway.projects.root to a path without ":".',
       );
       projectsConfig.enabled = false;
     }
     if ('enabled' in projectsConfig && typeof projectsConfig.enabled !== 'boolean') {
-      console.warn(`[gateway] gateway.projects.enabled must be true or false (got ${JSON.stringify(projectsConfig.enabled)}); ignoring it, so Projects stays on.`);
+      warnProjects(`[gateway] gateway.projects.enabled must be true or false (got ${JSON.stringify(projectsConfig.enabled)}); ignoring it, so Projects keeps its default, which is on.`);
       delete projectsConfig.enabled;
     }
     const trusted = (projects as Record<string, unknown>).trusted;
     if (trusted !== undefined) validateTrustedProjects(trusted);
     const unknown = Object.keys(projects).filter((key) => !PROJECTS_KEYS.includes(key));
     if (unknown.length > 0) {
-      console.warn(`[gateway] Ignoring unknown gateway.projects keys: ${unknown.join(', ')}. Known keys: ${PROJECTS_KEYS.join(', ')}.`);
+      warnProjects(`[gateway] Ignoring unknown gateway.projects keys: ${unknown.join(', ')}. Known keys: ${PROJECTS_KEYS.join(', ')}.`);
     }
   }
   // An operator who never chose a root, or whose config.json only carries the template's default, gets a warning, not a gateway that refuses to start.
   if (isDefaultProjectsRoot((projects as { root?: unknown } | undefined)?.root)) {
     const exposed = exposedByProjectsRoot(expandHome(DEFAULT_PROJECTS_ROOT), configPath);
     if (exposed !== null) {
-      console.warn(
+      warnProjects(
         `[gateway] The default projects root ${DEFAULT_PROJECTS_ROOT} is or contains ${exposed}, so the Projects API is disabled.\n` +
         '          Set gateway.projects.root to a folder that holds only projects.',
       );
       interpolatedGateway.projects = { ...(projects as object | undefined), enabled: false };
+    } else if (projects === undefined) {
+      const colonRoot = colonRealRoot(DEFAULT_PROJECTS_ROOT);
+      if (colonRoot !== null) {
+        warnProjects(
+          `[gateway] The default projects root ${DEFAULT_PROJECTS_ROOT} resolves to "${colonRoot}", which holds ":", so the Projects API is disabled.\n` +
+          '          Set gateway.projects.root to a path without ":".',
+        );
+        interpolatedGateway.projects = { enabled: false };
+      }
     }
   }
 

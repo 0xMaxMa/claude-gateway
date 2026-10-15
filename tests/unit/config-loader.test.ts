@@ -777,6 +777,40 @@ describe('config-loader', () => {
         expect(warn.mock.calls.filter(([m]) => String(m).includes('":"'))).toHaveLength(1);
       });
 
+      it('reports every Projects warning to onWarning, so it can reach gateway.log', () => {
+        const seen: string[] = [];
+        const configPath = path.join(configDir, 'config.json');
+        const loadWith = (projects: unknown) => {
+          fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/tmp', projects }, agents: [] }));
+          return loadConfig(configPath, { onWarning: (m) => seen.push(m) });
+        };
+        loadWith({ root: path.join(tmpDir, 'srv', 'a:b') });
+        loadWith({ enabled: 'false' });
+        loadWith({ rooot: '/x' });
+        fs.symlinkSync(home, path.join(home, 'projects'));
+        loadWith({});
+        expect(seen.map((m) => m.match(/":"|gateway\.projects\.enabled|unknown gateway\.projects keys|default projects root/)?.[0])).toEqual([
+          '":"', 'gateway.projects.enabled', 'unknown gateway.projects keys', 'default projects root',
+        ]);
+      });
+
+      it('disables projects for a root that is a symlink to a folder holding ":", like a root holding it', () => {
+        const target = path.join(tmpDir, 'srv', 'a:b');
+        fs.mkdirSync(target, { recursive: true });
+        const link = path.join(tmpDir, 'srv', 'lnk');
+        fs.symlinkSync(target, link);
+        expect(loadRoot(link).gateway.projects).toEqual({ root: link, enabled: false });
+        expect(warn.mock.calls.filter(([m]) => String(m).includes('":"'))).toHaveLength(1);
+      });
+
+      it('disables projects when the default root is a symlink to a folder holding ":"', () => {
+        const target = path.join(tmpDir, 'srv', 'c:d');
+        fs.mkdirSync(target, { recursive: true });
+        fs.symlinkSync(target, path.join(home, 'projects'));
+        expect(load({ projects: { trusted: [] } }).gateway.projects).toEqual({ trusted: [], enabled: false });
+        expect(warn.mock.calls.filter(([m]) => String(m).includes('":"'))).toHaveLength(1);
+      });
+
       it('warns about unknown keys inside gateway.projects and still loads', () => {
         const unknownWarnings = () => warn.mock.calls.filter(([m]) => String(m).includes('unknown gateway.projects keys'));
         expect(load({ projects: { rooot: '/srv/p', enabled: true } }).gateway.projects).toMatchObject({ enabled: true });
