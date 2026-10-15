@@ -17,10 +17,14 @@ import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
 import { VoiceReplays } from '../voice/replay';
 import { PCM16 } from '../voice/types';
 
+import type { VoiceScope } from '../voice/scope';
+
 interface VoiceTicket {
-  agentId: string; sessionId: string; chatId: string; principalId: string;
+  agentId: string; sessionId: string; scope: VoiceScope; principalId: string;
   voiceSessionId: string; expiresAt: number; origin?: string; allowTools: boolean; model?: string;
 }
+/** A minted ticket, or the HTTP status and body that refuse it. */
+export type VoiceTicketResult = { status: 200; body: Record<string, unknown> } | { status: number; body: { error: string; code?: string } };
 /** Authenticated voice sessions share conversation ownership with text and task controls. */
 export class VoiceApi {
   readonly router = Router();
@@ -112,37 +116,10 @@ export class VoiceApi {
       const config = this.configs.get(agentId), runner = this.agents.get(agentId);
       if (!config || !runner || !canAccessAgent(key, agentId)) { res.status(403).json({ error: 'Access denied' }); return; }
       if (!config.orchestration?.enabled || !config.voice?.enabled) { res.status(409).json({ error: 'Voice disabled' }); return; }
-      const voice = resolveOrchestrationConfig(config.orchestration, config.voice ?? { enabled: false }).voice;
-      const origin = req.headers.origin;
       const chatId = req.body?.chat_id;
       if (typeof chatId !== 'string' || !await runner.apiSessionExists(chatId, sessionId)) { res.status(404).json({ code: 'SESSION_NOT_FOUND', error: 'Session not found' }); return; }
-      try { await runner.authorizeVoiceSession(sessionId, apiPrincipal(key)); }
-      catch { res.status(403).json({ error: 'Session access denied' }); return; }
-      try {
-        const managed = [voice.stt.provider, voice.tts.provider].find(provider => provider.startsWith('managed:'));
-        if (managed) await requireManagedVoiceCredit(managed);
-      } catch (error) {
-        const code = error instanceof Error && error.message === 'MANAGED_VOICE_QUOTA_EXHAUSTED' ? error.message : 'MANAGED_VOICE_USAGE_UNAVAILABLE';
-        res.status(code === 'MANAGED_VOICE_QUOTA_EXHAUSTED' ? 429 : 503).json({error: code, code}); return;
-      }
-      this.prune();
-      const leaseKey = `${agentId}:${sessionId}`;
-      if (this.leases.has(leaseKey)) { res.status(409).json({ error: 'Voice session already active' }); return; }
-      if (this.leases.size >= 100) { res.status(503).json({ error: 'Voice capacity exceeded' }); return; }
-      const ticket = randomBytes(32).toString('hex'), voiceSessionId = randomUUID();
-      // Reserve synchronously before persistence yields, including capacity accounting.
-      this.leases.set(leaseKey, voiceSessionId);
-      try { await runner.setBrowserVoice(sessionId, apiPrincipal(key), true); }
-      catch {
-        if (this.leases.get(leaseKey) === voiceSessionId) this.leases.delete(leaseKey);
-        res.status(403).json({ error: 'Session access denied' }); return;
-      }
-      const value: VoiceTicket = { agentId, sessionId, chatId, principalId: apiPrincipal(key), voiceSessionId,
-        expiresAt: Date.now() + 30000, origin, allowTools: config.allow_tools ?? Boolean(key.allow_tools) };
-      this.tickets.set(ticket, value);
-      res.json({ voice_session_id: voiceSessionId, ticket, expires_at: value.expiresAt, input_format: PCM16, output_format: PCM16,
-        capabilities: { full_duplex: true, playback_clear: true, playback_progress: true },
-        stream_path: `/api/v1/agents/${encodeURIComponent(agentId)}/voice-sessions/${voiceSessionId}/stream` });
+      const result = await this.mintTicket(agentId, sessionId, { kind: 'api', principalId: apiPrincipal(key), chatId }, req.headers.origin, config.allow_tools ?? Boolean(key.allow_tools));
+      res.status(result.status).json(result.body);
     });
     this.router.delete('/v1/agents/:agentId/sessions/:sessionId/voice-sessions/:voiceSessionId', auth, async (req: Request, res: Response) => {
       const key = (req as Request & { apiKey: ApiKey }).apiKey;
@@ -155,6 +132,44 @@ export class VoiceApi {
       active?.socket.close(); await active?.session.close(); this.sessions.delete(id); this.releaseLease(owner);
       res.status(204).end();
     });
+  }
+  /** Reserve the conversation's voice lease and issue a single-use, origin-bound
+   * ticket. Callers authenticate the principal and resolve the session first. */
+  async mintTicket(agentId: string, sessionId: string, scope: VoiceScope, origin: string | undefined, allowTools: boolean): Promise<VoiceTicketResult> {
+    const config = this.configs.get(agentId), runner = this.agents.get(agentId);
+    if (!config || !runner) return { status: 403, body: { error: 'Access denied' } };
+    if (!config.orchestration?.enabled || !config.voice?.enabled) return { status: 409, body: { error: 'Voice disabled' } };
+    const voice = resolveOrchestrationConfig(config.orchestration, config.voice ?? { enabled: false }).voice;
+    try { await runner.authorizeVoiceSession(sessionId, scope.principalId); }
+    catch { return { status: 403, body: { error: 'Session access denied' } }; }
+    try {
+      const managed = [voice.stt.provider, voice.tts.provider].find(provider => provider.startsWith('managed:'));
+      if (managed) await requireManagedVoiceCredit(managed);
+    } catch (error) {
+      const code = error instanceof Error && error.message === 'MANAGED_VOICE_QUOTA_EXHAUSTED' ? error.message : 'MANAGED_VOICE_USAGE_UNAVAILABLE';
+      return { status: code === 'MANAGED_VOICE_QUOTA_EXHAUSTED' ? 429 : 503, body: { error: code, code } };
+    }
+    this.prune();
+    const leaseKey = `${agentId}:${sessionId}`;
+    if (this.leases.has(leaseKey)) return { status: 409, body: { error: 'Voice session already active' } };
+    if (this.leases.size >= 100) return { status: 503, body: { error: 'Voice capacity exceeded' } };
+    const ticket = randomBytes(32).toString('hex'), voiceSessionId = randomUUID();
+    // Reserve synchronously before persistence yields, including capacity accounting.
+    this.leases.set(leaseKey, voiceSessionId);
+    // API clients keep voice intent across reconnects until they turn it off.
+    // A Telegram chat has no such control; its live listener speaks while connected.
+    if (scope.kind === 'api') {
+      try { await runner.setBrowserVoice(sessionId, scope.principalId, true); }
+      catch {
+        if (this.leases.get(leaseKey) === voiceSessionId) this.leases.delete(leaseKey);
+        return { status: 403, body: { error: 'Session access denied' } };
+      }
+    }
+    const value: VoiceTicket = { agentId, sessionId, scope, principalId: scope.principalId, voiceSessionId, expiresAt: Date.now() + 30000, origin, allowTools };
+    this.tickets.set(ticket, value);
+    return { status: 200, body: { voice_session_id: voiceSessionId, ticket, expires_at: value.expiresAt, input_format: PCM16, output_format: PCM16,
+      capabilities: { full_duplex: true, playback_clear: true, playback_progress: true },
+      stream_path: `/api/v1/agents/${encodeURIComponent(agentId)}/voice-sessions/${voiceSessionId}/stream` } };
   }
   upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): boolean {
     const url = new URL(request.url ?? '/', 'http://localhost');
@@ -220,14 +235,14 @@ export class VoiceApi {
             const target=speechTarget??{taskId:executionTaskId};speechTarget=undefined;
             await target.pause;
             let accepted;
-            try{accepted=await runner.submitVoiceUtterance(ticket.sessionId,ticket.chatId,ticket.principalId,text,utteranceId,ticket.allowTools,ticket.model,target.taskId);}
+            try{accepted=await runner.submitVoiceUtterance(ticket.sessionId,ticket.scope,text,utteranceId,ticket.allowTools,ticket.model,target.taskId);}
             catch(error){release(target);throw error;}
             return accepted;
           },
-          () => runner.stopVoiceResponse(ticket.sessionId), { ...voice.turns, maxBufferedAudioMs: voice.playback.maxBufferedAudioMs, language: voice.language, mergeWindowMs: 1200 },
+          () => runner.stopVoiceResponse(ticket.sessionId), { ...voice.turns, maxBufferedAudioMs: voice.playback.maxBufferedAudioMs, language: voice.language },
           (responseId, progress, state) => runner.recordVoicePlayback(responseId, ticket.principalId, progress, state),
           (responseId, audio) => runner.saveVoiceReplay(ticket.sessionId, ticket.principalId, responseId, audio),
-          event => console.info(JSON.stringify({ ts: new Date().toISOString(), level: 'info', event: 'Voice timing', agentId: ticket.agentId, sessionId: ticket.sessionId, voiceSessionId: ticket.voiceSessionId, ...event, provider: voice[event.operation].provider, model: voice[event.operation].model })));
+          event => console.info(JSON.stringify({ ts: new Date().toISOString(), level: 'info', event: 'Voice timing', agentId: ticket.agentId, sessionId: ticket.sessionId, voiceSessionId: ticket.voiceSessionId, ...event, ...(event.operation === 'turn' ? {} : { provider: voice[event.operation].provider, model: voice[event.operation].model }) })));
       } catch { send({ type: 'voice.error', code: 'PROVIDER_CONFIGURATION_ERROR' }); ws.close(); this.releaseLease(ticket); return; }
       this.sessions.set(ticket.voiceSessionId, { session, socket: ws, ticket });
       let started = false, playbackReady = false;
@@ -328,10 +343,10 @@ export class VoiceApi {
   private prune(): void {
     for (const [key, ticket] of this.tickets) if (ticket.expiresAt < Date.now()) { this.tickets.delete(key); this.releaseLease(ticket); }
   }
+  /** API keys changed: revoke what they authorized. Telegram calls are proven by initData, not keys. */
   invalidateAuthorization(): void {
-    for(const ticket of this.tickets.values())this.releaseLease(ticket);
-    this.tickets.clear();
-    for(const value of this.sessions.values())value.socket.close(1008,'Authorization changed');
+    for(const [token,ticket] of this.tickets)if(ticket.scope.kind==='api'){this.releaseLease(ticket);this.tickets.delete(token);}
+    for(const value of this.sessions.values())if(value.ticket.scope.kind==='api')value.socket.close(1008,'Authorization changed');
   }
   async close(): Promise<void> {
     clearInterval(this.pruner); this.replays.close();

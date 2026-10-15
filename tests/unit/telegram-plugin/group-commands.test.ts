@@ -10,7 +10,7 @@ const group = (text: string, patch: Partial<Access> = {}, fromId = '7') =>
   groupCommandReply(allowed(patch), { chatType: 'supergroup', chatId: '-100', fromId, text, botUsername: 'agent_bot' })
 
 describe('a direct-message-only command in a group', () => {
-  it.each(['/model', '/models', '/help', '/status', '/clear', '/compact', '/restart', '/sessions', '/session', '/tasks', '/voice on', '/voices', '/start'])(
+  it.each(['/model', '/models', '/help', '/status', '/clear', '/compact', '/restart', '/sessions', '/session', '/tasks', '/voice on', '/voices', '/call', '/start'])(
     '%s in an allowed group gets a pointer to the direct message', text => {
       expect(group(text)).toBe(`${text.split(' ')[0]} is only available in a direct message with the bot.`)
     })

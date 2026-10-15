@@ -876,7 +876,7 @@ const RECEIVER_MODE = process.env.TELEGRAM_RECEIVER_MODE === 'true'
 import { parseMenuFileContent } from './menu-parser'
 
 const BOT_COMMANDS = [
-  ...(ORCHESTRATION_ENABLED ? [{ command: 'tasks', description: 'View pending tasks in this chat' }, { command: 'voice', description: 'Turn automatic voice replies on or off' }, { command: 'voices', description: 'Choose the agent voice' }] : []),
+  ...(ORCHESTRATION_ENABLED ? [{ command: 'tasks', description: 'View pending tasks in this chat' }, { command: 'voice', description: 'Turn automatic voice replies on or off' }, { command: 'voices', description: 'Choose the agent voice' }, { command: 'call', description: 'Start a live voice call with the agent' }] : []),
   { command: 'session', description: 'Show current session info' },
   { command: 'sessions', description: 'Manage conversation sessions' },
   { command: 'new', description: 'Create a new session' },
@@ -1529,6 +1529,28 @@ bot.command('voice', async ctx => {
     const menu = voiceMenu(await telegramVoiceSetting(String(ctx.chat.id), choice ? choice as VoiceReplyMode : undefined))
     await ctx.reply(menu.text, choice ? {} : { reply_markup: menu.reply_markup })
   } catch { await ctx.reply('Voice settings are unavailable. Check the agent TTS configuration.') }
+})
+
+// /call — open a live voice call as a Telegram Mini App bound to this DM. The
+// page proves the user again with signed initData before any ticket is issued.
+bot.command('call', async ctx => {
+  if (!ORCHESTRATION_ENABLED) { await ctx.reply('Voice calls require orchestration mode.'); return }
+  if (ctx.chat?.type !== 'private' || !isCallbackAuthorized(ctx)) return
+  if (!CALLBACK_URL_BASE) return
+  try {
+    const response = await fetch(CALLBACK_URL_BASE + '/command', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(10000),
+      body: JSON.stringify({ command: 'voice_call_pair', chat_id: String(ctx.chat.id), payload: { user_id: String(ctx.from!.id) } }),
+    })
+    const data = (await response.json()) as { success?: boolean; url?: string; error?: string }
+    if (!data.success || !data.url) {
+      await ctx.reply(data.error === 'not_configured' ? 'Voice calls are not configured. Set gateway.publicUrl in config.json first.'
+        : data.error === 'voice_not_configured' ? 'Voice calls need voice enabled for this agent.' : 'Could not start a voice call right now.')
+      return
+    }
+    // web_app buttons open the Mini App with signed initData; Telegram requires HTTPS.
+    await ctx.reply('Tap to start a voice call. Your words and the replies also appear here.', { reply_markup: new InlineKeyboard().webApp('\u{1F399} Start voice call', data.url) })
+  } catch { await ctx.reply('Could not start a voice call right now.') }
 })
 
 // Reuse the /tasks live-message lifecycle: serialize reads/replacement, edit only

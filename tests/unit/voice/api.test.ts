@@ -276,7 +276,7 @@ test('confirmed voice words pause the selected task once, retain its target acro
     stt.sessions[0].emit({type:'segment_final',segmentId:'segment',text:'Manchester instead'});
     stt.sessions[0].emit({type:'commit_done',commitId:stt.sessions[0].commitId!});
     await until(()=>submit.mock.calls.length===1&&audio.length>0);
-    expect((submit.mock.calls[0] as unknown[])[7]).toBe(first);
+    expect((submit.mock.calls[0] as unknown[])[6]).toBe(first);
     expect((pause.mock.calls[0] as unknown[])[2]).toBe(first);expect(pause).toHaveBeenCalledTimes(1);
     expect(events.some(e=>e.type==='utterance.accepted')).toBe(true);
     // A discarded partial belongs to neither the next task nor the next utterance.

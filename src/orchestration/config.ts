@@ -82,7 +82,8 @@ export interface OrchestrationConfig {
     language?: string;
     stt?: { provider?: string; model?: string };
     tts?: { provider?: string; model?: string; voiceId?: string };
-    turns?: { silenceCommitMs?: number; finalizationTimeoutMs?: number; maxUtteranceMs?: number };
+    /** mergeWindowMs: how long a committed utterance waits for a continuation before it becomes one turn; 0 admits it at once. */
+    turns?: { silenceCommitMs?: number; finalizationTimeoutMs?: number; maxUtteranceMs?: number; mergeWindowMs?: number };
     playback?: { maxBufferedAudioMs?: number; bargeIn?: boolean };
     /** Long-form `narrate` worker tool: read supplied text aloud as a sequence of audio files. */
     narrate?: { enabled?: boolean; maxChars?: number; maxParts?: number; targetChars?: number; partTimeoutMs?: number };
@@ -102,7 +103,7 @@ export const ORCHESTRATION_DEFAULTS = {
   voice: { enabled: false, notes: { enabled: true, provider: 'elevenlabs', model: 'scribe_v2', replyWithVoice: true }, transport: 'websocket' as const, maxActiveSessionsPerConversation: 1, allowedOrigins: [] as string[], language: '',
     stt: { provider: 'elevenlabs', model: 'scribe_v2_realtime' },
     tts: { provider: 'elevenlabs', model: 'eleven_v3_conversational', voiceId: '' },
-    turns: { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000 },
+    turns: { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, mergeWindowMs: 1200 },
     playback: { maxBufferedAudioMs: 1500, bargeIn: true },
     narrate: { enabled: true, maxChars: 100000, maxParts: 60, targetChars: 800, partTimeoutMs: 60000 } },
 };
@@ -130,7 +131,7 @@ export function validateTree(value: unknown, template: unknown, prefix: string):
       if (!Array.isArray(item) || (!item.length && key !== 'allowedOrigins') || item.some(v => typeof v !== 'string')) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a string array`);
     } else if (expected && typeof expected === 'object') validateTree(item, expected, where);
     else if (typeof item !== typeof expected) throw new OrchestrationError('INVALID_CONFIG', `Invalid ${where}`);
-    else if (typeof item === 'number' && (!Number.isSafeInteger(item) || item < (['maxDurationMs', 'progressStaleLimitMs', 'inputDebounceMs'].includes(key) ? 0 : 1) || item > 2147483647)) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a positive bounded integer`);
+    else if (typeof item === 'number' && (!Number.isSafeInteger(item) || item < (['maxDurationMs', 'progressStaleLimitMs', 'inputDebounceMs', 'mergeWindowMs'].includes(key) ? 0 : 1) || item > 2147483647)) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a positive bounded integer`);
   }
 }
 export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVoice?: AgentVoiceConfig) {

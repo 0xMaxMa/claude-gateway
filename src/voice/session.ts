@@ -1,5 +1,5 @@
 import { describeVoiceError } from './errors';
-import { voiceTrace, tracedAudio, VoiceDiagnosticSink } from './diagnostics';
+import { voiceTrace, tracedAudio, VoiceDiagnosticSink, VoiceTraceIds } from './diagnostics';
 import { pcmToWav } from './wav';
 import { resolveVoiceId } from './providers/voice-catalog';
 import { randomUUID } from 'crypto';
@@ -13,6 +13,8 @@ export interface VoiceClient {
   audio(frame: Buffer): void;
   bufferedBytes(): number;
 }
+/** The `turn` trace of one utterance; its ids fill in as the turn is admitted and answered. */
+type TurnTrace = { ids: VoiceTraceIds & { utteranceId: string }; trace: ReturnType<typeof voiceTrace> };
 export interface VoiceSessionOptions { silenceCommitMs: number; finalizationTimeoutMs: number; maxUtteranceMs: number; maxBufferedAudioMs: number; language?: string; mergeWindowMs?: number; }
 export class VoiceSession {
   readonly playback = new VoicePlayback();
@@ -27,14 +29,15 @@ export class VoiceSession {
   private playingResponseId?: string;
   private interruption = 0;
   private pausedUntil = 0;
-  private playbackTrace?: { epoch: number; firstProgress: boolean; trace: ReturnType<typeof voiceTrace> };
+  private playbackTrace?: { epoch: number; firstProgress: boolean; trace: ReturnType<typeof voiceTrace>; turn?: TurnTrace };
+  private endpoint?: TurnTrace;
   private readonly claimedSpeech = new Set<string>();
   private completedPlaybackEpoch?: number;
   private muteQueue: Promise<void> = Promise.resolve();
   private speechQueue: Promise<void> = Promise.resolve();
   private silenceTimer?: ReturnType<typeof setTimeout>;
   private admissionTimer?: ReturnType<typeof setTimeout>;
-  private pendingText: Array<{ text: string; utteranceId: string }> = [];
+  private pendingText: Array<{ text: string; utteranceId: string; turn: TurnTrace }> = [];
   /** Speech candidates defer admission; only confirmed words interrupt inference. */
   speechActivity(): void {
     if (this.closed) return;
@@ -50,7 +53,8 @@ export class VoiceSession {
     clearTimeout(this.admissionTimer);
     if (!this.pendingText.length || this.closed) return;
     const parts = this.pendingText.splice(0);
-    await this.admit(parts.map(p => p.text).join(' '), parts[0].utteranceId);
+    // The merged turn is answered once the user stops speaking: time it from the last part.
+    await this.admit(parts.map(p => p.text).join(' '), parts[0].utteranceId, parts[parts.length - 1].turn);
   }
   private readonly responses = new Set<Promise<void>>();
   setVoice(voiceId: string): void { this.voiceId = voiceId; }
@@ -134,6 +138,7 @@ export class VoiceSession {
   speechEnded(lastAudioSeq: number): void {
     if (!Number.isSafeInteger(lastAudioSeq) || lastAudioSeq < 0) throw new VoiceError('INVALID_AUDIO_SEQUENCE');
     this.speaking = false; clearTimeout(this.silenceTimer);
+    if (this.turn) { this.endpoint = this.turnTrace(this.turn.utteranceId); this.endpoint.trace.emit('speech_ended'); }
     this.silenceTimer = setTimeout(() => { void this.commit(lastAudioSeq).catch(error => this.error(error.code ?? 'VOICE_ERROR')); }, this.options.silenceCommitMs);
   }
   async commit(lastAudioSeq: number, flush = false): Promise<void> {
@@ -146,37 +151,47 @@ export class VoiceSession {
     this.pendingCommit = pending;
     try { await pending; } finally { if (this.pendingCommit === pending) this.pendingCommit = undefined; }
   }
+  private turnTrace(utteranceId: string): TurnTrace {
+    const ids = { utteranceId };
+    return { ids, trace: voiceTrace('turn', this.diagnostic, ids) };
+  }
   private async commitTurn(lastAudioSeq: number, flush: boolean): Promise<void> {
     if (this.finalizing || !this.turn || this.closed) return;
     this.finalizing = true; this.speaking = false; clearTimeout(this.silenceTimer);
     const turn = this.turn;
+    // An explicit commit without speech.ended starts its timing here.
+    let turnTrace = this.endpoint;
+    if (turnTrace?.ids.utteranceId !== turn.utteranceId) { turnTrace = this.turnTrace(turn.utteranceId); turnTrace.trace.emit('commit_received'); }
+    this.endpoint = undefined;
     try {
       const trace = voiceTrace('stt', this.diagnostic, { utteranceId: turn.utteranceId });
       trace.emit('commit_started');
       const text = await trace.run(() => turn.commit(lastAudioSeq)).then(text => { trace.emit('transcript_ready'); return text; }, error => { trace.emit('failed', { code: error instanceof VoiceError ? error.code : 'STT_PROVIDER_ERROR' }); throw error; });
       if (this.closed) return;
+      turnTrace.trace.emit('transcript_ready');
       // Some providers deliver no partial words. A confirmed continuation still
       // supersedes the previous reply before this text is admitted. Tasks survive.
       const playback = this.playback.snapshot();
       if (this.responses.size || (this.playingResponseId && (this.completedPlaybackEpoch !== playback.epoch || playback.playedSamples < playback.generatedSamples))) { this.speechStarted(this.playback.epoch + 1); this.speaking = false; }
       if (this.options.mergeWindowMs) {
         if (this.pendingText.reduce((n, p) => n + p.text.length, text.length) > 65536) throw new VoiceError('TRANSCRIPT_TOO_LARGE');
-        this.pendingText.push({ text, utteranceId: turn.utteranceId });
+        this.pendingText.push({ text, utteranceId: turn.utteranceId, turn: turnTrace });
         this.client.control({ type: 'stt.segment', utterance_id: turn.utteranceId, text, pending_text: this.pendingText.map(p => p.text).join(' ') });
         if (flush) await this.flushPending();
-      } else await this.admit(text, turn.utteranceId);
+      } else await this.admit(text, turn.utteranceId, turnTrace);
     } finally {
       await turn.close(false); if (this.turn === turn) this.turn = undefined; this.finalizing = false;
       if (!this.closed && !this.muted) await this.start();
       this.scheduleAdmission();
     }
   }
-  private async admit(text: string, utteranceId: string): Promise<void> {
+  private async admit(text: string, utteranceId: string, turn: TurnTrace): Promise<void> {
     this.client.control({ type: 'stt.final', utterance_id: utteranceId, text });
     const accepted = await this.submit(text, utteranceId);
+    turn.ids.inputId = accepted.inputId; turn.trace.emit('turn_admitted');
     this.client.control({ type: 'utterance.accepted', utterance_id: utteranceId, input_id: accepted.inputId });
     const epoch = this.interruption;
-    const streaming = accepted.stream ? this.speakStream(accepted.stream, epoch, accepted.response) : undefined;
+    const streaming = accepted.stream ? this.speakStream(accepted.stream, epoch, accepted.response, turn) : undefined;
     const response = accepted.response.then(async answer => {
       if (this.closed || epoch !== this.interruption) return;
       if (streaming) { this.client.control({ type: 'response.text', input_id: accepted.inputId, response_id: accepted.responseId?.(), text: answer, final: true }); await streaming; }
@@ -190,11 +205,12 @@ export class VoiceSession {
     void streaming?.catch(() => {}); // response chain reports the original failure once
     this.responses.add(response); void response.finally(() => this.responses.delete(response));
   }
-  private async speakStream(stream: AsyncIterable<{ responseId: string; text: string }>, epoch: number, response: Promise<string>): Promise<void> {
+  private async speakStream(stream: AsyncIterable<{ responseId: string; text: string }>, epoch: number, response: Promise<string>, turn: TurnTrace): Promise<void> {
     const iterator = stream[Symbol.asyncIterator]();
     const first = await iterator.next();
     if (this.closed) return;
     if (first.done) { await response; if (!this.closed && epoch === this.interruption) this.speechUnavailable(); return; }
+    turn.ids.responseId = first.value.responseId; turn.trace.emit('agent_first_spoken');
     const client = this.client;
     async function* source() {
       let chunk = first;
@@ -204,7 +220,7 @@ export class VoiceSession {
         chunk = await iterator.next();
       }
     }
-    try { await this.enqueueSpeech(source(), first.value.responseId, epoch); }
+    try { await this.enqueueSpeech(source(), first.value.responseId, epoch, turn); }
     finally { await iterator.return?.(); }
   }
   speechClaims(): string[] { return [...this.claimedSpeech]; }
@@ -219,12 +235,12 @@ export class VoiceSession {
       yield result.spoken;
     })(), result.responseId);
   }
-  private enqueueSpeech(text: AsyncIterable<string>, responseId?: string, interruption = this.interruption): Promise<void> {
+  private enqueueSpeech(text: AsyncIterable<string>, responseId?: string, interruption = this.interruption, turn?: TurnTrace): Promise<void> {
     if (responseId) {
       if (this.claimedSpeech.has(responseId)) return Promise.resolve();
       this.claimedSpeech.add(responseId);
     }
-    const trace = voiceTrace('tts', this.diagnostic, { responseId });
+    const trace = voiceTrace('tts', this.diagnostic, { responseId, utteranceId: turn?.ids.utteranceId, inputId: turn?.ids.inputId });
     trace.emit('speech_ready');
     const queued = this.speechQueue.then(async () => {
       while (!this.closed && interruption === this.interruption && (this.speaking || this.finalizing || this.pendingText.length)) await new Promise(resolve => setTimeout(resolve, 10));
@@ -234,7 +250,7 @@ export class VoiceSession {
         if (responseId) this.claimedSpeech.delete(responseId);
         return;
       }
-      await this.speak(text, this.playback.epoch, responseId, trace);
+      await this.speak(text, this.playback.epoch, responseId, trace, turn);
       // Synthesis completion is not playback completion. Preserve the tail before
       // the next utterance clears the playback epoch.
       const epoch = this.playback.epoch; let deadline = Date.now() + 10000;
@@ -249,7 +265,7 @@ export class VoiceSession {
     this.speechQueue = queued.catch(() => { this.error('TTS_UNAVAILABLE'); });
     return this.speechQueue;
   }
-  private async speak(spokenText: AsyncIterable<string>, expectedEpoch: number, responseId: string | undefined, trace: ReturnType<typeof voiceTrace>): Promise<void> {
+  private async speak(spokenText: AsyncIterable<string>, expectedEpoch: number, responseId: string | undefined, trace: ReturnType<typeof voiceTrace>, turn?: TurnTrace): Promise<void> {
     if (this.closed) return;
     if (this.speaking || expectedEpoch !== this.playback.epoch) return;
     const epoch = this.playback.clear(), segmentId = randomUUID();
@@ -265,7 +281,7 @@ export class VoiceSession {
       this.voiceId = voiceId;
     }
     this.playingResponseId = responseId;
-    this.playbackTrace = { epoch, firstProgress: false, trace };
+    this.playbackTrace = { epoch, firstProgress: false, trace, turn };
     trace.emit('synthesis_started');
     this.recordPlayback('streaming');
     this.client.control({ type: 'playback.start', voice_id: voiceId, phase: responseId ? 'response' : 'acknowledgement', response_id: responseId, segment_id: segmentId, epoch, generation: this.playback.generation, format: PCM16 });
@@ -317,7 +333,7 @@ export class VoiceSession {
   }
   progress(epoch: number, sampleOffset: number): void { this.playback.progress(epoch, sampleOffset);
     const state = this.playbackTrace;
-    if (state && state.epoch === epoch && epoch === this.playback.epoch && !state.firstProgress && this.playback.snapshot().playedSamples > 0) { state.firstProgress = true; state.trace.emit('first_playback_progress'); }
+    if (state && state.epoch === epoch && epoch === this.playback.epoch && !state.firstProgress && this.playback.snapshot().playedSamples > 0) { state.firstProgress = true; state.trace.emit('first_playback_progress'); state.turn?.trace.emit('e2e_first_audio'); }
     if (epoch === this.playback.epoch) this.recordPlayback('playback_progress'); }
   private recordPlayback(state: string): void {
     const progress = this.playback.snapshot();

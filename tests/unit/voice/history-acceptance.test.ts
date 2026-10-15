@@ -14,7 +14,7 @@ test('voice acceptance waits for visible history, without waiting for the Agent 
   runner.apiSessionExists = jest.fn(async () => true);
   runner.getOrchestration = jest.fn(async () => orchestration);
   let accepted = false;
-  const result = runner.submitVoiceUtterance('session', 'getpod', 'owner', 'สร้างรูปหมามีปีก', 'utterance', true, 'gpt-6-astra')
+  const result = runner.submitVoiceUtterance('session', { kind: 'api', principalId: 'owner', chatId: 'getpod' }, 'สร้างรูปหมามีปีก', 'utterance', true, 'gpt-6-astra')
     .then((value: unknown) => { accepted = true; return value; });
   await new Promise(resolve => setImmediate(resolve));
   expect(orchestration.submitInput).toHaveBeenCalledWith(expect.objectContaining({model:'gpt-6-astra',modality:'live_voice'}), expect.any(Object));

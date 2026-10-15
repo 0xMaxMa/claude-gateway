@@ -36,6 +36,7 @@ import { providerRefusalNotice, responseFailureMessage } from './response-errors
 import type { ProviderRefusal } from '../session/provider-refusal';
 import { displayPrefix } from './display-stream';
 import { responseHasVoiceOrigin, voiceReplyAllowed } from './voice-reply-policy';
+import { answersLiveVoice, withLiveVoiceTranscript } from './live-voice-transcript';
 import { taskReport } from './task-report';
 import { TelegramToolStatus } from './telegram-tool-status';
 import { ChannelActivity } from './channel-activity';
@@ -207,10 +208,10 @@ export class AgentOrchestrationRuntime {
       // no longer 'pending') still counts itself as part of the group needing quota.
       () => Number(store.get(`SELECT COUNT(*) n FROM outbox o JOIN deliveries d ON d.id=json_extract(o.payload_json,'$.deliveryId') JOIN conversation_bindings b ON b.id=d.binding_id WHERE o.kind='delivery' AND o.state IN ('pending','processing') AND b.channel='line'`)!.n)));
     this.decisions = new DecisionService(store, (response, binding, text) => {
-      this.delivery.enqueue(response, binding, text, this.voiceRetryControls(response, binding));
+      this.delivery.enqueue(response, binding, withLiveVoiceTranscript(store, response, text), this.voiceRetryControls(response, binding));
       const spoken = store.get('SELECT text FROM response_speech WHERE response_id=?', response);
       const destination = store.get('SELECT channel,chat_id,thread_key FROM conversation_bindings WHERE id=?', binding);
-      if (spoken?.text && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && destination && ['telegram','discord','line','slack'].includes(String(destination.channel)) && voiceReplyAllowed(store.channelVoiceMode(String(destination.channel),String(destination.chat_id),String(destination.thread_key??'')), responseHasVoiceOrigin(store,response))) {
+      if (spoken?.text && !answersLiveVoice(store, response) && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && destination && ['telegram','discord','line','slack'].includes(String(destination.channel)) && voiceReplyAllowed(store.channelVoiceMode(String(destination.channel),String(destination.chat_id),String(destination.thread_key??'')), responseHasVoiceOrigin(store,response))) {
         this.delivery.enqueueSpeech(response, binding, { ...this.telegramVoices.settings(channelVoiceKey(String(destination.channel),String(destination.chat_id),String(destination.thread_key??''))), text: String(spoken.text), voiceOrigin: responseHasVoiceOrigin(store,response) });
       }
     }); this.config = resolveOrchestrationConfig(agent.orchestration, agent.voice ?? { enabled: false });
@@ -1140,7 +1141,7 @@ export class AgentOrchestrationRuntime {
       const controlStepTasks=active.notification?this.store.all(`SELECT t.id FROM notifications n JOIN tasks t ON t.id=n.task_id WHERE n.decision_id=? AND n.status='assigned' AND ${CURRENT_CONTROL_ROUND_SQL}`,decision.decisionId).map(row=>String(row.id)):[];
       await this.host.refreshSkills?.();
       if (!input.skill) input = {...input, skill: resolveSkill(input.text, input.scope.source, this.host.skills?.())};
-      const channelSpeech = ['telegram','discord','line','slack'].includes(input.scope.source) && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && voiceReplyAllowed(this.store.channelVoiceMode(input.scope.source,input.scope.chatId,input.scope.threadKey), responseHasVoiceOrigin(this.store,decision.responseId!));
+      const channelSpeech = ['telegram','discord','line','slack'].includes(input.scope.source) && !answersLiveVoice(this.store, decision.responseId!) && (this.config.voice.enabled && this.config.voice.notes.replyWithVoice) && voiceReplyAllowed(this.store.channelVoiceMode(input.scope.source,input.scope.chatId,input.scope.threadKey), responseHasVoiceOrigin(this.store,decision.responseId!));
       const speechEnabled = channelSpeech || new BrowserVoice(this.store).enabled(sessionId, input.scope.principalId) || input.modality === 'live_voice' || this.voiceListeners.get(sessionId)?.principalId === input.scope.principalId;
       const typedSpeech = speechEnabled && input.modality !== 'live_voice';
 
