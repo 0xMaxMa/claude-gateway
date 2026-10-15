@@ -494,3 +494,36 @@ test('turn timing correlates utterance, input and response ids from the end of s
     expect(timing.find(e => e.operation === 'tts' && e.phase === 'first_playback_progress')).toMatchObject({ utteranceId: listening.utterance_id, inputId: 'input-1', responseId: 'response-1' });
   } finally { stream.close(); await session.close(); }
 });
+
+test('mute right after speech answers it without the silence timer, and the reply still plays while muted; mute with no speech admits nothing', async () => {
+  const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [];
+  const stream = new BoundedQueue<{ responseId: string; text: string }>(1024, value => Buffer.byteLength(value.text));
+  const submit = jest.fn(async () => ({ inputId: 'input', response: new Promise<string>(() => {}), stream, responseId: () => 'reply' }));
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] },
+    synthesize: async function* (options) { for await (const _ of options.text) yield { bytes: Buffer.alloc(640), format: PCM16, chunkSeq: 0 }; } };
+  // A long silence timer and merge window: an answer within the test proves mute did not wait for either.
+  const session = new VoiceSession(stt, tts, 'voice', { control: c => controls.push(c), audio: c => audio.push(c), bufferedBytes: () => 0 }, submit, jest.fn(),
+    { silenceCommitMs: 60000, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500, mergeWindowMs: 60000 });
+  const waitFor = async (predicate: () => boolean) => { const end = Date.now() + 2000; while (!predicate() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 5)); expect(predicate()).toBe(true); };
+  try {
+    await session.start();
+    await session.mute(true, 'commit', 0);
+    await session.mute(false, 'commit');
+    expect(submit).not.toHaveBeenCalled();
+
+    const listening = controls.filter(c => c.state === 'listening' && c.utterance_id).at(-1)!;
+    session.speechActivity();
+    for (const sequence of [1, 2]) await session.audio({ generation: listening.generation, epoch: 0, sequence, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    session.speechEnded(2);
+    const muting = session.mute(true, 'commit', 2);
+    await waitFor(() => !!stt.sessions.at(-1)!.commitId);
+    stt.sessions.at(-1)!.emit({ type: 'segment_final', segmentId: 's', text: 'สรุปให้หน่อย' });
+    stt.sessions.at(-1)!.emit({ type: 'commit_done', commitId: stt.sessions.at(-1)!.commitId! });
+    await muting;
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledWith('สรุปให้หน่อย', listening.utterance_id);
+    expect(controls.at(-1)).toMatchObject({ type: 'voice.state', state: 'muted' });
+    stream.push({ responseId: 'reply', text: 'ได้ครับ' });
+    await waitFor(() => audio.length === 1);
+  } finally { await session.close(); }
+});

@@ -115,7 +115,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     var ctx, media, capture, ws, uplink, vad, resample, progressTimer, level, levelSamples, speaker;
     var playhead = createVoiceCallPlayhead(), sources = [];
     var callToken, generation, epoch = 0, reportedPlayed = 0, stopRequest = 0, stopping = false;
-    var muted = false, paused = false, ended = false, attempts = 0, speakerOn = true, shownLevel;
+    var muted = false, paused = false, ended = false, attempts = 0, speakerOn = true, shownLevel, muteOnListening = false;
     // The call clock: set when a socket first listens, from the server's elapsed time
     // on a rejoin, so it keeps counting across reconnects like a phone call.
     var callStart, offeredElapsed = 0, joined = false;
@@ -160,7 +160,12 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
         case 'voice.state':
           if (message.generation) generation = message.generation;
           if ((message.state === 'listening' || message.state === 'muted') && !joined) { joined = true; callStart = Date.now() - offeredElapsed; showDuration(); }
-          if (message.state === 'listening') { attempts = 0; if (message.utterance_id) uplink.listening(message.utterance_id); if (!sources.length) state(muted ? 'Muted' : 'Listening'); }
+          if (message.state === 'listening') {
+            attempts = 0; if (message.utterance_id) uplink.listening(message.utterance_id);
+            // Words held for this utterance are sent now; muting then commits them.
+            if (muteOnListening) { muteOnListening = false; sendMute(true); }
+            if (!sources.length) state(muted ? 'Muted' : 'Listening');
+          }
           if (message.state === 'muted') { uplink.reset(); state('Muted'); }
           break;
         case 'stt.partial': case 'stt.segment': $('you').textContent = message.pending_text || message.text || ''; break;
@@ -187,7 +192,8 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       var scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
       if (ended || paused) return;
       var socket = new WebSocket(scheme + '//' + location.host + CFG.basePath + issued.stream_path + '?ticket=' + encodeURIComponent(issued.ticket));
-      ws = socket; joined = false;
+      // A new socket starts with the page's mute state; nothing waits on the old utterance.
+      ws = socket; joined = false; muteOnListening = false;
       socket.binaryType = 'arraybuffer';
       socket.onopen = function(){ send({ type: 'voice.start', muted: muted }); };
       socket.onmessage = function(event){ if (socket !== ws) return; if (typeof event.data === 'string') control(JSON.parse(event.data)); else playAudio(event.data); };
@@ -242,12 +248,20 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       var text = formatCallDuration(Date.now() - callStart), timer = $('timer');
       if (timer.textContent !== text) timer.textContent = text;
     }
+    // Mute sends what was said: the open utterance is committed now and the agent answers it.
+    function sendMute(value){
+      var sequence = uplink.pendingSequence();
+      send({ type: 'voice.mute', muted: value, policy: 'commit', last_audio_seq: value && sequence ? sequence : 0 });
+      if (value) uplink.reset();
+    }
     function setMuted(value){
       if (muted === value) return;
       muted = value;
-      var sequence = uplink.pendingSequence();
-      send({ type: 'voice.mute', muted: value, policy: 'commit', last_audio_seq: value && sequence ? sequence : 0 });
-      if (value) uplink.reset(); else vad = createVoiceCallVad(CFG.vad);
+      // Words spoken while the last utterance commits are held for the next one: mute once they are sent.
+      if (value && uplink.holding()) muteOnListening = true;
+      else if (!value && muteOnListening) muteOnListening = false;
+      else sendMute(value);
+      if (!value) vad = createVoiceCallVad(CFG.vad);
       media.getAudioTracks().forEach(function(track){ track.enabled = !value; });
       $('mute').setAttribute('aria-pressed', String(value));
       state(value ? 'Muted' : 'Listening');

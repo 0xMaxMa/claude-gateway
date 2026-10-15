@@ -233,7 +233,8 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
     createBuffer() { return { getChannelData: () => new Float32Array(1) }; }
     createBufferSource() { const source = node({ start: noop, stop: noop }); replies.push(source); return source; }
   }
-  class FakeWorkletNode { port = {}; outputs: Node[] = []; connect(next: Node) { this.outputs.push(next); } }
+  const worklets: FakeWorkletNode[] = [];
+  class FakeWorkletNode { port: { onmessage?: (event: { data: Float32Array }) => void } = {}; outputs: Node[] = []; constructor() { worklets.push(this); } connect(next: Node) { this.outputs.push(next); } }
   const tickets = [...(options.tickets ?? [TICKET])];
   const fetch = jest.fn(async () => { const next = tickets.shift() ?? TICKET; return { ok: next.status === 200, status: next.status, json: async () => JSON.parse(next.body) }; });
   const location = { protocol: 'https:', host: 'pod.example', reload: jest.fn() };
@@ -254,7 +255,9 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
   await settle();
   /** A tap on a page button, which also counts as the WebView's first touch. */
   const tap = async (id: string) => { touched = true; element(id).onclick!(); await settle(); };
-  return { element, location, fetch, sockets, getUserMedia, tap, replies, loudness };
+  /** The microphone hears `ms` of sound at one level, in the worklet's 40 ms chunks. */
+  const hear = (level: number, ms: number) => { for (let t = 0; t < ms; t += 40) worklets.at(-1)!.port.onmessage!({ data: new Float32Array(1920).fill(level) }); };
+  return { element, location, fetch, sockets, getUserMedia, tap, replies, loudness, hear };
 }
 
 describe('page after a refused ticket', () => {
@@ -423,5 +426,59 @@ describe('call page', () => {
     expect(element('avatar').className).toBe('');
     element('photo').onload!();
     expect(element('avatar').className).toBe('avatar photo');
+  });
+
+  describe('Mute sends what was said', () => {
+    const frames = (socket: FakeSocket) => socket.sent.filter(data => data instanceof ArrayBuffer).length;
+    const mutes = (socket: FakeSocket) => socket.sent.filter(message => message.type === 'voice.mute');
+
+    test('muting mid-sentence commits the open utterance at once, so the agent answers it', async () => {
+      const { sockets, tap, hear } = await openPage();
+      sockets[0].open(); sockets[0].receive(LISTENING);
+      hear(0.003, 400); hear(0.2, 600); // still talking: no speech.ended yet
+      const sent = frames(sockets[0]);
+      expect(sent).toBeGreaterThan(0);
+      expect(sockets[0].sent.some(message => message.type === 'speech.ended')).toBe(false);
+      await tap('mute');
+      expect(mutes(sockets[0])).toEqual([{ type: 'voice.mute', muted: true, policy: 'commit', last_audio_seq: sent }]);
+      hear(0.2, 400);
+      expect(frames(sockets[0])).toBe(sent); // the microphone is off afterwards
+    });
+
+    test('muting with nothing said since the last commit only mutes', async () => {
+      const { sockets, tap, hear } = await openPage();
+      sockets[0].open(); sockets[0].receive(LISTENING);
+      hear(0.003, 400);
+      await tap('mute');
+      expect(mutes(sockets[0])).toEqual([{ type: 'voice.mute', muted: true, policy: 'commit', last_audio_seq: 0 }]);
+      await tap('mute');
+      expect(mutes(sockets[0]).at(-1)).toEqual({ type: 'voice.mute', muted: false, policy: 'commit', last_audio_seq: 0 });
+    });
+
+    test('words spoken while the last utterance commits are sent with the next one, then committed by mute', async () => {
+      const { sockets, tap, hear } = await openPage();
+      sockets[0].open(); sockets[0].receive(LISTENING);
+      hear(0.003, 400); hear(0.2, 400); hear(0.003, 400); // speech.ended: the gateway commits utterance 0
+      expect(sockets[0].sent).toContainEqual(expect.objectContaining({ type: 'speech.ended' }));
+      hear(0.2, 400); // more words before the gateway opens the next utterance
+      await tap('mute');
+      expect(mutes(sockets[0])).toEqual([]);
+      const before = frames(sockets[0]);
+      sockets[0].receive({ ...LISTENING, utterance_id: '2'.repeat(32) });
+      const held = frames(sockets[0]) - before;
+      expect(held).toBeGreaterThan(0);
+      expect(mutes(sockets[0])).toEqual([{ type: 'voice.mute', muted: true, policy: 'commit', last_audio_seq: held }]);
+    });
+
+    test("the agent's reply still plays while the microphone is muted", async () => {
+      const { sockets, tap, replies, loudness, element } = await openPage();
+      sockets[0].open(); sockets[0].receive(LISTENING);
+      await tap('mute');
+      sockets[0].receive({ type: 'playback.start', epoch: 1 });
+      sockets[0].audio(1);
+      expect(replies).toHaveLength(1);
+      expect(loudness(replies[0])).toBe(1);
+      expect(element('mute').attributes['aria-pressed']).toBe('true');
+    });
   });
 });

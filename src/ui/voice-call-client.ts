@@ -133,6 +133,8 @@ export function createVoiceCallUplink(io: { json(message: Record<string, unknown
       if (state === 'ready') begin(); else if (state !== 'speaking') { speechPending = true; endPending = false; }
     },
     speechEnd() { if (state === 'speaking') end(); else if (speechPending) endPending = true; },
+    /** Words spoken after `speech.ended` wait for the next utterance before they can be sent. */
+    holding(): boolean { return speechPending; },
     /** `last_audio_seq` for a commit-on-mute: the utterance still open on the server, if any. */
     pendingSequence(): number | undefined { return state === 'speaking' && sequence ? sequence : state === 'ended' ? endedSequence : undefined; },
   };
