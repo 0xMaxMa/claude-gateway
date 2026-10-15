@@ -123,7 +123,8 @@ export function parseProcNetTcp(text: string, v6: boolean): NetSocket[] {
   return out;
 }
 
-const SECRET_WORD = /token|password|passwd|secret|key|auth|credential|bearer/i;
+/** `pass` alone ends `--requirepass`; it must not be followed by a letter, so `--passWithNoTests` stays. */
+const SECRET_WORD = /token|password|passwd|pass(?![a-z])|secret|key|auth|credential|bearer/i;
 const REDACTED = '[redacted]';
 
 const isKeyChar = (c: string) => /[\w.-]/.test(c);
@@ -150,7 +151,8 @@ function redactHeader(a: string): string | null {
   return `${a.slice(0, colon + 1)} ${REDACTED}`;
 }
 
-const isSecretFlag = (a: string) => /^--[\w-]+$/.test(a) && SECRET_WORD.test(a);
+/** `--requirepass` and the single-dash long flags (`-passwd`) of x11vnc and the like. */
+const isSecretFlag = (a: string) => /^--?[\w-]+$/.test(a) && a.length > 2 && SECRET_WORD.test(a);
 
 /** Joins argv for display. Secret values and URL credentials are replaced before truncation, so a cut never leaks one. */
 export function redactCommand(args: string[]): string {
@@ -158,6 +160,7 @@ export function redactCommand(args: string[]): string {
   const program = path.basename(args[0] ?? '');
   // `-p` is a port for most programs, so only these two shapes count. In the mysql family a bare `-p` prompts and the next arg is a database.
   const sshpass = program === 'sshpass';
+  const ttyd = program === 'ttyd';
   const mysqlFamily = /^(mysql|mysqldump|mysqladmin|mariadb|mariadb-dump)$/.test(program);
   for (let i = 0; i < args.length; i++) {
     const a = redactCredentials(args[i]);
@@ -170,6 +173,11 @@ export function redactCommand(args: string[]): string {
         out.push(REDACTED);
         i++;
       }
+    } else if (ttyd && a === '-c' && i + 1 < args.length) {
+      out.push(a, REDACTED);
+      i++;
+    } else if (ttyd && /^-c./.test(a)) {
+      out.push(`-c${REDACTED}`);
     } else if (sshpass && a === '-p' && i + 1 < args.length) {
       out.push(a, REDACTED);
       i++;
