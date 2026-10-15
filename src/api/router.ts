@@ -828,8 +828,7 @@ export function createApiRouter(
       });
       return;
     }
-    if (typeof session_id === 'string' && (!canWriteAgent(apiKey, agentId) || !canAccessPod(apiKey))
-        && (await runner.apiSessionBinding(session_id)).kind !== 'unbound') {
+    if (typeof session_id === 'string' && await refusesProjectChat(runner, apiKey, agentId, session_id)) {
       res.status(403).json({ error: 'API key not permitted to drive a project chat', code: 'forbidden_key' });
       return;
     }
@@ -5025,6 +5024,11 @@ export function createApiRouter(
       return;
     }
 
+    if (await refusesProjectChat(runner, apiKey, agentId, sessionId)) {
+      res.status(403).json({ error: 'API key not permitted to drive a project chat', code: 'forbidden_key' });
+      return;
+    }
+
     if (runner.hasActiveApiSession(sessionId)) {
       res.status(409).json({ error: 'Session already has a pending request' });
       return;
@@ -5045,6 +5049,12 @@ export function createApiRouter(
 
     if (!content) {
       res.status(204).send();
+      return;
+    }
+
+    // Decided before the unlink: a greeting must not be consumed by a turn that cannot run.
+    try { await runner.assertApiProjectAvailable(sessionId); } catch (err) {
+      res.status(409).json({ error: responseFailureMessage(err), code: 'PROJECT_UNAVAILABLE' });
       return;
     }
 
@@ -5080,7 +5090,7 @@ export function createApiRouter(
         if (code === 'CONFLICT') {
           res.status(409).json({ error: 'Session already has a pending request' });
         } else {
-          res.status(500).json({ error: responseFailureMessage(err), ...(errorCode(err) ? { code: errorCode(err) } : {}) });
+          res.status(code === 'PROJECT_UNAVAILABLE' ? 409 : 500).json({ error: responseFailureMessage(err), ...(errorCode(err) ? { code: errorCode(err) } : {}) });
         }
       } else {
         try {
@@ -5092,6 +5102,12 @@ export function createApiRouter(
   });
 
   return router;
+}
+
+/** A key that cannot write the agent pod-wide must not drive a project-bound session. */
+async function refusesProjectChat(runner: AgentRunner, apiKey: ApiKey, agentId: string, sessionId: string): Promise<boolean> {
+  if (canWriteAgent(apiKey, agentId) && canAccessPod(apiKey)) return false;
+  return (await runner.apiSessionBinding(sessionId)).kind !== 'unbound';
 }
 
 function parseHistoryChatId(fullChatId: string): { source: string; rawChatId: string } {

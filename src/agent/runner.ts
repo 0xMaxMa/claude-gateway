@@ -460,6 +460,12 @@ export class AgentRunner extends EventEmitter {
     return binding;
   }
 
+  /** Throws PROJECT_UNAVAILABLE when the session's project no longer resolves; a no-op for unbound sessions. */
+  async assertApiProjectAvailable(sessionId: string): Promise<void> {
+    const project = await this.apiSessionProjectCwd(sessionId);
+    if (project && !project.ok) throw projectUnavailableError(project.error);
+  }
+
   private async apiSessionProjectCwd(sessionId: string): Promise<Result<ProjectCwd, ProjectChatError> | undefined> {
     const binding = await this.apiSessionBinding(sessionId);
     if (binding.kind === 'unbound') return undefined;

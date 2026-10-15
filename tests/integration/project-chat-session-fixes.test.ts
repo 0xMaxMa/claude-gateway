@@ -154,4 +154,22 @@ describe('project chat session fixes', () => {
     expect(res.body.code).toBe('PROJECT_UNAVAILABLE');
     expect(Date.now() - t).toBeLessThan(15000);
   }, 30000);
+
+  it('F3 greeting refuses a key that /messages refuses, and keeps GREETING.md when the project is gone', async () => {
+    h = await harness();
+    const sid = await projectSession(h);
+    const greeting = path.join(h.base, 'agents', 'alfred', 'workspace', 'GREETING.md');
+    fs.writeFileSync(greeting, 'hello');
+    const denied = await supertest(h.app).post('/api/v1/agents/alfred/greeting').set(auth(KEYS.scopedWriter!)).send({ session_id: sid, chat_id: 'web' });
+    expect(denied.status).toBe(403);
+    expect(denied.body.code).toBe('forbidden_key');
+    expect(spawns(h)).toEqual([]);
+    expect(fs.existsSync(greeting)).toBe(true);
+
+    fs.rmSync(path.join(h.root, 'site'), { recursive: true });
+    const gone = await supertest(h.app).post('/api/v1/agents/alfred/greeting').set(auth(KEYS.admin!)).send({ session_id: sid, chat_id: 'web' });
+    expect(gone.status).toBe(409);
+    expect(gone.body.code).toBe('PROJECT_UNAVAILABLE');
+    expect(fs.existsSync(greeting)).toBe(true);
+  }, 30000);
 });
