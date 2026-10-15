@@ -613,14 +613,16 @@ describe('theme', () => {
     expect(style).toMatch(/\.call\.speaking \.ring \{[^}]*var\(--vc-speak/);
     expect(style).toMatch(/\.call\.muted \.chip \{[^}]*var\(--vc-muted\)/);
     expect(style).toMatch(/\.call\.thinking \.chip \{[^}]*var\(--vc-think\)/);
-    // Speaking is orange; Thinking a blue apart from Listening's.
+    // Speaking is orange, Listening blue, Thinking green.
     for (const palette of [dark, light]) {
       const value = (name: string) => palette.match(new RegExp(name + ': (#[0-9a-f]{6})'))![1];
-      const [r, g, b] = [1, 3, 5].map(i => parseInt(value('--vc-speak').slice(i, i + 2), 16));
+      const rgb = (name: string) => [1, 3, 5].map(i => parseInt(value(name).slice(i, i + 2), 16));
+      const [r, g, b] = rgb('--vc-speak');
       expect(r).toBeGreaterThan(g); expect(g).toBeGreaterThan(b); expect(r - b).toBeGreaterThan(120);
-      const blue = (name: string) => [1, 3, 5].map(i => parseInt(value(name).slice(i, i + 2), 16));
-      expect(blue('--vc-think')[2]).toBeGreaterThan(blue('--vc-think')[0]);
-      expect(value('--vc-think')).not.toBe(value('--vc-listen'));
+      const listen = rgb('--vc-listen');
+      expect(listen[2]).toBeGreaterThan(listen[0]); expect(listen[2]).toBeGreaterThan(listen[1]);
+      const think = rgb('--vc-think');
+      expect(think[1] - think[0]).toBeGreaterThan(60); expect(think[1] - think[2]).toBeGreaterThan(40);
     }
   });
 });

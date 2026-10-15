@@ -56,14 +56,14 @@ const STYLE = `${BASE_STYLE}
     --vc-bg: var(--tg-theme-bg-color, #0b0e14); --vc-text: var(--tg-theme-text-color, #e4e9ff); --vc-hint: var(--tg-theme-hint-color, #8f9bb3);
     --vc-surface: var(--tg-theme-secondary-bg-color, #232a3b); --vc-pressed: #e4e9ff; --vc-on-pressed: #0b0e14;
     --vc-button: #c3e88d; --vc-on-button: #0b0e14;
-    --vc-listen: #82aaff; --vc-listen-ring: rgba(130,170,255,.35); --vc-listen-glow: rgba(130,170,255,.08); --vc-think: #5cc8ff;
+    --vc-listen: #82aaff; --vc-listen-ring: rgba(130,170,255,.35); --vc-listen-glow: rgba(130,170,255,.08); --vc-think: #4ade80;
     --vc-speak: #ffa94d; --vc-speak-ring: rgba(255,169,77,.75); --vc-speak-glow: rgba(255,169,77,.14); --vc-speak-halo: rgba(255,169,77,.06);
     --vc-muted: #ff8d95; --vc-end: #ff5c67; --vc-err: #ff757f; }
   :root[data-theme="light"] { color-scheme: light;
     --vc-bg: var(--tg-theme-bg-color, #ffffff); --vc-text: var(--tg-theme-text-color, #1c2333); --vc-hint: var(--tg-theme-hint-color, #6b7486);
     --vc-surface: var(--tg-theme-secondary-bg-color, #eef0f5); --vc-pressed: #1c2333; --vc-on-pressed: #ffffff;
     --vc-button: #23863f; --vc-on-button: #ffffff;
-    --vc-listen: #2560c8; --vc-listen-ring: rgba(37,96,200,.45); --vc-listen-glow: rgba(37,96,200,.10); --vc-think: #0868a6;
+    --vc-listen: #2560c8; --vc-listen-ring: rgba(37,96,200,.45); --vc-listen-glow: rgba(37,96,200,.10); --vc-think: #13773a;
     --vc-speak: #a84b06; --vc-speak-ring: rgba(240,128,30,.80); --vc-speak-glow: rgba(240,128,30,.18); --vc-speak-halo: rgba(240,128,30,.07);
     --vc-muted: #c22631; --vc-end: #e5484d; --vc-err: #c4202b; }
   body { background: var(--vc-bg); color: var(--vc-text); }
