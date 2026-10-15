@@ -10,7 +10,7 @@ import {
   resolveProjectDir,
   TREE_ENTRY_LIMIT,
 } from "../../src/projects/fs";
-import { ProjectName, RelPath } from "../../src/projects/paths";
+import { parseRelPath, ProjectName, RelPath } from "../../src/projects/paths";
 
 const name = (s: string) => s as ProjectName;
 const rel = (s: string) => s as RelPath;
@@ -308,6 +308,14 @@ describe("listDir", () => {
     const sub = await listDir(root, name("p"), rel("src"));
     if (!sub.ok) throw new Error(sub.error);
     expect(sub.value.entries.map((e) => e.path)).toEqual(["src/index.ts"]);
+  });
+
+  it("lists only entries whose path the tree and file routes accept", async () => {
+    makeProject("p", { "a\\b.txt": "x", "c\\d/e.txt": "y", "ok.txt": "z" });
+    const res = await listDir(root, name("p"), rel(""));
+    if (!res.ok) throw new Error(res.error);
+    expect(res.value.entries.map((e) => e.path)).toEqual(["ok.txt"]);
+    for (const e of res.value.entries) expect(parseRelPath(e.path).ok).toBe(true);
   });
 
   it("shows symlinks without following them, classifying the target", async () => {

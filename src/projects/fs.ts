@@ -11,6 +11,7 @@ import {
   joinRel,
   ok,
   parseProjectName,
+  parseRelPath,
   ProjectName,
   ProjectsErrorCode,
   RelPath,
@@ -324,7 +325,10 @@ export async function listDir(
 
   let dirents: Dirent[];
   try {
-    dirents = await fsp.readdir(dir.value, { withFileTypes: true });
+    dirents = (await fsp.readdir(dir.value, { withFileTypes: true })).filter(
+      // A name such as `a\b` is legal on disk but no route accepts its path, so it is not listed.
+      (d) => parseRelPath(joinRel(rel, d.name)).ok,
+    );
   } catch (e) {
     return err(errnoToCode(e));
   }

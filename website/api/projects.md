@@ -163,7 +163,8 @@ naming the hidden folder that holds them. A project is never left listed with pa
 
 List one directory level. Query `path` selects the directory (default: the
 project root). Directories come first, then everything else, each group sorted
-by name in code-unit order. Dotfiles are included. At most 2000 entries are
+by name in code-unit order. Dotfiles are included. A name with a backslash is
+left out, since `path` cannot name it. At most 2000 entries are
 returned; `truncated` is `true` when there were more.
 
 ```bash
