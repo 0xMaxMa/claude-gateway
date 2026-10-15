@@ -306,16 +306,21 @@ test('a stop names the device error codes behind it, including APPLICATION_PROTE
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });
 
-test('a protected frontmost app in the last observation is named in the stop message',async()=>{
+// The device reports a protected frontmost app only as the APPLICATION_PROTECTED tool
+// error above; ComputerObservation has no such field, so an observation never names it.
+test('only the device APPLICATION_PROTECTED error names a protected app, never an observation',async()=>{
+ const {ComputerObservation}=jest.requireActual('../../../src/automation/computer-use');
+ const parsed=ComputerObservation.parse({generation:'g',application:'unapproved',controls:[],truncated:false,apps:[],frontmostProtected:true});
+ expect(parsed).not.toHaveProperty('frontmostProtected');
  const root=mkdtempSync(join(tmpdir(),'computer-protected-obs-'));
  const callTool=jest.fn(async({name}:any)=>({content:[{type:'text',text:JSON.stringify(name==='computer_request_access'?{state:'approved'}:{})}]}));
  jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
- runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{deps.observation({generation:'g',application:'unapproved',frontmostProtected:true});return {status:'blocked',reason:'NO_SUPPORTED_ACTION',steps:0,evaluations:0};});
+ runComputerUse.mockImplementationOnce(async(_input:any,deps:any)=>{deps.observation({...parsed,frontmostProtected:true});return {status:'blocked',reason:'NO_SUPPORTED_ACTION',steps:0,evaluations:0};});
  const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:{get:()=>({connectorId:'c',scope:{}}),connection:()=>({endpoint:'https://computer.example/mcp',headers:{}})} as any,allowed:()=>true,member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true});
  const task={agentId:'a',taskId:'t',ownerPrincipalId:'p',conversationId:'c',revision:1,gatewayTarget:{adapter:'computer',sessionId:'target'}} as any;
  try{await adapter.submit(task,'r','Open YouTube');let outcome:any;for(let i=0;i<50;i++){outcome=await adapter.inspect(task,'r');if(typeof outcome==='object')break;await new Promise(setImmediate);}
   expect(outcome.failure.code).toBe('COMPUTER_NO_SUPPORTED_ACTION');
-  expect(outcome.failure.message).toContain('APPLICATION_PROTECTED: a protected app');
+  expect(outcome.failure.message).not.toContain('APPLICATION_PROTECTED');
   expect(outcome.failure.message).not.toContain('Device tool errors');
  }finally{await adapter.close();rmSync(root,{recursive:true,force:true});}
 });

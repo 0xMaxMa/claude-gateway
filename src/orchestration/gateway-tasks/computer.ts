@@ -25,7 +25,7 @@ interface Receipt {command?:string;revision:number;taskId:string;requestId:strin
  * COMPUTER_TOOL_FAILED), so the agent can name the real cause instead of guessing. */
 function computerToolErrorNote(receipt:Receipt):string{
  const errors=[...new Set((receipt.toolErrors??[]).map(e=>`${e.tool} ${e.code}${e.reason&&e.reason!==e.code?` (${e.reason})`:''}`))].slice(-5);
- const isProtected=receipt.toolErrors?.some(e=>e.code==='APPLICATION_PROTECTED'||e.reason==='APPLICATION_PROTECTED')||receipt.snapshot?.state?.frontmostProtected===true;
+ const isProtected=receipt.toolErrors?.some(e=>e.code==='APPLICATION_PROTECTED'||e.reason==='APPLICATION_PROTECTED');
  return `${errors.length?` Device tool errors: ${errors.join(', ')}.`:''}${isProtected?' APPLICATION_PROTECTED: a protected app (such as GetPod, System Settings or a password manager) was frontmost, so it could not be observed or controlled. This is not a missing macOS permission; bring the target app to the front and continue.':''}`;
 }
 /** Gateway owns credentials and lifecycle; the remote device retains local consent. */
