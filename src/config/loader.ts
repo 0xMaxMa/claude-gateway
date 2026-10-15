@@ -178,9 +178,15 @@ export function logSkippedAgents(
 
 const PROJECTS_KEYS = ['root', 'trusted', 'enabled'];
 
-/** Unset, or spelled exactly like the default (config.template.json ships it): both mean "the operator chose nothing". */
+/** The spelling every check and the runtime agree on: no surrounding spaces, no trailing slashes (`/` stays). */
+function cleanProjectsRoot(raw: string): string {
+  const trimmed = raw.trim();
+  return trimmed.replace(/\/+$/, '') || (trimmed.startsWith('/') ? '/' : trimmed);
+}
+
+/** Unset, or spelled like the default in any clean or unclean way (config.template.json ships it): both mean "the operator chose nothing". */
 function isDefaultProjectsRoot(raw: unknown): boolean {
-  return raw === undefined || (typeof raw === 'string' && expandHome(raw.trim()) === expandHome(DEFAULT_PROJECTS_ROOT));
+  return raw === undefined || (typeof raw === 'string' && expandHome(cleanProjectsRoot(raw)) === expandHome(DEFAULT_PROJECTS_ROOT));
 }
 
 function validateProjectsRoot(raw: unknown, configPath: string): void {
@@ -432,8 +438,21 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
     if (typeof projects !== 'object' || projects === null || Array.isArray(projects)) {
       throw new ConfigValidationError('gateway.projects must be an object');
     }
-    const root = (projects as Record<string, unknown>).root;
+    const projectsConfig = projects as Record<string, unknown>;
+    if (typeof projectsConfig.root === 'string' && projectsConfig.root.trim()) projectsConfig.root = cleanProjectsRoot(projectsConfig.root);
+    const root = projectsConfig.root;
     if (root !== undefined && !isDefaultProjectsRoot(root)) validateProjectsRoot(root, configPath);
+    if (typeof root === 'string' && root.includes(':')) {
+      console.warn(
+        `[gateway] gateway.projects.root "${root}" holds ":", which git's discovery fence (GIT_CEILING_DIRECTORIES) cannot express, so the Projects API is disabled.\n` +
+        '          Set gateway.projects.root to a path without ":".',
+      );
+      projectsConfig.enabled = false;
+    }
+    if ('enabled' in projectsConfig && typeof projectsConfig.enabled !== 'boolean') {
+      console.warn(`[gateway] gateway.projects.enabled must be true or false (got ${JSON.stringify(projectsConfig.enabled)}); ignoring it, so Projects stays on.`);
+      delete projectsConfig.enabled;
+    }
     const trusted = (projects as Record<string, unknown>).trusted;
     if (trusted !== undefined) validateTrustedProjects(trusted);
     const unknown = Object.keys(projects).filter((key) => !PROJECTS_KEYS.includes(key));

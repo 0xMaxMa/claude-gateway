@@ -743,6 +743,40 @@ describe('config-loader', () => {
         expect(() => loadRoot(configDir)).toThrow(/gateway\.projects\.root .* must not be or contain/);
       });
 
+      it.each([' ~/projects ', '~/projects/', '~/projects//', ' /users/pod/projects/ '.replace('/users/pod', '__HOME__')])(
+        'reads the default spelled %j as the default, warns and disables when ~/projects is a symlink to HOME',
+        (spelled) => {
+          fs.symlinkSync(home, path.join(home, 'projects'));
+          const root = spelled.replace('__HOME__', home);
+          expect(loadRoot(root).gateway.projects).toEqual({ root: root.trim().replace(/\/+$/, ''), enabled: false });
+          expect(projectsWarnings()).toHaveLength(1);
+        },
+      );
+
+      it('validates a root spelled with spaces or a trailing slash like the clean spelling, and stores the clean one', () => {
+        expect(() => loadRoot(` ${home} `)).toThrow(/must not be or contain/);
+        expect(() => loadRoot(`${configDir}/`)).toThrow(/must not be or contain/);
+        expect(loadRoot(' ~/x/ ').gateway.projects?.root).toBe('~/x');
+      });
+
+      it('warns and keeps the default when enabled is not a boolean, and never fails the start', () => {
+        const enabledWarnings = () => warn.mock.calls.filter(([m]) => String(m).includes('gateway.projects.enabled'));
+        for (const enabled of ['false', 0, null]) {
+          warn.mockClear();
+          expect(load({ projects: { enabled } }).gateway.projects).toEqual({});
+          expect(enabledWarnings()).toHaveLength(1);
+        }
+        warn.mockClear();
+        expect(load({ projects: { enabled: false } }).gateway.projects).toEqual({ enabled: false });
+        expect(enabledWarnings()).toHaveLength(0);
+      });
+
+      it('disables projects with a warning for a root holding ":", which would break the git discovery fence', () => {
+        const colon = path.join(tmpDir, 'srv', 'a:b');
+        expect(loadRoot(colon).gateway.projects).toEqual({ root: colon, enabled: false });
+        expect(warn.mock.calls.filter(([m]) => String(m).includes('":"'))).toHaveLength(1);
+      });
+
       it('warns about unknown keys inside gateway.projects and still loads', () => {
         const unknownWarnings = () => warn.mock.calls.filter(([m]) => String(m).includes('unknown gateway.projects keys'));
         expect(load({ projects: { rooot: '/srv/p', enabled: true } }).gateway.projects).toMatchObject({ enabled: true });
