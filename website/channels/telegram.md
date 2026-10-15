@@ -97,7 +97,7 @@ The model list comes from the configured model provider's `/v1/models` catalog w
 
 With `gateway.orchestration: true`, Telegram voice notes and audio attachments can use the agent's configured speech-to-text provider. Enable `agents[].voice` and its `notes` settings first; see [voice setup](/guide/voice) for provider keys, models and prerequisites. Photos and file attachments keep their normal access checks.
 
-If a voice note cannot be transcribed for a temporary reason, the failure reply has a **🔁 Retry** button that transcribes the kept recording again. See [Voice-message failures and retry](../guide/voice.md#voice-message-failures-and-retry).
+If a voice note cannot be transcribed for a temporary reason, the failure reply in a private chat has a **🔁 Retry** button that transcribes the kept recording again. See [Voice-message failures and retry](../guide/voice.md#voice-message-failures-and-retry).
 
 In a paired private chat, `/voice` opens Always / Only reply voice message / Off buttons. `/voice on`, `/voice auto` and `/voice off` also set the mode directly. Every chat starts Off, and its choice persists across session switches and gateway restarts. `auto` adds audio to replies originating from voice input and their task results; a later typed instruction makes that turn text-only. `/voices` selects a voice through a paginated provider catalog. Agent voice must be enabled and `voice.notes.replyWithVoice` must permit spoken replies. Voice capability and chat preference are separate settings.
 

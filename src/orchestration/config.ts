@@ -172,7 +172,10 @@ export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVo
   const conversation = result.conversation;
   if (conversation.contextTimeoutScaleTokens < 1000 || conversation.contextTimeoutScaleTokens > 10_000_000)
     throw new OrchestrationError('INVALID_CONFIG', 'conversation.contextTimeoutScaleTokens must be between 1000 and 10000000');
-  if (conversation.maxContextTimeoutMs < Math.max(conversation.firstResponseTimeoutMs, conversation.idleTimeoutMs) || conversation.maxContextTimeoutMs > conversation.maxDecisionDurationMs)
+  // The default cap follows the configured budgets, so a config valid before scaling still loads.
+  const contextTimeoutBase = Math.max(conversation.firstResponseTimeoutMs, conversation.idleTimeoutMs);
+  if (config?.conversation?.maxContextTimeoutMs === undefined) conversation.maxContextTimeoutMs = Math.max(contextTimeoutBase, Math.min(conversation.maxContextTimeoutMs, conversation.maxDecisionDurationMs));
+  else if (conversation.maxContextTimeoutMs < contextTimeoutBase || conversation.maxContextTimeoutMs > conversation.maxDecisionDurationMs)
     throw new OrchestrationError('INVALID_CONFIG', 'conversation.maxContextTimeoutMs must be at least firstResponseTimeoutMs and idleTimeoutMs, and at most maxDecisionDurationMs');
   if (!['next_user_turn', 'existing_receive_path'].includes(result.conversation.notificationPolicy)) throw new OrchestrationError('INVALID_CONFIG', 'Invalid notification policy');
   if (result.tasks.maxConcurrentPerConversation > result.tasks.maxConcurrentPerAgent || result.tasks.maxQueuedPerConversation > result.tasks.maxQueuedPerAgent) throw new OrchestrationError('INVALID_CONFIG', 'Conversation task limits exceed agent limits');

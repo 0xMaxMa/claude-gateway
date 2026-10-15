@@ -8,6 +8,7 @@ import { SessionStore } from '../../../src/session/store';
 import { SessionProcess } from '../../../src/session/process';
 import { HistoryDB } from '../../../src/history/db';
 import { VoiceError } from '../../../src/voice/types';
+import { recoverOrchestration } from '../../../src/orchestration/recovery';
 import type { AgentConfig, GatewayConfig } from '../../../src/types';
 
 // meguri, input 16e7b607: one failed wallet check ended the voice note for good. The recording
@@ -17,7 +18,7 @@ const until = async (predicate: () => boolean) => {
   throw Error('condition not reached');
 };
 
-async function fixture(failures: string[]) {
+async function fixture(failures: string[], chatId = '42') {
   const root = mkdtempSync(join(tmpdir(), 'voice-retry-'));
   mkdirSync(join(root, 'a', 'media', 'chat'), { recursive: true });
   writeFileSync(join(root, 'a', 'media', 'chat', 'note.ogg'), Buffer.from('OggSfixture'));
@@ -43,7 +44,7 @@ async function fixture(failures: string[]) {
       return process;
     }, releaseAgentSession: async () => {},
   });
-  const scope = { agentId: 'a', agentSessionId: 's', source: 'telegram' as const, accountId: 'bot', chatId: '42', threadKey: '', principalId: 'telegram:42' };
+  const scope = { agentId: 'a', agentSessionId: 's', source: 'telegram' as const, accountId: 'bot', chatId, threadKey: '', principalId: 'telegram:42' };
   const send = () => runtime.send({ scope, text: '(voice message)', modality: 'voice_note', attachmentIds: ['media/chat/note.ogg'], ingressKey: 'tg-message-1' }, { execute: true, writeMemory: false }, { timeoutMs: 2000 });
   const controls = () => runtime.store.all("SELECT payload_json FROM outbox WHERE kind='delivery'").map(row => JSON.parse(String(row.payload_json)).controls).filter(Boolean);
   return { root, runtime, transcribed, prompts, send, controls, close: async () => { await runtime.close(); (history as any).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true }); } };
@@ -106,5 +107,43 @@ test('a rerun of an input whose earlier failure was retryable transcribes it aga
     await until(() => f.prompts.length === 1 && !f.runtime.isBusy('s'));
     expect(f.transcribed).toHaveLength(2);
     expect(f.runtime.store.get('SELECT state FROM voice_note_transcripts WHERE input_id=?', input)!.state).toBe('completed');
+  } finally { await f.close(); }
+});
+
+test('a retry inherits the conversation model instead of re-stamping the original note model as explicit', async () => {
+  const f = await fixture(['STT_PROVIDER_ERROR_HTTP_503']);
+  try {
+    await f.send();
+    const inputId = String(f.runtime.store.get('SELECT input_id FROM voice_note_transcripts')!.input_id);
+    // The original note only inherited a model that was in effect at the time.
+    const ingress = JSON.parse(String(f.runtime.store.get('SELECT ingress_json FROM conversation_inputs WHERE id=?', inputId)!.ingress_json));
+    f.runtime.store.run('UPDATE conversation_inputs SET ingress_json=? WHERE id=?', JSON.stringify({ ...ingress, model: 'stale-model', modelSelection: 'inherited' }), inputId);
+    expect(f.runtime.retryVoiceNote('telegram', '42', 'telegram:42', inputId)).toMatchObject({ retried: true });
+    const retried = f.runtime.store.get("SELECT json_extract(ingress_json,'$.model') model,json_extract(ingress_json,'$.modelSelection') selection FROM conversation_inputs WHERE id<>? AND modality='voice_note'", inputId)!;
+    expect(retried.selection).not.toBe('explicit');
+    expect(retried.model).toBeNull();
+    await until(() => f.prompts.length === 1 && !f.runtime.isBusy('s'));
+  } finally { await f.close(); }
+});
+
+test('a transcription cut off by a restart is a retryable interruption, not a stuck note', async () => {
+  const f = await fixture(['STT_PROVIDER_ERROR_HTTP_503']);
+  try {
+    await f.send();
+    const inputId = String(f.runtime.store.get('SELECT input_id FROM voice_note_transcripts')!.input_id);
+    // The process stopped while the provider call was still in flight.
+    f.runtime.store.run("UPDATE voice_note_transcripts SET state='processing',error_code=NULL WHERE input_id=?", inputId);
+    recoverOrchestration(f.runtime.store);
+    expect(f.runtime.store.get('SELECT state,error_code FROM voice_note_transcripts WHERE input_id=?', inputId)).toEqual({ state: 'failed', error_code: 'VOICE_NOTE_INTERRUPTED' });
+    expect(f.runtime.retryVoiceNote('telegram', '42', 'telegram:42', inputId)).toMatchObject({ retried: true });
+    await until(() => f.prompts.length === 1 && !f.runtime.isBusy('s'));
+  } finally { await f.close(); }
+});
+
+test('a group chat failure has no Retry button, since only a private chat can use it', async () => {
+  const f = await fixture(['STT_PROVIDER_ERROR_HTTP_503'], '-1001234567890');
+  try {
+    await f.send();
+    expect(f.controls()).toEqual([]);
   } finally { await f.close(); }
 });

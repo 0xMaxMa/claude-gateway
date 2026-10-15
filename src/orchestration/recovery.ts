@@ -11,6 +11,9 @@ export function recoverOrchestration(store: OrchestrationStore): { inputs: numbe
     store.run("UPDATE assistant_responses SET state='interrupted',completed_at=? WHERE state='generating'", now);
     const inputs = Number(store.run("UPDATE conversation_inputs SET status='accepted' WHERE status='assigned'").changes);
     store.run("UPDATE notifications SET status='pending',decision_id=NULL WHERE status='assigned'");
+    // A transcription in flight when the process stopped did not fail on its own: the rerun of its
+    // input, or the 🔁 Retry button, transcribes the kept recording again.
+    store.run("UPDATE voice_note_transcripts SET state='failed',error_code='VOICE_NOTE_INTERRUPTED' WHERE state='processing'");
     let uncertainTasks = 0;
     const rows = store.all('SELECT snapshot_json FROM tasks WHERE active_attempt_id IS NOT NULL');
     for (const row of rows) {

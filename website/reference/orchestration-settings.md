@@ -99,8 +99,8 @@ Withheld inputs do not create failed token turns or fabricated zero-usage rows.
 | `startupTimeoutMs` | `120000` | Startup budget |
 | `firstResponseTimeoutMs` | `120000` | Budget for first response activity |
 | `compactionTimeoutMs` | `300000` | Per-compaction deadline for agents and workers; independent of first-response and idle budgets. Any configured total deadline still applies. |
-| `contextTimeoutScaleTokens` | `200000` | Context size above which a decision turn's `firstResponseTimeoutMs` and `idleTimeoutMs` grow in proportion. The size is the previous turn's measured context plus this turn's text and images. At or below it both budgets are unchanged; at twice it they double. Between `1000` and `10000000` |
-| `maxContextTimeoutMs` | `300000` | Cap for those scaled budgets. Must be at least `firstResponseTimeoutMs` and `idleTimeoutMs` and at most `maxDecisionDurationMs`, which still bounds the whole turn |
+| `contextTimeoutScaleTokens` | `200000` | Context size above which a decision turn's `firstResponseTimeoutMs` and `idleTimeoutMs` grow in proportion. The size is the previous turn's measured context, when the turn resumes that CLI context, plus this turn's text and images. At or below it both budgets are unchanged; at twice it they double. Between `1000` and `10000000` |
+| `maxContextTimeoutMs` | `300000` | Cap for those scaled budgets. When set, it must be at least `firstResponseTimeoutMs` and `idleTimeoutMs` and at most `maxDecisionDurationMs`, which still bounds the whole turn. When unset, the `300000` default is lowered to `maxDecisionDurationMs` and raised to the larger of `firstResponseTimeoutMs` and `idleTimeoutMs`, so an existing config keeps loading |
 | `maxDecisionDurationMs` | `600000` | Total decision budget; separate from worker task runtime |
 | `preemptionGraceMs` | `250` | Accepted configuration field; currently not consumed by runtime preemption |
 | `maxPendingInputs` | `100` | Bound queued conversation input |

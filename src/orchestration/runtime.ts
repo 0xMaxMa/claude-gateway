@@ -78,8 +78,6 @@ import { HistoryDB } from '../history/db';
 import { RuntimeProfile } from '../session/runtime-profile';
 import { OrchestrationStore, AcceptInput, INTAKE_RECOVERY_PREFIX, channelVoiceKey, payloadHash } from './store';
 import { contextScaledTimeouts, resolveOrchestrationConfig } from './config';
-/** Estimated tokens per attached image (a ~1.15-megapixel image is about 1,600). */
-const IMAGE_TOKEN_ESTIMATE = 1600;
 import { mergeContextRefs, TaskService, taskIndexEntry } from './tasks/service';
 import { DecisionService, DecisionReceipt } from './decisions';
 import { TaskBridge } from './bridge';
@@ -93,8 +91,6 @@ import { acceptsDirectCommand } from './tasks/automation-session';
 import { recoverOrchestration } from './recovery';
 import { acquireInstanceLock } from './instance-lock';
 import { DeliveryOutbox, channelSender, ChannelSender, DeliveryControl } from './delivery';
-/** How long a failed voice note can be retried from its kept recording. */
-const VOICE_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
 import { ConversationEvents } from './events';
 import { BoundedQueue } from './bounded-queue';
@@ -106,6 +102,10 @@ import { workerShares } from './worker-shares';
 import { ProviderAdmissionStore, ProviderPermit, ProviderWaiting, providerFailure } from './provider-admission';
 import { resolveProviderScope, resolvedCodexProviderScope } from './provider-scope';
 import { DEFAULT_MODELS, selectableModels } from '../agent/model-registry';
+/** Estimated tokens per attached image (a ~1.15-megapixel image is about 1,600). */
+const IMAGE_TOKEN_ESTIMATE = 1600;
+/** How long a failed voice note can be retried from its kept recording. */
+const VOICE_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 
 /** Stable instructions are carried in the system prefix, not appended to every
@@ -937,7 +937,9 @@ export class AgentOrchestrationRuntime {
     if (!attachment || !existsSync(MediaStore.resolvePath(join(this.agent.workspace, '../..'), this.agent.id, attachment))) return { text: 'The recording is no longer available. Please record it again.', retried: false };
     // One transition per failure, so a double tap cannot queue the note twice.
     if (Number(this.store.run("UPDATE voice_note_transcripts SET state='retried' WHERE input_id=? AND state='failed'", inputId).changes) !== 1) return { text: 'This voice note is already being retried.', retried: false };
-    const { capabilities, ...original } = ingress;
+    // The model is not copied: the retry follows the conversation's current model selection,
+    // as a new note would, instead of stamping the original note's model as explicit.
+    const { capabilities, model: _model, modelSelection: _selection, ...original } = ingress as typeof ingress & { modelSelection?: string };
     try {
       const accepted = this.submitInput({ ...original, ingressKey: `voice-retry:${inputId}` },
         capabilities ?? { execute: false, writeMemory: false });
@@ -949,9 +951,11 @@ export class AgentOrchestrationRuntime {
     this.voiceLog('info', 'Voice note retry requested', { agentId: this.agent.id, referenceId: inputId, code: row.error_code });
     return { text: '🔁 Retrying the voice note…', retried: true };
   }
-  /** The 🔁 Retry button for a Telegram reply that reports a retryable voice-note failure. */
+  /** The 🔁 Retry button for a private Telegram reply that reports a retryable voice-note failure.
+   * A private chat's id is its user's (positive) id; the receiver refuses the button anywhere else. */
   private voiceRetryControls(responseId: string, bindingId: string): DeliveryControl[] | undefined {
-    if (this.store.get('SELECT channel FROM conversation_bindings WHERE id=?', bindingId)?.channel !== 'telegram') return;
+    const binding = this.store.get('SELECT channel,chat_id FROM conversation_bindings WHERE id=?', bindingId);
+    if (binding?.channel !== 'telegram' || !/^\d+$/.test(String(binding.chat_id))) return;
     const row = this.store.get(`SELECT t.input_id,t.error_code FROM assistant_responses r JOIN conversation_decisions d ON d.id=r.decision_id
       JOIN voice_note_transcripts t ON t.input_id=json_extract(d.input_ids_json,'$[0]') WHERE r.id=? AND t.state='failed'`, responseId);
     return row && retryableVoiceNoteFailure(String(row.error_code ?? '')) ? [{ label: '🔁 Retry', data: `orch:vr:${row.input_id}` }] : undefined;
@@ -1553,8 +1557,9 @@ export class AgentOrchestrationRuntime {
         options.onText?.(chunk);
       };
       const turnPrompt = unansweredInputContext(this.store, receipt.conversationId, receipt.inputId) + prompt;
-      // The previous turn's measured context, plus this turn's text (~4 bytes a token) and images.
-      const contextTokens = latestAgentContextTokens(this.store, sessionId) + Math.ceil(Buffer.byteLength(turnPrompt) / 4) + visualInput.images.length * IMAGE_TOKEN_ESTIMATE;
+      // The previous turn's measured context when this turn resumes it, plus this turn's text
+      // (~4 bytes a token) and images. A fresh CLI context starts from none of that history.
+      const contextTokens = (cliSession.resume ? latestAgentContextTokens(this.store, sessionId) : 0) + Math.ceil(Buffer.byteLength(turnPrompt) / 4) + visualInput.images.length * IMAGE_TOKEN_ESTIMATE;
       const timeouts = contextScaledTimeouts(this.config.conversation, contextTokens);
       const turn = startProcessTurn(agentSession, turnPrompt, Math.min(options.timeoutMs, this.config.conversation.maxDecisionDurationMs), text => {
         displayChunk(text);

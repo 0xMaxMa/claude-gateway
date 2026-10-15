@@ -7,6 +7,7 @@ import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
 import * as processTurn from '../../../src/orchestration/process-turn';
 import { contextScaledTimeouts, resolveOrchestrationConfig } from '../../../src/orchestration/config';
 import { recordTokenTurn } from '../../../src/orchestration/token-ledger';
+import { AgentCliSessions } from '../../../src/orchestration/agent-cli-session';
 import { SessionStore } from '../../../src/session/store';
 import { HistoryDB } from '../../../src/history/db';
 import type { SessionProcess } from '../../../src/session/process';
@@ -14,7 +15,7 @@ import type { AgentConfig, GatewayConfig } from '../../../src/types';
 
 // Session a3a24184 (shadow): at ~826k context tokens the first token, and the next request
 // after each tool result, took longer than the fixed 120 s, so the turn failed with TIMEOUT.
-async function timeoutsFor(contextTokens: number | undefined) {
+async function timeoutsFor(contextTokens: number | undefined, resume = true) {
   const root = mkdtempSync(join(tmpdir(), 'context-timeout-')), dir = join(root, 'a'), workspace = join(dir, 'workspace');
   mkdirSync(workspace, { recursive: true }); writeFileSync(join(workspace, 'CLAUDE.md'), 'Fixture identity');
   const agent = { id: 'a', description: 'fixture', env: '', workspace, claude: { model: 'fixture', extraFlags: [] } } as AgentConfig;
@@ -22,6 +23,12 @@ async function timeoutsFor(contextTokens: number | undefined) {
   const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a'), sid = randomUUID();
   await sessions.ensureApiSession('a', 'chat', sid);
   const spy = jest.spyOn(processTurn, 'startProcessTurn');
+  // The measured context belongs to the CLI context this turn resumes, or to none at all.
+  const resolve = AgentCliSessions.prototype.resolve;
+  const cli = jest.spyOn(AgentCliSessions.prototype, 'resolve').mockImplementation(function (this: AgentCliSessions, ...args) {
+    const decision = resolve.apply(this, args);
+    return contextTokens !== undefined && resume ? { id: decision.id, resume: true } : decision;
+  });
   const runtime = await AgentOrchestrationRuntime.open(agent, gateway, dir, sessions, history, {
     releaseAgentSession: async () => {},
     createAgentSession: async (_session, profile) => Object.assign(new EventEmitter(), { runtimeProfile: profile,
@@ -39,7 +46,7 @@ async function timeoutsFor(contextTokens: number | undefined) {
     const policy = spy.mock.calls.at(-1)![6]!;
     return { firstResponse: policy.firstResponseTimeoutMs, idle: policy.idleTimeoutMs };
   } finally {
-    spy.mockRestore();
+    spy.mockRestore(); cli.mockRestore();
     await runtime.close().catch(() => {}); (history as any).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true });
   }
 }
@@ -76,4 +83,20 @@ test('invalid scaling config is rejected', () => {
     { maxContextTimeoutMs: 0 }, { maxContextTimeoutMs: 60000 }, { maxContextTimeoutMs: 600001 },
     { firstResponseTimeoutMs: 200000, maxContextTimeoutMs: 150000 },
   ]) expect(() => resolveOrchestrationConfig({ conversation } as any)).toThrow(/contextTimeout|maxContextTimeoutMs|Invalid|must/);
+});
+
+test('a config that was valid before scaling existed still loads, with the cap raised to its own budgets', () => {
+  // Long budgets, including the legacy decisionTimeoutMs alias for idleTimeoutMs.
+  expect(resolveOrchestrationConfig({ conversation: { idleTimeoutMs: 450000 } }).conversation.maxContextTimeoutMs).toBe(450000);
+  expect(resolveOrchestrationConfig({ conversation: { decisionTimeoutMs: 400000 } }).conversation.maxContextTimeoutMs).toBe(400000);
+  expect(resolveOrchestrationConfig({ conversation: { firstResponseTimeoutMs: 350000 } }).conversation.maxContextTimeoutMs).toBe(350000);
+  // A short whole-turn limit lowers the default cap instead of rejecting the config.
+  expect(resolveOrchestrationConfig({ conversation: { maxDecisionDurationMs: 200000 } }).conversation.maxContextTimeoutMs).toBe(200000);
+  // An explicit cap is still checked.
+  expect(() => resolveOrchestrationConfig({ conversation: { idleTimeoutMs: 450000, maxContextTimeoutMs: 300000 } })).toThrow(/maxContextTimeoutMs/);
+});
+
+test('a fresh CLI context does not inherit the size measured in the one it replaced', async () => {
+  // After /new, a model switch or an unreadable transcript, the previous 826k turn is not in this context.
+  expect(await timeoutsFor(826000, false)).toEqual({ firstResponse: 120000, idle: 120000 });
 });
