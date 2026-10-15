@@ -14,6 +14,10 @@ export interface VoiceCallPageOpts {
   basePath: string;
   /** `voice.turns.maxUtteranceMs`: the client ends a turn before the server would reject it. */
   maxUtteranceMs: number;
+  /** The bot's Telegram name; the agent id when Telegram has not answered. */
+  botName?: string;
+  /** The bot photo's Telegram `file_unique_id`; without one the page shows the name's initial. */
+  avatarVersion?: string;
 }
 
 /** Collects ~40 ms of microphone samples per message at the context rate. */
@@ -40,8 +44,7 @@ const STYLE = `${BASE_STYLE}
   .ring { position: absolute; inset: 0; border-radius: 50%; border: 2px solid transparent; transition: border-color .2s, box-shadow .2s; }
   .avatar { width: 112px; height: 112px; border-radius: 50%; display: grid; place-items: center; font-size: 46px; font-weight: 600; color: #fff;
     position: relative; background: linear-gradient(135deg, #8ea2ff 0%, #6b7cff 55%, #5a5fd8 100%); box-shadow: 0 8px 30px rgba(107,124,255,.25); }
-  .avatar img { display: none; position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
-  .avatar.photo img { display: block; }
+  .avatar img { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
   .name { margin-top: 20px; font-size: 24px; font-weight: 600; color: #e4e9ff; word-break: break-word; }
   .timer { min-height: 22px; margin-top: 6px; font-size: 17px; color: #8f9bb3; font-variant-numeric: tabular-nums; letter-spacing: .5px; }
   .chip { margin-top: 18px; max-width: 100%; display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: 16px; background: #161b27; color: #8f9bb3; }
@@ -88,11 +91,13 @@ const ICONS = {
 export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
   const cfg = JSON.stringify({ pairingId: opts.pairingId, basePath: opts.basePath, maxUtteranceMs: opts.maxUtteranceMs, vad: VOICE_CALL_VAD }).replace(/</g, '\\u003c');
   const client = [createResampler, encodeVoiceCallFrame, voiceCallLevel, createVoiceCallVad, createVoiceCallUplink, createVoiceCallPlayhead, voiceCallTicketFailure, formatCallDuration, voiceCallErrorView].map(fn => fn.toString()).join(';\n');
-  const initial = Array.from(opts.agentId.trim())[0]?.toUpperCase() ?? '?';
+  const name = opts.botName ?? opts.agentId;
+  const initial = Array.from(name.trim())[0]?.toUpperCase() ?? '?';
+  const photo = opts.avatarVersion ? `${opts.basePath}/voice-call/${encodeURIComponent(opts.pairingId)}/avatar?v=${encodeURIComponent(opts.avatarVersion)}` : '';
   const body = `
   <div class="call" id="call">
-    <div class="avatar-wrap"><div class="ring"></div><div class="avatar" id="avatar" aria-hidden="true">${htmlEscape(initial)}<img id="photo" alt=""></div></div>
-    <div class="name">${htmlEscape(opts.agentId)}</div>
+    <div class="avatar-wrap"><div class="ring"></div><div class="avatar" id="avatar" aria-hidden="true">${htmlEscape(initial)}${photo ? `<img id="photo" alt="" src="${htmlEscape(photo)}">` : ''}</div></div>
+    <div class="name">${htmlEscape(name)}</div>
     <div class="timer" id="timer"></div>
     <div class="chip" role="status"><span class="dot"></span><span class="bars"><b style="--h:.45"></b><b style="--h:.85"></b><b style="--h:.65"></b><b style="--h:1"></b><b style="--h:.5"></b></span><span class="state" id="state">Starting…</span></div>
     <div class="lines"><div class="line you" id="you"></div><div class="line" id="reply"></div></div>
@@ -361,10 +366,6 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     }
     if (tg) { try { tg.ready(); tg.expand(); if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); tg.onEvent && tg.onEvent('deactivated', suspend); tg.onEvent && tg.onEvent('activated', resume); } catch (e) {} }
     document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'hidden') suspend(); else if (!tg || tg.isActive !== false) resume(); });
-    // The bot's profile photo replaces the initial once it loads; without one the initial stays.
-    var photo = $('photo');
-    photo.onload = function(){ $('avatar').className = 'avatar photo'; };
-    photo.src = api('/avatar');
     $('mute').onclick = function(){ setMuted(!muted); };
     $('speaker').onclick = function(){ setSpeaker(!speakerOn); };
     $('hangup').onclick = function(){ hangup(false); };

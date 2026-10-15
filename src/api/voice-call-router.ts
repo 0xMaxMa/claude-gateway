@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { AgentConfig } from '../types';
 import { AgentRunner } from '../agent/runner';
 import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
@@ -27,22 +27,26 @@ export interface VoiceCallRouterDeps {
  */
 export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
   const router = Router();
-  router.get('/:pairingId', (req: Request, res: Response) => {
+  // The bot's Telegram name and photo for the call screen, looked up as the page opens.
+  const avatars = deps.avatars ?? new TelegramBotAvatars();
+  router.get('/:pairingId', async (req: Request, res: Response, next: NextFunction) => { try {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
     const pairing = voiceCallPairings.get(String(req.params.pairingId));
     const config = pairing && deps.configs.get(pairing.agentId);
     if (!pairing || !config) { res.status(404).send(generateCliMessagePage('Link expired', 'This call link is invalid or has expired. Send /call again.', 'err')); return; }
     const voice = resolveOrchestrationConfig(config.orchestration, config.voice ?? { enabled: false }).voice;
-    res.send(generateVoiceCallPage({ pairingId: pairing.pairingId, agentId: pairing.agentId, basePath: deps.basePath(), maxUtteranceMs: voice.turns.maxUtteranceMs }));
-  });
+    const token = config.telegram?.botToken;
+    const bot = token ? await avatars.refresh(pairing.agentId, token) : { avatar: null };
+    res.send(generateVoiceCallPage({ pairingId: pairing.pairingId, agentId: pairing.agentId, basePath: deps.basePath(), maxUtteranceMs: voice.turns.maxUtteranceMs,
+      botName: bot.name, avatarVersion: bot.photoId }));
+  } catch (error) { next(error); } });
 
-  // The bot's profile photo for the call screen; 404 leaves the page on its initial letter.
-  const avatars = deps.avatars ?? new TelegramBotAvatars();
+  // The photo the page was rendered with; its URL carries the photo's id, so a new photo is a new URL.
   router.get('/:pairingId/avatar', async (req: Request, res: Response) => {
     const pairing = voiceCallPairings.get(String(req.params.pairingId));
     const token = pairing && deps.configs.get(pairing.agentId)?.telegram?.botToken;
-    const avatar = token ? await avatars.get(pairing.agentId, token) : null;
+    const avatar = token ? await avatars.avatar(pairing.agentId, token) : null;
     if (!avatar) { res.setHeader('Cache-Control', 'no-store'); res.status(404).end(); return; }
     res.setHeader('Content-Type', avatar.contentType);
     res.setHeader('Cache-Control', 'private, max-age=3600');

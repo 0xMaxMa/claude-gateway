@@ -11,6 +11,7 @@ import WebSocket from 'ws';
 import { VoiceApi } from '../../../src/api/voice-router';
 import { createVoiceCallRouter } from '../../../src/api/voice-call-router';
 import { voiceCallPairings } from '../../../src/voice/call-pairing';
+import { TelegramBotAvatars } from '../../../src/voice/telegram-avatar';
 import { FakeSttProvider, FakeTtsProvider } from '../../../src/voice/providers/fake';
 import { encodeVoiceFrame } from '../../../src/voice/protocol';
 import type { AgentConfig } from '../../../src/types';
@@ -43,7 +44,9 @@ function fixture(agentPatch: Partial<AgentConfig> = {}) {
   const agents = new Map([['a', runner]]), configs = new Map([['a', agent]]);
   const api = new VoiceApi(agents, configs, []);
   const app = express(); app.use(express.json());
-  app.use('/voice-call', createVoiceCallRouter({ agents, configs, voiceApi: api, basePath: () => '', telegramStateDir: () => stateDir }));
+  // Telegram is unreachable here: the page falls back to the agent id and its initial.
+  const avatars = new TelegramBotAvatars((async () => { throw new Error('offline'); }) as unknown as typeof fetch);
+  app.use('/voice-call', createVoiceCallRouter({ agents, configs, voiceApi: api, basePath: () => '', telegramStateDir: () => stateDir, avatars }));
   const server = createServer(app); server.on('upgrade', (req, socket, head) => { if (!api.upgrade(req, socket, head)) socket.destroy(); });
   const close = async () => { await api.close(); await new Promise<void>(resolve => server.close(() => resolve())); rmSync(stateDir, { recursive: true, force: true }); };
   return { agent, runner, submit, api, app, server, allow, close };

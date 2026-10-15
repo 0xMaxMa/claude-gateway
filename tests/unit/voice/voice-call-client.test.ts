@@ -375,7 +375,8 @@ describe('call page', () => {
     const html = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'agent', basePath: '/gateway', maxUtteranceMs: 60000 });
     const buttons = [...html.matchAll(/<button type="button" class="round[^"]*" id="(\w+)" aria-label="([^"]+)"(?: aria-pressed="(\w+)")?>/g)].map(match => match.slice(1));
     expect(buttons).toEqual([['speaker', 'Speaker', 'true'], ['hangup', 'End call', undefined], ['mute', 'Mute', 'false']]);
-    expect(html).toContain('<div class="avatar" id="avatar" aria-hidden="true">A<img id="photo" alt=""></div>');
+    // No photo known: the initial alone, and no request that could only 404.
+    expect(html).toContain('<div class="avatar" id="avatar" aria-hidden="true">A</div>');
   });
 
   test('the ring and chip follow the call: listening, the agent speaking, muted', async () => {
@@ -420,12 +421,13 @@ describe('call page', () => {
     expect(loudness(replies[1])).toBe(1);
   });
 
-  test("the bot's photo loads from the call's avatar route and replaces the initial", async () => {
-    const { element } = await openPage();
-    expect(element('photo').src).toBe('/gateway/voice-call/' + 'a'.repeat(36) + '/avatar');
-    expect(element('avatar').className).toBe('');
-    element('photo').onload!();
-    expect(element('avatar').className).toBe('avatar photo');
+  test("the bot's Telegram name and photo, versioned by the photo's id; the agent id without them", () => {
+    const named = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'getpod', basePath: '/gateway', maxUtteranceMs: 60000, botName: 'Meguri <Dev>', avatarVersion: 'AQADxyz' });
+    expect(named).toContain(`<div class="avatar" id="avatar" aria-hidden="true">M<img id="photo" alt="" src="/gateway/voice-call/${'a'.repeat(36)}/avatar?v=AQADxyz"></div>`);
+    expect(named).toContain('<div class="name">Meguri &lt;Dev&gt;</div>');
+    const plain = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'getpod', basePath: '/gateway', maxUtteranceMs: 60000 });
+    expect(plain).toContain('<div class="name">getpod</div>');
+    expect(plain).toContain('<div class="avatar" id="avatar" aria-hidden="true">G</div>');
   });
 
   describe('Mute sends what was said', () => {

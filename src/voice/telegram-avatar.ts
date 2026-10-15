@@ -1,20 +1,19 @@
 /**
- * A Telegram bot's profile photo for the `/call` page. Every Bot API request,
- * the file link included, carries the bot token, so the photo is fetched here
- * and served by the gateway; no Telegram URL reaches the browser or a log.
+ * A Telegram bot's name and profile photo for the `/call` page. Every Bot API
+ * request, the file link included, carries the bot token, so the gateway looks
+ * them up and serves the photo itself; no Telegram URL reaches the browser or a log.
  */
 export interface BotAvatar { bytes: Buffer; contentType: string }
+/** What the call page shows for the bot. `photoId` (Telegram's `file_unique_id`)
+ * changes when the photo does, so it versions the avatar URL. */
+export interface BotProfile { name?: string; photoId?: string; avatar: BotAvatar | null }
 
-/** Telegram keeps a file link valid for at least an hour. */
-export const BOT_AVATAR_TTL_MS = 60 * 60 * 1000;
-/** A failed lookup is retried sooner than a bot that has no photo. */
-const BOT_AVATAR_RETRY_MS = 5 * 60 * 1000;
 export const BOT_AVATAR_MAX_BYTES = 1024 * 1024;
 /** The page shows the avatar at 112 CSS px; 320 px stays sharp on a 3x screen. */
 const BOT_AVATAR_MIN_SIDE = 320;
 
 type BotApiResult<T> = { ok: boolean; result?: T };
-interface PhotoSize { file_id: string; width: number; height: number; file_size?: number }
+interface PhotoSize { file_id: string; file_unique_id: string; width: number; height: number; file_size?: number }
 
 const IMAGE_TYPES: Array<[string, (bytes: Buffer) => boolean]> = [
   ['image/jpeg', bytes => bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff],
@@ -23,27 +22,44 @@ const IMAGE_TYPES: Array<[string, (bytes: Buffer) => boolean]> = [
 ];
 
 export class TelegramBotAvatars {
-  private readonly cache = new Map<string, { token: string; expiresAt: number; avatar: Promise<BotAvatar | null> }>();
-  constructor(private readonly request: typeof fetch = fetch, private readonly now: () => number = Date.now) {}
+  private readonly profiles = new Map<string, BotProfile & { token: string }>();
+  private readonly lookups = new Map<string, Promise<BotProfile>>();
+  constructor(private readonly request: typeof fetch = fetch) {}
 
-  /** The agent's bot photo, or null when the bot has none or Telegram cannot be reached. */
-  get(agentId: string, botToken: string): Promise<BotAvatar | null> {
-    const cached = this.cache.get(agentId);
-    if (cached && cached.token === botToken && cached.expiresAt > this.now()) return cached.avatar;
-    const entry = { token: botToken, expiresAt: this.now() + BOT_AVATAR_TTL_MS, avatar: Promise.resolve<BotAvatar | null>(null) };
-    entry.avatar = this.fetchAvatar(botToken).then(
-      avatar => avatar,
-      () => { entry.expiresAt = this.now() + BOT_AVATAR_RETRY_MS; return null; });
-    this.cache.set(agentId, entry);
-    return entry.avatar;
+  /** Look the bot up again, as each call page opens: a renamed bot or a new photo
+   * shows on the next call. The photo is downloaded only when it changed. When
+   * Telegram cannot be reached the last known profile stands. */
+  refresh(agentId: string, botToken: string): Promise<BotProfile> {
+    const running = this.lookups.get(agentId);
+    if (running) return running;
+    const lookup = this.lookUp(agentId, botToken).finally(() => this.lookups.delete(agentId));
+    this.lookups.set(agentId, lookup);
+    return lookup;
   }
 
-  private async fetchAvatar(token: string): Promise<BotAvatar | null> {
-    const me = await this.call<{ id: number }>(token, 'getMe', {});
-    const photos = await this.call<{ photos: PhotoSize[][] }>(token, 'getUserProfilePhotos', { user_id: me.id, limit: 1 });
-    const sizes = [...(photos.photos[0] ?? [])].sort((a, b) => a.width - b.width);
-    const size = sizes.find(candidate => Math.min(candidate.width, candidate.height) >= BOT_AVATAR_MIN_SIDE) ?? sizes.at(-1);
-    if (!size) return null;
+  /** The photo the page was rendered with; looked up once if this process has none yet. */
+  async avatar(agentId: string, botToken: string): Promise<BotAvatar | null> {
+    const known = this.profiles.get(agentId);
+    return (known?.token === botToken ? known : await this.refresh(agentId, botToken)).avatar;
+  }
+
+  private async lookUp(agentId: string, token: string): Promise<BotProfile> {
+    const known = this.profiles.get(agentId), previous = known?.token === token ? known : undefined;
+    try {
+      const me = await this.call<{ id: number; first_name?: string }>(token, 'getMe', {});
+      const photos = await this.call<{ photos: PhotoSize[][] }>(token, 'getUserProfilePhotos', { user_id: me.id, limit: 1 });
+      const sizes = [...(photos.photos[0] ?? [])].sort((a, b) => a.width - b.width);
+      const size = sizes.find(candidate => Math.min(candidate.width, candidate.height) >= BOT_AVATAR_MIN_SIDE) ?? sizes.at(-1);
+      const avatar = !size ? null : previous?.photoId === size.file_unique_id ? previous.avatar : await this.download(token, size);
+      const profile = { token, name: me.first_name?.trim() || undefined, photoId: avatar ? size?.file_unique_id : undefined, avatar };
+      this.profiles.set(agentId, profile);
+      return profile;
+    } catch {
+      return previous ?? { avatar: null };
+    }
+  }
+
+  private async download(token: string, size: PhotoSize): Promise<BotAvatar | null> {
     const file = await this.call<{ file_path?: string; file_size?: number }>(token, 'getFile', { file_id: size.file_id });
     const path = file.file_path;
     if (!path || path.split('/').includes('..') || !/^[A-Za-z0-9_./-]+$/.test(path) || (file.file_size ?? 0) > BOT_AVATAR_MAX_BYTES) return null;
