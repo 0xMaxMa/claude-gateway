@@ -5392,9 +5392,9 @@ export class AgentRunner extends EventEmitter {
     return this.pendingApiSessions.has(sessionId);
   }
 
-  /** A chat bound to `project` has a turn in flight. Every running bound session passed through apiSessionBinding, so boundProjects holds it. */
+  /** A chat bound to `project` has a turn in flight, or its process is still spawning (pending is only set after the spawn). Every running bound session passed through apiSessionBinding, so boundProjects holds it. */
   hasActiveProjectTurn(project: string): boolean {
-    for (const [sessionId, bound] of this.boundProjects) if (bound === project && this.pendingApiSessions.has(sessionId)) return true;
+    for (const [sessionId, bound] of this.boundProjects) if (bound === project && (this.pendingApiSessions.has(sessionId) || this.sessionSpawnLocks.has(sessionId))) return true;
     return false;
   }
 
