@@ -13,6 +13,8 @@ export interface StartError {
   code: StartErrorCode;
   /** Redacted tail of what the process printed, when it printed anything. */
   log?: string;
+  /** Why the process could not be launched: an errno code such as EACCES, or `spawn_failed`. Never a path. */
+  reason?: string;
 }
 
 export interface StartResult {
@@ -218,8 +220,10 @@ export async function startProject(
   let launched: Launched;
   try {
     launched = await launch(plan.command(port), input.realProject, logPath);
-  } catch {
-    return err({ code: 'start_failed' });
+  } catch (e) {
+    console.warn(`[projects] start ${input.name} failed before the process ran: ${(e as Error).message}`);
+    const code = (e as NodeJS.ErrnoException).code;
+    return err({ code: 'start_failed', reason: typeof code === 'string' && /^E[A-Z]+$/.test(code) ? code : 'spawn_failed' });
   }
 
   const deadline = (input.waitMs ?? START_WAIT_MS) / POLL_MS;

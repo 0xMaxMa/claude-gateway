@@ -204,6 +204,21 @@ describe('POST /v1/projects/:name/running/start', () => {
     expect(res.body.log).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
   }, 20000);
 
+  it('says why a start failed before the process ran: a log folder that cannot be created', async () => {
+    project('site', { 'package.json': pkg({ start: 'node server.js' }), 'server.js': SERVER });
+    fs.writeFileSync(logs, 'a file where the log folder should be');
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const res = await start(app(), 'site', { port: await freePort() });
+      expect(res.status).toBe(502);
+      expect(res.body).toMatchObject({ code: 'start_failed', reason: expect.stringMatching(/^E[A-Z]+$/) });
+      expect(JSON.stringify(res.body)).not.toContain(base);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('start site failed'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('stops what it started when nothing listens in time', async () => {
     project('idle', { 'package.json': pkg({ start: 'node idle.js' }), 'idle.js': "console.log('up');setInterval(()=>{},1e6)" });
     const res = await start(app(1000), 'idle', { port: await freePort() });
