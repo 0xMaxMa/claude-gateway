@@ -413,8 +413,12 @@ export class AgentRunner extends EventEmitter {
   // keyed by sessionId so the dashboard can show the actual chat id.
   private readonly apiChatIds = new Map<string, string>();
   private readonly boundProjects = new Map<string, string>();
-  /** Sessions deleted while orchestrated work was live: they stay in boundProjects until that work ends. */
-  private readonly retiredBindings = new Set<string>();
+  /**
+   * Sessions deleted while a turn or orchestrated work was live, with the chat they belonged to. Their binding file
+   * and boundProjects entry stay until that work ends, so what the turn still writes stays hidden from non-admin keys;
+   * `reapRetiredBindings` then purges it and drops the binding.
+   */
+  private readonly retiredBindings = new Map<string, string>();
 
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
@@ -464,8 +468,31 @@ export class AgentRunner extends EventEmitter {
   }
 
   /** Ids of every project-bound session of this agent, from the binding files. Throws when they cannot be listed. */
-  boundSessionIds(): Promise<Set<string>> {
+  async boundSessionIds(): Promise<Set<string>> {
+    await this.reapRetiredBindings();
     return this.sessionStore.listBoundSessionIds(this.agentConfig.id);
+  }
+
+  private isApiSessionLive(sessionId: string, orchestratedLive = this.orchestration?.liveSessionIds() ?? new Set<string>()): boolean {
+    return orchestratedLive.has(sessionId) || this.pendingApiSessions.has(sessionId) || this.sessionSpawnLocks.has(sessionId);
+  }
+
+  /** Finishes the delete of every retired session whose work has ended: purge what it wrote, then drop the binding. */
+  private async reapRetiredBindings(): Promise<void> {
+    for (const [id, chatId] of [...this.retiredBindings]) {
+      if (this.isApiSessionLive(id)) continue;
+      this.retiredBindings.delete(id);
+      this.purgeApiSessionHistory(chatId, id);
+      await this.sessionStore.deleteProjectBinding(this.agentConfig.id, id).catch((err: unknown) => {
+        this.logger.warn('Failed to remove the binding of a deleted project session', { sessionId: id, error: (err as Error).message });
+      });
+      this.boundProjects.delete(id);
+    }
+  }
+
+  private purgeApiSessionHistory(chatId: string, sessionId: string): void {
+    const mediaPaths = this.historyDb.clearSession(`api-${chatId}`, sessionId);
+    MediaStore.deleteMediaFiles(this.agentsBaseDir, this.agentConfig.id, mediaPaths);
   }
 
   /** Throws PROJECT_UNAVAILABLE when the session's project no longer resolves; a no-op for unbound sessions. */
@@ -5428,11 +5455,7 @@ export class AgentRunner extends EventEmitter {
    */
   async hasActiveProjectTurn(project: string): Promise<boolean> {
     const orchestratedLive = this.orchestration?.liveSessionIds() ?? new Set<string>();
-    for (const id of [...this.retiredBindings]) {
-      if (orchestratedLive.has(id) || this.pendingApiSessions.has(id) || this.sessionSpawnLocks.has(id)) continue;
-      this.retiredBindings.delete(id);
-      this.boundProjects.delete(id);
-    }
+    await this.reapRetiredBindings();
     const names = new Set<string>(this.orchestration?.activeTaskProjects() ?? []);
     for (const sessionId of new Set([...this.pendingApiSessions, ...this.sessionSpawnLocks.keys(), ...orchestratedLive])) {
       const binding = await this.apiSessionBinding(sessionId);
@@ -6013,19 +6036,23 @@ export class AgentRunner extends EventEmitter {
   }
 
   async deleteApiSession(chatId: string, sessionId: string): Promise<void> {
+    let inChat = true;
     await this.sessionStore.deleteTelegramSession(this.agentConfig.id, chatId, sessionId, 'api').catch((err: unknown) => {
       // Legacy sessions (stored only in SQLite, no file index entry) are treated as already deleted
-      if (err instanceof SessionNotInIndexError) return;
+      if (err instanceof SessionNotInIndexError) { inChat = false; return; }
       throw err;
     });
-    // Stay in boundProjects while a turn or orchestrated work is live: the project guard reads it.
-    const live = this.pendingApiSessions.has(sessionId) || this.sessionSpawnLocks.has(sessionId) || Boolean(this.orchestration?.liveSessionIds().has(sessionId));
+    // History goes first: the binding file is what hides the session from non-admin keys, so it must outlive the transcript.
+    this.purgeApiSessionHistory(chatId, sessionId);
+    // A session this chat does not hold keeps its binding, since its transcript is still where it was.
+    if (!inChat) return;
+    // Live work keeps the binding, and in boundProjects the project guard reads it, until it ends.
+    if (this.isApiSessionLive(sessionId)) {
+      this.retiredBindings.set(sessionId, chatId);
+      return;
+    }
     await this.sessionStore.deleteProjectBinding(this.agentConfig.id, sessionId);
-    if (live) this.retiredBindings.add(sessionId);
-    else this.boundProjects.delete(sessionId);
-    // Purge from SQLite so the session no longer appears in listSessions()
-    const mediaPaths = this.historyDb.clearSession(`api-${chatId}`, sessionId);
-    MediaStore.deleteMediaFiles(this.agentsBaseDir, this.agentConfig.id, mediaPaths);
+    this.boundProjects.delete(sessionId);
   }
 
   /** The route has already authorized this API principal for the Agent. Preserve
