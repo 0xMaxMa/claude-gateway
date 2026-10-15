@@ -175,6 +175,18 @@ describe('redactCredentials cost', () => {
     expect(Date.now() - t0).toBeLessThan(100);
     expect(detail.length).toBeLessThanOrEqual(2000);
   });
+
+  it('hookDetail leaks no part of a credential that straddles the 64K cut', () => {
+    const cut = 64 * 1024;
+    for (const offset of [1, 3, 8, 12, 20]) {
+      const url = 'https://user:SUPERSECRETTOKEN@host/x';
+      const filler = `://${'a'.repeat(997)}@ `.repeat(Math.ceil(cut / 1000));
+      const text = `${filler.slice(0, cut - offset)}${url}`;
+      const detail = hookDetail({ code: 1, stdout: text, stderr: '' });
+      expect(detail).not.toContain('SUPERSECRET');
+      expect(detail).not.toContain('user:');
+    }
+  });
 });
 
 describe('isSensitiveName', () => {

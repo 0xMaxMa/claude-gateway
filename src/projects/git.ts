@@ -309,7 +309,10 @@ async function hasCommitHook(dir: string): Promise<boolean> {
 const HOOK_DETAIL_SCAN_CHARS = 64 * 1024;
 
 export function hookDetail(out: GitOutput): string {
-  const text = redactCredentials(`${out.stdout}${out.stderr}`.trim().slice(0, HOOK_DETAIL_SCAN_CHARS));
+  const raw = `${out.stdout}${out.stderr}`.trim();
+  // A userinfo credential holds no whitespace, so a cut at whitespace never leaves half of one for the regexes to miss.
+  const scanned = raw.length > HOOK_DETAIL_SCAN_CHARS ? raw.slice(0, HOOK_DETAIL_SCAN_CHARS).replace(/\S*$/, '') : raw;
+  const text = redactCredentials(scanned);
   // A cut through a multi-byte character decodes to U+FFFD, which would push past the byte cap.
   return Buffer.from(text).subarray(0, HOOK_DETAIL_MAX_BYTES).toString().replace(/\uFFFD$/, '');
 }
