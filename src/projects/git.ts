@@ -1,6 +1,6 @@
 import { constants as fsConstants, promises as fsp } from 'fs';
 import * as path from 'path';
-import { listProjects, resolveProjectDir } from './fs';
+import { listProjects, mapLimit, resolveProjectDir } from './fs';
 import { GIT_TIMEOUTS, GitOutput, runGit, withProjectLock } from './git-runner';
 import {
   buildStatus,
@@ -153,19 +153,6 @@ export function getStatus(root: string, name: ProjectName): Promise<GitResult<Gi
 /** The cheaper read for a chat's context note: an untracked folder counts once, no secret check needs its files, and no last commit or operation. */
 export function getStatusSummary(root: string, name: ProjectName): Promise<GitResult<GitStatus>> {
   return readStatus(root, name, SUMMARY_READ);
-}
-
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      out[i] = await fn(items[i]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return out;
 }
 
 /** Every project with a `.git`; null when its status timed out or failed. Non-git folders are left out. */

@@ -130,6 +130,28 @@ export async function resolveProjectDir(
   return st.isDirectory() ? dir : err("not_a_directory");
 }
 
+/** Bounds the open file handles a large root costs one list request. */
+const LIST_CONCURRENCY = 16;
+
+export async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker),
+  );
+  return out;
+}
+
 export async function listProjects(
   root: string,
 ): Promise<FsResult<ProjectList>> {
@@ -146,21 +168,22 @@ export async function listProjects(
     return err(errnoToCode(e));
   }
 
-  const projects: Project[] = [];
-  for (const d of dirents) {
-    // Names the other routes would reject are hidden so every listed project can be opened.
-    const name = parseProjectName(d.name);
-    if (!name.ok || !(d.isDirectory() || d.isSymbolicLink())) continue;
-    const dir = await resolveProjectDir(root, name.value);
-    if (!dir.ok) continue;
-    try {
-      projects.push(
-        await describeProject(realRoot.value, dir.value, name.value),
-      );
-    } catch {
+  const described = await mapLimit(
+    dirents,
+    LIST_CONCURRENCY,
+    async (d): Promise<Project | null> => {
+      // Names the other routes would reject are hidden so every listed project can be opened.
+      const name = parseProjectName(d.name);
+      if (!name.ok || !(d.isDirectory() || d.isSymbolicLink())) return null;
+      const dir = await resolveProjectDir(root, name.value);
+      if (!dir.ok) return null;
       // Vanished or unreadable between readdir and stat: not listable.
-    }
-  }
+      return describeProject(realRoot.value, dir.value, name.value).catch(
+        () => null,
+      );
+    },
+  );
+  const projects = described.filter((p): p is Project => p !== null);
   projects.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return ok({ root: realRoot.value, exists: true, projects });
 }
