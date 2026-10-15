@@ -56,6 +56,28 @@ const USER_CONFIG_TIMEOUT_MS = 3_000;
  * outrank these; they come only from the operator's environment.
  */
 async function trustedCommandConfig(env: NodeJS.ProcessEnv): Promise<string[]> {
+  const key = JSON.stringify(Object.entries(env).filter(([k]) => CONFIG_SOURCE_ENV.test(k)).sort());
+  let cached = operatorConfigCache.get(key);
+  if (!cached) {
+    cached = lookUpOperatorCommands(env);
+    operatorConfigCache.set(key, cached);
+  }
+  return cached;
+}
+
+/** What decides which config files git reads outside the repository. */
+const CONFIG_SOURCE_ENV = /^(HOME|XDG_CONFIG_HOME|GIT_CONFIG_.*)$/;
+const operatorConfigCache = new Map<string, Promise<string[]>>();
+
+/** Subcommands that never start ssh or an askpass program. */
+const NO_REMOTE_SUBCOMMANDS = new Set(['status', 'rev-parse', 'log', 'rev-list']);
+
+/** Forget the resolved operator values; for tests that rewrite a gitconfig under the same HOME. */
+export function resetOperatorConfigCache(): void {
+  operatorConfigCache.clear();
+}
+
+async function lookUpOperatorCommands(env: NodeJS.ProcessEnv): Promise<string[]> {
   const found = await new Promise<string>((resolve) => {
     // A git dir that does not exist keeps the repository's config out of the lookup.
     execFile(
@@ -97,7 +119,8 @@ export async function runGit(cwd: string, args: string[], opts: RunOptions): Pro
   const env: NodeJS.ProcessEnv = { ...gitEnv(), GIT_CEILING_DIRECTORIES: path.dirname(cwd), ...opts.env };
   if (opts.readOnly) env.GIT_OPTIONAL_LOCKS = '0';
   // core.fsmonitor is a command from the repo's config; add, commit and status all run it.
-  const argv = ['-c', 'core.fsmonitor=false', ...(await trustedCommandConfig(env)), ...args];
+  const remoteCapable = !opts.readOnly && !NO_REMOTE_SUBCOMMANDS.has(args[0] ?? '');
+  const argv = ['-c', 'core.fsmonitor=false', ...(remoteCapable ? await trustedCommandConfig(env) : []), ...args];
   return new Promise((resolve) => {
     // Its own process group, so a timeout also reaches the hooks, filters and ssh that git started.
     const child = spawn('git', argv, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });

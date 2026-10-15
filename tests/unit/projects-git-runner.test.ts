@@ -1,10 +1,16 @@
+import * as childProcess from 'child_process';
 import { execFileSync } from 'child_process';
+
+jest.mock('child_process', () => {
+  const actual = jest.requireActual('child_process');
+  return { ...actual, execFile: jest.fn(actual.execFile) };
+});
 import * as fs from 'fs';
 import * as http from 'http';
 import { AddressInfo } from 'net';
 import * as os from 'os';
 import * as path from 'path';
-import { GitOutput, runGit, withProjectLock } from '../../src/projects/git-runner';
+import { GitOutput, resetOperatorConfigCache, runGit, withProjectLock } from '../../src/projects/git-runner';
 import { err, ok, Result } from '../../src/projects/paths';
 
 // Names the gateway reads or interpolates for its own keys: config.template.json placeholders and the provider keys in src/.
@@ -135,6 +141,35 @@ describe('runGit', () => {
       } finally {
         server.close();
       }
+    });
+  });
+
+  describe('operator config lookup cost', () => {
+    const lookups = () => lookup.mock.calls.filter((c) => (c[1] as string[]).includes('--get-regexp')).length;
+    const lookup = childProcess.execFile as unknown as jest.Mock;
+    beforeEach(() => {
+      resetOperatorConfigCache();
+      lookup.mockClear();
+    });
+
+    it('runs no lookup for read-only calls', async () => {
+      value(await runGit(repo, ['status', '--porcelain=v2'], { timeoutMs: 3000, readOnly: true }));
+      value(await runGit(repo, ['rev-parse', '--absolute-git-dir'], { timeoutMs: 3000 }));
+      await runGit(repo, ['log', '-1'], { timeoutMs: 3000 });
+      expect(lookups()).toBe(0);
+    });
+
+    it('runs one lookup per config environment for the rest', async () => {
+      for (let i = 0; i < 3; i++) value(await runGit(repo, ['config', '--get', 'core.askPass'], { timeoutMs: 3000 }));
+      expect(lookups()).toBe(1);
+      const saved = process.env.HOME;
+      process.env.HOME = path.join(base, 'elsewhere');
+      try {
+        value(await runGit(repo, ['config', '--get', 'core.askPass'], { timeoutMs: 3000 }));
+      } finally {
+        process.env.HOME = saved;
+      }
+      expect(lookups()).toBe(2);
     });
   });
 
