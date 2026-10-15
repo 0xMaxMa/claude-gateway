@@ -232,7 +232,14 @@ anything.
 
 The repository's own config cannot choose which command git runs to reach a
 remote. `core.sshCommand` and `core.askPass` in a repository's `.git/config`
-are ignored and `core.fsmonitor` is turned off. The operator's values from
+are ignored and `core.fsmonitor` is turned off. Every `filter.<name>.clean`,
+`smudge` and `process` command that the repository's own config defines is
+blanked for every git call that could run one, including the status read
+behind the project list. The operator's own filters, such as `git lfs install`
+in `~/.gitconfig`, still run. A repository that defines its filters locally
+(`git lfs install --local`) therefore commits and checks out the raw file
+instead of the filtered one. A filter name holding `=` cannot be blanked, so
+git calls on that repository fail with `500 git_failed`. The operator's values from
 `/etc/gitconfig`, `~/.gitconfig` and `GIT_CONFIG_*` still apply. When the
 operator sets no `core.sshCommand`, git uses `ssh -o BatchMode=yes`. When the
 operator sets no `core.askPass`, it answers every prompt with an empty

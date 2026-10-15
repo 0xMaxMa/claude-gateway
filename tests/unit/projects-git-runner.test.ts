@@ -144,6 +144,82 @@ describe('runGit', () => {
     });
   });
 
+  describe('repository filter drivers', () => {
+    const ident = ['-c', 'user.name=t', '-c', 'user.email=t@t'];
+    let marker: string;
+    let script: string;
+    let saved: NodeJS.ProcessEnv;
+    beforeEach(() => {
+      saved = { ...process.env };
+      process.env.HOME = path.join(base, 'home');
+      fs.mkdirSync(process.env.HOME);
+      delete process.env.XDG_CONFIG_HOME;
+      delete process.env.GIT_CONFIG_GLOBAL;
+      marker = path.join(base, 'filter-ran');
+      script = path.join(base, 'filter.sh');
+      fs.writeFileSync(script, `#!/bin/sh\ntouch ${marker}\ncat\n`, { mode: 0o755 });
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'one\n');
+      fs.writeFileSync(path.join(repo, 'b.txt'), 'one\n');
+      fs.writeFileSync(path.join(repo, '.gitattributes'), 'a.txt filter=evil\n');
+      fs.writeFileSync(path.join(repo, '.git', 'info', 'attributes'), 'b.txt filter=evil\n');
+      execFileSync('git', [...ident, 'add', '-A'], { cwd: repo });
+      execFileSync('git', [...ident, 'commit', '-qm', 'init'], { cwd: repo });
+    });
+    afterEach(() => {
+      process.env = saved;
+    });
+
+    const dirty = () => {
+      for (const f of ['a.txt', 'b.txt']) {
+        fs.writeFileSync(path.join(repo, f), 'two\n');
+        fs.utimesSync(path.join(repo, f), new Date('2001-01-01'), new Date('2001-01-01'));
+      }
+    };
+    const defineFilter = (extra: string[] = []) => {
+      for (const key of ['clean', 'smudge']) execFileSync('git', ['config', ...extra, `filter.evil.${key}`, script], { cwd: repo });
+    };
+
+    it.each([
+      ['status', ['status', '--porcelain=v2'], true],
+      ['add', ['add', '-A'], false],
+    ])('does not run a repo filter on %s', async (_n, args, readOnly) => {
+      defineFilter();
+      dirty();
+      value(await runGit(repo, args as string[], { timeoutMs: 5000, readOnly }));
+      expect(fs.existsSync(marker)).toBe(false);
+    });
+
+    it('does not run a repo filter on commit', async () => {
+      defineFilter();
+      dirty();
+      value(await runGit(repo, ['add', '-A'], { timeoutMs: 5000 }));
+      value(await runGit(repo, [...ident, 'commit', '-qm', 'x'], { timeoutMs: 5000 }));
+      expect(fs.existsSync(marker)).toBe(false);
+    });
+
+    it('does not run a filter that an included file defines', async () => {
+      const extra = path.join(repo, '.git', 'extra.cfg');
+      execFileSync('git', ['config', '--file', extra, 'filter.evil.clean', script]);
+      execFileSync('git', ['config', 'include.path', extra], { cwd: repo });
+      dirty();
+      value(await runGit(repo, ['status', '--porcelain=v2'], { timeoutMs: 5000, readOnly: true }));
+      expect(fs.existsSync(marker)).toBe(false);
+    });
+
+    it('keeps a filter from the operator config', async () => {
+      fs.writeFileSync(path.join(process.env.HOME!, '.gitconfig'), `[filter "evil"]\n\tclean = ${script}\n`);
+      dirty();
+      value(await runGit(repo, ['add', '-A'], { timeoutMs: 5000 }));
+      expect(fs.existsSync(marker)).toBe(true);
+    });
+
+    it('refuses a repo filter name that cannot be blanked', async () => {
+      execFileSync('git', ['config', 'filter.a=b.clean', script], { cwd: repo });
+      const r = await runGit(repo, ['status'], { timeoutMs: 5000, readOnly: true });
+      expect(r.ok).toBe(false);
+    });
+  });
+
   describe('operator config lookup cost', () => {
     const lookups = () => lookup.mock.calls.filter((c) => (c[1] as string[]).includes('--get-regexp')).length;
     const lookup = childProcess.execFile as unknown as jest.Mock;

@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'child_process';
+import { promises as fsp } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { err, ok, Result } from './paths';
@@ -98,6 +99,59 @@ async function lookUpOperatorCommands(env: NodeJS.ProcessEnv): Promise<string[]>
   ];
 }
 
+const FILTER_SECTION = /^\s*\[\s*filter(?:\s+"((?:[^"\\\n]|\\.)*)"|\.([^\s\]]+))\s*\]/gim;
+const INCLUDE_SECTION = /^\s*\[\s*include(?:if)?\b/im;
+const FILTER_KEYS = ['clean', 'smudge', 'process'] as const;
+
+/** Filter names a repo's own config defines, or null when an include could add more and git must be asked. */
+async function repoFilterNames(cwd: string): Promise<string[] | null> {
+  let text = '';
+  for (const file of ['config', 'config.worktree']) {
+    try {
+      text += `\n${await fsp.readFile(path.join(cwd, '.git', file), 'utf8')}`;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' && file === 'config') return [];
+      if (code !== 'ENOENT') return null;
+    }
+  }
+  if (INCLUDE_SECTION.test(text)) return null;
+  const names = new Set<string>();
+  for (const m of text.matchAll(FILTER_SECTION)) names.add(m[1] !== undefined ? m[1].replace(/\\(.)/g, '$1') : (m[2] ?? '').toLowerCase());
+  return [...names];
+}
+
+async function repoFilterNamesFromGit(cwd: string, env: NodeJS.ProcessEnv): Promise<string[]> {
+  const out = await new Promise<string>((resolve) => {
+    execFile('git', ['config', '--show-scope', '--name-only', '-z', '--get-regexp', '^filter\\.'], { cwd, env, timeout: USER_CONFIG_TIMEOUT_MS }, (e, stdout) => resolve(e ? '' : stdout));
+  });
+  const fields = out.split('\0');
+  const names = new Set<string>();
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const key = fields[i + 1]!;
+    if ((fields[i] === 'local' || fields[i] === 'worktree') && key.startsWith('filter.') && key.includes('.', 7)) names.add(key.slice(7, key.lastIndexOf('.')));
+  }
+  return [...names];
+}
+
+/**
+ * `-c` overrides that blank every filter command the repository's own config defines. status runs a filter's clean
+ * command on a file that looks modified, and add, commit and merge run it too, so a clone could otherwise run a command
+ * when the project is listed. Filters from the operator's config stay.
+ */
+async function repoFilterOverrides(cwd: string, env: NodeJS.ProcessEnv): Promise<string[] | null> {
+  const names = (await repoFilterNames(cwd)) ?? (await repoFilterNamesFromGit(cwd, env));
+  // `-c name=value` splits at the first `=`, so a filter name holding one cannot be blanked.
+  if (names.some((name) => name.includes('='))) return null;
+  return names.flatMap((name) => [
+    ...FILTER_KEYS.flatMap((key) => ['-c', `filter.${name}.${key}=`]),
+    '-c', `filter.${name}.required=false`,
+  ]);
+}
+
+/** Subcommands that never run a filter. */
+const NO_FILTER_SUBCOMMANDS = new Set(['rev-parse', 'log', 'rev-list', 'config', 'init']);
+
 export interface RunOptions {
   timeoutMs: number;
   /** Status-style reads must not take .git/index.lock away from a concurrent mutation. */
@@ -120,7 +174,9 @@ export async function runGit(cwd: string, args: string[], opts: RunOptions): Pro
   if (opts.readOnly) env.GIT_OPTIONAL_LOCKS = '0';
   // core.fsmonitor is a command from the repo's config; add, commit and status all run it.
   const remoteCapable = !opts.readOnly && !NO_REMOTE_SUBCOMMANDS.has(args[0] ?? '');
-  const argv = ['-c', 'core.fsmonitor=false', ...(remoteCapable ? await trustedCommandConfig(env) : []), ...args];
+  const filters = NO_FILTER_SUBCOMMANDS.has(args[0] ?? '') ? [] : await repoFilterOverrides(cwd, env);
+  if (!filters) return err('git_failed');
+  const argv = ['-c', 'core.fsmonitor=false', ...filters, ...(remoteCapable ? await trustedCommandConfig(env) : []), ...args];
   return new Promise((resolve) => {
     // Its own process group, so a timeout also reaches the hooks, filters and ssh that git started.
     const child = spawn('git', argv, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
