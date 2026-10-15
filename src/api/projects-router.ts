@@ -1,7 +1,7 @@
 import * as path from 'path';
 import { NextFunction, Request, Response, Router } from 'express';
 import { ApiKey } from '../types';
-import { createApiAuthMiddleware, canAccessPod } from './auth';
+import { createApiAuthMiddleware, isAdmin, PROJECTS_ADMIN_REQUIRED } from './auth';
 import { defineRoute } from './route-registry';
 import { createProject, listDir, resolveProjectDir, listProjects, readFileContent } from '../projects/fs';
 import { getStatus, getSummaries, GitError, GitErrorCode } from '../projects/git';
@@ -22,7 +22,7 @@ const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode | Start
   not_a_file: { status: 400, message: 'Not a regular file' },
   path_escape: { status: 403, message: 'Path resolves outside the project' },
   permission_denied: { status: 403, message: 'Permission denied' },
-  forbidden_key: { status: 403, message: 'API key not permitted for this operation' },
+  forbidden_key: { status: 403, message: PROJECTS_ADMIN_REQUIRED.error },
   not_found: { status: 404, message: 'Not found' },
   project_exists: { status: 409, message: 'Project already exists' },
   internal: { status: 500, message: 'Internal error' },
@@ -54,14 +54,8 @@ function respond<T>(res: Response, result: Result<T, ProjectsErrorCode | Running
   else fail(res, result.error);
 }
 
-function requirePod(req: Request, res: Response, next: NextFunction): void {
-  if (canAccessPod((req as AuthedRequest).apiKey)) next();
-  else fail(res, 'forbidden_key');
-}
-
-function requireWrite(req: Request, res: Response, next: NextFunction): void {
-  const key = (req as AuthedRequest).apiKey;
-  if (key.admin || key.write === true) next();
+function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+  if (isAdmin((req as AuthedRequest).apiKey)) next();
   else fail(res, 'forbidden_key');
 }
 
@@ -72,8 +66,8 @@ function handle(fn: (req: Request, res: Response) => Promise<void>) {
 }
 
 /**
- * Pod-wide project browsing under `root`. Every route needs a key that can see
- * all agents, since projects are not agent-scoped.
+ * Pod-wide project routes under `root`. Every route needs an admin key, since
+ * projects are not agent-scoped and they read, run and delete files on the pod.
  */
 export interface RunningDeps {
   sys: Sys;
@@ -99,18 +93,17 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects', auth: 'key', summary: 'List projects under the configured projects root', cli: null },
+    { method: 'GET', path: '/v1/projects', auth: 'admin', summary: 'List projects under the configured projects root', cli: null },
     auth,
-    requirePod,
+    requireAdmin,
     handle(async (_req, res) => respond(res, await listProjects(root))),
   );
 
   defineRoute(
     router,
-    { method: 'POST', path: '/v1/projects', auth: 'key', summary: 'Create a project directory', cli: null },
+    { method: 'POST', path: '/v1/projects', auth: 'admin', summary: 'Create a project directory', cli: null },
     auth,
-    requirePod,
-    requireWrite,
+    requireAdmin,
     handle(async (req, res) => {
       const body = (req.body ?? {}) as { name?: unknown; git_init?: unknown };
       const name = parseProjectName(body.name);
@@ -121,10 +114,9 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'DELETE', path: '/v1/projects/:name', auth: 'key', summary: 'Delete a project folder and everything in it', cli: null },
+    { method: 'DELETE', path: '/v1/projects/:name', auth: 'admin', summary: 'Delete a project folder and everything in it', cli: null },
     auth,
-    requirePod,
-    requireWrite,
+    requireAdmin,
     handle(async (req, res) => {
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);
@@ -145,9 +137,9 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects/:name/tree', auth: 'key', summary: 'List one directory level of a project', cli: null },
+    { method: 'GET', path: '/v1/projects/:name/tree', auth: 'admin', summary: 'List one directory level of a project', cli: null },
     auth,
-    requirePod,
+    requireAdmin,
     handle(async (req, res) => {
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);
@@ -159,9 +151,9 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects/:name/file', auth: 'key', summary: 'Read a file from a project', cli: null },
+    { method: 'GET', path: '/v1/projects/:name/file', auth: 'admin', summary: 'Read a file from a project', cli: null },
     auth,
-    requirePod,
+    requireAdmin,
     handle(async (req, res) => {
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);
@@ -173,17 +165,17 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects/git-summary', auth: 'key', summary: 'Git sync summary for every project that is a repository', cli: null },
+    { method: 'GET', path: '/v1/projects/git-summary', auth: 'admin', summary: 'Git sync summary for every project that is a repository', cli: null },
     auth,
-    requirePod,
+    requireAdmin,
     handle(async (_req, res) => respond(res, await getSummaries(root))),
   );
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects/running', auth: 'key', summary: 'Processes listening from inside each project', cli: null },
+    { method: 'GET', path: '/v1/projects/running', auth: 'admin', summary: 'Processes listening from inside each project', cli: null },
     auth,
-    requirePod,
+    requireAdmin,
     handle(async (_req, res) => {
       const list = await listProjects(root);
       if (!list.ok) return fail(res, list.error);
@@ -199,9 +191,9 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects/:name/git', auth: 'key', summary: 'Git status of a project', cli: null },
+    { method: 'GET', path: '/v1/projects/:name/git', auth: 'admin', summary: 'Git status of a project', cli: null },
     auth,
-    requirePod,
+    requireAdmin,
     handle(async (req, res) => {
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);
@@ -211,9 +203,9 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects/:name/running', auth: 'key', summary: 'Processes listening on a port from inside a project', cli: null },
+    { method: 'GET', path: '/v1/projects/:name/running', auth: 'admin', summary: 'Processes listening on a port from inside a project', cli: null },
     auth,
-    requirePod,
+    requireAdmin,
     handle(async (req, res) => {
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);
@@ -226,10 +218,9 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'POST', path: '/v1/projects/:name/running/stop', auth: 'key', summary: "Stop the processes listening from inside a project", cli: null },
+    { method: 'POST', path: '/v1/projects/:name/running/stop', auth: 'admin', summary: "Stop the processes listening from inside a project", cli: null },
     auth,
-    requirePod,
-    requireWrite,
+    requireAdmin,
     handle(async (req, res) => {
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);
@@ -248,10 +239,9 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'POST', path: '/v1/projects/:name/running/start', auth: 'key', summary: 'Start a project the way its own files say, on a free port', cli: null },
+    { method: 'POST', path: '/v1/projects/:name/running/start', auth: 'admin', summary: 'Start a project the way its own files say, on a free port', cli: null },
     auth,
-    requirePod,
-    requireWrite,
+    requireAdmin,
     handle(async (req, res) => {
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);

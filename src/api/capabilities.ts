@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ApiKey } from '../types';
 import { CHAT_CHANNELS, type ChatChannel } from '../history/types';
-import { createApiAuthMiddleware } from './auth';
+import { createApiAuthMiddleware, isAdmin } from './auth';
 import { GATEWAY_VERSION } from './gateway-version';
 import { gatewayOrchestrationEnabled } from '../orchestration/gateway-config';
 import { projectsEnabled } from '../projects/chat';
@@ -54,7 +54,12 @@ export interface CapabilitiesResponse {
     cross_channel_message: ChatChannel[];
     projects: ProjectsCapability[];
   };
+  /** Why `projects` is empty for the calling key; absent when Projects is usable. */
+  projectsUnavailable?: ProjectsUnavailable;
 }
+
+/** `disabled`: the gateway serves no Projects API. `admin_required`: it does, but not to the calling key. */
+export type ProjectsUnavailable = 'disabled' | 'admin_required';
 
 /**
  * Project-bound chat is accepted through the queued-admission path, which needs orchestration,
@@ -68,13 +73,19 @@ export function projectsCapabilities(config?: GatewayConfig): ProjectsCapability
   return PROJECTS_CAPABILITIES.filter((c) => c !== 'chat' || orchestrated);
 }
 
-export function buildCapabilitiesResponse(version: string = GATEWAY_VERSION, config?: GatewayConfig): CapabilitiesResponse {
+/** Every Projects action needs an admin key, so a non-admin key sees no tokens. Without a key (tests) the gateway-wide answer is given. */
+export function projectsAvailability(config?: GatewayConfig, apiKey?: ApiKey): { projects: ProjectsCapability[]; projectsUnavailable?: ProjectsUnavailable } {
+  if (config && !projectsEnabled(config)) return { projects: [], projectsUnavailable: 'disabled' };
+  if (apiKey && !isAdmin(apiKey)) return { projects: [], projectsUnavailable: 'admin_required' };
+  return { projects: projectsCapabilities(config) };
+}
+
+export function buildCapabilitiesResponse(version: string = GATEWAY_VERSION, config?: GatewayConfig, apiKey?: ApiKey): CapabilitiesResponse {
+  const { projects, projectsUnavailable } = projectsAvailability(config, apiKey);
   return {
     version,
-    capabilities: {
-      cross_channel_message: [...CROSS_CHANNEL_MESSAGE_CHANNELS],
-      projects: projectsCapabilities(config),
-    },
+    capabilities: { cross_channel_message: [...CROSS_CHANNEL_MESSAGE_CHANNELS], projects },
+    ...(projectsUnavailable ? { projectsUnavailable } : {}),
   };
 }
 
@@ -90,8 +101,8 @@ export function buildCapabilitiesResponse(version: string = GATEWAY_VERSION, con
 export function createCapabilitiesRouter(apiKeys: ApiKey[], config?: GatewayConfig): Router {
   const router = Router();
   router.use(createApiAuthMiddleware(apiKeys));
-  router.get('/v1/capabilities', (_req: Request, res: Response) => {
-    res.json(buildCapabilitiesResponse(GATEWAY_VERSION, config));
+  router.get('/v1/capabilities', (req: Request, res: Response) => {
+    res.json(buildCapabilitiesResponse(GATEWAY_VERSION, config, (req as Request & { apiKey: ApiKey }).apiKey));
   });
   return router;
 }

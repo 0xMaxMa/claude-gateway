@@ -16,7 +16,7 @@ import { AgentConfig, ApiKey, ImageParams, ModelConfig, VideoParams } from '../t
 import { isValidConnectorId } from '../connectors/custom';
 import { agentsDirForConfig } from '../config/agent-env';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
-import { createApiAuthMiddleware, canAccessAgent, canAccessPod, canWriteAgent, isAdmin } from './auth';
+import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin, PROJECTS_ADMIN_REQUIRED } from './auth';
 import { PROJECT_CHAT_ERRORS } from '../projects/chat';
 import { parseProjectName, ProjectName } from '../projects/paths';
 import { MediaStore } from '../history/media-store';
@@ -828,8 +828,8 @@ export function createApiRouter(
       });
       return;
     }
-    if (typeof session_id === 'string' && await refusesProjectChat(runner, apiKey, agentId, session_id)) {
-      res.status(403).json({ error: 'API key not permitted to drive a project chat', code: 'forbidden_key' });
+    if (typeof session_id === 'string' && await refusesProjectChat(runner, apiKey, session_id)) {
+      res.status(403).json(PROJECTS_ADMIN_REQUIRED);
       return;
     }
     const sessionId = (session_id as string | undefined) ?? randomUUID();
@@ -4559,9 +4559,7 @@ export function createApiRouter(
     // Clients serialize an unset optional field as null.
     if (body.project !== undefined && body.project !== null) {
       const apiKey = (req as AuthedRequest).apiKey;
-      if (!canWriteAgent(apiKey, agentId) || !canAccessPod(apiKey)) {
-        res.status(403).json({ error: 'API key not permitted for this operation', code: 'forbidden_key' }); return;
-      }
+      if (!isAdmin(apiKey)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       const name = parseProjectName(body.project);
       if (!name.ok) { res.status(400).json({ error: 'Invalid project name', code: name.error }); return; }
       const bound = await runner.resolveApiProject(name.value);
@@ -4719,6 +4717,7 @@ export function createApiRouter(
     const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
     const key = (req as AuthedRequest).apiKey, runner = agentRunners.get(agentId);
     if (!canAccessAgent(key, agentId) || !runner || !isValidSessionId(sessionId)) { res.status(403).end(); return; }
+    if (await refusesProjectChat(runner, key, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     const after = req.query.after_id;
     let cursor = after === undefined ? 0 : Number(after);
     if ((after !== undefined && (typeof after !== 'string' || !/^\d+$/.test(after))) || !Number.isSafeInteger(cursor) || cursor < 0) {
@@ -4771,6 +4770,7 @@ export function createApiRouter(
     const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
     const key = (req as AuthedRequest).apiKey, runner = agentRunners.get(agentId);
     if (!canAccessAgent(key, agentId) || !runner || !isValidSessionId(sessionId)) { res.status(403).end(); return; }
+    if (await refusesProjectChat(runner, key, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     let unsubscribe: (() => void) | undefined, heartbeat: ReturnType<typeof setInterval> | undefined;
     let closed = false;
     res.on('close', () => { closed = true; unsubscribe?.(); clearInterval(heartbeat); });
@@ -4871,11 +4871,12 @@ export function createApiRouter(
     if (!runner) { res.status(404).json({ error: 'Agent not found' }); return; }
     const after = Number(req.query.after ?? 0);
     if (!isValidSessionId(sessionId) || !Number.isSafeInteger(after) || after < 0) { res.status(400).json({ error: 'Invalid session or cursor' }); return; }
+    if (await refusesProjectChat(runner, apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     try { res.json(await runner.orchestrationActivity(sessionId, apiPrincipal(apiKey), after)); }
     catch (error) { res.status(403).json({ error: 'Activity unavailable for this principal' }); }
   });
 
-  router.get('/v1/agents/:agentId/sessions/:sessionId/stream', auth, (req: Request, res: Response) => {
+  router.get('/v1/agents/:agentId/sessions/:sessionId/stream', auth, async (req: Request, res: Response) => {
     const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
     const apiKey = (req as AuthedRequest).apiKey;
     if (!canAccessAgent(apiKey, agentId)) {
@@ -4888,6 +4889,7 @@ export function createApiRouter(
       res.status(400).json({ error: 'session_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
       return;
     }
+    if (await refusesProjectChat(runner, apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
 
     const rawAfterSeq = req.query['after_seq'];
     const afterSeq = rawAfterSeq === undefined || rawAfterSeq === '' ? 0 : Number(rawAfterSeq);
@@ -5025,8 +5027,8 @@ export function createApiRouter(
       return;
     }
 
-    if (await refusesProjectChat(runner, apiKey, agentId, sessionId)) {
-      res.status(403).json({ error: 'API key not permitted to drive a project chat', code: 'forbidden_key' });
+    if (await refusesProjectChat(runner, apiKey, sessionId)) {
+      res.status(403).json(PROJECTS_ADMIN_REQUIRED);
       return;
     }
 
@@ -5105,9 +5107,9 @@ export function createApiRouter(
   return router;
 }
 
-/** A key that cannot write the agent pod-wide must not drive a project-bound session. */
-async function refusesProjectChat(runner: AgentRunner, apiKey: ApiKey, agentId: string, sessionId: string): Promise<boolean> {
-  if (canWriteAgent(apiKey, agentId) && canAccessPod(apiKey)) return false;
+/** Only an admin key may drive or watch a project-bound session. */
+async function refusesProjectChat(runner: AgentRunner, apiKey: ApiKey, sessionId: string): Promise<boolean> {
+  if (isAdmin(apiKey)) return false;
   return (await runner.apiSessionBinding(sessionId)).kind !== 'unbound';
 }
 

@@ -81,3 +81,6 @@ export function canAccessPod(apiKey: ApiKey): boolean {
 export function isAdmin(apiKey: ApiKey): boolean {
   return apiKey.admin === true;
 }
+
+/** The 403 body for any Projects action attempted without an admin key. */
+export const PROJECTS_ADMIN_REQUIRED = { error: 'An admin API key is required for Projects', code: 'forbidden_key' } as const;

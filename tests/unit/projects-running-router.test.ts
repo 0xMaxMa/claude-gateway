@@ -10,7 +10,7 @@ import { StopLimiter, systemSys } from '../../src/projects/running';
 import type { ApiKey } from '../../src/types';
 
 const apiKeys: ApiKey[] = [
-  { key: 'k-write', agents: '*', write: true },
+  { key: 'k-write', agents: '*', write: true, admin: true },
   { key: 'k-read', agents: '*' },
   { key: 'k-agent', agents: ['alfred'], write: true },
 ];
@@ -83,7 +83,7 @@ afterEach(() => {
   fs.rmSync(base, { recursive: true, force: true });
 });
 
-const get = (a: express.Express, name = 'api', key = 'k-read') => request(a).get(`/api/v1/projects/${name}/running`).set(as(key));
+const get = (a: express.Express, name = 'api', key = 'k-write') => request(a).get(`/api/v1/projects/${name}/running`).set(as(key));
 const stop = (a: express.Express, body: object = {}, name = 'api', key = 'k-write') =>
   request(a).post(`/api/v1/projects/${name}/running/stop`).set(as(key)).send(body);
 
@@ -345,7 +345,7 @@ describe('running routes', () => {
 });
 
 describe('GET /api/v1/projects/running', () => {
-  const all = (a: express.Express, key = 'k-read') => request(a).get('/api/v1/projects/running').set(as(key));
+  const all = (a: express.Express, key = 'k-write') => request(a).get('/api/v1/projects/running').set(as(key));
   const cwdEntry = (port: number | null, pid: number | undefined) => ({ port, pids: [pid], command: `node -e ${SERVER}`.slice(0, 120), address: '127.0.0.1', via: 'cwd' });
 
   beforeEach(() => {

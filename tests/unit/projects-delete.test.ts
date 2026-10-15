@@ -9,7 +9,7 @@ import { StopLimiter, systemSys } from '../../src/projects/running';
 import type { ApiKey } from '../../src/types';
 
 const apiKeys: ApiKey[] = [
-  { key: 'k-write', agents: '*', write: true },
+  { key: 'k-write', agents: '*', write: true, admin: true },
   { key: 'k-read', agents: '*' },
   { key: 'k-agent', agents: ['alfred'], write: true },
 ];
@@ -70,7 +70,7 @@ describe('DELETE /api/v1/projects/:name', () => {
     expect(res.body).toEqual({ name: 'api' });
     expect(exists('api')).toBe(false);
     expect(exists('keep')).toBe(true);
-    const list = await request(app()).get('/api/v1/projects').set(as('k-read'));
+    const list = await request(app()).get('/api/v1/projects').set(as('k-write'));
     expect(list.body.projects.map((p: { name: string }) => p.name)).toEqual(['keep']);
   });
 
@@ -128,7 +128,7 @@ describe('DELETE /api/v1/projects/:name', () => {
     fs.chmodSync(locked, 0o500);
     try {
       const res = await del();
-      const list = await request(app()).get('/api/v1/projects').set(as('k-read'));
+      const list = await request(app()).get('/api/v1/projects').set(as('k-write'));
       const names = list.body.projects.map((p: { name: string }) => p.name);
       if (res.status === 200) {
         expect(names).toEqual(['keep']);

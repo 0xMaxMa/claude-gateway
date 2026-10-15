@@ -16,7 +16,7 @@ test('HTTP committed-message stream replays, delivers live commits, reauthorizes
   const first = history.insertMessageOnce('input:one', message);
   let denied = false;
   const authorize = jest.fn(async () => { if (denied) throw Error('ACCESS_DENIED'); });
-  const runner = { authorizeVoiceSession: authorize, getHistoryDb: () => history } as unknown as AgentRunner;
+  const runner = { authorizeVoiceSession: authorize, getHistoryDb: () => history, apiSessionBinding: async () => ({ kind: 'unbound' }) } as unknown as AgentRunner;
   const app = express();
   app.use(createApiRouter(new Map([['a', runner]]), new Map([['a', {id:'a'} as AgentConfig]]), [{ key:'fixture', agents:['a'] }]));
   const server = createServer(app);

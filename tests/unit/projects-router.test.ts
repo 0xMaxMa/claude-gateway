@@ -9,7 +9,7 @@ import type { ApiKey, GatewayConfig } from "../../src/types";
 
 const apiKeys: ApiKey[] = [
   { key: "k-admin", agents: ["alfred"], admin: true },
-  { key: "k-pod-write", agents: "*", write: true },
+  { key: "k-pod-write", agents: "*", write: true, admin: true },
   { key: "k-pod-read", agents: "*" },
   { key: "k-agent", agents: ["alfred"], write: true },
   { key: "k-star-list", agents: ["*"], write: true },
@@ -70,31 +70,6 @@ describe("auth", () => {
 
   it.each(routes)("%s requires a key", async (_label, call) => {
     expect((await call(request(app))).status).toBe(401);
-  });
-
-  it("a pod key without write can read but not create", async () => {
-    seed();
-    const read = as("k-pod-read");
-    expect((await request(app).get("/api/v1/projects").set(read)).status).toBe(
-      200,
-    );
-    expect(
-      (await request(app).get("/api/v1/projects/app/tree").set(read)).status,
-    ).toBe(200);
-    expect(
-      (
-        await request(app)
-          .get("/api/v1/projects/app/file?path=README.md")
-          .set(read)
-      ).status,
-    ).toBe(200);
-    const res = await request(app)
-      .post("/api/v1/projects")
-      .set(read)
-      .send({ name: "new" });
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe("forbidden_key");
-    expect(fs.existsSync(path.join(root, "new"))).toBe(false);
   });
 
   it("an admin key may create", async () => {

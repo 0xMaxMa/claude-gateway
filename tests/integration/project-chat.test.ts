@@ -122,7 +122,7 @@ describe('POST /v1/agents/:id/sessions with project', () => {
   afterEach(async () => { await teardown(h); });
 
   it('binds the session to the project and exposes it on create, list and info', async () => {
-    const res = await create(h, 'alfred', KEYS.podWriter!, { project: 'site', name: 'Fix the footer' });
+    const res = await create(h, 'alfred', KEYS.admin!, { project: 'site', name: 'Fix the footer' });
     expect(res.status).toBe(201);
     expect(res.body).toMatchObject({ sessionName: 'Fix the footer', project: 'site', trusted: false });
 
@@ -190,6 +190,7 @@ describe('POST /v1/agents/:id/sessions with project', () => {
   });
 
   it.each([
+    ['a pod-wide write key without admin', 'podWriter'],
     ['a read-only pod key', 'podReader'],
     ['a write key scoped to this agent only', 'scopedWriter'],
   ])('forbids %s with 403 forbidden_key', async (_label, key) => {
@@ -207,6 +208,52 @@ describe('POST /v1/agents/:id/sessions with project', () => {
     const res = await create(h, 'boxed', KEYS.admin!, { project: 'site' });
     expect(res.status).toBe(409);
     expect(res.body).toMatchObject({ code: 'project_unsupported_agent', reason: 'container' });
+  });
+});
+
+describe('a project-bound session is admin-only on every path', () => {
+  let h: Harness;
+  beforeAll(() => { process.env.CLAUDE_BIN = `node ${MOCK_CLAUDE}`; });
+  afterEach(async () => { await teardown(h); });
+  const NON_ADMIN = ['podWriter', 'podReader', 'scopedWriter'] as const;
+  const bearer = (key: ApiKey) => ({ Authorization: `Bearer ${key.key}` });
+
+  it.each(NON_ADMIN)('%s is refused on messages, accept, greeting and every stream of a project session', async (name) => {
+    h = await harness();
+    const sid = await projectSession(h);
+    fs.writeFileSync(path.join(h.base, 'agents', 'alfred', 'workspace', 'GREETING.md'), 'hello');
+    const key = KEYS[name]!;
+    const base = '/api/v1/agents/alfred';
+    const body = { session_id: sid, chat_id: 'web', message: 'hi' };
+    const calls = [
+      supertest(h.app).post(`${base}/messages`).set(bearer(key)).send(body),
+      supertest(h.app).post(`${base}/messages/accept`).set(bearer(key)).send(body),
+      supertest(h.app).post(`${base}/greeting`).set(bearer(key)).send(body),
+      supertest(h.app).get(`${base}/sessions/${sid}/messages/stream`).set(bearer(key)),
+      supertest(h.app).get(`${base}/sessions/${sid}/activity/stream`).set(bearer(key)),
+      supertest(h.app).get(`${base}/sessions/${sid}/activity`).set(bearer(key)),
+      supertest(h.app).get(`${base}/sessions/${sid}/stream`).set(bearer(key)),
+      create(h, 'alfred', key, { project: 'site' }),
+    ];
+    for (const res of await Promise.all(calls)) {
+      const readOnlyGreeting = name === 'podReader' && res.req.path.endsWith('/greeting');
+      expect([res.req.path, res.status]).toEqual([res.req.path, 403]);
+      if (!readOnlyGreeting) {
+        expect(res.body.code).toBe('forbidden_key');
+        expect(res.body.error).toMatch(/admin API key is required/);
+      }
+    }
+    expect(spawns(h)).toEqual([]);
+  });
+
+  it('lets an admin key bind, send, accept and open the stream', async () => {
+    h = await harness();
+    const sid = await projectSession(h);
+    const base = '/api/v1/agents/alfred';
+    const body = { session_id: sid, chat_id: 'web', message: 'hi' };
+    expect((await supertest(h.app).post(`${base}/messages`).set(bearer(KEYS.admin!)).send(body)).status).toBe(200);
+    const stream = await supertest(h.app).get(`${base}/sessions/${sid}/activity`).set(bearer(KEYS.admin!));
+    expect(stream.status).not.toBe(403);
   });
 });
 
@@ -290,6 +337,7 @@ describe('a project-bound legacy chat turn', () => {
   });
 
   it.each([
+    ['a pod-wide write key without admin', 'podWriter'],
     ['a read-only pod key', 'podReader'],
     ['a write key scoped to this agent only', 'scopedWriter'],
   ])('refuses %s on send to a project session with 403 forbidden_key', async (_label, key) => {
@@ -301,10 +349,10 @@ describe('a project-bound legacy chat turn', () => {
     expect(spawns(h)).toEqual([]);
   });
 
-  it('lets a pod write key send to a project session, and a read-only key send to a plain one', async () => {
+  it('lets an admin key send to a project session, and a read-only key send to a plain one', async () => {
     h = await harness();
     const bound = await projectSession(h);
-    expect((await send(h, bound, 'hi', KEYS.podWriter!)).status).toBe(200);
+    expect((await send(h, bound, 'hi', KEYS.admin!)).status).toBe(200);
     const plain = (await create(h, 'alfred', KEYS.podReader!, {})).body.sessionId as string;
     expect((await send(h, plain, 'hi', KEYS.podReader!)).status).toBe(200);
   });

@@ -22,6 +22,8 @@ type AttachResult =
 class MockStreamRunner extends EventEmitter {
   get workspacePath(): string { return '/tmp/test-agent'; }
 
+  async apiSessionBinding(): Promise<{ kind: 'unbound' }> { return { kind: 'unbound' }; }
+
   /** What attachTurnStream should answer. Default: a turn exists. */
   attachResult: AttachResult | null = null;
   /** Replayed into the sink on a successful attach, then the terminal frame. */

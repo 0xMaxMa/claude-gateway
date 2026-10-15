@@ -177,7 +177,7 @@ Do not rely on the first behaviour; it is not advertised.
 | Status | `code` | When |
 |--------|--------|------|
 | `400` | `invalid_name` | `project` is not a valid project name |
-| `403` | `forbidden_key` | The key cannot write to this agent, or is scoped to specific agents and so cannot reach pod projects |
+| `403` | `forbidden_key` | The key is not an admin key. Binding a chat to a project needs `admin: true` |
 | `404` | `project_not_found` | No folder with that name exists under the projects root |
 | `409` | `projects_disabled` | The Projects API is disabled on this gateway (`gateway.projects.enabled` is `false`). No session is created |
 | `409` | `project_unavailable` | The folder exists but cannot be used, for example a symlink that leaves the root. `reason` holds the projects error code |
@@ -188,9 +188,9 @@ gone, been renamed or moved out of the root, the message fails with code
 `PROJECT_UNAVAILABLE` (uppercase) and the gateway does not fall back to the
 workspace. A synchronous [`POST /messages`](/api/messages) answers `409`. A
 streaming request gets an SSE `error` frame with that code. The key check runs
-again on every send too: a key that cannot write to the agent, or is scoped to
-specific agents, gets `403` with `code: "forbidden_key"` from
-[`POST /messages`](/api/messages) to a project-bound session.
+again on every request that drives or watches the session: a key that is not an admin
+key gets `403` with `code: "forbidden_key"` from [`POST /messages`](/api/messages),
+`POST /messages/accept`, `POST /greeting` and the session's message, activity and event streams.
 
 On an orchestrated agent the deciding agent stays in its workspace and is told
 which project the chat is in. Every task it starts runs in the project folder,

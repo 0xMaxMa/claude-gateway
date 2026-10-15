@@ -87,17 +87,17 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/api/v1/projects` | Pod key | List projects under the projects root (default `~/projects`) |
-| `POST` | `/api/v1/projects` | Pod key + Write | Create a project directory, optionally with `git init` |
-| `DELETE` | `/api/v1/projects/:name` | Pod key + Write | Delete a project directory and everything in it |
-| `GET` | `/api/v1/projects/:name/tree` | Pod key | List one directory level of a project |
-| `GET` | `/api/v1/projects/:name/file` | Pod key | Read a file from a project |
-| `GET` | `/api/v1/projects/git-summary` | Pod key | Git sync summary of every project that is a repository |
-| `GET` | `/api/v1/projects/:name/git` | Pod key | Git status of one project |
-| `GET` | `/api/v1/projects/running` | Pod key | Listening processes of every project |
-| `GET` | `/api/v1/projects/:name/running` | Pod key | Listening processes of one project |
-| `POST` | `/api/v1/projects/:name/running/stop` | Pod key + Write | Stop a project's listening processes |
-| `POST` | `/api/v1/projects/:name/running/start` | Pod key + Write | Start a project without an agent |
+| `GET` | `/api/v1/projects` | Admin key | List projects under the projects root (default `~/projects`) |
+| `POST` | `/api/v1/projects` | Admin key | Create a project directory, optionally with `git init` |
+| `DELETE` | `/api/v1/projects/:name` | Admin key | Delete a project directory and everything in it |
+| `GET` | `/api/v1/projects/:name/tree` | Admin key | List one directory level of a project |
+| `GET` | `/api/v1/projects/:name/file` | Admin key | Read a file from a project |
+| `GET` | `/api/v1/projects/git-summary` | Admin key | Git sync summary of every project that is a repository |
+| `GET` | `/api/v1/projects/:name/git` | Admin key | Git status of one project |
+| `GET` | `/api/v1/projects/running` | Admin key | Listening processes of every project |
+| `GET` | `/api/v1/projects/:name/running` | Admin key | Listening processes of one project |
+| `POST` | `/api/v1/projects/:name/running/stop` | Admin key | Stop a project's listening processes |
+| `POST` | `/api/v1/projects/:name/running/start` | Admin key | Start a project without an agent |
 
 ## Telegram Channel API {#telegram-channel-api}
 

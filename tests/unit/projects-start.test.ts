@@ -10,7 +10,7 @@ import { pickPort, planStart, StartFacts } from '../../src/projects/start';
 import type { ApiKey } from '../../src/types';
 
 const apiKeys: ApiKey[] = [
-  { key: 'k-write', agents: '*', write: true },
+  { key: 'k-write', agents: '*', write: true, admin: true },
   { key: 'k-read', agents: '*' },
 ];
 const as = (key: string) => ({ Authorization: `Bearer ${key}` });
@@ -143,7 +143,7 @@ describe('POST /v1/projects/:name/running/start', () => {
     expect(res.body).toMatchObject({ port, command: `PORT=${port} npm run start` });
     pids.push(res.body.pid);
 
-    const running = await request(a).get('/api/v1/projects/web/running').set(as('k-read'));
+    const running = await request(a).get('/api/v1/projects/web/running').set(as('k-write'));
     expect(running.body.processes.map((p: { port: number }) => p.port)).toEqual([port]);
 
     const stopped = await request(a).post('/api/v1/projects/web/running/stop').set(as('k-write')).send({});
@@ -226,9 +226,9 @@ describe('POST /v1/projects/:name/running/start', () => {
     project('web', { 'package.json': pkg({ dev: 'vite' }) });
     project('site', { 'index.html': 'x' });
     const a = app();
-    const web = await request(a).get('/api/v1/projects/web/running').set(as('k-read'));
+    const web = await request(a).get('/api/v1/projects/web/running').set(as('k-write'));
     expect(web.body.start).toEqual({ command: 'npm run dev -- --port 3000 --strictPort --host 0.0.0.0' });
-    const site = await request(a).get('/api/v1/projects/site/running').set(as('k-read'));
+    const site = await request(a).get('/api/v1/projects/site/running').set(as('k-write'));
     expect(site.body.start).toBeNull();
   });
 

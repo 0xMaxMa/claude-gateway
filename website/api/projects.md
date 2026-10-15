@@ -6,16 +6,19 @@ show a read-only file tree and file viewer, and read the git status of each
 project. Editing files and changing a repository (commit, push, pull) are out of
 scope. Use the code editor or the git connector for that.
 
-**Auth.** Every route needs an API key with pod-wide scope: `admin: true` or
-`agents: "*"`. A key scoped to specific agents gets `403 forbidden_key`, because
-projects belong to the pod, not to an agent. `POST /api/v1/projects`, `DELETE /api/v1/projects/:name`, `POST .../running/stop` and `POST .../running/start` also need
-`write: true` (or `admin: true`).
+**Auth.** Every route needs an admin API key (`admin: true`). A pod-wide key without
+`admin`, a read-only key and a key scoped to specific agents all get
+`403 forbidden_key`, with a message that an admin key is required. Projects belong to
+the pod, and the routes read, run and delete files on it. Binding a chat to a project
+needs an admin key too (see [Sessions](/api/sessions#post-apiv1agentsagentidsessions)).
 
 **Feature detection.** `GET /api/v1/capabilities` lists
 `"projects": ["list", "create", "read", "git", "chat", "run", "start", "delete"]`. Show project browsing
 only when the array includes `"list"`, the git status view only when it includes `"git"` (read-only: the gateway has no route that changes a repository),
 and [project-bound chat](/api/sessions#post-apiv1agentsagentidsessions) only when
-it includes `"chat"`. An older gateway omits the key, or lists projects without
+it includes `"chat"`. When the array is empty, read `projectsUnavailable`: `"admin_required"` means the
+calling key is not an admin key, and `"disabled"` means the gateway serves no Projects API. The field is
+absent when Projects is usable. An older gateway omits the key, or lists projects without
 `"git"`, `"chat"` or `"run"`. Show running status and the Stop button only when it includes `"run"`, the Start button only when it includes `"start"`, and the Delete action only when it includes `"delete"`.
 
 **Root.** Projects live in `gateway.projects.root`, which defaults to
@@ -58,7 +61,7 @@ codes, listed under [Git errors](#git-errors).
 | 400 | `not_a_file` | `file` was asked for a directory or a special file. |
 | 403 | `path_escape` | The real path (after symlinks) leaves the project, or the project leaves the root or is the root itself (for example a link `all -> .`). |
 | 403 | `permission_denied` | The gateway's user cannot read it. |
-| 403 | `forbidden_key` | The key lacks pod-wide scope, or lacks write for a `POST`. |
+| 403 | `forbidden_key` | The key is not an admin key. |
 | 404 | `not_found` | The project or path does not exist. |
 | 400 | `confirm_mismatch` | `DELETE` did not send `confirm` equal to the project name. |
 | 409 | `project_exists` | `POST` named a project, file or symlink that already exists, compared case-insensitively (`Site` collides with `site`). |
@@ -391,7 +394,7 @@ working directory is inside the project folder (`via: "cwd"`) or one of its
 arguments is an absolute path inside the project folder (`via: "argv"`, for example
 `python3 -m http.server --directory <project>` started from `/tmp`). Listening sockets come from `ss -H -ltnp`,
 or from `/proc/net/tcp` and `/proc/<pid>/fd` when `ss` is missing. Every route here needs
-a key that can see all agents. Stop and start also need a write key.
+an admin key.
 
 ### GET /api/v1/projects/:name/running {#get-running}
 

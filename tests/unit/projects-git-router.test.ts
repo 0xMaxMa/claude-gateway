@@ -8,7 +8,7 @@ import { createProjectsRouter } from '../../src/api/projects-router';
 import type { ApiKey } from '../../src/types';
 
 const apiKeys: ApiKey[] = [
-  { key: 'k-pod-write', agents: '*', write: true },
+  { key: 'k-pod-write', agents: '*', write: true, admin: true },
   { key: 'k-pod-read', agents: '*' },
   { key: 'k-agent', agents: ['alfred'], write: true },
 ];
@@ -196,9 +196,9 @@ describe('GET /api/v1/projects/:name/git', () => {
     expect(summary.body.summaries).toEqual({});
   });
 
-  it('allows a read-only pod key and refuses an agent-scoped key', async () => {
+  it('refuses a read-only pod key and an agent-scoped key', async () => {
     makeRepo('app');
-    expect((await status('app', as('k-pod-read'))).status).toBe(200);
+    expect((await status('app', as('k-pod-read'))).body.code).toBe('forbidden_key');
     expect((await status('app', as('k-agent'))).body.code).toBe('forbidden_key');
     expect((await request(app).get('/api/v1/projects/git-summary').set(as('k-agent'))).body.code).toBe('forbidden_key');
   });
@@ -214,7 +214,7 @@ describe('GET /api/v1/projects/git-summary', () => {
     execFileSync('mkfifo', [fifo]);
     git(slow, 'config', 'include.path', fifo);
 
-    const res = await request(app).get('/api/v1/projects/git-summary').set(as('k-pod-read'));
+    const res = await request(app).get('/api/v1/projects/git-summary').set(POD);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       summaries: {
