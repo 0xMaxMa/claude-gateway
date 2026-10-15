@@ -164,7 +164,7 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/capabilities 
   "version": "2.0.9",
   "capabilities": {
     "cross_channel_message": ["telegram", "discord", "line", "slack", "whatsapp", "whatsapp_cloud", "wechat"],
-    "projects": ["list", "create", "read", "git", "chat", "run"]
+    "projects": ["list", "create", "read", "git", "chat", "run", "start", "delete"]
   }
 }
 ```
@@ -183,7 +183,7 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/capabilities 
 | Key | Value | Meaning |
 |-----|-------|---------|
 | `cross_channel_message` | `string[]` of channel ids | Cross-channel message injection is supported for sessions whose channel is in the array. Currently every channel the gateway supports: `["telegram", "discord", "line", "slack", "whatsapp", "whatsapp_cloud", "wechat"]` — the web→channel echo fires for all of them. |
-| `projects` | `string[]` of operations | The [Projects API](/api/projects) is served. Currently `["list", "create", "read", "git", "chat", "run"]`. Check `includes("list")` before showing project browsing, `includes("git")` before showing the [git routes](/api/projects#git), `includes("chat")` before sending `project` on [session create](/api/sessions#post-apiv1agentsagentidsessions), and `includes("run")` before showing [running status and Stop](/api/projects#running). Later releases may append values. |
+| `projects` | `string[]` of operations | The [Projects API](/api/projects) is served. Currently `["list", "create", "read", "git", "chat", "run", "start", "delete"]`. Check `includes("list")` before showing project browsing, `includes("git")` before showing the [git routes](/api/projects#git), `includes("chat")` before sending `project` on [session create](/api/sessions#post-apiv1agentsagentidsessions), `includes("run")` before showing [running status and Stop](/api/projects#running), `includes("start")` before showing [Start](/api/projects#post-running-start), and `includes("delete")` before showing [project delete](/api/projects#delete-project). Later releases may append values. |
 
 Channel identifiers are the gateway's canonical channel names — the same strings a
 session reports as its `channel` — drawn from `CHAT_CHANNELS` in

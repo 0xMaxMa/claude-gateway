@@ -9,11 +9,14 @@
  */
 
 import express from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
 import request from 'supertest';
 import {
   createCapabilitiesRouter,
   buildCapabilitiesResponse,
   CROSS_CHANNEL_MESSAGE_CHANNELS,
+  PROJECTS_CAPABILITIES,
 } from '../../src/api/capabilities';
 import { GATEWAY_VERSION } from '../../src/api/gateway-version';
 import { CHAT_CHANNELS } from '../../src/history/types';
@@ -73,6 +76,14 @@ describe('GET /api/v1/capabilities', () => {
       expect(CHAT_CHANNELS).toContain(ch);
     }
     expect(new Set(CROSS_CHANNEL_MESSAGE_CHANNELS).size).toBe(CROSS_CHANNEL_MESSAGE_CHANNELS.length);
+  });
+
+  it('system.md shows the projects array the gateway serves, in the example and the reference table', () => {
+    const doc = fs.readFileSync(path.join(__dirname, '../../website/api/system.md'), 'utf8');
+    const example = doc.match(/"projects": (\[[^\]]*\])/);
+    const table = doc.match(/Currently `(\[[^\]]*\])`/);
+    expect(JSON.parse(example![1])).toEqual([...PROJECTS_CAPABILITIES]);
+    expect(JSON.parse(table![1])).toEqual([...PROJECTS_CAPABILITIES]);
   });
 
   it('the handler serves exactly what the builder produces (single source of truth)', async () => {
