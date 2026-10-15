@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import * as path from "path";
 import {
@@ -82,6 +82,18 @@ describe("readStack", () => {
     writeFileSync(path.join(dir, "package.json"), "x".repeat(300 * 1024));
     await expect(readStack(dir)).resolves.toBe("node");
     await expect(readStack(path.join(dir, "gone"))).resolves.toBeNull();
+  });
+
+  it("does not follow a package.json symlink out of the project", async () => {
+    const outside = mkdtempSync(path.join(tmpdir(), "stack-outside-"));
+    try {
+      const target = path.join(outside, "package.json");
+      writeFileSync(target, '{"dependencies":{"react":"1"}}');
+      symlinkSync(target, path.join(dir, "package.json"));
+      await expect(readStack(dir)).resolves.toBe("node");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it("ignores a package.json that is a directory", async () => {

@@ -1,4 +1,4 @@
-import { promises as fsp } from "fs";
+import { constants as fsConstants, promises as fsp } from "fs";
 import * as path from "path";
 
 export const STACKS = [
@@ -73,15 +73,31 @@ export async function readStack(dir: string): Promise<Stack | null> {
   const names = await fsp.readdir(dir).catch(() => null);
   if (!names) return null;
   const rootNames = new Set(names);
-  let packageJson: string | null = null;
-  if (rootNames.has("package.json")) {
-    const file = path.join(dir, "package.json");
-    const st = await fsp.stat(file).catch(() => null);
-    if (st?.isFile() && st.size <= PACKAGE_JSON_LIMIT) {
-      packageJson = await fsp.readFile(file, "utf8").catch(() => "");
-    } else {
-      packageJson = "";
-    }
-  }
+  const packageJson = rootNames.has("package.json")
+    ? await readPackageJson(path.join(dir, "package.json"))
+    : null;
   return detectStack(rootNames, packageJson);
+}
+
+/** "" when the file is unreadable, oversized, or not a regular file: the name alone marks Node. */
+async function readPackageJson(file: string): Promise<string> {
+  let handle: fsp.FileHandle;
+  try {
+    // O_NOFOLLOW so a link cannot make the stack reflect a file outside the project.
+    handle = await fsp.open(
+      file,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+    );
+  } catch {
+    return "";
+  }
+  try {
+    const st = await handle.stat();
+    if (!st.isFile() || st.size > PACKAGE_JSON_LIMIT) return "";
+    return await handle.readFile("utf8");
+  } catch {
+    return "";
+  } finally {
+    await handle.close();
+  }
 }
