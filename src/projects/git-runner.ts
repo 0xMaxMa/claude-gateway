@@ -16,13 +16,34 @@ export interface GitOutput {
 
 export type GitRunFailure = 'timeout' | 'git_failed';
 
+const PASSTHROUGH_ENV = new Set([
+  'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TZ', 'TMPDIR', 'TERM',
+  'XDG_CONFIG_HOME', 'SSH_AUTH_SOCK', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+]);
+
+/** Operator-set git settings that are credentials or config sources, not repository selectors. */
+const OPERATOR_GIT_ENV = new Set([
+  'GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_ASKPASS', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM', 'GIT_SSL_CAINFO',
+]);
+
 /**
- * process.env without any GIT_* variable: GIT_DIR, GIT_WORK_TREE and friends would aim git at
- * another repository. Built from process.env explicitly: jest gives tests a copy that child_process ignores.
+ * The environment git and its hooks run with: an allowlist of process.env, so a hook never sees the gateway's secrets,
+ * and no GIT_DIR/GIT_WORK_TREE that would aim git at another repository. Built from process.env explicitly: jest gives
+ * tests a copy that child_process ignores. GIT_SSH_COMMAND and GIT_ASKPASS always end up set: they outrank the repo's
+ * core.sshCommand and core.askPass, which are commands from a possibly untrusted config.
  */
 export function gitEnv(): NodeJS.ProcessEnv {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
-  return { ...env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' };
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([k]) => PASSTHROUGH_ENV.has(k) || OPERATOR_GIT_ENV.has(k) || k.startsWith('LC_')),
+  );
+  return {
+    GIT_SSH_COMMAND: 'ssh -o BatchMode=yes',
+    GIT_ASKPASS: 'true',
+    ...env,
+    GIT_TERMINAL_PROMPT: '0',
+    LC_ALL: 'C',
+  };
 }
 
 export interface RunOptions {
@@ -33,6 +54,9 @@ export interface RunOptions {
 }
 
 /** How long a timed-out git gets to clean up its lock files after SIGTERM before the group is killed. */
+/** After git exits, how long its pipes get to deliver the rest of the output. */
+const EXIT_DRAIN_MS = 200;
+
 const KILL_GRACE_MS = 1_000;
 
 /**
@@ -42,8 +66,8 @@ const KILL_GRACE_MS = 1_000;
 export function runGit(cwd: string, args: string[], opts: RunOptions): Promise<Result<GitOutput, GitRunFailure>> {
   const env: NodeJS.ProcessEnv = { ...gitEnv(), GIT_CEILING_DIRECTORIES: path.dirname(cwd), ...opts.env };
   if (opts.readOnly) env.GIT_OPTIONAL_LOCKS = '0';
-  // core.fsmonitor is a command from the repo's config, and listing projects reads every repo.
-  const argv = opts.readOnly ? ['-c', 'core.fsmonitor=false', ...args] : args;
+  // core.fsmonitor is a command from the repo's config; add, commit and status all run it.
+  const argv = ['-c', 'core.fsmonitor=false', ...args];
   return new Promise((resolve) => {
     // Its own process group, so a timeout also reaches the hooks, filters and ssh that git started.
     const child = spawn('git', argv, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -80,9 +104,18 @@ export function runGit(cwd: string, args: string[], opts: RunOptions): Promise<R
       console.warn(`projects: git ${args[0]} in ${cwd} failed: ${redactCredentials(e.message)}`);
       settle(err('git_failed'));
     });
-    child.on('close', (code) => {
+    const finish = (code: number | null) => {
       if (code === null) return settle(err('git_failed'));
       settle(ok({ code, stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8') }));
+    };
+    child.on('close', finish);
+    // A hook's backgrounded child keeps the pipes open long after git is done; take what arrived and let go.
+    child.on('exit', (code) => {
+      setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish(code);
+      }, EXIT_DRAIN_MS).unref();
     });
 
     const timer = setTimeout(() => {

@@ -42,6 +42,58 @@ describe('runGit', () => {
     }
   });
 
+  it('neutralizes repo-configured fsmonitor and sshCommand on mutating commands', async () => {
+    const marker = path.join(base, 'ran');
+    const script = path.join(base, 'mark.sh');
+    fs.writeFileSync(script, `#!/bin/sh\ntouch ${marker}\nexit 1\n`, { mode: 0o755 });
+    execFileSync('git', ['config', 'core.fsmonitor', script], { cwd: repo });
+    execFileSync('git', ['config', 'core.sshCommand', script], { cwd: repo });
+    fs.writeFileSync(path.join(repo, 'f'), 'x');
+    value(await runGit(repo, ['add', '-A'], { timeoutMs: 5000 }));
+    value(await runGit(repo, ['ls-remote', 'ssh://localhost:1/x'], { timeoutMs: 5000 }));
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it('keeps operator auth env but hides the rest of the gateway env from git and its hooks', async () => {
+    const saved = { ...process.env };
+    process.env.GATEWAY_SECRET_TOKEN = 'leak';
+    process.env.GIT_SSH_COMMAND = 'ssh -i /deploy/key';
+    process.env.GIT_ASKPASS = '/bin/true';
+    try {
+      const env = value(await runGit(repo, ['-c', 'alias.e=!env', 'e'], { timeoutMs: 3000 })).stdout;
+      expect(env).not.toContain('GATEWAY_SECRET_TOKEN');
+      expect(env).toContain('GIT_SSH_COMMAND=ssh -i /deploy/key');
+      expect(env).toContain('GIT_ASKPASS=/bin/true');
+      expect(env).toContain('PATH=');
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  it('defaults to a non-interactive ssh when the operator set none', async () => {
+    const saved = { ...process.env };
+    delete process.env.GIT_SSH_COMMAND;
+    try {
+      const env = value(await runGit(repo, ['-c', 'alias.e=!env', 'e'], { timeoutMs: 3000 })).stdout;
+      expect(env).toContain('GIT_SSH_COMMAND=ssh -o BatchMode=yes');
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  it('returns when git exits even if a hook left a background process holding the pipes', async () => {
+    const hook = path.join(repo, '.git', 'hooks', 'post-commit');
+    fs.writeFileSync(hook, '#!/bin/sh\nsleep 5 &\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(repo, 'f'), 'x');
+    execFileSync('git', ['add', 'f'], { cwd: repo });
+    const started = Date.now();
+    const r = value(
+      await runGit(repo, ['-c', 'user.name=a', '-c', 'user.email=a@b.c', 'commit', '-q', '-m', 'm'], { timeoutMs: 20_000 }),
+    );
+    expect(r.code).toBe(0);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
   it('does not discover a repository above the project dir', async () => {
     const plain = path.join(repo, 'plain');
     fs.mkdirSync(plain);

@@ -204,14 +204,9 @@ function classify(out: GitOutput): GitError {
   return { code: matchOutput(out, OUTPUT_CODES) ?? 'git_failed' };
 }
 
-async function git(dir: string, args: string[], timeoutMs: number, env?: Record<string, string>): Promise<GitResult<GitOutput>> {
-  const r = await runGit(dir, args, { timeoutMs, env });
+async function git(dir: string, args: string[], timeoutMs: number): Promise<GitResult<GitOutput>> {
+  const r = await runGit(dir, args, { timeoutMs });
   return r.ok ? r : fail(r.error);
-}
-
-/** Network commands must fail rather than ask for an ssh passphrase or host-key confirmation. */
-function sshEnv(cfg: RepoConfig): Record<string, string> {
-  return cfg.sshCommand ? {} : { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' };
 }
 
 /** Runs `fn` on the project's real dir under its mutation lock. */
@@ -246,7 +241,7 @@ export function fetchRemote(root: string, name: ProjectName): Promise<GitResult<
     if (!repo.ok) return repo;
     const { status, config } = repo.value;
     if (!status.remote) return fail('no_remote');
-    const fetch = await git(dir, ['fetch', '--prune', '--', status.remote.name], GIT_TIMEOUTS.network, sshEnv(config));
+    const fetch = await git(dir, ['fetch', '--prune', '--', status.remote.name], GIT_TIMEOUTS.network);
     if (!fetch.ok) return fetch;
     if (fetch.value.code !== 0) return err(classify(fetch.value));
     return ok(await statusAfter(dir));
@@ -380,7 +375,7 @@ export function pullFastForward(root: string, name: ProjectName): Promise<GitRes
     if (!status.remote) return fail('no_remote');
     if (!status.upstream) return fail('no_upstream');
 
-    const fetch = await git(dir, ['fetch', '--prune', '--', status.remote.name], GIT_TIMEOUTS.network, sshEnv(config));
+    const fetch = await git(dir, ['fetch', '--prune', '--', status.remote.name], GIT_TIMEOUTS.network);
     if (!fetch.ok) return fetch;
     if (fetch.value.code !== 0) return err(classify(fetch.value));
     const merge = await git(dir, ['merge', '--ff-only', '@{upstream}'], GIT_TIMEOUTS.network);
@@ -424,7 +419,7 @@ export function pushBranch(root: string, name: ProjectName): Promise<GitResult<{
     } else {
       return fail('no_upstream');
     }
-    const push = await git(dir, args, GIT_TIMEOUTS.network, sshEnv(config));
+    const push = await git(dir, args, GIT_TIMEOUTS.network);
     if (!push.ok) return push;
     if (push.value.code !== 0) return err(classify(push.value));
 

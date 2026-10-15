@@ -85,12 +85,18 @@ const REAL_GIT = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8'
  * every `status`, once a `SHIM_BREAK_AFTER` command succeeds makes every later `status` fail, and
  * creates `.git/index.lock` just before a `SHIM_LOCK_BEFORE` command runs.
  */
+/** git runs with an allowlisted env, so the shim reads its knobs from a file instead of process.env. */
+function shimSet(key: string, value: string): void {
+  fs.appendFileSync(path.join(base, 'shim-env'), `export ${key}=${value}\n`);
+}
+
 function shimGit(): void {
   const bin = path.join(base, 'shim-bin');
   write(
     path.join(bin, 'git'),
     [
       '#!/bin/sh',
+      `[ -f "${path.join(base, 'shim-env')}" ] && . "${path.join(base, 'shim-env')}"`,
       `flag="${path.join(base, 'shim-broken')}"`,
       'for a in "$@"; do',
       '  if [ "$a" = status ]; then',
@@ -515,7 +521,7 @@ describe('POST git/commit', () => {
     hook(dir, 'pre-commit', 'exit 0');
     write(path.join(dir, 'new.txt'), 'x');
     shimGit();
-    process.env.SHIM_LOCK_BEFORE = 'commit';
+    shimSet('SHIM_LOCK_BEFORE', 'commit');
     const before = head(dir);
     const res = await post('app', 'commit', { message: 'locked' });
     expect([res.status, res.body.code]).toEqual([409, 'index_locked']);
@@ -792,7 +798,7 @@ describe('mutation reads', () => {
     setIdentity(dir);
     write(path.join(dir, 'new.txt'), 'x');
     shimGit();
-    process.env.SHIM_SLOW_STATUS = '4';
+    shimSet('SHIM_SLOW_STATUS', '4');
     expect([(await status('app')).status, (await status('app')).body.code]).toEqual([504, 'timeout']);
     const res = await post('app', 'commit', { message: 'slow status' });
     expect(res.status).toBe(201);
@@ -804,7 +810,7 @@ describe('mutation reads', () => {
     setIdentity(dir);
     write(path.join(dir, 'new.txt'), 'x');
     shimGit();
-    process.env.SHIM_BREAK_AFTER = 'commit';
+    shimSet('SHIM_BREAK_AFTER', 'commit');
     const res = await post('app', 'commit', { message: 'landed' });
     expect(res.status).toBe(201);
     expect(res.body).toEqual({ commit: { sha: head(dir), subject: 'landed', author: 'Dev', committed_at: expect.any(String) }, status: null });
@@ -815,7 +821,7 @@ describe('mutation reads', () => {
     addRemote(dir);
     commitUpstream('up.txt', 'y');
     shimGit();
-    process.env.SHIM_BREAK_AFTER = 'merge';
+    shimSet('SHIM_BREAK_AFTER', 'merge');
     const res = await post('app', 'pull');
     expect([res.status, res.body]).toEqual([200, { result: 'fast_forwarded', status: null }]);
     expect(head(dir)).toBe(remoteHead());
@@ -826,7 +832,7 @@ describe('mutation reads', () => {
     addRemote(dir);
     commitLocal(dir, 'l.txt', 'x');
     shimGit();
-    process.env.SHIM_BREAK_AFTER = 'push';
+    shimSet('SHIM_BREAK_AFTER', 'push');
     const res = await post('app', 'push');
     expect([res.status, res.body]).toEqual([200, { status: null }]);
     expect(remoteHead()).toBe(head(dir));
@@ -835,7 +841,7 @@ describe('mutation reads', () => {
   it('fetch answers 200 with a null body when only the read after it fails', async () => {
     addRemote(makeRepo('app'));
     shimGit();
-    process.env.SHIM_BREAK_AFTER = 'fetch';
+    shimSet('SHIM_BREAK_AFTER', 'fetch');
     const res = await post('app', 'fetch');
     expect([res.status, res.body]).toEqual([200, null]);
   });
