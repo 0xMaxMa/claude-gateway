@@ -1,16 +1,19 @@
 import { canonicalVoiceProvider } from '../voice/providers/model-ref';
 import { randomUUID } from 'crypto';
-import { OrchestrationStore } from './store';
+import { OrchestrationStore, channelVoiceKey } from './store';
+import type { VoiceScope } from '../voice/scope';
 import { voiceChoices, VoiceChoice } from '../voice/providers/voice-catalog';
 
 type TtsConfig={provider:string;model:string;voiceId:string};
 export class TelegramVoices {
   private menus=new Map<string,{chatId:string;provider:string;until:number;voices:VoiceChoice[]}>();
   constructor(private store:OrchestrationStore,private config:()=>TtsConfig,private catalog=voiceChoices,private pageSize=10){}
-  settings(chatId:string):TtsConfig {
-    const config=this.config(),choice=this.store.get('SELECT provider,voice_id FROM telegram_tts_voices WHERE chat_id=?',chatId);
+  settings<T extends TtsConfig>(chatId:string,config:T=this.config() as T):T {
+    const choice=this.store.get('SELECT provider,voice_id FROM telegram_tts_voices WHERE chat_id=?',chatId);
     return {...config,voiceId:choice ? canonicalVoiceProvider(String(choice.provider))===canonicalVoiceProvider(config.provider) ? String(choice.voice_id) : config.voiceId : config.voiceId};
   }
+  /** The voice a live call speaks with: a Telegram call uses its chat's /voices choice, like voice notes; an API call keeps its own picker. */
+  forScope<T extends TtsConfig>(scope:VoiceScope,config:T):T {return scope.kind==='telegram'?this.settings(channelVoiceKey('telegram',scope.chatId,scope.threadKey),config):config;}
   private prune(){for(const [id,m] of this.menus)if(m.until<Date.now())this.menus.delete(id);}
   async menu(chatId:string,page=0,menuId?:string,gender?:string) {
     this.prune();const config=this.config();

@@ -14,13 +14,23 @@ import { voiceCallPairings } from '../../../src/voice/call-pairing';
 import { TelegramBotAvatars } from '../../../src/voice/telegram-avatar';
 import { FakeSttProvider, FakeTtsProvider } from '../../../src/voice/providers/fake';
 import { encodeVoiceFrame } from '../../../src/voice/protocol';
+import { OrchestrationStore } from '../../../src/orchestration/store';
+import { TelegramVoices } from '../../../src/orchestration/telegram-voices';
 import type { AgentConfig } from '../../../src/types';
 import type { AgentRunner } from '../../../src/agent/runner';
 
+// Auto picks "roger"; a configured or /voices voice id is used as given.
 jest.mock('../../../src/voice/providers/voice-catalog', () => ({
-  resolveVoiceId: async () => 'fixture', voiceChoices: async () => [{ id: 'fixture', name: 'Default' }],
+  resolveVoiceId: async (tts: { voiceId: string }) => tts.voiceId.trim() || 'roger',
+  voiceChoices: async () => [{ id: 'fixture', name: 'Default' }, { id: 'roger', name: 'Roger', gender: 'male' }, { id: 'lily', name: 'Lily', gender: 'female' }],
 }));
-jest.mock('../../../src/voice/providers/registry', () => ({ sttProvider: jest.fn(() => new FakeSttProvider()), ttsProvider: () => new FakeTtsProvider() }));
+// Every voice id the live session asks its TTS provider to speak with.
+const mockSpokenVoices: string[] = [];
+jest.mock('../../../src/voice/providers/registry', () => ({ sttProvider: jest.fn(() => new FakeSttProvider()), ttsProvider: () => {
+  const tts = new FakeTtsProvider(), synthesize = tts.synthesize.bind(tts);
+  tts.synthesize = (options: any) => { mockSpokenVoices.push(options.voiceId); return synthesize(options); };
+  return tts;
+} }));
 
 const BOT_TOKEN = '123456:fixture-bot-token';
 /** initData exactly as Telegram signs it for a Mini App launch. */
@@ -38,7 +48,8 @@ function fixture(agentPatch: Partial<AgentConfig> = {}) {
   const agent = { id: 'a', telegram: { botToken: BOT_TOKEN }, orchestration: { enabled: true, channels: ['telegram'] },
     voice: { ...ORCHESTRATION_DEFAULTS.voice, enabled: true, tts: { ...ORCHESTRATION_DEFAULTS.voice.tts, voiceId: 'fixture' } }, ...agentPatch } as AgentConfig;
   const submit = jest.fn(async () => ({ inputId: 'input', response: Promise.resolve('Done.') }));
-  const runner = { telegramVoiceSession: jest.fn(async () => 'tg-session'), authorizeVoiceSession: jest.fn(async () => {}), setBrowserVoice: jest.fn(async () => {}),
+  const store = new OrchestrationStore(':memory:', 'a'), voices = new TelegramVoices(store, () => agent.voice!.tts as never);
+  const runner = { voiceTts: jest.fn(async (scope, tts) => voices.forScope(scope, tts)), telegramVoiceSession: jest.fn(async () => 'tg-session'), authorizeVoiceSession: jest.fn(async () => {}), setBrowserVoice: jest.fn(async () => {}),
     pendingVoiceSpeech: async () => [], subscribeVoiceResults: async () => () => {}, submitVoiceUtterance: submit, stopVoiceResponse: jest.fn(),
     recordVoicePlayback: jest.fn(), saveVoiceReplay: jest.fn(), notifyVoiceCallEnded: jest.fn(async () => {}) } as unknown as AgentRunner;
   const agents = new Map([['a', runner]]), configs = new Map([['a', agent]]);
@@ -48,8 +59,8 @@ function fixture(agentPatch: Partial<AgentConfig> = {}) {
   const avatars = new TelegramBotAvatars((async () => { throw new Error('offline'); }) as unknown as typeof fetch);
   app.use('/voice-call', createVoiceCallRouter({ agents, configs, voiceApi: api, basePath: () => '', telegramStateDir: () => stateDir, avatars }));
   const server = createServer(app); server.on('upgrade', (req, socket, head) => { if (!api.upgrade(req, socket, head)) socket.destroy(); });
-  const close = async () => { await api.close(); await new Promise<void>(resolve => server.close(() => resolve())); rmSync(stateDir, { recursive: true, force: true }); };
-  return { agent, runner, submit, api, app, server, allow, close };
+  const close = async () => { await api.close(); await new Promise<void>(resolve => server.close(() => resolve())); store.close(); rmSync(stateDir, { recursive: true, force: true }); };
+  return { agent, runner, submit, api, app, server, allow, close, store };
 }
 
 const ORIGIN = 'https://host.example';
@@ -310,4 +321,56 @@ test('hanging up posts one call-length notice for the whole call; a socket that 
     expect(durationMs).toBeGreaterThanOrEqual(222_000);
     expect(durationMs).toBeLessThan(227_000);
   } finally { clock.mockRestore(); sockets.forEach(ws => ws.terminate()); await f.close(); }
+});
+
+test('a /call speaks with the chat\'s /voices choice, and with the configured default when the chat chose none', async () => {
+  const until = async (fn: () => boolean) => { const start = Date.now(); while (!fn()) { if (Date.now() - start > 5000) throw Error('voice fixture timeout'); await new Promise(r => setTimeout(r, 5)); } };
+  // [/voices choice for chat 42, configured voice, voice the call must speak with, persona gender]
+  const cases = [['lily', '', 'lily', 'female'], [undefined, '', 'roger', 'male'], [undefined, 'fixture', 'fixture', undefined], ['lily', 'fixture', 'lily', 'female']] as const;
+  for (const [chosen, configured, expected, gender] of cases) {
+    const f = fixture({ voice: { ...ORCHESTRATION_DEFAULTS.voice, enabled: true, tts: { ...ORCHESTRATION_DEFAULTS.voice.tts, voiceId: configured } } } as Partial<AgentConfig>);
+    // What /voices stores for a private chat; another chat's choice must not leak in.
+    f.store.run('INSERT INTO telegram_tts_voices VALUES(?,?,?)', '7', ORCHESTRATION_DEFAULTS.voice.tts.provider, 'other');
+    if (chosen) f.store.run('INSERT INTO telegram_tts_voices VALUES(?,?,?)', '42', ORCHESTRATION_DEFAULTS.voice.tts.provider, chosen);
+    let receive: ((result: { responseId: string; text: string; spoken: string }) => void) | undefined, persona: (() => string | undefined) | undefined;
+    (f.runner as any).subscribeVoiceResults = async (_s: string, _p: string, r: typeof receive, g: typeof persona) => { receive = r; persona = g; return () => {}; };
+    f.server.listen(0, '127.0.0.1'); await once(f.server, 'listening');
+    const events: any[] = [];
+    let ws: WebSocket | undefined;
+    mockSpokenVoices.length = 0;
+    try {
+      const issued = await request(f.app).post(`/voice-call/${voiceCallPairings.create('a', '42')}/ticket`).set('Origin', ORIGIN).send({ initData: initData(42) });
+      ws = new WebSocket(`ws://127.0.0.1:${(f.server.address() as { port: number }).port}${issued.body.stream_path}?ticket=${issued.body.ticket}`, { origin: ORIGIN });
+      ws.on('message', (data, binary) => { if (!binary) events.push(JSON.parse(String(data))); });
+      await until(() => events.some(e => e.state === 'ready'));
+      ws.send(JSON.stringify({ type: 'voice.start' }));
+      await until(() => events.some(e => e.state === 'listening'));
+      expect(events.find(e => e.type === 'voice.configured')?.voice_id).toBe(expected);
+      expect(persona?.()).toBe(gender);
+      receive!({ responseId: 'r1', text: 'Hello.', spoken: 'Hello.' });
+      await until(() => events.some(e => e.type === 'playback.start' && e.phase === 'response'));
+      expect(events.find(e => e.type === 'playback.start' && e.phase === 'response').voice_id).toBe(expected);
+      await until(() => mockSpokenVoices.length > 0);
+      expect(mockSpokenVoices).toEqual([expected]);
+    } finally { ws?.terminate(); await f.close(); }
+  }
+});
+
+test('an API voice call keeps the configured voice: /voices is a Telegram chat setting', async () => {
+  const f = fixture({ voice: { ...ORCHESTRATION_DEFAULTS.voice, enabled: true, tts: { ...ORCHESTRATION_DEFAULTS.voice.tts, voiceId: '' } } } as Partial<AgentConfig>);
+  f.store.run('INSERT INTO telegram_tts_voices VALUES(?,?,?)', '42', ORCHESTRATION_DEFAULTS.voice.tts.provider, 'lily');
+  f.server.listen(0, '127.0.0.1'); await once(f.server, 'listening');
+  const events: any[] = [];
+  const until = async (fn: () => boolean) => { const start = Date.now(); while (!fn()) { if (Date.now() - start > 5000) throw Error('voice fixture timeout'); await new Promise(r => setTimeout(r, 5)); } };
+  let ws: WebSocket | undefined;
+  try {
+    const minted = await f.api.mintTicket('a', 'api-session', { kind: 'api', principalId: 'api:owner', chatId: '42' }, ORIGIN, false);
+    const body = minted.body as { stream_path: string; ticket: string };
+    ws = new WebSocket(`ws://127.0.0.1:${(f.server.address() as { port: number }).port}${body.stream_path}?ticket=${body.ticket}`, { origin: ORIGIN });
+    ws.on('message', (data, binary) => { if (!binary) events.push(JSON.parse(String(data))); });
+    await until(() => events.some(e => e.state === 'ready'));
+    ws.send(JSON.stringify({ type: 'voice.start' }));
+    await until(() => events.some(e => e.type === 'voice.configured'));
+    expect(events.find(e => e.type === 'voice.configured').voice_id).toBe('roger');
+  } finally { ws?.terminate(); await f.close(); }
 });

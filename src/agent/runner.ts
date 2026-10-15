@@ -549,6 +549,9 @@ export class AgentRunner extends EventEmitter {
   async authorizeVoiceSession(sessionId: string, principalId: string): Promise<void> {
     (await this.getOrchestration()).authorizeSession(sessionId, principalId);
   }
+  async voiceTts<T extends { provider: string; model: string; voiceId: string }>(scope: VoiceScope, tts: T): Promise<T> {
+    return (await this.getOrchestration()).telegramVoices.forScope(scope, tts);
+  }
   async subscribeVoiceResults(sessionId: string, principalId: string, receive: (result: { responseId: string; text: string; spoken: string; requestId?: string; speechOnly?: boolean }) => void, gender?: () => string | undefined): Promise<() => void> {
     return (await this.getOrchestration()).subscribeVoiceResults(sessionId, principalId, receive, gender);
   }

@@ -296,10 +296,13 @@ export class VoiceApi {
                 send({ type: 'voice.configured', voice_id: control.voice_id });
               }
               if (control.voice_id === undefined) {
+                // A Telegram call speaks with its chat's /voices choice. It is read once per socket,
+                // so a change made mid-call applies from the next call or reconnect.
                 try {
-                  const voiceId = await resolveVoiceId(voice.tts);
+                  const tts = await runner.voiceTts(ticket.scope, voice.tts);
+                  const voiceId = await resolveVoiceId(tts);
                   session.setVoice(voiceId);
-                  selectedGender = (await voiceChoices(voice.tts).catch(() => [])).find(choice => choice.id === voiceId)?.gender;
+                  selectedGender = (await voiceChoices(tts).catch(() => [])).find(choice => choice.id === voiceId)?.gender;
                   send({ type: 'voice.configured', voice_id: voiceId });
                 } catch { send({ type: 'voice.error', code: 'TTS_UNAVAILABLE' }); }
               }
