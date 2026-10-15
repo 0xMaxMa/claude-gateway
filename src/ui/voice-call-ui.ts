@@ -6,7 +6,7 @@
  * `gateway.publicUrl`, and the WebSocket path comes from the ticket response.
  */
 import { BASE_STYLE, TG_WEBAPP_JS, htmlEscape, page } from './cli-viewer-ui';
-import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, formatCallDuration, voiceCallErrorView, voiceCallLevel, voiceCallTheme, voiceCallTicketFailure } from './voice-call-client';
+import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, formatCallDuration, voiceCallErrorView, voiceCallLevel, voiceCallReplyText, voiceCallTheme, voiceCallTicketFailure } from './voice-call-client';
 
 export interface VoiceCallPageOpts {
   pairingId: string;
@@ -66,10 +66,15 @@ const STYLE = `${BASE_STYLE}
     --vc-listen: #2560c8; --vc-listen-ring: rgba(37,96,200,.45); --vc-listen-glow: rgba(37,96,200,.10); --vc-think: #13773a;
     --vc-speak: #a84b06; --vc-speak-ring: rgba(240,128,30,.80); --vc-speak-glow: rgba(240,128,30,.18); --vc-speak-halo: rgba(240,128,30,.07);
     --vc-muted: #c22631; --vc-end: #e5484d; --vc-err: #c4202b; }
-  body { background: var(--vc-bg); color: var(--vc-text); }
+  /* The call fills the Mini App and never grows past it: the transcript scrolls between a
+   * fixed header and fixed controls. Telegram keeps --tg-viewport-stable-height current. */
+  body { background: var(--vc-bg); color: var(--vc-text); overflow: hidden;
+    height: 100vh; height: 100dvh; height: var(--tg-viewport-stable-height, 100dvh); }
   .muted { color: var(--vc-hint); }
   .err { color: var(--vc-err); }
-  .call { flex: 1; width: 100%; display: flex; flex-direction: column; align-items: center; text-align: center; padding: 48px 24px calc(28px + env(safe-area-inset-bottom)); }
+  .call { flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column; align-items: center; text-align: center;
+    padding: calc(48px + env(safe-area-inset-top)) 24px calc(28px + env(safe-area-inset-bottom)); }
+  .head, .foot { flex: none; width: 100%; display: flex; flex-direction: column; align-items: center; }
   .call.gone { justify-content: center; }
   .avatar-wrap { position: relative; width: 132px; height: 132px; display: grid; place-items: center; }
   .ring { position: absolute; inset: 0; border-radius: 50%; border: 2px solid transparent; transition: border-color .2s, box-shadow .2s; }
@@ -94,10 +99,12 @@ const STYLE = `${BASE_STYLE}
   .call.thinking .dot { animation: think 1s ease-in-out infinite alternate; }
   @keyframes think { from { opacity: .25; transform: scale(.7); } }
   .call.muted .chip { color: var(--vc-muted); }
-  .lines { margin-top: 28px; width: 100%; max-width: 340px; min-height: 96px; }
-  .line { min-height: 20px; font-size: 15px; line-height: 1.5; color: var(--vc-text); word-break: break-word; }
+  .lines { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; position: relative;
+    margin: 28px 0 8px; padding-bottom: 20px; width: 100%; max-width: 340px;
+    -webkit-mask-image: linear-gradient(#000 calc(100% - 20px), transparent); mask-image: linear-gradient(#000 calc(100% - 20px), transparent); }
+  .line { min-height: 20px; font-size: 15px; line-height: 1.5; color: var(--vc-text); word-break: break-word; white-space: pre-line; }
   .you { color: var(--vc-listen); }
-  .hint { margin-top: auto; }
+  .hint { margin: 12px 0 0; }
   .hint[hidden] { display: none; }
   button { font: inherit; font-size: 15px; border: 0; border-radius: 22px; padding: 11px 20px; cursor: pointer; color: var(--vc-on-button); background: var(--vc-button); }
   button:focus-visible { outline: 2px solid var(--vc-listen); outline-offset: 3px; }
@@ -110,6 +117,17 @@ const STYLE = `${BASE_STYLE}
   button.round[aria-pressed="true"] { background: var(--vc-pressed); color: var(--vc-on-pressed); }
   button.round.end { background: var(--vc-end); color: #fff; }
   button.round .off { display: none; }
+  /* Short screens (Telegram Desktop, small phones): a smaller header leaves the transcript room. */
+  @media (max-height: 720px) {
+    .call { padding-top: calc(20px + env(safe-area-inset-top)); padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+    .avatar-wrap { width: 96px; height: 96px; }
+    .avatar { width: 80px; height: 80px; font-size: 34px; }
+    .name { margin-top: 12px; font-size: 20px; }
+    .chip { margin-top: 10px; }
+    .lines { margin-top: 16px; }
+    .controls { margin-top: 14px; }
+    button.round { width: 60px; height: 60px; }
+  }
   #speaker[aria-pressed="false"] .on, #mute[aria-pressed="true"] .on { display: none; }
   #speaker[aria-pressed="false"] .off, #mute[aria-pressed="true"] .off { display: block; }
 `;
@@ -144,24 +162,28 @@ const ICONS = {
 
 export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
   const cfg = JSON.stringify({ pairingId: opts.pairingId, basePath: opts.basePath, maxUtteranceMs: opts.maxUtteranceMs, vad: VOICE_CALL_VAD, linkUsed: Boolean(opts.linkUsed) }).replace(/</g, '\\u003c');
-  const client = [createResampler, encodeVoiceCallFrame, voiceCallLevel, createVoiceCallVad, createVoiceCallUplink, createVoiceCallPlayhead, voiceCallTicketFailure, formatCallDuration, voiceCallErrorView].map(fn => fn.toString()).join(';\n');
+  const client = [createResampler, encodeVoiceCallFrame, voiceCallLevel, createVoiceCallVad, createVoiceCallUplink, createVoiceCallPlayhead, voiceCallTicketFailure, formatCallDuration, voiceCallErrorView, voiceCallReplyText].map(fn => fn.toString()).join(';\n');
   const name = opts.botName ?? opts.agentId;
   const initial = Array.from(name.trim())[0]?.toUpperCase() ?? '?';
   const photo = opts.avatarVersion ? `${opts.basePath}/voice-call/${encodeURIComponent(opts.pairingId)}/avatar?v=${encodeURIComponent(opts.avatarVersion)}` : '';
   const used = Boolean(opts.linkUsed);
   const body = `${THEME_SCRIPT}
   <div class="call" id="call">
+    <div class="head">
     <div class="avatar-wrap"><div class="ring"></div><div class="avatar" id="avatar" aria-hidden="true">${htmlEscape(initial)}${photo ? `<img id="photo" alt="" src="${htmlEscape(photo)}">` : ''}</div></div>
     <div class="name">${htmlEscape(name)}</div>
     <div class="timer" id="timer"></div>
     <div class="chip" role="status"><span class="dot"></span><span class="bars"><b style="--h:.45"></b><b style="--h:.85"></b><b style="--h:.65"></b><b style="--h:1"></b><b style="--h:.5"></b></span>${used ? `<span class="state err" id="state">${htmlEscape(VOICE_CALL_LINK_USED)}</span>` : '<span class="state" id="state">Starting…</span>'}</div>
-    <div class="lines"><div class="line you" id="you"></div><div class="line" id="reply"></div></div>
+    </div>
+    <div class="lines" id="lines"><div class="line you" id="you"></div><div class="line" id="reply"></div></div>
+    <div class="foot">
     <p class="muted hint" id="hint"${used ? ' hidden' : ''}>Your words and the replies also appear in the chat.</p>
     <button type="button" id="start" hidden>Start call</button>
     <div class="controls" id="controls" hidden>
       <div class="ctl"><button type="button" class="round" id="speaker" aria-label="Speaker" aria-pressed="true">${ICONS.speakerOn}${ICONS.speakerOff}</button><span aria-hidden="true">speaker</span></div>
       <div class="ctl"><button type="button" class="round end" id="hangup" aria-label="End call">${ICONS.end}</button><span aria-hidden="true">end</span></div>
       <div class="ctl"><button type="button" class="round" id="mute" aria-label="Mute" aria-pressed="false">${ICONS.mic}${ICONS.micOff}</button><span aria-hidden="true">mute</span></div>
+    </div>
     </div>
   </div>
   <script>
@@ -187,6 +209,17 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     function state(text, tone){
       var s = $('state'); s.textContent = text; s.className = 'state' + (tone ? ' ' + tone : '');
       $('call').className = 'call' + (!tone && SCENES[text] ? ' ' + SCENES[text] : '');
+    }
+    // The transcript follows new text unless the caller scrolled up to read; scrolling
+    // back down to where it was follows again. A reply opens at its first line, as it is
+    // spoken; the caller's words show their latest.
+    var follow = true, followTop = 0, lines = $('lines');
+    lines.onscroll = function(){ if (lines.scrollTop < followTop - 2) follow = false; else { follow = true; followTop = lines.scrollTop; } };
+    function show(id, text){
+      var line = $(id); line.textContent = text;
+      if (!follow) return;
+      lines.scrollTop = id === 'reply' ? line.offsetTop : Math.max(0, line.offsetTop + line.offsetHeight - lines.clientHeight);
+      followTop = lines.scrollTop;
     }
     function api(path){ return CFG.basePath + '/voice-call/' + CFG.pairingId + path; }
     function send(message){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(message)); }
@@ -231,10 +264,10 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
           }
           if (message.state === 'muted') { uplink.reset(); awaitingReply = false; state('Muted'); }
           break;
-        case 'stt.partial': case 'stt.segment': $('you').textContent = message.pending_text || message.text || ''; break;
-        case 'stt.final': $('you').textContent = message.text; awaitingReply = false; state('Thinking'); break;
+        case 'stt.partial': case 'stt.segment': show('you', message.pending_text || message.text || ''); break;
+        case 'stt.final': show('you', message.text); awaitingReply = false; state('Thinking'); break;
         case 'utterance.accepted': state('Thinking'); break;
-        case 'response.text': if (message.text) $('reply').textContent = message.text; break;
+        case 'response.text': if (message.text) show('reply', voiceCallReplyText(message.text)); break;
         case 'playback.start': if (!stopping) { epoch = message.epoch; flushPlayback(); awaitingReply = false; state('Speaking'); } break;
         case 'playback.end': break;
         case 'playback.clear': epoch = message.epoch; flushPlayback(); send({ type: 'playback.clear.ack', epoch: epoch }); if (!awaitingReply) state(muted ? 'Muted' : 'Listening'); break;
@@ -244,7 +277,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
           var view = voiceCallErrorView(message);
           awaitingReply = false;
           if (view.kind === 'ended') fail(new Error(view.message));
-          else if (view.kind === 'listening') { $('you').textContent = ''; if (!sources.length) state(muted ? 'Muted' : 'Listening'); }
+          else if (view.kind === 'listening') { show('you', ''); if (!sources.length) state(muted ? 'Muted' : 'Listening'); }
           else state(view.message, 'err');
           break;
         }

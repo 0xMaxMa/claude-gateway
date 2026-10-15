@@ -1,5 +1,5 @@
 import { decodeVoiceFrame } from '../../../src/voice/protocol';
-import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, voiceCallLevel, voiceCallTicketFailure, voiceCallTheme } from '../../../src/ui/voice-call-client';
+import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, voiceCallLevel, voiceCallReplyText, voiceCallTicketFailure, voiceCallTheme } from '../../../src/ui/voice-call-client';
 import { generateVoiceCallPage } from '../../../src/ui/voice-call-ui';
 
 const sine = (frequency: number, rate: number, samples: number, amplitude = 0.5) =>
@@ -149,7 +149,7 @@ describe('page', () => {
 
   test('the inline script is valid JavaScript with every client function embedded', () => {
     expect(() => new Function(script)).not.toThrow();
-    for (const name of ['createResampler', 'encodeVoiceCallFrame', 'createVoiceCallVad', 'createVoiceCallUplink', 'createVoiceCallPlayhead', 'voiceCallLevel', 'voiceCallTicketFailure', 'formatCallDuration', 'voiceCallErrorView']) expect(script).toContain(`function ${name}(`);
+    for (const name of ['createResampler', 'encodeVoiceCallFrame', 'createVoiceCallVad', 'createVoiceCallUplink', 'createVoiceCallPlayhead', 'voiceCallLevel', 'voiceCallTicketFailure', 'formatCallDuration', 'voiceCallErrorView', 'voiceCallReplyText']) expect(script).toContain(`function ${name}(`);
   });
 
   test('URLs derive from the base path and the agent id is escaped', () => {
@@ -159,6 +159,73 @@ describe('page', () => {
     expect(html).toContain('&lt;agent&gt;');
     expect(html).not.toContain('<agent>');
     expect(html).toContain('https://telegram.org/js/telegram-web-app.js');
+  });
+});
+
+describe('layout', () => {
+  const html = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'agent', basePath: '/gateway', maxUtteranceMs: 60000 });
+  const style = html.match(/<style>([\s\S]*)<\/style>/)![1];
+  const rule = (selector: string) => [...style.matchAll(new RegExp('(?:^|\\n)\\s*' + selector.replace(/[.[\]"]/g, '\\$&') + ' \\{([^}]*)\\}', 'g'))].map(match => match[1]).join(';');
+
+  test('only the transcript scrolls: the header and the controls sit outside it, fixed above and below', () => {
+    const call = html.slice(html.indexOf('<div class="call" id="call">'), html.indexOf('<script>', html.indexOf('<div class="call"')));
+    const order = ['<div class="head">', 'id="state"', '<div class="lines" id="lines">', '<div class="foot">', 'id="hint"', 'id="start"', 'id="speaker"', 'id="hangup"', 'id="mute"'].map(part => call.indexOf(part));
+    expect(order.every(index => index >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // The scroll container holds the two transcript lines and nothing else.
+    expect(call).toContain('<div class="lines" id="lines"><div class="line you" id="you"></div><div class="line" id="reply"></div></div>');
+  });
+
+  test('the screen is one viewport tall; the transcript takes the space left and scrolls inside it', () => {
+    expect(rule('body')).toMatch(/height: 100dvh/);
+    expect(rule('body')).toMatch(/height: var\(--tg-viewport-stable-height, 100dvh\)/);
+    expect(rule('body')).toMatch(/overflow: hidden/);
+    expect(rule('.call')).toMatch(/min-height: 0/);
+    expect(rule('.head, .foot')).toMatch(/flex: none/);
+    const lines = rule('.lines');
+    expect(lines).toMatch(/flex: 1 1 auto/);
+    expect(lines).toMatch(/min-height: 0/);
+    expect(lines).toMatch(/overflow-y: auto/);
+    // A reply keeps its line breaks.
+    expect(rule('.line')).toMatch(/white-space: pre-line/);
+    // Short screens shrink the header rather than the controls' reach.
+    expect(style).toMatch(/@media \(max-height: 720px\) \{[\s\S]*\.avatar-wrap \{ width: 96px; height: 96px; \}/);
+  });
+});
+
+describe('reply text', () => {
+  test("the chat's Markdown loses its markers; words, emoji, URLs and line breaks stay", () => {
+    const reply = [
+      '## ราคา Bitcoin ตอนนี้',
+      '',
+      '**ราคาล่าสุด:** ~**$67,240** USD 📈',
+      '- ขึ้น *2.1%* ใน 24 ชม.',
+      '* volume `31B`',
+      '> ที่มา: [CoinGecko](https://www.coingecko.com/en/coins/bitcoin)',
+      '',
+      '',
+      '',
+      '```',
+      'BTC/USD 67240',
+      '```',
+      '__สรุป__: ~~ลง~~ ขึ้น _เล็กน้อย_',
+    ].join('\n');
+    expect(voiceCallReplyText(reply)).toBe([
+      'ราคา Bitcoin ตอนนี้',
+      '',
+      'ราคาล่าสุด: ~$67,240 USD 📈',
+      '• ขึ้น 2.1% ใน 24 ชม.',
+      '• volume 31B',
+      'ที่มา: CoinGecko (https://www.coingecko.com/en/coins/bitcoin)',
+      '',
+      'BTC/USD 67240',
+      'สรุป: ลง ขึ้น เล็กน้อย',
+    ].join('\n'));
+  });
+
+  test('text that only looks like Markdown is left alone', () => {
+    expect(voiceCallReplyText('2 * 3 * 4 = 24, snake_case_name and a_b')).toBe('2 * 3 * 4 = 24, snake_case_name and a_b');
+    expect(voiceCallReplyText('<b>not html</b> & co')).toBe('<b>not html</b> & co');
   });
 });
 
@@ -206,10 +273,11 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
   const html = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'agent', basePath: '/gateway', maxUtteranceMs: 60000, linkUsed: options.linkUsed });
   const script = inlineScripts(html);
   type Element = { textContent: string; className: string; hidden: boolean; src?: string; onclick: null | (() => void); onload?: () => void;
+    onscroll?: () => void; scrollTop: number; clientHeight: number; offsetTop: number; offsetHeight: number;
     attributes: Record<string, string>; style: Record<string, string> & { setProperty(name: string, value: string): void }; setAttribute(name: string, value: string): void };
   const elements = new Map<string, Element>();
   const element = (id: string) => elements.get(id) ?? elements.set(id, {
-    textContent: '', className: '', hidden: false, onclick: null, attributes: {},
+    textContent: '', className: '', hidden: false, onclick: null, attributes: {}, scrollTop: 0, clientHeight: 0, offsetTop: 0, offsetHeight: 0,
     style: Object.assign(Object.create(null), { setProperty(this: Record<string, string>, name: string, value: string) { this[name] = value; } }),
     setAttribute(name: string, value: string) { this.attributes[name] = value; },
   }).get(id)!;
@@ -443,6 +511,41 @@ describe('call page', () => {
     const plain = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'getpod', basePath: '/gateway', maxUtteranceMs: 60000 });
     expect(plain).toContain('<div class="name">getpod</div>');
     expect(plain).toContain('<div class="avatar" id="avatar" aria-hidden="true">G</div>');
+  });
+
+  test("a reply shows as plain text: its Markdown markers gone, any HTML in it shown as text", async () => {
+    const { element, sockets } = await openPage();
+    sockets[0].open();
+    sockets[0].receive(LISTENING);
+    const text = '**Bitcoin** is at <b>$67,240</b>\n- up *2%*';
+    sockets[0].receive({ type: 'response.text', text, final: true });
+    expect(element('reply').textContent).toBe('Bitcoin is at <b>$67,240</b>\n• up 2%');
+  });
+
+  test('the transcript follows new text until the caller scrolls up, and again once they scroll back', async () => {
+    const { element, sockets } = await openPage();
+    sockets[0].open();
+    sockets[0].receive(LISTENING);
+    const lines = element('lines'), you = element('you'), reply = element('reply');
+    Object.assign(lines, { clientHeight: 200 });
+    // The caller's words show their latest line.
+    Object.assign(you, { offsetTop: 0, offsetHeight: 260 });
+    sockets[0].receive({ type: 'stt.partial', utterance_id: '0'.repeat(32), text: 'a long question' });
+    expect(lines.scrollTop).toBe(60);
+    // A reply opens at its first line.
+    Object.assign(reply, { offsetTop: 280, offsetHeight: 900 });
+    sockets[0].receive({ type: 'response.text', text: 'a long reply', final: true });
+    expect(lines.scrollTop).toBe(280);
+    // Scrolling down to read on keeps following.
+    lines.scrollTop = 500; lines.onscroll!();
+    // The caller scrolls up to reread: new text no longer moves the view.
+    lines.scrollTop = 120; lines.onscroll!();
+    sockets[0].receive({ type: 'response.text', text: 'another reply', final: true });
+    expect(lines.scrollTop).toBe(120);
+    // Back down to where it was: it follows again.
+    lines.scrollTop = 500; lines.onscroll!();
+    sockets[0].receive({ type: 'response.text', text: 'the next reply', final: true });
+    expect(lines.scrollTop).toBe(280);
   });
 
   describe('Thinking as soon as the user stops speaking', () => {

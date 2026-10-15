@@ -222,3 +222,28 @@ export function voiceCallErrorView(error: { code?: unknown; category?: unknown; 
   if (error.code === 'VOICE_SESSION_CHANGED') return { kind: 'ended', message: 'This chat switched sessions. Send /call to talk in the new one.' };
   return { kind: 'error', message: typeof error.message === 'string' && error.message ? error.message : 'Voice error' };
 }
+
+/**
+ * A reply as the call screen shows it: the chat's Markdown reduced to plain text
+ * (bold, italic, code, headings and quotes lose their markers, a link keeps its URL,
+ * a bullet becomes •), with the line breaks kept. The page sets it as text, never
+ * as HTML. stripMarkdownPreservingUrls (src/agent/line-pure.ts) does the same for
+ * LINE, but its patterns live outside the function and use lookbehind, which older
+ * iOS WebViews cannot parse; this one is embedded in the page whole.
+ */
+export function voiceCallReplyText(text: string): string {
+  return text
+    .replace(/```[^\n`]*\n?([\s\S]*?)\n?```/g, '$1')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/!?\[([^\]\n]+)\]\(([^)\s]+)\)/g, '$1 ($2)')
+    .replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '$2')
+    .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '$1')
+    .replace(/(^|[^\w*])\*([^\s*](?:[^*\n]*?[^\s*])?)\*(?![\w*])/gm, '$1$2')
+    .replace(/(^|\W)_([^\s_](?:[^_\n]*?[^\s_])?)_(?!\w)/gm, '$1$2')
+    .replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, '')
+    .replace(/^[ \t]{0,3}>[ \t]?/gm, '')
+    .replace(/^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$/gm, '')
+    .replace(/^([ \t]*)[-*+][ \t]+/gm, '$1• ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
