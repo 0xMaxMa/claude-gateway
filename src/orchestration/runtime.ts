@@ -527,7 +527,15 @@ export class AgentOrchestrationRuntime {
   async notifySession(sessionId: string, text: string, deliver = true): Promise<void> {
     const matches = this.store.all("SELECT id FROM conversations WHERE agent_session_id=? AND status='active'", sessionId);
     if (matches.length !== 1) return; // Unknown/ambiguous targets never fall back to a chat.
-    const responseId = this.decisions.notice(String(matches[0].id), text, deliver);
+    await this.publishNotice(sessionId, String(matches[0].id), text, deliver);
+  }
+  /** A delivered system notice in one chat (and topic) of a session; nothing if that chat has no conversation in it. */
+  async notifyChat(sessionId: string, source: string, chatId: string, threadKey: string, text: string): Promise<void> {
+    const match = this.store.get("SELECT id FROM conversations WHERE agent_session_id=? AND source=? AND chat_id=? AND thread_key=? AND status='active'", sessionId, source, chatId, threadKey);
+    if (match) await this.publishNotice(sessionId, String(match.id), text, true);
+  }
+  private async publishNotice(sessionId: string, conversationId: string, text: string, deliver: boolean): Promise<void> {
+    const responseId = this.decisions.notice(conversationId, text, deliver);
     await this.history.write(`response:${responseId}`);
     this.publishText(sessionId, responseId, text, true);
   }

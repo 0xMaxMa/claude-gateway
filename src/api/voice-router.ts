@@ -18,6 +18,7 @@ import { VoiceReplays } from '../voice/replay';
 import { PCM16 } from '../voice/types';
 
 import type { VoiceScope } from '../voice/scope';
+import { voiceCallPairings } from '../voice/call-pairing';
 
 interface VoiceTicket {
   agentId: string; sessionId: string; scope: VoiceScope;
@@ -245,7 +246,7 @@ export class VoiceApi {
           event => console.info(JSON.stringify({ ts: new Date().toISOString(), level: 'info', event: 'Voice timing', agentId: ticket.agentId, sessionId: ticket.sessionId, voiceSessionId: ticket.voiceSessionId, ...event, ...(event.operation === 'turn' ? {} : { provider: voice[event.operation].provider, model: voice[event.operation].model }) })));
       } catch { send({ type: 'voice.error', code: 'PROVIDER_CONFIGURATION_ERROR' }); ws.close(); this.releaseLease(ticket); return; }
       this.sessions.set(ticket.voiceSessionId, { session, socket: ws, ticket });
-      let started = false, playbackReady = false;
+      let started = false, playbackReady = false, hangup = false;
       let selectedGender: string | undefined;
       let unsubscribe: (() => void) | undefined;
       let alive = true;
@@ -303,6 +304,12 @@ export class VoiceApi {
               if (control.muted === true) await session.mute(true, 'discard');
               else await session.start();
               playbackReady = true;
+              // A Telegram call runs from its first listening socket until hang-up; reconnects continue it.
+              if (ticket.scope.kind === 'telegram') {
+                const scope = ticket.scope;
+                voiceCallPairings.connected(ticket.voiceSessionId, durationMs => void runner.notifyVoiceCallEnded(ticket.sessionId, scope, durationMs)
+                  .catch(error => console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Voice call end notice failed', agentId: ticket.agentId, sessionId: ticket.sessionId, code: error?.code ?? 'ERROR' }))));
+              }
               void catchUp(); break;
             case 'voice.configure': {
               if (control.voice_id === undefined && (control.model !== undefined || control.execution_task_id !== undefined)) break;
@@ -322,13 +329,13 @@ export class VoiceApi {
             case 'playback.progress': session.progress(control.epoch, control.sample_offset); break;
             case 'playback.clear.ack': break;
             case 'voice.mute': if (typeof control.muted !== 'boolean' || !['discard', 'commit'].includes(control.policy)) throw new Error('INVALID_CONTROL'); await session.mute(control.muted, control.policy, control.last_audio_seq); if(control.muted)discardSpeech(); break;
-            case 'voice.stop': await session.close(); ws.close(); break;
+            case 'voice.stop': if (control.hangup !== undefined && typeof control.hangup !== 'boolean') throw new Error('INVALID_CONTROL'); hangup = control.hangup === true; await session.close(); ws.close(); break;
             default: throw new Error('INVALID_CONTROL');
           }
         })().catch(error => send({ type: 'voice.error', code: error.code ?? 'INVALID_CONTROL' }));
       });
       ws.on('error', () => { void session.close(); });
-      ws.on('close', () => { discardSpeech(); clearInterval(resumeTimer); unsubscribe?.(); clearInterval(heartbeat); void session.close(); this.sessions.delete(ticket.voiceSessionId); this.releaseLease(ticket); });
+      ws.on('close', () => { if (ticket.scope.kind === 'telegram') voiceCallPairings.disconnected(ticket.voiceSessionId, hangup); discardSpeech(); clearInterval(resumeTimer); unsubscribe?.(); clearInterval(heartbeat); void session.close(); this.sessions.delete(ticket.voiceSessionId); this.releaseLease(ticket); });
       send({ type: 'voice.state', state: 'ready', turn_grouping: true, voice_session_id: ticket.voiceSessionId, generation: session.playback.generation });
     }); } catch {
       this.releaseLease(ticket);

@@ -39,7 +39,7 @@ function fixture(agentPatch: Partial<AgentConfig> = {}) {
   const submit = jest.fn(async () => ({ inputId: 'input', response: Promise.resolve('Done.') }));
   const runner = { telegramVoiceSession: jest.fn(async () => 'tg-session'), authorizeVoiceSession: jest.fn(async () => {}), setBrowserVoice: jest.fn(async () => {}),
     pendingVoiceSpeech: async () => [], subscribeVoiceResults: async () => () => {}, submitVoiceUtterance: submit, stopVoiceResponse: jest.fn(),
-    recordVoicePlayback: jest.fn(), saveVoiceReplay: jest.fn() } as unknown as AgentRunner;
+    recordVoicePlayback: jest.fn(), saveVoiceReplay: jest.fn(), notifyVoiceCallEnded: jest.fn(async () => {}) } as unknown as AgentRunner;
   const agents = new Map([['a', runner]]), configs = new Map([['a', agent]]);
   const api = new VoiceApi(agents, configs, []);
   const app = express(); app.use(express.json());
@@ -224,4 +224,58 @@ test('voice.turns.mergeWindowMs reaches the voice session: 0 admits a committed 
       expect(events.some(e => e.type === 'stt.segment')).toBe(merged);
     } finally { ws?.terminate(); await f.close(); }
   }
+});
+
+test('hanging up posts one call-length notice for the whole call; a socket that never started posts none', async () => {
+  const f = fixture();
+  f.server.listen(0, '127.0.0.1'); await once(f.server, 'listening');
+  const port = (f.server.address() as { port: number }).port;
+  const until = async (fn: () => boolean) => { const start = Date.now(); while (!fn()) { if (Date.now() - start > 5000) throw Error('voice fixture timeout'); await new Promise(r => setTimeout(r, 5)); } };
+  const notify = f.runner.notifyVoiceCallEnded as jest.Mock;
+  const sockets: WebSocket[] = [];
+  const open = async (pairingId: string, body: object) => {
+    const issued = await request(f.app).post(`/voice-call/${pairingId}/ticket`).set('Origin', ORIGIN).send(body);
+    expect(issued.status).toBe(200);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${issued.body.stream_path}?ticket=${issued.body.ticket}`, { origin: ORIGIN }), events: any[] = [];
+    sockets.push(ws);
+    ws.on('message', (data, binary) => { if (!binary) events.push(JSON.parse(String(data))); });
+    await until(() => events.some(e => e.state === 'ready'));
+    return { ws, events, issued: issued.body };
+  };
+  const clock = jest.spyOn(Date, 'now'), real = clock.getMockImplementation() ?? (() => new Date().getTime());
+  let offset = 0; clock.mockImplementation(() => real() + offset);
+  try {
+    // Opened, never listening, then closed: not a call.
+    const silent = voiceCallPairings.create('a', '42');
+    const idle = await open(silent, { initData: initData(42) });
+    idle.ws.send(JSON.stringify({ type: 'voice.stop', hangup: true }));
+    await once(idle.ws, 'close');
+
+    const pairingId = voiceCallPairings.create('a', '42');
+    const first = await open(pairingId, { initData: initData(42) });
+    expect(first.issued.call_elapsed_ms).toBeUndefined();
+    first.ws.send(JSON.stringify({ type: 'voice.start' }));
+    await until(() => first.events.some(e => e.state === 'listening'));
+    // The network drops; the page rejoins the same call and keeps its clock.
+    offset += 20_000;
+    first.ws.terminate();
+    await until(() => voiceCallPairings.get(pairingId)?.call?.connected === false);
+    const second = await open(pairingId, { initData: initData(42), call_token: first.issued.call_token });
+    expect(second.issued.call_elapsed_ms).toBeGreaterThanOrEqual(20_000);
+    expect(second.issued.call_elapsed_ms).toBeLessThan(25_000);
+    second.ws.send(JSON.stringify({ type: 'voice.start' }));
+    await until(() => second.events.some(e => e.state === 'listening'));
+    second.ws.send(JSON.stringify({ type: 'voice.stop', hangup: 'yes' }));
+    await until(() => second.events.some(e => e.type === 'voice.error' && e.code === 'INVALID_CONTROL'));
+    offset += 202_000;
+    second.ws.send(JSON.stringify({ type: 'voice.stop', hangup: true }));
+    await once(second.ws, 'close');
+    await until(() => notify.mock.calls.length > 0);
+    await new Promise(r => setTimeout(r, 50));
+    expect(notify).toHaveBeenCalledTimes(1);
+    const [sessionId, scope, durationMs] = notify.mock.calls[0];
+    expect([sessionId, scope]).toEqual(['tg-session', { kind: 'telegram', principalId: 'telegram:42', chatId: '42', threadKey: '' }]);
+    expect(durationMs).toBeGreaterThanOrEqual(222_000);
+    expect(durationMs).toBeLessThan(227_000);
+  } finally { clock.mockRestore(); sockets.forEach(ws => ws.terminate()); await f.close(); }
 });

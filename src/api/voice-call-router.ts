@@ -65,7 +65,9 @@ export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
       const result = await deps.voiceApi.mintTicket(pairing.agentId, sessionId, { kind: 'telegram', principalId: `telegram:${verified.userId}`, chatId, threadKey: pairing.threadKey },
         req.headers.origin, config.allow_tools !== false);
       if (result.status === 200) voiceCallPairings.attach(pairing.pairingId, String(result.body.voice_session_id));
-      res.status(result.status).json({ ...result.body, call_token: claim.callToken });
+      // A page rejoining a call in progress keeps its clock.
+      const elapsed = result.status === 200 ? voiceCallPairings.elapsed(pairing.pairingId) : undefined;
+      res.status(result.status).json({ ...result.body, call_token: claim.callToken, ...(elapsed === undefined ? {} : { call_elapsed_ms: elapsed }) });
     } catch { res.status(503).json({ error: 'Voice call unavailable', call_token: claim.callToken }); }
   });
   return router;

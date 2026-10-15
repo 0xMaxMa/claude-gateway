@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { ACCESS_TTL_MS, PAIRING_TTL_MS } from '../cli-viewer/pairing-store';
+import { formatCallDuration } from '../ui/voice-call-client';
 
 /**
  * A `/call` link, minted for one Telegram user in their DM with the bot.
@@ -22,6 +23,19 @@ export interface VoiceCallPairing {
   /** Voice session of the latest ticket, so a connected call keeps its pairing alive. */
   voiceSessionId?: string;
   expiresAt: number;
+  /** The call in progress: from the first connected socket until hang-up, or until
+   * no socket has rejoined for `CALL_END_GRACE_MS`. Reconnects belong to the same call. */
+  call?: { startedAt: number; connected: boolean; endTimer?: ReturnType<typeof setTimeout>; ended(durationMs: number): void };
+}
+
+/** How long a dropped call waits to be rejoined before it counts as ended. The
+ * page reconnects within seconds after a network drop or recognizer restart, and
+ * rejoins when the Mini App is shown again. */
+export const CALL_END_GRACE_MS = 60_000;
+
+/** The chat notice for a finished call. */
+export function voiceCallEndedText(durationMs: number): string {
+  return `📞 Call ended · ${formatCallDuration(durationMs)}`;
 }
 
 /** A Telegram DM can hold a call: orchestration serves Telegram and the agent has voice. */
@@ -63,6 +77,44 @@ export class VoiceCallPairings {
   attach(pairingId: string, voiceSessionId: string): void {
     const pairing = this.get(pairingId);
     if (pairing) pairing.voiceSessionId = voiceSessionId;
+  }
+
+  /** A socket of this call started listening. The first one starts the call; `ended`
+   * reports its length once, when the call ends. */
+  connected(voiceSessionId: string, ended: (durationMs: number) => void, now = Date.now()): void {
+    const pairing = this.bySession(voiceSessionId);
+    if (!pairing) return;
+    if (pairing.call) { clearTimeout(pairing.call.endTimer); pairing.call = { ...pairing.call, connected: true, endTimer: undefined, ended }; }
+    else pairing.call = { startedAt: now, connected: true, ended };
+  }
+
+  /** A socket of this call closed. A hang-up ends the call now; otherwise it ends
+   * at this disconnect unless a socket rejoins within the grace period. */
+  disconnected(voiceSessionId: string, hangup: boolean, now = Date.now()): void {
+    const pairing = this.bySession(voiceSessionId), call = pairing?.call;
+    if (!pairing || !call?.connected) return;
+    call.connected = false;
+    if (hangup) { this.end(pairing, now); return; }
+    call.endTimer = setTimeout(() => this.end(pairing, now), CALL_END_GRACE_MS);
+    call.endTimer.unref?.();
+  }
+
+  /** How long the call has run, for a page rejoining it; undefined when no call is in progress. */
+  elapsed(pairingId: string, now = Date.now()): number | undefined {
+    const call = this.get(pairingId)?.call;
+    return call ? now - call.startedAt : undefined;
+  }
+
+  private end(pairing: VoiceCallPairing, endedAt: number): void {
+    const call = pairing.call;
+    if (!call) return;
+    clearTimeout(call.endTimer); pairing.call = undefined;
+    call.ended(Math.max(0, endedAt - call.startedAt));
+  }
+
+  private bySession(voiceSessionId: string): VoiceCallPairing | undefined {
+    for (const pairing of this.pairings.values()) if (pairing.voiceSessionId === voiceSessionId) return pairing;
+    return undefined;
   }
 
   /** Extend calls that are still connected, then drop expired pairings. */

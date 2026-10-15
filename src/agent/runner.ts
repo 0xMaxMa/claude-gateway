@@ -73,7 +73,7 @@ import { scrubText } from './incident';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { cliPairingStore, isCliChannel, type CliChannel } from '../cli-viewer/pairing-store';
 import { buildCliUrl, buildVoiceCallUrl, normalizePublicUrl } from '../cli-viewer/url';
-import { telegramVoiceCallsEnabled, voiceCallPairings } from '../voice/call-pairing';
+import { telegramVoiceCallsEnabled, voiceCallEndedText, voiceCallPairings } from '../voice/call-pairing';
 import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
@@ -558,6 +558,11 @@ export class AgentRunner extends EventEmitter {
   /** The Telegram session a DM call speaks in: the chat's active session, as for typed messages. */
   async telegramVoiceSession(chatId: string): Promise<string> {
     return this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, 'telegram');
+  }
+  /** A `/call` ended: a system notice with its length in the DM (or topic) the call joined. */
+  async notifyVoiceCallEnded(sessionId: string, scope: Extract<VoiceScope, { kind: 'telegram' }>, durationMs: number): Promise<void> {
+    const orchestration = await this.getOrchestration();
+    await orchestration.notifyChat(sessionId, 'telegram', scope.chatId, scope.threadKey, voiceCallEndedText(durationMs));
   }
   async submitVoiceUtterance(sessionId: string, voiceScope: VoiceScope, text: string, utteranceId: string, allowTools: boolean, model?: string, executionTaskId?:string): Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId(): string | undefined }> {
     if (!this.agentConfig.orchestration?.enabled || !this.agentConfig.voice?.enabled) throw new Error('Voice is disabled');
