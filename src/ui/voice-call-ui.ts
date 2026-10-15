@@ -35,36 +35,75 @@ const CAPTURE_WORKLET = `class VoiceCallCapture extends AudioWorkletProcessor {
 registerProcessor('voice-call-capture', VoiceCallCapture);`;
 
 const STYLE = `${BASE_STYLE}
-  .call { gap: 14px; display: flex; flex-direction: column; align-items: center; }
-  .state { font-size: 15px; font-weight: 600; margin-top: 4px; }
-  .timer { min-height: 20px; font-size: 15px; color: #8f9bb3; font-variant-numeric: tabular-nums; }
-  .line { min-height: 20px; font-size: 14px; line-height: 1.5; color: #c8d3f5; word-break: break-word; }
+  .call { flex: 1; width: 100%; display: flex; flex-direction: column; align-items: center; text-align: center; padding: 48px 24px calc(28px + env(safe-area-inset-bottom)); }
+  .avatar-wrap { position: relative; width: 132px; height: 132px; display: grid; place-items: center; }
+  .ring { position: absolute; inset: 0; border-radius: 50%; border: 2px solid transparent; transition: border-color .2s, box-shadow .2s; }
+  .avatar { width: 112px; height: 112px; border-radius: 50%; display: grid; place-items: center; font-size: 46px; font-weight: 600; color: #fff;
+    position: relative; background: linear-gradient(135deg, #8ea2ff 0%, #6b7cff 55%, #5a5fd8 100%); box-shadow: 0 8px 30px rgba(107,124,255,.25); }
+  .avatar img { display: none; position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
+  .avatar.photo img { display: block; }
+  .name { margin-top: 20px; font-size: 24px; font-weight: 600; color: #e4e9ff; word-break: break-word; }
+  .timer { min-height: 22px; margin-top: 6px; font-size: 17px; color: #8f9bb3; font-variant-numeric: tabular-nums; letter-spacing: .5px; }
+  .chip { margin-top: 18px; max-width: 100%; display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: 16px; background: #161b27; color: #8f9bb3; }
+  .chip .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .chip .bars { display: none; gap: 3px; align-items: center; height: 14px; }
+  .chip .bars b { width: 3px; height: 14px; border-radius: 2px; background: currentColor; transform: scaleY(calc(var(--h) * (0.3 + 0.7 * var(--level, 0)))); transition: transform .1s linear; }
+  .state { font-size: 14px; font-weight: 600; }
+  .call.listening .ring { border-color: rgba(130,170,255,.35); box-shadow: 0 0 0 8px rgba(130,170,255,.08); }
+  .call.listening .chip { color: #82aaff; }
+  .call.speaking .ring { border-color: rgba(195,232,141,.75); box-shadow: 0 0 0 9px rgba(195,232,141,.14), 0 0 0 20px rgba(195,232,141,.06); }
+  .call.speaking .chip { color: #c3e88d; }
+  .call.speaking .dot { display: none; }
+  .call.speaking .bars { display: inline-flex; }
+  .call.muted .chip { color: #ff8d95; }
+  .lines { margin-top: 28px; width: 100%; max-width: 340px; min-height: 96px; }
+  .line { min-height: 20px; font-size: 15px; line-height: 1.5; color: #c8d3f5; word-break: break-word; }
   .you { color: #82aaff; }
-  .row { display: flex; gap: 10px; justify-content: center; margin-top: 8px; }
+  .hint { margin-top: auto; }
   button { font: inherit; font-size: 15px; border: 0; border-radius: 22px; padding: 11px 20px; cursor: pointer; color: #0b0e14; background: #c3e88d; }
-  button.secondary { background: #232a3b; color: #c8d3f5; }
-  button.danger { background: #ff757f; }
-  button[hidden] { display: none; }
+  button:focus-visible { outline: 2px solid #82aaff; outline-offset: 3px; }
+  button[hidden], .controls[hidden] { display: none; }
+  #start { margin-top: 14px; }
+  .controls { margin-top: 22px; display: flex; gap: 30px; justify-content: center; }
+  .ctl { display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 12px; color: #8f9bb3; }
+  button.round { width: 66px; height: 66px; padding: 0; border-radius: 50%; display: grid; place-items: center; background: #232a3b; color: #e4e9ff; }
+  button.round svg { width: 28px; height: 28px; pointer-events: none; }
+  button.round[aria-pressed="true"] { background: #e4e9ff; color: #0b0e14; }
+  button.round.end { background: #ff5c67; color: #fff; }
+  button.round .off { display: none; }
+  #speaker[aria-pressed="false"] .on, #mute[aria-pressed="true"] .on { display: none; }
+  #speaker[aria-pressed="false"] .off, #mute[aria-pressed="true"] .off { display: block; }
 `;
+
+const icon = (cls: string, paths: string) => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+const SPEAKER = '<path d="M11 5L6 9H3v6h3l5 4V5z"/>';
+const ICONS = {
+  speakerOn: icon('on', `${SPEAKER}<path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>`),
+  speakerOff: icon('off', `${SPEAKER}<path d="M16 9l5 6M21 9l-5 6"/>`),
+  mic: icon('on', '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/>'),
+  micOff: icon('off', '<path d="M3 3l18 18"/><path d="M9 9v2a3 3 0 0 0 5.1 2.1"/><path d="M15 9.3V6a3 3 0 0 0-5.7-1.3"/><path d="M5 11a7 7 0 0 0 11.4 5.4"/><path d="M19 11a7 7 0 0 1-.4 2.3"/><path d="M12 18v3"/>'),
+  end: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="transform: rotate(135deg)"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1z"/></svg>',
+};
 
 export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
   const cfg = JSON.stringify({ pairingId: opts.pairingId, basePath: opts.basePath, maxUtteranceMs: opts.maxUtteranceMs, vad: VOICE_CALL_VAD }).replace(/</g, '\\u003c');
   const client = [createResampler, encodeVoiceCallFrame, voiceCallLevel, createVoiceCallVad, createVoiceCallUplink, createVoiceCallPlayhead, voiceCallTicketFailure, formatCallDuration, voiceCallErrorView].map(fn => fn.toString()).join(';\n');
+  const initial = Array.from(opts.agentId.trim())[0]?.toUpperCase() ?? '?';
   const body = `
-  <div class="center"><div class="card call">
-    <h1>Voice call</h1>
-    <p class="muted">Agent <span class="agent">${htmlEscape(opts.agentId)}</span></p>
+  <div class="call" id="call">
+    <div class="avatar-wrap"><div class="ring"></div><div class="avatar" id="avatar" aria-hidden="true">${htmlEscape(initial)}<img id="photo" alt=""></div></div>
+    <div class="name">${htmlEscape(opts.agentId)}</div>
     <div class="timer" id="timer"></div>
-    <div class="state" id="state">Starting…</div>
-    <div class="line you" id="you"></div>
-    <div class="line" id="reply"></div>
-    <p class="muted" id="hint">Your words and the replies also appear in the chat.</p>
-    <div class="row">
-      <button id="start" hidden>Start call</button>
-      <button id="mute" class="secondary" hidden>Mute</button>
-      <button id="hangup" class="danger" hidden>Hang up</button>
+    <div class="chip" role="status"><span class="dot"></span><span class="bars"><b style="--h:.45"></b><b style="--h:.85"></b><b style="--h:.65"></b><b style="--h:1"></b><b style="--h:.5"></b></span><span class="state" id="state">Starting…</span></div>
+    <div class="lines"><div class="line you" id="you"></div><div class="line" id="reply"></div></div>
+    <p class="muted hint" id="hint">Your words and the replies also appear in the chat.</p>
+    <button type="button" id="start" hidden>Start call</button>
+    <div class="controls" id="controls" hidden>
+      <div class="ctl"><button type="button" class="round" id="speaker" aria-label="Speaker" aria-pressed="true">${ICONS.speakerOn}${ICONS.speakerOff}</button><span aria-hidden="true">speaker</span></div>
+      <div class="ctl"><button type="button" class="round end" id="hangup" aria-label="End call">${ICONS.end}</button><span aria-hidden="true">end</span></div>
+      <div class="ctl"><button type="button" class="round" id="mute" aria-label="Mute" aria-pressed="false">${ICONS.mic}${ICONS.micOff}</button><span aria-hidden="true">mute</span></div>
     </div>
-  </div></div>
+  </div>
   <script>
   (function(){
     'use strict';
@@ -73,14 +112,19 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     ${client};
     var tg = window.Telegram && window.Telegram.WebApp;
     var $ = function(id){ return document.getElementById(id); };
-    var ctx, media, capture, ws, uplink, vad, resample, progressTimer;
+    var ctx, media, capture, ws, uplink, vad, resample, progressTimer, level, levelSamples, speaker;
     var playhead = createVoiceCallPlayhead(), sources = [];
     var callToken, generation, epoch = 0, reportedPlayed = 0, stopRequest = 0, stopping = false;
-    var muted = false, paused = false, ended = false, attempts = 0;
+    var muted = false, paused = false, ended = false, attempts = 0, speakerOn = true, shownLevel;
     // The call clock: set when a socket first listens, from the server's elapsed time
     // on a rejoin, so it keeps counting across reconnects like a phone call.
     var callStart, offeredElapsed = 0, joined = false;
-    function state(text, tone){ var s = $('state'); s.textContent = text; s.className = 'state' + (tone ? ' ' + tone : ''); }
+    // The ring and chip follow the call: listening, the agent speaking, or muted.
+    var SCENES = { Listening: 'listening', Speaking: 'speaking', Muted: 'muted' };
+    function state(text, tone){
+      var s = $('state'); s.textContent = text; s.className = 'state' + (tone ? ' ' + tone : '');
+      $('call').className = 'call' + (!tone && SCENES[text] ? ' ' + SCENES[text] : '');
+    }
     function api(path){ return CFG.basePath + '/voice-call/' + CFG.pairingId + path; }
     function send(message){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(message)); }
     async function ticket(){
@@ -102,7 +146,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       if (data.byteLength <= 44 || stopping || view.getUint32(20) !== epoch) return;
       var count = (data.byteLength - 44) / 2, buffer = ctx.createBuffer(1, count, 16000), channel = buffer.getChannelData(0);
       for (var i = 0; i < count; i++) channel[i] = view.getInt16(44 + i * 2, true) / 32768;
-      var node = ctx.createBufferSource(); node.buffer = buffer; node.connect(ctx.destination);
+      var node = ctx.createBufferSource(); node.buffer = buffer; node.connect(level);
       node.onended = function(){ sources = sources.filter(function(item){ return item !== node; }); };
       node.start(playhead.schedule(count, 16000, ctx.currentTime)); sources.push(node);
     }
@@ -180,6 +224,19 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       var retry = $('start'); retry.textContent = 'Retry'; retry.hidden = false;
       retry.onclick = function(){ retry.hidden = true; attempts = 0; state('Reconnecting…'); connect().catch(fail); };
     }
+    // The speaking bars follow the agent's actual output level.
+    function showLevel(){
+      if (!level) return;
+      level.getFloatTimeDomainData(levelSamples);
+      var text = (sources.length ? Math.min(1, voiceCallLevel(levelSamples) * 5) : 0).toFixed(1);
+      if (text !== shownLevel) { shownLevel = text; $('call').style.setProperty('--level', text); }
+    }
+    // A web page cannot choose the earpiece or the loudspeaker; Speaker turns the agent's voice on or off.
+    function setSpeaker(on){
+      speakerOn = on;
+      if (speaker) speaker.gain.value = on ? 1 : 0;
+      $('speaker').setAttribute('aria-pressed', String(on));
+    }
     function showDuration(){
       if (callStart === undefined) return;
       var text = formatCallDuration(Date.now() - callStart), timer = $('timer');
@@ -192,7 +249,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       send({ type: 'voice.mute', muted: value, policy: 'commit', last_audio_seq: value && sequence ? sequence : 0 });
       if (value) uplink.reset(); else vad = createVoiceCallVad(CFG.vad);
       media.getAudioTracks().forEach(function(track){ track.enabled = !value; });
-      $('mute').textContent = value ? 'Unmute' : 'Mute';
+      $('mute').setAttribute('aria-pressed', String(value));
       state(value ? 'Muted' : 'Listening');
     }
     // A hidden Mini App cannot hear or be heard reliably (iOS cuts the mic). Leave the
@@ -219,7 +276,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       if (media) media.getTracks().forEach(function(track){ track.stop(); });
       if (ctx) ctx.close().catch(function(){});
       if (tg && tg.disableClosingConfirmation) tg.disableClosingConfirmation();
-      $('mute').hidden = true; $('hangup').hidden = true;
+      $('controls').hidden = true;
       if (!silent) { state('Call ended'); if (tg && tg.close) setTimeout(function(){ tg.close(); }, 600); }
     }
     // Telegram's Android WebView needs a tap before audio can play or be captured
@@ -278,14 +335,24 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
         uplink.audio(pcm);
         if (edge === 'end') uplink.speechEnd();
       };
-      progressTimer = setInterval(function(){ reportProgress(); showDuration(); }, 100);
+      if (!speaker) {
+        level = ctx.createAnalyser(); level.fftSize = 512; levelSamples = new Float32Array(level.fftSize);
+        speaker = ctx.createGain(); speaker.gain.value = speakerOn ? 1 : 0;
+        level.connect(speaker); speaker.connect(ctx.destination);
+      }
+      progressTimer = setInterval(function(){ reportProgress(); showDuration(); showLevel(); }, 100);
       if (tg.enableClosingConfirmation) tg.enableClosingConfirmation();
-      $('mute').hidden = false; $('hangup').hidden = false;
+      $('controls').hidden = false;
       try { await connect(); } catch (error) { fail(error); }
     }
     if (tg) { try { tg.ready(); tg.expand(); if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); tg.onEvent && tg.onEvent('deactivated', suspend); tg.onEvent && tg.onEvent('activated', resume); } catch (e) {} }
     document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'hidden') suspend(); else if (!tg || tg.isActive !== false) resume(); });
+    // The bot's profile photo replaces the initial once it loads; without one the initial stays.
+    var photo = $('photo');
+    photo.onload = function(){ $('avatar').className = 'avatar photo'; };
+    photo.src = api('/avatar');
     $('mute').onclick = function(){ setMuted(!muted); };
+    $('speaker').onclick = function(){ setSpeaker(!speakerOn); };
     $('hangup').onclick = function(){ hangup(false); };
     start(false);
   })();

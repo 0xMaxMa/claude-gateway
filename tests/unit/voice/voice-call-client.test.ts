@@ -188,6 +188,8 @@ class FakeSocket {
   close() { this.readyState = 3; }
   open() { this.readyState = 1; this.onopen?.(); }
   receive(message: object) { this.onmessage?.({ data: JSON.stringify(message) }); }
+  /** One PCM16 sample of reply audio in `epoch`, framed as the gateway sends it. */
+  audio(epoch: number) { const data = new ArrayBuffer(46); new DataView(data).setUint32(20, epoch); this.onmessage?.({ data }); }
   drop(code: number) { this.readyState = 3; this.onclose?.({ code }); }
 }
 
@@ -202,22 +204,36 @@ const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(reso
 async function openPage(options: { tickets?: { status: number; body: string }[]; audioNeedsTap?: boolean; micNeedsTap?: boolean; micDenied?: boolean; storage?: Map<string, string> } = {}) {
   const html = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'agent', basePath: '/gateway', maxUtteranceMs: 60000 });
   const script = html.match(/<script>([\s\S]*)<\/script>/)![1];
-  const elements = new Map<string, { textContent: string; className: string; hidden: boolean; onclick: null | (() => void) }>();
-  const element = (id: string) => elements.get(id) ?? elements.set(id, { textContent: '', className: '', hidden: false, onclick: null }).get(id)!;
+  type Element = { textContent: string; className: string; hidden: boolean; src?: string; onclick: null | (() => void); onload?: () => void;
+    attributes: Record<string, string>; style: Record<string, string> & { setProperty(name: string, value: string): void }; setAttribute(name: string, value: string): void };
+  const elements = new Map<string, Element>();
+  const element = (id: string) => elements.get(id) ?? elements.set(id, {
+    textContent: '', className: '', hidden: false, onclick: null, attributes: {},
+    style: Object.assign(Object.create(null), { setProperty(this: Record<string, string>, name: string, value: string) { this[name] = value; } }),
+    setAttribute(name: string, value: string) { this.attributes[name] = value; },
+  }).get(id)!;
   const noop = () => undefined;
   const tg = { initData: 'signed', ready: noop, expand: noop, onEvent: noop, enableClosingConfirmation: noop, disableClosingConfirmation: noop, close: noop };
   const track = { enabled: true, stop: noop };
   let touched = false;
+  /** Audio nodes record where they connect, so a test can follow reply audio to the speaker. */
+  type Node = { outputs: Node[]; gain?: { value: number }; connect(next: Node): void };
+  const node = (extra: object = {}): Node => ({ outputs: [], connect(this: Node, next: Node) { this.outputs.push(next); }, ...extra });
+  const destination = node(), replies: Node[] = [];
+  /** How loud a reply source reaches the destination: the product of the gains on its way. */
+  const loudness = (from: Node): number => from === destination ? 1 : Math.max(0, ...from.outputs.map(next => (from.gain?.value ?? 1) * loudness(next)));
   class FakeAudioContext {
-    sampleRate = 48000; currentTime = 0; destination = {}; state = 'suspended';
+    sampleRate = 48000; currentTime = 0; destination = destination; state = 'suspended';
     audioWorklet = { addModule: async () => undefined };
     resume = () => { if (options.audioNeedsTap && !touched) return new Promise<void>(noop); this.state = 'running'; return Promise.resolve(); };
     close = async () => undefined;
-    createGain() { return { gain: { value: 1 }, connect: noop }; }
-    createMediaStreamSource() { return { connect: noop }; }
+    createGain() { return node({ gain: { value: 1 } }); }
+    createAnalyser() { return node({ fftSize: 2048, getFloatTimeDomainData: noop }); }
+    createMediaStreamSource() { return node(); }
     createBuffer() { return { getChannelData: () => new Float32Array(1) }; }
+    createBufferSource() { const source = node({ start: noop, stop: noop }); replies.push(source); return source; }
   }
-  class FakeWorkletNode { port = {}; connect = noop; }
+  class FakeWorkletNode { port = {}; outputs: Node[] = []; connect(next: Node) { this.outputs.push(next); } }
   const tickets = [...(options.tickets ?? [TICKET])];
   const fetch = jest.fn(async () => { const next = tickets.shift() ?? TICKET; return { ok: next.status === 200, status: next.status, json: async () => JSON.parse(next.body) }; });
   const location = { protocol: 'https:', host: 'pod.example', reload: jest.fn() };
@@ -238,7 +254,7 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
   await settle();
   /** A tap on a page button, which also counts as the WebView's first touch. */
   const tap = async (id: string) => { touched = true; element(id).onclick!(); await settle(); };
-  return { element, location, fetch, sockets, getUserMedia, tap };
+  return { element, location, fetch, sockets, getUserMedia, tap, replies, loudness };
 }
 
 describe('page after a refused ticket', () => {
@@ -348,5 +364,64 @@ describe('call page', () => {
     expect(denied.element('state')).toMatchObject({ textContent: 'Microphone access was denied.', className: 'state err' });
     expect(denied.element('start').hidden).toBe(true);
     expect(denied.fetch).not.toHaveBeenCalled();
+  });
+
+  const LISTENING = { type: 'voice.state', state: 'listening', utterance_id: '0'.repeat(32), generation: '1'.repeat(32) };
+
+  test('round controls in phone order: Speaker, End call, Mute, as labelled toggle buttons', () => {
+    const html = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'agent', basePath: '/gateway', maxUtteranceMs: 60000 });
+    const buttons = [...html.matchAll(/<button type="button" class="round[^"]*" id="(\w+)" aria-label="([^"]+)"(?: aria-pressed="(\w+)")?>/g)].map(match => match.slice(1));
+    expect(buttons).toEqual([['speaker', 'Speaker', 'true'], ['hangup', 'End call', undefined], ['mute', 'Mute', 'false']]);
+    expect(html).toContain('<div class="avatar" id="avatar" aria-hidden="true">A<img id="photo" alt=""></div>');
+  });
+
+  test('the ring and chip follow the call: listening, the agent speaking, muted', async () => {
+    const { element, sockets, tap } = await openPage();
+    expect(element('controls').hidden).toBe(false);
+    sockets[0].open();
+    sockets[0].receive(LISTENING);
+    expect(element('call').className).toBe('call listening');
+    sockets[0].receive({ type: 'playback.start', epoch: 1 });
+    expect(element('call').className).toBe('call speaking');
+    expect(element('state').textContent).toBe('Speaking');
+    sockets[0].receive({ type: 'playback.clear', epoch: 2 });
+    expect(element('call').className).toBe('call listening');
+    await tap('mute');
+    expect(element('call').className).toBe('call muted');
+    expect(element('mute').attributes['aria-pressed']).toBe('true');
+    expect(sockets[0].sent).toContainEqual(expect.objectContaining({ type: 'voice.mute', muted: true }));
+    await tap('mute');
+    expect(element('call').className).toBe('call listening');
+    expect(element('mute').attributes['aria-pressed']).toBe('false');
+    sockets[0].receive({ type: 'voice.error', code: 'TTS_UNAVAILABLE', category: 'unavailable', message: 'Down' });
+    expect(element('call').className).toBe('call');
+  });
+
+  test("Speaker turns the agent's voice off and on without touching the call", async () => {
+    const { element, sockets, tap, replies, loudness } = await openPage();
+    sockets[0].open();
+    sockets[0].receive(LISTENING);
+    sockets[0].receive({ type: 'playback.start', epoch: 1 });
+    sockets[0].audio(1);
+    expect(replies).toHaveLength(1);
+    expect(loudness(replies[0])).toBe(1);
+    await tap('speaker');
+    expect(element('speaker').attributes['aria-pressed']).toBe('false');
+    expect(loudness(replies[0])).toBe(0);
+    sockets[0].audio(1);
+    expect(loudness(replies[1])).toBe(0);
+    // The call carries on: no stop, no mute sent to the gateway.
+    expect(sockets[0].sent.filter(message => ['voice.stop', 'voice.mute'].includes(message.type))).toEqual([]);
+    await tap('speaker');
+    expect(element('speaker').attributes['aria-pressed']).toBe('true');
+    expect(loudness(replies[1])).toBe(1);
+  });
+
+  test("the bot's photo loads from the call's avatar route and replaces the initial", async () => {
+    const { element } = await openPage();
+    expect(element('photo').src).toBe('/gateway/voice-call/' + 'a'.repeat(36) + '/avatar');
+    expect(element('avatar').className).toBe('');
+    element('photo').onload!();
+    expect(element('avatar').className).toBe('avatar photo');
   });
 });
