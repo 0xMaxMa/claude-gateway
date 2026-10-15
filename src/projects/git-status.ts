@@ -89,7 +89,7 @@ export interface ParsedStatus {
   changes: GitFileChange[];
 }
 
-/** The repo config keys status needs, read in one `git config --get-regexp` call. */
+/** The repo config status needs: remotes and branch tracking. */
 export interface RepoConfig {
   remotes: Array<{ name: string; url: string }>;
   /** `branch.<name>.remote` and `branch.<name>.merge`, keyed by branch name. */
@@ -172,21 +172,36 @@ export function parseStatusV2(raw: string): ParsedStatus {
   return out;
 }
 
-export function parseRepoConfig(raw: string): RepoConfig {
+/** Config scopes whose files the repository controls. Git reports an included file under the scope of the file that includes it. */
+const REPO_SCOPES = new Set(['local', 'worktree']);
+
+export interface ConfigList {
+  config: RepoConfig;
+  /** Filter driver names the repository's own config defines, directly or through an include. */
+  filterNames: string[];
+}
+
+/** What `git config --list -z --show-scope` prints: `scope NUL key NL value NUL` per entry, a valueless key without the NL. */
+export function parseConfigList(raw: string): ConfigList {
   const cfg: RepoConfig = { remotes: [], branches: {} };
-  for (const entry of raw.split('\0')) {
+  const filters = new Set<string>();
+  const fields = raw.split('\0');
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const scope = fields[i];
+    const entry = fields[i + 1];
     const nl = entry.indexOf('\n');
-    if (nl < 0) continue;
-    const key = entry.slice(0, nl);
-    const value = entry.slice(nl + 1);
+    const key = nl < 0 ? entry : entry.slice(0, nl);
+    const value = nl < 0 ? '' : entry.slice(nl + 1);
     let m: RegExpExecArray | null;
     if ((m = /^remote\.(.+)\.url$/.exec(key))) {
       if (!cfg.remotes.some((r) => r.name === m![1])) cfg.remotes.push({ name: m[1], url: value });
     } else if ((m = /^branch\.(.+)\.(remote|merge)$/.exec(key))) {
       (cfg.branches[m[1]] ??= {})[m[2] as 'remote' | 'merge'] = value;
+    } else if (REPO_SCOPES.has(scope) && key.startsWith('filter.') && key.lastIndexOf('.') > 'filter.'.length) {
+      filters.add(key.slice('filter.'.length, key.lastIndexOf('.')));
     }
   }
-  return cfg;
+  return { config: cfg, filterNames: [...filters] };
 }
 
 export function deriveSync(s: {

@@ -1,21 +1,27 @@
 import { promises as fsp } from 'fs';
 import * as path from 'path';
 import { listProjects, mapLimit, resolveProjectDir } from './fs';
-import { GIT_READ_TIMEOUT_MS, runGit } from './git-runner';
+import { GIT_READ_TIMEOUT_MS, GitOutput, MAX_BLANKED_FILTERS, MAX_FILTER_NAME, runGit } from './git-runner';
 import {
   buildStatus,
   GitCommitInfo,
   GitOperation,
   GitStatus,
   GitSummary,
-  parseRepoConfig,
+  parseConfigList,
   parseStatusV2,
-  RepoConfig,
   toSummary,
 } from './git-status';
 import { err, ok, ProjectName, ProjectsErrorCode, Result } from './paths';
 
-export type GitErrorCode = 'not_a_git_repo' | 'timeout' | 'git_failed';
+export type GitErrorCode =
+  | 'not_a_git_repo'
+  /** git refuses a repository that another user owns (`safe.directory`). */
+  | 'git_unsafe_owner'
+  /** There is a `.git` that git cannot read: permissions, damage, a bad config, or a filter setup the gateway cannot make safe. */
+  | 'git_unreadable'
+  | 'timeout'
+  | 'git_failed';
 
 export type GitError = { code: GitErrorCode | ProjectsErrorCode };
 
@@ -24,7 +30,6 @@ export type GitResult<T> = Result<T, GitError>;
 const fail = (code: GitErrorCode | ProjectsErrorCode) => err({ code });
 
 const SUMMARY_CONCURRENCY = 4;
-const CONFIG_KEYS = '^(remote\\..*\\.url|branch\\..*\\.(remote|merge))$';
 const COMMIT_FORMAT = '%H%x00%s%x00%an%x00%cI';
 
 /** First match wins: a rebase also leaves files a merge would. */
@@ -49,11 +54,6 @@ export function parseCommitInfo(stdout: string): GitCommitInfo | null {
   return sha && committed_at ? { sha, subject, author, committed_at } : null;
 }
 
-interface RepoState {
-  status: GitStatus;
-  config: RepoConfig;
-}
-
 interface ReadOptions {
   timeoutMs: number;
   /** `all` lists every file in an untracked folder; `normal` lists the folder once, which is cheaper. */
@@ -65,33 +65,55 @@ interface ReadOptions {
 const DETAIL_READ: ReadOptions = { timeoutMs: GIT_READ_TIMEOUT_MS, untracked: 'all', commitAndOperation: true };
 const SUMMARY_READ: ReadOptions = { timeoutMs: GIT_READ_TIMEOUT_MS, untracked: 'normal', commitAndOperation: false };
 
-async function readRepo(dir: string, read: ReadOptions): Promise<GitResult<RepoState>> {
-  const opts = { timeoutMs: read.timeoutMs };
+/** What git said when it could not read the repository, in words the client can act on. LC_ALL=C keeps these messages stable. */
+async function readFailure(dir: string, out: GitOutput): Promise<GitError> {
+  if (/detected dubious ownership/.test(out.stderr)) return { code: 'git_unsafe_owner' };
+  if (/not a git repository/.test(out.stderr)) {
+    // A `.git` entry git cannot open reads as "not a repository": say it is there but unreadable.
+    return { code: (await fsp.lstat(path.join(dir, '.git')).then(() => true, () => false)) ? 'git_unreadable' : 'not_a_git_repo' };
+  }
+  if (/permission denied|cannot (open|read|access)|unable to (open|read|access)|operation not permitted|bad config/i.test(out.stderr)) return { code: 'git_unreadable' };
+  return { code: 'git_failed' };
+}
+
+/**
+ * The config is listed first, by git itself, so the includes, the worktree config and the scopes are git's reading and
+ * not ours. Every filter driver the repository's own config defines is then blanked for the status call, which would
+ * otherwise run a driver's clean command on any file whose stat changed. A driver that cannot be blanked safely makes
+ * the repository unreadable rather than risking the run.
+ */
+async function readRepo(dir: string, read: ReadOptions): Promise<GitResult<GitStatus>> {
+  const started = Date.now();
+  const listed = await runGit(dir, ['config', '--list', '-z', '--show-scope'], { timeoutMs: read.timeoutMs });
+  if (!listed.ok) return fail(listed.error);
+  if (listed.value.code !== 0) return err(await readFailure(dir, listed.value));
+  const { config, filterNames } = parseConfigList(listed.value.stdout);
+  if (filterNames.length > MAX_BLANKED_FILTERS || filterNames.some((n) => n.length > MAX_FILTER_NAME)) return fail('git_unreadable');
+
+  const opts = { timeoutMs: Math.max(read.timeoutMs - (Date.now() - started), 1), blankFilters: filterNames };
   const skipped = Promise.resolve(ok({ code: 0, stdout: '', stderr: '' }));
   const full = read.commitAndOperation;
   const runs = await Promise.all([
     full ? runGit(dir, ['rev-parse', '--absolute-git-dir'], opts) : skipped,
-    runGit(dir, ['status', '--porcelain=v2', '--branch', '-z', `--untracked-files=${read.untracked}`], opts),
-    runGit(dir, ['config', '-z', '--get-regexp', CONFIG_KEYS], opts),
-    full ? runGit(dir, ['log', '-1', '-z', `--format=${COMMIT_FORMAT}`], opts) : skipped,
+    // Submodules are compared by commit only: checking their worktrees would run git, and its filters, inside each one.
+    runGit(dir, ['status', '--porcelain=v2', '--branch', '-z', '--ignore-submodules=dirty', `--untracked-files=${read.untracked}`], opts),
+    // --no-show-signature: log.showSignature would run the repository's gpg.program.
+    full ? runGit(dir, ['log', '-1', '-z', '--no-show-signature', `--format=${COMMIT_FORMAT}`], opts) : skipped,
   ]);
   for (const r of runs) if (!r.ok) return fail(r.error);
-  const [gitDir, status, config, log] = runs.map((r) => (r.ok ? r.value : null!));
-  if (gitDir.code !== 0) return fail('not_a_git_repo');
-  if (status.code !== 0) return fail('git_failed');
-  // get-regexp exits 1 when nothing matches, which is an empty config, not a failure.
-  const cfg = parseRepoConfig(config.code === 0 ? config.stdout : '');
+  const [gitDir, status, log] = runs.map((r) => (r.ok ? r.value : null!));
+  if (gitDir.code !== 0) return err(await readFailure(dir, gitDir));
+  if (status.code !== 0) return err(await readFailure(dir, status));
   const parsed = parseStatusV2(status.stdout);
   if (parsed.oid === null && parsed.upstream !== null) parsed.behind = await unbornBehind(dir, opts);
-  return ok({
-    config: cfg,
-    status: buildStatus({
+  return ok(
+    buildStatus({
       parsed,
-      config: cfg,
+      config,
       lastCommit: full && log.code === 0 ? parseCommitInfo(log.stdout) : null,
       operation: full ? await operationIn(gitDir.stdout.trim()) : 'none',
     }),
-  });
+  );
 }
 
 /** git prints no `branch.ab` for an unborn branch, so count what a pull would bring: every commit the tracking branch has, or 0 without one. */
@@ -108,8 +130,7 @@ export async function projectDir(root: string, name: ProjectName): Promise<GitRe
 async function readStatus(root: string, name: ProjectName, read: ReadOptions): Promise<GitResult<GitStatus>> {
   const dir = await projectDir(root, name);
   if (!dir.ok) return dir;
-  const repo = await readRepo(dir.value, read);
-  return repo.ok ? ok(repo.value.status) : repo;
+  return readRepo(dir.value, read);
 }
 
 export function getStatus(root: string, name: ProjectName): Promise<GitResult<GitStatus>> {

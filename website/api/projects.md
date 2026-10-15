@@ -244,12 +244,35 @@ provider keys, is dropped.
 | `HOME`, `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM` | Select the operator's config files: filters (`git lfs install`), `safe.directory`. |
 | `TMPDIR` | Temporary files. |
 
-Git itself runs with `LC_ALL=C` and `GIT_OPTIONAL_LOCKS=0`, so a status read
-never takes `.git/index.lock` from a git command you run in the same folder.
-`GIT_DIR` and `GIT_WORK_TREE` from the gateway's environment are never passed.
-When git runs past its time limit, the gateway stops git and every process git
-started, such as filters. It sends `SIGTERM` first so git removes its lock files,
-then `SIGKILL` one second later.
+Git itself runs with `LC_ALL=C`. `GIT_DIR` and `GIT_WORK_TREE` from the gateway's
+environment are never passed. When git runs past its time limit, the gateway
+stops git and every process git started, such as filters. It sends `SIGTERM`
+first so git removes its lock files, then `SIGKILL` one second later.
+
+#### What a hostile repository cannot make a read run {#git-hostile}
+
+A project folder can come from anywhere, and git runs commands that a
+repository's own config names. Every read (`status`, `rev-parse`, `log`,
+`rev-list`, `config`) and the `git init` of `git_init` run with these settings.
+
+| Setting | What it stops |
+| ------- | ------------- |
+| `GIT_ALLOW_PROTOCOL` set empty | Every transport: ssh, http(s), git, file and `ext::`. A repository cannot undo it: `protocol.<name>.allow=always` in its config does not outrank the environment, though it does beat a global `protocol.allow=never`. Git can start a fetch during a read, to get an object a partial clone left out, so this is what keeps `core.sshCommand`, `core.askPass`, `remote.<name>.uploadpack`, `ext::` URLs and `credential.helper` from running. Such a read fails and the project reads as `null` in the list. `credential.helper` and `core.sshCommand` in the repository are never reached, because no connection is opened. |
+| `GIT_NO_LAZY_FETCH=1` | Git 2.44 and later do not try the lazy fetch at all. Older git tries it and the line above stops it. |
+| `core.fsmonitor=false` | The command named by `core.fsmonitor`. |
+| `filter.<name>.clean`, `smudge`, `process` blanked and `required` set to `false` | The filter drivers that the repository's own config defines. `status` runs a driver's clean command on any file whose timestamp changed, so it would run it. The gateway asks git for the drivers (`git config --list --show-scope`) and blanks those in the `local` and `worktree` scopes, which covers `.git/config`, `config.worktree`, files they include (also nested, and `includeIf`), a `.git` file that points elsewhere, and the config of a linked worktree's main repository. It does not parse config text. The driver is found whichever way `.gitattributes`, `.git/info/attributes` or `core.attributesFile` names it. The operator's own drivers in `~/.gitconfig` or `/etc/gitconfig` still run, such as `git lfs install`. A repository that defines `git lfs` locally (`git lfs install --local`) reads its LFS files as the raw pointer, so they can show as modified. |
+| `--ignore-submodules=dirty` | `status` does not enter a submodule's worktree, where its own config and filters would apply. Only a changed submodule commit shows. |
+| `--no-show-signature` on `log` | `log.showSignature` would run the repository's `gpg.program`. |
+| `--no-optional-locks` | `status` never takes `.git/index.lock` from a git command you run in the same folder. |
+
+A repository that defines more than 64 filter drivers, or one with a name longer
+than 1024 characters, is not read: it answers `409 git_unreadable`, and
+`git-summary` shows `null` for it.
+
+Not neutralized, and not reachable from a read: hooks (`status`, `log` and
+`rev-parse` run none), `diff` and `merge` drivers and textconv (not used by a
+status), `core.pager`, `core.editor`. The operator's config is trusted: a
+filter, `safe.directory` or `GIT_CONFIG_*` set there applies.
 
 Credentials in a remote URL (`https://user:token@host/x`) are removed from
 every response and log line. Git's own output never reaches the client.
@@ -304,8 +327,8 @@ three, else `null`.
 A slim status for every project that is a git repository, for project cards.
 Plain folders are left out. A repository whose status takes longer than 3
 seconds or fails maps to `null`. The gateway reads at most 4 repositories at a
-time, and each read runs 2 git processes at once, so one request keeps up to 8
-git processes running. To stay fast, `change_count` counts an untracked folder as one change,
+time, and each read runs 2 git processes one after the other (the config, then the status), so one request keeps up to 4
+git processes running and spawns 2 per repository. To stay fast, `change_count` counts an untracked folder as one change,
 so it can be lower than the `change_count` of the full status.
 
 ```bash
@@ -323,7 +346,7 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/git-
 
 ### GET /api/v1/projects/:name/git {#get-git}
 
-Returns `200` with a [GitStatus](#git-status). Reads time out after 3 seconds.
+Returns `200` with a [GitStatus](#git-status). A read spawns 4 git processes: the config first, then `rev-parse`, `status` and `log` at once. The 3 second limit covers the whole read.
 
 ```bash
 curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/app/git
@@ -356,6 +379,8 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/app/
 | Status | `code` | When |
 |--------|--------|------|
 | 409 | `not_a_git_repo` | The project is not a repository. |
+| 409 | `git_unsafe_owner` | The repository belongs to another user and git refuses it (`detected dubious ownership`). Run `git config --global --add safe.directory <path>` as the gateway's user, or change the owner. `git-summary` shows `null` for it and the other repositories still read. |
+| 409 | `git_unreadable` | The folder has a `.git` that git cannot read: no permission, a `.git` file that points nowhere, a damaged config, or a repository that defines more filter drivers than the gateway blanks. |
 | 504 | `timeout` | Git ran past its limit of 3 seconds. |
 | 500 | `git_failed` | Any other git failure. Git's output is not returned. |
 

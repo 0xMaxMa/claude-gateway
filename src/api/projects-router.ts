@@ -27,6 +27,8 @@ const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode | Start
   project_exists: { status: 409, message: 'Project already exists' },
   internal: { status: 500, message: 'Internal error' },
   not_a_git_repo: { status: 409, message: 'Project is not a git repository' },
+  git_unsafe_owner: { status: 409, message: "Git refuses this repository because another user owns it. Run `git config --global --add safe.directory <path>` as the gateway's user, or fix the owner." },
+  git_unreadable: { status: 409, message: 'This is a git repository the gateway cannot read safely: check its permissions, its config, and any filter drivers it defines' },
   timeout: { status: 504, message: 'Git took too long' },
   git_failed: { status: 500, message: 'Git failed' },
   nothing_running: { status: 409, message: 'Nothing is running in this project' },

@@ -1,5 +1,4 @@
-import { execFile, spawn } from 'child_process';
-import { promises as fsp } from 'fs';
+import { spawn } from 'child_process';
 import * as path from 'path';
 import { err, ok, Result } from './paths';
 import { redactCredentials } from './git-status';
@@ -25,79 +24,57 @@ export type GitRunFailure = 'timeout' | 'git_failed';
  */
 const PASSTHROUGH_ENV = new Set(['PATH', 'HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM']);
 
-/** The git subcommand in `args`, past any leading `-c key=value` pairs. */
-export function subcommandOf(args: readonly string[]): string {
-  let i = 0;
-  while (args[i] === '-c') i += 2;
-  return args[i] ?? '';
-}
-
 /**
  * The environment git runs with: an allowlist of process.env, and no GIT_DIR/GIT_WORK_TREE that would aim git at
  * another repository. Built from process.env explicitly: jest gives tests a copy that child_process ignores.
+ *
+ * `GIT_ALLOW_PROTOCOL` set empty allows no transport at all, and unlike `protocol.<name>.allow` in the repository's
+ * config it cannot be overridden by the repository. Git can start a fetch on its own during a read, to fetch a missing
+ * object of a partial clone, so this is what keeps a repository's `core.sshCommand`, `uploadpack`, `ext::` URL or
+ * credential helper from ever running. `GIT_NO_LAZY_FETCH` (git 2.44 and later) stops that fetch from being tried.
  */
 export function gitEnv(): NodeJS.ProcessEnv {
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => PASSTHROUGH_ENV.has(k)));
-  return { ...env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' };
+  return { ...env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', GIT_ALLOW_PROTOCOL: '', GIT_NO_LAZY_FETCH: '1' };
 }
 
-const USER_CONFIG_TIMEOUT_MS = 3_000;
+/** Filter drivers a status read may blank; more than this, or a longer name, and the repository is refused. */
+export const MAX_BLANKED_FILTERS = 64;
+export const MAX_FILTER_NAME = 1024;
 
-const FILTER_SECTION = /^\s*\[\s*filter(?:\s+"((?:[^"\\\n]|\\.)*)"|\.([^\s\]]+))\s*\]/gim;
-const INCLUDE_SECTION = /^\s*\[\s*include(?:if)?\b/im;
-const FILTER_KEYS = ['clean', 'smudge', 'process'] as const;
-
-/** Filter names a repo's own config defines, or null when an include could add more and git must be asked. */
-async function repoFilterNames(cwd: string): Promise<string[] | null> {
-  let text = '';
-  for (const file of ['config', 'config.worktree']) {
-    try {
-      text += `\n${await fsp.readFile(path.join(cwd, '.git', file), 'utf8')}`;
-    } catch (e) {
-      const code = (e as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT' && file === 'config') return [];
-      if (code !== 'ENOENT') return null;
-    }
-  }
-  if (INCLUDE_SECTION.test(text)) return null;
-  const names = new Set<string>();
-  for (const m of text.matchAll(FILTER_SECTION)) names.add(m[1] !== undefined ? m[1].replace(/\\(.)/g, '$1') : (m[2] ?? '').toLowerCase());
-  return [...names];
-}
-
-async function repoFilterNamesFromGit(cwd: string, env: NodeJS.ProcessEnv): Promise<string[]> {
-  const out = await new Promise<string>((resolve) => {
-    execFile('git', ['config', '--show-scope', '--name-only', '-z', '--get-regexp', '^filter\\.'], { cwd, env, timeout: USER_CONFIG_TIMEOUT_MS }, (e, stdout) => resolve(e ? '' : stdout));
+/**
+ * `GIT_CONFIG_COUNT/KEY_n/VALUE_n` entries that blank each named filter driver. Unlike `-c name=value` they take the
+ * key whole, so a driver name holding `=` can be blanked too. They rank as command-line config, above every file.
+ */
+function blankFilterEnv(names: readonly string[]): NodeJS.ProcessEnv {
+  const pairs = names.flatMap((name) => [
+    ...['clean', 'smudge', 'process'].map((key) => [`filter.${name}.${key}`, ''] as const),
+    [`filter.${name}.required`, 'false'] as const,
+  ]);
+  const env: NodeJS.ProcessEnv = { GIT_CONFIG_COUNT: String(pairs.length) };
+  pairs.forEach(([key, value], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = key;
+    env[`GIT_CONFIG_VALUE_${i}`] = value;
   });
-  const fields = out.split('\0');
-  const names = new Set<string>();
-  for (let i = 0; i + 1 < fields.length; i += 2) {
-    const key = fields[i + 1]!;
-    if ((fields[i] === 'local' || fields[i] === 'worktree') && key.startsWith('filter.') && key.includes('.', 7)) names.add(key.slice(7, key.lastIndexOf('.')));
-  }
-  return [...names];
+  return env;
 }
 
 /**
- * `-c` overrides that blank every filter command the repository's own config defines. status runs a filter's clean
- * command on a file that looks modified, and add, commit and merge run it too, so a clone could otherwise run a command
- * when the project is listed. Filters from the operator's config stay.
+ * The command line and environment every git call of the gateway uses, reads and `git init` alike. `core.fsmonitor`
+ * is a command from the repository's config, so it is turned off for every call. A call that can run a clean filter
+ * (status) names the repository's filter drivers in `blankFilters` so none of them runs.
  */
-async function repoFilterOverrides(cwd: string, env: NodeJS.ProcessEnv): Promise<string[] | null> {
-  const names = (await repoFilterNames(cwd)) ?? (await repoFilterNamesFromGit(cwd, env));
-  // `-c name=value` splits at the first `=`, so a filter name holding one cannot be blanked.
-  if (names.some((name) => name.includes('='))) return null;
-  return names.flatMap((name) => [
-    ...FILTER_KEYS.flatMap((key) => ['-c', `filter.${name}.${key}=`]),
-    '-c', `filter.${name}.required=false`,
-  ]);
+export function hardenedGit(cwd: string, args: string[], blankFilters: readonly string[] = []): { argv: string[]; env: NodeJS.ProcessEnv } {
+  return {
+    argv: ['--no-optional-locks', '-c', 'core.fsmonitor=false', ...args],
+    env: { ...gitEnv(), GIT_CEILING_DIRECTORIES: path.dirname(cwd), ...blankFilterEnv(blankFilters) },
+  };
 }
-
-/** Subcommands that never run a filter. */
-const NO_FILTER_SUBCOMMANDS = new Set(['rev-parse', 'log', 'rev-list', 'config', 'init']);
 
 export interface RunOptions {
   timeoutMs: number;
+  /** The repository's own filter driver names, to blank for this call. */
+  blankFilters?: readonly string[];
 }
 
 /** How long a timed-out git gets to clean up its lock files after SIGTERM before the group is killed. */
@@ -111,13 +88,7 @@ const KILL_GRACE_MS = 1_000;
  * other repository never reads as a repo itself.
  */
 export async function runGit(cwd: string, args: string[], opts: RunOptions): Promise<Result<GitOutput, GitRunFailure>> {
-  const sub = subcommandOf(args);
-  // GIT_OPTIONAL_LOCKS keeps status off .git/index.lock, which a concurrent git run by the user may hold.
-  const env: NodeJS.ProcessEnv = { ...gitEnv(), GIT_CEILING_DIRECTORIES: path.dirname(cwd), GIT_OPTIONAL_LOCKS: '0' };
-  // core.fsmonitor is a command from the repo's config; status runs it.
-  const filters = NO_FILTER_SUBCOMMANDS.has(sub) ? [] : await repoFilterOverrides(cwd, env);
-  if (!filters) return err('git_failed');
-  const argv = ['-c', 'core.fsmonitor=false', ...filters, ...args];
+  const { argv, env } = hardenedGit(cwd, args, opts.blankFilters);
   return new Promise((resolve) => {
     // Its own process group, so a timeout also reaches the hooks, filters and ssh that git started.
     const child = spawn('git', argv, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });

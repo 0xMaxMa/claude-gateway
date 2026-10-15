@@ -4,7 +4,7 @@ import {
   deriveSync,
   describeRemote,
   GitSync,
-  parseRepoConfig,
+  parseConfigList,
   parseStatusV2,
   redactCredentials,
   RepoConfig,
@@ -97,17 +97,33 @@ describe('deriveSync', () => {
   it.each(table)('%s', (_label, input, expected) => expect(deriveSync(input)).toBe(expected));
 });
 
-describe('parseRepoConfig', () => {
-  it('reads remotes and branch tracking from get-regexp -z output', () => {
-    const raw = z(
-      'remote.My.Remote.url\nhttps://u:p@h/x',
-      'branch.feat.x.remote\nMy.Remote',
-      'branch.feat.x.merge\nrefs/heads/feat.x',
+describe('parseConfigList', () => {
+  const entries = (...e: Array<[string, string]>) => e.map(([scope, kv]) => `${scope}\0${kv}`).join('\0') + '\0';
+
+  it('reads remotes and branch tracking from every scope', () => {
+    const raw = entries(
+      ['global', 'user.name\nMe'],
+      ['local', 'remote.My.Remote.url\nhttps://u:p@h/x'],
+      ['local', 'branch.feat.x.remote\nMy.Remote'],
+      ['worktree', 'branch.feat.x.merge\nrefs/heads/feat.x'],
     );
-    expect(parseRepoConfig(raw)).toEqual({
+    expect(parseConfigList(raw).config).toEqual({
       remotes: [{ name: 'My.Remote', url: 'https://u:p@h/x' }],
       branches: { 'feat.x': { remote: 'My.Remote', merge: 'refs/heads/feat.x' } },
     });
+  });
+
+  it('names the filter drivers of the repository scopes only, whole, with odd characters kept', () => {
+    const raw = entries(
+      ['global', 'filter.lfs.clean\ngit-lfs clean'],
+      ['system', 'filter.sys.smudge\nx'],
+      ['local', 'filter.a=b.clean\nx'],
+      ['local', 'filter.we"ird.name.smudge\nx'],
+      ['worktree', 'filter.wt.process\nx'],
+      ['local', 'filter.noname\ntrue'],
+      ['local', 'core.bare'],
+    );
+    expect(parseConfigList(raw).filterNames).toEqual(['a=b', 'we"ird.name', 'wt']);
   });
 });
 

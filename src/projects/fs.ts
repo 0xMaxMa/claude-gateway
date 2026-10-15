@@ -2,7 +2,7 @@ import { execFile } from "child_process";
 import { constants as fsConstants, Dirent, promises as fsp } from "fs";
 import * as path from "path";
 import { promisify } from "util";
-import { gitEnv } from "./git-runner";
+import { hardenedGit } from "./git-runner";
 import { readStack, type Stack } from "./stack";
 import {
   err,
@@ -263,10 +263,11 @@ export async function createProject(
   let warning: string | undefined;
   if (gitInit) {
     try {
-      await promisify(execFile)("git", ["init", "-q", "--", dir], {
+      const { argv, env } = hardenedGit(dir, ["init", "-q", "--", dir]);
+      await promisify(execFile)("git", argv, {
         cwd: dir,
         timeout: GIT_INIT_TIMEOUT_MS,
-        env: gitEnv(),
+        env,
       });
     } catch (e) {
       warning = gitInitWarning(e as GitInitError);
