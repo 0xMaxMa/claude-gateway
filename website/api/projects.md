@@ -421,7 +421,8 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/app/
 |--------|--------|------|
 | 409 | `not_a_git_repo` | The project is not a repository. |
 | 409 | `git_unsafe_owner` | The repository belongs to another user and git refuses it (`detected dubious ownership`). Run `git config --global --add safe.directory <path>` as the gateway's user, or change the owner. `git-summary` shows `null` for it and the other repositories still read. |
-| 409 | `git_unreadable` | The folder has a `.git` that git cannot read: no permission, a `.git` file that points nowhere, a damaged config, or a repository that defines more filter drivers than the gateway blanks. |
+| 409 | `git_unreadable` | The folder has a `.git` that git cannot read: no permission, a `.git` file that points nowhere, a damaged config, or a repository that defines more `filter.*` keys than the gateway blanks. |
+| 503 | `git_unavailable` | Git is not installed, or is not on the gateway's `PATH`. `git-summary` answers it too, since no repository can be read. The gateway logs a warning once. |
 | 504 | `timeout` | Git ran past its limit of 3 seconds. |
 | 500 | `git_failed` | Any other git failure. Git's output is not returned. |
 

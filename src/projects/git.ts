@@ -21,6 +21,8 @@ export type GitErrorCode =
   /** There is a `.git` that git cannot read: permissions, damage, a bad config, or a filter setup the gateway cannot make safe. */
   | 'git_unreadable'
   | 'timeout'
+  /** git is not installed or not on the gateway's PATH. */
+  | 'git_unavailable'
   | 'git_failed';
 
 export type GitError = { code: GitErrorCode | ProjectsErrorCode };
@@ -147,9 +149,9 @@ export async function getSummaries(root: string): Promise<GitResult<{ summaries:
   const list = await listProjects(root);
   if (!list.ok) return fail(list.error);
   const repos = list.value.projects.filter((p) => p.is_git);
-  const results = await mapLimit(repos, SUMMARY_CONCURRENCY, async (p) => {
-    const status = await readStatus(root, p.name, SUMMARY_READ);
-    return status.ok ? toSummary(status.value) : null;
-  });
+  const reads = await mapLimit(repos, SUMMARY_CONCURRENCY, (p) => readStatus(root, p.name, SUMMARY_READ));
+  const noGit = reads.find((r) => !r.ok && r.error.code === 'git_unavailable');
+  if (noGit && !noGit.ok) return fail(noGit.error.code);
+  const results = reads.map((r) => (r.ok ? toSummary(r.value) : null));
   return ok({ summaries: Object.fromEntries(repos.map((p, i) => [p.name, results[i]])) });
 }

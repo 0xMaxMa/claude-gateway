@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { existsSync } from 'fs';
 import * as path from 'path';
 import { err, ok, Result } from './paths';
 import { redactCredentials } from './git-status';
@@ -14,7 +15,9 @@ export interface GitOutput {
   stderr: string;
 }
 
-export type GitRunFailure = 'timeout' | 'git_failed';
+export type GitRunFailure = 'timeout' | 'git_failed' | 'git_unavailable';
+
+let warnedGitMissing = false;
 
 /**
  * What git and the operator's filters may inherit. Anything not named here is dropped, so the gateway's own API keys
@@ -120,6 +123,14 @@ export async function runGit(cwd: string, args: string[], opts: RunOptions): Pro
     child.stderr.on('data', collect(stderr));
 
     child.on('error', (e) => {
+      // ENOENT is also what a missing cwd gives, and the folder going away mid-read is not a missing git.
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT' && existsSync(cwd)) {
+        if (!warnedGitMissing) {
+          warnedGitMissing = true;
+          console.warn('projects: git is not installed or not on PATH, so project git status is unavailable');
+        }
+        return settle(err('git_unavailable'));
+      }
       console.warn(`projects: git ${args[0]} in ${cwd} failed: ${redactCredentials(e.message)}`);
       settle(err('git_failed'));
     });

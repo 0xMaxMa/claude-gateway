@@ -316,3 +316,31 @@ describe('git write routes', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('git missing from PATH', () => {
+  it('answers 503 git_unavailable on a detail read and on git-summary, and warns once', async () => {
+    makeRepo('app');
+    makeRepo('web');
+    const empty = path.join(base, 'empty-bin');
+    fs.mkdirSync(empty);
+    process.env.PATH = empty;
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const detail = await status('app');
+      expect([detail.status, detail.body.code]).toEqual([503, 'git_unavailable']);
+      expect(detail.body.error).toMatch(/git is not installed/i);
+      const summary = await request(app).get('/api/v1/projects/git-summary').set(POD);
+      expect([summary.status, summary.body.code]).toEqual([503, 'git_unavailable']);
+      await status('web');
+      expect(warn.mock.calls.filter(([m]) => String(m).includes('git is not installed'))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('still answers a missing folder as not_found and not as a missing git', async () => {
+    makeRepo('app');
+    fs.rmSync(path.join(root, 'app'), { recursive: true });
+    expect((await status('app')).body.code).toBe('not_found');
+  });
+});
