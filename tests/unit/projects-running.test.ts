@@ -65,12 +65,26 @@ describe('redactCommand', () => {
     [['app', '--auth=sk-live-123'], 'app --auth=[redacted]'],
     [['app', '--credentials', 'c1'], 'app --credentials [redacted]'],
     [['app', '--bearer', 'b1'], 'app --bearer [redacted]'],
-    [['mysql', '-u', 'root', '-p', 'pw123'], 'mysql -u root -p [redacted]'],
+    [['mysql', '-u', 'root', '-p', 'pw123'], 'mysql -u root -p pw123'],
+    [['serve', '-p', '3000', '-p3000'], 'serve -p 3000 -p3000'],
+    [['curl', '-H', 'Authorization: Bearer abc123def'], 'curl -H Authorization: [redacted]'],
+    [['curl', '-H', 'authorization: Basic dXNlcjpwdw=='], 'curl -H authorization: [redacted]'],
+    [['curl', '-H', 'X-Api-Key: abc123'], 'curl -H X-Api-Key: [redacted]'],
+    [['app', '--url=https://h/p?token=SECRETVAL'], 'app --url=https://h/p?token=[redacted]'],
+    [['env', 'SECRET=abcd1234', 'MY_API_KEY=abcd', 'PORT=80'], 'env SECRET=[redacted] MY_API_KEY=[redacted] PORT=80'],
+    [['docker', 'run', '--env', 'API_KEY=abcd'], 'docker run --env API_KEY=[redacted]'],
     [['mysql', '-ppw123'], 'mysql -p[redacted]'],
     [['app', 'postgres://u:hunter2@db/x'], 'app postgres://db/x'],
     [['app', '--db=postgres://u:hunter2@db/x'], 'app --db=postgres://db/x'],
   ])('redacts %j', (argv, shown) => {
     expect(redactCommand(argv)).toBe(shown);
+  });
+
+  it('redacts a secret assignment nested in a flag and stays fast on hostile args', () => {
+    expect(redactCommand(['docker', '--env=API_KEY=abcd'])).toBe('docker --env=API_KEY=[redacted]');
+    const t0 = Date.now();
+    redactCommand(['key'.repeat(40_000), 'a:'.repeat(40_000), 'a='.repeat(40_000), '--' + 'token'.repeat(20_000)]);
+    expect(Date.now() - t0).toBeLessThan(200);
   });
 
   it('keeps flags that only look like secret flags', () => {

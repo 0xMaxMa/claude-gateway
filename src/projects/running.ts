@@ -123,24 +123,50 @@ export function parseProcNetTcp(text: string, v6: boolean): NetSocket[] {
   return out;
 }
 
-const SECRET_FLAG = /^(--[\w-]*(token|password|passwd|secret|key|auth|credential|bearer)[\w-]*|-p)$/i;
+const SECRET_WORD = /token|password|passwd|secret|key|auth|credential|bearer/i;
 const REDACTED = '[redacted]';
 
-/** Joins argv for display. Secret flag values and URL userinfo are replaced before truncation, so a cut never leaks one. */
+const isKeyChar = (c: string) => /[\w.-]/.test(c);
+
+/** The `[\w.-]` run that ends just before index `end`. Scanned by hand: a regex over untrusted argv would backtrack quadratically. */
+function keyBefore(s: string, end: number): string {
+  let start = end;
+  while (start > 0 && isKeyChar(s[start - 1])) start--;
+  return s.slice(start, end);
+}
+
+/** `NAME=value` at any `=` in the arg (`--env=API_KEY=x`, `--token=x`, `SECRET=x`) when NAME looks secret; everything after it goes. */
+function redactAssignment(a: string): string | null {
+  for (let i = a.indexOf('='); i > 0; i = a.indexOf('=', i + 1)) {
+    if (SECRET_WORD.test(keyBefore(a, i))) return `${a.slice(0, i + 1)}${REDACTED}`;
+  }
+  return null;
+}
+
+/** `Authorization: Bearer x`, `X-Api-Key: x`. */
+function redactHeader(a: string): string | null {
+  const colon = a.indexOf(':');
+  if (colon <= 0 || !/^[\w-]+$/.test(a.slice(0, colon)) || !SECRET_WORD.test(a.slice(0, colon))) return null;
+  return `${a.slice(0, colon + 1)} ${REDACTED}`;
+}
+
+const isSecretFlag = (a: string) => /^--[\w-]+$/.test(a) && SECRET_WORD.test(a);
+
+/** Joins argv for display. Secret values and URL credentials are replaced before truncation, so a cut never leaks one. */
 export function redactCommand(args: string[]): string {
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = redactCredentials(args[i]);
-    const eq = a.indexOf('=');
-    if (a.startsWith('--') && eq > 0 && SECRET_FLAG.test(a.slice(0, eq))) {
-      out.push(`${a.slice(0, eq)}=${REDACTED}`);
-    } else if (SECRET_FLAG.test(a)) {
+    const redacted = redactHeader(a) ?? redactAssignment(a);
+    if (redacted !== null) {
+      out.push(redacted);
+    } else if (isSecretFlag(a)) {
       out.push(a);
       if (i + 1 < args.length) {
         out.push(REDACTED);
         i++;
       }
-    } else if (/^-p./.test(a)) {
+    } else if (/^-p(?!\d+$)./.test(a)) {
       // mysql-style -p<password>, attached with no space.
       out.push(`-p${REDACTED}`);
     } else {
