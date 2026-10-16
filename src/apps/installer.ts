@@ -1039,7 +1039,7 @@ export class AppInstaller {
             BACKUP_HELPER_IMAGE,
             'sh', '-c',
             // Wipe the live volume, then untar the snapshot (uid/gid preserved).
-            `rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; tar xzf /backup/${vol}.tar.gz -C /data`,
+            `rm -rf /data/* /data/..?* 2>/dev/null; tar xzf /backup/${vol}.tar.gz -C /data`,
           ],
           undefined,
           VOLUME_TAR_TIMEOUT_MS,
@@ -1072,7 +1072,7 @@ export class AppInstaller {
             BACKUP_HELPER_IMAGE,
             'sh', '-c',
             // Wipe the live bind dir, then untar the snapshot (uid/gid preserved).
-            `rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; tar xzf /backup/bind-${i}.tar.gz -C /data`,
+            `rm -rf /data/* /data/..?* 2>/dev/null; tar xzf /backup/bind-${i}.tar.gz -C /data`,
           ],
           undefined,
           VOLUME_TAR_TIMEOUT_MS,

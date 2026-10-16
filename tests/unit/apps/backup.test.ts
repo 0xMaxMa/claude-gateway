@@ -758,10 +758,15 @@ describe('AppInstaller — backup/restore of an isolated app agent workspace', (
     fs.rmSync(agentDir, { recursive: true, force: true });
     fs.mkdirSync(tenantDir(agentDir, 'telegram', '333'), { recursive: true });
     fs.writeFileSync(path.join(tenantDir(agentDir, 'telegram', '333'), 'MEMORY.md'), 'FAMILY-C-MEMORY');
-    fs.writeFileSync(path.join(agentDir, '.stale-hidden'), 'not in the backup');
+    const bridgeSocket = path.join(agentDir, '.orch-0123456789abcdef.sock'); // stand-in for the live socket
+    fs.writeFileSync(bridgeSocket, '');
     const restored = await waitForJob(installer, installer.restore('habit', backup.backup!.id));
     expect(restored.status).toBe('completed');
 
+    // Hidden top-level entries are left in place: the running gateway keeps the
+    // orchestration bridge socket there for the container to reach it.
+    expect(fs.existsSync(bridgeSocket)).toBe(true);
+    fs.rmSync(bridgeSocket);
     expect(snapshot(agentDir)).toEqual(original);
     const a = composeTenantContext(agentDir, 'telegram', '111');
     expect(a).toContain('FAMILY-A-MEMORY');
