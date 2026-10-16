@@ -53,7 +53,8 @@ directly as `config.json` object keys and are interpolated into secret-file key 
 every route validates the shape of `:id` before touching either — anything else is `400
 Invalid connector id`, ahead of any lookup.
 
-**Auth levels:** read routes take any valid API key; every mutating route requires an
+**Auth levels:** read routes take any valid API key, except
+[`GET /connectors/github/account`](#get-apiv1connectorsgithubaccount); every mutating route requires an
 **admin** key (`admin: true`). The gateway mounts connector management routes only when `gateway.api.keys` is configured.
 
 ---
@@ -170,7 +171,7 @@ same `refresh` block documented under `GET /api/v1/connectors` above:
 Which GitHub account the `github` connector's token belongs to. The gateway asks
 `GET https://api.github.com/user` with the stored token (5-second timeout), so the
 answer reflects what GitHub says now, not just that a token is stored. The token
-itself is never returned.
+itself is never returned. **Admin.** Any other key gets `403` and GitHub is not called.
 
 ```bash
 curl -s -H "X-Api-Key: admin-key-456" \
@@ -200,6 +201,7 @@ Connected, and GitHub accepted the token:
 | `200` | `{ "connected": true, "valid": true, "account": {...} }` | GitHub answered `200` with a user |
 | `200` | `{ "connected": true, "valid": false, "reason": "token_rejected" }` | GitHub answered `401` |
 | `502` | `{ "error": "github_unreachable" }` | Network error, timeout, or any other GitHub status |
+| `403` | `{ "error": "Connector management requires an admin API key" }` | The key is not an admin key |
 | `500` | `{ "error": "..." }` | The connector configuration could not be read |
 
 Accepted and rejected answers are cached in memory for 60 seconds per token, keyed

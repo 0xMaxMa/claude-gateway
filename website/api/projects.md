@@ -6,24 +6,26 @@ show a read-only file tree and file viewer, and read the git status of each
 project. Editing files and changing a repository (commit, push, pull) are out of
 scope. Use the code editor or the git connector for that.
 
-**Auth.** Every route needs an admin API key (`admin: true`). A pod-wide key without
-`admin`, a read-only key and a key scoped to specific agents all get
-`403 forbidden_key`, with a message that an admin key is required. Projects belong to
-the pod, and the routes read, run and delete files on it. Binding a chat to a project
-needs an admin key too (see [Sessions](/api/sessions#post-apiv1agentsagentidsessions)).
+**Auth.** Projects belong to the pod, not to an agent, so any valid API key can read them: the list, the
+file tree, file contents, git status and running status. Creating, starting, stopping and deleting a project
+change the pod and need an admin API key (`admin: true`). Any other key, a pod-wide write key included, gets
+`403 forbidden_key` on those four routes, with the message `An admin API key is required for Projects`.
+A project-bound chat belongs to its agent and follows the agent's rules like any other chat: see
+[Sessions](/api/sessions#post-apiv1agentsagentidsessions).
 
 **Feature detection.** `GET /api/v1/capabilities` lists
-`"projects": ["list", "create", "read", "git", "chat", "run", "start", "delete"]`. Show project browsing
-only when the array includes `"list"`, the git status view only when it includes `"git"` (read-only: the gateway has no route that changes a repository),
+`"projects": ["list", "create", "read", "git", "chat", "run", "start", "delete", "stop"]` for an admin key.
+A key that is not an admin key gets `["list", "read", "git", "chat", "run"]`. Show project browsing
+only when the array includes `"list"`, project create only when it includes `"create"`, the git status view only when it includes `"git"` (read-only: the gateway has no route that changes a repository),
 and [project-bound chat](/api/sessions#post-apiv1agentsagentidsessions) only when
-it includes `"chat"`. When the array is empty, read `projectsUnavailable`: `"admin_required"` means the
-calling key is not an admin key, and `"disabled"` means the gateway serves no Projects API. The field is
-absent when Projects is usable. An older gateway omits the key, or lists projects without
-`"git"`, `"chat"` or `"run"`. Show running status and the Stop button only when it includes `"run"`, the Start button only when it includes `"start"`, and the Delete action only when it includes `"delete"`.
+it includes `"chat"`. Show running status only when it includes `"run"`, the Stop button only when it includes `"stop"`, the Start button only when it includes `"start"`, and the Delete action only when it includes `"delete"`.
+When the array is empty, `projectsUnavailable` is `"disabled"`: the gateway serves no Projects API. The field is
+absent when Projects is usable. An older gateway omits the key, lists projects without
+`"git"`, `"chat"`, `"run"` or `"stop"`, or answers `"admin_required"` for a key that is not an admin key.
 
 **On by default.** The routes are on for every install, with the root `~/projects`, and
-need no configuration. Every key with `admin: true` can list, read, run, start and delete whatever sits under
-that folder, and nothing else changes for keys without it. To switch Projects off, set
+need no configuration. Every valid key can list and read whatever sits under that folder, and every key with
+`admin: true` can also create, start, stop and delete projects there. To switch Projects off, set
 `gateway.projects.enabled` to `false` and restart. Only a boolean counts: the string `"false"`, `0` or `null` is
 ignored with a warning in `gateway.log`, and Projects keeps its default, which is on:
 
@@ -31,17 +33,19 @@ ignored with a warning in `gateway.log`, and Projects keeps its default, which i
 { "gateway": { "projects": { "enabled": false } } }
 ```
 
-**Security model.** The admin key gate decides who may use the Projects API and who may bind a chat to a
-project. It is not a filesystem boundary. Agents run with `--dangerously-skip-permissions`, so any key that can
-send an agent a message can ask it to read or change any file the gateway's user can reach, `~/projects` included.
-On a host-mode orchestrated agent, `task_spawn` accepts any absolute `working_directory`, so a worker can run
-inside a project folder without a project-bound chat. This predates Projects and is unchanged. What the gate does
-guarantee: a key without `admin` gets `403 forbidden_key` on every `/v1/projects` route and on every route that
-reveals or controls a project-bound session (its info, messages, history, search, streams, tasks, voice, media,
-attachments, shares, catalogs, rename, delete, clear, compact, stop and restart). [Sessions](/api/sessions#post-apiv1agentsagentidsessions)
-lists the few routes that are not refused and why. Lists leave bound sessions out for such a key, project name
-included. The check reads the session's binding file, so it also covers sessions bound before the gate existed.
-Treat an admin key as full access to the pod, and give the others no more than they need.
+**Security model.** An admin key can do everything, for every agent. Any other key reaches the agents it lists
+(or every agent with `agents: "*"`), can write only when it has `write: true`, and can read every project
+folder. Admin-only means only create, start, stop and delete. Reading includes every file under the root up
+to 1 MiB, `.env` files and other secrets in a project included, for a key scoped to one agent as for any
+other key. These checks are not a filesystem boundary.
+Agents run with `--dangerously-skip-permissions`, and a project-bound chat runs its agent inside the project
+folder, so any key that can send that agent a message can ask it to read or change any file in the project, or
+any other file the gateway's user can reach. Sending a message does not need `write`, so this includes a
+read-only key that lists the agent. Projects are shared by every agent, so such a key can change a project that
+other agents' chats also work in. On a host-mode orchestrated agent, `task_spawn` accepts any absolute
+`working_directory`, so a worker can run inside a project folder without a project-bound chat. This predates
+Projects. Treat an admin key as full access to the pod, and treat a key that can reach an agent as able to
+change every project folder.
 
 **Root.** Projects live in `gateway.projects.root`, which defaults to
 `~/projects`. Every listing returns the root as `root`, resolved through
@@ -103,7 +107,7 @@ codes, listed under [Git errors](#git-errors).
 | 400 | `not_a_file` | `file` was asked for a directory or a special file. |
 | 403 | `path_escape` | The real path (after symlinks) leaves the project, or the project leaves the root or is the root itself (for example a link `all -> .`). |
 | 403 | `permission_denied` | The gateway's user cannot read it. |
-| 403 | `forbidden_key` | The key is not an admin key. |
+| 403 | `forbidden_key` | Create, delete, stop or start with a key that is not an admin key. |
 | 404 | `not_found` | The project or path does not exist. |
 | 400 | `confirm_mismatch` | `DELETE` did not send `confirm` equal to the project name. |
 | 409 | `project_exists` | `POST` named a project, file or symlink that already exists, compared case-insensitively (`Site` collides with `site`). |
@@ -162,7 +166,7 @@ should treat an unknown value as `null`.
 
 ## POST /api/v1/projects {#post-projects}
 
-Create `<root>/<name>`, creating the root first if needed. Returns
+Create `<root>/<name>`, creating the root first if needed. Needs an admin key. Returns
 `201` with the new project in the same shape [the list](#get-projects) uses. Its `stack` is
 `null`, since a new directory has no files to mark one.
 
@@ -196,7 +200,7 @@ installed). It never includes git's output, which the gateway logs instead.
 
 ## DELETE /api/v1/projects/:name {#delete-project}
 
-Delete `<root>/<name>` and everything in it. Returns `200` with `{ "name": "demo" }`. This cannot
+Delete `<root>/<name>` and everything in it. Needs an admin key. Returns `200` with `{ "name": "demo" }`. This cannot
 be undone, and the gateway keeps no copy.
 
 | Field | Required | Description |
@@ -452,8 +456,8 @@ A project counts as running when a process listens on a TCP port and either its
 working directory is inside the project folder (`via: "cwd"`) or one of its
 arguments is an absolute path inside the project folder (`via: "argv"`, for example
 `python3 -m http.server --directory <project>` started from `/tmp`). Listening sockets come from `ss -H -ltnp`,
-or from `/proc/net/tcp` and `/proc/<pid>/fd` when `ss` is missing. Every route here needs
-an admin key.
+or from `/proc/net/tcp` and `/proc/<pid>/fd` when `ss` is missing. Any valid key can read
+running status. Stop and start need an admin key.
 
 ### GET /api/v1/projects/:name/running {#get-running}
 
@@ -511,12 +515,11 @@ On a host that is not Linux, or where `/proc` cannot be read, the response is
 `{ "supported": false, "projects": {}, "truncated": false }`. A project named `running` is still
 reached by name at `/api/v1/projects/running/running`.
 
-Errors: `403 forbidden_key`. A projects root that cannot be read gets the same
-error as `GET /api/v1/projects`.
+Errors: a projects root that cannot be read gets the same error as `GET /api/v1/projects`.
 
 ### POST /api/v1/projects/:name/running/stop {#post-running-stop}
 
-Body `{}` stops every listener of the project. `{ "port": 3000 }` stops only that
+Needs an admin key. Body `{}` stops every listener of the project. `{ "port": 3000 }` stops only that
 port. A `port` that is not an integer from 1 to 65535 gets `400 invalid_port`.
 
 The gateway sends SIGTERM to each listener pid and to its descendants, waits up to
@@ -543,7 +546,7 @@ Errors: `400 invalid_name`, `400 invalid_port`, `403 forbidden_key`,
 
 ### POST /api/v1/projects/:name/running/start {#post-running-start}
 
-Starts the project without an agent. Body `{}` picks the first free port from 3000
+Starts the project without an agent. Needs an admin key. Body `{}` picks the first free port from 3000
 to 3099. `{ "port": 3005 }` asks for that port and gets `409 port_in_use` when
 something listens on it.
 

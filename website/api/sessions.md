@@ -177,7 +177,7 @@ Do not rely on the first behaviour; it is not advertised.
 | Status | `code` | When |
 |--------|--------|------|
 | `400` | `invalid_name` | `project` is not a valid project name |
-| `403` | `forbidden_key` | The key is not an admin key. Binding a chat to a project needs `admin: true` |
+| `403` | | `Write permission required`: the key cannot write to this agent (it has no `write` and is not an admin key). `API key has no access to agent '<id>'`: the key does not list this agent. Binding a chat needs the same write access as any other change to the agent |
 | `404` | `project_not_found` | No folder with that name exists under the projects root |
 | `409` | `projects_disabled` | The Projects API is disabled on this gateway (`gateway.projects.enabled` is `false`). No session is created |
 | `409` | `project_unavailable` | The folder exists but cannot be used, for example a symlink that leaves the root. `reason` holds the projects error code |
@@ -187,47 +187,26 @@ Each check runs again when the session starts its process. If the folder has
 gone, been renamed or moved out of the root, the message fails with code
 `PROJECT_UNAVAILABLE` (uppercase) and the gateway does not fall back to the
 workspace. A synchronous [`POST /messages`](/api/messages) answers `409`. A
-streaming request gets an SSE `error` frame with that code. The key check runs
-again on every request that drives or watches the session: a key that is not an admin
-key gets `403` with `code: "forbidden_key"` from [`POST /messages`](/api/messages),
-`POST /messages/accept`, `POST /greeting` (a read-only key too) and the session's message, activity and event streams.
-The same answer comes from every other route that takes the session's id: info, rename, delete, clear, compact,
-stop, restart, `GET /sessions/:id/activity`, tasks (list, show, answer, control, cancel), voice,
-`POST /chats/:chatId/sessions/:sessionId/messages`, attachments, and its media folder; from
-`GET /v1/image-catalog`, `GET /v1/video-catalog`, `POST /v1/shares` and `POST /v1/image-artifacts` when `session_id`
-names the session or a path names a file in its media folder; from `media_files` in a message that names such a
-file; and from the chat history routes (`/chats/:chatId/messages`, `/messages/search`, `/messages/active-days`) when
-the request names the session with `session_id`. A session id that is not a plain id (`[A-Za-z0-9_-]`, 1 to 64
-characters) in the path of any route under `/api/v1/agents/:agentId/sessions/:sessionId` (the voice and browser-binding
-routes too) answers `400 INVALID_INPUT` before authentication, so for every key, and the media path is
-checked after dot segments, `%2e` and double slashes are resolved. For a key that is not an admin key, `GET /sessions`, `GET /chats`,
-the unfiltered history routes and the `/sessions` chat command leave the session out, its messages included, and
-carry no project name. When the gateway cannot read its `project-bindings` folder, the reads that list sessions or chats
-(`GET /sessions`, `GET /chats`, the unfiltered history routes) answer
-`503 project_bindings_unreadable` for a key that is not an admin key, and the gateway logs the reason once. A route that
-names one session in its path or body, the `/sessions` chat command included (it is sent through `POST /messages` with a
-`session_id`), answers `403 forbidden_key` instead, because the gateway cannot tell that the session is unbound. Both
-fail closed. An admin key is not affected. On start the gateway also removes binding files whose session no longer
-exists and logs the count.
+streaming request gets an SSE `error` frame with that code.
 
-**Routes that are not refused, and why.** `GET /v1/agents/sessions`, the `/dashboard/*` routes and
-`GET /api/v1/sessions/:id/screen` need an admin key or a dashboard login for every session, so they never reach a
-bound session through a key that is not an admin key. `GET /chats/:chatId/sessions` lists the sessions of
-Telegram, Discord and the other channel chats, which are never project-bound. `POST /v1/agents/:agentId/media`
-(upload) takes no session id. `DELETE /v1/shares/:shareId` takes a share id and answers only for a key with access
-to the owning agent. `GET /shared/:token` is public: the token is the capability, and it can only be minted through
-the refused `POST /v1/shares`.
+**Who can use a project chat.** A project chat belongs to its agent. Every route answers a key for a project chat
+exactly as it does for a plain chat of the same agent: an admin key reaches every agent; any other key reaches the
+agents it lists (or every agent with `agents: "*"`), and needs `write: true` wherever a plain chat needs it. A key
+that does not list the agent gets `403` with `API key has no access to agent '<id>'`. Lists, history, search,
+streams, media, attachments, shares and catalogs show project chats to every key that reaches the agent, with
+their `project`, `trusted` and `projectState` fields. Only binding a chat to a project adds a check: the key must be
+able to write to the agent (see the table above). On start the gateway removes binding files whose session no
+longer exists and logs the count.
 
 **The agent of a project chat.** The attachment tool (`api_reply`), `share_file` and the image tools call the share,
 catalog, artifact and attachment routes with the API key the gateway hands the agent: the first key in `gateway.api.keys`
-that reaches it. These routes apply the same admin key rule, so the agent must hold an admin key to attach or share media
-in a project chat, as it does on a provisioned pod. The same holds for the orchestration workers of that agent, which use the same key. With a key that is not an admin key, those tool calls in a project
-chat answer `403 forbidden_key`; a plain chat is not affected. A share URL is not private: anyone who holds it can open it.
+that reaches it. The orchestration workers of that agent use the same key. Those routes treat a project chat like a
+plain chat, so a key scoped to the agent is enough. A share URL is not private: anyone who holds it can open it.
 
 **When the chat is deleted.** Deleting a project chat removes its whole media folder (`media/api-<sessionId>/`), not only
-the files its messages name, once its last turn has ended. A read of a media folder named `api-<name>` by a key that is not
-an admin key answers `403 forbidden_key` only when `<name>` is a session bound to a project; every other folder is answered
-as it is on a gateway without projects, including the leftovers of a deleted session that was never bound.
+the files its messages name, once its last turn has ended. When the delete comes while a turn is still running, the
+gateway removes the media folder and what the turn wrote to history after the turn ends, the next time it lists that
+agent's sessions or checks whether a project is in use.
 
 On an orchestrated agent the deciding agent stays in its workspace and is told
 which project the chat is in. Every task it starts runs in the project folder,
