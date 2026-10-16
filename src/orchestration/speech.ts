@@ -1,5 +1,6 @@
 import { SPOKEN_TEXT_LIMIT } from './response-schema';
 import { fenceAdjusted } from './display-stream';
+import { stripAudioTags } from '../voice/audio-tags';
 
 /** Both surfaces are generated in one inference. The field contract itself lives in the
  * invariant ORCHESTRATION_RESPONSE_SCHEMA declared on every turn; this overlay is the
@@ -57,7 +58,6 @@ function objectEnd(text: string, start: number): number {
  * at most followed by one short sign-off sentence. A reply that explains the format writes it
  * into a sentence, or keeps writing after it, and must be published exactly as written. */
 const TRAILING_SIGN_OFF_LIMIT = 120;
-
 /** The span of the turn text that is an attempt to emit the declared payload, if any.
  * `body` is the JSON to parse and [start,end) is everything to remove when it turns out to
  * be unusable — the object plus the fence that wraps it. Prose before it is tolerated on its
@@ -91,8 +91,11 @@ export function splitSpeechResponse(raw: string): { display: string; spoken: str
   // wording; never truncate reports or read code/URLs/JSON aloud. Applied to whatever text
   // we are about to display, so a stripped payload cannot be spoken either.
   const speakable = (source: string): string => {
-    const plain = source.replace(/\*\*([^*]+)\*\*/g, '$1');
-    return plain && plain.length <= SPOKEN_TEXT_LIMIT && !/[{}\[\]`|]|https?:\/\/|^\s*#/m.test(plain) ? plain : '';
+    // Known audio tags pass the check (issue #595) and stay in the text: the TTS layer performs
+    // them or strips them per model. Any other bracket still fails it.
+    const plain = source.replace(/\*\*([^*]+)\*\*/g, '$1').trim();
+    const words = stripAudioTags(plain).trim();
+    return words && plain.length <= SPOKEN_TEXT_LIMIT && !/[{}\[\]`|]|https?:\/\/|^\s*#/m.test(words) ? plain : '';
   };
   const payload = payloadSpan(text);
   if (!payload) return { display: raw, spoken: speakable(text), outcome: 'plain' };
@@ -101,8 +104,9 @@ export function splitSpeechResponse(raw: string): { display: string; spoken: str
   const fields = (value && typeof value === 'object' ? value : {}) as { display_text?: unknown; spoken_text?: unknown };
   if (typeof fields.display_text === 'string' && fields.display_text.trim()) {
     const spoken = typeof fields.spoken_text === 'string' ? fields.spoken_text.trim() : '';
-    // Fail closed for malformed/over-budget speech, rather than reading the full report.
-    return { display: fields.display_text, spoken: spoken.length <= SPOKEN_TEXT_LIMIT && !/```/.test(spoken) ? spoken : '', outcome: 'structured' };
+    // Fail closed for malformed/over-budget speech, rather than reading the full report, and for
+    // audio tags alone, which leave a model that does not perform them nothing to say.
+    return { display: fields.display_text, spoken: spoken.length <= SPOKEN_TEXT_LIMIT && !/```/.test(spoken) && stripAudioTags(spoken).trim() ? spoken : '', outcome: 'structured' };
   }
   // No usable display_text. Publishing `raw` here is what used to put the JSON object itself
   // into the user's chat, so publish the prose around it instead, and an explicit notice when

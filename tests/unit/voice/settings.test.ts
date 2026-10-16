@@ -190,6 +190,8 @@ test('restricted model catalog permission does not hide usable voices', async ()
     expect(response.body.models).toEqual(expect.arrayContaining([expect.objectContaining({model_id:'scribe_v2_realtime',realtime:true}),expect.objectContaining({model_id:'scribe_v2',voice_messages:true,conversation:false})]));
     expect(response.body.warnings[0]).toContain('models_read');
     expect(response.body.models).toContainEqual(expect.objectContaining({model_id:'eleven_v3_conversational',catalog_source:'supported_defaults'}));
+    expect(response.body.models).toContainEqual(expect.objectContaining({model_id:'eleven_v4_turbo',catalog_source:'supported_defaults'}));
+    expect(response.body.models).toContainEqual(expect.objectContaining({model_id:'eleven_v4',catalog_source:'supported_defaults'}));
   } finally { choices.mockRestore(); fetchModels.mockRestore(); }
 });
 

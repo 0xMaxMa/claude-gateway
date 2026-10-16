@@ -2,7 +2,7 @@ import { requireManagedVoiceCredit } from '../managed-quota';
 import { voiceTiming } from '../diagnostics';
 import { OpenRouterStt, OpenRouterTts } from './openrouter';
 import { canonicalVoiceProvider, nativeVoiceModel } from './model-ref';
-import { GeminiStt, GeminiTts } from './gemini';
+import { GeminiStt, GeminiTts, performsGeminiAudioTags } from './gemini';
 import { GeminiLiveStt } from './gemini-live-stt';
 import { PaxaLabsStt } from './paxalabs-stt';
 import { PaxaLabsLiveStt, isPaxaRealtimeSttModel } from './paxalabs-live-stt';
@@ -10,7 +10,8 @@ import { PaxaLabsTts, paxaConnection } from './paxalabs-tts';
 import { upstreamVoiceConnection, upstreamVoiceSocket, managedVoiceSocket } from './upstream';
 import { SttProvider, TtsProvider, VoiceError } from '../types';
 import { ElevenLabsStt } from './elevenlabs-stt';
-import { ElevenLabsTts } from './elevenlabs-tts';
+import { ElevenLabsTts, isElevenLabsDialogueModel } from './elevenlabs-tts';
+import { stripAudioTags, withoutAudioTags } from '../audio-tags';
 import { DeepgramStt } from './deepgram-stt';
 import { CartesiaTts } from './cartesia-tts';
 
@@ -45,8 +46,22 @@ export function sttProvider(config: { provider: string; model: string }): SttPro
     return provider.open(options);
   }};
 }
+/** Audio tags reach TTS in spoken text. Only the ElevenLabs dialogue models and Gemini 3.1 Flash TTS
+ * (natively or through OpenRouter) perform them; every other model could read the word aloud. */
+function performsAudioTags(config: { provider: string; model: string }): boolean {
+  const provider = canonicalVoiceProvider(config.provider), model = nativeVoiceModel(config.provider, config.model);
+  if (provider.endsWith('elevenlabs')) return isElevenLabsDialogueModel(model);
+  return /(?:^|:)(?:gemini|openrouter)$/.test(provider) && performsGeminiAudioTags(model);
+}
+function withAudioTagSupport(config: { provider: string; model: string }, provider: TtsProvider): TtsProvider {
+  if (performsAudioTags(config)) return provider;
+  return { id: provider.id, capabilities: provider.capabilities,
+    synthesizeFile: provider.synthesizeFile ? options => provider.synthesizeFile!({ ...options, text: stripAudioTags(options.text).trim() }) : undefined,
+    synthesize: options => provider.synthesize({ ...options, text: withoutAudioTags(options.text) }),
+  };
+}
 export function ttsProvider(config: { provider: string; model: string }): TtsProvider {
-  const provider = makeTtsProvider(config);
+  const provider = withAudioTagSupport(config, makeTtsProvider(config));
   if (!config.provider.startsWith('managed:')) return provider;
   return { id: provider.id, capabilities: provider.capabilities,
     synthesizeFile: provider.synthesizeFile ? async options => {
