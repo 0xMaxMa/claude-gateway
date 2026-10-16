@@ -332,6 +332,26 @@ services:
 `.trim();
         expect(() => parseAppYaml(y, dir)).not.toThrow();
       });
+
+      it('accepts a boolean multi_tenant and rejects anything else (#601)', () => {
+        const y = (value: string) => `
+apiVersion: apps.getpod.ai/v1
+name: my-app
+version: 1.0.0
+services:
+  web:
+    image: nginx:1.25
+  agent:
+    path: ./agent
+    name: my-agent-bot
+    multi_tenant: ${value}
+`.trim();
+        expect(() => parseAppYaml(y('true'), dir)).not.toThrow();
+        expect(() => parseAppYaml(y('false'), dir)).not.toThrow();
+        for (const bad of ['"true"', 'yes-please', '1', '{ enabled: true }']) {
+          expect(() => parseAppYaml(y(bad), dir)).toThrow('"multi_tenant" must be true or false');
+        }
+      });
     });
   });
 
@@ -838,6 +858,13 @@ services:
         path: './agent',
         name: 'agent-note-bot',
       });
+    });
+
+    it('carries multi_tenant: true into agentDeclaration.multiTenant and nothing else (#601)', () => {
+      expect(generate(yamlWithAgent + '\n    multi_tenant: true', 'agent-note').agentDeclaration)
+        .toEqual({ path: './agent', name: 'agent-note-bot', multiTenant: true });
+      expect(generate(yamlWithAgent + '\n    multi_tenant: false', 'agent-note').agentDeclaration)
+        .toEqual({ path: './agent', name: 'agent-note-bot' });
     });
 
     it('returns null agentDeclaration when no agent service', () => {

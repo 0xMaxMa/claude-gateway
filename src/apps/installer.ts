@@ -50,7 +50,7 @@ export interface InstallResult {
   appName: string;
   proxyUrls: Record<string, string>; // portName → /app/<name>/<port>/
   secretKeys: string[];
-  agentDeclaration?: { path: string; name: string } | null;
+  agentDeclaration?: { path: string; name: string; multiTenant?: true } | null;
 }
 
 /** Per-app backup policy (mirrors `gateway.appBackup` in the gateway config). */

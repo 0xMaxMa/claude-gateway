@@ -616,7 +616,7 @@ describe('config-loader', () => {
     expect(skipped.map(agent => agent.reason)).toEqual([expect.stringMatching(/Computer Use/)]);
   });
 
-  it('accepts agents[].multiTenant and skips malformed or app-agent use (#601)', () => {
+  it('accepts agents[].multiTenant on host and app agents and skips malformed use (#601)', () => {
     const configPath = path.join(tmpDir, 'config.json');
     const base = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'valid-2-agents.json'), 'utf8'));
     fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], multiTenant: { enabled: true } }, base.agents[1]] }));
@@ -627,10 +627,12 @@ describe('config-loader', () => {
       expect(loadConfig(configPath, { onSkippedAgent: agent => skipped.push(agent) }).agents.map(agent => agent.id)).toEqual(['baerbel']);
       expect(skipped.map(agent => agent.reason)).toEqual([expect.stringMatching(/multiTenant must be/)]);
     }
+    // An app agent gets the field from its app.yaml (services.agent.multi_tenant).
     const skipped: SkippedAgent[] = [];
-    fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], type: 'app-agent', multiTenant: { enabled: true } }, base.agents[1]] }));
-    loadConfig(configPath, { onSkippedAgent: agent => skipped.push(agent) });
-    expect(skipped.map(agent => agent.reason)).toEqual([expect.stringMatching(/not supported for app-agent/)]);
+    fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], type: 'app-agent', container: 'demo-agent', multiTenant: { enabled: true } }, base.agents[1]] }));
+    const loaded = loadConfig(configPath, { onSkippedAgent: agent => skipped.push(agent) });
+    expect(skipped).toEqual([]);
+    expect(loaded.agents.map(agent => agent.multiTenant)).toEqual([{ enabled: true }, undefined]);
     // Claude Code keeps only the last --append-system-prompt-file, which would replace the tenant context.
     for (const extraFlags of [['--append-system-prompt-file', 'extra.md'], ['--append-system-prompt-file=extra.md']]) {
       const refused: SkippedAgent[] = [];

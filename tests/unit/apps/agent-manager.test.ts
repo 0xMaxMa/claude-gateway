@@ -413,6 +413,25 @@ describe('AgentManager', () => {
       expect(agentEntry!['claudeBin']).toBe('/usr/local/bin/claude'); // actual host path, volume-mounted
     });
 
+    // #601: an app opts its agent into isolate mode in app.yaml; only that
+    // agent's entry gets multiTenant, and a release that drops it turns it off.
+    it('writes multiTenant only for an app that declares it, and clears it when the declaration goes away', async () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: {}, agents: [{ id: 'host-agent', workspace: '/tmp/host', claude: { model: 'm' } }] }));
+      const read = () => (JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> }).agents;
+
+      const isolated = makeEntry(tmpDir);
+      isolated.agentDeclaration = { ...isolated.agentDeclaration!, multiTenant: true };
+      await manager.upsertAgent(isolated);
+      await manager.upsertAgent(makeEntry(tmpDir, 'other-app', 'other-agent'));
+      expect(Object.fromEntries(read().map((a) => [a['id'], a['multiTenant']]))).toEqual({
+        'host-agent': undefined, 'my-agent': { enabled: true }, 'other-agent': undefined,
+      });
+
+      await manager.upsertAgent(makeEntry(tmpDir));
+      expect(read().find((a) => a['id'] === 'my-agent')).not.toHaveProperty('multiTenant');
+    });
+
     it('is idempotent — calling twice does not duplicate entry', async () => {
       const entry = makeEntry(tmpDir);
       await manager.upsertAgent(entry);

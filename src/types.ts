@@ -373,6 +373,7 @@ export interface AgentConfig {
    * senders: USER.md/MEMORY.md are kept per conversation under
    * `<workspace>/tenants/<channel>-<chatId>-<hash>/`, and the memory, skill,
    * cron and agent MCP tools are not offered. Absent or `enabled: false` keeps the single-tenant behavior.
+   * An app agent's value is written from its app.yaml `services.agent.multi_tenant`.
    */
   multiTenant?: { enabled: boolean };
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */

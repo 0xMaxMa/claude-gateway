@@ -99,9 +99,6 @@ function validateAgent(agent: Record<string, unknown>, index: number, orchestrat
   }
   if (agent.multiTenant !== undefined) {
     if (!validEnabledOnly(agent.multiTenant)) return `agent '${agent.id}': multiTenant must be { "enabled": boolean }`;
-    // A container agent reads its context inside the container, where the
-    // per-tenant composition is not wired; refuse rather than leak.
-    if ((agent.multiTenant as { enabled: boolean }).enabled && agent.type === 'app-agent') return `agent '${agent.id}': multiTenant is not supported for app-agent`;
     // Claude Code keeps only the last --append-system-prompt-file, so one in
     // extraFlags would replace the conversation memory appended at spawn.
     const extraFlags = (agent.claude as { extraFlags?: unknown } | undefined)?.extraFlags;
