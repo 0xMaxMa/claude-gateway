@@ -1061,7 +1061,7 @@ export class TaskService {
       }
       const stalled = task.state === 'cancel_requested' ? this.stalledFailure(task, outcome.type !== 'unknown') : undefined;
       // Gateway-managed tasks recover through their controller; a subagent is re-spawned by its resumed parent.
-      const restartInterrupted = outcome.type !== 'completed' && outcome.failure?.code === 'GATEWAY_SHUTDOWN' && !task.gatewayTarget && !task.parentTaskId;
+      const restartInterrupted = (outcome.type === 'failed' || outcome.type === 'stopped') && outcome.failure?.code === 'GATEWAY_SHUTDOWN' && !task.gatewayTarget && !task.parentTaskId;
       if (outcome.type !== 'completed' && outcome.type !== 'paused') {
         attempt.failure = stalled ?? outcome.failure ?? taskFailure(undefined, outcome.type === 'stopped' ? 'WORKER_STOPPED' : 'WORKER_FAILED');
         task.failure = attempt.failure;
