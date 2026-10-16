@@ -1,6 +1,6 @@
 /** Serialize removal/addition per agent and always reconcile against the latest
- * config after an asynchronous stop/start. Busy removals are retried by the
- * caller's periodic sweep; a stopped runner is never reused. */
+ * config after an asynchronous stop/start. Busy removals and replacements are
+ * retried by the caller's periodic sweep; a stopped runner is never reused. */
 export class AgentLifecycle<C extends { id: string }, R extends { canRemoveFromConfig(): boolean; stop(): Promise<void> }> {
   private pending = new Set<string>();
   private running = new Map<string, Promise<void>>();
@@ -12,6 +12,8 @@ export class AgentLifecycle<C extends { id: string }, R extends { canRemoveFromC
     remove(id: string, runner: R): void;
     start(config: C): Promise<void>;
     error(id: string, error: unknown): void;
+    /** The runner was started with a setting it cannot change live; replace it once idle. */
+    stale?(config: C, runner: R): boolean;
   }) {}
 
   reconcile(id: string): Promise<void> {
@@ -23,7 +25,13 @@ export class AgentLifecycle<C extends { id: string }, R extends { canRemoveFromC
     const work = Promise.resolve().then(async () => {
       while (!this.closed && this.dirty.delete(id)) {
         const desired = this.deps.desired(id), runner = this.deps.runner(id);
-        if (desired) {
+        if (desired && runner && this.deps.stale?.(desired, runner)) {
+          this.pending.add(id);
+          if (!runner.canRemoveFromConfig()) break;
+          await runner.stop();
+          this.deps.remove(id, runner);
+          this.dirty.add(id); // Start the replacement from the latest config.
+        } else if (desired) {
           this.pending.delete(id);
           if (!runner) {
             await this.deps.start(desired);

@@ -838,6 +838,9 @@ async function main(): Promise<void> {
           ).enabled,
           multiTenant: agentConfig.multiTenant?.enabled === true,
         });
+        // A runner replaced meanwhile (an update toggling isolate mode, #601)
+        // composed its own CLAUDE.md; this one has the old mode's sections.
+        if (ctx.agentRunners.get(agentName) !== runner) return;
         const claudeMdPath = path.join(agentConfig.workspace, 'CLAUDE.md');
         await fs.promises.writeFile(claudeMdPath, updated.systemPrompt, 'utf8');
         logger.info('Rewrote CLAUDE.md after reinstall', { chars: updated.systemPrompt.length });
@@ -1023,6 +1026,9 @@ async function main(): Promise<void> {
         globalLogger.info('Configuration value applied',{agentId:change.agentId,field:change.field,lifecycle:change.reloadMode});
       }catch(err){globalLogger.error('Configuration application failed',{agentId:change.agentId,field:change.field,error:(err as Error).message});}
     }
+    // Isolate mode (#601) is fixed for a runner's lifetime; an edit, or an app
+    // update that toggles its app.yaml multi_tenant, replaces the runner once idle.
+    for(const id of new Set(changes.filter(c=>c.agentId&&(c.field==='multiTenant'||c.field.startsWith('multiTenant.'))).map(c=>c.agentId)))void agentLifecycle.reconcile(id);
     if(changes.some(c=>!c.agentId&&c.field.startsWith('gateway.processLimits')))gatewayCapacity(config);
     if(changes.some(c=>!c.agentId&&c.hotReloadable&&(c.field.startsWith('gateway.app')||c.field==='gateway.timezone'))){
       appInstaller.configurePolicies(config.gateway.appHousekeeping,config.gateway.appBackup,config.gateway.appRestore,config.gateway.timezone);
@@ -1048,9 +1054,13 @@ async function main(): Promise<void> {
       // Keep the live gateway config reference, not the watcher's snapshot.
       const agent = { ...newAgentConfig, workspace: expandTilde(newAgentConfig.workspace) };
       await startAgent(agent, config, ctx);
-      if (ctx.agentRunners.has(agent.id)) globalLogger.info('Agent hot-added successfully', { id: agent.id });
+      if (ctx.agentRunners.has(agent.id)) {
+        config.agents = [...config.agents.filter(existing => existing.id !== agent.id), agent];
+        globalLogger.info('Agent hot-added successfully', { id: agent.id });
+      }
     },
     error: (id, error) => globalLogger.error('Agent lifecycle reconciliation deferred', { agentId: id, error: String(error) }),
+    stale: desired => Boolean(desired.multiTenant?.enabled) !== Boolean(agentConfigs.get(desired.id)?.multiTenant?.enabled),
   });
   const removalTimer = setInterval(() => agentLifecycle.retry(), 5000);
   removalTimer.unref();

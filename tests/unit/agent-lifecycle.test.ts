@@ -94,3 +94,29 @@ test('removal and shutdown cancel a failed hot-add retry', async () => {
   desired = { id: 'agent' }; lifecycle.retry(); await lifecycle.reconcile('agent');
   expect(start).toHaveBeenCalledTimes(1);
 });
+
+test('a stale runner is replaced once idle, from the latest config', async () => {
+  // e.g. multi-tenant isolate mode toggled by an app update (#601): live sessions keep the mode they spawned with.
+  let desired: { id: string; isolated: boolean } | undefined = { id: 'agent', isolated: true };
+  const old = { isolated: false, canRemoveFromConfig: jest.fn(() => false), stop: jest.fn(async () => {}) };
+  let current: typeof old | undefined = old;
+  const start = jest.fn(async (config: { id: string; isolated: boolean }) => {
+    current = { isolated: config.isolated, canRemoveFromConfig: jest.fn(() => true), stop: jest.fn(async () => {}) };
+  });
+  const lifecycle = new AgentLifecycle({ desired: () => desired, runner: () => current, start, error: jest.fn(),
+    remove: (_id, runner) => { if (current === runner) current = undefined; },
+    stale: (config, runner) => config.isolated !== runner.isolated });
+  await lifecycle.reconcile('agent');
+  expect(old.stop).not.toHaveBeenCalled();
+  old.canRemoveFromConfig.mockReturnValue(true);
+  lifecycle.retry(); await lifecycle.reconcile('agent');
+  expect(old.stop).toHaveBeenCalledTimes(1);
+  expect(start).toHaveBeenCalledTimes(1);
+  expect(current?.isolated).toBe(true);
+  // An up-to-date runner is left alone, and a removed agent is not resurrected.
+  await lifecycle.reconcile('agent');
+  expect(start).toHaveBeenCalledTimes(1);
+  desired = undefined; await lifecycle.reconcile('agent');
+  expect(current).toBeUndefined();
+  await lifecycle.close();
+});
