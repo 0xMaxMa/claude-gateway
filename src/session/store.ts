@@ -17,8 +17,13 @@ export class SessionNotInIndexError extends Error {
   }
 }
 
-/** The only shape of session id that may name a binding file; anything else names no session. */
+/** The only shape of session id the API accepts or a binding file may name; anything else names no session. */
 export const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+/** True when `name` joined to a folder stays a file directly inside it: no separator, no `.` or `..`, no NUL. */
+function isPlainFileName(name: string): boolean {
+  return name !== '' && name !== '.' && name !== '..' && !/[/\\\0]/.test(name) && path.basename(name) === name;
+}
 
 export type ProjectBinding = { kind: 'unbound' } | { kind: 'bound'; project: string } | { kind: 'unreadable' };
 
@@ -234,6 +239,7 @@ export class SessionStore {
    * Resolve the path to a specific session's message file.
    */
   private resolveTelegramSessionPath(agentId: string, chatId: string, sessionId: string, channel: ChatChannelOrApi = 'telegram'): string {
+    if (!isPlainFileName(sessionId)) throw new Error('Invalid session id');
     return path.join(this.resolveTelegramDir(agentId, chatId, channel), `${sessionId}.json`);
   }
 
@@ -448,7 +454,9 @@ export class SessionStore {
 
       await this.saveIndex(agentId, chatId, index, channel);
 
-      // Delete the session messages file
+      // An index entry whose id is not a plain file name never had a file in this folder: it leaves the index and
+      // nothing is unlinked, so a poisoned index.json cannot point the unlink outside the chat folder.
+      if (!isPlainFileName(sessionId)) return;
       const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId, channel);
       try {
         fs.unlinkSync(sessionPath);

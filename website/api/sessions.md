@@ -198,6 +198,10 @@ their `project`, `trusted` and `projectState` fields. Only binding a chat to a p
 able to write to the agent (see the table above). On start the gateway removes binding files whose session no
 longer exists and logs the count.
 
+**Session ids.** A session id in the path of any route under `/api/v1/agents/:agentId/sessions/:sessionId`, the voice
+and browser-binding routes included, and in `POST /chats/:chatId/sessions/:sessionId/messages`, must be 1 to 64 of `[A-Za-z0-9_-]`. Any other id answers `400` with
+`code: "INVALID_INPUT"` before authentication, so for every key and for no key.
+
 **The agent of a project chat.** The attachment tool (`api_reply`), `share_file` and the image tools call the share,
 catalog, artifact and attachment routes with the API key the gateway hands the agent: the first key in `gateway.api.keys`
 that reaches it. The orchestration workers of that agent use the same key. Those routes treat a project chat like a

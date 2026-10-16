@@ -1,7 +1,7 @@
 import { type CommandAction, commandCatalog } from '../agent/command-help';
 import { responseFailureMessage } from '../orchestration/response-errors';
 import { voiceSettingsRouter } from './voice-settings-router';
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { apiPrincipal } from '../orchestration/identity';
 import { OrchestrationError } from '../orchestration/types';
 import { randomUUID, createHash } from 'crypto';
@@ -21,6 +21,7 @@ import { guardAsyncRoutes } from './async-guard';
 import { PROJECT_CHAT_ERRORS } from '../projects/chat';
 import { parseProjectName, ProjectName } from '../projects/paths';
 import { MediaStore } from '../history/media-store';
+import { SESSION_ID_RE } from '../session/store';
 import { HistoryDB, MAX_HISTORY_LIMIT } from '../history/db';
 import { isChatChannel } from '../history/types';
 import { wizardStore } from './wizard-state';
@@ -93,19 +94,24 @@ type AuthedRequest = Request & { apiKey: ApiKey };
 const AGENT_ID_RE = /^[a-z][a-z0-9_-]{1,31}$/;
 const SAFE_FILENAME_RE = /^[a-zA-Z0-9._\-() ]+$/;
 
-// session_id becomes a filesystem key (sessions/<id>.jsonl, .sessions/<id>/) so it
-// must be constrained to the same safe charset as chat_id — no '/' or '.' that could
-// escape the agent's directory. Clients may pass custom (non-UUID) session ids, so
-// this preserves that while blocking path traversal.
-const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 // Task and command ids are server/client-generated UUIDs; controlByUser rejects anything else.
 const TASK_CONTROL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TASK_CONTROL_ERROR_STATUS: Record<string, number> = {
   INVALID_INPUT: 400, EXECUTION_DENIED: 403, AUTOMATION_SESSION_CLOSED: 410, COMMAND_QUEUE_FULL: 429,
   REVISION_CONFLICT: 409, STATE_CONFLICT: 409, NOTHING_TO_RESUME: 409, IDEMPOTENCY_CONFLICT: 409, ORCHESTRATION_DISABLED: 409,
 };
+// session_id becomes a filesystem key (sessions/<id>.jsonl, .sessions/<id>/) so it
+// must be constrained to the same safe charset as chat_id — no '/' or '.' that could
+// escape the agent's directory. Clients may pass custom (non-UUID) session ids, so
+// this preserves that while blocking path traversal.
 export function isValidSessionId(v: unknown): v is string {
   return typeof v === 'string' && SESSION_ID_RE.test(v);
+}
+
+/** `router.param('sessionId', requireValidSessionId)`: a malformed id gets 400 before auth or any handler. */
+export function requireValidSessionId(_req: Request, res: Response, next: NextFunction, value: string): void {
+  if (isValidSessionId(value)) next();
+  else res.status(400).json({ error: 'Invalid session id', code: 'INVALID_INPUT' });
 }
 
 // agent_id likewise becomes a filesystem key (agents/<id>/media/…), so any
@@ -577,6 +583,9 @@ export function createApiRouter(
 ): Router {
   const router = guardAsyncRoutes(Router());
   const auth = createApiAuthMiddleware(apiKeys);
+  // A session id becomes a file name (index entries, bindings, media, history) and a lookup key. Anything but a plain
+  // id names no session, so every route with :sessionId answers 400 before its handler runs, whoever the caller is.
+  router.param('sessionId', requireValidSessionId);
   router.use(voiceSettingsRouter(agentConfigs, agentRunners, apiKeys, configPath));
 
   async function writeAgentsToConfigImpl(

@@ -37,7 +37,10 @@ ignored with a warning in `gateway.log`, and Projects keeps its default, which i
 (or every agent with `agents: "*"`), can write only when it has `write: true`, and can read every project
 folder. Admin-only means only create, start, stop and delete. Reading includes every file under the root up
 to 1 MiB, `.env` files and other secrets in a project included, for a key scoped to one agent as for any
-other key. These checks are not a filesystem boundary.
+other key. That includes `.git/config`: [`/file`](#get-file) returns it as it is on disk, so a remote URL with
+embedded credentials (`https://user:token@host/x`) reaches any key in clear, although the git routes remove them.
+Every listing also carries the host path of the projects root as `root`, which usually includes the home directory.
+These checks are not a filesystem boundary.
 Agents run with `--dangerously-skip-permissions`, and a project-bound chat runs its agent inside the project
 folder, so any key that can send that agent a message can ask it to read or change any file in the project, or
 any other file the gateway's user can reach. Sending a message does not need `write`, so this includes a
@@ -339,7 +342,8 @@ filter or `safe.directory` set in `~/.gitconfig` or `/etc/gitconfig` applies, an
 `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>` and `GIT_CONFIG_PARAMETERS` are dropped.
 
 Credentials in a remote URL (`https://user:token@host/x`) are removed from
-every response and log line. Git's own output never reaches the client.
+every git route response and log line. Git's own output never reaches the client. [`/file`](#get-file) does not
+remove them: reading `.git/config` returns the URL as written.
 
 ### GitStatus {#git-status}
 
