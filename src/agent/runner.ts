@@ -2263,6 +2263,7 @@ export class AgentRunner extends EventEmitter {
     source: ChatChannelOrApi,
     sessionId?: string,          // actual session UUID (only for channel sessions; equals mapKey for API)
     modelOverride?: string,      // per-session model override from SessionMeta
+    apiChatId?: string,          // API chat the session belongs to; keys its tenant memory (#601)
   ): Promise<SessionProcess> {
     // Normalize: treat agent-default model as "no override" so default sessions
     // don't restart unnecessarily when the frontend explicitly sends the default model.
@@ -2306,7 +2307,7 @@ export class AgentRunner extends EventEmitter {
           const respawn = (async () => {
             await existing.stop();          // idempotent on a dead child; closes watchers + signal file
             this.sessions.delete(mapKey);
-            return this.spawnSession(mapKey, source, sessionId, effectiveOverride);
+            return this.spawnSession(mapKey, source, sessionId, effectiveOverride, apiChatId);
           })();
           this.sessionSpawnLocks.set(mapKey, respawn);
           try {
@@ -2323,7 +2324,7 @@ export class AgentRunner extends EventEmitter {
         const respawn = (async () => {
           await existing.stop();
           this.sessions.delete(mapKey);
-          return this.spawnSession(mapKey, source, sessionId, effectiveOverride);
+          return this.spawnSession(mapKey, source, sessionId, effectiveOverride, apiChatId);
         })();
         this.sessionSpawnLocks.set(mapKey, respawn);
         try {
@@ -2337,7 +2338,7 @@ export class AgentRunner extends EventEmitter {
     }
 
     // No existing session — acquire lock for the spawn path
-    const spawnPromise = this.spawnSession(mapKey, source, sessionId, effectiveOverride);
+    const spawnPromise = this.spawnSession(mapKey, source, sessionId, effectiveOverride, apiChatId);
     this.sessionSpawnLocks.set(mapKey, spawnPromise);
     try {
       return await spawnPromise;
@@ -2351,6 +2352,7 @@ export class AgentRunner extends EventEmitter {
     source: ChatChannelOrApi,
     sessionId?: string,
     modelOverride?: string,
+    apiChatId?: string,
   ): Promise<SessionProcess> {
 
     // Evict oldest idle session if at capacity
@@ -2379,11 +2381,12 @@ export class AgentRunner extends EventEmitter {
       this.gatewayConfig,
       this.sessionStore,
       chatId,
+      undefined,
+      apiChatId,
     );
 
     // Apply per-session model override (caller already normalized to undefined when == agent default)
     if (modelOverride) proc.modelOverride = modelOverride;
-    if (source === 'api') proc.tenantChatId = this.apiChatIds.get(actualSessionId);
 
     // Keep the searchable memory archive (planning-64) fresh for the memory_search
     // tool. Fire-and-forget, detached, OFF the event loop — never blocks the spawn.
@@ -4729,9 +4732,9 @@ export class AgentRunner extends EventEmitter {
     });
 
     // Use model from request body if provided, otherwise use agent default.
-    // The chat is recorded first: a spawn keys its tenant memory by it (#601).
+    // A spawn keys its tenant memory by the chat (#601).
+    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
     this.apiChatIds.set(sessionId, chatId);
-    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFiles = opts.mediaFiles?.length
@@ -5059,9 +5062,9 @@ export class AgentRunner extends EventEmitter {
     });
 
     // Use model from request body if provided, otherwise use agent default.
-    // The chat is recorded first: a spawn keys its tenant memory by it (#601).
+    // A spawn keys its tenant memory by the chat (#601).
+    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
     this.apiChatIds.set(sessionId, chatId);
-    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFilesStream = opts.mediaFiles?.length

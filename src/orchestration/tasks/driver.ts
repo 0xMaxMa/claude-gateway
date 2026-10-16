@@ -34,7 +34,7 @@ import { startProcessTurn } from '../process-turn';
 import { randomUUID } from 'crypto';
 import { gatewayCapacity } from '../capacity';
 import { resolveSharedConfig, sharedVaultDir } from '../../agent/knowledge';
-import { composeTenantContext } from '../../agent/workspace-loader';
+import { agentMemoryBudget, composeTenantContext } from '../../agent/workspace-loader';
 import { MediaStore } from '../../history/media-store';
 import { providerFailure, ProviderPermit } from '../provider-admission';
 import type { ResolvedCodexProviderIdentity } from '../provider-scope';
@@ -158,7 +158,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     // tenant's memory only. Container agents are refused this mode at config load.
     if (this.agent.multiTenant?.enabled) {
       const conversation = this.tasks.store.get('SELECT source, chat_id FROM conversations WHERE id=?', task.conversationId)!;
-      context += '\n\n' + composeTenantContext(this.agent.workspace, String(conversation.source), String(conversation.chat_id), { ...this.gateway.gateway.memory, ...this.agent.memory });
+      context += '\n\n' + composeTenantContext(this.agent.workspace, String(conversation.source), String(conversation.chat_id), agentMemoryBudget(this.gateway, this.agent));
     }
     // pstack is installed for Claude Code host-wide; only a set-up agent's
     // Claude workers load it, with that agent's own model sheet. Codex

@@ -102,6 +102,12 @@ function validateAgent(agent: Record<string, unknown>, index: number, orchestrat
     // A container agent reads its context inside the container, where the
     // per-tenant composition is not wired; refuse rather than leak.
     if ((agent.multiTenant as { enabled: boolean }).enabled && agent.type === 'app-agent') return `agent '${agent.id}': multiTenant is not supported for app-agent`;
+    // Claude Code keeps only the last --append-system-prompt-file, so one in
+    // extraFlags would replace the conversation memory appended at spawn.
+    const extraFlags = (agent.claude as { extraFlags?: unknown } | undefined)?.extraFlags;
+    if ((agent.multiTenant as { enabled: boolean }).enabled && Array.isArray(extraFlags) && extraFlags.some(flag => typeof flag === 'string' && (flag === '--append-system-prompt-file' || flag.startsWith('--append-system-prompt-file=')))) {
+      return `agent '${agent.id}': multiTenant cannot be combined with claude.extraFlags --append-system-prompt-file; use --append-system-prompt or move that text into AGENTS.md`;
+    }
   }
   const hasTelegram = agent.telegram && typeof agent.telegram === 'object';
   const hasDiscord = agent.discord && typeof agent.discord === 'object';

@@ -631,5 +631,14 @@ describe('config-loader', () => {
     fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], type: 'app-agent', multiTenant: { enabled: true } }, base.agents[1]] }));
     loadConfig(configPath, { onSkippedAgent: agent => skipped.push(agent) });
     expect(skipped.map(agent => agent.reason)).toEqual([expect.stringMatching(/not supported for app-agent/)]);
+    // Claude Code keeps only the last --append-system-prompt-file, which would replace the tenant context.
+    for (const extraFlags of [['--append-system-prompt-file', 'extra.md'], ['--append-system-prompt-file=extra.md']]) {
+      const refused: SkippedAgent[] = [];
+      fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], claude: { ...base.agents[0].claude, extraFlags }, multiTenant: { enabled: true } }, base.agents[1]] }));
+      expect(loadConfig(configPath, { onSkippedAgent: agent => refused.push(agent) }).agents.map(agent => agent.id)).toEqual(['baerbel']);
+      expect(refused.map(agent => agent.reason)).toEqual([expect.stringMatching(/--append-system-prompt-file/)]);
+    }
+    fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], claude: { ...base.agents[0].claude, extraFlags: ['--append-system-prompt', 'Be brief.'] }, multiTenant: { enabled: true } }, base.agents[1]] }));
+    expect(loadConfig(configPath).agents[0].multiTenant).toEqual({ enabled: true });
   });
 });

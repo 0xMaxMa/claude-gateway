@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkspaceFiles, LoadedWorkspace, WatchHandle } from '../types';
+import { WorkspaceFiles, LoadedWorkspace, WatchHandle, AgentConfig, GatewayConfig } from '../types';
 import { createWatcher } from '../watch/factory';
 import { loadSkills, renderSkillsSection } from '../skills';
 import { DIARY_FILENAME } from './skill-learning/notifier';
@@ -128,6 +128,11 @@ export const DEFAULT_MEMORY_BUDGET: MemoryBudgetConfig = {
   overBudget: 'warn',
   writeRouting: false,
 };
+
+/** The agent's memory config over the gateway default, field by field. */
+export function agentMemoryBudget(gateway: GatewayConfig, agent: AgentConfig): Partial<MemoryBudgetConfig> {
+  return { ...gateway.gateway.memory, ...agent.memory };
+}
 
 /**
  * Resolve a (possibly partial or malformed) memory-budget config into a complete
