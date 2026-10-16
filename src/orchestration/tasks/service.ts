@@ -22,6 +22,7 @@ import { MAX_INTAKE_INPUTS } from '../conversation-intake';
 import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode, PublicTaskSnapshot, publicTask } from '../types';
 import type { Effort } from '../../agent/model-registry';
 import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
+import { MAX_RESTART_RESUMES } from '../restart-resume';
 
 /** Parent states a subagent runs under; any other parent can neither start nor wait for one. */
 export const RUNNING_PARENT: readonly string[] = ['starting', 'running', 'interrupting'];
@@ -1059,6 +1060,8 @@ export class TaskService {
         outcome = { type: 'failed', failure: { code: 'WORKER_BLOCKED', message: task.workflow!.checkpoint.findings.filter(f => f.status === 'open').map(f => f.summary).join('\n').slice(0, 4096), observedAt: Date.now() } };
       }
       const stalled = task.state === 'cancel_requested' ? this.stalledFailure(task, outcome.type !== 'unknown') : undefined;
+      // Gateway-managed tasks recover through their controller; a subagent is re-spawned by its resumed parent.
+      const restartInterrupted = outcome.type !== 'completed' && outcome.failure?.code === 'GATEWAY_SHUTDOWN' && !task.gatewayTarget && !task.parentTaskId;
       if (outcome.type !== 'completed' && outcome.type !== 'paused') {
         attempt.failure = stalled ?? outcome.failure ?? taskFailure(undefined, outcome.type === 'stopped' ? 'WORKER_STOPPED' : 'WORKER_FAILED');
         task.failure = attempt.failure;
@@ -1073,6 +1076,16 @@ export class TaskService {
         else if(task.executionControl?.phase==='pending'&&task.executionControl.action==='pause'){task.state='waiting_input';task.executionControl.phase='paused';delete task.failure;}
         else if (task.state === 'interrupting' || task.revision > attempt.revision) task.state = 'queued';
         else if(waitingForCommand){task.state='waiting_input';task.latestProgress={source:'runtime',observedAt:Date.now(),text:task.gatewayTarget?.adapter==='computer'&&outcome.computerReport?computerOutcomeText(outcome.computerReport):task.gatewayTarget?.adapter==='browser'&&outcome.browserReport?browserOutcomeText(outcome.browserReport):'Waiting for your next command.'};}
+        else if (restartInterrupted && (task.restartResumes ?? 0) < MAX_RESTART_RESUMES) {
+          // Already-authorized work resumes after the restart as a new attempt of the same task
+          // (#603). No failure report is sent: that report turn could only ask the user to continue.
+          task.state = 'queued'; task.restartResumes = (task.restartResumes ?? 0) + 1;
+          task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: `Interrupted by a gateway shutdown; resumes automatically after the restart (${task.restartResumes} of ${MAX_RESTART_RESUMES}).` };
+          this.cancelSubagents(task);
+        } else if (restartInterrupted) {
+          task.state = 'failed';
+          attempt.failure = task.failure = { code: 'GATEWAY_SHUTDOWN_REPEATED', message: `Gateway shutdowns interrupted this task ${(task.restartResumes ?? 0) + 1} times; automatic resume stopped after ${MAX_RESTART_RESUMES} resumes. Inspect existing changes before continuing; do not blindly repeat side effects.`, observedAt: Date.now() };
+        }
         else task.state = outcome.type === 'completed' ? 'completed' : 'failed';
         if (task.state === 'completed' && outcome.type === 'completed') task.result = outcome.result;
         // The device session ended with this round (a reached computer goal): the

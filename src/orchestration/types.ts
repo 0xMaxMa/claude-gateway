@@ -124,6 +124,8 @@ export interface TaskSnapshot {
   pendingQuestion?: { questionId: string; text: string; revision: number };
   result?: TaskResult;
   failure?: TaskFailure;
+  /** Automatic resumes after gateway shutdowns interrupted this task (#603). */
+  restartResumes?: number;
   capabilities: ExecutionCapabilities;
   createdAt: number;
   updatedAt: number;

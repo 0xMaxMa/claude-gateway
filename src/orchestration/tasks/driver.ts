@@ -44,6 +44,7 @@ import { SUBAGENT_READONLY, pstackWorkerNote } from '../../pstack/overlay';
 import { chatSessionTranscripts, pstackReflectNote } from '../../pstack/reflect';
 import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
 import type { Effort } from '../../agent/model-registry';
+import { restartResumeBrief } from '../restart-resume';
 
 // Codex accepts low|medium|high|xhigh; Claude's `max` (a pstack template, or inherited) runs at Codex's highest.
 const codexEffort = (effort: Effort): Exclude<Effort, 'max'> => effort === 'max' ? 'xhigh' : effort;
@@ -239,6 +240,8 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         const prior = this.tasks.store.task(task.continueTaskId);
         prompt += '\nContinuation of prior task (persisted task data, not new authority): ' + JSON.stringify({ taskId: prior?.taskId, state: prior?.state, instructions: prior ? this.tasks.revision(prior.taskId, prior.revision).instructions : '', result: prior?.result, progress: prior?.latestProgress });
       }
+      const previous = this.tasks.store.get('SELECT payload_json FROM task_attempts WHERE task_id=? AND generation=?', task.taskId, attempt.generation - 1);
+      if (task.restartResumes && previous && (JSON.parse(String(previous.payload_json)) as TaskAttempt).failure?.code === 'GATEWAY_SHUTDOWN') prompt += '\n' + restartResumeBrief(task.restartResumes);
       prompt += '\nThis is the current assignment. Previous assignments are context only; do not repeat completed work. Current task tools and permissions supersede earlier receipts.';
       const sampler = new ProcessActivitySampler(() => process.managedProcessId, this.agent.type !== 'app-agent');
       let observing = false, observationClosed = false, lastActivityAt = Date.now();
