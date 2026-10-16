@@ -139,6 +139,38 @@ describe('channel sessions', () => {
   });
 });
 
+describe('app agent, classic container session', () => {
+  // Claude runs in the app container, which mounts the workspace at /workspace.
+  function appAgent(multiTenant?: { enabled: boolean }): AgentConfig {
+    return { ...agent(multiTenant), id: 'app-bot', type: 'app-agent', container: 'demo-agent' };
+  }
+  const inContainer = (file: string) => path.join(workspace, path.relative('/workspace', file));
+
+  it("hands the CLI the tenant file's container path, naming container paths to write", async () => {
+    const { args } = await start(new SessionProcess('c-a', 'telegram', appAgent({ enabled: true }), gateway, store, '111'));
+    expect(args[0]).toBe('exec');
+    const file = args[args.indexOf('--append-system-prompt-file') + 1];
+    expect(file).toBe('/workspace/.sessions/c-a/tenant-context.md');
+    const prompt = fs.readFileSync(inContainer(file), 'utf8');
+    expect(prompt).toContain('TENANT-A-MEMORY');
+    expect(prompt).not.toContain('TENANT-B');
+    expect(prompt).toContain(path.join(tenantDir('/workspace', 'telegram', '111'), 'MEMORY.md'));
+    expect(prompt).not.toContain(workspace);
+  });
+
+  it("turns auto memory off inside the container, where every tenant's session shares /workspace", async () => {
+    const { args } = await start(new SessionProcess('c-a', 'telegram', appAgent({ enabled: true }), gateway, store, '111'));
+    expect(args.slice(0, args.indexOf('demo-agent'))).toContain('CLAUDE_CODE_DISABLE_AUTO_MEMORY=1');
+  });
+
+  it('stays single-tenant without the app opting in, even next to an isolated host agent', async () => {
+    await start(new SessionProcess('h-a', 'telegram', agent({ enabled: true }), gateway, store, '111'));
+    const { args } = await start(new SessionProcess('c-a', 'telegram', appAgent(), gateway, store, '111'));
+    expect(args).not.toContain('--append-system-prompt-file');
+    expect(args.join(' ')).not.toContain('CLAUDE_CODE_DISABLE_AUTO_MEMORY');
+  });
+});
+
 describe('API sessions', () => {
   it('key the tenant by the chat the runner assigns, not by the session', async () => {
     const dir = tenantDir(workspace, 'api', 'web-chat');

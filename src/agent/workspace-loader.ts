@@ -439,15 +439,18 @@ export function tenantDir(workspaceDir: string, channel: string, chatId: string)
  * (#601): this tenant's USER.md/MEMORY.md under the same budgets as the shared
  * compose, plus the paths the agent must write them to. A tenant with no files
  * yet gets empty sections — never the workspace-root files, which may hold data
- * written before isolate mode was turned on.
+ * written before isolate mode was turned on. `agentWorkspaceDir` is where the
+ * agent itself sees the workspace: `/workspace` for an app agent in its container.
  */
 export function composeTenantContext(
   workspaceDir: string,
   channel: string,
   chatId: string,
   memoryBudget?: Partial<MemoryBudgetConfig>,
+  agentWorkspaceDir = workspaceDir,
 ): string {
   const dir = tenantDir(workspaceDir, channel, chatId);
+  const shown = tenantDir(agentWorkspaceDir, channel, chatId);
   const budget = resolveMemoryBudget(memoryBudget);
   // The banner names the file to consolidate; a bare "MEMORY.md" would point at
   // the shared root file the memory rule forbids.
@@ -455,7 +458,7 @@ export function composeTenantContext(
   const user = applyMemoryBudget(readFileOrDefault(path.join(dir, 'USER.md'), ''), budget.userBudgetChars, label('USER.md'), budget.overBudget);
   const memory = applyMemoryBudget(readFileOrDefault(path.join(dir, 'MEMORY.md'), ''), budget.memoryBudgetChars, label('MEMORY.md'), budget.overBudget);
   return (
-    `--- TENANT CONTEXT ---\nThis conversation's own memory files:\n- ${path.join(dir, 'USER.md')}\n- ${path.join(dir, 'MEMORY.md')}\n\n` +
+    `--- TENANT CONTEXT ---\nThis conversation's own memory files:\n- ${path.join(shown, 'USER.md')}\n- ${path.join(shown, 'MEMORY.md')}\n\n` +
     `--- USER PROFILE ---\n${truncateFile(user.content).content}\n\n` +
     `--- LONG-TERM MEMORY ---\n${truncateFile(memory.content).content}`
   );

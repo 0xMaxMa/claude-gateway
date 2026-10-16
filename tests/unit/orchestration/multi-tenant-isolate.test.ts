@@ -164,6 +164,20 @@ describe('task_memory_append', () => {
     expect(task.taskId).toBeTruthy();
   });
 
+  it('writes through an app agent workspace, the gateway-owned symlink into the app directory', () => {
+    // upsertAgent links agents/<id>/workspace to the installed app's agent dir.
+    const appAgentDir = join(root, 'apps', 'demo', 'agent'); mkdirSync(appAgentDir, { recursive: true });
+    const link = join(root, 'agents', 'demo-bot', 'workspace'); mkdirSync(join(root, 'agents', 'demo-bot'), { recursive: true });
+    symlinkSync(appAgentDir, link);
+    const files = new TaskFiles(store, join(root, 'agents'), join(root, 'container-files'), link);
+    files.multiTenant = () => true;
+    const { attempt } = spawnTask('111', true);
+    tasks.started(attempt.attemptId, attempt.generation);
+    files.remember(attempt.attemptId, attempt.generation, 'remember', { note: 'Family A note.' });
+    expect(readFileSync(join(tenantDir(appAgentDir, 'telegram', '111'), 'MEMORY.md'), 'utf8')).toContain('Family A note.');
+    expect(existsSync(join(appAgentDir, 'MEMORY.md'))).toBe(false);
+  });
+
   it('refuses a tenants/ directory redirected by a symlink', () => {
     const files = new TaskFiles(store, root, undefined, workspace);
     files.multiTenant = () => true;

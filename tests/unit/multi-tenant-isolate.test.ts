@@ -87,6 +87,15 @@ describe('composeTenantContext', () => {
     expect(composeTenantContext(workspace, 'discord', '42')).not.toContain('TG-');
   });
 
+  it('names the files where the agent sees them: an app agent sees the workspace at /workspace', () => {
+    writeTenant('telegram', '111', 'TENANT-A-USER', 'TENANT-A-MEMORY');
+    const context = composeTenantContext(workspace, 'telegram', '111', undefined, '/workspace');
+    expect(context).toContain('TENANT-A-MEMORY');
+    expect(context).toContain(`- /workspace/tenants/${tenantDirName('telegram', '111')}/USER.md`);
+    expect(context).toContain(`- /workspace/tenants/${tenantDirName('telegram', '111')}/MEMORY.md`);
+    expect(context).not.toContain(workspace);
+  });
+
   it('applies the memory budget banner to tenant files', () => {
     writeTenant('telegram', '1', '', 'x'.repeat(50));
     const context = composeTenantContext(workspace, 'telegram', '1', { memoryBudgetChars: 10 });

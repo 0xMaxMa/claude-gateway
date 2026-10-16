@@ -45,6 +45,7 @@ import { join } from 'path';
 import { SessionProcess } from '../../../src/session/process';
 import type { AgentConfig, GatewayConfig } from '../../../src/types';
 import type { RuntimeProfile } from '../../../src/session/runtime-profile';
+import { tenantDir } from '../../../src/agent/workspace-loader';
 
 // ~200 KB of Thai: three bytes per character, so the 64 KiB pipe chunks that carry the
 // setup exec's stdin split characters, and a decode per chunk would corrupt the prompt.
@@ -71,11 +72,11 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-function session(profile: Partial<RuntimeProfile> = {}): SessionProcess {
-  const agent = { id: 'a', type: 'app-agent', container: 'app-test', workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] } } as unknown as AgentConfig;
+function session(profile: Partial<RuntimeProfile> = {}, tenant?: { chatId: string }): SessionProcess {
+  const agent = { id: 'a', type: 'app-agent', container: 'app-test', workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] }, ...(tenant ? { multiTenant: { enabled: true } } : {}) } as unknown as AgentConfig;
   const gateway = { gateway: { headless: true, timezone: 'UTC', logDir: join(root, 'logs') }, agents: [agent] } as GatewayConfig;
   const store = { getContextReset: () => undefined, loadSession: async () => [], loadTelegramSession: async () => [] } as any;
-  return new SessionProcess('session:c', 'api', agent, gateway, store, undefined, { role: 'agent', mcpConfigPath: join(root, 'mcp.json'), overlay: OVERLAY, capacityReserved: true, ...profile } as RuntimeProfile);
+  return new SessionProcess('session:c', tenant ? 'telegram' : 'api', agent, gateway, store, tenant?.chatId, { role: 'agent', mcpConfigPath: join(root, 'mcp.json'), overlay: OVERLAY, capacityReserved: true, ...profile } as RuntimeProfile);
 }
 
 const posix = process.platform === 'win32' ? test.skip : test;
@@ -97,6 +98,23 @@ posix('the prompt is written by the docker exec that creates the attempt, so a s
   await sp.stop();
   expect(existsSync(file)).toBe(false);
   expect(existsSync(file.replace('system-prompt.md', 'ticket.json'))).toBe(false);
+});
+
+posix('an isolated app agent gets its own tenant memory after the container CLAUDE.md, with container paths (#601)', async () => {
+  for (const [chatId, memory] of [['111', 'TENANT-A-MEMORY'], ['222', 'TENANT-B-MEMORY']]) {
+    mkdirSync(tenantDir(workspace, 'telegram', chatId), { recursive: true });
+    writeFileSync(join(tenantDir(workspace, 'telegram', chatId), 'MEMORY.md'), memory);
+  }
+  const sp = session({}, { chatId: '111' });
+  await sp.start();
+  const prompt = JSON.parse(execs[1].input).prompt as string;
+  expect(prompt.startsWith(CONTEXT)).toBe(true);
+  expect(prompt).toContain('TENANT-A-MEMORY');
+  expect(prompt).not.toContain('TENANT-B');
+  expect(prompt).toContain(join(tenantDir('/workspace', 'telegram', '111'), 'MEMORY.md'));
+  expect(prompt).not.toContain(workspace);
+  expect(launches[0].args).toContain('CLAUDE_CODE_DISABLE_AUTO_MEMORY=1');
+  await sp.stop();
 });
 
 posix.each([

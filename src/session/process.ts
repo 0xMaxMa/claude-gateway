@@ -756,7 +756,12 @@ export class SessionProcess extends EventEmitter {
 
   private tenantContext(): string {
     return composeTenantContext(this.agentConfig.workspace, this.source, this.tenantChatId ?? this.chatId,
-      agentMemoryBudget(this.gatewayConfig, this.agentConfig));
+      agentMemoryBudget(this.gatewayConfig, this.agentConfig), this.isContainerAgent() ? '/workspace' : undefined);
+  }
+
+  /** Claude runs in the app container, which mounts the workspace at /workspace. */
+  private isContainerAgent(): boolean {
+    return this.agentConfig.type === 'app-agent' && !!this.agentConfig.container;
   }
 
   /** Outside orchestration the tenant context cannot join an appended prompt, so
@@ -1061,7 +1066,8 @@ export class SessionProcess extends EventEmitter {
     // Multi-tenant isolate mode (#601): Claude Code loads the tenant-neutral
     // workspace CLAUDE.md itself; this conversation's own USER.md/MEMORY.md
     // ride alongside it (see writeTenantContextFile).
-    if (this.tenantContextPath) args.push('--append-system-prompt-file', this.tenantContextPath);
+    if (this.tenantContextPath) args.push('--append-system-prompt-file', this.isContainerAgent()
+      ? `/workspace/${path.relative(this.agentConfig.workspace, this.tenantContextPath)}` : this.tenantContextPath);
 
     // Enforce allow_tools:false as a real boundary. Gated on the SAME condition as
     // writeMcpConfig() (source==='api' && !allow_tools): those sessions get no MCP
@@ -1100,7 +1106,7 @@ export class SessionProcess extends EventEmitter {
 
     // Determine if this is a docker-exec app-agent before computing paths
     assertContainerBinding(this.agentConfig, this.runtimeProfile);
-    const isAppAgent = this.agentConfig.type === 'app-agent' && !!this.agentConfig.container;
+    const isAppAgent = this.isContainerAgent();
 
     const freshModel = this.readFreshModel();
     let containerArgs: string[] | undefined;
@@ -1108,6 +1114,8 @@ export class SessionProcess extends EventEmitter {
       const profile = this.runtimeProfile, container = this.agentConfig.container!;
       const attempt = await prepareContainerProfile(this.agentConfig, profile, async directory => {
         profile.context = await containerNode(container, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))");
+        // A context set here skips the tenant append in buildArgs, so it goes in now.
+        if (this.agentConfig.multiTenant?.enabled) profile.context += '\n\n' + this.tenantContext();
         const moved = appendSystemPromptViaFile(this.buildArgs(null, freshModel, { directory, config: directory + '/mcp.json' }), directory + '/system-prompt.md');
         containerArgs = moved.args;
         return moved.prompt;
@@ -1220,10 +1228,15 @@ export class SessionProcess extends EventEmitter {
     const configuredWorkerEnvironment = sanitizeJevChildEnv(this.runtimeProfile?.role === 'worker' ? workerEnvironment(this.agentConfig, this.gatewayConfig) : {}, this.gatewayConfig.gateway.jev);
     const turnEnvironment: Record<string,string> = this.runtimeProfile?.claudeEffort
       ? { CLAUDE_CODE_EFFORT_LEVEL: this.runtimeProfile.claudeEffort } : {};
+    // Isolate mode (#601): Claude Code's auto memory is one directory per cwd,
+    // loaded into every session there, so it would carry notes across tenants.
+    const isolateEnvironment: Record<string,string> = this.agentConfig.multiTenant?.enabled
+      ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {};
     const containerEnv: Record<string, string> = {
       HOME: os.homedir(),
       CLAUDE_WORKSPACE: '/workspace',
       ...turnEnvironment,
+      ...isolateEnvironment,
       GATEWAY_RESTART_SIGNAL_PATH: containerRestartPath,
     };
     if (!this.runtimeProfile && process.env.GATEWAY_API_URL) containerEnv.GATEWAY_API_URL = process.env.GATEWAY_API_URL;
@@ -1288,9 +1301,7 @@ export class SessionProcess extends EventEmitter {
         ...(hardenedPath ? { PATH: hardenedPath } : {}),
         ...configuredWorkerEnvironment,
         ...turnEnvironment,
-        // Isolate mode (#601): Claude Code's auto memory is one directory per cwd,
-        // loaded into every session there, so it would carry notes across tenants.
-        ...(this.agentConfig.multiTenant?.enabled ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {}),
+        ...isolateEnvironment,
         GATEWAY_ORIGIN_SESSION_ID: this.runtimeProfile?.originSessionId ?? this.sessionId,
         GATEWAY_TASK_ID: this.runtimeProfile?.taskId ?? '',
         GATEWAY_TASK_ATTEMPT_ID: this.runtimeProfile?.attemptId ?? '',

@@ -156,10 +156,10 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       ? await containerNode(this.agent.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))")
       : await readFile(join(this.agent.workspace, 'CLAUDE.md'), 'utf8');
     // Isolate mode (#601): the worker acts for one conversation, so it sees that
-    // tenant's memory only. Container agents are refused this mode at config load.
+    // tenant's memory only. A container worker sees the workspace at /workspace.
     if (this.agent.multiTenant?.enabled) {
       const conversation = this.tasks.store.get('SELECT source, chat_id FROM conversations WHERE id=?', task.conversationId)!;
-      context += '\n\n' + composeTenantContext(this.agent.workspace, String(conversation.source), String(conversation.chat_id), agentMemoryBudget(this.gateway, this.agent));
+      context += '\n\n' + composeTenantContext(this.agent.workspace, String(conversation.source), String(conversation.chat_id), agentMemoryBudget(this.gateway, this.agent), this.agent.type === 'app-agent' ? '/workspace' : undefined);
     }
     // pstack is installed for Claude Code host-wide; only a set-up agent's
     // Claude workers load it, with that agent's own model sheet. Codex
