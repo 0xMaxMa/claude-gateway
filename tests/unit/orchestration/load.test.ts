@@ -66,7 +66,9 @@ test.each(['shutdown','start_error','result_error'] as const)('worker %s evidenc
   const snapshot=tasks.status(input.conversationId,'owner',task.taskId)[0];
   expect(snapshot.failure?.code).toBe(mode==='shutdown'?'GATEWAY_SHUTDOWN':mode==='start_error'?'WORKSPACE_FAILED':'INFERENCE_FAILED');
   expect(snapshot.failure?.message).toBeTruthy();
-  expect(store.get('SELECT id FROM notifications WHERE task_id=?',task.taskId)).toBeDefined();
+  // A shutdown-interrupted task is re-queued for the restart instead of reported as failed (#603).
+  expect(Boolean(store.get('SELECT id FROM notifications WHERE task_id=?',task.taskId))).toBe(mode!=='shutdown');
+  if(mode==='shutdown')expect(snapshot.state).toBe('queued');
   const attempt=JSON.parse(String(store.get('SELECT payload_json FROM task_attempts WHERE task_id=?',task.taskId)?.payload_json));
   expect(attempt.failure).toEqual(snapshot.failure);
   if(mode==='result_error')expect(snapshot.state).toBe('needs_reconciliation');

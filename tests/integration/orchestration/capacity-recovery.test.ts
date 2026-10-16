@@ -26,14 +26,17 @@ test('runtime recovery transfers capacity ownership to cleanup without leaking s
   const process=new EventEmitter() as SessionProcess;
   process.start=async()=>{};process.stop=async()=>{};process.sendMessage=()=>{process.emit('output',JSON.stringify({type:'result',result:'Done'}));};return process;
  },releaseAgentSession:async()=>{}};
- const driver={cleanup:async()=>true,start:jest.fn(),available:()=>false};
+ // The stranded worker cannot be proven stopped until the user's cancellation retries cleanup;
+ // a provable stop would resume the task instead (#603, see restart-resume.test.ts).
+ let stoppable=false;
+ const driver={cleanup:async()=>stoppable,start:jest.fn(),available:()=>false};
  let runtime:AgentOrchestrationRuntime|undefined;
  try {
   runtime=await AgentOrchestrationRuntime.open(agent,gateway,root,sessions,history,host,driver);
   expect(capacity.count).toBe(1);await runtime.close();runtime=undefined;
   runtime=await AgentOrchestrationRuntime.open(agent,gateway,root,sessions,history,host,driver);
   expect(capacity.count).toBe(1);
-  runtime.tasks.cancelByUser(task.conversationId,'owner',task.taskId);
+  stoppable=true;runtime.tasks.cancelByUser(task.conversationId,'owner',task.taskId);
   const end=Date.now()+2000;
   while(runtime.store.task(task.taskId)!.state!=='cancelled'&&Date.now()<end)await new Promise(resolve=>setTimeout(resolve,5));
   expect(runtime.store.task(task.taskId)!.state).toBe('cancelled');expect(capacity.count).toBe(0);
