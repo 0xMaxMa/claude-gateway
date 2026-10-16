@@ -28,7 +28,7 @@ import { resolveSharedConfig, sharedVaultDir, buildGraphModel, demoGraphModel, d
 import { createLogger } from '../logger';
 import { parseDreamReport } from '../agent/dreaming/report';
 import { acceptDreamProposals } from '../agent/dreaming/accept';
-import { resolveMemoryBudget } from '../agent/workspace-loader';
+import { agentMemoryBudget, resolveMemoryBudget } from '../agent/workspace-loader';
 import { DREAMING_DIR } from '../agent/dreaming/audit';
 import {
   generateCliDevicePage,
@@ -969,7 +969,10 @@ export class GatewayRouter {
         if (!runner) { res.status(404).json({ error: 'Unknown agent' }); return; }
         try {
           const source = runner.getDashboardSource?.();
-          let report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, jevEnabled:Boolean(this.gatewayConfig && this.configs.get(agentId) && jevAllowed(this.gatewayConfig,this.configs.get(agentId)!)), multiTenant:Boolean(this.configs.get(agentId)?.multiTenant?.enabled), memoryBudget:{...this.gatewayConfig?.gateway.memory, ...this.configs.get(agentId)?.memory}, sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h'),Date.now(),this.gatewayConfig?.gateway?.timezone), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
+          // Isolate mode (#601): the footprint measures the conversation memory appended at spawn.
+          const agentConfig = this.configs.get(agentId);
+          const isolatedBudget = agentConfig?.multiTenant?.enabled && this.gatewayConfig ? agentMemoryBudget(this.gatewayConfig, agentConfig) : undefined;
+          let report = source ? await this.dashboardReader.read('report', source.filename, {workspace:source.workspace, jevEnabled:Boolean(this.gatewayConfig && this.configs.get(agentId) && jevAllowed(this.gatewayConfig,this.configs.get(agentId)!)), tenantMemoryBudget:isolatedBudget, sessionId, offset, since:dashboardSince(req.query.scope ?? (reportPath==='/token-report'?'all':'24h'),Date.now(),this.gatewayConfig?.gateway?.timezone), historyFilename:source.historyFilename}) : await runner.getTokenReport(sessionId);
           if (!report) { res.status(404).json({ error: 'No recorded session token report' }); return; }
           if (runner.isSessionCompacting?.(sessionId)) report = {...report, activityStatus:'compacting'};
           if (report.contextWindow) report.contextWindow.total = report.contextWindow.model ? await runner.dashboardContextWindow?.(report.contextWindow.model) ?? null : null;

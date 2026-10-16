@@ -82,3 +82,15 @@ test('multi-tenant isolate mode measures the conversation memory appended at spa
   expect(single.find(r=>r.name==='MEMORY.md · source file')?.tokens).toBe(referenceTokens('Root memory written before isolate mode. '.repeat(50)));
  }finally{rmSync(dir,{recursive:true,force:true});}
 });
+
+test('an oversized conversation memory file is reported unmeasured instead of read whole',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'footprint-tenant-large-'));
+ try{
+  const own=tenantDir(dir,'telegram','111');mkdirSync(own,{recursive:true});
+  writeFileSync(join(own,'MEMORY.md'),'x'.repeat(1024*1024+1));
+  const rows=contextFootprint(dir,false,{source:'telegram',chatId:'111'}).rows;
+  expect(rows.find(r=>r.name==='↳ Conversation memory')?.tokens).toBeNull();
+  expect(rows.find(r=>r.name==='↳ MEMORY.md')).toBeUndefined();
+  expect(rows.find(r=>r.name==='MEMORY.md · source file')?.tokens).toBeNull();
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});

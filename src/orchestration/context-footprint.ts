@@ -1,8 +1,8 @@
 import { readFileSync, statSync } from 'fs';
-import { basename, join } from 'path';
+import { join } from 'path';
 import { getEncoding } from 'js-tiktoken';
 import { AGENT_TASK_TOOLS } from './agent-tool-schemas';
-import { composeTenantContext, tenantDir, type MemoryBudgetConfig } from '../agent/workspace-loader';
+import { composeTenantContext, tenantDirName, type MemoryBudgetConfig } from '../agent/workspace-loader';
 
 const cache = new Map<string, {at:number; value:ContextFootprint}>();
 let encoder: ReturnType<typeof getEncoding> | undefined;
@@ -39,8 +39,11 @@ export function contextFootprint(workspace: string | undefined, jevEnabled = fal
   };
   if(composed)sections(composed,'Section found in generated CLAUDE.md; includes section whitespace. Boundary tokenization can differ from parent total.');
   // Isolate mode leaves sender files out of CLAUDE.md and appends this conversation's own at spawn.
-  const tenantFiles=tenant&&join('tenants',basename(tenantDir(workspace,tenant.source,tenant.chatId)));
-  if(tenant)sections(composeTenantContext(workspace,tenant.source,tenant.chatId,tenant.memoryBudget),'This conversation\'s memory, appended at spawn after its budgets (multi-tenant isolate mode).');
+  const tenantFiles=tenant&&join('tenants',tenantDirName(tenant.source,tenant.chatId));
+  // Same 1 MiB guard as read(): composeTenantContext reads the files whole.
+  const oversized=(name:string)=>{try{return statSync(join(workspace,tenantFiles!,name)).size>1024*1024;}catch{return false;}};
+  if(tenant&&(oversized('USER.md')||oversized('MEMORY.md')))add('↳ Conversation memory',undefined,'A conversation memory file is larger than 1 MiB, so it was not measured.');
+  else if(tenant)sections(composeTenantContext(workspace,tenant.source,tenant.chatId,tenant.memoryBudget),'This conversation\'s memory, appended at spawn after its budgets (multi-tenant isolate mode).');
   for(const name of ['AGENTS.md','IDENTITY.md','SOUL.md','USER.md','MEMORY.md','HEARTBEAT.md']){
     const own=tenantFiles&&(name==='USER.md'||name==='MEMORY.md');
     add(name+' · source file',read(own?join(tenantFiles,name):name),own?'This conversation\'s file under '+tenantFiles+' before budget/truncation. The workspace-root file is not composed in multi-tenant isolate mode.':'Current file on disk before budget/index/truncation. Reference only; not added to composed context.');
