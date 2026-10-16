@@ -146,9 +146,12 @@ export class TaskFiles {
   remember(attemptId: string, generation: number, actionId: string, args: Record<string, unknown>) {
     const { task, conversation } = this.scope(attemptId, generation);
     if (!task.capabilities.writeMemory || conversation.source === 'api') throw new OrchestrationError('MEMORY_WRITE_DENIED');
-    const note = boundedText(args.note, 8192), name = args.path === undefined ? `memory/${new Date().toISOString().slice(0,10)}.md` : boundedText(args.path, 256);
-    if (!/^(?:MEMORY\.md|USER\.md|memory\/[A-Za-z0-9_-]+\.md)$/.test(name)) throw new OrchestrationError('MEMORY_PATH_DENIED');
-    const tenant = this.multiTenant() ? join('tenants', tenantDirName(String(conversation.source), String(conversation.chat_id))) : '';
+    // Isolate mode (#601) injects only the tenant's MEMORY.md/USER.md and offers no
+    // archive search, so a memory/ note would be written and never seen again.
+    const isolated = this.multiTenant();
+    const note = boundedText(args.note, 8192), name = args.path === undefined ? (isolated ? 'MEMORY.md' : `memory/${new Date().toISOString().slice(0,10)}.md`) : boundedText(args.path, 256);
+    if (!(isolated ? /^(?:MEMORY|USER)\.md$/ : /^(?:MEMORY\.md|USER\.md|memory\/[A-Za-z0-9_-]+\.md)$/).test(name)) throw new OrchestrationError('MEMORY_PATH_DENIED');
+    const tenant = isolated ? join('tenants', tenantDirName(String(conversation.source), String(conversation.chat_id))) : '';
     const workspace = join(this.workspace, tenant), destination = join(workspace, name);
     mkdirSync(dirname(destination), { recursive: true });
     if (realpathSync(workspace) !== join(realpathSync(this.workspace), tenant) || realpathSync(dirname(destination)) !== join(realpathSync(workspace), name.startsWith('memory/') ? 'memory' : '') || (existsSync(destination) && lstatSync(destination).isSymbolicLink())) throw new OrchestrationError('MEMORY_PATH_DENIED');

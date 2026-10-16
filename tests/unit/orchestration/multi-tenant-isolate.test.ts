@@ -15,7 +15,7 @@ import { TaskBridge } from '../../../src/orchestration/bridge';
 import { TaskFiles } from '../../../src/orchestration/task-files';
 import { TaskWorkspaces } from '../../../src/orchestration/tasks/workspace';
 import { ClaudeWorkerDriver } from '../../../src/orchestration/tasks/driver';
-import { tenantDir } from '../../../src/agent/workspace-loader';
+import { tenantDir, tenantDirName } from '../../../src/agent/workspace-loader';
 import { IDENTITY_EDIT_RULES, SHARED_PERSONA_RULES } from '../../../src/orchestration/source-policy';
 import { AgentConfig, GatewayConfig } from '../../../src/types';
 
@@ -98,6 +98,25 @@ describe('workers', () => {
   });
 });
 
+describe('Agent overlay', () => {
+  it('names no persona workspace for the Agent to edit', async () => {
+    const overlay = async (multiTenant: boolean) => {
+      const bridge = new TaskBridge(tasks);
+      bridge.multiTenant = () => multiTenant;
+      await bridge.start();
+      try {
+        const input = store.acceptInput({ scope: { agentId: 'agent', agentSessionId: `o-${multiTenant}`, source: 'telegram', accountId: 'bot', principalId: 'u', chatId: '111', threadKey: '' }, text: 'Hi' });
+        const ticket = bridge.issue({ role: 'agent', context: { conversationId: input.conversationId, principalId: 'u', inputId: input.inputId, decisionId: 'd', epoch: 0, execute: true, writeMemory: true } }, join(root, `agent-${multiTenant}`), workspace, '');
+        return ticket.profile.overlay;
+      } finally { await bridge.close(); }
+    };
+    const isolated = await overlay(true);
+    expect(isolated).toContain(SHARED_PERSONA_RULES);
+    expect(isolated).not.toContain('This agent persona workspace');
+    expect(await overlay(false)).toContain('This agent persona workspace');
+  });
+});
+
 describe('task_memory_append', () => {
   it("writes to the conversation's tenant files, never the shared root", () => {
     const files = new TaskFiles(store, root, undefined, workspace);
@@ -105,11 +124,14 @@ describe('task_memory_append', () => {
     const { task, attempt } = spawnTask('111', true);
     tasks.started(attempt.attemptId, attempt.generation);
     const result = files.remember(attempt.attemptId, attempt.generation, 'remember', { path: 'MEMORY.md', note: 'Likes jasmine tea.' });
-    expect(result).toEqual({ updated: true, path: join('tenants', 'telegram-111', 'MEMORY.md') });
+    expect(result).toEqual({ updated: true, path: join('tenants', tenantDirName('telegram', '111'), 'MEMORY.md') });
     expect(readFileSync(join(tenantDir(workspace, 'telegram', '111'), 'MEMORY.md'), 'utf8')).toContain('Likes jasmine tea.');
     expect(readFileSync(join(workspace, 'MEMORY.md'), 'utf8')).toBe('ROOT-MEMORY');
-    files.remember(attempt.attemptId, attempt.generation, 'remember-log', { path: 'memory/notes.md', note: 'Asked about tea.' });
-    expect(existsSync(join(tenantDir(workspace, 'telegram', '111'), 'memory', 'notes.md'))).toBe(true);
+    // Without a path the note goes to the tenant MEMORY.md, the file that is injected.
+    files.remember(attempt.attemptId, attempt.generation, 'remember-default', { note: 'Prefers mornings.' });
+    expect(readFileSync(join(tenantDir(workspace, 'telegram', '111'), 'MEMORY.md'), 'utf8')).toContain('Prefers mornings.');
+    // memory/ notes are never injected or searchable in this mode, so they are refused.
+    expect(() => files.remember(attempt.attemptId, attempt.generation, 'remember-log', { path: 'memory/notes.md', note: 'Asked about tea.' })).toThrow('MEMORY_PATH_DENIED');
     expect(existsSync(join(workspace, 'memory', 'notes.md'))).toBe(false);
     expect(task.taskId).toBeTruthy();
   });

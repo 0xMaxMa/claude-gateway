@@ -472,7 +472,7 @@ export class TaskBridge {
     const quote = (value: string) => process.platform === 'win32' ? JSON.stringify(value) : "'" + value.replace(/'/g, "'\"'\"'") + "'";
     const checkpointCommand = scope.role === 'worker' ? [process.execPath, checkpointPath, ticketPath].map(quote).join(' ') : undefined;
     const writeMemory = workerMemory || (scope.role === 'agent' && scope.context.writeMemory && this.tasks.store.get('SELECT source FROM conversations WHERE id=?', scope.context.conversationId)?.source !== 'api');
-    const personaContext = scope.role === 'agent' ? `This agent persona workspace: ${JSON.stringify(this.container ? '/workspace' : workspace)}.` : '';
+    const personaContext = scope.role === 'agent' && !this.multiTenant() ? `This agent persona workspace: ${JSON.stringify(this.container ? '/workspace' : workspace)}.` : '';
     const sourceRules = `${personaContext}\n${writeMemory ? `Channel memory updates use scoped memory tools. ${SECRET_RULES}` : API_SOURCE_RULES}\n${this.multiTenant() ? SHARED_PERSONA_RULES : IDENTITY_EDIT_RULES}`;
     return { profile: { role: scope.role, jevEnabled, browserEnabled, checkpointCommand, containerExecution: Boolean(this.container), mcpConfigPath, overlay: `${scope.role === 'agent' ? AGENT_OVERLAY : WORKER_OVERLAY}\n\n${sourceRules}` },
       revoke: () => { this.cancellations.get(token)?.abort(); this.cancellations.delete(token); this.scopes.delete(token); if (scope.role === 'worker') this.files?.releaseCaptured(scope.attemptId); } };
