@@ -17,7 +17,7 @@ const voice = { enabled: true, stt: { provider: 'elevenlabs', model: 'scribe_v2_
  * the StructuredOutput argument deltas in `deltas`, then the final structured output.
  * `between` runs after each delta, so a test can observe what was spoken mid-turn.
  */
-export async function liveVoiceTurn(deltas: string[], final: Record<string, unknown>, options: { voice?: Record<string, unknown>; between?: (index: number, seen: { marks: string[]; spoken: string[] }) => void | Promise<void> } = {}) {
+export async function liveVoiceTurn(deltas: string[], final: Record<string, unknown>, options: { voice?: Record<string, unknown>; prompt?: (text: string) => void; between?: (index: number, seen: { marks: string[]; spoken: string[] }) => void | Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'live-voice-turn-')), dir = join(root, 'a'), workspace = join(dir, 'workspace');
   mkdirSync(workspace, { recursive: true }); writeFileSync(join(workspace, 'CLAUDE.md'), 'Identity');
   const agent = { id: 'a', description: 'fixture', env: '', workspace, claude: { model: 'fixture', extraFlags: [] },
@@ -28,7 +28,7 @@ export async function liveVoiceTurn(deltas: string[], final: Record<string, unkn
   let process!: EventEmitter; let prompted!: () => void; const prompt = new Promise<void>(resolve => { prompted = resolve; });
   const runtime = await AgentOrchestrationRuntime.open(agent, gateway, dir, sessions, history, {
     createAgentSession: async (_id, profile) => {
-      process = Object.assign(new EventEmitter(), { runtimeProfile: profile, start: async () => {}, interrupt: () => {}, stop: async () => {}, sendMessage: () => prompted() });
+      process = Object.assign(new EventEmitter(), { runtimeProfile: profile, start: async () => {}, interrupt: () => {}, stop: async () => {}, sendMessage: (text: string) => { options.prompt?.(text); prompted(); } });
       return process as SessionProcess;
     }, releaseAgentSession: async () => {},
   });
@@ -58,4 +58,43 @@ test('a live voice turn reports its agent phases: process ready, provider ready,
   const { marks, display } = await liveVoiceTurn([json.slice(0, 5), json.slice(5, 30), json.slice(30)], final);
   expect(display).toBe(final.display_text);
   expect(marks).toEqual(['process_spawned', 'first_model_token', 'agent_provider_ready', 'first_spoken_delta']);
+});
+
+describe('streaming spoken_text to TTS (voice.live.streamSpokenText)', () => {
+  const final = {
+    spoken_text: 'ได้ค่ะ ตอนนี้ราคา Bitcoin อยู่ที่ประมาณ 67,240 ดอลลาร์ ขึ้นมาราวสองเปอร์เซ็นต์จากเมื่อวาน ตลาดยังรอตัวเลขเงินเฟ้อคืนนี้อยู่ค่ะ',
+    display_text: '## Bitcoin\n**ราคา:** $67,240 — https://www.coingecko.com/en/coins/bitcoin\n```\nBTC 67240\n```',
+  };
+  const deltas = (object: Record<string, unknown>) => { const json = JSON.stringify(object); return Array.from({ length: Math.ceil(json.length / 7) }, (_, i) => json.slice(i * 7, i * 7 + 7)); };
+
+  test('speaks spoken_text sentence by sentence before the response completes; display_text never reaches TTS and nothing is said twice', async () => {
+    let spokenBeforeEnd: string[] = [];
+    const { spoken, display } = await liveVoiceTurn(deltas(final), final, { voice: { live: { streamSpokenText: true } },
+      between: (_index, seen) => { spokenBeforeEnd = [...seen.spoken]; } });
+    expect(display).toBe(final.display_text);
+    expect(spokenBeforeEnd.length).toBeGreaterThan(1);
+    expect(spoken.join(' ')).toBe(final.spoken_text);
+    for (const piece of spoken) expect(piece).not.toMatch(/https?:|```|\*\*|#|67240/);
+  });
+
+  test('display_text written first is still never spoken; spoken_text streams once it starts', async () => {
+    const reversed = { display_text: final.display_text, spoken_text: final.spoken_text };
+    const { spoken } = await liveVoiceTurn(deltas(reversed), reversed, { voice: { live: { streamSpokenText: true } } });
+    expect(spoken.join(' ')).toBe(final.spoken_text);
+  });
+
+  test('off by default: the whole spoken_text is spoken once, after the response', async () => {
+    let spokenBeforeEnd = 0;
+    const { spoken } = await liveVoiceTurn(deltas(final), final, { between: (_index, seen) => { spokenBeforeEnd = seen.spoken.length; } });
+    expect(spokenBeforeEnd).toBe(0);
+    expect(spoken).toEqual([final.spoken_text]);
+  });
+
+  test('asks the agent to write spoken_text first only when streaming is on', async () => {
+    const prompts: string[] = [];
+    await liveVoiceTurn(deltas(final), final, { voice: { live: { streamSpokenText: true } }, prompt: text => prompts.push(text) });
+    await liveVoiceTurn(deltas(final), final, { prompt: text => prompts.push(text) });
+    expect(prompts[0]).toContain('Write "spoken_text" FIRST');
+    expect(prompts[1]).not.toContain('Write "spoken_text" FIRST');
+  });
 });

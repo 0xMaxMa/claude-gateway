@@ -54,6 +54,22 @@ test.each(['elevenlabs', 'cartesia'])('%s exposes neutral PCM chunks and closes 
   }
 });
 
+test('the ElevenLabs dialogue socket is flushed after every piece of text, so each spoken sentence is generated as it arrives', async () => {
+  const fixture = socketFixture(), signal = new AbortController().signal;
+  async function* text() { yield 'ได้ค่ะ ตอนนี้ราคาอยู่ที่ประมาณหกหมื่นเจ็ดพันดอลลาร์'; yield 'ขึ้นมาราวสองเปอร์เซ็นต์ค่ะ'; }
+  const iterator = new ElevenLabsTts('fixture', undefined, fixture.connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal })[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise(resolve => setImmediate(resolve));
+  fixture.messages.push({ is_final: true });
+  await first;
+  expect(fixture.send.mock.calls.map(([message]) => message)).toEqual([
+    { voices: ['voice'], voice_settings: { stability: 1 } },
+    { inputs: [{ text: 'ได้ค่ะ ตอนนี้ราคาอยู่ที่ประมาณหกหมื่นเจ็ดพันดอลลาร์', voice_id: 'voice' }] }, { flush: true },
+    { inputs: [{ text: 'ขึ้นมาราวสองเปอร์เซ็นต์ค่ะ', voice_id: 'voice' }] }, { flush: true },
+    { close_socket: true },
+  ]);
+});
+
 test('provider closing without a terminal event is not a successful synthesis', async () => {
   const fixture = socketFixture();
   async function* text() { yield 'hello'; }

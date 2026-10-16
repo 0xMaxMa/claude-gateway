@@ -35,6 +35,7 @@ import { browserRouting } from './browser-routing';
 import { providerRefusalNotice, responseFailureMessage } from './response-errors';
 import type { ProviderRefusal } from '../session/provider-refusal';
 import { displayPrefix, partialField } from './display-stream';
+import { SpokenTextStream } from './spoken-stream';
 import { responseHasVoiceOrigin, voiceReplyAllowed } from './voice-reply-policy';
 import { answersLiveVoice, withLiveVoiceTranscript } from './live-voice-transcript';
 import { taskReport } from './task-report';
@@ -66,7 +67,7 @@ import { resolveSkill, skillCatalog } from './skills';
 import { PSTACK_DECISION_NOTE, pstackCommandReply, pstackNotSetUpReply } from '../pstack/overlay';
 import type { SkillRegistry } from '../skills';
 import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
-import { SPEECH_OVERLAY, SPEECH_REMINDER, splitSpeechResponse, speechVoiceStyle } from './speech';
+import { LIVE_SPEECH_ORDER, SPEECH_OVERLAY, SPEECH_REMINDER, splitSpeechResponse, speechVoiceStyle } from './speech';
 import { join } from 'path';
 import { pathWithin } from '../utils/paths';
 import { randomUUID } from 'crypto';
@@ -1431,6 +1432,7 @@ export class AgentOrchestrationRuntime {
         // voice turns repeat only the short reminder and the persona's voice style.
         const style = speechVoiceStyle(gender), full = SPEECH_OVERLAY + style;
         speechDirective = `\n\n${contextPlan.select('directives', [{ id: 'speech', full }], directive => directive.id).length ? full : SPEECH_REMINDER + style}`;
+        if (input.modality === 'live_voice' && this.config.voice.live.streamSpokenText) speechDirective += `\n${LIVE_SPEECH_ORDER}`;
       }
       const previousReports = internalReview ? recentCommunicatedProgress(this.store, receipt.conversationId) : [];
       // Anthropic's prompt cache is a strict prefix match over [tools, system, messages],
@@ -1558,6 +1560,9 @@ export class AgentOrchestrationRuntime {
       }));
       const bufferChat = semantic && this.config.conversation.inputDebounceMs > 0 && batchableInput(input);
       let rawDisplay = '', structuredStarted = false, firstToken = false, firstSpoken = false;
+      // A live call speaks spoken_text sentence by sentence while the agent is still writing.
+      const spokenStream = input.modality === 'live_voice' && this.config.voice.live.streamSpokenText && !channelSpeech && !semantic && !internalReview && !questionReview
+        ? new SpokenTextStream(text => { try { this.inputStreams.get(receipt.inputId)?.push({ responseId: decision.responseId!, text }); } catch { /* slow audio cannot stall inference */ } }) : undefined;
       const displayChunk = (chunk: string) => {
         if (!firstToken) { firstToken = true; options.onMark?.('first_model_token'); }
         if (internalReview || questionReview || bufferChat || recoveryInputId) return; // Buffer until the notify/silence decision is final.
@@ -1567,7 +1572,9 @@ export class AgentOrchestrationRuntime {
         // answer (the CLI never forces the tool call) still streams through unchanged.
         rawDisplay += chunk;
         if (Buffer.byteLength(rawDisplay) > 262144) throw new OrchestrationError('RESPONSE_TOO_LARGE');
-        if (!firstSpoken && options.onMark && structuredStarted && partialField(rawDisplay, 'spoken_text')?.text) { firstSpoken = true; options.onMark('first_spoken_delta'); }
+        const spokenField = structuredStarted && (options.onMark || spokenStream) ? partialField(rawDisplay, 'spoken_text') : undefined;
+        if (!firstSpoken && spokenField?.text) { firstSpoken = true; options.onMark?.('first_spoken_delta'); }
+        if (spokenField && !active.stopping) spokenStream?.update(spokenField.text, spokenField.complete);
         const next = displayPrefix(rawDisplay);
         if (!next || !next.startsWith(streamedDisplay)) return;
         chunk = next.slice(streamedDisplay.length);
@@ -1755,7 +1762,9 @@ export class AgentOrchestrationRuntime {
       }
       if (!silent && speechEnabled && !response.interrupted && !taskSpeech) {
         if (!channelSpeech) this.store.run('INSERT INTO response_speech VALUES(?,?)', decision.responseId!, surfaces.spoken);
-        if (surfaces.spoken) this.inputStreams.get(receipt.inputId)?.push({ responseId: decision.responseId!, text: surfaces.spoken });
+        // Pieces already streamed are not spoken again; only what the final spoken_text adds.
+        const rest = spokenStream ? spokenStream.finish(surfaces.spoken) : surfaces.spoken;
+        if (rest) this.inputStreams.get(receipt.inputId)?.push({ responseId: decision.responseId!, text: rest });
       }
       // The published stream may lag the final display on any turn now (structured arguments
       // arrive after any commentary), so the tail correction is no longer speech/review-only.

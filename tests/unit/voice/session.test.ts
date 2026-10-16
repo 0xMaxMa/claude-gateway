@@ -548,6 +548,36 @@ test('silenceCommitMs 0 commits on speech.ended without a pause, after the last 
   } finally { await session.close(); jest.useRealTimers(); }
 });
 
+test('barge-in while spoken sentences are still streaming cancels the rest: later sentences never reach TTS', async () => {
+  const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [], consumed: string[] = [];
+  const stream = new BoundedQueue<{ responseId: string; text: string }>(4096, value => Buffer.byteLength(value.text));
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] },
+    synthesize: async function* (options) { let sequence = 0; for await (const text of options.text) { consumed.push(text); yield { bytes: Buffer.alloc(640), format: PCM16, chunkSeq: sequence++ }; } } };
+  const stop = jest.fn();
+  const session = new VoiceSession(stt, tts, 'voice', { control: c => controls.push(c), audio: c => audio.push(c), bufferedBytes: () => 0 },
+    async () => ({ inputId: 'input', response: new Promise<string>(() => {}), stream }), stop,
+    { silenceCommitMs: 0, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500, mergeWindowMs: 0 });
+  const waitFor = async (predicate: () => boolean) => { const end = Date.now() + 2000; while (!predicate() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 5)); expect(predicate()).toBe(true); };
+  try {
+    await session.start();
+    const listening = controls.at(-1)!;
+    await session.audio({ generation: listening.generation, epoch: 0, sequence: 1, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    session.speechEnded(1);
+    await waitFor(() => !!stt.sessions[0].commitId);
+    stt.sessions[0].emit({ type: 'segment_final', segmentId: 's', text: 'ราคาเท่าไหร่' });
+    stt.sessions[0].emit({ type: 'commit_done', commitId: stt.sessions[0].commitId! });
+    await waitFor(() => controls.some(c => c.type === 'utterance.accepted'));
+    stream.push({ responseId: 'reply', text: 'ได้ค่ะ ตอนนี้ราคาอยู่ที่ประมาณหกหมื่นเจ็ดพันดอลลาร์' });
+    await waitFor(() => audio.length === 1);
+    session.speechStarted(session.playback.epoch + 1);
+    expect(stop).toHaveBeenCalled();
+    try { stream.push({ responseId: 'reply', text: 'ขึ้นมาราวสองเปอร์เซ็นต์จากเมื่อวานค่ะ' }); } catch { /* the queue may already be closed */ }
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(consumed).toEqual(['ได้ค่ะ ตอนนี้ราคาอยู่ที่ประมาณหกหมื่นเจ็ดพันดอลลาร์']);
+    expect(audio).toHaveLength(1);
+  } finally { stream.close(); await session.close(); }
+});
+
 test('mute right after speech answers it without the silence timer, and the reply still plays while muted; mute with no speech admits nothing', async () => {
   const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [];
   const stream = new BoundedQueue<{ responseId: string; text: string }>(1024, value => Buffer.byteLength(value.text));

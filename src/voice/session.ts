@@ -212,10 +212,11 @@ export class VoiceSession {
     if (this.closed) return;
     if (first.done) { await response; if (!this.closed && epoch === this.interruption) this.speechUnavailable(); return; }
     turn.ids.responseId = first.value.responseId; turn.trace.emit('agent_first_spoken');
-    const client = this.client;
+    const client = this.client, session = this;
     async function* source() {
       let chunk = first;
-      while (!chunk.done) {
+      // Barge-in or hang-up ends this reply: sentences still streaming in are never spoken.
+      while (!chunk.done && !session.closed && epoch === session.interruption) {
         client.control({ type: 'response.speech', response_id: chunk.value.responseId, text: chunk.value.text });
         turn.trace.emit('spoken_sentence_sent');
         yield chunk.value.text;

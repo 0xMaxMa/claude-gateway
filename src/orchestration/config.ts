@@ -85,6 +85,8 @@ export interface OrchestrationConfig {
     /** mergeWindowMs: how long a committed utterance waits for a continuation before it becomes one turn; 0 admits it at once. */
     turns?: { silenceCommitMs?: number; finalizationTimeoutMs?: number; maxUtteranceMs?: number; mergeWindowMs?: number };
     playback?: { maxBufferedAudioMs?: number; bargeIn?: boolean };
+    /** Live call latency: streamSpokenText speaks spoken_text sentence by sentence while the agent is still writing. */
+    live?: { streamSpokenText?: boolean };
     /** Long-form `narrate` worker tool: read supplied text aloud as a sequence of audio files. */
     narrate?: { enabled?: boolean; maxChars?: number; maxParts?: number; targetChars?: number; partTimeoutMs?: number };
   };
@@ -105,6 +107,7 @@ export const ORCHESTRATION_DEFAULTS = {
     tts: { provider: 'elevenlabs', model: 'eleven_v3_conversational', voiceId: '' },
     turns: { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, mergeWindowMs: 1200 },
     playback: { maxBufferedAudioMs: 1500, bargeIn: true },
+    live: { streamSpokenText: false },
     narrate: { enabled: true, maxChars: 100000, maxParts: 60, targetChars: 800, partTimeoutMs: 60000 } },
 };
 // New agents start disabled and choose models explicitly from connected providers.
@@ -150,7 +153,7 @@ export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVo
     events: { ...d.events, ...config?.events },
     voice: { ...d.voice, ...voice, notes: { ...d.voice.notes, ...voice?.notes },
       stt: { ...d.voice.stt, ...voice?.stt }, tts: { ...d.voice.tts, ...voice?.tts },
-      turns: { ...d.voice.turns, ...voice?.turns }, playback: { ...d.voice.playback, ...voice?.playback },
+      turns: { ...d.voice.turns, ...voice?.turns }, playback: { ...d.voice.playback, ...voice?.playback }, live: { ...d.voice.live, ...voice?.live },
       narrate: { ...d.voice.narrate, ...voice?.narrate } },
   };
   for (const role of ['tts', 'stt', 'notes'] as const) result.voice[role].provider = canonicalVoiceProvider(result.voice[role].provider);

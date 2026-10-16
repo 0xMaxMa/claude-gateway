@@ -35,7 +35,10 @@ export class ElevenLabsTts implements TtsProvider {
       await socket.send(dialogue ? { voices: [options.voiceId], voice_settings: { stability: 1 } } : { text: ' ', voice_settings: { stability: 0.5 }, generation_config: { chunk_length_schedule: [50,120,160,290] } });
       for await (const text of options.text) {
         if (options.signal.aborted) return;
-        await socket.send(dialogue ? { inputs: [{ text, voice_id: options.voiceId }] } : { text, try_trigger_generation: true });
+        // The dialogue socket waits for ~40 characters and 8 words before it generates, which
+        // unspaced Thai may never reach; every text handed over is a whole piece, so flush it.
+        if (dialogue) { await socket.send({ inputs: [{ text, voice_id: options.voiceId }] }); await socket.send({ flush: true }); }
+        else await socket.send({ text, try_trigger_generation: true });
       }
       await socket.send(dialogue ? { close_socket: true } : { text: '' });
     })().catch(error => { sendError = error; socket.close(); });

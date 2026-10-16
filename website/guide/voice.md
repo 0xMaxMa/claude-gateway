@@ -180,6 +180,14 @@ Runs of symbols with nothing to pronounce (for example a line of `=` characters)
 
 A shorter pause commits sooner and may cut a natural pause into separate segments; a longer pause waits for more speech but delays submission. The merge window is the larger of the two waits: every turn waits the full `mergeWindowMs` after its transcript before the agent starts. Lowering it to 600 ms answers about 600 ms sooner, but a pause longer than that in the middle of a thought becomes its own turn (the earlier part is answered, then interrupted by the continuation). The default stays 1200 ms; set `voice.turns.mergeWindowMs` per agent to trade one for the other, and remove the setting to go back. This is separate from orchestration's `intakeWaitMs`, which combines already received incomplete inputs. The setting is not a promise of end-to-end reply latency.
 
+## Live call latency settings
+
+These settings under `voice.live` change only live voice turns (`/call` and browser live voice). Each is off by default; set it to `false` or remove it to go back.
+
+| Setting under `voice.live` | Default | Effect |
+| --- | --- | --- |
+| `streamSpokenText` | `false` | Ask the agent to write `spoken_text` first and speak it sentence by sentence while the agent is still writing `display_text`. Sentences end at `.`, `!`, `?`, a line break, or a space between Thai phrases, and a long unbroken run is cut at about 160 characters. Only `spoken_text` is read: `display_text`, code, URLs and Markdown never reach TTS. When the response completes, only what was not yet spoken is added. Barge-in stops the sentences still to come. |
+
 ## Diagnose missing or delayed audio
 
 Start with the text result, the selected route and the error reference. Authentication failures, exhausted quota and temporary provider unavailability require different actions; switching voices does not fix a missing API key or exhausted quota. Auto voice selection requires a readable voice catalog. For a catalog failure, check credentials/model access instead of overwriting the saved selection with an invented voice.
