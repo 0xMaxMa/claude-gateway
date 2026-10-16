@@ -1,6 +1,7 @@
-import {mkdtempSync,writeFileSync,rmSync} from 'fs';
+import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from 'fs';
 import {tmpdir} from 'os';
-import {join} from 'path';
+import {basename,join} from 'path';
+import {tenantDir} from '../../../src/agent/workspace-loader';
 import {contextFootprint,referenceTokens} from '../../../src/orchestration/context-footprint';
 import {AGENT_TASK_TOOLS} from '../../../src/orchestration/agent-tool-schemas';
 test('counts generated sections separately from raw files and labels schemas without double counting',()=>{
@@ -62,4 +63,22 @@ test('optional Jev changes footprint independently of the workspace cache', () =
   expect(enabled.name).toContain('('+AGENT_TASK_TOOLS.length+')');
   expect(contextFootprint(dir).rows.find(r=>r.name.startsWith('Agent gateway tool'))).toEqual(disabled);
  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('multi-tenant isolate mode measures the conversation memory appended at spawn, not the root files',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'footprint-tenant-'));
+ try{
+  writeFileSync(join(dir,'CLAUDE.md'),'--- AGENT IDENTITY ---\nShared identity\n');
+  writeFileSync(join(dir,'MEMORY.md'),'Root memory written before isolate mode. '.repeat(50));
+  const own=tenantDir(dir,'telegram','111');mkdirSync(own,{recursive:true});
+  writeFileSync(join(own,'MEMORY.md'),'Tenant fact.');
+  const rows=contextFootprint(dir,false,{source:'telegram',chatId:'111'}).rows;
+  expect(rows.find(r=>r.name==='↳ MEMORY.md')?.tokens).toBe(referenceTokens('Tenant fact.'));
+  expect(rows.find(r=>r.name==='MEMORY.md · source file')?.tokens).toBe(referenceTokens('Tenant fact.'));
+  expect(rows.find(r=>r.name==='MEMORY.md · source file')?.note).toContain(join('tenants',basename(own)));
+  // Without isolate mode the root file is the source and no tenant section exists.
+  const single=contextFootprint(dir).rows;
+  expect(single.find(r=>r.name==='↳ MEMORY.md')).toBeUndefined();
+  expect(single.find(r=>r.name==='MEMORY.md · source file')?.tokens).toBe(referenceTokens('Root memory written before isolate mode. '.repeat(50)));
+ }finally{rmSync(dir,{recursive:true,force:true});}
 });
