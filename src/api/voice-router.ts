@@ -137,9 +137,10 @@ export class VoiceApi {
   }
   /** Reserve the conversation's voice lease and issue a single-use, origin-bound
    * ticket. Callers authenticate the principal and resolve the session first.
-   * `replaces` names this caller's previous voice session: if only its unused
-   * ticket holds the lease (the page closed before connecting), that ticket is
-   * revoked instead of blocking the caller until it expires. */
+   * `replaces` names this caller's previous voice session: if its unused ticket
+   * holds the lease (the page closed before connecting), that ticket is revoked;
+   * if its socket does (the network changed and the server has not seen the old
+   * socket die), that socket is closed. Either way the caller is not blocked. */
   async mintTicket(agentId: string, sessionId: string, scope: VoiceScope, origin: string | undefined, allowTools: boolean, replaces?: string): Promise<VoiceTicketResult> {
     const config = this.configs.get(agentId), runner = this.agents.get(agentId);
     if (!config || !runner) return { status: 403, body: { error: 'Access denied' } };
@@ -156,7 +157,7 @@ export class VoiceApi {
     }
     this.prune();
     const leaseKey = `${agentId}:${sessionId}`;
-    if (replaces && this.leases.get(leaseKey) === replaces) this.revokeUnusedTicket(replaces);
+    if (replaces && this.leases.get(leaseKey) === replaces) { this.revokeUnusedTicket(replaces); this.replaceSession(replaces, scope.principalId); }
     if (this.leases.has(leaseKey)) return { status: 409, body: { error: 'Voice session already active' } };
     if (this.leases.size >= 100) return { status: 503, body: { error: 'Voice capacity exceeded' } };
     const ticket = randomBytes(32).toString('hex'), voiceSessionId = randomUUID();
@@ -369,6 +370,15 @@ export class VoiceApi {
   /** A connected session has no ticket left, so this never ends a live call. */
   private revokeUnusedTicket(voiceSessionId: string): void {
     for (const [token, ticket] of this.tickets) if (ticket.voiceSessionId === voiceSessionId) { this.tickets.delete(token); this.releaseLease(ticket); }
+  }
+  /** The same caller reconnected: the old socket stops speaking for the conversation now, not
+   * when its heartbeat notices a dead network. A page still holding it sees 4001 and does not rejoin. */
+  private replaceSession(voiceSessionId: string, principalId: string): void {
+    const active = this.sessions.get(voiceSessionId);
+    if (!active || active.ticket.scope.principalId !== principalId) return;
+    this.sessions.delete(voiceSessionId); this.releaseLease(active.ticket);
+    active.socket.close(4001, 'Replaced by a reconnect');
+    void active.session.close().catch(() => {});
   }
   private prune(): void {
     for (const [key, ticket] of this.tickets) if (ticket.expiresAt < Date.now()) { this.tickets.delete(key); this.releaseLease(ticket); }

@@ -120,7 +120,7 @@ test('the /call ticket route proves the Telegram user, the pairing owner and the
   } finally { await f.close(); }
 });
 
-test('a connected call keeps its lease: its own token cannot take it over, and the replaced ticket no longer opens', async () => {
+test('a connected call is taken over by its own token: the held socket closes and the new one opens; the replaced ticket no longer opens', async () => {
   const f = fixture();
   f.server.listen(0, '127.0.0.1'); await once(f.server, 'listening');
   const port = (f.server.address() as { port: number }).port;
@@ -137,10 +137,16 @@ test('a connected call keeps its lease: its own token cannot take it over, and t
     expect(fresh.status).toBe(200);
     expect(await connect(stale.body)).toContain('403');
     expect(await connect(fresh.body)).toBe('open');
-    const busy = await ticket({ initData: initData(42), call_token: stale.body.call_token });
-    expect(busy.status).toBe(409);
-    expect(busy.body).toMatchObject({ error: 'Voice session already active' });
-    expect(sockets[1].readyState).toBe(WebSocket.OPEN);
+    // The network changed: the server still holds the old socket when the page asks again.
+    const held = sockets[1], closed = new Promise<number>(resolve => held.once('close', code => resolve(code)));
+    const rejoined = await ticket({ initData: initData(42), call_token: stale.body.call_token });
+    expect(rejoined.status).toBe(200);
+    expect(rejoined.body.voice_session_id).not.toBe(fresh.body.voice_session_id);
+    expect(await closed).toBe(4001);
+    expect(await connect(rejoined.body)).toBe('open');
+    expect(f.api.liveSessionIds()).toEqual(new Set([rejoined.body.voice_session_id]));
+    // Without the call token it is still someone else's call.
+    expect((await ticket({ initData: initData(42) })).body).toMatchObject({ code: 'CALL_LINK_USED' });
   } finally { sockets.forEach(ws => ws.terminate()); await f.close(); }
 });
 

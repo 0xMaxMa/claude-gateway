@@ -43,6 +43,26 @@ test('a call nobody rejoins ends at its last disconnect once the grace period pa
   expect(pairings.elapsed(pairingId, 2_005_000)).toBe(5_000);
 });
 
+test('a reconnect that replaces a still-connected socket, then never connects, still ends the call', () => {
+  const { pairings, pairingId, ended } = call();
+  pairings.connected('voice-1', ended, 1_000_000);
+  // The old socket is still held when the page asks for a new ticket; its close is never seen for this call.
+  pairings.attach(pairingId, 'voice-2', 1_030_000);
+  jest.advanceTimersByTime(CALL_END_GRACE_MS);
+  expect(ended.mock.calls).toEqual([[30_000]]);
+});
+
+test('a replacing socket that connects keeps the call going', () => {
+  const { pairings, pairingId, ended } = call();
+  pairings.connected('voice-1', ended, 1_000_000);
+  pairings.attach(pairingId, 'voice-2', 1_030_000);
+  pairings.connected('voice-2', ended, 1_031_000);
+  jest.advanceTimersByTime(CALL_END_GRACE_MS * 2);
+  expect(ended).not.toHaveBeenCalled();
+  pairings.disconnected('voice-2', true, 1_100_000);
+  expect(ended.mock.calls).toEqual([[100_000]]);
+});
+
 test('a call that never connected reports nothing', () => {
   const { pairings, pairingId, ended } = call();
   pairings.disconnected('voice-1', true);

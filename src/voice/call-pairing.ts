@@ -73,10 +73,14 @@ export class VoiceCallPairings {
     return { callToken: pairing.callToken };
   }
 
-  /** Record the voice session a ticket opened for this call. */
-  attach(pairingId: string, voiceSessionId: string): void {
+  /** Record the voice session a ticket opened for this call. A ticket that replaced a
+   * still-connected socket counts as its disconnect: that socket's close is no longer
+   * this call's, so without it a page closed before the new socket connects never ends. */
+  attach(pairingId: string, voiceSessionId: string, now = Date.now()): void {
     const pairing = this.get(pairingId);
-    if (pairing) pairing.voiceSessionId = voiceSessionId;
+    if (!pairing) return;
+    if (pairing.voiceSessionId && pairing.voiceSessionId !== voiceSessionId) this.disconnected(pairing.voiceSessionId, false, now);
+    pairing.voiceSessionId = voiceSessionId;
   }
 
   /** A socket of this call started listening. The first one starts the call; `ended`
