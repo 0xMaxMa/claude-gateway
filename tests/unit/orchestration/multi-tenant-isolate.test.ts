@@ -7,6 +7,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, readdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { request } from 'http';
 import { SessionProcess } from '../../../src/session/process';
 import { OrchestrationStore } from '../../../src/orchestration/store';
 import { DecisionService } from '../../../src/orchestration/decisions';
@@ -117,6 +118,33 @@ describe('Agent overlay', () => {
   });
 });
 
+describe('cron tools', () => {
+  it("are refused at the bridge, not only hidden from the worker's tool list", async () => {
+    const call = async (multiTenant: boolean) => {
+      const cronCall = jest.fn(async () => ({ jobs: [] }));
+      const bridge = new TaskBridge(tasks, new TaskFiles(store, root, undefined, workspace), undefined, undefined, undefined, cronCall);
+      bridge.multiTenant = () => multiTenant;
+      await bridge.start();
+      try {
+        const { attempt } = spawnTask(`cron-${multiTenant}`);
+        bridge.issue({ role: 'worker', attemptId: attempt.attemptId, generation: attempt.generation }, join(root, `cron-ticket-${multiTenant}`), workspace);
+        const auth = JSON.parse(readFileSync(join(root, `cron-ticket-${multiTenant}`, 'ticket.json'), 'utf8'));
+        // The same request a worker could make with curl and its ticket, bypassing the MCP tool list.
+        const body = await new Promise<unknown>((resolve, reject) => {
+          const req = request(auth.url, { method: 'POST', headers: { Authorization: `Bearer ${auth.token}` } }, res => {
+            let text = ''; res.on('data', chunk => text += chunk); res.on('end', () => resolve(JSON.parse(text)));
+          });
+          req.on('error', reject); req.end(JSON.stringify({ tool: 'cron_list', args: {}, action_id: 'cron' }));
+        });
+        const env = JSON.parse(readFileSync(join(root, `cron-ticket-${multiTenant}`, 'mcp.json'), 'utf8')).mcpServers.gateway.env;
+        return { body, called: cronCall.mock.calls.length, advertised: env.GATEWAY_ORCHESTRATION_CRON };
+      } finally { await bridge.close(); }
+    };
+    expect(await call(true)).toEqual({ body: { error: 'TOOL_DENIED' }, called: 0, advertised: '' });
+    expect(await call(false)).toEqual({ body: { jobs: [] }, called: 1, advertised: 'true' });
+  });
+});
+
 describe('task_memory_append', () => {
   it("writes to the conversation's tenant files, never the shared root", () => {
     const files = new TaskFiles(store, root, undefined, workspace);
@@ -147,5 +175,15 @@ describe('task_memory_append', () => {
     expect(() => files.remember(attempt.attemptId, attempt.generation, 'remember', { path: 'MEMORY.md', note: 'x' })).toThrow('MEMORY_PATH_DENIED');
     // The refused write leaves nothing behind outside the workspace.
     expect(readdirSync(outside)).toEqual([]);
+  });
+
+  it('refuses a tenant directory that is a dangling symlink with MEMORY_PATH_DENIED', () => {
+    const files = new TaskFiles(store, root, undefined, workspace);
+    files.multiTenant = () => true;
+    rmSync(tenantDir(workspace, 'telegram', '111'), { recursive: true });
+    symlinkSync(join(root, 'deleted'), tenantDir(workspace, 'telegram', '111'));
+    const { attempt } = spawnTask('111', true);
+    tasks.started(attempt.attemptId, attempt.generation);
+    expect(() => files.remember(attempt.attemptId, attempt.generation, 'remember', { path: 'MEMORY.md', note: 'x' })).toThrow('MEMORY_PATH_DENIED');
   });
 });

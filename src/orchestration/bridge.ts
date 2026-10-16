@@ -392,7 +392,8 @@ export class TaskBridge {
               }
             }
           }
-          else if (CRON_TOOLS.some(tool => tool.name === command.tool) && this.files && this.cronCall) {
+          // Isolate mode (#601) refuses agent-wide jobs here too: a worker holding its ticket can call the bridge without the MCP tool list.
+          else if (CRON_TOOLS.some(tool => tool.name === command.tool) && this.files && this.cronCall && !this.multiTenant()) {
             this.files.scope(scope.attemptId, scope.generation);
             const cancelled = this.cancellations.get(token!);
             if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
@@ -450,7 +451,7 @@ export class TaskBridge {
       GATEWAY_SESSION_ID: worker?.task.agentSessionId ?? '', GATEWAY_SESSION_MEDIA_DIR: worker?.mediaDir ?? '',
       GATEWAY_ORCHESTRATION_MEDIA: worker ? 'true' : '',
       GATEWAY_LAZY_TOOLS: worker ? 'true' : '',
-      GATEWAY_ORCHESTRATION_CRON: worker && this.cronCall ? 'true' : '',
+      GATEWAY_ORCHESTRATION_CRON: worker && this.cronCall && !this.multiTenant() ? 'true' : '',
       GATEWAY_SUBAGENTS: scope.role === 'worker' && scope.subagents ? 'true' : '',
       GATEWAY_READONLY_TASK: scope.role === 'worker' && scope.readonly ? 'true' : '',
       GETPOD_BROWSER_URL: worker ? process.env.GETPOD_BROWSER_URL ?? 'http://127.0.0.1:10880' : '',
