@@ -15,7 +15,7 @@ import {
 let workspace: string;
 
 beforeEach(() => {
-  workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-ws-'));
+  workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'iso-ws-'));
   fs.writeFileSync(path.join(workspace, 'AGENTS.md'), '# Agent: shared-bot\nShared operator instructions.');
   fs.writeFileSync(path.join(workspace, 'SOUL.md'), 'Warm and concise tone.');
   // Written before isolate mode was enabled: a mix of every sender's data.

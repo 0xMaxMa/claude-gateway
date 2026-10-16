@@ -72,7 +72,7 @@ function mcpEnv(args: string[]): Record<string, string> {
 }
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-mt-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-iso-'));
   workspace = path.join(tmpDir, 'agent', 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
   fs.writeFileSync(path.join(workspace, 'CLAUDE.md'), 'SHARED-CONTEXT');

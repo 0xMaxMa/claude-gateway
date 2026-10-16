@@ -23,7 +23,7 @@ import { AgentConfig, GatewayConfig } from '../../../src/types';
 let root: string, workspace: string, store: OrchestrationStore, tasks: TaskService;
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'orch-mt-'));
+  root = mkdtempSync(join(tmpdir(), 'orch-iso-'));
   workspace = join(root, 'agent', 'workspace');
   mkdirSync(workspace, { recursive: true });
   writeFileSync(join(workspace, 'CLAUDE.md'), 'SHARED-CONTEXT');
