@@ -106,6 +106,22 @@ describe('channel sessions', () => {
     expect(args).not.toContain('--append-system-prompt-file');
     expect(mcpEnv(args).GATEWAY_MULTI_TENANT_ISOLATE).toBe('');
   });
+  it("a stop still waiting on the old process keeps the new spawn's tenant context", async () => {
+    const spawnMock = require('child_process').spawn as jest.Mock;
+    // allow_tools:false API sessions write no MCP config, so only the tenant file claims .sessions/<id>.
+    const sp = new SessionProcess('api-race', 'api', agent({ enabled: true }), gateway, store);
+    const first = await start(sp);
+    const old = spawnMock.mock.results[0].value;
+    old.kill.mockImplementation(() => true); // exits only when the test says so
+    const stopping = sp.stop();
+    await new Promise(resolve => setImmediate(resolve));
+    const second = await start(sp);
+    const file = second.args[second.args.indexOf('--append-system-prompt-file') + 1];
+    old.emit('exit', 0, 'SIGTERM');
+    await stopping;
+    expect(first.args).toContain('--append-system-prompt-file');
+    expect(fs.existsSync(file)).toBe(true);
+  });
 });
 
 describe('orchestration agent sessions', () => {

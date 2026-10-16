@@ -767,7 +767,9 @@ export class SessionProcess extends EventEmitter {
     return file;
   }
 
-  /** `.sessions/<id>` (0700) for this session's generated spawn files. */
+  /** `.sessions/<id>` (0700) for this session's generated spawn files. Recording
+   * it as this spawn's directory keeps a stop() of an earlier spawn from removing
+   * it at that spawn's exit. */
   private ensureSessionDir(): string {
     const sessionsRoot = path.join(this.agentConfig.workspace, '.sessions');
     const sessionDir = path.join(sessionsRoot, this.sessionId);
@@ -778,6 +780,7 @@ export class SessionProcess extends EventEmitter {
       throw new Error('invalid session id');
     }
     fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+    this.sessionDirPath = sessionDir;
     return sessionDir;
   }
 
@@ -802,7 +805,6 @@ export class SessionProcess extends EventEmitter {
 
     const stateDir = path.join(this.agentConfig.workspace, '.telegram-state');
     const sessionDir = this.ensureSessionDir();
-    this.sessionDirPath = sessionDir;
 
     const mcpServerPath = path.resolve(__dirname, '..', '..', 'mcp', 'server.ts');
 
