@@ -221,7 +221,7 @@ the refused `POST /v1/shares`.
 **The agent of a project chat.** The attachment tool (`api_reply`), `share_file` and the image tools call the share,
 catalog, artifact and attachment routes with the API key the gateway hands the agent: the first key in `gateway.api.keys`
 that reaches it. These routes apply the same admin key rule, so the agent must hold an admin key to attach or share media
-in a project chat, as it does on a provisioned pod. With a key that is not an admin key, those tool calls in a project
+in a project chat, as it does on a provisioned pod. The same holds for the orchestration workers of that agent, which use the same key. With a key that is not an admin key, those tool calls in a project
 chat answer `403 forbidden_key`; a plain chat is not affected. A share URL is not private: anyone who holds it can open it.
 
 **When the chat is deleted.** Deleting a project chat removes its whole media folder (`media/api-<sessionId>/`), not only
