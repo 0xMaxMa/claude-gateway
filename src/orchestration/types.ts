@@ -127,8 +127,9 @@ export interface TaskSnapshot {
   /** Automatic resumes after gateway restarts interrupted this task (#603). `count` is per revision;
    * `pending` lasts until the resumed attempt starts; `lastProgress` is the last worker progress. */
   restartResume?: { count: number; revision: number; pending: boolean; lastProgress?: string };
-  /** Set by restart recovery on a task whose worker may have outlived the previous gateway. */
-  restartRecovery?: true;
+  /** Set on a running task whose worker may have outlived the previous gateway; the scheduler
+   * stops that worker, then resumes the task. Keeps the last worker progress for the brief. */
+  restartRecovery?: { lastProgress?: string };
   capabilities: ExecutionCapabilities;
   createdAt: number;
   updatedAt: number;

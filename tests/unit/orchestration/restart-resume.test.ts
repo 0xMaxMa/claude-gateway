@@ -191,6 +191,42 @@ describe('a worker that outlived a crashed or killed gateway', () => {
     expect(notifications(task.taskId)).toBe(0);
     await s.close();
   });
+  test('carries the last worker progress into the resumed brief', async () => {
+    const task = spawn(), attempt = tasks.claim(task.taskId)!;
+    tasks.started(attempt.attemptId, attempt.generation);
+    tasks.progress(attempt.attemptId, attempt.generation, 'Branch pushed; waiting for CI.');
+    recoverOrchestration(store);
+    const { scheduler: s } = scheduler(true);
+    await s.tick(); await settle();
+    expect(store.task(task.taskId)!.restartResume?.lastProgress).toBe('Branch pushed; waiting for CI.');
+    await s.close();
+  });
+  test('is cleaned up but not resumed when the user had stopped the task or it awaited an answer', async () => {
+    const stoppedTask = spawn('stopped'), stoppedAttempt = tasks.claim(stoppedTask.taskId)!;
+    tasks.started(stoppedAttempt.attemptId, stoppedAttempt.generation);
+    tasks.cancelByUser(context.conversationId, 'u', stoppedTask.taskId);
+    const asking = spawn('asking'), askingAttempt = tasks.claim(asking.taskId)!;
+    tasks.started(askingAttempt.attemptId, askingAttempt.generation);
+    tasks.requestInput(askingAttempt.attemptId, askingAttempt.generation, 'Which registry?');
+    recoverOrchestration(store);
+    expect(store.task(stoppedTask.taskId)!.restartRecovery).toBeUndefined();
+    expect(store.task(asking.taskId)!.restartRecovery).toBeUndefined();
+    const { scheduler: s, starts } = scheduler(true);
+    await s.tick(); await settle();
+    expect(starts).toEqual([]);
+    expect(store.task(stoppedTask.taskId)!.restartResume).toBeUndefined();
+    expect(store.task(asking.taskId)!.restartResume).toBeUndefined();
+    await s.close();
+  });
+  test('a task the user stops while it awaits recovery is never resumed', async () => {
+    const task = crash();
+    expect(tasks.cancelByUser(context.conversationId, 'u', task.taskId).state).toBe('cancel_requested');
+    const { scheduler: s, starts } = scheduler(true);
+    await s.tick(); await settle();
+    expect(store.task(task.taskId)!.state).toBe('cancelled');
+    expect(starts).toEqual([]);
+    await s.close();
+  });
   test('stays in reconciliation and reports the blocker when it cannot be proven stopped', async () => {
     const task = crash();
     const { scheduler: s, starts } = scheduler(false);
@@ -202,4 +238,21 @@ describe('a worker that outlived a crashed or killed gateway', () => {
     expect(notifications(task.taskId)).toBe(1);
     await s.close();
   });
+});
+
+test('a graceful shutdown that cannot confirm the worker stopped resumes after the next gateway stops it', async () => {
+  const task = spawn();
+  const attempt = tasks.claim(task.taskId)!;
+  tasks.started(attempt.attemptId, attempt.generation);
+  const after = tasks.finish(attempt.attemptId, attempt.generation, { type: 'unknown', failure: shutdownFailure() });
+  expect(after.state).toBe('needs_reconciliation');
+  expect(after.restartRecovery).toBeDefined();
+  expect(notifications(task.taskId)).toBe(0);
+  recoverOrchestration(store);
+  const { driver } = blockingDriver();
+  const s = new WorkerScheduler(tasks, { ...driver, cleanup: async () => true });
+  await s.tick(); await settle();
+  expect(store.task(task.taskId)!.restartResume).toMatchObject({ count: 1 });
+  expect(store.task(task.taskId)!.state).toBe('running');
+  await s.close();
 });

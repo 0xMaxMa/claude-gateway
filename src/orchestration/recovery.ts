@@ -1,6 +1,6 @@
 import { OrchestrationStore } from './store';
 import { TaskSnapshot, TaskAttempt } from './types';
-import { restartResumable } from './restart-resume';
+import { markRestartRecovery } from './restart-resume';
 
 /** Invoke under the gateway instance lock before accepting new work. Unknown
  * side effects are deliberately retained for operator/process reconciliation. */
@@ -22,9 +22,9 @@ export function recoverOrchestration(store: OrchestrationStore): { inputs: numbe
       if (task.state === 'needs_reconciliation' || task.gatewayTarget) continue;
       const attempt = store.attempt(task.activeAttemptId!) as TaskAttempt;
       uncertainTasks++;
-      attempt.state = 'unknown'; task.state = 'needs_reconciliation';
       // The scheduler stops a surviving worker, then resumes the task like a graceful shutdown (#603).
-      if (restartResumable(task)) task.restartRecovery = true;
+      markRestartRecovery(task);
+      attempt.state = 'unknown'; task.state = 'needs_reconciliation';
       task.latestProgress = { source: 'runtime', observedAt: now, text: 'Gateway restarted; process liveness and side effects require reconciliation.' };
       store.saveAttempt(attempt); store.saveTask(task, task.stateVersion);
     }

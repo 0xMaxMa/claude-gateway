@@ -59,7 +59,7 @@ test('a gateway restart resumes the interrupted task by itself and no report ask
     expect(starts).toEqual([taskId, taskId]);
     // The only report is the completion; no turn reported the shutdown as a failure to act on.
     expect(runtime.store.get("SELECT COUNT(*) n FROM notifications WHERE task_id=?", taskId)!.n).toBe(1);
-    expect(reports[0]).toContain('Never ask the user whether to continue work they already authorized');
+    expect(reports[0]).toContain('For work interrupted by a gateway restart, never ask the user whether to continue it');
     expect(reports[0]).toContain('never tell them to type "continue"');
   } finally { await runtime?.close(); (history as any).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true }); }
 });

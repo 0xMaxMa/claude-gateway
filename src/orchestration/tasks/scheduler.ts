@@ -57,38 +57,12 @@ export class WorkerScheduler {
         const task = this.tasks.store.task(taskId);
         if (task && ['cancel_requested', 'interrupting'].includes(task.state)) void handle.stop().catch(this.reportError);
       }
-      for (const row of this.tasks.store.all("SELECT id FROM tasks WHERE state='cancel_requested'")) {
-        const taskId = String(row.id);
-        if (this.active.has(taskId) || this.starting.has(taskId)) continue;
-        const task = this.tasks.store.task(taskId)!;
-        if (task.gatewayTarget) continue;
-        const attempt = task.activeAttemptId ? this.tasks.store.attempt(task.activeAttemptId) : undefined;
-        if (!attempt) continue;
-        let stopped = false;
-        try { stopped = await this.driver.cleanup?.(attempt) ?? false; } catch (error) { this.reportError(error); }
-        const current = this.tasks.store.task(taskId);
-        if (current?.state !== 'cancel_requested' || current.activeAttemptId !== attempt.attemptId) continue;
-        this.tasks.finishCleanup(attempt.attemptId, attempt.generation, stopped);
-        if (stopped) {
-          this.uncertainReservations.get(taskId)?.(); this.uncertainReservations.delete(taskId);
-          await this.driver.release?.(taskId).catch(this.reportError);
-        }
-      }
-      for (const row of this.tasks.store.all("SELECT id FROM tasks WHERE state='needs_reconciliation' AND json_extract(snapshot_json,'$.restartRecovery')=1")) {
-        const taskId = String(row.id);
-        if (this.closed || this.active.has(taskId) || this.starting.has(taskId)) continue;
-        const attempt = this.tasks.store.attempt(this.tasks.store.task(taskId)!.activeAttemptId!);
-        if (!attempt) continue;
-        let stopped = false;
-        try { stopped = await this.driver.cleanup?.(attempt) ?? false; } catch (error) { this.reportError(error); }
-        const current = this.tasks.store.task(taskId);
-        if (current?.state !== 'needs_reconciliation' || !current.restartRecovery || current.activeAttemptId !== attempt.attemptId) continue;
-        this.tasks.resolveRestartRecovery(attempt.attemptId, attempt.generation, stopped);
-        if (stopped) {
-          this.uncertainReservations.get(taskId)?.(); this.uncertainReservations.delete(taskId);
-          await this.driver.release?.(taskId).catch(this.reportError);
-        }
-      }
+      await this.stopStranded("state='cancel_requested'", task => task.state === 'cancel_requested',
+        (attempt, stopped) => this.tasks.finishCleanup(attempt.attemptId, attempt.generation, stopped));
+      // A worker that may have outlived the previous gateway is stopped before its task resumes (#603).
+      if (!this.closed) await this.stopStranded("state='needs_reconciliation' AND json_type(snapshot_json,'$.restartRecovery')='object'",
+        task => task.state === 'needs_reconciliation' && Boolean(task.restartRecovery),
+        (attempt, stopped) => this.tasks.resolveRestartRecovery(attempt.attemptId, attempt.generation, stopped));
       if (this.closed) return;
       const ceiling = Number(this.tasks.store.get('SELECT COALESCE(MAX(rowid),0) n FROM tasks')!.n);
       let cursor: {createdAt: number; id: string} | undefined;
@@ -137,6 +111,26 @@ export class WorkerScheduler {
         }
       }
     } finally { this.ticking = false; }
+  }
+  /** Stop persisted worker processes no run handle owns, then settle each task that still matches. */
+  private async stopStranded(where: string, matches: (task: TaskSnapshot) => boolean, settle: (attempt: TaskAttempt, stopped: boolean) => void): Promise<void> {
+    for (const row of this.tasks.store.all(`SELECT id FROM tasks WHERE ${where}`)) {
+      const taskId = String(row.id);
+      if (this.active.has(taskId) || this.starting.has(taskId)) continue;
+      const task = this.tasks.store.task(taskId)!;
+      if (task.gatewayTarget) continue;
+      const attempt = task.activeAttemptId ? this.tasks.store.attempt(task.activeAttemptId) : undefined;
+      if (!attempt) continue;
+      let stopped = false;
+      try { stopped = await this.driver.cleanup?.(attempt) ?? false; } catch (error) { this.reportError(error); }
+      const current = this.tasks.store.task(taskId);
+      if (!current || !matches(current) || current.activeAttemptId !== attempt.attemptId) continue;
+      settle(attempt, stopped);
+      if (stopped) {
+        this.uncertainReservations.get(taskId)?.(); this.uncertainReservations.delete(taskId);
+        await this.driver.release?.(taskId).catch(this.reportError);
+      }
+    }
   }
   private async run(taskId: string, attempt: TaskAttempt, release?: () => void, permit?: ProviderPermit): Promise<void> {
     let handle: WorkerHandle | undefined;

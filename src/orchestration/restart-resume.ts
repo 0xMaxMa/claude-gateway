@@ -8,6 +8,13 @@ export function restartResumable(task: Pick<TaskSnapshot, 'gatewayTarget' | 'par
   return !task.gatewayTarget && !task.parentTaskId;
 }
 
+/** Mark a running task whose worker may outlive this gateway. A stop, a cancellation or a pending
+ * question keeps its own handling; only work that was executing resumes. */
+export function markRestartRecovery(task: TaskSnapshot): void {
+  if (!restartResumable(task) || !['starting', 'running'].includes(task.state) || task.cancellation || task.pendingQuestion) return;
+  task.restartRecovery = task.latestProgress?.source === 'worker' ? { lastProgress: task.latestProgress.text } : {};
+}
+
 /** Worker brief for an attempt that resumes a task interrupted by a gateway shutdown. */
 export function restartResumeBrief(resumes: number, lastProgress?: string): string {
   return `Resumed after a gateway restart (automatic resume ${resumes} of ${MAX_RESTART_RESUMES}). A gateway shutdown interrupted the previous attempt of this same task. The user's authorization for this task still stands; continue it now without asking whether to continue. ` +
@@ -18,6 +25,6 @@ export function restartResumeBrief(resumes: number, lastProgress?: string): stri
 }
 
 /** Report-turn rule: work interrupted by a restart is resumed by the gateway, never by asking the user. */
-export const INTERRUPTED_WORK_REPORT_RULE = 'Never ask the user whether to continue work they already authorized, and never tell them to type "continue" (or "ต่อ") so that work resumes. ' +
+export const INTERRUPTED_WORK_REPORT_RULE = 'For work interrupted by a gateway restart, never ask the user whether to continue it and never tell them to type "continue" (or "ต่อ") so that it resumes; the user already authorized it. ' +
   'A task the gateway re-queued after a restart (state queued with restartResume.pending) resumes automatically; report it as resuming. Do not claim that any other task resumes. ' +
   'For a task that ended with GATEWAY_SHUTDOWN_REPEATED or CLEANUP_UNCONFIRMED, report the verified progress and that concrete blocker.';
