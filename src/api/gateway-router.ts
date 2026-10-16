@@ -1342,6 +1342,12 @@ export class GatewayRouter {
           res.status(404).json({ error: 'Unknown agent' });
           return;
         }
+        // Isolate mode (#601): the root MEMORY.md/USER.md are no longer composed, and a
+        // promotion would copy what several conversations said into the shared KB.
+        if (this.configs.get(agentId)?.isolateMemory) {
+          res.status(409).json({ error: 'Dreaming proposals cannot be applied to an agent in isolated memory mode' });
+          return;
+        }
         if (!Number.isFinite(ts)) {
           res.status(400).json({ error: 'ts must be a finite number' });
           return;
