@@ -19,6 +19,7 @@ import { PCM16 } from '../voice/types';
 
 import type { VoiceScope } from '../voice/scope';
 import { voiceCallPairings } from '../voice/call-pairing';
+import { fastAcknowledgement } from '../voice/fast-ack';
 
 interface VoiceTicket {
   agentId: string; sessionId: string; scope: VoiceScope;
@@ -244,7 +245,14 @@ export class VoiceApi {
             catch(error){release(target);throw error;}
             return accepted;
           },
-          () => runner.stopVoiceResponse(ticket.sessionId), { ...voice.turns, maxBufferedAudioMs: voice.playback.maxBufferedAudioMs, language: voice.language },
+          () => runner.stopVoiceResponse(ticket.sessionId), { ...voice.turns, maxBufferedAudioMs: voice.playback.maxBufferedAudioMs, language: voice.language,
+            ...(voice.live.fastAck ? { fastAckAfterMs: voice.live.fastAckAfterMs, acknowledge: async (transcript: string, signal: AbortSignal) => {
+              const ack = await fastAcknowledgement(transcript, { model: voice.live.fastAckModel, timeoutMs: voice.live.fastAckTimeoutMs, gender: selectedGender, signal });
+              // Token counts and timing only: never the transcript or the acknowledgement text.
+              console.info(JSON.stringify({ ts: new Date().toISOString(), level: 'info', event: 'Voice fast ack', agentId: ticket.agentId, sessionId: ticket.sessionId, voiceSessionId: ticket.voiceSessionId,
+                model: voice.live.fastAckModel, outcome: ack.outcome, code: ack.code, elapsedMs: ack.elapsedMs, inputTokens: ack.inputTokens, outputTokens: ack.outputTokens }));
+              return ack.text;
+            } } : {}) },
           (responseId, progress, state) => runner.recordVoicePlayback(responseId, ticket.scope.principalId, progress, state),
           (responseId, audio) => runner.saveVoiceReplay(ticket.sessionId, ticket.scope.principalId, responseId, audio),
           event => console.info(JSON.stringify({ ts: new Date().toISOString(), level: 'info', event: 'Voice timing', agentId: ticket.agentId, sessionId: ticket.sessionId, voiceSessionId: ticket.voiceSessionId, ...event, ...(event.operation === 'turn' ? {} : { provider: voice[event.operation].provider, model: voice[event.operation].model }) })));

@@ -15,7 +15,10 @@ export interface VoiceClient {
 }
 /** The `turn` trace of one utterance; its ids fill in as the turn is admitted and answered. */
 type TurnTrace = { ids: VoiceTraceIds & { utteranceId: string }; trace: ReturnType<typeof voiceTrace> };
-export interface VoiceSessionOptions { silenceCommitMs: number; finalizationTimeoutMs: number; maxUtteranceMs: number; maxBufferedAudioMs: number; language?: string; mergeWindowMs?: number; }
+export interface VoiceSessionOptions { silenceCommitMs: number; finalizationTimeoutMs: number; maxUtteranceMs: number; maxBufferedAudioMs: number; language?: string; mergeWindowMs?: number;
+  /** A short spoken acknowledgement of the caller's words, played when the reply has not started speaking
+   * within fastAckAfterMs of admission. Undefined when no acknowledgement fits. */
+  acknowledge?: (transcript: string, signal: AbortSignal) => Promise<string | undefined>; fastAckAfterMs?: number; }
 export class VoiceSession {
   readonly playback = new VoicePlayback();
   private readonly controller = new AbortController();
@@ -192,7 +195,9 @@ export class VoiceSession {
     turn.ids.inputId = accepted.inputId; turn.trace.emit('turn_admitted');
     this.client.control({ type: 'utterance.accepted', utterance_id: utteranceId, input_id: accepted.inputId });
     const epoch = this.interruption;
-    const streaming = accepted.stream ? this.speakStream(accepted.stream, epoch, accepted.response, turn) : undefined;
+    const ack = this.fastAck(text, epoch, turn);
+    void accepted.response.finally(ack.cancel).catch(() => {});
+    const streaming = accepted.stream ? this.speakStream(accepted.stream, epoch, accepted.response, turn, ack.cancel) : undefined;
     const response = accepted.response.then(async answer => {
       if (this.closed || epoch !== this.interruption) return;
       if (streaming) { this.client.control({ type: 'response.text', input_id: accepted.inputId, response_id: accepted.responseId?.(), text: answer, final: true }); await streaming; }
@@ -206,9 +211,10 @@ export class VoiceSession {
     void streaming?.catch(() => {}); // response chain reports the original failure once
     this.responses.add(response); void response.finally(() => this.responses.delete(response));
   }
-  private async speakStream(stream: AsyncIterable<{ responseId: string; text: string }>, epoch: number, response: Promise<string>, turn: TurnTrace): Promise<void> {
+  private async speakStream(stream: AsyncIterable<{ responseId: string; text: string }>, epoch: number, response: Promise<string>, turn: TurnTrace, firstSpoken: () => void): Promise<void> {
     const iterator = stream[Symbol.asyncIterator]();
     const first = await iterator.next();
+    firstSpoken();
     if (this.closed) return;
     if (first.done) { await response; if (!this.closed && epoch === this.interruption) this.speechUnavailable(); return; }
     turn.ids.responseId = first.value.responseId; turn.trace.emit('agent_first_spoken');
@@ -225,6 +231,26 @@ export class VoiceSession {
     }
     try { await this.enqueueSpeech(source(), first.value.responseId, epoch, turn); }
     finally { await iterator.return?.(); }
+  }
+  /** Starts the acknowledgement call with the turn. It is spoken only if the reply has not begun
+   * speaking `fastAckAfterMs` after admission, and never after barge-in or the reply's own speech.
+   * It is audio only: no response text, chat message or history entry. */
+  private fastAck(text: string, interruption: number, turn: TurnTrace): { cancel: () => void } {
+    const acknowledge = this.options.acknowledge;
+    if (!acknowledge) return { cancel: () => {} };
+    const controller = new AbortController(), due = Date.now() + (this.options.fastAckAfterMs ?? 0);
+    let settled = false;
+    const cancel = () => { if (!settled) { settled = true; controller.abort(); } };
+    void (async () => {
+      const reply = await acknowledge(text, controller.signal).catch(() => undefined);
+      if (!settled && reply) await new Promise(resolve => setTimeout(resolve, Math.max(0, due - Date.now())));
+      if (settled || this.closed || interruption !== this.interruption) return;
+      settled = true;
+      if (!reply) { turn.trace.emit('fast_ack_skipped'); return; }
+      turn.trace.emit('fast_ack_sent');
+      void this.enqueueSpeech((async function* () { yield reply; })(), undefined, interruption, turn);
+    })();
+    return { cancel };
   }
   speechClaims(): string[] { return [...this.claimedSpeech]; }
   /** Only approved summaries from authenticated automatic task reports enter here. */
