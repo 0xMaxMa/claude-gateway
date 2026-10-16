@@ -57,11 +57,13 @@ export class WorkerScheduler {
         const task = this.tasks.store.task(taskId);
         if (task && ['cancel_requested', 'interrupting'].includes(task.state)) void handle.stop().catch(this.reportError);
       }
-      await this.stopStranded("state='cancel_requested'", task => task.state === 'cancel_requested',
+      // Await only when there is work: an empty pass must not delay admission below.
+      const cancelling = this.tasks.store.all("SELECT id FROM tasks WHERE state='cancel_requested'");
+      if (cancelling.length) await this.stopStranded(cancelling, task => task.state === 'cancel_requested',
         (attempt, stopped) => this.tasks.finishCleanup(attempt.attemptId, attempt.generation, stopped));
       // A worker that may have outlived the previous gateway is stopped before its task resumes (#603).
-      if (!this.closed) await this.stopStranded("state='needs_reconciliation' AND json_type(snapshot_json,'$.restartRecovery')='object'",
-        task => task.state === 'needs_reconciliation' && Boolean(task.restartRecovery),
+      const stranded = this.closed ? [] : this.tasks.store.all("SELECT id FROM tasks WHERE state='needs_reconciliation' AND json_type(snapshot_json,'$.restartRecovery')='object'");
+      if (stranded.length) await this.stopStranded(stranded, task => task.state === 'needs_reconciliation' && Boolean(task.restartRecovery),
         (attempt, stopped) => this.tasks.resolveRestartRecovery(attempt.attemptId, attempt.generation, stopped));
       if (this.closed) return;
       const ceiling = Number(this.tasks.store.get('SELECT COALESCE(MAX(rowid),0) n FROM tasks')!.n);
@@ -113,8 +115,8 @@ export class WorkerScheduler {
     } finally { this.ticking = false; }
   }
   /** Stop persisted worker processes no run handle owns, then settle each task that still matches. */
-  private async stopStranded(where: string, matches: (task: TaskSnapshot) => boolean, settle: (attempt: TaskAttempt, stopped: boolean) => void): Promise<void> {
-    for (const row of this.tasks.store.all(`SELECT id FROM tasks WHERE ${where}`)) {
+  private async stopStranded(rows: Array<Record<string, unknown>>, matches: (task: TaskSnapshot) => boolean, settle: (attempt: TaskAttempt, stopped: boolean) => void): Promise<void> {
+    for (const row of rows) {
       const taskId = String(row.id);
       if (this.active.has(taskId) || this.starting.has(taskId)) continue;
       const task = this.tasks.store.task(taskId)!;
