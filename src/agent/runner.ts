@@ -505,7 +505,8 @@ export class AgentRunner extends EventEmitter {
               await old.stop(); this.sessions.delete(key);
             }
             if (this.sessions.size >= this.maxConcurrent) throw new Error('Session pool full');
-            if (this.agentConfig.type !== 'app-agent') spawnArchiveReindex(this.agentConfig.workspace, this.agentConfig.knowledge, this.gatewayConfig.gateway.knowledge);
+            // Isolate mode (#601) offers no archive tool, so nothing would read the index.
+            if (this.agentConfig.type !== 'app-agent' && !this.agentConfig.multiTenant?.enabled) spawnArchiveReindex(this.agentConfig.workspace, this.agentConfig.knowledge, this.gatewayConfig.gateway.knowledge);
             const agentSession = new SessionProcess(sessionId, scope?.source ?? 'api', this.agentConfig, this.gatewayConfig, this.sessionStore, scope?.chatId, profile);
             agentSession.historyLimit = resolveMaxHistoryMessages(this.agentConfig.history?.maxHistoryMessages, this.gatewayConfig.gateway.history?.maxHistoryMessages);
             if (model) agentSession.modelOverride = model;
@@ -2385,7 +2386,8 @@ export class AgentRunner extends EventEmitter {
 
     // Keep the searchable memory archive (planning-64) fresh for the memory_search
     // tool. Fire-and-forget, detached, OFF the event loop — never blocks the spawn.
-    spawnArchiveReindex(
+    // Isolate mode (#601) offers no archive tool, so nothing would read the index.
+    if (!this.agentConfig.multiTenant?.enabled) spawnArchiveReindex(
       this.agentConfig.workspace,
       this.agentConfig.knowledge,
       this.gatewayConfig.gateway.knowledge,

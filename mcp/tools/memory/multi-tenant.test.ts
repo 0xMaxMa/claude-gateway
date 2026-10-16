@@ -11,6 +11,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { MemoryModule } from './module';
+import { SkillsModule } from '../skills/module';
 import { archiveDbPath } from './archive-reader';
 
 let agentDir: string;
@@ -63,4 +64,10 @@ test('without isolate mode, any session can search a note written for another se
 test('isolate mode turns the memory module off, so its tools are never registered', () => {
   process.env.GATEWAY_MULTI_TENANT_ISOLATE = '1';
   expect(new MemoryModule().isEnabled()).toBe(false);
+});
+
+test('isolate mode turns the skills module off: the skill catalog is shared by every conversation', () => {
+  expect(new SkillsModule().isEnabled()).toBe(true);
+  process.env.GATEWAY_MULTI_TENANT_ISOLATE = '1';
+  expect(new SkillsModule().isEnabled()).toBe(false);
 });
