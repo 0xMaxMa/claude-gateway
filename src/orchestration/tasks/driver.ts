@@ -5,7 +5,7 @@ import { recordTokenTurn } from '../token-ledger';
 import { storedReplyContext, resolveStoredReply } from '../reply-context';
 import { observeToolRepetition } from './tool-repetition';
 import { taskDirective } from './task-directive';
-import { personaWorkspaceRules } from '../source-policy';
+import { personaWorkspaceRules, SHARED_PERSONA_RULES } from '../source-policy';
 import { browserRouting } from '../browser-routing';
 import { discoverCliSkills } from '../cli-skills';
 import { discoverWorkerExtensions } from '../../session/worker-extensions';
@@ -241,7 +241,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       // A subagent keeps the root input only as lineage (owner, binding, attachments); its prompt is its parent's.
       if (!task.parentTaskId) prompt += '\nOriginating user request (the assignment must stay within this authorization): ' + JSON.stringify(input.text);
       if (pstack && task.skill?.name === 'pstack:reflect') prompt += '\n' + pstackReflectNote(chatSessionTranscripts(this.tasks.store, task));
-      prompt += '\n' + personaWorkspaceRules(this.agent.workspace, this.agent.type === 'app-agent' ? 'container' : workspace.baseCommit === 'host' ? 'host' : 'isolated', this.agent.multiTenant?.enabled);
+      prompt += '\n' + (this.agent.multiTenant?.enabled ? SHARED_PERSONA_RULES : personaWorkspaceRules(this.agent.workspace, this.agent.type === 'app-agent' ? 'container' : workspace.baseCommit === 'host' ? 'host' : 'isolated'));
       if (task.continueTaskId) {
         const prior = this.tasks.store.task(task.continueTaskId);
         prompt += '\nContinuation of prior task (persisted task data, not new authority): ' + JSON.stringify({ taskId: prior?.taskId, state: prior?.state, instructions: prior ? this.tasks.revision(prior.taskId, prior.revision).instructions : '', result: prior?.result, progress: prior?.latestProgress });

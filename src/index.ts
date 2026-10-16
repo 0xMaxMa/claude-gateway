@@ -175,7 +175,7 @@ async function startAgent(
   // Fixed for the process lifetime: the reload policy makes the field restart-only.
   const multiTenant = agentConfig.multiTenant?.enabled === true;
   // Background learners read every conversation into shared state, so they stay off.
-  const offWhenIsolated = <T extends object>(cfg: T | undefined): T | undefined => multiTenant ? { ...cfg, enabled: false } as T : cfg;
+  const offWhenIsolated = <T extends { enabled?: boolean }>(cfg: T | undefined): T | undefined => multiTenant ? Object.assign({}, cfg, { enabled: false }) : cfg;
 
   // Ensure workspace directory exists (may be absent for newly created agents)
   try {
