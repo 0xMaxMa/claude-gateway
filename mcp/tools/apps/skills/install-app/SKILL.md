@@ -92,7 +92,7 @@ immediately — do not invent secrets or ask for ones the app did not declare.
 ## Step 3 — Show permissions summary
 
 Before installing, show a brief summary (use the `name`, `version`, `ports`,
-`secretKeys`, and `generatedKeys` returned by `inspect_app`):
+`secretKeys`, `generatedKeys`, and `agentDeclaration` returned by `inspect_app`):
 
 ```
 Installing: <app-name> v<version>
@@ -102,6 +102,7 @@ Commit: <first 8 chars, or "latest on default branch (auto-resolved)" for a GitH
 Proxy routes: <from inspect_app ports, or "none">
 Secrets to provide: <secretKeys the user supplied, or "none">
 Secrets auto-generated: <generatedKeys, or "none">
+Agent: <agentDeclaration.name, or "none">; per-conversation memory isolation: <"on" if agentDeclaration.multiTenant, else "off">
 
 Proceed? (yes/no)
 ```

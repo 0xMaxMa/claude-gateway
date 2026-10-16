@@ -126,13 +126,33 @@ Two read-only MCP tools expose it to the agent: **`memory_search`** (keyword/FTS
 
 Implementation: [config loader](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/config/loader.ts), [configuration template](https://github.com/0xMaxMa/claude-gateway/blob/b917843/config.template.json).
 
-## `agents[].multiTenant`
+## Multi-tenant isolate mode
 
-**Multi-tenant isolate mode** for one agent that serves many unrelated senders, such as a public Telegram or LINE bot. It is off by default. Without it, `USER.md` and `MEMORY.md` hold one profile and one memory for the whole agent, so a fact written while one sender talks reaches every other sender's session.
+**Multi-tenant isolate mode** is for one agent that serves many unrelated senders, such as a public Telegram or LINE bot. Without it, `USER.md` and `MEMORY.md` hold one profile and one memory for the whole agent, so a fact written while one sender talks reaches every other sender's session.
+
+Host agents and app agents have separate switches. Both are off by default, and turning one on never turns on the other.
+
+### Host agents: `agents[].multiTenant`
+
+The operator sets this per agent in the gateway config:
 
 ```json
 { "agents": [{ "id": "shop-bot", "multiTenant": { "enabled": true } }] }
 ```
+
+### App agents: `services.agent.multi_tenant` in `app.yaml`
+
+The app declares it for its own agent in the [`app.yaml` agent service declaration](../api/apps.md):
+
+```yaml
+services:
+  agent:
+    path: ./agent
+    name: shop-bot
+    multi_tenant: true
+```
+
+At install, update and every gateway start, the gateway writes `multiTenant` into the app agent's config entry from this declaration. A release that removes the line turns the mode off again, and a hand edit of `multiTenant` on an app agent is reset the same way. `inspect_app` and `POST /api/v1/apps/inspect` report it as `agentDeclaration.multiTenant`. The agent runs in its app container, which sees the workspace at `/workspace`. The gateway composes each conversation's memory on the host and gives the agent its files as `/workspace/tenants/…` paths. Each conversation's `tenants/` directory is part of the agent workspace, which the app's update and [backup/restore](../api/apps.md) already carry.
 
 When it is on:
 
@@ -145,7 +165,7 @@ When it is on:
 - **Operator-only persona.** No conversation may change `AGENTS.md`, `SOUL.md` or `IDENTITY.md`. The agent is told to decline name or persona change requests, and orchestration workers receive no persona-edit authorization.
 - **No `--append-system-prompt-file` in `claude.extraFlags`.** Claude Code keeps only the last such flag, so it would replace the conversation's memory. The config loader refuses such an agent; use `--append-system-prompt` or move the text into `AGENTS.md`.
 
-Changing the setting requires a gateway restart. The mode isolates the memory the gateway injects and the tools it offers. It does not sandbox the file system: an agent with file tools can still open another conversation's directory. Keep untrusted senders on agents without host execution. `app-agent` containers are refused at config load, because their context is read inside the container.
+Changing the setting requires a gateway restart; for an app agent, an app update applies it. The mode isolates the memory the gateway injects and the tools it offers. It does not sandbox the file system: an agent with file tools can still open another conversation's directory. Keep untrusted senders on agents without host execution. The tenant key is the conversation (channel and chat). An app that groups several chats into one account, such as one family with several linked parents, still gets one tenant per chat.
 
 Implementation: [workspace loader](https://github.com/0xMaxMa/claude-gateway/blob/main/src/agent/workspace-loader.ts), [session spawn](https://github.com/0xMaxMa/claude-gateway/blob/main/src/session/process.ts).
 
