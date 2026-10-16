@@ -16,6 +16,11 @@ import type { AgentConfig, GatewayConfig } from '../../../src/types';
 jest.mock('../../../src/voice/providers/voice-catalog', () => ({
   resolveVoiceId: async () => 'fixture', voiceChoices: async () => [{ id: 'fixture', name: 'Default' }],
 }));
+// Voice messages synthesize offline, so the result never depends on a provider key or the network.
+jest.mock('../../../src/voice/providers/registry', () => ({
+  ...jest.requireActual('../../../src/voice/providers/registry'),
+  ttsProvider: () => ({ synthesizeFile: async () => ({ bytes: new Uint8Array([1]), mime: 'audio/mpeg', name: 'reply.mp3' }) }),
+}));
 
 const voice = { enabled: true, stt: { provider: 'elevenlabs', model: 'scribe_v2_realtime' }, tts: { provider: 'elevenlabs', model: 'eleven_v3_conversational', voiceId: 'fixture' },
   notes: { enabled: true, provider: 'elevenlabs', model: 'scribe_v2', replyWithVoice: true } };
