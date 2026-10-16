@@ -21,6 +21,8 @@ export interface GatewayTaskAdapter {
   verifyEvidence?(task:PublicTaskSnapshot,requestId:string,evidenceId:string):void;
   ready?(task: TaskSnapshot): boolean;
   validateInput?(instructions:string,answers?:import('../types').TaskRevision['answers']):void;
+  /** device_shell (prototype): one command on the approved device, outside any task. */
+  shell?(context: CommandContext, input: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
   submit(task: TaskSnapshot, requestId: string, instructions: string, answers?: import('../types').TaskRevision['answers'], requestConsent?:boolean,computerInputs?:import('../types').TaskRevision['computerInputs'],startUrl?:string): Promise<void>;
   inspect(task: TaskSnapshot, requestId: string, attempt?:TaskAttempt): Promise<WorkerOutcome | 'running' | 'pending'>;
   interrupt?(task:TaskSnapshot,requestId:string):void;

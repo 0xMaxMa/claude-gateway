@@ -302,6 +302,17 @@ export class TaskBridge {
                 if(!field&&a.field_text!==undefined)throw new OrchestrationError('INVALID_INPUT','field_text is only for a pending missing-field question.');
                 result=this.tasks.answer(context,a.task_id,a.question_id,field?a.field_text:a.answer,a.browser_fields,a.computer_inputs);break;
               }
+              case 'device_shell': {
+                this.tasks.store.assertMember(context.conversationId, context.principalId);
+                if (!context.execute) deny('READ_ONLY_TURN');
+                const adapter = this.gatewayAdapters.get('computer');
+                if (this.container || !this.computerEnabled?.() || !adapter?.shell) throw new OrchestrationError('COMPUTER_NOT_ALLOWED');
+                const cancelled = this.cancellations.get(token!);
+                if (!cancelled) deny('TICKET_INVALID_OR_REVOKED');
+                result = await this.cancelOnDisconnect(response, cancelled.signal, signal => adapter.shell!(context, a, signal));
+                if (this.scopes.get(token!) !== scope) deny('TICKET_INVALID_OR_REVOKED');
+                this.tasks.store.assertMember(context.conversationId, context.principalId); break;
+              }
               default: throw new OrchestrationError('TOOL_DENIED');
             }
             if (mutation) scope.onMutationResult?.(context.actionId, true);
@@ -440,6 +451,8 @@ export class TaskBridge {
     writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: { gateway: { command: 'bun', args: [resolve(__dirname, '../../mcp/server.ts')], env: {
       GATEWAY_JEV_ENABLED: jevEnabled ? 'true' : '',
       GATEWAY_CAPABILITY_CATALOG: scope.role === 'agent' && scope.capabilities ? 'true' : '',
+      // device_shell is declared only when Computer Use is allowed; fixed for this MCP process (cached tool prefix).
+      GATEWAY_COMPUTER_ENABLED: scope.role === 'agent' && !this.container && this.computerEnabled?.() && this.gatewayAdapters.get('computer')?.shell ? 'true' : '',
       GATEWAY_ORCHESTRATION_ROLE: scope.role, GATEWAY_ORCHESTRATION_TICKET_FILE: ticketPath,
       GATEWAY_WORKSPACE_DIR: workspace, GATEWAY_SHARED_KB_DIR: sharedKbDir,
       GATEWAY_RECORD_RETRIEVALS: this.recordRetrievals ? '1' : '',
