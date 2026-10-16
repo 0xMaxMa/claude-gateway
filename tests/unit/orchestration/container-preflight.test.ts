@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { AgentConfig } from '../../../src/types';
@@ -26,6 +26,18 @@ test('Docker preflight rejects namespaces, privilege and alternate host mounts',
  }finally{rmSync(root,{recursive:true,force:true});}
 });
 
+
+test("admits the agent's own CLI mounted read-only at its real path, as the installer mounts it",async()=>{
+ const root=mkdtempSync(join(tmpdir(),'container-guard-')),workspace=join(root,'workspace');mkdirSync(workspace);mkdirSync(join(root,'media'));
+ const claudeBin=join(root,'lib','node_modules','@anthropic-ai','claude-code','bin','claude.exe');mkdirSync(join(claudeBin,'..'),{recursive:true});writeFileSync(claudeBin,'');
+ const agent={id:'a',type:'app-agent',container:'app-agent',workspace,claudeBin} as AgentConfig;
+ const inspect=(mount:object)=>({State:{Running:true},HostConfig:{Privileged:false,NetworkMode:'app_default',PidMode:'',IpcMode:'private',CapDrop:['ALL'],SecurityOpt:['no-new-privileges']},Mounts:[{Source:workspace,Destination:'/workspace',RW:true},mount]});
+ try {
+  mockInspect=inspect({Source:claudeBin,Destination:claudeBin,RW:false});await expect(validateContainer(agent)).resolves.toBeUndefined();
+  for(const mount of [{Source:claudeBin,Destination:claudeBin,RW:true},{Source:claudeBin,Destination:'/opt/other',RW:false},{Source:workspace,Destination:claudeBin,RW:false}]){mockInspect=inspect(mount);await expect(validateContainer(agent)).rejects.toMatchObject({code:'CONTAINER_HOST_MOUNT_DENIED'});}
+  mockInspect=inspect({Source:claudeBin,Destination:claudeBin,RW:false});await expect(validateContainer({...agent,claudeBin:undefined})).rejects.toMatchObject({code:'CONTAINER_HOST_MOUNT_DENIED'});
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
 
 test.each([
  [['no-new-privileges'],true],
