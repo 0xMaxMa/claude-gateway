@@ -767,6 +767,11 @@ export class SessionProcess extends EventEmitter {
     return this.agentConfig.type === 'app-agent' && !!this.agentConfig.container;
   }
 
+  /** A host path under the workspace as the app container sees it. */
+  private toContainerPath(hostPath: string): string {
+    return `/workspace/${path.relative(this.agentConfig.workspace, hostPath)}`;
+  }
+
   /** Outside orchestration the tenant context cannot join an appended prompt, so
    * it is written fresh each spawn to `.sessions/<id>/` (0700) and passed with
    * --append-system-prompt-file. Undefined when isolate mode is off. */
@@ -1069,8 +1074,7 @@ export class SessionProcess extends EventEmitter {
     // Multi-tenant isolate mode (#601): Claude Code loads the tenant-neutral
     // workspace CLAUDE.md itself; this conversation's own USER.md/MEMORY.md
     // ride alongside it (see writeTenantContextFile).
-    if (this.tenantContextPath) args.push('--append-system-prompt-file', this.isContainerAgent()
-      ? `/workspace/${path.relative(this.agentConfig.workspace, this.tenantContextPath)}` : this.tenantContextPath);
+    if (this.tenantContextPath) args.push('--append-system-prompt-file', this.isContainerAgent() ? this.toContainerPath(this.tenantContextPath) : this.tenantContextPath);
 
     // Enforce allow_tools:false as a real boundary. Gated on the SAME condition as
     // writeMcpConfig() (source==='api' && !allow_tools): those sessions get no MCP
@@ -1134,12 +1138,8 @@ export class SessionProcess extends EventEmitter {
     const mcpConfigPath = this.writeMcpConfig();
     this.tenantContextPath = this.writeTenantContextFile();
 
-    // For app-agents, Claude runs inside the container where /workspace is mounted.
-    // Convert host paths (agentConfig.workspace-relative) to container paths (/workspace/...).
-    const toContainerPath = (hostPath: string): string =>
-      `/workspace/${path.relative(this.agentConfig.workspace, hostPath)}`;
-    const effectiveMcpPath = (isAppAgent && mcpConfigPath) ? toContainerPath(mcpConfigPath) : mcpConfigPath;
-    const containerRestartPath = isAppAgent ? toContainerPath(this.restartSignalPath) : this.restartSignalPath;
+    const effectiveMcpPath = (isAppAgent && mcpConfigPath) ? this.toContainerPath(mcpConfigPath) : mcpConfigPath;
+    const containerRestartPath = isAppAgent ? this.toContainerPath(this.restartSignalPath) : this.restartSignalPath;
 
     const args = containerArgs ?? this.writeSystemPromptFile(this.buildArgs(effectiveMcpPath, freshModel), mcpConfigPath);
 
