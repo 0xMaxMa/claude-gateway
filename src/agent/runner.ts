@@ -2383,6 +2383,7 @@ export class AgentRunner extends EventEmitter {
 
     // Apply per-session model override (caller already normalized to undefined when == agent default)
     if (modelOverride) proc.modelOverride = modelOverride;
+    if (source === 'api') proc.tenantChatId = this.apiChatIds.get(actualSessionId);
 
     // Keep the searchable memory archive (planning-64) fresh for the memory_search
     // tool. Fire-and-forget, detached, OFF the event loop — never blocks the spawn.
@@ -4727,9 +4728,10 @@ export class AgentRunner extends EventEmitter {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
     });
 
-    // Use model from request body if provided, otherwise use agent default
-    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model);
+    // Use model from request body if provided, otherwise use agent default.
+    // The chat is recorded first: a spawn keys its tenant memory by it (#601).
     this.apiChatIds.set(sessionId, chatId);
+    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFiles = opts.mediaFiles?.length
@@ -5056,9 +5058,10 @@ export class AgentRunner extends EventEmitter {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
     });
 
-    // Use model from request body if provided, otherwise use agent default
-    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model);
+    // Use model from request body if provided, otherwise use agent default.
+    // The chat is recorded first: a spawn keys its tenant memory by it (#601).
     this.apiChatIds.set(sessionId, chatId);
+    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFilesStream = opts.mediaFiles?.length

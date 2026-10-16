@@ -122,6 +122,33 @@ describe('channel sessions', () => {
     expect(first.args).toContain('--append-system-prompt-file');
     expect(fs.existsSync(file)).toBe(true);
   });
+
+  it('refuses an extraFlags --append-system-prompt-file, which would replace the tenant context', async () => {
+    // Claude Code keeps only the last --append-system-prompt-file, and extraFlags come after the tenant file.
+    for (const flags of [['--append-system-prompt-file', 'extra.md'], ['--append-system-prompt-file=extra.md']]) {
+      const config = agent({ enabled: true });
+      config.claude.extraFlags = flags;
+      const sp = new SessionProcess('s-flags', 'telegram', config, gateway, store, '111');
+      spawned.push(sp);
+      await expect(sp.start()).rejects.toMatchObject({ code: 'INVALID_EXTRA_FLAGS' });
+    }
+    // An inline --append-system-prompt is applied alongside the file, so it stays allowed.
+    const inline = agent({ enabled: true });
+    inline.claude.extraFlags = ['--append-system-prompt', 'Be brief.'];
+    const { args } = await start(new SessionProcess('s-inline', 'telegram', inline, gateway, store, '111'));
+    expect(appendedPrompt(args)).toContain('TENANT-A-MEMORY');
+  });
+});
+
+describe('API sessions', () => {
+  it('key the tenant by the chat the runner assigns, not by the session', async () => {
+    const dir = tenantDir(workspace, 'api', 'web-chat');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'MEMORY.md'), 'WEB-CHAT-MEMORY');
+    const sp = new SessionProcess('sess-2', 'api', agent({ enabled: true }), gateway, store);
+    sp.tenantChatId = 'web-chat';
+    expect(appendedPrompt((await start(sp)).args)).toContain('WEB-CHAT-MEMORY');
+  });
 });
 
 describe('orchestration agent sessions', () => {

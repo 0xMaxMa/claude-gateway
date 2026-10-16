@@ -728,6 +728,9 @@ export class SessionProcess extends EventEmitter {
   private managedMcpConfigPath?: string;
   /** Host file holding this conversation's tenant context (see writeTenantContextFile). */
   private tenantContextPath?: string;
+  /** API chatId keying the tenant (#601). An API session's own chatId is its sessionId,
+   * but a chat holds many sessions, so the runner sets the chat it belongs to. */
+  tenantChatId?: string;
   /** Host file holding the appended system prompt (see writeSystemPromptFile). */
   private systemPromptPath?: string;
   private managedConnectorPaths = new Set<string>();
@@ -753,7 +756,7 @@ export class SessionProcess extends EventEmitter {
   }
 
   private tenantContext(): string {
-    return composeTenantContext(this.agentConfig.workspace, this.source, this.chatId,
+    return composeTenantContext(this.agentConfig.workspace, this.source, this.tenantChatId ?? this.chatId,
       { ...this.gatewayConfig.gateway.memory, ...this.agentConfig.memory });
   }
 
@@ -1075,6 +1078,10 @@ export class SessionProcess extends EventEmitter {
     const gated = this.agentConfig.pstack ? extraFlags : extraFlagsWithPluginOverrides(extraFlags, { [PSTACK_PLUGIN_ID]: false }, this.agentConfig.workspace);
     // Claude Code cannot start with it either; refusing here says why instead of loading pstack.
     if (!gated) throw Object.assign(new Error('claude.extraFlags --settings is not a readable JSON object, so pstack cannot be kept off for this agent. Fix that --settings value.'), { code: 'INVALID_EXTRA_FLAGS' });
+    // Claude Code keeps only the last --append-system-prompt-file, which would silently drop the tenant context.
+    if (this.tenantContextPath && extraFlags.some(flag => flag === '--append-system-prompt-file' || flag.startsWith('--append-system-prompt-file='))) {
+      throw Object.assign(new Error('claude.extraFlags --append-system-prompt-file would replace the conversation memory that multi-tenant isolate mode appends. Use --append-system-prompt or move that text into AGENTS.md.'), { code: 'INVALID_EXTRA_FLAGS' });
+    }
     args.push(...gated);
 
     return args;
