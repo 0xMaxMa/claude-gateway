@@ -669,3 +669,104 @@ describe('AppInstaller — backup/restore', () => {
     expect(backupIds(installer, 'shop')).toEqual(['a']);
   });
 });
+
+// ── Isolate-mode agent workspace round trip (#601) ───────────────────────────
+// The injected agent service bind-mounts <app>/agent at /workspace, so a backup
+// captures the whole agent workspace — every conversation's tenants/ included —
+// as one bind. This runs the helper's real tar/sh commands on this host
+// (/data and /backup mapped to their mount sources) instead of in a container.
+describe('AppInstaller — backup/restore of an isolated app agent workspace', () => {
+  const { spawnSync } = jest.requireActual('node:child_process') as typeof import('node:child_process');
+  const { composeTenantContext, tenantDir } = jest.requireActual('../../../src/agent/workspace-loader') as typeof import('../../../src/agent/workspace-loader');
+  let tmpDir: string;
+  let appDir: string;
+  let agentDir: string;
+
+  /** Docker for the helper container only; host tar runs for real. */
+  function realHelperSpawn() {
+    return jest.fn((cmd: string, args: string[]) => {
+      if (args.includes('config') && args.includes('--volumes')) return { stdout: '', stderr: '', status: 0 };
+      if (args.includes('config') && args.includes('json')) {
+        return { stdout: JSON.stringify({ services: { agent: { volumes: [{ type: 'bind', source: agentDir }] } } }), stderr: '', status: 0 };
+      }
+      let command: string[] | null = null;
+      if (cmd === 'docker' && args[0] === 'run') {
+        const mounts = new Map<string, string>();
+        args.forEach((a, i) => { if (args[i - 1] === '-v') { const [src, dst] = a.split(':'); mounts.set(dst, src); } });
+        const mapped = (s: string) => s.replace(/(^|\s)(\/data|\/backup)(?=[\s/]|$)/g, (_m, pre: string, mount: string) => pre + mounts.get(mount)!);
+        command = args.slice(args.indexOf('alpine') + 1).map(mapped);
+      } else if (cmd === 'tar') {
+        command = [cmd, ...args];
+      }
+      if (!command) return { stdout: '', stderr: '', status: 0 };
+      const r = spawnSync(command[0], command.slice(1), { encoding: 'utf-8' });
+      return { stdout: r.stdout, stderr: r.stderr, status: r.status ?? 1 };
+    });
+  }
+
+  function snapshot(dir: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    const walk = (rel: string) => {
+      for (const name of fs.readdirSync(path.join(dir, rel))) {
+        const r = path.join(rel, name), abs = path.join(dir, r), st = fs.lstatSync(abs);
+        if (st.isDirectory()) { out[r + '/'] = (st.mode & 0o777).toString(8); walk(r); }
+        else out[r] = `${(st.mode & 0o777).toString(8)}:${fs.readFileSync(abs, 'utf-8')}`;
+      }
+    };
+    walk('');
+    return out;
+  }
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+    appDir = path.join(tmpDir, 'apps', 'habit');
+    agentDir = path.join(appDir, 'agent');
+    for (const [file, text] of Object.entries({
+      'AGENTS.md': 'persona', 'SOUL.md': 'soul', 'IDENTITY.md': 'id', 'MEMORY.md': 'root memory', 'USER.md': 'root user',
+      '.sessions/s-1/tenant-context.md': 'regenerated each spawn',
+    })) {
+      fs.mkdirSync(path.dirname(path.join(agentDir, file)), { recursive: true });
+      fs.writeFileSync(path.join(agentDir, file), text);
+    }
+    for (const [chat, who] of [['111', 'FAMILY-A'], ['222', 'FAMILY-B']]) {
+      const dir = tenantDir(agentDir, 'telegram', chat);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'MEMORY.md'), `${who}-MEMORY`, { mode: 0o600 });
+      fs.writeFileSync(path.join(dir, 'USER.md'), `${who}-USER`, { mode: 0o600 });
+    }
+    fs.writeFileSync(path.join(appDir, '.env'), 'X=1\n');
+  });
+  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  it('restores every tenant and root file exactly, and each conversation still sees only its own memory', async () => {
+    const registry = new AppsRegistry(path.join(tmpDir, 'apps.json'));
+    await registry.upsert({
+      name: 'habit', version: '1.0.0', commit: 'a'.repeat(40), githubUrl: '', installPath: appDir, ports: [], sockets: {},
+      installedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', status: 'stopped', source: 'registry',
+      agentDeclaration: { path: './agent', name: 'habit-bot', multiTenant: true },
+    });
+    const spawnFn = realHelperSpawn();
+    const installer = new AppInstaller(registry, new RegistryClient(), makeCallbacks(),
+      spawnFn as unknown as ConstructorParameters<typeof AppInstaller>[3], path.join(tmpDir, 'apps'), undefined,
+      makeAsyncSpawn(spawnFn) as unknown as ConstructorParameters<typeof AppInstaller>[6], undefined, undefined, path.join(tmpDir, 'backups'));
+    const original = snapshot(agentDir);
+
+    const backup = await waitForJob(installer, installer.backup('habit'));
+    expect(backup.status).toBe('completed');
+
+    // Lose the workspace, then write over it: a changed tenant and one the backup never had.
+    fs.rmSync(agentDir, { recursive: true, force: true });
+    fs.mkdirSync(tenantDir(agentDir, 'telegram', '333'), { recursive: true });
+    fs.writeFileSync(path.join(tenantDir(agentDir, 'telegram', '333'), 'MEMORY.md'), 'FAMILY-C-MEMORY');
+    fs.writeFileSync(path.join(agentDir, '.stale-hidden'), 'not in the backup');
+    const restored = await waitForJob(installer, installer.restore('habit', backup.backup!.id));
+    expect(restored.status).toBe('completed');
+
+    expect(snapshot(agentDir)).toEqual(original);
+    const a = composeTenantContext(agentDir, 'telegram', '111');
+    expect(a).toContain('FAMILY-A-MEMORY');
+    expect(a).toContain('FAMILY-A-USER');
+    expect(a).not.toMatch(/FAMILY-[BC]|root memory|root user/);
+    expect(composeTenantContext(agentDir, 'telegram', '222')).not.toMatch(/FAMILY-[AC]/);
+  });
+});
