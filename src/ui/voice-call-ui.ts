@@ -206,9 +206,19 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     var callStart, offeredElapsed = 0, joined = false;
     // The ring and chip follow the call: listening, thinking, the agent speaking, or muted.
     var SCENES = { Listening: 'listening', Thinking: 'thinking', Speaking: 'speaking', Muted: 'muted' };
+    var scene;
     function state(text, tone){
       var s = $('state'); s.textContent = text; s.className = 'state' + (tone ? ' ' + tone : '');
-      $('call').className = 'call' + (!tone && SCENES[text] ? ' ' + SCENES[text] : '');
+      scene = !tone && SCENES[text] ? text : undefined;
+      $('call').className = 'call' + (scene ? ' ' + SCENES[scene] : '');
+    }
+    // Speaking ends when the reply has played out and stayed quiet for QUIET_MS, longer than
+    // the pause between its sentences. After an acknowledgement the answer is still coming.
+    var QUIET_MS = 1000, playbackPhase, audioHeard = false, quietSince;
+    function settlePlayback(){
+      if (scene !== 'Speaking' || !audioHeard || playhead.playing(ctx.currentTime)) { quietSince = undefined; return; }
+      if (quietSince === undefined) quietSince = Date.now();
+      if (Date.now() - quietSince >= QUIET_MS) state(muted ? 'Muted' : awaitingReply || playbackPhase === 'acknowledgement' ? 'Thinking' : 'Listening');
     }
     // The transcript follows new text unless the caller scrolled up to read; scrolling
     // back down to where it was follows again. A reply opens at its first line, as it is
@@ -245,6 +255,8 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       var node = ctx.createBufferSource(); node.buffer = buffer; node.connect(level);
       node.onended = function(){ sources = sources.filter(function(item){ return item !== node; }); };
       node.start(playhead.schedule(count, 16000, ctx.currentTime)); sources.push(node);
+      // More of the reply after a pause that looked like its end.
+      audioHeard = true; if (scene === 'Listening' || scene === 'Thinking') state('Speaking');
     }
     function reportProgress(){
       if (!ctx || !ws || ws.readyState !== 1) return;
@@ -268,7 +280,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
         case 'stt.final': show('you', message.text); awaitingReply = false; state('Thinking'); break;
         case 'utterance.accepted': state('Thinking'); break;
         case 'response.text': if (message.text) show('reply', voiceCallReplyText(message.text)); break;
-        case 'playback.start': if (!stopping) { epoch = message.epoch; flushPlayback(); awaitingReply = false; state('Speaking'); } break;
+        case 'playback.start': if (!stopping) { epoch = message.epoch; flushPlayback(); awaitingReply = false; playbackPhase = message.phase; audioHeard = false; state('Speaking'); } break;
         case 'playback.end': break;
         case 'playback.clear': epoch = message.epoch; flushPlayback(); send({ type: 'playback.clear.ack', epoch: epoch }); if (!awaitingReply) state(muted ? 'Muted' : 'Listening'); break;
         case 'playback.stopped': epoch = message.epoch; stopping = false; flushPlayback(); break;
@@ -454,7 +466,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
         speaker = ctx.createGain(); speaker.gain.value = speakerOn ? 1 : 0;
         level.connect(speaker); speaker.connect(ctx.destination);
       }
-      progressTimer = setInterval(function(){ reportProgress(); showDuration(); showLevel(); }, 100);
+      progressTimer = setInterval(function(){ reportProgress(); showDuration(); showLevel(); settlePlayback(); }, 100);
       if (tg.enableClosingConfirmation) tg.enableClosingConfirmation();
       $('controls').hidden = false;
       try { await connect(); } catch (error) { fail(error); }

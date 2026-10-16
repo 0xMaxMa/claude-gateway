@@ -295,8 +295,10 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
   const destination = node(), replies: Node[] = [];
   /** How loud a reply source reaches the destination: the product of the gains on its way. */
   const loudness = (from: Node): number => from === destination ? 1 : Math.max(0, ...from.outputs.map(next => (from.gain?.value ?? 1) * loudness(next)));
+  const contexts: FakeAudioContext[] = [];
   class FakeAudioContext {
     sampleRate = 48000; currentTime = 0; destination = destination; state = 'suspended';
+    constructor() { contexts.push(this); }
     audioWorklet = { addModule: async () => undefined };
     resume = () => { if (options.audioNeedsTap && !touched) return new Promise<void>(noop); this.state = 'running'; return Promise.resolve(); };
     close = async () => undefined;
@@ -335,7 +337,9 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
   /** Telegram switches theme, as it does when the user turns on night mode. */
   const themeChanged = (colorScheme: string, themeParams: Record<string, string>) => { Object.assign(tg, { colorScheme, themeParams }); (handlers.themeChanged ?? []).forEach(handler => handler()); };
   const systemThemeChanged = (light: boolean) => { systemTheme.matches = light; systemTheme.listeners.forEach(listener => listener()); };
-  return { element, location, fetch, sockets, getUserMedia, tap, replies, loudness, hear, root, tg, themeChanged, systemThemeChanged };
+  /** The audio clock moves to `seconds`, so reply audio scheduled before then has been heard. */
+  const audioTime = (seconds: number) => { contexts.at(-1)!.currentTime = seconds; };
+  return { element, location, fetch, sockets, getUserMedia, tap, replies, loudness, hear, root, tg, themeChanged, systemThemeChanged, audioTime };
 }
 
 /** Every inline script of a page, in page order, as one script. */
@@ -482,6 +486,56 @@ describe('call page', () => {
     expect(element('mute').attributes['aria-pressed']).toBe('false');
     sockets[0].receive({ type: 'voice.error', code: 'TTS_UNAVAILABLE', category: 'unavailable', message: 'Down' });
     expect(element('call').className).toBe('call');
+  });
+
+  describe('after the agent stops talking', () => {
+    test('the chip returns to Listening once the reply has played out, and to Speaking when more of it arrives', async () => {
+      const { element, sockets, audioTime } = await openPage();
+      sockets[0].open(); sockets[0].receive(LISTENING);
+      sockets[0].receive({ type: 'playback.start', epoch: 1, phase: 'response' });
+      sockets[0].audio(1);
+      // Still audible: however long it plays, it stays Speaking.
+      await jest.advanceTimersByTimeAsync(5_000);
+      expect(element('call').className).toBe('call speaking');
+      audioTime(1);
+      await jest.advanceTimersByTimeAsync(1_500);
+      expect(element('call').className).toBe('call listening');
+      expect(element('state').textContent).toBe('Listening');
+      // The next sentence of the same reply.
+      sockets[0].audio(1);
+      expect(element('call').className).toBe('call speaking');
+    });
+
+    test('a pause between sentences shorter than a second keeps Speaking', async () => {
+      const { element, sockets, audioTime } = await openPage();
+      sockets[0].open(); sockets[0].receive(LISTENING);
+      sockets[0].receive({ type: 'playback.start', epoch: 1, phase: 'response' });
+      sockets[0].audio(1); audioTime(1);
+      await jest.advanceTimersByTimeAsync(700);
+      sockets[0].audio(1);
+      expect(element('call').className).toBe('call speaking');
+    });
+
+    test('after a spoken acknowledgement it shows Thinking until the answer plays', async () => {
+      const { element, sockets, audioTime } = await openPage();
+      sockets[0].open(); sockets[0].receive(LISTENING);
+      sockets[0].receive({ type: 'playback.start', epoch: 1, phase: 'acknowledgement' });
+      sockets[0].audio(1); audioTime(1);
+      await jest.advanceTimersByTimeAsync(1_500);
+      expect(element('call').className).toBe('call thinking');
+      sockets[0].receive({ type: 'playback.start', epoch: 2, phase: 'response' });
+      expect(element('call').className).toBe('call speaking');
+    });
+
+    test('muted, it returns to Muted', async () => {
+      const { element, sockets, tap, audioTime } = await openPage();
+      sockets[0].open(); sockets[0].receive(LISTENING);
+      await tap('mute');
+      sockets[0].receive({ type: 'playback.start', epoch: 1, phase: 'response' });
+      sockets[0].audio(1); audioTime(1);
+      await jest.advanceTimersByTimeAsync(1_500);
+      expect(element('call').className).toBe('call muted');
+    });
   });
 
   test("Speaker turns the agent's voice off and on without touching the call", async () => {
