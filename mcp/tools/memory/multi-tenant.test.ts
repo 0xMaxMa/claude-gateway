@@ -12,6 +12,8 @@ import * as path from 'path';
 
 import { MemoryModule } from './module';
 import { SkillsModule } from '../skills/module';
+import { CronModule } from '../cron/module';
+import { AgentModule } from '../agent/module';
 import { archiveDbPath } from './archive-reader';
 
 let agentDir: string;
@@ -19,6 +21,8 @@ const originalEnv = {
   GATEWAY_WORKSPACE_DIR: process.env.GATEWAY_WORKSPACE_DIR,
   GATEWAY_SHARED_KB_DIR: process.env.GATEWAY_SHARED_KB_DIR,
   GATEWAY_MULTI_TENANT_ISOLATE: process.env.GATEWAY_MULTI_TENANT_ISOLATE,
+  GATEWAY_API_URL: process.env.GATEWAY_API_URL,
+  GATEWAY_AGENT_ID: process.env.GATEWAY_AGENT_ID,
 };
 
 beforeEach(() => {
@@ -70,4 +74,14 @@ test('isolate mode turns the skills module off: the skill catalog is shared by e
   expect(new SkillsModule().isEnabled()).toBe(true);
   process.env.GATEWAY_MULTI_TENANT_ISOLATE = '1';
   expect(new SkillsModule().isEnabled()).toBe(false);
+});
+
+test('isolate mode turns the cron and agent modules off: jobs and the persona are shared by every conversation', () => {
+  process.env.GATEWAY_API_URL = 'http://127.0.0.1:1';
+  process.env.GATEWAY_AGENT_ID = 'shared-bot';
+  expect(new CronModule().isEnabled()).toBe(true);
+  expect(new AgentModule().isEnabled()).toBe(true);
+  process.env.GATEWAY_MULTI_TENANT_ISOLATE = '1';
+  expect(new CronModule().isEnabled()).toBe(false);
+  expect(new AgentModule().isEnabled()).toBe(false);
 });

@@ -7,7 +7,9 @@ export class AgentModule implements ToolModule {
   toolVisibility: ToolVisibility = 'all-configured';
 
   isEnabled(): boolean {
-    return true;
+    // Never in multi-tenant isolate mode (#601): agent_update rewrites the persona
+    // files every conversation shares.
+    return !process.env.GATEWAY_MULTI_TENANT_ISOLATE;
   }
 
   getTools(): McpToolDefinition[] {

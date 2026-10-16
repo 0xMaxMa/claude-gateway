@@ -23,6 +23,9 @@ export class CronModule implements ToolModule {
   private client: CronClient | null = null;
 
   isEnabled(): boolean {
+    // Never in multi-tenant isolate mode (#601): the agent's jobs, and the prompts
+    // in them, are shared by every conversation.
+    if (process.env.GATEWAY_MULTI_TENANT_ISOLATE) return false;
     return Boolean((process.env.GATEWAY_ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_ORCHESTRATION_CRON === 'true' && process.env.GATEWAY_ORCHESTRATION_TICKET_FILE) || (process.env.GATEWAY_API_URL && process.env.GATEWAY_AGENT_ID));
   }
 
