@@ -371,8 +371,8 @@ export interface AgentConfig {
   /**
    * Multi-tenant isolate mode (#601) for one agent serving many unrelated
    * senders: USER.md/MEMORY.md are kept per conversation under
-   * `<workspace>/tenants/<channel>-<chatId>/`, and memory_search/memory_get are
-   * not offered. Absent or `enabled: false` keeps the single-tenant behavior.
+   * `<workspace>/tenants/<channel>-<chatId>-<hash>/`, and the memory and skill
+   * MCP tools are not offered. Absent or `enabled: false` keeps the single-tenant behavior.
    */
   multiTenant?: { enabled: boolean };
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
