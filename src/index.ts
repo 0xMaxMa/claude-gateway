@@ -174,7 +174,8 @@ async function startAgent(
   // Multi-tenant isolate mode (#601): the shared CLAUDE.md leaves out sender data.
   // Fixed for the process lifetime: the reload policy makes the field restart-only.
   const multiTenant = agentConfig.multiTenant?.enabled === true;
-  const learningConfig = () => multiTenant ? { ...agentConfig.skillLearning, enabled: false } : agentConfig.skillLearning;
+  // Background learners read every conversation into shared state, so they stay off.
+  const offWhenIsolated = <T extends object>(cfg: T | undefined): T | undefined => multiTenant ? { ...cfg, enabled: false } as T : cfg;
 
   // Ensure workspace directory exists (may be absent for newly created agents)
   try {
@@ -297,14 +298,14 @@ async function startAgent(
       globalCfg: gatewayConfig.gateway.skillLearning,
       // Isolate mode (#601): a skill learned from one conversation is offered to
       // every other one, so the reviewer stays off (as dreaming does below).
-      agentCfg: learningConfig(),
+      agentCfg: offWhenIsolated(agentConfig.skillLearning),
       gatewayTimezone: gatewayConfig.gateway.timezone,
       logger,
       sendNotification: (text, sessionId) => runner.notifySkillLearning(sessionId, text),
     });
     runner.setSkillLearning(skillLearning);
     skillLearning.startCurator();
-    runner.onConfigReload(() => skillLearning.reconfigure({globalCfg:gatewayConfig.gateway.skillLearning,agentCfg:learningConfig(),gatewayTimezone:gatewayConfig.gateway.timezone}));
+    runner.onConfigReload(() => skillLearning.reconfigure({globalCfg:gatewayConfig.gateway.skillLearning,agentCfg:offWhenIsolated(agentConfig.skillLearning),gatewayTimezone:gatewayConfig.gateway.timezone}));
     runner.onShutdown(()=>skillLearning.stop());
   } catch (err) {
     logger.warn('Failed to wire skill-learning (continuing without it)', { error: (err as Error).message });
@@ -320,7 +321,7 @@ async function startAgent(
       // Isolate mode (#601): dreaming reads every conversation's transcripts into
       // one MEMORY.md/USER.md (and may promote to the shared KB), so it cannot keep
       // tenants apart; it stays off for such an agent.
-      agentCfg: multiTenant ? { ...agentConfig.dreaming, enabled: false } : agentConfig.dreaming,
+      agentCfg: offWhenIsolated(agentConfig.dreaming),
       gatewayTimezone: gatewayConfig.gateway.timezone,
       logger,
       // K4 auto-applier net-negative gate uses the same soft budgets as compose.
