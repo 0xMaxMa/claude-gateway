@@ -99,7 +99,9 @@ test.each(['COMMAND_WAITING_INPUT','COMPLETION_CANDIDATE','VERIFICATION_FAILED']
   const task=store.task(String(row.task_id))!;
   store.transaction(()=>{task.state='waiting_input';task.gatewayTarget={adapter:'browser',sessionId:'tab',name:'Browser'};task.browserReport={contractVersion:1,status:'needs_verification',reason,steps:1,evaluations:1};store.saveTask(task,task.stateVersion);store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);});
   expect(pendingReports(store,[],[],false).map(r=>r.notification_id)).toContain(f.notificationId);
-  store.transaction(()=>{task.automationController='user';store.saveTask(task,task.stateVersion);store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);});
+  // The user's own direct command (revision 2) settles: silent. Revision 1 under user
+  // control is the agent's goal run, whose parked rounds do reach it (agentGoalRunParked).
+  store.transaction(()=>{task.automationController='user';task.revision=2;task.executionControl={id:'c',action:'revise',revision:2,phase:'applied',requestedAt:0};store.saveTask(task,task.stateVersion);store.run('UPDATE notifications SET task_state_version=? WHERE id=?',task.stateVersion,f.notificationId);});
   expect(pendingReports(store,[],[],false)).toHaveLength(0);
   expect(pendingReports(store,[],[],true)).toHaveLength(0);
  }finally{store.close();}
