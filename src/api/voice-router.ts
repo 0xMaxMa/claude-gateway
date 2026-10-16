@@ -236,11 +236,11 @@ export class VoiceApi {
       try {
         session = new VoiceSession(sttProvider(voice.stt), ttsProvider(voice.tts), voice.tts.voiceId,
           { control: send, audio: data => { if (ws.readyState === WebSocket.OPEN) ws.send(data); }, bufferedBytes: () => ws.bufferedAmount },
-          async (text, utteranceId) => {
+          async (text, utteranceId, mark) => {
             const target=speechTarget??{taskId:executionTaskId};speechTarget=undefined;
             await target.pause;
             let accepted;
-            try{accepted=await runner.submitVoiceUtterance(ticket.sessionId,ticket.scope,text,utteranceId,ticket.allowTools,ticket.model,target.taskId);}
+            try{accepted=await runner.submitVoiceUtterance(ticket.sessionId,ticket.scope,text,utteranceId,ticket.allowTools,ticket.model,target.taskId,mark);}
             catch(error){release(target);throw error;}
             return accepted;
           },

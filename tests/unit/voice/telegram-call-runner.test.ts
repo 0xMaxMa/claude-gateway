@@ -60,7 +60,7 @@ describe('submitVoiceUtterance scope', () => {
       // The scope Telegram ingress builds for user 42 in their DM (runner /channel handler).
       scope: { agentId: 'agent', agentSessionId: 'session', source: 'telegram', accountId: 'agent', chatId: '42', threadKey: '', principalId: 'telegram:42' },
       text: 'hello', model: undefined, metadata: { executionTaskId: undefined }, modality: 'live_voice', ingressKey: 'utterance:utterance', trustedChannelMember: true,
-    }, { execute: true, writeMemory: false });
+    }, { execute: true, writeMemory: false }, undefined, undefined);
   });
 
   test('an API call turn keeps its own api conversation and still requires an existing API session', async () => {
@@ -70,7 +70,7 @@ describe('submitVoiceUtterance scope', () => {
     expect(orchestration.submitInput).toHaveBeenCalledWith({
       scope: { agentId: 'agent', agentSessionId: 'session', source: 'api', accountId: 'api:owner', chatId: 'chat', threadKey: '', principalId: 'api:owner' },
       text: 'hello', model: 'model', metadata: { executionTaskId: 'task' }, modality: 'live_voice', ingressKey: 'utterance:utterance',
-    }, { execute: false, writeMemory: false });
+    }, { execute: false, writeMemory: false }, undefined, undefined);
     runner.apiSessionExists.mockResolvedValueOnce(false);
     await expect(runner.submitVoiceUtterance('gone', { kind: 'api', principalId: 'api:owner', chatId: 'chat' }, 'hello', 'u2', false)).rejects.toThrow('Session not found');
   });

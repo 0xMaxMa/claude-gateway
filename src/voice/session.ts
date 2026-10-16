@@ -60,7 +60,7 @@ export class VoiceSession {
   setVoice(voiceId: string): void { this.voiceId = voiceId; }
   constructor(private readonly stt: SttProvider, private readonly tts: TtsProvider, private voiceId: string,
     private readonly client: VoiceClient,
-    private readonly submit: (text: string, utteranceId: string) => Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId?(): string | undefined }>,
+    private readonly submit: (text: string, utteranceId: string, mark?: (phase: string) => void) => Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId?(): string | undefined }>,
     private readonly stopResponse: () => void,
     private readonly options: VoiceSessionOptions = { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500 },
     private readonly record?: (responseId: string, progress: ReturnType<VoicePlayback['snapshot']>, state: string) => void,
@@ -187,7 +187,8 @@ export class VoiceSession {
   }
   private async admit(text: string, utteranceId: string, turn: TurnTrace): Promise<void> {
     this.client.control({ type: 'stt.final', utterance_id: utteranceId, text });
-    const accepted = await this.submit(text, utteranceId);
+    // The agent turn reports its own phases (process, first token, first spoken words) on this trace.
+    const accepted = await this.submit(text, utteranceId, phase => turn.trace.emit(phase));
     turn.ids.inputId = accepted.inputId; turn.trace.emit('turn_admitted');
     this.client.control({ type: 'utterance.accepted', utterance_id: utteranceId, input_id: accepted.inputId });
     const epoch = this.interruption;
@@ -216,6 +217,7 @@ export class VoiceSession {
       let chunk = first;
       while (!chunk.done) {
         client.control({ type: 'response.speech', response_id: chunk.value.responseId, text: chunk.value.text });
+        turn.trace.emit('spoken_sentence_sent');
         yield chunk.value.text;
         chunk = await iterator.next();
       }

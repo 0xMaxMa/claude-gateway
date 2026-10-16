@@ -17,7 +17,7 @@ test('voice acceptance waits for visible history, without waiting for the Agent 
   const result = runner.submitVoiceUtterance('session', { kind: 'api', principalId: 'owner', chatId: 'getpod' }, 'สร้างรูปหมามีปีก', 'utterance', true, 'gpt-6-astra')
     .then((value: unknown) => { accepted = true; return value; });
   await new Promise(resolve => setImmediate(resolve));
-  expect(orchestration.submitInput).toHaveBeenCalledWith(expect.objectContaining({model:'gpt-6-astra',modality:'live_voice'}), expect.any(Object));
+  expect(orchestration.submitInput).toHaveBeenCalledWith(expect.objectContaining({model:'gpt-6-astra',modality:'live_voice'}), expect.any(Object), undefined, undefined);
   expect(accepted).toBe(false);
   finishHistory();
   await expect(result).resolves.toMatchObject({ inputId: 'input', response });

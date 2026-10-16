@@ -567,7 +567,7 @@ export class AgentRunner extends EventEmitter {
     const orchestration = await this.getOrchestration();
     await orchestration.notifyChat(sessionId, 'telegram', scope.chatId, scope.threadKey, voiceCallEndedText(durationMs));
   }
-  async submitVoiceUtterance(sessionId: string, voiceScope: VoiceScope, text: string, utteranceId: string, allowTools: boolean, model?: string, executionTaskId?:string): Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId(): string | undefined }> {
+  async submitVoiceUtterance(sessionId: string, voiceScope: VoiceScope, text: string, utteranceId: string, allowTools: boolean, model?: string, executionTaskId?:string, onMark?: (phase: string) => void): Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId(): string | undefined }> {
     if (!this.agentConfig.orchestration?.enabled || !this.agentConfig.voice?.enabled) throw new Error('Voice is disabled');
     const { chatId, principalId } = voiceScope;
     let scope: AcceptInput['scope'];
@@ -584,7 +584,7 @@ export class AgentRunner extends EventEmitter {
     }
     const orchestration = await this.getOrchestration();
     const accepted = orchestration.submitInput({ scope, text, model, metadata:{executionTaskId}, modality: 'live_voice', ingressKey: `utterance:${utteranceId}`,
-      ...(voiceScope.kind === 'telegram' ? { trustedChannelMember: true } : {}) }, { execute: allowTools, writeMemory: false });
+      ...(voiceScope.kind === 'telegram' ? { trustedChannelMember: true } : {}) }, { execute: allowTools, writeMemory: false }, undefined, onMark);
     // The browser refreshes history on utterance.accepted, before inference finishes.
     await orchestration.flushHistory();
     return { ...accepted, responseId: () => orchestration.responseIdForInput(accepted.inputId) };

@@ -34,7 +34,7 @@ import { CapabilityCatalog, readCapabilityPage } from './capabilities';
 import { browserRouting } from './browser-routing';
 import { providerRefusalNotice, responseFailureMessage } from './response-errors';
 import type { ProviderRefusal } from '../session/provider-refusal';
-import { displayPrefix } from './display-stream';
+import { displayPrefix, partialField } from './display-stream';
 import { responseHasVoiceOrigin, voiceReplyAllowed } from './voice-reply-policy';
 import { answersLiveVoice, withLiveVoiceTranscript } from './live-voice-transcript';
 import { taskReport } from './task-report';
@@ -173,6 +173,8 @@ export class AgentOrchestrationRuntime {
   private readonly deferred = new Map<string, { resolve(text: string): void; reject(error: unknown): void }>();
   private readonly inputResponses = new Map<string, Promise<string>>();
   private readonly inputTools = new Map<string, (event: ToolActivity) => void>();
+  /** Live voice timing marks of an input's agent turn, reported to its voice turn trace. */
+  private readonly inputMarks = new Map<string, (phase: string) => void>();
   private readonly voiceListeners = new Map<string, { principalId: string; receive: (result: { responseId: string; text: string; spoken: string; requestId?: string; speechOnly?: boolean }) => void; gender?: () => string | undefined }>();
   /** The caller hears this reply in a live call, either as the answer to spoken
    * words or spoken by the connected listener; never send it again as a chat voice message. */
@@ -827,7 +829,7 @@ export class AgentOrchestrationRuntime {
     this.store.run(`INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,audio_progress_json=excluded.audio_progress_json,updated_at=excluded.updated_at`,
       `voice:${responseId}:${progress.generation}:${progress.epoch}`, responseId, null, binding.id, 'audio', state, null, null, JSON.stringify(progress), Date.now());
   }
-  send(input: AcceptInput, capabilities: ExecutionCapabilities, options: { timeoutMs: number; model?: string; onText?: (text: string) => void; onTool?: (event: ToolActivity) => void; inputIds?: string[] }): Promise<string> {
+  send(input: AcceptInput, capabilities: ExecutionCapabilities, options: { timeoutMs: number; model?: string; onText?: (text: string) => void; onTool?: (event: ToolActivity) => void; onMark?: (phase: string) => void; inputIds?: string[] }): Promise<string> {
     if (this.closing) return Promise.reject(new OrchestrationError('ORCHESTRATION_CLOSING'));
     try {
       input = this.questionControls.normalizeReply(input);
@@ -978,7 +980,7 @@ export class AgentOrchestrationRuntime {
       JOIN voice_note_transcripts t ON t.input_id=json_extract(d.input_ids_json,'$[0]') WHERE r.id=? AND t.state='failed'`, responseId);
     return row && retryableVoiceNoteFailure(String(row.error_code ?? '')) ? [{ label: '🔁 Retry', data: `orch:vr:${row.input_id}` }] : undefined;
   }
-  submitInput(input: AcceptInput, capabilities: ExecutionCapabilities, onTool?: (event: ToolActivity) => void): { inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }> } {
+  submitInput(input: AcceptInput, capabilities: ExecutionCapabilities, onTool?: (event: ToolActivity) => void, onMark?: (phase: string) => void): { inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }> } {
     if (this.closing) throw new OrchestrationError('ORCHESTRATION_CLOSING');
     input = this.questionControls.normalizeReply(input);
     const direct = this.handleQuestionInput(input, capabilities);
@@ -1005,9 +1007,10 @@ export class AgentOrchestrationRuntime {
     const response = new Promise<string>((resolve, reject) => this.deferred.set(receipt.inputId, { resolve, reject }));
     this.inputResponses.set(receipt.inputId, response);
     if (onTool) this.inputTools.set(receipt.inputId, onTool);
+    if (onMark) this.inputMarks.set(receipt.inputId, onMark);
     const stream = input.modality === 'live_voice' ? new BoundedQueue<{ responseId: string; text: string }>(65536, chunk => Buffer.byteLength(chunk.text) + 128) : undefined;
     if (stream) this.inputStreams.set(receipt.inputId, stream);
-    void response.then(() => stream?.close(), error => stream?.close(error instanceof Error ? error : new Error('CONVERSATION_FAILED'))).finally(() => { this.inputResponses.delete(receipt.inputId); this.inputStreams.delete(receipt.inputId); this.inputTools.delete(receipt.inputId); });
+    void response.then(() => stream?.close(), error => stream?.close(error instanceof Error ? error : new Error('CONVERSATION_FAILED'))).finally(() => { this.inputResponses.delete(receipt.inputId); this.inputStreams.delete(receipt.inputId); this.inputTools.delete(receipt.inputId); this.inputMarks.delete(receipt.inputId); });
     void response.catch(() => {});
     this.pumpMailbox();
     return { inputId: receipt.inputId, response, stream };
@@ -1087,7 +1090,7 @@ export class AgentOrchestrationRuntime {
       // A persisted input retains the authenticated scope and model from ingress.
       // Recovery can repeat inference, but committed tool receipts remain fenced.
       const result = this.send({ ...input, acceptedInputId: String(batch.last.id) }, input.capabilities!,
-        { inputIds: batch.inputIds, timeoutMs: this.config.conversation.maxDecisionDurationMs, model: input.model, onTool: event => this.inputTools.get(String(row.id))?.(event), onText: text => {
+        { inputIds: batch.inputIds, timeoutMs: this.config.conversation.maxDecisionDurationMs, model: input.model, onTool: event => this.inputTools.get(String(row.id))?.(event), onMark: phase => this.inputMarks.get(String(row.id))?.(phase), onText: text => {
           const responseId = this.responseIdForInput(String(row.id));
           if (input.modality !== 'live_voice' && responseId) { try { this.inputStreams.get(String(row.id))?.push({ responseId, text }); } catch { /* slow audio cannot stall inference */ } }
         } });
@@ -1102,7 +1105,7 @@ export class AgentOrchestrationRuntime {
     if (this.active.size >= this.config.conversation.maxActiveSessions) break mailbox;
     }
   }
-  private async run(input: AcceptInput, capabilities: ExecutionCapabilities, options: { timeoutMs: number; model?: string; onText?: (text: string) => void; onTool?: (event: ToolActivity) => void; inputIds?: string[] }): Promise<string> {
+  private async run(input: AcceptInput, capabilities: ExecutionCapabilities, options: { timeoutMs: number; model?: string; onText?: (text: string) => void; onTool?: (event: ToolActivity) => void; onMark?: (phase: string) => void; inputIds?: string[] }): Promise<string> {
     const sessionId = input.scope.agentSessionId;
     const channelTts = this.telegramVoices.settings(channelVoiceKey(input.scope.source,input.scope.chatId,input.scope.threadKey));
     if (this.active.has(sessionId)) throw new OrchestrationError('CONFLICT');
@@ -1477,6 +1480,7 @@ export class AgentOrchestrationRuntime {
         .map(row => `response:${row.id}`);
       ticket.profile.responseId = decision.responseId;
       agentSession = await this.host.createAgentSession(sessionId, ticket.profile, options.model, input.scope);
+      options.onMark?.('process_spawned');
       const reportingTasks = new Set(this.store.all("SELECT task_id FROM notifications WHERE decision_id=? AND status='assigned'",decision.decisionId).map(row=>String(row.task_id)));
       const taskCandidates = this.tasks.context(receipt.conversationId, input.scope.principalId, decision.decisionId)
         .filter(task => !['completed','failed','cancelled'].includes(task.state) ||
@@ -1553,8 +1557,9 @@ export class AgentOrchestrationRuntime {
         if (!internalReview) options.onTool?.(event);
       }));
       const bufferChat = semantic && this.config.conversation.inputDebounceMs > 0 && batchableInput(input);
-      let rawDisplay = '', structuredStarted = false;
+      let rawDisplay = '', structuredStarted = false, firstToken = false, firstSpoken = false;
       const displayChunk = (chunk: string) => {
+        if (!firstToken) { firstToken = true; options.onMark?.('first_model_token'); }
         if (internalReview || questionReview || bufferChat || recoveryInputId) return; // Buffer until the notify/silence decision is final.
         if (semantic && (intakeChoice?.mode==='wait' || intakeDeferred || acknowledgementId)) return;
         // The union schema is declared on every turn now, so every turn may stream
@@ -1562,6 +1567,7 @@ export class AgentOrchestrationRuntime {
         // answer (the CLI never forces the tool call) still streams through unchanged.
         rawDisplay += chunk;
         if (Buffer.byteLength(rawDisplay) > 262144) throw new OrchestrationError('RESPONSE_TOO_LARGE');
+        if (!firstSpoken && options.onMark && structuredStarted && partialField(rawDisplay, 'spoken_text')?.text) { firstSpoken = true; options.onMark('first_spoken_delta'); }
         const next = displayPrefix(rawDisplay);
         if (!next || !next.startsWith(streamedDisplay)) return;
         chunk = next.slice(streamedDisplay.length);
@@ -1594,6 +1600,7 @@ export class AgentOrchestrationRuntime {
       let providerResponded = false;
       void turn.providerReady.then(() => {
         providerResponded = true;
+        options.onMark?.('agent_provider_ready');
         try {
           if (!active.stopping && this.providerAdmission.settle(providerPermit!, 'success', this.config.providerAdmission)) this.providerRecovered(providerPermit!.scope);
         } catch { /* Never turn a successful inference into a failed task receipt. */ }

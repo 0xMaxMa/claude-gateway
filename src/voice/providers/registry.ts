@@ -1,4 +1,5 @@
 import { requireManagedVoiceCredit } from '../managed-quota';
+import { voiceTiming } from '../diagnostics';
 import { OpenRouterStt, OpenRouterTts } from './openrouter';
 import { canonicalVoiceProvider, nativeVoiceModel } from './model-ref';
 import { GeminiStt, GeminiTts } from './gemini';
@@ -53,7 +54,9 @@ export function ttsProvider(config: { provider: string; model: string }): TtsPro
       return provider.synthesizeFile!(options);
     } : undefined,
     async *synthesize(options) {
+      voiceTiming('tts_credit_check_started');
       await requireManagedVoiceCredit(config.provider, undefined, options.signal);
+      voiceTiming('tts_credit_check_finished');
       yield* provider.synthesize(options);
     },
   };

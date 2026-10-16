@@ -1,6 +1,7 @@
 import { providerVoiceError } from '../errors';
 import { PCM16, TtsProvider, VoiceError, TtsAudioChunk, validateAudioFormat } from '../types';
 import { openProviderSocket, SocketFactory } from './socket';
+import { voiceTiming } from '../diagnostics';
 
 export class ElevenLabsTts implements TtsProvider {
   readonly capabilities = { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] };
@@ -28,6 +29,7 @@ export class ElevenLabsTts implements TtsProvider {
     url.searchParams.set('model_id', this.model); url.searchParams.set('output_format', format);
     if (options.language) url.searchParams.set('language_code', options.language);
     const socket = await this.connect(url.toString(), { 'xi-api-key': this.key }, options.signal);
+    voiceTiming('tts_socket_open');
     let sendError: unknown, finished = false;
     const sending = (async () => {
       await socket.send(dialogue ? { voices: [options.voiceId], voice_settings: { stability: 1 } } : { text: ' ', voice_settings: { stability: 0.5 }, generation_config: { chunk_length_schedule: [50,120,160,290] } });

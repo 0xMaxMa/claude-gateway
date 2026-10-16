@@ -210,7 +210,7 @@ test('short speech segments merge once; resuming speech defers admission and man
     expect(submit).not.toHaveBeenCalled(); // Candidate speech is still being transcribed.
     await say('หมามีปีก', true);
     expect(submit).toHaveBeenCalledTimes(1);
-    expect(submit.mock.calls[0]).toEqual(['ช่วยสร้างรูป หมามีปีก', expect.any(String)]);
+    expect(submit.mock.calls[0]).toEqual(['ช่วยสร้างรูป หมามีปีก', expect.any(String), expect.any(Function)]);
     expect(controls.filter(c => c.type === 'stt.final').map(c => c.text)).toEqual(['ช่วยสร้างรูป หมามีปีก']);
     expect(controls.filter(c => c.type === 'utterance.accepted')).toHaveLength(1);
   } finally { await session.close(); }
@@ -487,11 +487,41 @@ test('turn timing correlates utterance, input and response ids from the end of s
     const frame = decodeVoiceFrame(audio[0]);
     session.progress(frame.epoch, 320);
     const turn = timing.filter(e => e.operation === 'turn');
-    expect(turn.map(e => e.phase)).toEqual(['speech_ended', 'transcript_ready', 'turn_admitted', 'agent_first_spoken', 'e2e_first_audio']);
+    expect(turn.map(e => e.phase)).toEqual(['speech_ended', 'transcript_ready', 'turn_admitted', 'agent_first_spoken', 'spoken_sentence_sent', 'e2e_first_audio']);
     expect(new Set(turn.map(e => e.operationId)).size).toBe(1);
     expect(turn.at(-1)).toMatchObject({ utteranceId: listening.utterance_id, inputId: 'input-1', responseId: 'response-1' });
     expect(turn.at(-1).elapsedMs).toBeGreaterThanOrEqual(turn[0].elapsedMs);
     expect(timing.find(e => e.operation === 'tts' && e.phase === 'first_playback_progress')).toMatchObject({ utteranceId: listening.utterance_id, inputId: 'input-1', responseId: 'response-1' });
+  } finally { stream.close(); await session.close(); }
+});
+
+test('the agent turn reports its phases on the voice turn trace, and every spoken sentence handed to TTS is marked', async () => {
+  const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [], timing: any[] = [];
+  const stream = new BoundedQueue<{ responseId: string; text: string }>(1024, value => Buffer.byteLength(value.text));
+  let mark!: (phase: string) => void;
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] },
+    synthesize: async function* (options) { let sequence = 0; for await (const _ of options.text) yield { bytes: Buffer.alloc(640), format: PCM16, chunkSeq: sequence++ }; } };
+  const session = new VoiceSession(stt, tts, 'voice', { control: c => controls.push(c), audio: c => audio.push(c), bufferedBytes: () => 0 },
+    async (_text, _utterance, onMark) => { mark = onMark!; return { inputId: 'input-1', response: new Promise<string>(() => {}), stream }; }, jest.fn(),
+    { silenceCommitMs: 1, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500, mergeWindowMs: 0 }, undefined, undefined, event => timing.push(event));
+  const waitFor = async (predicate: () => boolean) => { const end = Date.now() + 2000; while (!predicate() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 5)); expect(predicate()).toBe(true); };
+  try {
+    await session.start();
+    const listening = controls.at(-1)!;
+    await session.audio({ generation: listening.generation, epoch: 0, sequence: 1, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    session.speechEnded(1);
+    await waitFor(() => !!stt.sessions[0].commitId);
+    stt.sessions[0].emit({ type: 'segment_final', segmentId: 's', text: 'hello' });
+    stt.sessions[0].emit({ type: 'commit_done', commitId: stt.sessions[0].commitId! });
+    await waitFor(() => controls.some(c => c.type === 'utterance.accepted'));
+    for (const phase of ['process_spawned', 'first_model_token', 'first_spoken_delta']) mark(phase);
+    stream.push({ responseId: 'response-1', text: 'One.' });
+    stream.push({ responseId: 'response-1', text: 'Two.' });
+    await waitFor(() => timing.filter(e => e.phase === 'spoken_sentence_sent').length === 2);
+    const turn = timing.filter(e => e.operation === 'turn');
+    expect(turn.map(e => e.phase)).toEqual(['speech_ended', 'transcript_ready', 'turn_admitted', 'process_spawned', 'first_model_token', 'first_spoken_delta', 'agent_first_spoken', 'spoken_sentence_sent', 'spoken_sentence_sent']);
+    expect(new Set(turn.map(e => e.operationId)).size).toBe(1);
+    expect(turn.find(e => e.phase === 'process_spawned')).toMatchObject({ utteranceId: listening.utterance_id, inputId: 'input-1' });
   } finally { stream.close(); await session.close(); }
 });
 
@@ -521,7 +551,7 @@ test('mute right after speech answers it without the silence timer, and the repl
     stt.sessions.at(-1)!.emit({ type: 'commit_done', commitId: stt.sessions.at(-1)!.commitId! });
     await muting;
     expect(submit).toHaveBeenCalledTimes(1);
-    expect(submit).toHaveBeenCalledWith('สรุปให้หน่อย', listening.utterance_id);
+    expect(submit).toHaveBeenCalledWith('สรุปให้หน่อย', listening.utterance_id, expect.any(Function));
     expect(controls.at(-1)).toMatchObject({ type: 'voice.state', state: 'muted' });
     stream.push({ responseId: 'reply', text: 'ได้ครับ' });
     await waitFor(() => audio.length === 1);
