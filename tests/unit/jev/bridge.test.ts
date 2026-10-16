@@ -237,3 +237,60 @@ test.each(['failed','paused'] as const)('parent verifies a computer completion c
   expect(()=>f.tasks.verifyComputer({...f.context,actionId:'verify-again'},task.taskId,1,'r','e','Visible',check)).toThrow();
  }finally{await f.close();}
 });
+
+describe('device_shell (prototype)', () => {
+ const shellAdapter = (shell: jest.Mock) => new Map<string, GatewayTaskAdapter>([['computer', { name: 'computer', shell } as unknown as GatewayTaskAdapter]]);
+ test('is declared only for a host agent with Computer Use allowed, and runs through the adapter', async () => {
+  const shell = jest.fn(async (_context, args) => ({ exitCode: 0, stdout: `ran ${args.command}\n`, stderr: '', truncated: false, durationMs: 5, timedOut: false }));
+  const f = fixture(false, shellAdapter(shell));
+  try {
+   await f.bridge.start();
+   const off = f.issue({ role: 'agent', context: f.context });
+   expect(JSON.parse(readFileSync(off.profile.mcpConfigPath, 'utf8')).mcpServers.gateway.env.GATEWAY_COMPUTER_ENABLED).toBe('');
+   expect(await off.call({ session_id: 'mac', command: 'which htop' }, 'device_shell')).toMatchObject({ error: 'COMPUTER_NOT_ALLOWED' });
+   expect(shell).not.toHaveBeenCalled();
+   f.bridge.computerEnabled = () => true;
+   const on = f.issue({ role: 'agent', context: f.context });
+   expect(JSON.parse(readFileSync(on.profile.mcpConfigPath, 'utf8')).mcpServers.gateway.env.GATEWAY_COMPUTER_ENABLED).toBe('true');
+   expect(await on.call({ session_id: 'mac', command: 'which htop' }, 'device_shell')).toEqual({ exitCode: 0, stdout: 'ran which htop\n', stderr: '', truncated: false, durationMs: 5, timedOut: false });
+   expect(shell.mock.calls[0][0]).toMatchObject({ principalId: 'u', conversationId: f.context.conversationId });
+   // A worker never gets the tool.
+   expect(await f.worker().ticket.call({ session_id: 'mac', command: 'id' }, 'device_shell')).toHaveProperty('error');
+   expect(shell).toHaveBeenCalledTimes(1);
+  } finally { await f.close(); }
+ });
+ test('needs an execution turn, a member, and surfaces adapter error codes', async () => {
+  const shell = jest.fn(async () => { throw Error('COMPUTER_ACCESS_DENIED'); });
+  const f = fixture(false, shellAdapter(shell)); f.bridge.computerEnabled = () => true;
+  try {
+   await f.bridge.start();
+   expect(await f.issue({ role: 'agent', context: { ...f.context, execute: false } }).call({ session_id: 'mac', command: 'id' }, 'device_shell')).toMatchObject({ error: 'ACCESS_DENIED', reason: 'READ_ONLY_TURN' });
+   expect(await f.issue({ role: 'agent', context: { ...f.context, principalId: 'foreign' } }).call({ session_id: 'mac', command: 'id' }, 'device_shell')).toHaveProperty('error');
+   expect(shell).not.toHaveBeenCalled();
+   expect(await f.issue({ role: 'agent', context: f.context }).call({ session_id: 'mac', command: 'id' }, 'device_shell')).toMatchObject({ error: 'COMPUTER_ACCESS_DENIED' });
+  } finally { await f.close(); }
+ });
+ test('is refused in an app container even with Computer Use allowed', async () => {
+  const shell = jest.fn();
+  const f = fixture(true, shellAdapter(shell)); f.bridge.computerEnabled = () => true;
+  try {
+   await f.bridge.start();
+   const agent = f.issue({ role: 'agent', context: f.context });
+   expect(agent.ticket.tools.map((t: any) => t.name)).not.toContain('device_shell');
+   expect(await agent.call({ session_id: 'mac', command: 'id' }, 'device_shell')).toHaveProperty('error');
+   expect(shell).not.toHaveBeenCalled();
+  } finally { await f.close(); }
+ });
+ test('revoking the ticket cancels a running command', async () => {
+  let started!: () => void; const entered = new Promise<void>(r => { started = r; });
+  let seen: AbortSignal | undefined;
+  const shell = jest.fn((_c, _a, signal: AbortSignal) => { seen = signal; started(); return new Promise((_r, reject) => signal.addEventListener('abort', () => reject(Error('COMPUTER_ACCESS_STOPPED')))); });
+  const f = fixture(false, shellAdapter(shell)); f.bridge.computerEnabled = () => true;
+  try {
+   await f.bridge.start();
+   const agent = f.issue({ role: 'agent', context: f.context });
+   const pending = agent.call({ session_id: 'mac', command: 'sleep 60' }, 'device_shell'); await entered; agent.revoke();
+   expect(await pending).toHaveProperty('error'); expect(seen?.aborted).toBe(true);
+  } finally { await f.close(); }
+ });
+});

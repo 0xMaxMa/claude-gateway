@@ -156,6 +156,7 @@ export function telegramToolDetail(name:string,input:Record<string,unknown>):str
   if (name==='mcp__gateway__task_spawn') return `🔥 ${String(input.title??'Starting work').slice(0,250)}`;
   if (name==='mcp__gateway__task_status') return '🔎 Checking task progress';
   if (name==='mcp__gateway__task_cancel') return '⏹ Stopping task';
+  if (name==='mcp__gateway__device_shell') return '💻 Running a command on the Mac';
   if (name==='mcp__gateway__task_update'||name==='mcp__gateway__task_answer') return '📝 Updating task';
   if (name==='Skill') return `📚 Using skill: ${String(input.skill??'assigned skill').replace(/^orchestration-task:/,'').slice(0,200)}`;
   return extractToolDetail(name,input);
