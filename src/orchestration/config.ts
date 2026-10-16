@@ -85,9 +85,8 @@ export interface OrchestrationConfig {
     /** mergeWindowMs: how long a committed utterance waits for a continuation before it becomes one turn; 0 admits it at once. */
     turns?: { silenceCommitMs?: number; finalizationTimeoutMs?: number; maxUtteranceMs?: number; mergeWindowMs?: number };
     playback?: { maxBufferedAudioMs?: number; bargeIn?: boolean };
-    /** Live call latency: streamSpokenText speaks spoken_text sentence by sentence while the agent is still writing;
-     * fastAck speaks a short fastAckModel acknowledgement when the reply has not started speaking fastAckAfterMs after admission. */
-    live?: { streamSpokenText?: boolean; fastAck?: boolean; fastAckModel?: string; fastAckAfterMs?: number; fastAckTimeoutMs?: number };
+    /** Live call latency: fastAck speaks a short fastAckModel acknowledgement when the reply has not started speaking fastAckAfterMs after admission. */
+    live?: { fastAck?: boolean; fastAckModel?: string; fastAckAfterMs?: number; fastAckTimeoutMs?: number };
     /** Long-form `narrate` worker tool: read supplied text aloud as a sequence of audio files. */
     narrate?: { enabled?: boolean; maxChars?: number; maxParts?: number; targetChars?: number; partTimeoutMs?: number };
   };
@@ -108,7 +107,7 @@ export const ORCHESTRATION_DEFAULTS = {
     tts: { provider: 'elevenlabs', model: 'eleven_v3_conversational', voiceId: '' },
     turns: { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, mergeWindowMs: 1200 },
     playback: { maxBufferedAudioMs: 1500, bargeIn: true },
-    live: { streamSpokenText: false, fastAck: false, fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000 },
+    live: { fastAck: false, fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000 },
     narrate: { enabled: true, maxChars: 100000, maxParts: 60, targetChars: 800, partTimeoutMs: 60000 } },
 };
 // New agents start disabled and choose models explicitly from connected providers.

@@ -90,8 +90,8 @@ test('the call goes to the agent model endpoint with thinking off, and reports t
 
 test('voice.live settings are off by default and validated', () => {
   const live = (value: Record<string, unknown>) => resolveOrchestrationConfig(undefined, { ...ORCHESTRATION_DEFAULTS.voice, live: value as never }).voice.live;
-  expect(live({})).toEqual({ streamSpokenText: false, fastAck: false, fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000 });
-  expect(live({ streamSpokenText: true, fastAck: true, fastAckAfterMs: 1200 })).toMatchObject({ streamSpokenText: true, fastAck: true, fastAckAfterMs: 1200 });
+  expect(live({})).toEqual({ fastAck: false, fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000 });
+  expect(live({ fastAck: true, fastAckAfterMs: 1200 })).toMatchObject({ fastAck: true, fastAckAfterMs: 1200 });
   expect(() => live({ fastAck: 'yes' })).toThrow('voice.live.fastAck');
   expect(() => live({ fastAckAfterMs: 0 })).toThrow('voice.live.fastAckAfterMs');
   expect(() => live({ unknown: true })).toThrow('voice.live.unknown');
