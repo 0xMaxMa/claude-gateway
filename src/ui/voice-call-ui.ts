@@ -198,6 +198,8 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     var playhead = createVoiceCallPlayhead(), sources = [];
     var callToken, generation, epoch = 0, reportedPlayed = 0;
     var muted = false, paused = false, ended = false, attempts = 0, speakerOn = true, shownLevel, muteOnListening = false;
+    // One connect at a time: a hide, show, hang-up or newer connect discards the pending one and its reconnect timer.
+    var connecting = 0, reconnectTimer;
     // The user stopped speaking: show Thinking at once, through the gateway's commit and
     // merge window, until it answers, reports no speech, or the user speaks again.
     var awaitingReply = false;
@@ -295,10 +297,12 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       }
     }
     async function connect(){
-      var issued = await ticket();
+      var mine = ++connecting, issued;
+      // A discarded connect neither opens a socket nor reports its failure.
+      try { issued = await ticket(); } catch (error) { if (mine !== connecting) return; throw error; }
+      if (mine !== connecting || ended || paused) return;
       offeredElapsed = typeof issued.call_elapsed_ms === 'number' ? issued.call_elapsed_ms : 0;
       var scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      if (ended || paused) return;
       var socket = new WebSocket(scheme + '//' + location.host + CFG.basePath + issued.stream_path + '?ticket=' + encodeURIComponent(issued.ticket));
       // A new socket starts with the page's mute state; nothing waits on the old utterance.
       ws = socket; joined = false; muteOnListening = false; awaitingReply = false;
@@ -318,11 +322,12 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     }
     // A dropped socket's lease can take a moment to clear: retry transient ticket errors with backoff.
     function reconnect(){
-      if (ended) return;
+      if (ended || paused) return;
       if (attempts >= 5) { var lost = new Error('The call was disconnected.'); lost.fatal = false; fail(lost); return; }
       attempts++; state('Reconnecting…');
-      setTimeout(function(){ connect().catch(function(error){ if (error.fatal === false) reconnect(); else fail(error); }); }, 500 * attempts);
+      reconnectTimer = setTimeout(function(){ reconnectTimer = undefined; connect().catch(function(error){ if (error.fatal === false) reconnect(); else fail(error); }); }, 500 * attempts);
     }
+    function cancelConnect(){ clearTimeout(reconnectTimer); reconnectTimer = undefined; connecting++; }
     function fail(error){
       state(error.message || 'The call could not continue.', 'err');
       if (error.signIn) {
@@ -376,23 +381,24 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     }
     // A hidden Mini App cannot hear or be heard reliably (iOS cuts the mic). Leave the
     // call while hidden, so replies reach the chat as they would without a call, and
-    // rejoin with the call token on return.
+    // rejoin with the call token on return. Before the call is set up (the page waits
+    // for the Start call tap) there is nothing to leave.
     function suspend(){
-      if (!media || ended || paused) return;
-      paused = true; uplink.reset(); flushPlayback();
+      if (!uplink || ended || paused) return;
+      paused = true; cancelConnect(); uplink.reset(); flushPlayback();
       media.getAudioTracks().forEach(function(track){ track.enabled = false; });
       if (ws) { send({ type: 'voice.stop' }); ws.close(); }
       state('Paused');
     }
     function resume(){
       if (!paused || ended || document.visibilityState !== 'visible') return;
-      paused = false; attempts = 0; vad = createVoiceCallVad(CFG.vad);
+      paused = false; cancelConnect(); attempts = 0; vad = createVoiceCallVad(CFG.vad);
       media.getAudioTracks().forEach(function(track){ track.enabled = !muted; });
       state('Reconnecting…'); connect().catch(fail);
     }
     function hangup(silent){
       if (ended) return;
-      showDuration(); ended = true; clearInterval(progressTimer);
+      showDuration(); ended = true; cancelConnect(); clearInterval(progressTimer);
       // hangup ends the call for the server too; a plain stop (the app hidden) may rejoin.
       send({ type: 'voice.stop', hangup: true }); if (ws) ws.close();
       if (media) media.getTracks().forEach(function(track){ track.stop(); });

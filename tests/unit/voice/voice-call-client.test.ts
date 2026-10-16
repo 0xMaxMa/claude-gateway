@@ -339,7 +339,10 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
   const systemThemeChanged = (light: boolean) => { systemTheme.matches = light; systemTheme.listeners.forEach(listener => listener()); };
   /** The audio clock moves to `seconds`, so reply audio scheduled before then has been heard. */
   const audioTime = (seconds: number) => { contexts.at(-1)!.currentTime = seconds; };
-  return { element, location, fetch, sockets, getUserMedia, tap, replies, loudness, hear, root, tg, themeChanged, systemThemeChanged, audioTime };
+  /** Telegram hides the Mini App (the user switched apps), then shows it again. */
+  const deactivate = async () => { (handlers.deactivated ?? []).forEach(handler => handler()); await settle(); };
+  const activate = async () => { (handlers.activated ?? []).forEach(handler => handler()); await settle(); };
+  return { element, location, fetch, sockets, getUserMedia, tap, replies, loudness, hear, root, tg, themeChanged, systemThemeChanged, audioTime, deactivate, activate };
 }
 
 /** Every inline script of a page, in page order, as one script. */
@@ -457,6 +460,63 @@ describe('call page', () => {
   });
 
   const LISTENING = { type: 'voice.state', state: 'listening', utterance_id: '0'.repeat(32), generation: '1'.repeat(32) };
+
+  test('switching apps before the Start call tap leaves the page waiting for that tap, and one tap starts one call', async () => {
+    const { element, fetch, sockets, tap, deactivate, activate } = await openPage({ audioNeedsTap: true });
+    await jest.advanceTimersByTimeAsync(800); await settle();
+    expect(element('state').textContent).toBe('Tap Start call to begin.');
+    await deactivate();
+    await activate();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(0);
+    expect(element('start')).toMatchObject({ hidden: false, textContent: 'Start call' });
+    await tap('start');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(sockets).toHaveLength(1);
+  });
+
+  test('hidden and shown again while a reconnect waits, the page opens one socket, not two', async () => {
+    const { fetch, sockets, deactivate, activate } = await openPage();
+    sockets[0].open(); sockets[0].receive(LISTENING);
+    sockets[0].drop(1006);
+    // The reconnect waits 500 ms; the user switches apps and back within it.
+    await deactivate();
+    await activate();
+    expect(sockets).toHaveLength(2);
+    await jest.advanceTimersByTimeAsync(5_000); await settle();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(sockets).toHaveLength(2);
+  });
+
+  test('a ticket request that fails after the page was hidden starts no second reconnect once it is shown again', async () => {
+    let refuse!: () => void;
+    const { fetch, sockets, deactivate, activate } = await openPage();
+    sockets[0].open(); sockets[0].receive(LISTENING);
+    fetch.mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = () => reject(new Error('offline')); }) as any);
+    sockets[0].drop(1006);
+    await jest.advanceTimersByTimeAsync(600); await settle();
+    await deactivate();
+    await activate();
+    expect(sockets).toHaveLength(2);
+    refuse(); await settle();
+    await jest.advanceTimersByTimeAsync(10_000); await settle();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(sockets).toHaveLength(2);
+  });
+
+  test('a ticket that arrives after the page was hidden opens no socket, and showing the page again opens one', async () => {
+    let answer!: () => void;
+    const { fetch, sockets, deactivate, activate } = await openPage();
+    sockets[0].open(); sockets[0].receive(LISTENING);
+    fetch.mockImplementationOnce(() => new Promise(resolve => { answer = () => resolve({ ok: true, status: 200, json: async () => JSON.parse(TICKET.body) }); }) as any);
+    sockets[0].drop(1006);
+    await jest.advanceTimersByTimeAsync(600); await settle();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await deactivate();
+    await activate();
+    answer(); await settle();
+    expect(sockets).toHaveLength(2);
+  });
 
   test('round controls in phone order: Speaker, End call, Mute, as labelled toggle buttons', () => {
     const html = generateVoiceCallPage({ pairingId: 'a'.repeat(36), agentId: 'agent', basePath: '/gateway', maxUtteranceMs: 60000 });
