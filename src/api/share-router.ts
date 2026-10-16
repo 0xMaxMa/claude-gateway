@@ -4,7 +4,7 @@ import * as path from 'path';
 import { createApiAuthMiddleware, canAccessAgent } from './auth';
 import { isValidAgentId, isValidSessionId } from './router';
 import { guardAsyncRoutes } from './async-guard';
-import { presentedSessionToken, ProjectGate } from './project-gate';
+import type { ProjectGate } from './project-gate';
 import { PROJECTS_ADMIN_REQUIRED } from './auth';
 import { MediaStore } from '../history/media-store';
 import { ApiKey } from '../types';
@@ -275,11 +275,11 @@ export function createSharesPrivateRouter(
 ): Router {
   const router = guardAsyncRoutes(Router());
   const auth = createApiAuthMiddleware(apiKeys);
-  /** Refuses a non-admin caller that is not the agent of `sessionId` when that session is bound to a project. */
+  /** Refuses a non-admin caller when `sessionId` is bound to a project. */
   const refusedSession = (req: Request, agentId: string, sessionId: string): Promise<boolean> =>
-    gate ? gate.refusesSession((req as AuthedRequest).apiKey, agentId, sessionId, presentedSessionToken(req)) : Promise.resolve(false);
+    gate ? gate.refusesSession((req as AuthedRequest).apiKey, agentId, sessionId) : Promise.resolve(false);
   const refusedMedia = (req: Request, agentId: string, relativePath: string): Promise<boolean> =>
-    gate ? gate.refusesMedia((req as AuthedRequest).apiKey, agentId, relativePath, presentedSessionToken(req)) : Promise.resolve(false);
+    gate ? gate.refusesMedia((req as AuthedRequest).apiKey, agentId, relativePath) : Promise.resolve(false);
   const limits = limitsOverride ?? shareLimitsFromEnv();
   const defaultTtl = (() => {
     const n = Number(shareEnv('CODEX_TTL_SECONDS'));

@@ -3,7 +3,6 @@ import * as os from 'os';
 import * as path from 'path';
 import request from 'supertest';
 import { AgentRunner } from '../../src/agent/runner';
-import { mintAgentSessionToken } from '../../src/api/agent-credential';
 import { GatewayRouter } from '../../src/api/gateway-router';
 import type { AgentConfig, ApiKey, GatewayConfig } from '../../src/types';
 
@@ -49,8 +48,8 @@ afterEach(async () => {
   fs.rmSync(base, { recursive: true, force: true });
 });
 
-const as = (key: ApiKey, method: 'get' | 'post', url: string, body?: object, headers: Record<string, string> = {}) =>
-  request(gw)[method](url).set('Authorization', `Bearer ${key.key}`).set(headers).send(body ?? {});
+const as = (key: ApiKey, method: 'get' | 'post', url: string, body?: object) =>
+  request(gw)[method](url).set('Authorization', `Bearer ${key.key}`).send(body ?? {});
 const boundFile = () => `media/api-${bound}/f.png`;
 const share = (sid: string, ref: string) => ({ agent_id: 'alfred', session_id: sid, refs: [{ path: ref }] });
 
@@ -84,25 +83,6 @@ describe('routes that name a bound session or its media', () => {
     expect((await as(KEYS.admin, 'post', '/api/v1/shares', share(bound, boundFile()))).status).toBe(201);
     expect((await as(KEYS.admin, 'get', `/api/v1/image-catalog?agent_id=alfred&session_id=${bound}`)).status).toBe(200);
     expect((await as(KEYS.admin, 'post', `${A}/sessions/${bound}/attachments`, { files: [path.join(base, 'agents', 'alfred', 'media', `api-${bound}`, 'f.png')] })).status).toBe(200);
-  });
-
-  it.each(NON_ADMIN)('serve the agent of the bound session, with $key as the API key and the session token', async (key) => {
-    const token = { 'X-Gateway-Session-Token': mintAgentSessionToken('alfred', bound) };
-    expect((await as(key, 'post', '/api/v1/shares', share(bound, boundFile()), token)).status).toBe(201);
-    expect((await as(key, 'post', '/api/v1/image-artifacts', { agent_id: 'alfred', session_id: bound, files: [boundFile()] }, token)).status).toBe(201);
-    expect((await as(key, 'get', `/api/v1/image-catalog?agent_id=alfred&session_id=${bound}`, undefined, token)).status).toBe(200);
-    expect((await as(key, 'post', `${A}/sessions/${bound}/attachments`, { files: [path.join(base, 'agents', 'alfred', 'media', `api-${bound}`, 'f.png')] }, token)).status).toBe(200);
-  });
-
-  it('never lets one session token open another bound session or a forged token open any', async () => {
-    const other = (await as(KEYS.admin, 'post', `${A}/sessions?chat_id=web`, { project: 'site' })).body.sessionId as string;
-    fs.mkdirSync(path.join(base, 'agents', 'alfred', 'media', `api-${other}`), { recursive: true });
-    fs.writeFileSync(path.join(base, 'agents', 'alfred', 'media', `api-${other}`, 'f.png'), PNG);
-    const mine = { 'X-Gateway-Session-Token': mintAgentSessionToken('alfred', bound) };
-    expect((await as(KEYS.podWrite, 'post', '/api/v1/shares', share(bound, `media/api-${other}/f.png`), mine)).status).toBe(403);
-    expect((await as(KEYS.podWrite, 'post', '/api/v1/shares', share(other, `media/api-${other}/f.png`), mine)).status).toBe(403);
-    expect((await as(KEYS.podWrite, 'post', '/api/v1/shares', share(bound, boundFile()), { 'X-Gateway-Session-Token': 'a'.repeat(64) })).status).toBe(403);
-    expect((await as(KEYS.podWrite, 'post', '/api/v1/shares', share(bound, boundFile()), { 'X-Gateway-Session-Token': mintAgentSessionToken('warrior', bound) })).status).toBe(403);
   });
 });
 

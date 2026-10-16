@@ -1,11 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import type { Request, Response } from 'express';
+import type { Response } from 'express';
 import type { AgentRunner } from '../agent/runner';
 import type { ApiKey } from '../types';
 import { SESSION_ID_RE } from '../session/store';
 import { MediaStore } from '../history/media-store';
-import { AGENT_SESSION_TOKEN_HEADER, isAgentSessionToken } from './agent-credential';
 import { isAdmin, PROJECTS_ADMIN_REQUIRED } from './auth';
 
 
@@ -60,22 +59,6 @@ export async function historyExclusions(runner: AgentRunner, apiKey: ApiKey, req
   return hidden;
 }
 
-/** The session token the caller presented, if any. */
-export function presentedSessionToken(req: Request): string | undefined {
-  const v = req.headers[AGENT_SESSION_TOKEN_HEADER];
-  return typeof v === 'string' ? v : undefined;
-}
-
-/**
- * Like `refusesProjectChat`, for routes the agent's own tools call (attachments, shares, image artifacts and
- * catalogs). The agent running session `sessionId` proves itself with the token it was spawned with, so a project
- * chat can still attach media and mint shares for itself while no outside non-admin key can.
- */
-export async function refusesProjectSession(runner: AgentRunner, agentId: string, apiKey: ApiKey, sessionId: string, token?: string): Promise<boolean> {
-  if (isAgentSessionToken(token, agentId, sessionId)) return false;
-  return refusesProjectChat(runner, apiKey, sessionId);
-}
-
 /** The session a media path (relative to the agent's media folder, or prefixed `media/`) belongs to, after resolving dot segments and links. */
 function mediaPathSession(runner: AgentRunner, agentId: string, relativePath: string): string | undefined {
   const base = runner.getAgentsBaseDir();
@@ -92,31 +75,31 @@ function mediaPathSession(runner: AgentRunner, agentId: string, relativePath: st
 }
 
 /**
- * True when `relativePath` names a file of a project-bound session that `apiKey` (or the token's agent) may not reach.
+ * True when `relativePath` names a file of a project-bound session that `apiKey` may not reach.
  * Only the one binding file of that session decides, so a folder of any other session (a legacy one that lives only in
  * the history database, one in an unreadable index, a deleted unbound one) is answered as it is without projects.
  */
-export async function refusesProjectMedia(runner: AgentRunner, agentId: string, apiKey: ApiKey, relativePath: string, token?: string): Promise<boolean> {
+export async function refusesProjectMedia(runner: AgentRunner, agentId: string, apiKey: ApiKey, relativePath: string): Promise<boolean> {
   const session = mediaPathSession(runner, agentId, relativePath);
   if (session === undefined) return false;
-  return refusesProjectSession(runner, agentId, apiKey, session, token);
+  return refusesProjectChat(runner, apiKey, session);
 }
 
 /** What the share router asks, without holding the runners. */
 export interface ProjectGate {
-  refusesSession(apiKey: ApiKey, agentId: string, sessionId: string, token?: string): Promise<boolean>;
-  refusesMedia(apiKey: ApiKey, agentId: string, relativePath: string, token?: string): Promise<boolean>;
+  refusesSession(apiKey: ApiKey, agentId: string, sessionId: string): Promise<boolean>;
+  refusesMedia(apiKey: ApiKey, agentId: string, relativePath: string): Promise<boolean>;
 }
 
 export function projectGateFor(runners: ReadonlyMap<string, AgentRunner>): ProjectGate {
   return {
-    async refusesSession(apiKey, agentId, sessionId, token) {
+    async refusesSession(apiKey, agentId, sessionId) {
       const runner = runners.get(agentId);
-      return runner ? refusesProjectSession(runner, agentId, apiKey, sessionId, token) : false;
+      return runner ? refusesProjectChat(runner, apiKey, sessionId) : false;
     },
-    async refusesMedia(apiKey, agentId, relativePath, token) {
+    async refusesMedia(apiKey, agentId, relativePath) {
       const runner = runners.get(agentId);
-      return runner ? refusesProjectMedia(runner, agentId, apiKey, relativePath, token) : false;
+      return runner ? refusesProjectMedia(runner, agentId, apiKey, relativePath) : false;
     },
   };
 }

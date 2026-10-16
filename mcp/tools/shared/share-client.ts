@@ -112,7 +112,6 @@ async function callGateway(
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${process.env.GATEWAY_API_KEY}`,
-      ...(process.env.GATEWAY_SESSION_TOKEN ? { 'X-Gateway-Session-Token': process.env.GATEWAY_SESSION_TOKEN } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),

@@ -64,7 +64,6 @@ export class ApiModule implements ToolModule {
           headers: {
             'Content-Type': 'application/json',
             ...(apiKey ? { 'X-Api-Key': apiKey } : {}),
-            ...(process.env.GATEWAY_SESSION_TOKEN ? { 'X-Gateway-Session-Token': process.env.GATEWAY_SESSION_TOKEN } : {}),
           },
           body: JSON.stringify({ files }),
           signal: AbortSignal.timeout(5000),

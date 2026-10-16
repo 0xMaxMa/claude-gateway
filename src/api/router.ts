@@ -18,7 +18,7 @@ import { agentsDirForConfig } from '../config/agent-env';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin, PROJECTS_ADMIN_REQUIRED } from './auth';
 import { guardAsyncRoutes } from './async-guard';
-import { BINDINGS_UNREADABLE, hiddenSessions, historyExclusions, presentedSessionToken, refusesProjectChat, refusesProjectMedia, refusesProjectSession } from './project-gate';
+import { BINDINGS_UNREADABLE, hiddenSessions, historyExclusions, refusesProjectChat, refusesProjectMedia } from './project-gate';
 import { PROJECT_CHAT_ERRORS } from '../projects/chat';
 import { parseProjectName, ProjectName } from '../projects/paths';
 import { MediaStore } from '../history/media-store';
@@ -4136,7 +4136,7 @@ export function createApiRouter(
         res.status(404).json({ error: `Agent '${agentId}' not found` });
         return;
       }
-      if (await refusesProjectSession(runner, agentId, apiKey, sessionId, presentedSessionToken(req))) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
+      if (await refusesProjectChat(runner, apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       const body = req.body as Record<string, unknown>;
       const files = body['files'];
       if (!Array.isArray(files) || files.some((f) => typeof f !== 'string')) {

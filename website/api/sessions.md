@@ -219,13 +219,10 @@ to the owning agent. `GET /shared/:token` is public: the token is the capability
 the refused `POST /v1/shares`.
 
 **The agent of a project chat.** The attachment tool (`api_reply`), `share_file` and the image tools call the share,
-catalog, artifact and attachment routes with the API key the gateway handed the agent, which can be a key that is not
-an admin key. The gateway also hands each agent process a token for its own session, and the routes accept a call
-for that session, and only that one, with the token. The token matters only when the first API key that matches the
-agent is not an admin key; an admin key needs no token. It is written to the agent's `mcp-config.json` (mode `0600`, in
-the session folder under the agent's workspace) and passed to the MCP server process, so any code the agent runs as the same
-user can read it, along with the API key beside it. It is the same for every spawn of the session, stops working when the
-gateway restarts, and opens no other session. It does not make a share URL private: anyone who holds a share URL can open it.
+catalog, artifact and attachment routes with the API key the gateway hands the agent: the first key in `gateway.api.keys`
+that reaches it. These routes apply the same admin key rule, so the agent must hold an admin key to attach or share media
+in a project chat, as it does on a provisioned pod. With a key that is not an admin key, those tool calls in a project
+chat answer `403 forbidden_key`; a plain chat is not affected. A share URL is not private: anyone who holds it can open it.
 
 **When the chat is deleted.** Deleting a project chat removes its whole media folder (`media/api-<sessionId>/`), not only
 the files its messages name, once its last turn has ended. A read of a media folder named `api-<name>` by a key that is not
