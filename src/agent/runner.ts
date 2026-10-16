@@ -5,6 +5,8 @@ import { resolveDreamingConfig } from './dreaming/config';
 import { presentedResponseError } from '../orchestration/response-errors';
 import { ChannelMediaError } from '../orchestration/channel-media-error';
 import { payloadHash, type AcceptInput } from '../orchestration/store';
+import { channelScope } from '../orchestration/identity';
+import type { VoiceScope } from '../voice/scope';
 import { ORCHESTRATION_DEFAULTS } from '../orchestration/config';
 import { channelInputMedia } from '../orchestration/channel-input-media';
 import { chunkText } from '../telegram/chunks';
@@ -70,7 +72,8 @@ import { initialBudget, type BudgetState } from './recovery-policy';
 import { scrubText } from './incident';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { cliPairingStore, isCliChannel, type CliChannel } from '../cli-viewer/pairing-store';
-import { buildCliUrl } from '../cli-viewer/url';
+import { buildCliUrl, buildVoiceCallUrl, normalizePublicUrl } from '../cli-viewer/url';
+import { telegramVoiceCallsEnabled, voiceCallEndedText, voiceCallPairings } from '../voice/call-pairing';
 import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
@@ -631,18 +634,42 @@ export class AgentRunner extends EventEmitter {
   async authorizeVoiceSession(sessionId: string, principalId: string): Promise<void> {
     (await this.getOrchestration()).authorizeSession(sessionId, principalId);
   }
+  async voiceTts<T extends { provider: string; model: string; voiceId: string }>(scope: VoiceScope, tts: T): Promise<T> {
+    return (await this.getOrchestration()).telegramVoices.forScope(scope, tts);
+  }
   async subscribeVoiceResults(sessionId: string, principalId: string, receive: (result: { responseId: string; text: string; spoken: string; requestId?: string; speechOnly?: boolean }) => void, gender?: () => string | undefined): Promise<() => void> {
     return (await this.getOrchestration()).subscribeVoiceResults(sessionId, principalId, receive, gender);
   }
   recordVoicePlayback(responseId: string, principalId: string, progress: { generation: string; epoch: number; generatedSamples: number; playedSamples: number }, state: string): void {
     this.orchestration?.recordPlayback(responseId, principalId, progress, state);
   }
-  async submitVoiceUtterance(sessionId: string, chatId: string, principalId: string, text: string, utteranceId: string, allowTools: boolean, model?: string, executionTaskId?:string): Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId(): string | undefined }> {
-    if (!this.agentConfig.orchestration?.enabled || !this.agentConfig.voice?.enabled) throw new Error('Voice is disabled');
-    if (!(await this.apiSessionExists(chatId, sessionId))) throw new Error('Session not found');
+  /** The Telegram session a DM call speaks in: the chat's active session, as for typed messages. */
+  async telegramVoiceSession(chatId: string): Promise<string> {
+    return this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, 'telegram');
+  }
+  /** A `/call` ended: a system notice with its length in the DM (or topic) the call joined. */
+  async notifyVoiceCallEnded(sessionId: string, scope: Extract<VoiceScope, { kind: 'telegram' }>, durationMs: number): Promise<void> {
     const orchestration = await this.getOrchestration();
-    const accepted = orchestration.submitInput({ scope: { agentId: this.agentConfig.id, agentSessionId: sessionId, source: 'api', accountId: principalId,
-      chatId, threadKey: '', principalId }, text, model, metadata:{executionTaskId}, modality: 'live_voice', ingressKey: `utterance:${utteranceId}` }, { execute: allowTools, writeMemory: false });
+    await orchestration.notifyChat(sessionId, 'telegram', scope.chatId, scope.threadKey, voiceCallEndedText(durationMs));
+  }
+  async submitVoiceUtterance(sessionId: string, voiceScope: VoiceScope, text: string, utteranceId: string, allowTools: boolean, model?: string, executionTaskId?:string, onMark?: (phase: string) => void): Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId(): string | undefined }> {
+    if (!this.agentConfig.orchestration?.enabled || !this.agentConfig.voice?.enabled) throw new Error('Voice is disabled');
+    const { chatId, principalId } = voiceScope;
+    let scope: AcceptInput['scope'];
+    if (voiceScope.kind === 'telegram') {
+      // The call joins the DM it was opened from: the same conversation, delivery
+      // binding and membership as a message typed in that chat.
+      if (!telegramVoiceCallsEnabled(this.agentConfig)) throw new Error('Voice is disabled');
+      // /new or a session switch moves the chat; the call must not keep talking to the old session.
+      if (await this.telegramVoiceSession(chatId) !== sessionId) throw Object.assign(new Error('Voice session changed'), { code: 'VOICE_SESSION_CHANGED' });
+      scope = channelScope(this.agentConfig.id, sessionId, 'telegram', chatId, voiceScope.threadKey, principalId.slice('telegram:'.length));
+    } else {
+      if (!(await this.apiSessionExists(chatId, sessionId))) throw new Error('Session not found');
+      scope = { agentId: this.agentConfig.id, agentSessionId: sessionId, source: 'api', accountId: principalId, chatId, threadKey: '', principalId };
+    }
+    const orchestration = await this.getOrchestration();
+    const accepted = orchestration.submitInput({ scope, text, model, metadata:{executionTaskId}, modality: 'live_voice', ingressKey: `utterance:${utteranceId}`,
+      ...(voiceScope.kind === 'telegram' ? { trustedChannelMember: true } : {}) }, { execute: allowTools, writeMemory: false }, undefined, onMark);
     // The browser refreshes history on utterance.accepted, before inference finishes.
     await orchestration.flushHistory();
     return { ...accepted, responseId: () => orchestration.responseIdForInput(accepted.inputId) };
@@ -940,8 +967,8 @@ export class AgentRunner extends EventEmitter {
             const sessionId = await this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, channelSource);
             const runtime = await this.getOrchestration();
             const senderId = meta.user_id ?? meta.user ?? chatId;
-            const scope: AcceptInput['scope'] = {agentId:this.agentConfig.id,agentSessionId:sessionId,source:channelSource,
-              accountId:this.agentConfig.id,chatId,threadKey:channelSource==='whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : meta.thread_ts ?? meta.message_thread_id ?? '',principalId:`${channelSource}:${senderId}`};
+            const scope = channelScope(this.agentConfig.id,sessionId,channelSource,chatId,
+              channelSource==='whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : meta.thread_ts ?? meta.message_thread_id ?? '',senderId);
             const {ingress_recovery_batch,...originalMeta} = meta;
             let recoveryBatch = ingress_recovery_batch, recoveryKey = meta.message_id;
             const fingerprint = payloadHash({content,meta:originalMeta});
@@ -1509,6 +1536,20 @@ export class AgentRunner extends EventEmitter {
       return;
     }
 
+
+    // `/call` — the receiver has checked the DM sender against its allowlist.
+    // Mint a voice-call pairing for that user; the Mini App proves the same user
+    // again with signed initData before any ticket is issued.
+    if (command === 'voice_call_pair') {
+      const chatId = body.chat_id ?? '', userId = body.payload?.user_id, threadId = body.payload?.thread_id;
+      // Private chats only: a DM's chat id is its user id.
+      if (!/^\d+$/.test(chatId) || userId !== chatId || (threadId !== undefined && (typeof threadId !== 'string' || !/^\d+$/.test(threadId)))) { respond({ success: false, error: 'invalid_request' }, 400); return; }
+      if (!telegramVoiceCallsEnabled(this.agentConfig)) { respond({ success: false, error: 'voice_not_configured' }); return; }
+      // Telegram opens Mini Apps over HTTPS only.
+      if (!normalizePublicUrl(this.gatewayConfig.gateway.publicUrl)?.startsWith('https://')) { respond({ success: false, error: 'not_configured' }); return; }
+      respond({ success: true, url: buildVoiceCallUrl(this.gatewayConfig.gateway.publicUrl, voiceCallPairings.create(this.agentConfig.id, chatId, threadId ?? '')) });
+      return;
+    }
 
     if (command === 'get_model') {
       respond({ model: this.agentConfig.claude.model });

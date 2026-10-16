@@ -42,6 +42,9 @@ import { normalizePublicUrl } from '../cli-viewer/url';
 import { createApiRouter } from './router';
 import { createPstackRouter } from './pstack-router';
 import { VoiceApi } from './voice-router';
+import { createVoiceCallRouter } from './voice-call-router';
+import { voiceCallPairings } from '../voice/call-pairing';
+import { telegramStateDir } from '../telegram/access';
 import { createCronRouter } from './cron-router';
 import { createMetaRouter } from './meta-router';
 import { createCapabilitiesRouter } from './capabilities';
@@ -646,6 +649,15 @@ export class GatewayRouter {
     // owns its own cookie/approval auth without the API-key gate intercepting.
     this.setupCliRoutes();
 
+    // Telegram `/call` voice Mini App. Its tickets are proven by Telegram
+    // initData, so voice calls work even on a gateway without API keys.
+    this.voiceApi = new VoiceApi(this.agents, this.configs, this.gatewayConfig?.gateway?.api?.keys ?? []);
+    this.app.use('/voice-call', createVoiceCallRouter({
+      agents: this.agents, configs: this.configs, voiceApi: this.voiceApi,
+      basePath: () => this.cliBasePath(),
+      telegramStateDir: agentId => telegramStateDir(this.configs.get(agentId)?.workspace, agentsDirForConfig(this.configPath), agentId),
+    }));
+
     // Share bridge (#70): a single reusable /shared/:token primitive. The store +
     // public fetch route mount UNCONDITIONALLY — the public route only serves tokens
     // that were actually minted (else a uniform 404), so it is safe to always mount.
@@ -721,7 +733,6 @@ export class GatewayRouter {
       this.app.use('/api', createBrowserBindingsRouter(this.gatewayConfig,this.agents,this.configPath));
       this.app.use('/api', createJevRouter(this.gatewayConfig, this.configs));
       this.app.use('/api', apiRouter);
-      this.voiceApi = new VoiceApi(this.agents, this.configs, this.gatewayConfig.gateway.api.keys);
       this.app.use('/api', this.voiceApi.router);
     }
 
@@ -1630,6 +1641,8 @@ export class GatewayRouter {
           if (rec.resetAt < now) this.loginAttempts.delete(ip);
         }
         cliPairingStore.prune();
+        const liveVoice = this.voiceApi?.liveSessionIds() ?? new Set<string>();
+        voiceCallPairings.prune(id => liveVoice.has(id));
         pendingOAuthStore.prune();
         refreshExpiringOAuthConnectors(this.customConnectorsStore, this.agents).catch((err) => {
           console.error(`oauth-refresh-sweep: ${(err as Error).message}`);

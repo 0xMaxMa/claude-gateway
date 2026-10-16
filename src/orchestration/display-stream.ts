@@ -3,6 +3,12 @@
  * Other fields of the union response schema (spoken_text, notify_user) are skipped
  * without ever being published, whatever order the model emits them in. */
 export function partialDisplay(raw: string): string {
+  return partialField(raw, 'display_text')?.text ?? '';
+}
+
+/** One string field of an incomplete flat response JSON object, as far as it has arrived;
+ * `complete` once its closing quote is in. Undefined until the field starts. */
+export function partialField(raw: string, field: 'display_text' | 'spoken_text'): { text: string; complete: boolean } | undefined {
   let i = 0;
   const space = () => { while (/\s/.test(raw[i] ?? '') && i < raw.length) i++; };
   const string = (): { text: string; complete: boolean } | undefined => {
@@ -38,17 +44,16 @@ export function partialDisplay(raw: string): string {
     if (!match) return false;
     i += match[0].length; return true;
   };
-  space(); if (raw[i++] !== '{') return '';
+  space(); if (raw[i++] !== '{') return;
   // One pass per union field; an unexpected shape simply holds the chunk back.
   for (let fields = 0; fields < 8; fields++) {
-    space(); const key = string(); if (!key?.complete) return '';
-    space(); if (raw[i++] !== ':') return '';
+    space(); const key = string(); if (!key?.complete) return;
+    space(); if (raw[i++] !== ':') return;
     space();
-    if (key.text === 'display_text') return string()?.text ?? '';
-    if (!(raw[i] === '"' ? string()?.complete : literal())) return '';
-    space(); if (raw[i++] !== ',') return '';
+    if (key.text === field) return string();
+    if (!(raw[i] === '"' ? string()?.complete : literal())) return;
+    space(); if (raw[i++] !== ',') return;
   }
-  return '';
 }
 
 /** An object opening with one of the union response schema's own field names. Ordinary

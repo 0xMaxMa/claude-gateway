@@ -3,7 +3,7 @@ import { describeVoiceError, providerHttpError } from '../voice/errors';
 import { VOICE_PREVIEW_TEXT, voicePreviewLanguages } from '../voice/preview';
 import { canonicalVoiceProvider, nativeVoiceModel } from '../voice/providers/model-ref';
 import { openRouterVoiceModels } from '../voice/providers/openrouter';
-import { geminiConnection } from '../voice/providers/gemini';
+import { geminiConnection, isGeminiTtsModel } from '../voice/providers/gemini';
 import { ttsProvider } from '../voice/providers/registry';
 import { resolveVoiceId } from '../voice/providers/voice-catalog';
 import { PCM16 } from '../voice/types';
@@ -216,6 +216,8 @@ export function voiceSettingsRouter(
             models = [
               ['eleven_v3_conversational','Eleven v3 Conversational'],
               ['eleven_v3','Eleven v3'],
+              ['eleven_v4_turbo','Eleven v4 Turbo'],
+              ['eleven_v4','Eleven v4'],
               ['eleven_multilingual_v2','Eleven Multilingual v2'],
               ['eleven_flash_v2_5','Eleven Flash v2.5'],
               ['eleven_turbo_v2_5','Eleven Turbo v2.5'],
@@ -256,7 +258,7 @@ export function voiceSettingsRouter(
               const id = model.name.replace(/^models\//, '');
               const live = id === 'gemini-3.5-transcribe-live' && !!model.supportedGenerationMethods?.includes('bidiGenerateContent');
               if (!live && !model.supportedGenerationMethods?.includes('generateContent')) continue;
-              const tts = /^gemini-[\d.]+-(flash|pro)-(preview-tts|tts-preview)$/.test(id);
+              const tts = isGeminiTtsModel(id);
               const stt = live || id === 'gemini-3.5-transcribe' || /^gemini-(2\.5-(flash|pro|flash-lite)|3(-|\.\d+-)(flash|pro)(-preview)?)$/.test(id);
               if (tts || stt) models.push({ model_id: id, name: model.displayName ?? id, can_do_text_to_speech: tts, can_do_speech_to_text: stt, realtime: live, voice_messages: stt && !live });
             }

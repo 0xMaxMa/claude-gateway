@@ -41,6 +41,10 @@ export class GeminiStt extends RecordedStt {
     super(provider, model, request, transcribeGemini, () => { if (!geminiConnection(provider).key) throw new VoiceError('STT_CREDENTIALS_MISSING'); });
   }
 }
+export const isGeminiTtsModel = (model: string): boolean => /^gemini-[\d.]+-(?:flash|pro)-(?:preview-tts|tts-preview)$/.test(model);
+/** Gemini 3.1 Flash TTS documents square-bracket audio tags such as [laughs]; 2.5 documents none
+ * and 3.8 documents <angle> tags. OpenRouter names the same model google/<id>. */
+export const performsGeminiAudioTags = (model: string): boolean => /^(?:google\/)?gemini-3\.1-flash-tts-preview$/.test(model);
 export class GeminiTts implements TtsProvider {
   readonly capabilities = { textStreaming: false, wordAlignment: false, outputFormats: [PCM16] };
   constructor(readonly id: string, private readonly model: string, private readonly request: typeof fetch = fetch) {}

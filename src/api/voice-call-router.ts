@@ -1,0 +1,92 @@
+import { Router, Request, Response, NextFunction } from 'express';
+import { AgentConfig } from '../types';
+import { AgentRunner } from '../agent/runner';
+import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
+import { VOICE_CALL_LINK_EXPIRED, generateVoiceCallGonePage, generateVoiceCallPage } from '../ui/voice-call-ui';
+import { telegramVoiceCallsEnabled, voiceCallPairings } from '../voice/call-pairing';
+import { TelegramBotAvatars } from '../voice/telegram-avatar';
+import { readTelegramAccess } from '../telegram/access';
+import { resolveOrchestrationConfig } from '../orchestration/config';
+import type { VoiceApi } from './voice-router';
+
+export interface VoiceCallRouterDeps {
+  agents: Map<string, AgentRunner>;
+  configs: Map<string, AgentConfig>;
+  voiceApi: VoiceApi;
+  /** Path of `gateway.publicUrl` ("" at the origin root). */
+  basePath(): string;
+  telegramStateDir(agentId: string): string;
+  avatars?: TelegramBotAvatars;
+}
+
+/**
+ * Telegram `/call` Mini App routes, mounted at `<base>/voice-call`. No API key:
+ * each ticket request proves the Telegram user with signed initData, matches the
+ * user the pairing was minted for, and re-checks the receiver's `allowFrom`.
+ */
+export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
+  const router = Router();
+  // The bot's Telegram name and photo for the call screen, looked up as the page opens.
+  const avatars = deps.avatars ?? new TelegramBotAvatars();
+  router.get('/:pairingId', async (req: Request, res: Response, next: NextFunction) => { try {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    const pairing = voiceCallPairings.get(String(req.params.pairingId));
+    const config = pairing && deps.configs.get(pairing.agentId);
+    if (!pairing || !config) { res.status(404).send(generateVoiceCallGonePage(VOICE_CALL_LINK_EXPIRED)); return; }
+    const voice = resolveOrchestrationConfig(config.orchestration, config.voice ?? { enabled: false }).voice;
+    const token = config.telegram?.botToken;
+    const bot = token ? await avatars.forPage(pairing.agentId, token) : { avatar: null };
+    res.send(generateVoiceCallPage({ pairingId: pairing.pairingId, agentId: pairing.agentId, basePath: deps.basePath(), maxUtteranceMs: voice.turns.maxUtteranceMs,
+      botName: bot.name, avatarVersion: bot.photoId, linkUsed: Boolean(pairing.callToken) }));
+  } catch (error) { next(error); } });
+
+  // The photo the page was rendered with; its URL carries the photo's id, so a new photo is a new URL.
+  router.get('/:pairingId/avatar', async (req: Request, res: Response) => {
+    const pairing = voiceCallPairings.get(String(req.params.pairingId));
+    const token = pairing && deps.configs.get(pairing.agentId)?.telegram?.botToken;
+    const avatar = token ? await avatars.avatar(pairing.agentId, token) : null;
+    if (!avatar) { res.setHeader('Cache-Control', 'no-store'); res.status(404).end(); return; }
+    res.setHeader('Content-Type', avatar.contentType);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.send(avatar.bytes);
+  });
+
+  router.post('/:pairingId/ticket', async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const pairing = voiceCallPairings.get(String(req.params.pairingId));
+    const config = pairing && deps.configs.get(pairing.agentId), runner = pairing && deps.agents.get(pairing.agentId);
+    if (!pairing || !config || !runner) { res.status(410).json({ error: 'Call link expired', code: 'CALL_LINK_EXPIRED' }); return; }
+    const initData = typeof req.body?.initData === 'string' ? req.body.initData : '';
+    const callToken = typeof req.body?.call_token === 'string' ? req.body.call_token : undefined;
+    const botToken = config.telegram?.botToken ?? '';
+    // Telegram never refreshes a Mini App's initData, so a call outliving its age
+    // limit reconnects on the signature plus the call token checked by claim().
+    // Opening a call always needs fresh initData.
+    const verified = verifyTelegramInitData(initData, botToken)
+      ?? (callToken && pairing.callToken ? verifyTelegramInitData(initData, botToken, Number.POSITIVE_INFINITY) : null);
+    if (!verified) { res.status(401).json({ error: 'Invalid initData' }); return; }
+    if (verified.userId !== pairing.userId) { res.status(403).json({ error: 'User mismatch' }); return; }
+    // The receiver checked access when it sent the button; it may have changed since.
+    const access = readTelegramAccess(deps.telegramStateDir(pairing.agentId));
+    if (access.dmPolicy === 'disabled' || !access.allowFrom.includes(verified.userId)) { res.status(403).json({ error: 'Not allowed' }); return; }
+    if (!telegramVoiceCallsEnabled(config)) { res.status(409).json({ error: 'Voice disabled', code: 'VOICE_DISABLED' }); return; }
+    const claim = voiceCallPairings.claim(pairing.pairingId, verified.userId, callToken);
+    if (claim === 'gone') { res.status(410).json({ error: 'Call link expired', code: 'CALL_LINK_EXPIRED' }); return; }
+    if (claim === 'mismatch') { res.status(403).json({ error: 'User mismatch' }); return; }
+    if (claim === 'claimed') { res.status(409).json({ error: 'Call link already used', code: 'CALL_LINK_USED' }); return; }
+    // A DM's chat id is the user id; the call speaks in that chat's active session.
+    const chatId = verified.userId;
+    try {
+      const sessionId = await runner.telegramVoiceSession(chatId);
+      const result = await deps.voiceApi.mintTicket(pairing.agentId, sessionId, { kind: 'telegram', principalId: `telegram:${verified.userId}`, chatId, threadKey: pairing.threadKey },
+        req.headers.origin, config.allow_tools !== false, pairing.voiceSessionId);
+      if (result.status === 200) voiceCallPairings.attach(pairing.pairingId, String(result.body.voice_session_id));
+      // A page rejoining a call in progress keeps its clock.
+      const elapsed = result.status === 200 ? voiceCallPairings.elapsed(pairing.pairingId) : undefined;
+      res.status(result.status).json({ ...result.body, call_token: claim.callToken, ...(elapsed === undefined ? {} : { call_elapsed_ms: elapsed }) });
+    } catch { res.status(503).json({ error: 'Voice call unavailable', call_token: claim.callToken }); }
+  });
+  return router;
+}

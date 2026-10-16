@@ -45,3 +45,28 @@ test('system notices persist and stream only to their origin without invoking in
     await runtime.close(); (history as any).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('a chat notice reaches only the topic it names, even when topics share a session', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'chat-notice-')), dir = join(root, 'a'), workspace = join(dir, 'workspace');
+  mkdirSync(workspace, { recursive: true }); writeFileSync(join(workspace, 'CLAUDE.md'), 'Identity');
+  const agent = { id: 'a', description: 'fixture', env: '', workspace, claude: { model: 'fixture', extraFlags: [] } } as AgentConfig;
+  const gateway = { gateway: { orchestration: true, headless: true }, agents: [agent] } as GatewayConfig;
+  const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a');
+  const runtime = await AgentOrchestrationRuntime.open(agent, gateway, dir, sessions, history, { createAgentSession: jest.fn(), releaseAgentSession: async () => {} });
+  try {
+    const session = randomUUID();
+    for (const threadKey of ['', '7']) runtime.store.acceptInput({ scope: { agentId: 'a', agentSessionId: session, source: 'telegram', accountId: 'a', chatId: '42', threadKey, principalId: 'telegram:42' }, text: 'hello' }, 20);
+    const delivered = () => runtime.store.all('SELECT d.delivered_text,b.thread_key FROM deliveries d JOIN conversation_bindings b ON b.id=d.binding_id');
+    // Two topics in one session: a session-wide notice has no single destination.
+    await runtime.notifySession(session, 'ambiguous');
+    expect(delivered()).toHaveLength(0);
+    await runtime.notifyChat(session, 'telegram', '42', '7', '📞 Call ended · 3:42');
+    expect(delivered()).toEqual([{ delivered_text: '📞 Call ended · 3:42', thread_key: '7' }]);
+    // No conversation for that chat in this session: nothing to post into.
+    await runtime.notifyChat(session, 'telegram', '99', '', 'stranger');
+    await runtime.notifyChat(randomUUID(), 'telegram', '42', '7', 'other session');
+    expect(delivered()).toHaveLength(1);
+  } finally {
+    await runtime.close(); (history as any).db.close(); HistoryDB.evict(root, 'a'); rmSync(root, { recursive: true, force: true });
+  }
+});

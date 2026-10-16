@@ -44,6 +44,8 @@ Merge this **partial configuration** into your existing configuration. Retain th
 
 An empty `voiceId` selects Auto; select a specific voice from the catalog if desired. Browser realtime STT and uploaded-file STT use different model IDs.
 
+ElevenLabs v3 and v4 TTS models (`eleven_v3_conversational`, `eleven_v3`, `eleven_v4_turbo`, `eleven_v4`) stream through the Text-to-Dialogue socket; other models use the classic stream-input socket. Both sockets close after 20 seconds without input by default. While a reply's text stalls, the gateway keeps them open for up to 180 seconds: it sends `keep_alive` every 10 seconds on the dialogue socket, and it sets `inactivity_timeout` on the classic socket. `eleven_v4_turbo` has low first-audio latency; `eleven_v4` is slower and costs about twice as much per character, so it is not recommended for live conversation. A reply that contains known audio tags such as `[laughs]` or `[whispers]` is still spoken. The ElevenLabs v3/v4 models and Gemini 3.1 Flash TTS (`gemini-3.1-flash-tts-preview`, natively or through OpenRouter) receive the tags and perform them. Every other TTS model, including Gemini 2.5 TTS and Gemini 3.8 TTS (which documents `<angle>` tags instead), receives the text without them, so it never reads a tag aloud. A spoken text that holds only tags is not spoken. On a turn that is spoken, the chat copy omits the tags, both while it streams and in the final message. On a text-only turn the chat keeps them, since there a tag may be part of the answer.
+
 ### Upstream ElevenLabs example
 
 Use the voice relay at the **origin of `ANTHROPIC_BASE_URL`**. For example, set the following in your gateway environment file when no higher-priority Claude settings identity is configured:
@@ -170,25 +172,41 @@ Runs of symbols with nothing to pronounce (for example a line of `=` characters)
 | Setting under `voice` | Default | Meaning |
 | --- | --- | --- |
 | `language` | empty | Recognition language hint; empty allows automatic recognition |
-| `turns.silenceCommitMs` | 650 ms | Pause before committing a microphone segment |
+| `turns.silenceCommitMs` | 650 ms | Pause after the client's `speech.ended` before committing a microphone segment; `0` commits at once (the `/call` page already waits 350 ms of silence before it sends `speech.ended`) |
 | `turns.finalizationTimeoutMs` | 5000 ms | Base finalization budget; batch providers may require a longer provider-specific budget |
 | `turns.maxUtteranceMs` | 60000 ms | Bound a single utterance |
+| `turns.mergeWindowMs` | 1200 ms | After a segment is committed, wait this long for a continuation before submitting the combined turn; `0` submits each segment at once |
 | `playback.maxBufferedAudioMs` | 1500 ms | Bound unacknowledged playback audio |
 | `playback.bargeIn` | true | Allow speech interruption behavior |
 | `maxActiveSessionsPerConversation` | 1 | Limit concurrent live voice connections for a conversation |
 
-A shorter pause commits sooner and may cut a natural pause into separate segments; a longer pause waits for more speech but delays submission. This is separate from orchestration's `intakeWaitMs`, which combines already received incomplete inputs. The setting is not a promise of end-to-end reply latency.
+A shorter pause commits sooner and may cut a natural pause into separate segments; a longer pause waits for more speech but delays submission. The merge window is the larger of the two waits: every turn waits the full `mergeWindowMs` after its transcript before the agent starts. Lowering it to 600 ms answers about 600 ms sooner, but a pause longer than that in the middle of a thought becomes its own turn (the earlier part is answered, then interrupted by the continuation). The default stays 1200 ms; set `voice.turns.mergeWindowMs` per agent to trade one for the other, and remove the setting to go back. This is separate from orchestration's `intakeWaitMs`, which combines already received incomplete inputs. The setting is not a promise of end-to-end reply latency.
+
+## Live call latency settings
+
+These settings under `voice.live` change only live voice turns (`/call` and browser live voice). Each is off by default; set it to `false` or remove it to go back.
+
+| Setting under `voice.live` | Default | Effect |
+| --- | --- | --- |
+| `fastAck` | `false` | When the reply has not started speaking `fastAckAfterMs` after the turn is admitted, speak one short acknowledgement (for example "รับทราบค่ะ กำลังเช็คให้นะคะ") written by `fastAckModel` from the caller's words and the voice's gender. The model is asked for at most 8 words and never to answer; a phrase longer than 80 characters or with a line break, a number, a link or markup is dropped, and greetings or small talk get none. The request starts as each turn is admitted, so every live turn sends one `fastAckModel` request; it is cancelled, or its acknowledgement discarded, when the reply starts speaking first. It is audio only; it is not added to the chat, the history or memory. The call uses the agent's own model endpoint and credential (the `ANTHROPIC_BASE_URL` group the Claude CLI uses); a subscription token is only sent through a proxy, never straight to Anthropic. Each call is logged as `Voice fast ack` with its outcome, elapsed time and token counts, never the text. |
+| `fastAckModel` | `claude-haiku-5-5` | Model for the acknowledgement, called with thinking disabled |
+| `fastAckAfterMs` | `1500` | How long after admission the reply may take to start speaking before the acknowledgement plays |
+| `fastAckTimeoutMs` | `3000` | Give up on an acknowledgement that takes longer |
 
 ## Diagnose missing or delayed audio
 
 Start with the text result, the selected route and the error reference. Authentication failures, exhausted quota and temporary provider unavailability require different actions; switching voices does not fix a missing API key or exhausted quota. Auto voice selection requires a readable voice catalog. For a catalog failure, check credentials/model access instead of overwriting the saved selection with an invented voice.
 
-Live voice logs `Voice timing` events with operation `stt` or `tts`, an operation ID, session/response identifiers and phase timestamps. Subtract elapsed times between phases:
+Live voice logs `Voice timing` events with operation `stt`, `tts` or `turn`, an operation ID, session identifiers, the `utteranceId`, `inputId` and `responseId` known so far, and phase timestamps. Subtract elapsed times between phases:
 
 1. `speech_ready` → `synthesis_started`: queue wait before TTS.
 2. `provider_request_started` → `provider_headers_received`: HTTP provider/proxy wait.
 3. `provider_body_received` → `first_provider_audio`: complete-body processing for the Gemini adapter.
 4. `first_audio_sent` → `first_playback_progress`: first positive browser playback receipt.
+
+A `turn` operation follows one user turn end to end, measured at the gateway: `speech_ended` (the client's `speech.ended` arrived; an explicit commit without it logs `commit_received`), `transcript_ready`, `turn_admitted`, `agent_first_spoken` (the agent's first approved spoken text) and `e2e_first_audio` (the first playback receipt for that reply). The `e2e_first_audio` elapsed time is the gateway's view of end of speech to first heard audio; it excludes microphone and network time before `speech.ended` arrives.
+
+The agent turn between `turn_admitted` and `agent_first_spoken` reports its own phases on the same `turn` operation: `process_spawned` (the agent CLI process is ready for the prompt, spawned or resumed), `first_model_token` (the first reply text or response-argument chunk), `agent_provider_ready` (the model provider answered), `first_spoken_delta` (the first characters of `spoken_text` in the streamed response), each `spoken_sentence_sent` (a piece of spoken text handed to TTS) and, when fast acknowledgements are on, `fast_ack_sent`. A `tts` operation on a managed provider logs `tts_credit_check_started` and `tts_credit_check_finished` around the wallet check, and the ElevenLabs adapter logs `tts_socket_open` when its streaming socket is connected.
 
 HTTP phases apply to adapters using the shared HTTP helper. They do not identify whether an upstream wait is internal queueing or work inside the final provider; that needs upstream diagnostics. A playback receipt is not an exact audio-device start timestamp. `audio_sent_complete` includes browser backpressure, so it must not be used as time to first sound.
 
@@ -196,6 +214,10 @@ The current Gemini adapter waits for the full provider JSON/audio result before 
 
 The diagnostic payload contains metadata, not transcript text, audio, URLs or provider credentials. See [voice API](../api/voice.md) for error fields, ticket authentication, replay and client reconnect behavior. Static `allowedOrigins` configuration is obsolete; live voice uses authenticated tickets bound to the initiating origin.
 
+
+## Telegram voice calls
+
+With orchestration serving Telegram, voice enabled and an HTTPS `gateway.publicUrl`, a paired user can send `/call` in the bot's private chat to talk with the agent live. The call uses the same STT, TTS and turn settings as browser live voice, and speaks with the voice chosen by `/voices` in that chat (the same voice as its voice messages), or the configured `voice.tts.voiceId` (Auto when empty) if the chat has not chosen one. A voice chosen during a call applies from the next call. It joins the chat's active session, and posts the user's words (`🎙 …`) and the agent's text replies in that chat. Tool permissions follow the Telegram channel (`allow_tools`); live voice never writes memory. Behind a proxy with its own sign-in, such as a GetPod pod, the call page uses the same login redirect as `/cli`. In a call, **Mute** sends what you just said: the agent answers at once instead of waiting for a pause, and keeps speaking while your microphone is off. Speaking while the agent's reply is still playing interrupts it, and your new words become the next turn. The page shows **Thinking** from when you stop speaking until the reply plays; the agent receives the turn after `voice.turns.silenceCommitMs`, transcription, and `voice.turns.mergeWindowMs` (a continuation within that window joins the same turn). A call link opens one call: an older or expired link renders only its ended state, and the page follows Telegram's light or dark theme. See [Telegram setup](../channels/telegram.md#live-voice-calls).
 
 ## Managed voice credits
 

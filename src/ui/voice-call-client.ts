@@ -1,0 +1,249 @@
+/**
+ * Pure browser logic for the Telegram `/call` page. Each function is
+ * self-contained so the page can embed it with `Function.toString()` (as the
+ * dashboard does) while tests import the same code.
+ */
+
+/** Client acoustic tuning for endpointing. These are microphone-level heuristics,
+ * not protocol timing: the server then waits `voice.turns.silenceCommitMs`
+ * (0 commits at once) after `speech.ended` before it commits an utterance. Levels are RMS of
+ * float samples in [-1, 1]. */
+export const VOICE_CALL_VAD = { startMs: 120, endMs: 350, ratio: 3, minLevel: 0.012, initialNoise: 0.004, noiseAdapt: 0.05, bargeInRatio: 2, bargeInMs: 250 };
+
+/**
+ * Streaming resampler from the AudioContext rate to 16 kHz PCM16. A one-pole
+ * low-pass at the output Nyquist frequency limits aliasing; linear interpolation
+ * carries the fractional position and last sample across chunks.
+ */
+export function createResampler(inputRate: number, outputRate: number): (input: Float32Array) => Int16Array {
+  const step = inputRate / outputRate;
+  const alpha = 1 - Math.exp(-2 * Math.PI * (outputRate / 2) / inputRate);
+  let position = 0, previous = 0, filtered = 0;
+  return input => {
+    const smooth = new Float32Array(input.length);
+    for (let i = 0; i < input.length; i++) { filtered += alpha * (input[i] - filtered); smooth[i] = filtered; }
+    const out: number[] = [];
+    // `position` is relative to this chunk; -1 is the previous chunk's last sample.
+    while (position < smooth.length - 1) {
+      const index = Math.floor(position), fraction = position - index;
+      const a = index < 0 ? previous : smooth[index], b = smooth[index + 1];
+      const value = Math.max(-1, Math.min(1, a + (b - a) * fraction));
+      out.push(value < 0 ? Math.round(value * 0x8000) : Math.round(value * 0x7fff));
+      position += step;
+    }
+    if (smooth.length) { position -= smooth.length; previous = smooth[smooth.length - 1]; }
+    return Int16Array.from(out);
+  };
+}
+
+/** One `CGV1` microphone frame: 44-byte header, then little-endian PCM16. */
+export function encodeVoiceCallFrame(generation: string, epoch: number, sequence: number, segmentId: string, pcm: Int16Array): ArrayBuffer {
+  const buffer = new ArrayBuffer(44 + pcm.length * 2), view = new DataView(buffer);
+  'CGV1'.split('').forEach((character, index) => view.setUint8(index, character.charCodeAt(0)));
+  const uuid = (value: string, offset: number) => {
+    const hex = value.replace(/-/g, '');
+    if (!/^[0-9a-f]{32}$/i.test(hex)) throw new Error('INVALID_FRAME_ID');
+    for (let i = 0; i < 16; i++) view.setUint8(offset + i, parseInt(hex.slice(i * 2, i * 2 + 2), 16));
+  };
+  uuid(generation, 4); view.setUint32(20, epoch >>> 0, false); view.setUint32(24, sequence >>> 0, false); uuid(segmentId, 28);
+  for (let i = 0; i < pcm.length; i++) view.setInt16(44 + i * 2, pcm[i], true);
+  return buffer;
+}
+
+/** RMS level of a float chunk. */
+export function voiceCallLevel(samples: Float32Array): number {
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+  return samples.length ? Math.sqrt(sum / samples.length) : 0;
+}
+
+/**
+ * Energy endpointing with an adaptive noise floor. Feed one level per chunk with
+ * its duration; it reports `start` after `startMs` above the threshold and `end`
+ * after `endMs` below it. The floor only learns from non-speech chunks. While the
+ * agent is audible, starting needs `bargeInRatio` times the level for `bargeInMs`,
+ * so echo the canceller leaves behind does not interrupt the reply.
+ */
+export function createVoiceCallVad(options: { startMs: number; endMs: number; ratio: number; minLevel: number; initialNoise: number; noiseAdapt: number; bargeInRatio: number; bargeInMs: number }): (level: number, ms: number, playing?: boolean) => 'start' | 'end' | undefined {
+  let noise = options.initialNoise, speaking = false, above = 0, below = 0;
+  return (level, ms, playing = false) => {
+    const threshold = Math.max(options.minLevel, noise * options.ratio);
+    const loud = level > threshold;
+    if (!speaking) {
+      const start = playing ? level > threshold * options.bargeInRatio : loud;
+      if (start) { above += ms; if (above >= (playing ? options.bargeInMs : options.startMs)) { speaking = true; below = 0; return 'start'; } }
+      else if (loud) above = 0;
+      else { above = 0; noise += (level - noise) * options.noiseAdapt; }
+      return undefined;
+    }
+    if (loud) { below = 0; return undefined; }
+    below += ms;
+    if (below >= options.endMs) { speaking = false; above = 0; return 'end'; }
+    return undefined;
+  };
+}
+
+/**
+ * Microphone uplink for one call. The server accepts frames only for the current
+ * `utterance_id`, with sequences 1, 2, 3…, and `speech.ended` must name the last
+ * sequence sent. After `speech.ended` the next words wait for a new `listening`
+ * state, so audio captured meanwhile is held (bounded) and sent first.
+ */
+export function createVoiceCallUplink(io: { json(message: Record<string, unknown>): void; frame(utteranceId: string, sequence: number, pcm: Int16Array): void },
+  limits: { preRollSamples: number; maxHeldSamples: number; maxUtteranceSamples: number }) {
+  let utteranceId: string | undefined, sequence = 0, sentSamples = 0;
+  let state: 'waiting' | 'ready' | 'speaking' | 'ended' = 'waiting';
+  let held: Int16Array[] = [], heldSamples = 0, speechPending = false, endPending = false, endedSequence = 0;
+  const hold = (pcm: Int16Array, cap: number) => {
+    held.push(pcm); heldSamples += pcm.length;
+    while (held.length > 1 && heldSamples - held[0].length >= cap) heldSamples -= held.shift()!.length;
+  };
+  const send = (pcm: Int16Array) => {
+    if (!utteranceId || !pcm.length) return;
+    // Stay under the utterance budget: end the turn rather than overrun it.
+    if (sentSamples + pcm.length > limits.maxUtteranceSamples) { end(); return; }
+    sequence++; sentSamples += pcm.length; io.frame(utteranceId, sequence, pcm);
+  };
+  const begin = () => {
+    state = 'speaking'; sequence = 0; sentSamples = 0;
+    const queued = held; held = []; heldSamples = 0;
+    for (const pcm of queued) if (state === 'speaking') send(pcm);
+  };
+  /** True when the gateway was told the utterance ended. */
+  const end = (): boolean => {
+    if (state !== 'speaking') return false;
+    if (!sequence) { state = 'ready'; return false; }
+    io.json({ type: 'speech.ended', last_audio_seq: sequence }); state = 'ended'; endedSequence = sequence; utteranceId = undefined;
+    return true;
+  };
+  return {
+    /** The server opened a new utterance. */
+    listening(id: string) {
+      utteranceId = id; state = 'ready'; endedSequence = 0;
+      if (speechPending) { speechPending = false; begin(); if (endPending) { endPending = false; end(); } }
+    },
+    /** The microphone is closed server-side (muted or reconnecting). */
+    reset() { utteranceId = undefined; state = 'waiting'; held = []; heldSamples = 0; speechPending = false; endPending = false; endedSequence = 0; },
+    audio(pcm: Int16Array) {
+      if (state === 'speaking') send(pcm);
+      else hold(pcm, speechPending ? limits.maxHeldSamples : limits.preRollSamples);
+    },
+    /** VAD start. A newer epoch interrupts audible playback; otherwise only defer admission. */
+    speechStart(playback: { playing: boolean; epoch: number }) {
+      io.json(playback.playing ? { type: 'speech.started', epoch: playback.epoch + 1 } : { type: 'speech.activity' });
+      if (state === 'ready') begin(); else if (state !== 'speaking') { speechPending = true; endPending = false; }
+    },
+    /** VAD end. True when the gateway is (or will be) told the utterance ended, so it will answer or report no speech. */
+    speechEnd(): boolean {
+      if (state === 'speaking') return end();
+      if (speechPending) endPending = true;
+      return speechPending;
+    },
+    /** Words spoken after `speech.ended` wait for the next utterance before they can be sent. */
+    holding(): boolean { return speechPending; },
+    /** `last_audio_seq` for a commit-on-mute: the utterance still open on the server, if any. */
+    pendingSequence(): number | undefined { return state === 'speaking' && sequence ? sequence : state === 'ended' ? endedSequence : undefined; },
+  };
+}
+
+/**
+ * Played-sample accounting for one playback epoch. Audio is scheduled back to
+ * back; whatever is still scheduled after `now` has not been heard yet.
+ */
+export function createVoiceCallPlayhead() {
+  let queuedSamples = 0, endTime = 0, reported = 0;
+  return {
+    reset() { queuedSamples = 0; endTime = 0; reported = 0; },
+    /** Returns the context time at which this chunk starts. */
+    schedule(samples: number, sampleRate: number, now: number): number {
+      const start = Math.max(now, endTime);
+      endTime = start + samples / sampleRate; queuedSamples += samples;
+      return start;
+    },
+    /** Samples heard so far, monotonic and never above what was received. */
+    played(sampleRate: number, now: number): number {
+      const remaining = Math.max(0, Math.ceil((endTime - now) * sampleRate));
+      reported = Math.max(reported, Math.min(queuedSamples, queuedSamples - remaining));
+      return reported;
+    },
+    playing(now: number): boolean { return endTime > now; },
+  };
+}
+
+/** How the page reacts to a refused `/ticket` request. */
+export interface VoiceCallTicketFailure { message: string; fatal: boolean; signIn: boolean }
+
+/**
+ * Map a refused `/ticket` response to the page's reaction. Every refusal from the
+ * gateway carries a JSON `error`; a 401 or 403 without one came from a proxy in
+ * front of it (a GetPod pod's sign-in expired, or another account is signed in).
+ * Only a page navigation can recover from that: the proxy answers it with the
+ * login redirect that brought `/cli` and `/call` here in the first place.
+ */
+export function voiceCallTicketFailure(status: number, body: { error?: unknown; code?: unknown }): VoiceCallTicketFailure {
+  const refusal = (message: string, fatal = true) => ({ message, fatal, signIn: false });
+  if ((status === 401 || status === 403) && typeof body.error !== 'string') {
+    return { message: 'You need to sign in again to continue the call.', fatal: true, signIn: true };
+  }
+  if (status === 401) return refusal('Telegram could not verify you. Reopen the call from the /call button.');
+  if (status === 403) return refusal('You are not allowed to call this agent.');
+  if (status === 409 && body.code === 'CALL_LINK_USED') return refusal('This call link was already used. Send /call again.');
+  if (status === 409 && body.code === 'VOICE_DISABLED') return refusal('Voice calls are turned off for this agent.');
+  // A lease still being released can succeed on retry.
+  if (status === 409) return refusal('A call is already open in this chat. Hang up there first.', Boolean(body.code));
+  if (status === 410 || status === 404) return refusal('This call link has expired. Send /call again.');
+  if (status === 429) return refusal('Voice credit is exhausted.');
+  // A busy gateway can succeed on retry.
+  return refusal('The call could not start right now. Please try again.', status !== 503);
+}
+
+/** The page's palette: Telegram's colour scheme when Telegram supplies a theme, the
+ * system's otherwise. Outside Telegram, telegram-web-app.js still reports "light"
+ * but without any theme colours. */
+export function voiceCallTheme(tg: { colorScheme?: unknown; themeParams?: { bg_color?: unknown } } | undefined, prefersLight: boolean): 'light' | 'dark' {
+  const scheme = tg && tg.themeParams && tg.themeParams.bg_color ? tg.colorScheme : undefined;
+  return scheme === 'light' || scheme === 'dark' ? scheme : prefersLight ? 'light' : 'dark';
+}
+
+/** Call length as a phone shows it: m:ss, then h:mm:ss. */
+export function formatCallDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000)), hours = Math.floor(total / 3600), minutes = Math.floor(total / 60) % 60, seconds = total % 60;
+  const pad = (value: number) => (value < 10 ? '0' : '') + value;
+  return hours ? hours + ':' + pad(minutes) + ':' + pad(seconds) : minutes + ':' + pad(seconds);
+}
+
+/**
+ * How the page shows a `voice.error`. `no_speech` means the recognizer heard
+ * sound but no words (a cough, the room, the microphone opening); the call is
+ * still listening, so it is not an error to the caller. The server log keeps it.
+ */
+export function voiceCallErrorView(error: { code?: unknown; category?: unknown; message?: unknown }): { kind: 'listening' } | { kind: 'ended' | 'error'; message: string } {
+  if (error.category === 'no_speech') return { kind: 'listening' };
+  if (error.code === 'VOICE_SESSION_CHANGED') return { kind: 'ended', message: 'This chat switched sessions. Send /call to talk in the new one.' };
+  return { kind: 'error', message: typeof error.message === 'string' && error.message ? error.message : 'Voice error' };
+}
+
+/**
+ * A reply as the call screen shows it: the chat's Markdown reduced to plain text
+ * (bold, italic, code, headings and quotes lose their markers, a link keeps its URL,
+ * a bullet becomes •), with the line breaks kept. The page sets it as text, never
+ * as HTML. stripMarkdownPreservingUrls (src/agent/line-pure.ts) does the same for
+ * LINE, but its patterns live outside the function and use lookbehind, which older
+ * iOS WebViews cannot parse; this one is embedded in the page whole.
+ */
+export function voiceCallReplyText(text: string): string {
+  return text
+    .replace(/```[^\n`]*\n?([\s\S]*?)\n?```/g, '$1')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/!?\[([^\]\n]+)\]\(([^)\s]+)\)/g, '$1 ($2)')
+    .replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '$2')
+    .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '$1')
+    .replace(/(^|[^\w*])\*([^\s*](?:[^*\n]*?[^\s*])?)\*(?![\w*])/gm, '$1$2')
+    .replace(/(^|\W)_([^\s_](?:[^_\n]*?[^\s_])?)_(?!\w)/gm, '$1$2')
+    .replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, '')
+    .replace(/^[ \t]{0,3}>[ \t]?/gm, '')
+    .replace(/^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$/gm, '')
+    .replace(/^([ \t]*)[-*+][ \t]+/gm, '$1• ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
