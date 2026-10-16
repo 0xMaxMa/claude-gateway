@@ -8,7 +8,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import yaml from 'js-yaml';
-import { AgentManager } from '../../../src/apps/agent-manager';
+import { AgentManager, applyDeclaredIsolateMemory } from '../../../src/apps/agent-manager';
+import type { AgentConfig } from '../../../src/types';
 import { AppsRegistry, AppEntry } from '../../../src/apps/registry';
 
 // ── os.homedir mock (set per-test) ────────────────────────────────────────────
@@ -430,6 +431,37 @@ describe('AgentManager', () => {
 
       await manager.upsertAgent(makeEntry(tmpDir));
       expect(read().find((a) => a['id'] === 'my-agent')).not.toHaveProperty('isolateMemory');
+    });
+
+    // #601: gateway start admits agents from the loaded config, and only then
+    // does reconcileAgents() rewrite config.json; the config watcher's baseline is
+    // the loaded config, so a hand-edited value would otherwise stay in effect.
+    it('applyDeclaredIsolateMemory gives the loaded config the value reconcile then writes', async () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      const declared = makeEntry(tmpDir);
+      declared.agentDeclaration = { ...declared.agentDeclaration!, isolateMemory: true };
+      const undeclared = makeEntry(tmpDir, 'other-app', 'other-agent');
+      const stopped = makeEntry(tmpDir, 'stopped-app', 'stopped-agent');
+      stopped.status = 'stopped';
+      const registry = new AppsRegistry(path.join(tmpDir, 'apps.json'));
+      for (const app of [declared, undeclared, stopped]) await registry.upsert(app);
+      await manager.reconcileAgents(registry);
+      // Hand edits while the gateway was down: the declared agent turned off, the others turned on.
+      const edited = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> };
+      for (const agent of edited.agents) agent['isolateMemory'] = agent['id'] !== 'my-agent';
+      edited.agents.push({ id: 'host-agent', workspace: '/tmp/host', claude: { model: 'm' }, isolateMemory: true });
+      // A stopped app is not reconciled, so its entry keeps whatever it has.
+      edited.agents.push({ id: 'stopped-agent', type: 'app-agent', workspace: '/tmp/stopped', claude: { model: 'm' }, isolateMemory: true });
+      fs.writeFileSync(configPath, JSON.stringify(edited));
+
+      const loaded = edited.agents.map((agent) => ({ ...agent })) as unknown as AgentConfig[];
+      applyDeclaredIsolateMemory(loaded, await registry.list());
+      await manager.reconcileAgents(registry);
+      const written = (JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> }).agents;
+      const isolation = (agents: Array<{ id?: unknown; isolateMemory?: unknown }>) =>
+        Object.fromEntries(agents.map((a) => [a.id as string, a.isolateMemory]));
+      expect(isolation(loaded)).toEqual({ 'my-agent': true, 'other-agent': undefined, 'stopped-agent': true, 'host-agent': true });
+      expect(isolation(loaded)).toEqual(isolation(written));
     });
 
     it('is idempotent — calling twice does not duplicate entry', async () => {

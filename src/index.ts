@@ -43,7 +43,7 @@ import { sweepOrphanedReceivers } from './utils/orphan-receivers';
 import { registerShutdownSignals } from './shutdown-signals';
 import { RegistryClient } from './apps/registry-client';
 import { AppInstaller } from './apps/installer';
-import { AgentManager } from './apps/agent-manager';
+import { AgentManager, applyDeclaredIsolateMemory } from './apps/agent-manager';
 import { SocketServer, parseTimeoutMs } from './apps/socket-server';
 import { parseAppYaml, AppYamlService, AppYamlScript } from './apps/compose-generator';
 import { claimSupervisorEnv, classifyInvocation, resolveInvocationSignals } from './cli/command-names';
@@ -789,10 +789,13 @@ async function main(): Promise<void> {
   const appsRegistry = new AppsRegistry(appsConfigPath);
   const agentManager = new AgentManager(CONFIG_PATH, agentsDirForConfig(CONFIG_PATH));
   const { migrateAppAgentContainer } = await import('./apps/agent-container-migration');
-  const restoringAgentIds = new Set((await appsRegistry.list().catch(error => {
+  const registeredApps = await appsRegistry.list().catch(error => {
     globalLogger.warn('App registry unavailable before Agent admission', {error: String(error)});
     return [];
-  })).filter(entry => entry.status === 'running').map(entry => entry.agentDeclaration?.name));
+  });
+  // Admit app Agents in the isolate mode their app.yaml declares, as the reconcile below writes it (#601).
+  applyDeclaredIsolateMemory(config.agents, registeredApps);
+  const restoringAgentIds = new Set(registeredApps.filter(entry => entry.status === 'running').map(entry => entry.agentDeclaration?.name));
   const deferredAppAgents = new Set<string>();
 
   for (const agentConfig of config.agents) {
