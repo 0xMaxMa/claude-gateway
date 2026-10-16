@@ -126,6 +126,8 @@ export interface TaskSnapshot {
   failure?: TaskFailure;
   /** Automatic resumes after gateway shutdowns interrupted this task (#603). */
   restartResumes?: number;
+  /** Set until the resumed attempt starts; carries the last worker progress into its brief. */
+  resumeAfterRestart?: { lastProgress?: string };
   capabilities: ExecutionCapabilities;
   createdAt: number;
   updatedAt: number;

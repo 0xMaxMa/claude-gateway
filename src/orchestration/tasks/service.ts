@@ -840,7 +840,7 @@ export class TaskService {
       const { task, attempt } = this.active(attemptId, generation);
       if (task.state !== 'starting') throw new OrchestrationError('STATE_CONFLICT');
       attempt.state = 'running'; attempt.startedAt = Date.now(); attempt.processIdentity = identity;
-      task.state = 'running'; task.appliedRevision = attempt.revision;
+      task.state = 'running'; task.appliedRevision = attempt.revision; delete task.resumeAfterRestart;
       if(task.executionControl?.revision===attempt.revision)task.executionControl.phase='applied';
       this.store.saveAttempt(attempt); this.store.saveTask(task, task.stateVersion);
       this.store.appendEvent(task.conversationId, 'task.revision_applied', { revision: attempt.revision }, task.taskId);
@@ -1080,11 +1080,12 @@ export class TaskService {
           // Already-authorized work resumes after the restart as a new attempt of the same task
           // (#603). No failure report is sent: that report turn could only ask the user to continue.
           task.state = 'queued'; task.restartResumes = (task.restartResumes ?? 0) + 1;
+          task.resumeAfterRestart = task.latestProgress?.source === 'worker' ? { lastProgress: task.latestProgress.text } : {};
           task.latestProgress = { source: 'runtime', observedAt: Date.now(), text: `Interrupted by a gateway shutdown; resumes automatically after the restart (${task.restartResumes} of ${MAX_RESTART_RESUMES}).` };
           this.cancelSubagents(task);
         } else if (restartInterrupted) {
           task.state = 'failed';
-          attempt.failure = task.failure = { code: 'GATEWAY_SHUTDOWN_REPEATED', message: `Gateway shutdowns interrupted this task ${(task.restartResumes ?? 0) + 1} times; automatic resume stopped after ${MAX_RESTART_RESUMES} resumes. Inspect existing changes before continuing; do not blindly repeat side effects.`, observedAt: Date.now() };
+          attempt.failure = task.failure = { code: 'GATEWAY_SHUTDOWN_REPEATED', message: `Gateway shutdowns interrupted this task ${(task.restartResumes ?? 0) + 1} times; automatic resume stopped after ${MAX_RESTART_RESUMES} resumes. Existing changes are retained; any follow-up must verify them first and must not blindly repeat side effects.`, observedAt: Date.now() };
         }
         else task.state = outcome.type === 'completed' ? 'completed' : 'failed';
         if (task.state === 'completed' && outcome.type === 'completed') task.result = outcome.result;

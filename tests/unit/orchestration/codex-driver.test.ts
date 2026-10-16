@@ -656,4 +656,19 @@ describe('a task resumed after a gateway restart', () => {
     expect(text).toMatch(/Never repeat a completed side effect/);
     expect(text).toContain('Do not ask the user whether to continue and do not tell them to type "continue"');
   });
+
+  test('keeps the brief and the last worker progress when the resumed start is deferred first', async () => {
+    const task = spawn('claude-sonnet-4-6'), first = tasks.claim(task.taskId)!;
+    tasks.started(first.attemptId, first.generation);
+    tasks.progress(first.attemptId, first.generation, 'Tagged v9.9.9 and pushed the tag; npm publish not started.');
+    expect(tasks.finish(first.attemptId, first.generation, { type: 'stopped', failure: shutdownFailure() }).state).toBe('queued');
+    // A provider or workspace wait ends one attempt without starting it.
+    const deferred = tasks.claim(task.taskId)!;
+    tasks.deferUnstarted(deferred.attemptId, deferred.generation, 'provider');
+    const resumed = tasks.claim(task.taskId)!;
+    const handle = await driver.start(tasks.store.task(task.taskId)!, resumed); await handle.accepted; await handle.result;
+    const text = prompt(0)[0];
+    expect(text).toContain('Resumed after a gateway restart (automatic resume 1 of 3)');
+    expect(text).toContain('Tagged v9.9.9 and pushed the tag; npm publish not started.');
+  });
 });
