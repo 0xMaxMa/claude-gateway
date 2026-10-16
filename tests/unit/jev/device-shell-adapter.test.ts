@@ -8,14 +8,15 @@ const RESULT={exitCode:0,stdout:'/opt/homebrew/bin/htop\n',stderr:'',truncated:f
 const reply=(value:unknown,isError=false)=>({content:[{type:'text',text:JSON.stringify(value)}],...(isError?{isError:true}:{})});
 const context={principalId:'p',conversationId:'c',actionId:'input:action',inputId:'input',decisionId:'d',execute:true,writeMemory:false} as any;
 
-function setup(replies:Record<string,any[]>,opts:{allowed?:()=>boolean;get?:any}={}){
+function setup(replies:Record<string,any[]>,opts:{allowed?:()=>boolean;get?:any;tools?:string[]}={}){
  const root=mkdtempSync(join(tmpdir(),'device-shell-'));
  const queues=Object.fromEntries(Object.entries(replies).map(([k,v])=>[k,[...v]]));
  const callTool=jest.fn(async(req:{name:string})=>{const q=queues[req.name];if(!q?.length)throw Error('unexpected '+req.name);return q.shift();});
- jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool} as any));
+ const listTools=jest.fn(async()=>({tools:(opts.tools??['computer_request_access','computer_shell']).map(name=>({name}))}));
+ jest.mocked(withComputerConnection).mockImplementation(async(_c,fn)=>fn({callTool,listTools} as any));
  const connectors={get:opts.get??(()=>({id:'mac',connectorId:'relay',scope:{device_id:'dev',grant_id:'grant'}})),discover:jest.fn(async()=>[]),connection:()=>({endpoint:'https://relay.example/mcp',headers:{}})};
  const adapter=new ComputerTaskAdapter({agentId:'a',root,connectors:connectors as any,allowed:opts.allowed??(()=>true),member:()=>true,active:()=>true,evaluate:jest.fn(),needsInput:()=>true});
- return {adapter,callTool,connectors,close:async()=>{await adapter.close();rmSync(root,{recursive:true,force:true});}};
+ return {adapter,callTool,listTools,connectors,close:async()=>{await adapter.close();rmSync(root,{recursive:true,force:true});}};
 }
 
 test('the tool schema bounds the request and tells the agent how to report',()=>{
@@ -99,5 +100,13 @@ test('a connection dropped after the command was sent is reported as unknown, no
  try{
   expect(await f.adapter.shell(context,{session_id:'mac',command:'id',timeout_ms:60000})).toMatchObject({error:'SHELL_OUTCOME_UNKNOWN',instruction:expect.stringContaining('may or may not have run')});
   expect(f.callTool.mock.calls.filter((c:any)=>c[0].name==='computer_shell')).toHaveLength(1);
+ }finally{await f.close();}
+});
+
+test('an older relay without computer_shell is SHELL_UNSUPPORTED before access is requested or anything is sent',async()=>{
+ const f=setup({},{tools:['computer_request_access','computer_observe']});
+ try{
+  expect(await f.adapter.shell(context,{session_id:'mac',command:'id'})).toMatchObject({error:'SHELL_UNSUPPORTED',instruction:expect.stringContaining('Nothing ran')});
+  expect(f.listTools).toHaveBeenCalledTimes(1);expect(f.callTool).not.toHaveBeenCalled();
  }finally{await f.close();}
 });

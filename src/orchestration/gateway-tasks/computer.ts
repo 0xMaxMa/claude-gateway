@@ -98,6 +98,10 @@ export class ComputerTaskAdapter implements GatewayTaskAdapter {
     if(!value||typeof value!=='object')throw Error('COMPUTER_TOOL_FAILED');
     return {error:response.isError?(typeof value.error==='string'&&DEVICE_CODE.test(value.error)?value.error:'COMPUTER_TOOL_FAILED'):undefined,value};
    };
+   // An older relay has no computer_shell: calling it would read as SHELL_OUTCOME_UNKNOWN although nothing ran.
+   signal?.throwIfAborted();
+   const tools=await client.listTools(undefined,{...(signal?{signal}:{}),timeout:10000});
+   if(!tools.tools.some(t=>t.name==='computer_shell'))return {error:'SHELL_UNSUPPORTED',instruction:SHELL_ERROR_HINTS.SHELL_UNSUPPORTED};
    const access=await call('computer_request_access',{request_id:`shell:${context.actionId}`.slice(0,160),wait_ms:15000},20000);
    if(access.error)throw Error('COMPUTER_ACCESS_UNAVAILABLE');
    if(access.value.state==='pending')return {state:'waiting_access',instruction:'The owner has not approved access on the Mac yet. Tell the user to approve the GetPod Desktop prompt, then call device_shell again with the same command. Nothing ran.'};
