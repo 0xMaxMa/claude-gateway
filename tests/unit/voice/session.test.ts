@@ -578,6 +578,35 @@ test('barge-in while spoken sentences are still streaming cancels the rest: late
   } finally { stream.close(); await session.close(); }
 });
 
+test('each streamed piece of a reply is synthesized on its own provider stream, as one playback with continuous chunk numbers', async () => {
+  const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [], calls: string[][] = [];
+  const stream = new BoundedQueue<{ responseId: string; text: string }>(4096, value => Buffer.byteLength(value.text));
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] },
+    synthesize: async function* (options) { const texts: string[] = []; calls.push(texts); let sequence = 0; for await (const text of options.text) { texts.push(text); yield { bytes: Buffer.alloc(640), format: PCM16, chunkSeq: sequence++ }; } } };
+  const session = new VoiceSession(stt, tts, 'voice', { control: c => controls.push(c), audio: c => audio.push(c), bufferedBytes: () => 0 },
+    async () => ({ inputId: 'input', response: new Promise<string>(() => {}), stream }), jest.fn(),
+    { silenceCommitMs: 0, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500, mergeWindowMs: 0 });
+  const waitFor = async (predicate: () => boolean) => { const end = Date.now() + 2000; while (!predicate() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 5)); expect(predicate()).toBe(true); };
+  try {
+    await session.start();
+    const listening = controls.at(-1)!;
+    await session.audio({ generation: listening.generation, epoch: 0, sequence: 1, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    session.speechEnded(1);
+    await waitFor(() => !!stt.sessions[0].commitId);
+    stt.sessions[0].emit({ type: 'segment_final', segmentId: 's', text: 'ราคาเท่าไหร่' });
+    stt.sessions[0].emit({ type: 'commit_done', commitId: stt.sessions[0].commitId! });
+    await waitFor(() => controls.some(c => c.type === 'utterance.accepted'));
+    stream.push({ responseId: 'reply', text: 'ได้ค่ะ ตอนนี้ราคาอยู่ที่ประมาณหกหมื่นเจ็ดพันดอลลาร์' });
+    await waitFor(() => audio.length === 1);
+    stream.push({ responseId: 'reply', text: 'ขึ้นมาราวสองเปอร์เซ็นต์จากเมื่อวานค่ะ' });
+    stream.close();
+    await waitFor(() => controls.some(c => c.type === 'playback.end'));
+    expect(calls).toEqual([['ได้ค่ะ ตอนนี้ราคาอยู่ที่ประมาณหกหมื่นเจ็ดพันดอลลาร์'], ['ขึ้นมาราวสองเปอร์เซ็นต์จากเมื่อวานค่ะ']]);
+    expect(controls.filter(c => c.type === 'playback.start')).toHaveLength(1);
+    expect(audio.map(bytes => decodeVoiceFrame(bytes).sequence)).toEqual([0, 1]);
+  } finally { stream.close(); await session.close(); }
+});
+
 test('mute right after speech answers it without the silence timer, and the reply still plays while muted; mute with no speech admits nothing', async () => {
   const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [];
   const stream = new BoundedQueue<{ responseId: string; text: string }>(1024, value => Buffer.byteLength(value.text));

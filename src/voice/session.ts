@@ -5,7 +5,7 @@ import { resolveVoiceId } from './providers/voice-catalog';
 import { randomUUID } from 'crypto';
 import { VoiceTurnManager } from './turn-manager';
 import { VoicePlayback } from './playback';
-import { SttProvider, SttSession, TtsProvider, PCM16, VoiceError } from './types';
+import { SttProvider, SttSession, TtsProvider, TtsAudioChunk, PCM16, VoiceError } from './types';
 import { VoiceFrame, encodeVoiceFrame } from './protocol';
 
 export interface VoiceClient {
@@ -321,7 +321,7 @@ export class VoiceSession {
       const signal = this.playback.signal;
       // The recognition hint belongs to microphone input. Let TTS follow the
       // approved response text, which can intentionally use another language.
-      for await (const chunk of tracedAudio(this.tts.synthesize({ text: spokenText, voiceId, outputFormat: PCM16, signal: this.playback.signal }), trace)) {
+      for await (const chunk of tracedAudio(this.synthesizePieces(spokenText, voiceId, signal), trace)) {
         if (this.closed || epoch !== this.playback.epoch || signal.aborted) break;
         if (providerSequence === 0) trace.emit('first_provider_audio');
         if (chunk.chunkSeq !== providerSequence++ || chunk.format.encoding !== PCM16.encoding || chunk.format.sampleRate !== PCM16.sampleRate || chunk.format.channels !== 1) throw new VoiceError('INVALID_AUDIO_CHUNK');
@@ -359,6 +359,21 @@ export class VoiceSession {
         this.completedPlaybackEpoch = epoch;
         this.recordPlayback('streamed'); this.client.control({ type: 'playback.end', response_id: responseId, epoch, generated_samples: this.playback.snapshot().generatedSamples }); }
     } catch (error) { if (!this.closed && epoch === this.playback.epoch) { trace.emit('failed', { code: error instanceof VoiceError ? error.code : 'TTS_UNAVAILABLE' }); this.recordPlayback('failed'); this.error(error instanceof VoiceError ? error.code : 'TTS_UNAVAILABLE'); } }
+  }
+  /** Each piece of spoken text is synthesized on its own provider stream, which ends as soon as the
+   * piece is sent. A streaming TTS socket otherwise holds short text (ElevenLabs dialogue: under ~40
+   * characters and 8 words, typical of Thai) until the socket closes, and the managed relay accepts
+   * no flush. One reply is still one playback: chunks are numbered across its pieces. */
+  private async *synthesizePieces(spokenText: AsyncIterable<string>, voiceId: string, signal: AbortSignal): AsyncGenerator<TtsAudioChunk> {
+    let chunkSeq = 0;
+    for await (const text of spokenText) {
+      if (signal.aborted) return;
+      let pieceSeq = 0;
+      for await (const chunk of this.tts.synthesize({ text: (async function* () { yield text; })(), voiceId, outputFormat: PCM16, signal })) {
+        if (chunk.chunkSeq !== pieceSeq++) throw new VoiceError('INVALID_AUDIO_CHUNK');
+        yield { ...chunk, chunkSeq: chunkSeq++ };
+      }
+    }
   }
   progress(epoch: number, sampleOffset: number): void { this.playback.progress(epoch, sampleOffset);
     const state = this.playbackTrace;
