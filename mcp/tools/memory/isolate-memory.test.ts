@@ -14,6 +14,7 @@ import { MemoryModule } from './module';
 import { SkillsModule } from '../skills/module';
 import { CronModule } from '../cron/module';
 import { AgentModule } from '../agent/module';
+import { AppsModule } from '../apps/module';
 import { archiveDbPath } from './archive-reader';
 
 let agentDir: string;
@@ -26,7 +27,7 @@ const originalEnv = {
 };
 
 beforeEach(() => {
-  agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-mt-'));
+  agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-iso-'));
   const workspaceDir = path.join(agentDir, 'workspace');
   fs.mkdirSync(workspaceDir);
   // Same schema src/ writes; one chunk recorded while serving conversation A.
@@ -84,4 +85,11 @@ test('isolate mode turns the cron and agent modules off: jobs and the persona ar
   process.env.GATEWAY_ISOLATE_MEMORY = '1';
   expect(new CronModule().isEnabled()).toBe(false);
   expect(new AgentModule().isEnabled()).toBe(false);
+});
+
+test('isolate mode turns the apps module off: restoring or uninstalling an app rewinds every conversation\'s memory', () => {
+  process.env.GATEWAY_API_URL = 'http://127.0.0.1:1';
+  expect(new AppsModule().isEnabled()).toBe(true);
+  process.env.GATEWAY_ISOLATE_MEMORY = '1';
+  expect(new AppsModule().isEnabled()).toBe(false);
 });

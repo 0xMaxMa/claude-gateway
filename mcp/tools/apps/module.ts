@@ -19,7 +19,9 @@ export class AppsModule implements ToolModule {
   private client: AppsClient | null = null;
 
   isEnabled(): boolean {
-    return Boolean(process.env.GATEWAY_API_URL);
+    // Never in isolated memory mode (#601): updating, restoring or uninstalling
+    // an app rewinds or deletes the memory of every conversation its agent serves.
+    return Boolean(process.env.GATEWAY_API_URL) && !process.env.GATEWAY_ISOLATE_MEMORY;
   }
 
   private getClient(): AppsClient {

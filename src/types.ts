@@ -372,7 +372,7 @@ export interface AgentConfig {
    * Isolated memory mode (#601) for one agent serving many unrelated
    * senders: USER.md/MEMORY.md are kept per conversation under
    * `<workspace>/chats/<channel>-<chatId>-<hash>/`, and the memory, skill,
-   * cron and agent MCP tools are not offered. Absent or `false` keeps one shared memory for the agent.
+   * cron, agent and apps MCP tools are not offered. Absent or `false` keeps one shared memory for the agent.
    * An app agent's value is written from its app.yaml `services.agent.isolate_memory`.
    */
   isolateMemory?: boolean;
