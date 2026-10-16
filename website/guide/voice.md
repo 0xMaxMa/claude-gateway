@@ -170,7 +170,7 @@ Runs of symbols with nothing to pronounce (for example a line of `=` characters)
 | Setting under `voice` | Default | Meaning |
 | --- | --- | --- |
 | `language` | empty | Recognition language hint; empty allows automatic recognition |
-| `turns.silenceCommitMs` | 650 ms | Pause before committing a microphone segment |
+| `turns.silenceCommitMs` | 650 ms | Pause after the client's `speech.ended` before committing a microphone segment; `0` commits at once (the `/call` page already waits 350 ms of silence before it sends `speech.ended`) |
 | `turns.finalizationTimeoutMs` | 5000 ms | Base finalization budget; batch providers may require a longer provider-specific budget |
 | `turns.maxUtteranceMs` | 60000 ms | Bound a single utterance |
 | `turns.mergeWindowMs` | 1200 ms | After a segment is committed, wait this long for a continuation before submitting the combined turn; `0` submits each segment at once |

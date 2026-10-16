@@ -131,7 +131,7 @@ export function validateTree(value: unknown, template: unknown, prefix: string):
       if (!Array.isArray(item) || (!item.length && key !== 'allowedOrigins') || item.some(v => typeof v !== 'string')) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a string array`);
     } else if (expected && typeof expected === 'object') validateTree(item, expected, where);
     else if (typeof item !== typeof expected) throw new OrchestrationError('INVALID_CONFIG', `Invalid ${where}`);
-    else if (typeof item === 'number' && (!Number.isSafeInteger(item) || item < (['maxDurationMs', 'progressStaleLimitMs', 'inputDebounceMs', 'mergeWindowMs'].includes(key) ? 0 : 1) || item > 2147483647)) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a positive bounded integer`);
+    else if (typeof item === 'number' && (!Number.isSafeInteger(item) || item < (['maxDurationMs', 'progressStaleLimitMs', 'inputDebounceMs', 'mergeWindowMs', 'silenceCommitMs'].includes(key) ? 0 : 1) || item > 2147483647)) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a positive bounded integer`);
   }
 }
 export function resolveOrchestrationConfig(config?: OrchestrationConfig, agentVoice?: AgentVoiceConfig) {

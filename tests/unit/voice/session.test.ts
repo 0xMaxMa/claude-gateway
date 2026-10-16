@@ -525,6 +525,29 @@ test('the agent turn reports its phases on the voice turn trace, and every spoke
   } finally { stream.close(); await session.close(); }
 });
 
+test('silenceCommitMs 0 commits on speech.ended without a pause, after the last audio frame reaches the recognizer', async () => {
+  jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+  const stt = new FakeSttProvider(), controls: Record<string, any>[] = [];
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] }, synthesize: async function* () {} };
+  const session = new VoiceSession(stt, tts, 'voice', { control: c => controls.push(c), audio: () => {}, bufferedBytes: () => 0 },
+    async () => ({ inputId: 'input', response: new Promise<string>(() => {}) }), jest.fn(),
+    { silenceCommitMs: 0, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500, mergeWindowMs: 0 });
+  try {
+    await session.start();
+    const listening = controls.at(-1)!;
+    await session.audio({ generation: listening.generation, epoch: 0, sequence: 1, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    await session.audio({ generation: listening.generation, epoch: 0, sequence: 2, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    session.speechEnded(2);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(stt.sessions[0].commitId).toBeDefined();
+    expect(stt.sessions[0].frames).toHaveLength(2);
+    stt.sessions[0].emit({ type: 'segment_final', segmentId: 's', text: 'สวัสดี' });
+    stt.sessions[0].emit({ type: 'commit_done', commitId: stt.sessions[0].commitId! });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(controls).toContainEqual(expect.objectContaining({ type: 'stt.final', text: 'สวัสดี' }));
+  } finally { await session.close(); jest.useRealTimers(); }
+});
+
 test('mute right after speech answers it without the silence timer, and the reply still plays while muted; mute with no speech admits nothing', async () => {
   const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], audio: Buffer[] = [];
   const stream = new BoundedQueue<{ responseId: string; text: string }>(1024, value => Buffer.byteLength(value.text));

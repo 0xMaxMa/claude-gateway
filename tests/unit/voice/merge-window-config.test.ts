@@ -9,5 +9,11 @@ test('voice.turns.mergeWindowMs defaults to the former fixed 1200 ms, accepts 0 
   expect(() => resolveOrchestrationConfig(undefined, voice({ mergeWindowMs: -1 }))).toThrow('voice.turns.mergeWindowMs');
   expect(() => resolveOrchestrationConfig(undefined, voice({ mergeWindowMs: 1.5 }))).toThrow('voice.turns.mergeWindowMs');
   // Other timings stay strictly positive.
-  expect(() => resolveOrchestrationConfig(undefined, voice({ silenceCommitMs: 0 }))).toThrow('voice.turns.silenceCommitMs');
+  expect(() => resolveOrchestrationConfig(undefined, voice({ finalizationTimeoutMs: 0 }))).toThrow('voice.turns.finalizationTimeoutMs');
+});
+
+test('voice.turns.silenceCommitMs keeps its 650 ms default and accepts 0, which commits as soon as speech.ended arrives', () => {
+  expect(resolveOrchestrationConfig(undefined, voice({})).voice.turns.silenceCommitMs).toBe(650);
+  expect(resolveOrchestrationConfig(undefined, voice({ silenceCommitMs: 0 })).voice.turns.silenceCommitMs).toBe(0);
+  expect(() => resolveOrchestrationConfig(undefined, voice({ silenceCommitMs: -1 }))).toThrow('voice.turns.silenceCommitMs');
 });
