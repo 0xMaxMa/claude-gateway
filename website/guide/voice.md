@@ -178,7 +178,7 @@ Runs of symbols with nothing to pronounce (for example a line of `=` characters)
 | `playback.bargeIn` | true | Allow speech interruption behavior |
 | `maxActiveSessionsPerConversation` | 1 | Limit concurrent live voice connections for a conversation |
 
-A shorter pause commits sooner and may cut a natural pause into separate segments; a longer pause waits for more speech but delays submission. This is separate from orchestration's `intakeWaitMs`, which combines already received incomplete inputs. The setting is not a promise of end-to-end reply latency.
+A shorter pause commits sooner and may cut a natural pause into separate segments; a longer pause waits for more speech but delays submission. The merge window is the larger of the two waits: every turn waits the full `mergeWindowMs` after its transcript before the agent starts. Lowering it to 600 ms answers about 600 ms sooner, but a pause longer than that in the middle of a thought becomes its own turn (the earlier part is answered, then interrupted by the continuation). The default stays 1200 ms; set `voice.turns.mergeWindowMs` per agent to trade one for the other, and remove the setting to go back. This is separate from orchestration's `intakeWaitMs`, which combines already received incomplete inputs. The setting is not a promise of end-to-end reply latency.
 
 ## Diagnose missing or delayed audio
 
