@@ -87,13 +87,20 @@ describe('composeTenantContext', () => {
 
   it('applies the memory budget banner to tenant files', () => {
     writeTenant('telegram', '1', '', 'x'.repeat(50));
-    expect(composeTenantContext(workspace, 'telegram', '1', { memoryBudgetChars: 10 })).toContain('OVER BUDGET');
+    const context = composeTenantContext(workspace, 'telegram', '1', { memoryBudgetChars: 10 });
+    // The banner must name the tenant's file, not the shared root MEMORY.md.
+    expect(context).toContain(`${path.join('tenants', tenantDirName('telegram', '1'), 'MEMORY.md')} OVER BUDGET`);
   });
 });
 
 describe('tenantDirName', () => {
   it('keeps ordinary ids readable', () => {
-    expect(tenantDirName('telegram', '-1001234')).toBe('telegram--1001234');
+    expect(tenantDirName('telegram', '-1001234')).toMatch(/^telegram--1001234-[0-9a-f]{16}$/);
+  });
+
+  it("a chosen chatId cannot reproduce another key's directory", () => {
+    const victim = tenantDirName('api', 'x.');
+    expect(tenantDirName('api', victim.slice('api-'.length))).not.toBe(victim);
   });
 
   it('cannot escape tenants/ and keeps distinct keys distinct', () => {
