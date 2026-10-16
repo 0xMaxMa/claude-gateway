@@ -20,6 +20,7 @@ import { OrchestrationError } from '../orchestration/types';
 import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
 import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
+import { composeTenantContext } from '../agent/workspace-loader';
 import { resolveDreamingConfig } from '../agent/dreaming/config';
 import { toChatChannel, type ChatChannel, type ChatChannelOrApi } from '../history/types';
 import { SessionStore } from './store';
@@ -725,6 +726,8 @@ export class SessionProcess extends EventEmitter {
   }
 
   private managedMcpConfigPath?: string;
+  /** Host file holding this conversation's tenant context (see writeTenantContextFile). */
+  private tenantContextPath?: string;
   /** Host file holding the appended system prompt (see writeSystemPromptFile). */
   private systemPromptPath?: string;
   private managedConnectorPaths = new Set<string>();
@@ -747,6 +750,26 @@ export class SessionProcess extends EventEmitter {
     fs.writeFileSync(file, moved.prompt, { mode: 0o600, flag: 'wx' });
     this.systemPromptPath = file;
     return moved.args;
+  }
+
+  private tenantContext(): string {
+    return composeTenantContext(this.agentConfig.workspace, this.source, this.chatId,
+      { ...this.gatewayConfig.gateway.memory, ...this.agentConfig.memory });
+  }
+
+  /** Outside orchestration the tenant context cannot join an appended prompt, so
+   * it is written fresh each spawn to `.sessions/<id>/` (0700) and passed with
+   * --append-system-prompt-file. Undefined when isolate mode is off. */
+  private writeTenantContextFile(): string | undefined {
+    if (this.runtimeProfile || !this.agentConfig.multiTenant?.enabled) return undefined;
+    const sessionsRoot = path.join(this.agentConfig.workspace, '.sessions');
+    const sessionDir = path.join(sessionsRoot, this.sessionId);
+    const rel = path.relative(sessionsRoot, sessionDir);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('invalid session id');
+    fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+    const file = path.join(sessionDir, 'tenant-context.md');
+    fs.writeFileSync(file, this.tenantContext(), { mode: 0o600 });
+    return file;
   }
 
   private writeMcpConfig(): string | null {
@@ -884,6 +907,9 @@ export class SessionProcess extends EventEmitter {
             GATEWAY_API_KEY: this.findApiKeyForAgent(this.agentConfig.id),
             GATEWAY_ORIGIN_CHANNEL: this.source,
             GATEWAY_WORKSPACE_DIR: this.agentConfig.workspace,
+            // Isolate mode (#601): the archive is one index for every tenant, so
+            // the memory module turns its tools off instead of filtering them.
+            GATEWAY_MULTI_TENANT_ISOLATE: this.agentConfig.multiTenant?.enabled ? '1' : '',
             GATEWAY_SHARED_SKILLS_DIR: path.join(os.homedir(), '.claude-gateway', 'shared-skills'),
             // Shared KB vault dir (planning-64 K3), so memory_search corpus:"shared"
             // can reach the cross-agent vault. Empty when shared KB is disabled.
@@ -1005,6 +1031,7 @@ export class SessionProcess extends EventEmitter {
           }
           throw error;
         }
+        if (this.agentConfig.multiTenant?.enabled) context += '\n\n' + this.tenantContext();
       }
       const profileArgs = runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${containerAttempt.directory}/checkpoint.cjs ${containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: containerAttempt && this.runtimeProfile.skillPluginDir ? containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []);
       args.push(...profileArgs);
@@ -1025,6 +1052,11 @@ export class SessionProcess extends EventEmitter {
     // Built-in: gateway sessions always run with permissions skipped.
     // (The old claude.dangerouslySkipPermissions config is gone.)
     args.push('--dangerously-skip-permissions');
+
+    // Multi-tenant isolate mode (#601): Claude Code loads the tenant-neutral
+    // workspace CLAUDE.md itself; this conversation's own USER.md/MEMORY.md
+    // ride alongside it (see writeTenantContextFile).
+    if (this.tenantContextPath) args.push('--append-system-prompt-file', this.tenantContextPath);
 
     // Enforce allow_tools:false as a real boundary. Gated on the SAME condition as
     // writeMcpConfig() (source==='api' && !allow_tools): those sessions get no MCP
@@ -1080,6 +1112,7 @@ export class SessionProcess extends EventEmitter {
       this.containerAttempt = attempt;
     }
     const mcpConfigPath = this.writeMcpConfig();
+    this.tenantContextPath = this.writeTenantContextFile();
 
     // For app-agents, Claude runs inside the container where /workspace is mounted.
     // Convert host paths (agentConfig.workspace-relative) to container paths (/workspace/...).

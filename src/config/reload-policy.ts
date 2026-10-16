@@ -29,6 +29,9 @@ const agent: Record<string, ReloadMode> = {
   sessionCompaction: 'component', knowledge: 'component',
   'knowledge.shared.root': 'restart', 'knowledge.shared.project': 'restart', 'knowledge.archive.tokenizer': 'restart',
   env: 'restart', workspace: 'restart', id: 'restart', type: 'restart', container: 'restart',
+  // Live sessions hold the composed context they spawned with; a mix of isolated
+  // and shared sessions on one agent is never a valid state.
+  multiTenant: 'restart',
 };
 export function reloadMode(agentId: string, field: string): ReloadMode {
   const policies = agentId ? agent : gateway;

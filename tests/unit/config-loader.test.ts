@@ -615,4 +615,21 @@ describe('config-loader', () => {
     expect(loaded.agents.map(agent => agent.id)).toEqual(['baerbel']);
     expect(skipped.map(agent => agent.reason)).toEqual([expect.stringMatching(/Computer Use/)]);
   });
+
+  it('accepts agents[].multiTenant and skips malformed or app-agent use (#601)', () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    const base = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'valid-2-agents.json'), 'utf8'));
+    fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], multiTenant: { enabled: true } }, base.agents[1]] }));
+    expect(loadConfig(configPath).agents[0].multiTenant).toEqual({ enabled: true });
+    for (const multiTenant of [{ enabled: 'yes' }, { enabled: true, scope: 'chat' }, true]) {
+      const skipped: SkippedAgent[] = [];
+      fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], multiTenant }, base.agents[1]] }));
+      expect(loadConfig(configPath, { onSkippedAgent: agent => skipped.push(agent) }).agents.map(agent => agent.id)).toEqual(['baerbel']);
+      expect(skipped.map(agent => agent.reason)).toEqual([expect.stringMatching(/multiTenant must be/)]);
+    }
+    const skipped: SkippedAgent[] = [];
+    fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], type: 'app-agent', multiTenant: { enabled: true } }, base.agents[1]] }));
+    loadConfig(configPath, { onSkippedAgent: agent => skipped.push(agent) });
+    expect(skipped.map(agent => agent.reason)).toEqual([expect.stringMatching(/not supported for app-agent/)]);
+  });
 });

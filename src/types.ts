@@ -368,6 +368,13 @@ export interface AgentConfig {
   sessionCompaction?: GatewayConfig['gateway']['sessionCompaction'];
   /** Per-agent knowledge-archive override (field-level over the global gateway default). */
   knowledge?: GatewayConfig['gateway']['knowledge'];
+  /**
+   * Multi-tenant isolate mode (#601) for one agent serving many unrelated
+   * senders: USER.md/MEMORY.md are kept per conversation under
+   * `<workspace>/tenants/<channel>-<chatId>/`, and memory_search/memory_get are
+   * not offered. Absent or `enabled: false` keeps the single-tenant behavior.
+   */
+  multiTenant?: { enabled: boolean };
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
   avatar?: string;
   /** Per-agent connector enablement, keyed by connector id (e.g. "github"). */

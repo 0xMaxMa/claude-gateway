@@ -77,6 +77,8 @@ export class TaskBridge {
   private server?: Server;
   private url = '';
   recordRetrievals = false;
+  /** Isolate mode (#601): turns the memory_search/memory_get module off in every MCP process this bridge issues. */
+  multiTenant = (): boolean => false;
   jevEnabled?: () => boolean;
   browserEnabled?: () => boolean;
   computerEnabled?: () => boolean;
@@ -442,7 +444,7 @@ export class TaskBridge {
       GATEWAY_JEV_ENABLED: jevEnabled ? 'true' : '',
       GATEWAY_CAPABILITY_CATALOG: scope.role === 'agent' && scope.capabilities ? 'true' : '',
       GATEWAY_ORCHESTRATION_ROLE: scope.role, GATEWAY_ORCHESTRATION_TICKET_FILE: ticketPath,
-      GATEWAY_WORKSPACE_DIR: workspace, GATEWAY_SHARED_KB_DIR: sharedKbDir,
+      GATEWAY_WORKSPACE_DIR: workspace, GATEWAY_SHARED_KB_DIR: sharedKbDir, GATEWAY_MULTI_TENANT_ISOLATE: this.multiTenant() ? '1' : '',
       GATEWAY_RECORD_RETRIEVALS: this.recordRetrievals ? '1' : '',
       GATEWAY_ORIGIN_CHANNEL: workerMemory ? String(worker!.conversation.source) : 'api', GATEWAY_AGENT_ID: this.tasks.store.agentId,
       GATEWAY_SESSION_ID: worker?.task.agentSessionId ?? '', GATEWAY_SESSION_MEDIA_DIR: worker?.mediaDir ?? '',

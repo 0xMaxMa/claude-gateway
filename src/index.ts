@@ -171,6 +171,9 @@ async function startAgent(
     agentConfig.knowledge?.archive,
     gatewayConfig.gateway.knowledge?.archive,
   ).enabled;
+  // Multi-tenant isolate mode (#601): the shared CLAUDE.md leaves out sender data.
+  // Fixed for the process lifetime: the reload policy makes the field restart-only.
+  const multiTenant = agentConfig.multiTenant?.enabled === true;
 
   // Ensure workspace directory exists (may be absent for newly created agents)
   try {
@@ -224,6 +227,7 @@ async function startAgent(
   try {
     workspace = await loadWorkspace(agentConfig.workspace, {
       coreShrink,
+      multiTenant,
       mcpToolsDir,
       sharedSkillsDir,
       logger,
@@ -310,7 +314,10 @@ async function startAgent(
       agentId: agentConfig.id,
       workspaceDir: agentConfig.workspace,
       globalCfg: gatewayConfig.gateway.dreaming,
-      agentCfg: agentConfig.dreaming,
+      // Isolate mode (#601): dreaming reads every conversation's transcripts into
+      // one MEMORY.md/USER.md (and may promote to the shared KB), so it cannot keep
+      // tenants apart; it stays off for such an agent.
+      agentCfg: multiTenant ? { ...agentConfig.dreaming, enabled: false } : agentConfig.dreaming,
       gatewayTimezone: gatewayConfig.gateway.timezone,
       logger,
       // K4 auto-applier net-negative gate uses the same soft budgets as compose.
@@ -375,7 +382,7 @@ async function startAgent(
     const next=JSON.stringify([memoryBudget,agentConfig.knowledge,gatewayConfig.gateway.knowledge]);
     if(next===composePolicy)return;composePolicy=next;
     composeReload=composeReload.then(async()=>{
-      const updated=await loadWorkspace(agentConfig.workspace,{mcpToolsDir,sharedSkillsDir,logger,memoryBudget,coreShrink});
+      const updated=await loadWorkspace(agentConfig.workspace,{mcpToolsDir,sharedSkillsDir,logger,memoryBudget,coreShrink,multiTenant});
       await fs.promises.writeFile(path.join(agentConfig.workspace,'CLAUDE.md'),updated.systemPrompt,'utf8');
       if(updated.skillRegistry)runner.setSkillRegistry(updated.skillRegistry);
       await runner.restartOrDefer({skipBusy:true,deferIdle:true});
@@ -403,6 +410,7 @@ async function startAgent(
         logger,
         memoryBudget,
         coreShrink,
+        multiTenant,
       });
       // Always rewrite CLAUDE.md so the next spawn picks up the new content.
       await fs.promises.writeFile(
@@ -462,6 +470,7 @@ async function startAgent(
           logger,
           memoryBudget,
           coreShrink,
+          multiTenant,
         });
         if (updated.skillRegistry) {
           runner.setSkillRegistry(updated.skillRegistry);
@@ -823,6 +832,7 @@ async function main(): Promise<void> {
             agentConfig.knowledge?.archive,
             config.gateway.knowledge?.archive,
           ).enabled,
+          multiTenant: agentConfig.multiTenant?.enabled === true,
         });
         const claudeMdPath = path.join(agentConfig.workspace, 'CLAUDE.md');
         await fs.promises.writeFile(claudeMdPath, updated.systemPrompt, 'utf8');

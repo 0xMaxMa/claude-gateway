@@ -97,6 +97,12 @@ function validateAgent(agent: Record<string, unknown>, index: number, orchestrat
   if (!agent.id || typeof agent.id !== 'string') {
     return `Agent at index ${index} is missing required field "id"`;
   }
+  if (agent.multiTenant !== undefined) {
+    if (!validEnabledOnly(agent.multiTenant)) return `agent '${agent.id}': multiTenant must be { "enabled": boolean }`;
+    // A container agent reads its context inside the container, where the
+    // per-tenant composition is not wired; refuse rather than leak.
+    if ((agent.multiTenant as { enabled: boolean }).enabled && agent.type === 'app-agent') return `agent '${agent.id}': multiTenant is not supported for app-agent`;
+  }
   const hasTelegram = agent.telegram && typeof agent.telegram === 'object';
   const hasDiscord = agent.discord && typeof agent.discord === 'object';
   // Agents without channels are allowed (API-only agents accessed via HTTP API key)

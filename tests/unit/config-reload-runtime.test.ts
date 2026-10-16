@@ -22,6 +22,8 @@ test('adding a nested block does not hide cold storage paths behind its live par
   expect(reloadMode('', 'gateway.knowledge.archive.tokenizer')).toBe('restart');
   expect(reloadMode('', 'gateway.knowledge.shared.root')).toBe('restart');
   expect(reloadMode('', 'gateway.futureSetting')).toBe('restart');
+  // Isolate mode (#601) changes what every session was composed with.
+  expect(reloadMode('agent', 'multiTenant.enabled')).toBe('restart');
   expect(() => setConfigValue({}, '__proto__.polluted', true)).toThrow();
   expect(({} as any).polluted).toBeUndefined();
 });

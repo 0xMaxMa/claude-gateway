@@ -32,7 +32,9 @@ export class MemoryModule implements ToolModule {
 
   isEnabled(): boolean {
     // Available whenever the agent's workspace dir is known (same gate as skills).
-    return Boolean(process.env.GATEWAY_WORKSPACE_DIR);
+    // Never in multi-tenant isolate mode (#601): the archive is one index over
+    // every conversation's notes, so a search could return another tenant's data.
+    return Boolean(process.env.GATEWAY_WORKSPACE_DIR) && !process.env.GATEWAY_MULTI_TENANT_ISOLATE;
   }
 
   getTools(): McpToolDefinition[] {

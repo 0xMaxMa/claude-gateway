@@ -34,6 +34,7 @@ import { startProcessTurn } from '../process-turn';
 import { randomUUID } from 'crypto';
 import { gatewayCapacity } from '../capacity';
 import { resolveSharedConfig, sharedVaultDir } from '../../agent/knowledge';
+import { composeTenantContext } from '../../agent/workspace-loader';
 import { MediaStore } from '../../history/media-store';
 import { providerFailure, ProviderPermit } from '../provider-admission';
 import type { ResolvedCodexProviderIdentity } from '../provider-scope';
@@ -153,6 +154,12 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     let context = this.agent.type === 'app-agent'
       ? await containerNode(this.agent.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))")
       : await readFile(join(this.agent.workspace, 'CLAUDE.md'), 'utf8');
+    // Isolate mode (#601): the worker acts for one conversation, so it sees that
+    // tenant's memory only. Container agents are refused this mode at config load.
+    if (this.agent.multiTenant?.enabled) {
+      const conversation = this.tasks.store.get('SELECT source, chat_id FROM conversations WHERE id=?', task.conversationId)!;
+      context += '\n\n' + composeTenantContext(this.agent.workspace, String(conversation.source), String(conversation.chat_id), { ...this.gateway.gateway.memory, ...this.agent.memory });
+    }
     // pstack is installed for Claude Code host-wide; only a set-up agent's
     // Claude workers load it, with that agent's own model sheet. Codex
     // children are leaf workers and never get the plugin or the sheet.

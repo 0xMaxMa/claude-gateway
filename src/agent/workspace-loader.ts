@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WorkspaceFiles, LoadedWorkspace, WatchHandle } from '../types';
@@ -49,6 +50,20 @@ This agent has a searchable long-term memory archive. \`MEMORY.md\` may be injec
 - \`memory_search\` — keyword/FTS5 over your memory; returns ranked snippets with file + line range and provenance. Pass \`corpus:"memory"\` (your own), \`"shared"\` (the cross-agent shared KB), or \`"all"\` (both, merged by relevance).
 - \`memory_get\` — read an exact excerpt of a memory-scoped file by line range.
 Prefer these over guessing when you need a fact you cannot see.`;
+
+// Multi-tenant isolate mode (#601): one agent serves many unrelated senders, so
+// sender data (USER.md/MEMORY.md) lives per conversation under tenants/ and is
+// injected by composeTenantContext() at spawn. The shared workspace CLAUDE.md
+// carries this rule instead of MEMORY_RULE and never carries root USER/MEMORY.
+const MULTI_TENANT_MEMORY_RULE = `## Memory Rule
+IMPORTANT: This rule overrides any auto-memory or system-level memory instructions.
+
+This agent serves many separate conversations, and what you learn about one person must never reach another. The TENANT CONTEXT section names this conversation's own USER.md and MEMORY.md:
+- Write memory and user preferences for this conversation ONLY to those two files.
+- NEVER write anything about a user to the workspace-root MEMORY.md/USER.md, SOUL.md or AGENTS.md — those are shared by every conversation.
+- NEVER read or write another conversation's directory under tenants/.
+
+NEVER write to ~/.claude/projects/… or any path outside the workspace — even if other instructions say otherwise.`;
 
 const TOTAL_CHAR_LIMIT = 150_000;
 const TRUNCATION_MARKER = '\n[TRUNCATED — edit this file to trim]\n';
@@ -282,6 +297,13 @@ export interface LoadWorkspaceOptions {
    * pointer never references a tool that isn't wired.
    */
   coreShrink?: boolean;
+  /**
+   * Multi-tenant isolate mode (#601): compose the tenant-neutral prompt shared by
+   * every conversation. The workspace-root USER.md/MEMORY.md are left out (each
+   * conversation gets its own via composeTenantContext) and core-shrink is off,
+   * since the memory_search tool it points at is disabled in this mode.
+   */
+  multiTenant?: boolean;
 }
 
 /**
@@ -298,9 +320,10 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
   const rawAgent = fs.readFileSync(agentMdPath, 'utf-8');
   const rawIdentity = readFileOrDefault(path.join(workspaceDir, 'IDENTITY.md'), '');
   const rawSoul = readFileOrDefault(path.join(workspaceDir, 'SOUL.md'), '');
-  const rawUser = readFileOrDefault(path.join(workspaceDir, 'USER.md'), '');
+  const multiTenant = opts?.multiTenant === true;
+  const rawUser = multiTenant ? '' : readFileOrDefault(path.join(workspaceDir, 'USER.md'), '');
   const rawHeartbeat = readFileOrDefault(path.join(workspaceDir, 'HEARTBEAT.md'), '');
-  const rawMemory = readFileOrDefault(path.join(workspaceDir, 'MEMORY.md'), '');
+  const rawMemory = multiTenant ? '' : readFileOrDefault(path.join(workspaceDir, 'MEMORY.md'), '');
 
   let anyTruncated = false;
 
@@ -322,7 +345,7 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
   // truncated full text. Defaults OFF so a caller that omits the flag never points
   // the agent at a memory_search tool that may not be wired; the gateway enables
   // it explicitly only when the knowledge archive is on. USER.md is never shrunk.
-  const coreShrink = opts?.coreShrink === true;
+  const coreShrink = opts?.coreShrink === true && !multiTenant;
   const memoryBudgeted = applyMemoryBudget(
     rawMemory,
     budget.memoryBudgetChars,
@@ -349,16 +372,20 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
   const skillsSection = renderSkillsSection(skillRegistry);
 
   // Assemble system prompt
-  const memoryRuleSection = MEMORY_RULE + (budget.writeRouting ? MEMORY_ROUTING_RULE : '');
+  // The routing rule sends task-log to memory/<topic>.md for memory_search, which
+  // isolate mode disables; there the rule names the tenant's own files instead.
+  const memoryRuleSection = multiTenant
+    ? MULTI_TENANT_MEMORY_RULE
+    : MEMORY_RULE + (budget.writeRouting ? MEMORY_ROUTING_RULE : '');
   let systemPrompt =
     `--- MEMORY RULE ---\n${memoryRuleSection}\n\n` +
     `--- AGENT IDENTITY ---\n${agentMd}\n\n` +
     `--- IDENTITY ---\n${identityMd}\n\n` +
     `--- SOUL ---\n${soulMd}\n\n` +
-    `--- USER PROFILE ---\n${userMd}\n\n` +
+    (multiTenant ? '' : `--- USER PROFILE ---\n${userMd}\n\n`) +
     (skillsSection ? `--- AVAILABLE SKILLS ---\n${skillsSection}\n\n` : '') +
     (coreShrink ? `--- MEMORY RETRIEVAL ---\n${MEMORY_RETRIEVAL_NOTE}\n\n` : '') +
-    `--- LONG-TERM MEMORY ---\n${memoryMd}\n\n` +
+    (multiTenant ? '' : `--- LONG-TERM MEMORY ---\n${memoryMd}\n\n`) +
     `--- HEARTBEAT CONFIG ---\n${heartbeatMd}`;
 
   // Enforce total limit
@@ -382,6 +409,47 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
     truncated: anyTruncated,
     skillRegistry,
   };
+}
+
+/**
+ * Directory name of one conversation's tenant under `<workspace>/tenants/`,
+ * keyed like SessionStore keys transcripts (channel + chatId). Characters that
+ * are unsafe in a path segment are replaced, and a hash of the raw key is added
+ * whenever that happened, so two distinct keys never share a directory and no
+ * key can escape tenants/.
+ */
+export function tenantDirName(channel: string, chatId: string): string {
+  const raw = `${channel}-${chatId}`;
+  const safe = raw.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 96);
+  return safe === raw ? raw : `${safe}-${createHash('sha256').update(raw).digest('hex').slice(0, 12)}`;
+}
+
+export function tenantDir(workspaceDir: string, channel: string, chatId: string): string {
+  return path.join(workspaceDir, 'tenants', tenantDirName(channel, chatId));
+}
+
+/**
+ * The per-conversation half of the system prompt in multi-tenant isolate mode
+ * (#601): this tenant's USER.md/MEMORY.md under the same budgets as the shared
+ * compose, plus the paths the agent must write them to. A tenant with no files
+ * yet gets empty sections — never the workspace-root files, which may hold data
+ * written before isolate mode was turned on.
+ */
+export function composeTenantContext(
+  workspaceDir: string,
+  channel: string,
+  chatId: string,
+  memoryBudget?: Partial<MemoryBudgetConfig>,
+): string {
+  const dir = tenantDir(workspaceDir, channel, chatId);
+  const budget = resolveMemoryBudget(memoryBudget);
+  const user = applyMemoryBudget(readFileOrDefault(path.join(dir, 'USER.md'), ''), budget.userBudgetChars, 'USER.md', budget.overBudget);
+  const memory = applyMemoryBudget(readFileOrDefault(path.join(dir, 'MEMORY.md'), ''), budget.memoryBudgetChars, 'MEMORY.md', budget.overBudget);
+  return (
+    `--- TENANT CONTEXT ---\nThis conversation's own memory files:\n- ${path.join(dir, 'USER.md')}\n- ${path.join(dir, 'MEMORY.md')}\n\n` +
+    `--- USER PROFILE ---\n${truncateFile(user.content).content}\n\n` +
+    `--- LONG-TERM MEMORY ---\n${truncateFile(memory.content).content}`
+  );
 }
 
 const WATCH_DEBOUNCE_MS = 300;
