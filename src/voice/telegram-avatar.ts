@@ -11,6 +11,8 @@ export interface BotProfile { name?: string; photoId?: string; avatar: BotAvatar
 export const BOT_AVATAR_MAX_BYTES = 1024 * 1024;
 /** The page shows the avatar at 112 CSS px; 320 px stays sharp on a 3x screen. */
 const BOT_AVATAR_MIN_SIDE = 320;
+/** How long a call page waits for the lookup before it renders with what is already known. */
+const PAGE_LOOKUP_WAIT_MS = 1500;
 
 type BotApiResult<T> = { ok: boolean; result?: T };
 interface PhotoSize { file_id: string; file_unique_id: string; width: number; height: number; file_size?: number }
@@ -24,7 +26,15 @@ const IMAGE_TYPES: Array<[string, (bytes: Buffer) => boolean]> = [
 export class TelegramBotAvatars {
   private readonly profiles = new Map<string, BotProfile & { token: string }>();
   private readonly lookups = new Map<string, Promise<BotProfile>>();
-  constructor(private readonly request: typeof fetch = fetch) {}
+  constructor(private readonly request: typeof fetch = fetch, private readonly pageWaitMs = PAGE_LOOKUP_WAIT_MS) {}
+
+  /** The profile a call page renders with: the fresh lookup when it answers within
+   * `pageWaitMs`, otherwise the last known one while the lookup finishes for the next call. */
+  async forPage(agentId: string, botToken: string): Promise<BotProfile> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const known = new Promise<BotProfile>(resolve => { timer = setTimeout(() => resolve(this.known(agentId, botToken) ?? { avatar: null }), this.pageWaitMs); });
+    try { return await Promise.race([this.refresh(agentId, botToken), known]); } finally { clearTimeout(timer); }
+  }
 
   /** Look the bot up again, as each call page opens: a renamed bot or a new photo
    * shows on the next call. The photo is downloaded only when it changed. When
@@ -39,12 +49,16 @@ export class TelegramBotAvatars {
 
   /** The photo the page was rendered with; looked up once if this process has none yet. */
   async avatar(agentId: string, botToken: string): Promise<BotAvatar | null> {
+    return (this.known(agentId, botToken) ?? await this.refresh(agentId, botToken)).avatar;
+  }
+
+  private known(agentId: string, botToken: string): BotProfile | undefined {
     const known = this.profiles.get(agentId);
-    return (known?.token === botToken ? known : await this.refresh(agentId, botToken)).avatar;
+    return known?.token === botToken ? known : undefined;
   }
 
   private async lookUp(agentId: string, token: string): Promise<BotProfile> {
-    const known = this.profiles.get(agentId), previous = known?.token === token ? known : undefined;
+    const previous = this.known(agentId, token);
     try {
       const me = await this.call<{ id: number; first_name?: string }>(token, 'getMe', {});
       const photos = await this.call<{ photos: PhotoSize[][] }>(token, 'getUserProfilePhotos', { user_id: me.id, limit: 1 });

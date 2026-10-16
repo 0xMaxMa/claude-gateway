@@ -14,10 +14,11 @@ type Size = { file_id: string; file_unique_id: string; width: number; height: nu
 const photo = (id: string): Size[] => [160, 320, 640].map(side => ({ file_id: `${id}-${side}`, file_unique_id: `${id}-${side}-unique`, width: side, height: side }));
 
 /** Telegram's Bot API for one bot whose name and photo the test changes, as BotFather would. */
-function botApi(state: { name?: string; photo?: Size[]; image?: Buffer; down?: boolean } = {}) {
+function botApi(state: { name?: string; photo?: Size[]; image?: Buffer; down?: boolean; slow?: Promise<void> } = {}) {
   const urls: string[] = [];
   const fetch = jest.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const href = String(url); urls.push(href);
+    if (state.slow) await state.slow;
     if (state.down) throw new Error('network down');
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     if (href.endsWith('/getMe')) return json({ id: 123456, is_bot: true, first_name: state.name ?? 'Fixture' });
@@ -104,3 +105,26 @@ test('the name falls back to the agent id, and an unreachable Telegram keeps the
   expect(notImage.src).toBeUndefined();
   expect((await request(server).get('/voice-call/unknown/avatar')).status).toBe(404);
 });
+
+test('a slow Telegram never holds the call page: it opens with what is known, and the lookup lands for the next call', async () => {
+  const api = botApi({ name: 'Meguri', photo: photo('first') });
+  const server = app(new TelegramBotAvatars(api.fetch, 50)), pairingId = voiceCallPairings.create('a', '42');
+  let answer = () => {};
+  api.state.slow = new Promise<void>(resolve => { answer = resolve; });
+  // Nothing known yet: the agent id and its initial, at once.
+  const cold = await open(server, pairingId);
+  expect(cold.name).toBe('a');
+  expect(cold.src).toBeUndefined();
+  answer(); api.state.slow = undefined;
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect((await open(server, pairingId)).name).toBe('Meguri');
+  // Renamed in BotFather while Telegram is slow: the last known profile, photo included, then the new name.
+  api.state.name = 'Meguri 2';
+  api.state.slow = new Promise<void>(resolve => { answer = resolve; });
+  const known = await open(server, pairingId);
+  expect(known.name).toBe('Meguri');
+  expect(known.avatar!.status).toBe(200);
+  answer(); api.state.slow = undefined;
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect((await open(server, pairingId)).name).toBe('Meguri 2');
+}, 4000);

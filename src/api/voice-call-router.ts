@@ -36,7 +36,7 @@ export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
     if (!pairing || !config) { res.status(404).send(generateVoiceCallGonePage(VOICE_CALL_LINK_EXPIRED)); return; }
     const voice = resolveOrchestrationConfig(config.orchestration, config.voice ?? { enabled: false }).voice;
     const token = config.telegram?.botToken;
-    const bot = token ? await avatars.refresh(pairing.agentId, token) : { avatar: null };
+    const bot = token ? await avatars.forPage(pairing.agentId, token) : { avatar: null };
     res.send(generateVoiceCallPage({ pairingId: pairing.pairingId, agentId: pairing.agentId, basePath: deps.basePath(), maxUtteranceMs: voice.turns.maxUtteranceMs,
       botName: bot.name, avatarVersion: bot.photoId, linkUsed: Boolean(pairing.callToken) }));
   } catch (error) { next(error); } });
