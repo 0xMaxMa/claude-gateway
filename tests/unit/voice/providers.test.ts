@@ -54,6 +54,19 @@ test.each(['elevenlabs', 'cartesia'])('%s exposes neutral PCM chunks and closes 
   }
 });
 
+test('the ElevenLabs dialogue stream sends only the messages the managed relay accepts: no flush or new_turn', async () => {
+  const fixture = socketFixture(), signal = new AbortController().signal;
+  async function* text() { yield 'ได้ค่ะ ตอนนี้ราคาอยู่ที่ประมาณหกหมื่นเจ็ดพันดอลลาร์'; yield 'ขึ้นมาราวสองเปอร์เซ็นต์ค่ะ'; }
+  const iterator = new ElevenLabsTts('fixture', undefined, fixture.connect).synthesize({ text: text(), voiceId: 'voice', outputFormat: PCM16, signal })[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise(resolve => setImmediate(resolve));
+  fixture.messages.push({ is_final: true });
+  await first;
+  // The managed relay closes the socket on any other message shape (seen on develop with flush and new_turn).
+  for (const [message] of fixture.send.mock.calls) expect(Object.keys(message as object).every(key => ['voices', 'voice_settings', 'inputs', 'close_socket'].includes(key))).toBe(true);
+  expect(fixture.send.mock.calls.at(-1)![0]).toEqual({ close_socket: true });
+});
+
 test('provider closing without a terminal event is not a successful synthesis', async () => {
   const fixture = socketFixture();
   async function* text() { yield 'hello'; }

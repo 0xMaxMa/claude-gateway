@@ -46,6 +46,7 @@ export function commandHelp(channel: CommandChannel, orchestration = false, inte
   if (orchestration && channel !== 'api') {
     lines.push('/tasks — View tasks, progress and cancellation controls', '/task_question — Open a pending task question (use the command supplied with the question)');
     if (['telegram', 'discord', 'line', 'slack'].includes(channel)) lines.push('/voice [on|auto|off] — Set voice replies', '/voices — Choose the agent voice');
+    if (channel === 'telegram') lines.push('/call — Start a live voice call (direct message)');
     if (channel !== 'telegram') lines.push('/orch <token> — Use a supplied menu action; tokens expire');
   }
   if (channel === 'discord') lines.push('/ask <question> — Send a message to the agent');

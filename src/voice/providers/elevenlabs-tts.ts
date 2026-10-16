@@ -1,6 +1,7 @@
 import { providerVoiceError } from '../errors';
 import { PCM16, TtsProvider, VoiceError, TtsAudioChunk, validateAudioFormat } from '../types';
 import { openProviderSocket, SocketFactory } from './socket';
+import { voiceTiming } from '../diagnostics';
 
 // v3 and v4 models are only served by the Text-to-Dialogue socket; the classic
 // stream-input socket rejects v4 with HTTP 400. An explicit list, so an unknown future
@@ -41,6 +42,7 @@ export class ElevenLabsTts implements TtsProvider {
     if (options.language) url.searchParams.set('language_code', options.language);
     if (!dialogue) url.searchParams.set('inactivity_timeout', String(MAX_IDLE_SECONDS));
     const socket = await this.connect(url.toString(), { 'xi-api-key': this.key }, options.signal);
+    voiceTiming('tts_socket_open');
     let sendError: unknown, finished = false, closing = false, keepAlive: NodeJS.Timeout | undefined;
     const fail = (error: unknown) => { sendError ??= error; socket.close(); };
     // Re-armed after every send, so keep-alives only go out while the reply text stalls,

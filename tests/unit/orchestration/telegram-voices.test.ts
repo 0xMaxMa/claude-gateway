@@ -34,3 +34,19 @@ test('gender filtering retains original voice indexes and supports returning to 
   await controls.choose('c',root.menuId,female.voices[0].index);expect(controls.settings('c').voiceId).toBe('f');
  }finally{store.close();}
 });
+
+test('a live call and voice notes read the same /voices choice for a Telegram chat',async()=>{
+ const store=new OrchestrationStore(':memory:','a');const config={provider:'p',model:'m',voiceId:''};
+ const controls=new TelegramVoices(store,()=>config,async()=>[{id:'lily',name:'Lily',gender:'female'}]);
+ try{
+  const telegram={kind:'telegram' as const,principalId:'telegram:42' as const,chatId:'42',threadKey:''};
+  expect(controls.forScope(telegram,config)).toEqual(config);
+  const menu=await controls.menu('42');await controls.choose('42',menu.menuId,0);
+  // Voice notes resolve settings(chat); /call resolves forScope(scope). Both now speak with Lily.
+  expect(controls.settings('42')).toEqual({...config,voiceId:'lily'});
+  expect(controls.forScope(telegram,{...config,language:'th'})).toEqual({...config,language:'th',voiceId:'lily'});
+  // An API call is not a Telegram chat, even with the same chat id; a provider change drops the stale pick.
+  expect(controls.forScope({kind:'api',principalId:'api:owner',chatId:'42'},config)).toEqual(config);
+  expect(controls.forScope(telegram,{...config,provider:'other',voiceId:'d'})).toEqual({...config,provider:'other',voiceId:'d'});
+ }finally{store.close();}
+});
