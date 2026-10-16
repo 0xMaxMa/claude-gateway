@@ -196,7 +196,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     var $ = function(id){ return document.getElementById(id); };
     var ctx, media, capture, ws, uplink, vad, resample, progressTimer, level, levelSamples, speaker;
     var playhead = createVoiceCallPlayhead(), sources = [];
-    var callToken, generation, epoch = 0, reportedPlayed = 0, stopRequest = 0, stopping = false;
+    var callToken, generation, epoch = 0, reportedPlayed = 0;
     var muted = false, paused = false, ended = false, attempts = 0, speakerOn = true, shownLevel, muteOnListening = false;
     // The user stopped speaking: show Thinking at once, through the gateway's commit and
     // merge window, until it answers, reports no speech, or the user speaks again.
@@ -249,7 +249,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     function flushPlayback(){ sources.forEach(function(node){ try { node.stop(); } catch (e) {} }); sources = []; playhead.reset(); reportedPlayed = 0; }
     function playAudio(data){
       var view = new DataView(data);
-      if (data.byteLength <= 44 || stopping || view.getUint32(20) !== epoch) return;
+      if (data.byteLength <= 44 || view.getUint32(20) !== epoch) return;
       var count = (data.byteLength - 44) / 2, buffer = ctx.createBuffer(1, count, 16000), channel = buffer.getChannelData(0);
       for (var i = 0; i < count; i++) channel[i] = view.getInt16(44 + i * 2, true) / 32768;
       var node = ctx.createBufferSource(); node.buffer = buffer; node.connect(level);
@@ -280,10 +280,9 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
         case 'stt.final': show('you', message.text); awaitingReply = false; state('Thinking'); break;
         case 'utterance.accepted': state('Thinking'); break;
         case 'response.text': if (message.text) show('reply', voiceCallReplyText(message.text)); break;
-        case 'playback.start': if (!stopping) { epoch = message.epoch; flushPlayback(); awaitingReply = false; playbackPhase = message.phase; audioHeard = false; state('Speaking'); } break;
+        case 'playback.start': epoch = message.epoch; flushPlayback(); awaitingReply = false; playbackPhase = message.phase; audioHeard = false; state('Speaking'); break;
         case 'playback.end': break;
         case 'playback.clear': epoch = message.epoch; flushPlayback(); send({ type: 'playback.clear.ack', epoch: epoch }); if (!awaitingReply) state(muted ? 'Muted' : 'Listening'); break;
-        case 'playback.stopped': epoch = message.epoch; stopping = false; flushPlayback(); break;
         case 'voice.notice': if (message.reconnect) state('Reconnecting…'); break;
         case 'voice.error': {
           var view = voiceCallErrorView(message);
@@ -309,7 +308,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       socket.onclose = function(event){
         // A socket replaced by a reconnect no longer owns the call state.
         if (socket !== ws) return;
-        uplink.reset(); flushPlayback(); stopping = false;
+        uplink.reset(); flushPlayback();
         if (ended || paused) return;
         // 1012: the recognizer restarted; 1006: the network dropped. Take a fresh ticket.
         if (event.code === 1012 || event.code === 1006) { reconnect(); return; }
