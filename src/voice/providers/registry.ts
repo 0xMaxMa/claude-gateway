@@ -63,15 +63,28 @@ function withAudioTagSupport(config: { provider: string; model: string }, provid
 export function ttsProvider(config: { provider: string; model: string }): TtsProvider {
   const provider = withAudioTagSupport(config, makeTtsProvider(config));
   if (!config.provider.startsWith('managed:')) return provider;
+  // A live reply is spoken piece by piece on one playback signal: check the wallet once for
+  // the reply. The next reply has a new signal and checks again, so an exhausted wallet is never reused.
+  const replyChecks = new WeakMap<AbortSignal, Promise<void>>();
+  const checkReply = (signal: AbortSignal) => {
+    let check = replyChecks.get(signal);
+    if (!check) {
+      check = (async () => {
+        voiceTiming('tts_credit_check_started');
+        await requireManagedVoiceCredit(config.provider, undefined, signal);
+        voiceTiming('tts_credit_check_finished');
+      })();
+      replyChecks.set(signal, check);
+    }
+    return check;
+  };
   return { id: provider.id, capabilities: provider.capabilities,
     synthesizeFile: provider.synthesizeFile ? async options => {
       await requireManagedVoiceCredit(config.provider, undefined, options.signal);
       return provider.synthesizeFile!(options);
     } : undefined,
     async *synthesize(options) {
-      voiceTiming('tts_credit_check_started');
-      await requireManagedVoiceCredit(config.provider, undefined, options.signal);
-      voiceTiming('tts_credit_check_finished');
+      await checkReply(options.signal);
       yield* provider.synthesize(options);
     },
   };
