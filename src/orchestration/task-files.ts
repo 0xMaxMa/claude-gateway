@@ -153,6 +153,8 @@ export class TaskFiles {
     if (!(isolated ? /^(?:MEMORY|USER)\.md$/ : /^(?:MEMORY\.md|USER\.md|memory\/[A-Za-z0-9_-]+\.md)$/).test(name)) throw new OrchestrationError('MEMORY_PATH_DENIED');
     const tenant = isolated ? join('tenants', tenantDirName(String(conversation.source), String(conversation.chat_id))) : '';
     const workspace = join(this.workspace, tenant), destination = join(workspace, name);
+    // Checked before mkdir, which would otherwise create the tenant dir wherever a symlinked tenants/ points.
+    if (tenant && lstatSync(join(this.workspace, 'tenants'), { throwIfNoEntry: false })?.isSymbolicLink()) throw new OrchestrationError('MEMORY_PATH_DENIED');
     mkdirSync(dirname(destination), { recursive: true });
     if (realpathSync(workspace) !== join(realpathSync(this.workspace), tenant) || realpathSync(dirname(destination)) !== join(realpathSync(workspace), name.startsWith('memory/') ? 'memory' : '') || (existsSync(destination) && lstatSync(destination).isSymbolicLink())) throw new OrchestrationError('MEMORY_PATH_DENIED');
     if (existsSync(destination) && statSync(destination).size > 1048576) throw new OrchestrationError('MEMORY_TOO_LARGE');

@@ -4,7 +4,7 @@
  * memory_search/memory_get module off, and scoped memory writes land in the
  * conversation's tenants/ directory.
  */
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, readdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionProcess } from '../../../src/session/process';
@@ -145,5 +145,7 @@ describe('task_memory_append', () => {
     const { attempt } = spawnTask('111', true);
     tasks.started(attempt.attemptId, attempt.generation);
     expect(() => files.remember(attempt.attemptId, attempt.generation, 'remember', { path: 'MEMORY.md', note: 'x' })).toThrow('MEMORY_PATH_DENIED');
+    // The refused write leaves nothing behind outside the workspace.
+    expect(readdirSync(outside)).toEqual([]);
   });
 });
