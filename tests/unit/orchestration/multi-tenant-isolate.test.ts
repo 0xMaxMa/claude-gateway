@@ -16,6 +16,7 @@ import { TaskFiles } from '../../../src/orchestration/task-files';
 import { TaskWorkspaces } from '../../../src/orchestration/tasks/workspace';
 import { ClaudeWorkerDriver } from '../../../src/orchestration/tasks/driver';
 import { tenantDir } from '../../../src/agent/workspace-loader';
+import { IDENTITY_EDIT_RULES, SHARED_PERSONA_RULES } from '../../../src/orchestration/source-policy';
 import { AgentConfig, GatewayConfig } from '../../../src/types';
 
 let root: string, workspace: string, store: OrchestrationStore, tasks: TaskService;
@@ -44,19 +45,19 @@ function spawnTask(chatId: string, writeMemory = false) {
 }
 
 describe('workers', () => {
-  async function workerStart(chatId: string, multiTenant: boolean): Promise<{ context: string; mcpEnv: Record<string, string> }> {
+  async function workerStart(chatId: string, multiTenant: boolean): Promise<{ context: string; overlay: string; prompt: string; mcpEnv: Record<string, string> }> {
     const agent = { id: 'agent', workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] },
       ...(multiTenant ? { multiTenant: { enabled: true } } : {}),
       orchestration: { tasks: { idleTimeoutMs: 30, maxDurationMs: 80 }, conversation: { startupTimeoutMs: 1000, firstResponseTimeoutMs: 1000 } } } as AgentConfig;
     const gateway = { gateway: { headless: true, timezone: 'UTC', logDir: join(root, 'logs') }, agents: [agent] } as GatewayConfig;
     const bridge = new TaskBridge(tasks);
     bridge.multiTenant = () => multiTenant;
-    let seen: { context: string; mcpEnv: Record<string, string> } | undefined;
+    let seen: { context: string; overlay: string; prompt: string; mcpEnv: Record<string, string> } | undefined;
     jest.spyOn(SessionProcess.prototype, 'start').mockImplementation(async function (this: SessionProcess) {
       const profile = this.runtimeProfile!;
-      seen = { context: profile.context!, mcpEnv: JSON.parse(readFileSync(profile.mcpConfigPath, 'utf8')).mcpServers.gateway.env };
+      seen = { context: profile.context!, overlay: profile.overlay, prompt: '', mcpEnv: JSON.parse(readFileSync(profile.mcpConfigPath, 'utf8')).mcpServers.gateway.env };
     });
-    jest.spyOn(SessionProcess.prototype, 'sendMessage').mockImplementation(() => {});
+    jest.spyOn(SessionProcess.prototype, 'sendMessage').mockImplementation((text: string) => { seen!.prompt += text; });
     jest.spyOn(SessionProcess.prototype, 'stop').mockImplementation(async function (this: SessionProcess) { this.managedGroupStopped = true; });
     try {
       await bridge.start();
@@ -80,10 +81,20 @@ describe('workers', () => {
     expect(b.context).not.toContain('TENANT-A');
   });
 
+  it('are given no authority to change the persona every conversation shares', async () => {
+    const worker = await workerStart('111', true);
+    expect(worker.overlay).toContain(SHARED_PERSONA_RULES);
+    expect(worker.overlay).not.toContain(IDENTITY_EDIT_RULES);
+    expect(worker.prompt).toContain(SHARED_PERSONA_RULES);
+    expect(worker.prompt).not.toContain('Authorized persona workspace');
+  });
+
   it('are unchanged when isolate mode is off', async () => {
     const worker = await workerStart('111', false);
     expect(worker.context).toBe('SHARED-CONTEXT');
     expect(worker.mcpEnv.GATEWAY_MULTI_TENANT_ISOLATE).toBe('');
+    expect(worker.overlay).toContain(IDENTITY_EDIT_RULES);
+    expect(worker.prompt).toContain('Authorized persona workspace');
   });
 });
 

@@ -174,6 +174,7 @@ async function startAgent(
   // Multi-tenant isolate mode (#601): the shared CLAUDE.md leaves out sender data.
   // Fixed for the process lifetime: the reload policy makes the field restart-only.
   const multiTenant = agentConfig.multiTenant?.enabled === true;
+  const learningConfig = () => multiTenant ? { ...agentConfig.skillLearning, enabled: false } : agentConfig.skillLearning;
 
   // Ensure workspace directory exists (may be absent for newly created agents)
   try {
@@ -294,14 +295,16 @@ async function startAgent(
       mcpToolsDir,
       sharedSkillsDir,
       globalCfg: gatewayConfig.gateway.skillLearning,
-      agentCfg: agentConfig.skillLearning,
+      // Isolate mode (#601): a skill learned from one conversation is offered to
+      // every other one, so the reviewer stays off (as dreaming does below).
+      agentCfg: learningConfig(),
       gatewayTimezone: gatewayConfig.gateway.timezone,
       logger,
       sendNotification: (text, sessionId) => runner.notifySkillLearning(sessionId, text),
     });
     runner.setSkillLearning(skillLearning);
     skillLearning.startCurator();
-    runner.onConfigReload(() => skillLearning.reconfigure({globalCfg:gatewayConfig.gateway.skillLearning,agentCfg:agentConfig.skillLearning,gatewayTimezone:gatewayConfig.gateway.timezone}));
+    runner.onConfigReload(() => skillLearning.reconfigure({globalCfg:gatewayConfig.gateway.skillLearning,agentCfg:learningConfig(),gatewayTimezone:gatewayConfig.gateway.timezone}));
     runner.onShutdown(()=>skillLearning.stop());
   } catch (err) {
     logger.warn('Failed to wire skill-learning (continuing without it)', { error: (err as Error).message });

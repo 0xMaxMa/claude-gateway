@@ -140,9 +140,10 @@ When it is on:
 - **Shared `CLAUDE.md` without sender data.** The composed `CLAUDE.md` leaves out the user profile and long-term memory sections. Its memory rule tells the agent to write only to the current conversation's files. Each session (orchestration Agent, worker or classic channel session) receives its own conversation's files when it spawns.
 - **Scoped memory writes.** `task_memory_append` writes `MEMORY.md`, `USER.md` and `memory/<topic>.md` under the conversation's `tenants/` directory.
 - **No archive tools.** `memory_search`, `memory_get` and the `memory_shared_*` tools are not offered, because the knowledge archive is one index over every conversation. Core-shrink and the write-routing addendum are off for the same reason.
-- **No nightly dreaming.** Dreaming merges every conversation's transcripts into one memory and can promote facts to the shared KB, so it does not run for the agent.
+- **No nightly dreaming or skill learning.** Dreaming merges every conversation's transcripts into one memory and can promote facts to the shared KB, and a skill learned from one conversation is offered to all of them, so neither runs for the agent.
+- **Operator-only persona.** No conversation may change `AGENTS.md`, `SOUL.md` or `IDENTITY.md`. The agent is told to decline name or persona change requests, and orchestration workers receive no persona-edit authorization.
 
-The mode isolates the memory the gateway injects and the tools it offers. It does not sandbox the file system: an agent with file tools can still open another conversation's directory. Keep untrusted senders on agents without host execution. `app-agent` containers are refused at config load, because their context is read inside the container.
+Changing the setting requires a gateway restart. The mode isolates the memory the gateway injects and the tools it offers. It does not sandbox the file system: an agent with file tools can still open another conversation's directory. Keep untrusted senders on agents without host execution. `app-agent` containers are refused at config load, because their context is read inside the container.
 
 Implementation: [workspace loader](https://github.com/0xMaxMa/claude-gateway/blob/main/src/agent/workspace-loader.ts), [session spawn](https://github.com/0xMaxMa/claude-gateway/blob/main/src/session/process.ts).
 

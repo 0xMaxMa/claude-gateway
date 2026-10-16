@@ -762,14 +762,23 @@ export class SessionProcess extends EventEmitter {
    * --append-system-prompt-file. Undefined when isolate mode is off. */
   private writeTenantContextFile(): string | undefined {
     if (this.runtimeProfile || !this.agentConfig.multiTenant?.enabled) return undefined;
-    const sessionsRoot = path.join(this.agentConfig.workspace, '.sessions');
-    const sessionDir = path.join(sessionsRoot, this.sessionId);
-    const rel = path.relative(sessionsRoot, sessionDir);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('invalid session id');
-    fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
-    const file = path.join(sessionDir, 'tenant-context.md');
+    const file = path.join(this.ensureSessionDir(), 'tenant-context.md');
     fs.writeFileSync(file, this.tenantContext(), { mode: 0o600 });
     return file;
+  }
+
+  /** `.sessions/<id>` (0700) for this session's generated spawn files. */
+  private ensureSessionDir(): string {
+    const sessionsRoot = path.join(this.agentConfig.workspace, '.sessions');
+    const sessionDir = path.join(sessionsRoot, this.sessionId);
+    // Defense-in-depth: a sessionId containing '../' would escape the .sessions
+    // directory. Reject anything that resolves outside it.
+    const sessionDirRel = path.relative(sessionsRoot, sessionDir);
+    if (sessionDirRel.startsWith('..') || path.isAbsolute(sessionDirRel)) {
+      throw new Error('invalid session id');
+    }
+    fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+    return sessionDir;
   }
 
   private writeMcpConfig(): string | null {
@@ -792,15 +801,7 @@ export class SessionProcess extends EventEmitter {
     if (this.source === 'api' && !this.agentConfig.allow_tools) return null;
 
     const stateDir = path.join(this.agentConfig.workspace, '.telegram-state');
-    const sessionsRoot = path.join(this.agentConfig.workspace, '.sessions');
-    const sessionDir = path.join(sessionsRoot, this.sessionId);
-    // Defense-in-depth: a sessionId containing '../' would escape the .sessions
-    // directory. Reject anything that resolves outside it.
-    const sessionDirRel = path.relative(sessionsRoot, sessionDir);
-    if (sessionDirRel.startsWith('..') || path.isAbsolute(sessionDirRel)) {
-      throw new Error('invalid session id');
-    }
-    fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+    const sessionDir = this.ensureSessionDir();
     this.sessionDirPath = sessionDir;
 
     const mcpServerPath = path.resolve(__dirname, '..', '..', 'mcp', 'server.ts');
