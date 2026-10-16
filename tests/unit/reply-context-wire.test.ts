@@ -49,7 +49,7 @@ let app: express.Express;
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reply-wire-test-'));
   db = HistoryDB.forAgent(tmpDir, AGENT_ID);
-  const runner = { getHistoryDb: () => db, getAgentsBaseDir: () => tmpDir, boundSessionIds: async () => new Set<string>() };
+  const runner = { getHistoryDb: () => db, getAgentsBaseDir: () => tmpDir };
   const runners = new Map([[AGENT_ID, runner as unknown as AgentRunner]]);
   const configs = new Map([[AGENT_ID, agentConfig]]);
   app = express();

@@ -12,7 +12,7 @@ test('replay returns the original stored bytes, scopes to session and expires re
  const d=decisions.begin(i.conversationId,'p',[i.inputId]);
  const wav=pcmToWav(Buffer.from([1,0,2,0]));store.saveResponseAudio(d.responseId!,wav);
  store.saveResponseAudio(d.responseId!,pcmToWav(Buffer.from([3,0])));
- const runner={apiSessionBinding:async()=>({kind:'unbound' as const}),voiceReplay:async(session:string,principal:string,id?:string)=>store.responseAudio(session,id),replayableVoiceResponses:async(session:string)=>store.replayableResponses(session)} as unknown as AgentRunner;
+ const runner={voiceReplay:async(session:string,principal:string,id?:string)=>store.responseAudio(session,id),replayableVoiceResponses:async(session:string)=>store.replayableResponses(session)} as unknown as AgentRunner;
  const api=new VoiceApi(new Map([['a',runner]]),new Map(),[{id:'key',key:'secret',agents:['a']}]);
  const app=express();app.use(api.router);
  try{
@@ -56,7 +56,6 @@ test('explicit replay synthesizes missing approved audio once, saves it, and enf
  const id='12345678-1234-1234-1234-123456789abc';
  let saved:Buffer|undefined;
  const runner={
-  apiSessionBinding:async()=>({kind:'unbound' as const}),
   voiceReplay:async(s:string,p:string)=>{if(p!=='api:owner')throw Error('denied'); return s==='s'?saved:undefined;},
   voiceReplaySpeech:jest.fn(async(s:string)=>s==='s'?'Approved speech':undefined),
   saveVoiceReplay:jest.fn((_s:string,_p:string,_r:string,a:Buffer)=>{saved=a;}),

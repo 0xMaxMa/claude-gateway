@@ -42,33 +42,26 @@ afterEach(async () => {
 });
 
 describe('deleting a project-bound session', () => {
-  it('purges its history before it drops the binding', async () => {
-    const order: string[] = [];
-    const db = runner.getHistoryDb();
-    const clear = db.clearSession.bind(db);
-    db.clearSession = (chat: string, id: string) => { order.push(`history:${fs.existsSync(bindingFile()) ? 'bound' : 'unbound'}`); return clear(chat, id); };
+  it('purges its history and drops the binding', async () => {
     expect((await as(KEYS.admin, 'delete', `${A}/sessions/${bound}?chat_id=web`)).status).toBe(204);
-    expect(order).toEqual(['history:bound']);
     expect(fs.existsSync(bindingFile())).toBe(false);
     expect(await readerSees()).not.toContain('FIRST-SECRET');
   });
 
-  it('keeps the session hidden while a turn is still live, and purges what the turn wrote when it ends', async () => {
+  it('keeps the binding while a turn is still live, and purges what the turn wrote when it ends', async () => {
     const live = (runner as unknown as { pendingApiSessions: Set<string> }).pendingApiSessions;
     live.add(bound);
     expect((await as(KEYS.admin, 'delete', `${A}/sessions/${bound}?chat_id=web`)).status).toBe(204);
+    expect(fs.existsSync(bindingFile())).toBe(true);
     insert('PARTIAL-PROJECT-SECRET');
-    expect(await readerSees()).not.toMatch(/PARTIAL-PROJECT-SECRET|FIRST-SECRET/);
     live.delete(bound);
+    expect((await as(KEYS.podRead, 'get', `${A}/sessions?chat_id=web`)).status).toBe(200);
     expect(await readerSees()).not.toMatch(/PARTIAL-PROJECT-SECRET|FIRST-SECRET/);
     expect(fs.existsSync(bindingFile())).toBe(false);
-    const admin = JSON.stringify((await as(KEYS.admin, 'get', `${A}/chats/api-web/messages`)).body);
-    expect(admin).not.toContain('PARTIAL-PROJECT-SECRET');
   });
 
   it('keeps the binding when the delete names a chat that does not hold the session', async () => {
     expect((await as(KEYS.admin, 'delete', `${A}/sessions/${bound}?chat_id=other`)).status).toBe(204);
     expect(fs.existsSync(bindingFile())).toBe(true);
-    expect(await readerSees()).not.toContain('FIRST-SECRET');
   });
 });

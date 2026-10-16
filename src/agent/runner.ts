@@ -1,5 +1,4 @@
 import { formatSessionStatus } from './session-status';
-import { projectsWarn } from '../projects/log';
 import { SessionCompactionScheduler } from './session-compaction-scheduler';
 import { resolveSessionCompaction } from '../orchestration/session-compaction';
 import { resolveDreamingConfig } from './dreaming/config';
@@ -416,8 +415,8 @@ export class AgentRunner extends EventEmitter {
   private readonly boundProjects = new Map<string, string>();
   /**
    * Sessions deleted while a turn or orchestrated work was live, with the chat they belonged to. Their binding file
-   * and boundProjects entry stay until that work ends, so what the turn still writes stays hidden from non-admin keys;
-   * `reapRetiredBindings` then purges it and drops the binding.
+   * and boundProjects entry stay until that work ends, so the project still counts as busy while the turn writes;
+   * `reapRetiredBindings` then purges what it wrote and drops the binding.
    */
   private readonly retiredBindings = new Map<string, { chatId: string; bound: boolean }>();
 
@@ -467,22 +466,6 @@ export class AgentRunner extends EventEmitter {
     if (binding.kind === 'bound') this.boundProjects.set(sessionId, binding.project);
     return binding;
   }
-
-  /** Ids of every project-bound session of this agent, from the binding files. Throws when they cannot be listed. */
-  async boundSessionIds(): Promise<Set<string>> {
-    await this.reapRetiredBindings();
-    try {
-      return await this.sessionStore.listBoundSessionIds(this.agentConfig.id);
-    } catch (err) {
-      if (!this.warnedBindingsUnreadable) {
-        this.warnedBindingsUnreadable = true;
-        projectsWarn(`projects: the project-bindings folder of agent '${this.agentConfig.id}' cannot be read (${(err as Error).message}), so non-admin keys are refused every history and session read until it can be`);
-      }
-      throw err;
-    }
-  }
-
-  private warnedBindingsUnreadable = false;
 
   private isApiSessionLive(sessionId: string, orchestratedLive = this.orchestration?.liveSessionIds() ?? new Set<string>()): boolean {
     return orchestratedLive.has(sessionId) || this.pendingApiSessions.has(sessionId) || this.sessionSpawnLocks.has(sessionId);
@@ -5650,8 +5633,6 @@ export class AgentRunner extends EventEmitter {
     chatId: string,
     command: string,
     opts?: { skipPersist?: boolean; model?: string; principalId?: string; displayCommand?: string; clientMessageId?: string; executionTaskId?:string; canWriteAgent?: boolean;
-      /** An admin caller; anyone else must not be shown a project-bound session. */
-      canSeeProjects?: boolean;
       /** The caller sent no session_id: `sessionId` is a fresh one made for this command. */
       implicitSession?: boolean },
   ): Promise<{ result: Record<string, unknown>; responseText: string; actions: CommandAction[] }> {
@@ -5855,8 +5836,7 @@ export class AgentRunner extends EventEmitter {
         // Advertised for the api channel (BUILTIN_COMMANDS), so handle it here — mirrors the
         // telegram /sessions list. Marks the session this command runs in as (current).
         const index = await this.sessionStore.listSessions(agentId, storeChatId, 'api').catch(() => null);
-        const hiddenFromCaller = opts?.canSeeProjects ? new Set<string>() : await this.sessionStore.listBoundSessionIds(agentId).catch(() => null);
-        const list = (index?.sessions ?? []).filter((s) => opts?.canSeeProjects || (hiddenFromCaller !== null && !s.project && !hiddenFromCaller.has(s.id)));
+        const list = index?.sessions ?? [];
         // Count each session's flat store directly — the api append path doesn't keep the
         // index messageCount in sync.
         const withCounts = await Promise.all(
@@ -5983,6 +5963,7 @@ export class AgentRunner extends EventEmitter {
   }
 
   async listApiSessions(chatId: string): Promise<import('../types').SessionIndex> {
+    await this.reapRetiredBindings();
     return this.sessionStore.listSessions(this.agentConfig.id, chatId, 'api');
   }
 
@@ -6066,7 +6047,6 @@ export class AgentRunner extends EventEmitter {
       if (err instanceof SessionNotInIndexError) { inChat = false; return; }
       throw err;
     });
-    // History goes first: the binding file is what hides the session from non-admin keys, so it must outlive the transcript.
     this.purgeApiSessionHistory(chatId, sessionId);
     // A session this chat does not hold keeps its binding, since its transcript is still where it was.
     if (!inChat) return;

@@ -48,21 +48,14 @@ describe("auth", () => {
     ["GET file", (r) => r.get("/api/v1/projects/app/file?path=README.md")],
   ];
 
-  it.each(routes)(
-    "%s refuses an agent-scoped key with 403 forbidden_key",
-    async (_label, call) => {
+  it.each(["k-agent", "k-star-list", "k-pod-read"])(
+    "%s may read projects but not create one",
+    async (key) => {
       seed();
-      const res = await call(request(app)).set(as("k-agent"));
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe("forbidden_key");
-    },
-  );
-
-  it.each(routes)(
-    '%s refuses agents: ["*"], which is a list and not pod-wide scope',
-    async (_label, call) => {
-      seed();
-      const res = await call(request(app)).set(as("k-star-list"));
+      expect((await request(app).get("/api/v1/projects").set(as(key))).status).toBe(200);
+      expect((await request(app).get("/api/v1/projects/app/tree").set(as(key))).status).toBe(200);
+      expect((await request(app).get("/api/v1/projects/app/file?path=README.md").set(as(key))).body.content).toBe("# hi\n");
+      const res = await request(app).post("/api/v1/projects").set(as(key)).send({ name: "x" });
       expect([res.status, res.body.code]).toEqual([403, "forbidden_key"]);
       expect(fs.existsSync(path.join(root, "x"))).toBe(false);
     },

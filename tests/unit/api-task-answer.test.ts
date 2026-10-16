@@ -9,7 +9,7 @@ import { AgentConfig } from '../../src/types';
 test('task answer requires authentication, agent and tool access, and explicit question identity', async () => {
   const answerApiTask=jest.fn(async () => ({taskId:'task-a',state:'queued'}));
   const config: Partial<AgentConfig>={};
-  const runner=Object.assign(new EventEmitter(),{apiSessionBinding:async()=>({kind:'unbound' as const}),answerApiTask,getAgentConfig:()=>config}) as unknown as AgentRunner;
+  const runner=Object.assign(new EventEmitter(),{answerApiTask,getAgentConfig:()=>config}) as unknown as AgentRunner;
   const owner={key:'owner-fixture',agents:['a'],allow_tools:true};
   const app=express(); app.use(express.json());
   app.use('/api',createApiRouter(new Map([['a',runner]]),new Map([['a',{id:'a'} as AgentConfig]]),[owner,{key:'other-fixture',agents:['other'],allow_tools:true},{key:'read-fixture',agents:['a'],allow_tools:false}]));

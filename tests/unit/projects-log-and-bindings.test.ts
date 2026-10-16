@@ -44,19 +44,12 @@ describe('a bindings folder that cannot be read', () => {
     fs.rmSync(base, { recursive: true, force: true });
   });
 
-  it('answers a non-admin read with a message about the folder, and logs the reason once', async () => {
-    const warn = sink();
-    for (const url of [`${A}/chats`, `${A}/chats/api-web/messages`, `${A}/sessions?chat_id=web`, `${A}/chats`]) {
-      const res = await request(gw).get(url).set('Authorization', 'Bearer k-ro');
-      expect([url, res.status, res.body.code]).toEqual([url, 503, 'project_bindings_unreadable']);
-      expect(res.body.error).not.toMatch(/admin API key/);
+  it('leaves every read alone, whatever the key', async () => {
+    for (const key of ['k-admin', 'k-ro']) {
+      for (const url of [`${A}/chats`, `${A}/chats/api-web/messages`, `${A}/sessions?chat_id=web`]) {
+        expect([key, url, (await request(gw).get(url).set('Authorization', `Bearer ${key}`)).status]).toEqual([key, url, 200]);
+      }
     }
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0]![0])).toMatch(/project-bindings.*ENOTDIR|ENOTDIR.*project-bindings/s);
-  });
-
-  it('leaves an admin read alone', async () => {
-    expect((await request(gw).get(`${A}/chats`).set('Authorization', 'Bearer k-admin')).status).toBe(200);
   });
 });
 

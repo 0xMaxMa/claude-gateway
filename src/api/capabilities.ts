@@ -41,11 +41,16 @@ import type { GatewayConfig } from '../types';
 export const CROSS_CHANNEL_MESSAGE_CHANNELS: readonly ChatChannel[] = [...CHAT_CHANNELS];
 
 /**
- * Project operations served by projects-router.ts; clients gate browsing on `includes('list')`
- * the git routes on `includes('git')`, project-bound chat on `includes('chat')`, running status and stop on `includes('run')`, starting a project on `includes('start')`, and deleting one on `includes('delete')`.
+ * Project operations served by projects-router.ts. Clients gate browsing on `includes('list')`, reading files on
+ * `includes('read')`, the git routes on `includes('git')`, project-bound chat on `includes('chat')`, running status on
+ * `includes('run')`, creating a project on `includes('create')`, starting one on `includes('start')`, stopping what
+ * runs in one on `includes('stop')`, and deleting one on `includes('delete')`.
  */
-export const PROJECTS_CAPABILITIES = ['list', 'create', 'read', 'git', 'chat', 'run', 'start', 'delete'] as const;
+export const PROJECTS_CAPABILITIES = ['list', 'create', 'read', 'git', 'chat', 'run', 'start', 'delete', 'stop'] as const;
 export type ProjectsCapability = (typeof PROJECTS_CAPABILITIES)[number];
+
+/** The operations projects-router.ts serves only to an admin key; every other token is open to any key. */
+export const PROJECTS_ADMIN_CAPABILITIES: ReadonlySet<ProjectsCapability> = new Set(['create', 'start', 'delete', 'stop']);
 
 export interface CapabilitiesResponse {
   /** Gateway version from package.json. Informational — clients should key off `capabilities`, not parse this. */
@@ -54,30 +59,23 @@ export interface CapabilitiesResponse {
     cross_channel_message: ChatChannel[];
     projects: ProjectsCapability[];
   };
-  /** Why `projects` is empty for the calling key; absent when Projects is usable. */
+  /** Why `projects` is empty; absent when Projects is usable. */
   projectsUnavailable?: ProjectsUnavailable;
 }
 
-/** `disabled`: the gateway serves no Projects API. `admin_required`: it does, but not to the calling key. */
-export type ProjectsUnavailable = 'disabled' | 'admin_required';
+/** `disabled`: the gateway serves no Projects API. */
+export type ProjectsUnavailable = 'disabled';
 
 /**
- * Project-bound chat is accepted through the queued-admission path, which needs orchestration,
- * so a gateway with orchestration off does not advertise `chat`. A gateway whose Projects API is
- * disabled advertises no projects token at all.
+ * The tokens `apiKey` may use. Project-bound chat is accepted through the queued-admission path, which needs
+ * orchestration, so a gateway with orchestration off does not advertise `chat`. A non-admin key gets every token but
+ * the admin-only ones. Without a config or a key (tests) the gateway-wide answer is given.
  */
-export function projectsCapabilities(config?: GatewayConfig): ProjectsCapability[] {
-  if (!config) return [...PROJECTS_CAPABILITIES];
-  if (!projectsEnabled(config)) return [];
-  const orchestrated = gatewayOrchestrationEnabled(config.gateway.orchestration);
-  return PROJECTS_CAPABILITIES.filter((c) => c !== 'chat' || orchestrated);
-}
-
-/** Every Projects action needs an admin key, so a non-admin key sees no tokens. Without a key (tests) the gateway-wide answer is given. */
 export function projectsAvailability(config?: GatewayConfig, apiKey?: ApiKey): { projects: ProjectsCapability[]; projectsUnavailable?: ProjectsUnavailable } {
   if (config && !projectsEnabled(config)) return { projects: [], projectsUnavailable: 'disabled' };
-  if (apiKey && !isAdmin(apiKey)) return { projects: [], projectsUnavailable: 'admin_required' };
-  return { projects: projectsCapabilities(config) };
+  const orchestrated = !config || gatewayOrchestrationEnabled(config.gateway.orchestration);
+  const admin = !apiKey || isAdmin(apiKey);
+  return { projects: PROJECTS_CAPABILITIES.filter((c) => (c !== 'chat' || orchestrated) && (admin || !PROJECTS_ADMIN_CAPABILITIES.has(c))) };
 }
 
 export function buildCapabilitiesResponse(version: string = GATEWAY_VERSION, config?: GatewayConfig, apiKey?: ApiKey): CapabilitiesResponse {

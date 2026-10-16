@@ -8,7 +8,7 @@ import { AgentConfig } from '../../src/types';
 
 test('task cancel HTTP control requires agent access and forwards authenticated session ownership', async () => {
   const cancelApiTask=jest.fn(async () => ({taskId:'task-a',state:'cancel_requested'}));
-  const runner=Object.assign(new EventEmitter(),{apiSessionBinding:async()=>({kind:'unbound' as const}),cancelApiTask}) as unknown as AgentRunner;
+  const runner=Object.assign(new EventEmitter(),{cancelApiTask}) as unknown as AgentRunner;
   const owner={key:'owner-fixture',agents:['a']};
   const app=express(); app.use(express.json());
   app.use('/api',createApiRouter(new Map([['a',runner]]),new Map([['a',{id:'a'} as AgentConfig]]),[owner,{key:'other-fixture',agents:['other']} ]));

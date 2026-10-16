@@ -38,7 +38,7 @@ type AuthedRequest = Request & { apiKey: ApiKey };
  *   GET    /v1/connectors/:id/status         — connected boolean (for polling)
  *   GET    /v1/connectors/github/account     — which GitHub account the `github`
  *                                              connector's token belongs to, asked
- *                                              live of api.github.com
+ *                                              live of api.github.com (admin)
  *   POST   /v1/connectors/:id/connect        — store a secret (admin) into a
  *                                              single-secret customConnectors entry
  *                                              (e.g. reconnecting a paste-token
@@ -165,7 +165,8 @@ export function createConnectorsRouter(
   // Not connected covers both "no entry" and "a secret is missing", the same test
   // /:id/status applies. The token is never echoed: every body below is built
   // from GitHub's parsed fields or a fixed literal.
-  router.get('/v1/connectors/github/account', async (_req: Request, res: Response) => {
+  router.get('/v1/connectors/github/account', async (req: Request, res: Response) => {
+    if (!requireAdmin(req, res)) return;
     try {
       const entry = (await store.read()).github;
       const tokenEnv = readTokenEnv();

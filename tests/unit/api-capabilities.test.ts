@@ -69,9 +69,9 @@ describe('GET /api/v1/capabilities', () => {
     expect(res.body.capabilities.cross_channel_message).toContain('telegram');
   });
 
-  it('advertises project list/create/read', async () => {
+  it('advertises every project token to an admin key', async () => {
     const res = await request(buildApp(apiKeys)).get('/api/v1/capabilities').set(AUTH);
-    expect(res.body.capabilities.projects).toEqual(['list', 'create', 'read', 'git', 'chat', 'run', 'start', 'delete']);
+    expect(res.body.capabilities.projects).toEqual(['list', 'create', 'read', 'git', 'chat', 'run', 'start', 'delete', 'stop']);
   });
 
   it('drops chat without orchestration and everything when the Projects API is disabled', () => {
@@ -81,12 +81,17 @@ describe('GET /api/v1/capabilities', () => {
     expect(buildCapabilitiesResponse('1', gw({ orchestration: true, projects: { enabled: false } })).capabilities.projects).toEqual([]);
   });
 
-  it.each(['sk-pod-write', 'sk-pod-read', 'sk-agent'])('%s gets no project tokens and projectsUnavailable admin_required, and still reaches the endpoint', async (key) => {
+  it.each(['sk-pod-write', 'sk-pod-read', 'sk-agent'])('%s gets every project token but create, start, delete and stop', async (key) => {
     const res = await request(buildApp(apiKeys)).get('/api/v1/capabilities').set(as(key));
     expect(res.status).toBe(200);
-    expect(res.body.capabilities.projects).toEqual([]);
-    expect(res.body.projectsUnavailable).toBe('admin_required');
+    expect(res.body.capabilities.projects).toEqual(['list', 'read', 'git', 'chat', 'run']);
+    expect(res.body).not.toHaveProperty('projectsUnavailable');
     expect(res.body.capabilities.cross_channel_message).toContain('telegram');
+  });
+
+  it('drops chat for a non-admin key too when orchestration is off', () => {
+    const config = { gateway: { orchestration: false }, agents: [] } as never;
+    expect(buildCapabilitiesResponse('1', config, apiKeys[2]).capabilities.projects).toEqual(['list', 'read', 'git', 'run']);
   });
 
   it('omits projectsUnavailable for an admin key when Projects is usable', async () => {

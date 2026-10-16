@@ -8,7 +8,7 @@ import { AgentConfig } from '../../src/types';
 import { OrchestrationError } from '../../src/orchestration/types';
 
 function app(controlApiTask: jest.Mock) {
-  const runner = Object.assign(new EventEmitter(), { apiSessionBinding:async()=>({kind:'unbound' as const}), controlApiTask, getAgentConfig: () => ({ id: 'a', allow_tools: true }) }) as unknown as AgentRunner;
+  const runner = Object.assign(new EventEmitter(), { controlApiTask, getAgentConfig: () => ({ id: 'a', allow_tools: true }) }) as unknown as AgentRunner;
   const server = express(); server.use(express.json());
   server.use('/api', createApiRouter(new Map([['a', runner]]), new Map([['a', { id: 'a' } as AgentConfig]]), [{ key: 'owner-fixture', agents: ['a'] }]));
   return server;

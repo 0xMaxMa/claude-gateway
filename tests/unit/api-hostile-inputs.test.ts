@@ -10,6 +10,7 @@ const KEYS = {
   admin: { key: 'k-admin', agents: '*', admin: true },
   podWrite: { key: 'k-pod-write', agents: '*', write: true },
   podRead: { key: 'k-pod-read', agents: '*' },
+  otherAgent: { key: 'k-other-agent', agents: ['bruce'], write: true },
 } satisfies Record<string, ApiKey>;
 
 const A = '/api/v1/agents/alfred';
@@ -146,7 +147,7 @@ describe.each(Object.entries(KEYS))('hostile inputs on every changed route (%s)'
       const res = await hit(p, key.key);
       if (!res) { failures.push(`${p.label}: no response`); continue; }
       if (res.status < 200 || res.status > 599) failures.push(`${p.label}: status ${res.status}`);
-      if (key.key !== 'k-admin' && (res.text.includes('TRANSCRIPT-OF-THE-PROJECT') || res.text.includes('secret-site-chat'))) failures.push(`${p.label}: leaked ${res.status}`);
+      if (key === KEYS.otherAgent && (res.text.includes('TRANSCRIPT-OF-THE-PROJECT') || res.text.includes('secret-site-chat'))) failures.push(`${p.label}: leaked ${res.status}`);
       if (res.status >= 500 && !/json/.test(res.type)) failures.push(`${p.label}: ${res.status} not JSON`);
     }
     await new Promise((r) => setImmediate(r));

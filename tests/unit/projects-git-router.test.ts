@@ -196,11 +196,11 @@ describe('GET /api/v1/projects/:name/git', () => {
     expect(summary.body.summaries).toEqual({});
   });
 
-  it('refuses a read-only pod key and an agent-scoped key', async () => {
+  it('answers a read-only pod key and an agent-scoped key', async () => {
     makeRepo('app');
-    expect((await status('app', as('k-pod-read'))).body.code).toBe('forbidden_key');
-    expect((await status('app', as('k-agent'))).body.code).toBe('forbidden_key');
-    expect((await request(app).get('/api/v1/projects/git-summary').set(as('k-agent'))).body.code).toBe('forbidden_key');
+    expect((await status('app', as('k-pod-read'))).status).toBe(200);
+    expect((await status('app', as('k-agent'))).status).toBe(200);
+    expect((await request(app).get('/api/v1/projects/git-summary').set(as('k-agent'))).status).toBe(200);
   });
 });
 

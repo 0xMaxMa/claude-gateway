@@ -324,10 +324,11 @@ describe('running routes', () => {
     const a = app();
     expect((await get(a, '..%2Fx')).status).toBe(400);
     expect((await get(a, 'nope')).status).toBe(404);
-    expect((await get(a, 'api', 'k-agent')).status).toBe(403);
+    expect((await get(a, 'api', 'k-agent')).status).toBe(200);
+    expect((await get(a, 'api', 'k-read')).status).toBe(200);
     expect((await get(a, "api", "bad")).status).toBe(403);
-    expect((await stop(a, {}, 'api', 'k-read')).status).toBe(403);
-    expect((await stop(a, {}, 'api', 'k-agent')).status).toBe(403);
+    expect((await stop(a, {}, 'api', 'k-read')).body.code).toBe('forbidden_key');
+    expect((await stop(a, {}, 'api', 'k-agent')).body.code).toBe('forbidden_key');
     expect((await stop(a, {}, 'nope')).status).toBe(404);
     expect((await stop(a, { port: 'x' })).body.code).toBe('invalid_port');
     expect((await stop(a, { port: 70000 })).status).toBe(400);
@@ -428,7 +429,8 @@ describe('GET /api/v1/projects/running', () => {
 
   it('applies the same key guards as the per-project route', async () => {
     const a = app();
-    expect((await all(a, 'k-agent')).body.code).toBe('forbidden_key');
+    expect((await all(a, 'k-agent')).status).toBe(200);
+    expect((await all(a, 'k-read')).status).toBe(200);
     expect((await all(a, 'bad')).status).toBe(403);
     expect((await request(a).get('/api/v1/projects/running')).status).toBe((await request(a).get('/api/v1/projects/api/running')).status);
     expect((await all(a, 'k-write')).status).toBe(200);

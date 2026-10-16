@@ -68,8 +68,8 @@ function handle(fn: (req: Request, res: Response) => Promise<void>) {
 }
 
 /**
- * Pod-wide project routes under `root`. Every route needs an admin key, since
- * projects are not agent-scoped and they read, run and delete files on the pod.
+ * Pod-wide project routes under `root`. Projects belong to no agent, so any key may read them; creating, starting,
+ * stopping and deleting one changes the pod and needs an admin key.
  */
 export interface RunningDeps {
   sys: Sys;
@@ -95,9 +95,8 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects', auth: 'admin', summary: 'List projects under the configured projects root', cli: null },
+    { method: 'GET', path: '/v1/projects', auth: 'key', summary: 'List projects under the configured projects root', cli: null },
     auth,
-    requireAdmin,
     handle(async (_req, res) => respond(res, await listProjects(root))),
   );
 
@@ -143,9 +142,8 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects/:name/tree', auth: 'admin', summary: 'List one directory level of a project', cli: null },
+    { method: 'GET', path: '/v1/projects/:name/tree', auth: 'key', summary: 'List one directory level of a project', cli: null },
     auth,
-    requireAdmin,
     handle(async (req, res) => {
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);
@@ -157,9 +155,8 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects/:name/file', auth: 'admin', summary: 'Read a file from a project', cli: null },
+    { method: 'GET', path: '/v1/projects/:name/file', auth: 'key', summary: 'Read a file from a project', cli: null },
     auth,
-    requireAdmin,
     handle(async (req, res) => {
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);
@@ -171,17 +168,15 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects/git-summary', auth: 'admin', summary: 'Git sync summary for every project that is a repository', cli: null },
+    { method: 'GET', path: '/v1/projects/git-summary', auth: 'key', summary: 'Git sync summary for every project that is a repository', cli: null },
     auth,
-    requireAdmin,
     handle(async (_req, res) => respond(res, await getSummaries(root))),
   );
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects/running', auth: 'admin', summary: 'Processes listening from inside each project', cli: null },
+    { method: 'GET', path: '/v1/projects/running', auth: 'key', summary: 'Processes listening from inside each project', cli: null },
     auth,
-    requireAdmin,
     handle(async (_req, res) => {
       const list = await listProjects(root);
       if (!list.ok) return fail(res, list.error);
@@ -197,9 +192,8 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects/:name/git', auth: 'admin', summary: 'Git status of a project', cli: null },
+    { method: 'GET', path: '/v1/projects/:name/git', auth: 'key', summary: 'Git status of a project', cli: null },
     auth,
-    requireAdmin,
     handle(async (req, res) => {
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);
@@ -209,9 +203,8 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'GET', path: '/v1/projects/:name/running', auth: 'admin', summary: 'Processes listening on a port from inside a project', cli: null },
+    { method: 'GET', path: '/v1/projects/:name/running', auth: 'key', summary: 'Processes listening on a port from inside a project', cli: null },
     auth,
-    requireAdmin,
     handle(async (req, res) => {
       const name = parseProjectName(req.params.name);
       if (!name.ok) return fail(res, name.error);

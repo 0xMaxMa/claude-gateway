@@ -1,7 +1,7 @@
 import { type CommandAction, commandCatalog } from '../agent/command-help';
 import { responseFailureMessage } from '../orchestration/response-errors';
 import { voiceSettingsRouter } from './voice-settings-router';
-import { Router, Request, Response, NextFunction } from 'express';
+import { Router, Request, Response } from 'express';
 import { apiPrincipal } from '../orchestration/identity';
 import { OrchestrationError } from '../orchestration/types';
 import { randomUUID, createHash } from 'crypto';
@@ -16,9 +16,8 @@ import { AgentConfig, ApiKey, ImageParams, ModelConfig, VideoParams } from '../t
 import { isValidConnectorId } from '../connectors/custom';
 import { agentsDirForConfig } from '../config/agent-env';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
-import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin, PROJECTS_ADMIN_REQUIRED } from './auth';
+import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { guardAsyncRoutes } from './async-guard';
-import { BINDINGS_UNREADABLE, hiddenSessions, historyExclusions, refusesProjectChat, refusesProjectMedia } from './project-gate';
 import { PROJECT_CHAT_ERRORS } from '../projects/chat';
 import { parseProjectName, ProjectName } from '../projects/paths';
 import { MediaStore } from '../history/media-store';
@@ -107,12 +106,6 @@ const TASK_CONTROL_ERROR_STATUS: Record<string, number> = {
 };
 export function isValidSessionId(v: unknown): v is string {
   return typeof v === 'string' && SESSION_ID_RE.test(v);
-}
-
-/** `router.param('sessionId', requireValidSessionId)`: a malformed id gets 400 before auth or any handler. */
-export function requireValidSessionId(_req: Request, res: Response, next: NextFunction, value: string): void {
-  if (isValidSessionId(value)) next();
-  else res.status(400).json({ error: 'Invalid session id', code: 'INVALID_INPUT' });
 }
 
 // agent_id likewise becomes a filesystem key (agents/<id>/media/…), so any
@@ -584,9 +577,6 @@ export function createApiRouter(
 ): Router {
   const router = guardAsyncRoutes(Router());
   const auth = createApiAuthMiddleware(apiKeys);
-  // A session id becomes a file name (bindings, media, history) and a lookup key. Anything but a plain id names no
-  // session, so every route with :sessionId answers 400 before its handler runs, whoever the caller is.
-  router.param('sessionId', requireValidSessionId);
   router.use(voiceSettingsRouter(agentConfigs, agentRunners, apiKeys, configPath));
 
   async function writeAgentsToConfigImpl(
@@ -713,7 +703,6 @@ export function createApiRouter(
           res.status(400).json({ error: `Invalid media path: ${f}` });
           return;
         }
-        if (await refusesProjectMedia(runner, agentId, apiKey, f)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       }
       validatedMediaFiles = media_files as string[];
     }
@@ -840,10 +829,6 @@ export function createApiRouter(
       });
       return;
     }
-    if (typeof session_id === 'string' && await refusesProjectChat(runner, apiKey, session_id)) {
-      res.status(403).json(PROJECTS_ADMIN_REQUIRED);
-      return;
-    }
     const sessionId = (session_id as string | undefined) ?? randomUUID();
     const startTime = Date.now();
     const timeoutMs =
@@ -890,7 +875,7 @@ export function createApiRouter(
           openSseStream(res);
           try {
             const reply = await runner.executeApiCommand(
-              sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, model: modelStr, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId), canSeeProjects: isAdmin(apiKey), implicitSession: session_id === undefined },
+              sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, model: modelStr, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId), implicitSession: session_id === undefined },
             );
             sseCallbacks.onChunk({ type: 'text_delta', text: reply.responseText } as import('../types').StreamEvent);
             sseCallbacks.onDone(reply.responseText, [], undefined, commandReplyFields(commandMessage, reply));
@@ -946,7 +931,7 @@ export function createApiRouter(
         if (isBuiltinCommand) {
           // Built-in command — answer locally, return the same JSON shape as a normal reply plus its structured part.
           const reply = await runner.executeApiCommand(
-            sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId), canSeeProjects: isAdmin(apiKey), implicitSession: session_id === undefined },
+            sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage, clientMessageId, canWriteAgent: canWriteAgent(apiKey, agentId), implicitSession: session_id === undefined },
           );
           responseText = reply.responseText;
           commandFields = commandReplyFields(commandMessage, reply);
@@ -3832,7 +3817,7 @@ export function createApiRouter(
    * GET /api/v1/agents/:agentId/chats
    * List all chats (across all channels) for an agent from the history DB.
    */
-  router.get('/v1/agents/:agentId/chats', auth, async (req: Request, res: Response) => {
+  router.get('/v1/agents/:agentId/chats', auth, (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
     if (!canAccessAgent(apiKey, agentId)) {
@@ -3844,9 +3829,8 @@ export function createApiRouter(
       res.status(404).json({ error: `Agent '${agentId}' not found` });
       return;
     }
-    const hidden = await hiddenSessions(runner, apiKey);
-    if (!hidden) { res.status(503).json(BINDINGS_UNREADABLE); return; }
-    res.json({ chats: runner.getHistoryDb().listChats({ excludeSessionIds: hidden }) });
+    const chats = runner.getHistoryDb().listChats();
+    res.json({ chats });
   });
 
   /**
@@ -3884,7 +3868,7 @@ export function createApiRouter(
    * Paginated message history (cursor-based).
    * Query: limit, before (ts ms), after (ts ms), session_id, order (asc|desc, default desc)
    */
-  router.get('/v1/agents/:agentId/chats/:chatId/messages', auth, async (req: Request, res: Response) => {
+  router.get('/v1/agents/:agentId/chats/:chatId/messages', auth, (req: Request, res: Response) => {
     const { agentId, chatId } = req.params as { agentId: string; chatId: string };
     const apiKey = (req as AuthedRequest).apiKey;
     if (!canAccessAgent(apiKey, agentId)) {
@@ -3896,9 +3880,11 @@ export function createApiRouter(
       res.status(404).json({ error: `Agent '${agentId}' not found` });
       return;
     }
-    const excludeSessionIds = await historyExclusions(runner, apiKey, req.query['session_id'], res);
-    if (!excludeSessionIds) return;
     const query = req.query as Record<string, string>;
+    if (query['session_id'] !== undefined && typeof query['session_id'] !== 'string') {
+      res.status(400).json({ error: 'session_id must be a single string', code: 'INVALID_INPUT' });
+      return;
+    }
     // Ceiling reuses MAX_HISTORY_LIMIT from the history layer so this HTTP-boundary
     // clamp and the db clamp can never drift (both 1000; see #1798).
     const limit = query['limit'] ? Math.min(parseInt(query['limit'], 10) || 50, MAX_HISTORY_LIMIT) : 50;
@@ -3948,7 +3934,7 @@ export function createApiRouter(
       }
     }
 
-    const page = runner.getHistoryDb().getMessages(chatId, { limit, before, after, beforeId, afterId, sessionId, order, excludeSessionIds });
+    const page = runner.getHistoryDb().getMessages(chatId, { limit, before, after, beforeId, afterId, sessionId, order });
     res.json(page);
   });
 
@@ -3957,7 +3943,7 @@ export function createApiRouter(
    * Full-text search using SQLite FTS5.
    * Query: q, limit, offset
    */
-  router.get('/v1/agents/:agentId/chats/:chatId/messages/search', auth, async (req: Request, res: Response) => {
+  router.get('/v1/agents/:agentId/chats/:chatId/messages/search', auth, (req: Request, res: Response) => {
     const { agentId, chatId } = req.params as { agentId: string; chatId: string };
     const apiKey = (req as AuthedRequest).apiKey;
     if (!canAccessAgent(apiKey, agentId)) {
@@ -3969,8 +3955,6 @@ export function createApiRouter(
       res.status(404).json({ error: `Agent '${agentId}' not found` });
       return;
     }
-    const excludeSessionIds = await historyExclusions(runner, apiKey, req.query['session_id'], res);
-    if (!excludeSessionIds) return;
     const query = req.query as Record<string, string>;
     if (query['q'] !== undefined && typeof query['q'] !== 'string') {
       res.status(400).json({ error: 'q must be a single string', code: 'INVALID_INPUT' });
@@ -3984,7 +3968,7 @@ export function createApiRouter(
     const limit = query['limit'] ? Math.min(parseInt(query['limit'], 10) || 20, 100) : 20;
     const offset = query['offset'] ? parseInt(query['offset'], 10) : 0;
 
-    const page = runner.getHistoryDb().searchMessages(chatId, q, { limit, offset, excludeSessionIds });
+    const page = runner.getHistoryDb().searchMessages(chatId, q, { limit, offset });
     res.json(page);
   });
 
@@ -3994,7 +3978,7 @@ export function createApiRouter(
    * Powers the jump-to-date calendar's per-day "has history" dot in one bounded index scan.
    * Query: from (ts ms, inclusive), to (ts ms, exclusive), tz_offset (min east of UTC, Bangkok=+420), session_id
    */
-  router.get('/v1/agents/:agentId/chats/:chatId/messages/active-days', auth, async (req: Request, res: Response) => {
+  router.get('/v1/agents/:agentId/chats/:chatId/messages/active-days', auth, (req: Request, res: Response) => {
     const { agentId, chatId } = req.params as { agentId: string; chatId: string };
     const apiKey = (req as AuthedRequest).apiKey;
     if (!canAccessAgent(apiKey, agentId)) {
@@ -4006,8 +3990,6 @@ export function createApiRouter(
       res.status(404).json({ error: `Agent '${agentId}' not found` });
       return;
     }
-    const excludeSessionIds = await historyExclusions(runner, apiKey, req.query['session_id'], res);
-    if (!excludeSessionIds) return;
     const query = req.query as Record<string, string>;
     // Number(), not parseInt() — parseInt("100garbage") silently returns 100, masking a malformed
     // client value the same way a case-sensitive/silently-defaulting enum param would (see order).
@@ -4044,7 +4026,7 @@ export function createApiRouter(
     }
     const sessionId = rawSessionId ?? undefined;
 
-    const days = runner.getHistoryDb().getActiveDays(chatId, { from, to, tzOffset, sessionId, excludeSessionIds });
+    const days = runner.getHistoryDb().getActiveDays(chatId, { from, to, tzOffset, sessionId });
     res.json({ days });
   });
 
@@ -4066,7 +4048,6 @@ export function createApiRouter(
       res.status(404).json({ error: `Agent '${agentId}' not found` });
       return;
     }
-    if (await refusesProjectChat(runner, apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     const { source, rawChatId } = parseHistoryChatId(chatId);
     if (!isChatChannel(source)) {
       res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord/line/slack/whatsapp/whatsapp_cloud chats' });
@@ -4124,7 +4105,7 @@ export function createApiRouter(
   router.post(
     '/v1/agents/:agentId/sessions/:sessionId/attachments',
     auth,
-    async (req: Request, res: Response) => {
+    (req: Request, res: Response) => {
       const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
       const apiKey = (req as AuthedRequest).apiKey;
       if (!canAccessAgent(apiKey, agentId)) {
@@ -4136,7 +4117,6 @@ export function createApiRouter(
         res.status(404).json({ error: `Agent '${agentId}' not found` });
         return;
       }
-      if (await refusesProjectChat(runner, apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       const body = req.body as Record<string, unknown>;
       const files = body['files'];
       if (!Array.isArray(files) || files.some((f) => typeof f !== 'string')) {
@@ -4269,7 +4249,7 @@ export function createApiRouter(
    * GET /api/v1/agents/:agentId/media/*filepath
    * Serve a media file. Validates path stays within agent's media directory.
    */
-  router.get('/v1/agents/:agentId/media/*', auth, async (req: Request, res: Response) => {
+  router.get('/v1/agents/:agentId/media/*', auth, (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
     if (!canAccessAgent(apiKey, agentId)) {
@@ -4291,8 +4271,6 @@ export function createApiRouter(
       res.status(400).json({ error: 'Invalid path' });
       return;
     }
-    // Gate the path the file system will open, not the spelling the client sent.
-    if (await refusesProjectMedia(runner, agentId, apiKey, wildcardParam)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     if (!fs.existsSync(absPath)) {
       res.status(404).json({ error: 'Not found' });
       return;
@@ -4554,12 +4532,7 @@ export function createApiRouter(
     if (!ctx) return;
     const { runner, chatId } = ctx;
     try {
-      const apiKey = (req as AuthedRequest).apiKey;
-      const hidden = await hiddenSessions(runner, apiKey);
-      if (!hidden) { res.status(503).json(BINDINGS_UNREADABLE); return; }
-      const listed = await runner.listApiSessions(chatId);
-      const shown = isAdmin(apiKey) ? listed.sessions : listed.sessions.filter((s) => !hidden.includes(s.id) && !s.project);
-      const index = { ...listed, sessions: shown, activeSessionId: shown.some((s) => s.id === listed.activeSessionId) ? listed.activeSessionId : (shown[0]?.id ?? '') };
+      const index = await runner.listApiSessions(chatId);
       const historySessions = runner.getHistoryDb().listSessions(`api-${chatId}`);
       const roleMap = new Map(historySessions.map((s) => [s.sessionId, s.lastMessageRole]));
       const enriched = {
@@ -4590,8 +4563,7 @@ export function createApiRouter(
     let project: ProjectName | undefined;
     // Clients serialize an unset optional field as null.
     if (body.project !== undefined && body.project !== null) {
-      const apiKey = (req as AuthedRequest).apiKey;
-      if (!isAdmin(apiKey)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
+      if (!canWriteAgent((req as AuthedRequest).apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
       const name = parseProjectName(body.project);
       if (!name.ok) { res.status(400).json({ error: 'Invalid project name', code: name.error }); return; }
       const bound = await runner.resolveApiProject(name.value);
@@ -4617,7 +4589,6 @@ export function createApiRouter(
     if (!ctx) return;
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
-    if (await refusesProjectChat(runner, (req as AuthedRequest).apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     try {
       const info = await runner.getApiSessionInfo(chatId, sessionId);
       if (!info) { res.status(404).json({ error: 'Session not found' }); return; }
@@ -4636,7 +4607,6 @@ export function createApiRouter(
     if (!ctx) return;
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
-    if (await refusesProjectChat(runner, (req as AuthedRequest).apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     const body = req.body as { session_name?: unknown; sessionName?: unknown };
     // Accept session_name (preferred, snake_case) or sessionName (camelCase, backward compat)
     const rawName = body.session_name ?? body.sessionName;
@@ -4658,7 +4628,6 @@ export function createApiRouter(
     if (!ctx) return;
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
-    if (await refusesProjectChat(runner, (req as AuthedRequest).apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     try {
       await runner.deleteApiSession(chatId, sessionId);
       res.status(204).send();
@@ -4675,7 +4644,6 @@ export function createApiRouter(
     if (!ctx) return;
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
-    if (await refusesProjectChat(runner, (req as AuthedRequest).apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     try {
       const { result } = await runner.executeApiCommand(sessionId, chatId, '/clear confirm', { skipPersist: true });
       res.json(result);
@@ -4692,7 +4660,6 @@ export function createApiRouter(
     if (!ctx) return;
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
-    if (await refusesProjectChat(runner, (req as AuthedRequest).apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     try {
       const { result } = await runner.executeApiCommand(sessionId, chatId, '/compact confirm', { skipPersist: true });
       res.json(result);
@@ -4709,7 +4676,6 @@ export function createApiRouter(
     if (!ctx) return;
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
-    if (await refusesProjectChat(runner, (req as AuthedRequest).apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     try {
       const { result } = await runner.executeApiCommand(sessionId, chatId, '/stop', { skipPersist: true, principalId: apiPrincipal((req as AuthedRequest).apiKey) });
       res.json(result);
@@ -4726,7 +4692,6 @@ export function createApiRouter(
     if (!ctx) return;
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
-    if (await refusesProjectChat(runner, (req as AuthedRequest).apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     try {
       const { result } = await runner.executeApiCommand(sessionId, chatId, '/restart confirm', { skipPersist: true });
       res.json(result);
@@ -4756,7 +4721,6 @@ export function createApiRouter(
     const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
     const key = (req as AuthedRequest).apiKey, runner = agentRunners.get(agentId);
     if (!canAccessAgent(key, agentId) || !runner || !isValidSessionId(sessionId)) { res.status(403).end(); return; }
-    if (await refusesProjectChat(runner, key, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     const after = req.query.after_id;
     let cursor = after === undefined ? 0 : Number(after);
     if ((after !== undefined && (typeof after !== 'string' || !/^\d+$/.test(after))) || !Number.isSafeInteger(cursor) || cursor < 0) {
@@ -4809,7 +4773,6 @@ export function createApiRouter(
     const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
     const key = (req as AuthedRequest).apiKey, runner = agentRunners.get(agentId);
     if (!canAccessAgent(key, agentId) || !runner || !isValidSessionId(sessionId)) { res.status(403).end(); return; }
-    if (await refusesProjectChat(runner, key, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     let unsubscribe: (() => void) | undefined, heartbeat: ReturnType<typeof setInterval> | undefined;
     let closed = false;
     res.on('close', () => { closed = true; unsubscribe?.(); clearInterval(heartbeat); });
@@ -4837,7 +4800,6 @@ export function createApiRouter(
       if (!isValidSessionId(sessionId) || (taskId !== undefined && !isValidSessionId(taskId))) {
         res.status(400).json({ error: 'Invalid session or task ID' }); return;
       }
-      if (await refusesProjectChat(runner, key, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
       const page = req.query.page === undefined ? 0 : Number(req.query.page);
       const pageSize = req.query.page_size === undefined ? 10 : Number(req.query.page_size);
       if ((req.query.page !== undefined && (typeof req.query.page !== 'string' || !/^\d+$/.test(req.query.page))) ||
@@ -4861,7 +4823,6 @@ export function createApiRouter(
     const { agentId, sessionId, taskId } = req.params as { agentId: string; sessionId: string; taskId: string };
     const key = (req as AuthedRequest).apiKey, runner = agentRunners.get(agentId);
     if (!canAccessAgent(key, agentId) || !runner) { res.status(403).json({ error: 'Task unavailable' }); return; }
-    if (await refusesProjectChat(runner, key, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     if (!(runner.getAgentConfig().allow_tools ?? Boolean(key.allow_tools))) { res.status(403).json({ error: 'Task answers require tool access' }); return; }
     const { questionId, answer } = req.body ?? {};
     if (!isValidSessionId(sessionId) || !isValidSessionId(taskId) || typeof questionId !== 'string' || !isValidSessionId(questionId) || typeof answer !== 'string' || !answer.trim()) {
@@ -4878,7 +4839,6 @@ export function createApiRouter(
     const {agentId,sessionId,taskId}=req.params as {agentId:string;sessionId:string;taskId:string};
     const key=(req as AuthedRequest).apiKey,runner=agentRunners.get(agentId);
     if(!canAccessAgent(key,agentId)||!runner){res.status(403).json({error:'ACCESS_DENIED'});return;}
-    if(await refusesProjectChat(runner,key,sessionId)){res.status(403).json(PROJECTS_ADMIN_REQUIRED);return;}
     if(!isValidSessionId(sessionId)||!TASK_CONTROL_UUID_RE.test(taskId)){res.status(400).json({error:'INVALID_INPUT'});return;}
     if(!(runner.getAgentConfig().allow_tools??Boolean(key.allow_tools))){res.status(403).json({error:'EXECUTION_DENIED'});return;}
     const b=req.body;
@@ -4898,7 +4858,6 @@ export function createApiRouter(
     const { agentId, sessionId, taskId } = req.params as { agentId: string; sessionId: string; taskId: string };
     const key = (req as AuthedRequest).apiKey, runner = agentRunners.get(agentId);
     if (!canAccessAgent(key, agentId) || !runner || !isValidSessionId(sessionId) || !isValidSessionId(taskId)) { res.status(403).json({ error: 'Task unavailable' }); return; }
-    if (await refusesProjectChat(runner, key, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     try { res.json({ task: await runner.cancelApiTask(sessionId, apiPrincipal(key), taskId) }); }
     catch (error) {
       if ((error as Error).message === 'ORCHESTRATION_DISABLED') { res.status(409).json({ error: 'ORCHESTRATION_DISABLED' }); return; }
@@ -4914,12 +4873,11 @@ export function createApiRouter(
     if (!runner) { res.status(404).json({ error: 'Agent not found' }); return; }
     const after = Number(req.query.after ?? 0);
     if (!isValidSessionId(sessionId) || !Number.isSafeInteger(after) || after < 0) { res.status(400).json({ error: 'Invalid session or cursor' }); return; }
-    if (await refusesProjectChat(runner, apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
     try { res.json(await runner.orchestrationActivity(sessionId, apiPrincipal(apiKey), after)); }
     catch (error) { res.status(403).json({ error: 'Activity unavailable for this principal' }); }
   });
 
-  router.get('/v1/agents/:agentId/sessions/:sessionId/stream', auth, async (req: Request, res: Response) => {
+  router.get('/v1/agents/:agentId/sessions/:sessionId/stream', auth, (req: Request, res: Response) => {
     const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
     const apiKey = (req as AuthedRequest).apiKey;
     if (!canAccessAgent(apiKey, agentId)) {
@@ -4932,7 +4890,6 @@ export function createApiRouter(
       res.status(400).json({ error: 'session_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
       return;
     }
-    if (await refusesProjectChat(runner, apiKey, sessionId)) { res.status(403).json(PROJECTS_ADMIN_REQUIRED); return; }
 
     const rawAfterSeq = req.query['after_seq'];
     const afterSeq = rawAfterSeq === undefined || rawAfterSeq === '' ? 0 : Number(rawAfterSeq);
@@ -5027,21 +4984,15 @@ export function createApiRouter(
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
 
-    const runner = agentRunners.get(agentId);
-    const body = req.body as { session_id?: unknown; chat_id?: unknown };
     if (!canWriteAgent(apiKey, agentId)) {
-      // A project-bound session answers every non-admin key the same way, a read-only key included.
-      const named = typeof body.session_id === 'string' ? body.session_id.trim() : '';
-      if (runner && canAccessAgent(apiKey, agentId) && await refusesProjectChat(runner, apiKey, named)) {
-        res.status(403).json(PROJECTS_ADMIN_REQUIRED);
-        return;
-      }
       res.status(403).json({ error: `greeting requires write or admin access to agent '${agentId}'` });
       return;
     }
 
+    const runner = agentRunners.get(agentId);
     if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
 
+    const body = req.body as { session_id?: unknown; chat_id?: unknown };
     const sessionId = typeof body.session_id === 'string' ? body.session_id.trim() : '';
     if (!sessionId) {
       res.status(400).json({ error: 'session_id is required' });
@@ -5073,11 +5024,6 @@ export function createApiRouter(
         error: `No session '${sessionId}' in chat '${chatId}'`,
         hint: 'Create it with POST /v1/agents/:agentId/sessions first.',
       });
-      return;
-    }
-
-    if (await refusesProjectChat(runner, apiKey, sessionId)) {
-      res.status(403).json(PROJECTS_ADMIN_REQUIRED);
       return;
     }
 

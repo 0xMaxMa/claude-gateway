@@ -14,7 +14,12 @@ import { ApiKey } from '../../src/types';
 
 const TOKEN_ENV = path.join(os.tmpdir(), `github-account-test-${process.pid}.env`);
 const TOKEN = 'ghp_secretTokenValue123';
-const apiKeys: ApiKey[] = [{ key: 'k', agents: '*', admin: true }];
+const apiKeys: ApiKey[] = [
+  { key: 'k', agents: '*', admin: true },
+  { key: 'k-pod-write', agents: '*', write: true },
+  { key: 'k-pod-read', agents: '*' },
+  { key: 'k-agent', agents: ['alfred'], write: true },
+];
 
 const githubEntry = {
   label: 'GitHub',
@@ -278,6 +283,16 @@ describe('GET /api/v1/connectors/github/account', () => {
     const res = await request(makeApp({ connectors: { github: githubEntry }, fetchGithub: jest.fn() }))
       .get('/api/v1/connectors/github/account');
     expect(res.status).toBe(401);
+  });
+
+  it.each(['k-pod-write', 'k-pod-read', 'k-agent'])('refuses %s, which is not an admin key, without asking GitHub', async (key) => {
+    storeToken('access_token', TOKEN);
+    const fetchGithub = jest.fn().mockResolvedValue(jsonResponse(200, octocat));
+    const res = await request(makeApp({ connectors: { github: githubEntry }, fetchGithub }))
+      .get('/api/v1/connectors/github/account').set('X-Api-Key', key);
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).not.toContain('octocat');
+    expect(fetchGithub).not.toHaveBeenCalled();
   });
 
   it('is advertised as capabilities.githubAccount on GET /v1/connectors', async () => {

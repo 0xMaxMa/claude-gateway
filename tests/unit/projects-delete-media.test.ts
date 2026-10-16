@@ -56,8 +56,8 @@ afterEach(async () => {
 });
 
 describe('the media of a deleted project chat', () => {
-  it('is removed with the chat, so a read-only key reaches nothing', async () => {
-    expect(await readerReaches(bound)).toEqual({ get: 403, share: 403 });
+  it('is removed with the chat', async () => {
+    expect(await readerReaches(bound)).toEqual({ get: 200, share: 201 });
     expect((await as(KEYS.admin, 'delete', `${A}/sessions/${bound}?chat_id=web`)).status).toBe(204);
     expect(fs.existsSync(mediaDir(bound))).toBe(false);
     expect(await readerReaches(bound)).toEqual({ get: 404, share: 404 });
@@ -68,9 +68,8 @@ describe('the media of a deleted project chat', () => {
     live.add(bound);
     expect((await as(KEYS.admin, 'delete', `${A}/sessions/${bound}?chat_id=web`)).status).toBe(204);
     expect(fs.existsSync(mediaDir(bound))).toBe(true);
-    expect((await readerReaches(bound)).get).toBe(403);
     live.delete(bound);
-    await runner.boundSessionIds();
+    expect((await as(KEYS.podRead, 'get', `${A}/sessions?chat_id=web`)).status).toBe(200);
     expect(fs.existsSync(mediaDir(bound))).toBe(false);
     expect(fs.existsSync(bindingFile(bound))).toBe(false);
   });
@@ -78,38 +77,11 @@ describe('the media of a deleted project chat', () => {
   it('is kept for a delete that names a chat not holding the session', async () => {
     expect((await as(KEYS.admin, 'delete', `${A}/sessions/${bound}?chat_id=other`)).status).toBe(204);
     expect(fs.existsSync(mediaDir(bound))).toBe(true);
-    expect((await readerReaches(bound)).get).toBe(403);
+    expect(fs.existsSync(bindingFile(bound))).toBe(true);
   });
 
   it('is not removed for an unbound session', async () => {
     expect((await as(KEYS.admin, 'delete', `${A}/sessions/${plain}?chat_id=web`)).status).toBe(204);
     expect(fs.existsSync(mediaDir(plain))).toBe(true);
-  });
-});
-
-describe('the media gate for a session that is not bound to a project', () => {
-  it('answers a read-only key as it does without projects for sessions with no index entry or no record at all', async () => {
-    // A legacy session that lives only in the history database, one in an unreadable index.json, a deleted unbound
-    // session's leftovers, and a never-seen id: none is bound, so none is refused.
-    const idx = path.join(base, 'agents', 'alfred', 'sessions', 'api-web', 'index.json');
-    fs.writeFileSync(idx, '{ broken');
-    const legacy = 'legacy-sqlite-only';
-    for (const id of [legacy, plain, 'never-seen']) {
-      fs.mkdirSync(mediaDir(id), { recursive: true });
-      fs.writeFileSync(path.join(mediaDir(id), 'f.png'), PNG);
-      expect(await readerReaches(id)).toEqual({ get: 200, share: 201 });
-    }
-  });
-
-  it('refuses a bound session while its index is unreadable', async () => {
-    fs.writeFileSync(path.join(base, 'agents', 'alfred', 'sessions', 'api-web', 'index.json'), '{ broken');
-    expect(await readerReaches(bound)).toEqual({ get: 403, share: 403 });
-  });
-
-  it('still serves a read-only key the media of an existing unbound session and of a chat folder', async () => {
-    expect(await readerReaches(plain)).toEqual({ get: 200, share: 201 });
-    fs.mkdirSync(mediaDir('web'), { recursive: true });
-    fs.writeFileSync(path.join(mediaDir('web'), 'f.png'), PNG);
-    expect((await readerReaches('web')).get).toBe(200);
   });
 });

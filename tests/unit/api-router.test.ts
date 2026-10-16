@@ -113,10 +113,6 @@ class MockAgentRunner extends EventEmitter {
   sessionProjectView(project?: string): Promise<{ project: string | null; trusted: boolean }> {
     return Promise.resolve({ project: project ?? null, trusted: false });
   }
-
-  apiSessionBinding(): Promise<{ kind: 'unbound' }> {
-    return Promise.resolve({ kind: 'unbound' });
-  }
 }
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
