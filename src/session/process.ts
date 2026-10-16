@@ -1288,6 +1288,9 @@ export class SessionProcess extends EventEmitter {
         ...(hardenedPath ? { PATH: hardenedPath } : {}),
         ...configuredWorkerEnvironment,
         ...turnEnvironment,
+        // Isolate mode (#601): Claude Code's auto memory is one directory per cwd,
+        // loaded into every session there, so it would carry notes across tenants.
+        ...(this.agentConfig.multiTenant?.enabled ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {}),
         GATEWAY_ORIGIN_SESSION_ID: this.runtimeProfile?.originSessionId ?? this.sessionId,
         GATEWAY_TASK_ID: this.runtimeProfile?.taskId ?? '',
         GATEWAY_TASK_ATTEMPT_ID: this.runtimeProfile?.attemptId ?? '',

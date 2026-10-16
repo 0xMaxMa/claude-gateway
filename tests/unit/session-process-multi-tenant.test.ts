@@ -101,10 +101,16 @@ describe('channel sessions', () => {
     expect(mcpEnv(args).GATEWAY_MULTI_TENANT_ISOLATE).toBe('1');
   });
 
+  it("turns Claude Code's auto memory off: its one directory per cwd is loaded into every tenant's session", async () => {
+    const { env } = await start(new SessionProcess('s-a', 'telegram', agent({ enabled: true }), gateway, store, '111'));
+    expect(env.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe('1');
+  });
+
   it('leaves a single-tenant agent unchanged', async () => {
-    const { args } = await start(new SessionProcess('s-a', 'telegram', agent(), gateway, store, '111'));
+    const { args, env } = await start(new SessionProcess('s-a', 'telegram', agent(), gateway, store, '111'));
     expect(args).not.toContain('--append-system-prompt-file');
     expect(mcpEnv(args).GATEWAY_MULTI_TENANT_ISOLATE).toBe('');
+    expect(env.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe(process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY);
   });
   it("a stop still waiting on the old process keeps the new spawn's tenant context", async () => {
     const spawnMock = require('child_process').spawn as jest.Mock;
@@ -165,5 +171,14 @@ describe('orchestration agent sessions', () => {
     const context = await managed('111', agent());
     expect(context).toContain('SHARED-CONTEXT');
     expect(context).not.toContain('TENANT-');
+  });
+
+  it("turns Claude Code's auto memory off for workers too: they run in a cwd every tenant's tasks share", async () => {
+    const mcp = path.join(tmpDir, 'worker-ticket', 'mcp.json');
+    fs.mkdirSync(path.dirname(mcp), { recursive: true });
+    fs.writeFileSync(mcp, '{"mcpServers":{}}');
+    const { env } = await start(new SessionProcess('w-111', 'telegram', agent({ enabled: true }), gateway, store, '111',
+      { role: 'worker', mcpConfigPath: mcp, overlay: '', context: 'WORKER-CONTEXT' }));
+    expect(env.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe('1');
   });
 });
