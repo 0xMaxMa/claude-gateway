@@ -44,7 +44,7 @@ Website checks validate JSON syntax only; they do not compare fields or types ag
 | `gateway.memory`, `gateway.knowledge`, `gateway.dreaming` | Memory budget, indexing, consolidation |
 | `gateway.sessionCompaction` / `agents[].sessionCompaction` | Optional nightly native session compaction; see [memory settings](./memory-settings.md#nightly-session-compaction) |
 | `gateway.skillLearning` | Automatic skill review and limits |
-| `agents[].multiTenant` | Per-conversation `USER.md`/`MEMORY.md` for a host agent that serves many unrelated senders. An app agent gets it from its `app.yaml` instead; see [memory settings](./memory-settings.md#multi-tenant-isolate-mode) |
+| `agents[].isolateMemory` | Per-conversation `USER.md`/`MEMORY.md` for a host agent that serves many unrelated senders. An app agent gets it from its `app.yaml` instead; see [memory settings](./memory-settings.md#isolated-memory-mode) |
 
 Fresh configurations and the server fallback bind to `127.0.0.1`. Migration preserves older externally reachable deployments by pinning `0.0.0.0` when needed; check your actual configuration after upgrading. A public URL does not itself configure a reverse proxy or make a loopback server reachable.
 

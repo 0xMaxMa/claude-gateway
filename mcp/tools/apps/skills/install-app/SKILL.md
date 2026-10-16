@@ -102,7 +102,7 @@ Commit: <first 8 chars, or "latest on default branch (auto-resolved)" for a GitH
 Proxy routes: <from inspect_app ports, or "none">
 Secrets to provide: <secretKeys the user supplied, or "none">
 Secrets auto-generated: <generatedKeys, or "none">
-Agent: <agentDeclaration.name, or "none">; per-conversation memory isolation: <"on" if agentDeclaration.multiTenant, else "off">
+Agent: <agentDeclaration.name, or "none">; per-conversation memory isolation: <"on" if agentDeclaration.isolateMemory, else "off">
 
 Proceed? (yes/no)
 ```
