@@ -384,6 +384,7 @@ export class SessionProcess extends EventEmitter {
     this.sessionId = sessionId;
     this.source = source;
     this.chatId = chatId ?? sessionId;
+    this.composedContext = runtimeProfile?.context;
     this.sessionChannel = toChatChannel(source);
     this.agentConfig = agentConfig;
     this.gatewayConfig = gatewayConfig;
@@ -730,6 +731,8 @@ export class SessionProcess extends EventEmitter {
   private managedMcpConfigPath?: string;
   /** Host file holding this conversation's tenant context (see writeTenantContextFile). */
   private tenantContextPath?: string;
+  /** The context the caller composed (a task driver for workers); the container Agent's is filled in per spawn. */
+  private readonly composedContext?: string;
   /** Host file holding the appended system prompt (see writeSystemPromptFile). */
   private systemPromptPath?: string;
   private managedConnectorPaths = new Set<string>();
@@ -1113,9 +1116,13 @@ export class SessionProcess extends EventEmitter {
     if (isAppAgent && this.runtimeProfile) {
       const profile = this.runtimeProfile, container = this.agentConfig.container!;
       const attempt = await prepareContainerProfile(this.agentConfig, profile, async directory => {
-        profile.context = await containerNode(container, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))");
-        // A context set here skips the tenant append in buildArgs, so it goes in now.
-        if (this.agentConfig.multiTenant?.enabled) profile.context += '\n\n' + this.tenantContext();
+        // A worker's context arrives composed by its task driver, with the task's
+        // own conversation tenant; only the Agent's is read from the container.
+        if (this.composedContext === undefined) {
+          profile.context = await containerNode(container, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))");
+          // A context set here skips the tenant append in buildArgs, so it goes in now.
+          if (this.agentConfig.multiTenant?.enabled) profile.context += '\n\n' + this.tenantContext();
+        }
         const moved = appendSystemPromptViaFile(this.buildArgs(null, freshModel, { directory, config: directory + '/mcp.json' }), directory + '/system-prompt.md');
         containerArgs = moved.args;
         return moved.prompt;

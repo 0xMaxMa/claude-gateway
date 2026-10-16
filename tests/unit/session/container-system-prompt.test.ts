@@ -117,6 +117,19 @@ posix('an isolated app agent gets its own tenant memory after the container CLAU
   await sp.stop();
 });
 
+posix.each([false, true])('a container worker keeps the context its task driver composed (isolate mode %s)', async isolated => {
+  // The driver already read the container CLAUDE.md and appended the task's own
+  // conversation tenant and read-only rule; the worker session is an api session
+  // keyed by its attempt, so recomposing here would name a tenant nobody owns.
+  const sp = session({ role: 'worker', context: 'DRIVER-CONTEXT tenant-of-the-task read-only-rule' }, isolated ? { chatId: undefined as unknown as string } : undefined);
+  await sp.start();
+  expect(execs.some(exec => exec.script.includes('/workspace/CLAUDE.md'))).toBe(false);
+  const prompt = JSON.parse(execs[0].input).prompt as string;
+  expect(prompt).toBe(`DRIVER-CONTEXT tenant-of-the-task read-only-rule\n\n${OVERLAY}`);
+  expect(prompt).not.toContain('TENANT CONTEXT');
+  await sp.stop();
+});
+
 posix.each([
   ['reading /workspace/CLAUDE.md', '/workspace/CLAUDE.md'],
   ['creating the attempt directory', 'ticket.json'],
