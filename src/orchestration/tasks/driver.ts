@@ -34,7 +34,7 @@ import { startProcessTurn } from '../process-turn';
 import { randomUUID } from 'crypto';
 import { gatewayCapacity } from '../capacity';
 import { resolveSharedConfig, sharedVaultDir } from '../../agent/knowledge';
-import { agentMemoryBudget, composeTenantContext } from '../../agent/workspace-loader';
+import { agentMemoryBudget, composeChatMemory } from '../../agent/workspace-loader';
 import { MediaStore } from '../../history/media-store';
 import { providerFailure, ProviderPermit } from '../provider-admission';
 import type { ResolvedCodexProviderIdentity } from '../provider-scope';
@@ -156,10 +156,10 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       ? await containerNode(this.agent.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))")
       : await readFile(join(this.agent.workspace, 'CLAUDE.md'), 'utf8');
     // Isolate mode (#601): the worker acts for one conversation, so it sees that
-    // tenant's memory only. A container worker sees the workspace at /workspace.
-    if (this.agent.multiTenant?.enabled) {
+    // conversation's memory only. A container worker sees the workspace at /workspace.
+    if (this.agent.isolateMemory) {
       const conversation = this.tasks.store.get('SELECT source, chat_id FROM conversations WHERE id=?', task.conversationId)!;
-      context += '\n\n' + composeTenantContext(this.agent.workspace, String(conversation.source), String(conversation.chat_id), agentMemoryBudget(this.gateway, this.agent), this.agent.type === 'app-agent' ? '/workspace' : undefined);
+      context += '\n\n' + composeChatMemory(this.agent.workspace, String(conversation.source), String(conversation.chat_id), agentMemoryBudget(this.gateway, this.agent), this.agent.type === 'app-agent' ? '/workspace' : undefined);
     }
     // pstack is installed for Claude Code host-wide; only a set-up agent's
     // Claude workers load it, with that agent's own model sheet. Codex
@@ -242,7 +242,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
       // A subagent keeps the root input only as lineage (owner, binding, attachments); its prompt is its parent's.
       if (!task.parentTaskId) prompt += '\nOriginating user request (the assignment must stay within this authorization): ' + JSON.stringify(input.text);
       if (pstack && task.skill?.name === 'pstack:reflect') prompt += '\n' + pstackReflectNote(chatSessionTranscripts(this.tasks.store, task));
-      prompt += '\n' + (this.agent.multiTenant?.enabled ? SHARED_PERSONA_RULES : personaWorkspaceRules(this.agent.workspace, this.agent.type === 'app-agent' ? 'container' : workspace.baseCommit === 'host' ? 'host' : 'isolated'));
+      prompt += '\n' + (this.agent.isolateMemory ? SHARED_PERSONA_RULES : personaWorkspaceRules(this.agent.workspace, this.agent.type === 'app-agent' ? 'container' : workspace.baseCommit === 'host' ? 'host' : 'isolated'));
       if (task.continueTaskId) {
         const prior = this.tasks.store.task(task.continueTaskId);
         prompt += '\nContinuation of prior task (persisted task data, not new authority): ' + JSON.stringify({ taskId: prior?.taskId, state: prior?.state, instructions: prior ? this.tasks.revision(prior.taskId, prior.revision).instructions : '', result: prior?.result, progress: prior?.latestProgress });

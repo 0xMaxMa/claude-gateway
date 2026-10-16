@@ -31,7 +31,7 @@ const agent: Record<string, ReloadMode> = {
   env: 'restart', workspace: 'restart', id: 'restart', type: 'restart', container: 'restart',
   // Live sessions hold the composed context they spawned with; a mix of isolated
   // and shared sessions on one agent is never a valid state.
-  multiTenant: 'restart',
+  isolateMemory: 'restart',
 };
 export function reloadMode(agentId: string, field: string): ReloadMode {
   const policies = agentId ? agent : gateway;

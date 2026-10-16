@@ -1,6 +1,6 @@
 /**
- * Bun tests for multi-tenant isolate mode (#601). The knowledge archive is one
- * index per agent with no tenant column, so any session's memory_search can
+ * Bun tests for isolated memory mode (#601). The knowledge archive is one
+ * index per agent with no conversation column, so any session's memory_search can
  * return a note written for another sender. Isolate mode turns the module off.
  */
 
@@ -20,7 +20,7 @@ let agentDir: string;
 const originalEnv = {
   GATEWAY_WORKSPACE_DIR: process.env.GATEWAY_WORKSPACE_DIR,
   GATEWAY_SHARED_KB_DIR: process.env.GATEWAY_SHARED_KB_DIR,
-  GATEWAY_MULTI_TENANT_ISOLATE: process.env.GATEWAY_MULTI_TENANT_ISOLATE,
+  GATEWAY_ISOLATE_MEMORY: process.env.GATEWAY_ISOLATE_MEMORY,
   GATEWAY_API_URL: process.env.GATEWAY_API_URL,
   GATEWAY_AGENT_ID: process.env.GATEWAY_AGENT_ID,
 };
@@ -29,7 +29,7 @@ beforeEach(() => {
   agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-mt-'));
   const workspaceDir = path.join(agentDir, 'workspace');
   fs.mkdirSync(workspaceDir);
-  // Same schema src/ writes; one chunk recorded while serving tenant A.
+  // Same schema src/ writes; one chunk recorded while serving conversation A.
   const db = new Database(archiveDbPath(workspaceDir));
   db.exec(`
     CREATE TABLE kb_chunks (rowid_id INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE, path TEXT,
@@ -43,11 +43,11 @@ beforeEach(() => {
     END;
   `);
   db.prepare('INSERT INTO kb_chunks(id,path,start_line,end_line,text,updated_at) VALUES(?,?,?,?,?,?)')
-    .run('c1', 'memory/tenant-a.md', 1, 1, 'Tenant A bank account ends 4321', 1);
+    .run('c1', 'memory/chat-a.md', 1, 1, 'Chat A bank account ends 4321', 1);
   db.close();
   process.env.GATEWAY_WORKSPACE_DIR = workspaceDir;
   delete process.env.GATEWAY_SHARED_KB_DIR;
-  delete process.env.GATEWAY_MULTI_TENANT_ISOLATE;
+  delete process.env.GATEWAY_ISOLATE_MEMORY;
 });
 
 afterEach(() => {
@@ -66,13 +66,13 @@ test('without isolate mode, any session can search a note written for another se
 });
 
 test('isolate mode turns the memory module off, so its tools are never registered', () => {
-  process.env.GATEWAY_MULTI_TENANT_ISOLATE = '1';
+  process.env.GATEWAY_ISOLATE_MEMORY = '1';
   expect(new MemoryModule().isEnabled()).toBe(false);
 });
 
 test('isolate mode turns the skills module off: the skill catalog is shared by every conversation', () => {
   expect(new SkillsModule().isEnabled()).toBe(true);
-  process.env.GATEWAY_MULTI_TENANT_ISOLATE = '1';
+  process.env.GATEWAY_ISOLATE_MEMORY = '1';
   expect(new SkillsModule().isEnabled()).toBe(false);
 });
 
@@ -81,7 +81,7 @@ test('isolate mode turns the cron and agent modules off: jobs and the persona ar
   process.env.GATEWAY_AGENT_ID = 'shared-bot';
   expect(new CronModule().isEnabled()).toBe(true);
   expect(new AgentModule().isEnabled()).toBe(true);
-  process.env.GATEWAY_MULTI_TENANT_ISOLATE = '1';
+  process.env.GATEWAY_ISOLATE_MEMORY = '1';
   expect(new CronModule().isEnabled()).toBe(false);
   expect(new AgentModule().isEnabled()).toBe(false);
 });

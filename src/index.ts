@@ -171,11 +171,11 @@ async function startAgent(
     agentConfig.knowledge?.archive,
     gatewayConfig.gateway.knowledge?.archive,
   ).enabled;
-  // Multi-tenant isolate mode (#601): the shared CLAUDE.md leaves out sender data.
+  // Isolated memory mode (#601): the shared CLAUDE.md leaves out sender data.
   // Fixed for the process lifetime: the reload policy makes the field restart-only.
-  const multiTenant = agentConfig.multiTenant?.enabled === true;
+  const isolateMemory = agentConfig.isolateMemory === true;
   // Background learners read every conversation into shared state, so they stay off.
-  const offWhenIsolated = <T extends { enabled?: boolean }>(cfg: T | undefined): T | undefined => multiTenant ? Object.assign({}, cfg, { enabled: false }) : cfg;
+  const offWhenIsolated = <T extends { enabled?: boolean }>(cfg: T | undefined): T | undefined => isolateMemory ? Object.assign({}, cfg, { enabled: false }) : cfg;
 
   // Ensure workspace directory exists (may be absent for newly created agents)
   try {
@@ -229,7 +229,7 @@ async function startAgent(
   try {
     workspace = await loadWorkspace(agentConfig.workspace, {
       coreShrink,
-      multiTenant,
+      isolateMemory,
       mcpToolsDir,
       sharedSkillsDir,
       logger,
@@ -320,7 +320,7 @@ async function startAgent(
       globalCfg: gatewayConfig.gateway.dreaming,
       // Isolate mode (#601): dreaming reads every conversation's transcripts into
       // one MEMORY.md/USER.md (and may promote to the shared KB), so it cannot keep
-      // tenants apart; it stays off for such an agent.
+      // conversations apart; it stays off for such an agent.
       agentCfg: offWhenIsolated(agentConfig.dreaming),
       gatewayTimezone: gatewayConfig.gateway.timezone,
       logger,
@@ -386,7 +386,7 @@ async function startAgent(
     const next=JSON.stringify([memoryBudget,agentConfig.knowledge,gatewayConfig.gateway.knowledge]);
     if(next===composePolicy)return;composePolicy=next;
     composeReload=composeReload.then(async()=>{
-      const updated=await loadWorkspace(agentConfig.workspace,{mcpToolsDir,sharedSkillsDir,logger,memoryBudget,coreShrink,multiTenant});
+      const updated=await loadWorkspace(agentConfig.workspace,{mcpToolsDir,sharedSkillsDir,logger,memoryBudget,coreShrink,isolateMemory});
       await fs.promises.writeFile(path.join(agentConfig.workspace,'CLAUDE.md'),updated.systemPrompt,'utf8');
       if(updated.skillRegistry)runner.setSkillRegistry(updated.skillRegistry);
       await runner.restartOrDefer({skipBusy:true,deferIdle:true});
@@ -414,7 +414,7 @@ async function startAgent(
         logger,
         memoryBudget,
         coreShrink,
-        multiTenant,
+        isolateMemory,
       });
       // Always rewrite CLAUDE.md so the next spawn picks up the new content.
       await fs.promises.writeFile(
@@ -474,7 +474,7 @@ async function startAgent(
           logger,
           memoryBudget,
           coreShrink,
-          multiTenant,
+          isolateMemory,
         });
         if (updated.skillRegistry) {
           runner.setSkillRegistry(updated.skillRegistry);
@@ -836,7 +836,7 @@ async function main(): Promise<void> {
             agentConfig.knowledge?.archive,
             config.gateway.knowledge?.archive,
           ).enabled,
-          multiTenant: agentConfig.multiTenant?.enabled === true,
+          isolateMemory: agentConfig.isolateMemory === true,
         });
         // A runner replaced meanwhile (an update toggling isolate mode, #601)
         // composed its own CLAUDE.md; this one has the old mode's sections.
@@ -1027,8 +1027,8 @@ async function main(): Promise<void> {
       }catch(err){globalLogger.error('Configuration application failed',{agentId:change.agentId,field:change.field,error:(err as Error).message});}
     }
     // Isolate mode (#601) is fixed for a runner's lifetime; an edit, or an app
-    // update that toggles its app.yaml multi_tenant, replaces the runner once idle.
-    for(const id of new Set(changes.filter(c=>c.agentId&&(c.field==='multiTenant'||c.field.startsWith('multiTenant.'))).map(c=>c.agentId)))void agentLifecycle.reconcile(id);
+    // update that toggles its app.yaml isolate_memory, replaces the runner once idle.
+    for(const id of new Set(changes.filter(c=>c.agentId&&c.field==='isolateMemory').map(c=>c.agentId)))void agentLifecycle.reconcile(id);
     if(changes.some(c=>!c.agentId&&c.field.startsWith('gateway.processLimits')))gatewayCapacity(config);
     if(changes.some(c=>!c.agentId&&c.hotReloadable&&(c.field.startsWith('gateway.app')||c.field==='gateway.timezone'))){
       appInstaller.configurePolicies(config.gateway.appHousekeeping,config.gateway.appBackup,config.gateway.appRestore,config.gateway.timezone);
@@ -1060,7 +1060,7 @@ async function main(): Promise<void> {
       }
     },
     error: (id, error) => globalLogger.error('Agent lifecycle reconciliation deferred', { agentId: id, error: String(error) }),
-    stale: desired => Boolean(desired.multiTenant?.enabled) !== Boolean(agentConfigs.get(desired.id)?.multiTenant?.enabled),
+    stale: desired => Boolean(desired.isolateMemory) !== Boolean(agentConfigs.get(desired.id)?.isolateMemory),
   });
   const removalTimer = setInterval(() => agentLifecycle.retry(), 5000);
   removalTimer.unref();

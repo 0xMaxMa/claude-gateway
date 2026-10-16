@@ -2846,7 +2846,7 @@ services:
     function agentUpdateSpawn(
       appName: string,
       port: number,
-      state: { head: string; version: string; agentName: string | null; multiTenant?: boolean },
+      state: { head: string; version: string; agentName: string | null; isolateMemory?: boolean },
     ) {
       return jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
         if (cmd === 'git' && args[0] === 'ls-remote') {
@@ -2855,7 +2855,7 @@ services:
         if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
           const agentBlock = state.agentName === null
             ? ''
-            : `\n  agent:\n    path: ./agent\n    name: ${state.agentName}${state.multiTenant ? '\n    multi_tenant: true' : ''}`;
+            : `\n  agent:\n    path: ./agent\n    name: ${state.agentName}${state.isolateMemory ? '\n    isolate_memory: true' : ''}`;
           fs.writeFileSync(
             path.join(opts.cwd, 'app.yaml'),
             `
@@ -2957,11 +2957,11 @@ services:
       expect(agentMgr.upsertAgent).toHaveBeenCalledTimes(1);
     });
 
-    // #601: app.yaml multi_tenant reaches inspect, the stored record and the
-    // agent registration, and each conversation's tenants/ memory survives the
+    // #601: app.yaml isolate_memory reaches inspect, the stored record and the
+    // agent registration, and each conversation's chats/ memory survives the
     // update's directory swap with the rest of the bind-mounted agent workspace.
-    it('carries multi_tenant from app.yaml through inspect, install and update, keeping tenants/', async () => {
-      const state = { head: 'a'.repeat(40), version: '1.0.0', agentName: 'iso-bot' as string | null, multiTenant: true };
+    it('carries isolate_memory from app.yaml through inspect, install and update, keeping chats/', async () => {
+      const state = { head: 'a'.repeat(40), version: '1.0.0', agentName: 'iso-bot' as string | null, isolateMemory: true };
       const agentMgr = makeAgentMgr('unrelated-bot');
       const base = agentUpdateSpawn('iso-agent-app', 5734, state);
       // The injected agent service bind-mounts the agent workspace at /workspace.
@@ -2970,7 +2970,7 @@ services:
           ? { stdout: JSON.stringify({ services: { agent: { volumes: [{ type: 'bind', source: path.join(opts.cwd, 'agent') }] } } }), stderr: '', status: 0 }
           : base(cmd, args, opts));
       const installer = makeInstallerWithAgent(spawn as unknown as typeof successSpawn, agentMgr);
-      const declared = { path: './agent', name: 'iso-bot', multiTenant: true };
+      const declared = { path: './agent', name: 'iso-bot', isolateMemory: true };
 
       const info = await installer.inspectSource({ githubUrl: 'https://github.com/test/iso-agent-app' });
       expect(info.agentDeclaration).toEqual(declared);
@@ -2980,7 +2980,7 @@ services:
       expect(agentMgr.upsertAgent).toHaveBeenLastCalledWith(expect.objectContaining({ agentDeclaration: declared }));
 
       const installPath = (await registry.get('iso-agent-app'))!.installPath;
-      const note = path.join(installPath, 'agent', 'tenants', 'telegram-1-abc', 'MEMORY.md');
+      const note = path.join(installPath, 'agent', 'chats', 'telegram-1-abc', 'MEMORY.md');
       fs.mkdirSync(path.dirname(note), { recursive: true });
       fs.writeFileSync(note, 'family A only', 'utf-8');
 

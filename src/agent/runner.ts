@@ -506,7 +506,7 @@ export class AgentRunner extends EventEmitter {
             }
             if (this.sessions.size >= this.maxConcurrent) throw new Error('Session pool full');
             // Isolate mode (#601) offers no archive tool, so nothing would read the index.
-            if (this.agentConfig.type !== 'app-agent' && !this.agentConfig.multiTenant?.enabled) spawnArchiveReindex(this.agentConfig.workspace, this.agentConfig.knowledge, this.gatewayConfig.gateway.knowledge);
+            if (this.agentConfig.type !== 'app-agent' && !this.agentConfig.isolateMemory) spawnArchiveReindex(this.agentConfig.workspace, this.agentConfig.knowledge, this.gatewayConfig.gateway.knowledge);
             const agentSession = new SessionProcess(sessionId, scope?.source ?? 'api', this.agentConfig, this.gatewayConfig, this.sessionStore, scope?.chatId, profile);
             agentSession.historyLimit = resolveMaxHistoryMessages(this.agentConfig.history?.maxHistoryMessages, this.gatewayConfig.gateway.history?.maxHistoryMessages);
             if (model) agentSession.modelOverride = model;
@@ -2263,7 +2263,7 @@ export class AgentRunner extends EventEmitter {
     source: ChatChannelOrApi,
     sessionId?: string,          // actual session UUID (only for channel sessions; equals mapKey for API)
     modelOverride?: string,      // per-session model override from SessionMeta
-    apiChatId?: string,          // API chat the session belongs to; keys its tenant memory (#601)
+    apiChatId?: string,          // API chat the session belongs to; keys its isolated memory (#601)
   ): Promise<SessionProcess> {
     // Normalize: treat agent-default model as "no override" so default sessions
     // don't restart unnecessarily when the frontend explicitly sends the default model.
@@ -2391,7 +2391,7 @@ export class AgentRunner extends EventEmitter {
     // Keep the searchable memory archive (planning-64) fresh for the memory_search
     // tool. Fire-and-forget, detached, OFF the event loop — never blocks the spawn.
     // Isolate mode (#601) offers no archive tool, so nothing would read the index.
-    if (!this.agentConfig.multiTenant?.enabled) spawnArchiveReindex(
+    if (!this.agentConfig.isolateMemory) spawnArchiveReindex(
       this.agentConfig.workspace,
       this.agentConfig.knowledge,
       this.gatewayConfig.gateway.knowledge,
@@ -4732,7 +4732,7 @@ export class AgentRunner extends EventEmitter {
     });
 
     // Use model from request body if provided, otherwise use agent default.
-    // A spawn keys its tenant memory by the chat (#601).
+    // A spawn keys its isolated memory by the chat (#601).
     const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
     this.apiChatIds.set(sessionId, chatId);
 
@@ -5062,7 +5062,7 @@ export class AgentRunner extends EventEmitter {
     });
 
     // Use model from request body if provided, otherwise use agent default.
-    // A spawn keys its tenant memory by the chat (#601).
+    // A spawn keys its isolated memory by the chat (#601).
     const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
     this.apiChatIds.set(sessionId, chatId);
 

@@ -338,7 +338,7 @@ export class AgentManager {
         // Isolate mode (#601) is the app's call, made in app.yaml. Undefined is
         // dropped when the config is written, so a release that stops declaring
         // it turns the mode off instead of keeping a stale value.
-        multiTenant: entry.agentDeclaration.multiTenant ? { enabled: true } : undefined,
+        isolateMemory: entry.agentDeclaration.isolateMemory ? true : undefined,
       });
     } catch (err) {
       // Rollback workspace symlink if config write fails to avoid orphaned symlink

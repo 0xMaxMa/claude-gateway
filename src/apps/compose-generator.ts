@@ -59,7 +59,7 @@ export interface AppYamlAgentService {
   path: string;
   name: string;
   /** Per-conversation memory isolation for this app's agent (#601). */
-  multi_tenant?: boolean;
+  isolate_memory?: boolean;
 }
 
 export interface AppYaml {
@@ -98,8 +98,8 @@ export interface ComposeSocket {
 export interface AgentDeclaration {
   path: string;
   name: string;
-  /** Set only when app.yaml opts the agent into isolate mode; written to its `multiTenant`. */
-  multiTenant?: true;
+  /** Set only when app.yaml opts the agent into isolate mode; written to its `isolateMemory`. */
+  isolateMemory?: true;
 }
 
 export interface GeneratedKey {
@@ -355,7 +355,7 @@ export function generateCompose(
   for (const [svcName, svcDef] of Object.entries(appYaml.services)) {
     if (svcName === 'agent') {
       const agentSvc = svcDef as AppYamlAgentService;
-      result.agentDeclaration = { path: agentSvc.path, name: agentSvc.name, ...(agentSvc.multi_tenant === true ? { multiTenant: true } : {}) };
+      result.agentDeclaration = { path: agentSvc.path, name: agentSvc.name, ...(agentSvc.isolate_memory === true ? { isolateMemory: true } : {}) };
       continue;
     }
 
@@ -640,16 +640,16 @@ function validateAgentServiceDecl(svcDef: unknown): void {
     throw new Error('Agent service declaration must be an object');
   }
   const obj = svcDef as Record<string, unknown>;
-  const allowed = new Set(['path', 'name', 'multi_tenant']);
+  const allowed = new Set(['path', 'name', 'isolate_memory']);
   for (const k of Object.keys(obj)) {
     if (!allowed.has(k)) {
       throw new Error(
-        `Agent service declaration has invalid field "${k}" — only "path", "name" and "multi_tenant" are allowed`,
+        `Agent service declaration has invalid field "${k}" — only "path", "name" and "isolate_memory" are allowed`,
       );
     }
   }
-  if (obj['multi_tenant'] !== undefined && typeof obj['multi_tenant'] !== 'boolean') {
-    throw new Error('Agent service declaration: "multi_tenant" must be true or false');
+  if (obj['isolate_memory'] !== undefined && typeof obj['isolate_memory'] !== 'boolean') {
+    throw new Error('Agent service declaration: "isolate_memory" must be true or false');
   }
   if (typeof obj['path'] !== 'string' || !obj['path']) {
     throw new Error('Agent service declaration: "path" is required');

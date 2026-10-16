@@ -672,12 +672,12 @@ describe('AppInstaller — backup/restore', () => {
 
 // ── Isolate-mode agent workspace round trip (#601) ───────────────────────────
 // The injected agent service bind-mounts <app>/agent at /workspace, so a backup
-// captures the whole agent workspace — every conversation's tenants/ included —
+// captures the whole agent workspace — every conversation's chats/ included —
 // as one bind. This runs the helper's real tar/sh commands on this host
 // (/data and /backup mapped to their mount sources) instead of in a container.
 describe('AppInstaller — backup/restore of an isolated app agent workspace', () => {
   const { spawnSync } = jest.requireActual('node:child_process') as typeof import('node:child_process');
-  const { composeTenantContext, tenantDir } = jest.requireActual('../../../src/agent/workspace-loader') as typeof import('../../../src/agent/workspace-loader');
+  const { composeChatMemory, chatMemoryDir } = jest.requireActual('../../../src/agent/workspace-loader') as typeof import('../../../src/agent/workspace-loader');
   let tmpDir: string;
   let appDir: string;
   let agentDir: string;
@@ -723,13 +723,13 @@ describe('AppInstaller — backup/restore of an isolated app agent workspace', (
     agentDir = path.join(appDir, 'agent');
     for (const [file, text] of Object.entries({
       'AGENTS.md': 'persona', 'SOUL.md': 'soul', 'IDENTITY.md': 'id', 'MEMORY.md': 'root memory', 'USER.md': 'root user',
-      '.sessions/s-1/tenant-context.md': 'regenerated each spawn',
+      '.sessions/s-1/chat-memory.md': 'regenerated each spawn',
     })) {
       fs.mkdirSync(path.dirname(path.join(agentDir, file)), { recursive: true });
       fs.writeFileSync(path.join(agentDir, file), text);
     }
     for (const [chat, who] of [['111', 'FAMILY-A'], ['222', 'FAMILY-B']]) {
-      const dir = tenantDir(agentDir, 'telegram', chat);
+      const dir = chatMemoryDir(agentDir, 'telegram', chat);
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(path.join(dir, 'MEMORY.md'), `${who}-MEMORY`, { mode: 0o600 });
       fs.writeFileSync(path.join(dir, 'USER.md'), `${who}-USER`, { mode: 0o600 });
@@ -738,12 +738,12 @@ describe('AppInstaller — backup/restore of an isolated app agent workspace', (
   });
   afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
 
-  it('restores every tenant and root file exactly, and each conversation still sees only its own memory', async () => {
+  it('restores every conversation file and root file exactly, and each conversation still sees only its own memory', async () => {
     const registry = new AppsRegistry(path.join(tmpDir, 'apps.json'));
     await registry.upsert({
       name: 'habit', version: '1.0.0', commit: 'a'.repeat(40), githubUrl: '', installPath: appDir, ports: [], sockets: {},
       installedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', status: 'stopped', source: 'registry',
-      agentDeclaration: { path: './agent', name: 'habit-bot', multiTenant: true },
+      agentDeclaration: { path: './agent', name: 'habit-bot', isolateMemory: true },
     });
     const spawnFn = realHelperSpawn();
     const installer = new AppInstaller(registry, new RegistryClient(), makeCallbacks(),
@@ -754,10 +754,10 @@ describe('AppInstaller — backup/restore of an isolated app agent workspace', (
     const backup = await waitForJob(installer, installer.backup('habit'));
     expect(backup.status).toBe('completed');
 
-    // Lose the workspace, then write over it: a changed tenant and one the backup never had.
+    // Lose the workspace, then write over it: a changed conversation and one the backup never had.
     fs.rmSync(agentDir, { recursive: true, force: true });
-    fs.mkdirSync(tenantDir(agentDir, 'telegram', '333'), { recursive: true });
-    fs.writeFileSync(path.join(tenantDir(agentDir, 'telegram', '333'), 'MEMORY.md'), 'FAMILY-C-MEMORY');
+    fs.mkdirSync(chatMemoryDir(agentDir, 'telegram', '333'), { recursive: true });
+    fs.writeFileSync(path.join(chatMemoryDir(agentDir, 'telegram', '333'), 'MEMORY.md'), 'FAMILY-C-MEMORY');
     const bridgeSocket = path.join(agentDir, '.orch-0123456789abcdef.sock'); // stand-in for the live socket
     fs.writeFileSync(bridgeSocket, '');
     const restored = await waitForJob(installer, installer.restore('habit', backup.backup!.id));
@@ -768,10 +768,10 @@ describe('AppInstaller — backup/restore of an isolated app agent workspace', (
     expect(fs.existsSync(bridgeSocket)).toBe(true);
     fs.rmSync(bridgeSocket);
     expect(snapshot(agentDir)).toEqual(original);
-    const a = composeTenantContext(agentDir, 'telegram', '111');
+    const a = composeChatMemory(agentDir, 'telegram', '111');
     expect(a).toContain('FAMILY-A-MEMORY');
     expect(a).toContain('FAMILY-A-USER');
     expect(a).not.toMatch(/FAMILY-[BC]|root memory|root user/);
-    expect(composeTenantContext(agentDir, 'telegram', '222')).not.toMatch(/FAMILY-[AC]/);
+    expect(composeChatMemory(agentDir, 'telegram', '222')).not.toMatch(/FAMILY-[AC]/);
   });
 });

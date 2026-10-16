@@ -78,7 +78,7 @@ export class TaskBridge {
   private url = '';
   recordRetrievals = false;
   /** Isolate mode (#601): turns the memory_search/memory_get module off in every MCP process this bridge issues. */
-  multiTenant = (): boolean => false;
+  isolateMemory = (): boolean => false;
   jevEnabled?: () => boolean;
   browserEnabled?: () => boolean;
   computerEnabled?: () => boolean;
@@ -393,7 +393,7 @@ export class TaskBridge {
             }
           }
           // Isolate mode (#601) refuses agent-wide jobs here too: a worker holding its ticket can call the bridge without the MCP tool list.
-          else if (CRON_TOOLS.some(tool => tool.name === command.tool) && this.files && this.cronCall && !this.multiTenant()) {
+          else if (CRON_TOOLS.some(tool => tool.name === command.tool) && this.files && this.cronCall && !this.isolateMemory()) {
             this.files.scope(scope.attemptId, scope.generation);
             const cancelled = this.cancellations.get(token!);
             if (!cancelled) throw new OrchestrationError('ACCESS_DENIED');
@@ -445,13 +445,13 @@ export class TaskBridge {
       GATEWAY_JEV_ENABLED: jevEnabled ? 'true' : '',
       GATEWAY_CAPABILITY_CATALOG: scope.role === 'agent' && scope.capabilities ? 'true' : '',
       GATEWAY_ORCHESTRATION_ROLE: scope.role, GATEWAY_ORCHESTRATION_TICKET_FILE: ticketPath,
-      GATEWAY_WORKSPACE_DIR: workspace, GATEWAY_SHARED_KB_DIR: sharedKbDir, GATEWAY_MULTI_TENANT_ISOLATE: this.multiTenant() ? '1' : '',
+      GATEWAY_WORKSPACE_DIR: workspace, GATEWAY_SHARED_KB_DIR: sharedKbDir, GATEWAY_ISOLATE_MEMORY: this.isolateMemory() ? '1' : '',
       GATEWAY_RECORD_RETRIEVALS: this.recordRetrievals ? '1' : '',
       GATEWAY_ORIGIN_CHANNEL: workerMemory ? String(worker!.conversation.source) : 'api', GATEWAY_AGENT_ID: this.tasks.store.agentId,
       GATEWAY_SESSION_ID: worker?.task.agentSessionId ?? '', GATEWAY_SESSION_MEDIA_DIR: worker?.mediaDir ?? '',
       GATEWAY_ORCHESTRATION_MEDIA: worker ? 'true' : '',
       GATEWAY_LAZY_TOOLS: worker ? 'true' : '',
-      GATEWAY_ORCHESTRATION_CRON: worker && this.cronCall && !this.multiTenant() ? 'true' : '',
+      GATEWAY_ORCHESTRATION_CRON: worker && this.cronCall && !this.isolateMemory() ? 'true' : '',
       GATEWAY_SUBAGENTS: scope.role === 'worker' && scope.subagents ? 'true' : '',
       GATEWAY_READONLY_TASK: scope.role === 'worker' && scope.readonly ? 'true' : '',
       GETPOD_BROWSER_URL: worker ? process.env.GETPOD_BROWSER_URL ?? 'http://127.0.0.1:10880' : '',
@@ -473,8 +473,8 @@ export class TaskBridge {
     const quote = (value: string) => process.platform === 'win32' ? JSON.stringify(value) : "'" + value.replace(/'/g, "'\"'\"'") + "'";
     const checkpointCommand = scope.role === 'worker' ? [process.execPath, checkpointPath, ticketPath].map(quote).join(' ') : undefined;
     const writeMemory = workerMemory || (scope.role === 'agent' && scope.context.writeMemory && this.tasks.store.get('SELECT source FROM conversations WHERE id=?', scope.context.conversationId)?.source !== 'api');
-    const personaContext = scope.role === 'agent' && !this.multiTenant() ? `This agent persona workspace: ${JSON.stringify(this.container ? '/workspace' : workspace)}.` : '';
-    const sourceRules = `${personaContext}\n${writeMemory ? `Channel memory updates use scoped memory tools. ${SECRET_RULES}` : API_SOURCE_RULES}\n${this.multiTenant() ? SHARED_PERSONA_RULES : IDENTITY_EDIT_RULES}`;
+    const personaContext = scope.role === 'agent' && !this.isolateMemory() ? `This agent persona workspace: ${JSON.stringify(this.container ? '/workspace' : workspace)}.` : '';
+    const sourceRules = `${personaContext}\n${writeMemory ? `Channel memory updates use scoped memory tools. ${SECRET_RULES}` : API_SOURCE_RULES}\n${this.isolateMemory() ? SHARED_PERSONA_RULES : IDENTITY_EDIT_RULES}`;
     return { profile: { role: scope.role, jevEnabled, browserEnabled, checkpointCommand, containerExecution: Boolean(this.container), mcpConfigPath, overlay: `${scope.role === 'agent' ? AGENT_OVERLAY : WORKER_OVERLAY}\n\n${sourceRules}` },
       revoke: () => { this.cancellations.get(token)?.abort(); this.cancellations.delete(token); this.scopes.delete(token); if (scope.role === 'worker') this.files?.releaseCaptured(scope.attemptId); } };
   }

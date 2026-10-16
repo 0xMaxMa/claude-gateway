@@ -350,7 +350,7 @@ export class AgentOrchestrationRuntime {
     const personalRetention = resolveDreamingConfig(agent.dreaming, gateway.gateway.dreaming, gateway.gateway.timezone).staleness;
     const sharedRetention = resolveSharedConfig(agent.knowledge?.shared, gateway.gateway.knowledge?.shared).staleness;
     bridge.recordRetrievals = (personalRetention.enabled && personalRetention.recordRetrievals) || (sharedRetention.enabled && sharedRetention.recordRetrievals);
-    bridge.multiTenant = files.multiTenant = () => Boolean(agent.multiTenant?.enabled);
+    bridge.isolateMemory = files.isolateMemory = () => Boolean(agent.isolateMemory);
     let admissionStore: ProviderAdmissionStore | undefined;
     try {
       recoverOrchestration(store);

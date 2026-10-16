@@ -1,6 +1,6 @@
 /**
- * Multi-tenant isolate mode (#601) on the plain API path: a web chat holds many
- * sessions, so a spawn must key its tenant memory by the chat, as the
+ * Isolated memory mode (#601) on the plain API path: a web chat holds many
+ * sessions, so a spawn must key its isolated memory by the chat, as the
  * orchestration API path does, and never by the session.
  *
  * HistoryDB and knowledge are mocked for the same node:sqlite/fts5 reason as
@@ -43,25 +43,25 @@ jest.mock('child_process', () => ({
 }));
 
 import { AgentRunner } from '../../src/agent/runner';
-import { tenantDir } from '../../src/agent/workspace-loader';
+import { chatMemoryDir } from '../../src/agent/workspace-loader';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 
 let tmpDir: string;
 let runner: AgentRunner;
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-api-tenant-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-api-isolate-memory-'));
   const workspace = path.join(tmpDir, 'agents', 'shared-bot', 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
   fs.writeFileSync(path.join(workspace, 'CLAUDE.md'), 'SHARED-CONTEXT');
-  const dir = tenantDir(workspace, 'api', 'web-chat');
+  const dir = chatMemoryDir(workspace, 'api', 'web-chat');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'MEMORY.md'), 'WEB-CHAT-MEMORY');
   const agent: AgentConfig = {
     id: 'shared-bot', description: 'test', workspace, env: '',
     telegram: { botToken: 'test-token' },
     claude: { model: 'claude-opus-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
-    multiTenant: { enabled: true },
+    isolateMemory: true,
   };
   const gateway: GatewayConfig = { gateway: { orchestration: false, logDir: path.join(tmpDir, 'logs'), timezone: 'UTC' }, agents: [] };
   runner = new AgentRunner(agent, gateway);
@@ -72,8 +72,8 @@ afterEach(async () => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-/** The tenant context a session's spawn appended, read when the spawn happens. */
-async function spawnedTenantContext(sessionId: string): Promise<string> {
+/** The chat memory a session's spawn appended, read when the spawn happens. */
+async function spawnedChatMemory(sessionId: string): Promise<string> {
   const spawnMock = require('child_process').spawn as jest.Mock;
   spawnMock.mockClear();
   const callbacks = { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() };
@@ -83,7 +83,7 @@ async function spawnedTenantContext(sessionId: string): Promise<string> {
   return fs.readFileSync(args[args.indexOf('--append-system-prompt-file') + 1], 'utf8');
 }
 
-test("every session of a web chat gets that chat's tenant memory", async () => {
-  expect(await spawnedTenantContext('sess-1')).toContain('WEB-CHAT-MEMORY');
-  expect(await spawnedTenantContext('sess-2')).toContain('WEB-CHAT-MEMORY');
+test("every session of a web chat gets that chat's memory", async () => {
+  expect(await spawnedChatMemory('sess-1')).toContain('WEB-CHAT-MEMORY');
+  expect(await spawnedChatMemory('sess-2')).toContain('WEB-CHAT-MEMORY');
 });

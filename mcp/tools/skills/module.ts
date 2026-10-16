@@ -27,9 +27,9 @@ export class SkillsModule implements ToolModule {
 
   isEnabled(): boolean {
     // Skills tools are available when workspace dir is known. Never in
-    // multi-tenant isolate mode (#601): the skill catalog is shared by every
+    // isolated memory mode (#601): the skill catalog is shared by every
     // conversation, so one sender must not be able to add to it.
-    return Boolean(process.env.GATEWAY_WORKSPACE_DIR) && !process.env.GATEWAY_MULTI_TENANT_ISOLATE;
+    return Boolean(process.env.GATEWAY_WORKSPACE_DIR) && !process.env.GATEWAY_ISOLATE_MEMORY;
   }
 
   getTools(): McpToolDefinition[] {

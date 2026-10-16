@@ -28,7 +28,7 @@ export interface AppEntry {
   source: 'registry' | 'custom' | 'local';
   agentPaths?: { claudeBin: string; nodeBin: string; npmRoot: string; claudeVersion?: string };
   /** Agent service declared in app.yaml (path + name). Null means no agent. */
-  agentDeclaration?: { path: string; name: string; multiTenant?: true } | null;
+  agentDeclaration?: { path: string; name: string; isolateMemory?: true } | null;
 }
 
 interface AppsFile {

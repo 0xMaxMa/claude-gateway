@@ -414,22 +414,22 @@ describe('AgentManager', () => {
     });
 
     // #601: an app opts its agent into isolate mode in app.yaml; only that
-    // agent's entry gets multiTenant, and a release that drops it turns it off.
-    it('writes multiTenant only for an app that declares it, and clears it when the declaration goes away', async () => {
+    // agent's entry gets isolateMemory, and a release that drops it turns it off.
+    it('writes isolateMemory only for an app that declares it, and clears it when the declaration goes away', async () => {
       const configPath = path.join(tmpDir, 'config.json');
       fs.writeFileSync(configPath, JSON.stringify({ gateway: {}, agents: [{ id: 'host-agent', workspace: '/tmp/host', claude: { model: 'm' } }] }));
       const read = () => (JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> }).agents;
 
       const isolated = makeEntry(tmpDir);
-      isolated.agentDeclaration = { ...isolated.agentDeclaration!, multiTenant: true };
+      isolated.agentDeclaration = { ...isolated.agentDeclaration!, isolateMemory: true };
       await manager.upsertAgent(isolated);
       await manager.upsertAgent(makeEntry(tmpDir, 'other-app', 'other-agent'));
-      expect(Object.fromEntries(read().map((a) => [a['id'], a['multiTenant']]))).toEqual({
-        'host-agent': undefined, 'my-agent': { enabled: true }, 'other-agent': undefined,
+      expect(Object.fromEntries(read().map((a) => [a['id'], a['isolateMemory']]))).toEqual({
+        'host-agent': undefined, 'my-agent': true, 'other-agent': undefined,
       });
 
       await manager.upsertAgent(makeEntry(tmpDir));
-      expect(read().find((a) => a['id'] === 'my-agent')).not.toHaveProperty('multiTenant');
+      expect(read().find((a) => a['id'] === 'my-agent')).not.toHaveProperty('isolateMemory');
     });
 
     it('is idempotent — calling twice does not duplicate entry', async () => {

@@ -2,7 +2,7 @@ import { readFileSync, statSync } from 'fs';
 import { join } from 'path';
 import { getEncoding } from 'js-tiktoken';
 import { AGENT_TASK_TOOLS } from './agent-tool-schemas';
-import { composeTenantContext, tenantDirName, type MemoryBudgetConfig } from '../agent/workspace-loader';
+import { composeChatMemory, chatMemoryDirName, type MemoryBudgetConfig } from '../agent/workspace-loader';
 
 const cache = new Map<string, {at:number; value:ContextFootprint}>();
 let encoder: ReturnType<typeof getEncoding> | undefined;
@@ -14,12 +14,12 @@ export interface ContextFootprint {
   observedAt: number;
   rows: Array<{name:string;tokens:number|null;characters:number|null;hasContent?:boolean;note:string}>;
 }
-/** Multi-tenant isolate mode (#601): the conversation whose memory is appended at spawn. */
-export interface FootprintTenant { source: string; chatId: string; memoryBudget?: Partial<MemoryBudgetConfig> }
+/** Isolated memory mode (#601): the conversation whose memory is appended at spawn. */
+export interface FootprintChat { source: string; chatId: string; memoryBudget?: Partial<MemoryBudgetConfig> }
 /** Run in the dashboard reader thread. Never launch a CLI/model or return file content. */
-export function contextFootprint(workspace: string | undefined, jevEnabled = false, tenant?: FootprintTenant): ContextFootprint {
+export function contextFootprint(workspace: string | undefined, jevEnabled = false, chat?: FootprintChat): ContextFootprint {
   if (!workspace) return {observedAt:Date.now(),rows:[]};
-  const key=JSON.stringify([workspace,jevEnabled,tenant]), previous=cache.get(key);
+  const key=JSON.stringify([workspace,jevEnabled,chat]), previous=cache.get(key);
   if(previous && Date.now()-previous.at<30000)return previous.value;
   const rows:ContextFootprint['rows']=[];
   const read=(name:string):string|undefined=>{
@@ -28,7 +28,7 @@ export function contextFootprint(workspace: string | undefined, jevEnabled = fal
   const add=(name:string,text:string|undefined,note:string)=>rows.push({name,tokens:text===undefined?null:referenceTokens(text),characters:text===undefined?null:[...text].length,hasContent:Boolean(text?.trim()),note});
   const composed=read('CLAUDE.md');
   add('CLAUDE.md · composed workspace context',composed,'Current generated file after workspace budgets. Parent total; do not add its sections again. Not the complete CLI prompt.');
-  const labels:Record<string,string>={'AGENT IDENTITY':'AGENTS.md','IDENTITY':'IDENTITY.md','SOUL':'SOUL.md','USER PROFILE':'USER.md','LONG-TERM MEMORY':'MEMORY.md','HEARTBEAT CONFIG':'HEARTBEAT.md','AVAILABLE SKILLS':'Skill catalog','MEMORY RULE':'Memory rules','MEMORY RETRIEVAL':'Memory retrieval instructions','TENANT CONTEXT':'Conversation memory paths'};
+  const labels:Record<string,string>={'AGENT IDENTITY':'AGENTS.md','IDENTITY':'IDENTITY.md','SOUL':'SOUL.md','USER PROFILE':'USER.md','LONG-TERM MEMORY':'MEMORY.md','HEARTBEAT CONFIG':'HEARTBEAT.md','AVAILABLE SKILLS':'Skill catalog','MEMORY RULE':'Memory rules','MEMORY RETRIEVAL':'Memory retrieval instructions','CHAT MEMORY':'Conversation memory paths'};
   const sections=(context:string,note:string)=>{
     const markers=[...context.matchAll(/^--- ([A-Z -]+) ---\n/gm)];
     for(let i=0;i<markers.length;i++){
@@ -39,14 +39,14 @@ export function contextFootprint(workspace: string | undefined, jevEnabled = fal
   };
   if(composed)sections(composed,'Section found in generated CLAUDE.md; includes section whitespace. Boundary tokenization can differ from parent total.');
   // Isolate mode leaves sender files out of CLAUDE.md and appends this conversation's own at spawn.
-  const tenantFiles=tenant&&join('tenants',tenantDirName(tenant.source,tenant.chatId));
-  // Same 1 MiB guard as read(): composeTenantContext reads the files whole.
-  const oversized=(name:string)=>{try{return statSync(join(workspace,tenantFiles!,name)).size>1024*1024;}catch{return false;}};
-  if(tenant&&(oversized('USER.md')||oversized('MEMORY.md')))add('↳ Conversation memory',undefined,'A conversation memory file is larger than 1 MiB, so it was not measured.');
-  else if(tenant)sections(composeTenantContext(workspace,tenant.source,tenant.chatId,tenant.memoryBudget),'This conversation\'s memory, appended at spawn after its budgets (multi-tenant isolate mode).');
+  const chatFiles=chat&&join('chats',chatMemoryDirName(chat.source,chat.chatId));
+  // Same 1 MiB guard as read(): composeChatMemory reads the files whole.
+  const oversized=(name:string)=>{try{return statSync(join(workspace,chatFiles!,name)).size>1024*1024;}catch{return false;}};
+  if(chat&&(oversized('USER.md')||oversized('MEMORY.md')))add('↳ Conversation memory',undefined,'A conversation memory file is larger than 1 MiB, so it was not measured.');
+  else if(chat)sections(composeChatMemory(workspace,chat.source,chat.chatId,chat.memoryBudget),'This conversation\'s memory, appended at spawn after its budgets (isolated memory mode).');
   for(const name of ['AGENTS.md','IDENTITY.md','SOUL.md','USER.md','MEMORY.md','HEARTBEAT.md']){
-    const own=tenantFiles&&(name==='USER.md'||name==='MEMORY.md');
-    add(name+' · source file',read(own?join(tenantFiles,name):name),own?'This conversation\'s file under '+tenantFiles+' before budget/truncation. The workspace-root file is not composed in multi-tenant isolate mode.':'Current file on disk before budget/index/truncation. Reference only; not added to composed context.');
+    const own=chatFiles&&(name==='USER.md'||name==='MEMORY.md');
+    add(name+' · source file',read(own?join(chatFiles,name):name),own?'This conversation\'s file under '+chatFiles+' before budget/truncation. The workspace-root file is not composed in isolated memory mode.':'Current file on disk before budget/index/truncation. Reference only; not added to composed context.');
   }
   // Intake is invariant; optional Jev must match the currently permitted inventory.
   const tools = AGENT_TASK_TOOLS.filter(tool => tool.name !== 'jev_evaluate' || jevEnabled);

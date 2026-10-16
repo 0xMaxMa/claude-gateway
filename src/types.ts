@@ -369,13 +369,13 @@ export interface AgentConfig {
   /** Per-agent knowledge-archive override (field-level over the global gateway default). */
   knowledge?: GatewayConfig['gateway']['knowledge'];
   /**
-   * Multi-tenant isolate mode (#601) for one agent serving many unrelated
+   * Isolated memory mode (#601) for one agent serving many unrelated
    * senders: USER.md/MEMORY.md are kept per conversation under
-   * `<workspace>/tenants/<channel>-<chatId>-<hash>/`, and the memory, skill,
-   * cron and agent MCP tools are not offered. Absent or `enabled: false` keeps the single-tenant behavior.
-   * An app agent's value is written from its app.yaml `services.agent.multi_tenant`.
+   * `<workspace>/chats/<channel>-<chatId>-<hash>/`, and the memory, skill,
+   * cron and agent MCP tools are not offered. Absent or `false` keeps one shared memory for the agent.
+   * An app agent's value is written from its app.yaml `services.agent.isolate_memory`.
    */
-  multiTenant?: { enabled: boolean };
+  isolateMemory?: boolean;
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
   avatar?: string;
   /** Per-agent connector enablement, keyed by connector id (e.g. "github"). */

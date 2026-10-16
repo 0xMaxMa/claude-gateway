@@ -96,7 +96,7 @@ test('removal and shutdown cancel a failed hot-add retry', async () => {
 });
 
 test('a stale runner is replaced once idle, from the latest config', async () => {
-  // e.g. multi-tenant isolate mode toggled by an app update (#601): live sessions keep the mode they spawned with.
+  // e.g. isolated memory mode toggled by an app update (#601): live sessions keep the mode they spawned with.
   let desired: { id: string; isolated: boolean } | undefined = { id: 'agent', isolated: true };
   const old = { isolated: false, canRemoveFromConfig: jest.fn(() => false), stop: jest.fn(async () => {}) };
   let current: typeof old | undefined = old;

@@ -20,7 +20,7 @@ import { OrchestrationError } from '../orchestration/types';
 import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
 import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
-import { agentMemoryBudget, composeTenantContext } from '../agent/workspace-loader';
+import { agentMemoryBudget, composeChatMemory } from '../agent/workspace-loader';
 import { resolveDreamingConfig } from '../agent/dreaming/config';
 import { toChatChannel, type ChatChannel, type ChatChannelOrApi } from '../history/types';
 import { SessionStore } from './store';
@@ -377,8 +377,8 @@ export class SessionProcess extends EventEmitter {
     sessionStore: SessionStore,
     chatId?: string,  // for telegram/discord: actual chatId; for api: same as sessionId
     readonly runtimeProfile?: RuntimeProfile,
-    /** API chat keying the tenant (#601): an API session's own chatId is its sessionId, but a chat holds many sessions. */
-    private readonly tenantChatId?: string,
+    /** API chat keying the isolated memory (#601): an API session's own chatId is its sessionId, but a chat holds many sessions. */
+    private readonly memoryChatId?: string,
   ) {
     super();
     this.sessionId = sessionId;
@@ -729,8 +729,8 @@ export class SessionProcess extends EventEmitter {
   }
 
   private managedMcpConfigPath?: string;
-  /** Host file holding this conversation's tenant context (see writeTenantContextFile). */
-  private tenantContextPath?: string;
+  /** Host file holding this conversation's memory (see writeChatMemoryFile). */
+  private chatMemoryPath?: string;
   /** The context the caller composed (a task driver for workers); the container Agent's is filled in per spawn. */
   private readonly composedContext?: string;
   /** Host file holding the appended system prompt (see writeSystemPromptFile). */
@@ -757,8 +757,8 @@ export class SessionProcess extends EventEmitter {
     return moved.args;
   }
 
-  private tenantContext(): string {
-    return composeTenantContext(this.agentConfig.workspace, this.source, this.tenantChatId ?? this.chatId,
+  private chatMemory(): string {
+    return composeChatMemory(this.agentConfig.workspace, this.source, this.memoryChatId ?? this.chatId,
       agentMemoryBudget(this.gatewayConfig, this.agentConfig), this.isContainerAgent() ? '/workspace' : undefined);
   }
 
@@ -772,13 +772,13 @@ export class SessionProcess extends EventEmitter {
     return `/workspace/${path.relative(this.agentConfig.workspace, hostPath)}`;
   }
 
-  /** Outside orchestration the tenant context cannot join an appended prompt, so
+  /** Outside orchestration the conversation's memory cannot join an appended prompt, so
    * it is written fresh each spawn to `.sessions/<id>/` (0700) and passed with
    * --append-system-prompt-file. Undefined when isolate mode is off. */
-  private writeTenantContextFile(): string | undefined {
-    if (this.runtimeProfile || !this.agentConfig.multiTenant?.enabled) return undefined;
-    const file = path.join(this.ensureSessionDir(), 'tenant-context.md');
-    fs.writeFileSync(file, this.tenantContext(), { mode: 0o600 });
+  private writeChatMemoryFile(): string | undefined {
+    if (this.runtimeProfile || !this.agentConfig.isolateMemory) return undefined;
+    const file = path.join(this.ensureSessionDir(), 'chat-memory.md');
+    fs.writeFileSync(file, this.chatMemory(), { mode: 0o600 });
     return file;
   }
 
@@ -925,9 +925,9 @@ export class SessionProcess extends EventEmitter {
             GATEWAY_API_KEY: this.findApiKeyForAgent(this.agentConfig.id),
             GATEWAY_ORIGIN_CHANNEL: this.source,
             GATEWAY_WORKSPACE_DIR: this.agentConfig.workspace,
-            // Isolate mode (#601): the archive is one index for every tenant, so
+            // Isolate mode (#601): the archive is one index for every conversation, so
             // the memory module turns its tools off instead of filtering them.
-            GATEWAY_MULTI_TENANT_ISOLATE: this.agentConfig.multiTenant?.enabled ? '1' : '',
+            GATEWAY_ISOLATE_MEMORY: this.agentConfig.isolateMemory ? '1' : '',
             GATEWAY_SHARED_SKILLS_DIR: path.join(os.homedir(), '.claude-gateway', 'shared-skills'),
             // Shared KB vault dir (planning-64 K3), so memory_search corpus:"shared"
             // can reach the cross-agent vault. Empty when shared KB is disabled.
@@ -1049,7 +1049,7 @@ export class SessionProcess extends EventEmitter {
           }
           throw error;
         }
-        if (this.agentConfig.multiTenant?.enabled) context += '\n\n' + this.tenantContext();
+        if (this.agentConfig.isolateMemory) context += '\n\n' + this.chatMemory();
       }
       const profileArgs = runtimeProfileArgs({ ...this.runtimeProfile, context, checkpointCommand: containerAttempt && this.runtimeProfile.checkpointCommand ? `node ${containerAttempt.directory}/checkpoint.cjs ${containerAttempt.directory}/ticket.json` : this.runtimeProfile.checkpointCommand, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: containerAttempt && this.runtimeProfile.skillPluginDir ? containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []);
       args.push(...profileArgs);
@@ -1071,10 +1071,10 @@ export class SessionProcess extends EventEmitter {
     // (The old claude.dangerouslySkipPermissions config is gone.)
     args.push('--dangerously-skip-permissions');
 
-    // Multi-tenant isolate mode (#601): Claude Code loads the tenant-neutral
+    // Isolated memory mode (#601): Claude Code loads the conversation-neutral
     // workspace CLAUDE.md itself; this conversation's own USER.md/MEMORY.md
-    // ride alongside it (see writeTenantContextFile).
-    if (this.tenantContextPath) args.push('--append-system-prompt-file', this.isContainerAgent() ? this.toContainerPath(this.tenantContextPath) : this.tenantContextPath);
+    // ride alongside it (see writeChatMemoryFile).
+    if (this.chatMemoryPath) args.push('--append-system-prompt-file', this.isContainerAgent() ? this.toContainerPath(this.chatMemoryPath) : this.chatMemoryPath);
 
     // Enforce allow_tools:false as a real boundary. Gated on the SAME condition as
     // writeMcpConfig() (source==='api' && !allow_tools): those sessions get no MCP
@@ -1121,11 +1121,11 @@ export class SessionProcess extends EventEmitter {
       const profile = this.runtimeProfile, container = this.agentConfig.container!;
       const attempt = await prepareContainerProfile(this.agentConfig, profile, async directory => {
         // A worker's context arrives composed by its task driver, with the task's
-        // own conversation tenant; only the Agent's is read from the container.
+        // own conversation's memory; only the Agent's is read from the container.
         if (this.composedContext === undefined) {
           profile.context = await containerNode(container, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))");
-          // A context set here skips the tenant append in buildArgs, so it goes in now.
-          if (this.agentConfig.multiTenant?.enabled) profile.context += '\n\n' + this.tenantContext();
+          // A context set here skips the chat memory append in buildArgs, so it goes in now.
+          if (this.agentConfig.isolateMemory) profile.context += '\n\n' + this.chatMemory();
         }
         const moved = appendSystemPromptViaFile(this.buildArgs(null, freshModel, { directory, config: directory + '/mcp.json' }), directory + '/system-prompt.md');
         containerArgs = moved.args;
@@ -1136,7 +1136,7 @@ export class SessionProcess extends EventEmitter {
       this.containerAttempt = attempt;
     }
     const mcpConfigPath = this.writeMcpConfig();
-    this.tenantContextPath = this.writeTenantContextFile();
+    this.chatMemoryPath = this.writeChatMemoryFile();
 
     const effectiveMcpPath = (isAppAgent && mcpConfigPath) ? this.toContainerPath(mcpConfigPath) : mcpConfigPath;
     const containerRestartPath = isAppAgent ? this.toContainerPath(this.restartSignalPath) : this.restartSignalPath;
@@ -1236,8 +1236,8 @@ export class SessionProcess extends EventEmitter {
     const turnEnvironment: Record<string,string> = this.runtimeProfile?.claudeEffort
       ? { CLAUDE_CODE_EFFORT_LEVEL: this.runtimeProfile.claudeEffort } : {};
     // Isolate mode (#601): Claude Code's auto memory is one directory per cwd,
-    // loaded into every session there, so it would carry notes across tenants.
-    const isolateEnvironment: Record<string,string> = this.agentConfig.multiTenant?.enabled
+    // loaded into every session there, so it would carry notes across conversations.
+    const isolateEnvironment: Record<string,string> = this.agentConfig.isolateMemory
       ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {};
     const containerEnv: Record<string, string> = {
       HOME: os.homedir(),

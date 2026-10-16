@@ -97,13 +97,13 @@ function validateAgent(agent: Record<string, unknown>, index: number, orchestrat
   if (!agent.id || typeof agent.id !== 'string') {
     return `Agent at index ${index} is missing required field "id"`;
   }
-  if (agent.multiTenant !== undefined) {
-    if (!validEnabledOnly(agent.multiTenant)) return `agent '${agent.id}': multiTenant must be { "enabled": boolean }`;
+  if (agent.isolateMemory !== undefined) {
+    if (typeof agent.isolateMemory !== 'boolean') return `agent '${agent.id}': isolateMemory must be true or false`;
     // Claude Code keeps only the last --append-system-prompt-file, so one in
     // extraFlags would replace the conversation memory appended at spawn.
     const extraFlags = (agent.claude as { extraFlags?: unknown } | undefined)?.extraFlags;
-    if ((agent.multiTenant as { enabled: boolean }).enabled && Array.isArray(extraFlags) && extraFlags.some(flag => typeof flag === 'string' && (flag === '--append-system-prompt-file' || flag.startsWith('--append-system-prompt-file=')))) {
-      return `agent '${agent.id}': multiTenant cannot be combined with claude.extraFlags --append-system-prompt-file; use --append-system-prompt or move that text into AGENTS.md`;
+    if (agent.isolateMemory && Array.isArray(extraFlags) && extraFlags.some(flag => typeof flag === 'string' && (flag === '--append-system-prompt-file' || flag.startsWith('--append-system-prompt-file=')))) {
+      return `agent '${agent.id}': isolateMemory cannot be combined with claude.extraFlags --append-system-prompt-file; use --append-system-prompt or move that text into AGENTS.md`;
     }
   }
   const hasTelegram = agent.telegram && typeof agent.telegram === 'object';
