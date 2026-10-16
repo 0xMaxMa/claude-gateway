@@ -138,10 +138,10 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects
 
 ```json
 {
-  "root": "/home/getpod/projects",
+  "root": "/home/user/projects",
   "exists": true,
   "projects": [
-    { "name": "demo", "path": "/home/getpod/projects/demo", "modified_at": "2026-10-06T07:41:58.706Z", "is_git": true, "stack": "nextjs" }
+    { "name": "demo", "path": "/home/user/projects/demo", "modified_at": "2026-10-06T07:41:58.706Z", "is_git": true, "stack": "nextjs" }
   ]
 }
 ```
@@ -184,7 +184,7 @@ curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json"
 ```
 
 ```json
-{ "project": { "name": "demo", "path": "/home/getpod/projects/demo", "modified_at": "2026-10-06T07:41:58.686Z", "is_git": true, "stack": null } }
+{ "project": { "name": "demo", "path": "/home/user/projects/demo", "modified_at": "2026-10-06T07:41:58.686Z", "is_git": true, "stack": null } }
 ```
 
 If the name is already taken the response is `409 project_exists` and the
@@ -196,7 +196,7 @@ installed). It never includes git's output, which the gateway logs instead.
 
 ```json
 {
-  "project": { "name": "nogit", "path": "/home/getpod/projects/nogit", "modified_at": "2026-10-06T07:41:58.698Z", "is_git": false, "stack": null },
+  "project": { "name": "nogit", "path": "/home/user/projects/nogit", "modified_at": "2026-10-06T07:41:58.698Z", "is_git": false, "stack": null },
   "warning": "git init failed (ENOENT)"
 }
 ```
