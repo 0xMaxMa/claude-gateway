@@ -50,7 +50,7 @@ test('a running task interrupted by gateway shutdown is re-queued, not failed, a
 
   const interrupted = store.task(task.taskId)!;
   expect(interrupted.state).toBe('queued');
-  expect(interrupted.restartResumes).toBe(1);
+  expect(interrupted.restartResume).toMatchObject({ count: 1, pending: true });
   expect(interrupted.failure?.code).toBe('GATEWAY_SHUTDOWN');
   expect(notifications(task.taskId)).toBe(0);
   // The original user authorization travels with the same task.
@@ -70,7 +70,7 @@ test(`repeated shutdown interruptions stop after ${MAX_RESTART_RESUMES} automati
   const task = spawn();
   for (let i = 1; i <= MAX_RESTART_RESUMES; i++) {
     expect(interrupt(task.taskId).state).toBe('queued');
-    expect(store.task(task.taskId)!.restartResumes).toBe(i);
+    expect(store.task(task.taskId)!.restartResume?.count).toBe(i);
   }
   const final = interrupt(task.taskId);
   expect(final.state).toBe('failed');
@@ -112,7 +112,7 @@ test('a task waiting for user input keeps its question through shutdown instead 
   const after = tasks.finish(attempt.attemptId, attempt.generation, { type: 'stopped', failure: shutdownFailure() });
   expect(after.state).toBe('waiting_input');
   expect(after.pendingQuestion?.text).toBe('Which registry?');
-  expect(after.restartResumes).toBeUndefined();
+  expect(after.restartResume).toBeUndefined();
 });
 
 test('gateway-managed tasks and subagents are not re-queued by the shutdown path', () => {
@@ -132,9 +132,74 @@ test('a task that failed with GATEWAY_SHUTDOWN before this change is not resumed
   tasks.finish(attempt.attemptId, attempt.generation, { type: 'stopped', failure: shutdownFailure() });
   // Simulate a row persisted by an older gateway: terminal, with no resume bookkeeping.
   const legacy = store.task(task.taskId)!;
-  legacy.state = 'failed'; delete legacy.restartResumes;
+  legacy.state = 'failed'; delete legacy.restartResume;
   store.transaction(() => store.saveTask(legacy, legacy.stateVersion));
   recoverOrchestration(store);
   expect(store.task(task.taskId)!.state).toBe('failed');
   expect(tasks.claim(task.taskId)).toBeUndefined();
+});
+
+test('the resume cap counts interruptions of one revision; a new user revision starts a fresh budget', () => {
+  const task = spawn();
+  for (let i = 0; i < MAX_RESTART_RESUMES; i++) interrupt(task.taskId);
+  expect(store.task(task.taskId)!.restartResume?.count).toBe(MAX_RESTART_RESUMES);
+  const updated = tasks.update({ ...context, actionId: 'update' }, task.taskId, 1, 'Also publish the docs', 'when_ready');
+  expect(updated.revision).toBe(2);
+  expect(interrupt(task.taskId).state).toBe('queued');
+  expect(store.task(task.taskId)!.restartResume).toMatchObject({ count: 1, revision: 2 });
+});
+
+test('the last worker progress survives a second interruption that reported nothing new', () => {
+  const task = spawn();
+  const first = tasks.claim(task.taskId)!;
+  tasks.started(first.attemptId, first.generation);
+  tasks.progress(first.attemptId, first.generation, 'Tag v9.9.9 pushed; publish not started.');
+  tasks.finish(first.attemptId, first.generation, { type: 'stopped', failure: shutdownFailure() });
+  interrupt(task.taskId);
+  expect(store.task(task.taskId)!.restartResume).toMatchObject({ count: 2, pending: true, lastProgress: 'Tag v9.9.9 pushed; publish not started.' });
+});
+
+test('a resumed attempt that fails before starting does not keep the resume brief pending', () => {
+  const task = spawn();
+  interrupt(task.taskId);
+  const attempt = tasks.claim(task.taskId)!;
+  const failed = tasks.finish(attempt.attemptId, attempt.generation, { type: 'failed', failure: { code: 'WORKER_START_FAILED', message: 'spawn failed', observedAt: Date.now() } });
+  expect(failed.state).toBe('failed');
+  expect(failed.restartResume?.pending).toBe(false);
+});
+
+describe('a worker that outlived a crashed or killed gateway', () => {
+  const crash = () => {
+    const task = spawn(), attempt = tasks.claim(task.taskId)!;
+    tasks.started(attempt.attemptId, attempt.generation);
+    recoverOrchestration(store);
+    expect(store.task(task.taskId)!.state).toBe('needs_reconciliation');
+    return task;
+  };
+  const scheduler = (stopped: boolean) => {
+    const cleanup = jest.fn(async () => stopped);
+    const { driver, starts } = blockingDriver();
+    return { cleanup, starts, scheduler: new WorkerScheduler(tasks, { ...driver, cleanup }) };
+  };
+  test('is stopped, then its task resumes like a graceful shutdown', async () => {
+    const task = crash();
+    const { scheduler: s, cleanup, starts } = scheduler(true);
+    await s.tick(); await settle();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(store.task(task.taskId)!.restartResume).toMatchObject({ count: 1 });
+    expect(starts).toEqual([task.taskId]);
+    expect(notifications(task.taskId)).toBe(0);
+    await s.close();
+  });
+  test('stays in reconciliation and reports the blocker when it cannot be proven stopped', async () => {
+    const task = crash();
+    const { scheduler: s, starts } = scheduler(false);
+    await s.tick(); await s.tick(); await settle();
+    const after = store.task(task.taskId)!;
+    expect(after.state).toBe('needs_reconciliation');
+    expect(after.failure?.code).toBe('CLEANUP_UNCONFIRMED');
+    expect(starts).toEqual([]);
+    expect(notifications(task.taskId)).toBe(1);
+    await s.close();
+  });
 });

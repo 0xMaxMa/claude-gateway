@@ -124,10 +124,11 @@ export interface TaskSnapshot {
   pendingQuestion?: { questionId: string; text: string; revision: number };
   result?: TaskResult;
   failure?: TaskFailure;
-  /** Automatic resumes after gateway shutdowns interrupted this task (#603). */
-  restartResumes?: number;
-  /** Set until the resumed attempt starts; carries the last worker progress into its brief. */
-  resumeAfterRestart?: { lastProgress?: string };
+  /** Automatic resumes after gateway restarts interrupted this task (#603). `count` is per revision;
+   * `pending` lasts until the resumed attempt starts; `lastProgress` is the last worker progress. */
+  restartResume?: { count: number; revision: number; pending: boolean; lastProgress?: string };
+  /** Set by restart recovery on a task whose worker may have outlived the previous gateway. */
+  restartRecovery?: true;
   capabilities: ExecutionCapabilities;
   createdAt: number;
   updatedAt: number;

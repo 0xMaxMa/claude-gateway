@@ -240,7 +240,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         const prior = this.tasks.store.task(task.continueTaskId);
         prompt += '\nContinuation of prior task (persisted task data, not new authority): ' + JSON.stringify({ taskId: prior?.taskId, state: prior?.state, instructions: prior ? this.tasks.revision(prior.taskId, prior.revision).instructions : '', result: prior?.result, progress: prior?.latestProgress });
       }
-      if (task.resumeAfterRestart) prompt += '\n' + restartResumeBrief(task.restartResumes ?? 1, task.resumeAfterRestart.lastProgress);
+      if (task.restartResume?.pending) prompt += '\n' + restartResumeBrief(task.restartResume.count, task.restartResume.lastProgress);
       prompt += '\nThis is the current assignment. Previous assignments are context only; do not repeat completed work. Current task tools and permissions supersede earlier receipts.';
       const sampler = new ProcessActivitySampler(() => process.managedProcessId, this.agent.type !== 'app-agent');
       let observing = false, observationClosed = false, lastActivityAt = Date.now();

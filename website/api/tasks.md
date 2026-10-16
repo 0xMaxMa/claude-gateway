@@ -106,7 +106,7 @@ App-Agent cold boot: registered orchestration App Agents defer admission until t
 
 ## Restart resume
 
-A worker task interrupted by a gateway shutdown is stored as `queued` with `failure.code` `GATEWAY_SHUTDOWN` and an incremented `restartResumes`, and no failure notification is sent. After the restart it runs as a new attempt of the same task with its original authorization; the attempt is told to verify and report existing progress before finishing the remaining steps. After three automatic resumes, the next interruption ends the task as `failed` with `GATEWAY_SHUTDOWN_REPEATED`. Cancellation, pending questions, subagents and gateway-managed targets keep their existing behavior. Tasks that failed with `GATEWAY_SHUTDOWN` before this behavior was installed are not resumed.
+A worker task interrupted by a gateway shutdown is stored as `queued` with `failure.code` `GATEWAY_SHUTDOWN` and `restartResume` (`count`, `revision`, `pending`, `lastProgress`); no failure notification is sent. After a crash or forced kill, restart recovery first stops the previous worker process; when that is confirmed the task is re-queued the same way, otherwise it stays `needs_reconciliation` with `CLEANUP_UNCONFIRMED`. The resumed attempt keeps the original authorization and is told to verify and report existing progress, using the last worker progress as a hint, before finishing the remaining steps. Each revision allows three automatic resumes; the next interruption ends the task as `failed` with `GATEWAY_SHUTDOWN_REPEATED`. Cancellation, pending questions, subagents and gateway-managed targets keep their existing behavior. Tasks that failed with `GATEWAY_SHUTDOWN` before this behavior was installed are not resumed.
 
 ## Report retries
 

@@ -1,5 +1,12 @@
+import type { TaskSnapshot } from './types';
+
 /** Automatic resumes after gateway shutdowns per task; one more interruption reports a blocker. */
 export const MAX_RESTART_RESUMES = 3;
+
+/** Gateway-managed tasks recover through their controller; a subagent is re-spawned by its resumed parent. */
+export function restartResumable(task: Pick<TaskSnapshot, 'gatewayTarget' | 'parentTaskId'>): boolean {
+  return !task.gatewayTarget && !task.parentTaskId;
+}
 
 /** Worker brief for an attempt that resumes a task interrupted by a gateway shutdown. */
 export function restartResumeBrief(resumes: number, lastProgress?: string): string {
@@ -12,5 +19,5 @@ export function restartResumeBrief(resumes: number, lastProgress?: string): stri
 
 /** Report-turn rule: work interrupted by a restart is resumed by the gateway, never by asking the user. */
 export const INTERRUPTED_WORK_REPORT_RULE = 'Never ask the user whether to continue work they already authorized, and never tell them to type "continue" (or "ต่อ") so that work resumes. ' +
-  `The gateway resumes a task interrupted by a gateway shutdown automatically, up to ${MAX_RESTART_RESUMES} times; report such a task as resuming. ` +
-  'If it ended with GATEWAY_SHUTDOWN_REPEATED, report the verified progress and that repeated gateway shutdowns are the blocker.';
+  'A task the gateway re-queued after a restart (state queued with restartResume.pending) resumes automatically; report it as resuming. Do not claim that any other task resumes. ' +
+  'For a task that ended with GATEWAY_SHUTDOWN_REPEATED or CLEANUP_UNCONFIRMED, report the verified progress and that concrete blocker.';

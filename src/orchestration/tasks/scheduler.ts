@@ -74,6 +74,21 @@ export class WorkerScheduler {
           await this.driver.release?.(taskId).catch(this.reportError);
         }
       }
+      for (const row of this.tasks.store.all("SELECT id FROM tasks WHERE state='needs_reconciliation' AND json_extract(snapshot_json,'$.restartRecovery')=1")) {
+        const taskId = String(row.id);
+        if (this.closed || this.active.has(taskId) || this.starting.has(taskId)) continue;
+        const attempt = this.tasks.store.attempt(this.tasks.store.task(taskId)!.activeAttemptId!);
+        if (!attempt) continue;
+        let stopped = false;
+        try { stopped = await this.driver.cleanup?.(attempt) ?? false; } catch (error) { this.reportError(error); }
+        const current = this.tasks.store.task(taskId);
+        if (current?.state !== 'needs_reconciliation' || !current.restartRecovery || current.activeAttemptId !== attempt.attemptId) continue;
+        this.tasks.resolveRestartRecovery(attempt.attemptId, attempt.generation, stopped);
+        if (stopped) {
+          this.uncertainReservations.get(taskId)?.(); this.uncertainReservations.delete(taskId);
+          await this.driver.release?.(taskId).catch(this.reportError);
+        }
+      }
       if (this.closed) return;
       const ceiling = Number(this.tasks.store.get('SELECT COALESCE(MAX(rowid),0) n FROM tasks')!.n);
       let cursor: {createdAt: number; id: string} | undefined;
