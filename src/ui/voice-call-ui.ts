@@ -201,7 +201,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     // One connect at a time: a hide, show, hang-up or newer connect discards the pending one and its reconnect timer.
     var connecting = 0, reconnectTimer;
     // The user stopped speaking: show Thinking at once, through the gateway's commit and
-    // merge window, until it answers, reports no speech, or the user speaks again.
+    // merge window and the agent's turn, until it answers, reports no speech, or the user speaks again.
     var awaitingReply = false;
     // The call clock: set when a socket first listens, from the server's elapsed time
     // on a rejoin, so it keeps counting across reconnects like a phone call.
@@ -279,7 +279,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
           if (message.state === 'muted') { uplink.reset(); awaitingReply = false; state('Muted'); }
           break;
         case 'stt.partial': case 'stt.segment': show('you', message.pending_text || message.text || ''); break;
-        case 'stt.final': show('you', message.text); awaitingReply = false; state('Thinking'); break;
+        case 'stt.final': show('you', message.text); awaitingReply = true; state('Thinking'); break;
         case 'utterance.accepted': state('Thinking'); break;
         case 'response.text': if (message.text) show('reply', voiceCallReplyText(message.text)); break;
         case 'playback.start': epoch = message.epoch; flushPlayback(); awaitingReply = false; playbackPhase = message.phase; audioHeard = false; state('Speaking'); break;

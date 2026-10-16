@@ -685,6 +685,20 @@ describe('call page', () => {
       expect(element('call').className).toBe('call speaking');
     });
 
+    test('with no merge window the next utterance opens after the final words, and the chip still shows Thinking until the reply plays', async () => {
+      const { element, sockets, hear } = await openPage();
+      sockets[0].open(); sockets[0].receive(LISTENING);
+      hear(0.003, 400); hear(0.2, 600); hear(0.003, 400);
+      expect(element('state').textContent).toBe('Thinking');
+      // mergeWindowMs 0: the gateway admits the words at once, then listens for the next utterance.
+      sockets[0].receive({ type: 'stt.final', utterance_id: '0'.repeat(32), text: 'Hello' });
+      sockets[0].receive({ type: 'utterance.accepted', utterance_id: '0'.repeat(32), input_id: 'i' });
+      sockets[0].receive(NEXT);
+      expect(element('call').className).toBe('call thinking');
+      sockets[0].receive({ type: 'playback.start', epoch: 1, phase: 'response' });
+      expect(element('call').className).toBe('call speaking');
+    });
+
     test('speaking again before the answer returns to Listening; sound without words does too', async () => {
       const { element, sockets, hear } = await openPage();
       sockets[0].open(); sockets[0].receive(LISTENING);
