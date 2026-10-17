@@ -319,3 +319,45 @@ describe('T29: agentId existence validation', () => {
     expect(res.status).toBe(201);
   });
 });
+
+describe('#609: cron policy errors are 403', () => {
+  function makePolicyApp(agent: Partial<import('../../src/types').AgentConfig>) {
+    const tmp = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'cron-router-609-'));
+    const configs = new Map([['agent-1', { id: 'agent-1', ...agent } as import('../../src/types').AgentConfig]]);
+    const manager = new CronManager({ storePath: `${tmp}/crons.json`, runsDir: `${tmp}/runs` }, new Map(), configs, makeLogger());
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createCronRouter(manager, apiKeys));
+    return { app, manager };
+  }
+  const body = { agentId: 'agent-1', name: 'j', schedule: '0 * * * *' };
+
+  it('refuses a command job for an app agent with 403', async () => {
+    const { app, manager } = makePolicyApp({ type: 'app-agent' });
+    const res = await request(app).post('/api/v1/crons').set('Authorization', 'Bearer admin-key').send({ ...body, command: 'id' });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/app agent: type=command/);
+    const ok = await request(app).post('/api/v1/crons').set('Authorization', 'Bearer admin-key').send({ ...body, type: 'agent', prompt: 'p' });
+    expect(ok.status).toBe(201);
+    const upd = await request(app).put(`/api/v1/crons/${ok.body.job.id}`).set('Authorization', `Bearer ${VALID_KEY}`).send({ type: 'command', command: 'id' });
+    expect(upd.status).toBe(403);
+    manager.stop();
+  });
+
+  it('refuses any job for an isolated agent with 403, even for an admin-scoped key', async () => {
+    const { app, manager } = makePolicyApp({ isolateMemory: true });
+    for (const key of [VALID_KEY, 'admin-key']) {
+      const res = await request(app).post('/api/v1/crons').set('Authorization', `Bearer ${key}`).send({ ...body, type: 'agent', prompt: 'p' });
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/isolate_memory/);
+    }
+    manager.stop();
+  });
+
+  it('still accepts a command job for a plain agent', async () => {
+    const { app, manager } = makePolicyApp({});
+    const res = await request(app).post('/api/v1/crons').set('Authorization', `Bearer ${VALID_KEY}`).send({ ...body, command: 'id' });
+    expect(res.status).toBe(201);
+    manager.stop();
+  });
+});

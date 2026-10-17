@@ -25,7 +25,23 @@ jest.mock('child_process', () => ({
   }),
 }));
 
+// A conversation sandbox (#609) is a docker container; only its name matters here.
+jest.mock('../../src/apps/conversation-sandbox', () => {
+  const actual = jest.requireActual('../../src/apps/conversation-sandbox');
+  const name = (agent: any, conversation: any) => actual.sandboxContainerName(agent, conversation);
+  return { ...actual, sandboxPool: { ensure: jest.fn(async (agent: any, conversation: any) => name(agent, conversation)), acquire: jest.fn(async (agent: any, conversation: any) => ({ container: name(agent, conversation), release: jest.fn() })) } };
+});
+jest.mock('../../src/orchestration/container', () => ({
+  ...jest.requireActual('../../src/orchestration/container'),
+  containerNode: jest.fn(async () => ''),
+}));
+jest.mock('../../src/config/claude-settings', () => ({
+  ...jest.requireActual('../../src/config/claude-settings'),
+  readClaudeSettings: () => ({ mcpServers: { 'operator-fs': { command: 'fs-server' } } }),
+}));
+
 import { SessionProcess } from '../../src/session/process';
+import { sandboxContainerName } from '../../src/apps/conversation-sandbox';
 import { SessionStore } from '../../src/session/store';
 import { chatMemoryDir } from '../../src/agent/workspace-loader';
 import { AgentConfig, GatewayConfig } from '../../src/types';
@@ -106,6 +122,28 @@ describe('channel sessions', () => {
     expect(env.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe('1');
   });
 
+  it('locks channel tools to this chat and its media directory', async () => {
+    const env = mcpEnv((await start(new SessionProcess('s-a', 'telegram', agent(true), gateway, store, '111'))).args);
+    expect(env.GATEWAY_ORIGIN_CHAT_ID).toBe('111');
+    expect(env.GATEWAY_SESSION_MEDIA_DIR).toBe(path.join(tmpDir, 'agent', 'media', 'telegram-111'));
+  });
+
+  it("injects none of the operator's MCP servers or connectors (default deny)", async () => {
+    const isolated = JSON.parse(fs.readFileSync((await start(new SessionProcess('s-a', 'telegram', agent(true), gateway, store, '111'))).args.find((_, i, a) => a[i - 1] === '--mcp-config')!, 'utf8'));
+    expect(Object.keys(isolated.mcpServers)).toEqual(['gateway']);
+    const shared = JSON.parse(fs.readFileSync((await start(new SessionProcess('s-b', 'telegram', agent(), gateway, store, '222'))).args.find((_, i, a) => a[i - 1] === '--mcp-config')!, 'utf8'));
+    expect(Object.keys(shared.mcpServers)).toContain('operator-fs');
+  });
+
+  it('hands an isolated agent only a non-admin API key scoped to it', async () => {
+    const keyed = (keys: any[]): GatewayConfig => ({ gateway: { ...gateway.gateway, api: { keys } }, agents: [] });
+    const admin = { key: 'k-admin', admin: true, agents: '*' }, wildcard = { key: 'k-all', agents: '*' }, scoped = { key: 'k-bot', agents: ['shared-bot'] };
+    const key = async (config: AgentConfig, keys: any[]) => mcpEnv((await start(new SessionProcess(`k-${keys.length}-${config.isolateMemory ? 1 : 0}`, 'telegram', config, keyed(keys), store, '111'))).args).GATEWAY_API_KEY;
+    expect(await key(agent(true), [admin, wildcard, scoped])).toBe('k-bot');
+    expect(await key(agent(true), [admin, wildcard])).toBe('');
+    expect(await key(agent(), [admin, wildcard])).toBe('k-admin');
+  });
+
   it('leaves an agent without isolateMemory unchanged', async () => {
     const { args, env } = await start(new SessionProcess('s-a', 'telegram', agent(), gateway, store, '111'));
     expect(args).not.toContain('--append-system-prompt-file');
@@ -144,28 +182,83 @@ describe('app agent, classic container session', () => {
   function appAgent(isolateMemory?: boolean): AgentConfig {
     return { ...agent(isolateMemory), id: 'app-bot', type: 'app-agent', container: 'demo-agent' };
   }
-  const inContainer = (file: string) => path.join(workspace, path.relative('/workspace', file));
 
-  it("hands the CLI the chat memory file's container path, naming container paths to write", async () => {
+  const containerNode = () => require('../../src/orchestration/container').containerNode as jest.Mock;
+
+  it("executes in its conversation's own sandbox, never the shared app container (#609)", async () => {
+    const a = await start(new SessionProcess('c-a', 'telegram', appAgent(true), gateway, store, '111'));
+    const b = await start(new SessionProcess('c-b', 'telegram', appAgent(true), gateway, store, '222'));
+    const target = (args: string[]) => args.find(arg => arg.startsWith('demo-agent'));
+    expect(a.args[0]).toBe('exec');
+    expect(target(a.args)).toBe(sandboxContainerName(appAgent(true), { source: 'telegram', chatId: '111' }));
+    expect(target(b.args)).toBe(sandboxContainerName(appAgent(true), { source: 'telegram', chatId: '222' }));
+    expect(target(a.args)).not.toBe(target(b.args));
+  });
+
+  it('holds its sandbox for the life of the process and lets go when it stops', async () => {
+    const acquire = require('../../src/apps/conversation-sandbox').sandboxPool.acquire as jest.Mock;
+    acquire.mockClear();
+    const sp = new SessionProcess('c-a', 'telegram', appAgent(true), gateway, store, '111');
+    await start(sp);
+    const lease = await acquire.mock.results[0].value;
+    expect(lease.release).not.toHaveBeenCalled();
+    await sp.stop();
+    expect(lease.release).toHaveBeenCalled();
+  });
+
+  it('lets go of a sandbox taken by a spawn that a stop() abandoned', async () => {
+    const acquire = require('../../src/apps/conversation-sandbox').sandboxPool.acquire as jest.Mock;
+    const release = jest.fn();
+    let grant!: () => void;
+    acquire.mockImplementationOnce(() => new Promise(resolve => { grant = () => resolve({ container: 'demo-agent-c-' + 'b'.repeat(20), release }); }));
+    const sp = new SessionProcess('c-a', 'telegram', appAgent(true), gateway, store, '111');
+    const starting = sp.start().catch(() => {});
+    await new Promise(resolve => setImmediate(resolve));
+    const stopping = sp.stop();
+    grant();
+    await Promise.all([starting, stopping]);
+    expect(release).toHaveBeenCalled();
+  });
+
+  it("writes the chat memory into the sandbox's own /tmp, not the shared workspace", async () => {
+    containerNode().mockClear();
     const { args } = await start(new SessionProcess('c-a', 'telegram', appAgent(true), gateway, store, '111'));
-    expect(args[0]).toBe('exec');
     const file = args[args.indexOf('--append-system-prompt-file') + 1];
-    expect(file).toBe('/workspace/.sessions/c-a/chat-memory.md');
-    const prompt = fs.readFileSync(inContainer(file), 'utf8');
+    expect(file).toBe('/tmp/gateway-session-c-a/chat-memory.md');
+    const [container, , [target], prompt] = containerNode().mock.calls[0];
+    expect(container).toBe(sandboxContainerName(appAgent(true), { source: 'telegram', chatId: '111' }));
+    expect(target).toBe(file);
     expect(prompt).toContain('CHAT-A-MEMORY');
     expect(prompt).not.toContain('CHAT-B');
     expect(prompt).toContain(path.join(chatMemoryDir('/workspace', 'telegram', '111'), 'MEMORY.md'));
     expect(prompt).not.toContain(workspace);
+    expect(fs.existsSync(path.join(workspace, '.sessions', 'c-a', 'chat-memory.md'))).toBe(false);
+  });
+
+  it('puts no API key, channel token or gateway address within its reach', async () => {
+    const before = process.env.GATEWAY_API_URL;
+    process.env.GATEWAY_API_URL = 'http://gateway.example:10850';
+    try {
+      const { args } = await start(new SessionProcess('c-a', 'telegram', appAgent(true), gateway, store, '111'));
+      const flags = args.slice(0, args.findIndex(arg => arg.startsWith('demo-agent')));
+      expect(args).not.toContain('--mcp-config');
+      expect(flags).not.toContain('TELEGRAM_BOT_TOKEN');
+      expect(flags.join(' ')).not.toContain('GATEWAY_API_URL');
+      expect(fs.existsSync(path.join(workspace, '.sessions', 'c-a', 'mcp-config.json'))).toBe(false);
+    } finally {
+      if (before === undefined) delete process.env.GATEWAY_API_URL; else process.env.GATEWAY_API_URL = before;
+    }
   });
 
   it("turns auto memory off inside the container, where every conversation's session shares /workspace", async () => {
     const { args } = await start(new SessionProcess('c-a', 'telegram', appAgent(true), gateway, store, '111'));
-    expect(args.slice(0, args.indexOf('demo-agent'))).toContain('CLAUDE_CODE_DISABLE_AUTO_MEMORY=1');
+    expect(args.slice(0, args.findIndex(arg => arg.startsWith('demo-agent')))).toContain('CLAUDE_CODE_DISABLE_AUTO_MEMORY=1');
   });
 
   it('stays shared without the app opting in, even next to an isolated host agent', async () => {
     await start(new SessionProcess('h-a', 'telegram', agent(true), gateway, store, '111'));
     const { args } = await start(new SessionProcess('c-a', 'telegram', appAgent(), gateway, store, '111'));
+    expect(args).toContain('demo-agent');
     expect(args).not.toContain('--append-system-prompt-file');
     expect(args.join(' ')).not.toContain('CLAUDE_CODE_DISABLE_AUTO_MEMORY');
   });

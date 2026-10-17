@@ -31,20 +31,27 @@ function declaredIsolateMemory(entry: AppEntry): true | undefined {
   return entry.agentDeclaration?.isolateMemory ? true : undefined;
 }
 
+/** The `disableArchive` an app Agent's config entry carries: its app.yaml declaration's (#609). */
+function declaredDisableArchive(entry: AppEntry): true | undefined {
+  return entry.agentDeclaration?.disableArchive ? true : undefined;
+}
+
 /**
  * Gives each app Agent that reconcileAgents() will register the isolateMemory
- * its app.yaml declares (#601). Gateway start applies it to the loaded config
+ * (#601) and disableArchive (#609) its app.yaml declares. Gateway start applies it to the loaded config
  * before admitting agents: reconcile rewrites config.json only after they
  * started, and the config watcher's baseline is the loaded config, so a
  * differing value on disk (a hand edit) would otherwise stay in effect.
  */
-export function applyDeclaredIsolateMemory(agents: AgentConfig[], apps: AppEntry[]): void {
+export function applyDeclaredMemoryModes(agents: AgentConfig[], apps: AppEntry[]): void {
   for (const app of apps) {
     if (app.status !== 'running' || !app.agentDeclaration || !app.agentPaths) continue;
     const agent = agents.find((a) => a.id === app.agentDeclaration!.name && a.type === 'app-agent');
     if (!agent) continue;
     if (declaredIsolateMemory(app)) agent.isolateMemory = true;
     else delete agent.isolateMemory;
+    if (declaredDisableArchive(app)) agent.disableArchive = true;
+    else delete agent.disableArchive;
   }
 }
 
@@ -362,6 +369,7 @@ export class AgentManager {
         // dropped when the config is written, so a release that stops declaring
         // it turns the mode off instead of keeping a stale value.
         isolateMemory: declaredIsolateMemory(entry),
+        disableArchive: declaredDisableArchive(entry),
       });
     } catch (err) {
       // Rollback workspace symlink if config write fails to avoid orphaned symlink

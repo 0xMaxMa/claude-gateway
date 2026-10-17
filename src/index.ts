@@ -43,7 +43,7 @@ import { sweepOrphanedReceivers } from './utils/orphan-receivers';
 import { registerShutdownSignals } from './shutdown-signals';
 import { RegistryClient } from './apps/registry-client';
 import { AppInstaller } from './apps/installer';
-import { AgentManager, applyDeclaredIsolateMemory } from './apps/agent-manager';
+import { AgentManager, applyDeclaredMemoryModes } from './apps/agent-manager';
 import { SocketServer, parseTimeoutMs } from './apps/socket-server';
 import { parseAppYaml, AppYamlService, AppYamlScript } from './apps/compose-generator';
 import { claimSupervisorEnv, classifyInvocation, resolveInvocationSignals } from './cli/command-names';
@@ -174,6 +174,8 @@ async function startAgent(
   // Isolated memory mode (#601): the shared CLAUDE.md leaves out sender data.
   // Fixed for the process lifetime: the reload policy makes the field restart-only.
   const isolateMemory = agentConfig.isolateMemory === true;
+  // No searchable archive (#609), so CLAUDE.md must not point at its tools. Restart-only too.
+  const disableArchive = agentConfig.disableArchive === true;
   // Background learners read every conversation into shared state, so they stay off.
   const offWhenIsolated = <T extends { enabled?: boolean }>(cfg: T | undefined): T | undefined => isolateMemory ? Object.assign({}, cfg, { enabled: false }) : cfg;
 
@@ -230,6 +232,7 @@ async function startAgent(
     workspace = await loadWorkspace(agentConfig.workspace, {
       coreShrink,
       isolateMemory,
+      disableArchive,
       mcpToolsDir,
       sharedSkillsDir,
       logger,
@@ -322,6 +325,8 @@ async function startAgent(
       // one MEMORY.md/USER.md (and may promote to the shared KB), so it cannot keep
       // conversations apart; it stays off for such an agent.
       agentCfg: offWhenIsolated(agentConfig.dreaming),
+      // No archive (#609): compaction, the staleness GC and shared-KB promotion stay off.
+      disableArchive,
       gatewayTimezone: gatewayConfig.gateway.timezone,
       logger,
       // K4 auto-applier net-negative gate uses the same soft budgets as compose.
@@ -331,13 +336,14 @@ async function startAgent(
       // Opt-in (=== true) to match compose; the template ships true so the migrator
       // turns it on for existing configs, and it stays off for anything pre-1.0.25
       // that hasn't merged the key yet (exact prior behavior).
-      writeRouting: memoryBudget.writeRouting === true,
+      // Routed notes are found through memory_search, so routing is off without the archive (#609).
+      writeRouting: memoryBudget.writeRouting === true && !disableArchive,
       episodicArchiveDir: memoryBudget.episodicArchiveDir,
       // planning-67: back the embedded auto-migrate route-out with a print-only
       // reviewer spawn (same model as the dreaming reviewer). Only when routing is
       // on; the manager gates it further on auto mode + over-budget + autoRouteOut.
       routeOutFn:
-        memoryBudget.writeRouting === true
+        memoryBudget.writeRouting === true && !disableArchive
           ? makeRouteOut(
               makeClaudeSpawn(
                 resolveDreamingConfig(agentConfig.dreaming, gatewayConfig.gateway.dreaming, gatewayConfig.gateway.timezone)
@@ -386,7 +392,7 @@ async function startAgent(
     const next=JSON.stringify([memoryBudget,agentConfig.knowledge,gatewayConfig.gateway.knowledge]);
     if(next===composePolicy)return;composePolicy=next;
     composeReload=composeReload.then(async()=>{
-      const updated=await loadWorkspace(agentConfig.workspace,{mcpToolsDir,sharedSkillsDir,logger,memoryBudget,coreShrink,isolateMemory});
+      const updated=await loadWorkspace(agentConfig.workspace,{mcpToolsDir,sharedSkillsDir,logger,memoryBudget,coreShrink,isolateMemory,disableArchive});
       await fs.promises.writeFile(path.join(agentConfig.workspace,'CLAUDE.md'),updated.systemPrompt,'utf8');
       if(updated.skillRegistry)runner.setSkillRegistry(updated.skillRegistry);
       await runner.restartOrDefer({skipBusy:true,deferIdle:true});
@@ -415,6 +421,7 @@ async function startAgent(
         memoryBudget,
         coreShrink,
         isolateMemory,
+        disableArchive,
       });
       // Always rewrite CLAUDE.md so the next spawn picks up the new content.
       await fs.promises.writeFile(
@@ -475,6 +482,7 @@ async function startAgent(
           memoryBudget,
           coreShrink,
           isolateMemory,
+          disableArchive,
         });
         if (updated.skillRegistry) {
           runner.setSkillRegistry(updated.skillRegistry);
@@ -793,8 +801,8 @@ async function main(): Promise<void> {
     globalLogger.warn('App registry unavailable before Agent admission', {error: String(error)});
     return [];
   });
-  // Admit app Agents in the isolate mode their app.yaml declares, as the reconcile below writes it (#601).
-  applyDeclaredIsolateMemory(config.agents, registeredApps);
+  // Admit app Agents in the isolate (#601) and archive (#609) modes their app.yaml declares, as the reconcile below writes them.
+  applyDeclaredMemoryModes(config.agents, registeredApps);
   const restoringAgentIds = new Set(registeredApps.filter(entry => entry.status === 'running').map(entry => entry.agentDeclaration?.name));
   const deferredAppAgents = new Set<string>();
 
@@ -840,6 +848,7 @@ async function main(): Promise<void> {
             config.gateway.knowledge?.archive,
           ).enabled,
           isolateMemory: agentConfig.isolateMemory === true,
+          disableArchive: agentConfig.disableArchive === true,
         });
         // A runner replaced meanwhile (an update toggling isolate mode, #601)
         // composed its own CLAUDE.md; this one has the old mode's sections.
@@ -1029,9 +1038,9 @@ async function main(): Promise<void> {
         globalLogger.info('Configuration value applied',{agentId:change.agentId,field:change.field,lifecycle:change.reloadMode});
       }catch(err){globalLogger.error('Configuration application failed',{agentId:change.agentId,field:change.field,error:(err as Error).message});}
     }
-    // Isolate mode (#601) is fixed for a runner's lifetime; an edit, or an app
-    // update that toggles its app.yaml isolate_memory, replaces the runner once idle.
-    for(const id of new Set(changes.filter(c=>c.agentId&&c.field==='isolateMemory').map(c=>c.agentId)))void agentLifecycle.reconcile(id);
+    // Isolate mode (#601) and disableArchive (#609) are fixed for a runner's lifetime; an edit, or an app
+    // update that toggles its app.yaml isolate_memory/disable_archive, replaces the runner once idle.
+    for(const id of new Set(changes.filter(c=>c.agentId&&(c.field==='isolateMemory'||c.field==='disableArchive')).map(c=>c.agentId)))void agentLifecycle.reconcile(id);
     if(changes.some(c=>!c.agentId&&c.field.startsWith('gateway.processLimits')))gatewayCapacity(config);
     if(changes.some(c=>!c.agentId&&c.hotReloadable&&(c.field.startsWith('gateway.app')||c.field==='gateway.timezone'))){
       appInstaller.configurePolicies(config.gateway.appHousekeeping,config.gateway.appBackup,config.gateway.appRestore,config.gateway.timezone);
@@ -1063,7 +1072,10 @@ async function main(): Promise<void> {
       }
     },
     error: (id, error) => globalLogger.error('Agent lifecycle reconciliation deferred', { agentId: id, error: String(error) }),
-    stale: desired => Boolean(desired.isolateMemory) !== Boolean(agentConfigs.get(desired.id)?.isolateMemory),
+    stale: desired => {
+      const running = agentConfigs.get(desired.id);
+      return Boolean(desired.isolateMemory) !== Boolean(running?.isolateMemory) || Boolean(desired.disableArchive) !== Boolean(running?.disableArchive);
+    },
   });
   const removalTimer = setInterval(() => agentLifecycle.retry(), 5000);
   removalTimer.unref();

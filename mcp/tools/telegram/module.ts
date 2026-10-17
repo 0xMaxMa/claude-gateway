@@ -9,6 +9,8 @@ import * as os from 'os';
 import { migrateAccess, defaultAccess } from './pure';
 import { chunkText, htmlToPlain, parseRepliedTurnId } from './typing';
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
+import { assertOriginChat, isolateMediaDir, isolateMode, resolveIsolateMediaPath } from '../shared/isolate';
+import { chatHasAttachment } from './attachment-log';
 import type {
   ChannelModule,
   ChannelCapabilities,
@@ -281,22 +283,26 @@ export class TelegramModule implements ChannelModule {
   }
 
   private assertAllowedChat(chat_id: string): void {
+    assertOriginChat(chat_id);
     const access = this.readAccessFile();
     if (access.allowFrom.includes(chat_id)) return;
     if (access.groupAllowlist.includes(chat_id)) return;
     throw new Error(`chat ${chat_id} is not allowlisted`);
   }
 
-  private assertSendable(f: string): void {
+  /** The path to send for `f`, refusing channel state (and, isolated, files outside the session media). */
+  private sendablePath(f: string): string {
+    const file = resolveIsolateMediaPath(f);
     let real: string, stateReal: string;
     try {
-      real = fs.realpathSync(f);
+      real = fs.realpathSync(file);
       stateReal = fs.realpathSync(this.stateDir);
-    } catch { return; }
+    } catch { return file; }
     const inbox = path.join(stateReal, 'inbox');
     if (real.startsWith(stateReal + path.sep) && !real.startsWith(inbox + path.sep)) {
       throw new Error(`refusing to send channel state: ${f}`);
     }
+    return file;
   }
 
   private async handleReply(args: Record<string, unknown>): Promise<McpToolResult> {
@@ -336,13 +342,13 @@ export class TelegramModule implements ChannelModule {
       }
     }
 
-    for (const f of files) {
-      this.assertSendable(f);
-      const st = fs.statSync(f);
+    const paths = files.map((f) => this.sendablePath(f));
+    paths.forEach((p, i) => {
+      const st = fs.statSync(p);
       if (st.size > MAX_ATTACHMENT_BYTES) {
-        throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);
+        throw new Error(`file too large: ${files[i]} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);
       }
-    }
+    });
 
     const access = this.readAccessFile();
     const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT));
@@ -374,7 +380,7 @@ export class TelegramModule implements ChannelModule {
       throw new Error(`reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent: ${msg}`);
     }
 
-    for (const f of files) {
+    for (const f of paths) {
       const ext = path.extname(f).toLowerCase();
       const input = new InputFile(f);
       const opts = reply_to != null && replyMode !== 'off'
@@ -417,6 +423,16 @@ export class TelegramModule implements ChannelModule {
 
   private async handleDownload(args: Record<string, unknown>): Promise<McpToolResult> {
     const file_id = args.file_id as string;
+    // A file_id carries no chat, so isolate mode takes only one the receiver
+    // logged for this conversation's chat, and saves it to the session's media.
+    let saveDir = this.inboxDir;
+    if (isolateMode()) {
+      const origin = process.env.GATEWAY_ORIGIN_CHAT_ID ?? '';
+      if (!origin || !chatHasAttachment(this.stateDir, origin, file_id)) {
+        throw new Error('isolate mode: this file_id was not sent in this conversation');
+      }
+      saveDir = isolateMediaDir();
+    }
     const token = this.getToken()!;
     const file = await this.bot.api.getFile(file_id);
     if (!file.file_path) throw new Error('Telegram returned no file_path — file may have expired');
@@ -428,8 +444,8 @@ export class TelegramModule implements ChannelModule {
     const rawExt = file.file_path.includes('.') ? file.file_path.split('.').pop()! : 'bin';
     const ext = rawExt.replace(/[^a-zA-Z0-9]/g, '') || 'bin';
     const uniqueId = (file.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'dl';
-    const dlPath = path.join(this.inboxDir, `${Date.now()}-${uniqueId}.${ext}`);
-    fs.mkdirSync(this.inboxDir, { recursive: true });
+    const dlPath = path.join(saveDir, `${Date.now()}-${uniqueId}.${ext}`);
+    fs.mkdirSync(saveDir, { recursive: true });
     fs.writeFileSync(dlPath, buf);
     return { content: [{ type: 'text', text: dlPath }] };
   }

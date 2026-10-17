@@ -34,7 +34,8 @@ export class MemoryModule implements ToolModule {
     // Available whenever the agent's workspace dir is known (same gate as skills).
     // Never in isolated memory mode (#601): the archive is one index over
     // every conversation's notes, so a search could return another conversation's data.
-    return Boolean(process.env.GATEWAY_WORKSPACE_DIR) && !process.env.GATEWAY_ISOLATE_MEMORY;
+    // Nor when the agent turns the archive off (#609).
+    return Boolean(process.env.GATEWAY_WORKSPACE_DIR) && !process.env.GATEWAY_ISOLATE_MEMORY && !process.env.GATEWAY_DISABLE_ARCHIVE;
   }
 
   getTools(): McpToolDefinition[] {

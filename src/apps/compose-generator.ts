@@ -60,6 +60,8 @@ export interface AppYamlAgentService {
   name: string;
   /** Per-conversation memory isolation for this app's agent (#601). */
   isolate_memory?: boolean;
+  /** Turns off the searchable memory archive and its tools for this app's agent (#609). */
+  disable_archive?: boolean;
 }
 
 export interface AppYaml {
@@ -100,6 +102,8 @@ export interface AgentDeclaration {
   name: string;
   /** Set only when app.yaml opts the agent into isolate mode; written to its `isolateMemory`. */
   isolateMemory?: true;
+  /** Set only when app.yaml turns the archive off; written to its `disableArchive`. */
+  disableArchive?: true;
 }
 
 export interface GeneratedKey {
@@ -355,7 +359,7 @@ export function generateCompose(
   for (const [svcName, svcDef] of Object.entries(appYaml.services)) {
     if (svcName === 'agent') {
       const agentSvc = svcDef as AppYamlAgentService;
-      result.agentDeclaration = { path: agentSvc.path, name: agentSvc.name, ...(agentSvc.isolate_memory === true ? { isolateMemory: true } : {}) };
+      result.agentDeclaration = { path: agentSvc.path, name: agentSvc.name, ...(agentSvc.isolate_memory === true ? { isolateMemory: true } : {}), ...(agentSvc.disable_archive === true ? { disableArchive: true } : {}) };
       continue;
     }
 
@@ -640,16 +644,19 @@ function validateAgentServiceDecl(svcDef: unknown): void {
     throw new Error('Agent service declaration must be an object');
   }
   const obj = svcDef as Record<string, unknown>;
-  const allowed = new Set(['path', 'name', 'isolate_memory']);
+  const allowed = new Set(['path', 'name', 'isolate_memory', 'disable_archive']);
   for (const k of Object.keys(obj)) {
     if (!allowed.has(k)) {
       throw new Error(
-        `Agent service declaration has invalid field "${k}" — only "path", "name" and "isolate_memory" are allowed`,
+        `Agent service declaration has invalid field "${k}" — only "path", "name", "isolate_memory" and "disable_archive" are allowed`,
       );
     }
   }
   if (obj['isolate_memory'] !== undefined && typeof obj['isolate_memory'] !== 'boolean') {
     throw new Error('Agent service declaration: "isolate_memory" must be true or false');
+  }
+  if (obj['disable_archive'] !== undefined && typeof obj['disable_archive'] !== 'boolean') {
+    throw new Error('Agent service declaration: "disable_archive" must be true or false');
   }
   if (typeof obj['path'] !== 'string' || !obj['path']) {
     throw new Error('Agent service declaration: "path" is required');

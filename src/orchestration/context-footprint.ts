@@ -2,7 +2,7 @@ import { readFileSync, statSync } from 'fs';
 import { join } from 'path';
 import { getEncoding } from 'js-tiktoken';
 import { AGENT_TASK_TOOLS } from './agent-tool-schemas';
-import { composeChatMemory, chatMemoryDirName, type MemoryBudgetConfig } from '../agent/workspace-loader';
+import { composeChatMemory, chatMemoryDirName, readChatFile, type MemoryBudgetConfig } from '../agent/workspace-loader';
 
 const cache = new Map<string, {at:number; value:ContextFootprint}>();
 let encoder: ReturnType<typeof getEncoding> | undefined;
@@ -46,7 +46,7 @@ export function contextFootprint(workspace: string | undefined, jevEnabled = fal
   else if(chat)sections(composeChatMemory(workspace,chat.source,chat.chatId,chat.memoryBudget),'This conversation\'s memory, appended at spawn after its budgets (isolated memory mode).');
   for(const name of ['AGENTS.md','IDENTITY.md','SOUL.md','USER.md','MEMORY.md','HEARTBEAT.md']){
     const own=chatFiles&&(name==='USER.md'||name==='MEMORY.md');
-    add(name+' · source file',read(own?join(chatFiles,name):name),own?'This conversation\'s file under '+chatFiles+' before budget/truncation. The workspace-root file is not composed in isolated memory mode.':'Current file on disk before budget/index/truncation. Reference only; not added to composed context.');
+    add(name+' · source file',own?(oversized(name)?undefined:readChatFile(join(workspace,chatFiles),name)):read(name),own?'This conversation\'s file under '+chatFiles+' before budget/truncation. The workspace-root file is not composed in isolated memory mode.':'Current file on disk before budget/index/truncation. Reference only; not added to composed context.');
   }
   // Intake is invariant; optional Jev must match the currently permitted inventory.
   const tools = AGENT_TASK_TOOLS.filter(tool => tool.name !== 'jev_evaluate' || jevEnabled);

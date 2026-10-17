@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import yaml from 'js-yaml';
-import { AgentManager, applyDeclaredIsolateMemory } from '../../../src/apps/agent-manager';
+import { AgentManager, applyDeclaredMemoryModes } from '../../../src/apps/agent-manager';
 import type { AgentConfig } from '../../../src/types';
 import { AppsRegistry, AppEntry } from '../../../src/apps/registry';
 
@@ -436,7 +436,7 @@ describe('AgentManager', () => {
     // #601: gateway start admits agents from the loaded config, and only then
     // does reconcileAgents() rewrite config.json; the config watcher's baseline is
     // the loaded config, so a hand-edited value would otherwise stay in effect.
-    it('applyDeclaredIsolateMemory gives the loaded config the value reconcile then writes', async () => {
+    it('applyDeclaredMemoryModes gives the loaded config the value reconcile then writes', async () => {
       const configPath = path.join(tmpDir, 'config.json');
       const declared = makeEntry(tmpDir);
       declared.agentDeclaration = { ...declared.agentDeclaration!, isolateMemory: true };
@@ -455,13 +455,55 @@ describe('AgentManager', () => {
       fs.writeFileSync(configPath, JSON.stringify(edited));
 
       const loaded = edited.agents.map((agent) => ({ ...agent })) as unknown as AgentConfig[];
-      applyDeclaredIsolateMemory(loaded, await registry.list());
+      applyDeclaredMemoryModes(loaded, await registry.list());
       await manager.reconcileAgents(registry);
       const written = (JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> }).agents;
       const isolation = (agents: Array<{ id?: unknown; isolateMemory?: unknown }>) =>
         Object.fromEntries(agents.map((a) => [a.id as string, a.isolateMemory]));
       expect(isolation(loaded)).toEqual({ 'my-agent': true, 'other-agent': undefined, 'stopped-agent': true, 'host-agent': true });
       expect(isolation(loaded)).toEqual(isolation(written));
+    });
+
+    // #609: disable_archive follows the same lifecycle as isolate_memory, and neither implies the other.
+    it('writes disableArchive only for an app that declares it, and clears it when the declaration goes away', async () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: {}, agents: [{ id: 'host-agent', workspace: '/tmp/host', claude: { model: 'm' } }] }));
+      const read = () => (JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> }).agents;
+
+      const declared = makeEntry(tmpDir);
+      declared.agentDeclaration = { ...declared.agentDeclaration!, disableArchive: true };
+      await manager.upsertAgent(declared);
+      await manager.upsertAgent(makeEntry(tmpDir, 'other-app', 'other-agent'));
+      expect(Object.fromEntries(read().map((a) => [a['id'], a['disableArchive']]))).toEqual({
+        'host-agent': undefined, 'my-agent': true, 'other-agent': undefined,
+      });
+      expect(read().find((a) => a['id'] === 'my-agent')).not.toHaveProperty('isolateMemory');
+
+      await manager.upsertAgent(makeEntry(tmpDir));
+      expect(read().find((a) => a['id'] === 'my-agent')).not.toHaveProperty('disableArchive');
+    });
+
+    it('applyDeclaredMemoryModes gives the loaded config the disableArchive reconcile then writes (#609)', async () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      const declared = makeEntry(tmpDir);
+      declared.agentDeclaration = { ...declared.agentDeclaration!, disableArchive: true };
+      const undeclared = makeEntry(tmpDir, 'other-app', 'other-agent');
+      const registry = new AppsRegistry(path.join(tmpDir, 'apps.json'));
+      for (const app of [declared, undeclared]) await registry.upsert(app);
+      await manager.reconcileAgents(registry);
+      // Hand edits while the gateway was down invert both.
+      const edited = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> };
+      for (const agent of edited.agents) agent['disableArchive'] = agent['id'] !== 'my-agent';
+      fs.writeFileSync(configPath, JSON.stringify(edited));
+
+      const loaded = edited.agents.map((agent) => ({ ...agent })) as unknown as AgentConfig[];
+      applyDeclaredMemoryModes(loaded, await registry.list());
+      await manager.reconcileAgents(registry);
+      const written = (JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { agents: Array<Record<string, unknown>> }).agents;
+      const archiveOff = (agents: Array<{ id?: unknown; disableArchive?: unknown }>) =>
+        Object.fromEntries(agents.map((a) => [a.id as string, a.disableArchive]));
+      expect(archiveOff(loaded)).toEqual({ 'my-agent': true, 'other-agent': undefined });
+      expect(archiveOff(loaded)).toEqual(archiveOff(written));
     });
 
     it('is idempotent — calling twice does not duplicate entry', async () => {

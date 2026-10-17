@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { sandboxPool } from './conversation-sandbox';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
@@ -50,7 +51,7 @@ export interface InstallResult {
   appName: string;
   proxyUrls: Record<string, string>; // portName → /app/<name>/<port>/
   secretKeys: string[];
-  agentDeclaration?: { path: string; name: string; isolateMemory?: true } | null;
+  agentDeclaration?: { path: string; name: string; isolateMemory?: true; disableArchive?: true } | null;
 }
 
 /** Per-app backup policy (mirrors `gateway.appBackup` in the gateway config). */
@@ -681,6 +682,10 @@ export class AppInstaller {
         );
       }
     }
+
+    // Conversation sandboxes (#609) are not compose services, and their containers hold
+    // the agent image that `down --rmi all` removes.
+    await sandboxPool.removeFor(`${appName}-agent`).catch(() => {});
 
     // docker compose down --rmi all (graceful fallback if dir is already gone)
     if (fs.existsSync(appDir)) {
@@ -2099,6 +2104,7 @@ export class AppInstaller {
       // The new compose file's bind sources are anchored to finalDir. Starting
       // before this swap would bind the old directory inode then delete it.
       this.log(job, 'Stopping old containers');
+      await sandboxPool.removeFor(`${appName}-agent`).catch(() => {});
       this.run(['docker', 'compose', '-p', appName, 'down'], entry.installPath, 120_000);
       this.log(job, 'Swapping app directories');
       const finalDir = entry.installPath;

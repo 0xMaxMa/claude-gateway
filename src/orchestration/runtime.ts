@@ -50,6 +50,7 @@ import { TelegramVoices } from './telegram-voices';
 import { StopControls } from './stop-controls';
 import { resolveDreamingConfig } from '../agent/dreaming/config';
 import { validateContainer } from './container';
+import { sandboxedAgent, usesConversationSandbox } from '../apps/conversation-sandbox';
 import { ConversationIntake, INTAKE_OVERLAY, IntakeChoice } from './conversation-intake';
 import { AgentCliSessions, resumeRejected, containerTranscriptCheckpoint } from './agent-cli-session';
 import { transcriptPath } from '../config/claude-settings';
@@ -284,7 +285,7 @@ export class AgentOrchestrationRuntime {
     };
     gatewayAdapters.set('browser', new BrowserTaskAdapter({agentId:agent.id,root:join(root,'browser-requests'),
       stepMode:()=>gateway.gateway.jev?.features?.browserSteps?.enabled===true,settled:()=>gatewayTick.run(),userSteps,
-      allowed:()=>jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true,
+      allowed:()=>!agent.isolateMemory&&jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true,
       bindings:browserBindings,
       refreshBindings:async (context,signal)=>{store.assertMember(context.conversationId,context.principalId);await automaticBrowsers.refresh(context.principalId,context.conversationId,context.execute,()=>{try{store.assertMember(context.conversationId,context.principalId);return jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true;}catch{return false;}},signal);store.assertMember(context.conversationId,context.principalId);},
       allowedEvidence:task=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return Boolean(store.task(task.taskId));}catch{return false;}},
@@ -309,7 +310,9 @@ export class AgentOrchestrationRuntime {
         principalId:task.ownerPrincipalId,agentId:agent.id,sessionId:task.agentSessionId,taskId:task.taskId,consumer:'browser',signal,
         authorize:()=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return authorized()&&jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true;}catch{return false;}}
       })}));
-    const computerAllowed=()=>computerDecisions(gateway,agent)!==undefined;
+    // Isolate mode (#609) is default-deny: one browser profile and one computer serve
+    // every conversation, so neither is offered to an isolated agent.
+    const computerAllowed=()=>!agent.isolateMemory&&computerDecisions(gateway,agent)!==undefined;
     gatewayAdapters.set('computer',new ComputerTaskAdapter({agentId:agent.id,root:join(root,'computer-requests'),connectors:new ComputerConnectors(gateway,agent),allowed:computerAllowed,
       stepMode:()=>gateway.gateway.jev?.features?.computerSteps?.enabled===true,settled:()=>gatewayTick.run(),
       userSteps,
@@ -331,7 +334,7 @@ export class AgentOrchestrationRuntime {
     bridge.computerEnabled = computerAllowed;
     bridge.models = () => selectableModels(gateway.gateway.models);
     bridge.jevEnabled = () => jevAllowed(gateway, agent);
-    bridge.browserEnabled = () => Boolean(gateway.gateway.jev?.browser) && jevAllowed(gateway, agent) && gateway.gateway.jev?.features?.browserTasks?.enabled === true;
+    bridge.browserEnabled = () => !agent.isolateMemory && Boolean(gateway.gateway.jev?.browser) && jevAllowed(gateway, agent) && gateway.gateway.jev?.features?.browserTasks?.enabled === true;
     bridge.jevCall = async (scope, args, actionId, signal) => {
       const current = scope.role === 'worker' ? files.scope(scope.attemptId, scope.generation) : undefined;
       const conversation = scope.role === 'agent' ? store.assertMember(scope.context.conversationId, scope.context.principalId) : current!.conversation;
@@ -352,6 +355,7 @@ export class AgentOrchestrationRuntime {
     const sharedRetention = resolveSharedConfig(agent.knowledge?.shared, gateway.gateway.knowledge?.shared).staleness;
     bridge.recordRetrievals = (personalRetention.enabled && personalRetention.recordRetrievals) || (sharedRetention.enabled && sharedRetention.recordRetrievals);
     bridge.isolateMemory = files.isolateMemory = () => Boolean(agent.isolateMemory);
+    bridge.disableArchive = () => Boolean(agent.disableArchive);
     let admissionStore: ProviderAdmissionStore | undefined;
     try {
       recoverOrchestration(store);
@@ -593,6 +597,12 @@ export class AgentOrchestrationRuntime {
     });
   }
 
+  /** The container a conversation's Claude Code transcript lives in: its own sandbox
+   * for an isolated app agent (#609), whose HOME no other conversation shares. */
+  private executionAgent(source: string, chatId: string, sessionId: string): Promise<AgentConfig> {
+    return usesConversationSandbox(this.agent) ? sandboxedAgent(this.agent, { source, chatId, sessionId }) : Promise.resolve(this.agent);
+  }
+
   /** An exclusive maintenance operation on the existing CLI transcript, not a chat summary. */
   compactSession(sessionId: string, model?: string): Promise<CompactMeasurements | null> {
     if (this.closing || this.draining) return Promise.reject(new OrchestrationError('ORCHESTRATION_CLOSING'));
@@ -607,7 +617,7 @@ export class AgentOrchestrationRuntime {
       let revoke: (() => void) | undefined;
       try {
         const cli = this.agent.type === 'app-agent'
-          ? await this.cliSessions.resolveContainer(sessionId,this.agent,true)
+          ? await this.cliSessions.resolveContainer(sessionId,await this.executionAgent(String(conversation.source),String(conversation.chat_id),sessionId),true)
           : this.cliSessions.resolve(sessionId,this.agent.workspace,true);
         if (!cli.resume || cli.id !== stored.cli_session_id) throw new OrchestrationError('NO_CLI_SESSION', 'The previous Claude Code transcript is unavailable. Chat history was not changed.');
         if (active.stopping || this.closing) throw new OrchestrationError('INTERRUPTED');
@@ -1228,7 +1238,7 @@ export class AgentOrchestrationRuntime {
       const preparedRefs = preparedInputs.flatMap(row => JSON.parse(String(row.attachment_refs_json)) as string[]);
       if (preparedRefs.length) input = {...input, attachmentIds:[...new Set([...(input.attachmentIds ?? []), ...preparedRefs])]};
       const cliSession = this.agent.type === 'app-agent'
-        ? await this.cliSessions.resolveContainer(sessionId, this.agent)
+        ? await this.cliSessions.resolveContainer(sessionId, await this.executionAgent(input.scope.source, input.scope.chatId, sessionId))
         : this.cliSessions.resolve(sessionId, this.agent.workspace);
       const contextPlan = this.contextDelivery.begin({conversationId:receipt.conversationId,
         principalId:input.scope.principalId,bindingId:String(admitted!.binding_id),
@@ -1476,7 +1486,7 @@ export class AgentOrchestrationRuntime {
       {
         ticket.profile.cliSession = { id: cliSession.id, resume: cliSession.resume };
         if (cliSession.resume && this.agent.type !== 'app-agent') transcriptCheckpoint = await checkpointTranscript(transcriptPath(this.agent.workspace, cliSession.id));
-        if (cliSession.resume && this.agent.type === 'app-agent') restoreContainerTranscript = await containerTranscriptCheckpoint(this.agent.container!,cliSession.id);
+        if (cliSession.resume && this.agent.type === 'app-agent') restoreContainerTranscript = await containerTranscriptCheckpoint((await this.executionAgent(input.scope.source, input.scope.chatId, sessionId)).container!,cliSession.id);
         if (cliSession.fallback) {
           // No silent failure: a session we had already started could not be continued, so this
           // turn re-seeds history and pays a cache write. Record why before it happens.
@@ -1489,7 +1499,10 @@ export class AgentOrchestrationRuntime {
       }
       ticket.profile.excludedHistoryOperationIds = this.store.all(`SELECT r.id FROM assistant_responses r
         JOIN conversation_decisions d ON d.id=r.decision_id WHERE d.session_id=? AND r.state='failed'`, sessionId)
-        .map(row => `response:${row.id}`);
+        .map(row => `response:${row.id}`)
+        // This turn's own inputs are already persisted, and the prompt delivers them as the current
+        // message; seeding them too would end the history on an unanswered user turn.
+        .concat(decision.inputIds.map(id => `input:${id}`));
       ticket.profile.responseId = decision.responseId;
       agentSession = await this.host.createAgentSession(sessionId, ticket.profile, options.model, input.scope);
       options.onMark?.('process_spawned');

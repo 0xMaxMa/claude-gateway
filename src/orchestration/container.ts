@@ -3,12 +3,13 @@ import { CHECKPOINT_HOOK } from './tasks/checkpoint-hook';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { realpath, readFile, mkdir, writeFile, readdir, lstat } from 'fs/promises';
-import { join, basename, dirname } from 'path';
+import { join, basename, dirname, relative } from 'path';
 import { randomUUID, createHash } from 'crypto';
 import { userInfo, homedir } from 'os';
 import type { AgentConfig } from '../types';
 import type { RuntimeProfile } from '../session/runtime-profile';
 import { OrchestrationError } from './types';
+import { SANDBOX_LABEL, BRIDGE_SOCKET_DIR, CLAUDE_DIR, CLAUDE_PROJECT_ENTRIES, workspaceEntryVisible } from '../apps/conversation-sandbox';
 // Resolve subprocess support only when this feature is invoked.
 const exec = (file: string, args: string[], options: import('child_process').ExecFileOptions = {}) =>
   promisify(execFile)(file, args, { ...options, encoding: 'utf8' as const });
@@ -52,6 +53,7 @@ export async function validateContainerInspection(agent: AgentConfig, c: any, op
   }
   const codexRuntime = inspectedCodexRuntime(c);
   for (const mount of codexRuntime?.mounts ?? []) ro.set(mount.target, mount.source);
+  if (c.Config?.Labels?.[SANDBOX_LABEL] === '1') return validateSandboxMounts(agent, c.Mounts ?? [], workspace, media, ro);
   let workspaceFound = false;
   for (const m of c.Mounts ?? []) {
     if (/docker\.sock|containerd\.sock/.test(m.Source + m.Destination)) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
@@ -63,6 +65,35 @@ export async function validateContainerInspection(agent: AgentConfig, c: any, op
     if (!readOnlyAllowed) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
   }
   if (!workspaceFound) throw new OrchestrationError('CONTAINER_WORKSPACE_REQUIRED');
+}
+
+/** A conversation sandbox (#609) mounts no whole workspace: only read-only workspace
+ * entries, its own `chats/<dir>` and media directory read-write, its own HOME, and the
+ * installer's read-only runtime mounts (see apps/conversation-sandbox.ts). */
+async function validateSandboxMounts(agent: AgentConfig, mounts: any[], workspace: string, media: string, ro: Map<string, string>): Promise<void> {
+  const agentHomes = await realpath(join(agent.workspace, '..', 'sandbox-homes')).catch(() => undefined);
+  // The writable chats/ directory and Claude Code directory belong to one conversation (same name).
+  const own = new Set<string>();
+  let chats = 0, ownMedia = 0, home = 0;
+  for (const m of mounts) {
+    if (m.Type !== 'bind' || /docker\.sock|containerd\.sock/.test(m.Source + m.Destination)) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
+    const source = await realpath(m.Source);
+    const destination = String(m.Destination);
+    if (destination.startsWith('/workspace/')) {
+      const rel = destination.slice('/workspace/'.length);
+      if (source !== join(workspace, rel)) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
+      if (/^chats\/[^/]+$/.test(rel) && m.RW) { chats++; own.add(basename(rel)); continue; }
+      const [first, second, ...rest] = rel.split('/');
+      const kind = (await lstat(source)).isDirectory() ? 'dir' : 'file';
+      const visible = rel === BRIDGE_SOCKET_DIR || (first === '.claude' ? CLAUDE_PROJECT_ENTRIES.has(second) && !rest.length : !second && workspaceEntryVisible(first, kind));
+      if (m.RW || !visible) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
+      continue;
+    }
+    if (m.RW && dirname(source) === media && [source, join(agent.workspace, '..', 'media', basename(source))].includes(destination)) { ownMedia++; continue; }
+    if (m.RW && destination === CLAUDE_DIR() && dirname(source) === agentHomes) { home++; own.add(basename(source)); continue; }
+    if (m.RW || ro.get(destination) !== source) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
+  }
+  if (chats !== 1 || ownMedia > 1 || home !== 1 || own.size !== 1) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
 }
 
 export function containerNode(container: string, script: string, args: string[] = [], input = ''): Promise<string> {
@@ -105,7 +136,7 @@ export async function prepareContainerProfile(agent: AgentConfig, profile: Runti
   const role = profile.role;
   // Schemas are data copied from the existing gateway MCP inventory, not executable host modules.
   const dir = '/tmp/gateway-orch-' + randomUUID();
-  const payload = { role, socket: '/workspace/' + basename(ticket.socket), token: ticket.token, tools: ticket.tools };
+  const payload = { role, socket: '/workspace/' + relative(agent.workspace, ticket.socket), token: ticket.token, tools: ticket.tools };
   const config = { mcpServers: { gateway: { command: 'node', args: ['-e', MCP_CLIENT, dir + '/ticket.json'] } } };
   const prompt = await systemPrompt?.(dir);
   // A step that fails after the setup exec would otherwise leave the ticket and prompt behind.

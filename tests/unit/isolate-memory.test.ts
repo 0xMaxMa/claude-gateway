@@ -96,6 +96,23 @@ describe('composeChatMemory', () => {
     expect(context).not.toContain(workspace);
   });
 
+  it('never follows a symlink a conversation planted in its own directory (#609)', () => {
+    writeChatMemory('telegram', '222', 'CHAT-B-USER', 'CHAT-B-MEMORY');
+    const own = chatMemoryDir(workspace, 'telegram', '111');
+    fs.mkdirSync(own, { recursive: true });
+    fs.symlinkSync(path.join(chatMemoryDir(workspace, 'telegram', '222'), 'MEMORY.md'), path.join(own, 'MEMORY.md'));
+    fs.symlinkSync(path.join(workspace, 'USER.md'), path.join(own, 'USER.md'));
+    const context = composeChatMemory(workspace, 'telegram', '111');
+    expect(context).not.toContain('CHAT-B-MEMORY');
+    expect(context).not.toContain('ROOT-USER');
+  });
+
+  it('never follows a symlinked conversation directory either', () => {
+    writeChatMemory('telegram', '222', 'CHAT-B-USER', 'CHAT-B-MEMORY');
+    fs.symlinkSync(chatMemoryDir(workspace, 'telegram', '222'), chatMemoryDir(workspace, 'telegram', '111'));
+    expect(composeChatMemory(workspace, 'telegram', '111')).not.toContain('CHAT-B');
+  });
+
   it("applies the memory budget banner to the conversation's files", () => {
     writeChatMemory('telegram', '1', '', 'x'.repeat(50));
     const context = composeChatMemory(workspace, 'telegram', '1', { memoryBudgetChars: 10 });
