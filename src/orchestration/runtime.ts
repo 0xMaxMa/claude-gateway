@@ -1497,7 +1497,10 @@ export class AgentOrchestrationRuntime {
       }
       ticket.profile.excludedHistoryOperationIds = this.store.all(`SELECT r.id FROM assistant_responses r
         JOIN conversation_decisions d ON d.id=r.decision_id WHERE d.session_id=? AND r.state='failed'`, sessionId)
-        .map(row => `response:${row.id}`);
+        .map(row => `response:${row.id}`)
+        // This turn's own inputs are already persisted, and the prompt delivers them as the current
+        // message; seeding them too would end the history on an unanswered user turn.
+        .concat(decision.inputIds.map(id => `input:${id}`));
       ticket.profile.responseId = decision.responseId;
       agentSession = await this.host.createAgentSession(sessionId, ticket.profile, options.model, input.scope);
       options.onMark?.('process_spawned');
