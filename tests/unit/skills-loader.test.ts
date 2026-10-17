@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { loadSkills, renderSkillsSection, AUTO_SKILL_MENU_DESC_MAX, type SkillRegistry } from '../../src/skills/loader';
+import { loadSkills, renderSkillsSection, AUTO_SKILL_MENU_DESC_MAX, AUTO_SKILL_CATALOG_GRACE_DAYS, type SkillRegistry } from '../../src/skills/loader';
 import type { SkillDefinition } from '../../src/skills/parser';
 
 function makeTmpDir(): string {
@@ -288,6 +288,47 @@ describe('Skill Loader', () => {
           ]),
         };
         expect(renderSkillsSection(registry)).toContain(`/mod:auto: ${longDesc}`);
+      });
+    });
+
+    describe('hide-until-used — never-loaded auto skills stay out of the catalog', () => {
+      const DAY = 24 * 60 * 60 * 1000;
+      const now = 1000 * DAY;
+      const old = now - (AUTO_SKILL_CATALOG_GRACE_DAYS + 1) * DAY;
+      const fm = (extra: string) => `---\nname: x\ndescription: "d"\n${extra}\n---\n\nbody`;
+      const ws = (name: string, content: string, source: SkillDefinition['source'] = 'workspace') =>
+        [name, makeSkill({ name, description: 'd', source, content })] as const;
+      const registry: SkillRegistry = {
+        skills: new Map([
+          ws('auto-unused', fm(`origin: auto\ncreatedAt: ${old}`)),
+          ws('auto-used', fm(`origin: auto\ncreatedAt: ${old}`)),
+          ws('auto-young', fm(`origin: auto\ncreatedAt: ${now - DAY}`)),
+          ws('auto-pinned', fm(`origin: auto\ncreatedAt: ${old}\npinned: true`)),
+          ws('auto-no-date', fm('origin: auto')),
+          ws('user-unused', fm(`createdAt: ${old}`)),
+          ws('shared-unused', fm(`origin: auto\ncreatedAt: ${old}`), 'shared'),
+        ]),
+      };
+      const usage = { now, timesLoaded: new Map([['auto-used', 3]]) };
+
+      it('hides an old auto skill that was never loaded and says how many were hidden', () => {
+        const section = renderSkillsSection(registry, usage);
+        expect(section).not.toContain('/auto-unused:');
+        expect(section).not.toContain('/auto-no-date:');
+        expect(section).toContain('2 auto-learned skills are hidden until first used');
+      });
+
+      it('keeps used, young and pinned auto skills, and every non-auto skill', () => {
+        const section = renderSkillsSection(registry, usage);
+        for (const key of ['auto-used', 'auto-young', 'auto-pinned', 'user-unused', 'shared-unused']) {
+          expect(section).toContain(`/${key}:`);
+        }
+      });
+
+      it('shows everything when no usage data is supplied', () => {
+        const section = renderSkillsSection(registry);
+        expect(section).toContain('/auto-unused:');
+        expect(section).not.toContain('hidden until first used');
       });
     });
   });

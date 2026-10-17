@@ -4,6 +4,9 @@
  *     AND stale (`age > maxAgeDays`) and not pinned;
  *   - enforce the `maxAutoSkills` cap by evicting least-recently-used auto skills;
  *   - NEVER touch hand-authored (non-auto) or pinned skills;
+ *   - archive instead of delete: a removed skill moves to
+ *     `skills/.archive/<YYYY-MM-DD>/<name>/` (outside the catalog) and is kept
+ *     `ARCHIVE_RETENTION_DAYS`; restore by moving the directory back to `skills/`;
  *   - run telemetry retention even when learning is disabled (tables don't grow
  *     unbounded);
  *   - log the effectiveness rollup headline.
@@ -16,7 +19,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { msUntilNextHour } from '../../history/cleanup';
 import { isValidTimezone } from './config';
-import { readSkillOrigin } from './writer';
+import { isOwnedAutoSkillDir } from './writer';
 import { computeRollup } from './metrics';
 import type { HistoryDB } from '../../history/db';
 import type { ResolvedSkillLearningCfg } from './types';
@@ -24,6 +27,11 @@ import type { ResolvedSkillLearningCfg } from './types';
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Telemetry retention window — keep this many days of turn_metrics/review rows. */
 export const TELEMETRY_RETENTION_DAYS = 90;
+/** Archived skills live here (dot-dir: the skill loader never lists it). */
+export const ARCHIVE_DIRNAME = '.archive';
+/** Days an archived skill is kept before the curator deletes it for good. */
+export const ARCHIVE_RETENTION_DAYS = 30;
+const ARCHIVE_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export interface CuratorDeps {
   db: HistoryDB;
@@ -32,8 +40,6 @@ export interface CuratorDeps {
   cfg: ResolvedSkillLearningCfg;
   now: number;
   logger?: { info: (msg: string) => void };
-  /** Injectable skill-dir remover (defaults to fs rm) — for tests. */
-  removeSkillDir?: (dir: string) => void;
 }
 
 export interface CuratorResult {
@@ -42,21 +48,17 @@ export interface CuratorResult {
   telemetryRowsRemoved: number;
 }
 
-function defaultRemove(dir: string): void {
-  fs.rmSync(dir, { recursive: true, force: true });
-}
-
 /**
  * Run one curation sweep. Always runs telemetry retention; skips skill pruning
  * when disabled. Pure w.r.t. time (`now` injected) and fs (remover injectable).
  */
 export function curateOnce(deps: CuratorDeps): CuratorResult {
   const { db, workspaceDir, cfg, now } = deps;
-  const remove = deps.removeSkillDir ?? defaultRemove;
   const result: CuratorResult = { pruned: [], evicted: [], telemetryRowsRemoved: 0 };
 
-  // Telemetry retention ALWAYS runs (even when disabled) so the tables are bounded.
+  // Telemetry and archive retention ALWAYS run (even when disabled) so both stay bounded.
   result.telemetryRowsRemoved = db.pruneTelemetry(now - TELEMETRY_RETENTION_DAYS * DAY_MS);
+  expireArchive(workspaceDir, now);
 
   if (!cfg.enabled) {
     logRollup(deps);
@@ -72,7 +74,7 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
     const unused = s.timesLoaded < cfg.minUsesToKeep;
     const stale = cfg.maxAgeDays > 0 && ageMs > cfg.maxAgeDays * DAY_MS;
     if (unused && stale) {
-      if (pruneSkill(s.name, deps, remove)) result.pruned.push(s.name);
+      if (archiveSkill(s.name, deps)) result.pruned.push(s.name);
     } else {
       survivors.push(s);
     }
@@ -88,7 +90,7 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
       .sort((a, b) => (a.lastUsedAt ?? a.createdAt ?? 0) - (b.lastUsedAt ?? b.createdAt ?? 0));
     const overflow = survivors.length - cfg.maxAutoSkills;
     for (const s of lru.slice(0, overflow)) {
-      if (pruneSkill(s.name, deps, remove)) result.evicted.push(s.name);
+      if (archiveSkill(s.name, deps)) result.evicted.push(s.name);
     }
   }
 
@@ -97,27 +99,55 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
 }
 
 /**
- * Remove a skill dir + drop its stat row. Returns `true` if the directory was
- * actually removed, `false` if it was preserved (adopted by the user). Re-verify
- * provenance against the on-disk file, not the (possibly stale) stat row: a user
- * who "adopts" an auto skill — editing SKILL.md and flipping `origin` away from
- * `auto` — must never have it deleted, even though the skill_stats row still says
- * origin:auto. Drop the stale row either way so it stops being tracked as auto.
+ * Move an auto skill into the dated archive + drop its stat row. Returns `true`
+ * only if the directory was moved. Provenance is re-verified against the on-disk
+ * file, not the (possibly stale) stat row: anything that is not a real directory
+ * holding an `origin: auto`, unpinned SKILL.md stays put — a user who "adopts" an
+ * auto skill (flips `origin` or sets `pinned: true`) keeps it, and a symlink or a
+ * directory without SKILL.md is never moved; its stat row is dropped so it stops
+ * being tracked as auto. A failed move keeps the row so the next sweep retries.
  */
-function pruneSkill(name: string, deps: CuratorDeps, remove: (dir: string) => void): boolean {
-  const skillDir = path.join(deps.workspaceDir, 'skills', name);
-  const skillFile = path.join(skillDir, 'SKILL.md');
-  if (fs.existsSync(skillFile) && readSkillOrigin(skillFile) !== 'auto') {
+function archiveSkill(name: string, deps: CuratorDeps): boolean {
+  const skillsDir = path.join(deps.workspaceDir, 'skills');
+  const skillDir = path.join(skillsDir, name);
+  // A stat-row name is not a trusted path segment: never follow one out of skills/.
+  if (path.basename(name) !== name || name.startsWith('.') || !isOwnedAutoSkillDir(skillDir)) {
     deps.db.deleteSkillStat(name);
     return false;
   }
+  const dayDir = path.join(skillsDir, ARCHIVE_DIRNAME, new Date(deps.now).toISOString().slice(0, 10));
+  let dest = path.join(dayDir, name);
+  if (fs.existsSync(dest)) dest = `${dest}-${deps.now}`;
   try {
-    remove(skillDir);
-  } catch {
-    /* best-effort — still drop the stat row */
+    fs.mkdirSync(dayDir, { recursive: true });
+    fs.renameSync(skillDir, dest);
+  } catch (err) {
+    deps.logger?.info(`[skill-learning:${deps.agentId}] archive of ${name} failed: ${(err as Error).message}`);
+    return false;
   }
   deps.db.deleteSkillStat(name);
+  deps.logger?.info(`[skill-learning:${deps.agentId}] archived ${name} → ${dest} (restore: move it back to ${skillDir})`);
   return true;
+}
+
+/** Delete archive day directories older than the retention window. Best-effort. */
+function expireArchive(workspaceDir: string, now: number): void {
+  const archiveDir = path.join(workspaceDir, 'skills', ARCHIVE_DIRNAME);
+  let days: string[];
+  try {
+    days = fs.readdirSync(archiveDir);
+  } catch {
+    return;
+  }
+  const cutoff = now - ARCHIVE_RETENTION_DAYS * DAY_MS;
+  for (const day of days) {
+    if (!ARCHIVE_DAY_RE.test(day) || Date.parse(`${day}T00:00:00Z`) >= cutoff) continue;
+    try {
+      fs.rmSync(path.join(archiveDir, day), { recursive: true, force: true });
+    } catch {
+      /* best-effort — retried next sweep */
+    }
+  }
 }
 
 function logRollup(deps: CuratorDeps): void {

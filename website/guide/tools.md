@@ -55,7 +55,7 @@ Learning is enabled in `auto` mode by default. A completed session qualifies for
 | `minToolCalls` | `5` | Tool-call trigger threshold |
 | `maxReviewsPerDay` | `20` | Daily background review ceiling |
 | `reviewModel` | `claude-haiku-4-5-20251001` | Background review model |
-| `maxAutoSkills` | `50` | Learned-skill capacity |
+| `maxAutoSkills` | `20` | Learned-skill capacity |
 | `maxAgeDays` / `minUsesToKeep` | `30` / `2` | Curator age/use policy |
 | `pruneHour` | `3` | Daily curator hour |
 | `notify` | `true` | Learning notifications |
@@ -63,6 +63,8 @@ Learning is enabled in `auto` mode by default. A completed session qualifies for
 Per-agent `skillLearning` values override `gateway.skillLearning`, then built-in defaults apply. The pruning timezone resolves through agent override, gateway skill-learning override, `gateway.timezone`, then UTC; invalid timezone values fall through to the next level.
 
 Choose `mode: "propose"` to queue candidate instructions in `skills/.pending/` for review before making them live. In `auto` mode, inspect the live skill and `SKILLS_LEARNED.md` after a learning event. The writer marks learned skills `origin: auto` and refuses to overwrite a human-authored target. Missing provenance is treated as human-authored. Curator policy applies to automatically learned skills, not a blanket deletion of all old instructions.
+
+The curator never deletes a learned skill outright. It moves the directory to `skills/.archive/<YYYY-MM-DD>/<name>/`, which the skills menu ignores, and removes archive days older than 30 days. To restore a skill, move its directory back to `skills/`. A learned skill that has not been invoked in its first 7 days drops out of the AVAILABLE SKILLS menu but still runs by `/name`; one invocation, or `pinned: true` in its frontmatter, brings it back on the next menu refresh. The reviewer sees installed Claude Code plugin skills as well as workspace, module, and shared skills, and the writer refuses a new learned skill that repeats an installed skill's name or description.
 
 The menu shortens auto-learned descriptions to 80 characters to bound recurring context cost; the full skill body remains available when invoked.
 

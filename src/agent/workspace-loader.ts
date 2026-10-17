@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WorkspaceFiles, LoadedWorkspace, WatchHandle, AgentConfig, GatewayConfig } from '../types';
 import { createWatcher } from '../watch/factory';
-import { loadSkills, renderSkillsSection } from '../skills';
+import { loadSkills, renderSkillsSection, type SkillCatalogUsage } from '../skills';
 import { DIARY_FILENAME } from './skill-learning/notifier';
 
 export class MissingRequiredFileError extends Error {
@@ -315,6 +315,8 @@ export interface LoadWorkspaceOptions {
    * and the write-routing rule all point at memory_search, so they are left out.
    */
   disableArchive?: boolean;
+  /** Skill load counts: when set, never-used auto skills drop out of the skills menu. */
+  skillUsage?: SkillCatalogUsage;
 }
 
 /**
@@ -381,7 +383,7 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
     sharedSkillsDir: opts?.sharedSkillsDir,
     logger: opts?.logger,
   });
-  const skillsSection = renderSkillsSection(skillRegistry);
+  const skillsSection = renderSkillsSection(skillRegistry, opts?.skillUsage);
 
   // Assemble system prompt
   // The routing rule sends task-log to memory/<topic>.md for memory_search, which

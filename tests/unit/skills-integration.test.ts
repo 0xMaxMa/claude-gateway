@@ -36,6 +36,17 @@ describe('Skills integration with workspace-loader', () => {
     expect(result.systemPrompt).toContain('**Workspace Skills**');
   });
 
+  it('SI-1b: skillUsage keeps a never-used old auto skill out of the prompt but in the registry', async () => {
+    const skillsDir = path.join(tmpDir, 'skills');
+    writeSkill(skillsDir, 'learned', 'name: learned\ndescription: "learned flow"\norigin: auto\ncreatedAt: 0');
+    writeSkill(skillsDir, 'handmade', 'name: handmade\ndescription: Handmade flow');
+
+    const result = await loadWorkspace(tmpDir, { skillUsage: { now: 30 * 24 * 60 * 60 * 1000, timesLoaded: new Map() } });
+    expect(result.systemPrompt).not.toContain('/learned:');
+    expect(result.systemPrompt).toContain('/handmade: Handmade flow');
+    expect(result.skillRegistry?.skills.has('learned')).toBe(true); // still invocable by /learned
+  });
+
   it('SI-2: workspace without skills does not inject AVAILABLE SKILLS section', async () => {
     const result = await loadWorkspace(tmpDir);
     expect(result.systemPrompt).not.toContain('--- AVAILABLE SKILLS ---');

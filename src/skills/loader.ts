@@ -11,16 +11,39 @@ import { parseSkill, extractFrontmatter, type SkillDefinition, type ParseSkillOp
  */
 export const AUTO_SKILL_MENU_DESC_MAX = 80;
 
-/** Menu description for one skill — compacted only for auto-learned skills. */
-function menuDescription(skill: SkillDefinition): string {
-  if (skill.source !== 'workspace') return skill.description;
-  let isAuto = false;
+/**
+ * Hide-until-used: an auto skill that is past this age and has never been loaded
+ * is left out of the menu (it stays invocable by /name). A new skill gets this
+ * many days on the menu to be picked up first.
+ */
+export const AUTO_SKILL_CATALOG_GRACE_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Load counts that decide which auto skills the menu shows (from `skill_stats`). */
+export interface SkillCatalogUsage {
+  now: number;
+  timesLoaded: ReadonlyMap<string, number>;
+}
+
+/** The frontmatter of an auto-learned workspace skill; undefined for any other skill. */
+function autoFrontmatter(skill: SkillDefinition): Record<string, unknown> | undefined {
+  if (skill.source !== 'workspace') return undefined;
   try {
     const fm = extractFrontmatter(skill.content)?.frontmatter;
-    isAuto = !!fm && fm['origin'] === 'auto';
+    return fm && fm['origin'] === 'auto' ? fm : undefined;
   } catch {
-    isAuto = false;
+    return undefined;
   }
+}
+
+function hiddenUntilUsed(key: string, fm: Record<string, unknown>, usage: SkillCatalogUsage): boolean {
+  if (fm['pinned'] === true || (usage.timesLoaded.get(key) ?? 0) > 0) return false;
+  const createdAt = typeof fm['createdAt'] === 'number' ? fm['createdAt'] : 0;
+  return usage.now - createdAt > AUTO_SKILL_CATALOG_GRACE_DAYS * DAY_MS;
+}
+
+/** Menu description for one skill — compacted only for auto-learned skills. */
+function menuDescription(skill: SkillDefinition, isAuto: boolean): string {
   if (!isAuto) return skill.description;
   const d = skill.description.trim();
   if (d.length <= AUTO_SKILL_MENU_DESC_MAX) return d;
@@ -184,34 +207,42 @@ export function loadSkills(opts: LoadSkillsOptions): SkillRegistry {
 
 /**
  * Render the AVAILABLE SKILLS section for the system prompt.
- * Groups skills by source: workspace, module, shared.
+ * Groups skills by source: workspace, module, shared. With `usage`, never-used
+ * auto skills past the grace window are hidden (see AUTO_SKILL_CATALOG_GRACE_DAYS).
  */
-export function renderSkillsSection(registry: SkillRegistry): string {
+export function renderSkillsSection(registry: SkillRegistry, usage?: SkillCatalogUsage): string {
   if (registry.skills.size === 0) return '';
 
   const workspace: string[] = [];
   const module: string[] = [];
   const shared: string[] = [];
+  let hidden = 0;
 
   for (const [key, skill] of registry.skills) {
     if (!skill.userInvocable) continue;
+    const autoFm = autoFrontmatter(skill);
+    if (autoFm && usage && hiddenUntilUsed(key, autoFm, usage)) {
+      hidden++;
+      continue;
+    }
 
     const emoji = skill.emoji ? ` [${skill.emoji}]` : '';
-    const line = `/${key}: ${menuDescription(skill)}${emoji}`;
+    const line = `/${key}: ${menuDescription(skill, autoFm !== undefined)}${emoji}`;
 
     if (skill.source === 'workspace') workspace.push(line);
     else if (skill.source === 'module') module.push(line);
     else shared.push(line);
   }
 
-  if (workspace.length === 0 && module.length === 0 && shared.length === 0) return '';
+  if (workspace.length === 0 && module.length === 0 && shared.length === 0 && hidden === 0) return '';
 
   const sections: string[] = [];
   sections.push('Use /skill-name [args] to invoke a skill\n');
 
-  if (workspace.length > 0) {
+  if (workspace.length > 0 || hidden > 0) {
     sections.push('**Workspace Skills**');
     sections.push(...workspace);
+    if (hidden > 0) sections.push(`(${hidden} auto-learned skills are hidden until first used; they live in skills/ and still run by /name)`);
     sections.push('');
   }
   if (module.length > 0) {

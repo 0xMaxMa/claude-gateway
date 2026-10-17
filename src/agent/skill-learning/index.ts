@@ -8,7 +8,7 @@
  */
 
 import { createHash } from 'crypto';
-import { loadSkills } from '../../skills/loader';
+import { loadSkills, type SkillCatalogUsage } from '../../skills/loader';
 import { extractFrontmatter } from '../../skills/parser';
 import { HistoryDB } from '../../history/db';
 import { resolveSkillLearningConfig } from './config';
@@ -48,12 +48,26 @@ interface Accum {
   reviewedTranscriptHash?: string;
 }
 
+/** Per-skill load counts for the skills menu (hide-until-used). */
+export function skillCatalogUsage(db: HistoryDB, now = Date.now()): SkillCatalogUsage {
+  return { now, timesLoaded: new Map(db.listSkillStats().map((s) => [s.name, s.timesLoaded])) };
+}
+
+/** A skill installed outside the workspace (e.g. a Claude Code plugin skill). */
+export interface InstalledSkill {
+  name: string;
+  description: string;
+  filePath?: string;
+}
+
 export interface SkillLearningManagerOpts {
   db: HistoryDB;
   agentId: string;
   workspaceDir: string;
   mcpToolsDir?: string;
   sharedSkillsDir?: string;
+  /** Plugin skills the agent's CLI loads; the reviewer must not re-learn them as auto skills. */
+  installedSkills?: () => InstalledSkill[];
   globalCfg?: SkillLearningConfig;
   agentCfg?: SkillLearningConfig;
   /** `gateway.timezone` — the shared default when neither `globalCfg`/`agentCfg` sets `pruneTimezone`. */
@@ -78,6 +92,7 @@ export class SkillLearningManager {
   private readonly workspaceDir: string;
   private readonly mcpToolsDir?: string;
   private readonly sharedSkillsDir?: string;
+  private readonly installedSkills?: () => InstalledSkill[];
   private readonly logger?: SkillLearningManagerOpts['logger'];
   private readonly reviewSpawn?: ClaudeSpawnFn;
   private readonly now: () => number;
@@ -93,6 +108,7 @@ export class SkillLearningManager {
     this.workspaceDir = opts.workspaceDir;
     this.mcpToolsDir = opts.mcpToolsDir;
     this.sharedSkillsDir = opts.sharedSkillsDir;
+    this.installedSkills = opts.installedSkills;
     this.logger = opts.logger;
     this.reviewSpawn = opts.reviewSpawn;
     this.now = opts.now ?? Date.now;
@@ -391,13 +407,20 @@ export class SkillLearningManager {
 
   /** All loaded skills with resolved provenance + path (for dedup + guards). */
   private loadExistingSkills(): ExistingSkill[] {
+    const out: ExistingSkill[] = [];
+    try {
+      for (const s of this.installedSkills?.() ?? []) {
+        out.push({ name: s.name, description: s.description, origin: 'user', filePath: s.filePath ?? '' });
+      }
+    } catch (err) {
+      this.logger?.warn?.(`[skill-learning:${this.agentId}] installed-skill discovery failed: ${(err as Error).message}`);
+    }
     try {
       const registry = loadSkills({
         workspaceDir: this.workspaceDir,
         mcpToolsDir: this.mcpToolsDir,
         sharedSkillsDir: this.sharedSkillsDir,
       });
-      const out: ExistingSkill[] = [];
       for (const skill of registry.skills.values()) {
         let origin: 'auto' | 'user' = 'user';
         // Only workspace skills can ever be origin:auto; trust the on-disk FM.
@@ -409,7 +432,7 @@ export class SkillLearningManager {
       }
       return out;
     } catch {
-      return [];
+      return out;
     }
   }
 }

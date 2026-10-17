@@ -123,6 +123,33 @@ describe('SkillLearningManager — review path', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it('shows installed plugin skills to the reviewer and refuses to re-learn one as an auto skill', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sl-mgr-'));
+    const ws = path.join(dir, 'ws');
+    fs.mkdirSync(path.join(ws, 'skills'), { recursive: true });
+    const db = HistoryDB.forAgent(dir, `agent-${Math.random().toString(36).slice(2)}`);
+    let reviewerInput = '';
+    const spawn: ClaudeSpawnFn = async (args, stdin) => {
+      reviewerInput = stdin;
+      return createEnvelope('wtb-auto-pilot')(args, stdin);
+    };
+    const mgr = new SkillLearningManager({
+      db, agentId: 'agent-x', workspaceDir: ws, globalCfg: { minToolCalls: 3 }, reviewSpawn: spawn, now: () => NOW,
+      installedSkills: () => [{ name: 'what-the-bug:wtb-auto-pilot', description: 'End-to-end bug auto-pilot', filePath: '/plugins/wtb/SKILL.md' }],
+    });
+    seedTranscript(db, 'sess1');
+    mgr.onTurnStart('chat1', 'sess1', 'deploy the thing', []);
+    for (let i = 0; i < 4; i++) mgr.onToolUse('chat1', `id-${i}`);
+    mgr.onTurnEnd('chat1', 'sess1');
+
+    await mgr.runReviewNow('chat1', 'sess1');
+
+    expect(reviewerInput).toContain('what-the-bug:wtb-auto-pilot');
+    expect(fs.existsSync(path.join(ws, 'skills', 'wtb-auto-pilot'))).toBe(false);
+    expect(db.getSkillStat('wtb-auto-pilot')).toBeNull();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('a successful live write appends the SKILLS_LEARNED.md diary (notifier wired)', async () => {
     const { db, ws, mgr, dir } = setup({ minToolCalls: 3 }, createEnvelope('ship-flow'));
     seedTranscript(db, 'sess1');

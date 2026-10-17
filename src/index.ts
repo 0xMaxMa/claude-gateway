@@ -26,7 +26,10 @@ import { watchSkills } from './skills';
 import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
 import { AgentRunner } from './agent/runner';
-import { SkillLearningManager } from './agent/skill-learning';
+import { SkillLearningManager, skillCatalogUsage } from './agent/skill-learning';
+import { HistoryDB } from './history/db';
+import { readClaudeExtensions } from './session/worker-extensions';
+import { PSTACK_PLUGIN_ID } from './pstack/plugin-info';
 import { DreamingManager } from './agent/dreaming';
 import { makeRouteOut } from './agent/dreaming/migrate';
 import { resolveDreamingConfig } from './agent/dreaming/config';
@@ -51,6 +54,24 @@ import { defaultPidfilePath } from './cli/manager';
 import { captureRuntimeProvenance, writeRuntimeProvenance } from './safemode/provenance';
 import { expandHome as expandTilde } from './utils/paths';
 
+
+/**
+ * Skills-menu load counts, read from the runner's history DB (<workspace>/../history.db).
+ * Undefined if the DB cannot be opened: the menu then lists every skill, as before.
+ */
+function agentSkillUsage(agent: AgentConfig) {
+  try {
+    return skillCatalogUsage(HistoryDB.forDir(path.resolve(agent.workspace, '..'), agent.id));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Claude Code plugin skills the agent's workers load (cwd + pstack as in discoverWorkerExtensions). */
+function agentInstalledSkills(agent: AgentConfig) {
+  const cwd = agent.orchestration?.tasks?.projectRoot || agent.workspace;
+  return readClaudeExtensions(cwd, process.env, { [PSTACK_PLUGIN_ID]: Boolean(agent.pstack) }).skills;
+}
 
 // ─── Simple argument parsing (no heavy deps) ──────────────────────────────────
 function parseArgs(argv: string[]): Record<string, string | boolean> {
@@ -230,6 +251,7 @@ async function startAgent(
   let workspace;
   try {
     workspace = await loadWorkspace(agentConfig.workspace, {
+      skillUsage: agentSkillUsage(agentConfig),
       coreShrink,
       isolateMemory,
       disableArchive,
@@ -298,6 +320,7 @@ async function startAgent(
       workspaceDir: agentConfig.workspace,
       mcpToolsDir,
       sharedSkillsDir,
+      installedSkills: () => agentInstalledSkills(agentConfig),
       globalCfg: gatewayConfig.gateway.skillLearning,
       // Isolate mode (#601): a skill learned from one conversation is offered to
       // every other one, so the reviewer stays off (as dreaming does below).
@@ -392,7 +415,7 @@ async function startAgent(
     const next=JSON.stringify([memoryBudget,agentConfig.knowledge,gatewayConfig.gateway.knowledge]);
     if(next===composePolicy)return;composePolicy=next;
     composeReload=composeReload.then(async()=>{
-      const updated=await loadWorkspace(agentConfig.workspace,{mcpToolsDir,sharedSkillsDir,logger,memoryBudget,coreShrink,isolateMemory,disableArchive});
+      const updated=await loadWorkspace(agentConfig.workspace,{mcpToolsDir,sharedSkillsDir,logger,memoryBudget,coreShrink,isolateMemory,disableArchive,skillUsage:agentSkillUsage(agentConfig)});
       await fs.promises.writeFile(path.join(agentConfig.workspace,'CLAUDE.md'),updated.systemPrompt,'utf8');
       if(updated.skillRegistry)runner.setSkillRegistry(updated.skillRegistry);
       await runner.restartOrDefer({skipBusy:true,deferIdle:true});
@@ -415,6 +438,7 @@ async function startAgent(
     logger.info('Workspace changed, reloading', { files: changedFiles });
     try {
       const updated = await loadWorkspace(agentConfig.workspace, {
+        skillUsage: agentSkillUsage(agentConfig),
         mcpToolsDir,
         sharedSkillsDir,
         logger,
@@ -476,6 +500,7 @@ async function startAgent(
       logger.info('Skills changed, reloading registry');
       try {
         const updated = await loadWorkspace(agentConfig.workspace, {
+          skillUsage: agentSkillUsage(agentConfig),
           mcpToolsDir,
           sharedSkillsDir,
           logger,
@@ -839,6 +864,7 @@ async function main(): Promise<void> {
       const logger = createLogger(agentName, ctx.logDir);
       try {
         const updated = await loadWorkspace(agentConfig.workspace, {
+          skillUsage: agentSkillUsage(agentConfig),
           mcpToolsDir: ctx.mcpToolsDir,
           sharedSkillsDir: ctx.sharedSkillsDir,
           logger,

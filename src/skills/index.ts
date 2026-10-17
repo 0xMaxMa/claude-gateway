@@ -1,7 +1,7 @@
 export { parseSkill, extractFrontmatter } from './parser';
 export type { SkillDefinition, SkillRequires, SkillInstallDescriptor, ParseSkillOptions } from './parser';
 export { loadSkills, renderSkillsSection } from './loader';
-export type { SkillRegistry, LoadSkillsOptions } from './loader';
+export type { SkillRegistry, LoadSkillsOptions, SkillCatalogUsage } from './loader';
 export { detectSkillCommand, formatSkillContext } from './invoker';
 export type { SkillInvocation } from './invoker';
 export { watchSkills } from './watcher';

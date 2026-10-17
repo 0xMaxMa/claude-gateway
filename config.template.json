@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.37",
+  "configVersion": "1.0.38",
   "gateway": {
     "orchestration": true,
     "logDir": "~/.claude-gateway/logs",
@@ -89,7 +89,7 @@
       "mode": "auto",
       "minToolCalls": 5,
       "reviewModel": "claude-haiku-4-5-20251001",
-      "maxAutoSkills": 50,
+      "maxAutoSkills": 20,
       "maxAgeDays": 30,
       "minUsesToKeep": 2,
       "maxReviewsPerDay": 20,

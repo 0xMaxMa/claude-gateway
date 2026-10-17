@@ -361,6 +361,29 @@ function upgradeRetiredFastAckDefault(config: Record<string, unknown>): string[]
   return changed;
 }
 
+/** Warning surfaced when a migration lowers the retired `skillLearning.maxAutoSkills: 50`. */
+export const MAX_AUTO_SKILLS_DEFAULT_WARNING =
+  'gateway.skillLearning.maxAutoSkills: 50 was lowered to the new default 20. The curator ' +
+  'archives the least-recently-used learned skills above the cap to skills/.archive/ ' +
+  '(kept 30 days; move a directory back to skills/ to restore it). Set ' +
+  'gateway.skillLearning.maxAutoSkills to keep a higher cap.';
+
+/**
+ * One-time upgrade of the retired `gateway.skillLearning.maxAutoSkills` default
+ * from 50 to 20. `config.template.json` wrote the literal 50 into every config,
+ * so a changed built-in default alone never reaches an existing install. Like
+ * {@link upgradeRetiredFastAckDefault}, this runs only when migrating a config
+ * older than the template (1.0.38): a 50 set before then is indistinguishable
+ * from the old default and is lowered once; a value set afterwards is kept.
+ * Per-agent overrides are the user's and left as-is.
+ */
+function upgradeRetiredMaxAutoSkillsDefault(config: Record<string, unknown>): string[] {
+  const skillLearning = (config.gateway as { skillLearning?: Record<string, unknown> } | null | undefined)?.skillLearning;
+  if (!skillLearning || typeof skillLearning !== 'object' || skillLearning.maxAutoSkills !== 50) return [];
+  skillLearning.maxAutoSkills = 20;
+  return ['gateway.skillLearning.maxAutoSkills'];
+}
+
 /**
  * Load a template file, extract the _migration metadata, strip it,
  * and return the clean template along with the ignorePaths set.
@@ -506,6 +529,11 @@ export function detectMigration(
     added.push(...fastAckFields);
     warnings.push(FAST_ACK_DEFAULT_WARNING);
   }
+  const maxAutoSkillsFields = upgradeRetiredMaxAutoSkillsDefault(configClone);
+  if (maxAutoSkillsFields.length > 0) {
+    added.push(...maxAutoSkillsFields);
+    warnings.push(MAX_AUTO_SKILLS_DEFAULT_WARNING);
+  }
 
   // Deep-merge top-level keys (except agents which need special handling)
   const templateWithoutAgents = { ...template };
@@ -604,6 +632,11 @@ export function applyMigration(
   if (fastAckFields.length > 0) {
     added.push(...fastAckFields);
     warnings.push(FAST_ACK_DEFAULT_WARNING);
+  }
+  const maxAutoSkillsFields = upgradeRetiredMaxAutoSkillsDefault(config);
+  if (maxAutoSkillsFields.length > 0) {
+    added.push(...maxAutoSkillsFields);
+    warnings.push(MAX_AUTO_SKILLS_DEFAULT_WARNING);
   }
 
   // Deep-merge top-level keys (except agents)

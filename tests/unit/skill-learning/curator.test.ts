@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { HistoryDB } from '../../../src/history/db';
-import { curateOnce, TELEMETRY_RETENTION_DAYS } from '../../../src/agent/skill-learning/curator';
+import { curateOnce, TELEMETRY_RETENTION_DAYS, ARCHIVE_DIRNAME, ARCHIVE_RETENTION_DAYS } from '../../../src/agent/skill-learning/curator';
 import { SKILL_LEARNING_DEFAULTS } from '../../../src/agent/skill-learning/config';
 import type { ResolvedSkillLearningCfg } from '../../../src/agent/skill-learning/types';
 
@@ -127,6 +127,76 @@ describe('curator.curateOnce', () => {
     expect(r.pruned).toEqual([]); // no skill prune when disabled
     expect(exists(ws, 'stale')).toBe(true);
     expect(r.telemetryRowsRemoved).toBe(1); // old turn row pruned regardless
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  it('archives a pruned skill under skills/.archive/<date>/ instead of deleting it', () => {
+    const { db, ws, dir } = setup();
+    const now = 100 * DAY;
+    seedSkill(db, ws, 'stale', { origin: 'auto', createdAt: now - 45 * DAY, timesLoaded: 0 });
+    const r = curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ minUsesToKeep: 2, maxAgeDays: 30 }), now });
+    expect(r.pruned).toEqual(['stale']);
+    expect(exists(ws, 'stale')).toBe(false);
+    const archived = path.join(ws, 'skills', ARCHIVE_DIRNAME, new Date(now).toISOString().slice(0, 10), 'stale', 'SKILL.md');
+    expect(fs.readFileSync(archived, 'utf-8')).toContain('origin: auto');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a skill archived twice on the same day keeps both copies', () => {
+    const { db, ws, dir } = setup();
+    const now = 100 * DAY;
+    seedSkill(db, ws, 'dup', { origin: 'auto', createdAt: now - 45 * DAY, timesLoaded: 0 });
+    curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ minUsesToKeep: 2, maxAgeDays: 30 }), now });
+    seedSkill(db, ws, 'dup', { origin: 'auto', createdAt: now - 45 * DAY, timesLoaded: 0 });
+    curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ minUsesToKeep: 2, maxAgeDays: 30 }), now: now + 1 });
+    const day = path.join(ws, 'skills', ARCHIVE_DIRNAME, new Date(now).toISOString().slice(0, 10));
+    expect(fs.readdirSync(day).length).toBe(2);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('NEVER archives an auto skill pinned in its on-disk frontmatter', () => {
+    const { db, ws, dir } = setup();
+    const now = 100 * DAY;
+    seedSkill(db, ws, 'fmpinned', { origin: 'auto', createdAt: now - 45 * DAY, timesLoaded: 0 });
+    fs.writeFileSync(path.join(ws, 'skills', 'fmpinned', 'SKILL.md'), '---\nname: fmpinned\ndescription: "x"\norigin: auto\npinned: true\n---\nbody\n', 'utf-8');
+    const r = curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ minUsesToKeep: 2, maxAgeDays: 30 }), now });
+    expect(r.pruned).toEqual([]);
+    expect(exists(ws, 'fmpinned')).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('NEVER moves a directory without an origin:auto SKILL.md, or a symlinked one', () => {
+    const { db, ws, dir } = setup();
+    const now = 100 * DAY;
+    // Stat row says auto, but the directory holds no SKILL.md (user content).
+    fs.mkdirSync(path.join(ws, 'skills', 'notes'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'skills', 'notes', 'keep.txt'), 'mine', 'utf-8');
+    db.recordSkillCreated({ name: 'notes', origin: 'auto', createdAt: now - 45 * DAY, createdFromSession: 's', pinned: 0 });
+    // Stat row says auto, but the directory is a symlink to a skill elsewhere.
+    const outside = path.join(dir, 'outside', 'linked');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'SKILL.md'), '---\nname: linked\ndescription: "x"\norigin: auto\n---\nbody\n', 'utf-8');
+    fs.symlinkSync(outside, path.join(ws, 'skills', 'linked'));
+    db.recordSkillCreated({ name: 'linked', origin: 'auto', createdAt: now - 45 * DAY, createdFromSession: 's', pinned: 0 });
+
+    const r = curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ minUsesToKeep: 2, maxAgeDays: 30 }), now });
+    expect(r.pruned).toEqual([]);
+    expect(fs.readFileSync(path.join(ws, 'skills', 'notes', 'keep.txt'), 'utf-8')).toBe('mine');
+    expect(fs.lstatSync(path.join(ws, 'skills', 'linked')).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(path.join(outside, 'SKILL.md'))).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('expires archive days older than the retention window, even when disabled', () => {
+    const { db, ws, dir } = setup();
+    const now = 100 * DAY;
+    const archive = path.join(ws, 'skills', ARCHIVE_DIRNAME);
+    const day = (offset: number) => new Date(now - offset * DAY).toISOString().slice(0, 10);
+    for (const d of [day(ARCHIVE_RETENTION_DAYS + 1), day(ARCHIVE_RETENTION_DAYS - 1)]) {
+      fs.mkdirSync(path.join(archive, d, 'old-skill'), { recursive: true });
+    }
+    fs.mkdirSync(path.join(archive, 'not-a-date'), { recursive: true });
+    curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ enabled: false }), now });
+    expect(fs.readdirSync(archive).sort()).toEqual([day(ARCHIVE_RETENTION_DAYS - 1), 'not-a-date'].sort());
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
