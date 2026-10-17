@@ -9,7 +9,7 @@ import { userInfo, homedir } from 'os';
 import type { AgentConfig } from '../types';
 import type { RuntimeProfile } from '../session/runtime-profile';
 import { OrchestrationError } from './types';
-import { SANDBOX_LABEL, BRIDGE_SOCKET_DIR, CLAUDE_PROJECT_ENTRIES, workspaceEntryVisible } from '../apps/conversation-sandbox';
+import { SANDBOX_LABEL, BRIDGE_SOCKET_DIR, CLAUDE_DIR, CLAUDE_PROJECT_ENTRIES, workspaceEntryVisible } from '../apps/conversation-sandbox';
 // Resolve subprocess support only when this feature is invoked.
 const exec = (file: string, args: string[], options: import('child_process').ExecFileOptions = {}) =>
   promisify(execFile)(file, args, { ...options, encoding: 'utf8' as const });
@@ -72,7 +72,7 @@ export async function validateContainerInspection(agent: AgentConfig, c: any, op
  * installer's read-only runtime mounts (see apps/conversation-sandbox.ts). */
 async function validateSandboxMounts(agent: AgentConfig, mounts: any[], workspace: string, media: string, ro: Map<string, string>): Promise<void> {
   const agentHomes = await realpath(join(agent.workspace, '..', 'sandbox-homes')).catch(() => undefined);
-  // The writable chats/ directory and HOME belong to one conversation (same name).
+  // The writable chats/ directory and Claude Code directory belong to one conversation (same name).
   const own = new Set<string>();
   let chats = 0, ownMedia = 0, home = 0;
   for (const m of mounts) {
@@ -90,7 +90,7 @@ async function validateSandboxMounts(agent: AgentConfig, mounts: any[], workspac
       continue;
     }
     if (m.RW && dirname(source) === media && [source, join(agent.workspace, '..', 'media', basename(source))].includes(destination)) { ownMedia++; continue; }
-    if (m.RW && destination === homedir() && dirname(source) === agentHomes) { home++; own.add(basename(source)); continue; }
+    if (m.RW && destination === CLAUDE_DIR() && dirname(source) === agentHomes) { home++; own.add(basename(source)); continue; }
     if (m.RW || ro.get(destination) !== source) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
   }
   if (chats !== 1 || ownMedia > 1 || home !== 1 || own.size !== 1) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');

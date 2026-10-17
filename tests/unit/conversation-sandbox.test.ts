@@ -56,10 +56,11 @@ describe('sandboxMounts', () => {
     expect(mounts.some(m => m.source.includes(chatMemoryDirName('telegram', '222')))).toBe(false);
   });
 
-  it('gives it its own media directory and HOME, outside the workspace', () => {
+  it('gives it its own media directory and Claude Code directory, outside the workspace', () => {
     const mounts = byTarget(sandboxMounts(agent, A, []));
     expect(mounts[path.join(root, 'agents', 'bot', 'media', 'telegram-111')]).toMatchObject({ readonly: false });
-    expect(mounts[os.homedir()]).toEqual({ source: path.join(root, 'agents', 'bot', 'sandbox-homes', chatMemoryDirName('telegram', '111')), target: os.homedir(), readonly: false });
+    expect(mounts[path.join(os.homedir(), '.claude')]).toEqual({ source: path.join(root, 'agents', 'bot', 'sandbox-homes', chatMemoryDirName('telegram', '111')), target: path.join(os.homedir(), '.claude'), readonly: false });
+    expect(mounts[os.homedir()]).toBeUndefined();
     expect(mounts['/workspace/.orch']).toMatchObject({ readonly: true });
   });
 
@@ -133,7 +134,7 @@ describe('validateContainerInspection, sandbox', () => {
     Mounts: mounts.map(m => ({ Type: 'bind', ...m })),
   });
   const generated = () => sandboxMounts(agent, A, []).map(m => ({ Source: m.source, Destination: m.target, RW: !m.readonly }));
-  const homeOf = (conversation: typeof A) => ({ Source: path.join(root, 'agents', 'bot', 'sandbox-homes', chatMemoryDirName(conversation.source, conversation.chatId)), Destination: os.homedir(), RW: true });
+  const homeOf = (conversation: typeof A) => ({ Source: path.join(root, 'agents', 'bot', 'sandbox-homes', chatMemoryDirName(conversation.source, conversation.chatId)), Destination: path.join(os.homedir(), '.claude'), RW: true });
 
   it('accepts the mounts the gateway creates', async () => {
     await expect(validateContainerInspection(agent, inspection(generated()))).resolves.toBeUndefined();
@@ -144,7 +145,7 @@ describe('validateContainerInspection, sandbox', () => {
     ["another conversation's directory", (ms: any[]) => [...ms, { Source: path.join(ws, 'chats', chatMemoryDirName('telegram', '222')), Destination: `/workspace/chats/${chatMemoryDirName('telegram', '222')}`, RW: true }]],
     ['a writable persona file', (ms: any[]) => ms.map(m => m.Destination === '/workspace/AGENTS.md' ? { ...m, RW: true } : m)],
     ['the root memory file', (ms: any[]) => [...ms, { Source: path.join(ws, 'MEMORY.md'), Destination: '/workspace/MEMORY.md', RW: false }]],
-    ["another conversation's HOME", (ms: any[]) => { fs.mkdirSync(homeOf(B).Source, { recursive: true }); return [...ms.filter(m => m.Destination !== os.homedir()), homeOf(B)]; }],
+    ["another conversation's Claude Code directory", (ms: any[]) => { fs.mkdirSync(homeOf(B).Source, { recursive: true }); return [...ms.filter(m => m.Destination !== path.join(os.homedir(), '.claude')), homeOf(B)]; }],
     ['a root note file', (ms: any[]) => [...ms, { Source: path.join(ws, 'notes-about-alice.md'), Destination: '/workspace/notes-about-alice.md', RW: false }]],
     ['the shared media root', (ms: any[]) => [...ms, { Source: path.join(root, 'agents', 'bot', 'media'), Destination: path.join(root, 'agents', 'bot', 'media'), RW: true }]],
   ])('refuses %s', async (_name, change) => {

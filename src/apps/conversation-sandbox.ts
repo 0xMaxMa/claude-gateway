@@ -26,7 +26,7 @@ import { CODEX_RUNTIME_LABEL } from '../session/codex-container-runtime';
  *   files (see `workspaceEntryVisible`);
  * - `chats/<this conversation>/`, the only writable workspace path;
  * - this conversation's media directory;
- * - a HOME of its own on the host, outside the workspace;
+ * - a Claude Code directory (`~/.claude`) of its own on the host, outside the workspace;
  * - the task bridge's socket directory, read-only.
  *
  * Everything else is absent, so a path that appears later stays hidden until
@@ -43,6 +43,8 @@ const NAME_PATTERN = /-c-[0-9a-f]{20}$/;
 /** The bridge socket directory under the workspace, shared read-only with sandboxes. */
 export const BRIDGE_SOCKET_DIR = '.orch';
 const IDLE_MS = 30 * 60_000;
+/** Where a sandbox keeps its conversation's Claude Code state (`HOME/.claude`). */
+export const CLAUDE_DIR = (): string => path.join(homedir(), '.claude');
 const REAP_INTERVAL_MS = 5 * 60_000;
 const CONVERGED_MS = 5_000;
 
@@ -127,7 +129,7 @@ export function sandboxPaths(agent: Pick<AgentConfig, 'workspace'>, conversation
  * read-only runtime mounts (CLI, node, seed, Codex). */
 export function sandboxMounts(agent: Pick<AgentConfig, 'workspace'>, conversation: SandboxConversation, toolMounts: SandboxMount[]): SandboxMount[] {
   const paths = sandboxPaths(agent, conversation);
-  const mounts: SandboxMount[] = toolMounts.filter(m => m.readonly && m.target !== '/workspace' && !m.target.startsWith('/workspace/') && m.target !== homedir());
+  const mounts: SandboxMount[] = toolMounts.filter(m => m.readonly && m.target !== '/workspace' && !m.target.startsWith('/workspace/') && m.target !== CLAUDE_DIR());
   for (const name of fs.readdirSync(paths.workspace).sort()) {
     const source = path.join(paths.workspace, name);
     const kind = plainEntry(source);
@@ -144,7 +146,10 @@ export function sandboxMounts(agent: Pick<AgentConfig, 'workspace'>, conversatio
   mounts.push({ source: ownDirectory(path.join(paths.workspace, BRIDGE_SOCKET_DIR)), target: `/workspace/${BRIDGE_SOCKET_DIR}`, readonly: true });
   mounts.push({ source: ownDirectory(path.join(paths.workspace, 'chats', paths.chat)), target: `/workspace/chats/${paths.chat}`, readonly: false });
   if (paths.media) mounts.push({ source: ownDirectory(paths.media), target: paths.media, readonly: false });
-  mounts.push({ source: ownDirectory(paths.home), target: homedir(), readonly: false });
+  // Only Claude Code's directory (its transcripts), not the whole HOME: Docker creates
+  // the mount points of the runtime and media mounts under HOME as root, which would
+  // land in this gateway-owned directory where the gateway could not remove them.
+  mounts.push({ source: ownDirectory(paths.home), target: CLAUDE_DIR(), readonly: false });
   for (const m of mounts) if (/[,"\n]/.test(m.source + m.target)) throw new Error('SANDBOX_PATH_DENIED');
   return mounts;
 }

@@ -163,7 +163,7 @@ At install, update and every gateway start, the gateway writes `isolateMemory` i
 - **read-only**, the persona files (`CLAUDE.md`, `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `HEARTBEAT.md`) and the workspace directories that exist when it is created, except `chats/`, `memory/`, `media/`, dot directories and symlinks; of `.claude/`, only `skills`, `commands`, `agents` and `settings.json`. Any other root file, such as the root `MEMORY.md`/`USER.md`, `kb.sqlite`, `SKILLS_LEARNED.md` or a note an agent wrote before the mode was on, is not mounted;
 - `chats/<this conversation>/`, the only writable workspace path;
 - this conversation's media directory (`media/<channel>-<chatId>`, or `media/api-<session>` for an API session);
-- its own home directory, `agents/<id>/sandbox-homes/<conversation>/`, which keeps its Claude Code transcripts;
+- its own Claude Code directory (`~/.claude`), kept on the host at `agents/<id>/sandbox-homes/<conversation>/`, which holds its Claude Code transcripts;
 - the orchestration task bridge's socket directory, read-only.
 
 So a conversation can read and write only its own memory, cannot change the persona or skills, and cannot see another conversation's files, transcripts, task tickets or processes. Claude, Codex and orchestration workers of that conversation all run there. The gateway removes a sandbox 30 minutes after its last session ends, recreates it when its mounts or the app image change, and removes all of an app's sandboxes when the app is updated or uninstalled. The gateway refuses to run a session in a container whose mounts are wider than this.
