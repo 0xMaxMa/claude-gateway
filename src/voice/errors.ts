@@ -88,7 +88,7 @@ export function describeVoiceError(error: unknown) {
     else if (httpStatus === 408 || httpStatus === 504 || /TIMEOUT|TimeoutError/.test(code)) category = 'timeout';
     else if (httpStatus && httpStatus >= 500) category = 'unavailable';
     // The recognizer heard the audio and found no words: noise, not a provider failure.
-    else if (code === 'EMPTY_TRANSCRIPT') category = 'no_speech';
+    else if (code === 'EMPTY_TRANSCRIPT' || code === 'VOICE_NOTE_NO_TRANSCRIPT') category = 'no_speech';
     else if (/LANGUAGE_UNSUPPORTED|UNSUPPORTED_LANGUAGE/.test(code)) category = 'language';
     else if (/INVALID_VOICE_MODEL|UNKNOWN_TTS_PROVIDER|UNKNOWN_STT_PROVIDER|TTS_FILE_UNSUPPORTED/.test(code)) category = 'model';
     else if (httpStatus && httpStatus >= 400) category = 'invalid_request';

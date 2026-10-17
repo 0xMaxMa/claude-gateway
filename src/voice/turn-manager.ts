@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { SttEvent, SttSession, VoiceError } from './types';
+import { hasSpokenWords, SttEvent, SttSession, VoiceError } from './types';
 
 /** An STT final segment is not a complete utterance. Acceptance waits for both
  * the audio sequence boundary and the provider's normalized finalization ack. */
@@ -41,7 +41,7 @@ export class VoiceTurnManager {
       if ([...this.finals.values()].join(' ').length > 65536) this.fail(new VoiceError('TRANSCRIPT_TOO_LARGE'));
     } else if (event.type === 'commit_done' && this.state === 'finalizing' && event.commitId === this.commitId) {
       const text = [...this.finals.values()].join(' ').trim();
-      if (!text) { this.fail(new VoiceError('EMPTY_TRANSCRIPT')); return; }
+      if (!hasSpokenWords(text)) { this.fail(new VoiceError('EMPTY_TRANSCRIPT')); return; }
       this.state = 'accepted'; clearTimeout(this.timer); this.resolveCommit?.(text);
     } else if (event.type === 'error') this.fail(new VoiceError(event.code));
   }

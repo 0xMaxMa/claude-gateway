@@ -25,6 +25,9 @@ export interface TtsProvider {
 export class VoiceError extends Error {
   constructor(readonly code: string) { super(code); this.name = 'VoiceError'; }
 }
+/** Whether a transcript holds any spoken word. Providers sometimes return only punctuation such
+ * as "." or "…" for clear speech, which carries nothing for the agent to answer. */
+export function hasSpokenWords(text: string): boolean { return /[\p{L}\p{N}]/u.test(text); }
 export const PCM16: AudioFormat = { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1 };
 export function validateAudioFormat(format: AudioFormat): void {
   if (format.encoding !== 'pcm_s16le' || format.channels !== 1 || ![8000, 16000, 22050, 24000, 44100, 48000].includes(format.sampleRate)) throw new VoiceError('UNSUPPORTED_AUDIO_FORMAT');

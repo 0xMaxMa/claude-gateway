@@ -103,10 +103,26 @@ describe('voice-note transcription', () => {
     expect(sleeps).toEqual([]);
   });
 
-  test('an empty transcript is final', async () => {
-    const { sleep } = recorder(), request = jest.fn(async () => json({ text: '' }));
-    await expect(transcribeVoiceNote(path, { provider: 'elevenlabs', model: 'scribe_v2', sleep }, request)).rejects.toThrow('VOICE_NOTE_NO_TRANSCRIPT');
-    expect(request).toHaveBeenCalledTimes(1);
+  // Issue #610: the provider returned no words, or only ".", for clear speech; the same file
+  // transcribed fine when sent again, but the user was asked to record it again.
+  test.each(['', '   ', '.', '…', '?!'])('a transcript of %j is retried and the next real text is returned', async empty => {
+    const { sleeps, sleep } = recorder(), diagnostics: any[] = [];
+    const responses = [json({ text: empty }), json({ text: ' สวัสดีครับ ' })];
+    const request = jest.fn(async () => responses.shift()!);
+    await expect(transcribeVoiceNote(path, { provider: 'elevenlabs', model: 'scribe_v2', sleep, onDiagnostic: event => diagnostics.push(event) }, request)).resolves.toBe('สวัสดีครับ');
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([1000]);
+    expect(diagnostics).toEqual([expect.objectContaining({ stage: 'transcription', outcome: 'retry', code: 'VOICE_NOTE_NO_TRANSCRIPT', attempt: 1 })]);
+  });
+
+  test('a transcript with no words on every attempt fails after the bounded attempts', async () => {
+    const { sleeps, sleep } = recorder(), diagnostics: any[] = [];
+    const responses = ['.', '…', ' '];
+    const request = jest.fn(async () => json({ text: responses.shift() }));
+    await expect(transcribeVoiceNote(path, { provider: 'elevenlabs', model: 'scribe_v2', sleep, onDiagnostic: event => diagnostics.push(event) }, request)).rejects.toMatchObject({ code: 'VOICE_NOTE_NO_TRANSCRIPT' });
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([1000, 3000]);
+    expect(diagnostics.map(event => event.outcome)).toEqual(['retry', 'retry', 'failed']);
   });
 });
 
@@ -139,6 +155,9 @@ test('credit-check codes say what failed, and keep the old code readable', () =>
   expect(describeVoiceError('MANAGED_VOICE_USAGE_HTTP_503').message).toContain('(HTTP 503)');
   // The provider itself failing still reads as a provider error.
   expect(describeVoiceError('STT_PROVIDER_ERROR_HTTP_503')).toMatchObject({ category: 'unavailable' });
-  for (const code of ['STT_PROVIDER_ERROR_HTTP_503', 'PROVIDER_TIMEOUT', 'PROVIDER_CONNECTION_FAILED', 'VOICE_NOTE_INTERRUPTED', 'STT_PROVIDER_ERROR_HTTP_429']) expect(retryableVoiceNoteFailure(code)).toBe(true);
-  for (const code of ['MANAGED_VOICE_QUOTA_EXHAUSTED', 'STT_PROVIDER_ERROR_HTTP_401', 'STT_PROVIDER_ERROR_HTTP_402', 'VOICE_NOTE_NO_TRANSCRIPT', 'VOICE_NOTE_SIZE_LIMIT', 'VOICE_NOTES_DISABLED']) expect(retryableVoiceNoteFailure(code)).toBe(false);
+  for (const code of ['STT_PROVIDER_ERROR_HTTP_503', 'PROVIDER_TIMEOUT', 'PROVIDER_CONNECTION_FAILED', 'VOICE_NOTE_INTERRUPTED', 'STT_PROVIDER_ERROR_HTTP_429', 'VOICE_NOTE_NO_TRANSCRIPT']) expect(retryableVoiceNoteFailure(code)).toBe(true);
+  for (const code of ['MANAGED_VOICE_QUOTA_EXHAUSTED', 'STT_PROVIDER_ERROR_HTTP_401', 'STT_PROVIDER_ERROR_HTTP_402', 'VOICE_NOTE_SIZE_LIMIT', 'VOICE_NOTES_DISABLED']) expect(retryableVoiceNoteFailure(code)).toBe(false);
+  // No words after every attempt is a recognition result, not an unknown failure.
+  expect(describeVoiceError('VOICE_NOTE_NO_TRANSCRIPT')).toMatchObject({ category: 'no_speech', retryable: true });
+  expect(voiceNoteFailureMessage('VOICE_NOTE_NO_TRANSCRIPT')).not.toContain('No speech was detected');
 });

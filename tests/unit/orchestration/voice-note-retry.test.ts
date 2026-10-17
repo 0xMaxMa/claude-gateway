@@ -18,7 +18,7 @@ const until = async (predicate: () => boolean) => {
   throw Error('condition not reached');
 };
 
-async function fixture(failures: string[], chatId = '42') {
+async function fixture(failures: string[], chatId = '42', results: string[] = []) {
   const root = mkdtempSync(join(tmpdir(), 'voice-retry-'));
   mkdirSync(join(root, 'a', 'media', 'chat'), { recursive: true });
   writeFileSync(join(root, 'a', 'media', 'chat', 'note.ogg'), Buffer.from('OggSfixture'));
@@ -35,7 +35,7 @@ async function fixture(failures: string[], chatId = '42') {
         options.onDiagnostic?.({ stage: 'transcription', outcome: 'failed', code: failure, attempt: 3, elapsedMs: 4100, httpStatus: 503 });
         throw new VoiceError(failure);
       }
-      return 'ช่วยสรุปงานวันนี้ให้หน่อย';
+      return results.shift() ?? 'ช่วยสรุปงานวันนี้ให้หน่อย';
     },
     createAgentSession: async () => {
       const process = new EventEmitter() as SessionProcess;
@@ -85,13 +85,34 @@ test('a retryable failure gets a 🔁 Retry button that re-transcribes the kept 
 });
 
 test('a final failure has no Retry button and cannot be retried', async () => {
-  const f = await fixture(['VOICE_NOTE_NO_TRANSCRIPT']);
+  const f = await fixture(['VOICE_NOTE_SIZE_LIMIT']);
   try {
     await f.send();
     const inputId = String(f.runtime.store.get("SELECT input_id FROM voice_note_transcripts")!.input_id);
     expect(f.controls()).toEqual([]);
     expect(f.runtime.retryVoiceNote('telegram', '42', 'telegram:42', inputId)).toMatchObject({ retried: false });
     expect(f.transcribed).toHaveLength(1);
+  } finally { await f.close(); }
+});
+
+// Issue #610: a transcript of only "." was stored as completed and sent to the agent as the
+// user's message, and "no words" after every attempt was final, so only re-recording helped.
+test('a punctuation-only transcript never reaches the agent, and the kept recording can be retried', async () => {
+  const f = await fixture([], '42', ['.']);
+  try {
+    const reply = await f.send();
+    const inputId = String(f.runtime.store.get('SELECT input_id FROM voice_note_transcripts')!.input_id);
+    expect(f.prompts).toEqual([]);
+    expect(f.runtime.store.get('SELECT state,text,error_code FROM voice_note_transcripts WHERE input_id=?', inputId)).toEqual({ state: 'failed', text: null, error_code: 'VOICE_NOTE_NO_TRANSCRIPT' });
+    expect(f.runtime.store.get('SELECT text FROM conversation_inputs WHERE id=?', inputId)!.text).not.toBe('.');
+    expect(reply).toContain(`Reference: ${inputId}`);
+    expect(reply).not.toContain('No speech was detected');
+    expect(f.controls()).toEqual([[{ label: '🔁 Retry', data: `orch:vr:${inputId}` }]]);
+    expect(readFileSync(join(f.root, 'logs', 'a.log'), 'utf8')).toContain('"category":"no_speech"');
+    expect(f.runtime.retryVoiceNote('telegram', '42', 'telegram:42', inputId)).toMatchObject({ retried: true });
+    await until(() => f.prompts.length === 1 && !f.runtime.isBusy('s'));
+    expect(f.transcribed).toHaveLength(2);
+    expect(f.prompts[0]).toContain('ช่วยสรุปงานวันนี้ให้หน่อย');
   } finally { await f.close(); }
 });
 
