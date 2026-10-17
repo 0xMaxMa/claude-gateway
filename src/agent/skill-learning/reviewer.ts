@@ -26,7 +26,7 @@ export interface ReviewerInput {
   /** Existing skills the agent already has (name + description), for dedup/priority. */
   existingSkills: Array<{ name: string; description: string }>;
   /** Installed skills the reviewer may not edit; a create must not duplicate them. */
-  readOnlySkills?: string[];
+  readOnlySkills?: Array<{ name: string; description: string }>;
 }
 
 export interface ReviewerResult {
@@ -78,7 +78,9 @@ function buildPrompt(input: ReviewerInput): string {
     '<existing_skills>',
     skillsList,
     '</existing_skills>',
-    ...(input.readOnlySkills?.length ? ['', '<installed_skills>', input.readOnlySkills.join(', '), '</installed_skills>'] : []),
+    ...(input.readOnlySkills?.length
+      ? ['', '<installed_skills>', ...input.readOnlySkills.map((s) => `- ${s.name}: ${s.description}`), '</installed_skills>']
+      : []),
     '',
     '<transcript>',
     input.transcript,

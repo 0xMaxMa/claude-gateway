@@ -81,9 +81,13 @@ export function isOwnedAutoSkillDir(skillDir: string): boolean {
   }
 }
 
-function isSymlink(p: string): boolean {
+/**
+ * A real directory holding only what an interrupted `atomicWrite` leaves behind
+ * (nothing, or `SKILL.md.tmp`). Anything else in it is user content: never claim it.
+ */
+function isLeftoverWriteDir(dir: string): boolean {
   try {
-    return fs.lstatSync(p).isSymbolicLink();
+    return fs.lstatSync(dir).isDirectory() && fs.readdirSync(dir).every((entry) => entry === 'SKILL.md.tmp');
   } catch {
     return false;
   }
@@ -243,7 +247,7 @@ export function applyProposal(proposal: ReviewProposal, ctx: WriterContext): Wri
   // the `.pending` queue (separate namespace, never a live user skill).
   const targetPath = skillFilePath(ctx.workspaceDir, name, queued);
   const targetDir = path.dirname(targetPath);
-  if (!queued && (pathEntryExists(targetPath) || isSymlink(targetDir)) && !isOwnedAutoSkillDir(targetDir)) {
+  if (!queued && pathEntryExists(targetDir) && !isOwnedAutoSkillDir(targetDir) && !isLeftoverWriteDir(targetDir)) {
     return { written: false, action, name, reason: 'provenance guard: on-disk target is not origin:auto (or is pinned or a symlink)' };
   }
 

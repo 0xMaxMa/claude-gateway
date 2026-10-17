@@ -168,6 +168,15 @@ describe('skill-learning writer.applyProposal', () => {
     expect(readSkill('half-written')).toContain('origin: auto');
   });
 
+  it('PROVENANCE GUARD: never claims an existing directory of user files without SKILL.md', () => {
+    fs.mkdirSync(path.join(ws, 'skills', 'common'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'skills', 'common', 'helper.sh'), 'echo mine', 'utf-8');
+    const out = applyProposal({ action: 'create', name: 'common', desc: 'd', body: 'b' }, ctx({ existing: [] }));
+    expect(out.written).toBe(false);
+    expect(out.reason).toMatch(/provenance guard/i);
+    expect(fs.existsSync(path.join(ws, 'skills', 'common', 'SKILL.md'))).toBe(false);
+  });
+
   it('create still succeeds when the target path is free', () => {
     const out = applyProposal({ action: 'create', name: 'fresh-skill', desc: 'd', body: 'b' }, ctx({ existing: [] }));
     expect(out.written).toBe(true);

@@ -310,6 +310,7 @@ export const MEMORY_MODE_AUTO_WARNING =
  * nothing was flipped).
  */
 function upgradeRetiredMemoryModeDefault(config: Record<string, unknown>): string[] {
+  if (!predates(config, '1.0.24')) return [];
   const gateway = config.gateway;
   if (!gateway || typeof gateway !== 'object' || Array.isArray(gateway)) return [];
   const g = gateway as Record<string, unknown>;
@@ -349,7 +350,7 @@ export const FAST_ACK_DEFAULT_WARNING =
  * a false set afterwards is kept.
  */
 function upgradeRetiredFastAckDefault(config: Record<string, unknown>): string[] {
-  if (!Array.isArray(config.agents)) return [];
+  if (!predates(config, '1.0.37') || !Array.isArray(config.agents)) return [];
   const changed: string[] = [];
   config.agents.forEach((agent: unknown, i) => {
     const live = (agent as { voice?: { live?: Record<string, unknown> } } | null)?.voice?.live;
@@ -368,8 +369,14 @@ export const MAX_AUTO_SKILLS_DEFAULT_WARNING =
   '(kept 30 days; move a directory back to skills/ to restore it). Set ' +
   'gateway.skillLearning.maxAutoSkills to keep a higher cap.';
 
-/** Template version that lowered the `maxAutoSkills` default. */
-const MAX_AUTO_SKILLS_DEFAULT_VERSION = '1.0.38';
+/**
+ * True when `config` was stamped before `version`. Retired-default upgrades gate
+ * on this so a later template bump never re-applies one to a value the user chose
+ * after the default changed.
+ */
+function predates(config: Record<string, unknown>, version: string): boolean {
+  return compareSemver((config.configVersion as string) ?? '0.0.0', version) < 0;
+}
 
 /**
  * One-time upgrade of the retired `gateway.skillLearning.maxAutoSkills` default
@@ -382,9 +389,7 @@ const MAX_AUTO_SKILLS_DEFAULT_VERSION = '1.0.38';
  * Per-agent overrides are the user's and left as-is.
  */
 function upgradeRetiredMaxAutoSkillsDefault(config: Record<string, unknown>): string[] {
-  // Gate on the source version: a later template bump must not re-lower a 50 the
-  // user set back on purpose after the warning.
-  if (compareSemver((config.configVersion as string) ?? '0.0.0', MAX_AUTO_SKILLS_DEFAULT_VERSION) >= 0) return [];
+  if (!predates(config, '1.0.38')) return [];
   const skillLearning = (config.gateway as { skillLearning?: Record<string, unknown> } | null | undefined)?.skillLearning;
   if (!skillLearning || typeof skillLearning !== 'object' || skillLearning.maxAutoSkills !== 50) return [];
   skillLearning.maxAutoSkills = 20;

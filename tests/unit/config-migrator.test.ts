@@ -1336,6 +1336,18 @@ describe('config-migrator', () => {
       expect(JSON.parse(fs.readFileSync(current, 'utf-8')).gateway.skillLearning.maxAutoSkills).toBe(50);
     });
 
+    it('the 1.0.38 bump keeps retired-default choices made after their own upgrade (fastAck, memory mode)', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.37',
+        gateway: { bind: '127.0.0.1', dreaming: { mode: 'propose' } },
+        agents: [{ id: 'a', voice: { enabled: true, live: { fastAck: false } } }],
+      });
+      migrateConfig(configPath, template(), '1.0.38');
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(updated.agents[0].voice.live.fastAck).toBe(false);
+      expect(updated.gateway.dreaming.mode).toBe('propose');
+    });
+
     it('a later template bump does not re-lower a 50 chosen at 1.0.38', () => {
       const next = writeJson('template.json', { configVersion: '1.0.39', gateway: { bind: '127.0.0.1', skillLearning: { maxAutoSkills: 20 } } });
       const chosen = writeJson('config.json', { configVersion: '1.0.38', gateway: { bind: '127.0.0.1', skillLearning: { maxAutoSkills: 50 } } });

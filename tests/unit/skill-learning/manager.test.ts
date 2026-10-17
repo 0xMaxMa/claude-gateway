@@ -144,7 +144,7 @@ describe('SkillLearningManager — review path', () => {
 
     await mgr.runReviewNow('chat1', 'sess1');
 
-    expect(reviewerInput).toMatch(/<installed_skills>\n[^<]*what-the-bug:wtb-auto-pilot[^<]*\n<\/installed_skills>/);
+    expect(reviewerInput).toMatch(/<installed_skills>\n[^<]*- what-the-bug:wtb-auto-pilot: End-to-end bug auto-pilot[^<]*\n<\/installed_skills>/);
     expect(reviewerInput).not.toMatch(/<existing_skills>[^]*what-the-bug:wtb-auto-pilot[^]*<\/existing_skills>/);
     expect(fs.existsSync(path.join(ws, 'skills', 'wtb-auto-pilot'))).toBe(false);
     expect(db.getSkillStat('wtb-auto-pilot')).toBeNull();
@@ -271,7 +271,7 @@ describe('review eligibility without another model call', () => {
 describe('managedTurnSkills', () => {
   it('counts Skill-tool calls for registry skills, alongside the task skill, once each', () => {
     const registry = { skills: new Map([['learned-flow', {}], ['task-skill', {}]]) } as never;
-    expect(managedTurnSkills(['task-skill'], ['learned-flow', 'pstack:tdd', 'task-skill'], registry).sort()).toEqual(['learned-flow', 'task-skill']);
+    expect(managedTurnSkills(['task-skill', 'pstack:arena'], ['learned-flow', 'pstack:tdd', 'task-skill'], registry).sort()).toEqual(['learned-flow', 'task-skill']);
     expect(managedTurnSkills(undefined, undefined, registry)).toEqual([]);
   });
 });

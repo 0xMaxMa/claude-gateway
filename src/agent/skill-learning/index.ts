@@ -53,12 +53,15 @@ export function skillCatalogUsage(db: HistoryDB, now = Date.now()): SkillCatalog
   return { now, timesLoaded: new Map(db.listSkillStats().map((s) => [s.name, s.timesLoaded])) };
 }
 
+/** Read-only skill descriptions are trimmed for the reviewer prompt (plugins can add ~100 of them). */
+const READ_ONLY_DESC_MAX = 120;
+
 /**
  * Skills a managed (orchestration) turn loaded: the task's skill command plus any
  * Skill-tool calls. Plugin skills outside the registry are not tracked in skill_stats.
  */
 export function managedTurnSkills(invoked: string[] | undefined, used: string[] | undefined, registry: SkillRegistry): string[] {
-  return [...new Set([...(invoked ?? []), ...(used ?? []).filter((name) => registry.skills.has(name))])];
+  return [...new Set([...(invoked ?? []), ...(used ?? [])])].filter((name) => registry.skills.has(name));
 }
 
 /** A skill installed outside the workspace (e.g. a Claude Code plugin skill). */
@@ -285,9 +288,9 @@ export class SkillLearningManager {
       const { proposal, tokensSpent, reviewed } = await runReviewer(
         {
           transcript: transcript.slice(-20_000),
-          // Only auto skills are editable; the rest are listed by name so the reviewer neither edits nor re-learns them.
+          // Only auto skills are editable; the rest are listed read-only so the reviewer neither edits nor re-learns them.
           existingSkills: existing.filter((s) => s.origin === 'auto').map((s) => ({ name: s.name, description: s.description })),
-          readOnlySkills: existing.filter((s) => s.origin !== 'auto').map((s) => s.name),
+          readOnlySkills: existing.filter((s) => s.origin !== 'auto').map((s) => ({ name: s.name, description: s.description.slice(0, READ_ONLY_DESC_MAX) })),
         },
         this.cfg,
         this.reviewSpawn,
