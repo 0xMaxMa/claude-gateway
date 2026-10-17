@@ -15,6 +15,7 @@ import { resolveOrchestrationConfig } from '../config';
 import { taskFailure } from './failure';
 import { payloadHash } from '../store';
 import { containerNode, validateContainer } from '../container';
+import { sandboxedAgent, usesConversationSandbox } from '../../apps/conversation-sandbox';
 import { toolActivity } from '../tool-activity';
 import { extractFrontmatter } from '../../skills/parser';
 import { dirname, join, relative } from 'path';
@@ -183,8 +184,13 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         ...(pstack ? { disallowedTools: ['Agent', 'Task'] } : {}),
         // Read-only is enforced by each harness (read tools; Codex's read-only sandbox) and no user connectors, which can write.
         ...(task.readonly ? { readOnly: true, connectorsAllowed: false, ...(harness.harness === 'claude' ? { workerTools: ['Read', 'Glob', 'Grep'] } : {}) } : {}), hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
-      const workerConfig: AgentConfig = { ...this.agent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
+      let workerConfig: AgentConfig = { ...this.agent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
         claude: { ...this.agent.claude, model: claudeModel, extraFlags: [] } };
+      // Isolate mode (#609): the worker executes in its conversation's own sandbox.
+      if (usesConversationSandbox(this.agent)) {
+        const conversation = this.tasks.store.get('SELECT source, chat_id FROM conversations WHERE id=?', task.conversationId)!;
+        workerConfig = await sandboxedAgent(workerConfig, { source: String(conversation.source), chatId: String(conversation.chat_id), sessionId: task.agentSessionId });
+      }
       const process = harness.harness === 'codex'
         ? new CodexProcess({ agent: workerConfig, gateway: this.gateway, profile, sessionId: attempt.sessionId,
           stateDirectory: join(this.privateRoot, 'codex-sessions'), config: task.effort ? { ...harness.config, reasoningEffort: codexEffort(task.effort) } : harness.config, resolvedCredentials,

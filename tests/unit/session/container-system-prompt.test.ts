@@ -34,6 +34,11 @@ jest.mock('child_process', () => {
   });
   return { ...real, execFile, spawn };
 });
+// An isolated app agent executes in its conversation's sandbox (#609); only the name matters here.
+jest.mock('../../../src/apps/conversation-sandbox', () => {
+  const actual = jest.requireActual('../../../src/apps/conversation-sandbox');
+  return { ...actual, sandboxPool: { ensure: jest.fn(async (agent: any, conversation: any) => actual.sandboxContainerName(agent, conversation)) } };
+});
 jest.mock('os', () => {
   const real = jest.requireActual('os');
   return { ...real, homedir: () => process.env.TEST_HOME ?? real.homedir() };
@@ -46,6 +51,7 @@ import { SessionProcess } from '../../../src/session/process';
 import type { AgentConfig, GatewayConfig } from '../../../src/types';
 import type { RuntimeProfile } from '../../../src/session/runtime-profile';
 import { chatMemoryDir } from '../../../src/agent/workspace-loader';
+import { sandboxContainerName } from '../../../src/apps/conversation-sandbox';
 
 // ~200 KB of Thai: three bytes per character, so the 64 KiB pipe chunks that carry the
 // setup exec's stdin split characters, and a decode per chunk would corrupt the prompt.
@@ -73,7 +79,9 @@ afterEach(() => {
 });
 
 function session(profile: Partial<RuntimeProfile> = {}, chat?: { chatId: string }): SessionProcess {
-  const agent = { id: 'a', type: 'app-agent', container: 'app-test', workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] }, ...(chat ? { isolateMemory: true } : {}) } as unknown as AgentConfig;
+  // A worker of an isolated agent arrives with its conversation's sandbox already resolved by its driver.
+  const container = chat && profile.role === 'worker' ? 'app-test-c-' + 'a'.repeat(20) : 'app-test';
+  const agent = { id: 'a', type: 'app-agent', container, workspace, description: 'fixture', env: '', claude: { model: 'fixture', extraFlags: [] }, ...(chat ? { isolateMemory: true } : {}) } as unknown as AgentConfig;
   const gateway = { gateway: { headless: true, timezone: 'UTC', logDir: join(root, 'logs') }, agents: [agent] } as GatewayConfig;
   const store = { getContextReset: () => undefined, loadSession: async () => [], loadTelegramSession: async () => [] } as any;
   return new SessionProcess('session:c', chat ? 'telegram' : 'api', agent, gateway, store, chat?.chatId, { role: 'agent', mcpConfigPath: join(root, 'mcp.json'), overlay: OVERLAY, capacityReserved: true, ...profile } as RuntimeProfile);
@@ -114,6 +122,9 @@ posix('an isolated app agent gets its own chat memory after the container CLAUDE
   expect(prompt).toContain(join(chatMemoryDir('/workspace', 'telegram', '111'), 'MEMORY.md'));
   expect(prompt).not.toContain(workspace);
   expect(launches[0].args).toContain('CLAUDE_CODE_DISABLE_AUTO_MEMORY=1');
+  // It runs in its conversation's sandbox, never the shared app container (#609).
+  expect(launches[0].args).toContain(sandboxContainerName({ id: 'a', container: 'app-test' }, { source: 'telegram', chatId: '111' }));
+  expect(launches[0].args).not.toContain('app-test');
   await sp.stop();
 });
 

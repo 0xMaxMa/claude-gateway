@@ -142,6 +142,8 @@ The operator sets this per agent in the gateway config:
 
 The value must be `true` or `false`; the config loader skips an agent with any other value.
 
+On a host agent the mode isolates memory, tools and the API, but it is **not an operating-system sandbox**: the agent's Bash and file tools run on the host as the gateway user, so they can still open another conversation's directory or the gateway config. Use it for a bot whose senders you trust not to attack it, such as your own family's chats. For untrusted senders, use an app agent, which gets a sandbox per conversation.
+
 ### App agents: `services.agent.isolate_memory` in `app.yaml`
 
 The app declares it for its own agent in the [`app.yaml` agent service declaration](../api/apps.md):
@@ -154,7 +156,17 @@ services:
     isolate_memory: true
 ```
 
-At install, update and every gateway start, the gateway writes `isolateMemory` into the app agent's config entry from this declaration, and a gateway start admits the agent with the declared value. A release that removes the line turns the mode off again, and a hand edit of `isolateMemory` on an app agent is reset the same way. A gateway start resets only agents of running apps: a stopped app's agent keeps its config entry until a gateway start finds the app running. `inspect_app` and `POST /api/v1/apps/inspect` report it as `agentDeclaration.isolateMemory`. The agent runs in its app container, which sees the workspace at `/workspace`. The gateway composes each conversation's memory on the host and gives the agent its files as `/workspace/chats/…` paths. Each conversation's `chats/` directory is part of the agent workspace, which the app's update and [backup/restore](../api/apps.md) already carry.
+At install, update and every gateway start, the gateway writes `isolateMemory` into the app agent's config entry from this declaration, and a gateway start admits the agent with the declared value. A release that removes the line turns the mode off again, and a hand edit of `isolateMemory` on an app agent is reset the same way. A gateway start resets only agents of running apps: a stopped app's agent keeps its config entry until a gateway start finds the app running. `inspect_app` and `POST /api/v1/apps/inspect` report it as `agentDeclaration.isolateMemory`. The gateway composes each conversation's memory on the host and gives the agent its files as `/workspace/chats/…` paths. Each conversation's `chats/` directory is part of the agent workspace, which the app's update and [backup/restore](../api/apps.md) already carry.
+
+**A sandbox container per conversation.** Without isolate mode every conversation of an app agent runs in the one app container. With it, each conversation runs in its own container, `<app>-agent-c-<hash>`, created from the app container's image, user, environment and networks, with every capability dropped and `no-new-privileges`. It has its own processes, `/tmp` and home directory, and mounts only:
+
+- the workspace entries that exist when it is created, **read-only** — not `chats/`, `memory/`, the root `MEMORY.md`/`USER.md`, `kb.sqlite`, `SKILLS_LEARNED.md`, dot entries (except `.claude/skills`, `commands`, `agents` and `settings.json`) or symlinks;
+- `chats/<this conversation>/`, the only writable workspace path;
+- this conversation's media directory (`media/<channel>-<chatId>`, or `media/api-<session>` for an API session);
+- its own home directory, `agents/<id>/sandbox-homes/<conversation>/`, which keeps its Claude Code transcripts;
+- the orchestration task bridge's socket directory, read-only.
+
+So a conversation can read and write only its own memory, cannot change the persona or skills, and cannot see another conversation's files, transcripts, task tickets or processes. Claude, Codex and orchestration workers of that conversation all run there. The gateway removes a sandbox after 30 minutes without a running process, recreates it when its mounts or the app image change, and removes all of an app's sandboxes when the app is updated or uninstalled. The gateway refuses to run a session in a container whose mounts are wider than this.
 
 When it is on:
 
@@ -164,12 +176,37 @@ When it is on:
 - **No archive or skill tools.** `memory_search`, `memory_get` and the `memory_shared_*` tools are not offered, because the knowledge archive is one index over every conversation, and the archive is not reindexed at spawn. Core-shrink and the write-routing addendum are off for the same reason. `skill_create`, `skill_install`, `skill_delete` and `skill_metrics` are not offered either, because the skill catalog is shared by every conversation. The `cron_*`, `agent_create` and `agent_update` tools are off too: scheduled jobs and their prompts belong to the whole agent, and `agent_update` rewrites the shared persona files. So are the app tools (`install_app`, `update_app`, `restore_app`, `uninstall_app` and the rest), because updating, restoring or uninstalling an app rewinds or deletes the memory of every conversation its agent serves.
 - **No Claude Code auto memory.** Claude Code keeps one auto-memory directory per working directory (`~/.claude/projects/<cwd>/memory/`) and loads its index into every session there, so every conversation would share it. Sessions and workers of the agent run with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
 - **No nightly dreaming or skill learning.** Dreaming merges every conversation's transcripts into one memory and can promote facts to the shared KB, and a skill learned from one conversation is offered to all of them, so neither runs for the agent. The dashboard also refuses to apply dreaming proposals left from before the mode was turned on (`409`).
-- **Operator-only persona.** No conversation may change `AGENTS.md`, `SOUL.md` or `IDENTITY.md`. The agent is told to decline name or persona change requests, and orchestration workers receive no persona-edit authorization.
+- **Operator-only persona.** No conversation may change `AGENTS.md`, `SOUL.md` or `IDENTITY.md`. The agent is told to decline name or persona change requests, and orchestration workers receive no persona-edit authorization. In an app agent's sandbox these files are mounted read-only.
+- **Replies only to the originating chat.** Every channel's reply, react, edit and thread tool refuses any chat but the one the session serves (`GATEWAY_ORIGIN_CHAT_ID`), and refuses everything when that is unknown. `telegram_download_attachment` is not offered; `discord_download_attachment` accepts only Discord CDN URLs and saves into the session's media directory.
+- **Files only from the session's own media directory.** Files a tool sends, shares (`share_file`, `line_image`, image and video references) or attaches must resolve inside the session's media directory, and the gateway applies the same rule to `/v1/shares`, `/v1/image-artifacts` and API attachments. A share is revoked only by its own session.
+- **Default-deny MCP tools.** Only the originating channel's module and the `image`, `video` and `share-file` modules load; every other module, including `browser` and any module added later, is off. The operator's own Claude Code MCP servers and the agent's connectors are not injected. Orchestration browser and computer tasks are off, because one browser profile and one computer serve every conversation.
+- **No broad API key, token or gateway address in an app sandbox.** A sandbox gets no gateway MCP config, no channel bot token and no `GATEWAY_API_URL`. A host agent's MCP server gets only a non-admin API key whose `agents` list names the agent, never a wildcard or admin key; WhatsApp and WeChat replies need such a key with `write: true`.
+- **Cross-chat API needs an admin key.** For an isolated agent, `/v1/agents/:id/chats…` (chat list, sessions, messages, search, active days and session inject) refuses a non-admin key with `403`.
+- **No cron jobs.** Creating a cron job for an isolated agent is refused, and the agent's existing jobs, including ones created before the mode was turned on, do not run. `type: command` jobs, which run on the host, are refused for every app agent too.
 - **No `--append-system-prompt-file` in `claude.extraFlags`.** Claude Code keeps only the last such flag, so it would replace the conversation's memory. The config loader refuses such an agent; use `--append-system-prompt` or move the text into `AGENTS.md`.
 
-A running agent keeps the mode it started with. When the setting changes, through a config edit or an app update that changes `isolate_memory`, the gateway restarts that agent once none of its sessions is busy; no gateway restart is needed. The mode isolates the memory the gateway injects and turns off the tools that change or search state shared by the whole agent. Channel tools such as `telegram_reply` still accept any chat the bot's access policy allows. It does not sandbox the file system: an agent with file tools can still open another conversation's directory. Keep untrusted senders on agents without host execution. Memory is keyed by the conversation (channel and chat). An app that groups several chats into one account, such as one family with several linked parents, still gets one memory per chat.
+A running agent keeps the mode it started with. When the setting changes, through a config edit or an app update that changes `isolate_memory`, the gateway restarts that agent once none of its sessions is busy; no gateway restart is needed. Memory is keyed by the conversation (channel and chat). An app that groups several chats into one account, such as one family with several linked parents, still gets one memory per chat.
 
-Implementation: [workspace loader](https://github.com/0xMaxMa/claude-gateway/blob/main/src/agent/workspace-loader.ts), [session spawn](https://github.com/0xMaxMa/claude-gateway/blob/main/src/session/process.ts).
+The app's own API is outside the gateway's reach: if the app hands its agent one token that serves every tenant, that token can still reach any tenant, so the app must scope it.
+
+Implementation: [workspace loader](https://github.com/0xMaxMa/claude-gateway/blob/main/src/agent/workspace-loader.ts), [session spawn](https://github.com/0xMaxMa/claude-gateway/blob/main/src/session/process.ts), [conversation sandbox](https://github.com/0xMaxMa/claude-gateway/blob/main/src/apps/conversation-sandbox.ts), [MCP isolation](https://github.com/0xMaxMa/claude-gateway/blob/main/mcp/tools/shared/isolate.ts).
+
+## Turning the memory archive off
+
+The searchable memory archive (`kb.sqlite`) is one index over the agent's `MEMORY.md`, `USER.md` and every `memory/*.md` file, with no conversation boundary. An app that keeps its own per-tenant memory files, such as `memory/family-<id>.md` for a family with several linked chats, cannot use isolated memory mode, because that mode keys memory by chat. Without another switch, a `memory_search` made while serving one family can return another family's notes.
+
+`disableArchive` turns the archive off without changing how memory is injected:
+
+- Host agents: `agents[].disableArchive` in the gateway config, `true` or `false`. The config loader skips an agent with any other value.
+- App agents: `services.agent.disable_archive` in [`app.yaml`](../api/apps.md). At install, update and every gateway start, the gateway writes it into the agent's `disableArchive`, with the same lifecycle as `isolate_memory`.
+
+When it is on:
+
+- The archive is not reindexed when a session spawns, so no `kb.sqlite` is built.
+- The `memory` MCP tools (`memory_search`, `memory_get` and the `memory_shared_*` tools) are not offered.
+- The composed `CLAUDE.md` leaves out the memory retrieval note, core-shrink and the write-routing addendum, because each one points at `memory_search`.
+
+It does not turn on isolated memory mode: `USER.md` and `MEMORY.md` are still injected for the whole agent, and the other MCP tools stay available. The two switches can be combined. A running agent keeps the setting it started with; when it changes, the gateway restarts the agent once none of its sessions is busy. An existing `kb.sqlite` from before the switch is left on disk but is no longer read or updated.
 
 ## Nightly session compaction
 

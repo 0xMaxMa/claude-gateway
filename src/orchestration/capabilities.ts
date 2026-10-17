@@ -461,6 +461,7 @@ export class CapabilityCatalog {
                 GATEWAY_JEV_ENABLED: jevAllowed(this.gateway,this.agent)?'true':'',
                 GATEWAY_WORKSPACE_DIR: this.agent.workspace,
                 GATEWAY_ISOLATE_MEMORY: this.agent.isolateMemory ? '1' : '',
+                GATEWAY_DISABLE_ARCHIVE: this.agent.disableArchive ? '1' : '',
                 GATEWAY_ORIGIN_CHANNEL: 'api',
                 GETPOD_BROWSER_URL:
                   process.env.GETPOD_BROWSER_URL ?? 'http://127.0.0.1:10880',
