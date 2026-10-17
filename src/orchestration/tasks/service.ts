@@ -22,7 +22,7 @@ import { MAX_INTAKE_INPUTS } from '../conversation-intake';
 import { CommandContext, OrchestrationError, TaskSnapshot, TaskRevision, TaskAttempt, TaskResult, WorkerOutcome, TERMINAL_TASK_STATES, ChangeMode, PublicTaskSnapshot, publicTask } from '../types';
 import type { Effort } from '../../agent/model-registry';
 import { SUBAGENT_MAX_DEPTH } from '../subagent-tool-schemas';
-import { MAX_RESTART_RESUMES, markRestartRecovery, restartResumable } from '../restart-resume';
+import { markRestartRecovery, restartResumable, resumeAfterRestart } from '../restart-resume';
 
 /** Parent states a subagent runs under; any other parent can neither start nor wait for one. */
 export const RUNNING_PARENT: readonly string[] = ['starting', 'running', 'interrupting'];
@@ -1303,23 +1303,11 @@ export class TaskService {
       return task;
     },taskId);
   }
-  /** Re-queue already-authorized work interrupted by a gateway restart as a new attempt of the same
-   * task (#603), or fail it as a blocker once the per-revision cap is spent. No failure report is
-   * sent for a resume: that report turn could only ask the user to continue. */
+  /** No failure report is sent for a resume: that report turn could only ask the user to continue. */
   private resumeAfterRestart(task: TaskSnapshot, attempt: TaskAttempt, lastProgressHint?: string): boolean {
-    const previous = task.restartResume?.revision === attempt.revision ? task.restartResume : undefined;
-    const count = (previous?.count ?? 0) + 1;
-    if (count > MAX_RESTART_RESUMES) {
-      task.state = 'failed';
-      if (task.restartResume) task.restartResume.pending = false;
-      attempt.failure = task.failure = { code: 'GATEWAY_SHUTDOWN_REPEATED', message: `Gateway restarts interrupted this task ${count} times; automatic resume stopped after ${MAX_RESTART_RESUMES} resumes. Existing changes are retained; any follow-up must verify them first and must not blindly repeat side effects.`, observedAt: Date.now() };
-      return false;
-    }
-    task.state = 'queued';
-    task.restartResume = { count, revision: attempt.revision, pending: true,
-      lastProgress: task.latestProgress?.source === 'worker' ? task.latestProgress.text : lastProgressHint ?? previous?.lastProgress };
-    this.cancelSubagents(task);
-    return true;
+    const resumed = resumeAfterRestart(task, attempt, lastProgressHint);
+    if (resumed) this.cancelSubagents(task);
+    return resumed;
   }
   /** Scheduler-only: settle a worker that restart recovery could not prove had stopped. */
   resolveRestartRecovery(attemptId: string, generation: number, stopped: boolean): void {

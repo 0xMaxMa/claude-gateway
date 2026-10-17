@@ -92,6 +92,7 @@ import { OrchestrationError, ExecutionCapabilities, ConversationScope, TERMINAL_
 import { acceptsDirectCommand } from './tasks/automation-session';
 import { recoverOrchestration } from './recovery';
 import { INTERRUPTED_WORK_REPORT_RULE } from './restart-resume';
+import { promisesWork, unbackedPromiseNote, workPending } from './report-promise';
 import { acquireInstanceLock } from './instance-lock';
 import { DeliveryOutbox, channelSender, ChannelSender, DeliveryControl } from './delivery';
 import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
@@ -1738,6 +1739,15 @@ export class AgentOrchestrationRuntime {
           : thai ? 'ยังไม่ได้เริ่มงานตามคำขอที่ค้างอยู่ คำขอยังถูกเก็บไว้ ส่งข้อความสั้นๆ ตามมาเพื่อลองอีกครั้ง หรือบอกว่าต้องการยกเลิกค่ะ' : 'The pending request was not started: the recovery attempt ended without starting a task or resolving it. The request is still saved; send a short follow-up message to retry or say that you want to cancel it.';
         surfaces.spoken = '';
         this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.dispatch_unresolved', {responseId:decision.responseId, inputId:receipt.inputId}));
+      }
+      // A report turn cannot start or re-run work (#605). A reply that says it will, with nothing
+      // committed or queued to do it, would leave the user waiting for work that never runs.
+      if (active.notification && !capabilities.execute && !review && !controlSilent && !response.interrupted &&
+        promisesWork(surfaces.display) && !workPending(this.store, receipt.conversationId, decision.decisionId)) {
+        const note = unbackedPromiseNote(surfaces.display);
+        surfaces.display = `${surfaces.display}\n\n${note}`;
+        if (surfaces.spoken) surfaces.spoken = `${surfaces.spoken} ${note}`;
+        this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.unbacked_promise', { responseId: decision.responseId }));
       }
       const intakeSilent = !recoveryFailed && semantic && !uncommittedDispatch && (intakeChoice?.mode==='wait' || intakeDeferred || (acknowledgementId && unresolved?.deferredDispatch && !dispatchCommitted) || (acknowledgementId && this.store.get("SELECT action_id FROM task_commands WHERE decision_id=? AND command_type IN ('spawn','update','answer') LIMIT 1",decision.decisionId)));
       if (intakeSilent) {

@@ -1,6 +1,6 @@
 import { OrchestrationStore } from './store';
 import { TaskSnapshot, TaskAttempt } from './types';
-import { markRestartRecovery } from './restart-resume';
+import { ORPHANED_SHUTDOWN_WINDOW_MS, markRestartRecovery, restartResumable, resumeAfterRestart } from './restart-resume';
 
 /** Invoke under the gateway instance lock before accepting new work. Unknown
  * side effects are deliberately retained for operator/process reconciliation. */
@@ -42,6 +42,25 @@ export function recoverOrchestration(store: OrchestrationStore): { inputs: numbe
         store.saveTask(task, task.stateVersion);
         changed = true;
       }
+    }
+    // A gateway without restart resume (the process an upgrade replaces) settled its shutdown as
+    // failed; resume that work here as the stopping process would have (#605). After the subagent
+    // pass above, so the failed parent's unstarted subagents are already cancelled.
+    for (const row of store.all("SELECT snapshot_json FROM tasks WHERE state='failed' AND json_extract(snapshot_json,'$.failure.code')='GATEWAY_SHUTDOWN' AND json_extract(snapshot_json,'$.failure.observedAt')>=?", now - ORPHANED_SHUTDOWN_WINDOW_MS)) {
+      const task = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
+      if (!restartResumable(task) || task.cancellation || task.pendingQuestion) continue;
+      const last = store.get('SELECT payload_json FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', task.taskId);
+      const attempt = last && JSON.parse(String(last.payload_json)) as TaskAttempt;
+      if (!attempt || attempt.revision !== task.revision) continue;
+      const resumed = resumeAfterRestart(task, attempt);
+      store.saveAttempt(attempt); store.saveTask(task, task.stateVersion);
+      store.appendEvent(task.conversationId, 'task.restart_recovered', { stopped: true, state: task.state }, task.taskId);
+      if (!resumed) continue;
+      // Its failure report is pending from the stopping process; a resume sends none.
+      store.run("UPDATE notifications SET status='handled' WHERE task_id=? AND status='pending'", task.taskId);
+      store.run(`UPDATE outbox SET state='completed' WHERE kind='notification' AND state IN ('pending','processing') AND json_extract(payload_json,'$.notificationId') IN
+        (SELECT id FROM notifications WHERE task_id=? AND status='handled')`, task.taskId);
+      store.enqueue('schedule', `schedule:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
     }
     // A send interrupted between provider acceptance and local receipt cannot
     // be retried as if it were known not to have happened.
