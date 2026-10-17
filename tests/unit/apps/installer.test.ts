@@ -2,9 +2,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { AppInstaller, InstallerCallbacks, JobState, parseComposePs, mapContainerStatesToAppStatus } from '../../../src/apps/installer';
-import { AppsRegistry } from '../../../src/apps/registry';
+import { AppsRegistry, AppEntry } from '../../../src/apps/registry';
 import { RegistryClient } from '../../../src/apps/registry-client';
 import { ComposePort, ComposeSocket } from '../../../src/apps/compose-generator';
+import { writeAgentEnvFile } from '../../../src/apps/agent-manager';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -87,7 +88,7 @@ function makeAgentMgr(existingAgentName: string) {
       nodeBin: '/usr/bin/node',
       npmRoot: '/usr/lib/node_modules',
     })),
-    injectAgentService: jest.fn(() => {}),
+    injectAgentService: jest.fn((_entry: AppEntry) => {}),
     upsertAgent: jest.fn(async () => {}),
     syncMemoryModes: jest.fn(async (): Promise<boolean> => true),
     backupMemory: jest.fn((): string | null => null),
@@ -3473,7 +3474,7 @@ services:
     // #615: reconfigure re-reads app.yaml, so the agent settings it declares
     // must reach apps.json and the running agent, not just the compose.
     describe('agent declaration', () => {
-      type AgentYaml = { name: string; path?: string; isolate?: boolean; noArchive?: boolean } | null;
+      type AgentYaml = { name: string; path?: string; isolate?: boolean; noArchive?: boolean; env?: string[] } | null;
 
       function agentAppYaml(port: number, agent: AgentYaml): string {
         const agentBlock = agent === null ? '' : [
@@ -3482,6 +3483,7 @@ services:
           `    name: ${agent.name}`,
           ...(agent.isolate ? ['    isolate_memory: true'] : []),
           ...(agent.noArchive ? ['    disable_archive: true'] : []),
+          ...(agent.env ? [`    env: [${agent.env.join(', ')}]`] : []),
         ].join('\n');
         return `
 apiVersion: apps.getpod.ai/v1
@@ -3491,6 +3493,9 @@ commit: "abc123def456abc123def456abc123def456abc1"
 services:
   app:
     image: nginx:1.25
+    environment:
+      - DB_PASSWORD
+      - AGENT_API_TOKEN
     ports:
       - name: api
         host: ${port}
@@ -3505,6 +3510,7 @@ services:
       /** Install agent-reconf declaring `agent`, then rewrite its on-disk app.yaml to `next`. */
       async function installThenEditYaml(agent: AgentYaml, next: AgentYaml, port = 5760) {
         const calls: Array<{ cmd: string; args: string[] }> = [];
+        const spawnImpl: { fail?: (cmd: string, args: string[]) => boolean } = {};
         const spawn = jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
           calls.push({ cmd, args });
           if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
@@ -3512,6 +3518,7 @@ services:
             fs.mkdirSync(path.join(opts.cwd, 'agent'), { recursive: true });
             fs.mkdirSync(path.join(opts.cwd, 'other-agent'), { recursive: true });
           }
+          if (spawnImpl.fail?.(cmd, args)) return { stdout: '', stderr: 'mocked: recreate failed', status: 1 };
           return { stdout: '', stderr: '', status: 0 };
         });
         const agentMgr = makeAgentMgr('unrelated-bot');
@@ -3528,7 +3535,7 @@ services:
         agentMgr.upsertAgent.mockClear();
         agentMgr.syncMemoryModes.mockClear();
         calls.length = 0;
-        return { installer, agentMgr, appDir, calls };
+        return { installer, agentMgr, appDir, calls, spawnImpl };
       }
 
       it('persists toggled isolate_memory and disable_archive and reports them in the job result', async () => {
@@ -3625,6 +3632,103 @@ services:
 
         expect(job.status).toBe('completed');
         expect((await registry.get('agent-reconf'))?.status).toBe('running');
+      });
+
+      it('rewrites the agent env file from the new .env on an env-only reconfigure (#618)', async () => {
+        const { installer, agentMgr, appDir } = await installThenEditYaml(
+          { name: 'reconf-bot', env: ['AGENT_API_TOKEN'] },
+          { name: 'reconf-bot', env: ['AGENT_API_TOKEN'] },
+        );
+        // Like the real injectAgentService, which writes .env.agent from the .env on disk.
+        agentMgr.injectAgentService.mockImplementation((e: AppEntry) => writeAgentEnvFile(e.installPath, e.agentDeclaration!));
+
+        const job = await waitForJob(
+          installer,
+          installer.reconfigure('agent-reconf', { envVars: { AGENT_API_TOKEN: 'new-token', DB_PASSWORD: 'db-secret' } }),
+          5000,
+        );
+
+        expect(job.status).toBe('completed');
+        expect(fs.readFileSync(path.join(appDir, '.env.agent'), 'utf-8')).toBe('AGENT_API_TOKEN=new-token\n');
+        expect(job.logs.join('\n')).toContain('] Agent container gets app secrets: AGENT_API_TOKEN\n');
+      });
+
+      it('re-injects the agent service on an env-only reconfigure (#618)', async () => {
+        // An agent service injected before #618 reads the app's full .env;
+        // re-injecting points it at .env.agent.
+        const { installer, agentMgr } = await installThenEditYaml(
+          { name: 'reconf-bot' },
+          { name: 'reconf-bot', env: ['AGENT_API_TOKEN'] },
+        );
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { AGENT_API_TOKEN: 't' } }), 5000);
+
+        expect(job.status).toBe('completed');
+        expect(agentMgr.injectAgentService).toHaveBeenCalledWith(
+          expect.objectContaining({ agentDeclaration: { path: './agent', name: 'reconf-bot', env: ['AGENT_API_TOKEN'] } }),
+        );
+      });
+
+      it('says when the agent container gets no app secrets', async () => {
+        const { installer } = await installThenEditYaml({ name: 'reconf-bot' }, { name: 'reconf-bot' });
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
+
+        expect(job.logs.join('\n')).toContain('Agent container gets no app secrets (app.yaml services.agent.env is not set)');
+      });
+
+      it('still restores the compose and recreates when .env.agent cannot be restored', async () => {
+        const { installer, agentMgr, appDir, spawnImpl } = await installThenEditYaml({ name: 'reconf-bot' }, { name: 'reconf-bot' });
+        const composePath = path.join(appDir, 'docker-compose.yml');
+        const composeBefore = fs.readFileSync(composePath, 'utf-8');
+        agentMgr.injectAgentService.mockImplementation(() => fs.appendFileSync(composePath, '# re-injected\n'));
+        let recreates = 0;
+        spawnImpl.fail = (cmd, args) => {
+          if (!(cmd === 'docker' && args.includes('--force-recreate'))) return false;
+          // A non-empty directory in its place makes the rename fail.
+          fs.mkdirSync(path.join(appDir, '.env.agent', 'x'), { recursive: true });
+          return ++recreates === 1;
+        };
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
+
+        expect(job.status).toBe('failed');
+        expect(fs.readFileSync(composePath, 'utf-8')).toBe(composeBefore);
+        expect(recreates).toBe(2);
+        expect(job.logs.join('\n')).toContain('Could not restore .env.agent:');
+      });
+
+      it('puts the compose back when an env-only reconfigure fails to recreate (#618)', async () => {
+        const { installer, agentMgr, appDir, spawnImpl } = await installThenEditYaml({ name: 'reconf-bot' }, { name: 'reconf-bot' });
+        const composePath = path.join(appDir, 'docker-compose.yml');
+        const composeBefore = fs.readFileSync(composePath, 'utf-8');
+        agentMgr.injectAgentService.mockImplementation(() => fs.appendFileSync(composePath, '# re-injected\n'));
+        let recreates = 0;
+        spawnImpl.fail = (cmd, args) => cmd === 'docker' && args.includes('--force-recreate') && ++recreates === 1;
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
+
+        expect(job.status).toBe('failed');
+        expect(fs.readFileSync(composePath, 'utf-8')).toBe(composeBefore);
+      });
+
+      it('puts the agent env file back with the .env when the recreate fails (#618)', async () => {
+        const { installer, appDir, spawnImpl } = await installThenEditYaml(
+          { name: 'reconf-bot', env: ['AGENT_API_TOKEN'] },
+          { name: 'reconf-bot', env: ['AGENT_API_TOKEN'] },
+        );
+        await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { AGENT_API_TOKEN: 'old-token' } }), 5000);
+        let recreates = 0;
+        spawnImpl.fail = (cmd, args) => cmd === 'docker' && args.includes('--force-recreate') && ++recreates === 1;
+
+        const job = await waitForJob(
+          installer,
+          installer.reconfigure('agent-reconf', { envVars: { AGENT_API_TOKEN: 'bad-token', DB_PASSWORD: 'db-secret' } }),
+          5000,
+        );
+
+        expect(job.status).toBe('failed');
+        expect(fs.readFileSync(path.join(appDir, '.env.agent'), 'utf-8')).toBe('AGENT_API_TOKEN=old-token\n');
       });
 
       it('re-injects the agent service from the new declaration on a port change', async () => {

@@ -2,6 +2,7 @@ import { resolveCodexCredentials } from '../session/codex-auth';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import * as crypto from 'node:crypto';
 import { execSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import { resolveCodexRuntime, CodexRuntime } from '../session/codex-runtime';
@@ -11,6 +12,7 @@ import { pathWithNativeBin } from '../session/claude-bin';
 import { agentsDirForConfig } from '../config/agent-env';
 import { withConfigWriteLock, writeConfigAtomicSync } from '../config/config-write-lock';
 import type { AgentConfig } from '../types';
+import type { AgentDeclaration } from './compose-generator';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -24,6 +26,32 @@ interface RawConfig {
   gateway: Record<string, unknown>;
   agents: Record<string, unknown>[];
   [key: string]: unknown;
+}
+
+/**
+ * Write `<installPath>/.env.agent` (mode 0600): the lines of the app's `.env`
+ * whose key the agent declares in app.yaml `env`, and nothing else (#618). The
+ * app's `.env` holds every service's secrets, so the agent container gets this
+ * file instead. Rerun whenever `.env` changes; compose reads it on recreate.
+ */
+export function writeAgentEnvFile(installPath: string, declaration: Pick<AgentDeclaration, 'env'>): void {
+  const allowed = new Set(declaration.env ?? []);
+  const envPath = path.join(installPath, '.env');
+  const appEnv = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8').split('\n') : [];
+  const lines = appEnv.filter((line) => line.includes('=') && allowed.has(line.slice(0, line.indexOf('=')).trim()));
+  const agentEnvPath = path.join(installPath, '.env.agent');
+  // Write a new file and rename it into place, never through the old path: an
+  // app repo could ship .env.agent as a symlink, and a concurrent compose run
+  // must see either the old file or the new one.
+  const tmp = `${agentEnvPath}.tmp.${crypto.randomUUID()}`;
+  try {
+    fs.writeFileSync(tmp, lines.map((l) => l + '\n').join(''), { mode: 0o600, flag: 'wx' });
+    fs.chmodSync(tmp, 0o600);
+    fs.renameSync(tmp, agentEnvPath);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
 }
 
 /** The `isolateMemory` an app Agent's config entry carries: its app.yaml declaration's (#601). */
@@ -183,6 +211,10 @@ export class AgentManager {
     // Resolve symlinks so Docker daemon gets the real path — avoids Docker creating
     // a root-owned empty directory instead of bind-mounting the existing one.
     const workspaceDir = fs.realpathSync(path.join(entry.installPath, agentRelPath));
+    // A symlinked agent path must not mount the app dir, which holds its .env (#618).
+    if (!workspaceDir.startsWith(fs.realpathSync(entry.installPath) + path.sep)) {
+      throw new Error(`Agent path "${agentRelPath}" resolves outside the app directory`);
+    }
 
     let uid = 1000;
     try { uid = os.userInfo().uid; } catch { /* use 1000 */ }
@@ -253,6 +285,8 @@ export class AgentManager {
       ? `cp "${containerSeedDir}/.claude.json" "${homeDir}/.claude.json"; `
       : '';
 
+    writeAgentEnvFile(entry.installPath, entry.agentDeclaration);
+
     // Re-resolve on every generation: apps.json must not pin a stale npm path.
     const codex = await this.codexRuntime(entry);
     const agentService = {
@@ -263,7 +297,8 @@ export class AgentManager {
       restart: 'unless-stopped',
       cap_drop: ['ALL'],
       security_opt: ['no-new-privileges'],
-      env_file: '.env',
+      // Never the app's .env: that file holds every service's secrets (#618).
+      env_file: '.env.agent',
       labels: { [CODEX_RUNTIME_LABEL]: codex?.fingerprint ?? 'unavailable' },
       volumes: [
         `${claudeBin}:${claudeBin}:ro`,
