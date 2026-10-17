@@ -52,7 +52,8 @@ registerProcessor('voice-call-capture', VoiceCallCapture);`;
  * Reply playback: one node for the whole call (see createVoiceCallPlayback). The
  * page posts `{ pcm }` frames and `{ flush: token }`; the node reports
  * `{ token, played, playing }` when playback starts or stops and every 100 ms of
- * audio (the page reports progress at that pace), so stale reports from before a flush are recognisable.
+ * audio (the page reports progress at that pace). Each report carries the token
+ * of the last flush, so the page can ignore reports from before it.
  */
 const PLAYER_WORKLET = `${createVoiceCallPlayback.toString()}
 class VoiceCallPlayer extends AudioWorkletProcessor {
