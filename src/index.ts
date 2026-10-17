@@ -28,8 +28,7 @@ import { createWatcher } from './watch/factory';
 import { AgentRunner } from './agent/runner';
 import { SkillLearningManager, skillCatalogUsage } from './agent/skill-learning';
 import { HistoryDB } from './history/db';
-import { readClaudeExtensions } from './session/worker-extensions';
-import { PSTACK_PLUGIN_ID } from './pstack/plugin-info';
+import { discoverWorkerExtensions } from './session/worker-extensions';
 import { DreamingManager } from './agent/dreaming';
 import { makeRouteOut } from './agent/dreaming/migrate';
 import { resolveDreamingConfig } from './agent/dreaming/config';
@@ -65,12 +64,6 @@ function agentSkillUsage(agent: AgentConfig) {
   } catch {
     return undefined;
   }
-}
-
-/** Claude Code plugin skills the agent's workers load (cwd + pstack as in discoverWorkerExtensions). */
-function agentInstalledSkills(agent: AgentConfig) {
-  const cwd = agent.orchestration?.tasks?.projectRoot || agent.workspace;
-  return readClaudeExtensions(cwd, process.env, { [PSTACK_PLUGIN_ID]: Boolean(agent.pstack) }).skills;
 }
 
 // ─── Simple argument parsing (no heavy deps) ──────────────────────────────────
@@ -320,7 +313,7 @@ async function startAgent(
       workspaceDir: agentConfig.workspace,
       mcpToolsDir,
       sharedSkillsDir,
-      installedSkills: () => agentInstalledSkills(agentConfig),
+      installedSkills: async () => (await discoverWorkerExtensions(agentConfig, gatewayConfig)).skills,
       globalCfg: gatewayConfig.gateway.skillLearning,
       // Isolate mode (#601): a skill learned from one conversation is offered to
       // every other one, so the reviewer stays off (as dreaming does below).

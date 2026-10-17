@@ -160,6 +160,14 @@ describe('skill-learning writer.applyProposal', () => {
     }
   });
 
+  it('a leftover skill dir without SKILL.md (interrupted write) does not block the name forever', () => {
+    fs.mkdirSync(path.join(ws, 'skills', 'half-written'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'skills', 'half-written', 'SKILL.md.tmp'), 'partial', 'utf-8');
+    const out = applyProposal({ action: 'create', name: 'half-written', desc: 'd', body: 'b' }, ctx({ existing: [] }));
+    expect(out.written).toBe(true);
+    expect(readSkill('half-written')).toContain('origin: auto');
+  });
+
   it('create still succeeds when the target path is free', () => {
     const out = applyProposal({ action: 'create', name: 'fresh-skill', desc: 'd', body: 'b' }, ctx({ existing: [] }));
     expect(out.written).toBe(true);

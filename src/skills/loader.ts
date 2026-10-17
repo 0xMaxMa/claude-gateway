@@ -37,7 +37,9 @@ function autoFrontmatter(skill: SkillDefinition): Record<string, unknown> | unde
 }
 
 function hiddenUntilUsed(key: string, fm: Record<string, unknown>, usage: SkillCatalogUsage): boolean {
-  if (fm['pinned'] === true || (usage.timesLoaded.get(key) ?? 0) > 0) return false;
+  // No stat row (restored from the archive, or copied in by hand): no usage data, keep it listed.
+  const loaded = usage.timesLoaded.get(key);
+  if (fm['pinned'] === true || loaded === undefined || loaded > 0) return false;
   const createdAt = typeof fm['createdAt'] === 'number' ? fm['createdAt'] : 0;
   return usage.now - createdAt > AUTO_SKILL_CATALOG_GRACE_DAYS * DAY_MS;
 }

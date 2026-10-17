@@ -8,7 +8,7 @@
  */
 
 import { createHash } from 'crypto';
-import { loadSkills, type SkillCatalogUsage } from '../../skills/loader';
+import { loadSkills, type SkillCatalogUsage, type SkillRegistry } from '../../skills/loader';
 import { extractFrontmatter } from '../../skills/parser';
 import { HistoryDB } from '../../history/db';
 import { resolveSkillLearningConfig } from './config';
@@ -53,6 +53,14 @@ export function skillCatalogUsage(db: HistoryDB, now = Date.now()): SkillCatalog
   return { now, timesLoaded: new Map(db.listSkillStats().map((s) => [s.name, s.timesLoaded])) };
 }
 
+/**
+ * Skills a managed (orchestration) turn loaded: the task's skill command plus any
+ * Skill-tool calls. Plugin skills outside the registry are not tracked in skill_stats.
+ */
+export function managedTurnSkills(invoked: string[] | undefined, used: string[] | undefined, registry: SkillRegistry): string[] {
+  return [...new Set([...(invoked ?? []), ...(used ?? []).filter((name) => registry.skills.has(name))])];
+}
+
 /** A skill installed outside the workspace (e.g. a Claude Code plugin skill). */
 export interface InstalledSkill {
   name: string;
@@ -67,7 +75,7 @@ export interface SkillLearningManagerOpts {
   mcpToolsDir?: string;
   sharedSkillsDir?: string;
   /** Plugin skills the agent's CLI loads; the reviewer must not re-learn them as auto skills. */
-  installedSkills?: () => InstalledSkill[];
+  installedSkills?: () => Promise<InstalledSkill[]>;
   globalCfg?: SkillLearningConfig;
   agentCfg?: SkillLearningConfig;
   /** `gateway.timezone` — the shared default when neither `globalCfg`/`agentCfg` sets `pruneTimezone`. */
@@ -92,7 +100,7 @@ export class SkillLearningManager {
   private readonly workspaceDir: string;
   private readonly mcpToolsDir?: string;
   private readonly sharedSkillsDir?: string;
-  private readonly installedSkills?: () => InstalledSkill[];
+  private readonly installedSkills?: () => Promise<InstalledSkill[]>;
   private readonly logger?: SkillLearningManagerOpts['logger'];
   private readonly reviewSpawn?: ClaudeSpawnFn;
   private readonly now: () => number;
@@ -272,10 +280,15 @@ export class SkillLearningManager {
       if (!transcript.trim()) return;
       const transcriptHash = createHash('sha256').update(transcript).digest('hex');
       if (a.reviewedTranscriptHash === transcriptHash && !signals.recoveryFired && !signals.userCorrection) return;
-      const existing = this.loadExistingSkills();
+      const existing = await this.loadExistingSkills();
 
       const { proposal, tokensSpent, reviewed } = await runReviewer(
-        { transcript: transcript.slice(-20_000), existingSkills: existing.map((s) => ({ name: s.name, description: s.description })) },
+        {
+          transcript: transcript.slice(-20_000),
+          // Only auto skills are editable; the rest are listed by name so the reviewer neither edits nor re-learns them.
+          existingSkills: existing.filter((s) => s.origin === 'auto').map((s) => ({ name: s.name, description: s.description })),
+          readOnlySkills: existing.filter((s) => s.origin !== 'auto').map((s) => s.name),
+        },
         this.cfg,
         this.reviewSpawn,
       );
@@ -406,10 +419,10 @@ export class SkillLearningManager {
   }
 
   /** All loaded skills with resolved provenance + path (for dedup + guards). */
-  private loadExistingSkills(): ExistingSkill[] {
+  private async loadExistingSkills(): Promise<ExistingSkill[]> {
     const out: ExistingSkill[] = [];
     try {
-      for (const s of this.installedSkills?.() ?? []) {
+      for (const s of (await this.installedSkills?.()) ?? []) {
         out.push({ name: s.name, description: s.description, origin: 'user', filePath: s.filePath ?? '' });
       }
     } catch (err) {

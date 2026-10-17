@@ -83,7 +83,7 @@ import { receiveChannelMedia } from '../orchestration/channel-media';
 import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
 import type { HistorySource, ChatChannel, ChatChannelOrApi } from '../history/types';
 import { isChatChannel } from '../history/types';
-import type { SkillLearningManager } from './skill-learning';
+import { managedTurnSkills, type SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 import { resolveEnabledConnectors } from '../connectors/resolve';
 
@@ -493,7 +493,7 @@ export class AgentRunner extends EventEmitter {
           },
           onManagedTurn: (sessionId, text, metrics, skills) => {
             const key = `orchestration:${sessionId}`;
-            this.skillLearning?.onTurnStart(key, sessionId, text, skills, metrics.startedAt);
+            this.skillLearning?.onTurnStart(key, sessionId, text, managedTurnSkills(skills, metrics.usedSkills, this.skillRegistry), metrics.startedAt);
             for (const id of metrics.toolIds) this.skillLearning?.onToolUse(key, id);
             this.skillLearning?.onTokenUsage(key, metrics.inputTokens, metrics.totalTokens);
             this.skillLearning?.onTurnEnd(key, sessionId);

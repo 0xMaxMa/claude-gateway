@@ -39,7 +39,7 @@ export interface CuratorDeps {
   agentId: string;
   cfg: ResolvedSkillLearningCfg;
   now: number;
-  logger?: { info: (msg: string) => void };
+  logger?: { info: (msg: string) => void; warn?: (msg: string) => void };
 }
 
 export interface CuratorResult {
@@ -117,7 +117,7 @@ function archiveSkill(name: string, deps: CuratorDeps): boolean {
   }
   const archiveDir = path.join(skillsDir, ARCHIVE_DIRNAME);
   if (!archiveDirUsable(archiveDir)) {
-    deps.logger?.info(`[skill-learning:${deps.agentId}] archive of ${name} skipped: ${archiveDir} is not a real directory`);
+    warn(deps, `archive of ${name} skipped: ${archiveDir} is not a real directory`);
     return false;
   }
   const dayDir = path.join(archiveDir, new Date(deps.now).toISOString().slice(0, 10));
@@ -127,12 +127,19 @@ function archiveSkill(name: string, deps: CuratorDeps): boolean {
     fs.mkdirSync(dayDir, { recursive: true });
     fs.renameSync(skillDir, dest);
   } catch (err) {
-    deps.logger?.info(`[skill-learning:${deps.agentId}] archive of ${name} failed: ${(err as Error).message}`);
+    warn(deps, `archive of ${name} failed: ${(err as Error).message}`);
     return false;
   }
   deps.db.deleteSkillStat(name);
   deps.logger?.info(`[skill-learning:${deps.agentId}] archived ${name} → ${dest} (restore: move it back to ${skillDir})`);
   return true;
+}
+
+/** A failed archive stalls cap/age enforcement, so it must reach the operator. */
+function warn(deps: CuratorDeps, msg: string): void {
+  const line = `[skill-learning:${deps.agentId}] ${msg}`;
+  if (deps.logger?.warn) deps.logger.warn(line);
+  else deps.logger?.info(line);
 }
 
 /** True if the archive dir is absent or a real directory (never a symlink out of skills/). */
@@ -156,7 +163,8 @@ function expireArchive(workspaceDir: string, now: number): void {
   }
   const cutoff = now - ARCHIVE_RETENTION_DAYS * DAY_MS;
   for (const day of days) {
-    if (!ARCHIVE_DAY_RE.test(day) || Date.parse(`${day}T00:00:00Z`) >= cutoff) continue;
+    // Measure from the END of the UTC day so a skill archived late that day still gets the full window.
+    if (!ARCHIVE_DAY_RE.test(day) || Date.parse(`${day}T00:00:00Z`) + DAY_MS > cutoff) continue;
     try {
       fs.rmSync(path.join(archiveDir, day), { recursive: true, force: true });
     } catch {

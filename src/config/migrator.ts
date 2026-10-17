@@ -368,16 +368,23 @@ export const MAX_AUTO_SKILLS_DEFAULT_WARNING =
   '(kept 30 days; move a directory back to skills/ to restore it). Set ' +
   'gateway.skillLearning.maxAutoSkills to keep a higher cap.';
 
+/** Template version that lowered the `maxAutoSkills` default. */
+const MAX_AUTO_SKILLS_DEFAULT_VERSION = '1.0.38';
+
 /**
  * One-time upgrade of the retired `gateway.skillLearning.maxAutoSkills` default
  * from 50 to 20. `config.template.json` wrote the literal 50 into every config,
  * so a changed built-in default alone never reaches an existing install. Like
  * {@link upgradeRetiredFastAckDefault}, this runs only when migrating a config
- * older than the template (1.0.38): a 50 set before then is indistinguishable
- * from the old default and is lowered once; a value set afterwards is kept.
+ * older than 1.0.38: a 50 set before then is indistinguishable from the old
+ * default and is lowered once; a value set afterwards is kept, including across
+ * later template bumps.
  * Per-agent overrides are the user's and left as-is.
  */
 function upgradeRetiredMaxAutoSkillsDefault(config: Record<string, unknown>): string[] {
+  // Gate on the source version: a later template bump must not re-lower a 50 the
+  // user set back on purpose after the warning.
+  if (compareSemver((config.configVersion as string) ?? '0.0.0', MAX_AUTO_SKILLS_DEFAULT_VERSION) >= 0) return [];
   const skillLearning = (config.gateway as { skillLearning?: Record<string, unknown> } | null | undefined)?.skillLearning;
   if (!skillLearning || typeof skillLearning !== 'object' || skillLearning.maxAutoSkills !== 50) return [];
   skillLearning.maxAutoSkills = 20;

@@ -1335,5 +1335,13 @@ describe('config-migrator', () => {
       expect(migrateConfig(current, template(), '1.0.38').migrated).toBe(false);
       expect(JSON.parse(fs.readFileSync(current, 'utf-8')).gateway.skillLearning.maxAutoSkills).toBe(50);
     });
+
+    it('a later template bump does not re-lower a 50 chosen at 1.0.38', () => {
+      const next = writeJson('template.json', { configVersion: '1.0.39', gateway: { bind: '127.0.0.1', skillLearning: { maxAutoSkills: 20 } } });
+      const chosen = writeJson('config.json', { configVersion: '1.0.38', gateway: { bind: '127.0.0.1', skillLearning: { maxAutoSkills: 50 } } });
+      expect(detectMigration(chosen, next, '1.0.39').addedFields).not.toContain('gateway.skillLearning.maxAutoSkills');
+      migrateConfig(chosen, next, '1.0.39');
+      expect(JSON.parse(fs.readFileSync(chosen, 'utf-8')).gateway.skillLearning.maxAutoSkills).toBe(50);
+    });
   });
 });

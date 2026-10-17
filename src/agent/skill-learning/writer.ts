@@ -81,6 +81,14 @@ export function isOwnedAutoSkillDir(skillDir: string): boolean {
   }
 }
 
+function isSymlink(p: string): boolean {
+  try {
+    return fs.lstatSync(p).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
 /** lstat-based existence: true for a dangling symlink too. */
 function pathEntryExists(p: string): boolean {
   try {
@@ -234,7 +242,8 @@ export function applyProposal(proposal: ReviewProposal, ctx: WriterContext): Wri
   // directory (a symlink would be written through to wherever it points). Skips
   // the `.pending` queue (separate namespace, never a live user skill).
   const targetPath = skillFilePath(ctx.workspaceDir, name, queued);
-  if (!queued && pathEntryExists(path.dirname(targetPath)) && !isOwnedAutoSkillDir(path.dirname(targetPath))) {
+  const targetDir = path.dirname(targetPath);
+  if (!queued && (pathEntryExists(targetPath) || isSymlink(targetDir)) && !isOwnedAutoSkillDir(targetDir)) {
     return { written: false, action, name, reason: 'provenance guard: on-disk target is not origin:auto (or is pinned or a symlink)' };
   }
 

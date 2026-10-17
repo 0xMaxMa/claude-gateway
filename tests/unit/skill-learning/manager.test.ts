@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { HistoryDB } from '../../../src/history/db';
-import { SkillLearningManager, type SkillLearningManagerOpts } from '../../../src/agent/skill-learning';
+import { SkillLearningManager, managedTurnSkills, type SkillLearningManagerOpts } from '../../../src/agent/skill-learning';
 import { extractFrontmatter } from '../../../src/skills/parser';
 import type { ClaudeSpawnFn } from '../../../src/agent/skill-learning/reviewer';
 import type { SkillLearningConfig } from '../../../src/agent/skill-learning/types';
@@ -135,7 +135,7 @@ describe('SkillLearningManager — review path', () => {
     };
     const mgr = new SkillLearningManager({
       db, agentId: 'agent-x', workspaceDir: ws, globalCfg: { minToolCalls: 3 }, reviewSpawn: spawn, now: () => NOW,
-      installedSkills: () => [{ name: 'what-the-bug:wtb-auto-pilot', description: 'End-to-end bug auto-pilot', filePath: '/plugins/wtb/SKILL.md' }],
+      installedSkills: async () => [{ name: 'what-the-bug:wtb-auto-pilot', description: 'End-to-end bug auto-pilot', filePath: '/plugins/wtb/SKILL.md' }],
     });
     seedTranscript(db, 'sess1');
     mgr.onTurnStart('chat1', 'sess1', 'deploy the thing', []);
@@ -144,7 +144,8 @@ describe('SkillLearningManager — review path', () => {
 
     await mgr.runReviewNow('chat1', 'sess1');
 
-    expect(reviewerInput).toContain('what-the-bug:wtb-auto-pilot');
+    expect(reviewerInput).toMatch(/<installed_skills>\n[^<]*what-the-bug:wtb-auto-pilot[^<]*\n<\/installed_skills>/);
+    expect(reviewerInput).not.toMatch(/<existing_skills>[^]*what-the-bug:wtb-auto-pilot[^]*<\/existing_skills>/);
     expect(fs.existsSync(path.join(ws, 'skills', 'wtb-auto-pilot'))).toBe(false);
     expect(db.getSkillStat('wtb-auto-pilot')).toBeNull();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -250,6 +251,7 @@ describe('review eligibility without another model call', () => {
       seedTranscript(db, 'session'); qualify(mgr);
       const pending = mgr.runReviewNow('chat', 'session');
       qualify(mgr, true);
+      while (!finish) await new Promise((r) => setImmediate(r)); // reviewer spawned
       finish(await none()); await pending;
       await mgr.runReviewNow('chat', 'session');
       expect(spawn).toHaveBeenCalledTimes(2);
@@ -263,5 +265,13 @@ describe('review eligibility without another model call', () => {
       qualify(mgr); await mgr.runReviewNow('chat', 'session');
       expect(spawn).toHaveBeenCalledTimes(2);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('managedTurnSkills', () => {
+  it('counts Skill-tool calls for registry skills, alongside the task skill, once each', () => {
+    const registry = { skills: new Map([['learned-flow', {}], ['task-skill', {}]]) } as never;
+    expect(managedTurnSkills(['task-skill'], ['learned-flow', 'pstack:tdd', 'task-skill'], registry).sort()).toEqual(['learned-flow', 'task-skill']);
+    expect(managedTurnSkills(undefined, undefined, registry)).toEqual([]);
   });
 });

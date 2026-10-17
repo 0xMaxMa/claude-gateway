@@ -309,7 +309,10 @@ describe('Skill Loader', () => {
           ws('shared-unused', fm(`origin: auto\ncreatedAt: ${old}`), 'shared'),
         ]),
       };
-      const usage = { now, timesLoaded: new Map([['auto-used', 3]]) };
+      const usage = {
+        now,
+        timesLoaded: new Map([['auto-used', 3], ['auto-unused', 0], ['auto-no-date', 0], ['auto-young', 0], ['auto-pinned', 0], ['user-unused', 0], ['shared-unused', 0]]),
+      };
 
       it('hides an old auto skill that was never loaded and says how many were hidden', () => {
         const section = renderSkillsSection(registry, usage);
@@ -323,6 +326,12 @@ describe('Skill Loader', () => {
         for (const key of ['auto-used', 'auto-young', 'auto-pinned', 'user-unused', 'shared-unused']) {
           expect(section).toContain(`/${key}:`);
         }
+      });
+
+      it('keeps an old auto skill with no stat row listed (restored from the archive)', () => {
+        const restored = renderSkillsSection(registry, { now, timesLoaded: new Map([['auto-used', 3]]) });
+        expect(restored).toContain('/auto-unused:');
+        expect(restored).not.toContain('hidden until first used');
       });
 
       it('shows everything when no usage data is supplied', () => {

@@ -216,4 +216,17 @@ describe('curator.curateOnce', () => {
     expect(db.getSkillStat('stale')).not.toBeNull(); // retried once the archive is a real dir
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it('keeps an archive day for the full retention window, measured from the end of that UTC day', () => {
+    const { db, ws, dir } = setup();
+    const archivedAt = 100 * DAY + DAY - 60_000; // 23:59 UTC
+    const day = new Date(archivedAt).toISOString().slice(0, 10);
+    const archive = path.join(ws, 'skills', ARCHIVE_DIRNAME);
+    fs.mkdirSync(path.join(archive, day, 's'), { recursive: true });
+    curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ enabled: false }), now: archivedAt + ARCHIVE_RETENTION_DAYS * DAY - 1 });
+    expect(fs.existsSync(path.join(archive, day))).toBe(true);
+    curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ enabled: false }), now: 101 * DAY + ARCHIVE_RETENTION_DAYS * DAY + 1 });
+    expect(fs.existsSync(path.join(archive, day))).toBe(false);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });
