@@ -129,6 +129,8 @@ describe('a GATEWAY_SHUTDOWN failure settled by a gateway without restart resume
   // The process an upgrade replaces ran the pre-#603 shutdown path: the task ended failed, with
   // no resume bookkeeping and its failure report pending, and nothing resumed it after the restart.
   let spawned = 0;
+  // Rewrites the row in place, as the stopping process persisted it, keeping the state version its report refers to.
+  const persist = (task: TaskSnapshot) => store.run('UPDATE tasks SET snapshot_json=? WHERE id=?', JSON.stringify(task), task.taskId);
   const legacyShutdown = (observedAt = Date.now()) => {
     const task = spawn(`legacy-${spawned++}`);
     const attempt = tasks.claim(task.taskId)!;
@@ -136,7 +138,7 @@ describe('a GATEWAY_SHUTDOWN failure settled by a gateway without restart resume
     tasks.finish(attempt.attemptId, attempt.generation, { type: 'failed', failure: { code: 'WORKER_FAILED', message: 'placeholder', observedAt } });
     const legacy = store.task(task.taskId)!;
     legacy.failure = { code: 'GATEWAY_SHUTDOWN', message: 'Gateway shutdown interrupted this worker. Inspect existing changes before continuing; do not blindly repeat side effects.', observedAt };
-    store.transaction(() => store.saveTask(legacy, legacy.stateVersion));
+    persist(legacy);
     return store.task(task.taskId)!;
   };
   const pendingNotifications = (taskId: string) => Number(store.get("SELECT COUNT(*) n FROM notifications WHERE task_id=? AND status='pending'", taskId)!.n);
@@ -164,7 +166,7 @@ describe('a GATEWAY_SHUTDOWN failure settled by a gateway without restart resume
   test(`ends GATEWAY_SHUTDOWN_REPEATED once its revision has used ${MAX_RESTART_RESUMES} resumes`, () => {
     const task = legacyShutdown();
     task.restartResume = { count: MAX_RESTART_RESUMES, revision: 1, pending: false };
-    store.transaction(() => store.saveTask(task, task.stateVersion));
+    persist(task);
     recoverOrchestration(store);
     const after = store.task(task.taskId)!;
     expect(after.state).toBe('failed');
@@ -173,11 +175,19 @@ describe('a GATEWAY_SHUTDOWN failure settled by a gateway without restart resume
     expect(tasks.claim(task.taskId)).toBeUndefined();
   });
 
+  test('is not resumed when its failure was already reported, so the user may have acted on it', () => {
+    const task = legacyShutdown();
+    store.run("UPDATE notifications SET status='handled' WHERE task_id=?", task.taskId);
+    recoverOrchestration(store);
+    expect(store.task(task.taskId)!.state).toBe('failed');
+    expect(store.task(task.taskId)!.restartResume).toBeUndefined();
+  });
+
   test('is not resumed when it is old, cancelled, asking, gateway-managed, a subagent or superseded', () => {
     const edit = (change: (task: TaskSnapshot) => void) => {
       const task = legacyShutdown();
       change(task);
-      store.transaction(() => store.saveTask(task, task.stateVersion));
+      persist(task);
       return task;
     };
     const skipped = [

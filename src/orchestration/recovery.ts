@@ -51,15 +51,16 @@ export function recoverOrchestration(store: OrchestrationStore): { inputs: numbe
       if (!restartResumable(task) || task.cancellation || task.pendingQuestion) continue;
       const last = store.get('SELECT payload_json FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', task.taskId);
       const attempt = last && JSON.parse(String(last.payload_json)) as TaskAttempt;
-      if (!attempt || attempt.revision !== task.revision) continue;
+      // Only an unreported failure: once its report was delivered the user may already have acted on it.
+      const report = store.get("SELECT id FROM notifications WHERE task_id=? AND task_state_version=? AND status='pending'", task.taskId, task.stateVersion);
+      if (!attempt || attempt.revision !== task.revision || !report) continue;
       const resumed = resumeAfterRestart(task, attempt);
       store.saveAttempt(attempt); store.saveTask(task, task.stateVersion);
       store.appendEvent(task.conversationId, 'task.restart_recovered', { stopped: true, state: task.state }, task.taskId);
       if (!resumed) continue;
-      // Its failure report is pending from the stopping process; a resume sends none.
-      store.run("UPDATE notifications SET status='handled' WHERE task_id=? AND status='pending'", task.taskId);
-      store.run(`UPDATE outbox SET state='completed' WHERE kind='notification' AND state IN ('pending','processing') AND json_extract(payload_json,'$.notificationId') IN
-        (SELECT id FROM notifications WHERE task_id=? AND status='handled')`, task.taskId);
+      // A resume sends no failure report.
+      store.run("UPDATE notifications SET status='handled' WHERE id=?", report.id);
+      store.run("UPDATE outbox SET state='completed' WHERE kind='notification' AND state IN ('pending','processing') AND json_extract(payload_json,'$.notificationId')=?", report.id);
       store.enqueue('schedule', `schedule:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
     }
     // A send interrupted between provider acceptance and local receipt cannot

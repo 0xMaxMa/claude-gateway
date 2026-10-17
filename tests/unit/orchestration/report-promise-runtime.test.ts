@@ -80,10 +80,13 @@ test('a report turn whose promise is backed by queued work, or that promises not
 
 test('promisesWork recognizes commitments to (re)start work, not reports of what happened', () => {
   for (const text of [THAI_PROMISE, "I'll re-run the review next turn.", 'I will restart the deployment now.', 'Let me retry it.',
-    'เดี๋ยวผมรันใหม่ให้ครับ', 'ผมจะดำเนินการต่อทันทีครับ'])
+    'เดี๋ยวผมรันใหม่ให้ครับ', 'ผมจะดำเนินการต่อทันทีครับ',
+    'รีวิวถูกตัดกลางคัน (ไม่ใช่ปัญหาจากโค้ด) งานก่อนหน้ายัง push ครบ ไม่หายไปไหนครับ ผมจะสั่งรันรีวิวใหม่ให้ทันทีในรอบถัดไปครับ'])
     expect(promisesWork(text)).toBe(true);
   for (const text of ['The review ran and found two issues.', 'Gateway restarts interrupted the task; the branch is intact.',
     'รีวิวเสร็จแล้ว พบปัญหา 2 ข้อครับ', 'งานหยุดเพราะ gateway รีสตาร์ทซ้ำหลายครั้ง',
-    'I will not re-run it automatically.', "I'll never retry a failed publish.", 'ผมจะไม่รันซ้ำเองครับ', 'งานจะยังไม่เริ่มจนกว่าจะได้คำตอบ'])
+    'I will not re-run it automatically.', "I'll never retry a failed publish.", 'ผมจะไม่รันซ้ำเองครับ', 'งานจะยังไม่เริ่มจนกว่าจะได้คำตอบ',
+    "Task failed on lint. Let me know if you'd like me to re-run it.", "I'll be unable to re-run the review from here.", 'I will, as before, not restart it.',
+    'ผมจะสั่งรันใหม่เองไม่ได้ ถ้าต้องการกรุณาสั่งงานอีกครั้ง', 'ถ้าจะให้ตรวจใหม่ แจ้งได้เลย', 'ผมจะส่งคำสั่งให้ดูอีกที'])
     expect(promisesWork(text)).toBe(false);
 });

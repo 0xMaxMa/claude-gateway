@@ -1743,10 +1743,9 @@ export class AgentOrchestrationRuntime {
       // A report turn cannot start or re-run work (#605). A reply that says it will, with nothing
       // committed or queued to do it, would leave the user waiting for work that never runs.
       if (active.notification && !capabilities.execute && !review && !controlSilent && !response.interrupted &&
-        promisesWork(surfaces.display) && !workPending(this.store, receipt.conversationId, decision.decisionId)) {
-        const note = unbackedPromiseNote(surfaces.display);
-        surfaces.display = `${surfaces.display}\n\n${note}`;
-        if (surfaces.spoken) surfaces.spoken = `${surfaces.spoken} ${note}`;
+        !dispatchCommitted && promisesWork(surfaces.display) && !workPending(this.store, receipt.conversationId)) {
+        surfaces.display = `${surfaces.display}\n\n${unbackedPromiseNote(surfaces.display)}`;
+        if (surfaces.spoken) surfaces.spoken = `${surfaces.spoken} ${unbackedPromiseNote(surfaces.spoken)}`;
         this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.unbacked_promise', { responseId: decision.responseId }));
       }
       const intakeSilent = !recoveryFailed && semantic && !uncommittedDispatch && (intakeChoice?.mode==='wait' || intakeDeferred || (acknowledgementId && unresolved?.deferredDispatch && !dispatchCommitted) || (acknowledgementId && this.store.get("SELECT action_id FROM task_commands WHERE decision_id=? AND command_type IN ('spawn','update','answer') LIMIT 1",decision.decisionId)));
