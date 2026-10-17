@@ -115,6 +115,13 @@ describe('voice-note transcription', () => {
     expect(diagnostics).toEqual([expect.objectContaining({ stage: 'transcription', outcome: 'retry', code: 'VOICE_NOTE_NO_TRANSCRIPT', attempt: 1 })]);
   });
 
+  test.each([[{}], [{ text: 'ก'.repeat(20001) }]])('a malformed or oversized body %# is final, not "no words"', async body => {
+    const { sleeps, sleep } = recorder(), request = jest.fn(async () => json(body));
+    await expect(transcribeVoiceNote(path, { provider: 'elevenlabs', model: 'scribe_v2', sleep }, request)).rejects.toMatchObject({ code: 'STT_INVALID_RESPONSE' });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+  });
+
   test('a transcript with no words on every attempt fails after the bounded attempts', async () => {
     const { sleeps, sleep } = recorder(), diagnostics: any[] = [];
     const responses = ['.', '…', ' '];

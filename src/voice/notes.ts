@@ -75,7 +75,9 @@ async function transcribeOnce(path: string, options: VoiceNoteOptions, request: 
   }, request);
   if (!response.ok) throw await providerHttpError('STT', response);
   const result = await response.json() as { text?: unknown };
-  if (typeof result.text !== 'string' || !hasSpokenWords(result.text) || Buffer.byteLength(result.text) > 60000) throw new OrchestrationError('VOICE_NOTE_NO_TRANSCRIPT');
+  // A malformed or oversized body is not "no words": retrying it would only repeat the same answer.
+  if (typeof result.text !== 'string' || Buffer.byteLength(result.text) > 60000) throw new VoiceError('STT_INVALID_RESPONSE');
+  if (!hasSpokenWords(result.text)) throw new OrchestrationError('VOICE_NOTE_NO_TRANSCRIPT');
   return result.text.trim();
 }
 
