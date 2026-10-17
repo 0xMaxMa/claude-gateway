@@ -171,7 +171,8 @@ describe('a GATEWAY_SHUTDOWN failure settled by a gateway without restart resume
     const after = store.task(task.taskId)!;
     expect(after.state).toBe('failed');
     expect(after.failure?.code).toBe('GATEWAY_SHUTDOWN_REPEATED');
-    expect(pendingNotifications(task.taskId)).toBe(1);
+    // Its pending report now refers to the blocker state, not the superseded shutdown failure.
+    expect(store.get("SELECT task_state_version v FROM notifications WHERE task_id=? AND status='pending'", task.taskId)!.v).toBe(after.stateVersion);
     expect(tasks.claim(task.taskId)).toBeUndefined();
   });
 

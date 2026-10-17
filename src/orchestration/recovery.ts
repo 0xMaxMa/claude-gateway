@@ -56,8 +56,9 @@ export function recoverOrchestration(store: OrchestrationStore): { inputs: numbe
       if (!attempt || attempt.revision !== task.revision || !report) continue;
       const resumed = resumeAfterRestart(task, attempt);
       store.saveAttempt(attempt); store.saveTask(task, task.stateVersion);
-      store.appendEvent(task.conversationId, 'task.restart_recovered', { stopped: true, state: task.state }, task.taskId);
-      if (!resumed) continue;
+      store.appendEvent(task.conversationId, 'task.restart_recovered', { orphaned: true, state: task.state }, task.taskId);
+      // The pending report now reports the GATEWAY_SHUTDOWN_REPEATED blocker.
+      if (!resumed) { store.run('UPDATE notifications SET task_state_version=? WHERE id=?', task.stateVersion, report.id); continue; }
       // A resume sends no failure report.
       store.run("UPDATE notifications SET status='handled' WHERE id=?", report.id);
       store.run("UPDATE outbox SET state='completed' WHERE kind='notification' AND state IN ('pending','processing') AND json_extract(payload_json,'$.notificationId')=?", report.id);

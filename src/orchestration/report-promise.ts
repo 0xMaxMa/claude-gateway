@@ -1,16 +1,24 @@
 import { OrchestrationStore } from './store';
 
-// A first-person commitment to (re)start work: "I'll re-run the review", "ผมจะสั่งรันรีวิวใหม่".
-const ENGLISH_PROMISE = /\b(?:I(?:'ll| will| am going to|'m going to)|let me|we(?:'ll| will))\b.{0,60}?\b(?:re-?run|run|re-?start|retry|resume|continue|kick off|redo|re-?launch|try (?:it )?again)\b/i;
-const THAI_PROMISE = /(?:จะ|เดี๋ยว).{0,40}?(?:รัน|เริ่ม|ทำต่อ|ดำเนินการต่อ|(?<!คำ)สั่ง|ลองใหม่|ลองอีก|ทำใหม่|รีวิวใหม่|ตรวจใหม่|ต่อให้)/;
-// A negated or conditional clause ("I will not re-run it", "let me know if…", "จะรันเองไม่ได้", "ถ้าจะให้…") promises nothing.
-const NOT_A_COMMITMENT = /\b(?:not|never|unable|cannot|if|unless|whether|let me know)\b|n't\b|ไม่|ถ้า|หาก/i;
+// A commitment to (re)start work right after its subject: "I'll re-run the review", "let me retry",
+// "ผมจะสั่งรันรีวิวใหม่", "เดี๋ยวผมรันใหม่ให้". Only adverbs and particles may sit in between, so
+// "I'll summarize the run" or "จะสรุปผลการรัน" is not one.
+const ENGLISH_PROMISE = /\b(?:I(?:'ll| will| am going to|'m going to)|let me(?! know)|we(?:'ll| will))(?:\s+(?:now|then|also|just|immediately|quickly|automatically|go ahead and|try to|start to))*\s+(?:re-?run|run|re-?start|retry|resume|continue(?! to (?:keep|update|let))|kick off|redo|re-?launch|try (?:it )?again)\b/i;
+const THAI_PROMISE = /(?:จะ|เดี๋ยว)(?:\s*(?:ผม|ฉัน|เรา|หนู|ขอ|ให้|ทำการ|ลอง|รีบ|ไป))*\s*(?:รัน|เริ่ม|ทำต่อ|ดำเนินการต่อ|สั่ง|ลองใหม่|ลองอีก|ทำใหม่|รีวิวใหม่|ตรวจใหม่)/g;
+// An offer ("let me know if…", "if you want, I'll…", "ถ้าต้องการ…จะ…") promises nothing on its own.
+const ENGLISH_CONDITION = /\b(?:if|unless|whether)\b/i;
+const THAI_CONDITION = /ถ้า|หาก/, THAI_CANNOT = /^[^ ]{0,25}?ไม่(?:ได้|ไหว)/;
 
-/** Whether a reply says the agent will start, re-run or continue work. Thai rarely ends a
- * sentence with punctuation, so a space before Thai text also ends a clause. */
+/** Whether a reply says the agent will start, re-run or continue work. */
 export function promisesWork(text: string): boolean {
-  return text.split(/[.!?;\n]+|\s+(?=[\u0E00-\u0E7F])/).some(clause =>
-    !NOT_A_COMMITMENT.test(clause) && (ENGLISH_PROMISE.test(clause) || THAI_PROMISE.test(clause)));
+  const normalized = text.replace(/[\u2018\u2019]/g, "'");
+  if (normalized.split(/[.!?\n]+/).some(sentence => ENGLISH_PROMISE.test(sentence) && !ENGLISH_CONDITION.test(sentence))) return true;
+  // Thai rarely punctuates sentences, so an offer or a "cannot" is looked for around the match.
+  for (const match of normalized.matchAll(THAI_PROMISE)) {
+    const before = normalized.slice(Math.max(0, match.index! - 30), match.index), after = normalized.slice(match.index! + match[0].length);
+    if (!THAI_CONDITION.test(before) && !THAI_CANNOT.test(after)) return true;
+  }
+  return false;
 }
 
 /** Work a report turn can truthfully say continues besides a task command it committed: a task of
