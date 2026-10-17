@@ -60,7 +60,7 @@ import { pendingReports } from './notification-mailbox';
 import { toolActivity, ToolActivity } from './tool-activity';
 import { retryableVoiceNoteFailure, transcribeVoiceNote, voiceNoteFailureMessage, VoiceNoteDiagnostic } from '../voice/notes';
 import { createLogger } from '../logger';
-import { VoiceError } from '../voice/types';
+import { hasSpokenWords, VoiceError } from '../voice/types';
 import { describeVoiceError } from '../voice/errors';
 import { MediaStore } from '../history/media-store';
 import { resolveSkill, skillCatalog } from './skills';
@@ -1188,6 +1188,8 @@ export class AgentOrchestrationRuntime {
               // Retries and an incomplete credit check that still let the note through are traceable by reference.
               this.voiceLog('info', 'Voice note diagnostic', { ...trace, ...event });
             } });
+            // Whatever transcribed it, a note without words is never sent to the agent as the user's message.
+            if (!hasSpokenWords(text)) throw new OrchestrationError('VOICE_NOTE_NO_TRANSCRIPT');
             this.store.run("UPDATE voice_note_transcripts SET state='completed',text=? WHERE input_id=?", text, receipt.inputId);
           } catch (error) {
             const code = error instanceof OrchestrationError || error instanceof VoiceError ? error.code : 'VOICE_NOTE_STT_FAILED';

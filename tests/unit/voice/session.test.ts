@@ -397,6 +397,8 @@ test('batch STT only interrupts completed response playback after confirmed word
     await waitFor(()=>controls.some(c=>c.type==='playback.end'));
     const epoch=session.playback.epoch;
     expect((await commit(''))?.code).toBe('EMPTY_TRANSCRIPT');
+    // A punctuation-only final (#610) is no words either: it neither interrupts the reply nor reaches the agent.
+    expect((await commit('.'))?.code).toBe('EMPTY_TRANSCRIPT');
     expect(session.playback.epoch).toBe(epoch);expect(stop).not.toHaveBeenCalled();
     await commit('please wait');
     expect(session.playback.epoch).toBeGreaterThan(epoch);expect(stop).toHaveBeenCalledTimes(1);
