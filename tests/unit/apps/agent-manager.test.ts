@@ -197,6 +197,7 @@ describe('AgentManager', () => {
         expect(fs.statSync(victim).mode & 0o777).toBe(0o644);
         expect(fs.lstatSync(path.join(entry.installPath, '.env.agent')).isSymbolicLink()).toBe(false);
         expect(resolvedAgentEnv(entry)).toEqual({ AGENT_API_TOKEN: 'agent-token' });
+        expect(fs.readdirSync(entry.installPath).filter((f) => f.includes('.tmp.'))).toEqual([]);
       });
 
       it('refuses an agent path that is a symlink to the app dir', async () => {

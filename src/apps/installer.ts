@@ -1879,6 +1879,7 @@ export class AppInstaller {
     if (generated.agentDeclaration && this.agentManager && agentPaths) {
       await this.agentManager.injectAgentService(entry);
       this.log(job, `Agent service injected for ${generated.agentDeclaration.name}`);
+      this.logAgentEnv(job, generated.agentDeclaration);
       // Pre-pull the agent base image so compose up --wait doesn't time out during pull
       this.log(job, 'Pre-pulling agent base image');
       try {
@@ -2076,6 +2077,7 @@ export class AppInstaller {
 
       if (generated.agentDeclaration && this.agentManager && agentPaths) {
         await this.agentManager.injectAgentService(newEntry);
+        this.logAgentEnv(job, generated.agentDeclaration);
       }
 
       // Pin the images the app is running before the build takes their tags
@@ -2482,6 +2484,7 @@ export class AppInstaller {
       if (newAgent && this.agentManager && (hasPortChange || entry.agentPaths)) {
         const agentPaths = entry.agentPaths ?? this.agentManager.detectAgentPaths();
         await this.agentManager.injectAgentService({ ...nextEntry, agentPaths });
+        this.logAgentEnv(job, newAgent);
       }
 
       // Deregister old proxy routes before the port mapping changes (the proxy is
@@ -2528,9 +2531,15 @@ export class AppInstaller {
           fs.writeFileSync(envPath, oldEnvContent, { mode: 0o600 });
           fs.chmodSync(envPath, 0o600);
         }
-        if (oldAgent) writeAgentEnvFile(appDir, oldAgent);
         if (oldComposeContent !== null) {
           fs.writeFileSync(composePath, oldComposeContent);
+        }
+        if (oldAgent) {
+          try {
+            writeAgentEnvFile(appDir, oldAgent);
+          } catch (envErr) {
+            this.log(job, `Could not restore .env.agent: ${(envErr as Error).message}`);
+          }
         }
         await this.composeUp(appName, appDir, job, { forceRecreate: true });
         if (hasPortChange) {
@@ -2685,6 +2694,13 @@ export class AppInstaller {
       throw new Error(`Failed to write .env: ${(err as Error).message}`);
     }
     return generatedNames;
+  }
+
+  /** Say which app secrets the agent container gets: an agent from before #618 had them all. */
+  private logAgentEnv(job: JobState, declaration: AgentDeclaration): void {
+    this.log(job, declaration.env?.length
+      ? `Agent container gets app secrets: ${declaration.env.join(', ')}`
+      : 'Agent container gets no app secrets (app.yaml services.agent.env is not set)');
   }
 
   /** Parse an app's existing .env into a key→value map (empty if absent). */

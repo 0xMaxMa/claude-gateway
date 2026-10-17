@@ -3650,6 +3650,7 @@ services:
 
         expect(job.status).toBe('completed');
         expect(fs.readFileSync(path.join(appDir, '.env.agent'), 'utf-8')).toBe('AGENT_API_TOKEN=new-token\n');
+        expect(job.logs.join('\n')).toContain('] Agent container gets app secrets: AGENT_API_TOKEN\n');
       });
 
       it('re-injects the agent service on an env-only reconfigure (#618)', async () => {
@@ -3666,6 +3667,35 @@ services:
         expect(agentMgr.injectAgentService).toHaveBeenCalledWith(
           expect.objectContaining({ agentDeclaration: { path: './agent', name: 'reconf-bot', env: ['AGENT_API_TOKEN'] } }),
         );
+      });
+
+      it('says when the agent container gets no app secrets', async () => {
+        const { installer } = await installThenEditYaml({ name: 'reconf-bot' }, { name: 'reconf-bot' });
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
+
+        expect(job.logs.join('\n')).toContain('Agent container gets no app secrets (app.yaml services.agent.env is not set)');
+      });
+
+      it('still restores the compose and recreates when .env.agent cannot be restored', async () => {
+        const { installer, agentMgr, appDir, spawnImpl } = await installThenEditYaml({ name: 'reconf-bot' }, { name: 'reconf-bot' });
+        const composePath = path.join(appDir, 'docker-compose.yml');
+        const composeBefore = fs.readFileSync(composePath, 'utf-8');
+        agentMgr.injectAgentService.mockImplementation(() => fs.appendFileSync(composePath, '# re-injected\n'));
+        let recreates = 0;
+        spawnImpl.fail = (cmd, args) => {
+          if (!(cmd === 'docker' && args.includes('--force-recreate'))) return false;
+          // A non-empty directory in its place makes the rename fail.
+          fs.mkdirSync(path.join(appDir, '.env.agent', 'x'), { recursive: true });
+          return ++recreates === 1;
+        };
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
+
+        expect(job.status).toBe('failed');
+        expect(fs.readFileSync(composePath, 'utf-8')).toBe(composeBefore);
+        expect(recreates).toBe(2);
+        expect(job.logs.join('\n')).toContain('Could not restore .env.agent:');
       });
 
       it('puts the compose back when an env-only reconfigure fails to recreate (#618)', async () => {

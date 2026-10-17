@@ -2,6 +2,7 @@ import { resolveCodexCredentials } from '../session/codex-auth';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import * as crypto from 'node:crypto';
 import { execSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import { resolveCodexRuntime, CodexRuntime } from '../session/codex-runtime';
@@ -39,10 +40,18 @@ export function writeAgentEnvFile(installPath: string, declaration: Pick<AgentDe
   const appEnv = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8').split('\n') : [];
   const lines = appEnv.filter((line) => line.includes('=') && allowed.has(line.slice(0, line.indexOf('=')).trim()));
   const agentEnvPath = path.join(installPath, '.env.agent');
-  // Replace, never write through: an app repo could ship .env.agent as a symlink.
-  fs.rmSync(agentEnvPath, { force: true });
-  fs.writeFileSync(agentEnvPath, lines.map((l) => l + '\n').join(''), { mode: 0o600, flag: 'wx' });
-  fs.chmodSync(agentEnvPath, 0o600);
+  // Write a new file and rename it into place, never through the old path: an
+  // app repo could ship .env.agent as a symlink, and a concurrent compose run
+  // must see either the old file or the new one.
+  const tmp = `${agentEnvPath}.tmp.${crypto.randomUUID()}`;
+  try {
+    fs.writeFileSync(tmp, lines.map((l) => l + '\n').join(''), { mode: 0o600, flag: 'wx' });
+    fs.chmodSync(tmp, 0o600);
+    fs.renameSync(tmp, agentEnvPath);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
 }
 
 /** The `isolateMemory` an app Agent's config entry carries: its app.yaml declaration's (#601). */
