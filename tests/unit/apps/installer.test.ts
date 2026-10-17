@@ -88,7 +88,7 @@ function makeAgentMgr(existingAgentName: string) {
       nodeBin: '/usr/bin/node',
       npmRoot: '/usr/lib/node_modules',
     })),
-    injectAgentService: jest.fn(() => {}),
+    injectAgentService: jest.fn((_entry: AppEntry) => {}),
     upsertAgent: jest.fn(async () => {}),
     syncMemoryModes: jest.fn(async (): Promise<boolean> => true),
     backupMemory: jest.fn((): string | null => null),
