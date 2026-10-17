@@ -4185,13 +4185,17 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    const wildcardParam = (req.params as Record<string, string>)['0'] ?? '';
+    // The media root holds every conversation's files (#609). An API client addresses
+    // its own sessions (`api-<session>`, as in the reply attachment URLs it is handed);
+    // a channel chat's media needs an admin key for an isolated agent.
+    if (!/^(media\/)?api-[^/]+\//.test(wildcardParam) && denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
       return;
     }
 
-    const wildcardParam = (req.params as Record<string, string>)['0'] ?? '';
     const agentsBaseDir = runner.getAgentsBaseDir();
     let absPath: string;
     try {

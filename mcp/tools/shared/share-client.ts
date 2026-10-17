@@ -9,7 +9,7 @@
  * module must not import from src/ (see tests/unit/mcp-no-src-imports.test.ts).
  */
 
-import { assertIsolateMediaPath } from './isolate';
+import { resolveIsolateMediaPath } from './isolate';
 
 const REQUEST_TIMEOUT_MS = 15_000;
 
@@ -135,14 +135,14 @@ export async function createShares(
 ): Promise<ShareItem[]> {
   // Isolate mode: a path ref must sit in this conversation's own media dir. An
   // artifact ref is already resolved per (agent, session) by the gateway.
-  for (const ref of refs) {
-    if (ref.path === undefined) continue;
+  refs = refs.map((ref) => {
+    if (ref.path === undefined) return ref;
     try {
-      assertIsolateMediaPath(ref.path);
+      return { ...ref, path: resolveIsolateMediaPath(ref.path) };
     } catch (err) {
       throw new ShareClientError('isolate_path_denied', (err as Error).message, 403);
     }
-  }
+  });
   const body: Record<string, unknown> = {
     agent_id: process.env.GATEWAY_AGENT_ID,
     session_id: process.env.GATEWAY_SESSION_ID,

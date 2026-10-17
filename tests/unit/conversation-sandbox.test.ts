@@ -28,6 +28,9 @@ beforeEach(() => {
     'SKILLS_LEARNED.md': 'diary', 'kb.sqlite': '', 'kb.sqlite-wal': '', [`chats/${chatMemoryDirName('telegram', '222')}/MEMORY.md`]: 'CHAT-B',
   })) fs.writeFileSync(path.join(ws, file), text);
   fs.symlinkSync('/etc', path.join(ws, 'host-etc'));
+  // A root note an agent wrote before isolate mode, about one user.
+  fs.writeFileSync(path.join(ws, 'notes-about-alice.md'), 'ALICE');
+  fs.mkdirSync(path.join(ws, 'odd,name'));
   fs.mkdirSync(path.join(root, 'agents', 'bot'), { recursive: true });
   fs.symlinkSync(ws, path.join(root, 'agents', 'bot', 'workspace'));
   agent = { id: 'bot', description: 'test', type: 'app-agent', container: 'demo-agent', isolateMemory: true, workspace: path.join(root, 'agents', 'bot', 'workspace'), env: '', claude: { model: 'm', dangerouslySkipPermissions: false, extraFlags: [] } };
@@ -42,7 +45,7 @@ describe('sandboxMounts', () => {
     const mounts = byTarget(sandboxMounts(agent, A, []));
     for (const name of ['CLAUDE.md', 'AGENTS.md', 'SOUL.md', 'skills', 'tools']) expect(mounts[`/workspace/${name}`]).toMatchObject({ readonly: true });
     expect(mounts['/workspace/.claude/skills']).toMatchObject({ readonly: true });
-    for (const name of ['MEMORY.md', 'USER.md', 'memory', 'SKILLS_LEARNED.md', 'kb.sqlite', 'kb.sqlite-wal', '.telegram-state', '.sessions', '.claude/agent-memory', 'host-etc', 'chats'])
+    for (const name of ['MEMORY.md', 'USER.md', 'memory', 'SKILLS_LEARNED.md', 'kb.sqlite', 'kb.sqlite-wal', '.telegram-state', '.sessions', '.claude/agent-memory', 'host-etc', 'chats', 'notes-about-alice.md'])
       expect(mounts[`/workspace/${name}`]).toBeUndefined();
   });
 
@@ -70,6 +73,10 @@ describe('sandboxMounts', () => {
     expect(mounts[0]).toEqual({ source: '/usr/local/bin/claude', target: '/usr/local/bin/claude', readonly: true });
   });
 
+  it('leaves out an entry the --mount syntax cannot carry instead of refusing the sandbox', () => {
+    expect(sandboxMounts(agent, A, []).some(m => m.source.includes('odd,name'))).toBe(false);
+  });
+
   it('refuses a symlinked chats/ directory, which Docker would follow on the host', () => {
     fs.rmSync(path.join(ws, 'chats'), { recursive: true });
     fs.symlinkSync(os.tmpdir(), path.join(ws, 'chats'));
@@ -94,9 +101,11 @@ describe('sandboxContainerName', () => {
   });
 });
 
-it('keeps root memory, conversation and state entries out of every sandbox', () => {
-  for (const name of ['MEMORY.md', 'USER.md', 'chats', 'memory', 'media', '.sessions', '.env', 'kb.sqlite', 'app.db', 'SKILLS_LEARNED.md']) expect(workspaceEntryVisible(name)).toBe(false);
-  for (const name of ['CLAUDE.md', 'AGENTS.md', 'skills', 'HEARTBEAT.md']) expect(workspaceEntryVisible(name)).toBe(true);
+it('shows only the persona among root files, and no per-user or state directory', () => {
+  for (const name of ['MEMORY.md', 'USER.md', '.env', 'kb.sqlite', 'app.db', 'SKILLS_LEARNED.md', 'project_notes.md']) expect(workspaceEntryVisible(name, 'file')).toBe(false);
+  for (const name of ['chats', 'memory', 'media', '.sessions', '.claude']) expect(workspaceEntryVisible(name, 'dir')).toBe(false);
+  for (const name of ['CLAUDE.md', 'AGENTS.md', 'SOUL.md', 'IDENTITY.md', 'HEARTBEAT.md']) expect(workspaceEntryVisible(name, 'file')).toBe(true);
+  for (const name of ['skills', 'tools']) expect(workspaceEntryVisible(name, 'dir')).toBe(true);
 });
 
 describe('sandboxCreateArgs', () => {
@@ -107,8 +116,8 @@ describe('sandboxCreateArgs', () => {
   };
 
   it('drops every capability, forbids privilege gain and never puts env values on the argv', () => {
-    const args = sandboxCreateArgs('demo-agent-c-1', base, sandboxMounts(agent, A, []), 'spec');
-    expect(args).toEqual(expect.arrayContaining(['--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--network', 'demo_default', '--user', '1000:1000', '--env', 'APP_TOKEN']));
+    const args = sandboxCreateArgs('demo-agent-c-1', base, sandboxMounts(agent, A, []), 'spec', {}, '/private/env');
+    expect(args).toEqual(expect.arrayContaining(['--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--network', 'demo_default', '--user', '1000:1000', '--env-file', '/private/env']));
     expect(args.join(' ')).not.toContain('s3cret');
     expect(args).toContain(`${SANDBOX_LABEL}=1`);
     expect(args.slice(-4)).toEqual(['sha256:abc', 'sh', '-c', 'exec sleep infinity']);
@@ -124,6 +133,7 @@ describe('validateContainerInspection, sandbox', () => {
     Mounts: mounts.map(m => ({ Type: 'bind', ...m })),
   });
   const generated = () => sandboxMounts(agent, A, []).map(m => ({ Source: m.source, Destination: m.target, RW: !m.readonly }));
+  const homeOf = (conversation: typeof A) => ({ Source: path.join(root, 'agents', 'bot', 'sandbox-homes', chatMemoryDirName(conversation.source, conversation.chatId)), Destination: os.homedir(), RW: true });
 
   it('accepts the mounts the gateway creates', async () => {
     await expect(validateContainerInspection(agent, inspection(generated()))).resolves.toBeUndefined();
@@ -134,6 +144,8 @@ describe('validateContainerInspection, sandbox', () => {
     ["another conversation's directory", (ms: any[]) => [...ms, { Source: path.join(ws, 'chats', chatMemoryDirName('telegram', '222')), Destination: `/workspace/chats/${chatMemoryDirName('telegram', '222')}`, RW: true }]],
     ['a writable persona file', (ms: any[]) => ms.map(m => m.Destination === '/workspace/AGENTS.md' ? { ...m, RW: true } : m)],
     ['the root memory file', (ms: any[]) => [...ms, { Source: path.join(ws, 'MEMORY.md'), Destination: '/workspace/MEMORY.md', RW: false }]],
+    ["another conversation's HOME", (ms: any[]) => { fs.mkdirSync(homeOf(B).Source, { recursive: true }); return [...ms.filter(m => m.Destination !== os.homedir()), homeOf(B)]; }],
+    ['a root note file', (ms: any[]) => [...ms, { Source: path.join(ws, 'notes-about-alice.md'), Destination: '/workspace/notes-about-alice.md', RW: false }]],
     ['the shared media root', (ms: any[]) => [...ms, { Source: path.join(root, 'agents', 'bot', 'media'), Destination: path.join(root, 'agents', 'bot', 'media'), RW: true }]],
   ])('refuses %s', async (_name, change) => {
     fs.mkdirSync(path.join(root, 'agents', 'bot', 'media'), { recursive: true });

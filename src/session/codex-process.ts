@@ -21,6 +21,7 @@ import type { AgentConfig, GatewayConfig } from '../types';
 import type { RuntimeProfile } from './runtime-profile';
 import type { InputImage } from './input-image';
 import { assertContainerBinding, prepareContainerProfile, containerNode, CONTAINER_SUPERVISOR, stopContainerProfile } from '../orchestration/container';
+import { isSandboxContainerName } from '../apps/conversation-sandbox';
 import { recordProcessRoot, stopProcessGroup, workerSpawnDetached } from '../orchestration/process-supervisor';
 
 export interface CodexProcessOptions {
@@ -202,7 +203,9 @@ export class CodexProcess extends EventEmitter {
         // Native homes live in the container writable layer. A recreated container
         // cannot resume them even though its name and the host pool slot survive.
         // Legacy records have no Docker ID: retain them only if their transcript exists.
-        const sameContainer = !this.saved.containerId || this.saved.containerId === this.containerId;
+        // A conversation sandbox's HOME is a host directory (#609), so a sandbox recreated
+        // under the same name still holds the home.
+        const sameContainer = !this.saved.containerId || this.saved.containerId === this.containerId || (isSandboxContainerName(agent.container) && this.saved.container === agent.container);
         const transcriptExists = sameContainer && await containerNode(agent.container!, "const fs=require('fs');try{process.stdout.write(fs.statSync(process.argv[1]+'/sessions').isDirectory()?'yes':'no');}catch(e){if(e.code!=='ENOENT')throw e;process.stdout.write('no');}", [this.saved.home]) === 'yes';
         if (!transcriptExists) {
           this.saved = undefined;

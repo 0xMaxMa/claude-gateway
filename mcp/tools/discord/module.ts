@@ -31,7 +31,7 @@ import { createMessageHandler } from './inbound';
 import { initDedupDir, isDuplicate, pruneDedup } from '../telegram/dedup';
 import type { DiscordMessageContext } from './types';
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
-import { assertIsolateMediaPath, assertOriginChat, isolateMediaDir, isolateMode } from '../shared/isolate';
+import { assertOriginChat, resolveIsolateMediaPath, isolateMediaDir, isolateMode } from '../shared/isolate';
 
 /** AgentRunner callback base (origin of CLAUDE_CHANNEL_CALLBACK, "" when unset).
  *  Used to mint/approve `/cli` pairings via the runner, the same bridge the
@@ -72,6 +72,8 @@ export class DiscordModule implements ChannelModule {
   // discord_reply after a transient send hiccup even though the upload
   // succeeded, which spams duplicate images. We never re-send the same file.
   private readonly sentFiles = new Set<string>();
+  /** Threads discord_create_thread opened from this conversation (#609). */
+  private readonly createdThreads = new Set<string>();
 
   constructor() {
     this.stateDir = process.env.DISCORD_STATE_DIR
@@ -715,12 +717,14 @@ export class DiscordModule implements ChannelModule {
     };
   }
 
-  /** Fetch a channel the tool may act on: the conversation's own, or a thread under it. */
+  /**
+   * Fetch a channel the tool may act on: the conversation's own, or (isolate
+   * mode) a thread this process created with discord_create_thread. Any other
+   * thread, even one under the origin channel, is its own conversation.
+   */
   private async fetchOriginChannel(channelId: string): Promise<any> {
-    const channel = await this.client.channels.fetch(channelId);
-    // A text channel's parentId is its category, so only a thread may borrow its parent's id.
-    assertOriginChat(channelId, channel?.isThread?.() ? channel.parentId : undefined);
-    return channel;
+    if (!this.createdThreads.has(channelId)) assertOriginChat(channelId);
+    return this.client.channels.fetch(channelId);
   }
 
   private async handleReply(args: Record<string, unknown>): Promise<McpToolResult> {
@@ -741,15 +745,15 @@ export class DiscordModule implements ChannelModule {
       return { content: [{ type: 'text', text: 'already sent (duplicate suppressed)' }] };
     }
 
-    for (const f of files) {
-      assertIsolateMediaPath(f);
-      const st = fs.statSync(f);
+    const paths = files.map(resolveIsolateMediaPath);
+    paths.forEach((p, i) => {
+      const st = fs.statSync(p);
       if (st.size > MAX_ATTACHMENT_BYTES) {
-        throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);
+        throw new Error(`file too large: ${files[i]} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);
       }
-    }
+    });
 
-    const sent = await sendMessage(channel, text, { replyTo, files, useEmbed });
+    const sent = await sendMessage(channel, text, { replyTo, files: paths, useEmbed });
     // Mark as sent only AFTER the send succeeds — if sendMessage throws, the files
     // stay un-marked so a genuine retry re-delivers them (never silently dropped).
     for (const f of files) this.sentFiles.add(f);
@@ -817,6 +821,7 @@ export class DiscordModule implements ChannelModule {
     } else {
       thread = await channel.threads.create({ name, autoArchiveDuration: 60 });
     }
+    this.createdThreads.add(thread.id);
     return { content: [{ type: 'text', text: `thread created (id: ${thread.id})` }] };
   }
 }

@@ -41,6 +41,7 @@ import { join, extname, sep } from 'path'
 import { execFileSync } from 'child_process'
 import { createWorkingStateManager, drainOrphanForwards, chunkText, htmlToPlain } from './typing'
 import { extractRepliedAttachment, safeName } from './reply-attachment'
+import { recordChatAttachments } from './attachment-log'
 // Import compiled dist/, not raw src/ — src/ is not published (files: ["mcp/"]),
 // so a src/ import crashes this bun-run receiver on installed packages (the bug
 // that silenced every bot on systemd installs). Enforced by
@@ -1071,6 +1072,13 @@ async function handleInbound(
   // file_id so the agent can fetch it with download_attachment — without this a
   // quote-reply of e.g. a CSV dropped the file entirely.
   const repliedAttachment = extractRepliedAttachment(replyMsg)
+  // Isolate mode downloads only the file_ids this chat was shown (#609).
+  const repliedPhotoId = orchestrationSpool && replyMsg?.photo ? replyMsg.photo[replyMsg.photo.length - 1]!.file_id : undefined
+  try {
+    recordChatAttachments(STATE_DIR, chat_id, [attachment?.file_id, repliedPhotoId, repliedAttachment?.file_id].filter((id): id is string => Boolean(id)))
+  } catch (err) {
+    process.stderr.write(`telegram channel: failed to record attachment ids: ${err}\n`)
+  }
 
   // image_path goes in meta only — an in-content "[image attached — read: PATH]"
   // annotation is forgeable by any allowlisted sender typing that string.

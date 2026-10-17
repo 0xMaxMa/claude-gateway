@@ -32,14 +32,13 @@ export function isolateAllowsModule(id: string): boolean {
 
 /**
  * Origin-chat lock: in isolate mode a tool may only act on this conversation's
- * own chat. `parentId` lets a thread whose parent is the origin chat through
- * (Discord threads started from the conversation's channel).
+ * own chat.
  */
-export function assertOriginChat(chatId: string, parentId?: string | null): void {
+export function assertOriginChat(chatId: string): void {
   if (!isolateMode()) return;
   const origin = process.env.GATEWAY_ORIGIN_CHAT_ID ?? '';
   if (!origin) throw new Error('isolate mode: the originating chat is unknown, so chat tools are disabled');
-  if (chatId === origin || (parentId != null && parentId === origin)) return;
+  if (chatId === origin) return;
   throw new Error('isolate mode: this conversation can only reply to its own chat');
 }
 
@@ -54,10 +53,11 @@ export function isolateMediaDir(): string {
  * In isolate mode a local file a tool sends or shares must realpath-resolve
  * inside this session's media dir. A relative path is media-root relative
  * ("media/<chat>/x.png" or "<chat>/x.png"), the form the share route accepts;
- * the agent media root is the session media dir's parent.
+ * the agent media root is the session media dir's parent. Returns the path to
+ * send: the validated realpath in isolate mode, `file` unchanged otherwise.
  */
-export function assertIsolateMediaPath(file: string): void {
-  if (!isolateMode()) return;
+export function resolveIsolateMediaPath(file: string): string {
+  if (!isolateMode()) return file;
   const dir = isolateMediaDir();
   const abs = path.isAbsolute(file)
     ? file
@@ -73,4 +73,5 @@ export function assertIsolateMediaPath(file: string): void {
   if (!real.startsWith(dirReal + path.sep)) {
     throw new Error(`isolate mode: file is outside this conversation's media directory: ${file}`);
   }
+  return real;
 }

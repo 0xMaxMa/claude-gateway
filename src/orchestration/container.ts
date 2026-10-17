@@ -72,6 +72,8 @@ export async function validateContainerInspection(agent: AgentConfig, c: any, op
  * installer's read-only runtime mounts (see apps/conversation-sandbox.ts). */
 async function validateSandboxMounts(agent: AgentConfig, mounts: any[], workspace: string, media: string, ro: Map<string, string>): Promise<void> {
   const agentHomes = await realpath(join(agent.workspace, '..', 'sandbox-homes')).catch(() => undefined);
+  // The writable chats/ directory and HOME belong to one conversation (same name).
+  const own = new Set<string>();
   let chats = 0, ownMedia = 0, home = 0;
   for (const m of mounts) {
     if (m.Type !== 'bind' || /docker\.sock|containerd\.sock/.test(m.Source + m.Destination)) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
@@ -80,17 +82,18 @@ async function validateSandboxMounts(agent: AgentConfig, mounts: any[], workspac
     if (destination.startsWith('/workspace/')) {
       const rel = destination.slice('/workspace/'.length);
       if (source !== join(workspace, rel)) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
-      if (/^chats\/[^/]+$/.test(rel) && m.RW) { chats++; continue; }
+      if (/^chats\/[^/]+$/.test(rel) && m.RW) { chats++; own.add(basename(rel)); continue; }
       const [first, second, ...rest] = rel.split('/');
-      const visible = rel === BRIDGE_SOCKET_DIR || (first === '.claude' ? CLAUDE_PROJECT_ENTRIES.has(second) && !rest.length : !second && workspaceEntryVisible(first));
+      const kind = (await lstat(source)).isDirectory() ? 'dir' : 'file';
+      const visible = rel === BRIDGE_SOCKET_DIR || (first === '.claude' ? CLAUDE_PROJECT_ENTRIES.has(second) && !rest.length : !second && workspaceEntryVisible(first, kind));
       if (m.RW || !visible) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
       continue;
     }
     if (m.RW && dirname(source) === media && [source, join(agent.workspace, '..', 'media', basename(source))].includes(destination)) { ownMedia++; continue; }
-    if (m.RW && destination === homedir() && dirname(source) === agentHomes) { home++; continue; }
+    if (m.RW && destination === homedir() && dirname(source) === agentHomes) { home++; own.add(basename(source)); continue; }
     if (m.RW || ro.get(destination) !== source) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
   }
-  if (chats !== 1 || ownMedia > 1 || home !== 1) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
+  if (chats !== 1 || ownMedia > 1 || home !== 1 || own.size !== 1) throw new OrchestrationError('CONTAINER_HOST_MOUNT_DENIED');
 }
 
 export function containerNode(container: string, script: string, args: string[] = [], input = ''): Promise<string> {

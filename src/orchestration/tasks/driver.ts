@@ -15,7 +15,7 @@ import { resolveOrchestrationConfig } from '../config';
 import { taskFailure } from './failure';
 import { payloadHash } from '../store';
 import { containerNode, validateContainer } from '../container';
-import { sandboxedAgent, usesConversationSandbox } from '../../apps/conversation-sandbox';
+import { sandboxPool, usesConversationSandbox, type SandboxLease } from '../../apps/conversation-sandbox';
 import { toolActivity } from '../tool-activity';
 import { extractFrontmatter } from '../../skills/parser';
 import { dirname, join, relative } from 'path';
@@ -71,6 +71,21 @@ export class ClaudeWorkerDriver implements WorkerDriver {
   available(taskId: string): boolean { return this.workspaces.available(taskId); }
   release(taskId: string): Promise<void> { return this.workspaces.release(taskId); }
   async start(task: TaskSnapshot, attempt: TaskAttempt, capacityReserved = false, providerPermit?: ProviderPermit): Promise<WorkerHandle> {
+    // Isolate mode (#609): the attempt executes in its conversation's own sandbox,
+    // held until its process is stopped so the sandbox is never reaped under it.
+    let lease: SandboxLease | undefined;
+    if (usesConversationSandbox(this.agent)) {
+      const conversation = this.tasks.store.get('SELECT source, chat_id FROM conversations WHERE id=?', task.conversationId)!;
+      lease = await sandboxPool.acquire(this.agent, { source: String(conversation.source), chatId: String(conversation.chat_id), sessionId: task.agentSessionId });
+    }
+    try {
+      const handle = await this.startAttempt(task, attempt, capacityReserved, providerPermit, lease ? { ...this.agent, container: lease.container } : this.agent);
+      if (lease) void handle.result.finally(() => lease!.release()).catch(() => {});
+      return handle;
+    } catch (error) { lease?.release(); throw error; }
+  }
+
+  private async startAttempt(task: TaskSnapshot, attempt: TaskAttempt, capacityReserved: boolean, providerPermit: ProviderPermit | undefined, execAgent: AgentConfig): Promise<WorkerHandle> {
     if (!['default-worker', 'media-worker', 'skill-worker'].includes(task.targetProfile) || !task.capabilities.execute) throw new OrchestrationError('EXECUTION_DENIED');
     if (task.targetProfile === 'default-worker' && task.resourceProfile?.mode === 'shared-lock') {
       const [project, identity] = await Promise.all([realpath(task.resourceProfile.projectRoot), realpath(this.agent.workspace)]);
@@ -90,7 +105,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     if (harness.harness === 'codex') {
       try {
         if (task.skill?.invocation === 'cli' && !task.skill.filePath) {
-          const inventory = await discoverWorkerExtensions(this.agent, this.gateway, workspace.path, 'codex');
+          const inventory = await discoverWorkerExtensions(execAgent, this.gateway, workspace.path, 'codex');
           const installed = inventory.skills.find(skill => skill.name === task.skill!.name || skill.aliases?.includes(task.skill!.name));
           if (installed) task.skill = { ...task.skill, filePath: installed.filePath, resourceRoot: installed.resourceRoot, fileScope: installed.fileScope, content: installed.fileScope === 'container' ? installed.content ?? '' : await readFile(installed.filePath, 'utf8') };
         }
@@ -123,7 +138,7 @@ export class ClaudeWorkerDriver implements WorkerDriver {
     const cliSkill = task.skill?.invocation === 'cli' && harness.harness !== 'codex';
     const invokedSkill = task.skill ? (cliSkill ? task.skill.name : `orchestration-task:${task.skill.name}`) : undefined;
     if (cliSkill) {
-      const installed = await discoverCliSkills(this.agent, workspace.path);
+      const installed = await discoverCliSkills(execAgent, workspace.path);
       if (!installed.some(skill => skill.name === task.skill!.name)) throw new OrchestrationError('CLI_SKILL_UNAVAILABLE', 'The selected skill is unavailable in this worker harness; no host/container fallback was attempted.');
     }
     const containerSkill = task.skill?.fileScope === 'container' && !cliSkill ? { name: task.skill.name, filePath: task.skill.filePath, resourceRoot: task.skill.resourceRoot ?? dirname(task.skill.filePath), content: task.skill.content } : undefined;
@@ -184,13 +199,8 @@ export class ClaudeWorkerDriver implements WorkerDriver {
         ...(pstack ? { disallowedTools: ['Agent', 'Task'] } : {}),
         // Read-only is enforced by each harness (read tools; Codex's read-only sandbox) and no user connectors, which can write.
         ...(task.readonly ? { readOnly: true, connectorsAllowed: false, ...(harness.harness === 'claude' ? { workerTools: ['Read', 'Glob', 'Grep'] } : {}) } : {}), hostExecution: workspace.baseCommit === 'host', containerExecution: this.agent.type === 'app-agent', originSessionId: task.agentSessionId, taskId: task.taskId, attemptId: attempt.attemptId, context, cliSession: { id: attempt.sessionId, resume: Boolean(attempt.resumeSession) }, capacityReserved, skillPluginDir, containerSkill };
-      let workerConfig: AgentConfig = { ...this.agent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
+      const workerConfig: AgentConfig = { ...execAgent, workspace: this.agent.type === 'app-agent' ? this.agent.workspace : workspace.path, allow_tools: true, orchestration: undefined,
         claude: { ...this.agent.claude, model: claudeModel, extraFlags: [] } };
-      // Isolate mode (#609): the worker executes in its conversation's own sandbox.
-      if (usesConversationSandbox(this.agent)) {
-        const conversation = this.tasks.store.get('SELECT source, chat_id FROM conversations WHERE id=?', task.conversationId)!;
-        workerConfig = await sandboxedAgent(workerConfig, { source: String(conversation.source), chatId: String(conversation.chat_id), sessionId: task.agentSessionId });
-      }
       const process = harness.harness === 'codex'
         ? new CodexProcess({ agent: workerConfig, gateway: this.gateway, profile, sessionId: attempt.sessionId,
           stateDirectory: join(this.privateRoot, 'codex-sessions'), config: task.effort ? { ...harness.config, reasoningEffort: codexEffort(task.effort) } : harness.config, resolvedCredentials,

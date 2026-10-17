@@ -37,7 +37,8 @@ jest.mock('child_process', () => {
 // An isolated app agent executes in its conversation's sandbox (#609); only the name matters here.
 jest.mock('../../../src/apps/conversation-sandbox', () => {
   const actual = jest.requireActual('../../../src/apps/conversation-sandbox');
-  return { ...actual, sandboxPool: { ensure: jest.fn(async (agent: any, conversation: any) => actual.sandboxContainerName(agent, conversation)) } };
+  const name = (agent: any, conversation: any) => actual.sandboxContainerName(agent, conversation);
+  return { ...actual, sandboxPool: { ensure: jest.fn(async (agent: any, conversation: any) => name(agent, conversation)), acquire: jest.fn(async (agent: any, conversation: any) => ({ container: name(agent, conversation), release: jest.fn() })) } };
 });
 jest.mock('os', () => {
   const real = jest.requireActual('os');

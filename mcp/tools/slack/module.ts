@@ -22,7 +22,7 @@ import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } fro
 // run at least once for this import to resolve locally.
 import { SlackClient } from '../../../dist/api/slack-client.js';
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
-import { assertIsolateMediaPath, assertOriginChat } from '../shared/isolate';
+import { assertOriginChat, resolveIsolateMediaPath } from '../shared/isolate';
 
 export class SlackModule implements ToolModule {
   id = 'slack';
@@ -133,20 +133,20 @@ export class SlackModule implements ToolModule {
     try {
       // Size-check before any upload starts, so an oversized file fails fast
       // instead of half-way through a multi-file batch.
-      for (const f of files) {
-        assertIsolateMediaPath(f);
-        const st = fs.statSync(f);
+      const paths = files.map(resolveIsolateMediaPath);
+      paths.forEach((p, i) => {
+        const st = fs.statSync(p);
         if (st.size > MAX_ATTACHMENT_BYTES) {
-          throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);
+          throw new Error(`file too large: ${files[i]} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);
         }
-      }
+      });
 
       // With files, ONE uploadFiles call carries both the attachments and the
       // text (as Slack's initial_comment) — never also postMessage, which would
       // split one reply into two Slack messages.
       const sent =
         files.length > 0
-          ? await client.uploadFiles(chatId, files, {
+          ? await client.uploadFiles(chatId, paths, {
               threadTs: threadId || undefined,
               initialComment: text || undefined,
             })

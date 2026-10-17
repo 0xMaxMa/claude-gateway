@@ -324,8 +324,9 @@ async function startAgent(
       // Isolate mode (#601): dreaming reads every conversation's transcripts into
       // one MEMORY.md/USER.md (and may promote to the shared KB), so it cannot keep
       // conversations apart; it stays off for such an agent.
-      // disableArchive (#609): the staleness GC reindexes the archive, so it stays off.
-      agentCfg: offWhenIsolated(disableArchive ? { ...agentConfig.dreaming, staleness: { ...agentConfig.dreaming?.staleness, enabled: false } } : agentConfig.dreaming),
+      agentCfg: offWhenIsolated(agentConfig.dreaming),
+      // No archive (#609): compaction, the staleness GC and shared-KB promotion stay off.
+      disableArchive,
       gatewayTimezone: gatewayConfig.gateway.timezone,
       logger,
       // K4 auto-applier net-negative gate uses the same soft budgets as compose.

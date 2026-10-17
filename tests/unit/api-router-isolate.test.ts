@@ -1,6 +1,6 @@
 /**
  * isolate_memory default-deny on the agent API (#609): routes that read or
- * message an arbitrary chat need an admin key for an isolated agent, and the
+ * message an arbitrary chat (or serve any chat's media) need an admin key for an isolated agent, and the
  * attachments route checks realpath (and, isolated, the session's own media).
  */
 import * as fs from 'node:fs';
@@ -64,7 +64,17 @@ describe('isolate_memory API hardening (#609)', () => {
     ['search', (r) => r.get(`/api/v1/agents/${AGENT}/chats/telegram-1/messages/search?q=x`)],
     ['active days', (r) => r.get(`/api/v1/agents/${AGENT}/chats/telegram-1/messages/active-days?from=0&to=86400000`)],
     ['session inject', (r) => r.post(`/api/v1/agents/${AGENT}/chats/telegram-1/sessions/s1/messages`).send({ content: 'hi' })],
+    ['media file', (r) => r.get(`/api/v1/agents/${AGENT}/media/telegram-1/x.png`)],
   ];
+
+  test("media of an API session stays readable with the agent's key: reply attachments link to it", async () => {
+    const dir = path.join(baseDir, AGENT, 'media', 'api-s1');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'x.png'), 'x');
+    const res = await supertest.default(buildApp(true)).get(`/api/v1/agents/${AGENT}/media/api-s1/x.png`).set(bearer('agent-key'));
+    expect(res.body?.error ?? '').not.toMatch(/isolate_memory/);
+    expect(res.status).not.toBe(403);
+  });
 
   // The reply path of an isolated agent's own conversation: the MCP tool locks the
   // recipient to the originating chat, so these stay open to the agent's key.

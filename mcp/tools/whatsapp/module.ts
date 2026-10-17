@@ -16,7 +16,7 @@
  * port, not through this MCP subprocess at all.
  */
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
-import { assertIsolateMediaPath, assertOriginChat } from '../shared/isolate';
+import { assertOriginChat, resolveIsolateMediaPath } from '../shared/isolate';
 
 export class WhatsAppModule implements ToolModule {
   id = 'whatsapp';
@@ -96,7 +96,7 @@ export class WhatsAppModule implements ToolModule {
   private async handleReply(args: Record<string, unknown>): Promise<McpToolResult> {
     const chatId = typeof args.chat_id === 'string' ? args.chat_id : '';
     const text = typeof args.text === 'string' ? args.text : '';
-    const imagePath = typeof args.image_path === 'string' ? args.image_path : undefined;
+    let imagePath = typeof args.image_path === 'string' ? args.image_path : undefined;
     const accountId = typeof args.account_id === 'string' && args.account_id ? args.account_id : undefined;
     const replyTo =
       typeof args.reply_to_message_id === 'string' && args.reply_to_message_id
@@ -113,7 +113,7 @@ export class WhatsAppModule implements ToolModule {
     }
     try {
       assertOriginChat(chatId);
-      if (imagePath) assertIsolateMediaPath(imagePath);
+      if (imagePath) imagePath = resolveIsolateMediaPath(imagePath);
     } catch (err) {
       return { content: [{ type: 'text', text: `whatsapp_reply: ${(err as Error).message}` }], isError: true };
     }

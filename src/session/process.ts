@@ -5,7 +5,7 @@ import { prepareManagedConnectors } from './managed-connectors';
 import { RequestToolCapture, RequestToolSchemas } from './request-tool-capture';
 import type { InputImage } from './input-image';
 import { prepareContainerProfile, stopContainerProfile, CONTAINER_SUPERVISOR, containerNode, assertContainerBinding } from '../orchestration/container';
-import { isSandboxContainerName, sandboxPool, usesConversationSandbox } from '../apps/conversation-sandbox';
+import { isSandboxContainerName, sandboxPool, usesConversationSandbox, type SandboxLease } from '../apps/conversation-sandbox';
 import { spawn, ChildProcess } from 'child_process';
 import { createHash, randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
@@ -232,6 +232,7 @@ export class SessionProcess extends EventEmitter {
   private containerAttempt?: { directory: string; config: string };
   /** The container the current spawn executes in (an app agent's, or its sandbox). */
   private execContainer?: string;
+  private sandboxLease?: SandboxLease;
   /** Bumped by stop(): a spawnProcess() that awaited across it abandons its spawn. */
   private spawnEpoch = 0;
   // Bumped by every start(): a stop() still awaiting after one ran no longer owns the session's live state.
@@ -784,7 +785,12 @@ export class SessionProcess extends EventEmitter {
       if (!isSandboxContainerName(this.agentConfig.container)) throw Object.assign(new Error('Isolated worker has no conversation sandbox'), { code: 'CONTAINER_ISOLATION_REQUIRED' });
       return this.agentConfig.container!;
     }
-    return sandboxPool.ensure(this.agentConfig, { source: this.source, chatId: this.memoryChatId ?? this.chatId, sessionId: this.sessionId });
+    // Held until this spawn's process exits (or stop()), so the sandbox is never
+    // reaped or replaced under it; a respawn takes a new lease first.
+    const lease = await sandboxPool.acquire(this.agentConfig, { source: this.source, chatId: this.memoryChatId ?? this.chatId, sessionId: this.sessionId });
+    this.sandboxLease?.release();
+    this.sandboxLease = lease;
+    return lease.container;
   }
 
   /** Outside orchestration a sandbox has no `.sessions/` to read, so its conversation's
@@ -1390,6 +1396,8 @@ export class SessionProcess extends EventEmitter {
     this.process = proc;
     const startsAtSpawn = this.starts;
     proc.once('exit', releaseCapacity);
+    const lease = this.sandboxLease;
+    if (lease) { proc.once('exit', () => lease.release()); proc.once('error', () => lease.release()); }
     proc.once('exit', () => { setTimeout(() => toolCapture?.close(), 200).unref(); });
     proc.once('error', () => toolCapture?.close());
     proc.once('error', releaseCapacity);
@@ -2241,6 +2249,7 @@ export class SessionProcess extends EventEmitter {
     let exited = false;
     const exit = proc ? new Promise<void>(resolve => proc.once('exit', () => { exited = true; resolve(); })) : undefined;
     this.resetBackgroundDispatchState();
+    const lease = this.sandboxLease;
     if (attempt && this.execContainer) {
       this.managedGroupStopped = await stopContainerProfile(this.execContainer, attempt.directory);
       if (this.containerAttempt === attempt) this.containerAttempt = undefined;
@@ -2278,6 +2287,7 @@ export class SessionProcess extends EventEmitter {
     };
     // A child that failed to spawn never exits; its 'error' handler already let go of it.
     if (!proc || exited || (this.process !== proc && !proc.pid)) {
+      if (!superseded()) lease?.release();
       removeSessionDir();
       return;
     }
@@ -2291,6 +2301,7 @@ export class SessionProcess extends EventEmitter {
     await exit;
     if (forceKillTimer !== null) clearTimeout(forceKillTimer);
     if (this.process === proc) this.process = null;
+    if (!superseded()) lease?.release();
     removeSessionDir();
   }
 }

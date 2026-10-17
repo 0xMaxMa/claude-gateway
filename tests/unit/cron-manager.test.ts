@@ -1755,6 +1755,60 @@ describe('#609 cron policy for isolated and app agents', () => {
     } finally { manager.stop(); }
   });
 
+  function storedJob(agentId: string, overrides: Record<string, unknown>) {
+    return {
+      id: 'j-' + Math.random().toString(36).slice(2), agentId, name: 'stored', type: 'agent', prompt: 'p',
+      enabled: true, deleteAfterRun: true, createdAt: Date.now(), updatedAt: Date.now(),
+      state: { lastRunAt: null, lastStatus: null, lastError: null, runCount: 0, consecutiveErrors: 0 },
+      ...overrides,
+    };
+  }
+
+  it('does not consume a stored one-shot of an isolated agent at load, and warns once', async () => {
+    const runner = makeRunner();
+    const { manager, agentId, agentConfigs, tmpDir } = makeManager({ runner });
+    agentConfigs.get(agentId)!.isolateMemory = true;
+    const job = storedJob(agentId, { scheduleKind: 'at', scheduleAt: new Date(Date.now() - 1000).toISOString() });
+    fs.writeFileSync(path.join(tmpDir, 'crons.json'), JSON.stringify({ version: 1, jobs: [job] }));
+    await manager.start();
+    try {
+      await new Promise((r) => setTimeout(r, 100));
+      expect(manager.get(job.id)).toMatchObject({ enabled: true, state: { lastRunAt: null } });
+      expect(runner.sendApiMessage).not.toHaveBeenCalled();
+      await manager.run(job.id);
+      expect(manager.get(job.id)?.enabled).toBe(true);
+      expect((manager as any).logger.warn.mock.calls.filter((c: unknown[]) => /skipped/.test(String(c[0])))).toHaveLength(1);
+    } finally { manager.stop(); }
+  });
+
+  it('does not consume a scheduled one-shot whose agent became isolated before it fired', async () => {
+    const runner = makeRunner();
+    const { manager, agentId, agentConfigs } = makeManager({ runner });
+    await manager.start();
+    try {
+      const job = await manager.create({ agentId, name: 'once', scheduleKind: 'at', scheduleAt: new Date(Date.now() + 150).toISOString(), type: 'agent', prompt: 'p', deleteAfterRun: true });
+      agentConfigs.get(agentId)!.isolateMemory = true;
+      await new Promise((r) => setTimeout(r, 400));
+      expect(manager.get(job.id)).toMatchObject({ enabled: true, state: { lastRunAt: null } });
+      expect(runner.sendApiMessage).not.toHaveBeenCalled();
+    } finally { manager.stop(); }
+  });
+
+  it('does not schedule a stored recurring job of an isolated agent, so it warns once, not every tick', async () => {
+    const runner = makeRunner();
+    const { manager, agentId, agentConfigs, tmpDir } = makeManager({ runner });
+    agentConfigs.get(agentId)!.isolateMemory = true;
+    const job = storedJob(agentId, { scheduleKind: 'cron', schedule: '* * * * * *', deleteAfterRun: false });
+    fs.writeFileSync(path.join(tmpDir, 'crons.json'), JSON.stringify({ version: 1, jobs: [job] }));
+    await manager.start();
+    try {
+      await new Promise((r) => setTimeout(r, 2300));
+      expect((manager as any).logger.warn.mock.calls.filter((c: unknown[]) => /skipped/.test(String(c[0])))).toHaveLength(1);
+      expect(runner.sendApiMessage).not.toHaveBeenCalled();
+      expect(manager.get(job.id)?.enabled).toBe(true);
+    } finally { manager.stop(); }
+  });
+
   it('leaves a plain agent unchanged', async () => {
     const { manager, agentId, tmpDir } = makeManager();
     await manager.start();

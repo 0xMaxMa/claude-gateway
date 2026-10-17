@@ -37,7 +37,7 @@ import { optimizeImageFile } from '../../../dist/shared/image-optimize.js';
 // dmPolicy/dmAllowlist semantics.
 import { isWhatsAppCloudSenderAllowed } from '../../../dist/api/whatsapp-cloud-access.js';
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
-import { assertIsolateMediaPath, assertOriginChat } from '../shared/isolate';
+import { assertOriginChat, resolveIsolateMediaPath } from '../shared/isolate';
 
 /**
  * Channel state-directory names that must never be reachable through
@@ -424,14 +424,14 @@ export class WhatsAppCloudModule implements ToolModule {
     try {
       // Size-check before any upload starts, so an oversized file fails fast
       // instead of half-way through a multi-file batch.
-      for (const f of files) {
-        assertSendableWhatsAppCloudFile(f);
-        assertIsolateMediaPath(f);
-        const st = fs.statSync(f);
+      const paths = files.map(resolveIsolateMediaPath);
+      paths.forEach((p, i) => {
+        assertSendableWhatsAppCloudFile(p);
+        const st = fs.statSync(p);
         if (st.size > MAX_ATTACHMENT_BYTES) {
-          throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);
+          throw new Error(`file too large: ${files[i]} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);
         }
-      }
+      });
 
       // Send-mode precedence: template → buttons → list → files → plain text.
       // Template wins outright because it is the only mode that works outside
@@ -461,8 +461,8 @@ export class WhatsAppCloudModule implements ToolModule {
       } else if (files.length > 0) {
         // The Cloud API sends one message per media item (no Slack-style
         // batch-into-one-message) — the caption rides on the FIRST file only.
-        for (let i = 0; i < files.length; i++) {
-          const f = files[i]!;
+        for (let i = 0; i < paths.length; i++) {
+          const f = paths[i]!;
           const mime = guessMimeType(f);
           const isImage = mime.startsWith('image/');
 

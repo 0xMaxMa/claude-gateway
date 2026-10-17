@@ -43,6 +43,8 @@ import { createChannelManager } from '../../mcp/channel-manager';
 // eslint-disable-next-line import/first
 import { TelegramModule } from '../../mcp/tools/telegram/module';
 // eslint-disable-next-line import/first
+import { chatHasAttachment, MAX_LOGGED_ATTACHMENTS, recordChatAttachments } from '../../mcp/tools/telegram/attachment-log';
+// eslint-disable-next-line import/first
 import { DiscordModule } from '../../mcp/tools/discord/module';
 // eslint-disable-next-line import/first
 import { LineModule } from '../../mcp/tools/line/module';
@@ -91,6 +93,7 @@ let sessionMedia: string;
 let ownFile: string;
 let foreignFile: string;
 let fetchCalls: string[];
+let fetchBodies: string[];
 
 function isolate(channel: string, chatId = ORIGIN): void {
   process.env.GATEWAY_ISOLATE_MEMORY = '1';
@@ -116,11 +119,13 @@ beforeEach(() => {
   fs.writeFileSync(ownFile, png);
   fs.writeFileSync(foreignFile, png);
   fetchCalls = [];
+  fetchBodies = [];
   // One canned success body that satisfies every client under test (Slack's ok,
   // the share bridge's 201 + items, WeChat/WhatsApp/api_reply's plain ok).
   const body = { ok: true, ts: '1.2', items: [{ share_id: 's', token: 't', expires_at: 'x' }] };
-  global.fetch = (async (url: string) => {
+  global.fetch = (async (url: string, init?: RequestInit) => {
     fetchCalls.push(String(url));
+    fetchBodies.push(typeof init?.body === 'string' ? init.body : '');
     return new Response(JSON.stringify(body), { status: 201, headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
   mockLinePush.mockClear();
@@ -254,6 +259,15 @@ describe('telegram', () => {
     expect(api.sendPhoto).toHaveBeenCalledTimes(1);
   });
 
+  it('a media-relative attachment is sent from its resolved path', async () => {
+    isolate('telegram');
+    const { m, api } = mod();
+    (m as any)._InputFile = class { constructor(readonly file: string) {} };
+    const res = await m.handleTool('telegram_reply', { chat_id: ORIGIN, text: 'x', files: [`media/telegram-${ORIGIN}/own.png`] });
+    expect(res.isError).toBeUndefined();
+    expect(api.sendPhoto.mock.calls[0][1].file).toBe(fs.realpathSync(ownFile));
+  });
+
   it('a symlink in the session dir pointing elsewhere is rejected', async () => {
     isolate('telegram');
     const { m } = mod();
@@ -263,14 +277,50 @@ describe('telegram', () => {
     expect(res.content[0].text).toMatch(/outside this conversation's media directory/);
   });
 
-  it('download by file_id is hidden and denied in isolate mode only', async () => {
+  it("isolate download takes only a file_id logged for the origin chat, into the session media dir", async () => {
     const { m, api } = mod();
-    expect(m.getTools().map((t) => t.name)).toContain('telegram_download_attachment');
+    process.env.TELEGRAM_BOT_TOKEN = 'tok';
+    const stateDir = process.env.TELEGRAM_STATE_DIR!;
+    recordChatAttachments(stateDir, ORIGIN, ['OWN_ID']);
+    recordChatAttachments(stateDir, FOREIGN, ['THEIR_ID']);
     isolate('telegram');
-    expect(m.getTools().map((t) => t.name)).not.toContain('telegram_download_attachment');
-    const res = await m.handleTool('telegram_download_attachment', { file_id: 'abc' });
-    expect(res.content[0].text).toMatch(/isolate mode: downloading attachments by file_id is disabled/);
+    expect(m.getTools().map((t) => t.name)).toContain('telegram_download_attachment');
+    for (const file_id of ['THEIR_ID', 'never-seen']) {
+      const res = await m.handleTool('telegram_download_attachment', { file_id });
+      expect(res.content[0].text).toMatch(/isolate mode: this file_id was not sent in this conversation/);
+    }
     expect(api.getFile).not.toHaveBeenCalled();
+    const ok = await m.handleTool('telegram_download_attachment', { file_id: 'OWN_ID' });
+    expect(ok.isError).toBeUndefined();
+    expect(path.dirname(ok.content[0].text)).toBe(sessionMedia);
+    expect(fs.existsSync(ok.content[0].text)).toBe(true);
+    delete process.env.GATEWAY_SESSION_MEDIA_DIR;
+    const noDir = await m.handleTool('telegram_download_attachment', { file_id: 'OWN_ID' });
+    expect(noDir.content[0].text).toMatch(/no session media directory/);
+    isolate('telegram', '');
+    const noOrigin = await m.handleTool('telegram_download_attachment', { file_id: 'OWN_ID' });
+    expect(noOrigin.isError).toBe(true);
+    expect(api.getFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('non-isolate download takes any file_id into the shared inbox', async () => {
+    const { m, api } = mod();
+    process.env.TELEGRAM_BOT_TOKEN = 'tok';
+    const res = await m.handleTool('telegram_download_attachment', { file_id: 'anything' });
+    expect(res.isError).toBeUndefined();
+    expect(path.dirname(res.content[0].text)).toBe(path.join(process.env.TELEGRAM_STATE_DIR!, 'inbox'));
+    expect(api.getFile).toHaveBeenCalledWith('anything');
+  });
+
+  it('the attachment log is per chat and keeps only the newest ids', () => {
+    const dir = path.join(root, 'log');
+    recordChatAttachments(dir, ORIGIN, Array.from({ length: MAX_LOGGED_ATTACHMENTS + 5 }, (_, i) => `id${i}`));
+    recordChatAttachments(dir, ORIGIN, ['id5']); // re-seen ids move to the newest end
+    expect(chatHasAttachment(dir, ORIGIN, 'id4')).toBe(false);
+    expect(chatHasAttachment(dir, ORIGIN, 'id5')).toBe(true);
+    expect(chatHasAttachment(dir, ORIGIN, `id${MAX_LOGGED_ATTACHMENTS + 4}`)).toBe(true);
+    expect(chatHasAttachment(dir, FOREIGN, 'id5')).toBe(false);
+    expect(chatHasAttachment(dir, '../x', 'id5')).toBe(false);
   });
 });
 
@@ -280,6 +330,7 @@ describe('discord', () => {
     const message = { react, edit: jest.fn(async () => ({ id: 'e1' })), startThread: jest.fn(async () => ({ id: 'th' })) };
     const channels: Record<string, unknown> = {
       [ORIGIN]: { isThread: () => false, parentId: 'category', messages: { fetch: async () => message }, threads: { create: async () => ({ id: 'th' }) } },
+      th: { isThread: () => true, parentId: ORIGIN, messages: { fetch: async () => message } },
       [FOREIGN]: { isThread: () => false, parentId: 'category', messages: { fetch: async () => message } },
       thread_of_origin: { isThread: () => true, parentId: ORIGIN, messages: { fetch: async () => message } },
       thread_of_foreign: { isThread: () => true, parentId: FOREIGN, messages: { fetch: async () => message } },
@@ -293,7 +344,7 @@ describe('discord', () => {
 
   it('reply/react/edit/create_thread reject a foreign channel', async () => {
     isolate('discord');
-    const { m, react } = mod();
+    const { m, react, fetchChannel } = mod();
     for (const [tool, extra] of [
       ['discord_reply', { text: 'hi' }],
       ['discord_react', { message_id: '1', emoji: '👍' }],
@@ -306,15 +357,27 @@ describe('discord', () => {
     const bad = await m.handleTool('discord_react', { channel_id: 'thread_of_foreign', message_id: '1', emoji: 'x' });
     expect(bad.content[0].text).toMatch(LOCK);
     expect(react).not.toHaveBeenCalled();
+    expect(fetchChannel).not.toHaveBeenCalled(); // the lock runs before any fetch
   });
 
-  it('accepts the origin channel and threads under it', async () => {
+  it('accepts the origin channel and only the threads this conversation created', async () => {
     isolate('discord');
     const { m, react } = mod();
     expect((await m.handleTool('discord_react', { channel_id: ORIGIN, message_id: '1', emoji: 'x' })).isError).toBeUndefined();
-    expect((await m.handleTool('discord_react', { channel_id: 'thread_of_origin', message_id: '1', emoji: 'x' })).isError).toBeUndefined();
+    // Another user's thread under the same channel is its own conversation.
+    const other = await m.handleTool('discord_react', { channel_id: 'thread_of_origin', message_id: '1', emoji: 'x' });
+    expect(other.content[0].text).toMatch(LOCK);
     expect((await m.handleTool('discord_create_thread', { channel_id: ORIGIN, name: 't' })).isError).toBeUndefined();
+    expect((await m.handleTool('discord_react', { channel_id: 'th', message_id: '1', emoji: 'x' })).isError).toBeUndefined();
     expect(react).toHaveBeenCalledTimes(2);
+  });
+
+  it('non-isolate mode acts on any channel or thread', async () => {
+    const { m, react } = mod();
+    for (const id of [FOREIGN, 'thread_of_foreign', 'thread_of_origin']) {
+      expect((await m.handleTool('discord_react', { channel_id: id, message_id: '1', emoji: 'x' })).isError).toBeUndefined();
+    }
+    expect(react).toHaveBeenCalledTimes(3);
   });
 
   it('a text channel whose category id equals the origin is still foreign', async () => {
@@ -435,6 +498,20 @@ describe('media paths', () => {
     const res = await new ShareFileModule().handleTool('share_file', { path: foreignFile });
     expect(res.isError).toBeUndefined();
     expect(fetchCalls).toHaveLength(1);
+  });
+
+  it('api_reply and share_file hand the gateway the resolved path of a media-relative file', async () => {
+    isolate('api', '');
+    const rel = `media/telegram-${ORIGIN}/own.png`;
+    expect((await new ApiModule().handleTool('api_reply', { files: [rel] })).isError).toBeUndefined();
+    expect(JSON.parse(fetchBodies[0]).files).toEqual([fs.realpathSync(ownFile)]);
+    expect((await new ShareFileModule().handleTool('share_file', { path: rel })).isError).toBeUndefined();
+    expect(JSON.parse(fetchBodies[1]).refs[0].path).toBe(fs.realpathSync(ownFile));
+  });
+
+  it('non-isolate api_reply passes paths unchanged', async () => {
+    expect((await new ApiModule().handleTool('api_reply', { files: ['rel/x.png'] })).isError).toBeUndefined();
+    expect(JSON.parse(fetchBodies[0]).files).toEqual(['rel/x.png']);
   });
 
   it('api_reply attaches only session media files', async () => {

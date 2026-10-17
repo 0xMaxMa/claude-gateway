@@ -28,7 +28,8 @@ jest.mock('child_process', () => ({
 // A conversation sandbox (#609) is a docker container; only its name matters here.
 jest.mock('../../src/apps/conversation-sandbox', () => {
   const actual = jest.requireActual('../../src/apps/conversation-sandbox');
-  return { ...actual, sandboxPool: { ensure: jest.fn(async (agent: any, conversation: any) => actual.sandboxContainerName(agent, conversation)) } };
+  const name = (agent: any, conversation: any) => actual.sandboxContainerName(agent, conversation);
+  return { ...actual, sandboxPool: { ensure: jest.fn(async (agent: any, conversation: any) => name(agent, conversation)), acquire: jest.fn(async (agent: any, conversation: any) => ({ container: name(agent, conversation), release: jest.fn() })) } };
 });
 jest.mock('../../src/orchestration/container', () => ({
   ...jest.requireActual('../../src/orchestration/container'),
@@ -192,6 +193,17 @@ describe('app agent, classic container session', () => {
     expect(target(a.args)).toBe(sandboxContainerName(appAgent(true), { source: 'telegram', chatId: '111' }));
     expect(target(b.args)).toBe(sandboxContainerName(appAgent(true), { source: 'telegram', chatId: '222' }));
     expect(target(a.args)).not.toBe(target(b.args));
+  });
+
+  it('holds its sandbox for the life of the process and lets go when it stops', async () => {
+    const acquire = require('../../src/apps/conversation-sandbox').sandboxPool.acquire as jest.Mock;
+    acquire.mockClear();
+    const sp = new SessionProcess('c-a', 'telegram', appAgent(true), gateway, store, '111');
+    await start(sp);
+    const lease = await acquire.mock.results[0].value;
+    expect(lease.release).not.toHaveBeenCalled();
+    await sp.stop();
+    expect(lease.release).toHaveBeenCalled();
   });
 
   it("writes the chat memory into the sandbox's own /tmp, not the shared workspace", async () => {
