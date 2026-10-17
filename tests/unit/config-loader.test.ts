@@ -644,6 +644,20 @@ describe('config-loader', () => {
     expect(loadConfig(configPath).agents[0].isolateMemory).toBe(true);
   });
 
+  it('accepts agents[].disableArchive as a boolean only, independent of isolateMemory (#609)', () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    const base = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'valid-2-agents.json'), 'utf8'));
+    fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], type: 'app-agent', container: 'demo-agent', disableArchive: true }, { ...base.agents[1], disableArchive: false }] }));
+    const loaded = loadConfig(configPath);
+    expect(loaded.agents.map(agent => [agent.disableArchive, agent.isolateMemory])).toEqual([[true, undefined], [false, undefined]]);
+    for (const disableArchive of ['yes', 1, { enabled: true }]) {
+      const skipped: SkippedAgent[] = [];
+      fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], disableArchive }, base.agents[1]] }));
+      expect(loadConfig(configPath, { onSkippedAgent: agent => skipped.push(agent) }).agents.map(agent => agent.id)).toEqual(['baerbel']);
+      expect(skipped.map(agent => agent.reason)).toEqual([expect.stringMatching(/disableArchive must be true or false/)]);
+    }
+  });
+
   it('ignores the pre-rename multiTenant key like any unknown agent field, so it never turns isolation on (#601)', () => {
     const configPath = path.join(tmpDir, 'config.json');
     const base = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'valid-2-agents.json'), 'utf8'));

@@ -106,6 +106,9 @@ function validateAgent(agent: Record<string, unknown>, index: number, orchestrat
       return `agent '${agent.id}': isolateMemory cannot be combined with claude.extraFlags --append-system-prompt-file; use --append-system-prompt or move that text into AGENTS.md`;
     }
   }
+  if (agent.disableArchive !== undefined && typeof agent.disableArchive !== 'boolean') {
+    return `agent '${agent.id}': disableArchive must be true or false`;
+  }
   const hasTelegram = agent.telegram && typeof agent.telegram === 'object';
   const hasDiscord = agent.discord && typeof agent.discord === 'object';
   // Agents without channels are allowed (API-only agents accessed via HTTP API key)

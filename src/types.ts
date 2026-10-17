@@ -376,6 +376,13 @@ export interface AgentConfig {
    * An app agent's value is written from its app.yaml `services.agent.isolate_memory`.
    */
   isolateMemory?: boolean;
+  /**
+   * Turns off the searchable memory archive (#609): no `kb.sqlite` is built,
+   * the memory_search/memory_get tools are not offered, and CLAUDE.md does not
+   * point at them. Independent of `isolateMemory`. An app agent's value is
+   * written from its app.yaml `services.agent.disable_archive`.
+   */
+  disableArchive?: boolean;
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
   avatar?: string;
   /** Per-agent connector enablement, keyed by connector id (e.g. "github"). */

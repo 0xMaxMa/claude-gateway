@@ -310,6 +310,11 @@ export interface LoadWorkspaceOptions {
    * since the memory_search tool it points at is disabled in this mode.
    */
   isolateMemory?: boolean;
+  /**
+   * The agent has no searchable archive (#609): core-shrink, the retrieval note
+   * and the write-routing rule all point at memory_search, so they are left out.
+   */
+  disableArchive?: boolean;
 }
 
 /**
@@ -351,7 +356,8 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
   // truncated full text. Defaults OFF so a caller that omits the flag never points
   // the agent at a memory_search tool that may not be wired; the gateway enables
   // it explicitly only when the knowledge archive is on. USER.md is never shrunk.
-  const coreShrink = opts?.coreShrink === true && !isolateMemory;
+  const disableArchive = opts?.disableArchive === true;
+  const coreShrink = opts?.coreShrink === true && !isolateMemory && !disableArchive;
   const memoryBudgeted = applyMemoryBudget(
     rawMemory,
     budget.memoryBudgetChars,
@@ -382,7 +388,7 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
   // isolate mode disables; there the rule names the conversation's own files instead.
   const memoryRuleSection = isolateMemory
     ? ISOLATED_MEMORY_RULE
-    : MEMORY_RULE + (budget.writeRouting ? MEMORY_ROUTING_RULE : '');
+    : MEMORY_RULE + (budget.writeRouting && !disableArchive ? MEMORY_ROUTING_RULE : '');
   let systemPrompt =
     `--- MEMORY RULE ---\n${memoryRuleSection}\n\n` +
     `--- AGENT IDENTITY ---\n${agentMd}\n\n` +
@@ -435,6 +441,23 @@ export function chatMemoryDir(workspaceDir: string, channel: string, chatId: str
 }
 
 /**
+ * One conversation's own memory file, or '' (#609). The conversation can write its
+ * chats/ directory, and this read runs on the host: a symlink anywhere on the path
+ * (chats/, its directory, the file) would hand it another conversation's file or any
+ * file the gateway can read, so none is followed.
+ */
+export function readChatFile(dir: string, name: string): string | undefined {
+  for (const p of [path.dirname(dir), dir]) {
+    if (fs.lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink()) return undefined;
+  }
+  let fd: number;
+  try { fd = fs.openSync(path.join(dir, name), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch { return undefined; }
+  try { return fs.fstatSync(fd).isFile() ? fs.readFileSync(fd, 'utf-8') : undefined; }
+  catch { return undefined; }
+  finally { fs.closeSync(fd); }
+}
+
+/**
  * The per-conversation half of the system prompt in isolated memory mode
  * (#601): this conversation's USER.md/MEMORY.md under the same budgets as the shared
  * compose, plus the paths the agent must write them to. A conversation with no files
@@ -455,8 +478,8 @@ export function composeChatMemory(
   // The banner names the file to consolidate; a bare "MEMORY.md" would point at
   // the shared root file the memory rule forbids.
   const label = (file: string) => path.join('chats', path.basename(dir), file);
-  const user = applyMemoryBudget(readFileOrDefault(path.join(dir, 'USER.md'), ''), budget.userBudgetChars, label('USER.md'), budget.overBudget);
-  const memory = applyMemoryBudget(readFileOrDefault(path.join(dir, 'MEMORY.md'), ''), budget.memoryBudgetChars, label('MEMORY.md'), budget.overBudget);
+  const user = applyMemoryBudget(readChatFile(dir, 'USER.md') ?? '', budget.userBudgetChars, label('USER.md'), budget.overBudget);
+  const memory = applyMemoryBudget(readChatFile(dir, 'MEMORY.md') ?? '', budget.memoryBudgetChars, label('MEMORY.md'), budget.overBudget);
   return (
     `--- CHAT MEMORY ---\nThis conversation's own memory files:\n- ${path.join(shown, 'USER.md')}\n- ${path.join(shown, 'MEMORY.md')}\n\n` +
     `--- USER PROFILE ---\n${truncateFile(user.content).content}\n\n` +

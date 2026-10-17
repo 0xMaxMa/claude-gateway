@@ -353,7 +353,27 @@ services:
         }
         // The pre-rename key is an unknown field like any other, never a silent no-op.
         expect(() => parseAppYaml(y('true').replace('isolate_memory', 'multi_tenant'), dir))
-          .toThrow('invalid field "multi_tenant" — only "path", "name" and "isolate_memory" are allowed');
+          .toThrow('invalid field "multi_tenant" — only "path", "name", "isolate_memory" and "disable_archive" are allowed');
+      });
+
+      it('accepts a boolean disable_archive and rejects anything else (#609)', () => {
+        const y = (value: string) => `
+apiVersion: apps.getpod.ai/v1
+name: my-app
+version: 1.0.0
+services:
+  web:
+    image: nginx:1.25
+  agent:
+    path: ./agent
+    name: my-agent-bot
+    disable_archive: ${value}
+`.trim();
+        expect(() => parseAppYaml(y('true'), dir)).not.toThrow();
+        expect(() => parseAppYaml(y('false'), dir)).not.toThrow();
+        for (const bad of ['"true"', 'yes-please', '1', '{ enabled: true }']) {
+          expect(() => parseAppYaml(y(bad), dir)).toThrow('"disable_archive" must be true or false');
+        }
       });
     });
   });
@@ -868,6 +888,15 @@ services:
         .toEqual({ path: './agent', name: 'agent-note-bot', isolateMemory: true });
       expect(generate(yamlWithAgent + '\n    isolate_memory: false', 'agent-note').agentDeclaration)
         .toEqual({ path: './agent', name: 'agent-note-bot' });
+    });
+
+    it('carries disable_archive: true into agentDeclaration.disableArchive, independent of isolate_memory (#609)', () => {
+      expect(generate(yamlWithAgent + '\n    disable_archive: true', 'agent-note').agentDeclaration)
+        .toEqual({ path: './agent', name: 'agent-note-bot', disableArchive: true });
+      expect(generate(yamlWithAgent + '\n    disable_archive: false', 'agent-note').agentDeclaration)
+        .toEqual({ path: './agent', name: 'agent-note-bot' });
+      expect(generate(yamlWithAgent + '\n    disable_archive: true\n    isolate_memory: true', 'agent-note').agentDeclaration)
+        .toEqual({ path: './agent', name: 'agent-note-bot', isolateMemory: true, disableArchive: true });
     });
 
     it('returns null agentDeclaration when no agent service', () => {

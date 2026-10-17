@@ -32,6 +32,8 @@ const agent: Record<string, ReloadMode> = {
   // Live sessions hold the composed context they spawned with; a mix of isolated
   // and shared sessions on one agent is never a valid state.
   isolateMemory: 'restart',
+  // The composed CLAUDE.md and the MCP tool list are fixed at spawn (#609).
+  disableArchive: 'restart',
 };
 export function reloadMode(agentId: string, field: string): ReloadMode {
   const policies = agentId ? agent : gateway;
