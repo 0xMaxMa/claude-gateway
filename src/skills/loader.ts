@@ -215,6 +215,41 @@ export function loadSkills(opts: LoadSkillsOptions): SkillRegistry {
   return { skills: registry };
 }
 
+/**
+ * SKILL.md paths a tool call reads on its own (not through the Skill tool): a Read's
+ * `file_path`, or paths named in a shell command — Codex, and some agents, read files
+ * through Bash. Paths are as written (absolute or relative); see `skillsAtPaths`.
+ */
+export function skillFileRefs(block: { name?: unknown; input?: unknown }): string[] {
+  const input = block.input && typeof block.input === 'object' ? (block.input as Record<string, unknown>) : {};
+  if (block.name === 'Read' && typeof input['file_path'] === 'string') {
+    return path.basename(input['file_path']) === 'SKILL.md' ? [input['file_path']] : [];
+  }
+  if (block.name !== 'Bash' || typeof input['command'] !== 'string') return [];
+  return (input['command'].match(/[^\s'"`;|&<>()=]*SKILL\.md(?![\w.-])/g) ?? [])
+    .filter((ref) => path.basename(ref) === 'SKILL.md')
+    .slice(0, 32);
+}
+
+/**
+ * Registry skills whose SKILL.md is one of `refs`. An absolute ref must be the file; a
+ * relative one (cwd unknown) matches any skill file it is a path suffix of, so an
+ * ambiguous read counts as use and keeps the skill listed rather than hiding it.
+ */
+export function skillsAtPaths(refs: readonly string[], registry: SkillRegistry): string[] {
+  const out = new Set<string>();
+  for (const ref of refs) {
+    const rel = path.normalize(ref);
+    if (!path.isAbsolute(ref) && (!rel.includes(path.sep) || rel.startsWith('..'))) continue;
+    for (const [key, def] of registry.skills) {
+      if (!def.filePath) continue;
+      const file = path.resolve(def.filePath);
+      if (path.isAbsolute(ref) ? file === path.resolve(ref) : file.endsWith(path.sep + rel)) out.add(key);
+    }
+  }
+  return [...out];
+}
+
 /** Keys of the never-used auto skills past the grace window (see AUTO_SKILL_CATALOG_GRACE_DAYS). */
 export function hiddenAutoSkills(registry: SkillRegistry, usage: SkillCatalogUsage): Set<string> {
   const hidden = new Set<string>();

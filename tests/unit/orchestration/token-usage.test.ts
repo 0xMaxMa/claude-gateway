@@ -192,3 +192,13 @@ test('persists worker native context without replacing the conversational agent 
   expect(report.contextWindow).toBeNull();
  } finally {store.close();}
 });
+
+test('records the SKILL.md files a turn read itself, through Read or a shell command', () => {
+  const c = new TurnUsageCollector();
+  c.observe({type:'assistant',message:{id:'m1',content:[
+    {type:'tool_use',id:'t1',name:'Read',input:{file_path:'/ws/skills/learned/SKILL.md'}},
+    {type:'tool_use',id:'t2',name:'Bash',input:{command:"sed -n '1,80p' skills/other/SKILL.md"}},
+    {type:'tool_use',id:'t3',name:'Read',input:{file_path:'/ws/notes.md'}},
+  ]}});
+  expect(c.snapshot().usedSkillFiles).toEqual(['/ws/skills/learned/SKILL.md', 'skills/other/SKILL.md']);
+});

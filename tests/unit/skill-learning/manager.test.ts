@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { HistoryDB } from '../../../src/history/db';
-import { SkillLearningManager, managedTurnSkills, toolUseSkill, type SkillLearningManagerOpts } from '../../../src/agent/skill-learning';
+import { SkillLearningManager, managedTurnSkills, toolUseSkills, skillLearningHostHooks, type SkillLearningManagerOpts } from '../../../src/agent/skill-learning';
 import { extractFrontmatter } from '../../../src/skills/parser';
 import type { ClaudeSpawnFn } from '../../../src/agent/skill-learning/reviewer';
 import type { SkillLearningConfig } from '../../../src/agent/skill-learning/types';
@@ -289,16 +289,27 @@ describe('direct-turn skill usage', () => {
     ]),
   }) as never;
 
-  it('maps a Skill-tool call or a Read of a registry SKILL.md to the skill', () => {
+  it('maps a Skill-tool call, a Read of a registry SKILL.md, or a shell read of one to the skill', () => {
     const r = registry('/ws');
-    expect(toolUseSkill({ name: 'Skill', input: { skill: 'learned' } }, r)).toBe('learned');
-    expect(toolUseSkill({ name: 'Read', input: { file_path: '/ws/skills/learned/SKILL.md' } }, r)).toBe('learned');
-    expect(toolUseSkill({ name: 'Read', input: { file_path: '/ws/skills/../skills/learned/SKILL.md' } }, r)).toBe('learned');
-    expect(toolUseSkill({ name: 'Read', input: { file_path: '/mcp/mod/skills/tool/SKILL.md' } }, r)).toBe('mod:tool');
-    expect(toolUseSkill({ name: 'Skill', input: { skill: 'pstack:tdd' } }, r)).toBeUndefined();
-    expect(toolUseSkill({ name: 'Read', input: { file_path: '/ws/skills/learned/notes.md' } }, r)).toBeUndefined();
-    expect(toolUseSkill({ name: 'Bash', input: { command: 'cat /ws/skills/learned/SKILL.md' } }, r)).toBeUndefined();
-    expect(toolUseSkill({ name: 'Read', input: { file_path: 42 } }, r)).toBeUndefined();
+    expect(toolUseSkills({ name: 'Skill', input: { skill: 'learned' } }, r)).toEqual(['learned']);
+    expect(toolUseSkills({ name: 'Read', input: { file_path: '/ws/skills/learned/SKILL.md' } }, r)).toEqual(['learned']);
+    expect(toolUseSkills({ name: 'Read', input: { file_path: '/ws/skills/../skills/learned/SKILL.md' } }, r)).toEqual(['learned']);
+    expect(toolUseSkills({ name: 'Read', input: { file_path: '/mcp/mod/skills/tool/SKILL.md' } }, r)).toEqual(['mod:tool']);
+    // Codex (and a Bash-happy agent) reads files through the shell.
+    expect(toolUseSkills({ name: 'Bash', input: { command: 'cat /ws/skills/learned/SKILL.md' } }, r)).toEqual(['learned']);
+    expect(toolUseSkills({ name: 'Bash', input: { command: "sed -n '1,80p' skills/learned/SKILL.md && cat '/mcp/mod/skills/tool/SKILL.md'" } }, r).sort()).toEqual(['learned', 'mod:tool']);
+    expect(toolUseSkills({ name: 'Skill', input: { skill: 'pstack:tdd' } }, r)).toEqual([]);
+    expect(toolUseSkills({ name: 'Read', input: { file_path: '/ws/skills/learned/notes.md' } }, r)).toEqual([]);
+    expect(toolUseSkills({ name: 'Read', input: { file_path: '/other/learned/SKILL.md' } }, r)).toEqual([]);
+    expect(toolUseSkills({ name: 'Bash', input: { command: 'ls /ws/skills/learned' } }, r)).toEqual([]);
+    expect(toolUseSkills({ name: 'Read', input: { file_path: 42 } }, r)).toEqual([]);
+  });
+
+  it('counts a SKILL.md an orchestration/worker turn read itself (Read or shell)', () => {
+    const r = registry('/ws');
+    expect(managedTurnSkills([], [], r, ['/ws/skills/learned/SKILL.md'])).toEqual(['learned']);
+    expect(managedTurnSkills([], [], r, ['skills/learned/SKILL.md', '/mcp/mod/skills/tool/SKILL.md']).sort()).toEqual(['learned', 'mod:tool']);
+    expect(managedTurnSkills([], [], r, ['/elsewhere/SKILL.md'])).toEqual([]);
   });
 
   it('a skill the agent loaded itself in a direct turn bumps its load count once per turn', () => {
@@ -319,6 +330,44 @@ describe('direct-turn skill usage', () => {
     live.onTurnEnd('chat1', 'sess1');
     expect(loaded).toEqual([['learned']]);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('skill-learning host hooks (src/index.ts wiring)', () => {
+  const cli = [{ name: 'pstack:tdd', description: 'tdd' }];
+  const hostWith = (registry: Record<string, unknown>) => {
+    const calls = { discover: 0, refresh: 0 };
+    const hooks = skillLearningHostHooks({
+      registry: () => registry as never,
+      discoverInstalled: async () => { calls.discover++; return [{ name: 'scanned', description: 'scan' }]; },
+      refreshMenu: async () => { calls.refresh++; },
+    });
+    return { hooks, calls };
+  };
+
+  it('reuses the CLI skills the runner already discovered instead of scanning again', async () => {
+    const { hooks, calls } = hostWith({ skills: new Map(), cliSkills: cli });
+    expect(await hooks.installedSkills()).toEqual(cli);
+    expect(calls.discover).toBe(0);
+  });
+
+  it('scans when the runner has no CLI skill list, or its discovery failed', async () => {
+    const none = hostWith({ skills: new Map() });
+    expect(await none.hooks.installedSkills()).toEqual([{ name: 'scanned', description: 'scan' }]);
+    const failed = hostWith({ skills: new Map(), cliSkills: [], cliDiscoveryError: 'boom' });
+    expect(await failed.hooks.installedSkills()).toEqual([{ name: 'scanned', description: 'scan' }]);
+    expect(none.calls.discover + failed.calls.discover).toBe(2);
+  });
+
+  it('a hidden skill that gets used rejoins the catalog and recomposes the menu once', async () => {
+    const hiddenUntilUsed = new Set(['learned', 'other']);
+    const { hooks, calls } = hostWith({ skills: new Map(), hiddenUntilUsed });
+    hooks.onSkillsLoaded(['learned']);
+    hooks.onSkillsLoaded(['learned']); // already visible: no second rebuild
+    hooks.onSkillsLoaded(['visible-skill']);
+    await new Promise((r) => setImmediate(r));
+    expect([...hiddenUntilUsed]).toEqual(['other']);
+    expect(calls.refresh).toBe(1);
   });
 });
 

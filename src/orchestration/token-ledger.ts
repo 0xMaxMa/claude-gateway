@@ -103,7 +103,7 @@ export function taskTurnDetails(turn: Pick<TokenTurn, 'usedSkills'>, snapshot: a
 /** What the overview polls: measurements only. Request bodies, texts and the turn's skill and
  * extension inventory are read for one turn's details, from token_turns. */
 function metricsProjection(turn: TokenTurn): TokenTurn {
-  return {...turn, requests: undefined, inputTexts: undefined, responseText: undefined, extensions: undefined, usedSkills: undefined};
+  return {...turn, requests: undefined, inputTexts: undefined, responseText: undefined, extensions: undefined, usedSkills: undefined, usedSkillFiles: undefined};
 }
 export function recordTokenTurn(store: OrchestrationStore, turn: TokenTurn): void {
   ensure(store);

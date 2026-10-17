@@ -8,8 +8,7 @@
  */
 
 import { createHash } from 'crypto';
-import * as path from 'path';
-import { loadSkills, type SkillCatalogUsage, type SkillRegistry } from '../../skills/loader';
+import { loadSkills, skillFileRefs, skillsAtPaths, type SkillCatalogUsage, type SkillRegistry } from '../../skills/loader';
 import { extractFrontmatter } from '../../skills/parser';
 import { HistoryDB } from '../../history/db';
 import { resolveSkillLearningConfig } from './config';
@@ -58,27 +57,24 @@ export function skillCatalogUsage(db: HistoryDB, now = Date.now()): SkillCatalog
 const READ_ONLY_DESC_MAX = 120;
 
 /**
- * Skills a managed (orchestration) turn loaded: the task's skill command plus any
- * Skill-tool calls. Plugin skills outside the registry are not tracked in skill_stats.
+ * Skills a managed (orchestration) turn loaded: the task's skill command, Skill-tool
+ * calls, and SKILL.md files the turn read itself (`skillFiles`, see `skillFileRefs`).
+ * Plugin skills outside the registry are not tracked in skill_stats.
  */
-export function managedTurnSkills(invoked: string[] | undefined, used: string[] | undefined, registry: SkillRegistry): string[] {
+export function managedTurnSkills(invoked: string[] | undefined, used: string[] | undefined, registry: SkillRegistry, skillFiles: string[] = []): string[] {
   // A task's skill runs as a task-specific plugin skill named orchestration-task:<name>.
   const names = [...(invoked ?? []), ...(used ?? [])].map((name) => name.replace(/^orchestration-task:/, ''));
-  return [...new Set(names)].filter((name) => registry.skills.has(name));
+  return [...new Set([...names.filter((name) => registry.skills.has(name)), ...skillsAtPaths(skillFiles, registry)])];
 }
 
 /**
- * The registry skill a direct-turn tool call loaded: a Skill-tool call by name, or a
- * Read of the skill's SKILL.md (how an agent follows a menu entry on its own).
+ * The registry skills a direct-turn tool call loaded: a Skill-tool call by name, or a
+ * read of the skill's SKILL.md (Read or shell — how an agent follows a menu entry on its own).
  */
-export function toolUseSkill(block: { name?: string; input?: Record<string, unknown> }, registry: SkillRegistry): string | undefined {
+export function toolUseSkills(block: { name?: string; input?: Record<string, unknown> }, registry: SkillRegistry): string[] {
   const skill = block.input?.['skill'];
-  if (block.name === 'Skill' && typeof skill === 'string') return registry.skills.has(skill) ? skill : undefined;
-  const file = block.input?.['file_path'];
-  if (block.name !== 'Read' || typeof file !== 'string' || path.basename(file) !== 'SKILL.md') return undefined;
-  const target = path.resolve(file);
-  for (const [key, def] of registry.skills) if (def.filePath && path.resolve(def.filePath) === target) return key;
-  return undefined;
+  if (block.name === 'Skill') return typeof skill === 'string' && registry.skills.has(skill) ? [skill] : [];
+  return skillsAtPaths(skillFileRefs(block), registry);
 }
 
 /** A skill installed outside the workspace (e.g. a Claude Code plugin skill). */
@@ -113,6 +109,40 @@ export interface SkillLearningManagerOpts {
   notifier?: SkillNotifier;
   /** Skills a finished turn loaded (after their counts were bumped). */
   onSkillsLoaded?: (names: string[]) => void;
+}
+
+/** What `skillLearningHostHooks` needs from the running agent (src/index.ts). */
+export interface SkillLearningHost {
+  /** The runner's live registry (its CLI skill list and hidden set). */
+  registry: () => SkillRegistry;
+  /** A fresh installed-skill scan, for when the runner has no CLI skill list. */
+  discoverInstalled: () => Promise<InstalledSkill[]>;
+  /** Recompose CLAUDE.md (the skills menu) from the current skill_stats. */
+  refreshMenu: () => Promise<void>;
+  logger?: SkillLearningManagerOpts['logger'];
+}
+
+/**
+ * The manager's hooks into the running agent. The reviewer sees the CLI skill list the
+ * runner already discovered. A hidden auto skill that gets used rejoins the orchestration
+ * catalog at once, and the menu is recomposed for future spawns — once per skill that
+ * flips to visible, never per turn.
+ */
+export function skillLearningHostHooks(host: SkillLearningHost): Required<Pick<SkillLearningManagerOpts, 'installedSkills' | 'onSkillsLoaded'>> {
+  let refresh = Promise.resolve();
+  return {
+    installedSkills: async () => {
+      const registry = host.registry();
+      return registry.cliSkills && !registry.cliDiscoveryError ? registry.cliSkills : host.discoverInstalled();
+    },
+    onSkillsLoaded: (names) => {
+      const hidden = host.registry().hiddenUntilUsed;
+      if (!hidden || !names.filter((name) => hidden.delete(name)).length) return;
+      refresh = refresh
+        .then(host.refreshMenu)
+        .catch((err) => host.logger?.warn?.(`skills menu refresh failed: ${(err as Error).message}`));
+    },
+  };
 }
 
 export class SkillLearningManager {

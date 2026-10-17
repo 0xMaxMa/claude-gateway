@@ -26,7 +26,7 @@ import { watchSkills } from './skills';
 import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
 import { AgentRunner } from './agent/runner';
-import { SkillLearningManager, skillCatalogUsage } from './agent/skill-learning';
+import { SkillLearningManager, skillCatalogUsage, skillLearningHostHooks } from './agent/skill-learning';
 import { HistoryDB } from './history/db';
 import { discoverWorkerExtensions } from './session/worker-extensions';
 import { DreamingManager } from './agent/dreaming';
@@ -313,12 +313,18 @@ async function startAgent(
       workspaceDir: agentConfig.workspace,
       mcpToolsDir,
       sharedSkillsDir,
-      // Reuse the CLI skill list the runner already discovered; scan only when it has none.
-      installedSkills: async () => {
-        const registry = runner.getSkillRegistry();
-        return registry.cliSkills && !registry.cliDiscoveryError ? registry.cliSkills : (await discoverWorkerExtensions(agentConfig, gatewayConfig)).skills;
-      },
-      onSkillsLoaded: (names) => runner.unhideSkills(names),
+      ...skillLearningHostHooks({
+        registry: () => runner.getSkillRegistry(),
+        discoverInstalled: async () => (await discoverWorkerExtensions(agentConfig, gatewayConfig)).skills,
+        // A used skill is back on the menu for future spawns. CLAUDE.md is frozen-at-spawn
+        // and the session that used it already has it, so no session restarts.
+        refreshMenu: async () => {
+          const updated = await loadWorkspace(agentConfig.workspace, { mcpToolsDir, sharedSkillsDir, logger, memoryBudget, coreShrink, isolateMemory, disableArchive, skillUsage: agentSkillUsage(agentConfig) });
+          await fs.promises.writeFile(path.join(agentConfig.workspace, 'CLAUDE.md'), updated.systemPrompt, 'utf8');
+          if (updated.skillRegistry) runner.setSkillRegistry(updated.skillRegistry);
+        },
+        logger,
+      }),
       globalCfg: gatewayConfig.gateway.skillLearning,
       // Isolate mode (#601): a skill learned from one conversation is offered to
       // every other one, so the reviewer stays off (as dreaming does below).
