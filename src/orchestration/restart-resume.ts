@@ -1,7 +1,11 @@
-import type { TaskSnapshot } from './types';
+import type { TaskAttempt, TaskSnapshot } from './types';
 
 /** Automatic resumes after gateway shutdowns per task; one more interruption reports a blocker. */
 export const MAX_RESTART_RESUMES = 3;
+
+/** Startup resumes a GATEWAY_SHUTDOWN failure settled by a gateway without restart resume only
+ * this recently; an older one has already been reported and must not come back on its own. */
+export const ORPHANED_SHUTDOWN_WINDOW_MS = 10 * 60_000;
 
 /** Gateway-managed tasks recover through their controller; a subagent is re-spawned by its resumed parent. */
 export function restartResumable(task: Pick<TaskSnapshot, 'gatewayTarget' | 'parentTaskId'>): boolean {
@@ -13,6 +17,23 @@ export function restartResumable(task: Pick<TaskSnapshot, 'gatewayTarget' | 'par
 export function markRestartRecovery(task: TaskSnapshot): void {
   if (!restartResumable(task) || !['starting', 'running'].includes(task.state) || task.cancellation || task.pendingQuestion) return;
   task.restartRecovery = task.latestProgress?.source === 'worker' ? { lastProgress: task.latestProgress.text } : {};
+}
+
+/** Re-queue already-authorized work interrupted by a gateway restart as a new attempt of the same
+ * task (#603), or fail it as a blocker once the per-revision cap is spent. */
+export function resumeAfterRestart(task: TaskSnapshot, attempt: TaskAttempt, lastProgressHint?: string): boolean {
+  const previous = task.restartResume?.revision === attempt.revision ? task.restartResume : undefined;
+  const count = (previous?.count ?? 0) + 1;
+  if (count > MAX_RESTART_RESUMES) {
+    task.state = 'failed';
+    if (task.restartResume) task.restartResume.pending = false;
+    attempt.failure = task.failure = { code: 'GATEWAY_SHUTDOWN_REPEATED', message: `Gateway restarts interrupted this task ${count} times; automatic resume stopped after ${MAX_RESTART_RESUMES} resumes. Existing changes are retained; any follow-up must verify them first and must not blindly repeat side effects.`, observedAt: Date.now() };
+    return false;
+  }
+  task.state = 'queued';
+  task.restartResume = { count, revision: attempt.revision, pending: true,
+    lastProgress: task.latestProgress?.source === 'worker' ? task.latestProgress.text : lastProgressHint ?? previous?.lastProgress };
+  return true;
 }
 
 /** Worker brief for an attempt that resumes a task interrupted by a gateway shutdown. */

@@ -1,6 +1,6 @@
 import { OrchestrationStore } from './store';
 import { TaskSnapshot, TaskAttempt } from './types';
-import { markRestartRecovery } from './restart-resume';
+import { ORPHANED_SHUTDOWN_WINDOW_MS, markRestartRecovery, restartResumable, resumeAfterRestart } from './restart-resume';
 
 /** Invoke under the gateway instance lock before accepting new work. Unknown
  * side effects are deliberately retained for operator/process reconciliation. */
@@ -42,6 +42,27 @@ export function recoverOrchestration(store: OrchestrationStore): { inputs: numbe
         store.saveTask(task, task.stateVersion);
         changed = true;
       }
+    }
+    // A gateway without restart resume (the process an upgrade replaces) settled its shutdown as
+    // failed; resume that work here as the stopping process would have (#605). After the subagent
+    // pass above, so the failed parent's unstarted subagents are already cancelled.
+    for (const row of store.all("SELECT snapshot_json FROM tasks WHERE state='failed' AND json_extract(snapshot_json,'$.failure.code')='GATEWAY_SHUTDOWN' AND json_extract(snapshot_json,'$.failure.observedAt')>=?", now - ORPHANED_SHUTDOWN_WINDOW_MS)) {
+      const task = JSON.parse(String(row.snapshot_json)) as TaskSnapshot;
+      if (!restartResumable(task) || task.cancellation || task.pendingQuestion) continue;
+      const last = store.get('SELECT payload_json FROM task_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1', task.taskId);
+      const attempt = last && JSON.parse(String(last.payload_json)) as TaskAttempt;
+      // Only an unreported failure: once its report was delivered the user may already have acted on it.
+      const report = store.get("SELECT id FROM notifications WHERE task_id=? AND task_state_version=? AND status='pending'", task.taskId, task.stateVersion);
+      if (!attempt || attempt.revision !== task.revision || !report) continue;
+      const resumed = resumeAfterRestart(task, attempt);
+      store.saveAttempt(attempt); store.saveTask(task, task.stateVersion);
+      store.appendEvent(task.conversationId, 'task.restart_recovered', { orphaned: true, state: task.state }, task.taskId);
+      // The pending report now reports the GATEWAY_SHUTDOWN_REPEATED blocker.
+      if (!resumed) { store.run('UPDATE notifications SET task_state_version=? WHERE id=?', task.stateVersion, report.id); continue; }
+      // A resume sends no failure report.
+      store.run("UPDATE notifications SET status='handled' WHERE id=?", report.id);
+      store.run("UPDATE outbox SET state='completed' WHERE kind='notification' AND state IN ('pending','processing') AND json_extract(payload_json,'$.notificationId')=?", report.id);
+      store.enqueue('schedule', `schedule:${task.taskId}:${task.stateVersion}`, { taskId: task.taskId });
     }
     // A send interrupted between provider acceptance and local receipt cannot
     // be retried as if it were known not to have happened.

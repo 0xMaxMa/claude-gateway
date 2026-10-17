@@ -4,8 +4,8 @@ import { TaskService } from '../../../src/orchestration/tasks/service';
 import { WorkerScheduler, WorkerHandle } from '../../../src/orchestration/tasks/scheduler';
 import { shutdownFailure } from '../../../src/orchestration/tasks/failure';
 import { recoverOrchestration } from '../../../src/orchestration/recovery';
-import { MAX_RESTART_RESUMES } from '../../../src/orchestration/restart-resume';
-import { CommandContext } from '../../../src/orchestration/types';
+import { MAX_RESTART_RESUMES, ORPHANED_SHUTDOWN_WINDOW_MS } from '../../../src/orchestration/restart-resume';
+import { CommandContext, TaskSnapshot } from '../../../src/orchestration/types';
 
 // Issue #603: a task interrupted by a gateway shutdown ended `failed` and was never resumed.
 // The only follow-up was a non-executing report turn, so agents asked the user whether to
@@ -125,18 +125,88 @@ test('gateway-managed tasks and subagents are not re-queued by the shutdown path
   expect(interrupt(child.taskId).state).toBe('failed');
 });
 
-test('a task that failed with GATEWAY_SHUTDOWN before this change is not resumed by restart recovery', () => {
-  const task = spawn();
-  const attempt = tasks.claim(task.taskId)!;
-  tasks.started(attempt.attemptId, attempt.generation);
-  tasks.finish(attempt.attemptId, attempt.generation, { type: 'stopped', failure: shutdownFailure() });
-  // Simulate a row persisted by an older gateway: terminal, with no resume bookkeeping.
-  const legacy = store.task(task.taskId)!;
-  legacy.state = 'failed'; delete legacy.restartResume;
-  store.transaction(() => store.saveTask(legacy, legacy.stateVersion));
-  recoverOrchestration(store);
-  expect(store.task(task.taskId)!.state).toBe('failed');
-  expect(tasks.claim(task.taskId)).toBeUndefined();
+describe('a GATEWAY_SHUTDOWN failure settled by a gateway without restart resume (#605)', () => {
+  // The process an upgrade replaces ran the pre-#603 shutdown path: the task ended failed, with
+  // no resume bookkeeping and its failure report pending, and nothing resumed it after the restart.
+  let spawned = 0;
+  // Rewrites the row in place, as the stopping process persisted it, keeping the state version its report refers to.
+  const persist = (task: TaskSnapshot) => store.run('UPDATE tasks SET snapshot_json=? WHERE id=?', JSON.stringify(task), task.taskId);
+  const legacyShutdown = (observedAt = Date.now()) => {
+    const task = spawn(`legacy-${spawned++}`);
+    const attempt = tasks.claim(task.taskId)!;
+    tasks.started(attempt.attemptId, attempt.generation);
+    tasks.finish(attempt.attemptId, attempt.generation, { type: 'failed', failure: { code: 'WORKER_FAILED', message: 'placeholder', observedAt } });
+    const legacy = store.task(task.taskId)!;
+    legacy.failure = { code: 'GATEWAY_SHUTDOWN', message: 'Gateway shutdown interrupted this worker. Inspect existing changes before continuing; do not blindly repeat side effects.', observedAt };
+    persist(legacy);
+    return store.task(task.taskId)!;
+  };
+  const pendingNotifications = (taskId: string) => Number(store.get("SELECT COUNT(*) n FROM notifications WHERE task_id=? AND status='pending'", taskId)!.n);
+
+  test('is resumed once by startup recovery, without its failure report', async () => {
+    const task = legacyShutdown();
+    expect(task.state).toBe('failed');
+    expect(pendingNotifications(task.taskId)).toBe(1);
+    recoverOrchestration(store);
+    const resumed = store.task(task.taskId)!;
+    expect(resumed.state).toBe('queued');
+    expect(resumed.restartResume).toMatchObject({ count: 1, revision: 1, pending: true });
+    expect(pendingNotifications(task.taskId)).toBe(0);
+    // Idempotent: a second startup does not resume it again.
+    recoverOrchestration(store);
+    expect(store.task(task.taskId)!.restartResume).toMatchObject({ count: 1 });
+    const { driver, starts } = blockingDriver();
+    const after = new WorkerScheduler(tasks, driver);
+    await after.tick(); await settle();
+    expect(starts).toEqual([task.taskId]);
+    expect(store.task(task.taskId)!.state).toBe('running');
+    await after.close();
+  });
+
+  test(`ends GATEWAY_SHUTDOWN_REPEATED once its revision has used ${MAX_RESTART_RESUMES} resumes`, () => {
+    const task = legacyShutdown();
+    task.restartResume = { count: MAX_RESTART_RESUMES, revision: 1, pending: false };
+    persist(task);
+    recoverOrchestration(store);
+    const after = store.task(task.taskId)!;
+    expect(after.state).toBe('failed');
+    expect(after.failure?.code).toBe('GATEWAY_SHUTDOWN_REPEATED');
+    // Its pending report now refers to the blocker state, not the superseded shutdown failure.
+    expect(store.get("SELECT task_state_version v FROM notifications WHERE task_id=? AND status='pending'", task.taskId)!.v).toBe(after.stateVersion);
+    expect(tasks.claim(task.taskId)).toBeUndefined();
+  });
+
+  test('is not resumed when its failure was already reported, so the user may have acted on it', () => {
+    const task = legacyShutdown();
+    store.run("UPDATE notifications SET status='handled' WHERE task_id=?", task.taskId);
+    recoverOrchestration(store);
+    expect(store.task(task.taskId)!.state).toBe('failed');
+    expect(store.task(task.taskId)!.restartResume).toBeUndefined();
+  });
+
+  test('is not resumed when it is old, cancelled, asking, gateway-managed, a subagent or superseded', () => {
+    const edit = (change: (task: TaskSnapshot) => void) => {
+      const task = legacyShutdown();
+      change(task);
+      persist(task);
+      return task;
+    };
+    const skipped = [
+      legacyShutdown(Date.now() - ORPHANED_SHUTDOWN_WINDOW_MS - 1000),
+      edit(task => { task.cancellation = { requestedBy: 'user', requestedAt: Date.now() }; }),
+      edit(task => { task.pendingQuestion = { questionId: 'q', text: 'Which registry?', revision: 1 }; }),
+      edit(task => { task.gatewayTarget = { adapter: 'safemode', sessionId: 'safe-1', name: 'Safe mode' }; }),
+      edit(task => { task.parentTaskId = 'parent'; }),
+      edit(task => { task.revision = 2; }),
+    ];
+    recoverOrchestration(store);
+    for (const task of skipped) {
+      const after = store.task(task.taskId)!;
+      expect(after.state).toBe('failed');
+      expect(after.failure?.code).toBe('GATEWAY_SHUTDOWN');
+      expect(after.restartResume).toBeUndefined();
+    }
+  });
 });
 
 test('the resume cap counts interruptions of one revision; a new user revision starts a fresh budget', () => {
