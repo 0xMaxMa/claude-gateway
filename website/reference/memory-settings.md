@@ -156,7 +156,7 @@ services:
     isolate_memory: true
 ```
 
-At install, update and every gateway start, the gateway writes `isolateMemory` into the app agent's config entry from this declaration, and a gateway start admits the agent with the declared value. A release that removes the line turns the mode off again, and a hand edit of `isolateMemory` on an app agent is reset the same way. A gateway start resets only agents of running apps: a stopped app's agent keeps its config entry until a gateway start finds the app running. `inspect_app` and `POST /api/v1/apps/inspect` report it as `agentDeclaration.isolateMemory`. The gateway composes each conversation's memory on the host and gives the agent its files as `/workspace/chats/…` paths. Each conversation's `chats/` directory is part of the agent workspace, which the app's update and [backup/restore](../api/apps.md) already carry.
+At install, update, reconfigure and every gateway start, the gateway writes `isolateMemory` into the app agent's config entry from this declaration, and a gateway start admits the agent with the declared value. A release that removes the line turns the mode off again, and a hand edit of `isolateMemory` on an app agent is reset the same way. A gateway start resets only agents of running apps: a stopped app's agent keeps its config entry until a gateway start finds the app running. `inspect_app` and `POST /api/v1/apps/inspect` report it as `agentDeclaration.isolateMemory`. The gateway composes each conversation's memory on the host and gives the agent its files as `/workspace/chats/…` paths. Each conversation's `chats/` directory is part of the agent workspace, which the app's update and [backup/restore](../api/apps.md) already carry.
 
 **A sandbox container per conversation.** Without isolate mode every conversation of an app agent runs in the one app container. With it, each conversation runs in its own container, `<app>-agent-c-<hash>`, created from the app container's image, user, environment and networks, with every capability dropped and `no-new-privileges`. It has its own processes, `/tmp` and home directory, and mounts only:
 
@@ -185,7 +185,7 @@ When it is on:
 - **No cron jobs.** Creating a cron job for an isolated agent is refused, and the agent's existing jobs, including ones created before the mode was turned on, do not run. They stay stored unchanged, so a one-shot job is not used up. `type: command` jobs, which run on the host, are refused for every app agent too.
 - **No `--append-system-prompt-file` in `claude.extraFlags`.** Claude Code keeps only the last such flag, so it would replace the conversation's memory. The config loader refuses such an agent; use `--append-system-prompt` or move the text into `AGENTS.md`.
 
-A running agent keeps the mode it started with. When the setting changes, through a config edit or an app update that changes `isolate_memory`, the gateway restarts that agent once none of its sessions is busy; no gateway restart is needed. Memory is keyed by the conversation (channel and chat). An app that groups several chats into one account, such as one family with several linked parents, still gets one memory per chat.
+A running agent keeps the mode it started with. When the setting changes, through a config edit or an app update or reconfigure that changes `isolate_memory`, the gateway restarts that agent once none of its sessions is busy; no gateway restart is needed. Memory is keyed by the conversation (channel and chat). An app that groups several chats into one account, such as one family with several linked parents, still gets one memory per chat.
 
 The app's own API is outside the gateway's reach: if the app hands its agent one token that serves every tenant, that token can still reach any tenant, so the app must scope it.
 
@@ -198,7 +198,7 @@ The searchable memory archive (`kb.sqlite`) is one index over the agent's `MEMOR
 `disableArchive` turns the archive off without changing how memory is injected:
 
 - Host agents: `agents[].disableArchive` in the gateway config, `true` or `false`. The config loader skips an agent with any other value.
-- App agents: `services.agent.disable_archive` in [`app.yaml`](../api/apps.md). At install, update and every gateway start, the gateway writes it into the agent's `disableArchive`, with the same lifecycle as `isolate_memory`.
+- App agents: `services.agent.disable_archive` in [`app.yaml`](../api/apps.md). At install, update, reconfigure and every gateway start, the gateway writes it into the agent's `disableArchive`, with the same lifecycle as `isolate_memory`.
 
 When it is on:
 

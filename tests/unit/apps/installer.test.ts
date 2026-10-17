@@ -3468,6 +3468,156 @@ services:
       );
       await waitForJob(installer, first, 5000);
     });
+
+    // #615: reconfigure re-reads app.yaml, so the agent settings it declares
+    // must reach apps.json and the running agent, not just the compose.
+    describe('agent declaration', () => {
+      type AgentYaml = { name: string; path?: string; isolate?: boolean; noArchive?: boolean } | null;
+
+      function agentAppYaml(port: number, agent: AgentYaml): string {
+        const agentBlock = agent === null ? '' : [
+          '\n  agent:',
+          `    path: ${agent.path ?? './agent'}`,
+          `    name: ${agent.name}`,
+          ...(agent.isolate ? ['    isolate_memory: true'] : []),
+          ...(agent.noArchive ? ['    disable_archive: true'] : []),
+        ].join('\n');
+        return `
+apiVersion: apps.getpod.ai/v1
+name: agent-reconf
+version: 1.0.0
+commit: "abc123def456abc123def456abc123def456abc1"
+services:
+  app:
+    image: nginx:1.25
+    ports:
+      - name: api
+        host: ${port}
+        container: ${port}
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:${port}/health
+      interval: 30s
+`.trim() + agentBlock;
+      }
+
+      /** Install agent-reconf declaring `agent`, then rewrite its on-disk app.yaml to `next`. */
+      async function installThenEditYaml(agent: AgentYaml, next: AgentYaml, port = 5760) {
+        const calls: Array<{ cmd: string; args: string[] }> = [];
+        const spawn = jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+          calls.push({ cmd, args });
+          if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+            fs.writeFileSync(path.join(opts.cwd, 'app.yaml'), agentAppYaml(port, agent), 'utf-8');
+            fs.mkdirSync(path.join(opts.cwd, 'agent'), { recursive: true });
+            fs.mkdirSync(path.join(opts.cwd, 'other-agent'), { recursive: true });
+          }
+          return { stdout: '', stderr: '', status: 0 };
+        });
+        const agentMgr = makeAgentMgr('unrelated-bot');
+        const installer = makeInstallerWithAgent(spawn as unknown as typeof successSpawn, agentMgr);
+        const install = await waitForJob(
+          installer,
+          installer.install({ githubUrl: 'https://github.com/test/agent-reconf', commit: 'a'.repeat(40) }),
+          5000,
+        );
+        expect(install.error ?? install.status).toBe('completed');
+        const appDir = (await registry.get('agent-reconf'))!.installPath;
+        fs.writeFileSync(path.join(appDir, 'app.yaml'), agentAppYaml(port, next), 'utf-8');
+        agentMgr.injectAgentService.mockClear();
+        agentMgr.upsertAgent.mockClear();
+        calls.length = 0;
+        return { installer, agentMgr, appDir, calls };
+      }
+
+      it('persists toggled isolate_memory and disable_archive and reports them in the job result', async () => {
+        const { installer, agentMgr } = await installThenEditYaml(
+          { name: 'reconf-bot' },
+          { name: 'reconf-bot', isolate: true, noArchive: true },
+        );
+        const declared = { path: './agent', name: 'reconf-bot', isolateMemory: true, disableArchive: true };
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
+
+        expect(job.status).toBe('completed');
+        expect(job.result?.agentDeclaration).toEqual(declared);
+        expect((await registry.get('agent-reconf'))?.agentDeclaration).toEqual(declared);
+        // The config.json entry the config watcher acts on gets the new modes too.
+        expect(agentMgr.upsertAgent).toHaveBeenCalledTimes(1);
+        expect(agentMgr.upsertAgent).toHaveBeenCalledWith(expect.objectContaining({ agentDeclaration: declared }));
+        expect(job.logs.join('\n')).toContain('applied once the agent is idle');
+      });
+
+      it('turns the modes back off when app.yaml stops declaring them', async () => {
+        const { installer } = await installThenEditYaml(
+          { name: 'reconf-bot', isolate: true, noArchive: true },
+          { name: 'reconf-bot' },
+        );
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
+
+        expect(job.status).toBe('completed');
+        expect((await registry.get('agent-reconf'))?.agentDeclaration).toEqual({ path: './agent', name: 'reconf-bot' });
+      });
+
+      it('leaves the agent registration alone when its declaration is unchanged', async () => {
+        const { installer, agentMgr } = await installThenEditYaml(
+          { name: 'reconf-bot', isolate: true },
+          { name: 'reconf-bot', isolate: true },
+        );
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
+
+        expect(job.status).toBe('completed');
+        expect(agentMgr.upsertAgent).not.toHaveBeenCalled();
+      });
+
+      it('re-injects the agent service from the new declaration on a port change', async () => {
+        const { installer, agentMgr } = await installThenEditYaml(
+          { name: 'reconf-bot' },
+          { name: 'reconf-bot', isolate: true },
+        );
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { portOverrides: { api: 5761 } }), 5000);
+
+        expect(job.status).toBe('completed');
+        expect(agentMgr.injectAgentService).toHaveBeenCalledWith(
+          expect.objectContaining({ agentDeclaration: { path: './agent', name: 'reconf-bot', isolateMemory: true } }),
+        );
+        const entry = await registry.get('agent-reconf');
+        expect(entry?.ports[0].hostPort).toBe(5761);
+        expect(entry?.agentDeclaration).toEqual({ path: './agent', name: 'reconf-bot', isolateMemory: true });
+      });
+
+      it.each<[string, AgentYaml, AgentYaml, RegExp]>([
+        ['renames the agent', { name: 'reconf-bot' }, { name: 'other-bot' }, /renames agent "reconf-bot" to "other-bot"/],
+        ['moves the agent', { name: 'reconf-bot' }, { name: 'reconf-bot', path: './other-agent' }, /moves agent "reconf-bot"/],
+        ['adds an agent', null, { name: 'reconf-bot' }, /adds agent "reconf-bot"/],
+        ['removes the agent', { name: 'reconf-bot' }, null, /removes agent "reconf-bot"/],
+      ])('rejects an app.yaml that %s, changing nothing', async (_label, before, after, message) => {
+        const { installer, agentMgr, appDir, calls } = await installThenEditYaml(before, after);
+        const entryBefore = await registry.get('agent-reconf');
+        const envBefore = fs.readFileSync(path.join(appDir, '.env'), 'utf-8');
+        const composeBefore = fs.readFileSync(path.join(appDir, 'docker-compose.yml'), 'utf-8');
+        callbacks.deregistered.length = 0;
+
+        const job = await waitForJob(
+          installer,
+          installer.reconfigure('agent-reconf', { envVars: { A: '1' }, portOverrides: { api: 5762 } }),
+          5000,
+        );
+
+        expect(job.status).toBe('failed');
+        expect(job.error).toMatch(message);
+        expect(job.error).toMatch(/use update or reinstall/);
+        expect(await registry.get('agent-reconf')).toEqual(entryBefore);
+        expect(fs.readFileSync(path.join(appDir, '.env'), 'utf-8')).toBe(envBefore);
+        expect(fs.readFileSync(path.join(appDir, 'docker-compose.yml'), 'utf-8')).toBe(composeBefore);
+        expect(calls.filter((c) => c.cmd === 'docker')).toEqual([]);
+        expect(callbacks.deregistered).not.toContain('agent-reconf');
+        expect(agentMgr.injectAgentService).not.toHaveBeenCalled();
+        expect(agentMgr.upsertAgent).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // ─── reconcileStatus() — sync stored status with the live Docker runtime ────
