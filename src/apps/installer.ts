@@ -279,6 +279,19 @@ const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
  * scheduler at boot — config is untrusted input, so a typo must degrade to UTC,
  * never crash the gateway.
  */
+/** How app.yaml changes the app's agent registration, or null when name, path and presence all match. */
+function agentIdentityChange(
+  oldAgent: AgentDeclaration | null,
+  newAgent: AgentDeclaration | null,
+): string | null {
+  if (!oldAgent && newAgent) return `adds agent "${newAgent.name}"`;
+  if (oldAgent && !newAgent) return `removes agent "${oldAgent.name}"`;
+  if (!oldAgent || !newAgent) return null;
+  if (oldAgent.name !== newAgent.name) return `renames agent "${oldAgent.name}" to "${newAgent.name}"`;
+  if (path.posix.resolve('/', oldAgent.path) !== path.posix.resolve('/', newAgent.path)) return `moves agent "${newAgent.name}" from ${oldAgent.path} to ${newAgent.path}`;
+  return null;
+}
+
 function isValidTimezone(tz: string | undefined): tz is string {
   if (typeof tz !== 'string' || tz.length === 0) return false;
   try {
@@ -2350,9 +2363,10 @@ export class AppInstaller {
   /**
    * Reconfigure an installed app: merge env vars and/or override host ports,
    * then force-recreate the container in place. No clone, no dir swap — the app
-   * stays at its current commit/appDir; only its .env and (optionally) its
-   * compose port mappings change. Named volumes and their data survive because
-   * this is an `up --force-recreate`, never a `down -v`.
+   * stays at its current commit/appDir; only its .env, (optionally) its
+   * compose port mappings and its agent's memory settings change. Named
+   * volumes and their data survive because this is an `up --force-recreate`,
+   * never a `down -v`.
    */
   private async runReconfigure(
     job: JobState,
@@ -2415,6 +2429,19 @@ export class AppInstaller {
       }
     }
 
+    // Reconfigure applies the agent's settings but not its identity: a renamed,
+    // moved, added or removed agent needs the deregister/re-register that only
+    // update and install do. Refuse before anything is touched.
+    const oldAgent = entry.agentDeclaration ?? null;
+    const newAgent = generated.agentDeclaration;
+    const agentChange = agentIdentityChange(oldAgent, newAgent);
+    if (agentChange) {
+      throw new Error(
+        `app.yaml for "${appName}" ${agentChange} — reconfigure cannot change the agent registration; use update or reinstall instead`,
+      );
+    }
+    const nextEntry: AppEntry = newAgent ? { ...entry, agentDeclaration: newAgent } : entry;
+
     // Host-port collision across other installed apps (only if ports changed).
     // Runs before the live compose is touched, so a collision leaves nothing to
     // undo on disk.
@@ -2438,9 +2465,9 @@ export class AppInstaller {
       if (hasPortChange) {
         this.log(job, 'Updating docker-compose.yml');
         fs.writeFileSync(composePath, newComposeContent);
-        if (generated.agentDeclaration && this.agentManager) {
+        if (newAgent && this.agentManager) {
           const agentPaths = entry.agentPaths ?? this.agentManager.detectAgentPaths();
-          await this.agentManager.injectAgentService({ ...entry, agentPaths });
+          await this.agentManager.injectAgentService({ ...nextEntry, agentPaths });
         }
       }
 
@@ -2463,12 +2490,10 @@ export class AppInstaller {
       this.log(job, 'Recreating container');
       await this.composeUp(appName, appDir, job, { forceRecreate: true });
 
-      await this.registry.updateStatus(appName, 'running');
-
-      // Persist the reconfigure: always bump updatedAt so the registry reflects
-      // that the app was reconfigured; refresh the port mappings + re-register
-      // proxy routes only when a host port actually changed.
-      const updatedEntry: AppEntry = { ...entry, updatedAt: new Date().toISOString() };
+      // Persist the reconfigure: the container is up again (an app reconfigured
+      // while stopped or errored is now running), updatedAt is bumped, and the
+      // port mappings + proxy routes are refreshed only when a host port changed.
+      const updatedEntry: AppEntry = { ...nextEntry, status: 'running', updatedAt: new Date().toISOString() };
       if (hasPortChange) {
         updatedEntry.ports = generated.ports.map((p) => ({
           name: p.name,
@@ -2524,6 +2549,24 @@ export class AppInstaller {
       throw reconfErr;
     }
 
+    // Write the declared isolate_memory/disable_archive into the agent's
+    // config.json entry. When they differ from what the agent runs with, the
+    // config watcher replaces its runner once idle, as after an update.
+    if (newAgent && this.agentManager) {
+      let synced: boolean;
+      try {
+        synced = await this.agentManager.syncMemoryModes(nextEntry);
+      } catch (err) {
+        // apps.json already holds the new modes; gateway start applies them from there.
+        throw new Error(
+          `Reconfigure applied, but agent "${newAgent.name}" config entry was not updated (${(err as Error).message}) — its memory settings take effect at the next gateway start`,
+        );
+      }
+      this.log(job, synced
+        ? `Agent "${newAgent.name}" memory settings written — a changed isolate_memory or disable_archive applies once the agent is idle`
+        : `Agent "${newAgent.name}" is not registered — its memory settings apply at the next gateway start`);
+    }
+
     const proxyUrls: Record<string, string> = {};
     for (const p of generated.ports) {
       proxyUrls[p.name] = `/app/${appName}/${p.name}/`;
@@ -2534,7 +2577,7 @@ export class AppInstaller {
       appName,
       proxyUrls,
       secretKeys: generated.secretKeys,
-      agentDeclaration: entry.agentDeclaration ?? null,
+      agentDeclaration: newAgent,
     };
     job.updatedAt = Date.now();
     this.log(job, `Reconfigure complete: ${JSON.stringify(proxyUrls)}`);

@@ -506,6 +506,50 @@ describe('AgentManager', () => {
       expect(archiveOff(loaded)).toEqual(archiveOff(written));
     });
 
+    describe('syncMemoryModes()', () => {
+      const configPath = () => path.join(tmpDir, 'config.json');
+      const agentEntry = () =>
+        (JSON.parse(fs.readFileSync(configPath(), 'utf-8')) as { agents: Array<Record<string, unknown>> })
+          .agents.find((a) => a['id'] === 'my-agent');
+
+      it('writes the declared modes and keeps operator-edited fields', async () => {
+        const entry = makeEntry(tmpDir);
+        await manager.upsertAgent(entry);
+        const config = JSON.parse(fs.readFileSync(configPath(), 'utf-8')) as { agents: Array<Record<string, unknown>> };
+        Object.assign(config.agents.find((a) => a['id'] === 'my-agent')!, { claude: { model: 'operator-model' }, env: 'X=1' });
+        fs.writeFileSync(configPath(), JSON.stringify(config), 'utf-8');
+
+        const synced = await manager.syncMemoryModes({
+          ...entry,
+          agentDeclaration: { ...entry.agentDeclaration!, isolateMemory: true, disableArchive: true },
+        });
+
+        expect(synced).toBe(true);
+        expect(agentEntry()).toMatchObject({ isolateMemory: true, disableArchive: true, claude: { model: 'operator-model' }, env: 'X=1' });
+      });
+
+      it('removes modes the declaration no longer sets, including a hand edit', async () => {
+        const entry = makeEntry(tmpDir);
+        await manager.upsertAgent({ ...entry, agentDeclaration: { ...entry.agentDeclaration!, disableArchive: true } });
+        const config = JSON.parse(fs.readFileSync(configPath(), 'utf-8')) as { agents: Array<Record<string, unknown>> };
+        config.agents.find((a) => a['id'] === 'my-agent')!['isolateMemory'] = true;
+        fs.writeFileSync(configPath(), JSON.stringify(config), 'utf-8');
+
+        expect(await manager.syncMemoryModes(entry)).toBe(true);
+
+        expect(agentEntry()).not.toHaveProperty('isolateMemory');
+        expect(agentEntry()).not.toHaveProperty('disableArchive');
+      });
+
+      it('returns false and creates nothing when the agent is not registered', async () => {
+        const entry = makeEntry(tmpDir);
+
+        expect(await manager.syncMemoryModes(entry)).toBe(false);
+
+        expect(fs.existsSync(configPath()) ? agentEntry() : undefined).toBeUndefined();
+      });
+    });
+
     it('is idempotent — calling twice does not duplicate entry', async () => {
       const entry = makeEntry(tmpDir);
       await manager.upsertAgent(entry);

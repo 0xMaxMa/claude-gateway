@@ -379,6 +379,31 @@ export class AgentManager {
   }
 
   /**
+   * Write the isolateMemory (#601) and disableArchive (#609) the app declares
+   * into its agent's existing config entry, leaving every other field alone.
+   * Returns false when the agent has no app-agent entry yet; reconcileAgents
+   * creates it with these values at the next gateway start.
+   */
+  async syncMemoryModes(entry: AppEntry): Promise<boolean> {
+    if (!entry.agentDeclaration) return false;
+    const agentName = entry.agentDeclaration.name;
+    return this.withConfigLock(() => {
+      const config = this.readConfig();
+      const agent = config.agents.find((a) => a['id'] === agentName && a['type'] === 'app-agent');
+      if (!agent) return false;
+      const isolateMemory = declaredIsolateMemory(entry);
+      const disableArchive = declaredDisableArchive(entry);
+      if (agent['isolateMemory'] === isolateMemory && agent['disableArchive'] === disableArchive) return true;
+      if (isolateMemory) agent['isolateMemory'] = true;
+      else delete agent['isolateMemory'];
+      if (disableArchive) agent['disableArchive'] = true;
+      else delete agent['disableArchive'];
+      this.writeConfig(config);
+      return true;
+    });
+  }
+
+  /**
    * Remove the workspace symlink and config entry for this app's agent.
    * Preserves the agent dir (and its sessions) so reinstalling picks up history.
    */
