@@ -89,6 +89,7 @@ function makeAgentMgr(existingAgentName: string) {
     })),
     injectAgentService: jest.fn(() => {}),
     upsertAgent: jest.fn(async () => {}),
+    syncMemoryModes: jest.fn(async (): Promise<boolean> => true),
     backupMemory: jest.fn((): string | null => null),
     restoreMemory: jest.fn(() => {}),
   };
@@ -3525,6 +3526,7 @@ services:
         fs.writeFileSync(path.join(appDir, 'app.yaml'), agentAppYaml(port, next), 'utf-8');
         agentMgr.injectAgentService.mockClear();
         agentMgr.upsertAgent.mockClear();
+        agentMgr.syncMemoryModes.mockClear();
         calls.length = 0;
         return { installer, agentMgr, appDir, calls };
       }
@@ -3541,9 +3543,11 @@ services:
         expect(job.status).toBe('completed');
         expect(job.result?.agentDeclaration).toEqual(declared);
         expect((await registry.get('agent-reconf'))?.agentDeclaration).toEqual(declared);
-        // The config.json entry the config watcher acts on gets the new modes too.
-        expect(agentMgr.upsertAgent).toHaveBeenCalledTimes(1);
-        expect(agentMgr.upsertAgent).toHaveBeenCalledWith(expect.objectContaining({ agentDeclaration: declared }));
+        // The config.json entry the config watcher acts on gets the new modes too,
+        // without re-registering the agent.
+        expect(agentMgr.syncMemoryModes).toHaveBeenCalledTimes(1);
+        expect(agentMgr.syncMemoryModes).toHaveBeenCalledWith(expect.objectContaining({ agentDeclaration: declared }));
+        expect(agentMgr.upsertAgent).not.toHaveBeenCalled();
         expect(job.logs.join('\n')).toContain('applies once the agent is idle');
       });
 
@@ -3552,7 +3556,7 @@ services:
           { name: 'reconf-bot' },
           { name: 'reconf-bot', isolate: true },
         );
-        agentMgr.upsertAgent.mockRejectedValueOnce(new Error('config locked'));
+        agentMgr.syncMemoryModes.mockRejectedValueOnce(new Error('config locked'));
 
         const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
 
@@ -3575,7 +3579,7 @@ services:
         expect((await registry.get('agent-reconf'))?.agentDeclaration).toEqual({ path: './agent', name: 'reconf-bot' });
       });
 
-      it('rewrites the agent config entry even when apps.json already matches app.yaml', async () => {
+      it('writes the agent memory settings even when apps.json already matches app.yaml', async () => {
         // A retry after a failed config write, or a hand edit of isolateMemory,
         // leaves config.json behind apps.json; reconfigure must still converge.
         const { installer, agentMgr } = await installThenEditYaml(
@@ -3586,24 +3590,31 @@ services:
         const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
 
         expect(job.status).toBe('completed');
-        expect(agentMgr.upsertAgent).toHaveBeenCalledWith(
+        expect(agentMgr.syncMemoryModes).toHaveBeenCalledWith(
           expect.objectContaining({ agentDeclaration: { path: './agent', name: 'reconf-bot', isolateMemory: true } }),
         );
       });
 
-      it('fills in missing agentPaths so the agent entry can be written', async () => {
-        const { installer, agentMgr } = await installThenEditYaml(
-          { name: 'reconf-bot' },
-          { name: 'reconf-bot', isolate: true },
-        );
-        const { agentPaths: _dropped, ...withoutPaths } = (await registry.get('agent-reconf'))!;
-        await registry.upsert(withoutPaths);
+      it('says when the agent is not registered yet', async () => {
+        const { installer, agentMgr } = await installThenEditYaml({ name: 'reconf-bot' }, { name: 'reconf-bot', isolate: true });
+        agentMgr.syncMemoryModes.mockResolvedValueOnce(false);
 
         const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
 
         expect(job.status).toBe('completed');
-        expect(agentMgr.upsertAgent).toHaveBeenCalledWith(expect.objectContaining({ agentPaths: expect.any(Object) }));
-        expect((await registry.get('agent-reconf'))?.agentPaths).toEqual(agentMgr.detectAgentPaths());
+        expect(job.logs.join('\n')).toContain('apply at the next gateway start');
+      });
+
+      it('accepts the same agent path written differently', async () => {
+        const { installer } = await installThenEditYaml(
+          { name: 'reconf-bot', path: './agent' },
+          { name: 'reconf-bot', path: 'agent/', isolate: true },
+        );
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
+
+        expect(job.status).toBe('completed');
+        expect((await registry.get('agent-reconf'))?.agentDeclaration).toEqual({ path: 'agent/', name: 'reconf-bot', isolateMemory: true });
       });
 
       it('records a stopped app as running once reconfigure has recreated it', async () => {
@@ -3660,7 +3671,7 @@ services:
         expect(calls.filter((c) => c.cmd === 'docker')).toEqual([]);
         expect(callbacks.deregistered).not.toContain('agent-reconf');
         expect(agentMgr.injectAgentService).not.toHaveBeenCalled();
-        expect(agentMgr.upsertAgent).not.toHaveBeenCalled();
+        expect(agentMgr.syncMemoryModes).not.toHaveBeenCalled();
       });
     });
   });

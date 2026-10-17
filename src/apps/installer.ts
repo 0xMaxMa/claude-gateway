@@ -288,7 +288,7 @@ function agentIdentityChange(
   if (oldAgent && !newAgent) return `removes agent "${oldAgent.name}"`;
   if (!oldAgent || !newAgent) return null;
   if (oldAgent.name !== newAgent.name) return `renames agent "${oldAgent.name}" to "${newAgent.name}"`;
-  if (oldAgent.path !== newAgent.path) return `moves agent "${newAgent.name}" from ${oldAgent.path} to ${newAgent.path}`;
+  if (path.posix.resolve('/', oldAgent.path) !== path.posix.resolve('/', newAgent.path)) return `moves agent "${newAgent.name}" from ${oldAgent.path} to ${newAgent.path}`;
   return null;
 }
 
@@ -2440,9 +2440,7 @@ export class AppInstaller {
         `app.yaml for "${appName}" ${agentChange} — reconfigure cannot change the agent registration; use update or reinstall instead`,
       );
     }
-    const nextEntry: AppEntry = newAgent
-      ? { ...entry, agentDeclaration: newAgent, agentPaths: entry.agentPaths ?? this.agentManager?.detectAgentPaths() }
-      : entry;
+    const nextEntry: AppEntry = newAgent ? { ...entry, agentDeclaration: newAgent } : entry;
 
     // Host-port collision across other installed apps (only if ports changed).
     // Runs before the live compose is touched, so a collision leaves nothing to
@@ -2468,7 +2466,8 @@ export class AppInstaller {
         this.log(job, 'Updating docker-compose.yml');
         fs.writeFileSync(composePath, newComposeContent);
         if (newAgent && this.agentManager) {
-          await this.agentManager.injectAgentService(nextEntry);
+          const agentPaths = entry.agentPaths ?? this.agentManager.detectAgentPaths();
+          await this.agentManager.injectAgentService({ ...nextEntry, agentPaths });
         }
       }
 
@@ -2550,19 +2549,22 @@ export class AppInstaller {
       throw reconfErr;
     }
 
-    // Rewrite the agent's config.json entry from the declaration, as update and
-    // every gateway start do. A toggled isolate_memory/disable_archive then
-    // reaches the running agent: the config watcher replaces its runner once idle.
+    // Write the declared isolate_memory/disable_archive into the agent's
+    // config.json entry. When they differ from what the agent runs with, the
+    // config watcher replaces its runner once idle, as after an update.
     if (newAgent && this.agentManager) {
+      let synced: boolean;
       try {
-        await this.agentManager.upsertAgent(nextEntry);
+        synced = await this.agentManager.syncMemoryModes(nextEntry);
       } catch (err) {
         // apps.json already holds the new modes; gateway start applies them from there.
         throw new Error(
           `Reconfigure applied, but agent "${newAgent.name}" config entry was not updated (${(err as Error).message}) — its memory settings take effect at the next gateway start`,
         );
       }
-      this.log(job, `Agent "${newAgent.name}" config entry refreshed — a changed isolate_memory or disable_archive applies once the agent is idle`);
+      this.log(job, synced
+        ? `Agent "${newAgent.name}" memory settings written — a changed isolate_memory or disable_archive applies once the agent is idle`
+        : `Agent "${newAgent.name}" is not registered — its memory settings apply at the next gateway start`);
     }
 
     const proxyUrls: Record<string, string> = {};
