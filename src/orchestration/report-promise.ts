@@ -1,8 +1,9 @@
 import { OrchestrationStore } from './store';
 
 // A first-person commitment to (re)start work: "I'll re-run the review", "ผมจะสั่งรันรีวิวใหม่".
-const ENGLISH_PROMISE = /\b(?:I(?:'ll| will| am going to|'m going to)|let me|we(?:'ll| will))\b[^.!?\n]{0,60}?\b(?:re-?run|run|re-?start|retry|resume|continue|kick off|redo|re-?launch|try (?:it )?again)\b/i;
-const THAI_PROMISE = /(?:จะ|เดี๋ยว)[^.!?\n]{0,40}?(?:รัน|เริ่ม|ทำต่อ|ดำเนินการต่อ|สั่ง|ลองใหม่|ลองอีก|ทำใหม่|รีวิวใหม่|ตรวจใหม่|ต่อให้)/;
+// A negated one ("I will not re-run it", "จะไม่รันซ้ำ") promises nothing.
+const ENGLISH_PROMISE = /\b(?:I(?:'ll| will| am going to|'m going to)|let me|we(?:'ll| will))\b(?![^.!?\n]{0,20}?\b(?:not|never)\b)[^.!?\n]{0,60}?\b(?:re-?run|run|re-?start|retry|resume|continue|kick off|redo|re-?launch|try (?:it )?again)\b/i;
+const THAI_PROMISE = /(?:จะ|เดี๋ยว)(?!(?:ยัง)?ไม่)[^.!?\n]{0,40}?(?:รัน|เริ่ม|ทำต่อ|ดำเนินการต่อ|สั่ง|ลองใหม่|ลองอีก|ทำใหม่|รีวิวใหม่|ตรวจใหม่|ต่อให้)/;
 
 /** Whether a reply says the agent will start, re-run or continue work. */
 export function promisesWork(text: string): boolean {

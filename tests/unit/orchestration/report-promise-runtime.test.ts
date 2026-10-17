@@ -83,6 +83,7 @@ test('promisesWork recognizes commitments to (re)start work, not reports of what
     'เดี๋ยวผมรันใหม่ให้ครับ', 'ผมจะดำเนินการต่อทันทีครับ'])
     expect(promisesWork(text)).toBe(true);
   for (const text of ['The review ran and found two issues.', 'Gateway restarts interrupted the task; the branch is intact.',
-    'รีวิวเสร็จแล้ว พบปัญหา 2 ข้อครับ', 'งานหยุดเพราะ gateway รีสตาร์ทซ้ำหลายครั้ง'])
+    'รีวิวเสร็จแล้ว พบปัญหา 2 ข้อครับ', 'งานหยุดเพราะ gateway รีสตาร์ทซ้ำหลายครั้ง',
+    'I will not re-run it automatically.', "I'll never retry a failed publish.", 'ผมจะไม่รันซ้ำเองครับ', 'งานจะยังไม่เริ่มจนกว่าจะได้คำตอบ'])
     expect(promisesWork(text)).toBe(false);
 });
