@@ -2,9 +2,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { AppInstaller, InstallerCallbacks, JobState, parseComposePs, mapContainerStatesToAppStatus } from '../../../src/apps/installer';
-import { AppsRegistry } from '../../../src/apps/registry';
+import { AppsRegistry, AppEntry } from '../../../src/apps/registry';
 import { RegistryClient } from '../../../src/apps/registry-client';
 import { ComposePort, ComposeSocket } from '../../../src/apps/compose-generator';
+import { writeAgentEnvFile } from '../../../src/apps/agent-manager';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -3634,10 +3635,12 @@ services:
       });
 
       it('rewrites the agent env file from the new .env on an env-only reconfigure (#618)', async () => {
-        const { installer, appDir } = await installThenEditYaml(
+        const { installer, agentMgr, appDir } = await installThenEditYaml(
           { name: 'reconf-bot', env: ['AGENT_API_TOKEN'] },
           { name: 'reconf-bot', env: ['AGENT_API_TOKEN'] },
         );
+        // Like the real injectAgentService, which writes .env.agent from the .env on disk.
+        agentMgr.injectAgentService.mockImplementation((e: AppEntry) => writeAgentEnvFile(e.installPath, e.agentDeclaration!));
 
         const job = await waitForJob(
           installer,

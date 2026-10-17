@@ -664,7 +664,7 @@ services:
 ```yaml
 services:
   agent:
-    path: ./agent      # relative path to agent workspace within repo
+    path: ./agent      # agent workspace: a directory inside the app (not the app dir itself)
     name: my-agent     # agent ID, must match [a-z][a-z0-9-]{1,63}
     isolate_memory: true # optional, default false
     disable_archive: true # optional, default false
@@ -677,7 +677,9 @@ When declared, the gateway injects a `debian:stable-slim` container, mounts the 
 
 `disable_archive: true` [turns the memory archive off](../reference/memory-settings.md#turning-the-memory-archive-off) for this agent: no `kb.sqlite` is built and `memory_search`/`memory_get` are not offered. Use it for an agent that keeps its own per-tenant memory files, such as `memory/family-<id>.md`, because the archive indexes every file into one index that any conversation can search. It must be a boolean and does not turn on `isolate_memory`. The gateway writes it to the agent's `disableArchive` at install, update, reconfigure and every gateway start, like `isolate_memory`.
 
-`env` lists the app secrets that the agent container receives. The app's `.env` holds the secrets of every service, such as database passwords, so the agent container never gets that file. Instead it gets `.env.agent` (mode `0600`), which holds only the `.env` lines whose key is in `env`. Without `env`, the file is empty and the agent container has no app secrets. Each name must be a secret that another service declares in its `environment`, either a bare `KEY` or a `KEY=!generate:...`/`KEY=!default:...` entry; any other name fails the parse. The gateway rewrites `.env.agent` from `.env` at install, update, reconfigure (and its rollback) and backup restore. An app installed before `env` existed keeps giving its agent the full `.env` until it is updated, reinstalled or reconfigured.
+`env` lists the app secrets that the agent container receives. The app's `.env` holds the secrets of every service, such as database passwords, so the agent container never gets that file. Instead it gets `.env.agent` (mode `0600`), which holds only the `.env` lines whose key is in `env`. Without `env`, the file is empty and the agent container has no app secrets. Each name must be a secret that another service declares in its `environment`, either a bare `KEY` or a `KEY=!generate:...`/`KEY=!default:...` entry; any other name fails the parse. The gateway rewrites `.env.agent` from `.env` whenever it generates the agent service (install, update, reconfigure, a Codex runtime refresh and the start-up container migration), at a reconfigure rollback and at backup restore. A restore recreates the app's containers so that they read the restored files. An app installed before `env` existed keeps giving its agent the full `.env` until the gateway next generates its agent service. From then on its agent gets only the names its recorded declaration lists, which is none until an update installs an `app.yaml` that declares `env`.
+
+`path` is mounted into the agent container, so it must name a directory inside the app. The app directory itself (`.`), a path that leaves it (`../...`) and an absolute path fail the parse, and a symlinked `path` that resolves outside its subdirectories fails the install.
 
 **Host script bridge (`gateway_api`):**
 

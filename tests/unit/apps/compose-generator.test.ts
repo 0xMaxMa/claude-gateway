@@ -376,6 +376,24 @@ services:
         }
       });
 
+      it('rejects an agent path that is the app dir or leaves it (#618)', () => {
+        const y = (p: string) => `
+apiVersion: apps.getpod.ai/v1
+name: my-app
+version: 1.0.0
+services:
+  web:
+    image: nginx:1.25
+  agent:
+    path: "${p}"
+    name: my-agent-bot
+`.trim();
+        for (const ok of ['./agent', 'agent/', 'a/../agent']) expect(() => parseAppYaml(y(ok), dir)).not.toThrow();
+        for (const bad of ['.', './', '..', '../other', 'agent/../..', '/etc']) {
+          expect(() => parseAppYaml(y(bad), dir)).toThrow('"path" must be a directory inside the app, such as ./agent');
+        }
+      });
+
       it('accepts env as a list of variable names and rejects anything else (#618)', () => {
         const y = (value: string) => `
 apiVersion: apps.getpod.ai/v1

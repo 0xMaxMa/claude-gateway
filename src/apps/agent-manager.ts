@@ -37,9 +37,11 @@ export function writeAgentEnvFile(installPath: string, declaration: Pick<AgentDe
   const allowed = new Set(declaration.env ?? []);
   const envPath = path.join(installPath, '.env');
   const appEnv = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8').split('\n') : [];
-  const lines = appEnv.filter((line) => line.includes('=') && allowed.has(line.slice(0, line.indexOf('='))));
+  const lines = appEnv.filter((line) => line.includes('=') && allowed.has(line.slice(0, line.indexOf('=')).trim()));
   const agentEnvPath = path.join(installPath, '.env.agent');
-  fs.writeFileSync(agentEnvPath, lines.map((l) => l + '\n').join(''), { mode: 0o600 });
+  // Replace, never write through: an app repo could ship .env.agent as a symlink.
+  fs.rmSync(agentEnvPath, { force: true });
+  fs.writeFileSync(agentEnvPath, lines.map((l) => l + '\n').join(''), { mode: 0o600, flag: 'wx' });
   fs.chmodSync(agentEnvPath, 0o600);
 }
 
@@ -200,6 +202,10 @@ export class AgentManager {
     // Resolve symlinks so Docker daemon gets the real path — avoids Docker creating
     // a root-owned empty directory instead of bind-mounting the existing one.
     const workspaceDir = fs.realpathSync(path.join(entry.installPath, agentRelPath));
+    // A symlinked agent path must not mount the app dir, which holds its .env (#618).
+    if (!workspaceDir.startsWith(fs.realpathSync(entry.installPath) + path.sep)) {
+      throw new Error(`Agent path "${agentRelPath}" resolves outside the app directory`);
+    }
 
     let uid = 1000;
     try { uid = os.userInfo().uid; } catch { /* use 1000 */ }

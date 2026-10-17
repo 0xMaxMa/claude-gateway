@@ -311,6 +311,8 @@ describe('AppInstaller — backup/restore', () => {
 
     expect(job.status).toBe('completed');
     expect(fs.readFileSync(path.join(appsDir, 'shop', '.env.agent'), 'utf-8')).toBe('SECRET=restored\n');
+    // compose does not notice a changed env_file, so only a recreate applies it.
+    expect(joinCalls(calls).some((l) => l.includes('compose -p shop up') && l.includes('--force-recreate'))).toBe(true);
   });
 
   it('U-RS-2: restore across a differing app version warns but proceeds', async () => {

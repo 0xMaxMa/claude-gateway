@@ -1103,7 +1103,9 @@ export class AppInstaller {
       if (entry.agentDeclaration) writeAgentEnvFile(appDir, entry.agentDeclaration);
 
       log(`Starting "${appName}" on restored data`);
-      await this.composeUp(appName, appDir);
+      // Recreate: compose does not notice a changed env_file, so a plain `up`
+      // would restart the containers with the pre-restore .env/.env.agent.
+      await this.composeUp(appName, appDir, undefined, { forceRecreate: true });
       await this.registry.updateStatus(appName, 'running').catch(() => {});
 
       log(`Restore of "${backupId}" complete`);
@@ -2469,10 +2471,6 @@ export class AppInstaller {
         this.log(job, 'Updating docker-compose.yml');
         fs.writeFileSync(composePath, newComposeContent);
       }
-      if (newAgent && this.agentManager && (hasPortChange || entry.agentPaths)) {
-        const agentPaths = entry.agentPaths ?? this.agentManager.detectAgentPaths();
-        await this.agentManager.injectAgentService({ ...nextEntry, agentPaths });
-      }
 
       // Merge the new env vars onto the existing .env: keys not supplied are
       // preserved, and existing generated-secret values are carried over rather
@@ -2480,7 +2478,11 @@ export class AppInstaller {
       this.log(job, 'Writing .env');
       const mergedEnv = { ...this.readEnvFile(appDir), ...(options.envVars ?? {}) };
       this.writeEnvFile(appDir, appName, generated, mergedEnv);
-      if (newAgent) writeAgentEnvFile(appDir, newAgent);
+      // After .env: injecting rewrites .env.agent from it.
+      if (newAgent && this.agentManager && (hasPortChange || entry.agentPaths)) {
+        const agentPaths = entry.agentPaths ?? this.agentManager.detectAgentPaths();
+        await this.agentManager.injectAgentService({ ...nextEntry, agentPaths });
+      }
 
       // Deregister old proxy routes before the port mapping changes (the proxy is
       // bound to the old hostPort).

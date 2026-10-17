@@ -676,6 +676,12 @@ function validateAgentServiceDecl(svcDef: unknown): void {
   if (typeof obj['path'] !== 'string' || !obj['path']) {
     throw new Error('Agent service declaration: "path" is required');
   }
+  // The path is mounted into the agent container, so it must name a directory
+  // below the app dir: the app dir itself holds the app's .env (#618).
+  const agentPath = path.posix.normalize(obj['path']);
+  if (agentPath.startsWith('/') || ['.', './', '..', '../'].includes(agentPath) || agentPath.startsWith('../')) {
+    throw new Error('Agent service declaration: "path" must be a directory inside the app, such as ./agent');
+  }
   if (typeof obj['name'] !== 'string' || !AGENT_NAME_RE.test(obj['name'])) {
     throw new Error(
       `Agent service declaration: "name" must match ${AGENT_NAME_RE} (got "${obj['name']}")`,

@@ -173,6 +173,42 @@ describe('AgentManager', () => {
         expect(fs.statSync(path.join(entry.installPath, '.env.agent')).mode & 0o777).toBe(0o600);
       });
 
+      it('matches a declared name with whitespace around the key', async () => {
+        const entry = makeEntry(tmpDir);
+        entry.agentDeclaration = { ...entry.agentDeclaration!, env: ['AGENT_API_TOKEN'] };
+        fs.writeFileSync(path.join(entry.installPath, '.env'), 'DB_PASSWORD=db-secret\n  AGENT_API_TOKEN=agent-token\n');
+
+        await manager.injectAgentService(entry);
+
+        expect(fs.readFileSync(path.join(entry.installPath, '.env.agent'), 'utf-8')).toBe('  AGENT_API_TOKEN=agent-token\n');
+      });
+
+      it('replaces a .env.agent symlink instead of writing through it', async () => {
+        const entry = makeEntry(tmpDir);
+        entry.agentDeclaration = { ...entry.agentDeclaration!, env: ['AGENT_API_TOKEN'] };
+        fs.writeFileSync(path.join(entry.installPath, '.env'), APP_ENV);
+        const victim = path.join(tmpDir, 'victim.json');
+        fs.writeFileSync(victim, '{"keep":true}', { mode: 0o644 });
+        fs.symlinkSync(victim, path.join(entry.installPath, '.env.agent'));
+
+        await manager.injectAgentService(entry);
+
+        expect(fs.readFileSync(victim, 'utf-8')).toBe('{"keep":true}');
+        expect(fs.statSync(victim).mode & 0o777).toBe(0o644);
+        expect(fs.lstatSync(path.join(entry.installPath, '.env.agent')).isSymbolicLink()).toBe(false);
+        expect(resolvedAgentEnv(entry)).toEqual({ AGENT_API_TOKEN: 'agent-token' });
+      });
+
+      it('refuses an agent path that is a symlink to the app dir', async () => {
+        const entry = makeEntry(tmpDir);
+        fs.rmSync(path.join(entry.installPath, 'agent'), { recursive: true });
+        fs.symlinkSync('.', path.join(entry.installPath, 'agent'));
+        fs.writeFileSync(path.join(entry.installPath, '.env'), APP_ENV);
+
+        await expect(manager.injectAgentService(entry)).rejects.toThrow('Agent path "./agent" resolves outside the app directory');
+        expect(fs.readFileSync(path.join(entry.installPath, 'docker-compose.yml'), 'utf-8')).not.toContain('agent:');
+      });
+
       it('does not pass a line without "=" whose text starts with a declared name', async () => {
         const entry = makeEntry(tmpDir);
         entry.agentDeclaration = { ...entry.agentDeclaration!, env: ['AGENT_API_TOKEN'] };
