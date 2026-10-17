@@ -229,4 +229,61 @@ describe('curator.curateOnce', () => {
     expect(fs.existsSync(path.join(archive, day))).toBe(false);
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it('re-tracks a skill restored from the archive, so the cap still covers it and it stays origin:auto', () => {
+    const { db, ws, dir } = setup();
+    const now = 100 * DAY;
+    seedSkill(db, ws, 'kept', { origin: 'auto', createdAt: now, timesLoaded: 5, lastUsedAt: now - DAY });
+    // Moved back from skills/.archive/ by hand: on disk, but its stat row was dropped at archive time.
+    fs.mkdirSync(path.join(ws, 'skills', 'restored'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'skills', 'restored', 'SKILL.md'), '---\nname: restored\ndescription: "x"\norigin: auto\ncreatedAt: 1\n---\nbody\n', 'utf-8');
+
+    curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ maxAutoSkills: 5, minUsesToKeep: 0, maxAgeDays: 0 }), now });
+    expect(db.getSkillStat('restored')).toMatchObject({ origin: 'auto', createdAt: now, timesLoaded: 0 });
+
+    const r = curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ maxAutoSkills: 1, minUsesToKeep: 0, maxAgeDays: 0 }), now: now + DAY });
+    expect(r.evicted).toEqual(['kept']); // the restored skill is counted against the cap again
+    expect(exists(ws, 'restored')).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('flips a restored skill counted before the sweep (row origin user) back to auto, keeping its load count', () => {
+    const { db, ws, dir } = setup();
+    const now = 100 * DAY;
+    fs.mkdirSync(path.join(ws, 'skills', 'restored'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'skills', 'restored', 'SKILL.md'), '---\nname: restored\ndescription: "x"\norigin: auto\n---\nbody\n', 'utf-8');
+    db.bumpSkillLoaded('restored', now - DAY); // first load inserts an origin:user row
+    seedSkill(db, ws, 'handmade', { origin: 'user', createdAt: now - 50 * DAY, timesLoaded: 0 });
+
+    curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg(), now });
+    expect(db.getSkillStat('restored')).toMatchObject({ origin: 'auto', createdAt: now, timesLoaded: 1 });
+    expect(db.getSkillStat('handmade')).toMatchObject({ origin: 'user' }); // never claimed
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('moves on to the next LRU candidate when an archive fails, so the cap holds', () => {
+    const { db, ws, dir } = setup();
+    const now = 100 * DAY;
+    seedSkill(db, ws, 'a1', { origin: 'auto', createdAt: now, timesLoaded: 5, lastUsedAt: now - 1 * DAY });
+    seedSkill(db, ws, 'a2', { origin: 'auto', createdAt: now, timesLoaded: 5, lastUsedAt: now - 5 * DAY });
+    seedSkill(db, ws, 'a3', { origin: 'auto', createdAt: now, timesLoaded: 5, lastUsedAt: now - 10 * DAY }); // oldest
+    // Both archive destinations for a3 are non-empty directories, so its rename fails.
+    const dayDir = path.join(ws, 'skills', ARCHIVE_DIRNAME, new Date(now).toISOString().slice(0, 10));
+    for (const d of ['a3', `a3-${now}`]) fs.mkdirSync(path.join(dayDir, d, 'occupied'), { recursive: true });
+
+    const r = curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ maxAutoSkills: 2, minUsesToKeep: 0, maxAgeDays: 0 }), now });
+    expect(r.evicted).toEqual(['a2']);
+    expect(exists(ws, 'a3')).toBe(true);
+    expect(exists(ws, 'a1')).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps archive folders whose name is not a real date', () => {
+    const { db, ws, dir } = setup();
+    const archive = path.join(ws, 'skills', ARCHIVE_DIRNAME);
+    for (const d of ['2026-13-01', '2020-02-30']) fs.mkdirSync(path.join(archive, d, 's'), { recursive: true });
+    curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ enabled: false }), now: Date.parse('2027-01-01T00:00:00Z') });
+    expect(fs.readdirSync(archive).sort()).toEqual(['2020-02-30', '2026-13-01']);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });

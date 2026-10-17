@@ -8,6 +8,7 @@
  */
 
 import { createHash } from 'crypto';
+import * as path from 'path';
 import { loadSkills, type SkillCatalogUsage, type SkillRegistry } from '../../skills/loader';
 import { extractFrontmatter } from '../../skills/parser';
 import { HistoryDB } from '../../history/db';
@@ -48,9 +49,9 @@ interface Accum {
   reviewedTranscriptHash?: string;
 }
 
-/** Per-skill load counts for the skills menu (hide-until-used). */
+/** Per-skill usage for the skills menu (hide-until-used). */
 export function skillCatalogUsage(db: HistoryDB, now = Date.now()): SkillCatalogUsage {
-  return { now, timesLoaded: new Map(db.listSkillStats().map((s) => [s.name, s.timesLoaded])) };
+  return { now, stats: new Map(db.listSkillStats().map((s) => [s.name, { timesLoaded: s.timesLoaded, createdAt: s.createdAt }])) };
 }
 
 /** Read-only skill descriptions are trimmed for the reviewer prompt (plugins can add ~100 of them). */
@@ -61,7 +62,23 @@ const READ_ONLY_DESC_MAX = 120;
  * Skill-tool calls. Plugin skills outside the registry are not tracked in skill_stats.
  */
 export function managedTurnSkills(invoked: string[] | undefined, used: string[] | undefined, registry: SkillRegistry): string[] {
-  return [...new Set([...(invoked ?? []), ...(used ?? [])])].filter((name) => registry.skills.has(name));
+  // A task's skill runs as a task-specific plugin skill named orchestration-task:<name>.
+  const names = [...(invoked ?? []), ...(used ?? [])].map((name) => name.replace(/^orchestration-task:/, ''));
+  return [...new Set(names)].filter((name) => registry.skills.has(name));
+}
+
+/**
+ * The registry skill a direct-turn tool call loaded: a Skill-tool call by name, or a
+ * Read of the skill's SKILL.md (how an agent follows a menu entry on its own).
+ */
+export function toolUseSkill(block: { name?: string; input?: Record<string, unknown> }, registry: SkillRegistry): string | undefined {
+  const skill = block.input?.['skill'];
+  if (block.name === 'Skill' && typeof skill === 'string') return registry.skills.has(skill) ? skill : undefined;
+  const file = block.input?.['file_path'];
+  if (block.name !== 'Read' || typeof file !== 'string' || path.basename(file) !== 'SKILL.md') return undefined;
+  const target = path.resolve(file);
+  for (const [key, def] of registry.skills) if (def.filePath && path.resolve(def.filePath) === target) return key;
+  return undefined;
 }
 
 /** A skill installed outside the workspace (e.g. a Claude Code plugin skill). */
@@ -94,6 +111,8 @@ export interface SkillLearningManagerOpts {
   sendNotification?: SkillNotifierOpts['send'];
   /** Injectable notifier (tests). Production uses the origin-session sender. */
   notifier?: SkillNotifier;
+  /** Skills a finished turn loaded (after their counts were bumped). */
+  onSkillsLoaded?: (names: string[]) => void;
 }
 
 export class SkillLearningManager {
@@ -108,6 +127,7 @@ export class SkillLearningManager {
   private readonly reviewSpawn?: ClaudeSpawnFn;
   private readonly now: () => number;
   private readonly notifier: SkillNotifier;
+  private readonly onSkillsLoaded?: (names: string[]) => void;
 
   private readonly accum = new Map<string, Accum>();
   private readonly reviewInFlight = new Set<string>();
@@ -123,6 +143,7 @@ export class SkillLearningManager {
     this.logger = opts.logger;
     this.reviewSpawn = opts.reviewSpawn;
     this.now = opts.now ?? Date.now;
+    this.onSkillsLoaded = opts.onSkillsLoaded;
     this.cfg = resolveSkillLearningConfig(opts.agentCfg, opts.globalCfg, opts.gatewayTimezone);
     this.notifier =
       opts.notifier ??
@@ -183,6 +204,11 @@ export class SkillLearningManager {
     }
   }
 
+  /** The agent loaded a skill mid-turn (Skill tool, or a Read of its SKILL.md). */
+  onSkillUsed(mapKey: string, name: string): void {
+    this.accum.get(mapKey)?.skillsLoaded.add(name);
+  }
+
   /** A tool_use block streamed by. Deduped by block id (cumulative snapshots). */
   onToolUse(mapKey: string, toolUseId?: string): void {
     const a = this.accum.get(mapKey);
@@ -230,6 +256,7 @@ export class SkillLearningManager {
         enabled: this.cfg.enabled ? 1 : 0,
       });
       for (const name of skills) this.db.bumpSkillLoaded(name, ts);
+      if (skills.length) this.onSkillsLoaded?.(skills);
       a.sigMaxToolCalls = Math.max(a.sigMaxToolCalls, a.toolCalls);
       this.scheduleIdleReview(mapKey, sessionId);
     } catch {
@@ -421,16 +448,13 @@ export class SkillLearningManager {
       .join('\n');
   }
 
-  /** All loaded skills with resolved provenance + path (for dedup + guards). */
+  /**
+   * All loaded skills with resolved provenance + path (for dedup + guards). Registry
+   * skills come first and win a name clash: a same-named installed copy (e.g. a shared
+   * skill synced to ~/.claude/skills) must neither shadow an auto skill nor be listed twice.
+   */
   private async loadExistingSkills(): Promise<ExistingSkill[]> {
     const out: ExistingSkill[] = [];
-    try {
-      for (const s of (await this.installedSkills?.()) ?? []) {
-        out.push({ name: s.name, description: s.description, origin: 'user', filePath: s.filePath ?? '' });
-      }
-    } catch (err) {
-      this.logger?.warn?.(`[skill-learning:${this.agentId}] installed-skill discovery failed: ${(err as Error).message}`);
-    }
     try {
       const registry = loadSkills({
         workspaceDir: this.workspaceDir,
@@ -446,9 +470,19 @@ export class SkillLearningManager {
         }
         out.push({ name: skill.name, description: skill.description, origin, filePath: skill.filePath });
       }
-      return out;
     } catch {
-      return out;
+      /* installed skills below still guard against re-learning */
     }
+    try {
+      const seen = new Set(out.map((s) => s.name));
+      for (const s of (await this.installedSkills?.()) ?? []) {
+        if (seen.has(s.name)) continue;
+        seen.add(s.name);
+        out.push({ name: s.name, description: s.description, origin: 'user', filePath: s.filePath ?? '' });
+      }
+    } catch (err) {
+      this.logger?.warn?.(`[skill-learning:${this.agentId}] installed-skill discovery failed: ${(err as Error).message}`);
+    }
+    return out;
   }
 }

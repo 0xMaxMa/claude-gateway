@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { HistoryDB } from '../../../src/history/db';
-import { SkillLearningManager, managedTurnSkills, type SkillLearningManagerOpts } from '../../../src/agent/skill-learning';
+import { SkillLearningManager, managedTurnSkills, toolUseSkill, type SkillLearningManagerOpts } from '../../../src/agent/skill-learning';
 import { extractFrontmatter } from '../../../src/skills/parser';
 import type { ClaudeSpawnFn } from '../../../src/agent/skill-learning/reviewer';
 import type { SkillLearningConfig } from '../../../src/agent/skill-learning/types';
@@ -273,5 +273,81 @@ describe('managedTurnSkills', () => {
     const registry = { skills: new Map([['learned-flow', {}], ['task-skill', {}]]) } as never;
     expect(managedTurnSkills(['task-skill', 'pstack:arena'], ['learned-flow', 'pstack:tdd', 'task-skill'], registry).sort()).toEqual(['learned-flow', 'task-skill']);
     expect(managedTurnSkills(undefined, undefined, registry)).toEqual([]);
+  });
+
+  it('counts a task-plugin Skill call (orchestration-task:<name>) as the registry skill', () => {
+    const registry = { skills: new Map([['learned-flow', {}]]) } as never;
+    expect(managedTurnSkills([], ['orchestration-task:learned-flow'], registry)).toEqual(['learned-flow']);
+  });
+});
+
+describe('direct-turn skill usage', () => {
+  const registry = (ws: string) => ({
+    skills: new Map([
+      ['learned', { filePath: path.join(ws, 'skills', 'learned', 'SKILL.md') }],
+      ['mod:tool', { filePath: '/mcp/mod/skills/tool/SKILL.md' }],
+    ]),
+  }) as never;
+
+  it('maps a Skill-tool call or a Read of a registry SKILL.md to the skill', () => {
+    const r = registry('/ws');
+    expect(toolUseSkill({ name: 'Skill', input: { skill: 'learned' } }, r)).toBe('learned');
+    expect(toolUseSkill({ name: 'Read', input: { file_path: '/ws/skills/learned/SKILL.md' } }, r)).toBe('learned');
+    expect(toolUseSkill({ name: 'Read', input: { file_path: '/ws/skills/../skills/learned/SKILL.md' } }, r)).toBe('learned');
+    expect(toolUseSkill({ name: 'Read', input: { file_path: '/mcp/mod/skills/tool/SKILL.md' } }, r)).toBe('mod:tool');
+    expect(toolUseSkill({ name: 'Skill', input: { skill: 'pstack:tdd' } }, r)).toBeUndefined();
+    expect(toolUseSkill({ name: 'Read', input: { file_path: '/ws/skills/learned/notes.md' } }, r)).toBeUndefined();
+    expect(toolUseSkill({ name: 'Bash', input: { command: 'cat /ws/skills/learned/SKILL.md' } }, r)).toBeUndefined();
+    expect(toolUseSkill({ name: 'Read', input: { file_path: 42 } }, r)).toBeUndefined();
+  });
+
+  it('a skill the agent loaded itself in a direct turn bumps its load count once per turn', () => {
+    const { db, mgr, dir } = setup();
+    mgr.onTurnStart('chat1', 'sess1', 'deploy it', []);
+    mgr.onSkillUsed('chat1', 'learned');
+    mgr.onSkillUsed('chat1', 'learned'); // cumulative snapshot re-emits the block
+    mgr.onTurnEnd('chat1', 'sess1');
+    expect(db.getSkillStat('learned')!.timesLoaded).toBe(1);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reports loaded skills so a hidden skill can rejoin the catalog right away', () => {
+    const loaded: string[][] = [];
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sl-mgr-'));
+    const live = new SkillLearningManager({ db: HistoryDB.forAgent(dir, 'agent-cb'), agentId: 'agent-cb', workspaceDir: dir, now: () => NOW, onSkillsLoaded: (names) => loaded.push(names) });
+    live.onTurnStart('chat1', 'sess1', 'x', ['learned']);
+    live.onTurnEnd('chat1', 'sess1');
+    expect(loaded).toEqual([['learned']]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('installed skills vs workspace skills', () => {
+  it('an installed skill with the same name never shadows the workspace auto skill (still editable, listed once)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sl-mgr-'));
+    const ws = path.join(dir, 'ws');
+    fs.mkdirSync(path.join(ws, 'skills', 'learned'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'skills', 'learned', 'SKILL.md'), '---\nname: learned\ndescription: "learned flow"\norigin: auto\ncreatedAt: 1\n---\nold body\n', 'utf-8');
+    const db = HistoryDB.forAgent(dir, `agent-${Math.random().toString(36).slice(2)}`);
+    let reviewerInput = '';
+    const spawn: ClaudeSpawnFn = async (_args, stdin) => {
+      reviewerInput = stdin;
+      return { stdout: JSON.stringify({ type: 'result', result: JSON.stringify({ action: 'edit', targetSkill: 'learned', desc: 'learned flow', body: 'new body' }), usage: { input_tokens: 1, output_tokens: 1 } }) };
+    };
+    const mgr = new SkillLearningManager({
+      db, agentId: 'agent-x', workspaceDir: ws, globalCfg: { minToolCalls: 3 }, reviewSpawn: spawn, now: () => NOW,
+      // ~/.claude/skills copy under the same bare name (scanned without a plugin prefix).
+      installedSkills: async () => [{ name: 'learned', description: 'learned flow', filePath: '/home/u/.claude/skills/learned/SKILL.md' }],
+    });
+    seedTranscript(db, 'sess1');
+    mgr.onTurnStart('chat1', 'sess1', 'deploy the thing', []);
+    for (let i = 0; i < 4; i++) mgr.onToolUse('chat1', `id-${i}`);
+    mgr.onTurnEnd('chat1', 'sess1');
+
+    await mgr.runReviewNow('chat1', 'sess1');
+
+    expect(fs.readFileSync(path.join(ws, 'skills', 'learned', 'SKILL.md'), 'utf-8')).toContain('new body');
+    expect(reviewerInput.match(/- learned: /g)).toHaveLength(1);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

@@ -83,7 +83,7 @@ import { receiveChannelMedia } from '../orchestration/channel-media';
 import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
 import type { HistorySource, ChatChannel, ChatChannelOrApi } from '../history/types';
 import { isChatChannel } from '../history/types';
-import { managedTurnSkills, type SkillLearningManager } from './skill-learning';
+import { managedTurnSkills, toolUseSkill, type SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 import { resolveEnabledConnectors } from '../connectors/resolve';
 
@@ -768,6 +768,11 @@ export class AgentRunner extends EventEmitter {
 
   getSkillRegistry(): SkillRegistry {
     return this.skillRegistry;
+  }
+
+  /** A hidden auto skill that just got used rejoins the orchestration catalog (the menu follows on reload). */
+  unhideSkills(names: string[]): void {
+    for (const name of names) this.skillRegistry.hiddenUntilUsed?.delete(name);
   }
 
   /** Wire the skill-learning manager (planning-62). Optional; unset = feature off. */
@@ -2555,6 +2560,8 @@ export class AgentRunner extends EventEmitter {
                 // completed blocks). Cheap, best-effort.
                 if (block.type === 'tool_use') {
                   this.skillLearning?.onToolUse(mapKey, (block as Record<string, unknown>)['id'] as string | undefined);
+                  const usedSkill = toolUseSkill(block, this.skillRegistry);
+                  if (usedSkill) this.skillLearning?.onSkillUsed(mapKey, usedSkill);
                 }
                 // LINE sends images through its own line_image tool (not the reply
                 // tool's `files`), so capture those sends into history too — the

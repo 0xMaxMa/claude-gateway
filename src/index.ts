@@ -313,7 +313,12 @@ async function startAgent(
       workspaceDir: agentConfig.workspace,
       mcpToolsDir,
       sharedSkillsDir,
-      installedSkills: async () => (await discoverWorkerExtensions(agentConfig, gatewayConfig)).skills,
+      // Reuse the CLI skill list the runner already discovered; scan only when it has none.
+      installedSkills: async () => {
+        const registry = runner.getSkillRegistry();
+        return registry.cliSkills && !registry.cliDiscoveryError ? registry.cliSkills : (await discoverWorkerExtensions(agentConfig, gatewayConfig)).skills;
+      },
+      onSkillsLoaded: (names) => runner.unhideSkills(names),
       globalCfg: gatewayConfig.gateway.skillLearning,
       // Isolate mode (#601): a skill learned from one conversation is offered to
       // every other one, so the reviewer stays off (as dreaming does below).

@@ -6,7 +6,8 @@
  *   - NEVER touch hand-authored (non-auto) or pinned skills;
  *   - archive instead of delete: a removed skill moves to
  *     `skills/.archive/<YYYY-MM-DD>/<name>/` (outside the catalog) and is kept
- *     `ARCHIVE_RETENTION_DAYS`; restore by moving the directory back to `skills/`;
+ *     `ARCHIVE_RETENTION_DAYS`; restore by moving the directory back to `skills/`
+ *     (the next sweep re-tracks it as auto);
  *   - run telemetry retention even when learning is disabled (tables don't grow
  *     unbounded);
  *   - log the effectiveness rollup headline.
@@ -65,6 +66,7 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
     return result;
   }
 
+  trackUntrackedAutoSkills(deps);
   const auto = db.listSkillStats().filter((s) => s.origin === 'auto' && s.pinned !== 1);
 
   // 1. Stale + unused prune (both conditions; age-prune disabled when maxAgeDays<=0).
@@ -73,11 +75,10 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
     const ageMs = s.createdAt != null ? now - s.createdAt : 0;
     const unused = s.timesLoaded < cfg.minUsesToKeep;
     const stale = cfg.maxAgeDays > 0 && ageMs > cfg.maxAgeDays * DAY_MS;
-    if (unused && stale) {
-      if (archiveSkill(s.name, deps)) result.pruned.push(s.name);
-    } else {
-      survivors.push(s);
-    }
+    const outcome = unused && stale ? archiveSkill(s.name, deps) : 'kept';
+    if (outcome === 'archived') result.pruned.push(s.name);
+    // A failed archive is still an auto skill on disk: it counts against the cap.
+    else if (outcome !== 'untracked') survivors.push(s);
   }
 
   // 2. Cap eviction (LRU) among the survivors (0 = unbounded).
@@ -88,9 +89,13 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
       // brand-new (lastUsedAt=null) skill is not treated as the stalest and
       // evicted before it is ever loaded.
       .sort((a, b) => (a.lastUsedAt ?? a.createdAt ?? 0) - (b.lastUsedAt ?? b.createdAt ?? 0));
-    const overflow = survivors.length - cfg.maxAutoSkills;
-    for (const s of lru.slice(0, overflow)) {
-      if (archiveSkill(s.name, deps)) result.evicted.push(s.name);
+    let overflow = survivors.length - cfg.maxAutoSkills;
+    // A failed archive moves on to the next candidate, so the cap still holds.
+    for (const s of lru) {
+      if (overflow <= 0) break;
+      const outcome = archiveSkill(s.name, deps);
+      if (outcome === 'archived') result.evicted.push(s.name);
+      if (outcome !== 'failed') overflow--;
     }
   }
 
@@ -99,26 +104,57 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
 }
 
 /**
- * Move an auto skill into the dated archive + drop its stat row. Returns `true`
- * only if the directory was moved. Provenance is re-verified against the on-disk
+ * Give every on-disk auto skill an `origin: auto` stat row. A skill restored from the
+ * archive lost its row at archive time (and its first load re-creates it as
+ * origin:user), which would take it out of the cap for good. The row's age clock
+ * starts now, so a restored skill gets a fresh grace window.
+ */
+function trackUntrackedAutoSkills(deps: CuratorDeps): void {
+  const skillsDir = path.join(deps.workspaceDir, 'skills');
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(skillsDir);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (name.startsWith('.') || !isOwnedAutoSkillDir(path.join(skillsDir, name))) continue;
+    const row = deps.db.getSkillStat(name);
+    if (row?.origin === 'auto') continue;
+    deps.db.recordSkillCreated({
+      name,
+      origin: 'auto',
+      createdAt: row?.createdAt ?? deps.now,
+      createdFromSession: row?.createdFromSession ?? null,
+      pinned: row?.pinned ?? 0,
+    });
+  }
+}
+
+type ArchiveOutcome = 'archived' | 'untracked' | 'failed';
+
+/**
+ * Move an auto skill into the dated archive + drop its stat row. Returns
+ * `archived` only if the directory was moved. Provenance is re-verified against the on-disk
  * file, not the (possibly stale) stat row: anything that is not a real directory
  * holding an `origin: auto`, unpinned SKILL.md stays put — a user who "adopts" an
  * auto skill (flips `origin` or sets `pinned: true`) keeps it, and a symlink or a
  * directory without SKILL.md is never moved; its stat row is dropped so it stops
- * being tracked as auto. A failed move keeps the row so the next sweep retries.
+ * being tracked as auto (`untracked`). A failed move keeps the row so the next
+ * sweep retries (`failed`).
  */
-function archiveSkill(name: string, deps: CuratorDeps): boolean {
+function archiveSkill(name: string, deps: CuratorDeps): ArchiveOutcome {
   const skillsDir = path.join(deps.workspaceDir, 'skills');
   const skillDir = path.join(skillsDir, name);
   // A stat-row name is not a trusted path segment: never follow one out of skills/.
   if (path.basename(name) !== name || name.startsWith('.') || !isOwnedAutoSkillDir(skillDir)) {
     deps.db.deleteSkillStat(name);
-    return false;
+    return 'untracked';
   }
   const archiveDir = path.join(skillsDir, ARCHIVE_DIRNAME);
   if (!archiveDirUsable(archiveDir)) {
     warn(deps, `archive of ${name} skipped: ${archiveDir} is not a real directory`);
-    return false;
+    return 'failed';
   }
   const dayDir = path.join(archiveDir, new Date(deps.now).toISOString().slice(0, 10));
   let dest = path.join(dayDir, name);
@@ -128,11 +164,11 @@ function archiveSkill(name: string, deps: CuratorDeps): boolean {
     fs.renameSync(skillDir, dest);
   } catch (err) {
     warn(deps, `archive of ${name} failed: ${(err as Error).message}`);
-    return false;
+    return 'failed';
   }
   deps.db.deleteSkillStat(name);
   deps.logger?.info(`[skill-learning:${deps.agentId}] archived ${name} → ${dest} (restore: move it back to ${skillDir})`);
-  return true;
+  return 'archived';
 }
 
 /** A failed archive stalls cap/age enforcement, so it must reach the operator. */
@@ -164,7 +200,10 @@ function expireArchive(workspaceDir: string, now: number): void {
   const cutoff = now - ARCHIVE_RETENTION_DAYS * DAY_MS;
   for (const day of days) {
     // Measure from the END of the UTC day so a skill archived late that day still gets the full window.
-    if (!ARCHIVE_DAY_RE.test(day) || Date.parse(`${day}T00:00:00Z`) + DAY_MS > cutoff) continue;
+    if (!ARCHIVE_DAY_RE.test(day)) continue;
+    const start = Date.parse(`${day}T00:00:00Z`);
+    // Not a real calendar day (2026-13-01 is NaN, 2026-02-30 rolls over): not ours, keep it.
+    if (!Number.isFinite(start) || new Date(start).toISOString().slice(0, 10) !== day || start + DAY_MS > cutoff) continue;
     try {
       fs.rmSync(path.join(archiveDir, day), { recursive: true, force: true });
     } catch {

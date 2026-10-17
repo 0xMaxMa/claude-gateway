@@ -19,10 +19,16 @@ export const AUTO_SKILL_MENU_DESC_MAX = 80;
 export const AUTO_SKILL_CATALOG_GRACE_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Load counts that decide which auto skills the menu shows (from `skill_stats`). */
+/** One `skill_stats` row as the menu sees it: load count + the curator's age clock. */
+export interface SkillUsageStat {
+  timesLoaded: number;
+  createdAt: number | null;
+}
+
+/** Usage that decides which auto skills the menu shows (from `skill_stats`). */
 export interface SkillCatalogUsage {
   now: number;
-  timesLoaded: ReadonlyMap<string, number>;
+  stats: ReadonlyMap<string, SkillUsageStat>;
 }
 
 /** The frontmatter of an auto-learned workspace skill; undefined for any other skill. */
@@ -37,11 +43,11 @@ function autoFrontmatter(skill: SkillDefinition): Record<string, unknown> | unde
 }
 
 function hiddenUntilUsed(key: string, fm: Record<string, unknown>, usage: SkillCatalogUsage): boolean {
-  // No stat row (restored from the archive, or copied in by hand): no usage data, keep it listed.
-  const loaded = usage.timesLoaded.get(key);
-  if (fm['pinned'] === true || loaded === undefined || loaded > 0) return false;
-  const createdAt = typeof fm['createdAt'] === 'number' ? fm['createdAt'] : 0;
-  return usage.now - createdAt > AUTO_SKILL_CATALOG_GRACE_DAYS * DAY_MS;
+  // Age comes from the stat row (the clock the curator prunes by; a restored skill is
+  // re-tracked with a fresh one). No row or no creation time: unknown, keep it listed.
+  const stat = usage.stats.get(key);
+  if (fm['pinned'] === true || !stat || stat.timesLoaded > 0 || stat.createdAt == null) return false;
+  return usage.now - stat.createdAt > AUTO_SKILL_CATALOG_GRACE_DAYS * DAY_MS;
 }
 
 /** Menu description for one skill — compacted only for auto-learned skills. */
@@ -59,7 +65,7 @@ export interface SkillRegistry {
   extensionNotices?: string[];
   skills: Map<string, SkillDefinition>;
   /** Auto skills left out of the skills menu and the orchestration catalog (still invocable by name). */
-  hiddenUntilUsed?: ReadonlySet<string>;
+  hiddenUntilUsed?: Set<string>;
 }
 
 export interface LoadSkillsOptions {
@@ -221,16 +227,16 @@ export function hiddenAutoSkills(registry: SkillRegistry, usage: SkillCatalogUsa
 
 /**
  * Render the AVAILABLE SKILLS section for the system prompt.
- * Groups skills by source: workspace, module, shared. With `usage`, never-used
- * auto skills past the grace window are hidden (see AUTO_SKILL_CATALOG_GRACE_DAYS).
+ * Groups skills by source: workspace, module, shared. Skills in
+ * `registry.hiddenUntilUsed` are left out (see AUTO_SKILL_CATALOG_GRACE_DAYS).
  */
-export function renderSkillsSection(registry: SkillRegistry, usage?: SkillCatalogUsage): string {
+export function renderSkillsSection(registry: SkillRegistry): string {
   if (registry.skills.size === 0) return '';
 
   const workspace: string[] = [];
   const module: string[] = [];
   const shared: string[] = [];
-  const hiddenKeys = usage ? hiddenAutoSkills(registry, usage) : new Set<string>();
+  const hiddenKeys = registry.hiddenUntilUsed ?? new Set<string>();
   const hidden = hiddenKeys.size;
 
   for (const [key, skill] of registry.skills) {

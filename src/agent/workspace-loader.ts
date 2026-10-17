@@ -384,7 +384,7 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
     logger: opts?.logger,
   });
   if (opts?.skillUsage) skillRegistry.hiddenUntilUsed = hiddenAutoSkills(skillRegistry, opts.skillUsage);
-  const skillsSection = renderSkillsSection(skillRegistry, opts?.skillUsage);
+  const skillsSection = renderSkillsSection(skillRegistry);
 
   // Assemble system prompt
   // The routing rule sends task-log to memory/<topic>.md for memory_search, which

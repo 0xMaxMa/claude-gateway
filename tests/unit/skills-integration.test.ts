@@ -42,7 +42,7 @@ describe('Skills integration with workspace-loader', () => {
     writeSkill(skillsDir, 'learned', 'name: learned\ndescription: "learned flow"\norigin: auto\ncreatedAt: 0');
     writeSkill(skillsDir, 'handmade', 'name: handmade\ndescription: Handmade flow');
 
-    const result = await loadWorkspace(tmpDir, { skillUsage: { now: 30 * 24 * 60 * 60 * 1000, timesLoaded: new Map([['learned', 0]]) } });
+    const result = await loadWorkspace(tmpDir, { skillUsage: { now: 30 * 24 * 60 * 60 * 1000, stats: new Map([['learned', { timesLoaded: 0, createdAt: 0 }]]) } });
     expect(result.systemPrompt).not.toContain('/learned:');
     expect(result.systemPrompt).toContain('/handmade: Handmade flow');
     expect(result.skillRegistry?.skills.has('learned')).toBe(true); // still invocable by /learned
@@ -53,7 +53,7 @@ describe('Skills integration with workspace-loader', () => {
     writeSkill(skillsDir, 'learned', 'name: learned\ndescription: "learned flow"\norigin: auto\ncreatedAt: 0');
     writeSkill(skillsDir, 'handmade', 'name: handmade\ndescription: Handmade flow');
 
-    const result = await loadWorkspace(tmpDir, { skillUsage: { now: 30 * 24 * 60 * 60 * 1000, timesLoaded: new Map([['learned', 0]]) } });
+    const result = await loadWorkspace(tmpDir, { skillUsage: { now: 30 * 24 * 60 * 60 * 1000, stats: new Map([['learned', { timesLoaded: 0, createdAt: 0 }]]) } });
     const catalog = skillCatalog(result.skillRegistry);
     expect(catalog).not.toContain('"learned"');
     expect(catalog).toContain('"handmade"');
