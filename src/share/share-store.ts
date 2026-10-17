@@ -3,6 +3,7 @@ import * as path from 'path';
 import { createHash, randomBytes, randomInt } from 'crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { MediaStore } from '../history/media-store';
+import { HistoryDB } from '../history/db';
 
 /**
  * Share bridge — SQLite-backed store for short-lived public image shares
@@ -187,6 +188,7 @@ export function validateShareFile(
   ref: string,
   maxFileBytes: number = DEFAULT_MAX_FILE_BYTES,
   allow: ShareAllowKind = 'image',
+  allowedDirs?: string[],
 ): ValidatedShareFile {
   const root = MediaStore.agentMediaRoot(agentsBaseDir, agentId);
   let resolved: string;
@@ -203,6 +205,9 @@ export function validateShareFile(
     }
   } catch {
     throw new ShareError('invalid_path', 'path is outside the agent media root');
+  }
+  if (allowedDirs && !isInsideAnyDir(resolved, allowedDirs)) {
+    throw new ShareError('invalid_path', "path is outside this session's media directory");
   }
   let stat: fs.Stats;
   try {
@@ -237,6 +242,32 @@ export function validateShareFile(
     throw new ShareError('invalid_path', 'path is outside the agent media root');
   }
   return { relativePath, size: stat.size, mime };
+}
+
+/**
+ * Media dirs one session owns (#609): `api-<sessionId>` (API sessions and
+ * orchestration task output) and, for a channel session, `<channel>-<chatId>`
+ * where its inbound media lands. The chat comes from the session's history
+ * rows, so a session with no user message yet owns only its api dir.
+ */
+export function sessionMediaDirs(agentsBaseDir: string, agentId: string, sessionId: string): string[] {
+  const root = MediaStore.agentMediaRoot(agentsBaseDir, agentId);
+  const dirs = [path.join(root, `api-${sessionId}`)];
+  const [first] = HistoryDB.forAgent(agentsBaseDir, agentId).getUserMessagesAfter(sessionId, 0, 1);
+  if (first && first.source !== 'api' && first.source !== 'ui') dirs.push(path.join(root, first.chatId));
+  return dirs.filter((dir) => path.dirname(dir) === root);
+}
+
+/** True when `file` sits strictly inside one of `dirs`, both compared by realpath. */
+export function isInsideAnyDir(file: string, dirs: string[]): boolean {
+  let real: string;
+  try { real = fs.realpathSync(file); } catch { real = path.resolve(file); }
+  return dirs.some((dir) => {
+    let realDir: string;
+    try { realDir = fs.realpathSync(dir); } catch { return false; }
+    const rel = path.relative(realDir, real);
+    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  });
 }
 
 export type MintedShare = {

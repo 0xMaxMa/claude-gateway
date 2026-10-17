@@ -18,6 +18,7 @@ import { agentsDirForConfig } from '../config/agent-env';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
+import { isInsideAnyDir, sessionMediaDirs } from '../share/share-store';
 import { HistoryDB, MAX_HISTORY_LIMIT } from '../history/db';
 import { isChatChannel } from '../history/types';
 import { readTelegramAccess as readTelegramAccessFile, telegramStateDir, type TelegramAccess } from '../telegram/access';
@@ -602,6 +603,15 @@ export function createApiRouter(
     newId?: string,
   ): Promise<void> {
     return withConfigWriteLock(cfgPath, () => writeAgentsToConfigImpl(cfgPath, mutate, newId));
+  }
+
+  // An isolate_memory agent serves many unrelated end users, and the key a
+  // conversation can reach is agent-scoped, so routes that read or message an
+  // arbitrary chat need an admin key for such agents (#609).
+  function denyCrossChatForIsolated(apiKey: ApiKey, agentId: string, res: Response): boolean {
+    if (isAdmin(apiKey) || agentConfigs.get(agentId)?.isolateMemory !== true) return false;
+    res.status(403).json({ error: `Agent '${agentId}' uses isolate_memory: cross-chat access requires an admin key` });
+    return true;
   }
 
   /**
@@ -3741,6 +3751,7 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    if (denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
@@ -3762,6 +3773,7 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    if (denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
@@ -3792,6 +3804,7 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    if (denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
@@ -3863,6 +3876,7 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    if (denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
@@ -3894,6 +3908,7 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    if (denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
@@ -3952,6 +3967,7 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
+    if (denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
@@ -4032,17 +4048,21 @@ export function createApiRouter(
         res.status(400).json({ error: 'files must be an array of strings' });
         return;
       }
-      // Validate all paths stay within the agent's media directory
+      // Validate all paths stay within the agent's media directory, through
+      // realpath so a symlink cannot point outside it. An isolate_memory agent
+      // is further held to this session's own media dirs (#609).
       const agentsBaseDir = runner.getAgentsBaseDir();
-      const mediaRoot = path.join(agentsBaseDir, agentId, 'media') + path.sep;
+      const allowedDirs = agentConfigs.get(agentId)?.isolateMemory === true
+        ? sessionMediaDirs(agentsBaseDir, agentId, sessionId)
+        : [MediaStore.agentMediaRoot(agentsBaseDir, agentId)];
       const validFiles: string[] = [];
       for (const f of files as string[]) {
         const real = path.resolve(f);
-        if (!real.startsWith(mediaRoot)) {
+        if (!isInsideAnyDir(real, allowedDirs)) {
           res.status(400).json({ error: `File path outside media directory: ${f}` });
           return;
         }
-        validFiles.push(real);
+        validFiles.push(fs.existsSync(real) ? fs.realpathSync(real) : real);
       }
       runner.addApiAttachments(sessionId, validFiles);
       res.json({ ok: true, count: validFiles.length });

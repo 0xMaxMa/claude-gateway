@@ -9,6 +9,7 @@ import * as os from 'os';
 import { migrateAccess, defaultAccess } from './pure';
 import { chunkText, htmlToPlain, parseRepliedTurnId } from './typing';
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
+import { assertIsolateMediaPath, assertOriginChat, isolateMode } from '../shared/isolate';
 import type {
   ChannelModule,
   ChannelCapabilities,
@@ -82,7 +83,7 @@ export class TelegramModule implements ChannelModule {
   }
 
   getTools(): McpToolDefinition[] {
-    return [
+    const tools: McpToolDefinition[] = [
       {
         name: 'telegram_reply',
         description:
@@ -157,6 +158,7 @@ export class TelegramModule implements ChannelModule {
         },
       },
     ];
+    return isolateMode() ? tools.filter((t) => t.name !== 'telegram_download_attachment') : tools;
   }
 
   async handleTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
@@ -281,6 +283,7 @@ export class TelegramModule implements ChannelModule {
   }
 
   private assertAllowedChat(chat_id: string): void {
+    assertOriginChat(chat_id);
     const access = this.readAccessFile();
     if (access.allowFrom.includes(chat_id)) return;
     if (access.groupAllowlist.includes(chat_id)) return;
@@ -288,6 +291,7 @@ export class TelegramModule implements ChannelModule {
   }
 
   private assertSendable(f: string): void {
+    assertIsolateMediaPath(f);
     let real: string, stateReal: string;
     try {
       real = fs.realpathSync(f);
@@ -416,6 +420,9 @@ export class TelegramModule implements ChannelModule {
   }
 
   private async handleDownload(args: Record<string, unknown>): Promise<McpToolResult> {
+    // A file_id carries no chat, and nothing records which conversation saw it,
+    // so isolate mode cannot tell this conversation's attachment from another's.
+    if (isolateMode()) throw new Error('isolate mode: downloading attachments by file_id is disabled');
     const file_id = args.file_id as string;
     const token = this.getToken()!;
     const file = await this.bot.api.getFile(file_id);

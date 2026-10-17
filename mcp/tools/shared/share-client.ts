@@ -9,6 +9,8 @@
  * module must not import from src/ (see tests/unit/mcp-no-src-imports.test.ts).
  */
 
+import { assertIsolateMediaPath } from './isolate';
+
 const REQUEST_TIMEOUT_MS = 15_000;
 
 export type ShareRef = { artifact_id?: string; path?: string };
@@ -131,6 +133,16 @@ export async function createShares(
   refs: ShareRef[],
   opts: { purpose?: string; ttlSeconds?: number; allowDocuments?: boolean } = {},
 ): Promise<ShareItem[]> {
+  // Isolate mode: a path ref must sit in this conversation's own media dir. An
+  // artifact ref is already resolved per (agent, session) by the gateway.
+  for (const ref of refs) {
+    if (ref.path === undefined) continue;
+    try {
+      assertIsolateMediaPath(ref.path);
+    } catch (err) {
+      throw new ShareClientError('isolate_path_denied', (err as Error).message, 403);
+    }
+  }
   const body: Record<string, unknown> = {
     agent_id: process.env.GATEWAY_AGENT_ID,
     session_id: process.env.GATEWAY_SESSION_ID,
@@ -195,7 +207,9 @@ function extractError(
 
 /** Revoke a share by id. Throws ShareClientError on failure. */
 export async function revokeShare(shareId: string): Promise<void> {
-  const { status, json } = await callGateway('DELETE', `/api/v1/shares/${encodeURIComponent(shareId)}`);
+  // An isolated agent's share is revoked only by its own session (#609).
+  const session = process.env.GATEWAY_ISOLATE_MEMORY && process.env.GATEWAY_SESSION_ID ? `?session_id=${encodeURIComponent(process.env.GATEWAY_SESSION_ID)}` : '';
+  const { status, json } = await callGateway('DELETE', `/api/v1/shares/${encodeURIComponent(shareId)}${session}`);
   if (status !== 200) {
     const message = typeof json.error === 'string' ? json.error : `revoke failed (HTTP ${status})`;
     throw new ShareClientError('revoke_failed', message, status);

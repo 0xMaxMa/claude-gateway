@@ -37,6 +37,7 @@ import { optimizeImageFile } from '../../../dist/shared/image-optimize.js';
 // dmPolicy/dmAllowlist semantics.
 import { isWhatsAppCloudSenderAllowed } from '../../../dist/api/whatsapp-cloud-access.js';
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
+import { assertIsolateMediaPath, assertOriginChat } from '../shared/isolate';
 
 /**
  * Channel state-directory names that must never be reachable through
@@ -328,6 +329,11 @@ export class WhatsAppCloudModule implements ToolModule {
     if (!chatId) {
       return { content: [{ type: 'text', text: 'whatsapp_cloud_reply: missing chat_id' }], isError: true };
     }
+    try {
+      assertOriginChat(chatId);
+    } catch (err) {
+      return { content: [{ type: 'text', text: `whatsapp_cloud_reply: ${(err as Error).message}` }], isError: true };
+    }
 
     // chat_id allowlist: this channel has no gateway-side relay route to add
     // a second checkpoint to (it posts to Meta directly from this
@@ -420,6 +426,7 @@ export class WhatsAppCloudModule implements ToolModule {
       // instead of half-way through a multi-file batch.
       for (const f of files) {
         assertSendableWhatsAppCloudFile(f);
+        assertIsolateMediaPath(f);
         const st = fs.statSync(f);
         if (st.size > MAX_ATTACHMENT_BYTES) {
           throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);

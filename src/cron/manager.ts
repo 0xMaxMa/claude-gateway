@@ -61,6 +61,9 @@ function chunkPlainText(text: string, limit: number): string[] {
   return chunks;
 }
 
+/** A job the agent's isolation policy forbids (#609); the API maps it to 403. */
+export class CronPolicyError extends Error {}
+
 export class CronManager extends EventEmitter {
   private readonly storePath: string;
   private readonly runsDir: string;
@@ -135,6 +138,7 @@ export class CronManager extends EventEmitter {
   async create(input: CronJobCreate): Promise<CronJob> {
     this.validateSchedule(input);
     this.validatePayload(input);
+    this.assertAllowed(input.agentId, input.type ?? 'command');
 
     const now = Date.now();
     const scheduleKind = input.scheduleKind ?? 'cron';
@@ -199,6 +203,7 @@ export class CronManager extends EventEmitter {
     if (input.type !== undefined || input.command !== undefined || input.prompt !== undefined) {
       const merged = { ...job, ...input };
       this.validatePayload(merged);
+      this.assertAllowed(job.agentId, merged.type ?? 'command');
     }
 
     if (input.scheduleKind !== undefined) job.scheduleKind = input.scheduleKind;
@@ -329,6 +334,23 @@ export class CronManager extends EventEmitter {
     }
   }
 
+  /**
+   * An isolate_memory agent serves many unrelated end users, and any cron
+   * job runs and delivers outside every conversation, so none may be created
+   * for it (#609). A command job is a host shell, which an app agent (a
+   * container) must not reach. executeJob applies the same rule to jobs
+   * created before it held.
+   */
+  private assertAllowed(agentId: string, type: string): void {
+    const agent = this.agentConfigs.get(agentId);
+    if (agent?.isolateMemory === true) {
+      throw new CronPolicyError(`Agent '${agentId}' uses isolate_memory: cron jobs are not allowed`);
+    }
+    if (type === 'command' && agent?.type === 'app-agent') {
+      throw new CronPolicyError(`Agent '${agentId}' is an app agent: type=command cron jobs are not allowed`);
+    }
+  }
+
   private validatePayload(input: { type?: string; command?: string; prompt?: string; telegram?: string; discord?: string }): void {
     const kind = input.type ?? 'command';
     if (kind === 'command') {
@@ -431,6 +453,16 @@ export class CronManager extends EventEmitter {
 
   private async executeJob(job: CronJob): Promise<CronRunLog> {
     const startedAt = Date.now();
+    // A job created before the agent became isolated or an app agent: not an
+    // error and not a run, so leave job state and Run History alone and
+    // deliver nothing (see assertAllowed).
+    try {
+      this.assertAllowed(job.agentId, job.type ?? 'command');
+    } catch (err) {
+      const reason = `skipped: ${(err as Error).message}`;
+      this.logger.warn(`Cron job "${job.name}" ${reason}`, { id: job.id });
+      return { jobId: job.id, startedAt, durationMs: 0, status: 'error', output: reason, error: reason };
+    }
     this.logger.info(`Executing cron job "${job.name}"`, { id: job.id, type: job.type ?? 'command' });
 
     let status: 'ok' | 'error' = 'ok';

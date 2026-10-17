@@ -16,6 +16,7 @@ import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } fro
 import { messagingApi } from '@line/bot-sdk';
 import { chunkText, planLineSend, LINE_TEXT_LIMIT } from './pure';
 import { createShares, ShareClientError, shareBridgeEnabled } from '../shared/share-client';
+import { assertOriginChat } from '../shared/isolate';
 
 /** Default lifetime of a share URL handed to LINE (1 hour). */
 const DEFAULT_MEDIA_URL_TTL_MS = 60 * 60 * 1000;
@@ -128,6 +129,11 @@ export class LineModule implements ToolModule {
     if (!chatId) {
       return { content: [{ type: 'text', text: 'line_reply: missing chat_id' }], isError: true };
     }
+    try {
+      assertOriginChat(chatId);
+    } catch (err) {
+      return { content: [{ type: 'text', text: `line_reply: ${(err as Error).message}` }], isError: true };
+    }
     if (!text) {
       return { content: [{ type: 'text', text: 'line_reply: text cannot be empty' }], isError: true };
     }
@@ -199,6 +205,11 @@ export class LineModule implements ToolModule {
 
     if (!chatId) {
       return { content: [{ type: 'text', text: 'line_image: missing chat_id' }], isError: true };
+    }
+    try {
+      assertOriginChat(chatId);
+    } catch (err) {
+      return { content: [{ type: 'text', text: `line_image: ${(err as Error).message}` }], isError: true };
     }
     if (!image) {
       return { content: [{ type: 'text', text: 'line_image: image path is required' }], isError: true };

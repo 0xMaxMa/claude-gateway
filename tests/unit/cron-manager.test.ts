@@ -1692,3 +1692,77 @@ it('managed recurring runs request fresh data and wait without a total cap unles
   expect(runner.sendApiMessage).toHaveBeenLastCalledWith(expect.any(String),expect.any(String),expect.stringContaining('fresh data'),expect.objectContaining({timeoutMs:45000}));
  }finally{f.manager.stop();}
 });
+
+// ─── #609: isolate_memory / app-agent cron policy ─────────────────────────────
+
+describe('#609 cron policy for isolated and app agents', () => {
+  const cronJob = { name: 'j', scheduleKind: 'cron' as const, schedule: '0 * * * *' };
+
+  it('refuses a command job for an app agent, keeps agent jobs', async () => {
+    const { manager, agentId, agentConfigs } = makeManager({ runner: makeRunner() });
+    agentConfigs.get(agentId)!.type = 'app-agent';
+    await manager.start();
+    try {
+      await expect(manager.create({ ...cronJob, agentId, command: 'id' })).rejects.toThrow(/app agent: type=command/);
+      await expect(manager.create({ ...cronJob, agentId, type: 'command', command: 'id' })).rejects.toThrow(/app agent/);
+      const job = await manager.create({ ...cronJob, agentId, type: 'agent', prompt: 'p' });
+      await expect(manager.update(job.id, { type: 'command', command: 'id' })).rejects.toThrow(/app agent/);
+      expect(manager.list(agentId)).toHaveLength(1);
+      expect(manager.get(job.id)!.type).toBe('agent');
+    } finally { manager.stop(); }
+  });
+
+  it('refuses every job for an isolated agent', async () => {
+    const { manager, agentId, agentConfigs } = makeManager({ runner: makeRunner() });
+    agentConfigs.get(agentId)!.isolateMemory = true;
+    await manager.start();
+    try {
+      await expect(manager.create({ ...cronJob, agentId, command: 'id' })).rejects.toThrow(/isolate_memory/);
+      await expect(manager.create({ ...cronJob, agentId, type: 'agent', prompt: 'p' })).rejects.toThrow(/isolate_memory/);
+      expect(manager.list(agentId)).toHaveLength(0);
+    } finally { manager.stop(); }
+  });
+
+  it('does not run or deliver a job created before the agent became isolated', async () => {
+    const runner = makeRunner();
+    const { manager, agentId, agentConfigs } = makeManager({ runner });
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(new Response('{"ok":true}'));
+    await manager.start();
+    try {
+      const job = await manager.create({ ...cronJob, agentId, type: 'agent', prompt: 'p', telegram: '123' });
+      agentConfigs.get(agentId)!.isolateMemory = true;
+      const log = await manager.run(job.id);
+      expect(log.output).toMatch(/^skipped: .*isolate_memory/);
+      expect(runner.sendApiMessage).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(manager.get(job.id)!.state).toMatchObject({ runCount: 0, lastRunAt: null });
+      expect(await manager.getRuns(job.id)).toEqual([]);
+      await expect(manager.update(job.id, { prompt: 'q' })).rejects.toThrow(/isolate_memory/);
+      await expect(manager.update(job.id, { enabled: false })).resolves.toMatchObject({ enabled: false });
+    } finally { manager.stop(); fetchMock.mockRestore(); }
+  });
+
+  it('does not exec a command job created before the agent became an app agent', async () => {
+    const { manager, agentId, agentConfigs, tmpDir } = makeManager();
+    await manager.start();
+    try {
+      const marker = path.join(tmpDir, 'ran');
+      const job = await manager.create({ ...cronJob, agentId, command: `touch ${marker}` });
+      agentConfigs.get(agentId)!.type = 'app-agent';
+      const log = await manager.run(job.id);
+      expect(log.output).toMatch(/^skipped: .*app agent/);
+      expect(fs.existsSync(marker)).toBe(false);
+    } finally { manager.stop(); }
+  });
+
+  it('leaves a plain agent unchanged', async () => {
+    const { manager, agentId, tmpDir } = makeManager();
+    await manager.start();
+    try {
+      const marker = path.join(tmpDir, 'ran');
+      const job = await manager.create({ ...cronJob, agentId, command: `touch ${marker}` });
+      expect((await manager.run(job.id)).status).toBe('ok');
+      expect(fs.existsSync(marker)).toBe(true);
+    } finally { manager.stop(); }
+  });
+});

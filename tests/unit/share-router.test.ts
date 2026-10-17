@@ -467,6 +467,80 @@ describe('file share router', () => {
     });
   });
 
+  describe('isolate_memory session scoping (#609)', () => {
+    const OWN = 'sess-own';
+    const OTHER = 'sess-other';
+    const CHANNEL = 'sess-tg';
+    const media = (dir: string, file: string) => {
+      fs.mkdirSync(path.join(baseDir, AGENT, 'media', dir), { recursive: true });
+      fs.writeFileSync(path.join(baseDir, AGENT, 'media', dir, file), PNG);
+      return path.join(baseDir, AGENT, 'media', dir, file);
+    };
+    const isolatedApp = (isolated: boolean) => {
+      const a = express();
+      a.use(express.json());
+      a.use('/api', createSharesPrivateRouter(store, KEYS, baseDir, BASE_URL, undefined, (id) => isolated && id === AGENT));
+      return a;
+    };
+    const mint = (a: express.Application, session: string, ref: string) =>
+      supertest.default(a).post('/api/v1/shares').set(AUTH_A1).send({ agent_id: AGENT, session_id: session, refs: [{ path: ref }] });
+    const register = (a: express.Application, session: string, file: string) =>
+      supertest.default(a).post('/api/v1/image-artifacts').set(AUTH_A1).send({ agent_id: AGENT, session_id: session, provider: 'p', model: 'm', files: [file] });
+
+    beforeEach(() => {
+      media(`api-${OWN}`, 'own.png');
+      media(`api-${OTHER}`, 'theirs.png');
+      media('telegram-42', 'inbound.png');
+      HistoryDB.forAgent(baseDir, AGENT).insertMessage({
+        chatId: 'telegram-42', sessionId: CHANNEL, source: 'telegram', role: 'user', content: 'hi', ts: 1_700_000_000_000,
+      });
+    });
+
+    test("a session shares and registers only files in its own media dirs", async () => {
+      const a = isolatedApp(true);
+      expect((await mint(a, OWN, `api-${OWN}/own.png`)).status).toBe(201);
+      expect((await mint(a, OWN, path.join(baseDir, AGENT, 'media', `api-${OWN}`, 'own.png'))).status).toBe(201);
+      const foreign = await mint(a, OWN, `api-${OTHER}/theirs.png`);
+      expect(foreign.status).toBe(400);
+      expect(foreign.body.code).toBe('invalid_path');
+      expect((await mint(a, OWN, 'telegram-42/inbound.png')).status).toBe(400);
+      expect((await mint(a, OWN, `${SESSION}/ok.png`)).status).toBe(400);
+      // A channel session owns `<channel>-<chatId>` (inbound media) and its api dir.
+      expect((await mint(a, CHANNEL, 'telegram-42/inbound.png')).status).toBe(201);
+      expect((await mint(a, CHANNEL, `api-${OWN}/own.png`)).status).toBe(400);
+      expect((await register(a, OWN, path.join(baseDir, AGENT, 'media', `api-${OWN}`, 'own.png'))).status).toBe(201);
+      expect((await register(a, OWN, path.join(baseDir, AGENT, 'media', `api-${OTHER}`, 'theirs.png'))).status).toBe(400);
+    });
+
+    test('a symlink in the own dir pointing at another session is refused', async () => {
+      const link = path.join(baseDir, AGENT, 'media', `api-${OWN}`, 'link.png');
+      fs.symlinkSync(path.join(baseDir, AGENT, 'media', `api-${OTHER}`, 'theirs.png'), link);
+      const a = isolatedApp(true);
+      expect((await mint(a, OWN, `api-${OWN}/link.png`)).status).toBe(400);
+      expect((await register(a, OWN, link)).status).toBe(400);
+    });
+
+    test('revoking needs the owning session for a non-admin key', async () => {
+      const a = isolatedApp(true);
+      const minted = await mint(a, OWN, `api-${OWN}/own.png`);
+      const id = minted.body.items[0].share_id as string;
+      const del = (query: string, auth = AUTH_A1) => supertest.default(a).delete(`/api/v1/shares/${id}${query}`).set(auth);
+      expect((await del('')).status).toBe(404);
+      expect((await del(`?session_id=${OTHER}`)).status).toBe(404);
+      expect((await del(`?session_id=${OWN}`)).status).toBe(200);
+      const again = await mint(a, OWN, `api-${OWN}/own.png`);
+      const res = await supertest.default(a).delete(`/api/v1/shares/${again.body.items[0].share_id}`).set({ Authorization: 'Bearer admin-key' });
+      expect(res.status).toBe(200);
+    });
+
+    test('a non-isolated agent keeps agent-wide media access', async () => {
+      const a = isolatedApp(false);
+      expect((await mint(a, OWN, `api-${OTHER}/theirs.png`)).status).toBe(201);
+      const minted = await mint(a, OWN, `api-${OWN}/own.png`);
+      expect((await supertest.default(a).delete(`/api/v1/shares/${minted.body.items[0].share_id}`).set(AUTH_A1)).status).toBe(200);
+    });
+  });
+
   describe('revoke (§10)', () => {
     test('owner revokes → public URL dies; foreign key sees uniform 404', async () => {
       const item = await mintOne();

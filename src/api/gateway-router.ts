@@ -678,6 +678,8 @@ export class GatewayRouter {
             this.gatewayConfig.gateway.api.keys,
             this.agentsRoot(),
             publicUrl,
+            undefined,
+            agentId => this.configs.get(agentId)?.isolateMemory === true,
           ),
         );
       }

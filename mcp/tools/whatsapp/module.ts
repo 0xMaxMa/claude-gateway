@@ -16,6 +16,7 @@
  * port, not through this MCP subprocess at all.
  */
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
+import { assertIsolateMediaPath, assertOriginChat } from '../shared/isolate';
 
 export class WhatsAppModule implements ToolModule {
   id = 'whatsapp';
@@ -109,6 +110,12 @@ export class WhatsAppModule implements ToolModule {
 
     if (!chatId) {
       return { content: [{ type: 'text', text: 'whatsapp_reply: missing chat_id' }], isError: true };
+    }
+    try {
+      assertOriginChat(chatId);
+      if (imagePath) assertIsolateMediaPath(imagePath);
+    } catch (err) {
+      return { content: [{ type: 'text', text: `whatsapp_reply: ${(err as Error).message}` }], isError: true };
     }
     if (!text && !imagePath) {
       return {

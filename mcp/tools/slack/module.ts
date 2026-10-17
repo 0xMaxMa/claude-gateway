@@ -22,6 +22,7 @@ import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } fro
 // run at least once for this import to resolve locally.
 import { SlackClient } from '../../../dist/api/slack-client.js';
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
+import { assertIsolateMediaPath, assertOriginChat } from '../shared/isolate';
 
 export class SlackModule implements ToolModule {
   id = 'slack';
@@ -103,6 +104,11 @@ export class SlackModule implements ToolModule {
     if (!chatId) {
       return { content: [{ type: 'text', text: 'slack_reply: missing chat_id' }], isError: true };
     }
+    try {
+      assertOriginChat(chatId);
+    } catch (err) {
+      return { content: [{ type: 'text', text: `slack_reply: ${(err as Error).message}` }], isError: true };
+    }
 
     // Drop files already delivered successfully this session (retry-dedup): a
     // small model sometimes retries slack_reply after a transient hiccup even
@@ -128,6 +134,7 @@ export class SlackModule implements ToolModule {
       // Size-check before any upload starts, so an oversized file fails fast
       // instead of half-way through a multi-file batch.
       for (const f of files) {
+        assertIsolateMediaPath(f);
         const st = fs.statSync(f);
         if (st.size > MAX_ATTACHMENT_BYTES) {
           throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);

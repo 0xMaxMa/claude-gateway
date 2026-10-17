@@ -5,6 +5,7 @@
  */
 
 import type { ChannelModule, InboundMessageHandler, ChannelId, ChannelAccountSnapshot } from './types';
+import { isolateAllowsModule } from './tools/shared/isolate';
 
 const RESTART_POLICY = {
   initialMs: 5_000,
@@ -66,7 +67,7 @@ export function createChannelManager(modules: ChannelModule[]) {
   }
 
   async function startAll(handler: InboundMessageHandler): Promise<void> {
-    const enabledModules = modules.filter(m => m.isEnabled());
+    const enabledModules = modules.filter(m => isolateAllowsModule(m.id) && m.isEnabled());
 
     for (const mod of enabledModules) {
       const state: ModuleState = {

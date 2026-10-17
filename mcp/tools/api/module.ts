@@ -1,4 +1,5 @@
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
+import { assertIsolateMediaPath } from '../shared/isolate';
 
 export class ApiModule implements ToolModule {
   id = 'api';
@@ -42,6 +43,12 @@ export class ApiModule implements ToolModule {
     const files = (args.files as string[] | undefined) ?? [];
     if (!files.length) {
       return { content: [{ type: 'text', text: 'No files provided.' }] };
+    }
+
+    try {
+      for (const f of files) assertIsolateMediaPath(f);
+    } catch (err) {
+      return { content: [{ type: 'text', text: `api_reply: ${(err as Error).message}` }], isError: true };
     }
 
     const apiUrl = process.env.GATEWAY_API_URL;

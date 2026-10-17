@@ -31,6 +31,7 @@ import { createMessageHandler } from './inbound';
 import { initDedupDir, isDuplicate, pruneDedup } from '../telegram/dedup';
 import type { DiscordMessageContext } from './types';
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
+import { assertIsolateMediaPath, assertOriginChat, isolateMediaDir, isolateMode } from '../shared/isolate';
 
 /** AgentRunner callback base (origin of CLAUDE_CHANNEL_CALLBACK, "" when unset).
  *  Used to mint/approve `/cli` pairings via the runner, the same bridge the
@@ -43,6 +44,8 @@ function cliCallbackBase(): string {
     return '';
   }
 }
+
+const DISCORD_CDN_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
 
 export class DiscordModule implements ChannelModule {
   id = 'discord' as ChannelId;
@@ -712,8 +715,16 @@ export class DiscordModule implements ChannelModule {
     };
   }
 
+  /** Fetch a channel the tool may act on: the conversation's own, or a thread under it. */
+  private async fetchOriginChannel(channelId: string): Promise<any> {
+    const channel = await this.client.channels.fetch(channelId);
+    // A text channel's parentId is its category, so only a thread may borrow its parent's id.
+    assertOriginChat(channelId, channel?.isThread?.() ? channel.parentId : undefined);
+    return channel;
+  }
+
   private async handleReply(args: Record<string, unknown>): Promise<McpToolResult> {
-    const channel = await this.client.channels.fetch(args.channel_id as string);
+    const channel = await this.fetchOriginChannel(args.channel_id as string);
     const text = args.text as string;
     const replyTo = args.reply_to as string | undefined;
     const requested = (args.files as string[] | undefined) ?? [];
@@ -731,6 +742,7 @@ export class DiscordModule implements ChannelModule {
     }
 
     for (const f of files) {
+      assertIsolateMediaPath(f);
       const st = fs.statSync(f);
       if (st.size > MAX_ATTACHMENT_BYTES) {
         throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);
@@ -746,14 +758,14 @@ export class DiscordModule implements ChannelModule {
   }
 
   private async handleReact(args: Record<string, unknown>): Promise<McpToolResult> {
-    const channel = await this.client.channels.fetch(args.channel_id as string);
+    const channel = await this.fetchOriginChannel(args.channel_id as string);
     const message = await channel.messages.fetch(args.message_id as string);
     await message.react(args.emoji as string);
     return { content: [{ type: 'text', text: 'reacted' }] };
   }
 
   private async handleEditMessage(args: Record<string, unknown>): Promise<McpToolResult> {
-    const channel = await this.client.channels.fetch(args.channel_id as string);
+    const channel = await this.fetchOriginChannel(args.channel_id as string);
     const message = await channel.messages.fetch(args.message_id as string);
     const edited = await message.edit(args.text as string);
     return { content: [{ type: 'text', text: `edited (id: ${edited.id})` }] };
@@ -761,11 +773,22 @@ export class DiscordModule implements ChannelModule {
 
   private async handleDownloadAttachment(args: Record<string, unknown>): Promise<McpToolResult> {
     const url = args.url as string;
+    // Isolate mode: only Discord's own CDN, and into this conversation's media
+    // dir rather than the inbox every conversation shares.
+    let destDir = this.inboxDir;
+    if (isolateMode()) {
+      let parsed: URL | null = null;
+      try { parsed = new URL(url); } catch {}
+      if (!parsed || parsed.protocol !== 'https:' || !DISCORD_CDN_HOSTS.has(parsed.hostname)) {
+        throw new Error('isolate mode: only https://cdn.discordapp.com or https://media.discordapp.net attachment URLs can be downloaded');
+      }
+      destDir = isolateMediaDir();
+    }
     const filename = (args.filename as string | undefined) ?? path.basename(url.split('?')[0]);
     const ext = path.extname(filename).replace(/[^a-zA-Z0-9.]/g, '') || '.bin';
-    const dlPath = path.join(this.inboxDir, `${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`);
+    const dlPath = path.join(destDir, `${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`);
 
-    fs.mkdirSync(this.inboxDir, { recursive: true });
+    fs.mkdirSync(destDir, { recursive: true });
 
     await new Promise<void>((resolve, reject) => {
       const proto = url.startsWith('https') ? https : http;
@@ -785,7 +808,7 @@ export class DiscordModule implements ChannelModule {
   }
 
   private async handleCreateThread(args: Record<string, unknown>): Promise<McpToolResult> {
-    const channel = await this.client.channels.fetch(args.channel_id as string);
+    const channel = await this.fetchOriginChannel(args.channel_id as string);
     const name = (args.name as string).slice(0, 100);
     let thread: any;
     if (args.message_id) {
