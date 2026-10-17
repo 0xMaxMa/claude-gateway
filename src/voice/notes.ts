@@ -93,7 +93,7 @@ export function retryableVoiceNoteFailure(code: string): boolean {
 /** Keep provider diagnostics consistent across chat channels and browser voice. */
 export function voiceNoteFailureMessage(code: string): string {
   const local: Record<string, string> = {
-    VOICE_NOTE_NO_TRANSCRIPT: 'No words could be recognized in the voice note, even after retrying. Please try again, record it again or type your message.',
+    VOICE_NOTE_NO_TRANSCRIPT: 'No words could be recognized in the voice note. Please try again, record it again or type your message.',
     VOICE_NOTE_SIZE_LIMIT: 'The voice note is empty or exceeds the provider file size limit. Please send a shorter recording.',
     VOICE_NOTES_DISABLED: 'Voice message transcription is disabled for this agent.',
     VOICE_NOTE_ATTACHMENT_MISSING: 'The voice note attachment is missing. Please resend it or type your message.',
