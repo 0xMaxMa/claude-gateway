@@ -5,6 +5,7 @@ import { createServer, request as httpRequest } from 'http';
 import { once } from 'events';
 import WebSocket from 'ws';
 import { VoiceApi } from '../../../src/api/voice-router';
+import { fastAcknowledgement } from '../../../src/voice/fast-ack';
 import { FakeSttProvider, FakeTtsProvider } from '../../../src/voice/providers/fake';
 import type { AgentConfig } from '../../../src/types';
 import type { AgentRunner } from '../../../src/agent/runner';
@@ -17,6 +18,8 @@ jest.mock('../../../src/voice/providers/voice-catalog', () => ({
 jest.mock('../../../src/voice/providers/registry', () => ({
   sttProvider: jest.fn(() => new FakeSttProvider()), ttsProvider: () => new FakeTtsProvider(),
 }));
+// voice.live.fastAck is on by default: keep its acknowledgement call off the network.
+jest.mock('../../../src/voice/fast-ack', () => ({ fastAcknowledgement: jest.fn(async () => ({ outcome: 'skipped', elapsedMs: 0 })) }));
 
 test('voice ticket requires scoped auth and origin-bound tickets without URL registration, is single-use, and releases its mic lease on disconnect', async () => {
   const agent = { id: 'a', orchestration: { enabled: true }, voice: { ...ORCHESTRATION_DEFAULTS.voice, enabled: true, tts: { ...ORCHESTRATION_DEFAULTS.voice.tts, voiceId: 'fixture' } } } as AgentConfig;
@@ -239,6 +242,8 @@ test('speech that yields no command releases its provisional pause; an admitted 
     await until(()=>submit.mock.calls.length===1);
     await new Promise(r=>setTimeout(r,50));
     expect(release).toHaveBeenCalledTimes(2);
+    // The agent keeps the default voice.live, so the admitted turn requests a fast acknowledgement.
+    expect(fastAcknowledgement).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({model:'claude-haiku-5-5',timeoutMs:3000}));
   }finally{ws?.terminate();await api.close();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
 

@@ -107,7 +107,7 @@ export const ORCHESTRATION_DEFAULTS = {
     tts: { provider: 'elevenlabs', model: 'eleven_v3_conversational', voiceId: '' },
     turns: { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, mergeWindowMs: 1200 },
     playback: { maxBufferedAudioMs: 1500, bargeIn: true },
-    live: { fastAck: false, fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000 },
+    live: { fastAck: true, fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000 },
     narrate: { enabled: true, maxChars: 100000, maxParts: 60, targetChars: 800, partTimeoutMs: 60000 } },
 };
 // New agents start disabled and choose models explicitly from connected providers.
