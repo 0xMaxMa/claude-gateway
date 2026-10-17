@@ -1,10 +1,11 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { parseSkill, extractFrontmatter, type SkillDefinition, type ParseSkillOptions } from './parser';
 
 /**
  * Progressive disclosure: auto-learned skills (`origin: auto`) can proliferate up
- * to the curator cap (default 50), and each full description in the CLAUDE.md
+ * to the curator cap (default 20), and each full description in the CLAUDE.md
  * menu costs context on every turn. Truncate the menu line for auto skills to
  * this many chars — the full body still loads when the skill is invoked.
  * Human/module/shared skills are curated and bounded, so they are never trimmed.
@@ -215,10 +216,17 @@ export function loadSkills(opts: LoadSkillsOptions): SkillRegistry {
   return { skills: registry };
 }
 
+/** `p` as the shell resolves it from `cwd`: `~/x`, `$HOME/x` and `${HOME}/x` are home-expanded. */
+function shellPath(cwd: string, p: string): string {
+  const expanded = p.replace(/^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/, os.homedir());
+  return path.isAbsolute(expanded) ? path.normalize(expanded) : path.join(cwd, expanded);
+}
+
 /**
  * SKILL.md paths a tool call reads on its own (not through the Skill tool): a Read's
  * `file_path`, or paths named in a shell command — Codex, and some agents, read files
- * through Bash. Paths are as written (absolute or relative); see `skillsAtPaths`.
+ * through Bash. A shell path is home-expanded and joined to the last `cd` before it
+ * (`cd skills/x && cat SKILL.md`). Paths stay absolute or relative; see `skillsAtPaths`.
  */
 export function skillFileRefs(block: { name?: unknown; input?: unknown }): string[] {
   const input = block.input && typeof block.input === 'object' ? (block.input as Record<string, unknown>) : {};
@@ -226,9 +234,19 @@ export function skillFileRefs(block: { name?: unknown; input?: unknown }): strin
     return path.basename(input['file_path']) === 'SKILL.md' ? [input['file_path']] : [];
   }
   if (block.name !== 'Bash' || typeof input['command'] !== 'string') return [];
-  return (input['command'].match(/[^\s'"`;|&<>()=]*SKILL\.md(?![\w.-])/g) ?? [])
-    .filter((ref) => path.basename(ref) === 'SKILL.md')
-    .slice(0, 32);
+  const refs: string[] = [];
+  let cwd = '';
+  for (const segment of input['command'].split(/&&|\|\||[;|\n]/)) {
+    const cd = /^\s*cd\s+(['"]?)([^\s'"]+)\1\s*$/.exec(segment);
+    if (cd) {
+      cwd = shellPath(cwd, cd[2]!);
+      continue;
+    }
+    for (const ref of segment.match(/[^\s'"`;|&<>()=]*SKILL\.md(?![\w.-])/g) ?? []) {
+      if (path.basename(ref) === 'SKILL.md') refs.push(shellPath(cwd, ref));
+    }
+  }
+  return refs.slice(0, 32);
 }
 
 /**

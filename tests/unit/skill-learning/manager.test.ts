@@ -305,6 +305,20 @@ describe('direct-turn skill usage', () => {
     expect(toolUseSkills({ name: 'Read', input: { file_path: 42 } }, r)).toEqual([]);
   });
 
+  it('resolves ~, $HOME and a preceding cd in a shell read of SKILL.md', () => {
+    const r = registry(path.join(os.homedir(), 'ws'));
+    const bash = (command: string) => toolUseSkills({ name: 'Bash', input: { command } }, r).sort();
+    expect(bash('cat ~/ws/skills/learned/SKILL.md')).toEqual(['learned']);
+    expect(bash('head -50 "$HOME/ws/skills/learned/SKILL.md"')).toEqual(['learned']);
+    expect(bash('cat ${HOME}/ws/skills/learned/SKILL.md')).toEqual(['learned']);
+    expect(bash('cd ~/ws/skills/learned && cat SKILL.md')).toEqual(['learned']);
+    expect(bash("cd '/mcp/mod/skills'; sed -n 1,40p tool/SKILL.md")).toEqual(['mod:tool']);
+    expect(bash('cd skills/learned && cat SKILL.md')).toEqual(['learned']);
+    expect(bash('cd /mcp/mod && cd skills/tool && cat SKILL.md')).toEqual(['mod:tool']);
+    expect(bash('cat SKILL.md')).toEqual([]);
+    expect(bash('cd /elsewhere && cat SKILL.md')).toEqual([]);
+  });
+
   it('counts a SKILL.md an orchestration/worker turn read itself (Read or shell)', () => {
     const r = registry('/ws');
     expect(managedTurnSkills([], [], r, ['/ws/skills/learned/SKILL.md'])).toEqual(['learned']);

@@ -202,3 +202,14 @@ test('records the SKILL.md files a turn read itself, through Read or a shell com
   ]}});
   expect(c.snapshot().usedSkillFiles).toEqual(['/ws/skills/learned/SKILL.md', 'skills/other/SKILL.md']);
 });
+
+test('skill file paths feed skill learning only; the ledger does not store them', () => {
+  const store = new OrchestrationStore(':memory:','agent');
+  try {
+    recordTokenTurn(store,{id:'t',sessionId:'s',role:'agent',category:'input',toolIds:[],inputTokens:0,totalTokens:0,startedAt:1,usedSkillFiles:['/ws/skills/learned/SKILL.md']});
+    for (const table of ['token_turns','token_turn_metrics']) {
+      const row = store.get(`SELECT payload_json FROM ${table} WHERE id=?`,'t');
+      expect(JSON.parse(String(row!.payload_json))).not.toHaveProperty('usedSkillFiles');
+    }
+  } finally {store.close();}
+});
