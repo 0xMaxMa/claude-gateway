@@ -506,6 +506,30 @@ describe('AgentManager', () => {
       expect(archiveOff(loaded)).toEqual(archiveOff(written));
     });
 
+    it('keeps a live agent workspace link when its config write fails', async () => {
+      // Reconfigure and reconcile re-upsert a running agent; a failed config write
+      // must not remove the workspace that agent is serving sessions from.
+      const entry = makeEntry(tmpDir);
+      await manager.upsertAgent(entry);
+      const workspaceLink = path.join(tmpDir, 'agents', 'my-agent', 'workspace');
+      jest.spyOn(manager as unknown as { upsertConfigEntry: () => Promise<void> }, 'upsertConfigEntry')
+        .mockRejectedValueOnce(new Error('config locked'));
+
+      await expect(manager.upsertAgent(entry)).rejects.toThrow('config locked');
+
+      expect(fs.readlinkSync(workspaceLink)).toBe(path.join(entry.installPath, 'agent'));
+    });
+
+    it('removes a link it created when the first config write fails', async () => {
+      const entry = makeEntry(tmpDir);
+      jest.spyOn(manager as unknown as { upsertConfigEntry: () => Promise<void> }, 'upsertConfigEntry')
+        .mockRejectedValueOnce(new Error('config locked'));
+
+      await expect(manager.upsertAgent(entry)).rejects.toThrow('config locked');
+
+      expect(fs.existsSync(path.join(tmpDir, 'agents', 'my-agent', 'workspace'))).toBe(false);
+    });
+
     it('is idempotent — calling twice does not duplicate entry', async () => {
       const entry = makeEntry(tmpDir);
       await manager.upsertAgent(entry);

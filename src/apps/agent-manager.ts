@@ -348,8 +348,14 @@ export class AgentManager {
       this.stageClaudeSeed(agentName);
     } catch { /* keep the existing seed */ }
 
-    try { fs.rmSync(workspaceLink, { force: true, recursive: true }); } catch { /* ignore */ }
-    fs.symlinkSync(targetDir, workspaceLink);
+    // A live agent's link already points here (reconcile, reconfigure): leave it
+    // in place rather than briefly removing the workspace under its sessions.
+    let linkedBefore = false;
+    try { linkedBefore = fs.readlinkSync(workspaceLink) === targetDir; } catch { /* missing or not a link */ }
+    if (!linkedBefore) {
+      try { fs.rmSync(workspaceLink, { force: true, recursive: true }); } catch { /* ignore */ }
+      fs.symlinkSync(targetDir, workspaceLink);
+    }
 
     try {
       await this.upsertConfigEntry(agentName, {
@@ -372,8 +378,11 @@ export class AgentManager {
         disableArchive: declaredDisableArchive(entry),
       });
     } catch (err) {
-      // Rollback workspace symlink if config write fails to avoid orphaned symlink
-      try { fs.rmSync(workspaceLink, { force: true }); } catch { /* best-effort */ }
+      // Roll back a symlink this call created so it is not orphaned; an existing
+      // agent keeps the workspace it was already running on.
+      if (!linkedBefore) {
+        try { fs.rmSync(workspaceLink, { force: true }); } catch { /* best-effort */ }
+      }
       throw err;
     }
   }
