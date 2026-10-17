@@ -273,6 +273,10 @@ test('confirmed voice words pause the selected task once, retain its target acro
     ws.send(encodeVoiceFrame({generation:listening.generation,epoch:0,sequence:1,segmentId:listening.utterance_id,audio:Buffer.alloc(640)}));
     await until(()=>stt.sessions[0].frames.length===1);
     expect(pause).not.toHaveBeenCalled();
+    // A punctuation-only partial (#610) is no words: it is shown, but it does not pause the task.
+    stt.sessions[0].emit({type:'partial',segmentId:'segment',text:'.'});
+    await until(()=>events.some(e=>e.type==='stt.partial'&&e.text==='.'));
+    expect(pause).not.toHaveBeenCalled();
     stt.sessions[0].emit({type:'partial',segmentId:'segment',text:'Manchester'});
     await until(()=>pause.mock.calls.length===1);
     ws.send(JSON.stringify({type:'voice.configure',execution_task_id:second}));

@@ -15,7 +15,7 @@ import { VoiceSession } from '../voice/session';
 import { decodeVoiceFrame } from '../voice/protocol';
 import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
 import { VoiceReplays } from '../voice/replay';
-import { PCM16 } from '../voice/types';
+import { hasSpokenWords, PCM16 } from '../voice/types';
 
 import type { VoiceScope } from '../voice/scope';
 import { voiceCallPairings } from '../voice/call-pairing';
@@ -209,7 +209,7 @@ export class VoiceApi {
         if (reconnecting) return;
         // Confirmed words, not microphone amplitude, pause automation. Keep the
         // chosen destination stable for all segments of this spoken message.
-        if(['stt.partial','stt.segment','stt.final'].includes(String(message.type))&&typeof message.text==='string'&&message.text.trim()&&!speechTarget){
+        if(['stt.partial','stt.segment','stt.final'].includes(String(message.type))&&typeof message.text==='string'&&hasSpokenWords(message.text)&&!speechTarget){
           speechTarget={taskId:executionTaskId};
           if(executionTaskId&&ticket.allowTools)speechTarget.pause=runner.pauseVoiceExecution(ticket.sessionId,ticket.scope.principalId,executionTaskId).catch(()=>undefined);
         }
