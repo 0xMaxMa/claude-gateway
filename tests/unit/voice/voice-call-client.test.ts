@@ -1,5 +1,5 @@
 import { decodeVoiceFrame } from '../../../src/voice/protocol';
-import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, voiceCallLevel, voiceCallReplyText, voiceCallTicketFailure, voiceCallTheme } from '../../../src/ui/voice-call-client';
+import { VOICE_CALL_PLAYBACK, VOICE_CALL_VAD, createResampler, createVoiceCallPlayback, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, voiceCallLevel, voiceCallReplyText, voiceCallTicketFailure, voiceCallTheme } from '../../../src/ui/voice-call-client';
 import { generateVoiceCallPage } from '../../../src/ui/voice-call-ui';
 
 const sine = (frequency: number, rate: number, samples: number, amplitude = 0.5) =>
@@ -130,17 +130,95 @@ describe('uplink', () => {
   });
 });
 
-test('playhead reports monotonic heard samples, never more than received', () => {
-  const playhead = createVoiceCallPlayhead();
-  expect(playhead.schedule(1600, 16000, 10)).toBe(10);
-  expect(playhead.schedule(1600, 16000, 10.05)).toBeCloseTo(10.1);
-  expect(playhead.played(16000, 10.05)).toBe(800);
-  expect(playhead.played(16000, 10.04)).toBe(800);
-  expect(playhead.playing(10.15)).toBe(true);
-  expect(playhead.played(16000, 11)).toBe(3200);
-  expect(playhead.playing(11)).toBe(false);
-  playhead.reset();
-  expect(playhead.played(16000, 11)).toBe(0);
+describe('reply playback', () => {
+  /** Real speech stand-in: two partials, so every frame boundary lands on a non-zero, moving waveform. */
+  const speech = (samples: number) => Int16Array.from({ length: samples }, (_, i) => Math.round(12000 * Math.sin(2 * Math.PI * 220 * i / 16000) + 6000 * Math.sin(2 * Math.PI * 1830 * i / 16000)));
+  /** One linear resample of the whole reply: what a single continuous buffer would play. */
+  const continuous = (pcm: Int16Array, rate: number, count: number) => Float32Array.from({ length: count }, (_, k) => {
+    const position = k * 16000 / rate, i = Math.floor(position), a = pcm[i] / 32768;
+    return a + ((pcm[i + 1] ?? pcm[i]) / 32768 - a) * (position - i);
+  });
+  /** Wire frames as the gateway cuts provider chunks: up to 1600 samples, often a ragged remainder. */
+  const frames = (pcm: Int16Array) => {
+    const out: Int16Array[] = [], sizes = [1600, 1600, 937, 1600, 413, 1, 1600, 1201, 1599, 2];
+    for (let offset = 0, i = 0; offset < pcm.length; offset += sizes[i++ % sizes.length]) out.push(pcm.subarray(offset, offset + sizes[i % sizes.length]));
+    return out;
+  };
+
+  test.each([44100, 48000])('ragged frames play at %i Hz exactly as one continuous resample, with no step at any frame boundary', rate => {
+    const pcm = speech(16000 * 3), playback = createVoiceCallPlayback(rate, VOICE_CALL_PLAYBACK), queue = frames(pcm);
+    const out = new Float32Array(Math.floor((pcm.length - 2) * rate / 16000));
+    let pushed = 0;
+    // Frames arrive just ahead of the render quanta, as they do from the socket.
+    for (let k = 0; k < out.length; k += 128) {
+      while (queue.length && pushed - playback.played() < 3200 + 64) { const frame = queue.shift()!; playback.push(frame); pushed += frame.length; }
+      playback.render(out.subarray(k, Math.min(out.length, k + 128)));
+    }
+    const reference = continuous(pcm, rate, out.length), faded = Math.round(VOICE_CALL_PLAYBACK.fadeMs * rate / 1000);
+    let worst = 0;
+    for (let k = faded; k < out.length; k++) worst = Math.max(worst, Math.abs(out[k] - reference[k]));
+    // One buffer source per frame left errors up to -9 dBFS at boundaries; continuous playback has none.
+    expect(worst).toBeLessThan(1e-5);
+  });
+
+  test('a reply waits for the jitter buffer, or that long after its first sample, then plays', () => {
+    const playback = createVoiceCallPlayback(48000, VOICE_CALL_PLAYBACK), out = new Float32Array(128);
+    playback.push(speech(1600));
+    // 100 ms queued, under the 200 ms buffer: silent until 200 ms have passed.
+    for (let k = 0; k < 74; k++) { playback.render(out); expect(Math.max(...out.map(Math.abs))).toBe(0); }
+    expect(playback.active()).toBe(true);
+    playback.render(out); playback.render(out);
+    expect(playback.played()).toBeGreaterThan(0);
+
+    const full = createVoiceCallPlayback(48000, VOICE_CALL_PLAYBACK);
+    full.push(speech(3200));
+    full.render(out);
+    expect(full.played()).toBeGreaterThan(0);
+  });
+
+  test('played samples are monotonic, never above what was pushed, and reach it once the reply has played out', () => {
+    const playback = createVoiceCallPlayback(44100, VOICE_CALL_PLAYBACK), out = new Float32Array(128);
+    playback.push(speech(3200)); playback.push(speech(801));
+    let last = 0;
+    for (let k = 0; k < 200; k++) {
+      playback.render(out);
+      expect(playback.played()).toBeGreaterThanOrEqual(last);
+      expect(playback.played()).toBeLessThanOrEqual(4001);
+      last = playback.played();
+    }
+    expect(playback.played()).toBe(4001);
+    expect(playback.active()).toBe(false);
+  });
+
+  test('an underrun and a flush fade out instead of cutting the waveform, and a flush restarts the count', () => {
+    const playback = createVoiceCallPlayback(48000, VOICE_CALL_PLAYBACK), out = new Float32Array(48000);
+    const loud = Int16Array.from({ length: 3200 }, () => 30000);
+    playback.push(loud);
+    playback.render(out.subarray(0, 12000));
+    // The queue ran dry at about 0.92 of full scale: it decays in fadeMs, never jumps to zero.
+    const steps = (from: number, to: number) => Math.max(...out.subarray(from + 1, to).map((value, i) => Math.abs(value - out[from + i])));
+    expect(playback.active()).toBe(false);
+    expect(steps(300, 12000)).toBeLessThan(0.01);
+    expect(out[11999]).toBe(0);
+
+    playback.push(loud);
+    playback.render(out.subarray(0, 1000));
+    expect(out[999]).toBeGreaterThan(0.9);
+    playback.flush();
+    expect(playback.played()).toBe(0);
+    expect(playback.active()).toBe(false);
+    playback.render(out.subarray(1000, 2000));
+    expect(steps(999, 2000)).toBeLessThan(0.01);
+    expect(out[1999]).toBe(0);
+  });
+
+  test('a queue longer than its first allocation grows without losing or reordering samples', () => {
+    const playback = createVoiceCallPlayback(16000, { ...VOICE_CALL_PLAYBACK, fadeMs: 0 }), pcm = speech(16000 * 9);
+    playback.push(pcm.subarray(0, 50000)); playback.push(pcm.subarray(50000));
+    const out = new Float32Array(pcm.length - 1);
+    playback.render(out);
+    expect(out.every((value, i) => Math.abs(value - pcm[i] / 32768) < 1e-6)).toBe(true);
+  });
 });
 
 describe('page', () => {
@@ -149,7 +227,7 @@ describe('page', () => {
 
   test('the inline script is valid JavaScript with every client function embedded', () => {
     expect(() => new Function(script)).not.toThrow();
-    for (const name of ['createResampler', 'encodeVoiceCallFrame', 'createVoiceCallVad', 'createVoiceCallUplink', 'createVoiceCallPlayhead', 'voiceCallLevel', 'voiceCallTicketFailure', 'formatCallDuration', 'voiceCallErrorView', 'voiceCallReplyText']) expect(script).toContain(`function ${name}(`);
+    for (const name of ['createResampler', 'encodeVoiceCallFrame', 'createVoiceCallVad', 'createVoiceCallUplink', 'voiceCallLevel', 'voiceCallTicketFailure', 'formatCallDuration', 'voiceCallErrorView', 'voiceCallReplyText']) expect(script).toContain(`function ${name}(`);
   });
 
   test('URLs derive from the base path and the agent id is escaped', () => {
@@ -159,6 +237,25 @@ describe('page', () => {
     expect(html).toContain('&lt;agent&gt;');
     expect(html).not.toContain('<agent>');
     expect(html).toContain('https://telegram.org/js/telegram-web-app.js');
+  });
+
+  test('the worklet module plays reply frames through one player node and reports progress with its flush token', () => {
+    const module = JSON.parse(script.match(/var WORKLET = ("(?:[^"\\]|\\.)*");/)![1]) as string;
+    const processors = new Map<string, new (options: object) => any>();
+    class AudioWorkletProcessor { port = { onmessage: undefined as undefined | ((event: { data: unknown }) => void), sent: [] as any[], postMessage(data: unknown) { this.sent.push(data); } }; }
+    new Function('AudioWorkletProcessor', 'registerProcessor', 'sampleRate', module)(AudioWorkletProcessor, (name: string, processor: new (options: object) => any) => processors.set(name, processor), 48000);
+    expect([...processors.keys()]).toEqual(['voice-call-capture', 'voice-call-player']);
+    const player = new (processors.get('voice-call-player')!)({ processorOptions: VOICE_CALL_PLAYBACK }), out = new Float32Array(128);
+    player.port.onmessage({ data: { flush: 3 } });
+    player.port.onmessage({ data: { pcm: Int16Array.from({ length: 3200 }, () => 16384) } });
+    for (let k = 0; k < 40; k++) player.process([], [[out]]);
+    expect(out[127]).toBeCloseTo(0.5);
+    const reports = player.port.sent;
+    expect(reports[0]).toEqual({ token: 3, played: 0, playing: false });
+    expect(reports.at(-1)).toMatchObject({ token: 3, playing: true });
+    expect(reports.at(-1).played).toBeGreaterThan(1000);
+    for (let k = 0; k < 400; k++) player.process([], [[out]]);
+    expect(player.port.sent.at(-1)).toEqual({ token: 3, played: 3200, playing: false });
   });
 });
 
@@ -287,29 +384,34 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
     colorScheme: options.telegramTheme?.colorScheme ?? 'light', themeParams: options.telegramTheme?.themeParams ?? {},
     setHeaderColor: jest.fn(), setBackgroundColor: jest.fn(),
     onEvent(name: string, handler: () => void) { (handlers[name] ??= []).push(handler); } };
-  const track = { enabled: true, stop: noop };
+  const track = { enabled: true, stop: noop, getSettings: () => ({ sampleRate: 24000 }) };
   let touched = false;
   /** Audio nodes record where they connect, so a test can follow reply audio to the speaker. */
   type Node = { outputs: Node[]; gain?: { value: number }; connect(next: Node): void };
   const node = (extra: object = {}): Node => ({ outputs: [], connect(this: Node, next: Node) { this.outputs.push(next); }, ...extra });
-  const destination = node(), replies: Node[] = [];
+  const destination = node(), order: string[] = [];
   /** How loud a reply source reaches the destination: the product of the gains on its way. */
   const loudness = (from: Node): number => from === destination ? 1 : Math.max(0, ...from.outputs.map(next => (from.gain?.value ?? 1) * loudness(next)));
   const contexts: FakeAudioContext[] = [];
   class FakeAudioContext {
     sampleRate = 48000; currentTime = 0; destination = destination; state = 'suspended';
-    constructor() { contexts.push(this); }
+    constructor() { contexts.push(this); order.push('AudioContext'); }
     audioWorklet = { addModule: async () => undefined };
     resume = () => { if (options.audioNeedsTap && !touched) return new Promise<void>(noop); this.state = 'running'; return Promise.resolve(); };
     close = async () => undefined;
     createGain() { return node({ gain: { value: 1 } }); }
     createAnalyser() { return node({ fftSize: 2048, getFloatTimeDomainData: noop }); }
     createMediaStreamSource() { return node(); }
-    createBuffer() { return { getChannelData: () => new Float32Array(1) }; }
-    createBufferSource() { const source = node({ start: noop, stop: noop }); replies.push(source); return source; }
+    createBufferSource(): Node { throw new Error('reply audio is played by the player worklet'); }
   }
   const worklets: FakeWorkletNode[] = [];
-  class FakeWorkletNode { port: { onmessage?: (event: { data: Float32Array }) => void } = {}; outputs: Node[] = []; constructor() { worklets.push(this); } connect(next: Node) { this.outputs.push(next); } }
+  class FakeWorkletNode {
+    port: { onmessage?: (event: { data: any }) => void; posted: any[]; postMessage(data: unknown): void } = { posted: [], postMessage(data) { this.posted.push(data); } };
+    outputs: Node[] = [];
+    constructor(_context: unknown, readonly name: string, readonly options?: object) { worklets.push(this); }
+    connect(next: Node) { this.outputs.push(next); }
+  }
+  const worklet = (name: string) => worklets.filter(item => item.name === name).at(-1)!;
   const tickets = [...(options.tickets ?? [TICKET])];
   const fetch = jest.fn(async () => { const next = tickets.shift() ?? TICKET; return { ok: next.status === 200, status: next.status, json: async () => JSON.parse(next.body) }; });
   const location = { protocol: 'https:', host: 'pod.example', reload: jest.fn() };
@@ -318,6 +420,7 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
   const root = { attributes: {} as Record<string, string>, style: {} as Record<string, string>, setAttribute(name: string, value: string) { this.attributes[name] = value; } };
   const document = { getElementById: element, addEventListener: noop, visibilityState: 'visible', documentElement: root };
   const getUserMedia = jest.fn(async () => {
+    order.push('getUserMedia');
     if (options.micDenied || (options.micNeedsTap && !touched)) throw Object.assign(new Error('denied'), { name: 'NotAllowedError' });
     return { getAudioTracks: () => [track], getTracks: () => [track] };
   });
@@ -327,22 +430,28 @@ async function openPage(options: { tickets?: { status: number; body: string }[];
   const WebSocket = function(url: string) { return new FakeSocket(url, sockets); };
   const stored = options.storage ?? new Map<string, string>();
   const sessionStorage = { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { stored.set(key, value); } };
-  new Function('window', 'document', 'navigator', 'AudioContext', 'AudioWorkletNode', 'fetch', 'location', 'URL', 'WebSocket', 'sessionStorage', script)(
-    window, document, navigator, FakeAudioContext, FakeWorkletNode, fetch, location, URL, WebSocket, sessionStorage);
+  const console = { info: jest.fn() };
+  new Function('window', 'document', 'navigator', 'AudioContext', 'AudioWorkletNode', 'fetch', 'location', 'URL', 'WebSocket', 'sessionStorage', 'console', script)(
+    window, document, navigator, FakeAudioContext, FakeWorkletNode, fetch, location, URL, WebSocket, sessionStorage, console);
   await settle();
   /** A tap on a page button, which also counts as the WebView's first touch. */
   const tap = async (id: string) => { touched = true; element(id).onclick!(); await settle(); };
   /** The microphone hears `ms` of sound at one level, in the worklet's 40 ms chunks. */
-  const hear = (level: number, ms: number) => { for (let t = 0; t < ms; t += 40) worklets.at(-1)!.port.onmessage!({ data: new Float32Array(1920).fill(level) }); };
+  const hear = (level: number, ms: number) => { for (let t = 0; t < ms; t += 40) worklet('voice-call-capture').port.onmessage!({ data: new Float32Array(1920).fill(level) }); };
   /** Telegram switches theme, as it does when the user turns on night mode. */
   const themeChanged = (colorScheme: string, themeParams: Record<string, string>) => { Object.assign(tg, { colorScheme, themeParams }); (handlers.themeChanged ?? []).forEach(handler => handler()); };
   const systemThemeChanged = (light: boolean) => { systemTheme.matches = light; systemTheme.listeners.forEach(listener => listener()); };
-  /** The audio clock moves to `seconds`, so reply audio scheduled before then has been heard. */
-  const audioTime = (seconds: number) => { contexts.at(-1)!.currentTime = seconds; };
+  /** The player worklet reports every frame posted since its last flush as heard. */
+  const playedOut = () => {
+    const posted: any[] = worklet('voice-call-player').port.posted;
+    const last = posted.map(message => message.flush !== undefined).lastIndexOf(true);
+    const played = posted.slice(last + 1).reduce((sum, message) => sum + message.pcm.length, 0);
+    worklet('voice-call-player').port.onmessage!({ data: { token: posted[last]?.flush, played, playing: false } });
+  };
   /** Telegram hides the Mini App (the user switched apps), then shows it again. */
   const deactivate = async () => { (handlers.deactivated ?? []).forEach(handler => handler()); await settle(); };
   const activate = async () => { (handlers.activated ?? []).forEach(handler => handler()); await settle(); };
-  return { element, location, fetch, sockets, getUserMedia, tap, replies, loudness, hear, root, tg, themeChanged, systemThemeChanged, audioTime, deactivate, activate };
+  return { element, location, fetch, sockets, getUserMedia, tap, worklet, order, console, loudness, hear, root, tg, themeChanged, systemThemeChanged, playedOut, deactivate, activate };
 }
 
 /** Every inline script of a page, in page order, as one script. */
@@ -550,14 +659,14 @@ describe('call page', () => {
 
   describe('after the agent stops talking', () => {
     test('the chip returns to Listening once the reply has played out, and to Speaking when more of it arrives', async () => {
-      const { element, sockets, audioTime } = await openPage();
+      const { element, sockets, playedOut } = await openPage();
       sockets[0].open(); sockets[0].receive(LISTENING);
       sockets[0].receive({ type: 'playback.start', epoch: 1, phase: 'response' });
       sockets[0].audio(1);
       // Still audible: however long it plays, it stays Speaking.
       await jest.advanceTimersByTimeAsync(5_000);
       expect(element('call').className).toBe('call speaking');
-      audioTime(1);
+      playedOut();
       await jest.advanceTimersByTimeAsync(1_500);
       expect(element('call').className).toBe('call listening');
       expect(element('state').textContent).toBe('Listening');
@@ -567,20 +676,20 @@ describe('call page', () => {
     });
 
     test('a pause between sentences shorter than a second keeps Speaking', async () => {
-      const { element, sockets, audioTime } = await openPage();
+      const { element, sockets, playedOut } = await openPage();
       sockets[0].open(); sockets[0].receive(LISTENING);
       sockets[0].receive({ type: 'playback.start', epoch: 1, phase: 'response' });
-      sockets[0].audio(1); audioTime(1);
+      sockets[0].audio(1); playedOut();
       await jest.advanceTimersByTimeAsync(700);
       sockets[0].audio(1);
       expect(element('call').className).toBe('call speaking');
     });
 
     test('after a spoken acknowledgement it shows Thinking until the answer plays', async () => {
-      const { element, sockets, audioTime } = await openPage();
+      const { element, sockets, playedOut } = await openPage();
       sockets[0].open(); sockets[0].receive(LISTENING);
       sockets[0].receive({ type: 'playback.start', epoch: 1, phase: 'acknowledgement' });
-      sockets[0].audio(1); audioTime(1);
+      sockets[0].audio(1); playedOut();
       await jest.advanceTimersByTimeAsync(1_500);
       expect(element('call').className).toBe('call thinking');
       sockets[0].receive({ type: 'playback.start', epoch: 2, phase: 'response' });
@@ -588,34 +697,73 @@ describe('call page', () => {
     });
 
     test('muted, it returns to Muted', async () => {
-      const { element, sockets, tap, audioTime } = await openPage();
+      const { element, sockets, tap, playedOut } = await openPage();
       sockets[0].open(); sockets[0].receive(LISTENING);
       await tap('mute');
       sockets[0].receive({ type: 'playback.start', epoch: 1, phase: 'response' });
-      sockets[0].audio(1); audioTime(1);
+      sockets[0].audio(1); playedOut();
       await jest.advanceTimersByTimeAsync(1_500);
       expect(element('call').className).toBe('call muted');
     });
   });
 
+  test('every reply frame goes to the one player node, which reports playback progress for the current epoch only', async () => {
+    const { sockets, worklet } = await openPage();
+    sockets[0].open(); sockets[0].receive(LISTENING);
+    const player = worklet('voice-call-player');
+    expect(player.options).toEqual({ numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1], processorOptions: VOICE_CALL_PLAYBACK });
+    sockets[0].receive({ type: 'playback.start', epoch: 1, phase: 'response' });
+    const frame = (samples: number, epoch: number) => {
+      const data = new ArrayBuffer(44 + samples * 2), view = new DataView(data);
+      view.setUint32(20, epoch); for (let i = 0; i < samples; i++) view.setInt16(44 + i * 2, i - 500, true);
+      sockets[0].onmessage!({ data });
+    };
+    frame(1600, 1); frame(937, 1); frame(3, 2);
+    const flush = player.port.posted.filter(message => message.flush !== undefined).at(-1).flush;
+    const pcm = player.port.posted.filter(message => message.pcm);
+    expect(pcm.map(message => message.pcm.length)).toEqual([1600, 937]);
+    expect(pcm[1].pcm[0]).toBe(-500);
+    const progress = () => sockets[0].sent.filter(message => message.type === 'playback.progress');
+    // A report from before the flush is stale; the current one is sent on.
+    player.port.onmessage!({ data: { token: flush - 1, played: 9999, playing: true } });
+    player.port.onmessage!({ data: { token: flush, played: 1200, playing: true } });
+    await jest.advanceTimersByTimeAsync(100);
+    expect(progress()).toEqual([{ type: 'playback.progress', epoch: 1, sample_offset: 1200 }]);
+    // Barge-in clears the player under a new token.
+    sockets[0].receive({ type: 'playback.clear', epoch: 2 });
+    expect(player.port.posted.at(-1)).toEqual({ flush: flush + 1 });
+    player.port.onmessage!({ data: { token: flush, played: 2537, playing: false } });
+    await jest.advanceTimersByTimeAsync(100);
+    expect(progress()).toHaveLength(1);
+  });
+
+  test('the AudioContext is created after the microphone is granted, and both rates are logged once', async () => {
+    const { order, console } = await openPage();
+    expect(order).toEqual(['getUserMedia', 'AudioContext']);
+    expect(console.info.mock.calls).toEqual([['voice call audio: context 48000 Hz, microphone 24000 Hz']]);
+    const tapped = await openPage({ micNeedsTap: true });
+    await tapped.tap('start');
+    expect(tapped.order).toEqual(['getUserMedia', 'getUserMedia', 'AudioContext']);
+  });
+
   test("Speaker turns the agent's voice off and on without touching the call", async () => {
-    const { element, sockets, tap, replies, loudness } = await openPage();
+    const { element, sockets, tap, worklet, loudness } = await openPage();
     sockets[0].open();
     sockets[0].receive(LISTENING);
     sockets[0].receive({ type: 'playback.start', epoch: 1 });
     sockets[0].audio(1);
-    expect(replies).toHaveLength(1);
-    expect(loudness(replies[0])).toBe(1);
+    const player = worklet('voice-call-player') as any;
+    expect(loudness(player)).toBe(1);
     await tap('speaker');
     expect(element('speaker').attributes['aria-pressed']).toBe('false');
-    expect(loudness(replies[0])).toBe(0);
+    expect(loudness(player)).toBe(0);
     sockets[0].audio(1);
-    expect(loudness(replies[1])).toBe(0);
+    expect(loudness(player)).toBe(0);
     // The call carries on: no stop, no mute sent to the gateway.
     expect(sockets[0].sent.filter(message => ['voice.stop', 'voice.mute'].includes(message.type))).toEqual([]);
     await tap('speaker');
     expect(element('speaker').attributes['aria-pressed']).toBe('true');
-    expect(loudness(replies[1])).toBe(1);
+    expect(loudness(player)).toBe(1);
   });
 
   test("the bot's Telegram name and photo, versioned by the photo's id; the agent id without them", () => {
@@ -759,13 +907,13 @@ describe('call page', () => {
     });
 
     test("the agent's reply still plays while the microphone is muted", async () => {
-      const { sockets, tap, replies, loudness, element } = await openPage();
+      const { sockets, tap, worklet, loudness, element } = await openPage();
       sockets[0].open(); sockets[0].receive(LISTENING);
       await tap('mute');
       sockets[0].receive({ type: 'playback.start', epoch: 1 });
       sockets[0].audio(1);
-      expect(replies).toHaveLength(1);
-      expect(loudness(replies[0])).toBe(1);
+      expect(worklet('voice-call-player').port.posted.at(-1).pcm).toHaveLength(1);
+      expect(loudness(worklet('voice-call-player') as any)).toBe(1);
       expect(element('mute').attributes['aria-pressed']).toBe('true');
     });
   });

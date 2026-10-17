@@ -4,7 +4,7 @@ import { AgentRunner } from '../agent/runner';
 import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
 import { VOICE_CALL_LINK_EXPIRED, generateVoiceCallGonePage, generateVoiceCallPage } from '../ui/voice-call-ui';
 import { telegramVoiceCallsEnabled, voiceCallPairings } from '../voice/call-pairing';
-import { TelegramBotAvatars } from '../voice/telegram-avatar';
+import { TelegramBotAvatars, telegramBotAvatars } from '../voice/telegram-avatar';
 import { readTelegramAccess } from '../telegram/access';
 import { resolveOrchestrationConfig } from '../orchestration/config';
 import type { VoiceApi } from './voice-router';
@@ -27,7 +27,7 @@ export interface VoiceCallRouterDeps {
 export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
   const router = Router();
   // The bot's Telegram name and photo for the call screen, looked up as the page opens.
-  const avatars = deps.avatars ?? new TelegramBotAvatars();
+  const avatars = deps.avatars ?? telegramBotAvatars;
   router.get('/:pairingId', async (req: Request, res: Response, next: NextFunction) => { try {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
@@ -38,17 +38,18 @@ export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
     const token = config.telegram?.botToken;
     const bot = token ? await avatars.forPage(pairing.agentId, token) : { avatar: null };
     res.send(generateVoiceCallPage({ pairingId: pairing.pairingId, agentId: pairing.agentId, basePath: deps.basePath(), maxUtteranceMs: voice.turns.maxUtteranceMs,
-      botName: bot.name, avatarVersion: bot.photoId, linkUsed: Boolean(pairing.callToken) }));
+      botName: bot.name, photo: Boolean(token), avatarVersion: bot.photoId, linkUsed: Boolean(pairing.callToken) }));
   } catch (error) { next(error); } });
 
-  // The photo the page was rendered with; its URL carries the photo's id, so a new photo is a new URL.
+  // The bot's photo, waiting for the lookup when the page opened before it answered. A URL that
+  // carries the photo's id is cached, as a new photo is a new URL; the plain one is not.
   router.get('/:pairingId/avatar', async (req: Request, res: Response) => {
     const pairing = voiceCallPairings.get(String(req.params.pairingId));
     const token = pairing && deps.configs.get(pairing.agentId)?.telegram?.botToken;
     const avatar = token ? await avatars.avatar(pairing.agentId, token) : null;
     if (!avatar) { res.setHeader('Cache-Control', 'no-store'); res.status(404).end(); return; }
     res.setHeader('Content-Type', avatar.contentType);
-    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.setHeader('Cache-Control', req.query.v ? 'private, max-age=3600' : 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(avatar.bytes);
   });

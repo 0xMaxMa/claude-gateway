@@ -65,9 +65,10 @@ test('a photo set after a call without one shows on the next call, and a changed
   const api = botApi({ name: 'Meguri' });
   const server = app(new TelegramBotAvatars(api.fetch)), pairingId = voiceCallPairings.create('a', '42');
   const none = await open(server, pairingId);
-  expect(none.src).toBeUndefined();
-  expect(none.page.text).toContain('<div class="avatar" id="avatar" aria-hidden="true">M</div>');
-  expect((await request(server).get(`/voice-call/${pairingId}/avatar`)).headers['cache-control']).toBe('no-store');
+  // The page still asks (a photo may be set any time); the 404 leaves the initial under it showing.
+  expect(none.page.text).toContain(`<div class="avatar" id="avatar" aria-hidden="true">M<img id="photo" alt="" src="/voice-call/${pairingId}/avatar"></div>`);
+  expect(none.avatar!.status).toBe(404);
+  expect(none.avatar!.headers['cache-control']).toBe('no-store');
 
   api.state.photo = photo('first');
   const first = await open(server, pairingId);
@@ -90,7 +91,7 @@ test('the name falls back to the agent id, and an unreachable Telegram keeps the
   const pairingId = voiceCallPairings.create('a', '42');
   const offline = await open(app(new TelegramBotAvatars(botApi({ down: true }).fetch)), pairingId);
   expect(offline.name).toBe('a');
-  expect(offline.src).toBeUndefined();
+  expect(offline.avatar!.status).toBe(404);
   expect(offline.page.status).toBe(200);
 
   const api = botApi({ name: 'Meguri', photo: photo('first') });
@@ -102,7 +103,8 @@ test('the name falls back to the agent id, and an unreachable Telegram keeps the
   expect(later.avatar!.status).toBe(200);
 
   const notImage = await open(app(new TelegramBotAvatars(botApi({ photo: photo('x'), image: Buffer.from('<html>') }).fetch)), pairingId);
-  expect(notImage.src).toBeUndefined();
+  expect(notImage.src).toBe(`/voice-call/${pairingId}/avatar`);
+  expect(notImage.avatar!.status).toBe(404);
   expect((await request(server).get('/voice-call/unknown/avatar')).status).toBe(404);
 });
 
@@ -111,11 +113,21 @@ test('a slow Telegram never holds the call page: it opens with what is known, an
   const server = app(new TelegramBotAvatars(api.fetch, 50)), pairingId = voiceCallPairings.create('a', '42');
   let answer = () => {};
   api.state.slow = new Promise<void>(resolve => { answer = resolve; });
-  // Nothing known yet: the agent id and its initial, at once.
-  const cold = await open(server, pairingId);
-  expect(cold.name).toBe('a');
-  expect(cold.src).toBeUndefined();
+  // Nothing known yet: the page opens at once with the agent id, and still asks for the photo.
+  const page = await request(server).get(`/voice-call/${pairingId}`);
+  expect(/<div class="name">([^<]*)<\/div>/.exec(page.text)?.[1]).toBe('a');
+  const src = /<img id="photo" alt="" src="([^"]+)">/.exec(page.text)?.[1];
+  expect(src).toBe(`/voice-call/${pairingId}/avatar`);
+  // The photo request waits for the lookup and shows the bot's photo once Telegram answers, uncached.
+  const photoRequest = request(server).get(src!).buffer(true).then(response => response);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  // The bot's id is in its token: the photo lookup does not wait for getMe.
+  expect(api.urls.map(url => url.split('/').pop())).toEqual(['getMe', 'getUserProfilePhotos']);
   answer(); api.state.slow = undefined;
+  const cold = await photoRequest;
+  expect(cold.status).toBe(200);
+  expect(cold.headers['content-type']).toBe('image/jpeg');
+  expect(cold.headers['cache-control']).toBe('no-store');
   await new Promise(resolve => setTimeout(resolve, 20));
   expect((await open(server, pairingId)).name).toBe('Meguri');
   // Renamed in BotFather while Telegram is slow: the last known profile, photo included, then the new name.

@@ -1,5 +1,6 @@
 import { AgentRunner } from '../../../src/agent/runner';
 import { voiceCallPairings } from '../../../src/voice/call-pairing';
+import { telegramBotAvatars } from '../../../src/voice/telegram-avatar';
 
 const voiceConfig = (voiceEnabled = true, allowTools?: boolean) => ({ id: 'agent', allow_tools: allowTools,
   orchestration: { enabled: true, channels: ['telegram'] }, voice: { enabled: voiceEnabled } });
@@ -27,6 +28,18 @@ describe('voice_call_pair (/call)', () => {
     // Sent in a private-chat topic, the call joins that topic.
     const topic = await command(runnerWith(voiceConfig(), 'https://host.example/gateway'), { command: 'voice_call_pair', chat_id: '42', payload: { user_id: '42', thread_id: '7' } });
     expect(voiceCallPairings.get(String(topic.data.url).split('/').pop()!)).toMatchObject({ threadKey: '7' });
+  });
+
+  test("starts the bot's name and photo lookup as it sends the button, so the call page finds them ready", async () => {
+    const refresh = jest.spyOn(telegramBotAvatars, 'refresh').mockResolvedValue({ name: 'Bot', avatar: null });
+    try {
+      const pair = { command: 'voice_call_pair', chat_id: '42', payload: { user_id: '42' } };
+      await command(runnerWith({ ...voiceConfig(), telegram: { botToken: '123:token' } }, 'https://host.example/gateway'), pair);
+      expect(refresh).toHaveBeenCalledWith('agent', '123:token');
+      refresh.mockClear();
+      await command(runnerWith(voiceConfig(), 'https://host.example/gateway'), pair);
+      expect(refresh).not.toHaveBeenCalled();
+    } finally { refresh.mockRestore(); }
   });
 
   test('refuses group chats, disabled voice, agents without Telegram orchestration, and a missing public URL', async () => {
