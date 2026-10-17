@@ -47,6 +47,8 @@ An app can declare an agent workspace. The gateway registers it as an agent and 
 
 An agent that serves many unrelated users can declare `isolate_memory: true` in its `services.agent` block. Each conversation then keeps its own memory under the workspace's `chats/`; see [isolated memory mode](../reference/memory-settings.md#isolated-memory-mode).
 
+The agent container does not get the app's `.env`, which holds the secrets of every service. It gets only the secrets that its `services.agent.env` list names, such as an API token for the app's own HTTP API, and none when the list is absent; see [agent service declaration](../api/apps.md).
+
 The container receives read-only host binary mounts and a read-only staged Claude configuration seed. The seed is copied into a writable container configuration file at container start, allowing Claude to perform atomic rewrites. Refreshing the staged seed on gateway reconciliation does not itself restart an already running container; check the container lifecycle when an account change is not reflected.
 
 These are explicit mounts and execution boundaries, not a guarantee that arbitrary app code is harmless. Review the generated Compose file, app services, port exposure, and any declared host-script bridge. The bridge exists to run approved app scripts through the host socket, so its declared capabilities matter when assessing what the app can access.
