@@ -2364,8 +2364,9 @@ export class AppInstaller {
    * Reconfigure an installed app: merge env vars and/or override host ports,
    * then force-recreate the container in place. No clone, no dir swap — the app
    * stays at its current commit/appDir; only its .env, (optionally) its
-   * compose port mappings and its agent's memory settings change. Named volumes and their data survive because
-   * this is an `up --force-recreate`, never a `down -v`.
+   * compose port mappings and its agent's memory settings change. Named
+   * volumes and their data survive because this is an `up --force-recreate`,
+   * never a `down -v`.
    */
   private async runReconfigure(
     job: JobState,
@@ -2440,10 +2441,12 @@ export class AppInstaller {
       );
     }
     const nextEntry: AppEntry = newAgent ? { ...entry, agentDeclaration: newAgent } : entry;
-    const memoryModeChanged =
-      oldAgent !== null && newAgent !== null &&
+    const memoryModeChangedAgent =
+      oldAgent && newAgent &&
       (Boolean(oldAgent.isolateMemory) !== Boolean(newAgent.isolateMemory) ||
-        Boolean(oldAgent.disableArchive) !== Boolean(newAgent.disableArchive));
+        Boolean(oldAgent.disableArchive) !== Boolean(newAgent.disableArchive))
+        ? newAgent
+        : null;
 
     // Host-port collision across other installed apps (only if ports changed).
     // Runs before the live compose is touched, so a collision leaves nothing to
@@ -2557,9 +2560,17 @@ export class AppInstaller {
     // A toggled isolate_memory/disable_archive reaches the running agent the way
     // an update's does: the config.json entry changes, and the config watcher
     // replaces the agent's runner once it is idle.
-    if (memoryModeChanged && this.agentManager && nextEntry.agentPaths) {
-      await this.agentManager.upsertAgent(nextEntry);
-      this.log(job, `Agent "${newAgent!.name}" memory settings updated — applied once the agent is idle`);
+    if (memoryModeChangedAgent && this.agentManager && nextEntry.agentPaths) {
+      const agentName = memoryModeChangedAgent.name;
+      try {
+        await this.agentManager.upsertAgent(nextEntry);
+      } catch (err) {
+        // apps.json already holds the new modes; gateway start applies them from there.
+        throw new Error(
+          `Reconfigure applied, but agent "${agentName}" config entry was not updated (${(err as Error).message}) — its memory settings take effect at the next gateway start`,
+        );
+      }
+      this.log(job, `Agent "${agentName}" memory settings updated — applied once the agent is idle`);
     }
 
     const proxyUrls: Record<string, string> = {};

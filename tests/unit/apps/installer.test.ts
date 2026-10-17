@@ -3547,6 +3547,22 @@ services:
         expect(job.logs.join('\n')).toContain('applied once the agent is idle');
       });
 
+      it('says the change waits for a gateway start when the agent config entry cannot be written', async () => {
+        const { installer, agentMgr } = await installThenEditYaml(
+          { name: 'reconf-bot' },
+          { name: 'reconf-bot', isolate: true },
+        );
+        agentMgr.upsertAgent.mockRejectedValueOnce(new Error('config locked'));
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
+
+        expect(job.status).toBe('failed');
+        expect(job.error).toMatch(/config locked.*take effect at the next gateway start/);
+        expect((await registry.get('agent-reconf'))?.agentDeclaration).toEqual(
+          { path: './agent', name: 'reconf-bot', isolateMemory: true },
+        );
+      });
+
       it('turns the modes back off when app.yaml stops declaring them', async () => {
         const { installer } = await installThenEditYaml(
           { name: 'reconf-bot', isolate: true, noArchive: true },
