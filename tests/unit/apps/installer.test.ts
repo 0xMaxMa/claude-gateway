@@ -3649,6 +3649,36 @@ services:
         expect(fs.readFileSync(path.join(appDir, '.env.agent'), 'utf-8')).toBe('AGENT_API_TOKEN=new-token\n');
       });
 
+      it('re-injects the agent service on an env-only reconfigure (#618)', async () => {
+        // An agent service injected before #618 reads the app's full .env;
+        // re-injecting points it at .env.agent.
+        const { installer, agentMgr } = await installThenEditYaml(
+          { name: 'reconf-bot' },
+          { name: 'reconf-bot', env: ['AGENT_API_TOKEN'] },
+        );
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { AGENT_API_TOKEN: 't' } }), 5000);
+
+        expect(job.status).toBe('completed');
+        expect(agentMgr.injectAgentService).toHaveBeenCalledWith(
+          expect.objectContaining({ agentDeclaration: { path: './agent', name: 'reconf-bot', env: ['AGENT_API_TOKEN'] } }),
+        );
+      });
+
+      it('puts the compose back when an env-only reconfigure fails to recreate (#618)', async () => {
+        const { installer, agentMgr, appDir, spawnImpl } = await installThenEditYaml({ name: 'reconf-bot' }, { name: 'reconf-bot' });
+        const composePath = path.join(appDir, 'docker-compose.yml');
+        const composeBefore = fs.readFileSync(composePath, 'utf-8');
+        agentMgr.injectAgentService.mockImplementation(() => fs.appendFileSync(composePath, '# re-injected\n'));
+        let recreates = 0;
+        spawnImpl.fail = (cmd, args) => cmd === 'docker' && args.includes('--force-recreate') && ++recreates === 1;
+
+        const job = await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { A: '1' } }), 5000);
+
+        expect(job.status).toBe('failed');
+        expect(fs.readFileSync(composePath, 'utf-8')).toBe(composeBefore);
+      });
+
       it('puts the agent env file back with the .env when the recreate fails (#618)', async () => {
         const { installer, appDir, spawnImpl } = await installThenEditYaml(
           { name: 'reconf-bot', env: ['AGENT_API_TOKEN'] },

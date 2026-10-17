@@ -2403,12 +2403,12 @@ export class AppInstaller {
     // Snapshot the current on-disk state BEFORE any mutation so a failed
     // recreate can be rolled back. Both an env-only and a port change rewrite
     // .env and force-recreate the container; a port change additionally rewrites
-    // the live compose file and swaps proxy routes. If the new container never
+    // the live compose file and swaps proxy routes, and an app agent's service is
+    // re-injected into it. If the new container never
     // comes up the app would otherwise be left down (or, for a port change,
     // unreachable with routes gone and compose/registry mismatched).
     const envPath = path.join(appDir, '.env');
-    const oldComposeContent =
-      hasPortChange && fs.existsSync(composePath) ? fs.readFileSync(composePath, 'utf-8') : null;
+    const oldComposeContent = fs.existsSync(composePath) ? fs.readFileSync(composePath, 'utf-8') : null;
     const oldEnvContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : null;
     const oldPorts = entry.ports;
 
@@ -2462,14 +2462,16 @@ export class AppInstaller {
     try {
       // Swap in the newly-generated compose only now that we're inside the
       // guard (finding F2). Regenerating drops the injected agent service, so we
-      // re-inject it. An env-only reconfigure leaves the compose untouched.
+      // re-inject it. An env-only reconfigure re-injects it too when the agent
+      // was injected (it has agentPaths), so an agent service from before #618
+      // stops reading the app's full .env.
       if (hasPortChange) {
         this.log(job, 'Updating docker-compose.yml');
         fs.writeFileSync(composePath, newComposeContent);
-        if (newAgent && this.agentManager) {
-          const agentPaths = entry.agentPaths ?? this.agentManager.detectAgentPaths();
-          await this.agentManager.injectAgentService({ ...nextEntry, agentPaths });
-        }
+      }
+      if (newAgent && this.agentManager && (hasPortChange || entry.agentPaths)) {
+        const agentPaths = entry.agentPaths ?? this.agentManager.detectAgentPaths();
+        await this.agentManager.injectAgentService({ ...nextEntry, agentPaths });
       }
 
       // Merge the new env vars onto the existing .env: keys not supplied are
@@ -2525,7 +2527,7 @@ export class AppInstaller {
           fs.chmodSync(envPath, 0o600);
         }
         if (oldAgent) writeAgentEnvFile(appDir, oldAgent);
-        if (hasPortChange && oldComposeContent !== null) {
+        if (oldComposeContent !== null) {
           fs.writeFileSync(composePath, oldComposeContent);
         }
         await this.composeUp(appName, appDir, job, { forceRecreate: true });

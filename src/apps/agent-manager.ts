@@ -37,7 +37,7 @@ export function writeAgentEnvFile(installPath: string, declaration: Pick<AgentDe
   const allowed = new Set(declaration.env ?? []);
   const envPath = path.join(installPath, '.env');
   const appEnv = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8').split('\n') : [];
-  const lines = appEnv.filter((line) => allowed.has(line.slice(0, line.indexOf('='))));
+  const lines = appEnv.filter((line) => line.includes('=') && allowed.has(line.slice(0, line.indexOf('='))));
   const agentEnvPath = path.join(installPath, '.env.agent');
   fs.writeFileSync(agentEnvPath, lines.map((l) => l + '\n').join(''), { mode: 0o600 });
   fs.chmodSync(agentEnvPath, 0o600);

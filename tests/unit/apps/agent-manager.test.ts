@@ -172,6 +172,16 @@ describe('AgentManager', () => {
         expect(compose.services.agent.env_file).toBe('.env.agent');
         expect(fs.statSync(path.join(entry.installPath, '.env.agent')).mode & 0o777).toBe(0o600);
       });
+
+      it('does not pass a line without "=" whose text starts with a declared name', async () => {
+        const entry = makeEntry(tmpDir);
+        entry.agentDeclaration = { ...entry.agentDeclaration!, env: ['AGENT_API_TOKEN'] };
+        fs.writeFileSync(path.join(entry.installPath, '.env'), 'AGENT_API_TOKENX\n' + APP_ENV);
+
+        await manager.injectAgentService(entry);
+
+        expect(fs.readFileSync(path.join(entry.installPath, '.env.agent'), 'utf-8')).toBe('AGENT_API_TOKEN=agent-token\n');
+      });
     });
 
     it('does not download or install Codex in a Claude-only agent image', async () => {
