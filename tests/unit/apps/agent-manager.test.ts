@@ -132,6 +132,48 @@ describe('AgentManager', () => {
       expect(agentSvc['container_name']).toBe('my-app-agent');
     });
 
+    describe('environment (#618)', () => {
+      const APP_ENV = 'DB_PASSWORD=db-secret\nNEXTAUTH_SECRET=auth-secret\nAGENT_API_TOKEN=agent-token\n';
+
+      /** The environment compose gives the agent container: its env_file(s) plus `environment`. */
+      function resolvedAgentEnv(entry: AppEntry): Record<string, string> {
+        const compose = yaml.load(fs.readFileSync(path.join(entry.installPath, 'docker-compose.yml'), 'utf-8')) as any;
+        const svc = compose.services.agent;
+        const out: Record<string, string> = {};
+        const files = svc.env_file === undefined ? [] : [svc.env_file].flat();
+        for (const f of files) {
+          for (const line of fs.readFileSync(path.join(entry.installPath, f), 'utf-8').split('\n')) {
+            const eq = line.indexOf('=');
+            if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+          }
+        }
+        for (const e of svc.environment ?? []) out[e.split('=')[0]] = e.split('=').slice(1).join('=');
+        return out;
+      }
+
+      it('gives the agent no app secrets when app.yaml declares no env', async () => {
+        const entry = makeEntry(tmpDir);
+        fs.writeFileSync(path.join(entry.installPath, '.env'), APP_ENV);
+
+        await manager.injectAgentService(entry);
+
+        expect(resolvedAgentEnv(entry)).toEqual({});
+      });
+
+      it('gives the agent only the declared env names, from a file of its own', async () => {
+        const entry = makeEntry(tmpDir);
+        entry.agentDeclaration = { ...entry.agentDeclaration!, env: ['AGENT_API_TOKEN'] };
+        fs.writeFileSync(path.join(entry.installPath, '.env'), APP_ENV);
+
+        await manager.injectAgentService(entry);
+
+        expect(resolvedAgentEnv(entry)).toEqual({ AGENT_API_TOKEN: 'agent-token' });
+        const compose = yaml.load(fs.readFileSync(path.join(entry.installPath, 'docker-compose.yml'), 'utf-8')) as any;
+        expect(compose.services.agent.env_file).toBe('.env.agent');
+        expect(fs.statSync(path.join(entry.installPath, '.env.agent')).mode & 0o777).toBe(0o600);
+      });
+    });
+
     it('does not download or install Codex in a Claude-only agent image', async () => {
       const entry = makeEntry(tmpDir);
       await manager.injectAgentService(entry);

@@ -243,7 +243,7 @@ curl -X POST \
 - `secretKeys` — env vars the operator **must** supply (declared as bare keys in `app.yaml`).
 - `generatedKeys` — secrets the gateway fills with a fresh random value at install (declared as `KEY=!generate:<encoding>:<bytes>`); never prompted for.
 - `secretDefaults` — defaults for prompted secrets declared as `KEY=!default:<value>`. The key is still listed in `secretKeys` (prompted and editable), but the value here pre-fills the field; if the operator leaves it blank the default is written to `.env`. Only keys with a declared default appear. Precedence at install: operator-supplied value → default → empty.
-- `agentDeclaration` — the app's `services.agent` declaration (`path`, `name`), or `null` when the app has no agent. It carries `"isolateMemory": true` when the app opts its agent into [isolated memory mode](../reference/memory-settings.md#isolated-memory-mode), and `"disableArchive": true` when the app [turns the memory archive off](../reference/memory-settings.md#turning-the-memory-archive-off).
+- `agentDeclaration` — the app's `services.agent` declaration (`path`, `name`), or `null` when the app has no agent. It carries `"isolateMemory": true` when the app opts its agent into [isolated memory mode](../reference/memory-settings.md#isolated-memory-mode), `"disableArchive": true` when the app [turns the memory archive off](../reference/memory-settings.md#turning-the-memory-archive-off), and `"env"` when the app passes secrets to its agent.
 
 **Error responses:**
 
@@ -471,7 +471,7 @@ curl -X POST \
 
 Poll the returned `jobId` with `GET /api/v1/apps/jobs/:jobId` to track progress. When a host port changes, the proxy route is re-registered and the returned job's `proxyUrls` reflect the new port.
 
-**Agent settings:** reconfigure re-reads the app's installed `app.yaml`. It stores the agent declaration's `isolate_memory` and `disable_archive` in the app record and reports the result as the job's `agentDeclaration`. It also writes these two settings into the agent's config entry, without changing any other field of the entry. When either value differs from the one the agent runs with, the gateway restarts that agent once none of its sessions is busy, as after an update. If the config entry cannot be written, the job fails with a message that the rest of the reconfigure was already applied. The settings then take effect at the next gateway start. Reconfigure does not change which agent the app registers: when the `app.yaml` renames the agent, changes its `path`, or adds or removes the `agent` service, the job fails before anything changes. Use update or reinstall the app instead.
+**Agent settings:** reconfigure re-reads the app's installed `app.yaml`. It stores the agent declaration's `isolate_memory`, `disable_archive` and `env` in the app record and reports the result as the job's `agentDeclaration`. It rewrites the agent's `.env.agent` from the new `.env` and the declared `env`. It also writes these two settings into the agent's config entry, without changing any other field of the entry. When either value differs from the one the agent runs with, the gateway restarts that agent once none of its sessions is busy, as after an update. If the config entry cannot be written, the job fails with a message that the rest of the reconfigure was already applied. The settings then take effect at the next gateway start. Reconfigure does not change which agent the app registers: when the `app.yaml` renames the agent, changes its `path`, or adds or removes the `agent` service, the job fails before anything changes. Use update or reinstall the app instead.
 
 **Rollback on failure:** if a host-port reconfigure fails to recreate the container (e.g. the new port is unbindable or the healthcheck never passes), the app is rolled back to its previous ports — the old compose/`.env` are restored, the old container is brought back up, and the old proxy routes are re-registered — so the app stays reachable. The job is still reported as `failed`.
 
@@ -628,6 +628,7 @@ services:
 | `services.agent` | No | Agent service declaration (see below) |
 | `services.agent.isolate_memory` | No | `true` gives each conversation its own agent memory (default `false`) |
 | `services.agent.disable_archive` | No | `true` turns off the agent's searchable memory archive and its tools (default `false`) |
+| `services.agent.env` | No | Names of the app's secrets the agent container receives (default: none) |
 
 **Service fields:**
 
@@ -654,7 +655,7 @@ services:
 | `type` | No | `api` (strips the `/app/:name/:portName` prefix before forwarding) or `web` (preserves the full path, required for SPAs). |
 | `rate_limit` | No | Requests per second for this port (positive number, default 200). |
 
-**Banned fields:** `network_mode: host`, `privileged`, `cap_add`. The gateway always injects `cap_drop: ALL`, `restart: unless-stopped`, `env_file: .env`, and resource limits.
+**Banned fields:** `network_mode: host`, `privileged`, `cap_add`. The gateway always injects `cap_drop: ALL`, `restart: unless-stopped`, `env_file: .env`, and resource limits. The `agent` service does not get `.env` (see `env` under **Agent service declaration**).
 
 **Self-generating secrets (`!generate`):** An `environment` entry of the form `KEY=!generate:<encoding>:<bytes>` declares a per-install random string. The installer fills it with `crypto.randomBytes(<bytes>)` at install time — the author never hands a value to the installer, and such keys are **not** reported in `secretKeys` (they are never prompted for). Encodings: `hex`, `base64`, `base64url` (URL/connection-string safe — no `+` `/` `=`). Length must be `8`–`512` bytes; an unknown encoding or bad length fails at parse. An explicit `env_vars` value for the key overrides generation. `update` preserves the value already in `.env` (never regenerates). A **local** install also preserves a value already present in the app dir's `.env`: re-installing a local app over a source tree that still holds a prior `.env` keeps the secret stable, so the app can reconnect to persisted data (e.g. a `pgdata` bind mount). A registry/GitHub install always generates fresh (any `.env` checked out from the source is ignored). Precedence: operator-supplied `env_vars` → existing `.env` (local install / update) → generate. Example: `- NEXTAUTH_SECRET=!generate:base64:32`.
 
@@ -667,6 +668,7 @@ services:
     name: my-agent     # agent ID, must match [a-z][a-z0-9-]{1,63}
     isolate_memory: true # optional, default false
     disable_archive: true # optional, default false
+    env: [AGENT_API_TOKEN] # optional, default none
 ```
 
 When declared, the gateway injects a `debian:stable-slim` container, mounts the claude CLI and node binaries, and registers the agent in `config.json`. Messages to this agent are dispatched via `docker exec`.
@@ -674,6 +676,8 @@ When declared, the gateway injects a `debian:stable-slim` container, mounts the 
 `isolate_memory: true` turns on [isolated memory mode](../reference/memory-settings.md#isolated-memory-mode) for this agent: each conversation gets its own `USER.md`/`MEMORY.md` under the workspace's `chats/`, and the workspace-root files are no longer injected. Each conversation also runs in its own sandbox container that mounts only its own `chats/` directory read-write and the shared persona files read-only, gets no gateway API key or bot token, and can reply only to its own chat. Use it for an agent that serves many unrelated users. It must be a boolean. The gateway writes it to the agent's `isolateMemory` at install, update, [reconfigure](#post-apiv1appsnamereconfigure) and every gateway start, so a release that removes it turns the mode off. It is independent of `agents[].isolateMemory` on host agents.
 
 `disable_archive: true` [turns the memory archive off](../reference/memory-settings.md#turning-the-memory-archive-off) for this agent: no `kb.sqlite` is built and `memory_search`/`memory_get` are not offered. Use it for an agent that keeps its own per-tenant memory files, such as `memory/family-<id>.md`, because the archive indexes every file into one index that any conversation can search. It must be a boolean and does not turn on `isolate_memory`. The gateway writes it to the agent's `disableArchive` at install, update, reconfigure and every gateway start, like `isolate_memory`.
+
+`env` lists the app secrets that the agent container receives. The app's `.env` holds the secrets of every service, such as database passwords, so the agent container never gets that file. Instead it gets `.env.agent` (mode `0600`), which holds only the `.env` lines whose key is in `env`. Without `env`, the file is empty and the agent container has no app secrets. Each name must be a secret that another service declares in its `environment`, either a bare `KEY` or a `KEY=!generate:...`/`KEY=!default:...` entry; any other name fails the parse. The gateway rewrites `.env.agent` from `.env` at install, update, reconfigure (and its rollback) and backup restore. An app installed before `env` existed keeps giving its agent the full `.env` until it is updated or reinstalled.
 
 **Host script bridge (`gateway_api`):**
 

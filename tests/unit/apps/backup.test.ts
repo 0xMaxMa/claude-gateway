@@ -297,6 +297,22 @@ describe('AppInstaller — backup/restore', () => {
     expect(fs.readFileSync(path.join(appsDir, 'shop', '.env'), 'utf-8')).toContain('SECRET=restored');
   });
 
+  it('U-RS-AGENT-ENV: restore rewrites the agent env file from the restored .env (#618)', async () => {
+    const { calls } = makeCallLog();
+    const installer = makeInstaller(backupSpawn(calls, { volumes: ['data'] }));
+    const entry = await seedApp('shop', 'stopped');
+    await registry.upsert({ ...entry, agentDeclaration: { path: './agent', name: 'shop-bot', env: ['SECRET'] } });
+    fs.writeFileSync(path.join(appsDir, 'shop', '.env.agent'), 'SECRET=stale\n');
+    const dir = path.join(backupsDir, 'shop');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'bk1.tar.gz'), 'ARCHIVE');
+
+    const job = await waitForJob(installer, installer.restore('shop', 'bk1'));
+
+    expect(job.status).toBe('completed');
+    expect(fs.readFileSync(path.join(appsDir, 'shop', '.env.agent'), 'utf-8')).toBe('SECRET=restored\n');
+  });
+
   it('U-RS-2: restore across a differing app version warns but proceeds', async () => {
     const { calls } = makeCallLog();
     const installer = makeInstaller(

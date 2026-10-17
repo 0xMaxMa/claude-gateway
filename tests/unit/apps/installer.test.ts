@@ -3473,7 +3473,7 @@ services:
     // #615: reconfigure re-reads app.yaml, so the agent settings it declares
     // must reach apps.json and the running agent, not just the compose.
     describe('agent declaration', () => {
-      type AgentYaml = { name: string; path?: string; isolate?: boolean; noArchive?: boolean } | null;
+      type AgentYaml = { name: string; path?: string; isolate?: boolean; noArchive?: boolean; env?: string[] } | null;
 
       function agentAppYaml(port: number, agent: AgentYaml): string {
         const agentBlock = agent === null ? '' : [
@@ -3482,6 +3482,7 @@ services:
           `    name: ${agent.name}`,
           ...(agent.isolate ? ['    isolate_memory: true'] : []),
           ...(agent.noArchive ? ['    disable_archive: true'] : []),
+          ...(agent.env ? [`    env: [${agent.env.join(', ')}]`] : []),
         ].join('\n');
         return `
 apiVersion: apps.getpod.ai/v1
@@ -3491,6 +3492,9 @@ commit: "abc123def456abc123def456abc123def456abc1"
 services:
   app:
     image: nginx:1.25
+    environment:
+      - DB_PASSWORD
+      - AGENT_API_TOKEN
     ports:
       - name: api
         host: ${port}
@@ -3505,6 +3509,7 @@ services:
       /** Install agent-reconf declaring `agent`, then rewrite its on-disk app.yaml to `next`. */
       async function installThenEditYaml(agent: AgentYaml, next: AgentYaml, port = 5760) {
         const calls: Array<{ cmd: string; args: string[] }> = [];
+        const spawnImpl: { fail?: (cmd: string, args: string[]) => boolean } = {};
         const spawn = jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
           calls.push({ cmd, args });
           if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
@@ -3512,6 +3517,7 @@ services:
             fs.mkdirSync(path.join(opts.cwd, 'agent'), { recursive: true });
             fs.mkdirSync(path.join(opts.cwd, 'other-agent'), { recursive: true });
           }
+          if (spawnImpl.fail?.(cmd, args)) return { stdout: '', stderr: 'mocked: recreate failed', status: 1 };
           return { stdout: '', stderr: '', status: 0 };
         });
         const agentMgr = makeAgentMgr('unrelated-bot');
@@ -3528,7 +3534,7 @@ services:
         agentMgr.upsertAgent.mockClear();
         agentMgr.syncMemoryModes.mockClear();
         calls.length = 0;
-        return { installer, agentMgr, appDir, calls };
+        return { installer, agentMgr, appDir, calls, spawnImpl };
       }
 
       it('persists toggled isolate_memory and disable_archive and reports them in the job result', async () => {
@@ -3625,6 +3631,41 @@ services:
 
         expect(job.status).toBe('completed');
         expect((await registry.get('agent-reconf'))?.status).toBe('running');
+      });
+
+      it('rewrites the agent env file from the new .env on an env-only reconfigure (#618)', async () => {
+        const { installer, appDir } = await installThenEditYaml(
+          { name: 'reconf-bot', env: ['AGENT_API_TOKEN'] },
+          { name: 'reconf-bot', env: ['AGENT_API_TOKEN'] },
+        );
+
+        const job = await waitForJob(
+          installer,
+          installer.reconfigure('agent-reconf', { envVars: { AGENT_API_TOKEN: 'new-token', DB_PASSWORD: 'db-secret' } }),
+          5000,
+        );
+
+        expect(job.status).toBe('completed');
+        expect(fs.readFileSync(path.join(appDir, '.env.agent'), 'utf-8')).toBe('AGENT_API_TOKEN=new-token\n');
+      });
+
+      it('puts the agent env file back with the .env when the recreate fails (#618)', async () => {
+        const { installer, appDir, spawnImpl } = await installThenEditYaml(
+          { name: 'reconf-bot', env: ['AGENT_API_TOKEN'] },
+          { name: 'reconf-bot', env: ['AGENT_API_TOKEN'] },
+        );
+        await waitForJob(installer, installer.reconfigure('agent-reconf', { envVars: { AGENT_API_TOKEN: 'old-token' } }), 5000);
+        let recreates = 0;
+        spawnImpl.fail = (cmd, args) => cmd === 'docker' && args.includes('--force-recreate') && ++recreates === 1;
+
+        const job = await waitForJob(
+          installer,
+          installer.reconfigure('agent-reconf', { envVars: { AGENT_API_TOKEN: 'bad-token', DB_PASSWORD: 'db-secret' } }),
+          5000,
+        );
+
+        expect(job.status).toBe('failed');
+        expect(fs.readFileSync(path.join(appDir, '.env.agent'), 'utf-8')).toBe('AGENT_API_TOKEN=old-token\n');
       });
 
       it('re-injects the agent service from the new declaration on a port change', async () => {

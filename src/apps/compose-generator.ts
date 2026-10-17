@@ -62,6 +62,8 @@ export interface AppYamlAgentService {
   isolate_memory?: boolean;
   /** Turns off the searchable memory archive and its tools for this app's agent (#609). */
   disable_archive?: boolean;
+  /** Names of the app's secrets the agent container receives; none by default (#618). */
+  env?: string[];
 }
 
 export interface AppYaml {
@@ -104,6 +106,8 @@ export interface AgentDeclaration {
   isolateMemory?: true;
   /** Set only when app.yaml turns the archive off; written to its `disableArchive`. */
   disableArchive?: true;
+  /** Set only when app.yaml lists env names; the agent's `.env.agent` holds just these keys. */
+  env?: string[];
 }
 
 export interface GeneratedKey {
@@ -359,7 +363,7 @@ export function generateCompose(
   for (const [svcName, svcDef] of Object.entries(appYaml.services)) {
     if (svcName === 'agent') {
       const agentSvc = svcDef as AppYamlAgentService;
-      result.agentDeclaration = { path: agentSvc.path, name: agentSvc.name, ...(agentSvc.isolate_memory === true ? { isolateMemory: true } : {}), ...(agentSvc.disable_archive === true ? { disableArchive: true } : {}) };
+      result.agentDeclaration = { path: agentSvc.path, name: agentSvc.name, ...(agentSvc.isolate_memory === true ? { isolateMemory: true } : {}), ...(agentSvc.disable_archive === true ? { disableArchive: true } : {}), ...(agentSvc.env?.length ? { env: agentSvc.env } : {}) };
       continue;
     }
 
@@ -600,6 +604,13 @@ export function generateCompose(
     }
   }
 
+  // The agent's env names must be keys the installer writes to .env (#618).
+  for (const key of result.agentDeclaration?.env ?? []) {
+    if (!result.secretKeys.includes(key) && !result.generatedKeys.some((g) => g.key === key)) {
+      throw new Error(`Agent service declaration: env "${key}" is not a secret declared by another service`);
+    }
+  }
+
   // Top-level volumes for named volumes
   const composeDoc: Record<string, unknown> = {
     services: composeServices,
@@ -644,13 +655,17 @@ function validateAgentServiceDecl(svcDef: unknown): void {
     throw new Error('Agent service declaration must be an object');
   }
   const obj = svcDef as Record<string, unknown>;
-  const allowed = new Set(['path', 'name', 'isolate_memory', 'disable_archive']);
+  const allowed = new Set(['path', 'name', 'isolate_memory', 'disable_archive', 'env']);
   for (const k of Object.keys(obj)) {
     if (!allowed.has(k)) {
       throw new Error(
-        `Agent service declaration has invalid field "${k}" — only "path", "name", "isolate_memory" and "disable_archive" are allowed`,
+        `Agent service declaration has invalid field "${k}" — only "path", "name", "isolate_memory", "disable_archive" and "env" are allowed`,
       );
     }
+  }
+  const env = obj['env'];
+  if (env !== undefined && (!Array.isArray(env) || env.some((k) => typeof k !== 'string' || !ENV_KEY_RE.test(k)) || new Set(env).size !== env.length)) {
+    throw new Error('Agent service declaration: "env" must be a list of distinct environment variable names');
   }
   if (obj['isolate_memory'] !== undefined && typeof obj['isolate_memory'] !== 'boolean') {
     throw new Error('Agent service declaration: "isolate_memory" must be true or false');

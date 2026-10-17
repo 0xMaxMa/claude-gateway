@@ -16,7 +16,7 @@ import {
   GeneratedCompose,
   AgentDeclaration,
 } from './compose-generator';
-import { AgentManager } from './agent-manager';
+import { AgentManager, writeAgentEnvFile } from './agent-manager';
 import { msUntilNextHour } from '../history/cleanup';
 import { msOr } from '../utils/config-num';
 
@@ -51,7 +51,7 @@ export interface InstallResult {
   appName: string;
   proxyUrls: Record<string, string>; // portName → /app/<name>/<port>/
   secretKeys: string[];
-  agentDeclaration?: { path: string; name: string; isolateMemory?: true; disableArchive?: true } | null;
+  agentDeclaration?: { path: string; name: string; isolateMemory?: true; disableArchive?: true; env?: string[] } | null;
 }
 
 /** Per-app backup policy (mirrors `gateway.appBackup` in the gateway config). */
@@ -1100,6 +1100,7 @@ export class AppInstaller {
       // Restore config that carries generated secrets, so the app boots with the
       // same credentials the volume data was created under.
       this.copyIfExists(path.join(staging, 'config', '.env'), path.join(appDir, '.env'));
+      if (entry.agentDeclaration) writeAgentEnvFile(appDir, entry.agentDeclaration);
 
       log(`Starting "${appName}" on restored data`);
       await this.composeUp(appName, appDir);
@@ -2477,6 +2478,7 @@ export class AppInstaller {
       this.log(job, 'Writing .env');
       const mergedEnv = { ...this.readEnvFile(appDir), ...(options.envVars ?? {}) };
       this.writeEnvFile(appDir, appName, generated, mergedEnv);
+      if (newAgent) writeAgentEnvFile(appDir, newAgent);
 
       // Deregister old proxy routes before the port mapping changes (the proxy is
       // bound to the old hostPort).
@@ -2522,6 +2524,7 @@ export class AppInstaller {
           fs.writeFileSync(envPath, oldEnvContent, { mode: 0o600 });
           fs.chmodSync(envPath, 0o600);
         }
+        if (oldAgent) writeAgentEnvFile(appDir, oldAgent);
         if (hasPortChange && oldComposeContent !== null) {
           fs.writeFileSync(composePath, oldComposeContent);
         }
