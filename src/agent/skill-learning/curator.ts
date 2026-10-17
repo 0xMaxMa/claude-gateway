@@ -115,7 +115,12 @@ function archiveSkill(name: string, deps: CuratorDeps): boolean {
     deps.db.deleteSkillStat(name);
     return false;
   }
-  const dayDir = path.join(skillsDir, ARCHIVE_DIRNAME, new Date(deps.now).toISOString().slice(0, 10));
+  const archiveDir = path.join(skillsDir, ARCHIVE_DIRNAME);
+  if (!archiveDirUsable(archiveDir)) {
+    deps.logger?.info(`[skill-learning:${deps.agentId}] archive of ${name} skipped: ${archiveDir} is not a real directory`);
+    return false;
+  }
+  const dayDir = path.join(archiveDir, new Date(deps.now).toISOString().slice(0, 10));
   let dest = path.join(dayDir, name);
   if (fs.existsSync(dest)) dest = `${dest}-${deps.now}`;
   try {
@@ -130,11 +135,21 @@ function archiveSkill(name: string, deps: CuratorDeps): boolean {
   return true;
 }
 
+/** True if the archive dir is absent or a real directory (never a symlink out of skills/). */
+function archiveDirUsable(archiveDir: string): boolean {
+  try {
+    return fs.lstatSync(archiveDir).isDirectory();
+  } catch {
+    return true;
+  }
+}
+
 /** Delete archive day directories older than the retention window. Best-effort. */
 function expireArchive(workspaceDir: string, now: number): void {
   const archiveDir = path.join(workspaceDir, 'skills', ARCHIVE_DIRNAME);
   let days: string[];
   try {
+    if (!fs.lstatSync(archiveDir).isDirectory()) return;
     days = fs.readdirSync(archiveDir);
   } catch {
     return;

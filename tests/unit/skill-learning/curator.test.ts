@@ -199,4 +199,21 @@ describe('curator.curateOnce', () => {
     expect(fs.readdirSync(archive).sort()).toEqual([day(ARCHIVE_RETENTION_DAYS - 1), 'not-a-date'].sort());
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it('NEVER follows a symlinked skills/.archive out of the workspace (no move, no expiry)', () => {
+    const { db, ws, dir } = setup();
+    const now = 100 * DAY;
+    const outside = path.join(dir, 'outside-archive');
+    const oldDay = new Date(now - (ARCHIVE_RETENTION_DAYS + 1) * DAY).toISOString().slice(0, 10);
+    fs.mkdirSync(path.join(outside, oldDay), { recursive: true });
+    fs.symlinkSync(outside, path.join(ws, 'skills', ARCHIVE_DIRNAME));
+    seedSkill(db, ws, 'stale', { origin: 'auto', createdAt: now - 45 * DAY, timesLoaded: 0 });
+
+    const r = curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ minUsesToKeep: 2, maxAgeDays: 30 }), now });
+    expect(r.pruned).toEqual([]);
+    expect(exists(ws, 'stale')).toBe(true);
+    expect(fs.readdirSync(outside)).toEqual([oldDay]);
+    expect(db.getSkillStat('stale')).not.toBeNull(); // retried once the archive is a real dir
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });
