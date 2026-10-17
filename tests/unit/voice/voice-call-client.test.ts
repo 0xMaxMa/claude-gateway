@@ -212,6 +212,20 @@ describe('reply playback', () => {
     expect(out[1999]).toBe(0);
   });
 
+  test('an underrun while an earlier fade is still running carries that fade on instead of dropping it', () => {
+    // No jitter buffer, so the next reply starts inside the fade.
+    const playback = createVoiceCallPlayback(48000, { ...VOICE_CALL_PLAYBACK, prebufferMs: 0 }), out = new Float32Array(2000);
+    const loud = (samples: number) => Int16Array.from({ length: samples }, () => 30000);
+    playback.push(loud(3200));
+    playback.render(out.subarray(0, 500));
+    // Barge-in, then a few samples of the next reply that run dry while the barge-in fade still sounds.
+    playback.flush();
+    playback.push(loud(3));
+    playback.render(out.subarray(500, 2000));
+    const worst = Math.max(...out.subarray(301, 2000).map((value, i) => Math.abs(value - out[300 + i])));
+    expect(worst).toBeLessThan(0.01);
+  });
+
   test('a queue longer than its first allocation grows without losing or reordering samples', () => {
     const playback = createVoiceCallPlayback(16000, { ...VOICE_CALL_PLAYBACK, fadeMs: 0 }), pcm = speech(16000 * 9);
     playback.push(pcm.subarray(0, 50000)); playback.push(pcm.subarray(50000));

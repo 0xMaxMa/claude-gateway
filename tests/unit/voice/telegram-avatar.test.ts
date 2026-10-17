@@ -140,3 +140,32 @@ test('a slow Telegram never holds the call page: it opens with what is known, an
   await new Promise(resolve => setTimeout(resolve, 20));
   expect((await open(server, pairingId)).name).toBe('Meguri 2');
 }, 4000);
+
+test('a page opened while Telegram is down costs one failed lookup: the photo request starts none of its own', async () => {
+  const api = botApi({ down: true });
+  const server = app(new TelegramBotAvatars(api.fetch)), pairingId = voiceCallPairings.create('a', '42');
+  const { avatar } = await open(server, pairingId);
+  expect(avatar!.status).toBe(404);
+  expect(api.urls.map(url => url.split('/').pop())).toEqual(['getMe', 'getUserProfilePhotos']);
+});
+
+test('the photo request waits for a running lookup even when an earlier one found no photo, and an outdated version is not cached', async () => {
+  const api = botApi({ name: 'Meguri' });
+  const server = app(new TelegramBotAvatars(api.fetch, 50)), pairingId = voiceCallPairings.create('a', '42');
+  expect((await open(server, pairingId)).avatar!.status).toBe(404);
+  // A photo is set; Telegram is slow on the next open, so the page renders before the lookup finds it.
+  api.state.photo = photo('first');
+  let answer = () => {};
+  api.state.slow = new Promise<void>(resolve => { answer = resolve; });
+  const page = await request(server).get(`/voice-call/${pairingId}`);
+  const photoRequest = request(server).get(`/voice-call/${pairingId}/avatar`).buffer(true).then(response => response);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  answer(); api.state.slow = undefined;
+  expect(page.text).toContain(`src="/voice-call/${pairingId}/avatar"`);
+  expect((await photoRequest).status).toBe(200);
+  // An image URL naming another photo id gets the current photo, uncached.
+  const stale = await request(server).get(`/voice-call/${pairingId}/avatar?v=old-unique`);
+  expect(stale.status).toBe(200);
+  expect(stale.headers['cache-control']).toBe('no-store');
+  expect((await request(server).get(`/voice-call/${pairingId}/avatar?v=first-320-unique`)).headers['cache-control']).toBe('private, max-age=3600');
+});

@@ -42,14 +42,16 @@ export function createVoiceCallRouter(deps: VoiceCallRouterDeps): Router {
   } catch (error) { next(error); } });
 
   // The bot's photo, waiting for the lookup when the page opened before it answered. A URL that
-  // carries the photo's id is cached, as a new photo is a new URL; the plain one is not.
+  // carries the current photo's id is cached, as a new photo is a new URL; any other is not.
   router.get('/:pairingId/avatar', async (req: Request, res: Response) => {
     const pairing = voiceCallPairings.get(String(req.params.pairingId));
     const token = pairing && deps.configs.get(pairing.agentId)?.telegram?.botToken;
-    const avatar = token ? await avatars.avatar(pairing.agentId, token) : null;
+    const profile = token ? await avatars.photo(pairing.agentId, token) : undefined;
+    const avatar = profile?.avatar;
     if (!avatar) { res.setHeader('Cache-Control', 'no-store'); res.status(404).end(); return; }
     res.setHeader('Content-Type', avatar.contentType);
-    res.setHeader('Cache-Control', req.query.v ? 'private, max-age=3600' : 'no-store');
+    // Cached only under the photo's own id: a page rendered with an older id gets the new photo uncached.
+    res.setHeader('Cache-Control', req.query.v && req.query.v === profile.photoId ? 'private, max-age=3600' : 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(avatar.bytes);
   });

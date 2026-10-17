@@ -40,16 +40,23 @@ export class TelegramBotAvatars {
    * shows on the next call. The photo is downloaded only when it changed. When
    * Telegram cannot be reached the last known profile stands. */
   refresh(agentId: string, botToken: string): Promise<BotProfile> {
-    const running = this.lookups.get(agentId);
+    // Keyed by token too: a lookup still running with a rotated-out token is not reused.
+    const key = `${agentId}\n${botToken}`;
+    const running = this.lookups.get(key);
     if (running) return running;
-    const lookup = this.lookUp(agentId, botToken).finally(() => this.lookups.delete(agentId));
-    this.lookups.set(agentId, lookup);
+    const lookup = this.lookUp(agentId, botToken).finally(() => this.lookups.delete(key));
+    this.lookups.set(key, lookup);
     return lookup;
   }
 
-  /** The photo the page was rendered with; looked up once if this process has none yet. */
-  async avatar(agentId: string, botToken: string): Promise<BotAvatar | null> {
-    return (this.known(agentId, botToken) ?? await this.refresh(agentId, botToken)).avatar;
+  /** The profile for the photo request: the last known photo at once, otherwise what the
+   * lookup the page started finds. It never starts a lookup of its own, so a page opened
+   * while Telegram is down costs one failed lookup, not two. */
+  async photo(agentId: string, botToken: string): Promise<BotProfile | undefined> {
+    const known = this.known(agentId, botToken);
+    if (known?.avatar) return known;
+    await this.lookups.get(`${agentId}\n${botToken}`);
+    return this.known(agentId, botToken);
   }
 
   private known(agentId: string, botToken: string): BotProfile | undefined {

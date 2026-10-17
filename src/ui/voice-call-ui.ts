@@ -51,14 +51,14 @@ registerProcessor('voice-call-capture', VoiceCallCapture);`;
 /**
  * Reply playback: one node for the whole call (see createVoiceCallPlayback). The
  * page posts `{ pcm }` frames and `{ flush: token }`; the node reports
- * `{ token, played, playing }` when playback starts or stops and every 25 ms of
- * audio, so stale reports from before a flush are recognisable.
+ * `{ token, played, playing }` when playback starts or stops and every 100 ms of
+ * audio (the page reports progress at that pace), so stale reports from before a flush are recognisable.
  */
 const PLAYER_WORKLET = `${createVoiceCallPlayback.toString()}
 class VoiceCallPlayer extends AudioWorkletProcessor {
   constructor(options){
     super(); this.player = createVoiceCallPlayback(sampleRate, options.processorOptions); this.token = 0; this.reported = 0; this.playing = false;
-    this.step = Math.round(options.processorOptions.inputRate * 0.025);
+    this.step = Math.round(options.processorOptions.inputRate * 0.1);
     this.port.onmessage = event => { if (event.data.pcm) this.player.push(event.data.pcm); else { this.token = event.data.flush; this.player.flush(); this.report(); } };
   }
   report(){ this.reported = this.player.played(); this.playing = this.player.active(); this.port.postMessage({ token: this.token, played: this.reported, playing: this.playing }); }

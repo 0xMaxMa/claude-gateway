@@ -3,6 +3,7 @@
  * self-contained so the page can embed it with `Function.toString()` (as the
  * dashboard does) while tests import the same code.
  */
+import { PCM16 } from '../voice/types';
 
 /** Client acoustic tuning for endpointing. These are microphone-level heuristics,
  * not protocol timing: the server then waits `voice.turns.silenceCommitMs`
@@ -11,7 +12,7 @@
 export const VOICE_CALL_VAD = { startMs: 120, endMs: 350, ratio: 3, minLevel: 0.012, initialNoise: 0.004, noiseAdapt: 0.05, bargeInRatio: 2, bargeInMs: 250 };
 
 /** Reply playback: the gateway's 16 kHz stream, a jitter buffer before each start, and the fade at its edges. */
-export const VOICE_CALL_PLAYBACK = { inputRate: 16000, prebufferMs: 200, fadeMs: 4 };
+export const VOICE_CALL_PLAYBACK = { inputRate: PCM16.sampleRate, prebufferMs: 200, fadeMs: 4 };
 
 /**
  * Streaming resampler from the AudioContext rate to 16 kHz PCM16. A one-pole
@@ -197,8 +198,8 @@ export function createVoiceCallPlayback(outputRate: number, options: { inputRate
             fraction += step;
             while (fraction >= 1 && written - read >= 2) { fraction -= 1; read++; }
           } else {
-            // Underrun: the last sample is heard as the fade's start, and the reply waits for more.
-            release(written > read ? at(read) * fadeIn : 0);
+            // Underrun: the last sample, plus any tail still fading, starts the new fade; the reply waits for more.
+            release(tail * tailGain + (written > read ? at(read) * fadeIn : 0));
             read = written; fraction = 0; playing = false;
           }
         }
