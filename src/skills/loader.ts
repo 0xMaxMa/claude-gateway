@@ -58,6 +58,8 @@ export interface SkillRegistry {
   extensionServers?: string[];
   extensionNotices?: string[];
   skills: Map<string, SkillDefinition>;
+  /** Auto skills left out of the skills menu and the orchestration catalog (still invocable by name). */
+  hiddenUntilUsed?: ReadonlySet<string>;
 }
 
 export interface LoadSkillsOptions {
@@ -207,6 +209,16 @@ export function loadSkills(opts: LoadSkillsOptions): SkillRegistry {
   return { skills: registry };
 }
 
+/** Keys of the never-used auto skills past the grace window (see AUTO_SKILL_CATALOG_GRACE_DAYS). */
+export function hiddenAutoSkills(registry: SkillRegistry, usage: SkillCatalogUsage): Set<string> {
+  const hidden = new Set<string>();
+  for (const [key, skill] of registry.skills) {
+    const fm = autoFrontmatter(skill);
+    if (skill.userInvocable && fm && hiddenUntilUsed(key, fm, usage)) hidden.add(key);
+  }
+  return hidden;
+}
+
 /**
  * Render the AVAILABLE SKILLS section for the system prompt.
  * Groups skills by source: workspace, module, shared. With `usage`, never-used
@@ -218,15 +230,12 @@ export function renderSkillsSection(registry: SkillRegistry, usage?: SkillCatalo
   const workspace: string[] = [];
   const module: string[] = [];
   const shared: string[] = [];
-  let hidden = 0;
+  const hiddenKeys = usage ? hiddenAutoSkills(registry, usage) : new Set<string>();
+  const hidden = hiddenKeys.size;
 
   for (const [key, skill] of registry.skills) {
-    if (!skill.userInvocable) continue;
+    if (!skill.userInvocable || hiddenKeys.has(key)) continue;
     const autoFm = autoFrontmatter(skill);
-    if (autoFm && usage && hiddenUntilUsed(key, autoFm, usage)) {
-      hidden++;
-      continue;
-    }
 
     const emoji = skill.emoji ? ` [${skill.emoji}]` : '';
     const line = `/${key}: ${menuDescription(skill, autoFm !== undefined)}${emoji}`;

@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WorkspaceFiles, LoadedWorkspace, WatchHandle, AgentConfig, GatewayConfig } from '../types';
 import { createWatcher } from '../watch/factory';
-import { loadSkills, renderSkillsSection, type SkillCatalogUsage } from '../skills';
+import { loadSkills, renderSkillsSection, hiddenAutoSkills, type SkillCatalogUsage } from '../skills';
 import { DIARY_FILENAME } from './skill-learning/notifier';
 
 export class MissingRequiredFileError extends Error {
@@ -383,6 +383,7 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
     sharedSkillsDir: opts?.sharedSkillsDir,
     logger: opts?.logger,
   });
+  if (opts?.skillUsage) skillRegistry.hiddenUntilUsed = hiddenAutoSkills(skillRegistry, opts.skillUsage);
   const skillsSection = renderSkillsSection(skillRegistry, opts?.skillUsage);
 
   // Assemble system prompt
