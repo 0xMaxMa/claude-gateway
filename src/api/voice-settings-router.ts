@@ -113,6 +113,17 @@ export function voiceSettingsRouter(
           orchestration,
           raw.gateway.orchestration,
         );
+        // Persist only live/narrate values the request changes, so echoing the
+        // GET payload back does not pin today's defaults into the agent.
+        const current = resolveOrchestrationConfig(effective, previous).voice;
+        for (const field of ['live', 'narrate'] as const) {
+          if (!req.body[field]) continue;
+          const own: Record<string, unknown> = { ...previous[field] };
+          for (const [name, value] of Object.entries(req.body[field] as Record<string, unknown>))
+            if (name in own || value !== (current[field] as Record<string, unknown>)[name]) own[name] = value;
+          if (Object.keys(own).length) voice[field] = own;
+          else delete voice[field];
+        }
         const resolved = resolveOrchestrationConfig(effective, voice).voice;
         if (
           !['', 'elevenlabs', 'upstream:elevenlabs', 'deepgram', 'paxalabs', 'upstream:paxalabs', 'managed:paxalabs', 'managed:elevenlabs', 'gemini', 'upstream:gemini', 'openrouter', 'upstream:openrouter'].includes(

@@ -74,6 +74,7 @@ import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { cliPairingStore, isCliChannel, type CliChannel } from '../cli-viewer/pairing-store';
 import { buildCliUrl, buildVoiceCallUrl, normalizePublicUrl } from '../cli-viewer/url';
 import { telegramVoiceCallsEnabled, voiceCallEndedText, voiceCallPairings } from '../voice/call-pairing';
+import { telegramBotAvatars } from '../voice/telegram-avatar';
 import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
@@ -1461,6 +1462,9 @@ export class AgentRunner extends EventEmitter {
       // Telegram opens Mini Apps over HTTPS only.
       if (!normalizePublicUrl(this.gatewayConfig.gateway.publicUrl)?.startsWith('https://')) { respond({ success: false, error: 'not_configured' }); return; }
       respond({ success: true, url: buildVoiceCallUrl(this.gatewayConfig.gateway.publicUrl, voiceCallPairings.create(this.agentConfig.id, chatId, threadId ?? '')) });
+      // Look the bot up while the user taps the button, so the call page opens with its name and photo.
+      const botToken = this.agentConfig.telegram?.botToken;
+      if (botToken) void telegramBotAvatars.refresh(this.agentConfig.id, botToken);
       return;
     }
 

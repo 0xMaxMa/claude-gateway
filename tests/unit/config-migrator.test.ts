@@ -14,6 +14,7 @@ import {
   AGENT_CREDENTIAL_FIELDS,
   BIND_PRESERVED_WARNING,
   MEMORY_MODE_AUTO_WARNING,
+  FAST_ACK_DEFAULT_WARNING,
 } from '../../src/config/migrator';
 
 describe('config-migrator', () => {
@@ -1266,6 +1267,41 @@ describe('config-migrator', () => {
       expect(updated.gateway.dreaming.mode).toBe('auto');
       // shared block came from the template default, already "auto"
       expect(updated.gateway.knowledge.shared.mode).toBe('auto');
+    });
+  });
+
+  // voice.live.fastAck default false -> true (PR #608). Configs migrated from
+  // before 1.0.37 drop a persisted false, which was only ever the old default.
+  describe('voice live fastAck retired-default upgrade (false -> default true)', () => {
+    const template = (): string =>
+      writeJson('template.json', { configVersion: '1.0.37', gateway: { bind: '127.0.0.1' } });
+    const live = { fastAck: false, fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000 };
+
+    it('removes a persisted fastAck false when migrating a pre-1.0.37 config', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.36',
+        gateway: { bind: '127.0.0.1' },
+        agents: [{ id: 'meguri', voice: { enabled: true, live } }, { id: 'other', voice: { enabled: true, live: { fastAck: true } } }, { id: 'none' }],
+      });
+      expect(detectMigration(configPath, template(), '1.0.37').addedFields).toContain('agents[0].voice.live.fastAck');
+      const result = migrateConfig(configPath, template(), '1.0.37');
+
+      expect(result.addedFields).toContain('agents[0].voice.live.fastAck');
+      expect(result.warnings).toContain(FAST_ACK_DEFAULT_WARNING);
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(updated.agents[0].voice.live).toEqual({ fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000 });
+      expect(updated.agents[1].voice.live).toEqual({ fastAck: true });
+      expect(updated.agents[2]).not.toHaveProperty('voice');
+    });
+
+    it('keeps a fastAck false set at 1.0.37 or later', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.37',
+        gateway: { bind: '127.0.0.1' },
+        agents: [{ id: 'meguri', voice: { enabled: true, live } }],
+      });
+      expect(migrateConfig(configPath, template(), '1.0.37').migrated).toBe(false);
+      expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).agents[0].voice.live.fastAck).toBe(false);
     });
   });
 });

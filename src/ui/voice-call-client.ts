@@ -3,12 +3,16 @@
  * self-contained so the page can embed it with `Function.toString()` (as the
  * dashboard does) while tests import the same code.
  */
+import { PCM16 } from '../voice/types';
 
 /** Client acoustic tuning for endpointing. These are microphone-level heuristics,
  * not protocol timing: the server then waits `voice.turns.silenceCommitMs`
  * (0 commits at once) after `speech.ended` before it commits an utterance. Levels are RMS of
  * float samples in [-1, 1]. */
 export const VOICE_CALL_VAD = { startMs: 120, endMs: 350, ratio: 3, minLevel: 0.012, initialNoise: 0.004, noiseAdapt: 0.05, bargeInRatio: 2, bargeInMs: 250 };
+
+/** Reply playback: the gateway's 16 kHz stream, a jitter buffer before each start, and the fade at its edges. */
+export const VOICE_CALL_PLAYBACK = { inputRate: PCM16.sampleRate, prebufferMs: 200, fadeMs: 4 };
 
 /**
  * Streaming resampler from the AudioContext rate to 16 kHz PCM16. A one-pole
@@ -147,26 +151,66 @@ export function createVoiceCallUplink(io: { json(message: Record<string, unknown
 }
 
 /**
- * Played-sample accounting for one playback epoch. Audio is scheduled back to
- * back; whatever is still scheduled after `now` has not been heard yet.
+ * Reply playback for one call, run inside an AudioWorklet: 16 kHz PCM16 in, one
+ * continuous stream at the context rate out. Interpolation runs across wire
+ * frames, so a frame boundary is not a step in the waveform (one buffer source
+ * per frame was resampled on its own and clicked at every boundary). Playback
+ * starts once `prebufferMs` is queued, or that long after the first sample, so
+ * a late frame does not cut the reply. Every start, underrun and flush fades
+ * over `fadeMs` instead of jumping.
  */
-export function createVoiceCallPlayhead() {
-  let queuedSamples = 0, endTime = 0, reported = 0;
+export function createVoiceCallPlayback(outputRate: number, options: { inputRate: number; prebufferMs: number; fadeMs: number }) {
+  const step = options.inputRate / outputRate;
+  const prebuffer = Math.max(1, Math.round(options.prebufferMs * options.inputRate / 1000));
+  const maxWait = Math.round(options.prebufferMs * outputRate / 1000);
+  const fade = 1 / Math.max(1, Math.round(options.fadeMs * outputRate / 1000));
+  let ring = new Float32Array(options.inputRate * 4), written = 0, read = 0, base = 0, fraction = 0;
+  let playing = false, waited = 0, fadeIn = 0, tail = 0, tailGain = 0, last = 0;
+  const at = (index: number) => ring[index % ring.length];
+  // Hold `value` and fade it to silence while the next sound fades in.
+  const release = (value: number) => { tail = value; tailGain = 1; fadeIn = 0; };
   return {
-    reset() { queuedSamples = 0; endTime = 0; reported = 0; },
-    /** Returns the context time at which this chunk starts. */
-    schedule(samples: number, sampleRate: number, now: number): number {
-      const start = Math.max(now, endTime);
-      endTime = start + samples / sampleRate; queuedSamples += samples;
-      return start;
+    push(pcm: Int16Array) {
+      if (written - read + pcm.length > ring.length) {
+        let size = ring.length; while (written - read + pcm.length > size) size *= 2;
+        const grown = new Float32Array(size);
+        for (let i = read; i < written; i++) grown[i % size] = at(i);
+        ring = grown;
+      }
+      for (let i = 0; i < pcm.length; i++) ring[(written + i) % ring.length] = pcm[i] / 32768;
+      written += pcm.length;
     },
-    /** Samples heard so far, monotonic and never above what was received. */
-    played(sampleRate: number, now: number): number {
-      const remaining = Math.max(0, Math.ceil((endTime - now) * sampleRate));
-      reported = Math.max(reported, Math.min(queuedSamples, queuedSamples - remaining));
-      return reported;
+    /** Drop everything queued (barge-in or a new epoch); what was audible fades out. */
+    flush() { read = written; base = written; fraction = 0; playing = false; waited = 0; release(last); },
+    /** Fill `out` with the next samples at the output rate. */
+    render(out: Float32Array) {
+      for (let k = 0; k < out.length; k++) {
+        let value = 0;
+        if (!playing && written > read) {
+          waited++;
+          if (written - read >= prebuffer || waited >= maxWait) { playing = true; waited = 0; }
+        }
+        if (playing) {
+          if (written - read >= 2) {
+            const a = at(read);
+            value = (a + (at(read + 1) - a) * fraction) * fadeIn;
+            fadeIn = Math.min(1, fadeIn + fade);
+            fraction += step;
+            while (fraction >= 1 && written - read >= 2) { fraction -= 1; read++; }
+          } else {
+            // Underrun: the last sample, plus any tail still fading, starts the new fade; the reply waits for more.
+            release(tail * tailGain + (written > read ? at(read) * fadeIn : 0));
+            read = written; fraction = 0; playing = false;
+          }
+        }
+        value += tail * tailGain; tailGain = Math.max(0, tailGain - fade);
+        out[k] = last = value;
+      }
     },
-    playing(now: number): boolean { return endTime > now; },
+    /** Input samples heard in this epoch: monotonic, never above what was pushed. */
+    played(): number { return read - base; },
+    /** Reply audio is audible or queued. */
+    active(): boolean { return playing || written > read; },
   };
 }
 

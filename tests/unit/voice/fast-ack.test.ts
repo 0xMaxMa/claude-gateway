@@ -88,9 +88,13 @@ test('the call goes to the agent model endpoint with thinking off, and reports t
   expect(fetch).toHaveBeenCalledTimes(1);
 });
 
-test('voice.live settings are off by default and validated', () => {
+test('voice.live.fastAck is on by default, explicit false turns it off, and settings are validated', () => {
   const live = (value: Record<string, unknown>) => resolveOrchestrationConfig(undefined, { ...ORCHESTRATION_DEFAULTS.voice, live: value as never }).voice.live;
-  expect(live({})).toEqual({ fastAck: false, fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000 });
+  expect(live({})).toEqual({ fastAck: true, fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000 });
+  // An agent with no voice.live block at all, as most saved configs are.
+  expect(resolveOrchestrationConfig(undefined, { enabled: false }).voice.live.fastAck).toBe(true);
+  expect(resolveOrchestrationConfig(undefined).voice.live.fastAck).toBe(true);
+  expect(live({ fastAck: false })).toEqual({ fastAck: false, fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000 });
   expect(live({ fastAck: true, fastAckAfterMs: 1200 })).toMatchObject({ fastAck: true, fastAckAfterMs: 1200 });
   expect(() => live({ fastAck: 'yes' })).toThrow('voice.live.fastAck');
   expect(() => live({ fastAckAfterMs: 0 })).toThrow('voice.live.fastAckAfterMs');

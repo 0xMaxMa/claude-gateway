@@ -31,6 +31,8 @@ jest.mock('../../../src/voice/providers/registry', () => ({ sttProvider: jest.fn
   tts.synthesize = (options: any) => { mockSpokenVoices.push(options.voiceId); return synthesize(options); };
   return tts;
 } }));
+// voice.live.fastAck is on by default: keep its acknowledgement call off the network.
+jest.mock('../../../src/voice/fast-ack', () => ({ fastAcknowledgement: jest.fn(async () => ({ outcome: 'skipped', elapsedMs: 0 })) }));
 
 const BOT_TOKEN = '123456:fixture-bot-token';
 /** initData exactly as Telegram signs it for a Mini App launch. */

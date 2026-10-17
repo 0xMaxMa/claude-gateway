@@ -40,16 +40,23 @@ export class TelegramBotAvatars {
    * shows on the next call. The photo is downloaded only when it changed. When
    * Telegram cannot be reached the last known profile stands. */
   refresh(agentId: string, botToken: string): Promise<BotProfile> {
-    const running = this.lookups.get(agentId);
+    // Keyed by token too: a lookup still running with a rotated-out token is not reused.
+    const key = `${agentId}\n${botToken}`;
+    const running = this.lookups.get(key);
     if (running) return running;
-    const lookup = this.lookUp(agentId, botToken).finally(() => this.lookups.delete(agentId));
-    this.lookups.set(agentId, lookup);
+    const lookup = this.lookUp(agentId, botToken).finally(() => this.lookups.delete(key));
+    this.lookups.set(key, lookup);
     return lookup;
   }
 
-  /** The photo the page was rendered with; looked up once if this process has none yet. */
-  async avatar(agentId: string, botToken: string): Promise<BotAvatar | null> {
-    return (this.known(agentId, botToken) ?? await this.refresh(agentId, botToken)).avatar;
+  /** The profile for the photo request: the last known photo at once, otherwise what the
+   * lookup the page started finds. It never starts a lookup of its own, so a page opened
+   * while Telegram is down costs one failed lookup, not two. */
+  async photo(agentId: string, botToken: string): Promise<BotProfile | undefined> {
+    const known = this.known(agentId, botToken);
+    if (known?.avatar) return known;
+    await this.lookups.get(`${agentId}\n${botToken}`);
+    return this.known(agentId, botToken);
   }
 
   private known(agentId: string, botToken: string): BotProfile | undefined {
@@ -60,12 +67,15 @@ export class TelegramBotAvatars {
   private async lookUp(agentId: string, token: string): Promise<BotProfile> {
     const previous = this.known(agentId, token);
     try {
-      const me = await this.call<{ id: number; first_name?: string }>(token, 'getMe', {});
-      const photos = await this.call<{ photos: PhotoSize[][] }>(token, 'getUserProfilePhotos', { user_id: me.id, limit: 1 });
+      // A bot token starts with the bot's user id, so the photo lookup need not wait for getMe.
+      const id = /^(\d+):/.exec(token)?.[1];
+      const me = this.call<{ id: number; first_name?: string }>(token, 'getMe', {});
+      const photosFor = (userId: number | string) => this.call<{ photos: PhotoSize[][] }>(token, 'getUserProfilePhotos', { user_id: Number(userId), limit: 1 });
+      const [bot, photos] = id ? await Promise.all([me, photosFor(id)]) : await me.then(async found => [found, await photosFor(found.id)] as const);
       const sizes = [...(photos.photos[0] ?? [])].sort((a, b) => a.width - b.width);
       const size = sizes.find(candidate => Math.min(candidate.width, candidate.height) >= BOT_AVATAR_MIN_SIDE) ?? sizes.at(-1);
       const avatar = !size ? null : previous?.photoId === size.file_unique_id ? previous.avatar : await this.download(token, size);
-      const profile = { token, name: me.first_name?.trim() || undefined, photoId: avatar ? size?.file_unique_id : undefined, avatar };
+      const profile = { token, name: bot.first_name?.trim() || undefined, photoId: avatar ? size?.file_unique_id : undefined, avatar };
       this.profiles.set(agentId, profile);
       return profile;
     } catch {
@@ -95,3 +105,6 @@ export class TelegramBotAvatars {
     return parsed.result;
   }
 }
+
+/** The gateway's one cache: the `/call` button warms it, so the page opening next finds the bot already looked up. */
+export const telegramBotAvatars = new TelegramBotAvatars();
