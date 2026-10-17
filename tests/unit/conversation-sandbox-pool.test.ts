@@ -45,6 +45,10 @@ let root: string;
 let agent: AgentConfig;
 const A = { source: 'telegram', chatId: '111' };
 const verbs = () => calls.map(c => c.args[0]);
+let clock = Date.now();
+/** Moves past the pool's few-second convergence cache. */
+const later = () => { clock += 6_000; };
+jest.spyOn(Date, 'now').mockImplementation(() => clock);
 
 beforeEach(() => {
   calls.length = 0; containers.clear();
@@ -75,10 +79,20 @@ it('creates the sandbox with the app environment in a private env file, never on
   expect(verbs()).toContain('start');
 });
 
+it('opens a just-converged sandbox without asking docker again', async () => {
+  const pool = new SandboxPool();
+  await pool.ensure(agent, A);
+  calls.length = 0;
+  await pool.ensure(agent, A);
+  (await pool.acquire(agent, A)).release();
+  expect(calls).toEqual([]);
+});
+
 it('reuses a running sandbox whose spec is unchanged', async () => {
   const pool = new SandboxPool();
   await pool.ensure(agent, A);
   calls.length = 0;
+  later();
   await pool.ensure(agent, A);
   expect(verbs()).not.toContain('create');
   expect(verbs()).not.toContain('rm');
@@ -87,13 +101,13 @@ it('reuses a running sandbox whose spec is unchanged', async () => {
 it('never reaps a sandbox a session holds, and reaps it once released and idle', async () => {
   const pool = new SandboxPool();
   const lease = await pool.acquire(agent, A);
-  await pool.reap(Date.now() + 24 * 3600_000);
+  await pool.reap(clock + 24 * 3600_000);
   expect(containers.has(lease.container)).toBe(true);
   lease.release();
   lease.release(); // idempotent: one release per lease
-  await pool.reap(Date.now() + 10_000);
+  await pool.reap(clock + 10_000);
   expect(containers.has(lease.container)).toBe(true); // used moments ago
-  await pool.reap(Date.now() + 31 * 60_000);
+  await pool.reap(clock + 31 * 60_000);
   expect(containers.has(lease.container)).toBe(false);
 });
 
@@ -102,10 +116,12 @@ it('keeps a held sandbox when its spec changes, and replaces it once released', 
   const lease = await pool.acquire(agent, A);
   fs.mkdirSync(path.join(root, 'ws', 'tools')); // a new workspace entry changes the mounts
   calls.length = 0;
+  later();
   const second = await pool.acquire(agent, A);
   expect(verbs()).not.toContain('rm');
   lease.release(); second.release();
   calls.length = 0;
+  later();
   await pool.ensure(agent, A);
   expect(verbs()).toEqual(expect.arrayContaining(['rm', 'create', 'start']));
 });
@@ -113,8 +129,8 @@ it('keeps a held sandbox when its spec changes, and replaces it once released', 
 it('reaps a sandbox left by an earlier gateway run once idle since this one started', async () => {
   containers.set('demo-agent-c-00000000000000000000', { State: { Running: true }, Config: { Labels: { 'ai.claude-gateway.sandbox': '1' } } });
   const pool = new SandboxPool();
-  await pool.reap(Date.now());
+  await pool.reap(clock);
   expect(containers.size).toBe(1);
-  await pool.reap(Date.now() + 31 * 60_000);
+  await pool.reap(clock + 31 * 60_000);
   expect(containers.size).toBe(0);
 });

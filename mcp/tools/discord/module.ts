@@ -786,6 +786,11 @@ export class DiscordModule implements ChannelModule {
       if (!parsed || parsed.protocol !== 'https:' || !DISCORD_CDN_HOSTS.has(parsed.hostname)) {
         throw new Error('isolate mode: only https://cdn.discordapp.com or https://media.discordapp.net attachment URLs can be downloaded');
       }
+      // A CDN attachment URL names the channel it was posted in:
+      // /attachments/<channel_id>/<attachment_id>/<file>. Only this conversation's.
+      const [, kind, channelId] = parsed.pathname.split('/');
+      if (kind !== 'attachments' || !channelId) throw new Error('isolate mode: only channel attachment URLs can be downloaded');
+      if (!this.createdThreads.has(channelId)) assertOriginChat(channelId);
       destDir = isolateMediaDir();
     }
     const filename = (args.filename as string | undefined) ?? path.basename(url.split('?')[0]);

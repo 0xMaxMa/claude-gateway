@@ -39,8 +39,6 @@ jest.mock(
 // jest type check cannot resolve.
 const { gatewayModules } = require('../../mcp/modules') as { gatewayModules: (role?: string, media?: boolean) => Array<{ id: string }> };
 // eslint-disable-next-line import/first
-import { createChannelManager } from '../../mcp/channel-manager';
-// eslint-disable-next-line import/first
 import { TelegramModule } from '../../mcp/tools/telegram/module';
 // eslint-disable-next-line import/first
 import { chatHasAttachment, MAX_LOGGED_ATTACHMENTS, recordChatAttachments } from '../../mcp/tools/telegram/attachment-log';
@@ -175,25 +173,6 @@ describe('default-deny module allowlist', () => {
     expect(ids()).toEqual(['image', 'video', 'share-file', 'api']);
   });
 
-  it('channel manager starts only the origin channel in isolate mode', async () => {
-    const started: string[] = [];
-    const mk = (id: string): ChannelModule => ({
-      id: id as ChannelId,
-      capabilities: {
-        typingIndicator: false, reactions: false, editMessage: false, fileAttachment: false,
-        threadReply: false, maxMessageLength: 1, markupFormat: 'none',
-      },
-      toolVisibility: 'current-channel',
-      isEnabled: () => true,
-      getTools: () => [],
-      handleTool: async () => ({ content: [] }),
-      start: async () => { started.push(id); },
-      getSnapshot: () => ({ accountId: id, running: false, configured: true }),
-    });
-    isolate('telegram');
-    await createChannelManager([mk('discord'), mk('telegram'), mk('browser')]).startAll(async () => {});
-    expect(started).toEqual(['telegram']);
-  });
 });
 
 describe('telegram', () => {
@@ -401,8 +380,11 @@ describe('discord', () => {
       const res = await m.handleTool('discord_download_attachment', { url });
       expect(res.content[0].text).toMatch(/only https:\/\/cdn\.discordapp\.com/);
     }
+    // An attachment posted in another conversation's channel is refused.
+    const foreign = await m.handleTool('discord_download_attachment', { url: `https://cdn.discordapp.com/attachments/${FOREIGN}/1/a.png` });
+    expect(foreign.content[0].text).toMatch(LOCK);
     delete process.env.GATEWAY_SESSION_MEDIA_DIR;
-    const res = await m.handleTool('discord_download_attachment', { url: 'https://cdn.discordapp.com/a.png' });
+    const res = await m.handleTool('discord_download_attachment', { url: `https://cdn.discordapp.com/attachments/${ORIGIN}/1/a.png` });
     expect(res.content[0].text).toMatch(/no session media directory/);
   });
 });

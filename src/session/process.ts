@@ -232,7 +232,6 @@ export class SessionProcess extends EventEmitter {
   private containerAttempt?: { directory: string; config: string };
   /** The container the current spawn executes in (an app agent's, or its sandbox). */
   private execContainer?: string;
-  private sandboxLease?: SandboxLease;
   /** Bumped by stop(): a spawnProcess() that awaited across it abandons its spawn. */
   private spawnEpoch = 0;
   // Bumped by every start(): a stop() still awaiting after one ran no longer owns the session's live state.
@@ -779,18 +778,16 @@ export class SessionProcess extends EventEmitter {
 
   /** The container this spawn executes in. A worker's driver already resolved its
    * conversation's sandbox; anything else resolves its own conversation's here. */
-  private async executionContainer(): Promise<string> {
+  private async executionContainer(held: { lease?: SandboxLease }): Promise<string> {
     if (!this.sandboxed()) return this.agentConfig.container!;
     if (this.runtimeProfile?.role === 'worker') {
       if (!isSandboxContainerName(this.agentConfig.container)) throw Object.assign(new Error('Isolated worker has no conversation sandbox'), { code: 'CONTAINER_ISOLATION_REQUIRED' });
       return this.agentConfig.container!;
     }
-    // Held until this spawn's process exits (or stop()), so the sandbox is never
-    // reaped or replaced under it; a respawn takes a new lease first.
-    const lease = await sandboxPool.acquire(this.agentConfig, { source: this.source, chatId: this.memoryChatId ?? this.chatId, sessionId: this.sessionId });
-    this.sandboxLease?.release();
-    this.sandboxLease = lease;
-    return lease.container;
+    // Held until this spawn's process exits, so the sandbox is never reaped or replaced
+    // under it; a spawn that starts no process lets go of it (see spawnProcess).
+    held.lease = await sandboxPool.acquire(this.agentConfig, { source: this.source, chatId: this.memoryChatId ?? this.chatId, sessionId: this.sessionId });
+    return held.lease.container;
   }
 
   /** Outside orchestration a sandbox has no `.sessions/` to read, so its conversation's
@@ -1039,7 +1036,11 @@ export class SessionProcess extends EventEmitter {
   private findApiKeyForAgent(agentId: string): string {
     const keys = this.gatewayConfig.gateway.api?.keys;
     if (!keys?.length) return '';
-    if (this.agentConfig.isolateMemory) return keys.find(k => Array.isArray(k.agents) && k.agents.includes(agentId) && !k.admin)?.key ?? '';
+    if (this.agentConfig.isolateMemory) {
+      const scoped = keys.find(k => Array.isArray(k.agents) && k.agents.includes(agentId) && !k.admin)?.key;
+      if (!scoped) this.logger.warn('Isolated agent has no non-admin API key naming it: gateway-API tools (api_reply, share_file, image/video, WhatsApp and WeChat replies) are unavailable', { agentId });
+      return scoped ?? '';
+    }
     // Prefer a key scoped to this agent; fall back to wildcard or admin key.
     const match = keys.find(k =>
       (Array.isArray(k.agents) && k.agents.includes(agentId)) ||
@@ -1155,6 +1156,16 @@ export class SessionProcess extends EventEmitter {
   /** Resolves false when a stop() during its awaits abandoned the spawn: nothing was
    * started, and a container attempt it prepared is already cleaned up. */
   private async spawnProcess(): Promise<boolean> {
+    // A sandbox lease this spawn took and has not handed to a process.
+    const held: { lease?: SandboxLease } = {};
+    try {
+      const started = await this.spawnProcessOnce(held);
+      if (!started) held.lease?.release();
+      return started;
+    } catch (error) { held.lease?.release(); throw error; }
+  }
+
+  private async spawnProcessOnce(held: { lease?: SandboxLease }): Promise<boolean> {
     const epoch = this.spawnEpoch;
     const { historyPrompt, loadedAtSpawn, archivedCount, messageCountAtSpawn } = await this.buildInitialPrompt();
     if (epoch !== this.spawnEpoch) return false;
@@ -1164,7 +1175,7 @@ export class SessionProcess extends EventEmitter {
     assertContainerBinding(this.agentConfig, this.runtimeProfile);
     const isAppAgent = this.isContainerAgent();
     let execContainer: string | undefined;
-    try { execContainer = isAppAgent ? await this.executionContainer() : undefined; }
+    try { execContainer = isAppAgent ? await this.executionContainer(held) : undefined; }
     catch (error) { if (epoch !== this.spawnEpoch) return false; throw error; }
     if (epoch !== this.spawnEpoch) return false;
     this.execContainer = execContainer;
@@ -1396,7 +1407,8 @@ export class SessionProcess extends EventEmitter {
     this.process = proc;
     const startsAtSpawn = this.starts;
     proc.once('exit', releaseCapacity);
-    const lease = this.sandboxLease;
+    const lease = held.lease;
+    held.lease = undefined;
     if (lease) { proc.once('exit', () => lease.release()); proc.once('error', () => lease.release()); }
     proc.once('exit', () => { setTimeout(() => toolCapture?.close(), 200).unref(); });
     proc.once('error', () => toolCapture?.close());
@@ -2249,7 +2261,6 @@ export class SessionProcess extends EventEmitter {
     let exited = false;
     const exit = proc ? new Promise<void>(resolve => proc.once('exit', () => { exited = true; resolve(); })) : undefined;
     this.resetBackgroundDispatchState();
-    const lease = this.sandboxLease;
     if (attempt && this.execContainer) {
       this.managedGroupStopped = await stopContainerProfile(this.execContainer, attempt.directory);
       if (this.containerAttempt === attempt) this.containerAttempt = undefined;
@@ -2287,7 +2298,6 @@ export class SessionProcess extends EventEmitter {
     };
     // A child that failed to spawn never exits; its 'error' handler already let go of it.
     if (!proc || exited || (this.process !== proc && !proc.pid)) {
-      if (!superseded()) lease?.release();
       removeSessionDir();
       return;
     }
@@ -2301,7 +2311,6 @@ export class SessionProcess extends EventEmitter {
     await exit;
     if (forceKillTimer !== null) clearTimeout(forceKillTimer);
     if (this.process === proc) this.process = null;
-    if (!superseded()) lease?.release();
     removeSessionDir();
   }
 }

@@ -206,6 +206,20 @@ describe('app agent, classic container session', () => {
     expect(lease.release).toHaveBeenCalled();
   });
 
+  it('lets go of a sandbox taken by a spawn that a stop() abandoned', async () => {
+    const acquire = require('../../src/apps/conversation-sandbox').sandboxPool.acquire as jest.Mock;
+    const release = jest.fn();
+    let grant!: () => void;
+    acquire.mockImplementationOnce(() => new Promise(resolve => { grant = () => resolve({ container: 'demo-agent-c-' + 'b'.repeat(20), release }); }));
+    const sp = new SessionProcess('c-a', 'telegram', appAgent(true), gateway, store, '111');
+    const starting = sp.start().catch(() => {});
+    await new Promise(resolve => setImmediate(resolve));
+    const stopping = sp.stop();
+    grant();
+    await Promise.all([starting, stopping]);
+    expect(release).toHaveBeenCalled();
+  });
+
   it("writes the chat memory into the sandbox's own /tmp, not the shared workspace", async () => {
     containerNode().mockClear();
     const { args } = await start(new SessionProcess('c-a', 'telegram', appAgent(true), gateway, store, '111'));

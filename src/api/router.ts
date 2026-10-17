@@ -4186,10 +4186,6 @@ export function createApiRouter(
       return;
     }
     const wildcardParam = (req.params as Record<string, string>)['0'] ?? '';
-    // The media root holds every conversation's files (#609). An API client addresses
-    // its own sessions (`api-<session>`, as in the reply attachment URLs it is handed);
-    // a channel chat's media needs an admin key for an isolated agent.
-    if (!/^(media\/)?api-[^/]+\//.test(wildcardParam) && denyCrossChatForIsolated(apiKey, agentId, res)) return;
     const runner = agentRunners.get(agentId);
     if (!runner) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
@@ -4204,6 +4200,14 @@ export function createApiRouter(
       res.status(400).json({ error: 'Invalid path' });
       return;
     }
+    // The media root holds every conversation's files (#609). An API client addresses
+    // its own sessions (`api-<session>`, as in the reply attachment URLs it is handed);
+    // any other file of an isolated agent needs an admin key. Judged on the resolved
+    // file, so neither `..` nor a symlink in a session directory leads elsewhere.
+    const mediaRoot = MediaStore.agentMediaRoot(agentsBaseDir, agentId);
+    const root = fs.existsSync(mediaRoot) ? fs.realpathSync(mediaRoot) : mediaRoot;
+    const [session] = path.relative(root, absPath).split(path.sep);
+    if (!(session?.startsWith('api-') && path.relative(root, absPath).split(path.sep).length > 1) && denyCrossChatForIsolated(apiKey, agentId, res)) return;
     if (!fs.existsSync(absPath)) {
       res.status(404).json({ error: 'Not found' });
       return;

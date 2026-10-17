@@ -76,6 +76,17 @@ describe('isolate_memory API hardening (#609)', () => {
     expect(res.status).not.toBe(403);
   });
 
+  test.each([
+    ['a .. segment', (link: string) => `api-s1/../telegram-1/x.png`],
+    ['a symlink in an API session directory', (link: string) => `api-s1/${link}`],
+  ])("an API session path cannot reach a channel chat's media through %s", async (_name, target) => {
+    for (const dir of ['api-s1', 'telegram-1']) fs.mkdirSync(path.join(baseDir, AGENT, 'media', dir), { recursive: true });
+    fs.writeFileSync(path.join(baseDir, AGENT, 'media', 'telegram-1', 'x.png'), 'secret');
+    fs.symlinkSync(path.join(baseDir, AGENT, 'media', 'telegram-1', 'x.png'), path.join(baseDir, AGENT, 'media', 'api-s1', 'link.png'));
+    const res = await supertest.default(buildApp(true)).get(`/api/v1/agents/${AGENT}/media/${target('link.png').replace('..', '%2E%2E')}`).set(bearer('agent-key'));
+    expect(res.status).toBe(403);
+  });
+
   // The reply path of an isolated agent's own conversation: the MCP tool locks the
   // recipient to the originating chat, so these stay open to the agent's key.
   test.each([

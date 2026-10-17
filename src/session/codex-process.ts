@@ -205,7 +205,7 @@ export class CodexProcess extends EventEmitter {
         // Legacy records have no Docker ID: retain them only if their transcript exists.
         // A conversation sandbox's HOME is a host directory (#609), so a sandbox recreated
         // under the same name still holds the home.
-        const sameContainer = !this.saved.containerId || this.saved.containerId === this.containerId || (isSandboxContainerName(agent.container) && this.saved.container === agent.container);
+        const sameContainer = !this.saved.containerId || this.saved.containerId === this.containerId || isSandboxContainerName(agent.container);
         const transcriptExists = sameContainer && await containerNode(agent.container!, "const fs=require('fs');try{process.stdout.write(fs.statSync(process.argv[1]+'/sessions').isDirectory()?'yes':'no');}catch(e){if(e.code!=='ENOENT')throw e;process.stdout.write('no');}", [this.saved.home]) === 'yes';
         if (!transcriptExists) {
           this.saved = undefined;

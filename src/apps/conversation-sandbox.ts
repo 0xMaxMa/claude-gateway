@@ -44,6 +44,7 @@ const NAME_PATTERN = /-c-[0-9a-f]{20}$/;
 export const BRIDGE_SOCKET_DIR = '.orch';
 const IDLE_MS = 30 * 60_000;
 const REAP_INTERVAL_MS = 5 * 60_000;
+const CONVERGED_MS = 5_000;
 
 /** The conversation one sandbox serves. An API chat holds many sessions, each with
  * its own media directory, so an API sandbox also names the session. */
@@ -195,6 +196,8 @@ export class SandboxPool {
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly leases = new Map<string, number>();
   private readonly used = new Map<string, number>();
+  /** When each sandbox was last converged: one turn opens it several times. */
+  private readonly converged = new Map<string, number>();
   private readonly started = Date.now();
   private timer?: ReturnType<typeof setInterval>;
 
@@ -215,7 +218,10 @@ export class SandboxPool {
     this.timer ??= setInterval(() => { void this.reap().catch(() => {}); }, REAP_INTERVAL_MS);
     this.timer.unref?.();
     return this.serialize(name, async () => {
-      await this.converge(agent, conversation, name);
+      if (Date.now() - (this.converged.get(name) ?? 0) >= CONVERGED_MS) {
+        await this.converge(agent, conversation, name);
+        this.converged.set(name, Date.now());
+      }
       if (!hold) return { container: name, release: () => {} };
       this.leases.set(name, (this.leases.get(name) ?? 0) + 1);
       let released = false;
@@ -281,6 +287,7 @@ export class SandboxPool {
         if ((this.leases.get(name) ?? 0) > 0 || now - (this.used.get(name) ?? this.started) < IDLE_MS) return;
         await exec('docker', ['rm', '-f', name], { timeout: 30_000 }).catch(() => {});
         this.used.delete(name);
+        this.converged.delete(name);
       });
     }
   }
@@ -290,6 +297,7 @@ export class SandboxPool {
     const { stdout } = await exec('docker', ['ps', '-aq', '--filter', `label=${BASE_LABEL}=${baseContainer}`], { timeout: 10_000 });
     const ids = stdout.split('\n').map(s => s.trim()).filter(Boolean);
     if (ids.length) await exec('docker', ['rm', '-f', ...ids], { timeout: 60_000 });
+    this.converged.clear();
   }
 }
 
