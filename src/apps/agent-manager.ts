@@ -10,6 +10,7 @@ import { AppsRegistry, AppEntry } from './registry';
 import { pathWithNativeBin } from '../session/claude-bin';
 import { agentsDirForConfig } from '../config/agent-env';
 import { withConfigWriteLock, writeConfigAtomicSync } from '../config/config-write-lock';
+import type { AgentConfig } from '../types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -23,6 +24,28 @@ interface RawConfig {
   gateway: Record<string, unknown>;
   agents: Record<string, unknown>[];
   [key: string]: unknown;
+}
+
+/** The `isolateMemory` an app Agent's config entry carries: its app.yaml declaration's (#601). */
+function declaredIsolateMemory(entry: AppEntry): true | undefined {
+  return entry.agentDeclaration?.isolateMemory ? true : undefined;
+}
+
+/**
+ * Gives each app Agent that reconcileAgents() will register the isolateMemory
+ * its app.yaml declares (#601). Gateway start applies it to the loaded config
+ * before admitting agents: reconcile rewrites config.json only after they
+ * started, and the config watcher's baseline is the loaded config, so a
+ * differing value on disk (a hand edit) would otherwise stay in effect.
+ */
+export function applyDeclaredIsolateMemory(agents: AgentConfig[], apps: AppEntry[]): void {
+  for (const app of apps) {
+    if (app.status !== 'running' || !app.agentDeclaration || !app.agentPaths) continue;
+    const agent = agents.find((a) => a.id === app.agentDeclaration!.name && a.type === 'app-agent');
+    if (!agent) continue;
+    if (declaredIsolateMemory(app)) agent.isolateMemory = true;
+    else delete agent.isolateMemory;
+  }
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -335,6 +358,10 @@ export class AgentManager {
           model: 'claude-sonnet-4-6',
           extraFlags: [],
         },
+        // Isolate mode (#601) is the app's call, made in app.yaml. Undefined is
+        // dropped when the config is written, so a release that stops declaring
+        // it turns the mode off instead of keeping a stale value.
+        isolateMemory: declaredIsolateMemory(entry),
       });
     } catch (err) {
       // Rollback workspace symlink if config write fails to avoid orphaned symlink

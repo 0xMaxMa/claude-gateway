@@ -6,11 +6,14 @@ import { OrchestrationError } from './types';
 import { ingestOrchestrationMedia } from './media';
 import { MediaStore } from '../history/media-store';
 import { detectImageMime, detectAudioMime } from '../share/share-store';
+import { chatMemoryDirName } from '../agent/workspace-loader';
 
 const MAX_STAGED_FILES = 10;
 
 export class TaskFiles {
   constructor(readonly store: OrchestrationStore, readonly agentsRoot: string, private readonly containerSpool?: string, private readonly workspace = join(agentsRoot, store.agentId, 'workspace')) {}
+  /** Isolate mode (#601): scoped memory writes land in the conversation's chats/ directory. */
+  isolateMemory = (): boolean => false;
   private readonly capturedImages = new Map<string, Map<string, string>>();
   private readonly pendingImageTools = new Map<string, Set<string>>();
   private readonly reservations = new Map<string, Set<{ files: number }>>();
@@ -143,11 +146,17 @@ export class TaskFiles {
   remember(attemptId: string, generation: number, actionId: string, args: Record<string, unknown>) {
     const { task, conversation } = this.scope(attemptId, generation);
     if (!task.capabilities.writeMemory || conversation.source === 'api') throw new OrchestrationError('MEMORY_WRITE_DENIED');
-    const note = boundedText(args.note, 8192), name = args.path === undefined ? `memory/${new Date().toISOString().slice(0,10)}.md` : boundedText(args.path, 256);
-    if (!/^(?:MEMORY\.md|USER\.md|memory\/[A-Za-z0-9_-]+\.md)$/.test(name)) throw new OrchestrationError('MEMORY_PATH_DENIED');
-    const workspace = this.workspace, destination = join(workspace, name);
+    // Isolate mode (#601) injects only the conversation's MEMORY.md/USER.md and offers no
+    // archive search, so a memory/ note would be written and never seen again.
+    const isolated = this.isolateMemory();
+    const note = boundedText(args.note, 8192), name = args.path === undefined ? (isolated ? 'MEMORY.md' : `memory/${new Date().toISOString().slice(0,10)}.md`) : boundedText(args.path, 256);
+    if (!(isolated ? /^(?:MEMORY|USER)\.md$/ : /^(?:MEMORY\.md|USER\.md|memory\/[A-Za-z0-9_-]+\.md)$/).test(name)) throw new OrchestrationError('MEMORY_PATH_DENIED');
+    const chatDir = isolated ? join('chats', chatMemoryDirName(String(conversation.source), String(conversation.chat_id))) : '';
+    const workspace = join(this.workspace, chatDir), destination = join(workspace, name);
+    // Checked before mkdir, which would otherwise create the conversation's dir wherever a symlinked chats/ points.
+    if (chatDir && [join(this.workspace, 'chats'), workspace].some(dir => lstatSync(dir, { throwIfNoEntry: false })?.isSymbolicLink())) throw new OrchestrationError('MEMORY_PATH_DENIED');
     mkdirSync(dirname(destination), { recursive: true });
-    if (realpathSync(dirname(destination)) !== join(realpathSync(workspace), name.startsWith('memory/') ? 'memory' : '') || (existsSync(destination) && lstatSync(destination).isSymbolicLink())) throw new OrchestrationError('MEMORY_PATH_DENIED');
+    if (realpathSync(workspace) !== join(realpathSync(this.workspace), chatDir) || realpathSync(dirname(destination)) !== join(realpathSync(workspace), name.startsWith('memory/') ? 'memory' : '') || (existsSync(destination) && lstatSync(destination).isSymbolicLink())) throw new OrchestrationError('MEMORY_PATH_DENIED');
     if (existsSync(destination) && statSync(destination).size > 1048576) throw new OrchestrationError('MEMORY_TOO_LARGE');
     const old = existsSync(destination) ? readFileSync(destination, 'utf8') : '';
     const operation = createHash('sha256').update(`${attemptId}:${actionId}`).digest('hex');
@@ -159,7 +168,8 @@ export class TaskFiles {
       renameSync(temporary, destination);
       const directory = openSync(dirname(destination), 'r'); try { fsyncSync(directory); } finally { closeSync(directory); }
     }
-    this.store.transaction(() => this.store.appendEvent(task.conversationId, 'task.memory_updated', { taskId: task.taskId, path: name, operation }));
-    return { updated: true, path: name };
+    const written = join(chatDir, name);
+    this.store.transaction(() => this.store.appendEvent(task.conversationId, 'task.memory_updated', { taskId: task.taskId, path: written, operation }));
+    return { updated: true, path: written };
   }
 }

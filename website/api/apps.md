@@ -243,6 +243,7 @@ curl -X POST \
 - `secretKeys` — env vars the operator **must** supply (declared as bare keys in `app.yaml`).
 - `generatedKeys` — secrets the gateway fills with a fresh random value at install (declared as `KEY=!generate:<encoding>:<bytes>`); never prompted for.
 - `secretDefaults` — defaults for prompted secrets declared as `KEY=!default:<value>`. The key is still listed in `secretKeys` (prompted and editable), but the value here pre-fills the field; if the operator leaves it blank the default is written to `.env`. Only keys with a declared default appear. Precedence at install: operator-supplied value → default → empty.
+- `agentDeclaration` — the app's `services.agent` declaration (`path`, `name`), or `null` when the app has no agent. It carries `"isolateMemory": true` when the app opts its agent into [isolated memory mode](../reference/memory-settings.md#isolated-memory-mode).
 
 **Error responses:**
 
@@ -623,6 +624,7 @@ services:
 | `resources.memory` | No | Memory limit e.g. `"256M"`, `"1G"` (max 2G) |
 | `services.<name>` | Yes | One or more service definitions |
 | `services.agent` | No | Agent service declaration (see below) |
+| `services.agent.isolate_memory` | No | `true` gives each conversation its own agent memory (default `false`) |
 
 **Service fields:**
 
@@ -660,9 +662,12 @@ services:
   agent:
     path: ./agent      # relative path to agent workspace within repo
     name: my-agent     # agent ID, must match [a-z][a-z0-9-]{1,63}
+    isolate_memory: true # optional, default false
 ```
 
 When declared, the gateway injects a `debian:stable-slim` container, mounts the claude CLI and node binaries, and registers the agent in `config.json`. Messages to this agent are dispatched via `docker exec`.
+
+`isolate_memory: true` turns on [isolated memory mode](../reference/memory-settings.md#isolated-memory-mode) for this agent: each conversation gets its own `USER.md`/`MEMORY.md` under the workspace's `chats/`, and the workspace-root files are no longer injected. Use it for an agent that serves many unrelated users. It must be a boolean. The gateway writes it to the agent's `isolateMemory` at install, update and every gateway start, so a release that removes it turns the mode off. It is independent of `agents[].isolateMemory` on host agents.
 
 **Host script bridge (`gateway_api`):**
 

@@ -332,6 +332,29 @@ services:
 `.trim();
         expect(() => parseAppYaml(y, dir)).not.toThrow();
       });
+
+      it('accepts a boolean isolate_memory and rejects anything else (#601)', () => {
+        const y = (value: string) => `
+apiVersion: apps.getpod.ai/v1
+name: my-app
+version: 1.0.0
+services:
+  web:
+    image: nginx:1.25
+  agent:
+    path: ./agent
+    name: my-agent-bot
+    isolate_memory: ${value}
+`.trim();
+        expect(() => parseAppYaml(y('true'), dir)).not.toThrow();
+        expect(() => parseAppYaml(y('false'), dir)).not.toThrow();
+        for (const bad of ['"true"', 'yes-please', '1', '{ enabled: true }']) {
+          expect(() => parseAppYaml(y(bad), dir)).toThrow('"isolate_memory" must be true or false');
+        }
+        // The pre-rename key is an unknown field like any other, never a silent no-op.
+        expect(() => parseAppYaml(y('true').replace('isolate_memory', 'multi_tenant'), dir))
+          .toThrow('invalid field "multi_tenant" — only "path", "name" and "isolate_memory" are allowed');
+      });
     });
   });
 
@@ -838,6 +861,13 @@ services:
         path: './agent',
         name: 'agent-note-bot',
       });
+    });
+
+    it('carries isolate_memory: true into agentDeclaration.isolateMemory and nothing else (#601)', () => {
+      expect(generate(yamlWithAgent + '\n    isolate_memory: true', 'agent-note').agentDeclaration)
+        .toEqual({ path: './agent', name: 'agent-note-bot', isolateMemory: true });
+      expect(generate(yamlWithAgent + '\n    isolate_memory: false', 'agent-note').agentDeclaration)
+        .toEqual({ path: './agent', name: 'agent-note-bot' });
     });
 
     it('returns null agentDeclaration when no agent service', () => {

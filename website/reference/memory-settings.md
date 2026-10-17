@@ -126,6 +126,51 @@ Two read-only MCP tools expose it to the agent: **`memory_search`** (keyword/FTS
 
 Implementation: [config loader](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/config/loader.ts), [configuration template](https://github.com/0xMaxMa/claude-gateway/blob/b917843/config.template.json).
 
+## Isolated memory mode
+
+**Isolated memory mode** is for one agent that serves many unrelated senders, such as a public Telegram or LINE bot. Without it, `USER.md` and `MEMORY.md` hold one profile and one memory for the whole agent, so a fact written while one sender talks reaches every other sender's session.
+
+Host agents and app agents have separate switches. Both are off by default, and turning one on never turns on the other.
+
+### Host agents: `agents[].isolateMemory`
+
+The operator sets this per agent in the gateway config:
+
+```json
+{ "agents": [{ "id": "shop-bot", "isolateMemory": true }] }
+```
+
+The value must be `true` or `false`; the config loader skips an agent with any other value.
+
+### App agents: `services.agent.isolate_memory` in `app.yaml`
+
+The app declares it for its own agent in the [`app.yaml` agent service declaration](../api/apps.md):
+
+```yaml
+services:
+  agent:
+    path: ./agent
+    name: shop-bot
+    isolate_memory: true
+```
+
+At install, update and every gateway start, the gateway writes `isolateMemory` into the app agent's config entry from this declaration, and a gateway start admits the agent with the declared value. A release that removes the line turns the mode off again, and a hand edit of `isolateMemory` on an app agent is reset the same way. A gateway start resets only agents of running apps: a stopped app's agent keeps its config entry until a gateway start finds the app running. `inspect_app` and `POST /api/v1/apps/inspect` report it as `agentDeclaration.isolateMemory`. The agent runs in its app container, which sees the workspace at `/workspace`. The gateway composes each conversation's memory on the host and gives the agent its files as `/workspace/chats/…` paths. Each conversation's `chats/` directory is part of the agent workspace, which the app's update and [backup/restore](../api/apps.md) already carry.
+
+When it is on:
+
+- **Per-conversation memory.** Each conversation keeps its own files at `<workspace>/chats/<channel>-<chatId>-<hash>/USER.md` and `MEMORY.md`, and is shown its own files only. A group chat is one conversation, so its members share one memory. An API chat (`chat_id`) is one conversation across all of its sessions and every API key that uses it. A heartbeat runs in each live session with that conversation's own memory; only when no session is live does it run in a `__heartbeat__` session, which keeps a memory of its own. A new conversation starts with empty files and never inherits the workspace-root `USER.md`/`MEMORY.md`, which may still hold data written before the mode was turned on. `AGENTS.md`, `IDENTITY.md`, `SOUL.md` and `HEARTBEAT.md` stay shared by every conversation.
+- **Shared `CLAUDE.md` without sender data.** The composed `CLAUDE.md` leaves out the user profile and long-term memory sections. Its memory rule tells the agent to write only to the current conversation's files. Each session (orchestration Agent, worker or classic channel session) receives its own conversation's files when it spawns.
+- **Scoped memory writes.** `task_memory_append` writes `MEMORY.md` (the default) or `USER.md` under the conversation's `chats/` directory. It refuses `memory/<topic>.md`, because those notes would never be injected or searchable.
+- **No archive or skill tools.** `memory_search`, `memory_get` and the `memory_shared_*` tools are not offered, because the knowledge archive is one index over every conversation, and the archive is not reindexed at spawn. Core-shrink and the write-routing addendum are off for the same reason. `skill_create`, `skill_install`, `skill_delete` and `skill_metrics` are not offered either, because the skill catalog is shared by every conversation. The `cron_*`, `agent_create` and `agent_update` tools are off too: scheduled jobs and their prompts belong to the whole agent, and `agent_update` rewrites the shared persona files. So are the app tools (`install_app`, `update_app`, `restore_app`, `uninstall_app` and the rest), because updating, restoring or uninstalling an app rewinds or deletes the memory of every conversation its agent serves.
+- **No Claude Code auto memory.** Claude Code keeps one auto-memory directory per working directory (`~/.claude/projects/<cwd>/memory/`) and loads its index into every session there, so every conversation would share it. Sessions and workers of the agent run with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+- **No nightly dreaming or skill learning.** Dreaming merges every conversation's transcripts into one memory and can promote facts to the shared KB, and a skill learned from one conversation is offered to all of them, so neither runs for the agent. The dashboard also refuses to apply dreaming proposals left from before the mode was turned on (`409`).
+- **Operator-only persona.** No conversation may change `AGENTS.md`, `SOUL.md` or `IDENTITY.md`. The agent is told to decline name or persona change requests, and orchestration workers receive no persona-edit authorization.
+- **No `--append-system-prompt-file` in `claude.extraFlags`.** Claude Code keeps only the last such flag, so it would replace the conversation's memory. The config loader refuses such an agent; use `--append-system-prompt` or move the text into `AGENTS.md`.
+
+A running agent keeps the mode it started with. When the setting changes, through a config edit or an app update that changes `isolate_memory`, the gateway restarts that agent once none of its sessions is busy; no gateway restart is needed. The mode isolates the memory the gateway injects and turns off the tools that change or search state shared by the whole agent. Channel tools such as `telegram_reply` still accept any chat the bot's access policy allows. It does not sandbox the file system: an agent with file tools can still open another conversation's directory. Keep untrusted senders on agents without host execution. Memory is keyed by the conversation (channel and chat). An app that groups several chats into one account, such as one family with several linked parents, still gets one memory per chat.
+
+Implementation: [workspace loader](https://github.com/0xMaxMa/claude-gateway/blob/main/src/agent/workspace-loader.ts), [session spawn](https://github.com/0xMaxMa/claude-gateway/blob/main/src/session/process.ts).
+
 ## Nightly session compaction
 
 Memory dreaming consolidates workspace memory files. **Session compaction** separately reduces a resumed Claude Code conversation using its native `/compact` command. It does not delete stored chat history, rebuild the conversation from recent messages, or ask a question when a user returns.

@@ -43,7 +43,7 @@ import { sweepOrphanedReceivers } from './utils/orphan-receivers';
 import { registerShutdownSignals } from './shutdown-signals';
 import { RegistryClient } from './apps/registry-client';
 import { AppInstaller } from './apps/installer';
-import { AgentManager } from './apps/agent-manager';
+import { AgentManager, applyDeclaredIsolateMemory } from './apps/agent-manager';
 import { SocketServer, parseTimeoutMs } from './apps/socket-server';
 import { parseAppYaml, AppYamlService, AppYamlScript } from './apps/compose-generator';
 import { claimSupervisorEnv, classifyInvocation, resolveInvocationSignals } from './cli/command-names';
@@ -171,6 +171,11 @@ async function startAgent(
     agentConfig.knowledge?.archive,
     gatewayConfig.gateway.knowledge?.archive,
   ).enabled;
+  // Isolated memory mode (#601): the shared CLAUDE.md leaves out sender data.
+  // Fixed for the process lifetime: the reload policy makes the field restart-only.
+  const isolateMemory = agentConfig.isolateMemory === true;
+  // Background learners read every conversation into shared state, so they stay off.
+  const offWhenIsolated = <T extends { enabled?: boolean }>(cfg: T | undefined): T | undefined => isolateMemory ? Object.assign({}, cfg, { enabled: false }) : cfg;
 
   // Ensure workspace directory exists (may be absent for newly created agents)
   try {
@@ -224,6 +229,7 @@ async function startAgent(
   try {
     workspace = await loadWorkspace(agentConfig.workspace, {
       coreShrink,
+      isolateMemory,
       mcpToolsDir,
       sharedSkillsDir,
       logger,
@@ -290,14 +296,16 @@ async function startAgent(
       mcpToolsDir,
       sharedSkillsDir,
       globalCfg: gatewayConfig.gateway.skillLearning,
-      agentCfg: agentConfig.skillLearning,
+      // Isolate mode (#601): a skill learned from one conversation is offered to
+      // every other one, so the reviewer stays off (as dreaming does below).
+      agentCfg: offWhenIsolated(agentConfig.skillLearning),
       gatewayTimezone: gatewayConfig.gateway.timezone,
       logger,
       sendNotification: (text, sessionId) => runner.notifySkillLearning(sessionId, text),
     });
     runner.setSkillLearning(skillLearning);
     skillLearning.startCurator();
-    runner.onConfigReload(() => skillLearning.reconfigure({globalCfg:gatewayConfig.gateway.skillLearning,agentCfg:agentConfig.skillLearning,gatewayTimezone:gatewayConfig.gateway.timezone}));
+    runner.onConfigReload(() => skillLearning.reconfigure({globalCfg:gatewayConfig.gateway.skillLearning,agentCfg:offWhenIsolated(agentConfig.skillLearning),gatewayTimezone:gatewayConfig.gateway.timezone}));
     runner.onShutdown(()=>skillLearning.stop());
   } catch (err) {
     logger.warn('Failed to wire skill-learning (continuing without it)', { error: (err as Error).message });
@@ -310,7 +318,10 @@ async function startAgent(
       agentId: agentConfig.id,
       workspaceDir: agentConfig.workspace,
       globalCfg: gatewayConfig.gateway.dreaming,
-      agentCfg: agentConfig.dreaming,
+      // Isolate mode (#601): dreaming reads every conversation's transcripts into
+      // one MEMORY.md/USER.md (and may promote to the shared KB), so it cannot keep
+      // conversations apart; it stays off for such an agent.
+      agentCfg: offWhenIsolated(agentConfig.dreaming),
       gatewayTimezone: gatewayConfig.gateway.timezone,
       logger,
       // K4 auto-applier net-negative gate uses the same soft budgets as compose.
@@ -375,7 +386,7 @@ async function startAgent(
     const next=JSON.stringify([memoryBudget,agentConfig.knowledge,gatewayConfig.gateway.knowledge]);
     if(next===composePolicy)return;composePolicy=next;
     composeReload=composeReload.then(async()=>{
-      const updated=await loadWorkspace(agentConfig.workspace,{mcpToolsDir,sharedSkillsDir,logger,memoryBudget,coreShrink});
+      const updated=await loadWorkspace(agentConfig.workspace,{mcpToolsDir,sharedSkillsDir,logger,memoryBudget,coreShrink,isolateMemory});
       await fs.promises.writeFile(path.join(agentConfig.workspace,'CLAUDE.md'),updated.systemPrompt,'utf8');
       if(updated.skillRegistry)runner.setSkillRegistry(updated.skillRegistry);
       await runner.restartOrDefer({skipBusy:true,deferIdle:true});
@@ -403,6 +414,7 @@ async function startAgent(
         logger,
         memoryBudget,
         coreShrink,
+        isolateMemory,
       });
       // Always rewrite CLAUDE.md so the next spawn picks up the new content.
       await fs.promises.writeFile(
@@ -462,6 +474,7 @@ async function startAgent(
           logger,
           memoryBudget,
           coreShrink,
+          isolateMemory,
         });
         if (updated.skillRegistry) {
           runner.setSkillRegistry(updated.skillRegistry);
@@ -776,10 +789,13 @@ async function main(): Promise<void> {
   const appsRegistry = new AppsRegistry(appsConfigPath);
   const agentManager = new AgentManager(CONFIG_PATH, agentsDirForConfig(CONFIG_PATH));
   const { migrateAppAgentContainer } = await import('./apps/agent-container-migration');
-  const restoringAgentIds = new Set((await appsRegistry.list().catch(error => {
+  const registeredApps = await appsRegistry.list().catch(error => {
     globalLogger.warn('App registry unavailable before Agent admission', {error: String(error)});
     return [];
-  })).filter(entry => entry.status === 'running').map(entry => entry.agentDeclaration?.name));
+  });
+  // Admit app Agents in the isolate mode their app.yaml declares, as the reconcile below writes it (#601).
+  applyDeclaredIsolateMemory(config.agents, registeredApps);
+  const restoringAgentIds = new Set(registeredApps.filter(entry => entry.status === 'running').map(entry => entry.agentDeclaration?.name));
   const deferredAppAgents = new Set<string>();
 
   for (const agentConfig of config.agents) {
@@ -823,7 +839,11 @@ async function main(): Promise<void> {
             agentConfig.knowledge?.archive,
             config.gateway.knowledge?.archive,
           ).enabled,
+          isolateMemory: agentConfig.isolateMemory === true,
         });
+        // A runner replaced meanwhile (an update toggling isolate mode, #601)
+        // composed its own CLAUDE.md; this one has the old mode's sections.
+        if (ctx.agentRunners.get(agentName) !== runner) return;
         const claudeMdPath = path.join(agentConfig.workspace, 'CLAUDE.md');
         await fs.promises.writeFile(claudeMdPath, updated.systemPrompt, 'utf8');
         logger.info('Rewrote CLAUDE.md after reinstall', { chars: updated.systemPrompt.length });
@@ -1009,6 +1029,9 @@ async function main(): Promise<void> {
         globalLogger.info('Configuration value applied',{agentId:change.agentId,field:change.field,lifecycle:change.reloadMode});
       }catch(err){globalLogger.error('Configuration application failed',{agentId:change.agentId,field:change.field,error:(err as Error).message});}
     }
+    // Isolate mode (#601) is fixed for a runner's lifetime; an edit, or an app
+    // update that toggles its app.yaml isolate_memory, replaces the runner once idle.
+    for(const id of new Set(changes.filter(c=>c.agentId&&c.field==='isolateMemory').map(c=>c.agentId)))void agentLifecycle.reconcile(id);
     if(changes.some(c=>!c.agentId&&c.field.startsWith('gateway.processLimits')))gatewayCapacity(config);
     if(changes.some(c=>!c.agentId&&c.hotReloadable&&(c.field.startsWith('gateway.app')||c.field==='gateway.timezone'))){
       appInstaller.configurePolicies(config.gateway.appHousekeeping,config.gateway.appBackup,config.gateway.appRestore,config.gateway.timezone);
@@ -1034,9 +1057,13 @@ async function main(): Promise<void> {
       // Keep the live gateway config reference, not the watcher's snapshot.
       const agent = { ...newAgentConfig, workspace: expandTilde(newAgentConfig.workspace) };
       await startAgent(agent, config, ctx);
-      if (ctx.agentRunners.has(agent.id)) globalLogger.info('Agent hot-added successfully', { id: agent.id });
+      if (ctx.agentRunners.has(agent.id)) {
+        config.agents = [...config.agents.filter(existing => existing.id !== agent.id), agent];
+        globalLogger.info('Agent hot-added successfully', { id: agent.id });
+      }
     },
     error: (id, error) => globalLogger.error('Agent lifecycle reconciliation deferred', { agentId: id, error: String(error) }),
+    stale: desired => Boolean(desired.isolateMemory) !== Boolean(agentConfigs.get(desired.id)?.isolateMemory),
   });
   const removalTimer = setInterval(() => agentLifecycle.retry(), 5000);
   removalTimer.unref();

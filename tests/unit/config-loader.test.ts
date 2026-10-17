@@ -615,4 +615,42 @@ describe('config-loader', () => {
     expect(loaded.agents.map(agent => agent.id)).toEqual(['baerbel']);
     expect(skipped.map(agent => agent.reason)).toEqual([expect.stringMatching(/Computer Use/)]);
   });
+
+  it('accepts agents[].isolateMemory on host and app agents and skips malformed use (#601)', () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    const base = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'valid-2-agents.json'), 'utf8'));
+    fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], isolateMemory: true }, base.agents[1]] }));
+    expect(loadConfig(configPath).agents[0].isolateMemory).toBe(true);
+    for (const isolateMemory of ['yes', 1, { enabled: true }]) {
+      const skipped: SkippedAgent[] = [];
+      fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], isolateMemory }, base.agents[1]] }));
+      expect(loadConfig(configPath, { onSkippedAgent: agent => skipped.push(agent) }).agents.map(agent => agent.id)).toEqual(['baerbel']);
+      expect(skipped.map(agent => agent.reason)).toEqual([expect.stringMatching(/isolateMemory must be true or false/)]);
+    }
+    // An app agent gets the field from its app.yaml (services.agent.isolate_memory).
+    const skipped: SkippedAgent[] = [];
+    fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], type: 'app-agent', container: 'demo-agent', isolateMemory: true }, base.agents[1]] }));
+    const loaded = loadConfig(configPath, { onSkippedAgent: agent => skipped.push(agent) });
+    expect(skipped).toEqual([]);
+    expect(loaded.agents.map(agent => agent.isolateMemory)).toEqual([true, undefined]);
+    // Claude Code keeps only the last --append-system-prompt-file, which would replace the conversation's memory.
+    for (const extraFlags of [['--append-system-prompt-file', 'extra.md'], ['--append-system-prompt-file=extra.md']]) {
+      const refused: SkippedAgent[] = [];
+      fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], claude: { ...base.agents[0].claude, extraFlags }, isolateMemory: true }, base.agents[1]] }));
+      expect(loadConfig(configPath, { onSkippedAgent: agent => refused.push(agent) }).agents.map(agent => agent.id)).toEqual(['baerbel']);
+      expect(refused.map(agent => agent.reason)).toEqual([expect.stringMatching(/--append-system-prompt-file/)]);
+    }
+    fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], claude: { ...base.agents[0].claude, extraFlags: ['--append-system-prompt', 'Be brief.'] }, isolateMemory: true }, base.agents[1]] }));
+    expect(loadConfig(configPath).agents[0].isolateMemory).toBe(true);
+  });
+
+  it('ignores the pre-rename multiTenant key like any unknown agent field, so it never turns isolation on (#601)', () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    const base = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'valid-2-agents.json'), 'utf8'));
+    const skipped: SkippedAgent[] = [];
+    fs.writeFileSync(configPath, JSON.stringify({ ...base, agents: [{ ...base.agents[0], multiTenant: { enabled: true } }, base.agents[1]] }));
+    const loaded = loadConfig(configPath, { onSkippedAgent: agent => skipped.push(agent) });
+    expect(skipped).toEqual([]);
+    expect(loaded.agents.map(agent => agent.isolateMemory)).toEqual([undefined, undefined]);
+  });
 });

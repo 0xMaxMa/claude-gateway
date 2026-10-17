@@ -45,7 +45,9 @@ export async function validateContainerInspection(agent: AgentConfig, c: any, op
   const workspace = await realpath(agent.workspace);
   const media = await realpath(join(agent.workspace, '..', 'media')).catch(() => join(agent.workspace, '..', 'media'));
   const ro = new Map<string, string>();
-  for (const [destination, source] of [['/usr/local/bin/claude', '/usr/local/bin/claude'], ['/usr/bin/node', process.execPath], [join(dirname(dirname(process.execPath)), 'lib/node_modules'), join(dirname(dirname(process.execPath)), 'lib/node_modules')], [join(homedir(), '.claude-seed'), join(agent.workspace, '..', '.claude-seed')]]) {
+  // The installer mounts the detected CLI read-only at its own real path, which
+  // is not /usr/local/bin/claude when Claude Code is an npm global install.
+  for (const [destination, source] of [['/usr/local/bin/claude', '/usr/local/bin/claude'], ...(agent.claudeBin ? [[agent.claudeBin, agent.claudeBin]] : []), ['/usr/bin/node', process.execPath], [join(dirname(dirname(process.execPath)), 'lib/node_modules'), join(dirname(dirname(process.execPath)), 'lib/node_modules')], [join(homedir(), '.claude-seed'), join(agent.workspace, '..', '.claude-seed')]]) {
     try { ro.set(destination, await realpath(source)); } catch { /* absent optional installer mount */ }
   }
   const codexRuntime = inspectedCodexRuntime(c);
