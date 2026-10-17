@@ -38,7 +38,11 @@ export async function transcribeVoiceNote(path: string, options: VoiceNoteOption
   const delays = options.retryDelaysMs ?? TRANSCRIPTION_RETRY_DELAYS_MS, started = Date.now();
   for (let attempt = 1; ; attempt++) {
     const remaining = TRANSCRIPTION_BUDGET_MS - (Date.now() - started);
-    try { return await transcribeOnce(path, options, request, AbortSignal.timeout(Math.max(1, Math.min(TRANSCRIPTION_ATTEMPT_TIMEOUT_MS, remaining)))); }
+    try {
+      const text = await transcribeOnce(path, options, request, AbortSignal.timeout(Math.max(1, Math.min(TRANSCRIPTION_ATTEMPT_TIMEOUT_MS, remaining))));
+      if (!hasSpokenWords(text)) throw new OrchestrationError('VOICE_NOTE_NO_TRANSCRIPT');
+      return text.trim();
+    }
     catch (error) {
       const code = error instanceof VoiceError || error instanceof OrchestrationError ? error.code : '';
       const delay = delays[attempt - 1];
@@ -56,8 +60,7 @@ async function transcribeOnce(path: string, options: VoiceNoteOptions, request: 
     const info = await stat(path);
     if (!info.isFile() || !info.size || info.size > 25 * 1024 * 1024) throw new OrchestrationError('VOICE_NOTE_SIZE_LIMIT');
     const text = await (options.provider.includes('gemini') ? transcribeGemini : options.provider.includes('openrouter') ? transcribeOpenRouter : transcribePaxa)(await readFile(path), { ...options, signal }, request);
-    if (!hasSpokenWords(text)) throw new OrchestrationError('VOICE_NOTE_NO_TRANSCRIPT');
-    return text.trim();
+    return text;
   }
   if (!['elevenlabs','upstream:elevenlabs','managed:elevenlabs'].includes(options.provider)) throw new OrchestrationError('VOICE_NOTE_PROVIDER_UNSUPPORTED');
   const upstream = options.provider === 'managed:elevenlabs' ? upstreamVoiceConnection('elevenlabs', true) : options.provider === 'upstream:elevenlabs' ? upstreamVoiceConnection() : undefined;
@@ -75,10 +78,9 @@ async function transcribeOnce(path: string, options: VoiceNoteOptions, request: 
   }, request);
   if (!response.ok) throw await providerHttpError('STT', response);
   const result = await response.json() as { text?: unknown };
-  // A malformed or oversized body is not "no words": retrying it would only repeat the same answer.
+  // A malformed or oversized body is an invalid response, as Paxa reports it, not "no words".
   if (typeof result.text !== 'string' || Buffer.byteLength(result.text) > 60000) throw new VoiceError('STT_INVALID_RESPONSE');
-  if (!hasSpokenWords(result.text)) throw new OrchestrationError('VOICE_NOTE_NO_TRANSCRIPT');
-  return result.text.trim();
+  return result.text;
 }
 
 /** A stored voice-note failure that a retry from the kept audio can fix: the provider or the
@@ -93,7 +95,7 @@ export function retryableVoiceNoteFailure(code: string): boolean {
 /** Keep provider diagnostics consistent across chat channels and browser voice. */
 export function voiceNoteFailureMessage(code: string): string {
   const local: Record<string, string> = {
-    VOICE_NOTE_NO_TRANSCRIPT: 'No words could be recognized in the voice note. Please try again, record it again or type your message.',
+    VOICE_NOTE_NO_TRANSCRIPT: 'No words could be recognized in the voice note. Please resend it or type your message.',
     VOICE_NOTE_SIZE_LIMIT: 'The voice note is empty or exceeds the provider file size limit. Please send a shorter recording.',
     VOICE_NOTES_DISABLED: 'Voice message transcription is disabled for this agent.',
     VOICE_NOTE_ATTACHMENT_MISSING: 'The voice note attachment is missing. Please resend it or type your message.',
