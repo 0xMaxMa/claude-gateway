@@ -64,6 +64,20 @@ npm test
 
 For async tests, wait for an observable state or event with a bounded deadline rather than an arbitrary sleep. Test real cancellation and failure paths when changing process supervision; CPU movement alone is not proof that a test passed.
 
+## Release and promote
+
+Push a `vX.Y.Z` tag to release. The release workflow runs the unit tests, builds, creates a GitHub pre-release and publishes the package to the `next` dist-tag. The `latest` dist-tag does not move, so installed gateways do not report an update yet.
+
+Promote a version by running the Promote workflow from the Actions tab with the version number. Its preflight script, `scripts/release/promote-check.sh`, runs four read-only checks. The version must be plain `x.y.z` with no leading `v`. The version must be published on npm. The current `latest` must be older than the version, which refuses demotion and repeated promotion. No newer stable version may have been published within 24 hours after it, because a same-day follow-up usually means the version had a regression.
+
+When every check passes, the workflow points `latest` at the version and clears the pre-release flag on its GitHub Release. Neither CI nor a rebuild runs at promotion. The tarball is the one the release workflow already tested and published. Run the preflight locally before promoting by hand:
+
+```bash
+scripts/release/promote-check.sh 2.1.3
+npm dist-tag add @0xmaxma/claude-gateway@2.1.3 latest
+gh release edit v2.1.3 --prerelease=false --latest
+```
+
 ## Update documentation with code
 
 HTTP API changes belong in [API reference](../api/). Update the relevant channel or feature guide when behavior changes. Regenerate `website/reference/cli.md` with the repository's CLI generator when changing CLI command definitions. Keep examples consistent with configuration validation, authorization and route mounts.
