@@ -747,7 +747,7 @@ export class GatewayRouter {
       this.app.use('/api', workspaceRouter);
     }
 
-    // Mount pod-wide project browsing (gateway.projects.root, default ~/projects)
+    // Mount the pod-wide Projects API (gateway.projects.root, default ~/projects)
     if (this.gatewayConfig?.gateway?.api?.keys && projectsEnabled(this.gatewayConfig)) {
       this.app.use('/api', createProjectsRouter(this.gatewayConfig.gateway.api.keys, resolveProjectsRoot(this.gatewayConfig), {
         sys: systemSys(),

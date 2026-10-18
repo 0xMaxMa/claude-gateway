@@ -1,21 +1,23 @@
 # Projects API {#projects-api}
 
-Browse the project directories under the pod's projects root, `~/projects` by
-default. The web dashboard uses these routes to list projects, create a new one,
-show a read-only file tree and file viewer, and read the git status of each
-project. Editing files and changing a repository (commit, push, pull) are out of
-scope. Use the code editor or the git connector for that.
+List the project directories under the pod's projects root, `~/projects` by
+default. The web dashboard uses these routes to list projects, create and delete
+one, read the git status of each project, and see, start and stop what runs in
+it. The gateway does not serve project files: it has no route that lists a
+project's folders or returns a file's contents. View project files in
+code-server. Editing files and changing a repository (commit, push, pull) are
+out of scope too. Use code-server or the git connector for that.
 
-**Auth.** Projects belong to the pod, not to an agent, so any valid API key can read them: the list, the
-file tree, file contents, git status and running status. Creating, starting, stopping and deleting a project
+**Auth.** Projects belong to the pod, not to an agent, so any valid API key can read the list, git status and
+running status. Creating, starting, stopping and deleting a project
 change the pod and need an admin API key (`admin: true`). Any other key, a pod-wide write key included, gets
 `403 forbidden_key` on those four routes, with the message `An admin API key is required for Projects`.
 A project-bound chat belongs to its agent and follows the agent's rules like any other chat: see
 [Sessions](/api/sessions#post-apiv1agentsagentidsessions).
 
 **Feature detection.** `GET /api/v1/capabilities` lists
-`"projects": ["list", "create", "read", "git", "chat", "run", "start", "delete", "stop"]` for an admin key.
-A key that is not an admin key gets `["list", "read", "git", "chat", "run"]`. Show project browsing
+`"projects": ["list", "create", "git", "chat", "run", "start", "delete", "stop"]` for an admin key.
+A key that is not an admin key gets `["list", "git", "chat", "run"]`. Show the project list
 only when the array includes `"list"`, project create only when it includes `"create"`, the git status view only when it includes `"git"` (read-only: the gateway has no route that changes a repository),
 and [project-bound chat](/api/sessions#post-apiv1agentsagentidsessions) only when
 it includes `"chat"`. Show running status only when it includes `"run"`, the Stop button only when it includes `"stop"`, the Start button only when it includes `"start"`, and the Delete action only when it includes `"delete"`.
@@ -24,7 +26,7 @@ absent when Projects is usable. An older gateway omits the key, lists projects w
 `"git"`, `"chat"`, `"run"` or `"stop"`, or answers `"admin_required"` for a key that is not an admin key.
 
 **On by default.** The routes are on for every install, with the root `~/projects`, and
-need no configuration. Every valid key can list and read whatever sits under that folder, and every key with
+need no configuration. Every valid key can list the projects in that folder and read their git and running status, and every key with
 `admin: true` can also create, start, stop and delete projects there. To switch Projects off, set
 `gateway.projects.enabled` to `false` and restart. Only a boolean counts: the string `"false"`, `0` or `null` is
 ignored with a warning in `gateway.log`, and Projects keeps its default, which is on:
@@ -34,12 +36,10 @@ ignored with a warning in `gateway.log`, and Projects keeps its default, which i
 ```
 
 **Security model.** An admin key can do everything, for every agent. Any other key reaches the agents it lists
-(or every agent with `agents: "*"`), can write only when it has `write: true`, and can read every project
-folder. Admin-only means only create, start, stop and delete. Reading includes every file under the root up
-to 1 MiB, `.env` files and other secrets in a project included, for a key scoped to one agent as for any
-other key. That includes `.git/config`: [`/file`](#get-file) returns it as it is on disk, so a remote URL with
-embedded credentials (`https://user:token@host/x`) reaches any key in clear, although the git routes remove them.
-Every listing also carries the host path of the projects root as `root`, which usually includes the home directory.
+(or every agent with `agents: "*"`), can write only when it has `write: true`, and can list every project
+and read its git and running status. Admin-only means only create, start, stop and delete. The gateway does
+not serve project files to any key, so files are viewed in code-server. The git routes remove credentials from
+remote URLs. Every listing also carries the host path of the projects root as `root`, which usually includes the home directory.
 These checks are not a filesystem boundary.
 Agents run with `--dangerously-skip-permissions`, and a project-bound chat runs its agent inside the project
 folder, so any key that can send that agent a message can ask it to read or change any file in the project, or
@@ -50,15 +50,12 @@ other agents' chats also work in. On a host-mode orchestrated agent, `task_spawn
 Projects. Treat an admin key as full access to the pod, and treat a key that can reach an agent as able to
 change every project folder.
 
-**Isolated memory agents.** An agent with `isolateMemory: true` can chat in a project like any other host agent, and the project is not split per conversation. Every chat bound to the project works in the same folder, and every key can read its files through the routes above, so what one conversation writes there reaches the others. A trusted project also loads its own settings, hooks and `.mcp.json`, so its MCP servers reach the session although isolated memory mode gives a session none of the operator's. Bind a chat of an isolated agent only to a project its conversations may share, and leave that project out of `gateway.projects.trusted`. App agents cannot chat in a project (`409 project_unsupported_agent`, reason `container`).
+**Isolated memory agents.** An agent with `isolateMemory: true` can chat in a project like any other host agent, and the project is not split per conversation. Every chat bound to the project works in the same folder, so what one conversation writes there reaches the others. A trusted project also loads its own settings, hooks and `.mcp.json`, so its MCP servers reach the session although isolated memory mode gives a session none of the operator's. Bind a chat of an isolated agent only to a project its conversations may share, and leave that project out of `gateway.projects.trusted`. App agents cannot chat in a project (`409 project_unsupported_agent`, reason `container`).
 
 **Root.** Projects live in `gateway.projects.root`, which defaults to
 `~/projects`. Every listing returns the root as `root`, resolved through
-symlinks when it exists, so a client never has to rebuild it. The gateway follows symlinks with `realpath` and refuses any project, directory, or
-file whose real location is outside the root (for a project) or outside the
-project (for a path inside it). Hardlinks are not detected: a hardlinked file reads like any other file,
-because the API is a view of what the gateway's user can already read, not a
-sandbox.
+symlinks when it exists, so a client never has to rebuild it. The gateway follows symlinks with `realpath` and refuses any project
+whose real location is outside the root, or is the root itself.
 
 **Disabled.** When the default root would expose your home or config directory, the gateway logs a warning and does not mount these routes: they answer `404`, `capabilities.projects` is empty, and `POST /sessions` with `project` answers `409 projects_disabled`. Sessions already bound to a project fail with `409 PROJECT_UNAVAILABLE`. Set `gateway.projects.root` to a folder that holds only projects to re-enable. A `root` that is spelled like the default, spaces and trailing slashes aside (`config.template.json` ships `"~/projects"`, and the config migration copies it into old configs) counts as unset, so it warns and disables the routes instead of stopping the gateway. Any other unsafe `root` stops the gateway from loading.
 
@@ -73,7 +70,7 @@ absolute path or a path starting with `~/`:
 }
 ```
 
-The API has no denylist inside the root, so the gateway rejects a configuration
+The gateway rejects a configuration
 whose root is `/`, your home directory, `~/.claude-gateway`, the directory holding
 `config.json`, or any directory that contains one of them. Changing the root
 takes effect after a gateway restart. The gateway trims the root and strips trailing slashes before it checks and
@@ -107,13 +104,11 @@ codes, listed under [Git errors](#git-errors).
 | Status | `code` | When |
 |--------|--------|------|
 | 400 | `invalid_name` | The project name fails the name rules below. |
-| 400 | `invalid_path` | The `path` query fails the path rules below, or the filesystem rejects it as too long. |
-| 400 | `not_a_directory` | `tree` was asked for a file, or the root exists but is not a directory. |
-| 400 | `not_a_file` | `file` was asked for a directory or a special file. |
-| 403 | `path_escape` | The real path (after symlinks) leaves the project, or the project leaves the root or is the root itself (for example a link `all -> .`). |
+| 400 | `not_a_directory` | The project is a link to a file, or the root exists but is not a directory. |
+| 403 | `path_escape` | The project's real path (after symlinks) leaves the root or is the root itself (for example a link `all -> .`). |
 | 403 | `permission_denied` | The gateway's user cannot read it. |
 | 403 | `forbidden_key` | Create, delete, stop or start with a key that is not an admin key. |
-| 404 | `not_found` | The project or path does not exist. |
+| 404 | `not_found` | The project does not exist. |
 | 400 | `confirm_mismatch` | `DELETE` did not send `confirm` equal to the project name. |
 | 409 | `project_exists` | `POST` named a project, file or symlink that already exists, compared case-insensitively (`Site` collides with `site`). |
 | 409 | `project_running` | `DELETE` found a process listening from inside the project, a chat turn running in it (a turn still starting, an accepted message not yet handled, or a task that has not finished), a `running/start` still waiting for its listener, or a chat or task that works in the folder through a symlink alias. Deleting the chat session does not release it while its turn, accepted message or task is still live. |
@@ -122,11 +117,6 @@ codes, listed under [Git errors](#git-errors).
 
 **Project name.** Matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. Directories under
 the root whose names do not match are not listed.
-
-**Path.** A POSIX path relative to the project. The empty string (or no `path`
-query) is the project directory. A path must not start with `/`, contain a
-backslash or NUL, contain an empty, `.`, or `..` segment, or exceed 4096
-characters.
 
 ## GET /api/v1/projects {#get-projects}
 
@@ -231,64 +221,6 @@ the list in one step and its name is free at once. If some files there cannot be
 example a subfolder without write permission, the response is still `200` and adds a `warning`
 naming the exact folder to remove by hand (`rm -rf <root>/.deleting-<name>-<id>`). The folder is also listed in `leftovers` of [`GET /api/v1/projects`](#get-projects). A project is never left listed with part of its files gone.
 
-## GET /api/v1/projects/:name/tree {#get-tree}
-
-List one directory level. Query `path` selects the directory (default: the
-project root). Directories come first, then everything else, each group sorted
-by name in code-unit order. Dotfiles are included. A name with a backslash is
-left out, since `path` cannot name it. At most 2000 entries are
-returned; `truncated` is `true` when there were more.
-
-```bash
-curl -H "Authorization: Bearer $KEY" "http://localhost:10850/api/v1/projects/demo/tree?path="
-```
-
-```json
-{
-  "path": "",
-  "entries": [
-    { "kind": "dir", "name": "src", "path": "src", "modified_at": "2026-10-06T07:41:58.705Z" },
-    { "kind": "file", "name": "README.md", "path": "README.md", "size": 7, "modified_at": "2026-10-06T07:41:58.705Z" },
-    { "kind": "symlink", "name": "passwd", "path": "passwd", "target_kind": "outside" }
-  ],
-  "truncated": false
-}
-```
-
-| `kind` | Fields | Notes |
-|--------|--------|-------|
-| `dir` | `name`, `path`, `modified_at` | |
-| `file` | `name`, `path`, `size`, `modified_at` | `size` in bytes. |
-| `symlink` | `name`, `path`, `target_kind` | Never followed. `target_kind` is `file`, `dir`, `outside` (resolves outside the project), or `dangling`. |
-| `other` | `name`, `path` | Sockets, FIFOs, devices. |
-
-`path` on each entry is the value to pass back as the `path` query.
-
-## GET /api/v1/projects/:name/file {#get-file}
-
-Read one file. Always `200` for a regular file; `kind` says what you got.
-
-```bash
-curl -H "Authorization: Bearer $KEY" "http://localhost:10850/api/v1/projects/demo/file?path=src/index.ts"
-```
-
-| `kind` | Fields | When |
-|--------|--------|------|
-| `text` | `path`, `size`, `modified_at`, `content` | Valid UTF-8 with no NUL byte in the first 8 KiB. `content` is byte-exact, including any BOM and trailing newline. |
-| `binary` | `path`, `size`, `modified_at` | Anything else. |
-| `too_large` | `path`, `size`, `modified_at`, `limit` | Larger than `limit` (1 MiB). The gateway does not read the file. |
-
-```json
-{ "kind": "text", "path": "src/index.ts", "size": 22, "modified_at": "2026-10-06T07:41:58.705Z", "content": "  export const x = 1;\n" }
-```
-
-```json
-{ "kind": "too_large", "path": "big.log", "size": 1048577, "modified_at": "2026-10-06T07:41:58.705Z", "limit": 1048576 }
-```
-
-A symlink inside the project to a file inside the same project is followed. A
-symlink whose target is outside the project returns `403 path_escape`.
-
 ## Git {#git}
 
 The git routes read the status of a project that is a git repository. They
@@ -296,7 +228,7 @@ change nothing. A project is a repository only when its own directory holds the
 repository. A plain folder inside a repository is not one. The gateway runs `git`
 directly, never through a shell, and never prompts for credentials
 (`GIT_TERMINAL_PROMPT=0`). To change a repository (commit, push, pull), use the
-git connector or the code editor. The one write is `git_init` on
+git connector or code-server. The one write is `git_init` on
 [`POST /api/v1/projects`](#post-projects), which runs `git init -q` in the new,
 empty directory.
 
@@ -344,8 +276,7 @@ filter or `safe.directory` set in `~/.gitconfig` or `/etc/gitconfig` applies, an
 `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>` and `GIT_CONFIG_PARAMETERS` are dropped.
 
 Credentials in a remote URL (`https://user:token@host/x`) are removed from
-every git route response and log line. Git's own output never reaches the client. [`/file`](#get-file) does not
-remove them: reading `.git/config` returns the URL as written.
+every git route response and log line. Git's own output never reaches the client.
 
 ### GitStatus {#git-status}
 
@@ -435,7 +366,7 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/app/
   "remote": { "name": "origin", "url": "https://github.com/acme/app.git", "host": "github", "web_url": "https://github.com/acme/app" },
   "changes": [
     { "path": "README.md", "staged": null, "unstaged": "modified" },
-    { "path": ".env", "staged": null, "unstaged": "untracked" }
+    { "path": "notes.md", "staged": null, "unstaged": "untracked" }
   ],
   "change_count": 2,
   "conflicted_count": 0,

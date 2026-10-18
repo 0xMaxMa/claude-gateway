@@ -507,7 +507,7 @@ export interface GatewayConfig {
       keys: ApiKey[];
     };
     /**
-     * Pod-wide root the Projects API browses (default `~/projects`). Distinct
+     * Pod-wide root the Projects API lists (default `~/projects`). Distinct
      * from an agent's `orchestration.tasks.projectRoot`, which is one repo per agent.
      */
     projects?: {
