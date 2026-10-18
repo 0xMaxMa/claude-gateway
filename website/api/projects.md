@@ -50,6 +50,8 @@ other agents' chats also work in. On a host-mode orchestrated agent, `task_spawn
 Projects. Treat an admin key as full access to the pod, and treat a key that can reach an agent as able to
 change every project folder.
 
+**Isolated memory agents.** An agent with `isolateMemory: true` can chat in a project like any other host agent, and the project is not split per conversation. Every chat bound to the project works in the same folder, and every key can read its files through the routes above, so what one conversation writes there reaches the others. A trusted project also loads its own settings, hooks and `.mcp.json`, so its MCP servers reach the session although isolated memory mode gives a session none of the operator's. Bind a chat of an isolated agent only to a project its conversations may share, and leave that project out of `gateway.projects.trusted`. App agents cannot chat in a project (`409 project_unsupported_agent`, reason `container`).
+
 **Root.** Projects live in `gateway.projects.root`, which defaults to
 `~/projects`. Every listing returns the root as `root`, resolved through
 symlinks when it exists, so a client never has to rebuild it. The gateway follows symlinks with `realpath` and refuses any project, directory, or
