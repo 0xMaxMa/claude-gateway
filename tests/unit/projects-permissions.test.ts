@@ -22,7 +22,7 @@ const ADMIN_ONLY_ROUTES = [
   'POST /v1/projects', 'DELETE /v1/projects/:name', 'POST /v1/projects/:name/running/stop', 'POST /v1/projects/:name/running/start',
 ];
 const READ_ROUTES = [
-  'GET /v1/projects', 'GET /v1/projects/:name/tree', 'GET /v1/projects/:name/file', 'GET /v1/projects/git-summary',
+  'GET /v1/projects', 'GET /v1/projects/git-summary',
   'GET /v1/projects/running', 'GET /v1/projects/:name/git', 'GET /v1/projects/:name/running',
 ];
 
@@ -49,12 +49,12 @@ describe('the /v1/projects routes', () => {
   const call = (route: string, key?: ApiKey) => {
     const [method, url] = route.split(' ') as [string, string];
     const req = (request(app) as unknown as Record<string, (u: string) => request.Test>)[method.toLowerCase()]!(
-      `/api${url.replace(':name', 'app')}${url.endsWith('/file') ? '?path=README.md' : ''}`,
+      `/api${url.replace(':name', 'app')}`,
     );
     return (key ? req.set('Authorization', `Bearer ${key.key}`) : req).send({ name: 'made-by-test', confirm: 'app' });
   };
 
-  it('registers the eleven routes, and marks exactly create, delete, stop and start as admin', () => {
+  it('registers the nine routes, and marks exactly create, delete, stop and start as admin', () => {
     const all = routes().map((r) => `${r.method} ${r.path}`);
     expect(all.sort()).toEqual([...ADMIN_ONLY_ROUTES, ...READ_ROUTES].sort());
     expect(routes().filter((r) => r.auth === 'admin').map((r) => `${r.method} ${r.path}`).sort()).toEqual([...ADMIN_ONLY_ROUTES].sort());
@@ -66,7 +66,6 @@ describe('the /v1/projects routes', () => {
       const expected = route.endsWith('/git') ? 409 : 200;
       expect([route, res.status]).toEqual([route, expected]);
     }
-    expect((await call('GET /v1/projects/:name/file', key)).body.content).toBe('# app\n');
   });
 
   it.each(NON_ADMIN)('refuses $key on create, delete, stop and start with 403 forbidden_key, and changes nothing', async (key) => {
@@ -199,6 +198,15 @@ describe('a project-bound chat', () => {
     const reader = await bind(KEYS.podRead, 'alfred');
     expect([reader.status, reader.body.error]).toEqual([403, 'Write permission required']);
     expect((await bind(KEYS.podWrite, 'alfred', 'missing')).body.code).toBe('project_not_found');
+  });
+
+  it.each(Object.values(KEYS))('answers $key 404 on the removed project file routes of the full gateway', async (key) => {
+    fs.writeFileSync(path.join(base, 'projects', 'site', 'README.md'), 'SITE-README');
+    for (const url of ['/api/v1/projects/site/tree', '/api/v1/projects/site/tree?path=', '/api/v1/projects/site/file?path=README.md']) {
+      const res = await as(key, 'get', url);
+      expect([url, res.status]).toEqual([url, 404]);
+      expect(res.text).not.toContain('SITE-README');
+    }
   });
 
   it('refuses a read-only key the greeting of a bound chat, as for a plain one', async () => {

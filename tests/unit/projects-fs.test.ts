@@ -4,16 +4,12 @@ import * as os from "os";
 import * as path from "path";
 import {
   createProject,
-  listDir,
   listProjects,
-  readFileContent,
   resolveProjectDir,
-  TREE_ENTRY_LIMIT,
 } from "../../src/projects/fs";
-import { parseRelPath, ProjectName, RelPath } from "../../src/projects/paths";
+import { ProjectName } from "../../src/projects/paths";
 
 const name = (s: string) => s as ProjectName;
-const rel = (s: string) => s as RelPath;
 
 let base: string;
 let root: string;
@@ -41,27 +37,6 @@ function makeProject(
     fs.writeFileSync(path.join(dir, f), body);
   }
   return dir;
-}
-
-/** After realpath resolves a path ending in `suffix`, replace `<dir>/sub` with a symlink to `target`. */
-function swapSubAfterRealpath(
-  dir: string,
-  suffix: string,
-  target: string,
-): void {
-  const realRealpath = fs.promises.realpath;
-  let swapped = false;
-  jest
-    .spyOn(fs.promises, "realpath")
-    .mockImplementation(async (...args: Parameters<typeof realRealpath>) => {
-      const resolved = await realRealpath(...args);
-      if (!swapped && String(args[0]).endsWith(suffix)) {
-        swapped = true;
-        fs.rmSync(path.join(dir, "sub"), { recursive: true });
-        fs.symlinkSync(target, path.join(dir, "sub"));
-      }
-      return resolved;
-    });
 }
 
 describe("listProjects", () => {
@@ -280,87 +255,12 @@ describe("createProject", () => {
   );
 });
 
-describe("listDir", () => {
-  it("lists one level, dirs first then by name, dotfiles included", async () => {
-    makeProject("p", {
-      "b.txt": "bb",
-      ".env": "x",
-      "src/index.ts": "",
-      "A/x": "",
-    });
-    const res = await listDir(root, name("p"), rel(""));
-    if (!res.ok) throw new Error(res.error);
-    expect(res.value.truncated).toBe(false);
-    expect(res.value.entries.map((e) => [e.kind, e.path])).toEqual([
-      ["dir", "A"],
-      ["dir", "src"],
-      ["file", ".env"],
-      ["file", "b.txt"],
-    ]);
-    expect(res.value.entries[3]).toEqual({
-      kind: "file",
-      name: "b.txt",
-      path: "b.txt",
-      size: 2,
-      modified_at: expect.any(String),
-    });
-
-    const sub = await listDir(root, name("p"), rel("src"));
-    if (!sub.ok) throw new Error(sub.error);
-    expect(sub.value.entries.map((e) => e.path)).toEqual(["src/index.ts"]);
-  });
-
-  it("lists only entries whose path the tree and file routes accept", async () => {
-    makeProject("p", { "a\\b.txt": "x", "c\\d/e.txt": "y", "ok.txt": "z" });
-    const res = await listDir(root, name("p"), rel(""));
-    if (!res.ok) throw new Error(res.error);
-    expect(res.value.entries.map((e) => e.path)).toEqual(["ok.txt"]);
-    for (const e of res.value.entries) expect(parseRelPath(e.path).ok).toBe(true);
-  });
-
-  it("shows symlinks without following them, classifying the target", async () => {
-    const dir = makeProject("p", { "real.txt": "r", "sub/x": "" });
-    fs.symlinkSync("/etc/passwd", path.join(dir, "passwd"));
-    fs.symlinkSync(path.join(dir, "real.txt"), path.join(dir, "to-file"));
-    fs.symlinkSync("sub", path.join(dir, "to-dir"));
-    fs.symlinkSync("missing", path.join(dir, "dangling"));
-
-    const res = await listDir(root, name("p"), rel(""));
-    if (!res.ok) throw new Error(res.error);
-    const links = Object.fromEntries(
-      res.value.entries
-        .filter((e) => e.kind === "symlink")
-        .map((e) => [e.name, e.kind === "symlink" && e.target_kind]),
-    );
-    expect(links).toEqual({
-      passwd: "outside",
-      "to-file": "file",
-      "to-dir": "dir",
-      dangling: "dangling",
-    });
-  });
-
-  it("caps a large directory and flags truncation", async () => {
-    const dir = makeProject("big");
-    for (let i = 0; i < 2500; i++)
-      fs.writeFileSync(path.join(dir, `f${String(i).padStart(4, "0")}`), "");
-    const res = await listDir(root, name("big"), rel(""));
-    if (!res.ok) throw new Error(res.error);
-    expect(res.value.entries).toHaveLength(TREE_ENTRY_LIMIT);
-    expect(res.value.truncated).toBe(true);
-    expect(res.value.entries[0].name).toBe("f0000");
-  });
-
+describe("resolveProjectDir", () => {
   it("refuses a project dir that is itself a symlink escaping the root", async () => {
     fs.mkdirSync(root, { recursive: true });
     const outside = fs.mkdtempSync(path.join(base, "outside-"));
-    fs.writeFileSync(path.join(outside, "secret"), "s");
     fs.symlinkSync(outside, path.join(root, "evil"));
-    expect(await listDir(root, name("evil"), rel(""))).toEqual({
-      ok: false,
-      error: "path_escape",
-    });
-    expect(await readFileContent(root, name("evil"), rel("secret"))).toEqual({
+    expect(await resolveProjectDir(root, name("evil"))).toEqual({
       ok: false,
       error: "path_escape",
     });
@@ -373,195 +273,21 @@ describe("listDir", () => {
       ok: false,
       error: "path_escape",
     });
-    expect(await listDir(root, name("all"), rel(""))).toEqual({
-      ok: false,
-      error: "path_escape",
-    });
-    expect(await readFileContent(root, name("all"), rel("app/a.txt"))).toEqual({
-      ok: false,
-      error: "path_escape",
-    });
     const listed = await listProjects(root);
     if (!listed.ok) throw new Error(listed.error);
     expect(listed.value.projects.map((p) => p.name)).toEqual(["app"]);
   });
 
-  it("refuses a directory symlink that escapes the project", async () => {
-    const dir = makeProject("p");
-    const outside = fs.mkdtempSync(path.join(base, "outside-"));
-    fs.writeFileSync(path.join(outside, "secret"), "s");
-    fs.symlinkSync(outside, path.join(dir, "out"));
-    expect(await listDir(root, name("p"), rel("out"))).toEqual({
-      ok: false,
-      error: "path_escape",
-    });
-  });
-
-  it("refuses a directory swapped for an escaping symlink after the realpath check", async () => {
-    const dir = makeProject("p", { "sub/x": "" });
-    const outside = fs.mkdtempSync(path.join(base, "outside-"));
-    fs.writeFileSync(path.join(outside, "secret"), "s");
-    swapSubAfterRealpath(dir, "/sub", outside);
-    expect(await listDir(root, name("p"), rel("sub"))).toEqual({
-      ok: false,
-      error: "path_escape",
-    });
-  });
-
-  it("maps a file path to not_a_directory and a missing one to not_found", async () => {
-    makeProject("p", { "a.txt": "" });
-    expect(await listDir(root, name("p"), rel("a.txt"))).toEqual({
+  it("maps a file to not_a_directory and a missing project to not_found", async () => {
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, "plain"), "");
+    expect(await resolveProjectDir(root, name("plain"))).toEqual({
       ok: false,
       error: "not_a_directory",
     });
-    expect(await listDir(root, name("p"), rel("nope"))).toEqual({
+    expect(await resolveProjectDir(root, name("ghost"))).toEqual({
       ok: false,
       error: "not_found",
-    });
-    expect(await listDir(root, name("ghost"), rel(""))).toEqual({
-      ok: false,
-      error: "not_found",
-    });
-  });
-});
-
-describe("readFileContent", () => {
-  it("returns utf-8 text byte-exact, including leading spaces, BOM, and trailing newline", async () => {
-    const body = "﻿  indented\n\tline two ✓\n";
-    makeProject("p", { "a.md": body });
-    const res = await readFileContent(root, name("p"), rel("a.md"));
-    expect(res).toEqual({
-      ok: true,
-      value: {
-        kind: "text",
-        path: "a.md",
-        size: Buffer.byteLength(body),
-        modified_at: expect.any(String),
-        content: body,
-      },
-    });
-  });
-
-  it("classifies PNG bytes and latin-1 text as binary", async () => {
-    const png = Buffer.from([
-      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
-    ]);
-    makeProject("p", {
-      "img.png": png,
-      "latin1.txt": Buffer.from("café", "latin1"),
-    });
-    for (const f of ["img.png", "latin1.txt"]) {
-      const res = await readFileContent(root, name("p"), rel(f));
-      if (!res.ok) throw new Error(res.error);
-      expect(res.value).toEqual({
-        kind: "binary",
-        path: f,
-        size: expect.any(Number),
-        modified_at: expect.any(String),
-      });
-    }
-  });
-
-  it("returns too_large for a file over the limit without reading a byte", async () => {
-    makeProject("p", { "big.bin": Buffer.alloc(1024 * 1024 + 1, 0x61) });
-    const realOpen = fs.promises.open;
-    const reads: jest.SpyInstance[] = [];
-    jest
-      .spyOn(fs.promises, "open")
-      .mockImplementation(async (...args: Parameters<typeof realOpen>) => {
-        const handle = await realOpen(...args);
-        reads.push(jest.spyOn(handle, "read"), jest.spyOn(handle, "readFile"));
-        return handle;
-      });
-
-    const res = await readFileContent(root, name("p"), rel("big.bin"));
-    expect(res).toEqual({
-      ok: true,
-      value: {
-        kind: "too_large",
-        path: "big.bin",
-        size: 1024 * 1024 + 1,
-        modified_at: expect.any(String),
-        limit: 1024 * 1024,
-      },
-    });
-    expect(reads).toHaveLength(2);
-    for (const spy of reads) expect(spy).not.toHaveBeenCalled();
-  });
-
-  it("reads a file of exactly the limit", async () => {
-    makeProject("p", { "edge.txt": Buffer.alloc(1024 * 1024, 0x61) });
-    const res = await readFileContent(root, name("p"), rel("edge.txt"));
-    if (!res.ok) throw new Error(res.error);
-    expect(res.value.kind).toBe("text");
-  });
-
-  it("refuses a symlink to /etc/passwd inside a project", async () => {
-    const dir = makeProject("p");
-    fs.symlinkSync("/etc/passwd", path.join(dir, "passwd"));
-    expect(await readFileContent(root, name("p"), rel("passwd"))).toEqual({
-      ok: false,
-      error: "path_escape",
-    });
-  });
-
-  it("refuses a symlink into a sibling project", async () => {
-    makeProject("other", { "secret.txt": "s" });
-    const dir = makeProject("p");
-    fs.symlinkSync(
-      path.join(root, "other", "secret.txt"),
-      path.join(dir, "peek"),
-    );
-    expect(await readFileContent(root, name("p"), rel("peek"))).toEqual({
-      ok: false,
-      error: "path_escape",
-    });
-  });
-
-  (process.platform === "linux" ? it : it.skip)(
-    "refuses a file whose parent dir is swapped for an escaping symlink after the realpath check",
-    async () => {
-      const dir = makeProject("p", { "sub/file": "inside" });
-      const outside = fs.mkdtempSync(path.join(base, "outside-"));
-      fs.writeFileSync(path.join(outside, "file"), "secret");
-      swapSubAfterRealpath(dir, "/sub/file", outside);
-      expect(await readFileContent(root, name("p"), rel("sub/file"))).toEqual({
-        ok: false,
-        error: "path_escape",
-      });
-    },
-  );
-
-  it("follows an in-project symlink to its real file", async () => {
-    const dir = makeProject("p", { "real.txt": "hi" });
-    fs.symlinkSync("real.txt", path.join(dir, "alias"));
-    const res = await readFileContent(root, name("p"), rel("alias"));
-    if (!res.ok) throw new Error(res.error);
-    expect(res.value).toMatchObject({
-      kind: "text",
-      path: "alias",
-      content: "hi",
-    });
-  });
-
-  it("refuses a FIFO as not_a_file without blocking on open", async () => {
-    const dir = makeProject("p");
-    execFileSync("mkfifo", [path.join(dir, "pipe")]);
-    expect(await readFileContent(root, name("p"), rel("pipe"))).toEqual({
-      ok: false,
-      error: "not_a_file",
-    });
-  }, 5000);
-
-  it("maps a directory to not_a_file", async () => {
-    makeProject("p", { "src/a": "" });
-    expect(await readFileContent(root, name("p"), rel("src"))).toEqual({
-      ok: false,
-      error: "not_a_file",
-    });
-    expect(await readFileContent(root, name("p"), rel(""))).toEqual({
-      ok: false,
-      error: "not_a_file",
     });
   });
 });

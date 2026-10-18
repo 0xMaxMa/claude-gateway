@@ -44,8 +44,8 @@ describe("auth", () => {
   > = [
     ["GET /projects", (r) => r.get("/api/v1/projects")],
     ["POST /projects", (r) => r.post("/api/v1/projects").send({ name: "x" })],
-    ["GET tree", (r) => r.get("/api/v1/projects/app/tree")],
-    ["GET file", (r) => r.get("/api/v1/projects/app/file?path=README.md")],
+    ["GET git", (r) => r.get("/api/v1/projects/app/git")],
+    ["GET running", (r) => r.get("/api/v1/projects/app/running")],
   ];
 
   it.each(["k-agent", "k-star-list", "k-pod-read"])(
@@ -53,8 +53,7 @@ describe("auth", () => {
     async (key) => {
       seed();
       expect((await request(app).get("/api/v1/projects").set(as(key))).status).toBe(200);
-      expect((await request(app).get("/api/v1/projects/app/tree").set(as(key))).status).toBe(200);
-      expect((await request(app).get("/api/v1/projects/app/file?path=README.md").set(as(key))).body.content).toBe("# hi\n");
+      expect((await request(app).get("/api/v1/projects/app/running").set(as(key))).status).toBe(200);
       const res = await request(app).post("/api/v1/projects").set(as(key)).send({ name: "x" });
       expect([res.status, res.body.code]).toEqual([403, "forbidden_key"]);
       expect(fs.existsSync(path.join(root, "x"))).toBe(false);
@@ -90,7 +89,7 @@ describe("a root that is a regular file", () => {
       "POST /projects",
       () => request(app).post("/api/v1/projects").send({ name: "x" }),
     ],
-    ["GET tree", () => request(app).get("/api/v1/projects/x/tree")],
+    ["GET running", () => request(app).get("/api/v1/projects/x/running")],
   ])("%s returns 400 not_a_directory", async (_label, call) => {
     fs.writeFileSync(root, "not a dir");
     const res = await call().set(POD);
@@ -168,146 +167,48 @@ describe("POST /api/v1/projects", () => {
   );
 });
 
-describe("GET /api/v1/projects/:name/tree and /file", () => {
-  it.each([
-    "../../etc/passwd",
-    "%2e%2e/%2e%2e/etc/passwd",
-    "%2Fetc%2Fpasswd",
-    "a%00b",
-    "src/../..",
-  ])("rejects path=%s with 400 invalid_path", async (p) => {
-    seed();
-    for (const route of ["tree", "file"]) {
-      const res = await request(app)
-        .get(`/api/v1/projects/app/${route}?path=${p}`)
-        .set(POD);
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe("invalid_path");
-    }
-  });
-
-  it.each([
-    ["a 4096-char segment", "x".repeat(4096)],
-    ["a 3999-char nested path", `${"abcdefghi/".repeat(399)}abcdefghi`],
-  ])(
-    "rejects %s that the OS calls too long with 400 invalid_path",
-    async (_label, p) => {
-      // A deep root, and the directory chain built as far as the OS allows, so
-      // realpath reaches PATH_MAX (4096) instead of stopping at a missing component.
-      const deepRoot = path.join(base, "d".repeat(120), "projects");
-      let dir = path.join(deepRoot, "app");
-      fs.mkdirSync(dir, { recursive: true });
-      for (const seg of p.split("/")) {
-        dir = path.join(dir, seg);
-        try {
-          fs.mkdirSync(dir);
-        } catch {
-          break;
-        }
-      }
-      const deep = express().use(
-        "/api",
-        createProjectsRouter(apiKeys, deepRoot),
-      );
-      for (const route of ["tree", "file"]) {
-        const res = await request(deep)
-          .get(`/api/v1/projects/app/${route}?path=${p}`)
-          .set(POD);
-        expect([route, res.status, res.body.code]).toEqual([
-          route,
-          400,
-          "invalid_path",
-        ]);
+describe("project files", () => {
+  it.each(apiKeys.map((k) => k.key))(
+    "%s gets 404 from the removed tree and file routes, and no file content",
+    async (key) => {
+      seed();
+      for (const url of [
+        "/api/v1/projects/app/tree",
+        "/api/v1/projects/app/tree?path=src",
+        "/api/v1/projects/app/file?path=README.md",
+      ]) {
+        const res = await request(app).get(url).set(as(key));
+        expect([url, res.status]).toEqual([url, 404]);
+        expect(res.text).not.toContain("# hi");
       }
     },
   );
+});
 
+describe("GET /api/v1/projects/:name routes", () => {
   it("rejects an encoded traversal in the project name", async () => {
     const res = await request(app)
-      .get("/api/v1/projects/..%2F..%2Fetc/file?path=passwd")
+      .get("/api/v1/projects/..%2F..%2Fetc/git")
       .set(POD);
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("invalid_name");
   });
 
-  it("refuses to read a symlink to /etc/passwd and shows it as an outside symlink", async () => {
-    seed();
-    fs.symlinkSync("/etc/passwd", path.join(root, "app", "passwd"));
-
-    const file = await request(app)
-      .get("/api/v1/projects/app/file?path=passwd")
-      .set(POD);
-    expect(file.status).toBe(403);
-    expect(file.body.code).toBe("path_escape");
-    expect(JSON.stringify(file.body)).not.toContain("root:");
-
-    const tree = await request(app).get("/api/v1/projects/app/tree").set(POD);
-    expect(tree.body.entries).toContainEqual({
-      kind: "symlink",
-      name: "passwd",
-      path: "passwd",
-      target_kind: "outside",
-    });
-  });
-
-  it("refuses to read through or list an intermediate directory symlink to /etc", async () => {
-    seed();
-    fs.symlinkSync("/etc", path.join(root, "app", "etcdir"));
-
-    const file = await request(app)
-      .get("/api/v1/projects/app/file?path=etcdir/passwd")
-      .set(POD);
-    expect([file.status, file.body.code]).toEqual([403, "path_escape"]);
-    expect(JSON.stringify(file.body)).not.toContain("root:");
-
-    const tree = await request(app)
-      .get("/api/v1/projects/app/tree?path=etcdir")
-      .set(POD);
-    expect([tree.status, tree.body.code]).toEqual([403, "path_escape"]);
-    expect(tree.body.entries).toBeUndefined();
-  });
-
   it("refuses a project directory that is itself a symlink out of the root", async () => {
     fs.mkdirSync(root, { recursive: true });
     fs.symlinkSync("/etc", path.join(root, "etc"));
-    const file = await request(app)
-      .get("/api/v1/projects/etc/file?path=passwd")
+    const res = await request(app)
+      .get("/api/v1/projects/etc/running")
       .set(POD);
-    expect(file.status).toBe(403);
-    expect(file.body.code).toBe("path_escape");
+    expect([res.status, res.body.code]).toEqual([403, "path_escape"]);
     const list = await request(app).get("/api/v1/projects").set(POD);
     expect(list.body.projects).toEqual([]);
   });
 
-  it("maps errors to the contract status codes", async () => {
+  it("answers 404 not_found for a missing project", async () => {
     seed();
-    const cases: Array<[string, number, string]> = [
-      ["/api/v1/projects/ghost/tree", 404, "not_found"],
-      ["/api/v1/projects/app/tree?path=README.md", 400, "not_a_directory"],
-      ["/api/v1/projects/app/file?path=src", 400, "not_a_file"],
-      ["/api/v1/projects/app/file?path=nope.txt", 404, "not_found"],
-    ];
-    for (const [url, status, code] of cases) {
-      const res = await request(app).get(url).set(POD);
-      expect([url, res.status, res.body.code]).toEqual([url, status, code]);
-    }
-  });
-
-  it("returns file content byte-exact as JSON", async () => {
-    seed();
-    const body = "  leading spaces\nsecond line\n";
-    fs.writeFileSync(path.join(root, "app", "src", "a.ts"), body);
-    const res = await request(app)
-      .get("/api/v1/projects/app/file?path=src/a.ts")
-      .set(POD);
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({
-      kind: "text",
-      path: "src/a.ts",
-      size: body.length,
-      modified_at: expect.any(String),
-      content: body,
-    });
+    const res = await request(app).get("/api/v1/projects/ghost/running").set(POD);
+    expect([res.status, res.body.code]).toEqual([404, "not_found"]);
   });
 });
 

@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { parseProjectName, parseRelPath, resolveInside } from '../../src/projects/paths';
+import { parseProjectName, resolveInside } from '../../src/projects/paths';
 
 describe('parseProjectName', () => {
   it.each(['app', 'my-app_1.2', 'A', 'a'.repeat(64)])('accepts %p', (name) => {
@@ -14,37 +14,6 @@ describe('parseProjectName', () => {
       expect(parseProjectName(name)).toEqual({ ok: false, error: 'invalid_name' });
     },
   );
-});
-
-describe('parseRelPath', () => {
-  it.each(['', 'src', 'src/index.ts', '.github/workflows/ci.yml', 'a..b'])('accepts %p', (p) => {
-    expect(parseRelPath(p)).toEqual({ ok: true, value: p });
-  });
-
-  it('treats a missing path as the project root', () => {
-    expect(parseRelPath(undefined)).toEqual({ ok: true, value: '' });
-  });
-
-  it.each([
-    '../../etc/passwd',
-    '..',
-    'a/../../b',
-    './a',
-    'a/./b',
-    '/etc/passwd',
-    'a//b',
-    'a/',
-    'a\0b',
-    'a\\..\\b',
-    ['a', 'b'],
-  ])('rejects %p', (p) => {
-    expect(parseRelPath(p)).toEqual({ ok: false, error: 'invalid_path' });
-  });
-
-  it('rejects a path longer than 4096 chars', () => {
-    expect(parseRelPath('x'.repeat(4096))).toEqual({ ok: true, value: 'x'.repeat(4096) });
-    expect(parseRelPath('x'.repeat(4097))).toEqual({ ok: false, error: 'invalid_path' });
-  });
 });
 
 describe('resolveInside', () => {
@@ -81,9 +50,5 @@ describe('resolveInside', () => {
 
   it('reports a missing target as not_found', async () => {
     expect(await resolveInside(root, 'proj/nope')).toEqual({ ok: false, error: 'not_found' });
-  });
-
-  it('reports a name the OS calls too long as invalid_path', async () => {
-    expect(await resolveInside(root, 'x'.repeat(4096))).toEqual({ ok: false, error: 'invalid_path' });
   });
 });
