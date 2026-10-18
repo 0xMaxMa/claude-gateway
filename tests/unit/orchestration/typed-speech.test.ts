@@ -175,7 +175,7 @@ test('failed voice note retains provider code and returns a readable diagnostic 
  }finally{await runtime.close();log.mockRestore();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
 });
 
-test.each([false,true])('managed quota skip preserves pending worker results (%s) without replying or invoking an agent', async pendingResult => {
+test.each([false,true])('managed quota notifies once per chat and preserves pending worker results (%s) without invoking an agent', async pendingResult => {
  const root=mkdtempSync(join(tmpdir(),'voice-note-failure-')),dir=join(root,'a'),workspace=join(dir,'workspace');mkdirSync(workspace,{recursive:true});writeFileSync(join(workspace,'CLAUDE.md'),'Identity');
  const a={id:'a',description:'fixture',env:'',workspace,voice:{...ORCHESTRATION_DEFAULTS.voice,enabled:true},claude:{model:'fixture',extraFlags:[]},orchestration:{conversation:{notificationPolicy:'next_user_turn'}}} as AgentConfig;
  const c={gateway:{orchestration:true,headless:true},agents:[a]} as GatewayConfig,sessions=new SessionStore(root),history=HistoryDB.forAgent(root,'a');
@@ -198,17 +198,20 @@ test.each([false,true])('managed quota skip preserves pending worker results (%s
    runtime.tasks.finish(attempt.attemptId,attempt.generation,{type:'completed',result:{summary:'Unreported result',artifactIds:[]}});
    notificationId=String(runtime.store.get('SELECT id FROM notifications WHERE task_id=?',task.taskId)!.id);
   }
-  const result=await runtime.send({scope:{agentId:'a',agentSessionId:sid,source:'api',accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'},text:'(voice message)',modality:'voice_note',attachmentIds:['media/chat/fixture.ogg'],requestId:randomUUID()},{execute:false,writeMemory:false},{timeoutMs:1000});
+  const note=()=>runtime.send({scope:{agentId:'a',agentSessionId:sid,source:'api',accountId:'owner',chatId:'chat',threadKey:'',principalId:'owner'},text:'(voice message)',modality:'voice_note',attachmentIds:['media/chat/fixture.ogg'],requestId:randomUUID()},{execute:false,writeMemory:false},{timeoutMs:1000});
+  const result=await note();
   const row=runtime.store.get('SELECT * FROM voice_note_transcripts')!;
   expect(row).toMatchObject({state:'failed',error_code:'MANAGED_VOICE_QUOTA_EXHAUSTED'});
-  expect(result).toBe('');
-  expect(runtime.store.get('SELECT status FROM conversation_inputs WHERE id=?',row.input_id)?.status).toBe('handled');
+  expect(result).toBe(`Voice credit is used up, so this voice message could not be transcribed. Please type your message instead. Reference: ${row.input_id}`);
+  // A second note in the same chat within the cooldown does not repeat the notice.
+  expect(await note()).toBe('');
+  for(const input of runtime.store.all("SELECT status FROM conversation_inputs WHERE modality='voice_note'"))expect(input.status).toBe('handled');
+  expect(runtime.store.all("SELECT generated_text FROM assistant_responses r JOIN conversation_decisions d ON d.id=r.decision_id ORDER BY r.created_at").map(r=>r.generated_text).filter(t=>String(t).startsWith('Voice credit'))).toHaveLength(1);
   if(notificationId){
    expect(runtime.store.get('SELECT status,decision_id FROM notifications WHERE id=?',notificationId)).toMatchObject({status:'pending',decision_id:null});
    expect(runtime.store.get("SELECT state FROM outbox WHERE kind='notification' AND json_extract(payload_json,'$.notificationId')=?",notificationId)?.state).toBe('pending');
   }
-  expect(runtime.store.all('SELECT * FROM deliveries')).toHaveLength(0);
-  expect(transcribe).toHaveBeenCalledTimes(1);expect(createAgentSession).not.toHaveBeenCalled();
+  expect(transcribe).toHaveBeenCalledTimes(2);expect(createAgentSession).not.toHaveBeenCalled();
  }finally{await runtime.close();log.mockRestore();(history as any).db.close();HistoryDB.evict(root,'a');rmSync(root,{recursive:true,force:true});}
 });
 
