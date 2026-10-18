@@ -234,15 +234,15 @@ export class DeliveryOutbox {
           if (delivery.modality === 'speech' && result.state === 'failed' && result.speechSynthesisFailed) {
             const key = `speech-failure:${id}`;
             // An empty managed wallet fails every reply until it is topped up: say so once per chat.
-            const creditNotice = result.code !== 'MANAGED_VOICE_QUOTA_EXHAUSTED' || this.store.claimVoiceCreditNotice(String(delivery.binding_id), 'tts');
-            if (creditNotice && !this.store.get('SELECT id FROM outbox WHERE dedup_key=?', key)) {
-              const noticeId = randomUUID();
-              const diagnostic = describeVoiceError(result.code);
-              const text = speechFailureNotice(result.code);
-              this.store.run('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?,?,?)', noticeId, delivery.response_id, null, delivery.binding_id, 'text', 'pending', null, text, null, Date.now());
-              this.store.enqueue('delivery', key, { deliveryId: noticeId, textFormat: 'text', speechFailureFor: id });
+            if (!this.store.get('SELECT id FROM outbox WHERE dedup_key=?', key)) {
+              const notify = result.code !== 'MANAGED_VOICE_QUOTA_EXHAUSTED' || this.store.claimVoiceCreditNotice(String(delivery.binding_id), 'tts');
+              if (notify) {
+                const noticeId = randomUUID();
+                this.store.run('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?,?,?)', noticeId, delivery.response_id, null, delivery.binding_id, 'text', 'pending', null, speechFailureNotice(result.code), null, Date.now());
+                this.store.enqueue('delivery', key, { deliveryId: noticeId, textFormat: 'text', speechFailureFor: id });
+              }
               const speech = JSON.parse(String(delivery.delivered_text)) as SpeechDelivery;
-              console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Speech synthesis failed', agentId: this.store.agentId, channel: binding.channel, referenceId: id, provider: speech.provider, model: speech.model, code: result.code, ...diagnostic }));
+              console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Speech synthesis failed', agentId: this.store.agentId, channel: binding.channel, referenceId: id, provider: speech.provider, model: speech.model, code: result.code, notified: notify, ...describeVoiceError(result.code) }));
             }
           }
         });

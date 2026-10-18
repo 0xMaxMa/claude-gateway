@@ -168,3 +168,22 @@ test('a group chat failure has no Retry button, since only a private chat can us
     expect(f.controls()).toEqual([]);
   } finally { await f.close(); }
 });
+
+test('an empty managed wallet is reported once per chat until a note transcribes again', async () => {
+  const f = await fixture(['MANAGED_VOICE_QUOTA_EXHAUSTED', 'MANAGED_VOICE_QUOTA_EXHAUSTED', '', 'MANAGED_VOICE_QUOTA_EXHAUSTED']);
+  const scope = { agentId: 'a', agentSessionId: 's', source: 'telegram' as const, accountId: 'bot', chatId: '42', threadKey: '', principalId: 'telegram:42' };
+  let n = 0;
+  const send = () => f.runtime.send({ scope, text: '(voice message)', modality: 'voice_note', attachmentIds: ['media/chat/note.ogg'], ingressKey: `tg-message-${++n}` }, { execute: true, writeMemory: false }, { timeoutMs: 2000 });
+  const notices = () => f.runtime.store.all("SELECT delivered_text FROM deliveries WHERE modality='text'").map(row => String(row.delivered_text)).filter(text => text.startsWith('Voice credit is used up'));
+  try {
+    expect(await send()).toContain('Voice credit is used up');
+    expect(await send()).toBe('');
+    expect(notices()).toHaveLength(1);
+    // Credit is back: the note is answered and the next empty wallet is news again.
+    await send();
+    await until(() => f.prompts.length === 1 && !f.runtime.isBusy('s'));
+    expect(await send()).toContain('Voice credit is used up');
+    expect(notices()).toHaveLength(2);
+    expect(f.controls()).toEqual([]);
+  } finally { await f.close(); }
+});
