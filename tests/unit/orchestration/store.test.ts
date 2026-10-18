@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { OrchestrationStore } from '../../../src/orchestration/store';
+import { OrchestrationStore, VOICE_CREDIT_NOTICE_COOLDOWN_MS } from '../../../src/orchestration/store';
 import { DecisionService } from '../../../src/orchestration/decisions';
 import { TaskService } from '../../../src/orchestration/tasks/service';
 import { CommandContext, ConversationScope } from '../../../src/orchestration/types';
@@ -169,4 +169,22 @@ describe('durable conversation/task state', () => {
     expect(next.generation).toBe(a.generation + 1);
     expect(() => tasks.progress(a.attemptId, a.generation, 'Late')).toThrow('STALE_ATTEMPT');
   });
+});
+
+test('empty-wallet notices are claimed once per chat and kind, survive a restart, and reopen after the cooldown or recovered voice', () => {
+  const root = mkdtempSync(join(tmpdir(), 'voice-credit-notice-')), file = join(root, 'orchestration.db');
+  let store = new OrchestrationStore(file, 'agent');
+  try {
+    const one = store.acceptInput({ scope, text: 'a' }).bindingId, other = store.acceptInput({ scope: { ...scope, chatId: 'other' }, text: 'b' }).bindingId;
+    const now = 1_000_000_000;
+    expect(store.claimVoiceCreditNotice(one, 'stt', now)).toBe(true);
+    expect(store.claimVoiceCreditNotice(one, 'stt', now + 1)).toBe(false);
+    expect(store.claimVoiceCreditNotice(one, 'tts', now + 1)).toBe(true);
+    expect(store.claimVoiceCreditNotice(other, 'stt', now + 1)).toBe(true);
+    store.close(); store = new OrchestrationStore(file, 'agent');
+    expect(store.claimVoiceCreditNotice(one, 'stt', now + VOICE_CREDIT_NOTICE_COOLDOWN_MS - 1)).toBe(false);
+    expect(store.claimVoiceCreditNotice(one, 'stt', now + VOICE_CREDIT_NOTICE_COOLDOWN_MS)).toBe(true);
+    store.clearVoiceCreditNotice(one, 'tts');
+    expect(store.claimVoiceCreditNotice(one, 'tts', now + 2)).toBe(true);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });

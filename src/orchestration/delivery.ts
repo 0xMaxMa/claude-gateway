@@ -87,6 +87,7 @@ export function channelSender(config: AgentConfig | (() => AgentConfig), request
 /** Channel notices share one provider-independent vocabulary; details stay in logs. */
 export function speechFailureNotice(code: string): string {
   const diagnostic = describeVoiceError(code);
+  if (diagnostic.category === 'managed_credit') return 'Voice reply unavailable: voice credit is used up. Text replies continue, and voice returns after the credit resets or is topped up. Use /voice off to stop voice replies.';
   const messages: Record<string, [string, string]> = {
     quota: ['Voice quota exhausted', 'Try again after the quota resets'],
     daily_quota: ['Voice quota exhausted', 'Try again after the quota resets'],
@@ -229,9 +230,12 @@ export class DeliveryOutbox {
           }
           this.store.run('UPDATE deliveries SET state=?,provider_message_id=?,updated_at=? WHERE id=?', result.state, result.state === 'delivered' ? result.providerId ?? null : null, Date.now(), id);
           this.store.run('UPDATE outbox SET state=?,last_error=? WHERE id=?', result.state === 'delivered' ? 'completed' : result.state, result.state === 'delivered' ? null : result.message ? `${result.code}: ${result.message}` : result.code, row.id);
+          if (delivery.modality === 'speech' && result.state === 'delivered') this.store.clearVoiceCreditNotice(String(delivery.binding_id), 'tts');
           if (delivery.modality === 'speech' && result.state === 'failed' && result.speechSynthesisFailed) {
             const key = `speech-failure:${id}`;
-            if (!this.store.get('SELECT id FROM outbox WHERE dedup_key=?', key)) {
+            // An empty managed wallet fails every reply until it is topped up: say so once per chat.
+            const creditNotice = result.code !== 'MANAGED_VOICE_QUOTA_EXHAUSTED' || this.store.claimVoiceCreditNotice(String(delivery.binding_id), 'tts');
+            if (creditNotice && !this.store.get('SELECT id FROM outbox WHERE dedup_key=?', key)) {
               const noticeId = randomUUID();
               const diagnostic = describeVoiceError(result.code);
               const text = speechFailureNotice(result.code);

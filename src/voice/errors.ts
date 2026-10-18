@@ -1,10 +1,11 @@
 import { voiceTiming } from './diagnostics';
 import { VoiceError } from './types';
 
-type Category = 'local_dependency' | 'credit_check' | 'payment' | 'authentication' | 'permission' | 'quota' | 'daily_quota' | 'rate_limit' | 'unavailable' | 'language' | 'model' | 'timeout' | 'network' | 'cancelled' | 'invalid_response' | 'invalid_request' | 'no_speech' | 'unknown';
+type Category = 'local_dependency' | 'credit_check' | 'managed_credit' | 'payment' | 'authentication' | 'permission' | 'quota' | 'daily_quota' | 'rate_limit' | 'unavailable' | 'language' | 'model' | 'timeout' | 'network' | 'cancelled' | 'invalid_response' | 'invalid_request' | 'no_speech' | 'unknown';
 const descriptions: Record<Category, [string, boolean]> = {
   local_dependency: ['A local audio dependency (ffmpeg or ffprobe) is missing or cannot run. Run claude-gateway doctor, then claude-gateway doctor fix on the gateway machine.', false],
   credit_check: ['Could not check the voice credit balance with the provider. This is not a missing-credit error; please try again.', true],
+  managed_credit: ['Voice credit is used up. Voice will work again after the credit resets or is topped up.', false],
   payment: ['The voice provider requires payment. Check provider credits or billing before trying again.', false],
   authentication: ['No API key is configured or the voice provider rejected it. Check the connected API key.', false],
   permission: ['The voice provider denied access. Check API key permissions and model access.', false],
@@ -72,6 +73,8 @@ export function describeVoiceError(error: unknown) {
   const httpStatus = Number(code.match(/_HTTP_(\d{3})/)?.[1]) || undefined;
   const explicit = code.match(/_REASON_([A-Z_]+)$/)?.[1]?.toLowerCase() as Category | undefined;
   let category: Category = explicit && Object.prototype.hasOwnProperty.call(descriptions, explicit) ? explicit : 'unknown';
+  // Only a definite empty managed wallet; a check that could not finish is credit_check below.
+  if (code === 'MANAGED_VOICE_QUOTA_EXHAUSTED') return { category: 'managed_credit', message: descriptions.managed_credit[0], retryable: false };
   // The wallet check, not the voice provider: its HTTP status describes that check only.
   if (category === 'unknown' && code.startsWith('MANAGED_VOICE_USAGE_')) {
     const detail = code === 'MANAGED_VOICE_USAGE_TIMEOUT' ? ' (timed out)' : code === 'MANAGED_VOICE_USAGE_NETWORK' ? ' (no connection)'

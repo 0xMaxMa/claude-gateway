@@ -16,9 +16,9 @@ test('BYOK does not consult managed wallet', async()=>{
  for(const provider of ['elevenlabs','upstream:elevenlabs','upstream:paxalabs']) await requireManagedVoiceCredit(provider,request);
  expect(request).not.toHaveBeenCalled();
 });
-test('only explicit managed exhaustion suppresses audio failure notifications',()=>{
+test('every TTS failure, managed exhaustion included, is flagged for a text notice',()=>{
  const exhausted=providerVoiceError('TTS',429,{code:'MANAGED_VOICE_QUOTA_EXHAUSTED'});
- expect(speechSynthesisFailure(exhausted)).toEqual({state:'failed',code:'MANAGED_VOICE_QUOTA_EXHAUSTED'});
+ expect(speechSynthesisFailure(exhausted)).toEqual({state:'failed',code:'MANAGED_VOICE_QUOTA_EXHAUSTED',speechSynthesisFailed:true});
  expect(speechSynthesisFailure(providerVoiceError('TTS',429,{}))).toMatchObject({speechSynthesisFailed:true});
  expect(speechSynthesisFailure(new VoiceError('TTS_PROVIDER_ERROR_HTTP_503'))).toMatchObject({speechSynthesisFailed:true});
 });

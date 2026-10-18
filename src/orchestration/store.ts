@@ -13,6 +13,8 @@ export type Row = Record<string, string | number | null>;
 export interface InputReceipt { inputId: string; conversationId: string; bindingId: string; }
 /** Ingress key prefix of the internal recovery input; its model is a snapshot, never a user selection. */
 export const INTAKE_RECOVERY_PREFIX = 'intake-recovery:';
+export type VoiceCreditNoticeKind = 'stt' | 'tts';
+export const VOICE_CREDIT_NOTICE_COOLDOWN_MS = 60 * 60 * 1000;
 /** Root tasks: subagents belong to their root (its task_status lists them), not to the chat's task list. */
 export const ROOT_TASK_SQL = "json_extract(snapshot_json,'$.parentTaskId') IS NULL";
 /** Tasks the user sees and controls: the roots, plus any subagent whose stop could not be confirmed
@@ -119,6 +121,7 @@ export class OrchestrationStore {
         this.db.exec('CREATE TABLE IF NOT EXISTS telegram_tts_voices(chat_id TEXT PRIMARY KEY, provider TEXT NOT NULL, voice_id TEXT NOT NULL)');
         this.db.exec('CREATE TABLE IF NOT EXISTS telegram_voice_preferences(chat_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)))');
         this.db.exec("CREATE TABLE IF NOT EXISTS voice_reply_modes(chat_id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('off','auto','on')))");
+        this.db.exec("CREATE TABLE IF NOT EXISTS voice_credit_notices(binding_id TEXT NOT NULL REFERENCES conversation_bindings(id), kind TEXT NOT NULL CHECK(kind IN ('stt','tts')), noticed_at INTEGER NOT NULL, PRIMARY KEY(binding_id,kind))");
       });
       const foreign = this.get('SELECT id FROM conversations WHERE agent_id != ? LIMIT 1', agentId);
       if (foreign) throw new OrchestrationError('AGENT_STORE_MISMATCH');
@@ -169,6 +172,15 @@ export class OrchestrationStore {
       this.run('INSERT INTO telegram_voice_preferences VALUES(?,?) ON CONFLICT(chat_id) DO UPDATE SET enabled=excluded.enabled', chatId, mode === 'on' ? 1 : 0);
     };
     if (this.inTransaction) write(); else this.transaction(write);
+  }
+  /** One empty-wallet notice per chat and kind per cooldown; durable so a restart does not repeat it. */
+  claimVoiceCreditNotice(bindingId: string, kind: VoiceCreditNoticeKind, now = Date.now()): boolean {
+    return Number(this.run(`INSERT INTO voice_credit_notices VALUES(?,?,?) ON CONFLICT(binding_id,kind)
+      DO UPDATE SET noticed_at=excluded.noticed_at WHERE noticed_at<=?`, bindingId, kind, now, now - VOICE_CREDIT_NOTICE_COOLDOWN_MS).changes) > 0;
+  }
+  /** Voice worked again, so the wallet was reset or topped up: the next exhaustion is news. */
+  clearVoiceCreditNotice(bindingId: string, kind: VoiceCreditNoticeKind): void {
+    this.run('DELETE FROM voice_credit_notices WHERE binding_id=? AND kind=?', bindingId, kind);
   }
   close(): void { this.db.close(); }
   get(sql: string, ...values: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...values) as Row | undefined; }

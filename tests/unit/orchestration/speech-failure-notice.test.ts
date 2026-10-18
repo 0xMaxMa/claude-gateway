@@ -5,7 +5,9 @@ import { OrchestrationStore } from '../../../src/orchestration/store';
 import { DecisionService } from '../../../src/orchestration/decisions';
 import { DeliveryOutbox, channelSender, ChannelSender, speechFailureNotice } from '../../../src/orchestration/delivery';
 import { sendChannelSpeech } from '../../../src/orchestration/channel-speech';
-import { providerVoiceError } from '../../../src/voice/errors';
+import { describeVoiceError, providerVoiceError } from '../../../src/voice/errors';
+import { VoiceError } from '../../../src/voice/types';
+import { voiceNoteFailureMessage } from '../../../src/voice/notes';
 import type { AgentConfig } from '../../../src/types';
 import type { TtsProvider } from '../../../src/voice/types';
 
@@ -107,4 +109,73 @@ test.each([
   ['future', 'private unrecognized upstream detail', 'Voice audio unavailable. Try again later'],
 ])('%s has a concise safe notice for %s', (_provider, code, expected) => {
   expect(speechFailureNotice(code)).toBe(`${expected}, or use /voice off.`);
+});
+
+test.each(['telegram', 'discord', 'line', 'slack'] as const)('%s follows text with one empty-wallet voice notice per chat, even across a restart', async channel => {
+  const root = mkdtempSync(join(tmpdir(), 'speech-credit-')), database = join(root, 'state.db');
+  let store = new OrchestrationStore(database, 'a');
+  const agent = { id: 'a', telegram: { botToken: 'fixture' }, discord: { botToken: 'fixture' }, line: { channelAccessToken: 'fixture' }, slack: { botToken: 'fixture' } } as AgentConfig;
+  const request = jest.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({ ok: true, id: 'receipt', result: { message_id: 42 } })));
+  const synthesizeFile = jest.fn(async () => { throw new VoiceError('MANAGED_VOICE_QUOTA_EXHAUSTED'); });
+  const provider = () => ({ synthesizeFile } as unknown as TtsProvider);
+  const sender: ChannelSender = (binding, text, id, file, audio, format) => audio
+    ? sendChannelSpeech(agent, binding, { ...audio, provider: 'managed:paxalabs' }, id, request, provider)
+    : channelSender(agent, request)(binding, text, id, file, audio, format);
+  const sentTexts = () => request.mock.calls.map(([, init]) => { const body = JSON.parse(String(init!.body)); return channel === 'line' ? body.messages[0].text : channel === 'discord' ? body.content : body.text; });
+  const log = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const reply = async (text: string) => {
+      const outbox = new DeliveryOutbox(store, sender);
+      const decisions = new DecisionService(store, (r, b, body) => outbox.enqueue(r, b, body));
+      const input = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's', source: channel, accountId: 'account', chatId: '123', threadKey: '', principalId: 'owner' }, text });
+      const receipt = decisions.begin(input.conversationId, 'owner', [input.inputId]);
+      store.transaction(() => outbox.enqueueSpeech(receipt.responseId!, input.bindingId, speech));
+      decisions.finish(receipt, text);
+      for (let i = 0; i < 4; i++) await outbox.tick();
+    };
+    await reply('First answer');
+    expect(sentTexts()).toEqual(['First answer', 'Voice reply unavailable: voice credit is used up. Text replies continue, and voice returns after the credit resets or is topped up. Use /voice off to stop voice replies.']);
+    store.close(); store = new OrchestrationStore(database, 'a');
+    await reply('Second answer');
+    expect(sentTexts()).toHaveLength(3);
+    expect(sentTexts()[2]).toBe('Second answer');
+    expect(synthesizeFile).toHaveBeenCalledTimes(2);
+    expect(store.all("SELECT id FROM outbox WHERE dedup_key LIKE 'speech-failure:%'")).toHaveLength(1);
+  } finally { log.mockRestore(); store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a delivered voice reply means credit is back, so the next empty wallet is reported again', async () => {
+  const store = new OrchestrationStore(':memory:', 'a');
+  let outcome: 'quota' | 'ok' = 'quota';
+  const sender: ChannelSender = async (_binding, _text, _id, _file, audio) => audio
+    ? outcome === 'ok' ? { state: 'delivered', providerId: 'voice' } : { state: 'failed', code: 'MANAGED_VOICE_QUOTA_EXHAUSTED', speechSynthesisFailed: true }
+    : { state: 'delivered' };
+  const outbox = new DeliveryOutbox(store, sender);
+  const decisions = new DecisionService(store, (r, b, text) => outbox.enqueue(r, b, text));
+  const reply = async () => {
+    const input = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's', source: 'telegram', accountId: 'account', chatId: '123', threadKey: '', principalId: 'owner' }, text: 'hello' });
+    const receipt = decisions.begin(input.conversationId, 'owner', [input.inputId]);
+    decisions.finish(receipt, 'Answer');
+    store.transaction(() => outbox.enqueueSpeech(receipt.responseId!, input.bindingId, speech));
+    for (let i = 0; i < 3; i++) await outbox.tick();
+  };
+  const log = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    await reply(); await reply();
+    expect(store.all("SELECT id FROM outbox WHERE dedup_key LIKE 'speech-failure:%'")).toHaveLength(1);
+    outcome = 'ok'; await reply();
+    outcome = 'quota'; await reply();
+    expect(store.all("SELECT id FROM outbox WHERE dedup_key LIKE 'speech-failure:%'")).toHaveLength(2);
+  } finally { log.mockRestore(); store.close(); }
+});
+
+test('only a definite empty wallet uses the used-up wording', () => {
+  expect(describeVoiceError('MANAGED_VOICE_QUOTA_EXHAUSTED')).toEqual({ category: 'managed_credit', message: 'Voice credit is used up. Voice will work again after the credit resets or is topped up.', retryable: false });
+  expect(voiceNoteFailureMessage('MANAGED_VOICE_QUOTA_EXHAUSTED')).toBe('Voice credit is used up, so this voice message could not be transcribed. Please type your message instead.');
+  for (const code of ['MANAGED_VOICE_USAGE_TIMEOUT', 'MANAGED_VOICE_USAGE_HTTP_503', 'STT_PROVIDER_ERROR_HTTP_503', 'PROVIDER_TIMEOUT', 'STT_PROVIDER_ERROR_HTTP_429_REASON_RATE_LIMIT', 'STT_PROVIDER_ERROR_HTTP_402']) {
+    expect(describeVoiceError(code).category).not.toBe('managed_credit');
+    expect(speechFailureNotice(code)).not.toContain('used up');
+    expect(voiceNoteFailureMessage(code)).not.toContain('used up');
+  }
+  expect(describeVoiceError('MANAGED_VOICE_USAGE_TIMEOUT')).toMatchObject({ category: 'credit_check', retryable: true });
 });
