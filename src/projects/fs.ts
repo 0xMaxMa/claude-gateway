@@ -1,6 +1,6 @@
 import { execFile } from "child_process";
 import { projectsWarn } from './log';
-import { constants as fsConstants, Dirent, promises as fsp } from "fs";
+import { Dirent, promises as fsp } from "fs";
 import * as path from "path";
 import { promisify } from "util";
 import { hardenedGit } from "./git-runner";
@@ -8,21 +8,14 @@ import { readStack, type Stack } from "./stack";
 import {
   err,
   errnoToCode,
-  isInside,
-  joinRel,
   ok,
   parseProjectName,
-  parseRelPath,
   ProjectName,
   ProjectsErrorCode,
-  RelPath,
   resolveInside,
   Result,
 } from "./paths";
 
-const FILE_SIZE_LIMIT = 1024 * 1024;
-export const TREE_ENTRY_LIMIT = 2000;
-const BINARY_SNIFF_BYTES = 8192;
 const GIT_INIT_TIMEOUT_MS = 10_000;
 
 export interface Project {
@@ -33,42 +26,6 @@ export interface Project {
   /** Best guess at the project's stack from its root files; null when nothing marks one. */
   stack: Stack | null;
 }
-
-export type SymlinkTargetKind = "file" | "dir" | "outside" | "dangling";
-
-export type FileEntry =
-  | { kind: "dir"; name: string; path: RelPath; modified_at: string }
-  | {
-      kind: "file";
-      name: string;
-      path: RelPath;
-      size: number;
-      modified_at: string;
-    }
-  | {
-      kind: "symlink";
-      name: string;
-      path: RelPath;
-      target_kind: SymlinkTargetKind;
-    }
-  | { kind: "other"; name: string; path: RelPath };
-
-export type FileContent =
-  | {
-      kind: "text";
-      path: RelPath;
-      size: number;
-      modified_at: string;
-      content: string;
-    }
-  | { kind: "binary"; path: RelPath; size: number; modified_at: string }
-  | {
-      kind: "too_large";
-      path: RelPath;
-      size: number;
-      modified_at: string;
-      limit: number;
-    };
 
 /** Why a folder under the root is not a project. */
 export type SkipReason = 'invalid_name' | 'symlink_outside_root' | 'not_a_directory';
@@ -91,12 +48,6 @@ export interface ProjectList {
 export const SKIPPED_LIMIT = 50;
 
 const DELETING_LEFTOVER_RE = /^\.deleting-/;
-
-export interface DirListing {
-  path: RelPath;
-  entries: FileEntry[];
-  truncated: boolean;
-}
 
 export interface CreatedProject {
   project: Project;
@@ -323,180 +274,5 @@ export async function createProject(
     return ok({ project, warning });
   } catch (e) {
     return err(errnoToCode(e));
-  }
-}
-
-async function symlinkTargetKind(
-  realProjectDir: string,
-  linkPath: string,
-): Promise<SymlinkTargetKind> {
-  let real: string;
-  try {
-    real = await fsp.realpath(linkPath);
-  } catch {
-    return "dangling";
-  }
-  if (!isInside(realProjectDir, real)) return "outside";
-  const st = await fsp.stat(real).catch(() => null);
-  if (!st) return "dangling";
-  return st.isDirectory() ? "dir" : "file";
-}
-
-async function toEntry(
-  realProjectDir: string,
-  realDir: string,
-  rel: RelPath,
-  d: Dirent,
-): Promise<FileEntry | null> {
-  const abs = path.join(realDir, d.name);
-  const entryPath = joinRel(rel, d.name);
-  if (d.isSymbolicLink()) {
-    return {
-      kind: "symlink",
-      name: d.name,
-      path: entryPath,
-      target_kind: await symlinkTargetKind(realProjectDir, abs),
-    };
-  }
-  if (!d.isDirectory() && !d.isFile())
-    return { kind: "other", name: d.name, path: entryPath };
-  const st = await fsp.lstat(abs).catch(() => null);
-  if (!st) return null;
-  const modified_at = st.mtime.toISOString();
-  return d.isDirectory()
-    ? { kind: "dir", name: d.name, path: entryPath, modified_at }
-    : {
-        kind: "file",
-        name: d.name,
-        path: entryPath,
-        size: st.size,
-        modified_at,
-      };
-}
-
-export async function listDir(
-  root: string,
-  name: ProjectName,
-  rel: RelPath,
-): Promise<FsResult<DirListing>> {
-  const projectDir = await resolveProjectDir(root, name);
-  if (!projectDir.ok) return projectDir;
-  const dir = await resolveInside(projectDir.value, rel);
-  if (!dir.ok) return dir;
-
-  let dirents: Dirent[];
-  try {
-    dirents = (await fsp.readdir(dir.value, { withFileTypes: true })).filter(
-      // A name such as `a\b` is legal on disk but no route accepts its path, so it is not listed.
-      (d) => parseRelPath(joinRel(rel, d.name)).ok,
-    );
-  } catch (e) {
-    return err(errnoToCode(e));
-  }
-  // A path component may have been swapped for a symlink between realpath and readdir.
-  const after = await resolveInside(projectDir.value, rel);
-  if (!after.ok) return after;
-  if (after.value !== dir.value) return err("path_escape");
-
-  // Sort and cap on dirent data first so a huge directory costs one lstat per kept entry.
-  dirents.sort((a, b) => {
-    const byKind = Number(b.isDirectory()) - Number(a.isDirectory());
-    if (byKind !== 0) return byKind;
-    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
-  });
-  const kept = dirents.slice(0, TREE_ENTRY_LIMIT);
-  const entries = (
-    await Promise.all(
-      kept.map((d) => toEntry(projectDir.value, dir.value, rel, d)),
-    )
-  ).filter((e): e is FileEntry => e !== null);
-  return ok({
-    path: rel,
-    entries,
-    truncated: dirents.length > TREE_ENTRY_LIMIT,
-  });
-}
-
-const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-
-function decodeText(buf: Buffer): string | null {
-  if (buf.subarray(0, BINARY_SNIFF_BYTES).includes(0)) return null;
-  try {
-    return utf8.decode(buf);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Where the open fd really points, so a parent directory swapped for a symlink
- * after realpath is caught. Needs /proc; other platforms keep only the realpath check.
- */
-async function openedInside(
-  handle: fsp.FileHandle,
-  realProjectDir: string,
-): Promise<boolean> {
-  if (process.platform !== "linux") return true;
-  const opened = await fsp
-    .readlink(`/proc/self/fd/${handle.fd}`)
-    .catch(() => null);
-  return opened !== null && isInside(realProjectDir, opened);
-}
-
-export async function readFileContent(
-  root: string,
-  name: ProjectName,
-  rel: RelPath,
-): Promise<FsResult<FileContent>> {
-  const projectDir = await resolveProjectDir(root, name);
-  if (!projectDir.ok) return projectDir;
-  const file = await resolveInside(projectDir.value, rel);
-  if (!file.ok) return file;
-
-  let handle: fsp.FileHandle;
-  try {
-    // O_NONBLOCK so a FIFO fails the isFile check instead of blocking open() until a writer appears.
-    handle = await fsp.open(
-      file.value,
-      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
-    );
-  } catch (e) {
-    return err(errnoToCode(e));
-  }
-  try {
-    if (!(await openedInside(handle, projectDir.value)))
-      return err("path_escape");
-    const st = await handle.stat();
-    if (!st.isFile()) return err("not_a_file");
-    const meta = {
-      path: rel,
-      size: st.size,
-      modified_at: st.mtime.toISOString(),
-    };
-    if (st.size > FILE_SIZE_LIMIT)
-      return ok({ kind: "too_large", ...meta, limit: FILE_SIZE_LIMIT });
-
-    const buf = Buffer.alloc(st.size);
-    let filled = 0;
-    while (filled < buf.length) {
-      const { bytesRead } = await handle.read(
-        buf,
-        filled,
-        buf.length - filled,
-        filled,
-      );
-      if (bytesRead === 0) break;
-      filled += bytesRead;
-    }
-    const content = decodeText(buf.subarray(0, filled));
-    return ok(
-      content === null
-        ? { kind: "binary", ...meta }
-        : { kind: "text", ...meta, content },
-    );
-  } catch (e) {
-    return err(errnoToCode(e));
-  } finally {
-    await handle.close();
   }
 }

@@ -3,13 +3,13 @@ import { NextFunction, Request, Response, Router } from 'express';
 import { ApiKey } from '../types';
 import { createApiAuthMiddleware, isAdmin, PROJECTS_ADMIN_REQUIRED } from './auth';
 import { defineRoute } from './route-registry';
-import { createProject, listDir, resolveProjectDir, listProjects, readFileContent } from '../projects/fs';
+import { createProject, resolveProjectDir, listProjects } from '../projects/fs';
 import { getStatus, getSummaries, GitError, GitErrorCode } from '../projects/git';
 import { listRunning, ProjectDir, RunningErrorCode, scanProjects, StopLimiter, stopRunning, Sys, systemSys } from '../projects/running';
 import { planStart, PORT_MIN, readStartFacts, startProject, StartError, StartErrorCode, StartGuard, Launcher, systemLauncher } from '../projects/start';
 import { DeleteErrorCode, removeProject } from '../projects/delete';
 import { isProjectDeleting, markProjectDeleting } from '../projects/chat';
-import { parseProjectName, parseRelPath, ProjectName, ProjectsErrorCode, Result } from '../projects/paths';
+import { parseProjectName, ProjectName, ProjectsErrorCode, Result } from '../projects/paths';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
@@ -17,9 +17,7 @@ const MAX_RUNNING_PROJECTS = 200;
 
 const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode | StartErrorCode | DeleteErrorCode, { status: number; message: string }> = {
   invalid_name: { status: 400, message: 'Invalid project name' },
-  invalid_path: { status: 400, message: 'Invalid path' },
   not_a_directory: { status: 400, message: 'Not a directory' },
-  not_a_file: { status: 400, message: 'Not a regular file' },
   path_escape: { status: 403, message: 'Path resolves outside the project' },
   permission_denied: { status: 403, message: 'Permission denied' },
   forbidden_key: { status: 403, message: PROJECTS_ADMIN_REQUIRED.error },
@@ -137,32 +135,6 @@ export function createProjectsRouter(
       } finally {
         release();
       }
-    }),
-  );
-
-  defineRoute(
-    router,
-    { method: 'GET', path: '/v1/projects/:name/tree', auth: 'key', summary: 'List one directory level of a project', cli: null },
-    auth,
-    handle(async (req, res) => {
-      const name = parseProjectName(req.params.name);
-      if (!name.ok) return fail(res, name.error);
-      const rel = parseRelPath(req.query.path);
-      if (!rel.ok) return fail(res, rel.error);
-      respond(res, await listDir(root, name.value, rel.value));
-    }),
-  );
-
-  defineRoute(
-    router,
-    { method: 'GET', path: '/v1/projects/:name/file', auth: 'key', summary: 'Read a file from a project', cli: null },
-    auth,
-    handle(async (req, res) => {
-      const name = parseProjectName(req.params.name);
-      if (!name.ok) return fail(res, name.error);
-      const rel = parseRelPath(req.query.path);
-      if (!rel.ok) return fail(res, rel.error);
-      respond(res, await readFileContent(root, name.value, rel.value));
     }),
   );
 

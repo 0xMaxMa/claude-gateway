@@ -41,12 +41,12 @@ import type { GatewayConfig } from '../types';
 export const CROSS_CHANNEL_MESSAGE_CHANNELS: readonly ChatChannel[] = [...CHAT_CHANNELS];
 
 /**
- * Project operations served by projects-router.ts. Clients gate browsing on `includes('list')`, reading files on
- * `includes('read')`, the git routes on `includes('git')`, project-bound chat on `includes('chat')`, running status on
- * `includes('run')`, creating a project on `includes('create')`, starting one on `includes('start')`, stopping what
- * runs in one on `includes('stop')`, and deleting one on `includes('delete')`.
+ * Project operations served by projects-router.ts. Clients gate listing on `includes('list')`, the git routes on
+ * `includes('git')`, project-bound chat on `includes('chat')`, running status on `includes('run')`, creating a project
+ * on `includes('create')`, starting one on `includes('start')`, stopping what runs in one on `includes('stop')`, and
+ * deleting one on `includes('delete')`. The gateway serves no project files; they are viewed in code-server.
  */
-export const PROJECTS_CAPABILITIES = ['list', 'create', 'read', 'git', 'chat', 'run', 'start', 'delete', 'stop'] as const;
+export const PROJECTS_CAPABILITIES = ['list', 'create', 'git', 'chat', 'run', 'start', 'delete', 'stop'] as const;
 export type ProjectsCapability = (typeof PROJECTS_CAPABILITIES)[number];
 
 /** The operations projects-router.ts serves only to an admin key; every other token is open to any key. */
