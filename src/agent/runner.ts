@@ -83,7 +83,7 @@ import { receiveChannelMedia } from '../orchestration/channel-media';
 import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
 import type { HistorySource, ChatChannel, ChatChannelOrApi } from '../history/types';
 import { isChatChannel } from '../history/types';
-import type { SkillLearningManager } from './skill-learning';
+import { managedTurnSkills, toolUseSkills, type SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 import { resolveEnabledConnectors } from '../connectors/resolve';
 
@@ -414,6 +414,7 @@ export class AgentRunner extends EventEmitter {
 
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
+  private workspaceRecompose?: () => Promise<unknown>;
 
   // Skill self-improvement (planning-62). Optional — set by index.ts per agent.
   // All calls are guarded (`this.skillLearning?.`) and best-effort.
@@ -493,7 +494,7 @@ export class AgentRunner extends EventEmitter {
           },
           onManagedTurn: (sessionId, text, metrics, skills) => {
             const key = `orchestration:${sessionId}`;
-            this.skillLearning?.onTurnStart(key, sessionId, text, skills, metrics.startedAt);
+            this.skillLearning?.onTurnStart(key, sessionId, text, managedTurnSkills(skills, metrics.usedSkills, this.skillRegistry, metrics.usedSkillFiles), metrics.startedAt);
             for (const id of metrics.toolIds) this.skillLearning?.onToolUse(key, id);
             this.skillLearning?.onTokenUsage(key, metrics.inputTokens, metrics.totalTokens);
             this.skillLearning?.onTurnEnd(key, sessionId);
@@ -759,10 +760,29 @@ export class AgentRunner extends EventEmitter {
       Number(process.env.CHANNEL_COALESCE_WINDOW_MS) || CHANNEL_COALESCE_WINDOW_MS;
   }
 
+  /** Wire this agent's CLAUDE.md + skill registry rebuild (src/index.ts, workspaceRecomposer). */
+  setWorkspaceRecomposer(recompose: () => Promise<unknown>): void {
+    this.workspaceRecompose = recompose;
+  }
+
+  /** Rebuild CLAUDE.md and the skill registry through the wired recomposer; false if none is wired. */
+  async recomposeWorkspace(): Promise<boolean> {
+    if (!this.workspaceRecompose) return false;
+    await this.workspaceRecompose();
+    return true;
+  }
+
   /**
-   * Update the skill registry used for detecting /skill-name commands.
+   * Update the skill registry used for detecting /skill-name commands. A workspace
+   * reload has no CLI/extension skills of its own: it keeps the last discovered ones
+   * until refreshCliSkillRegistry swaps in a new list.
    */
   setSkillRegistry(registry: SkillRegistry): void {
+    const previous = this.skillRegistry;
+    if (registry.cliSkills === undefined && previous.cliSkills !== undefined) {
+      const { cliSkills, cliDiscoveryError, extensionServers, extensionNotices } = previous;
+      Object.assign(registry, { cliSkills, extensionServers, extensionNotices }, cliDiscoveryError ? { cliDiscoveryError } : {});
+    }
     this.skillRegistry = registry;
   }
 
@@ -2555,6 +2575,7 @@ export class AgentRunner extends EventEmitter {
                 // completed blocks). Cheap, best-effort.
                 if (block.type === 'tool_use') {
                   this.skillLearning?.onToolUse(mapKey, (block as Record<string, unknown>)['id'] as string | undefined);
+                  for (const usedSkill of toolUseSkills(block, this.skillRegistry)) this.skillLearning?.onSkillUsed(mapKey, usedSkill);
                 }
                 // LINE sends images through its own line_image tool (not the reply
                 // tool's `files`), so capture those sends into history too — the

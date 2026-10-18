@@ -1,6 +1,7 @@
 import type { CodexContextMeasurement } from '../session/codex-context';
 import type { RequestToolSchemas } from '../session/request-tool-capture';
 import { executionTool } from './tool-name';
+import { skillFileRefs } from '../skills/loader';
 /** Model token volume, not billing cost. Output already includes thinking. */
 export interface TokenUsage {
   inputTokens: number;
@@ -58,6 +59,8 @@ export class TurnUsageCollector {
   loadedTools: string[] | null = null;
   readonly usedTools = new Set<string>();
   readonly usedSkills = new Set<string>();
+  /** SKILL.md files the turn read itself (skill-learning usage, see skillFileRefs). */
+  readonly usedSkillFiles = new Set<string>();
   extensions?: TurnExtensions;
   model?: string;
   contextWindow?: CodexContextMeasurement;
@@ -82,7 +85,9 @@ export class TurnUsageCollector {
     if (event.type === 'system' && event.subtype === 'native_usage' && event.usage && typeof event.usage === 'object') this.aggregate = normalize(event.usage);
     const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
     for (const block of [...blocks, stream?.content_block]) if (block?.type === 'tool_use' && typeof block.name === 'string' && !(/^mcp__[a-zA-Z0-9_-]+__tool_call$/.test(block.name) && !block.input?.name)) {
-      this.usedTools.add(executionTool(block).name);
+      const tool = executionTool(block);
+      this.usedTools.add(tool.name);
+      for (const ref of skillFileRefs(tool)) if (ref.length <= 4096 && this.usedSkillFiles.size < 64) this.usedSkillFiles.add(ref);
       if (block.name === 'Skill' && typeof block.input?.skill === 'string' && block.input.skill && block.input.skill.length <= 256) this.usedSkills.add(block.input.skill);
     }
   }
@@ -92,7 +97,7 @@ export class TurnUsageCollector {
     next.totalTokens = next.inputTokens + next.cacheCreationTokens + next.cacheReadTokens + next.outputTokens;
     this.messages.set(id, {id, model: typeof model === 'string' ? model : previous?.model, usage: next, toolSchemas:this.schemas.get(id)});
   }
-  snapshot(): { usage: TokenUsage | null; requests: RequestUsage[]; loadedTools: string[] | null; usedTools: string[]; usedSkills: string[]; extensions?: TurnExtensions; contextTools: string[] | null; schemaCoverage: {measured:number;total:number}; model?: string; contextWindow?: CodexContextMeasurement } {
+  snapshot(): { usage: TokenUsage | null; requests: RequestUsage[]; loadedTools: string[] | null; usedTools: string[]; usedSkills: string[]; usedSkillFiles: string[]; extensions?: TurnExtensions; contextTools: string[] | null; schemaCoverage: {measured:number;total:number}; model?: string; contextWindow?: CodexContextMeasurement } {
     const requests = [...this.messages.values()];
     // The CLI aggregate includes otherwise unreported subcalls. It is a fallback
     // and reconciliation source, not an extra request or fabricated request ID.
@@ -106,6 +111,6 @@ export class TurnUsageCollector {
     // has a private per-attempt trace that includes in-flight requests here.
     const captures=[...this.schemas.values()].filter(s=>s.source==='codex-request-body'||this.messages.has(s.messageId));
     const contextTools=captures.length?[...new Set(captures.flatMap(s=>s.loaded))].sort():null;
-    return {usage, requests, contextTools, schemaCoverage:{measured:captures.length,total:new Set([...this.messages.keys(),...captures.map(s=>s.messageId)]).size}, loadedTools: this.loadedTools, usedTools: [...this.usedTools].sort(), usedSkills: [...this.usedSkills].sort(), ...(this.extensions ? { extensions: this.extensions } : {}), model: this.model, ...(this.contextWindow ? { contextWindow: this.contextWindow } : {})};
+    return {usage, requests, contextTools, schemaCoverage:{measured:captures.length,total:new Set([...this.messages.keys(),...captures.map(s=>s.messageId)]).size}, loadedTools: this.loadedTools, usedTools: [...this.usedTools].sort(), usedSkills: [...this.usedSkills].sort(), usedSkillFiles: [...this.usedSkillFiles].sort(), ...(this.extensions ? { extensions: this.extensions } : {}), model: this.model, ...(this.contextWindow ? { contextWindow: this.contextWindow } : {})};
   }
 }

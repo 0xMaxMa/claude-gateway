@@ -25,6 +25,8 @@ export interface ReviewerInput {
   transcript: string;
   /** Existing skills the agent already has (name + description), for dedup/priority. */
   existingSkills: Array<{ name: string; description: string }>;
+  /** Installed skills the reviewer may not edit; a create must not duplicate them. */
+  readOnlySkills?: Array<{ name: string; description: string }>;
 }
 
 export interface ReviewerResult {
@@ -63,7 +65,8 @@ Respond with STRICT JSON only (no prose, no markdown fences), matching:
 
 - action "none": nothing worth capturing. Omit other fields.
 - action "create": a new skill. Provide name (lowercase kebab, <=64 chars), desc, body.
-- action "edit": improve an existing skill. Provide targetSkill (must be one of the existing skills), plus updated desc/body.`;
+- action "edit": improve an existing skill. Provide targetSkill (must be one of <existing_skills>), plus updated desc/body.
+- <installed_skills> are read-only: never edit them, and never create a skill that duplicates one.`;
 
 function buildPrompt(input: ReviewerInput): string {
   const skillsList = input.existingSkills.length
@@ -75,6 +78,9 @@ function buildPrompt(input: ReviewerInput): string {
     '<existing_skills>',
     skillsList,
     '</existing_skills>',
+    ...(input.readOnlySkills?.length
+      ? ['', '<installed_skills>', ...input.readOnlySkills.map((s) => `- ${s.name}: ${s.description}`), '</installed_skills>']
+      : []),
     '',
     '<transcript>',
     input.transcript,

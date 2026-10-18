@@ -8,7 +8,7 @@
  */
 
 import { createHash } from 'crypto';
-import { loadSkills } from '../../skills/loader';
+import { loadSkills, skillFileRefs, skillsAtPaths, type SkillCatalogUsage, type SkillRegistry } from '../../skills/loader';
 import { extractFrontmatter } from '../../skills/parser';
 import { HistoryDB } from '../../history/db';
 import { resolveSkillLearningConfig } from './config';
@@ -16,7 +16,7 @@ import { intentHash, startOfDayMs } from './telemetry';
 import { shouldReview } from './trigger';
 import { runReviewer, type ClaudeSpawnFn } from './reviewer';
 import { applyProposal, readSkillOrigin, type ExistingSkill } from './writer';
-import { startCurator, curateOnce, type CuratorResult } from './curator';
+import { startCurator, curateOnce, archiveDirUsable, type CuratorResult } from './curator';
 import { computeRollup } from './metrics';
 import { SkillNotifier, type SkillNotifierOpts, type ChannelTokens } from './notifier';
 import type { SessionSignals, SkillLearningConfig, ResolvedSkillLearningCfg, SkillMetricsRollup } from './types';
@@ -48,12 +48,59 @@ interface Accum {
   reviewedTranscriptHash?: string;
 }
 
+/**
+ * Per-skill usage for the skills menu (hide-until-used). With `cap`, a curator that cannot
+ * archive (unusable skills/.archive) hands its `maxAutoSkills` cap to the menu.
+ */
+export function skillCatalogUsage(
+  db: HistoryDB,
+  now = Date.now(),
+  cap?: { workspaceDir: string; cfg: ResolvedSkillLearningCfg },
+): SkillCatalogUsage {
+  const stats = new Map(db.listSkillStats().map((s) => [s.name, { timesLoaded: s.timesLoaded, createdAt: s.createdAt, lastUsedAt: s.lastUsedAt }]));
+  const menuCap = cap && cap.cfg.enabled && cap.cfg.maxAutoSkills > 0 && !archiveDirUsable(cap.workspaceDir);
+  return menuCap ? { now, stats, maxListedAutoSkills: cap.cfg.maxAutoSkills } : { now, stats };
+}
+
+/** Read-only skill descriptions are trimmed for the reviewer prompt (plugins can add ~100 of them). */
+const READ_ONLY_DESC_MAX = 120;
+
+/**
+ * Skills a managed (orchestration) turn loaded: the task's skill command, Skill-tool
+ * calls, and SKILL.md files the turn read itself (`skillFiles`, see `skillFileRefs`).
+ * Plugin skills outside the registry are not tracked in skill_stats.
+ */
+export function managedTurnSkills(invoked: string[] | undefined, used: string[] | undefined, registry: SkillRegistry, skillFiles: string[] = []): string[] {
+  // A task's skill runs as a task-specific plugin skill named orchestration-task:<name>.
+  const names = [...(invoked ?? []), ...(used ?? [])].map((name) => name.replace(/^orchestration-task:/, ''));
+  return [...new Set([...names.filter((name) => registry.skills.has(name)), ...skillsAtPaths(skillFiles, registry)])];
+}
+
+/**
+ * The registry skills a direct-turn tool call loaded: a Skill-tool call by name, or a
+ * read of the skill's SKILL.md (Read or shell — how an agent follows a menu entry on its own).
+ */
+export function toolUseSkills(block: { name?: string; input?: Record<string, unknown> }, registry: SkillRegistry): string[] {
+  const skill = block.input?.['skill'];
+  if (block.name === 'Skill') return typeof skill === 'string' && registry.skills.has(skill) ? [skill] : [];
+  return skillsAtPaths(skillFileRefs(block), registry);
+}
+
+/** A skill installed outside the workspace (e.g. a Claude Code plugin skill). */
+export interface InstalledSkill {
+  name: string;
+  description: string;
+  filePath?: string;
+}
+
 export interface SkillLearningManagerOpts {
   db: HistoryDB;
   agentId: string;
   workspaceDir: string;
   mcpToolsDir?: string;
   sharedSkillsDir?: string;
+  /** Plugin skills the agent's CLI loads; the reviewer must not re-learn them as auto skills. */
+  installedSkills?: () => Promise<InstalledSkill[]>;
   globalCfg?: SkillLearningConfig;
   agentCfg?: SkillLearningConfig;
   /** `gateway.timezone` — the shared default when neither `globalCfg`/`agentCfg` sets `pruneTimezone`. */
@@ -69,6 +116,42 @@ export interface SkillLearningManagerOpts {
   sendNotification?: SkillNotifierOpts['send'];
   /** Injectable notifier (tests). Production uses the origin-session sender. */
   notifier?: SkillNotifier;
+  /** Skills a finished turn loaded (after their counts were bumped). */
+  onSkillsLoaded?: (names: string[]) => void;
+}
+
+/** What `skillLearningHostHooks` needs from the running agent (src/index.ts). */
+export interface SkillLearningHost {
+  /** The runner's live registry (its CLI skill list and hidden set). */
+  registry: () => SkillRegistry;
+  /** A fresh installed-skill scan, for when the runner has no CLI skill list. */
+  discoverInstalled: () => Promise<InstalledSkill[]>;
+  /** Recompose CLAUDE.md (the skills menu) from the current skill_stats. */
+  refreshMenu: () => Promise<void>;
+  logger?: SkillLearningManagerOpts['logger'];
+}
+
+/**
+ * The manager's hooks into the running agent. The reviewer sees the CLI skill list the
+ * runner already discovered. A hidden auto skill that gets used rejoins the orchestration
+ * catalog at once, and the menu is recomposed for future spawns — once per skill that
+ * flips to visible, never per turn.
+ */
+export function skillLearningHostHooks(host: SkillLearningHost): Required<Pick<SkillLearningManagerOpts, 'installedSkills' | 'onSkillsLoaded'>> {
+  let refresh = Promise.resolve();
+  return {
+    installedSkills: async () => {
+      const registry = host.registry();
+      return registry.cliSkills && !registry.cliDiscoveryError ? registry.cliSkills : host.discoverInstalled();
+    },
+    onSkillsLoaded: (names) => {
+      const hidden = host.registry().hiddenUntilUsed;
+      if (!hidden || !names.filter((name) => hidden.delete(name)).length) return;
+      refresh = refresh
+        .then(host.refreshMenu)
+        .catch((err) => host.logger?.warn?.(`skills menu refresh failed: ${(err as Error).message}`));
+    },
+  };
 }
 
 export class SkillLearningManager {
@@ -78,10 +161,12 @@ export class SkillLearningManager {
   private readonly workspaceDir: string;
   private readonly mcpToolsDir?: string;
   private readonly sharedSkillsDir?: string;
+  private readonly installedSkills?: () => Promise<InstalledSkill[]>;
   private readonly logger?: SkillLearningManagerOpts['logger'];
   private readonly reviewSpawn?: ClaudeSpawnFn;
   private readonly now: () => number;
   private readonly notifier: SkillNotifier;
+  private readonly onSkillsLoaded?: (names: string[]) => void;
 
   private readonly accum = new Map<string, Accum>();
   private readonly reviewInFlight = new Set<string>();
@@ -93,9 +178,11 @@ export class SkillLearningManager {
     this.workspaceDir = opts.workspaceDir;
     this.mcpToolsDir = opts.mcpToolsDir;
     this.sharedSkillsDir = opts.sharedSkillsDir;
+    this.installedSkills = opts.installedSkills;
     this.logger = opts.logger;
     this.reviewSpawn = opts.reviewSpawn;
     this.now = opts.now ?? Date.now;
+    this.onSkillsLoaded = opts.onSkillsLoaded;
     this.cfg = resolveSkillLearningConfig(opts.agentCfg, opts.globalCfg, opts.gatewayTimezone);
     this.notifier =
       opts.notifier ??
@@ -156,6 +243,11 @@ export class SkillLearningManager {
     }
   }
 
+  /** The agent loaded a skill mid-turn (Skill tool, or a Read of its SKILL.md). */
+  onSkillUsed(mapKey: string, name: string): void {
+    this.accum.get(mapKey)?.skillsLoaded.add(name);
+  }
+
   /** A tool_use block streamed by. Deduped by block id (cumulative snapshots). */
   onToolUse(mapKey: string, toolUseId?: string): void {
     const a = this.accum.get(mapKey);
@@ -203,6 +295,11 @@ export class SkillLearningManager {
         enabled: this.cfg.enabled ? 1 : 0,
       });
       for (const name of skills) this.db.bumpSkillLoaded(name, ts);
+      try {
+        if (skills.length) this.onSkillsLoaded?.(skills);
+      } catch (err) {
+        this.logger?.warn?.(`[skill-learning:${this.agentId}] onSkillsLoaded failed: ${(err as Error).message}`);
+      }
       a.sigMaxToolCalls = Math.max(a.sigMaxToolCalls, a.toolCalls);
       this.scheduleIdleReview(mapKey, sessionId);
     } catch {
@@ -256,10 +353,15 @@ export class SkillLearningManager {
       if (!transcript.trim()) return;
       const transcriptHash = createHash('sha256').update(transcript).digest('hex');
       if (a.reviewedTranscriptHash === transcriptHash && !signals.recoveryFired && !signals.userCorrection) return;
-      const existing = this.loadExistingSkills();
+      const existing = await this.loadExistingSkills();
 
       const { proposal, tokensSpent, reviewed } = await runReviewer(
-        { transcript: transcript.slice(-20_000), existingSkills: existing.map((s) => ({ name: s.name, description: s.description })) },
+        {
+          transcript: transcript.slice(-20_000),
+          // Only auto skills are editable; the rest are listed read-only so the reviewer neither edits nor re-learns them.
+          existingSkills: existing.filter((s) => s.origin === 'auto').map((s) => ({ name: s.name, description: s.description })),
+          readOnlySkills: existing.filter((s) => s.origin !== 'auto').map((s) => ({ name: s.name, description: s.description.slice(0, READ_ONLY_DESC_MAX) })),
+        },
         this.cfg,
         this.reviewSpawn,
       );
@@ -389,15 +491,19 @@ export class SkillLearningManager {
       .join('\n');
   }
 
-  /** All loaded skills with resolved provenance + path (for dedup + guards). */
-  private loadExistingSkills(): ExistingSkill[] {
+  /**
+   * All loaded skills with resolved provenance + path (for dedup + guards). Registry
+   * skills come first and win a name clash: a same-named installed copy (e.g. a shared
+   * skill synced to ~/.claude/skills) must neither shadow an auto skill nor be listed twice.
+   */
+  private async loadExistingSkills(): Promise<ExistingSkill[]> {
+    const out: ExistingSkill[] = [];
     try {
       const registry = loadSkills({
         workspaceDir: this.workspaceDir,
         mcpToolsDir: this.mcpToolsDir,
         sharedSkillsDir: this.sharedSkillsDir,
       });
-      const out: ExistingSkill[] = [];
       for (const skill of registry.skills.values()) {
         let origin: 'auto' | 'user' = 'user';
         // Only workspace skills can ever be origin:auto; trust the on-disk FM.
@@ -407,9 +513,19 @@ export class SkillLearningManager {
         }
         out.push({ name: skill.name, description: skill.description, origin, filePath: skill.filePath });
       }
-      return out;
     } catch {
-      return [];
+      /* installed skills below still guard against re-learning */
     }
+    try {
+      const seen = new Set(out.map((s) => s.name));
+      for (const s of (await this.installedSkills?.()) ?? []) {
+        if (seen.has(s.name)) continue;
+        seen.add(s.name);
+        out.push({ name: s.name, description: s.description, origin: 'user', filePath: s.filePath ?? '' });
+      }
+    } catch (err) {
+      this.logger?.warn?.(`[skill-learning:${this.agentId}] installed-skill discovery failed: ${(err as Error).message}`);
+    }
+    return out;
   }
 }

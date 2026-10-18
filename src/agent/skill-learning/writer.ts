@@ -5,10 +5,12 @@
  * safety guards live here:
  *   - name / reserved-name / size validation (mirrors mcp/tools/skills/handlers.ts
  *     — keep in sync; src/ cannot import from mcp/ because tsc rootDir is ./src).
- *   - HARD provenance guard: only `origin: auto` skills are ever edited or
- *     overwritten; a create that collides with a non-auto skill is refused.
+ *   - HARD provenance guard: only `origin: auto` skills in a real (non-symlink)
+ *     directory are ever edited or overwritten (pinned ones too: a pin only stops
+ *     the curator); a create that collides with a non-auto skill is refused.
  *   - priority/dedup: a create that duplicates an existing auto skill (by name
- *     or description) is downgraded to an edit of that skill.
+ *     or description) is downgraded to an edit of that skill; one that duplicates
+ *     an installed (shared/module/plugin) skill is refused.
  *   - `mode: propose` writes to a review queue (`skills/.pending/`) instead of live.
  */
 
@@ -59,6 +61,49 @@ export function readSkillOrigin(filePath: string): SkillOrigin {
     return fm && fm['origin'] === 'auto' ? 'auto' : 'user';
   } catch {
     return 'user';
+  }
+}
+
+/**
+ * The on-disk frontmatter of a skill the gateway owns: a real directory (not a
+ * symlink) holding a regular SKILL.md that says `origin: auto`. Undefined for
+ * anything else. Owned skills are editable; the curator also leaves `pinned: true` ones in place.
+ */
+export function ownedAutoSkillFrontmatter(skillDir: string): Record<string, unknown> | undefined {
+  try {
+    if (!fs.lstatSync(skillDir).isDirectory()) return undefined;
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    if (!fs.lstatSync(skillFile).isFile()) return undefined;
+    const fm = extractFrontmatter(fs.readFileSync(skillFile, 'utf-8'))?.frontmatter;
+    return fm && fm['origin'] === 'auto' ? fm : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function isOwnedAutoSkillDir(skillDir: string): boolean {
+  return ownedAutoSkillFrontmatter(skillDir) !== undefined;
+}
+
+/**
+ * A real directory holding only what an interrupted `atomicWrite` leaves behind
+ * (nothing, or `SKILL.md.tmp`). Anything else in it is user content: never claim it.
+ */
+function isLeftoverWriteDir(dir: string): boolean {
+  try {
+    return fs.lstatSync(dir).isDirectory() && fs.readdirSync(dir).every((entry) => entry === 'SKILL.md.tmp');
+  } catch {
+    return false;
+  }
+}
+
+/** lstat-based existence: true for a dangling symlink too. */
+function pathEntryExists(p: string): boolean {
+  try {
+    fs.lstatSync(p);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -142,6 +187,10 @@ export function applyProposal(proposal: ReviewProposal, ctx: WriterContext): Wri
       action = 'edit';
       target = byName;
     } else {
+      const installed = findInstalledDuplicate(name, proposal.desc ?? '', ctx.existing);
+      if (installed) {
+        return { written: false, action: 'create', name, reason: `duplicates installed skill ${installed.name}` };
+      }
       // dedup by description against auto skills → downgrade to edit
       const byDesc = ctx.existing.find(
         (s) => s.origin === 'auto' && normalizeDesc(s.description) === normalizeDesc(proposal.desc ?? ''),
@@ -197,11 +246,13 @@ export function applyProposal(proposal: ReviewProposal, ctx: WriterContext): Wri
   // in-memory `ctx.existing` registry). A user file can occupy the exact target
   // path while being invisible to `ctx.existing` — its frontmatter fails to
   // parse, or its `name` field differs from its directory. Re-read the real
-  // target and refuse unless it is origin:auto. Skips the `.pending` queue
-  // (separate namespace, never a live user skill).
+  // target and refuse unless it is an origin:auto skill in a real
+  // directory (a symlink would be written through to wherever it points). Skips
+  // the `.pending` queue (separate namespace, never a live user skill).
   const targetPath = skillFilePath(ctx.workspaceDir, name, queued);
-  if (!queued && fs.existsSync(targetPath) && readSkillOrigin(targetPath) !== 'auto') {
-    return { written: false, action, name, reason: 'provenance guard: on-disk target is not origin:auto' };
+  const targetDir = path.dirname(targetPath);
+  if (!queued && pathEntryExists(targetDir) && !isOwnedAutoSkillDir(targetDir) && !isLeftoverWriteDir(targetDir)) {
+    return { written: false, action, name, reason: 'provenance guard: on-disk target is not origin:auto (or is a symlink)' };
   }
 
   try {
@@ -211,6 +262,17 @@ export function applyProposal(proposal: ReviewProposal, ctx: WriterContext): Wri
   }
 
   return { written: true, action, name, queued };
+}
+
+/**
+ * A non-auto skill the create would re-learn: a plugin skill under the same bare
+ * name (`plugin:name`), or any non-auto skill with the same description.
+ */
+function findInstalledDuplicate(name: string, desc: string, existing: ExistingSkill[]): ExistingSkill | undefined {
+  const d = normalizeDesc(desc);
+  return existing.find(
+    (s) => s.origin !== 'auto' && (s.name.endsWith(`:${name}`) || (d !== '' && normalizeDesc(s.description) === d)),
+  );
 }
 
 function normalizeDesc(d: string): string {

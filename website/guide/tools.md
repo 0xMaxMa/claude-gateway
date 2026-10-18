@@ -55,7 +55,7 @@ Learning is enabled in `auto` mode by default. A completed session qualifies for
 | `minToolCalls` | `5` | Tool-call trigger threshold |
 | `maxReviewsPerDay` | `20` | Daily background review ceiling |
 | `reviewModel` | `claude-haiku-4-5-20251001` | Background review model |
-| `maxAutoSkills` | `50` | Learned-skill capacity |
+| `maxAutoSkills` | `20` | Learned-skill capacity |
 | `maxAgeDays` / `minUsesToKeep` | `30` / `2` | Curator age/use policy |
 | `pruneHour` | `3` | Daily curator hour |
 | `notify` | `true` | Learning notifications |
@@ -63,6 +63,8 @@ Learning is enabled in `auto` mode by default. A completed session qualifies for
 Per-agent `skillLearning` values override `gateway.skillLearning`, then built-in defaults apply. The pruning timezone resolves through agent override, gateway skill-learning override, `gateway.timezone`, then UTC; invalid timezone values fall through to the next level.
 
 Choose `mode: "propose"` to queue candidate instructions in `skills/.pending/` for review before making them live. In `auto` mode, inspect the live skill and `SKILLS_LEARNED.md` after a learning event. The writer marks learned skills `origin: auto` and refuses to overwrite a human-authored target. Missing provenance is treated as human-authored. Curator policy applies to automatically learned skills, not a blanket deletion of all old instructions.
+
+The curator never deletes a learned skill outright. It moves the directory to `skills/.archive/<YYYY-MM-DD>/<name>/`, which the skills menu ignores, and removes archive days older than 30 days. If `skills/.archive` is not a usable directory (for example a file or a symlink), the curator moves and deletes nothing and logs one warning per run; the menu then lists at most `maxAutoSkills` unpinned learned skills, most recently used first, and the rest still run by `/name`. To restore a skill, move its directory back to `skills/`; the next curator run tracks it as a learned skill again, so it counts toward `maxAutoSkills` and gets a fresh 7 days in the menu. A learned skill that has not been used (by `/name`, the Skill tool, or the agent or a worker reading its `SKILL.md`, including with a shell read such as `cat` or `sed -n`, also from a container agent at `/workspace`) in its first 7 days drops out of the AVAILABLE SKILLS menu and the orchestration skill catalog but still runs by `/name`. One use brings it back to the orchestration catalog at once and rewrites CLAUDE.md so the menu lists it from the next session start; running sessions are not restarted. `pinned: true` in its frontmatter keeps it listed. The reviewer sees installed Claude Code plugin skills as well as workspace, module, and shared skills, and the writer refuses a new learned skill that repeats an installed skill's name or description.
 
 The menu shortens auto-learned descriptions to 80 characters to bound recurring context cost; the full skill body remains available when invoked.
 
