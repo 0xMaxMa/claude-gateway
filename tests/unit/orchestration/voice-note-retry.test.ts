@@ -18,13 +18,13 @@ const until = async (predicate: () => boolean) => {
   throw Error('condition not reached');
 };
 
-async function fixture(failures: string[], chatId = '42', results: string[] = [], notes: Partial<typeof ORCHESTRATION_DEFAULTS.voice.notes> = {}) {
+async function fixture(failures: string[], chatId = '42', results: string[] = [], notes: Partial<typeof ORCHESTRATION_DEFAULTS.voice.notes> = {}, language = '') {
   const root = mkdtempSync(join(tmpdir(), 'voice-retry-'));
   mkdirSync(join(root, 'a', 'media', 'chat'), { recursive: true });
   writeFileSync(join(root, 'a', 'media', 'chat', 'note.ogg'), Buffer.from('OggSfixture'));
   const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a');
   const agent: AgentConfig = { id: 'a', workspace: join(root, 'a', 'workspace'), description: '', env: '', claude: { model: 'fixture', extraFlags: [] },
-    orchestration: { enabled: true, channels: ['telegram'] }, voice: { ...ORCHESTRATION_DEFAULTS.voice, enabled: true, notes: { ...ORCHESTRATION_DEFAULTS.voice.notes, replyWithVoice: false, ...notes } } };
+    orchestration: { enabled: true, channels: ['telegram', 'discord', 'line', 'slack'] }, voice: { ...ORCHESTRATION_DEFAULTS.voice, enabled: true, language, notes: { ...ORCHESTRATION_DEFAULTS.voice.notes, replyWithVoice: false, ...notes } } };
   const gateway = { gateway: { orchestration: true, headless: true, logDir: join(root, 'logs'), timezone: 'UTC' }, agents: [agent] } as GatewayConfig;
   const transcribed: string[] = [], prompts: string[] = [];
   const runtime = await AgentOrchestrationRuntime.open(agent, gateway, root, sessions, history, {
@@ -185,5 +185,19 @@ test('an empty managed wallet is reported once per chat until a note transcribes
     expect(await send()).toContain('Voice credit is used up');
     expect(notices()).toHaveLength(2);
     expect(f.controls()).toEqual([]);
+  } finally { await f.close(); }
+});
+
+test.each(['telegram', 'discord', 'line', 'slack'] as const)('%s reports an empty managed wallet in fixed English, even for a Thai chat', async source => {
+  const f = await fixture(['MANAGED_VOICE_QUOTA_EXHAUSTED'], '42', [], { provider: 'managed:paxalabs' }, 'th');
+  const scope = { agentId: 'a', agentSessionId: 's', source, accountId: 'bot', chatId: '42', threadKey: '', principalId: `${source}:42` };
+  try {
+    const reply = await f.runtime.send({ scope, text: '(ข้อความเสียง)', modality: 'voice_note', attachmentIds: ['media/chat/note.ogg'], ingressKey: `${source}-message-1` }, { execute: true, writeMemory: false }, { timeoutMs: 2000 });
+    const inputId = String(f.runtime.store.get('SELECT input_id FROM voice_note_transcripts')!.input_id);
+    const expected = `Voice credit is used up, so this voice message could not be transcribed. Please type your message instead. Reference: ${inputId}`;
+    expect(reply).toBe(expected);
+    expect(f.runtime.store.all("SELECT delivered_text FROM deliveries WHERE modality='text'").map(row => String(row.delivered_text))).toEqual([expected]);
+    // The fixed notice never reaches the agent, so nothing can translate it.
+    expect(f.prompts).toEqual([]);
   } finally { await f.close(); }
 });

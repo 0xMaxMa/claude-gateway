@@ -111,7 +111,7 @@ test.each([
   expect(speechFailureNotice(code)).toBe(`${expected}, or use /voice off.`);
 });
 
-test.each(['telegram', 'discord', 'line', 'slack'] as const)('%s follows text with one empty-wallet voice notice per chat, even across a restart', async channel => {
+test.each(['telegram', 'discord', 'line', 'slack'] as const)('%s follows a Thai text reply with one fixed-English empty-wallet voice notice per chat, even across a restart', async channel => {
   const root = mkdtempSync(join(tmpdir(), 'speech-credit-')), database = join(root, 'state.db');
   let store = new OrchestrationStore(database, 'a');
   const agent = { id: 'a', telegram: { botToken: 'fixture' }, discord: { botToken: 'fixture' }, line: { channelAccessToken: 'fixture' }, slack: { botToken: 'fixture' } } as AgentConfig;
@@ -129,16 +129,16 @@ test.each(['telegram', 'discord', 'line', 'slack'] as const)('%s follows text wi
       const decisions = new DecisionService(store, (r, b, body) => outbox.enqueue(r, b, body));
       const input = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's', source: channel, accountId: 'account', chatId: '123', threadKey: '', principalId: 'owner' }, text });
       const receipt = decisions.begin(input.conversationId, 'owner', [input.inputId]);
-      store.transaction(() => outbox.enqueueSpeech(receipt.responseId!, input.bindingId, speech));
+      store.transaction(() => outbox.enqueueSpeech(receipt.responseId!, input.bindingId, { ...speech, text }));
       decisions.finish(receipt, text);
       for (let i = 0; i < 4; i++) await outbox.tick();
     };
-    await reply('First answer');
-    expect(sentTexts()).toEqual(['First answer', 'Voice reply unavailable: voice credit is used up. Text replies continue until the credit resets or is topped up, or use /voice off.']);
+    await reply('สวัสดีครับ คำตอบแรก');
+    expect(sentTexts()).toEqual(['สวัสดีครับ คำตอบแรก', 'Voice reply unavailable: voice credit is used up. Text replies continue until the credit resets or is topped up, or use /voice off.']);
     store.close(); store = new OrchestrationStore(database, 'a');
-    await reply('Second answer');
+    await reply('คำตอบที่สอง');
     expect(sentTexts()).toHaveLength(3);
-    expect(sentTexts()[2]).toBe('Second answer');
+    expect(sentTexts()[2]).toBe('คำตอบที่สอง');
     expect(synthesizeFile).toHaveBeenCalledTimes(2);
     expect(store.all("SELECT id FROM outbox WHERE dedup_key LIKE 'speech-failure:%'")).toHaveLength(1);
   } finally { log.mockRestore(); store.close(); rmSync(root, { recursive: true, force: true }); }
