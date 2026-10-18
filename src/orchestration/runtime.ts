@@ -1203,7 +1203,7 @@ export class AgentOrchestrationRuntime {
             if (!hasSpokenWords(text)) throw new OrchestrationError('VOICE_NOTE_NO_TRANSCRIPT');
             this.store.transaction(() => {
               this.store.run("UPDATE voice_note_transcripts SET state='completed',text=? WHERE input_id=?", text, receipt.inputId);
-              if (this.config.voice.notes.provider.startsWith('managed:')) this.store.clearVoiceCreditNotice(input.scope.source, input.scope.chatId, input.scope.threadKey);
+              if (trace.provider.startsWith('managed:')) this.store.clearVoiceCreditNotices();
             });
           } catch (error) {
             const code = error instanceof OrchestrationError || error instanceof VoiceError ? error.code : 'VOICE_NOTE_STT_FAILED';
@@ -1218,7 +1218,7 @@ export class AgentOrchestrationRuntime {
           // An empty managed wallet fails every note until it is topped up: say so once per chat.
           // The claim commits with the notice, so an interrupted turn does not use it up.
           const notify = this.store.compose(() => {
-            if (code !== MANAGED_VOICE_QUOTA_EXHAUSTED || this.store.claimVoiceCreditNotice(input.scope.source, input.scope.chatId, input.scope.threadKey, 'stt')) {
+            if (code !== MANAGED_VOICE_QUOTA_EXHAUSTED || this.store.claimVoiceCreditNotice(input.scope.source, input.scope.chatId, input.scope.threadKey, 'stt', decision.responseId!)) {
               this.decisions.finish(decision, text, 'failed'); return true;
             }
             // Skipping a recording has not reported any assigned worker results.

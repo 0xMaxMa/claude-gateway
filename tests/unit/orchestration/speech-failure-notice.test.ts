@@ -148,12 +148,13 @@ test.each([
   ['a delivered managed voice reply means credit is back', 'managed:paxalabs', 'delivered', 2],
   ['a delivered BYOK voice reply says nothing about the managed wallet', 'paxalabs', 'delivered', 1],
   ['an undelivered notice releases its claim', 'managed:paxalabs', 'failed', 2],
+  ['a notice that may have arrived keeps its claim', 'managed:paxalabs', 'unknown', 1],
 ] as const)('%s', async (_name, provider, noticeState, expected) => {
   const store = new OrchestrationStore(':memory:', 'a');
   let outcome: 'quota' | 'ok' = 'quota';
   const sender: ChannelSender = async (_binding, text, _id, _file, audio) => audio
     ? outcome === 'ok' ? { state: 'delivered', providerId: 'voice' } : { state: 'failed', code: 'MANAGED_VOICE_QUOTA_EXHAUSTED', speechSynthesisFailed: true }
-    : text.startsWith('Voice reply unavailable') && noticeState === 'failed' ? { state: 'failed', code: 'PROVIDER_HTTP_400' } : { state: 'delivered' };
+    : text.startsWith('Voice reply unavailable') && noticeState !== 'delivered' ? { state: noticeState, code: noticeState === 'failed' ? 'PROVIDER_HTTP_400' : 'PROVIDER_RECEIPT_UNKNOWN' } : { state: 'delivered' };
   const outbox = new DeliveryOutbox(store, sender);
   const decisions = new DecisionService(store, (r, b, text) => outbox.enqueue(r, b, text));
   const reply = async () => {
@@ -184,4 +185,25 @@ test('only a definite empty wallet uses the used-up wording', () => {
   expect(describeVoiceError('MANAGED_VOICE_USAGE_TIMEOUT')).toMatchObject({ category: 'credit_check', retryable: true });
   // Only the exact wallet code, never a provider reason that happens to share the category name.
   expect(describeVoiceError('TTS_PROVIDER_ERROR_HTTP_400_REASON_MANAGED_CREDIT').category).toBe('invalid_request');
+});
+
+test('a voice-note credit notice that failed to send releases its claim; other chats share the managed wallet reset', async () => {
+  const store = new OrchestrationStore(':memory:', 'a');
+  let fail = true;
+  const outbox = new DeliveryOutbox(store, async () => fail ? { state: 'failed', code: 'PROVIDER_HTTP_403' } : { state: 'delivered' });
+  const decisions = new DecisionService(store, (r, b, text) => outbox.enqueue(r, b, text));
+  try {
+    const notice = (chatId: string) => {
+      const input = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's', source: 'telegram', accountId: 'account', chatId, threadKey: '', principalId: 'owner' }, text: '(voice message)' });
+      const receipt = decisions.begin(input.conversationId, 'owner', [input.inputId]);
+      const claimed = store.compose(() => { const ok = store.claimVoiceCreditNotice('telegram', chatId, '', 'stt', receipt.responseId!); if (ok) decisions.finish(receipt, 'Voice credit is used up', 'failed'); return ok; });
+      if (!claimed) decisions.finish(receipt, '', 'completed', undefined, false);
+      return claimed;
+    };
+    expect(notice('1')).toBe(true);
+    await outbox.tick();
+    expect(notice('1')).toBe(true);
+    fail = false; await outbox.tick();
+    expect(notice('1')).toBe(false);
+  } finally { store.close(); }
 });
