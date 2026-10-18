@@ -121,7 +121,7 @@ export class OrchestrationStore {
         this.db.exec('CREATE TABLE IF NOT EXISTS telegram_tts_voices(chat_id TEXT PRIMARY KEY, provider TEXT NOT NULL, voice_id TEXT NOT NULL)');
         this.db.exec('CREATE TABLE IF NOT EXISTS telegram_voice_preferences(chat_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)))');
         this.db.exec("CREATE TABLE IF NOT EXISTS voice_reply_modes(chat_id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('off','auto','on')))");
-        this.db.exec("CREATE TABLE IF NOT EXISTS voice_credit_notices(binding_id TEXT NOT NULL REFERENCES conversation_bindings(id), kind TEXT NOT NULL CHECK(kind IN ('stt','tts')), noticed_at INTEGER NOT NULL, PRIMARY KEY(binding_id,kind))");
+        this.db.exec("CREATE TABLE IF NOT EXISTS voice_credit_notices(chat_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('stt','tts')), noticed_at INTEGER NOT NULL, PRIMARY KEY(chat_id,kind))");
       });
       const foreign = this.get('SELECT id FROM conversations WHERE agent_id != ? LIMIT 1', agentId);
       if (foreign) throw new OrchestrationError('AGENT_STORE_MISMATCH');
@@ -173,14 +173,15 @@ export class OrchestrationStore {
     };
     if (this.inTransaction) write(); else this.transaction(write);
   }
-  /** One empty-wallet notice per chat and kind per cooldown; durable so a restart does not repeat it. */
-  claimVoiceCreditNotice(bindingId: string, kind: VoiceCreditNoticeKind, now = Date.now()): boolean {
-    return Number(this.run(`INSERT INTO voice_credit_notices VALUES(?,?,?) ON CONFLICT(binding_id,kind)
-      DO UPDATE SET noticed_at=excluded.noticed_at WHERE noticed_at<=?`, bindingId, kind, now, now - VOICE_CREDIT_NOTICE_COOLDOWN_MS).changes) > 0;
+  /** One empty-wallet notice per chat and kind per cooldown, across sessions; durable so a restart does not repeat it. */
+  claimVoiceCreditNotice(channel: string, chatId: string, thread: string, kind: VoiceCreditNoticeKind, now = Date.now()): boolean {
+    return Number(this.run(`INSERT INTO voice_credit_notices VALUES(?,?,?) ON CONFLICT(chat_id,kind)
+      DO UPDATE SET noticed_at=excluded.noticed_at WHERE noticed_at<=?`, channelVoiceKey(channel, chatId, thread), kind, now, now - VOICE_CREDIT_NOTICE_COOLDOWN_MS).changes) > 0;
   }
-  /** Voice worked again, so the wallet was reset or topped up: the next exhaustion is news. */
-  clearVoiceCreditNotice(bindingId: string, kind: VoiceCreditNoticeKind): void {
-    this.run('DELETE FROM voice_credit_notices WHERE binding_id=? AND kind=?', bindingId, kind);
+  /** Managed voice worked again, so the shared wallet was reset or topped up: the next exhaustion is news.
+   * With a kind, releases a claim whose notice could not be delivered. */
+  clearVoiceCreditNotice(channel: string, chatId: string, thread: string, kind?: VoiceCreditNoticeKind): void {
+    this.run('DELETE FROM voice_credit_notices WHERE chat_id=? AND (? IS NULL OR kind=?)', channelVoiceKey(channel, chatId, thread), kind ?? null, kind ?? null);
   }
   close(): void { this.db.close(); }
   get(sql: string, ...values: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...values) as Row | undefined; }

@@ -134,7 +134,7 @@ test.each(['telegram', 'discord', 'line', 'slack'] as const)('%s follows text wi
       for (let i = 0; i < 4; i++) await outbox.tick();
     };
     await reply('First answer');
-    expect(sentTexts()).toEqual(['First answer', 'Voice reply unavailable: voice credit is used up. Text replies continue, and voice returns after the credit resets or is topped up. Use /voice off to stop voice replies.']);
+    expect(sentTexts()).toEqual(['First answer', 'Voice reply unavailable: voice credit is used up. Text replies continue until the credit resets or is topped up, or use /voice off.']);
     store.close(); store = new OrchestrationStore(database, 'a');
     await reply('Second answer');
     expect(sentTexts()).toHaveLength(3);
@@ -144,28 +144,32 @@ test.each(['telegram', 'discord', 'line', 'slack'] as const)('%s follows text wi
   } finally { log.mockRestore(); store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test('a delivered voice reply means credit is back, so the next empty wallet is reported again', async () => {
+test.each([
+  ['a delivered managed voice reply means credit is back', 'managed:paxalabs', 'delivered', 2],
+  ['a delivered BYOK voice reply says nothing about the managed wallet', 'paxalabs', 'delivered', 1],
+  ['an undelivered notice releases its claim', 'managed:paxalabs', 'failed', 2],
+] as const)('%s', async (_name, provider, noticeState, expected) => {
   const store = new OrchestrationStore(':memory:', 'a');
   let outcome: 'quota' | 'ok' = 'quota';
-  const sender: ChannelSender = async (_binding, _text, _id, _file, audio) => audio
+  const sender: ChannelSender = async (_binding, text, _id, _file, audio) => audio
     ? outcome === 'ok' ? { state: 'delivered', providerId: 'voice' } : { state: 'failed', code: 'MANAGED_VOICE_QUOTA_EXHAUSTED', speechSynthesisFailed: true }
-    : { state: 'delivered' };
+    : text.startsWith('Voice reply unavailable') && noticeState === 'failed' ? { state: 'failed', code: 'PROVIDER_HTTP_400' } : { state: 'delivered' };
   const outbox = new DeliveryOutbox(store, sender);
   const decisions = new DecisionService(store, (r, b, text) => outbox.enqueue(r, b, text));
   const reply = async () => {
     const input = store.acceptInput({ scope: { agentId: 'a', agentSessionId: 's', source: 'telegram', accountId: 'account', chatId: '123', threadKey: '', principalId: 'owner' }, text: 'hello' });
     const receipt = decisions.begin(input.conversationId, 'owner', [input.inputId]);
     decisions.finish(receipt, 'Answer');
-    store.transaction(() => outbox.enqueueSpeech(receipt.responseId!, input.bindingId, speech));
+    store.transaction(() => outbox.enqueueSpeech(receipt.responseId!, input.bindingId, { ...speech, provider }));
     for (let i = 0; i < 3; i++) await outbox.tick();
   };
   const log = jest.spyOn(console, 'warn').mockImplementation(() => {});
   try {
-    await reply(); await reply();
-    expect(store.all("SELECT id FROM outbox WHERE dedup_key LIKE 'speech-failure:%'")).toHaveLength(1);
-    outcome = 'ok'; await reply();
-    outcome = 'quota'; await reply();
-    expect(store.all("SELECT id FROM outbox WHERE dedup_key LIKE 'speech-failure:%'")).toHaveLength(2);
+    await reply();
+    if (noticeState === 'delivered') { await reply(); outcome = 'ok'; await reply(); outcome = 'quota'; }
+    await reply();
+    expect(store.all("SELECT id FROM outbox WHERE dedup_key LIKE 'speech-failure:%'")).toHaveLength(expected);
+    expect(log.mock.calls.map(([line]) => JSON.parse(line)).filter(event => event.event === 'Speech synthesis failed')).toHaveLength(noticeState === 'delivered' ? 3 : 2);
   } finally { log.mockRestore(); store.close(); }
 });
 
@@ -178,4 +182,6 @@ test('only a definite empty wallet uses the used-up wording', () => {
     expect(voiceNoteFailureMessage(code)).not.toContain('used up');
   }
   expect(describeVoiceError('MANAGED_VOICE_USAGE_TIMEOUT')).toMatchObject({ category: 'credit_check', retryable: true });
+  // Only the exact wallet code, never a provider reason that happens to share the category name.
+  expect(describeVoiceError('TTS_PROVIDER_ERROR_HTTP_400_REASON_MANAGED_CREDIT').category).toBe('invalid_request');
 });

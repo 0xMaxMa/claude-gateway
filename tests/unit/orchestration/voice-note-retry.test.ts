@@ -18,13 +18,13 @@ const until = async (predicate: () => boolean) => {
   throw Error('condition not reached');
 };
 
-async function fixture(failures: string[], chatId = '42', results: string[] = []) {
+async function fixture(failures: string[], chatId = '42', results: string[] = [], notes: Partial<typeof ORCHESTRATION_DEFAULTS.voice.notes> = {}) {
   const root = mkdtempSync(join(tmpdir(), 'voice-retry-'));
   mkdirSync(join(root, 'a', 'media', 'chat'), { recursive: true });
   writeFileSync(join(root, 'a', 'media', 'chat', 'note.ogg'), Buffer.from('OggSfixture'));
   const sessions = new SessionStore(root), history = HistoryDB.forAgent(root, 'a');
   const agent: AgentConfig = { id: 'a', workspace: join(root, 'a', 'workspace'), description: '', env: '', claude: { model: 'fixture', extraFlags: [] },
-    orchestration: { enabled: true, channels: ['telegram'] }, voice: { ...ORCHESTRATION_DEFAULTS.voice, enabled: true, notes: { ...ORCHESTRATION_DEFAULTS.voice.notes, replyWithVoice: false } } };
+    orchestration: { enabled: true, channels: ['telegram'] }, voice: { ...ORCHESTRATION_DEFAULTS.voice, enabled: true, notes: { ...ORCHESTRATION_DEFAULTS.voice.notes, replyWithVoice: false, ...notes } } };
   const gateway = { gateway: { orchestration: true, headless: true, logDir: join(root, 'logs'), timezone: 'UTC' }, agents: [agent] } as GatewayConfig;
   const transcribed: string[] = [], prompts: string[] = [];
   const runtime = await AgentOrchestrationRuntime.open(agent, gateway, root, sessions, history, {
@@ -170,7 +170,7 @@ test('a group chat failure has no Retry button, since only a private chat can us
 });
 
 test('an empty managed wallet is reported once per chat until a note transcribes again', async () => {
-  const f = await fixture(['MANAGED_VOICE_QUOTA_EXHAUSTED', 'MANAGED_VOICE_QUOTA_EXHAUSTED', '', 'MANAGED_VOICE_QUOTA_EXHAUSTED']);
+  const f = await fixture(['MANAGED_VOICE_QUOTA_EXHAUSTED', 'MANAGED_VOICE_QUOTA_EXHAUSTED', '', 'MANAGED_VOICE_QUOTA_EXHAUSTED'], '42', [], { provider: 'managed:paxalabs' });
   const scope = { agentId: 'a', agentSessionId: 's', source: 'telegram' as const, accountId: 'bot', chatId: '42', threadKey: '', principalId: 'telegram:42' };
   let n = 0;
   const send = () => f.runtime.send({ scope, text: '(voice message)', modality: 'voice_note', attachmentIds: ['media/chat/note.ogg'], ingressKey: `tg-message-${++n}` }, { execute: true, writeMemory: false }, { timeoutMs: 2000 });

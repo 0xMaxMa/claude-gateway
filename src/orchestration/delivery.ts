@@ -1,5 +1,6 @@
 import { stripMarkdownPreservingUrls } from '../agent/line-pure';
 import { describeVoiceError } from '../voice/errors';
+import { MANAGED_VOICE_QUOTA_EXHAUSTED } from '../voice/managed-quota';
 import { resolveTelegramReplyFormat } from '../telegram/markdown';
 import { chunkText, htmlToPlain } from '../telegram/chunks';
 import { orderLineRequest } from '../shared/line-request-order';
@@ -87,8 +88,8 @@ export function channelSender(config: AgentConfig | (() => AgentConfig), request
 /** Channel notices share one provider-independent vocabulary; details stay in logs. */
 export function speechFailureNotice(code: string): string {
   const diagnostic = describeVoiceError(code);
-  if (diagnostic.category === 'managed_credit') return 'Voice reply unavailable: voice credit is used up. Text replies continue, and voice returns after the credit resets or is topped up. Use /voice off to stop voice replies.';
   const messages: Record<string, [string, string]> = {
+    managed_credit: ['Voice reply unavailable: voice credit is used up', 'Text replies continue until the credit resets or is topped up'],
     quota: ['Voice quota exhausted', 'Try again after the quota resets'],
     daily_quota: ['Voice quota exhausted', 'Try again after the quota resets'],
     quota_or_rate_limit: ['Voice rate limit or quota reached', 'Check provider usage'],
@@ -230,16 +231,20 @@ export class DeliveryOutbox {
           }
           this.store.run('UPDATE deliveries SET state=?,provider_message_id=?,updated_at=? WHERE id=?', result.state, result.state === 'delivered' ? result.providerId ?? null : null, Date.now(), id);
           this.store.run('UPDATE outbox SET state=?,last_error=? WHERE id=?', result.state === 'delivered' ? 'completed' : result.state, result.state === 'delivered' ? null : result.message ? `${result.code}: ${result.message}` : result.code, row.id);
-          if (delivery.modality === 'speech' && result.state === 'delivered') this.store.clearVoiceCreditNotice(String(delivery.binding_id), 'tts');
+          const chat = [String(binding.channel), String(binding.chat_id), String(binding.thread_key)] as const;
+          if (delivery.modality === 'speech' && result.state === 'delivered' && String(JSON.parse(String(delivery.delivered_text)).provider).startsWith('managed:')) this.store.clearVoiceCreditNotice(...chat);
+          // An undelivered notice told nobody: the next exhaustion may say it again.
+          if (payload.creditNotice && result.state !== 'delivered') this.store.clearVoiceCreditNotice(...chat, 'tts');
           if (delivery.modality === 'speech' && result.state === 'failed' && result.speechSynthesisFailed) {
             const key = `speech-failure:${id}`;
             // An empty managed wallet fails every reply until it is topped up: say so once per chat.
             if (!this.store.get('SELECT id FROM outbox WHERE dedup_key=?', key)) {
-              const notify = result.code !== 'MANAGED_VOICE_QUOTA_EXHAUSTED' || this.store.claimVoiceCreditNotice(String(delivery.binding_id), 'tts');
+              const creditNotice = result.code === MANAGED_VOICE_QUOTA_EXHAUSTED;
+              const notify = !creditNotice || this.store.claimVoiceCreditNotice(...chat, 'tts');
               if (notify) {
                 const noticeId = randomUUID();
                 this.store.run('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?,?,?)', noticeId, delivery.response_id, null, delivery.binding_id, 'text', 'pending', null, speechFailureNotice(result.code), null, Date.now());
-                this.store.enqueue('delivery', key, { deliveryId: noticeId, textFormat: 'text', speechFailureFor: id });
+                this.store.enqueue('delivery', key, { deliveryId: noticeId, textFormat: 'text', speechFailureFor: id, ...(creditNotice ? { creditNotice } : {}) });
               }
               const speech = JSON.parse(String(delivery.delivered_text)) as SpeechDelivery;
               console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'Speech synthesis failed', agentId: this.store.agentId, channel: binding.channel, referenceId: id, provider: speech.provider, model: speech.model, code: result.code, notified: notify, ...describeVoiceError(result.code) }));
