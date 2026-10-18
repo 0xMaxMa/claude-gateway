@@ -324,17 +324,20 @@ export interface LoadWorkspaceOptions {
  * it (the runner's skill registry). Every trigger — skill use, config reload, workspace
  * and skill watchers — shares the returned function, and runs go one at a time: a later
  * recompose loads after the earlier one is written, so a stale load (an older skill_stats
- * read) can never land last and re-hide a skill that was just used.
+ * read) can never land last and re-hide a skill that was just used. Once `isCurrent` says
+ * false (the runner was replaced), a run neither writes CLAUDE.md nor applies the load.
  */
 export function workspaceRecomposer(
   workspaceDir: string,
   load: () => Promise<LoadedWorkspace>,
   apply: (updated: LoadedWorkspace) => void,
+  isCurrent: () => boolean = () => true,
 ): () => Promise<LoadedWorkspace> {
   let tail: Promise<unknown> = Promise.resolve();
   return () => {
     const run = tail.then(async () => {
       const updated = await load();
+      if (!isCurrent()) return updated;
       await fs.promises.writeFile(path.join(workspaceDir, 'CLAUDE.md'), updated.systemPrompt, 'utf8');
       apply(updated);
       return updated;

@@ -21,6 +21,7 @@ import * as path from 'path';
 import { msUntilNextHour } from '../../history/cleanup';
 import { isValidTimezone } from './config';
 import { ownedAutoSkillFrontmatter } from './writer';
+import { lastActivity } from '../../skills/loader';
 import { computeRollup } from './metrics';
 import type { HistoryDB } from '../../history/db';
 import type { ResolvedSkillLearningCfg } from './types';
@@ -69,9 +70,14 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
   trackUntrackedAutoSkills(deps);
   const auto = db.listSkillStats().filter((s) => s.origin === 'auto' && s.pinned !== 1);
   // Nothing can be archived into an unusable archive: say so once, keep every skill.
+  // The skills menu enforces the cap meanwhile (skillCatalogUsage → maxListedAutoSkills).
   const archiveDir = path.join(workspaceDir, 'skills', ARCHIVE_DIRNAME);
-  if (!archiveDirUsable(archiveDir)) {
-    warn(deps, `prune and cap skipped: ${archiveDir} is not a real directory`);
+  if (!archiveDirUsable(workspaceDir)) {
+    warn(
+      deps,
+      `prune and cap skipped: ${archiveDir} is not a real directory. No skill is moved or deleted; ` +
+        'the skills menu hides the least-recently-used auto skills above maxAutoSkills until it is fixed',
+    );
     logRollup(deps);
     return result;
   }
@@ -95,7 +101,7 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
       // Oldest-used first. Fall back to createdAt for never-used skills so a
       // brand-new (lastUsedAt=null) skill is not treated as the stalest and
       // evicted before it is ever loaded.
-      .sort((a, b) => (a.lastUsedAt ?? a.createdAt ?? 0) - (b.lastUsedAt ?? b.createdAt ?? 0));
+      .sort((a, b) => lastActivity(a) - lastActivity(b));
     let overflow = survivors.length - cfg.maxAutoSkills;
     // A failed archive moves on to the next candidate, so the cap still holds.
     for (const s of lru) {
@@ -188,10 +194,10 @@ function warn(deps: CuratorDeps, msg: string): void {
   else deps.logger?.info(line);
 }
 
-/** True if the archive dir is absent or a real directory (never a symlink out of skills/). */
-function archiveDirUsable(archiveDir: string): boolean {
+/** True if `<workspace>/skills/.archive` is absent or a real directory (never a symlink out of skills/). */
+export function archiveDirUsable(workspaceDir: string): boolean {
   try {
-    return fs.lstatSync(archiveDir).isDirectory();
+    return fs.lstatSync(path.join(workspaceDir, 'skills', ARCHIVE_DIRNAME)).isDirectory();
   } catch {
     return true;
   }

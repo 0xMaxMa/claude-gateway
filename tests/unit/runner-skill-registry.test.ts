@@ -54,3 +54,14 @@ describe('AgentRunner.setSkillRegistry', () => {
     expect(runner.getSkillRegistry()).toMatchObject({ cliSkills: [], cliDiscoveryError: 'CLI_SKILL_DISCOVERY_UNAVAILABLE' });
   });
 });
+
+describe('AgentRunner.recomposeWorkspace', () => {
+  it('runs the wired workspace recomposer, and reports false when none is wired', async () => {
+    const runner = makeRunner();
+    await expect(runner.recomposeWorkspace()).resolves.toBe(false);
+    const recompose = jest.fn(async () => undefined);
+    runner.setWorkspaceRecomposer(recompose);
+    await expect(runner.recomposeWorkspace()).resolves.toBe(true);
+    expect(recompose).toHaveBeenCalledTimes(1);
+  });
+});

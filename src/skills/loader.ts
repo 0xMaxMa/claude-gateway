@@ -20,16 +20,27 @@ export const AUTO_SKILL_MENU_DESC_MAX = 80;
 export const AUTO_SKILL_CATALOG_GRACE_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** One `skill_stats` row as the menu sees it: load count + the curator's age clock. */
+/** One `skill_stats` row as the menu sees it: load count, last use + the curator's age clock. */
 export interface SkillUsageStat {
   timesLoaded: number;
   createdAt: number | null;
+  lastUsedAt: number | null;
 }
 
 /** Usage that decides which auto skills the menu shows (from `skill_stats`). */
 export interface SkillCatalogUsage {
   now: number;
   stats: ReadonlyMap<string, SkillUsageStat>;
+  /**
+   * Set when the curator cannot archive (an unusable skills/.archive): the menu then lists at
+   * most this many unpinned auto skills, most recently used first, instead of the curator.
+   */
+  maxListedAutoSkills?: number;
+}
+
+/** LRU clock shared with the curator: last use, or creation for a never-used skill. */
+export function lastActivity(s: { lastUsedAt: number | null; createdAt: number | null }): number {
+  return s.lastUsedAt ?? s.createdAt ?? 0;
 }
 
 /** The frontmatter of an auto-learned workspace skill; undefined for any other skill. */
@@ -295,12 +306,24 @@ function containerPath(def: SkillDefinition): string | undefined {
   return path.posix.join(CONTAINER_WORKSPACE, 'skills', dir, file);
 }
 
-/** Keys of the never-used auto skills past the grace window (see AUTO_SKILL_CATALOG_GRACE_DAYS). */
+/**
+ * Keys of the never-used auto skills past the grace window (see AUTO_SKILL_CATALOG_GRACE_DAYS),
+ * plus, under `maxListedAutoSkills`, the least-recently-used listed ones above that cap.
+ */
 export function hiddenAutoSkills(registry: SkillRegistry, usage: SkillCatalogUsage): Set<string> {
   const hidden = new Set<string>();
+  const listed: Array<[string, SkillUsageStat]> = [];
   for (const [key, skill] of registry.skills) {
     const fm = autoFrontmatter(skill);
-    if (skill.userInvocable && fm && hiddenUntilUsed(key, fm, usage)) hidden.add(key);
+    if (!skill.userInvocable || !fm) continue;
+    const stat = usage.stats.get(key);
+    if (hiddenUntilUsed(key, fm, usage)) hidden.add(key);
+    else if (stat && fm['pinned'] !== true) listed.push([key, stat]);
+  }
+  const overflow = usage.maxListedAutoSkills === undefined ? 0 : listed.length - usage.maxListedAutoSkills;
+  if (overflow > 0) {
+    listed.sort(([, a], [, b]) => lastActivity(a) - lastActivity(b));
+    for (const [key] of listed.slice(0, overflow)) hidden.add(key);
   }
   return hidden;
 }
@@ -339,7 +362,7 @@ export function renderSkillsSection(registry: SkillRegistry): string {
   if (workspace.length > 0 || hidden > 0) {
     sections.push('**Workspace Skills**');
     sections.push(...workspace);
-    if (hidden > 0) sections.push(`(${hidden} auto-learned skills are hidden until first used; they live in skills/ and still run by /name)`);
+    if (hidden > 0) sections.push(`(${hidden} auto-learned skills are hidden until used; they live in skills/ and still run by /name)`);
     sections.push('');
   }
   if (module.length > 0) {

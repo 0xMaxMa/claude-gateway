@@ -2,10 +2,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { HistoryDB } from '../../../src/history/db';
-import { SkillLearningManager, managedTurnSkills, toolUseSkills, skillLearningHostHooks, REVIEW_IDLE_DEBOUNCE_MS, type SkillLearningManagerOpts } from '../../../src/agent/skill-learning';
+import { SkillLearningManager, skillCatalogUsage, managedTurnSkills, toolUseSkills, skillLearningHostHooks, REVIEW_IDLE_DEBOUNCE_MS, type SkillLearningManagerOpts } from '../../../src/agent/skill-learning';
 import { extractFrontmatter } from '../../../src/skills/parser';
 import type { ClaudeSpawnFn } from '../../../src/agent/skill-learning/reviewer';
 import type { SkillLearningConfig } from '../../../src/agent/skill-learning/types';
+import { resolveSkillLearningConfig } from '../../../src/agent/skill-learning/config';
 
 const NOW = 1_000_000;
 
@@ -463,6 +464,28 @@ describe('installed skills vs workspace skills', () => {
 
     expect(fs.readFileSync(path.join(ws, 'skills', 'learned', 'SKILL.md'), 'utf-8')).toContain('new body');
     expect(reviewerInput.match(/- learned: /g)).toHaveLength(1);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('skillCatalogUsage — the menu enforces the cap when the curator cannot archive', () => {
+  const resolved = (over: SkillLearningConfig = {}) => resolveSkillLearningConfig({ maxAutoSkills: 3, ...over });
+
+  it('sets the menu cap only when skills/.archive is unusable and learning is enabled', () => {
+    const { db, ws, dir } = setup();
+    expect(skillCatalogUsage(db, NOW, { workspaceDir: ws, cfg: resolved() }).maxListedAutoSkills).toBeUndefined();
+    fs.writeFileSync(path.join(ws, 'skills', '.archive'), 'not a dir');
+    expect(skillCatalogUsage(db, NOW, { workspaceDir: ws, cfg: resolved() }).maxListedAutoSkills).toBe(3);
+    expect(skillCatalogUsage(db, NOW, { workspaceDir: ws, cfg: resolved({ enabled: false }) }).maxListedAutoSkills).toBeUndefined();
+    expect(skillCatalogUsage(db, NOW, { workspaceDir: ws, cfg: resolved({ maxAutoSkills: 0 }) }).maxListedAutoSkills).toBeUndefined();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('carries each skill\'s last use for the LRU order', () => {
+    const { db, dir } = setup();
+    db.recordSkillCreated({ name: 's', origin: 'auto', createdAt: 5, createdFromSession: null, pinned: 0 });
+    db.bumpSkillLoaded('s', 42);
+    expect(skillCatalogUsage(db, NOW).stats.get('s')).toEqual({ timesLoaded: 1, createdAt: 5, lastUsedAt: 42 });
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });

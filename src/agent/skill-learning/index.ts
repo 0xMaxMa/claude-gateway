@@ -16,7 +16,7 @@ import { intentHash, startOfDayMs } from './telemetry';
 import { shouldReview } from './trigger';
 import { runReviewer, type ClaudeSpawnFn } from './reviewer';
 import { applyProposal, readSkillOrigin, type ExistingSkill } from './writer';
-import { startCurator, curateOnce, type CuratorResult } from './curator';
+import { startCurator, curateOnce, archiveDirUsable, type CuratorResult } from './curator';
 import { computeRollup } from './metrics';
 import { SkillNotifier, type SkillNotifierOpts, type ChannelTokens } from './notifier';
 import type { SessionSignals, SkillLearningConfig, ResolvedSkillLearningCfg, SkillMetricsRollup } from './types';
@@ -48,9 +48,18 @@ interface Accum {
   reviewedTranscriptHash?: string;
 }
 
-/** Per-skill usage for the skills menu (hide-until-used). */
-export function skillCatalogUsage(db: HistoryDB, now = Date.now()): SkillCatalogUsage {
-  return { now, stats: new Map(db.listSkillStats().map((s) => [s.name, { timesLoaded: s.timesLoaded, createdAt: s.createdAt }])) };
+/**
+ * Per-skill usage for the skills menu (hide-until-used). With `cap`, a curator that cannot
+ * archive (unusable skills/.archive) hands its `maxAutoSkills` cap to the menu.
+ */
+export function skillCatalogUsage(
+  db: HistoryDB,
+  now = Date.now(),
+  cap?: { workspaceDir: string; cfg: ResolvedSkillLearningCfg },
+): SkillCatalogUsage {
+  const stats = new Map(db.listSkillStats().map((s) => [s.name, { timesLoaded: s.timesLoaded, createdAt: s.createdAt, lastUsedAt: s.lastUsedAt }]));
+  const menuCap = cap && cap.cfg.enabled && cap.cfg.maxAutoSkills > 0 && !archiveDirUsable(cap.workspaceDir);
+  return menuCap ? { now, stats, maxListedAutoSkills: cap.cfg.maxAutoSkills } : { now, stats };
 }
 
 /** Read-only skill descriptions are trimmed for the reviewer prompt (plugins can add ~100 of them). */

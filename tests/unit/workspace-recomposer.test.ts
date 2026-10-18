@@ -45,4 +45,14 @@ describe('workspaceRecomposer', () => {
     await expect(recompose()).resolves.toMatchObject({ systemPrompt: 'ok' });
     expect(fs.readFileSync(path.join(ws, 'CLAUDE.md'), 'utf8')).toBe('ok');
   });
+
+  it('a recompose for a replaced runner writes nothing and applies nothing', async () => {
+    let current = true;
+    const applied: string[] = [];
+    const recompose = workspaceRecomposer(ws, async () => { current = false; return loaded('old-mode'); }, (u) => applied.push(u.systemPrompt), () => current);
+    fs.writeFileSync(path.join(ws, 'CLAUDE.md'), 'new-runner', 'utf8');
+    await recompose();
+    expect(applied).toEqual([]);
+    expect(fs.readFileSync(path.join(ws, 'CLAUDE.md'), 'utf8')).toBe('new-runner');
+  });
 });

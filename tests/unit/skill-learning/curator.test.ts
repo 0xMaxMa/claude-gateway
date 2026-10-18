@@ -177,6 +177,8 @@ describe('curator.curateOnce', () => {
     expect(r.pruned).toEqual([]);
     expect(r.evicted).toEqual([]);
     expect(warnings.filter((w) => w.includes(ARCHIVE_DIRNAME))).toHaveLength(1);
+    // Nothing is deleted: the skills menu enforces the cap instead (see skillCatalogUsage).
+    expect(warnings[0]).toContain('hides the least-recently-used auto skills above maxAutoSkills');
     for (const n of ['s1', 's2', 's3']) expect(exists(ws, n)).toBe(true);
     fs.rmSync(dir, { recursive: true, force: true });
   });

@@ -27,6 +27,7 @@ import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
 import { AgentRunner } from './agent/runner';
 import { SkillLearningManager, skillCatalogUsage, skillLearningHostHooks } from './agent/skill-learning';
+import { resolveSkillLearningConfig } from './agent/skill-learning/config';
 import { HistoryDB } from './history/db';
 import { discoverWorkerExtensions } from './session/worker-extensions';
 import { DreamingManager } from './agent/dreaming';
@@ -53,18 +54,6 @@ import { defaultPidfilePath } from './cli/manager';
 import { captureRuntimeProvenance, writeRuntimeProvenance } from './safemode/provenance';
 import { expandHome as expandTilde } from './utils/paths';
 
-
-/**
- * Skills-menu load counts, read from the runner's history DB (<workspace>/../history.db).
- * Undefined if the DB cannot be opened: the menu then lists every skill, as before.
- */
-function agentSkillUsage(agent: AgentConfig) {
-  try {
-    return skillCatalogUsage(HistoryDB.forDir(path.resolve(agent.workspace, '..'), agent.id));
-  } catch {
-    return undefined;
-  }
-}
 
 // ─── Simple argument parsing (no heavy deps) ──────────────────────────────────
 function parseArgs(argv: string[]): Record<string, string | boolean> {
@@ -192,6 +181,20 @@ async function startAgent(
   const disableArchive = agentConfig.disableArchive === true;
   // Background learners read every conversation into shared state, so they stay off.
   const offWhenIsolated = <T extends { enabled?: boolean }>(cfg: T | undefined): T | undefined => isolateMemory ? Object.assign({}, cfg, { enabled: false }) : cfg;
+  // Skills-menu usage, read from the runner's history DB (<workspace>/../history.db), plus the
+  // curator's cap when it cannot archive. Undefined if the DB cannot be opened: the menu then
+  // lists every skill, as before.
+  const agentSkillUsage = () => {
+    try {
+      return skillCatalogUsage(HistoryDB.forDir(path.resolve(agentConfig.workspace, '..'), agentConfig.id), Date.now(), {
+        workspaceDir: agentConfig.workspace,
+        cfg: resolveSkillLearningConfig(offWhenIsolated(agentConfig.skillLearning), gatewayConfig.gateway.skillLearning, gatewayConfig.gateway.timezone),
+      });
+    } catch (err) {
+      logger.warn('Skill usage unavailable; the skills menu lists every skill', { error: (err as Error).message });
+      return undefined;
+    }
+  };
 
   // Ensure workspace directory exists (may be absent for newly created agents)
   try {
@@ -244,7 +247,7 @@ async function startAgent(
   let workspace;
   try {
     workspace = await loadWorkspace(agentConfig.workspace, {
-      skillUsage: agentSkillUsage(agentConfig),
+      skillUsage: agentSkillUsage(),
       coreShrink,
       isolateMemory,
       disableArchive,
@@ -296,12 +299,16 @@ async function startAgent(
 
   agentRunners.set(agentConfig.id, runner);
   agentConfigs.set(agentConfig.id, agentConfig);
-  // Every later CLAUDE.md rewrite for this agent goes through this one queue.
+  // Every later CLAUDE.md rewrite for this agent goes through this one queue (the skills API
+  // and an app reinstall reach it via runner.recomposeWorkspace). Once a replacement runner
+  // takes over (an update toggling isolate mode, #601), this one never writes CLAUDE.md again.
   const recompose = workspaceRecomposer(
     agentConfig.workspace,
-    () => loadWorkspace(agentConfig.workspace, { skillUsage: agentSkillUsage(agentConfig), mcpToolsDir, sharedSkillsDir, logger, memoryBudget, coreShrink, isolateMemory, disableArchive }),
+    () => loadWorkspace(agentConfig.workspace, { skillUsage: agentSkillUsage(), mcpToolsDir, sharedSkillsDir, logger, memoryBudget, coreShrink, isolateMemory, disableArchive }),
     (updated) => { if (updated.skillRegistry) runner.setSkillRegistry(updated.skillRegistry); },
+    () => agentRunners.get(agentConfig.id) === runner,
   );
+  runner.setWorkspaceRecomposer(recompose);
   runner.onConfigReload(() => {
     agentConfig=agentConfigs.get(agentConfig.id) ?? agentConfig;
     memoryBudget={...gatewayConfig.gateway.memory,...agentConfig.memory};
@@ -833,28 +840,9 @@ async function main(): Promise<void> {
       if (!runner || !agentConfig) return; // first install — agent.added will call startAgent
       const logger = createLogger(agentName, ctx.logDir);
       try {
-        const updated = await loadWorkspace(agentConfig.workspace, {
-          skillUsage: agentSkillUsage(agentConfig),
-          mcpToolsDir: ctx.mcpToolsDir,
-          sharedSkillsDir: ctx.sharedSkillsDir,
-          logger,
-          memoryBudget: { ...config.gateway.memory, ...agentConfig.memory },
-          coreShrink: resolveArchiveConfig(
-            agentConfig.knowledge?.archive,
-            config.gateway.knowledge?.archive,
-          ).enabled,
-          isolateMemory: agentConfig.isolateMemory === true,
-          disableArchive: agentConfig.disableArchive === true,
-        });
-        // A runner replaced meanwhile (an update toggling isolate mode, #601)
-        // composed its own CLAUDE.md; this one has the old mode's sections.
-        if (ctx.agentRunners.get(agentName) !== runner) return;
-        const claudeMdPath = path.join(agentConfig.workspace, 'CLAUDE.md');
-        await fs.promises.writeFile(claudeMdPath, updated.systemPrompt, 'utf8');
-        logger.info('Rewrote CLAUDE.md after reinstall', { chars: updated.systemPrompt.length });
-        if (updated.skillRegistry) {
-          runner.setSkillRegistry(updated.skillRegistry);
-        }
+        // The runner's own recompose queue; it skips the write once a replacement runner
+        // (an update toggling isolate mode, #601) has composed its own CLAUDE.md.
+        if (await runner.recomposeWorkspace()) logger.info('Rewrote CLAUDE.md after reinstall');
       } catch (err) {
         logger.error('Failed to reinitialize agent workspace after reinstall', { error: (err as Error).message });
       }

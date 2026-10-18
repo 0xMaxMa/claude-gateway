@@ -309,7 +309,7 @@ describe('Skill Loader', () => {
           ws('shared-unused', fm(`origin: auto\ncreatedAt: ${old}`), 'shared'),
         ]),
       };
-      const stat = (createdAt: number | null, timesLoaded = 0) => ({ createdAt, timesLoaded });
+      const stat = (createdAt: number | null, timesLoaded = 0) => ({ createdAt, timesLoaded, lastUsedAt: null as number | null });
       const usage = {
         now,
         stats: new Map([
@@ -323,7 +323,7 @@ describe('Skill Loader', () => {
         const section = renderSkillsSection(withHidden(usage));
         expect(section).not.toContain('/auto-unused:');
         expect(section).not.toContain('/auto-no-date:');
-        expect(section).toContain('2 auto-learned skills are hidden until first used');
+        expect(section).toContain('2 auto-learned skills are hidden until used');
       });
 
       it('keeps used, young and pinned auto skills, and every non-auto skill', () => {
@@ -336,7 +336,7 @@ describe('Skill Loader', () => {
       it('keeps an old auto skill with no stat row listed (restored from the archive)', () => {
         const restored = renderSkillsSection(withHidden({ now, stats: new Map([['auto-used', stat(old, 3)]]) }));
         expect(restored).toContain('/auto-unused:');
-        expect(restored).not.toContain('hidden until first used');
+        expect(restored).not.toContain('hidden until used');
       });
 
       it('measures the grace window from the stat row, not the frontmatter createdAt', () => {
@@ -347,11 +347,33 @@ describe('Skill Loader', () => {
         expect(hiddenAutoSkills(registry, { now, stats: new Map([['auto-unused', stat(null)]]) }).size).toBe(0);
       });
 
+      it('with a menu cap (unusable archive) hides the least-recently-used listed auto skills above it', () => {
+        const capped = {
+          now,
+          maxListedAutoSkills: 1,
+          stats: new Map([
+            ['auto-unused', stat(old)],
+            ['auto-used', { ...stat(old, 3), lastUsedAt: now - 2 * DAY }],
+            ['auto-young', stat(now - DAY)],
+            ['auto-pinned', stat(old)],
+            ['user-unused', stat(old)],
+          ]),
+        };
+        const hidden = hiddenAutoSkills(registry, capped);
+        // auto-unused: never used; auto-used (used 2 days ago) is older than auto-young (created yesterday).
+        expect([...hidden].sort()).toEqual(['auto-unused', 'auto-used']);
+        const section = renderSkillsSection({ ...registry, hiddenUntilUsed: hidden });
+        expect(section).toContain('/auto-young:');
+        expect(section).toContain('/auto-pinned:');
+        expect(section).toContain('/user-unused:');
+        expect(section).toContain('2 auto-learned skills are hidden until used');
+      });
+
       it('honors the registry hidden set and shows everything without one', () => {
         expect(renderSkillsSection({ ...registry, hiddenUntilUsed: new Set(['auto-young']) })).not.toContain('/auto-young:');
         const section = renderSkillsSection(registry);
         expect(section).toContain('/auto-unused:');
-        expect(section).not.toContain('hidden until first used');
+        expect(section).not.toContain('hidden until used');
       });
     });
   });

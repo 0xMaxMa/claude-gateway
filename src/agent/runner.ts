@@ -414,6 +414,7 @@ export class AgentRunner extends EventEmitter {
 
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
+  private workspaceRecompose?: () => Promise<unknown>;
 
   // Skill self-improvement (planning-62). Optional — set by index.ts per agent.
   // All calls are guarded (`this.skillLearning?.`) and best-effort.
@@ -757,6 +758,18 @@ export class AgentRunner extends EventEmitter {
 
     this.coalesceWindowMs =
       Number(process.env.CHANNEL_COALESCE_WINDOW_MS) || CHANNEL_COALESCE_WINDOW_MS;
+  }
+
+  /** Wire this agent's CLAUDE.md + skill registry rebuild (src/index.ts, workspaceRecomposer). */
+  setWorkspaceRecomposer(recompose: () => Promise<unknown>): void {
+    this.workspaceRecompose = recompose;
+  }
+
+  /** Rebuild CLAUDE.md and the skill registry through the wired recomposer; false if none is wired. */
+  async recomposeWorkspace(): Promise<boolean> {
+    if (!this.workspaceRecompose) return false;
+    await this.workspaceRecompose();
+    return true;
   }
 
   /**
