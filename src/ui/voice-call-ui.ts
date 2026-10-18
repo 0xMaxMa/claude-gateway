@@ -6,7 +6,7 @@
  * `gateway.publicUrl`, and the WebSocket path comes from the ticket response.
  */
 import { BASE_STYLE, TG_WEBAPP_JS, htmlEscape, page } from './cli-viewer-ui';
-import { VOICE_CALL_VAD, createResampler, createVoiceCallPlayhead, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, formatCallDuration, voiceCallErrorView, voiceCallLevel, voiceCallReplyText, voiceCallTheme, voiceCallTicketFailure } from './voice-call-client';
+import { VOICE_CALL_PLAYBACK, VOICE_CALL_VAD, createResampler, createVoiceCallPlayback, createVoiceCallUplink, createVoiceCallVad, encodeVoiceCallFrame, formatCallDuration, voiceCallErrorView, voiceCallLevel, voiceCallReplyText, voiceCallTheme, voiceCallTicketFailure } from './voice-call-client';
 
 export interface VoiceCallPageOpts {
   pairingId: string;
@@ -16,7 +16,10 @@ export interface VoiceCallPageOpts {
   maxUtteranceMs: number;
   /** The bot's Telegram name; the agent id when Telegram has not answered. */
   botName?: string;
-  /** The bot photo's Telegram `file_unique_id`; without one the page shows the name's initial. */
+  /** The agent has a Telegram bot, so the page asks for its photo. The photo covers the
+   * name's initial, which shows when there is none. */
+  photo?: boolean;
+  /** The bot photo's Telegram `file_unique_id`, when known: it versions the photo URL. */
   avatarVersion?: string;
   /** The link already holds a call. Only the page holding its call token (a reload of
    * that call) rejoins; any other open shows the link as used and starts nothing. */
@@ -44,6 +47,31 @@ const CAPTURE_WORKLET = `class VoiceCallCapture extends AudioWorkletProcessor {
   }
 }
 registerProcessor('voice-call-capture', VoiceCallCapture);`;
+
+/**
+ * Reply playback: one node for the whole call (see createVoiceCallPlayback). The
+ * page posts `{ pcm }` frames and `{ flush: token }`; the node reports
+ * `{ token, played, playing }` when playback starts or stops and every 100 ms of
+ * audio (the page reports progress at that pace). Each report carries the token
+ * of the last flush, so the page can ignore reports from before it.
+ */
+const PLAYER_WORKLET = `${createVoiceCallPlayback.toString()}
+class VoiceCallPlayer extends AudioWorkletProcessor {
+  constructor(options){
+    super(); this.player = createVoiceCallPlayback(sampleRate, options.processorOptions); this.token = 0; this.reported = 0; this.playing = false;
+    this.step = Math.round(options.processorOptions.inputRate * 0.1);
+    this.port.onmessage = event => { if (event.data.pcm) this.player.push(event.data.pcm); else { this.token = event.data.flush; this.player.flush(); this.report(); } };
+  }
+  report(){ this.reported = this.player.played(); this.playing = this.player.active(); this.port.postMessage({ token: this.token, played: this.reported, playing: this.playing }); }
+  process(inputs, outputs){
+    const out = outputs[0][0];
+    if (out) this.player.render(out);
+    const played = this.player.played(), playing = this.player.active();
+    if (playing !== this.playing || played >= this.reported + this.step || (!playing && played !== this.reported)) this.report();
+    return true;
+  }
+}
+registerProcessor('voice-call-player', VoiceCallPlayer);`;
 
 /**
  * Light and dark palettes. Telegram's theme colours lead where it gives them (it
@@ -161,11 +189,12 @@ const ICONS = {
 };
 
 export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
-  const cfg = JSON.stringify({ pairingId: opts.pairingId, basePath: opts.basePath, maxUtteranceMs: opts.maxUtteranceMs, vad: VOICE_CALL_VAD, linkUsed: Boolean(opts.linkUsed) }).replace(/</g, '\\u003c');
-  const client = [createResampler, encodeVoiceCallFrame, voiceCallLevel, createVoiceCallVad, createVoiceCallUplink, createVoiceCallPlayhead, voiceCallTicketFailure, formatCallDuration, voiceCallErrorView, voiceCallReplyText].map(fn => fn.toString()).join(';\n');
+  const cfg = JSON.stringify({ pairingId: opts.pairingId, basePath: opts.basePath, maxUtteranceMs: opts.maxUtteranceMs, vad: VOICE_CALL_VAD, playback: VOICE_CALL_PLAYBACK, linkUsed: Boolean(opts.linkUsed) }).replace(/</g, '\\u003c');
+  const client = [createResampler, encodeVoiceCallFrame, voiceCallLevel, createVoiceCallVad, createVoiceCallUplink, voiceCallTicketFailure, formatCallDuration, voiceCallErrorView, voiceCallReplyText].map(fn => fn.toString()).join(';\n');
   const name = opts.botName ?? opts.agentId;
   const initial = Array.from(name.trim())[0]?.toUpperCase() ?? '?';
-  const photo = opts.avatarVersion ? `${opts.basePath}/voice-call/${encodeURIComponent(opts.pairingId)}/avatar?v=${encodeURIComponent(opts.avatarVersion)}` : '';
+  // Asked for even before the lookup answers: the photo route waits for it.
+  const photo = opts.photo || opts.avatarVersion ? `${opts.basePath}/voice-call/${encodeURIComponent(opts.pairingId)}/avatar${opts.avatarVersion ? `?v=${encodeURIComponent(opts.avatarVersion)}` : ''}` : '';
   const used = Boolean(opts.linkUsed);
   const body = `${THEME_SCRIPT}
   <div class="call" id="call">
@@ -190,12 +219,14 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
   (function(){
     'use strict';
     var CFG = ${cfg};
-    var WORKLET = ${JSON.stringify(CAPTURE_WORKLET).replace(/</g, '\\u003c')};
+    var WORKLET = ${JSON.stringify(CAPTURE_WORKLET + '\n' + PLAYER_WORKLET).replace(/</g, '\\u003c')};
     ${client};
     var tg = window.Telegram && window.Telegram.WebApp;
     var $ = function(id){ return document.getElementById(id); };
     var ctx, media, capture, ws, uplink, vad, resample, progressTimer, level, levelSamples, speaker;
-    var playhead = createVoiceCallPlayhead(), sources = [];
+    // Reply audio of this epoch: samples sent to the player, and the player's last report.
+    // A flush starts a new token, so reports from before it are ignored.
+    var player, playerToken = 0, pushedSamples = 0, playedSamples = 0, playing = false;
     var callToken, generation, epoch = 0, reportedPlayed = 0;
     var muted = false, paused = false, ended = false, attempts = 0, speakerOn = true, shownLevel, muteOnListening = false;
     // One connect at a time: a hide, show, hang-up or newer connect discards the pending one and its reconnect timer.
@@ -218,7 +249,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     // the pause between its sentences. After an acknowledgement the answer is still coming.
     var QUIET_MS = 1000, playbackPhase, audioHeard = false, quietSince;
     function settlePlayback(){
-      if (scene !== 'Speaking' || !audioHeard || playhead.playing(ctx.currentTime)) { quietSince = undefined; return; }
+      if (scene !== 'Speaking' || !audioHeard || playing) { quietSince = undefined; return; }
       if (quietSince === undefined) quietSince = Date.now();
       if (Date.now() - quietSince >= QUIET_MS) state(muted ? 'Muted' : awaitingReply || playbackPhase === 'acknowledgement' ? 'Thinking' : 'Listening');
     }
@@ -248,22 +279,22 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       }
       return body;
     }
-    function flushPlayback(){ sources.forEach(function(node){ try { node.stop(); } catch (e) {} }); sources = []; playhead.reset(); reportedPlayed = 0; }
+    function flushPlayback(){
+      playerToken++; pushedSamples = 0; playedSamples = 0; playing = false; reportedPlayed = 0;
+      if (player) player.port.postMessage({ flush: playerToken });
+    }
     function playAudio(data){
       var view = new DataView(data);
       if (data.byteLength <= 44 || view.getUint32(20) !== epoch) return;
-      var count = (data.byteLength - 44) / 2, buffer = ctx.createBuffer(1, count, 16000), channel = buffer.getChannelData(0);
-      for (var i = 0; i < count; i++) channel[i] = view.getInt16(44 + i * 2, true) / 32768;
-      var node = ctx.createBufferSource(); node.buffer = buffer; node.connect(level);
-      node.onended = function(){ sources = sources.filter(function(item){ return item !== node; }); };
-      node.start(playhead.schedule(count, 16000, ctx.currentTime)); sources.push(node);
+      var pcm = new Int16Array((data.byteLength - 44) >> 1);
+      for (var i = 0; i < pcm.length; i++) pcm[i] = view.getInt16(44 + i * 2, true);
+      player.port.postMessage({ pcm: pcm }, [pcm.buffer]); pushedSamples += pcm.length; playing = true;
       // More of the reply after a pause that looked like its end.
       audioHeard = true; if (scene === 'Listening' || scene === 'Thinking') state('Speaking');
     }
     function reportProgress(){
       if (!ctx || !ws || ws.readyState !== 1) return;
-      var played = playhead.played(16000, ctx.currentTime);
-      if (played > reportedPlayed) { reportedPlayed = played; send({ type: 'playback.progress', epoch: epoch, sample_offset: played }); }
+      if (playedSamples > reportedPlayed) { reportedPlayed = playedSamples; send({ type: 'playback.progress', epoch: epoch, sample_offset: playedSamples }); }
     }
     function control(message){
       switch (message.type) {
@@ -274,7 +305,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
             attempts = 0; if (message.utterance_id) uplink.listening(message.utterance_id);
             // Words held for this utterance are sent now; muting then commits them.
             if (muteOnListening) { muteOnListening = false; sendMute(true); }
-            if (!sources.length && !awaitingReply) state(muted ? 'Muted' : 'Listening');
+            if (!playing && !awaitingReply) state(muted ? 'Muted' : 'Listening');
           }
           if (message.state === 'muted') { uplink.reset(); awaitingReply = false; state('Muted'); }
           break;
@@ -290,7 +321,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
           var view = voiceCallErrorView(message);
           awaitingReply = false;
           if (view.kind === 'ended') fail(new Error(view.message));
-          else if (view.kind === 'listening') { show('you', ''); if (!sources.length) state(muted ? 'Muted' : 'Listening'); }
+          else if (view.kind === 'listening') { show('you', ''); if (!playing) state(muted ? 'Muted' : 'Listening'); }
           else state(view.message, 'err');
           break;
         }
@@ -347,7 +378,7 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     function showLevel(){
       if (!level) return;
       level.getFloatTimeDomainData(levelSamples);
-      var text = (sources.length ? Math.min(1, voiceCallLevel(levelSamples) * 5) : 0).toFixed(1);
+      var text = (playing ? Math.min(1, voiceCallLevel(levelSamples) * 5) : 0).toFixed(1);
       if (text !== shownLevel) { shownLevel = text; $('call').style.setProperty('--level', text); }
     }
     // A web page cannot choose the earpiece or the loudspeaker; Speaker turns the agent's voice on or off.
@@ -434,9 +465,15 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       if (!callToken) callToken = Array.prototype.map.call(crypto.getRandomValues(new Uint8Array(32)), function(byte){ return ('0' + byte.toString(16)).slice(-2); }).join('');
       try { sessionStorage.setItem(key, callToken); } catch (e) {}
       try {
-        if (!ctx) ctx = new AudioContext();
         // One microphone request per call: some Telegram clients prompt on every getUserMedia.
         if (!media) media = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+        // Only after the microphone: on iOS it switches the audio session to voice processing,
+        // which can change the hardware rate under a context created before it (WebKit 221334).
+        if (!ctx) {
+          ctx = new AudioContext();
+          var track = media.getAudioTracks()[0], settings = track && track.getSettings ? track.getSettings() : {};
+          console.info('voice call audio: context ' + ctx.sampleRate + ' Hz, microphone ' + (settings.sampleRate || 'unknown') + ' Hz');
+        }
       } catch (error) {
         if (!gesture) { askTap(); return; }
         state('Microphone access was denied.', 'err'); hangup(true); return;
@@ -457,19 +494,27 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
       capture.port.onmessage = function(event){
         if (muted || paused || ended) return;
         // Audible reply audio raises the bar for speech, so speaker echo does not interrupt it.
-        var playing = playhead.playing(ctx.currentTime);
         var samples = event.data, edge = vad(voiceCallLevel(samples), samples.length / ctx.sampleRate * 1000, playing), pcm = resample(samples);
         if (edge === 'start') {
           uplink.speechStart({ playing: playing, epoch: epoch });
-          if (awaitingReply) { awaitingReply = false; if (!sources.length) state('Listening'); }
+          if (awaitingReply) { awaitingReply = false; if (!playing) state('Listening'); }
         }
         uplink.audio(pcm);
-        if (edge === 'end' && uplink.speechEnd() && !sources.length) { awaitingReply = true; state('Thinking'); }
+        if (edge === 'end' && uplink.speechEnd() && !playing) { awaitingReply = true; state('Thinking'); }
       };
       if (!speaker) {
         level = ctx.createAnalyser(); level.fftSize = 512; levelSamples = new Float32Array(level.fftSize);
         speaker = ctx.createGain(); speaker.gain.value = speakerOn ? 1 : 0;
         level.connect(speaker); speaker.connect(ctx.destination);
+        player = new AudioWorkletNode(ctx, 'voice-call-player', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1], processorOptions: CFG.playback });
+        player.port.onmessage = function(event){
+          var report = event.data;
+          if (report.token !== playerToken) return;
+          playedSamples = Math.max(playedSamples, report.played);
+          // Frames still on their way to the player count as playing.
+          playing = report.playing || report.played < pushedSamples;
+        };
+        player.connect(level);
       }
       progressTimer = setInterval(function(){ reportProgress(); showDuration(); showLevel(); settlePlayback(); }, 100);
       if (tg.enableClosingConfirmation) tg.enableClosingConfirmation();
@@ -481,6 +526,9 @@ export function generateVoiceCallPage(opts: VoiceCallPageOpts): string {
     $('mute').onclick = function(){ setMuted(!muted); };
     $('speaker').onclick = function(){ setSpeaker(!speakerOn); };
     $('hangup').onclick = function(){ hangup(false); };
+    // No photo (the bot has none, or Telegram could not be reached): the initial under it shows.
+    var photo = $('photo');
+    if (photo) { photo.onerror = function(){ photo.remove(); }; if (photo.complete && !photo.naturalWidth) photo.remove(); }
     // A used link opened from an old /call button stays as rendered: nothing starts.
     // The page holding its call token is a reload of that call, and rejoins it.
     var stored; try { stored = sessionStorage.getItem('voice-call:' + CFG.pairingId); } catch (e) {}

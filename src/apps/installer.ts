@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { sandboxPool } from './conversation-sandbox';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
@@ -15,7 +16,7 @@ import {
   GeneratedCompose,
   AgentDeclaration,
 } from './compose-generator';
-import { AgentManager } from './agent-manager';
+import { AgentManager, writeAgentEnvFile } from './agent-manager';
 import { msUntilNextHour } from '../history/cleanup';
 import { msOr } from '../utils/config-num';
 
@@ -50,7 +51,7 @@ export interface InstallResult {
   appName: string;
   proxyUrls: Record<string, string>; // portName → /app/<name>/<port>/
   secretKeys: string[];
-  agentDeclaration?: { path: string; name: string } | null;
+  agentDeclaration?: { path: string; name: string; isolateMemory?: true; disableArchive?: true; env?: string[] } | null;
 }
 
 /** Per-app backup policy (mirrors `gateway.appBackup` in the gateway config). */
@@ -278,6 +279,19 @@ const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
  * scheduler at boot — config is untrusted input, so a typo must degrade to UTC,
  * never crash the gateway.
  */
+/** How app.yaml changes the app's agent registration, or null when name, path and presence all match. */
+function agentIdentityChange(
+  oldAgent: AgentDeclaration | null,
+  newAgent: AgentDeclaration | null,
+): string | null {
+  if (!oldAgent && newAgent) return `adds agent "${newAgent.name}"`;
+  if (oldAgent && !newAgent) return `removes agent "${oldAgent.name}"`;
+  if (!oldAgent || !newAgent) return null;
+  if (oldAgent.name !== newAgent.name) return `renames agent "${oldAgent.name}" to "${newAgent.name}"`;
+  if (path.posix.resolve('/', oldAgent.path) !== path.posix.resolve('/', newAgent.path)) return `moves agent "${newAgent.name}" from ${oldAgent.path} to ${newAgent.path}`;
+  return null;
+}
+
 function isValidTimezone(tz: string | undefined): tz is string {
   if (typeof tz !== 'string' || tz.length === 0) return false;
   try {
@@ -682,6 +696,10 @@ export class AppInstaller {
       }
     }
 
+    // Conversation sandboxes (#609) are not compose services, and their containers hold
+    // the agent image that `down --rmi all` removes.
+    await sandboxPool.removeFor(`${appName}-agent`).catch(() => {});
+
     // docker compose down --rmi all (graceful fallback if dir is already gone)
     if (fs.existsSync(appDir)) {
       try {
@@ -1082,9 +1100,12 @@ export class AppInstaller {
       // Restore config that carries generated secrets, so the app boots with the
       // same credentials the volume data was created under.
       this.copyIfExists(path.join(staging, 'config', '.env'), path.join(appDir, '.env'));
+      if (entry.agentDeclaration) writeAgentEnvFile(appDir, entry.agentDeclaration);
 
       log(`Starting "${appName}" on restored data`);
-      await this.composeUp(appName, appDir);
+      // Recreate: compose does not notice a changed env_file, so a plain `up`
+      // would restart the containers with the pre-restore .env/.env.agent.
+      await this.composeUp(appName, appDir, undefined, { forceRecreate: true });
       await this.registry.updateStatus(appName, 'running').catch(() => {});
 
       log(`Restore of "${backupId}" complete`);
@@ -1858,6 +1879,7 @@ export class AppInstaller {
     if (generated.agentDeclaration && this.agentManager && agentPaths) {
       await this.agentManager.injectAgentService(entry);
       this.log(job, `Agent service injected for ${generated.agentDeclaration.name}`);
+      this.logAgentEnv(job, generated.agentDeclaration);
       // Pre-pull the agent base image so compose up --wait doesn't time out during pull
       this.log(job, 'Pre-pulling agent base image');
       try {
@@ -2055,6 +2077,7 @@ export class AppInstaller {
 
       if (generated.agentDeclaration && this.agentManager && agentPaths) {
         await this.agentManager.injectAgentService(newEntry);
+        this.logAgentEnv(job, generated.agentDeclaration);
       }
 
       // Pin the images the app is running before the build takes their tags
@@ -2099,6 +2122,7 @@ export class AppInstaller {
       // The new compose file's bind sources are anchored to finalDir. Starting
       // before this swap would bind the old directory inode then delete it.
       this.log(job, 'Stopping old containers');
+      await sandboxPool.removeFor(`${appName}-agent`).catch(() => {});
       this.run(['docker', 'compose', '-p', appName, 'down'], entry.installPath, 120_000);
       this.log(job, 'Swapping app directories');
       const finalDir = entry.installPath;
@@ -2344,9 +2368,10 @@ export class AppInstaller {
   /**
    * Reconfigure an installed app: merge env vars and/or override host ports,
    * then force-recreate the container in place. No clone, no dir swap — the app
-   * stays at its current commit/appDir; only its .env and (optionally) its
-   * compose port mappings change. Named volumes and their data survive because
-   * this is an `up --force-recreate`, never a `down -v`.
+   * stays at its current commit/appDir; only its .env, (optionally) its
+   * compose port mappings and its agent's memory settings change. Named
+   * volumes and their data survive because this is an `up --force-recreate`,
+   * never a `down -v`.
    */
   private async runReconfigure(
     job: JobState,
@@ -2382,12 +2407,12 @@ export class AppInstaller {
     // Snapshot the current on-disk state BEFORE any mutation so a failed
     // recreate can be rolled back. Both an env-only and a port change rewrite
     // .env and force-recreate the container; a port change additionally rewrites
-    // the live compose file and swaps proxy routes. If the new container never
+    // the live compose file and swaps proxy routes, and an app agent's service is
+    // re-injected into it. If the new container never
     // comes up the app would otherwise be left down (or, for a port change,
     // unreachable with routes gone and compose/registry mismatched).
     const envPath = path.join(appDir, '.env');
-    const oldComposeContent =
-      hasPortChange && fs.existsSync(composePath) ? fs.readFileSync(composePath, 'utf-8') : null;
+    const oldComposeContent = fs.existsSync(composePath) ? fs.readFileSync(composePath, 'utf-8') : null;
     const oldEnvContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : null;
     const oldPorts = entry.ports;
 
@@ -2409,6 +2434,19 @@ export class AppInstaller {
       }
     }
 
+    // Reconfigure applies the agent's settings but not its identity: a renamed,
+    // moved, added or removed agent needs the deregister/re-register that only
+    // update and install do. Refuse before anything is touched.
+    const oldAgent = entry.agentDeclaration ?? null;
+    const newAgent = generated.agentDeclaration;
+    const agentChange = agentIdentityChange(oldAgent, newAgent);
+    if (agentChange) {
+      throw new Error(
+        `app.yaml for "${appName}" ${agentChange} — reconfigure cannot change the agent registration; use update or reinstall instead`,
+      );
+    }
+    const nextEntry: AppEntry = newAgent ? { ...entry, agentDeclaration: newAgent } : entry;
+
     // Host-port collision across other installed apps (only if ports changed).
     // Runs before the live compose is touched, so a collision leaves nothing to
     // undo on disk.
@@ -2428,14 +2466,12 @@ export class AppInstaller {
     try {
       // Swap in the newly-generated compose only now that we're inside the
       // guard (finding F2). Regenerating drops the injected agent service, so we
-      // re-inject it. An env-only reconfigure leaves the compose untouched.
+      // re-inject it. An env-only reconfigure re-injects it too when the agent
+      // was injected (it has agentPaths), so an agent service from before #618
+      // stops reading the app's full .env.
       if (hasPortChange) {
         this.log(job, 'Updating docker-compose.yml');
         fs.writeFileSync(composePath, newComposeContent);
-        if (generated.agentDeclaration && this.agentManager) {
-          const agentPaths = entry.agentPaths ?? this.agentManager.detectAgentPaths();
-          await this.agentManager.injectAgentService({ ...entry, agentPaths });
-        }
       }
 
       // Merge the new env vars onto the existing .env: keys not supplied are
@@ -2444,6 +2480,12 @@ export class AppInstaller {
       this.log(job, 'Writing .env');
       const mergedEnv = { ...this.readEnvFile(appDir), ...(options.envVars ?? {}) };
       this.writeEnvFile(appDir, appName, generated, mergedEnv);
+      // After .env: injecting rewrites .env.agent from it.
+      if (newAgent && this.agentManager && (hasPortChange || entry.agentPaths)) {
+        const agentPaths = entry.agentPaths ?? this.agentManager.detectAgentPaths();
+        await this.agentManager.injectAgentService({ ...nextEntry, agentPaths });
+        this.logAgentEnv(job, newAgent);
+      }
 
       // Deregister old proxy routes before the port mapping changes (the proxy is
       // bound to the old hostPort).
@@ -2457,12 +2499,10 @@ export class AppInstaller {
       this.log(job, 'Recreating container');
       await this.composeUp(appName, appDir, job, { forceRecreate: true });
 
-      await this.registry.updateStatus(appName, 'running');
-
-      // Persist the reconfigure: always bump updatedAt so the registry reflects
-      // that the app was reconfigured; refresh the port mappings + re-register
-      // proxy routes only when a host port actually changed.
-      const updatedEntry: AppEntry = { ...entry, updatedAt: new Date().toISOString() };
+      // Persist the reconfigure: the container is up again (an app reconfigured
+      // while stopped or errored is now running), updatedAt is bumped, and the
+      // port mappings + proxy routes are refreshed only when a host port changed.
+      const updatedEntry: AppEntry = { ...nextEntry, status: 'running', updatedAt: new Date().toISOString() };
       if (hasPortChange) {
         updatedEntry.ports = generated.ports.map((p) => ({
           name: p.name,
@@ -2491,8 +2531,15 @@ export class AppInstaller {
           fs.writeFileSync(envPath, oldEnvContent, { mode: 0o600 });
           fs.chmodSync(envPath, 0o600);
         }
-        if (hasPortChange && oldComposeContent !== null) {
+        if (oldComposeContent !== null) {
           fs.writeFileSync(composePath, oldComposeContent);
+        }
+        if (oldAgent) {
+          try {
+            writeAgentEnvFile(appDir, oldAgent);
+          } catch (envErr) {
+            this.log(job, `Could not restore .env.agent: ${(envErr as Error).message}`);
+          }
         }
         await this.composeUp(appName, appDir, job, { forceRecreate: true });
         if (hasPortChange) {
@@ -2518,6 +2565,24 @@ export class AppInstaller {
       throw reconfErr;
     }
 
+    // Write the declared isolate_memory/disable_archive into the agent's
+    // config.json entry. When they differ from what the agent runs with, the
+    // config watcher replaces its runner once idle, as after an update.
+    if (newAgent && this.agentManager) {
+      let synced: boolean;
+      try {
+        synced = await this.agentManager.syncMemoryModes(nextEntry);
+      } catch (err) {
+        // apps.json already holds the new modes; gateway start applies them from there.
+        throw new Error(
+          `Reconfigure applied, but agent "${newAgent.name}" config entry was not updated (${(err as Error).message}) — its memory settings take effect at the next gateway start`,
+        );
+      }
+      this.log(job, synced
+        ? `Agent "${newAgent.name}" memory settings written — a changed isolate_memory or disable_archive applies once the agent is idle`
+        : `Agent "${newAgent.name}" is not registered — its memory settings apply at the next gateway start`);
+    }
+
     const proxyUrls: Record<string, string> = {};
     for (const p of generated.ports) {
       proxyUrls[p.name] = `/app/${appName}/${p.name}/`;
@@ -2528,7 +2593,7 @@ export class AppInstaller {
       appName,
       proxyUrls,
       secretKeys: generated.secretKeys,
-      agentDeclaration: entry.agentDeclaration ?? null,
+      agentDeclaration: newAgent,
     };
     job.updatedAt = Date.now();
     this.log(job, `Reconfigure complete: ${JSON.stringify(proxyUrls)}`);
@@ -2629,6 +2694,13 @@ export class AppInstaller {
       throw new Error(`Failed to write .env: ${(err as Error).message}`);
     }
     return generatedNames;
+  }
+
+  /** Say which app secrets the agent container gets: an agent from before #618 had them all. */
+  private logAgentEnv(job: JobState, declaration: AgentDeclaration): void {
+    this.log(job, declaration.env?.length
+      ? `Agent container gets app secrets: ${declaration.env.join(', ')}`
+      : 'Agent container gets no app secrets (app.yaml services.agent.env is not set)');
   }
 
   /** Parse an app's existing .env into a key→value map (empty if absent). */

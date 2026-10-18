@@ -69,6 +69,12 @@ export interface DreamingManagerDeps {
    * resolution and is easy to test. Best-effort; must not throw.
    */
   sharedPromote?: (proposal: DreamProposal) => void;
+  /**
+   * The agent's `disableArchive` (#609): with no memory_search, nothing may move
+   * out of MEMORY.md into memory/archive/ (compactor, staleness GC) or out to the
+   * shared KB, since the agent could never find it again.
+   */
+  disableArchive?: boolean;
 }
 
 const MS_PER_MINUTE = 60 * 1000;
@@ -198,7 +204,7 @@ export class DreamingManager {
     // needs no transcript — so it runs (auto mode only) even on empty-transcript
     // nights. Best-effort; never blocks the dream.
     let compactedCount = 0;
-    if (cfg.mode === 'auto') {
+    if (cfg.mode === 'auto' && !this.deps.disableArchive) {
       try {
         compactedCount = compactCompletedEntries(this.deps.workspaceDir, now).archivedCount;
       } catch {
@@ -211,7 +217,7 @@ export class DreamingManager {
     // low-recall entries (move to memory/archive/stale.md, never delete) and
     // promote back anything retrieved after invalidation. Deterministic, memory-
     // only (no session restart), best-effort. Auto mode only; injectable clock.
-    if (cfg.mode === 'auto' && cfg.staleness.enabled) {
+    if (cfg.mode === 'auto' && cfg.staleness.enabled && !this.deps.disableArchive) {
       try {
         runStalenessGc(this.deps.workspaceDir, cfg.staleness, { now });
       } catch {
@@ -347,7 +353,7 @@ export class DreamingManager {
       // (net-negative / bounded-loss), so the shared vault can't gain content the
       // agent's own memory refused. Gated + wired by the gateway (shared enabled +
       // mode auto); best-effort — a promotion failure never affects the local dream.
-      if (this.deps.sharedPromote) {
+      if (this.deps.sharedPromote && !this.deps.disableArchive) {
         for (const p of appliedProposals) {
           // Only durable `add`s promote to shared; episodic task-log stays local.
           if (p.op !== 'add' || !p.content || p.tier === 'episodic') continue;

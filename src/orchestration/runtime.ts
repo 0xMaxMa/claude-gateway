@@ -50,6 +50,7 @@ import { TelegramVoices } from './telegram-voices';
 import { StopControls } from './stop-controls';
 import { resolveDreamingConfig } from '../agent/dreaming/config';
 import { validateContainer } from './container';
+import { sandboxedAgent, usesConversationSandbox } from '../apps/conversation-sandbox';
 import { ConversationIntake, INTAKE_OVERLAY, IntakeChoice } from './conversation-intake';
 import { AgentCliSessions, resumeRejected, containerTranscriptCheckpoint } from './agent-cli-session';
 import { transcriptPath } from '../config/claude-settings';
@@ -60,8 +61,9 @@ import { pendingReports } from './notification-mailbox';
 import { toolActivity, ToolActivity } from './tool-activity';
 import { retryableVoiceNoteFailure, transcribeVoiceNote, voiceNoteFailureMessage, VoiceNoteDiagnostic } from '../voice/notes';
 import { createLogger } from '../logger';
-import { VoiceError } from '../voice/types';
+import { hasSpokenWords, VoiceError } from '../voice/types';
 import { describeVoiceError } from '../voice/errors';
+import { MANAGED_VOICE_QUOTA_EXHAUSTED } from '../voice/managed-quota';
 import { MediaStore } from '../history/media-store';
 import { resolveSkill, skillCatalog } from './skills';
 import { PSTACK_DECISION_NOTE, pstackCommandReply, pstackNotSetUpReply } from '../pstack/overlay';
@@ -93,6 +95,8 @@ import { ProcessTurn, startProcessTurn } from './process-turn';
 import { OrchestrationError, ExecutionCapabilities, ConversationScope, TERMINAL_TASK_STATES, type TaskSnapshot, type WorkerOutcome } from './types';
 import { acceptsDirectCommand } from './tasks/automation-session';
 import { recoverOrchestration } from './recovery';
+import { INTERRUPTED_WORK_REPORT_RULE } from './restart-resume';
+import { promisesWork, unbackedPromiseNote, workPending } from './report-promise';
 import { acquireInstanceLock } from './instance-lock';
 import { DeliveryOutbox, channelSender, ChannelSender, DeliveryControl } from './delivery';
 import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
@@ -286,7 +290,7 @@ export class AgentOrchestrationRuntime {
     };
     gatewayAdapters.set('browser', new BrowserTaskAdapter({agentId:agent.id,root:join(root,'browser-requests'),
       stepMode:()=>gateway.gateway.jev?.features?.browserSteps?.enabled===true,settled:()=>gatewayTick.run(),userSteps,
-      allowed:()=>jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true,
+      allowed:()=>!agent.isolateMemory&&jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true,
       bindings:browserBindings,
       refreshBindings:async (context,signal)=>{store.assertMember(context.conversationId,context.principalId);await automaticBrowsers.refresh(context.principalId,context.conversationId,context.execute,()=>{try{store.assertMember(context.conversationId,context.principalId);return jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true;}catch{return false;}},signal);store.assertMember(context.conversationId,context.principalId);},
       allowedEvidence:task=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return Boolean(store.task(task.taskId));}catch{return false;}},
@@ -311,7 +315,9 @@ export class AgentOrchestrationRuntime {
         principalId:task.ownerPrincipalId,agentId:agent.id,sessionId:task.agentSessionId,taskId:task.taskId,consumer:'browser',signal,
         authorize:()=>{try{store.assertMember(task.conversationId,task.ownerPrincipalId);return authorized()&&jevAllowed(gateway,agent)&&gateway.gateway.jev?.features?.browserTasks?.enabled===true;}catch{return false;}}
       })}));
-    const computerAllowed=()=>computerDecisions(gateway,agent)!==undefined;
+    // Isolate mode (#609) is default-deny: one browser profile and one computer serve
+    // every conversation, so neither is offered to an isolated agent.
+    const computerAllowed=()=>!agent.isolateMemory&&computerDecisions(gateway,agent)!==undefined;
     gatewayAdapters.set('computer',new ComputerTaskAdapter({agentId:agent.id,root:join(root,'computer-requests'),connectors:new ComputerConnectors(gateway,agent),allowed:computerAllowed,
       stepMode:()=>gateway.gateway.jev?.features?.computerSteps?.enabled===true,settled:()=>gatewayTick.run(),
       userSteps,
@@ -333,7 +339,7 @@ export class AgentOrchestrationRuntime {
     bridge.computerEnabled = computerAllowed;
     bridge.models = () => selectableModels(gateway.gateway.models);
     bridge.jevEnabled = () => jevAllowed(gateway, agent);
-    bridge.browserEnabled = () => Boolean(gateway.gateway.jev?.browser) && jevAllowed(gateway, agent) && gateway.gateway.jev?.features?.browserTasks?.enabled === true;
+    bridge.browserEnabled = () => !agent.isolateMemory && Boolean(gateway.gateway.jev?.browser) && jevAllowed(gateway, agent) && gateway.gateway.jev?.features?.browserTasks?.enabled === true;
     bridge.jevCall = async (scope, args, actionId, signal) => {
       const current = scope.role === 'worker' ? files.scope(scope.attemptId, scope.generation) : undefined;
       const conversation = scope.role === 'agent' ? store.assertMember(scope.context.conversationId, scope.context.principalId) : current!.conversation;
@@ -353,6 +359,8 @@ export class AgentOrchestrationRuntime {
     const personalRetention = resolveDreamingConfig(agent.dreaming, gateway.gateway.dreaming, gateway.gateway.timezone).staleness;
     const sharedRetention = resolveSharedConfig(agent.knowledge?.shared, gateway.gateway.knowledge?.shared).staleness;
     bridge.recordRetrievals = (personalRetention.enabled && personalRetention.recordRetrievals) || (sharedRetention.enabled && sharedRetention.recordRetrievals);
+    bridge.isolateMemory = files.isolateMemory = () => Boolean(agent.isolateMemory);
+    bridge.disableArchive = () => Boolean(agent.disableArchive);
     let admissionStore: ProviderAdmissionStore | undefined;
     try {
       recoverOrchestration(store);
@@ -594,6 +602,12 @@ export class AgentOrchestrationRuntime {
     });
   }
 
+  /** The container a conversation's Claude Code transcript lives in: its own sandbox
+   * for an isolated app agent (#609), whose HOME no other conversation shares. */
+  private executionAgent(source: string, chatId: string, sessionId: string): Promise<AgentConfig> {
+    return usesConversationSandbox(this.agent) ? sandboxedAgent(this.agent, { source, chatId, sessionId }) : Promise.resolve(this.agent);
+  }
+
   /** An exclusive maintenance operation on the existing CLI transcript, not a chat summary. */
   compactSession(sessionId: string, model?: string): Promise<CompactMeasurements | null> {
     if (this.closing || this.draining) return Promise.reject(new OrchestrationError('ORCHESTRATION_CLOSING'));
@@ -608,7 +622,7 @@ export class AgentOrchestrationRuntime {
       let revoke: (() => void) | undefined;
       try {
         const cli = this.agent.type === 'app-agent'
-          ? await this.cliSessions.resolveContainer(sessionId,this.agent,true)
+          ? await this.cliSessions.resolveContainer(sessionId,await this.executionAgent(String(conversation.source),String(conversation.chat_id),sessionId),true)
           : this.cliSessions.resolve(sessionId,this.agent.workspace,true);
         if (!cli.resume || cli.id !== stored.cli_session_id) throw new OrchestrationError('NO_CLI_SESSION', 'The previous Claude Code transcript is unavailable. Chat history was not changed.');
         if (active.stopping || this.closing) throw new OrchestrationError('INTERRUPTED');
@@ -1064,7 +1078,7 @@ export class AgentOrchestrationRuntime {
         const supervision = monitor ? `This task is due for a routine progress update. Inspect fresh task_status including workflow evidenceVersion, checks and open findings. Treat latestProgress as historical when newer tools or checkpoints exist; request a current checkpoint if phase/evidence is unknown. Never assert an old workaround is correct or prohibit investigation based only on an old report. Report only new completed steps, the current step and any concrete blocker. An idle tool snapshot only means no tool was observed executing; it does not reveal what the worker is thinking or prove health. Do not infer the cause of a tool error without its error evidence. Do not volunteer claims that it is not stuck, not frozen, or really running; discuss a stall only when the user asks or evidence establishes a specific problem. If useful, call task_update ONLY for task ${monitor.id}, mode=when_ready, with planning advice to improve the existing approach. On this reporting turn that tool appends advice; it cannot replace the original goal or authorize new work. Do not spawn, restart or cancel work automatically, and do not mistake normal polling for a proven stall. ` : '';
         this.store.acceptInput({ scope: { agentId: this.agent.id, agentSessionId: String(row.agent_session_id), source: row.source as ConversationScope['source'],
           accountId: String(row.account_id), chatId: String(row.chat_id), threadKey: String(row.thread_key), principalId: String(row.owner_principal_id) },
-          text: controlStep ? `You are controlling task ${controlStep.id} for the user. Its last action has settled. If Fresh computer control evidence is attached to this turn, inspect that image and state directly; do not make a duplicate task_status call unless the evidence is insufficient or has changed. Otherwise inspect task_status with browser_evidence=screenshot (computer_evidence=screenshot for a computer task). Use that evidence to choose and send ONE next concrete instruction with task_update mode=when_ready on the SAME task. Use one UI operation or one field edit per instruction, not a multi-field recipe. For a known text value, supply computer_inputs with the observed application, label, role and windowTitle so text does not need to be inferred again. The type operation REPLACES the entire editable field; it does not append at the caret. For an observed field that offers type, request the field edit directly: the native helper focuses and verifies the target before typing. Do not routinely add a separate press just to focus it. A separate press may be needed when the field does not offer type yet or a prior not-executed result reports unsupported focus; inspect fresh evidence first. For a multiline note or document, supply the complete desired contents in one field edit, preserving the other wanted lines. Do not build it by repeated type/Enter commands. For computer tasks, press means click/focus a control, NOT press Enter. Use a distinct key action to submit or navigate the current non-sensitive focus: enter, tab, escape, up, down, left, right. These keyboard actions are supported separately from the control actions and scroll/navigation capabilities in the observation. Typing a cell address or search text does not submit it; request key enter when appropriate after verifying focus. Use only observed control targets and supported actions. Keep reasoning short for routine steps: inspect current evidence, choose the next step, submit it. Keep the overall user objective from conversation; do not repeat completed steps. If the overall request is fulfilled, leave the session idle and report the supported result. If required information or consent is missing, ask. Do not merely announce that the loop is waiting, ask the user to say continue, or claim success from an action receipt alone. Unknown mutations must be reconciled before any action. TARGET_OCCLUDED means the intended pointer point was covered and no click was dispatched; inspect current evidence and move the target into an unobstructed part of the viewport (for example by scrolling) before retrying. Do not blame changing text or retry an unchanged covered point. After task_update succeeds, END THIS TURN immediately with an empty final response. Do not poll or issue another command in this turn: the next result schedules a fresh authorized notification. Routine intermediate steps can be silent.` : supervision + 'Report the persisted task status update as your own work, preserving your persona. Write a concise, natural first-person progress update in the existing persona: what you have completed, what you are doing now, and any concrete blocker. Use direct sentences such as "I have fixed both issues and the tests pass. I am now reviewing the PR diff." rather than labels such as "What is happening now:" or an outside observer account. Do not narrate receiving a worker report, forwarding instructions, or waiting for a summary to come back. Mention only meaningful new progress; do not repeat the entire root-cause analysis in every update unless asked. State the current action directly when supported by recent evidence. If an action is only planned, describe it as the next step, not as already happening; do not turn guesses into facts or claim a PR was opened or merged without confirmation. If a task was cancelled, briefly confirm which task stopped. Describe cancellation neutrally as the end of the task or session; for Computer Use, say the Computer Use session has ended. Do not tell the user they cancelled it, attribute blame, or repeat who requested the stop. Do not describe it as an execution failure. Summarize only observed actions, not unverified success. Do not retry or restart it. If cancellation is still pending, say stopping, not stopped. Do not start tasks or change their goal. A progress-alert turn may append scoped planning advice as described above. Browser exception: before reporting a low-confidence, stale-page, model-blocked, NO_PROGRESS, NO_SUPPORTED_ACTION, TEXT_BUDGET, OBSERVATION_TRUNCATED stop or completion candidate, call task_status(browser_evidence=fresh) for the assigned browser task. If fresh evidence proves completion, use task_update(mode=verify_browser); otherwise use task_update(mode=when_ready) with concrete guidance within the existing authorization and recovery budget. This is continuation of the same authorized goal, not permission to spawn new work or change the goal. Never replay an unknown mutation or retry a provider failure. Only report a blocker after inspecting it and exhausting the permitted recovery, or ask for genuinely missing facts/consent. Other tasks remain reporting-only by design, not an execution outage. OBSERVATION_TRUNCATED means some controls may be omitted, not that every observed control is unusable. Inspect fresh controls and guide the same task toward a visible search/filter/input or a different viewport. Do not infer anti-automation blocking from NO_PROGRESS, MODEL_BLOCKED or NO_SUPPORTED_ACTION alone; these describe loop decisions, not independently observed website denial. Before saying you will retry or asking the user to wait, commit task_update(mode=when_ready) successfully and check the returned task state. If it was rejected, handle the actual rejection; never claim a retry is pending. Do not promise an automatic future retry or claim the execution system is unavailable. When reporting completion, inspect current task states: distinguish the finished investigation from an implementation merely proposed in its result. If no follow-up task is queued or running, say that this stage is complete and the proposed next step has not started. Do not promise to continue or imply background work without a committed task receipt. Preserve the original user scope; a request to investigate does not itself authorize edits or deployment. If a genuinely new decision is needed, ask it clearly instead of ending with an ambiguous future-work statement. If a worker repeats an answered question, explain the specific unresolved discrepancy instead of asking the user to repeat the same approval.', storeUserMessage: false,
+          text: controlStep ? `You are controlling task ${controlStep.id} for the user. Its last action has settled. If Fresh computer control evidence is attached to this turn, inspect that image and state directly; do not make a duplicate task_status call unless the evidence is insufficient or has changed. Otherwise inspect task_status with browser_evidence=screenshot (computer_evidence=screenshot for a computer task). Use that evidence to choose and send ONE next concrete instruction with task_update mode=when_ready on the SAME task. Use one UI operation or one field edit per instruction, not a multi-field recipe. For a known text value, supply computer_inputs with the observed application, label, role and windowTitle so text does not need to be inferred again. The type operation REPLACES the entire editable field; it does not append at the caret. For an observed field that offers type, request the field edit directly: the native helper focuses and verifies the target before typing. Do not routinely add a separate press just to focus it. A separate press may be needed when the field does not offer type yet or a prior not-executed result reports unsupported focus; inspect fresh evidence first. For a multiline note or document, supply the complete desired contents in one field edit, preserving the other wanted lines. Do not build it by repeated type/Enter commands. For computer tasks, press means click/focus a control, NOT press Enter. Use a distinct key action to submit or navigate the current non-sensitive focus: enter, tab, escape, up, down, left, right. These keyboard actions are supported separately from the control actions and scroll/navigation capabilities in the observation. Typing a cell address or search text does not submit it; request key enter when appropriate after verifying focus. Use only observed control targets and supported actions. Keep reasoning short for routine steps: inspect current evidence, choose the next step, submit it. Keep the overall user objective from conversation; do not repeat completed steps. If the overall request is fulfilled, leave the session idle and report the supported result. If required information or consent is missing, ask. Do not merely announce that the loop is waiting, ask the user to say continue, or claim success from an action receipt alone. Unknown mutations must be reconciled before any action. TARGET_OCCLUDED means the intended pointer point was covered and no click was dispatched; inspect current evidence and move the target into an unobstructed part of the viewport (for example by scrolling) before retrying. Do not blame changing text or retry an unchanged covered point. After task_update succeeds, END THIS TURN immediately with an empty final response. Do not poll or issue another command in this turn: the next result schedules a fresh authorized notification. Routine intermediate steps can be silent.` : supervision + 'Report the persisted task status update as your own work, preserving your persona. Write a concise, natural first-person progress update in the existing persona: what you have completed, what you are doing now, and any concrete blocker. Use direct sentences such as "I have fixed both issues and the tests pass. I am now reviewing the PR diff." rather than labels such as "What is happening now:" or an outside observer account. Do not narrate receiving a worker report, forwarding instructions, or waiting for a summary to come back. Mention only meaningful new progress; do not repeat the entire root-cause analysis in every update unless asked. State the current action directly when supported by recent evidence. If an action is only planned, describe it as the next step, not as already happening; do not turn guesses into facts or claim a PR was opened or merged without confirmation. If a task was cancelled, briefly confirm which task stopped. Describe cancellation neutrally as the end of the task or session; for Computer Use, say the Computer Use session has ended. Do not tell the user they cancelled it, attribute blame, or repeat who requested the stop. Do not describe it as an execution failure. Summarize only observed actions, not unverified success. Do not retry or restart it. If cancellation is still pending, say stopping, not stopped. Do not start tasks or change their goal. A progress-alert turn may append scoped planning advice as described above. Browser exception: before reporting a low-confidence, stale-page, model-blocked, NO_PROGRESS, NO_SUPPORTED_ACTION, TEXT_BUDGET, OBSERVATION_TRUNCATED stop or completion candidate, call task_status(browser_evidence=fresh) for the assigned browser task. If fresh evidence proves completion, use task_update(mode=verify_browser); otherwise use task_update(mode=when_ready) with concrete guidance within the existing authorization and recovery budget. This is continuation of the same authorized goal, not permission to spawn new work or change the goal. Never replay an unknown mutation or retry a provider failure. Only report a blocker after inspecting it and exhausting the permitted recovery, or ask for genuinely missing facts/consent. Other tasks remain reporting-only by design, not an execution outage. OBSERVATION_TRUNCATED means some controls may be omitted, not that every observed control is unusable. Inspect fresh controls and guide the same task toward a visible search/filter/input or a different viewport. Do not infer anti-automation blocking from NO_PROGRESS, MODEL_BLOCKED or NO_SUPPORTED_ACTION alone; these describe loop decisions, not independently observed website denial. Before saying you will retry or asking the user to wait, commit task_update(mode=when_ready) successfully and check the returned task state. If it was rejected, handle the actual rejection; never claim a retry is pending. Do not promise an automatic future retry or claim the execution system is unavailable. When reporting completion, inspect current task states: distinguish the finished investigation from an implementation merely proposed in its result. If no follow-up task is queued or running, say that this stage is complete and the proposed next step has not started. Do not promise to continue or imply background work without a committed task receipt. Preserve the original user scope; a request to investigate does not itself authorize edits or deployment. ' + INTERRUPTED_WORK_REPORT_RULE + ' If a genuinely new decision is needed, ask it clearly instead of ending with an ambiguous future-work statement. If a worker repeats an answered question, explain the specific unresolved discrepancy instead of asking the user to repeat the same approval.', storeUserMessage: false,
           modality: (this.voiceListeners.get(String(row.agent_session_id))?.principalId === row.owner_principal_id || new BrowserVoice(this.store).enabled(String(row.agent_session_id), String(row.owner_principal_id))) ? 'live_voice' : undefined,
           ingressKey: `notification:${row.notification_id}${row.previous_input_id ? `:retry:${row.previous_seq}` : ''}`, capabilities: { execute: false, writeMemory: false } }, this.config.conversation.maxPendingInputs);
       }
@@ -1189,7 +1203,12 @@ export class AgentOrchestrationRuntime {
               // Retries and an incomplete credit check that still let the note through are traceable by reference.
               this.voiceLog('info', 'Voice note diagnostic', { ...trace, ...event });
             } });
-            this.store.run("UPDATE voice_note_transcripts SET state='completed',text=? WHERE input_id=?", text, receipt.inputId);
+            // Whatever transcribed it, a note without words is never sent to the agent as the user's message.
+            if (!hasSpokenWords(text)) throw new OrchestrationError('VOICE_NOTE_NO_TRANSCRIPT');
+            this.store.transaction(() => {
+              this.store.run("UPDATE voice_note_transcripts SET state='completed',text=? WHERE input_id=?", text, receipt.inputId);
+              if (trace.provider.startsWith('managed:')) this.store.clearVoiceCreditNotices();
+            });
           } catch (error) {
             const code = error instanceof OrchestrationError || error instanceof VoiceError ? error.code : 'VOICE_NOTE_STT_FAILED';
             this.store.run("UPDATE voice_note_transcripts SET state='failed',error_code=? WHERE input_id=?", code, receipt.inputId);
@@ -1198,18 +1217,23 @@ export class AgentOrchestrationRuntime {
           transcript = this.store.get('SELECT * FROM voice_note_transcripts WHERE input_id=?', receipt.inputId)!;
         }
         if (transcript.state !== 'completed') {
-          if (transcript.error_code === 'MANAGED_VOICE_QUOTA_EXHAUSTED') {
+          const code = String(transcript.error_code ?? 'VOICE_NOTE_INTERRUPTED');
+          const text = `${voiceNoteFailureMessage(code)} Reference: ${receipt.inputId}`;
+          // An empty managed wallet fails every note until it is topped up: say so once per chat.
+          // The claim commits with the notice, so an interrupted turn does not use it up.
+          const notify = this.store.compose(() => {
+            if (code !== MANAGED_VOICE_QUOTA_EXHAUSTED || this.store.claimVoiceCreditNotice(input.scope.source, input.scope.chatId, input.scope.threadKey, 'stt', decision.responseId!)) {
+              this.decisions.finish(decision, text, 'failed'); return true;
+            }
             // Skipping a recording has not reported any assigned worker results.
             // Preserve their notifications and staged files for the next report.
-            this.store.transaction(() => {
-              this.store.run("UPDATE notifications SET status='pending',decision_id=NULL WHERE decision_id=? AND status='assigned'", decision.decisionId);
-              this.store.run("UPDATE conversation_decisions SET notification_ids_json='[]' WHERE id=?", decision.decisionId);
-            });
-            this.decisions.finish(decision, '', 'completed', undefined, false);
-            await this.flushHistory(); return '';
-          }
-          const text = `${voiceNoteFailureMessage(String(transcript.error_code ?? 'VOICE_NOTE_INTERRUPTED'))} Reference: ${receipt.inputId}`;
-          this.decisions.finish(decision, text, 'failed'); await this.flushHistory(); options.onText?.(text); return text;
+            this.store.run("UPDATE notifications SET status='pending',decision_id=NULL WHERE decision_id=? AND status='assigned'", decision.decisionId);
+            this.store.run("UPDATE conversation_decisions SET notification_ids_json='[]' WHERE id=?", decision.decisionId);
+            this.decisions.finish(decision, '', 'completed', undefined, false); return false;
+          });
+          await this.flushHistory();
+          if (!notify) return '';
+          options.onText?.(text); return text;
         }
         input = { ...input, text: String(transcript.text), skill: resolveSkill(String(transcript.text), input.scope.source, this.host.skills?.()) };
         // Preserve original ingress/hash for provider retry; canonical history uses the transcript.
@@ -1227,7 +1251,7 @@ export class AgentOrchestrationRuntime {
       const preparedRefs = preparedInputs.flatMap(row => JSON.parse(String(row.attachment_refs_json)) as string[]);
       if (preparedRefs.length) input = {...input, attachmentIds:[...new Set([...(input.attachmentIds ?? []), ...preparedRefs])]};
       const cliSession = this.agent.type === 'app-agent'
-        ? await this.cliSessions.resolveContainer(sessionId, this.agent)
+        ? await this.cliSessions.resolveContainer(sessionId, await this.executionAgent(input.scope.source, input.scope.chatId, sessionId))
         : this.cliSessions.resolve(sessionId, this.agent.workspace);
       const contextPlan = this.contextDelivery.begin({conversationId:receipt.conversationId,
         principalId:input.scope.principalId,bindingId:String(admitted!.binding_id),
@@ -1479,7 +1503,7 @@ export class AgentOrchestrationRuntime {
       {
         ticket.profile.cliSession = { id: cliSession.id, resume: cliSession.resume };
         if (cliSession.resume && this.agent.type !== 'app-agent') transcriptCheckpoint = await checkpointTranscript(transcriptPath(this.agent.workspace, cliSession.id));
-        if (cliSession.resume && this.agent.type === 'app-agent') restoreContainerTranscript = await containerTranscriptCheckpoint(this.agent.container!,cliSession.id);
+        if (cliSession.resume && this.agent.type === 'app-agent') restoreContainerTranscript = await containerTranscriptCheckpoint((await this.executionAgent(input.scope.source, input.scope.chatId, sessionId)).container!,cliSession.id);
         if (cliSession.fallback) {
           // No silent failure: a session we had already started could not be continued, so this
           // turn re-seeds history and pays a cache write. Record why before it happens.
@@ -1492,7 +1516,10 @@ export class AgentOrchestrationRuntime {
       }
       ticket.profile.excludedHistoryOperationIds = this.store.all(`SELECT r.id FROM assistant_responses r
         JOIN conversation_decisions d ON d.id=r.decision_id WHERE d.session_id=? AND r.state='failed'`, sessionId)
-        .map(row => `response:${row.id}`);
+        .map(row => `response:${row.id}`)
+        // This turn's own inputs are already persisted, and the prompt delivers them as the current
+        // message; seeding them too would end the history on an unanswered user turn.
+        .concat(decision.inputIds.map(id => `input:${id}`));
       ticket.profile.responseId = decision.responseId;
       agentSession = await this.host.createAgentSession(sessionId, ticket.profile, options.model, input.scope);
       options.onMark?.('process_spawned');
@@ -1744,6 +1771,14 @@ export class AgentOrchestrationRuntime {
           : thai ? 'ยังไม่ได้เริ่มงานตามคำขอที่ค้างอยู่ คำขอยังถูกเก็บไว้ ส่งข้อความสั้นๆ ตามมาเพื่อลองอีกครั้ง หรือบอกว่าต้องการยกเลิกค่ะ' : 'The pending request was not started: the recovery attempt ended without starting a task or resolving it. The request is still saved; send a short follow-up message to retry or say that you want to cancel it.';
         surfaces.spoken = '';
         this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.dispatch_unresolved', {responseId:decision.responseId, inputId:receipt.inputId}));
+      }
+      // A report turn cannot start or re-run work (#605). A reply that says it will, with nothing
+      // committed or queued to do it, would leave the user waiting for work that never runs.
+      if (active.notification && !capabilities.execute && !review && !controlSilent && !response.interrupted &&
+        !dispatchCommitted && promisesWork(surfaces.display) && !workPending(this.store, receipt.conversationId)) {
+        surfaces.display = `${surfaces.display}\n\n${unbackedPromiseNote(surfaces.display)}`;
+        if (surfaces.spoken) surfaces.spoken = `${surfaces.spoken} ${unbackedPromiseNote(surfaces.spoken)}`;
+        this.store.transaction(() => this.store.appendEvent(receipt.conversationId, 'response.unbacked_promise', { responseId: decision.responseId }));
       }
       const intakeSilent = !recoveryFailed && semantic && !uncommittedDispatch && (intakeChoice?.mode==='wait' || intakeDeferred || (acknowledgementId && unresolved?.deferredDispatch && !dispatchCommitted) || (acknowledgementId && this.store.get("SELECT action_id FROM task_commands WHERE decision_id=? AND command_type IN ('spawn','update','answer') LIMIT 1",decision.decisionId)));
       if (intakeSilent) {

@@ -368,6 +368,21 @@ export interface AgentConfig {
   sessionCompaction?: GatewayConfig['gateway']['sessionCompaction'];
   /** Per-agent knowledge-archive override (field-level over the global gateway default). */
   knowledge?: GatewayConfig['gateway']['knowledge'];
+  /**
+   * Isolated memory mode (#601) for one agent serving many unrelated
+   * senders: USER.md/MEMORY.md are kept per conversation under
+   * `<workspace>/chats/<channel>-<chatId>-<hash>/`, and the memory, skill,
+   * cron, agent and apps MCP tools are not offered. Absent or `false` keeps one shared memory for the agent.
+   * An app agent's value is written from its app.yaml `services.agent.isolate_memory`.
+   */
+  isolateMemory?: boolean;
+  /**
+   * Turns off the searchable memory archive (#609): no `kb.sqlite` is built,
+   * the memory_search/memory_get tools are not offered, and CLAUDE.md does not
+   * point at them. Independent of `isolateMemory`. An app agent's value is
+   * written from its app.yaml `services.agent.disable_archive`.
+   */
+  disableArchive?: boolean;
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
   avatar?: string;
   /** Per-agent connector enablement, keyed by connector id (e.g. "github"). */

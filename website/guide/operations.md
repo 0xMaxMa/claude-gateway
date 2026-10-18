@@ -33,7 +33,7 @@ claude-gateway version
 claude-gateway update check
 ```
 
-Review release changes and back up configuration, agent workspaces/session data, and relevant app data before upgrading. Store backups securely because configuration contains credentials. Stop or coordinate active work before restarting.
+Review release changes and back up configuration, agent workspaces/session data, and relevant app data before upgrading. Store backups securely because configuration contains credentials. Stop or coordinate active work before restarting. Worker tasks interrupted by the restart resume automatically afterward (see [orchestration](orchestration.md)).
 
 ```bash
 claude-gateway update

@@ -1,10 +1,12 @@
 import { voiceTiming } from './diagnostics';
 import { VoiceError } from './types';
+import { MANAGED_VOICE_QUOTA_EXHAUSTED } from './managed-quota';
 
-type Category = 'local_dependency' | 'credit_check' | 'payment' | 'authentication' | 'permission' | 'quota' | 'daily_quota' | 'rate_limit' | 'unavailable' | 'language' | 'model' | 'timeout' | 'network' | 'cancelled' | 'invalid_response' | 'invalid_request' | 'no_speech' | 'unknown';
+type Category = 'local_dependency' | 'credit_check' | 'managed_credit' | 'payment' | 'authentication' | 'permission' | 'quota' | 'daily_quota' | 'rate_limit' | 'unavailable' | 'language' | 'model' | 'timeout' | 'network' | 'cancelled' | 'invalid_response' | 'invalid_request' | 'no_speech' | 'unknown';
 const descriptions: Record<Category, [string, boolean]> = {
   local_dependency: ['A local audio dependency (ffmpeg or ffprobe) is missing or cannot run. Run claude-gateway doctor, then claude-gateway doctor fix on the gateway machine.', false],
   credit_check: ['Could not check the voice credit balance with the provider. This is not a missing-credit error; please try again.', true],
+  managed_credit: ['Voice credit is used up. Voice will work again after the credit resets or is topped up.', false],
   payment: ['The voice provider requires payment. Check provider credits or billing before trying again.', false],
   authentication: ['No API key is configured or the voice provider rejected it. Check the connected API key.', false],
   permission: ['The voice provider denied access. Check API key permissions and model access.', false],
@@ -37,7 +39,7 @@ function object(value: unknown): Record<string, unknown> {
 export function providerVoiceError(prefix: 'STT' | 'TTS' | 'VOICE', status?: number, payload?: unknown): VoiceError {
   const body = object(payload), error = object(body.error), detail = object(body.detail);
   const candidates = [error.code, error.status, detail.code, detail.status, body.code, body.err_code, body.status, body.error, body.detail];
-  if (candidates.includes('MANAGED_VOICE_QUOTA_EXHAUSTED')) return new VoiceError('MANAGED_VOICE_QUOTA_EXHAUSTED');
+  if (candidates.includes(MANAGED_VOICE_QUOTA_EXHAUSTED)) return new VoiceError(MANAGED_VOICE_QUOTA_EXHAUSTED);
   const dailyQuota = status === 429 && Array.isArray(error.details) && error.details.some(value => {
     const quota = object(value);
     return quota['@type'] === 'type.googleapis.com/google.rpc.QuotaFailure' && Array.isArray(quota.violations) && quota.violations.some(value => {
@@ -71,7 +73,9 @@ export function describeVoiceError(error: unknown) {
   const code = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
   const httpStatus = Number(code.match(/_HTTP_(\d{3})/)?.[1]) || undefined;
   const explicit = code.match(/_REASON_([A-Z_]+)$/)?.[1]?.toLowerCase() as Category | undefined;
-  let category: Category = explicit && Object.prototype.hasOwnProperty.call(descriptions, explicit) ? explicit : 'unknown';
+  // Only a definite empty managed wallet; a check that could not finish is credit_check below.
+  if (code === MANAGED_VOICE_QUOTA_EXHAUSTED) return { category: 'managed_credit', message: descriptions.managed_credit[0], retryable: false };
+  let category: Category = explicit && explicit !== 'managed_credit' && Object.prototype.hasOwnProperty.call(descriptions, explicit) ? explicit : 'unknown';
   // The wallet check, not the voice provider: its HTTP status describes that check only.
   if (category === 'unknown' && code.startsWith('MANAGED_VOICE_USAGE_')) {
     const detail = code === 'MANAGED_VOICE_USAGE_TIMEOUT' ? ' (timed out)' : code === 'MANAGED_VOICE_USAGE_NETWORK' ? ' (no connection)'
@@ -88,7 +92,7 @@ export function describeVoiceError(error: unknown) {
     else if (httpStatus === 408 || httpStatus === 504 || /TIMEOUT|TimeoutError/.test(code)) category = 'timeout';
     else if (httpStatus && httpStatus >= 500) category = 'unavailable';
     // The recognizer heard the audio and found no words: noise, not a provider failure.
-    else if (code === 'EMPTY_TRANSCRIPT') category = 'no_speech';
+    else if (code === 'EMPTY_TRANSCRIPT' || code === 'VOICE_NOTE_NO_TRANSCRIPT') category = 'no_speech';
     else if (/LANGUAGE_UNSUPPORTED|UNSUPPORTED_LANGUAGE/.test(code)) category = 'language';
     else if (/INVALID_VOICE_MODEL|UNKNOWN_TTS_PROVIDER|UNKNOWN_STT_PROVIDER|TTS_FILE_UNSUPPORTED/.test(code)) category = 'model';
     else if (httpStatus && httpStatus >= 400) category = 'invalid_request';

@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { createApiAuthMiddleware, canAccessAgent } from './auth';
+import { createApiAuthMiddleware, canAccessAgent, isAdmin } from './auth';
 import { isValidAgentId, isValidSessionId } from './router';
 import { MediaStore } from '../history/media-store';
 import { ApiKey } from '../types';
@@ -14,6 +14,7 @@ import {
   shareEnv,
   shareLimitsFromEnv,
   validateShareFile,
+  sessionMediaDirs,
   DEFAULT_SHARE_TTL_SECONDS,
 } from '../share/share-store';
 import { computeSessionImageCatalog } from '../share/session-image-catalog';
@@ -268,10 +269,15 @@ export function createSharesPrivateRouter(
   agentsBaseDir: string,
   publicBaseUrl?: string | (() => string | undefined),
   limitsOverride?: ShareLimits,
+  isIsolatedAgent: (agentId: string) => boolean = () => false,
 ): Router {
   const router = Router();
   const auth = createApiAuthMiddleware(apiKeys);
   const limits = limitsOverride ?? shareLimitsFromEnv();
+  // isolate_memory agents serve unrelated end users from one media root, so a
+  // session may only share or register files from its own media dirs (#609).
+  const sessionScope = (agentId: string, sessionId: string): string[] | undefined =>
+    isIsolatedAgent(agentId) ? sessionMediaDirs(agentsBaseDir, agentId, sessionId) : undefined;
   const defaultTtl = (() => {
     const n = Number(shareEnv('CODEX_TTL_SECONDS'));
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_SHARE_TTL_SECONDS;
@@ -350,6 +356,7 @@ export function createSharesPrivateRouter(
     };
     const resolved: Resolved[] = [];
     const seen = new Set<string>();
+    const allowedDirs = sessionScope(agentId, sessionId);
     let totalBytes = 0;
     for (const raw of refs as unknown[]) {
       if (typeof raw !== 'object' || raw === null) {
@@ -382,7 +389,7 @@ export function createSharesPrivateRouter(
       }
       let validated;
       try {
-        validated = validateShareFile(agentsBaseDir, agentId, candidatePath, limits.maxFileBytes, allowKind);
+        validated = validateShareFile(agentsBaseDir, agentId, candidatePath, limits.maxFileBytes, allowKind, allowedDirs);
       } catch (err) {
         if (err instanceof ShareError) {
           res.status(errStatus(err.code)).json({ error: err.message, code: err.code });
@@ -461,13 +468,17 @@ export function createSharesPrivateRouter(
   /**
    * DELETE /api/v1/shares/:shareId — revoke (§10). Only a key with
    * access to the owning agent (or admin) may revoke; anything else is a
-   * uniform 404 so share ids are not confirmable cross-tenant.
+   * uniform 404 so share ids are not confirmable cross-tenant. For an
+   * isolate_memory agent a non-admin key must also name the owning session
+   * (`?session_id=`).
    */
   router.delete('/v1/shares/:shareId', auth, (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
     const shareId = req.params.shareId ?? '';
     const owner = store.getShareOwner(shareId);
-    if (!owner || !canAccessAgent(apiKey, owner.agentId)) {
+    const sameSession = req.query.session_id === owner?.sessionId;
+    if (!owner || !canAccessAgent(apiKey, owner.agentId)
+      || (isIsolatedAgent(owner.agentId) && !isAdmin(apiKey) && !sameSession)) {
       res.status(404).json({ error: 'share not found' });
       return;
     }
@@ -522,6 +533,7 @@ export function createSharesPrivateRouter(
       : undefined;
 
     const items: Array<{ artifact_id: string; artifact_ref: string; index: number; path: string }> = [];
+    const allowedDirs = sessionScope(agentId, sessionId);
     for (let index = 0; index < (files as string[]).length; index++) {
       const file = (files as string[])[index]!;
       let validated;
@@ -529,7 +541,7 @@ export function createSharesPrivateRouter(
         // Deliberately NOT widened by #444: this registry feeds the session
         // IMAGE catalog (generate_image refs, "the second image"), so it takes
         // the default 'image' allow-kind and a PDF here is still a 415.
-        validated = validateShareFile(agentsBaseDir, agentId, file, limits.maxFileBytes);
+        validated = validateShareFile(agentsBaseDir, agentId, file, limits.maxFileBytes, 'image', allowedDirs);
       } catch (err) {
         const code = err instanceof ShareError ? err.code : 'invalid_path';
         res.status(errStatus(code)).json({ error: err instanceof Error ? err.message : 'invalid file', code });

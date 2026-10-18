@@ -74,6 +74,7 @@ import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { cliPairingStore, isCliChannel, type CliChannel } from '../cli-viewer/pairing-store';
 import { buildCliUrl, buildVoiceCallUrl, normalizePublicUrl } from '../cli-viewer/url';
 import { telegramVoiceCallsEnabled, voiceCallEndedText, voiceCallPairings } from '../voice/call-pairing';
+import { telegramBotAvatars } from '../voice/telegram-avatar';
 import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
@@ -589,7 +590,8 @@ export class AgentRunner extends EventEmitter {
               await old.stop(); this.sessions.delete(key);
             }
             if (this.sessions.size >= this.maxConcurrent) throw new Error('Session pool full');
-            if (this.agentConfig.type !== 'app-agent') spawnArchiveReindex(this.agentConfig.workspace, this.agentConfig.knowledge, this.gatewayConfig.gateway.knowledge);
+            // Isolate mode (#601) and disableArchive (#609) offer no archive tool, so nothing would read the index.
+            if (this.agentConfig.type !== 'app-agent' && !this.agentConfig.isolateMemory && !this.agentConfig.disableArchive) spawnArchiveReindex(this.agentConfig.workspace, this.agentConfig.knowledge, this.gatewayConfig.gateway.knowledge);
             const agentSession = new SessionProcess(sessionId, scope?.source ?? 'api', this.agentConfig, this.gatewayConfig, this.sessionStore, scope?.chatId, profile);
             agentSession.historyLimit = resolveMaxHistoryMessages(this.agentConfig.history?.maxHistoryMessages, this.gatewayConfig.gateway.history?.maxHistoryMessages);
             if (model) agentSession.modelOverride = model;
@@ -1548,6 +1550,9 @@ export class AgentRunner extends EventEmitter {
       // Telegram opens Mini Apps over HTTPS only.
       if (!normalizePublicUrl(this.gatewayConfig.gateway.publicUrl)?.startsWith('https://')) { respond({ success: false, error: 'not_configured' }); return; }
       respond({ success: true, url: buildVoiceCallUrl(this.gatewayConfig.gateway.publicUrl, voiceCallPairings.create(this.agentConfig.id, chatId, threadId ?? '')) });
+      // Look the bot up while the user taps the button, so the call page opens with its name and photo.
+      const botToken = this.agentConfig.telegram?.botToken;
+      if (botToken) void telegramBotAvatars.refresh(this.agentConfig.id, botToken);
       return;
     }
 
@@ -2350,6 +2355,7 @@ export class AgentRunner extends EventEmitter {
     source: ChatChannelOrApi,
     sessionId?: string,          // actual session UUID (only for channel sessions; equals mapKey for API)
     modelOverride?: string,      // per-session model override from SessionMeta
+    apiChatId?: string,          // API chat the session belongs to; keys its isolated memory (#601)
   ): Promise<SessionProcess> {
     // Normalize: treat agent-default model as "no override" so default sessions
     // don't restart unnecessarily when the frontend explicitly sends the default model.
@@ -2393,7 +2399,7 @@ export class AgentRunner extends EventEmitter {
           const respawn = (async () => {
             await existing.stop();          // idempotent on a dead child; closes watchers + signal file
             this.sessions.delete(mapKey);
-            return this.spawnSession(mapKey, source, sessionId, effectiveOverride);
+            return this.spawnSession(mapKey, source, sessionId, effectiveOverride, apiChatId);
           })();
           this.sessionSpawnLocks.set(mapKey, respawn);
           try {
@@ -2411,7 +2417,7 @@ export class AgentRunner extends EventEmitter {
         const respawn = (async () => {
           await existing.stop();
           this.sessions.delete(mapKey);
-          return this.spawnSession(mapKey, source, sessionId, effectiveOverride);
+          return this.spawnSession(mapKey, source, sessionId, effectiveOverride, apiChatId);
         })();
         this.sessionSpawnLocks.set(mapKey, respawn);
         try {
@@ -2425,7 +2431,7 @@ export class AgentRunner extends EventEmitter {
     }
 
     // No existing session — acquire lock for the spawn path
-    const spawnPromise = this.spawnSession(mapKey, source, sessionId, effectiveOverride);
+    const spawnPromise = this.spawnSession(mapKey, source, sessionId, effectiveOverride, apiChatId);
     this.sessionSpawnLocks.set(mapKey, spawnPromise);
     try {
       return await spawnPromise;
@@ -2439,6 +2445,7 @@ export class AgentRunner extends EventEmitter {
     source: ChatChannelOrApi,
     sessionId?: string,
     modelOverride?: string,
+    apiChatId?: string,
   ): Promise<SessionProcess> {
 
     // Evict oldest idle session if at capacity
@@ -2467,6 +2474,8 @@ export class AgentRunner extends EventEmitter {
       this.gatewayConfig,
       this.sessionStore,
       chatId,
+      undefined,
+      apiChatId,
     );
 
     // Apply per-session model override (caller already normalized to undefined when == agent default)
@@ -2476,7 +2485,8 @@ export class AgentRunner extends EventEmitter {
 
     // Keep the searchable memory archive (planning-64) fresh for the memory_search
     // tool. Fire-and-forget, detached, OFF the event loop — never blocks the spawn.
-    spawnArchiveReindex(
+    // Isolate mode (#601) and disableArchive (#609) offer no archive tool, so nothing would read the index.
+    if (!this.agentConfig.isolateMemory && !this.agentConfig.disableArchive) spawnArchiveReindex(
       this.agentConfig.workspace,
       this.agentConfig.knowledge,
       this.gatewayConfig.gateway.knowledge,
@@ -4820,9 +4830,10 @@ export class AgentRunner extends EventEmitter {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
     });
 
-    // Use model from request body if provided, otherwise use agent default
+    // Use model from request body if provided, otherwise use agent default.
+    // A spawn keys its isolated memory by the chat (#601).
     this.apiChatIds.set(sessionId, chatId);
-    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model);
+    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFiles = opts.mediaFiles?.length
@@ -5156,9 +5167,10 @@ export class AgentRunner extends EventEmitter {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
     });
 
-    // Use model from request body if provided, otherwise use agent default
+    // Use model from request body if provided, otherwise use agent default.
+    // A spawn keys its isolated memory by the chat (#601).
     this.apiChatIds.set(sessionId, chatId);
-    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model);
+    const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model, chatId);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFilesStream = opts.mediaFiles?.length

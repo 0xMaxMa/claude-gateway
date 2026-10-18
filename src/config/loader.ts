@@ -99,6 +99,18 @@ function validateAgent(agent: Record<string, unknown>, index: number, orchestrat
   if (!agent.id || typeof agent.id !== 'string') {
     return `Agent at index ${index} is missing required field "id"`;
   }
+  if (agent.isolateMemory !== undefined) {
+    if (typeof agent.isolateMemory !== 'boolean') return `agent '${agent.id}': isolateMemory must be true or false`;
+    // Claude Code keeps only the last --append-system-prompt-file, so one in
+    // extraFlags would replace the conversation memory appended at spawn.
+    const extraFlags = (agent.claude as { extraFlags?: unknown } | undefined)?.extraFlags;
+    if (agent.isolateMemory && Array.isArray(extraFlags) && extraFlags.some(flag => typeof flag === 'string' && (flag === '--append-system-prompt-file' || flag.startsWith('--append-system-prompt-file=')))) {
+      return `agent '${agent.id}': isolateMemory cannot be combined with claude.extraFlags --append-system-prompt-file; use --append-system-prompt or move that text into AGENTS.md`;
+    }
+  }
+  if (agent.disableArchive !== undefined && typeof agent.disableArchive !== 'boolean') {
+    return `agent '${agent.id}': disableArchive must be true or false`;
+  }
   const hasTelegram = agent.telegram && typeof agent.telegram === 'object';
   const hasDiscord = agent.discord && typeof agent.discord === 'object';
   // Agents without channels are allowed (API-only agents accessed via HTTP API key)

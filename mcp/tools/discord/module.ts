@@ -31,6 +31,7 @@ import { createMessageHandler } from './inbound';
 import { initDedupDir, isDuplicate, pruneDedup } from '../telegram/dedup';
 import type { DiscordMessageContext } from './types';
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
+import { assertOriginChat, resolveIsolateMediaPath, isolateMediaDir, isolateMode } from '../shared/isolate';
 
 /** AgentRunner callback base (origin of CLAUDE_CHANNEL_CALLBACK, "" when unset).
  *  Used to mint/approve `/cli` pairings via the runner, the same bridge the
@@ -43,6 +44,8 @@ function cliCallbackBase(): string {
     return '';
   }
 }
+
+const DISCORD_CDN_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
 
 export class DiscordModule implements ChannelModule {
   id = 'discord' as ChannelId;
@@ -69,6 +72,8 @@ export class DiscordModule implements ChannelModule {
   // discord_reply after a transient send hiccup even though the upload
   // succeeded, which spams duplicate images. We never re-send the same file.
   private readonly sentFiles = new Set<string>();
+  /** Threads discord_create_thread opened from this conversation (#609). */
+  private readonly createdThreads = new Set<string>();
 
   constructor() {
     this.stateDir = process.env.DISCORD_STATE_DIR
@@ -712,8 +717,18 @@ export class DiscordModule implements ChannelModule {
     };
   }
 
+  /**
+   * Fetch a channel the tool may act on: the conversation's own, or (isolate
+   * mode) a thread this process created with discord_create_thread. Any other
+   * thread, even one under the origin channel, is its own conversation.
+   */
+  private async fetchOriginChannel(channelId: string): Promise<any> {
+    if (!this.createdThreads.has(channelId)) assertOriginChat(channelId);
+    return this.client.channels.fetch(channelId);
+  }
+
   private async handleReply(args: Record<string, unknown>): Promise<McpToolResult> {
-    const channel = await this.client.channels.fetch(args.channel_id as string);
+    const channel = await this.fetchOriginChannel(args.channel_id as string);
     const text = args.text as string;
     const replyTo = args.reply_to as string | undefined;
     const requested = (args.files as string[] | undefined) ?? [];
@@ -730,14 +745,15 @@ export class DiscordModule implements ChannelModule {
       return { content: [{ type: 'text', text: 'already sent (duplicate suppressed)' }] };
     }
 
-    for (const f of files) {
-      const st = fs.statSync(f);
+    const paths = files.map(resolveIsolateMediaPath);
+    paths.forEach((p, i) => {
+      const st = fs.statSync(p);
       if (st.size > MAX_ATTACHMENT_BYTES) {
-        throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);
+        throw new Error(`file too large: ${files[i]} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);
       }
-    }
+    });
 
-    const sent = await sendMessage(channel, text, { replyTo, files, useEmbed });
+    const sent = await sendMessage(channel, text, { replyTo, files: paths, useEmbed });
     // Mark as sent only AFTER the send succeeds — if sendMessage throws, the files
     // stay un-marked so a genuine retry re-delivers them (never silently dropped).
     for (const f of files) this.sentFiles.add(f);
@@ -746,14 +762,14 @@ export class DiscordModule implements ChannelModule {
   }
 
   private async handleReact(args: Record<string, unknown>): Promise<McpToolResult> {
-    const channel = await this.client.channels.fetch(args.channel_id as string);
+    const channel = await this.fetchOriginChannel(args.channel_id as string);
     const message = await channel.messages.fetch(args.message_id as string);
     await message.react(args.emoji as string);
     return { content: [{ type: 'text', text: 'reacted' }] };
   }
 
   private async handleEditMessage(args: Record<string, unknown>): Promise<McpToolResult> {
-    const channel = await this.client.channels.fetch(args.channel_id as string);
+    const channel = await this.fetchOriginChannel(args.channel_id as string);
     const message = await channel.messages.fetch(args.message_id as string);
     const edited = await message.edit(args.text as string);
     return { content: [{ type: 'text', text: `edited (id: ${edited.id})` }] };
@@ -761,11 +777,27 @@ export class DiscordModule implements ChannelModule {
 
   private async handleDownloadAttachment(args: Record<string, unknown>): Promise<McpToolResult> {
     const url = args.url as string;
+    // Isolate mode: only Discord's own CDN, and into this conversation's media
+    // dir rather than the inbox every conversation shares.
+    let destDir = this.inboxDir;
+    if (isolateMode()) {
+      let parsed: URL | null = null;
+      try { parsed = new URL(url); } catch {}
+      if (!parsed || parsed.protocol !== 'https:' || !DISCORD_CDN_HOSTS.has(parsed.hostname)) {
+        throw new Error('isolate mode: only https://cdn.discordapp.com or https://media.discordapp.net attachment URLs can be downloaded');
+      }
+      // A CDN attachment URL names the channel it was posted in:
+      // /attachments/<channel_id>/<attachment_id>/<file>. Only this conversation's.
+      const [, kind, channelId] = parsed.pathname.split('/');
+      if (kind !== 'attachments' || !channelId) throw new Error('isolate mode: only channel attachment URLs can be downloaded');
+      if (!this.createdThreads.has(channelId)) assertOriginChat(channelId);
+      destDir = isolateMediaDir();
+    }
     const filename = (args.filename as string | undefined) ?? path.basename(url.split('?')[0]);
     const ext = path.extname(filename).replace(/[^a-zA-Z0-9.]/g, '') || '.bin';
-    const dlPath = path.join(this.inboxDir, `${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`);
+    const dlPath = path.join(destDir, `${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`);
 
-    fs.mkdirSync(this.inboxDir, { recursive: true });
+    fs.mkdirSync(destDir, { recursive: true });
 
     await new Promise<void>((resolve, reject) => {
       const proto = url.startsWith('https') ? https : http;
@@ -785,7 +817,7 @@ export class DiscordModule implements ChannelModule {
   }
 
   private async handleCreateThread(args: Record<string, unknown>): Promise<McpToolResult> {
-    const channel = await this.client.channels.fetch(args.channel_id as string);
+    const channel = await this.fetchOriginChannel(args.channel_id as string);
     const name = (args.name as string).slice(0, 100);
     let thread: any;
     if (args.message_id) {
@@ -794,6 +826,7 @@ export class DiscordModule implements ChannelModule {
     } else {
       thread = await channel.threads.create({ name, autoArchiveDuration: 60 });
     }
+    this.createdThreads.add(thread.id);
     return { content: [{ type: 'text', text: `thread created (id: ${thread.id})` }] };
   }
 }

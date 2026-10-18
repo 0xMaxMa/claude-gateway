@@ -333,6 +333,34 @@ function upgradeRetiredMemoryModeDefault(config: Record<string, unknown>): strin
   return changed;
 }
 
+/** Warning surfaced when a migration drops a persisted `voice.live.fastAck: false` (PR #608). */
+export const FAST_ACK_DEFAULT_WARNING =
+  'voice.live.fastAck: false was removed so live calls use the new default (on): ' +
+  'a short acknowledgement is spoken while the agent prepares its reply. ' +
+  'Set voice.live.fastAck to false for an agent to turn it off again.';
+
+/**
+ * One-time upgrade of the retired `voice.live.fastAck` default from false to
+ * true (PR #608). The voice settings PATCH used to persist an echoed settings
+ * payload verbatim, pinning the old default `fastAck: false` into agents that
+ * never chose it. Like {@link upgradeRetiredMemoryModeDefault}, this runs only
+ * when migrating a config older than the template (1.0.37), so a false set
+ * before 1.0.37 is indistinguishable from the old default and is dropped once;
+ * a false set afterwards is kept.
+ */
+function upgradeRetiredFastAckDefault(config: Record<string, unknown>): string[] {
+  if (!Array.isArray(config.agents)) return [];
+  const changed: string[] = [];
+  config.agents.forEach((agent: unknown, i) => {
+    const live = (agent as { voice?: { live?: Record<string, unknown> } } | null)?.voice?.live;
+    if (live && typeof live === 'object' && live.fastAck === false) {
+      delete live.fastAck;
+      changed.push(`agents[${i}].voice.live.fastAck`);
+    }
+  });
+  return changed;
+}
+
 /**
  * Load a template file, extract the _migration metadata, strip it,
  * and return the clean template along with the ignorePaths set.
@@ -473,6 +501,11 @@ export function detectMigration(
     added.push(...modeFields);
     warnings.push(MEMORY_MODE_AUTO_WARNING);
   }
+  const fastAckFields = upgradeRetiredFastAckDefault(configClone);
+  if (fastAckFields.length > 0) {
+    added.push(...fastAckFields);
+    warnings.push(FAST_ACK_DEFAULT_WARNING);
+  }
 
   // Deep-merge top-level keys (except agents which need special handling)
   const templateWithoutAgents = { ...template };
@@ -566,6 +599,11 @@ export function applyMigration(
   if (modeFields.length > 0) {
     added.push(...modeFields);
     warnings.push(MEMORY_MODE_AUTO_WARNING);
+  }
+  const fastAckFields = upgradeRetiredFastAckDefault(config);
+  if (fastAckFields.length > 0) {
+    added.push(...fastAckFields);
+    warnings.push(FAST_ACK_DEFAULT_WARNING);
   }
 
   // Deep-merge top-level keys (except agents)

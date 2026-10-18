@@ -21,6 +21,7 @@ import { ClaudeWorkerDriver } from '../../../src/orchestration/tasks/driver';
 import { SessionProcess } from '../../../src/session/process';
 import { CodexProcess, cleanupCodexSessions } from '../../../src/session/codex-process';
 import { startProcessTurn } from '../../../src/orchestration/process-turn';
+import { shutdownFailure } from '../../../src/orchestration/tasks/failure';
 import type { AgentConfig, GatewayConfig } from '../../../src/types';
 import type { CommandContext } from '../../../src/orchestration/types';
 
@@ -632,5 +633,42 @@ describe('pstack reflect reviews the chat session', () => {
     await run('claude-sonnet-4-6', skillTask('pstack:reflect'));
     expect(promptOf(0)).not.toContain('chat session\'s transcripts');
     expect(promptOf(1)).not.toContain('chat session\'s transcripts');
+  });
+});
+
+// Issue #603: the attempt that resumes a shutdown-interrupted task is told the work is still
+// authorized and must be verified, reported and finished, never handed back to the user.
+describe('a task resumed after a gateway restart', () => {
+  const prompt = (index: number) => (jest.mocked(SessionProcess).mock.results[index].value as MockWorker).sendMessage.mock.calls[0] as unknown as string[];
+  test('gets the verify-report-continue brief only on the resumed attempt', async () => {
+    const task = spawn('claude-sonnet-4-6'), first = tasks.claim(task.taskId)!;
+    const handle = await driver.start(task, first); await handle.accepted;
+    tasks.started(first.attemptId, first.generation);
+    expect(tasks.finish(first.attemptId, first.generation, { type: 'stopped', failure: shutdownFailure() }).state).toBe('queued');
+    await handle.result.catch(() => {});
+    const resumed = tasks.claim(task.taskId)!;
+    const second = await driver.start(tasks.store.task(task.taskId)!, resumed); await second.accepted; await second.result;
+    expect(prompt(0)[0]).not.toContain('Resumed after a gateway restart');
+    const text = prompt(1)[0];
+    expect(text).toContain('Resumed after a gateway restart (automatic resume 1 of 3)');
+    expect(text).toMatch(/verify how far the work actually got: files and the working tree, git branch and commits, pushes, tags, PR and CI status/);
+    expect(text).toContain('task_report_progress');
+    expect(text).toMatch(/Never repeat a completed side effect/);
+    expect(text).toContain('Do not ask the user whether to continue and do not tell them to type "continue"');
+  });
+
+  test('keeps the brief and the last worker progress when the resumed start is deferred first', async () => {
+    const task = spawn('claude-sonnet-4-6'), first = tasks.claim(task.taskId)!;
+    tasks.started(first.attemptId, first.generation);
+    tasks.progress(first.attemptId, first.generation, 'Tagged v9.9.9 and pushed the tag; npm publish not started.');
+    expect(tasks.finish(first.attemptId, first.generation, { type: 'stopped', failure: shutdownFailure() }).state).toBe('queued');
+    // A provider or workspace wait ends one attempt without starting it.
+    const deferred = tasks.claim(task.taskId)!;
+    tasks.deferUnstarted(deferred.attemptId, deferred.generation, 'provider');
+    const resumed = tasks.claim(task.taskId)!;
+    const handle = await driver.start(tasks.store.task(task.taskId)!, resumed); await handle.accepted; await handle.result;
+    const text = prompt(0)[0];
+    expect(text).toContain('Resumed after a gateway restart (automatic resume 1 of 3)');
+    expect(text).toContain('Tagged v9.9.9 and pushed the tag; npm publish not started.');
   });
 });

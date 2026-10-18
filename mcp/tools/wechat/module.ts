@@ -14,6 +14,7 @@
  */
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
 import { WeChatClient } from './client';
+import { assertOriginChat } from '../shared/isolate';
 
 export class WeChatModule implements ToolModule {
   id = 'wechat';
@@ -78,6 +79,7 @@ export class WeChatModule implements ToolModule {
       };
     }
     try {
+      assertOriginChat(chatId);
       await this.getClient().send(chatId, text);
       return { content: [{ type: 'text', text: 'sent' }] };
     } catch (err) {
