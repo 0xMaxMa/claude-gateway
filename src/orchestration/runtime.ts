@@ -63,6 +63,7 @@ import { retryableVoiceNoteFailure, transcribeVoiceNote, voiceNoteFailureMessage
 import { createLogger } from '../logger';
 import { hasSpokenWords, VoiceError } from '../voice/types';
 import { describeVoiceError } from '../voice/errors';
+import { MANAGED_VOICE_QUOTA_EXHAUSTED } from '../voice/managed-quota';
 import { MediaStore } from '../history/media-store';
 import { resolveSkill, skillCatalog } from './skills';
 import { PSTACK_DECISION_NOTE, pstackCommandReply, pstackNotSetUpReply } from '../pstack/overlay';
@@ -1200,7 +1201,10 @@ export class AgentOrchestrationRuntime {
             } });
             // Whatever transcribed it, a note without words is never sent to the agent as the user's message.
             if (!hasSpokenWords(text)) throw new OrchestrationError('VOICE_NOTE_NO_TRANSCRIPT');
-            this.store.run("UPDATE voice_note_transcripts SET state='completed',text=? WHERE input_id=?", text, receipt.inputId);
+            this.store.transaction(() => {
+              this.store.run("UPDATE voice_note_transcripts SET state='completed',text=? WHERE input_id=?", text, receipt.inputId);
+              if (trace.provider.startsWith('managed:')) this.store.clearVoiceCreditNotices();
+            });
           } catch (error) {
             const code = error instanceof OrchestrationError || error instanceof VoiceError ? error.code : 'VOICE_NOTE_STT_FAILED';
             this.store.run("UPDATE voice_note_transcripts SET state='failed',error_code=? WHERE input_id=?", code, receipt.inputId);
@@ -1209,18 +1213,23 @@ export class AgentOrchestrationRuntime {
           transcript = this.store.get('SELECT * FROM voice_note_transcripts WHERE input_id=?', receipt.inputId)!;
         }
         if (transcript.state !== 'completed') {
-          if (transcript.error_code === 'MANAGED_VOICE_QUOTA_EXHAUSTED') {
+          const code = String(transcript.error_code ?? 'VOICE_NOTE_INTERRUPTED');
+          const text = `${voiceNoteFailureMessage(code)} Reference: ${receipt.inputId}`;
+          // An empty managed wallet fails every note until it is topped up: say so once per chat.
+          // The claim commits with the notice, so an interrupted turn does not use it up.
+          const notify = this.store.compose(() => {
+            if (code !== MANAGED_VOICE_QUOTA_EXHAUSTED || this.store.claimVoiceCreditNotice(input.scope.source, input.scope.chatId, input.scope.threadKey, 'stt', decision.responseId!)) {
+              this.decisions.finish(decision, text, 'failed'); return true;
+            }
             // Skipping a recording has not reported any assigned worker results.
             // Preserve their notifications and staged files for the next report.
-            this.store.transaction(() => {
-              this.store.run("UPDATE notifications SET status='pending',decision_id=NULL WHERE decision_id=? AND status='assigned'", decision.decisionId);
-              this.store.run("UPDATE conversation_decisions SET notification_ids_json='[]' WHERE id=?", decision.decisionId);
-            });
-            this.decisions.finish(decision, '', 'completed', undefined, false);
-            await this.flushHistory(); return '';
-          }
-          const text = `${voiceNoteFailureMessage(String(transcript.error_code ?? 'VOICE_NOTE_INTERRUPTED'))} Reference: ${receipt.inputId}`;
-          this.decisions.finish(decision, text, 'failed'); await this.flushHistory(); options.onText?.(text); return text;
+            this.store.run("UPDATE notifications SET status='pending',decision_id=NULL WHERE decision_id=? AND status='assigned'", decision.decisionId);
+            this.store.run("UPDATE conversation_decisions SET notification_ids_json='[]' WHERE id=?", decision.decisionId);
+            this.decisions.finish(decision, '', 'completed', undefined, false); return false;
+          });
+          await this.flushHistory();
+          if (!notify) return '';
+          options.onText?.(text); return text;
         }
         input = { ...input, text: String(transcript.text), skill: resolveSkill(String(transcript.text), input.scope.source, this.host.skills?.()) };
         // Preserve original ingress/hash for provider retry; canonical history uses the transcript.
