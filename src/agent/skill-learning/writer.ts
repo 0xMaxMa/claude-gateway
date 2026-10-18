@@ -5,9 +5,9 @@
  * safety guards live here:
  *   - name / reserved-name / size validation (mirrors mcp/tools/skills/handlers.ts
  *     — keep in sync; src/ cannot import from mcp/ because tsc rootDir is ./src).
- *   - HARD provenance guard: only unpinned `origin: auto` skills in a real
- *     (non-symlink) directory are ever edited or overwritten; a create that
- *     collides with a non-auto skill is refused.
+ *   - HARD provenance guard: only `origin: auto` skills in a real (non-symlink)
+ *     directory are ever edited or overwritten (pinned ones too: a pin only stops
+ *     the curator); a create that collides with a non-auto skill is refused.
  *   - priority/dedup: a create that duplicates an existing auto skill (by name
  *     or description) is downgraded to an edit of that skill; one that duplicates
  *     an installed (shared/module/plugin) skill is refused.
@@ -65,20 +65,24 @@ export function readSkillOrigin(filePath: string): SkillOrigin {
 }
 
 /**
- * True only for a skill the gateway may rewrite or move: a real directory (not a
- * symlink) holding a regular SKILL.md whose on-disk frontmatter says
- * `origin: auto` and not `pinned: true`.
+ * The on-disk frontmatter of a skill the gateway owns: a real directory (not a
+ * symlink) holding a regular SKILL.md that says `origin: auto`. Undefined for
+ * anything else. Owned skills are editable; the curator also leaves `pinned: true` ones in place.
  */
-export function isOwnedAutoSkillDir(skillDir: string): boolean {
+export function ownedAutoSkillFrontmatter(skillDir: string): Record<string, unknown> | undefined {
   try {
-    if (!fs.lstatSync(skillDir).isDirectory()) return false;
+    if (!fs.lstatSync(skillDir).isDirectory()) return undefined;
     const skillFile = path.join(skillDir, 'SKILL.md');
-    if (!fs.lstatSync(skillFile).isFile()) return false;
+    if (!fs.lstatSync(skillFile).isFile()) return undefined;
     const fm = extractFrontmatter(fs.readFileSync(skillFile, 'utf-8'))?.frontmatter;
-    return !!fm && fm['origin'] === 'auto' && fm['pinned'] !== true;
+    return fm && fm['origin'] === 'auto' ? fm : undefined;
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+export function isOwnedAutoSkillDir(skillDir: string): boolean {
+  return ownedAutoSkillFrontmatter(skillDir) !== undefined;
 }
 
 /**
@@ -242,13 +246,13 @@ export function applyProposal(proposal: ReviewProposal, ctx: WriterContext): Wri
   // in-memory `ctx.existing` registry). A user file can occupy the exact target
   // path while being invisible to `ctx.existing` — its frontmatter fails to
   // parse, or its `name` field differs from its directory. Re-read the real
-  // target and refuse unless it is an unpinned origin:auto skill in a real
+  // target and refuse unless it is an origin:auto skill in a real
   // directory (a symlink would be written through to wherever it points). Skips
   // the `.pending` queue (separate namespace, never a live user skill).
   const targetPath = skillFilePath(ctx.workspaceDir, name, queued);
   const targetDir = path.dirname(targetPath);
   if (!queued && pathEntryExists(targetDir) && !isOwnedAutoSkillDir(targetDir) && !isLeftoverWriteDir(targetDir)) {
-    return { written: false, action, name, reason: 'provenance guard: on-disk target is not origin:auto (or is pinned or a symlink)' };
+    return { written: false, action, name, reason: 'provenance guard: on-disk target is not origin:auto (or is a symlink)' };
   }
 
   try {

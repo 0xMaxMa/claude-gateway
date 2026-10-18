@@ -760,9 +760,16 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
-   * Update the skill registry used for detecting /skill-name commands.
+   * Update the skill registry used for detecting /skill-name commands. A workspace
+   * reload has no CLI/extension skills of its own: it keeps the last discovered ones
+   * until refreshCliSkillRegistry swaps in a new list.
    */
   setSkillRegistry(registry: SkillRegistry): void {
+    const previous = this.skillRegistry;
+    if (registry.cliSkills === undefined && previous.cliSkills !== undefined) {
+      const { cliSkills, cliDiscoveryError, extensionServers, extensionNotices } = previous;
+      Object.assign(registry, { cliSkills, extensionServers, extensionNotices }, cliDiscoveryError ? { cliDiscoveryError } : {});
+    }
     this.skillRegistry = registry;
   }
 

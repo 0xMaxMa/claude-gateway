@@ -286,7 +286,11 @@ export class SkillLearningManager {
         enabled: this.cfg.enabled ? 1 : 0,
       });
       for (const name of skills) this.db.bumpSkillLoaded(name, ts);
-      if (skills.length) this.onSkillsLoaded?.(skills);
+      try {
+        if (skills.length) this.onSkillsLoaded?.(skills);
+      } catch (err) {
+        this.logger?.warn?.(`[skill-learning:${this.agentId}] onSkillsLoaded failed: ${(err as Error).message}`);
+      }
       a.sigMaxToolCalls = Math.max(a.sigMaxToolCalls, a.toolCalls);
       this.scheduleIdleReview(mapKey, sessionId);
     } catch {

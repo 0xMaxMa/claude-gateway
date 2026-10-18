@@ -320,6 +320,31 @@ export interface LoadWorkspaceOptions {
 }
 
 /**
+ * One running agent's context recompose: load the workspace, write CLAUDE.md, then `apply`
+ * it (the runner's skill registry). Every trigger — skill use, config reload, workspace
+ * and skill watchers — shares the returned function, and runs go one at a time: a later
+ * recompose loads after the earlier one is written, so a stale load (an older skill_stats
+ * read) can never land last and re-hide a skill that was just used.
+ */
+export function workspaceRecomposer(
+  workspaceDir: string,
+  load: () => Promise<LoadedWorkspace>,
+  apply: (updated: LoadedWorkspace) => void,
+): () => Promise<LoadedWorkspace> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return () => {
+    const run = tail.then(async () => {
+      const updated = await load();
+      await fs.promises.writeFile(path.join(workspaceDir, 'CLAUDE.md'), updated.systemPrompt, 'utf8');
+      apply(updated);
+      return updated;
+    });
+    tail = run.catch(() => {});
+    return run;
+  };
+}
+
+/**
  * Load workspace markdown files and assemble the system prompt.
  */
 export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOptions): Promise<LoadedWorkspace> {

@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { HistoryDB } from '../../../src/history/db';
-import { SkillLearningManager, managedTurnSkills, toolUseSkills, skillLearningHostHooks, type SkillLearningManagerOpts } from '../../../src/agent/skill-learning';
+import { SkillLearningManager, managedTurnSkills, toolUseSkills, skillLearningHostHooks, REVIEW_IDLE_DEBOUNCE_MS, type SkillLearningManagerOpts } from '../../../src/agent/skill-learning';
 import { extractFrontmatter } from '../../../src/skills/parser';
 import type { ClaudeSpawnFn } from '../../../src/agent/skill-learning/reviewer';
 import type { SkillLearningConfig } from '../../../src/agent/skill-learning/types';
@@ -284,8 +284,8 @@ describe('managedTurnSkills', () => {
 describe('direct-turn skill usage', () => {
   const registry = (ws: string) => ({
     skills: new Map([
-      ['learned', { filePath: path.join(ws, 'skills', 'learned', 'SKILL.md') }],
-      ['mod:tool', { filePath: '/mcp/mod/skills/tool/SKILL.md' }],
+      ['learned', { source: 'workspace', filePath: path.join(ws, 'skills', 'learned', 'SKILL.md') }],
+      ['mod:tool', { source: 'module', filePath: '/mcp/mod/skills/tool/SKILL.md' }],
     ]),
   }) as never;
 
@@ -319,6 +319,34 @@ describe('direct-turn skill usage', () => {
     expect(bash('cd /elsewhere && cat SKILL.md')).toEqual([]);
   });
 
+  it('a container agent reads its workspace at /workspace: that still counts as the host skill', () => {
+    const r = registry('/srv/agents/a/workspace');
+    expect(toolUseSkills({ name: 'Read', input: { file_path: '/workspace/skills/learned/SKILL.md' } }, r)).toEqual(['learned']);
+    expect(toolUseSkills({ name: 'Bash', input: { command: 'cat /workspace/skills/learned/SKILL.md' } }, r)).toEqual(['learned']);
+    expect(toolUseSkills({ name: 'Bash', input: { command: 'cd /workspace/skills/learned && cat SKILL.md' } }, r)).toEqual(['learned']);
+    expect(managedTurnSkills([], [], r, ['/workspace/skills/learned/SKILL.md'])).toEqual(['learned']);
+    // Only the agent's own workspace is mounted there: a module skill is not.
+    expect(toolUseSkills({ name: 'Read', input: { file_path: '/workspace/skills/tool/SKILL.md' } }, r)).toEqual([]);
+  });
+
+  it('only a command that reads SKILL.md counts as use, not one that edits, diffs, moves or deletes it', () => {
+    const r = registry('/ws');
+    const bash = (command: string) => toolUseSkills({ name: 'Bash', input: { command } }, r);
+    for (const read of ['head -40 /ws/skills/learned/SKILL.md', 'tail /ws/skills/learned/SKILL.md', 'less /ws/skills/learned/SKILL.md', '/usr/bin/cat /ws/skills/learned/SKILL.md', 'cat -n /ws/skills/learned/SKILL.md | head'])
+      expect([read, bash(read)]).toEqual([read, ['learned']]);
+    for (const other of ['git diff /ws/skills/learned/SKILL.md', 'rm /ws/skills/learned/SKILL.md', 'grep -n deploy /ws/skills/learned/SKILL.md', "sed -i 's/a/b/' /ws/skills/learned/SKILL.md", 'echo x > /ws/skills/learned/SKILL.md', 'mv /ws/skills/learned/SKILL.md /tmp/', 'git add skills/learned/SKILL.md'])
+      expect([other, bash(other)]).toEqual([other, []]);
+  });
+
+  it('reads inside a `bash -lc` wrapper (how Codex runs commands), including a cd', () => {
+    const r = registry('/ws');
+    const bash = (command: string) => toolUseSkills({ name: 'Bash', input: { command } }, r);
+    expect(bash("/bin/bash -lc 'cd skills/learned && cat SKILL.md'")).toEqual(['learned']);
+    expect(bash('bash -lc "sed -n 1,80p /ws/skills/learned/SKILL.md"')).toEqual(['learned']);
+    expect(bash("/usr/bin/zsh -c 'cd /ws/skills/learned; head SKILL.md'")).toEqual(['learned']);
+    expect(bash("bash -lc 'git diff skills/learned/SKILL.md'")).toEqual([]);
+  });
+
   it('counts a SKILL.md an orchestration/worker turn read itself (Read or shell)', () => {
     const r = registry('/ws');
     expect(managedTurnSkills([], [], r, ['/ws/skills/learned/SKILL.md'])).toEqual(['learned']);
@@ -344,6 +372,30 @@ describe('direct-turn skill usage', () => {
     live.onTurnEnd('chat1', 'sess1');
     expect(loaded).toEqual([['learned']]);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('onSkillsLoaded failure', () => {
+  it('a throwing callback is logged and the idle review is still scheduled', () => {
+    jest.useFakeTimers();
+    try {
+      const warnings: string[] = [];
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sl-mgr-'));
+      const live = new SkillLearningManager({
+        db: HistoryDB.forAgent(dir, 'agent-throw'), agentId: 'agent-throw', workspaceDir: dir, now: () => NOW, globalCfg: { enabled: true },
+        logger: { info: () => {}, warn: (m) => warnings.push(m) },
+        onSkillsLoaded: () => { throw new Error('menu boom'); },
+      });
+      const review = jest.spyOn(live, 'runReviewNow').mockResolvedValue();
+      live.onTurnStart('chat1', 'sess1', 'x', ['learned']);
+      live.onTurnEnd('chat1', 'sess1');
+      jest.advanceTimersByTime(REVIEW_IDLE_DEBOUNCE_MS + 1);
+      expect(review).toHaveBeenCalledWith('chat1', 'sess1');
+      expect(warnings.join('\n')).toMatch(/menu boom/);
+      fs.rmSync(dir, { recursive: true, force: true });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

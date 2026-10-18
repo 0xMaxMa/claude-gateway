@@ -135,12 +135,12 @@ describe('skill-learning writer.applyProposal', () => {
     expect(readSkill('orphan')).toContain('HAND WRITTEN'); // user content preserved
   });
 
-  it('PROVENANCE GUARD: edit refuses an auto skill pinned in its on-disk frontmatter', () => {
+  it('a pinned auto skill stays editable (pinned only means never pruned) and keeps its pin', () => {
     const pinned = seed('kept-flow', 'auto', 'seeded', { pinned: 'true' });
     const out = applyProposal({ action: 'edit', targetSkill: 'kept-flow', desc: 'x', body: 'new body' }, ctx({ existing: [pinned] }));
-    expect(out.written).toBe(false);
-    expect(out.reason).toMatch(/provenance guard/i);
-    expect(readSkill('kept-flow')).toContain('old body');
+    expect(out.written).toBe(true);
+    expect(readSkill('kept-flow')).toContain('new body');
+    expect(extractFrontmatter(readSkill('kept-flow'))!.frontmatter['pinned']).toBe(true);
   });
 
   it('PROVENANCE GUARD: never writes through a symlinked skill dir, even one that says origin:auto', () => {

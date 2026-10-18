@@ -161,6 +161,23 @@ describe('curator.curateOnce', () => {
     const r = curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ minUsesToKeep: 2, maxAgeDays: 30 }), now });
     expect(r.pruned).toEqual([]);
     expect(exists(ws, 'fmpinned')).toBe(true);
+    // Recorded as pinned (kept out of the cap), not dropped and re-claimed every night.
+    expect(db.getSkillStat('fmpinned')).toMatchObject({ origin: 'auto', pinned: 1 });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('an unusable skills/.archive is reported once per sweep, not once per skill', () => {
+    const { db, ws, dir } = setup();
+    const now = 100 * DAY;
+    fs.writeFileSync(path.join(ws, 'skills', ARCHIVE_DIRNAME), 'not a dir');
+    for (const n of ['s1', 's2', 's3']) seedSkill(db, ws, n, { origin: 'auto', createdAt: now - 45 * DAY, timesLoaded: 0 });
+    const warnings: string[] = [];
+    const logger = { info: () => {}, warn: (m: string) => warnings.push(m) };
+    const r = curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ minUsesToKeep: 2, maxAgeDays: 30, maxAutoSkills: 1 }), now, logger });
+    expect(r.pruned).toEqual([]);
+    expect(r.evicted).toEqual([]);
+    expect(warnings.filter((w) => w.includes(ARCHIVE_DIRNAME))).toHaveLength(1);
+    for (const n of ['s1', 's2', 's3']) expect(exists(ws, n)).toBe(true);
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

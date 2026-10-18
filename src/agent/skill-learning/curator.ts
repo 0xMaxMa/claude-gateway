@@ -20,7 +20,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { msUntilNextHour } from '../../history/cleanup';
 import { isValidTimezone } from './config';
-import { isOwnedAutoSkillDir } from './writer';
+import { ownedAutoSkillFrontmatter } from './writer';
 import { computeRollup } from './metrics';
 import type { HistoryDB } from '../../history/db';
 import type { ResolvedSkillLearningCfg } from './types';
@@ -68,6 +68,13 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
 
   trackUntrackedAutoSkills(deps);
   const auto = db.listSkillStats().filter((s) => s.origin === 'auto' && s.pinned !== 1);
+  // Nothing can be archived into an unusable archive: say so once, keep every skill.
+  const archiveDir = path.join(workspaceDir, 'skills', ARCHIVE_DIRNAME);
+  if (!archiveDirUsable(archiveDir)) {
+    warn(deps, `prune and cap skipped: ${archiveDir} is not a real directory`);
+    logRollup(deps);
+    return result;
+  }
 
   // 1. Stale + unused prune (both conditions; age-prune disabled when maxAgeDays<=0).
   const survivors = [];
@@ -118,15 +125,21 @@ function trackUntrackedAutoSkills(deps: CuratorDeps): void {
     return;
   }
   for (const name of entries) {
-    if (name.startsWith('.') || !isOwnedAutoSkillDir(path.join(skillsDir, name))) continue;
+    const fm = name.startsWith('.') ? undefined : ownedAutoSkillFrontmatter(path.join(skillsDir, name));
+    if (!fm) continue;
     const row = deps.db.getSkillStat(name);
-    if (row?.origin === 'auto') continue;
+    const pinned = fm['pinned'] === true ? 1 : (row?.pinned ?? 0);
+    if (row?.origin === 'auto') {
+      // Pinned by hand in SKILL.md: kept out of prune and the cap from now on.
+      if (pinned && !row.pinned) deps.db.setSkillPinned(name, true);
+      continue;
+    }
     deps.db.recordSkillCreated({
       name,
       origin: 'auto',
       createdAt: row?.createdAt ?? deps.now,
       createdFromSession: row?.createdFromSession ?? null,
-      pinned: row?.pinned ?? 0,
+      pinned,
     });
   }
 }
@@ -147,15 +160,12 @@ function archiveSkill(name: string, deps: CuratorDeps): ArchiveOutcome {
   const skillsDir = path.join(deps.workspaceDir, 'skills');
   const skillDir = path.join(skillsDir, name);
   // A stat-row name is not a trusted path segment: never follow one out of skills/.
-  if (path.basename(name) !== name || name.startsWith('.') || !isOwnedAutoSkillDir(skillDir)) {
+  const fm = path.basename(name) !== name || name.startsWith('.') ? undefined : ownedAutoSkillFrontmatter(skillDir);
+  if (!fm || fm['pinned'] === true) {
     deps.db.deleteSkillStat(name);
     return 'untracked';
   }
   const archiveDir = path.join(skillsDir, ARCHIVE_DIRNAME);
-  if (!archiveDirUsable(archiveDir)) {
-    warn(deps, `archive of ${name} skipped: ${archiveDir} is not a real directory`);
-    return 'failed';
-  }
   const dayDir = path.join(archiveDir, new Date(deps.now).toISOString().slice(0, 10));
   let dest = path.join(dayDir, name);
   if (fs.existsSync(dest)) dest = `${dest}-${deps.now}`;

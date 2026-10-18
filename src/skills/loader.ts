@@ -222,10 +222,21 @@ function shellPath(cwd: string, p: string): string {
   return path.isAbsolute(expanded) ? path.normalize(expanded) : path.join(cwd, expanded);
 }
 
+/** Shell commands that only read a file; a SKILL.md they name is a skill being followed. */
+const SHELL_READERS = new Set(['cat', 'head', 'tail', 'less', 'more', 'bat', 'batcat', 'nl', 'sed', 'awk', 'view']);
+
+/** The script inside `bash -lc '…'` / `sh -c "…"` (how Codex runs every command), or undefined. */
+function shellWrapperScript(command: string): string | undefined {
+  const wrapped = /^\s*(?:\S*\/)?(?:ba|z|da)?sh\s+-\w*c\s+(['"])([\s\S]*)\1\s*$/.exec(command);
+  return wrapped?.[2];
+}
+
 /**
  * SKILL.md paths a tool call reads on its own (not through the Skill tool): a Read's
- * `file_path`, or paths named in a shell command — Codex, and some agents, read files
- * through Bash. A shell path is home-expanded and joined to the last `cd` before it
+ * `file_path`, or paths a shell read command names — Codex, and some agents, read files
+ * through Bash, Codex inside `bash -lc '…'`. Only reading commands count (`cat`, `sed -n`,
+ * `head`…): a SKILL.md that is diffed, grepped, edited or removed is not a skill in use.
+ * A shell path is home-expanded and joined to the last `cd` before it
  * (`cd skills/x && cat SKILL.md`). Paths stay absolute or relative; see `skillsAtPaths`.
  */
 export function skillFileRefs(block: { name?: unknown; input?: unknown }): string[] {
@@ -234,14 +245,19 @@ export function skillFileRefs(block: { name?: unknown; input?: unknown }): strin
     return path.basename(input['file_path']) === 'SKILL.md' ? [input['file_path']] : [];
   }
   if (block.name !== 'Bash' || typeof input['command'] !== 'string') return [];
+  const command = shellWrapperScript(input['command']) ?? input['command'];
   const refs: string[] = [];
   let cwd = '';
-  for (const segment of input['command'].split(/&&|\|\||[;|\n]/)) {
+  for (const segment of command.split(/&&|\|\||[;|\n]/)) {
     const cd = /^\s*cd\s+(['"]?)([^\s'"]+)\1\s*$/.exec(segment);
     if (cd) {
       cwd = shellPath(cwd, cd[2]!);
       continue;
     }
+    const [cmd = '', ...args] = segment.trim().split(/\s+/);
+    const reader = path.basename(cmd);
+    const writes = /^-[a-zA-Z]*i|^--in-place/;
+    if (!SHELL_READERS.has(reader) || (reader === 'sed' && args.some((a) => writes.test(a))) || />\s*\S*SKILL\.md/.test(segment)) continue;
     for (const ref of segment.match(/[^\s'"`;|&<>()=]*SKILL\.md(?![\w.-])/g) ?? []) {
       if (path.basename(ref) === 'SKILL.md') refs.push(shellPath(cwd, ref));
     }
@@ -249,9 +265,13 @@ export function skillFileRefs(block: { name?: unknown; input?: unknown }): strin
   return refs.slice(0, 32);
 }
 
+/** Where a container agent sees its workspace (`docker run -v <workspace>:/workspace`). */
+const CONTAINER_WORKSPACE = '/workspace';
+
 /**
- * Registry skills whose SKILL.md is one of `refs`. An absolute ref must be the file; a
- * relative one (cwd unknown) matches any skill file it is a path suffix of, so an
+ * Registry skills whose SKILL.md is one of `refs`. An absolute ref must be the file — or,
+ * for a workspace skill, the same file under /workspace, where a container agent reads
+ * it; a relative one (cwd unknown) matches any skill file it is a path suffix of, so an
  * ambiguous read counts as use and keeps the skill listed rather than hiding it.
  */
 export function skillsAtPaths(refs: readonly string[], registry: SkillRegistry): string[] {
@@ -262,10 +282,17 @@ export function skillsAtPaths(refs: readonly string[], registry: SkillRegistry):
     for (const [key, def] of registry.skills) {
       if (!def.filePath) continue;
       const file = path.resolve(def.filePath);
-      if (path.isAbsolute(ref) ? file === path.resolve(ref) : file.endsWith(path.sep + rel)) out.add(key);
+      if (path.isAbsolute(ref) ? file === path.resolve(ref) || containerPath(def) === path.posix.normalize(ref) : file.endsWith(path.sep + rel)) out.add(key);
     }
   }
   return [...out];
+}
+
+/** A workspace skill's SKILL.md as a container agent sees it (`/workspace/skills/<dir>/SKILL.md`). */
+function containerPath(def: SkillDefinition): string | undefined {
+  if (def.source !== 'workspace' || !def.filePath) return undefined;
+  const [dir, file] = [path.basename(path.dirname(def.filePath)), path.basename(def.filePath)];
+  return path.posix.join(CONTAINER_WORKSPACE, 'skills', dir, file);
 }
 
 /** Keys of the never-used auto skills past the grace window (see AUTO_SKILL_CATALOG_GRACE_DAYS). */
