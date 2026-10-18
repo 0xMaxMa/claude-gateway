@@ -124,10 +124,14 @@ describe('POST /v1/projects/:name/running/start', () => {
 
   afterEach(async () => {
     for (const pid of pids.splice(0)) {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch {
-        // gone
+      // The start route runs the command detached, so it leads its own process group. Killing only the npm
+      // pid leaves its `node server.js` child listening on a port in 3000-3099 after the suite ends.
+      for (const target of [-pid, pid]) {
+        try {
+          process.kill(target, 'SIGKILL');
+        } catch {
+          // gone
+        }
       }
     }
     fs.rmSync(base, { recursive: true, force: true });
