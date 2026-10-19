@@ -24,8 +24,8 @@ export interface StartResult {
   command: string;
 }
 
-export const PORT_MIN = 3000;
-export const PORT_MAX = 3099;
+const PORT_MIN = 3000;
+const PORT_MAX = 3099;
 const START_WAIT_MS = 20_000;
 const POLL_MS = 250;
 const LOG_TAIL_BYTES = 2000;
@@ -53,7 +53,7 @@ export async function hasStartScript(realProject: string): Promise<boolean> {
   }
 }
 
-export const startDisplay = (port: number) => `PORT=${port} sh ${START_SCRIPT}`;
+const startDisplay = (port: number) => `PORT=${port} sh ${START_SCRIPT}`;
 
 const startCommand = (port: number): StartCommand => ({ file: 'sh', args: [START_SCRIPT], env: { PORT: String(port) } });
 
@@ -103,7 +103,7 @@ export const systemLauncher: Launcher = async (cmd, cwd, logPath) => {
   return { pid: child.pid, exitCode: () => code };
 };
 
-export function logPathFor(name: string): string {
+function logPathFor(name: string): string {
   return path.join(os.homedir(), '.claude-gateway', 'logs', 'projects', `${name}.log`);
 }
 
