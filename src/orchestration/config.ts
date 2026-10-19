@@ -127,7 +127,8 @@ export const NARRATE_LIMITS = { targetChars: 4000, maxParts: 200, partTimeoutMs:
 // Validate the complete tree, including unknown keys: a misspelled capacity or
 // secret field must not be silently accepted as a working configuration.
 // The call page's VAD levels and ratios are fractions, unlike the integer ms and counts elsewhere.
-const VAD_FRACTION_LIMITS: Record<string, number> = { ratio: 100, bargeInRatio: 100, minLevel: 1, initialNoise: 1, noiseAdapt: 1 };
+// A ratio below 1 would put the threshold under the noise floor, so noise or echo would start speech.
+const VAD_FRACTION_LIMITS: Record<string, [number, number]> = { ratio: [1, 100], bargeInRatio: [1, 100], minLevel: [0, 1], initialNoise: [0, 1], noiseAdapt: [0, 1] };
 export function validateTree(value: unknown, template: unknown, prefix: string): void {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new OrchestrationError('INVALID_CONFIG', `${prefix} must be an object`);
   const shape = template as Record<string, unknown>;
@@ -140,7 +141,8 @@ export function validateTree(value: unknown, template: unknown, prefix: string):
     } else if (expected && typeof expected === 'object') validateTree(item, expected, where);
     else if (typeof item !== typeof expected) throw new OrchestrationError('INVALID_CONFIG', `Invalid ${where}`);
     else if (typeof item === 'number' && prefix.endsWith('.live.vad') && key in VAD_FRACTION_LIMITS) {
-      if (!Number.isFinite(item) || item < 0 || item > VAD_FRACTION_LIMITS[key]) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a number from 0 to ${VAD_FRACTION_LIMITS[key]}`);
+      const [min, max] = VAD_FRACTION_LIMITS[key];
+      if (!Number.isFinite(item) || item < min || item > max) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a number from ${min} to ${max}`);
     }
     else if (typeof item === 'number' && (!Number.isSafeInteger(item) || item < (['maxDurationMs', 'progressStaleLimitMs', 'inputDebounceMs', 'mergeWindowMs', 'silenceCommitMs'].includes(key) ? 0 : 1) || item > 2147483647)) throw new OrchestrationError('INVALID_CONFIG', `${where} must be a positive bounded integer`);
   }

@@ -83,7 +83,7 @@ describe('voice config', () => {
   });
 
   test.each([
-    ['minLevel', -0.01], ['minLevel', Number.NaN], ['minLevel', 2], ['ratio', -1], ['ratio', Number.POSITIVE_INFINITY], ['noiseAdapt', 1.5],
+    ['minLevel', -0.01], ['minLevel', Number.NaN], ['minLevel', 2], ['ratio', -1], ['ratio', 0.5], ['bargeInRatio', 0], ['ratio', Number.POSITIVE_INFINITY], ['noiseAdapt', 1.5],
     ['initialNoise', '0.004'], ['startMs', 0], ['startMs', 12.5], ['bargeInMs', -1], ['typo', 1],
   ])('an invalid VAD value %s=%p fails validation', (key, value) => {
     expect(() => resolveOrchestrationConfig(undefined, voice({ live: { vad: { [key]: value } } }))).toThrow(/INVALID_CONFIG|voice\.live\.vad/);
