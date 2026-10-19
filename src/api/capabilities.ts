@@ -44,9 +44,9 @@ export const CROSS_CHANNEL_MESSAGE_CHANNELS: readonly ChatChannel[] = [...CHAT_C
  * Project operations served by projects-router.ts. Clients gate listing on `includes('list')`, the git routes on
  * `includes('git')`, project-bound chat on `includes('chat')`, running status on `includes('run')`, creating a project
  * on `includes('create')`, starting one on `includes('start')`, stopping what runs in one on `includes('stop')`, and
- * deleting one on `includes('delete')`. The gateway serves no project files; they are viewed in code-server.
+ * deleting one on `includes('delete')`, and disk usage on `includes('disk')`. The gateway serves no project files; they are viewed in code-server.
  */
-export const PROJECTS_CAPABILITIES = ['list', 'create', 'git', 'chat', 'run', 'start', 'delete', 'stop'] as const;
+export const PROJECTS_CAPABILITIES = ['list', 'create', 'git', 'chat', 'run', 'start', 'delete', 'stop', 'disk'] as const;
 export type ProjectsCapability = (typeof PROJECTS_CAPABILITIES)[number];
 
 /** The operations projects-router.ts serves only to an admin key; every other token is open to any key. */
