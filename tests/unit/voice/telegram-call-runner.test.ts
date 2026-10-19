@@ -1,6 +1,7 @@
 import { AgentRunner } from '../../../src/agent/runner';
 import { voiceCallPairings } from '../../../src/voice/call-pairing';
 import { telegramBotAvatars } from '../../../src/voice/telegram-avatar';
+import { LIVE_VOICE_ACK_NOTE } from '../../../src/orchestration/speech';
 
 const voiceConfig = (voiceEnabled = true, allowTools?: boolean) => ({ id: 'agent', allow_tools: allowTools,
   orchestration: { enabled: true, channels: ['telegram'] }, voice: { enabled: voiceEnabled } });
@@ -86,6 +87,18 @@ describe('submitVoiceUtterance scope', () => {
     }, { execute: false, writeMemory: false }, undefined, undefined);
     runner.apiSessionExists.mockResolvedValueOnce(false);
     await expect(runner.submitVoiceUtterance('gone', { kind: 'api', principalId: 'api:owner', chatId: 'chat' }, 'hello', 'u2', false)).rejects.toThrow('Session not found');
+  });
+
+  test('a turn that may get a fast acknowledgement tells the agent not to open with another receipt (#625)', async () => {
+    const { runner, orchestration } = voiceRunner(voiceConfig());
+    const metadata = async (hints?: { fastAck: boolean }) => {
+      orchestration.submitInput.mockClear();
+      await runner.submitVoiceUtterance('session', { kind: 'api', principalId: 'api:owner', chatId: 'chat' }, 'hello', 'utterance', false, undefined, undefined, undefined, hints);
+      return (orchestration.submitInput.mock.calls[0] as unknown as [{ metadata: Record<string, unknown> }])[0].metadata;
+    };
+    expect(await metadata({ fastAck: true })).toEqual({ executionTaskId: undefined, promptContext: LIVE_VOICE_ACK_NOTE });
+    expect(await metadata({ fastAck: false })).toEqual({ executionTaskId: undefined });
+    expect(await metadata()).toEqual({ executionTaskId: undefined });
   });
 
   test('a call does not follow the chat into another session: after /new its turns are refused', async () => {

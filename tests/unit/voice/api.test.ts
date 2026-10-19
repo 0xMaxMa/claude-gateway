@@ -19,7 +19,7 @@ jest.mock('../../../src/voice/providers/registry', () => ({
   sttProvider: jest.fn(() => new FakeSttProvider()), ttsProvider: () => new FakeTtsProvider(),
 }));
 // voice.live.fastAck is on by default: keep its acknowledgement call off the network.
-jest.mock('../../../src/voice/fast-ack', () => ({ fastAcknowledgement: jest.fn(async () => ({ outcome: 'skipped', elapsedMs: 0 })) }));
+jest.mock('../../../src/voice/fast-ack', () => ({ ...jest.requireActual('../../../src/voice/fast-ack'), fastAcknowledgement: jest.fn(async () => ({ outcome: 'skipped', elapsedMs: 0 })) }));
 
 test('voice ticket requires scoped auth and origin-bound tickets without URL registration, is single-use, and releases its mic lease on disconnect', async () => {
   const agent = { id: 'a', orchestration: { enabled: true }, voice: { ...ORCHESTRATION_DEFAULTS.voice, enabled: true, tts: { ...ORCHESTRATION_DEFAULTS.voice.tts, voiceId: 'fixture' } } } as AgentConfig;

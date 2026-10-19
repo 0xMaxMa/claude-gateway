@@ -7,6 +7,7 @@ import { VoiceTurnManager } from './turn-manager';
 import { VoicePlayback } from './playback';
 import { SttProvider, SttSession, TtsProvider, TtsAudioChunk, PCM16, VoiceError } from './types';
 import { VoiceFrame, encodeVoiceFrame } from './protocol';
+import { fillerOnly, type FastAckContext } from './fast-ack';
 
 export interface VoiceClient {
   control(message: Record<string, unknown>): void;
@@ -18,7 +19,24 @@ type TurnTrace = { ids: VoiceTraceIds & { utteranceId: string }; trace: ReturnTy
 export interface VoiceSessionOptions { silenceCommitMs: number; finalizationTimeoutMs: number; maxUtteranceMs: number; maxBufferedAudioMs: number; language?: string; mergeWindowMs?: number;
   /** A short spoken acknowledgement of the caller's words, played when the reply has not started speaking
    * within fastAckAfterMs of admission. Undefined when no acknowledgement fits. */
-  acknowledge?: (transcript: string, signal: AbortSignal) => Promise<string | undefined>; fastAckAfterMs?: number; }
+  acknowledge?: (transcript: string, signal: AbortSignal, context: FastAckContext) => Promise<string | undefined>; fastAckAfterMs?: number; }
+/** Per-turn facts the conversation turn is told. fastAck: a short acknowledgement may play before the reply. */
+export interface VoiceTurnHints { fastAck: boolean }
+/** Acknowledgements more alike than this (character-bigram Dice) are heard as the same phrase. */
+const ACK_SIMILARITY = 0.6;
+function bigrams(text: string): string[] {
+  const letters = text.toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, '');
+  return Array.from({ length: Math.max(0, letters.length - 1) }, (_, i) => letters.slice(i, i + 2));
+}
+function similar(a: string, b: string): boolean {
+  const left = bigrams(a), right = bigrams(b);
+  if (!left.length || !right.length) return a.trim() === b.trim();
+  const pool = new Map<string, number>();
+  for (const pair of right) pool.set(pair, (pool.get(pair) ?? 0) + 1);
+  let shared = 0;
+  for (const pair of left) { const n = pool.get(pair); if (n) { shared++; pool.set(pair, n - 1); } }
+  return 2 * shared / (left.length + right.length) >= ACK_SIMILARITY;
+}
 export class VoiceSession {
   readonly playback = new VoicePlayback();
   private readonly controller = new AbortController();
@@ -41,6 +59,11 @@ export class VoiceSession {
   private silenceTimer?: ReturnType<typeof setTimeout>;
   private admissionTimer?: ReturnType<typeof setTimeout>;
   private pendingText: Array<{ text: string; utteranceId: string; turn: TurnTrace }> = [];
+  /** This call's acknowledgement memory: the last caller turns, the acknowledgements actually spoken,
+   * and the admitted turn that was last acknowledged. */
+  private readonly acks: { turns: string[]; spoken: string[]; admitted: number; lastAcked?: number } = { turns: [], spoken: [], admitted: 0 };
+  /** Drops the current turn's acknowledgement if it has not begun playing. */
+  private supersedeAck?: () => void;
   /** Speech candidates defer admission; only confirmed words interrupt inference. */
   speechActivity(): void {
     if (this.closed) return;
@@ -63,7 +86,7 @@ export class VoiceSession {
   setVoice(voiceId: string): void { this.voiceId = voiceId; }
   constructor(private readonly stt: SttProvider, private readonly tts: TtsProvider, private voiceId: string,
     private readonly client: VoiceClient,
-    private readonly submit: (text: string, utteranceId: string, mark?: (phase: string) => void) => Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId?(): string | undefined }>,
+    private readonly submit: (text: string, utteranceId: string, mark?: (phase: string) => void, hints?: VoiceTurnHints) => Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId?(): string | undefined }>,
     private readonly stopResponse: () => void,
     private readonly options: VoiceSessionOptions = { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500 },
     private readonly record?: (responseId: string, progress: ReturnType<VoicePlayback['snapshot']>, state: string) => void,
@@ -190,12 +213,17 @@ export class VoiceSession {
   }
   private async admit(text: string, utteranceId: string, turn: TurnTrace): Promise<void> {
     this.client.control({ type: 'stt.final', utterance_id: utteranceId, text });
+    const index = this.acks.admitted++;
+    const context: FastAckContext = { recentTurns: [...this.acks.turns], recentAcks: [...this.acks.spoken] };
+    this.acks.turns = [...this.acks.turns, text].slice(-2);
+    // Decided before submitting, so the turn knows whether an acknowledgement may precede its reply.
+    const skip = !this.options.acknowledge ? 'disabled' : fillerOnly(text) ? 'filler' : this.acks.lastAcked === index - 1 ? 'cooldown' : undefined;
     // The agent turn reports its own phases (process, first token, first spoken words) on this trace.
-    const accepted = await this.submit(text, utteranceId, phase => turn.trace.emit(phase));
+    const accepted = await this.submit(text, utteranceId, phase => turn.trace.emit(phase), { fastAck: !skip });
     turn.ids.inputId = accepted.inputId; turn.trace.emit('turn_admitted');
     this.client.control({ type: 'utterance.accepted', utterance_id: utteranceId, input_id: accepted.inputId });
     const epoch = this.interruption;
-    const ack = this.fastAck(text, epoch, turn);
+    const ack = this.fastAck(text, epoch, turn, index, context, skip);
     void accepted.response.finally(ack.cancel).catch(() => {});
     const streaming = accepted.stream ? this.speakStream(accepted.stream, epoch, accepted.response, turn, ack.cancel) : undefined;
     const response = accepted.response.then(async answer => {
@@ -233,22 +261,31 @@ export class VoiceSession {
     finally { await iterator.return?.(); }
   }
   /** Starts the acknowledgement call with the turn. It is spoken only if the reply has not begun
-   * speaking `fastAckAfterMs` after admission, and never after barge-in or the reply's own speech.
+   * speaking `fastAckAfterMs` after admission, and never after barge-in, the reply's own speech or
+   * another spoken response such as the turn's contextual acknowledgement. It is skipped on filler,
+   * right after an acknowledged turn, and when it repeats one already spoken in this call.
    * It is audio only: no response text, chat message or history entry. */
-  private fastAck(text: string, interruption: number, turn: TurnTrace): { cancel: () => void } {
+  private fastAck(text: string, interruption: number, turn: TurnTrace, index: number, context: FastAckContext, skip?: string): { cancel: () => void } {
     const acknowledge = this.options.acknowledge;
-    if (!acknowledge) return { cancel: () => {} };
+    if (!acknowledge || skip === 'disabled') return { cancel: () => {} };
+    if (skip) { turn.trace.emit('fast_ack_skipped', { code: skip }); return { cancel: () => {} }; }
     const controller = new AbortController(), due = Date.now() + (this.options.fastAckAfterMs ?? 0);
-    let settled = false;
-    const cancel = () => { if (!settled) { settled = true; controller.abort(); } };
+    let settled = false, superseded = false;
+    const cancel = () => { superseded = true; if (!settled) { settled = true; controller.abort(); } };
+    this.supersedeAck = cancel;
     void (async () => {
-      const reply = await acknowledge(text, controller.signal).catch(() => undefined);
+      const reply = await acknowledge(text, controller.signal, context).catch(() => undefined);
       if (!settled && reply) await new Promise(resolve => setTimeout(resolve, Math.max(0, due - Date.now())));
       if (settled || this.closed || interruption !== this.interruption) return;
       settled = true;
-      if (!reply) { turn.trace.emit('fast_ack_skipped'); return; }
-      turn.trace.emit('fast_ack_sent');
-      void this.enqueueSpeech((async function* () { yield reply; })(), undefined, interruption, turn);
+      const code = !reply ? 'no_fit' : this.acks.spoken.some(spoken => similar(spoken, reply)) ? 'duplicate' : undefined;
+      if (code) { turn.trace.emit('fast_ack_skipped', { code }); return; }
+      void this.enqueueSpeech((async function* () { yield reply!; })(), undefined, interruption, turn, () => {
+        if (superseded) { turn.trace.emit('fast_ack_skipped', { code: 'superseded' }); return false; }
+        this.acks.spoken = [...this.acks.spoken, reply!].slice(-3); this.acks.lastAcked = index;
+        turn.trace.emit('fast_ack_sent');
+        return true;
+      });
     })();
     return { cancel };
   }
@@ -256,6 +293,8 @@ export class VoiceSession {
   /** Only approved summaries from authenticated automatic task reports enter here. */
   notifyResult(result: { responseId: string; text: string; spoken: string; requestId?: string; speechOnly?: boolean }): void {
     if (this.closed || this.claimedSpeech.has(result.responseId)) return;
+    // The agent's own contextual speech replaces a generic acknowledgement that has not played yet.
+    this.supersedeAck?.();
     if (!result.speechOnly) this.client.control({ type: 'response.text', response_id: result.responseId, request_id: result.requestId, text: result.text, final: true });
     if (!result.spoken) { this.speechUnavailable(); return; }
     const client = this.client;
@@ -264,7 +303,8 @@ export class VoiceSession {
       yield result.spoken;
     })(), result.responseId);
   }
-  private enqueueSpeech(text: AsyncIterable<string>, responseId?: string, interruption = this.interruption, turn?: TurnTrace): Promise<void> {
+  /** `begin`, when given, is asked as playback would start; false drops the speech unplayed. */
+  private enqueueSpeech(text: AsyncIterable<string>, responseId?: string, interruption = this.interruption, turn?: TurnTrace, begin?: () => boolean): Promise<void> {
     if (responseId) {
       if (this.claimedSpeech.has(responseId)) return Promise.resolve();
       this.claimedSpeech.add(responseId);
@@ -279,6 +319,7 @@ export class VoiceSession {
         if (responseId) this.claimedSpeech.delete(responseId);
         return;
       }
+      if (begin && !begin()) return;
       await this.speak(text, this.playback.epoch, responseId, trace, turn);
       // Synthesis completion is not playback completion. Preserve the tail before
       // the next utterance clears the playback epoch.

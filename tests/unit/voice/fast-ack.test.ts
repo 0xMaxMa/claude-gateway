@@ -33,7 +33,7 @@ async function call(ackAfterMs: number, ackReply: string | undefined) {
 test('a slow reply gets the acknowledgement first, as audio only, then the reply itself', async () => {
   const { session, stream, spoken, controls, acknowledge, submit, phases, waitFor } = await call(30, 'รับทราบค่ะ กำลังเช็คให้นะคะ');
   try {
-    expect(acknowledge).toHaveBeenCalledWith('ราคา Bitcoin ตอนนี้เท่าไหร่', expect.any(AbortSignal));
+    expect(acknowledge).toHaveBeenCalledWith('ราคา Bitcoin ตอนนี้เท่าไหร่', expect.any(AbortSignal), { recentTurns: [], recentAcks: [] });
     await waitFor(() => spoken.length === 1);
     expect(spoken).toEqual(['รับทราบค่ะ กำลังเช็คให้นะคะ']);
     expect(phases()).toContain('fast_ack_sent');
