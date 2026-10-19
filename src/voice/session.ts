@@ -28,14 +28,19 @@ function bigrams(text: string): string[] {
   const letters = text.toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, '');
   return Array.from({ length: Math.max(0, letters.length - 1) }, (_, i) => letters.slice(i, i + 2));
 }
-function similar(a: string, b: string): boolean {
-  const left = bigrams(a), right = bigrams(b);
-  if (!left.length || !right.length) return a.trim() === b.trim();
+/** An acknowledgement repeats an earlier one when the two are nearly the same phrase and the new
+ * one adds nothing from the caller's words: "เดี๋ยวเช็คเมลให้นะคะ" after "เดี๋ยวเช็คปฏิทินให้นะคะ" names a
+ * new request, a second "รับทราบค่ะ กำลังดูให้นะคะ" does not. */
+function repeats(earlier: string, reply: string, heard: string): boolean {
+  const left = bigrams(earlier), right = bigrams(reply);
+  if (!left.length || !right.length) return earlier.trim() === reply.trim();
   const pool = new Map<string, number>();
-  for (const pair of right) pool.set(pair, (pool.get(pair) ?? 0) + 1);
-  let shared = 0;
-  for (const pair of left) { const n = pool.get(pair); if (n) { shared++; pool.set(pair, n - 1); } }
-  return 2 * shared / (left.length + right.length) >= ACK_SIMILARITY;
+  for (const pair of left) pool.set(pair, (pool.get(pair) ?? 0) + 1);
+  const added: string[] = [];
+  for (const pair of right) { const n = pool.get(pair); if (n) pool.set(pair, n - 1); else added.push(pair); }
+  const caller = new Set(bigrams(heard));
+  if (added.filter(pair => caller.has(pair)).length >= 2 || added.some(pair => /\d\d/.test(pair) && caller.has(pair))) return false;
+  return 2 * (right.length - added.length) / (left.length + right.length) >= ACK_SIMILARITY;
 }
 export class VoiceSession {
   readonly playback = new VoicePlayback();
@@ -224,7 +229,7 @@ export class VoiceSession {
     this.client.control({ type: 'utterance.accepted', utterance_id: utteranceId, input_id: accepted.inputId });
     const epoch = this.interruption;
     const ack = this.fastAck(text, epoch, turn, index, context, skip);
-    void accepted.response.finally(ack.cancel).catch(() => {});
+    void accepted.response.finally(() => ack.cancel()).catch(() => {});
     const streaming = accepted.stream ? this.speakStream(accepted.stream, epoch, accepted.response, turn, ack.cancel) : undefined;
     const response = accepted.response.then(async answer => {
       if (this.closed || epoch !== this.interruption) return;
@@ -239,10 +244,10 @@ export class VoiceSession {
     void streaming?.catch(() => {}); // response chain reports the original failure once
     this.responses.add(response); void response.finally(() => this.responses.delete(response));
   }
-  private async speakStream(stream: AsyncIterable<{ responseId: string; text: string }>, epoch: number, response: Promise<string>, turn: TurnTrace, firstSpoken: () => void): Promise<void> {
+  private async speakStream(stream: AsyncIterable<{ responseId: string; text: string }>, epoch: number, response: Promise<string>, turn: TurnTrace, firstSpoken: (spoken: boolean) => void): Promise<void> {
     const iterator = stream[Symbol.asyncIterator]();
     const first = await iterator.next();
-    firstSpoken();
+    firstSpoken(!first.done);
     if (this.closed) return;
     if (first.done) { await response; if (!this.closed && epoch === this.interruption) this.speechUnavailable(); return; }
     turn.ids.responseId = first.value.responseId; turn.trace.emit('agent_first_spoken');
@@ -265,20 +270,22 @@ export class VoiceSession {
    * another spoken response such as the turn's contextual acknowledgement. It is skipped on filler,
    * right after an acknowledged turn, and when it repeats one already spoken in this call.
    * It is audio only: no response text, chat message or history entry. */
-  private fastAck(text: string, interruption: number, turn: TurnTrace, index: number, context: FastAckContext, skip?: string): { cancel: () => void } {
+  private fastAck(text: string, interruption: number, turn: TurnTrace, index: number, context: FastAckContext, skip?: string): { cancel: (spoken?: boolean) => void } {
     const acknowledge = this.options.acknowledge;
     if (!acknowledge || skip === 'disabled') return { cancel: () => {} };
     if (skip) { turn.trace.emit('fast_ack_skipped', { code: skip }); return { cancel: () => {} }; }
     const controller = new AbortController(), due = Date.now() + (this.options.fastAckAfterMs ?? 0);
     let settled = false, superseded = false;
-    const cancel = () => { superseded = true; if (!settled) { settled = true; controller.abort(); } };
-    this.supersedeAck = cancel;
+    // Before it is due the acknowledgement is simply cancelled; once queued, only speech that
+    // actually reaches the caller (`spoken`) replaces it.
+    const cancel = (spoken = false) => { if (spoken) superseded = true; if (!settled) { settled = true; controller.abort(); } };
+    this.supersedeAck = () => cancel(true);
     void (async () => {
       const reply = await acknowledge(text, controller.signal, context).catch(() => undefined);
       if (!settled && reply) await new Promise(resolve => setTimeout(resolve, Math.max(0, due - Date.now())));
       if (settled || this.closed || interruption !== this.interruption) return;
       settled = true;
-      const code = !reply ? 'no_fit' : this.acks.spoken.some(spoken => similar(spoken, reply)) ? 'duplicate' : undefined;
+      const code = !reply ? 'no_fit' : this.acks.spoken.some(spoken => repeats(spoken, reply, text)) ? 'duplicate' : undefined;
       if (code) { turn.trace.emit('fast_ack_skipped', { code }); return; }
       void this.enqueueSpeech((async function* () { yield reply!; })(), undefined, interruption, turn, () => {
         if (superseded) { turn.trace.emit('fast_ack_skipped', { code: 'superseded' }); return false; }
@@ -293,8 +300,8 @@ export class VoiceSession {
   /** Only approved summaries from authenticated automatic task reports enter here. */
   notifyResult(result: { responseId: string; text: string; spoken: string; requestId?: string; speechOnly?: boolean }): void {
     if (this.closed || this.claimedSpeech.has(result.responseId)) return;
-    // The agent's own contextual speech replaces a generic acknowledgement that has not played yet.
-    this.supersedeAck?.();
+    // The agent's own spoken acknowledgement or clarification replaces a generic one that has not played yet.
+    if (result.speechOnly && result.spoken) this.supersedeAck?.();
     if (!result.speechOnly) this.client.control({ type: 'response.text', response_id: result.responseId, request_id: result.requestId, text: result.text, final: true });
     if (!result.spoken) { this.speechUnavailable(); return; }
     const client = this.client;

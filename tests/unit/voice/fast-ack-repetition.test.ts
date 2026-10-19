@@ -2,6 +2,7 @@ import { VoiceSession } from '../../../src/voice/session';
 import { FakeSttProvider } from '../../../src/voice/providers/fake';
 import { PCM16, TtsProvider } from '../../../src/voice/types';
 import { fastAcknowledgement, fastAckText, fillerOnly } from '../../../src/voice/fast-ack';
+import { BoundedQueue } from '../../../src/orchestration/bounded-queue';
 
 /** A live call of several turns. Every reply is slow (it never speaks), so each eligible turn reaches the
  * acknowledgement deadline; the fake model returns `ackReply` for every request, like the canned phrase
@@ -170,7 +171,76 @@ test('an acknowledgement may repeat a number the caller said, never one it inven
   expect(fastAckText('ราคาอยู่ที่ 67,240 ดอลลาร์', 'ราคา Bitcoin เท่าไหร่')).toBeUndefined();
   expect(fastAckText('เปิด PR 62 ให้ค่ะ', 'เปิด PR 623')).toBeUndefined();
   expect(fastAckText('PR 623', undefined)).toBeUndefined();
+  // Thai and ASCII digits are the same number.
+  expect(fastAckText('เดี๋ยวเปิด PR ๖๒๓ ให้นะคะ', 'เปิด PR 623')).toBe('เดี๋ยวเปิด PR ๖๒๓ ให้นะคะ');
 });
+
+test('a number from an earlier caller turn may be repeated (the model sees those turns)', async () => {
+  const fetch = jest.fn(async () => new Response(JSON.stringify({ content: [{ type: 'text', text: 'เดี๋ยว merge PR 623 ให้นะคะ' }] }), { headers: { 'content-type': 'application/json' } }));
+  const result = await fastAcknowledgement('แล้ว merge ด้วย', { model: 'claude-haiku-5-5', timeoutMs: 1000, signal: new AbortController().signal,
+    context: { recentTurns: ['เปิด PR 623'], recentAcks: [] },
+    connection: () => ({ baseUrl: 'https://provider.test', apiKey: 'token', scheme: 'oauth' }), fetch: fetch as unknown as typeof globalThis.fetch });
+  expect(result).toMatchObject({ outcome: 'ready', text: 'เดี๋ยว merge PR 623 ให้นะคะ' });
+});
+
+test('acknowledgements on one template that name different requests are not duplicates', async () => {
+  const acks: Record<string, string> = { 'ช่วยเช็คปฏิทินให้หน่อย': 'เดี๋ยวเช็คปฏิทินให้นะคะ', 'สรุปข่าวเช้านี้ให้ที': 'สักครู่ค่ะ', 'เช็คเมลให้หน่อย': 'เดี๋ยวเช็คเมลให้นะคะ',
+    'แล้วเปิด PR 630 ด้วย': 'เดี๋ยวเปิด PR 623 ดูให้นะคะ', 'เปิด PR 623 ให้หน่อย': 'เดี๋ยวเปิด PR 623 ดูให้นะคะ', 'แล้ว PR 630 ล่ะ': 'เดี๋ยวเปิด PR 630 ดูให้นะคะ' };
+  const { session, spoken, say } = await call(transcript => acks[transcript]);
+  try {
+    for (const request of ['ช่วยเช็คปฏิทินให้หน่อย', 'สรุปข่าวเช้านี้ให้ที', 'เช็คเมลให้หน่อย', 'สรุปข่าวเช้านี้ให้ที', 'เปิด PR 623 ให้หน่อย', 'สรุปข่าวเช้านี้ให้ที', 'แล้ว PR 630 ล่ะ']) await say(request);
+    expect(spoken).toEqual(['เดี๋ยวเช็คปฏิทินให้นะคะ', 'เดี๋ยวเช็คเมลให้นะคะ', 'เดี๋ยวเปิด PR 623 ดูให้นะคะ', 'เดี๋ยวเปิด PR 630 ดูให้นะคะ']);
+  } finally { await session.close(); }
+});
+
+test('filler detection stays linear on long hesitation runs', () => {
+  const started = Date.now();
+  for (const text of ['m'.repeat(5000) + 'okay', 'u'.repeat(5000) + 'x', 'เอ่อ'.repeat(2000) + 'ก', ('um' + 'hm').repeat(3000) + '?z']) expect(fillerOnly(text)).toBe(false);
+  expect(fillerOnly('m'.repeat(5000))).toBe(true);
+  expect(Date.now() - started).toBeLessThan(500);
+});
+
+test('a background report that is not the turn\'s own spoken acknowledgement does not cancel it', async () => {
+  // An earlier task's report arrives while this turn's acknowledgement is being prepared.
+  let report = () => {};
+  const { session, spoken, say, waitFor } = await call(() => { report(); return 'เดี๋ยวเช็คปฏิทินให้นะคะ'; }, 150);
+  report = () => session.notifyResult({ responseId: 'report', text: 'Task finished', spoken: '' });
+  try {
+    const decision = await say('ช่วยเช็คปฏิทินให้หน่อย');
+    expect(decision.phase).toBe('fast_ack_sent');
+    await waitFor(() => spoken.includes('เดี๋ยวเช็คปฏิทินให้นะคะ'));
+  } finally { await session.close(); }
+});
+
+test('a reply stream that ends without speech does not drop an acknowledgement already queued', async () => {
+  const stt = new FakeSttProvider(), controls: Record<string, any>[] = [], spoken: string[] = [];
+  const stream = new BoundedQueue<{ responseId: string; text: string }>(4096, value => Buffer.byteLength(value.text));
+  const tts: TtsProvider = { id: 'fixture', capabilities: { textStreaming: true, wordAlignment: false, outputFormats: [PCM16] },
+    synthesize: async function* (options) { let sequence = 0; for await (const text of options.text) { spoken.push(text); yield { bytes: Buffer.alloc(640), format: PCM16, chunkSeq: sequence++ }; } } };
+  const submit = jest.fn(async () => ({ inputId: 'input', response: new Promise<string>(() => {}), stream }));
+  const session = new VoiceSession(stt, tts, 'voice', { control: c => controls.push(c), audio: () => {}, bufferedBytes: () => 0 }, submit, jest.fn(),
+    { silenceCommitMs: 0, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, maxBufferedAudioMs: 1500, mergeWindowMs: 0, acknowledge: async () => 'เดี๋ยวเช็คปฏิทินให้นะคะ', fastAckAfterMs: 10 });
+  const waitFor = async (predicate: () => boolean) => { const end = Date.now() + 2000; while (!predicate() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 5)); expect(predicate()).toBe(true); };
+  try {
+    await session.start();
+    const listening = controls.at(-1)!;
+    await session.audio({ generation: listening.generation, epoch: 0, sequence: 1, segmentId: listening.utterance_id, audio: Buffer.alloc(320) });
+    session.speechEnded(1);
+    await waitFor(() => !!stt.sessions[0].commitId);
+    stt.sessions[0].emit({ type: 'segment_final', segmentId: 's', text: 'ช่วยเช็คปฏิทินให้หน่อย' });
+    stt.sessions[0].emit({ type: 'commit_done', commitId: stt.sessions[0].commitId! });
+    await waitFor(() => controls.some(c => c.type === 'utterance.accepted'));
+    // The caller starts talking again, so the due acknowledgement waits in the speech queue.
+    session.speechActivity();
+    await new Promise(resolve => setTimeout(resolve, 60));
+    stream.close();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(spoken).toEqual([]);
+    (session as unknown as { speaking: boolean }).speaking = false;
+    await waitFor(() => spoken.length === 1);
+  } finally { await session.close(); }
+});
+
 
 test('filler detection keeps real short requests', () => {
   for (const text of ['เอ่อ เอาใหม่', 'เอ่อเอาใหม่', 'um', 'uh huh', 'อ่า', 'เดี๋ยวนะ', 'แป๊บนึงนะ', 'hmm...', '', 'Wait.', 'hold on']) expect(fillerOnly(text)).toBe(true);

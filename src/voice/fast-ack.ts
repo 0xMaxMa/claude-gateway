@@ -2,25 +2,30 @@ import { agentIdentity } from '../orchestration/jev-gateway';
 import { speechVoiceStyle } from '../orchestration/speech';
 import { messagesEndpoint, modelAuthHeaders, type ModelConnection } from '../automation/model-choice-evaluator';
 
+/** Thai digits as ASCII, so "623" and "๖๒๓" are the same number. */
+const asciiDigits = (text: string) => text.replace(/[๐-๙]/g, digit => String(digit.charCodeAt(0) - 0x0e50));
 /** Bounds a spoken acknowledgement. It must say "I heard you" and nothing the answer could
  * contradict, so a reply holding a link, markup, more than one short line, or a number the caller
  * did not say (`heard`) is not spoken at all. */
 export function fastAckText(reply: string, heard = ''): string | undefined {
   const text = reply.trim();
   if (!/\p{L}/u.test(text) || text.length > 80 || /[\r\n{}[\]<>|*#`_~]|https?:|www\./i.test(text)) return undefined;
-  const said = new Set(heard.match(/[0-9๐-๙]+/g) ?? []);
-  if ((text.match(/[0-9๐-๙]+/g) ?? []).some(number => !said.has(number))) return undefined;
+  const said = new Set(asciiDigits(heard).match(/\d+/g) ?? []);
+  if ((asciiDigits(text).match(/\d+/g) ?? []).some(number => !said.has(number))) return undefined;
   return text;
 }
 
-/** Hesitation and restart words that carry no request on their own. Thai STT often joins words
- * without spaces, so a transcript is filler when it is any run of these with spacing removed. */
-const FILLER = /^(?:เอ่อ|เออ|เอ้อ|เอ่|อ่า|อ้า|อา|อืม|อือ|อ่ะ|อะ|เอ้า|เอาใหม่|ใหม่|เดี๋ยว|ก่อน|แป๊บ|นึง|แบบว่า|แบบ|คือว่า|คือ|นะ|um+|uh+|uhm+|er+|erm+|hm+|mm+|ah+|oh|huh|wait|holdon|sorry|so|well|like)+$/u;
+/** One hesitation or restart word at the start of the text, longest alternative first. Each
+ * alternative is tried once per position (no nested repetition), so matching stays linear. */
+const FILLER = /^(?:เอาใหม่|เดี๋ยวก่อน|เดี๋ยว|แบบว่า|แบบ|คือว่า|คือ|แป๊บ|นึง|ก่อน|ใหม่|เอ่อ|เอ้อ|เออ|เอ่|เอ้า|อ่า|อ้า|อา|อืม|อือ|อ่ะ|อะ|นะ|holdon|sorry|wait|well|like|huh|oh|so|u+h*m*|e+r+m*|h+m+|m+|a+h+)/u;
 /** A transcript that is only hesitation, a restart or too short to be a request: it gets no
- * acknowledgement and costs no model call. */
+ * acknowledgement and costs no model call. Thai STT often joins words without spaces, so the
+ * words are peeled off a spacing-free copy. */
 export function fillerOnly(transcript: string): boolean {
-  const letters = transcript.toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, '');
-  return FILLER.test(letters) || (letters.match(/\p{L}/gu) ?? []).length < 3;
+  let rest = transcript.toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, '');
+  if (rest.length < 3) return true;
+  for (let match = FILLER.exec(rest); rest && match?.[0]; match = FILLER.exec(rest)) rest = rest.slice(match[0].length);
+  return !rest;
 }
 
 const SYSTEM = 'You voice a short acknowledgement in a live phone call while the assistant prepares its real answer. '
@@ -63,7 +68,7 @@ export async function fastAcknowledgement(transcript: string, options: { model: 
     const body = await response.json().catch(() => undefined) as { content?: Array<{ type?: string; text?: string }>; usage?: { input_tokens?: number; output_tokens?: number } } | undefined;
     const usage = { inputTokens: body?.usage?.input_tokens, outputTokens: body?.usage?.output_tokens };
     if (!response.ok) return { ...usage, elapsedMs: Date.now() - started, outcome: 'failed', code: `HTTP_${response.status}` };
-    const text = fastAckText((body?.content ?? []).filter(part => part.type === 'text').map(part => part.text ?? '').join(''), transcript);
+    const text = fastAckText((body?.content ?? []).filter(part => part.type === 'text').map(part => part.text ?? '').join(''), [transcript, ...(options.context?.recentTurns ?? [])].join(' '));
     return { ...usage, text, elapsedMs: Date.now() - started, outcome: text ? 'ready' : 'skipped' };
   } catch (error) {
     return { elapsedMs: Date.now() - started, outcome: 'failed', code: options.signal.aborted ? 'CANCELLED' : error instanceof Error && error.name === 'TimeoutError' ? 'TIMEOUT' : 'UNAVAILABLE' };
