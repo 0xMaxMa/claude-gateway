@@ -30,93 +30,32 @@ const START_WAIT_MS = 20_000;
 const POLL_MS = 250;
 const LOG_TAIL_BYTES = 2000;
 
-/** What the project's own files let us run without asking anyone. */
-export interface StartFacts {
-  packageJson: string | null;
-  rootNames: ReadonlySet<string>;
-  mainPy: string | null;
-  appPy: string | null;
-}
-
 export interface StartCommand {
   file: string;
   args: string[];
   env: Record<string, string>;
 }
 
-/** A way to run the project, and the command it makes for a port. */
-export interface StartPlan {
-  /** What a person would type, for display and logs. */
-  display: (port: number) => string;
-  command: (port: number) => StartCommand;
-}
+/** The script the project's agent writes once; starting a project only ever runs this file. */
+export const START_SCRIPT = '.pod/start.sh';
+const START_SCRIPT_MAX_BYTES = 64 * 1024;
 
-const LOCKFILE_RUNNERS: ReadonlyArray<readonly [string, string]> = [
-  ['pnpm-lock.yaml', 'pnpm'],
-  ['yarn.lock', 'yarn'],
-  ['bun.lockb', 'bun'],
-  ['bun.lock', 'bun'],
-];
-
-/** Flags that pin the port and the host for the dev servers whose script text names them. */
-const FRAMEWORK_FLAGS: ReadonlyArray<readonly [RegExp, (port: number) => string[]]> = [
-  [/\bvite\b/, (p) => ['--port', String(p), '--strictPort', '--host', '0.0.0.0']],
-  [/\bastro\b/, (p) => ['--port', String(p), '--host', '0.0.0.0']],
-  [/\bnext\b/, (p) => ['-p', String(p), '-H', '0.0.0.0']],
-];
-
-function nodePlan(facts: StartFacts): StartPlan | null {
-  if (facts.packageJson === null) return null;
-  let scripts: unknown;
+/** True when the project has a start script we will run: a regular file (no symlink), small, inside the project. */
+export async function hasStartScript(realProject: string): Promise<boolean> {
+  const file = path.join(realProject, START_SCRIPT);
   try {
-    scripts = (JSON.parse(facts.packageJson) as { scripts?: unknown } | null)?.scripts;
+    const st = await fsp.lstat(file);
+    if (!st.isFile() || st.size > START_SCRIPT_MAX_BYTES) return false;
+    const real = await fsp.realpath(file);
+    return real === path.join(realProject, START_SCRIPT);
   } catch {
-    return null;
+    return false;
   }
-  if (typeof scripts !== 'object' || scripts === null) return null;
-  const table = scripts as Record<string, unknown>;
-  const name = ['dev', 'start'].find((n) => typeof table[n] === 'string');
-  if (!name) return null;
-  const text = table[name] as string;
-  const runner = LOCKFILE_RUNNERS.find(([lock]) => facts.rootNames.has(lock))?.[1] ?? 'npm';
-  const flags = FRAMEWORK_FLAGS.find(([re]) => re.test(text))?.[1];
-  const forward = runner === 'yarn' || runner === 'bun' ? [] : ['--'];
-  return {
-    display: (port) => (flags ? [runner, 'run', name, ...forward, ...flags(port)].join(' ') : `PORT=${port} ${runner} run ${name}`),
-    command: (port) => ({
-      file: runner,
-      args: flags ? ['run', name, ...forward, ...flags(port)] : ['run', name],
-      env: { PORT: String(port) },
-    }),
-  };
 }
 
-function uvicornPlan(facts: StartFacts): StartPlan | null {
-  if (!facts.rootNames.has('.venv')) return null;
-  const candidates: Array<[string | null, string]> = [
-    [facts.mainPy, 'main'],
-    [facts.appPy, 'app'],
-  ];
-  const hit = candidates.find(([text]) => text !== null && /^app\s*=\s*FastAPI\(/m.test(text));
-  if (!hit) return null;
-  const target = `${hit[1]}:app`;
-  return {
-    display: (port) => `.venv/bin/uvicorn ${target} --host 0.0.0.0 --port ${port}`,
-    command: (port) => ({ file: '.venv/bin/uvicorn', args: [target, '--host', '0.0.0.0', '--port', String(port)], env: {} }),
-  };
-}
+export const startDisplay = (port: number) => `PORT=${port} sh ${START_SCRIPT}`;
 
-/** Null when the files do not name a way to run the project that we know how to pin to a port. */
-export function planStart(facts: StartFacts): StartPlan | null {
-  return nodePlan(facts) ?? uvicornPlan(facts);
-}
-
-export async function readStartFacts(realProject: string): Promise<StartFacts> {
-  const text = (name: string) => fsp.readFile(path.join(realProject, name), 'utf8').then((t) => (t.length <= 1_000_000 ? t : null), () => null);
-  const names = await fsp.readdir(realProject).catch(() => [] as string[]);
-  const [packageJson, mainPy, appPy] = await Promise.all([text('package.json'), text('main.py'), text('app.py')]);
-  return { packageJson, rootNames: new Set(names), mainPy, appPy };
-}
+const startCommand = (port: number): StartCommand => ({ file: 'sh', args: [START_SCRIPT], env: { PORT: String(port) } });
 
 /** The first port from 3000 up to 3099 nobody listens on, or `wanted` when it is free. */
 export function pickPort(taken: ReadonlySet<number>, wanted?: number): Result<number, 'port_in_use' | 'no_free_port' | 'invalid_port'> {
@@ -200,7 +139,7 @@ async function abandon(sys: Sys, launched: Launched): Promise<void> {
 const listening = (ports: RunningPort[] | null, port: number) => !!ports?.some((p) => p.port === port);
 
 /**
- * Runs the project the way its files say, on a free port, and answers once something listens on
+ * Runs the project's start script, on a free port, and answers once something listens on
  * that port from inside the project. Nothing the caller sends becomes part of the command.
  */
 export async function startProject(
@@ -208,8 +147,7 @@ export async function startProject(
   launch: Launcher,
   input: { realProject: string; name: string; port?: number; waitMs?: number; logPath?: string },
 ): Promise<Result<StartResult, StartError>> {
-  const plan = planStart(await readStartFacts(input.realProject));
-  if (!plan) return err({ code: 'no_start_command' });
+  if (!(await hasStartScript(input.realProject))) return err({ code: 'no_start_command' });
   if (((await scanProject(sys, input.realProject)) ?? []).length > 0) return err({ code: 'already_running' });
 
   const taken = new Set(((await sys.listeners()) ?? []).map((l) => l.port));
@@ -220,7 +158,7 @@ export async function startProject(
   const logPath = input.logPath ?? logPathFor(input.name);
   let launched: Launched;
   try {
-    launched = await launch(plan.command(port), input.realProject, logPath);
+    launched = await launch(startCommand(port), input.realProject, logPath);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     // The response carries only a bare code. The message and errno stay here, in the gateway log.
@@ -230,7 +168,7 @@ export async function startProject(
 
   const deadline = (input.waitMs ?? START_WAIT_MS) / POLL_MS;
   for (let i = 0; i < deadline; i++) {
-    if (listening(await scanProject(sys, input.realProject), port)) return ok({ port, pid: launched.pid, command: plan.display(port) });
+    if (listening(await scanProject(sys, input.realProject), port)) return ok({ port, pid: launched.pid, command: startDisplay(port) });
     const code = launched.exitCode();
     // Exit 0 can be a dev server that backgrounds itself, so only a failing exit ends the wait.
     if (code !== null && code !== 0) return err({ code: 'start_failed', log: await logTail(logPath) });

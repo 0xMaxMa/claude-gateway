@@ -6,7 +6,7 @@ import { defineRoute } from './route-registry';
 import { createProject, resolveProjectDir, listProjects } from '../projects/fs';
 import { getStatus, getSummaries, GitError, GitErrorCode } from '../projects/git';
 import { listRunning, ProjectDir, RunningErrorCode, scanProjects, StopLimiter, stopRunning, Sys, systemSys } from '../projects/running';
-import { planStart, PORT_MIN, readStartFacts, startProject, StartError, StartErrorCode, StartGuard, Launcher, systemLauncher } from '../projects/start';
+import { hasStartScript, START_SCRIPT, startProject, StartError, StartErrorCode, StartGuard, Launcher, systemLauncher } from '../projects/start';
 import { DeleteErrorCode, removeProject } from '../projects/delete';
 import { isProjectDeleting, markProjectDeleting } from '../projects/chat';
 import { parseProjectName, ProjectName, ProjectsErrorCode, Result } from '../projects/paths';
@@ -32,7 +32,7 @@ const ERRORS: Record<ProjectsErrorCode | GitErrorCode | RunningErrorCode | Start
   git_failed: { status: 500, message: 'Git failed' },
   nothing_running: { status: 409, message: 'Nothing is running in this project' },
   invalid_port: { status: 400, message: 'port must be an integer between 1 and 65535' },
-  no_start_command: { status: 422, message: 'The project files do not say how to start it' },
+  no_start_command: { status: 422, message: 'The project has no start script yet' },
   already_running: { status: 409, message: 'Something is already running in this project' },
   port_in_use: { status: 409, message: 'That port is in use' },
   no_free_port: { status: 409, message: 'No free port between 3000 and 3099' },
@@ -182,8 +182,7 @@ export function createProjectsRouter(
       if (!name.ok) return fail(res, name.error);
       const dir = await resolveProjectDir(root, name.value);
       if (!dir.ok) return fail(res, dir.error);
-      const plan = planStart(await readStartFacts(dir.value));
-      res.json({ ...(await listRunning(running.sys, dir.value)), start: plan ? { command: plan.display(PORT_MIN) } : null });
+      res.json({ ...(await listRunning(running.sys, dir.value)), start: (await hasStartScript(dir.value)) ? { command: `sh ${START_SCRIPT}` } : null });
     }),
   );
 
@@ -210,7 +209,7 @@ export function createProjectsRouter(
 
   defineRoute(
     router,
-    { method: 'POST', path: '/v1/projects/:name/running/start', auth: 'admin', summary: 'Start a project the way its own files say, on a free port', cli: null },
+    { method: 'POST', path: '/v1/projects/:name/running/start', auth: 'admin', summary: 'Run the project start script on a free port', cli: null },
     auth,
     requireAdmin,
     handle(async (req, res) => {
