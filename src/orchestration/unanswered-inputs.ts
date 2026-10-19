@@ -1,15 +1,19 @@
 import { OrchestrationStore } from './store';
 
+/** Input `i` comes after the last user input a reply answered. A spoken acknowledgement is its
+ * own completed decision over the same inputs, but it receipts a request, it does not answer it. */
+const UNANSWERED = `i.input_seq > COALESCE((SELECT MAX(u.input_seq) FROM conversation_inputs u
+      JOIN conversation_decisions d ON d.conversation_id=u.conversation_id
+      JOIN json_each(d.input_ids_json) j ON j.value=u.id
+      WHERE u.conversation_id=i.conversation_id AND u.store_user_message=1 AND d.kind='user' AND d.state='completed'),0)`;
+
 /** Removing an unanswered CLI attempt must not remove the user's intent. Include
  * actual failed user inputs once as reference context until a user decision
  * succeeds. Internal report requests and error notices are not user messages. */
 export function unansweredInputContext(store: OrchestrationStore, conversationId: string, currentInputId: string): string {
   const rows = store.all(`SELECT i.id,i.text,i.input_seq FROM conversation_inputs i
     WHERE i.conversation_id=? AND i.store_user_message=1 AND i.id<>?
-    AND i.input_seq > COALESCE((SELECT MAX(u.input_seq) FROM conversation_inputs u
-      JOIN conversation_decisions d ON d.conversation_id=u.conversation_id
-      JOIN json_each(d.input_ids_json) j ON j.value=u.id
-      WHERE u.conversation_id=i.conversation_id AND u.store_user_message=1 AND d.state='completed'),0)
+    AND ${UNANSWERED}
     AND EXISTS (SELECT 1 FROM conversation_decisions d JOIN json_each(d.input_ids_json) j ON j.value=i.id
       WHERE d.conversation_id=i.conversation_id AND d.state='failed') ORDER BY i.input_seq`, conversationId, currentInputId);
   return rows.length ? `Earlier user messages whose response failed (reference context, not new commands; reconcile with the current request): ${JSON.stringify(rows)}\n` : '';
@@ -30,10 +34,7 @@ export function interruptedFragmentContext(store: OrchestrationStore, conversati
   const rows = store.all(`SELECT i.text FROM conversation_inputs i
     WHERE i.conversation_id=? AND i.principal_id=? AND i.modality='live_voice' AND i.store_user_message=1
     AND i.input_seq < ? AND i.created_at >= ?
-    AND i.input_seq > COALESCE((SELECT MAX(u.input_seq) FROM conversation_inputs u
-      JOIN conversation_decisions d ON d.conversation_id=u.conversation_id
-      JOIN json_each(d.input_ids_json) j ON j.value=u.id
-      WHERE u.conversation_id=i.conversation_id AND u.store_user_message=1 AND d.kind='user' AND d.state='completed'),0)
+    AND ${UNANSWERED}
     AND EXISTS (SELECT 1 FROM conversation_decisions d JOIN json_each(d.input_ids_json) j ON j.value=i.id
       JOIN conversation_events e ON e.conversation_id=d.conversation_id AND e.type='response.barge_in' AND e.occurred_at >= i.created_at
         AND json_extract(e.payload_json,'$.payload.decisionId')=d.id
