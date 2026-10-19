@@ -105,7 +105,7 @@ export const ORCHESTRATION_DEFAULTS = {
   voice: { enabled: false, notes: { enabled: true, provider: 'elevenlabs', model: 'scribe_v2', replyWithVoice: true }, transport: 'websocket' as const, maxActiveSessionsPerConversation: 1, allowedOrigins: [] as string[], language: '',
     stt: { provider: 'elevenlabs', model: 'scribe_v2_realtime' },
     tts: { provider: 'elevenlabs', model: 'eleven_v3_conversational', voiceId: '' },
-    turns: { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, mergeWindowMs: 1200 },
+    turns: { silenceCommitMs: 650, finalizationTimeoutMs: 5000, maxUtteranceMs: 60000, mergeWindowMs: 2000 },
     playback: { maxBufferedAudioMs: 1500, bargeIn: true },
     live: { fastAck: true, fastAckModel: 'claude-haiku-5-5', fastAckAfterMs: 1500, fastAckTimeoutMs: 3000 },
     narrate: { enabled: true, maxChars: 100000, maxParts: 60, targetChars: 800, partTimeoutMs: 60000 } },

@@ -15,13 +15,14 @@ Your final display_text for this delegation turn should agree with that contextu
 After spawning a worker, end this turn with a brief factual progress update. Do not poll or wait for that worker to finish; a separate automatic notification turn will report its persisted result.
 On an automatic task notification, report the actual result or failure without starting more work.
 Compose both in this same turn. spoken_text normally contains 1–3 short sentences, at most 600 characters.
+spoken_text answers the user's latest question or request first, then, within the same budget, briefly covers every other question display_text answers. When display_text answers a question, never speak only an acknowledgement of an earlier command. Keep a name or term the user said in Latin script spelled as written, not transliterated.
 For reviews/reports speak the conclusion, most important issue and next step; retain all findings and evidence in display_text, including the worker's severity markers, per-severity counts and verdict. Speech may omit the visual markers, but both surfaces must agree on the findings and the blocking verdict.
 Do not read code, diffs, tables, URLs or raw tool receipts aloud. For follow-up questions answer the specific point using existing task results, without re-running work unnecessarily.
 If the user explicitly requests a longer oral explanation, explain the requested part within 600 characters and offer to continue.
 Never claim a task finished before its persisted result. Both fields must agree on facts and uncertainty. Do not infer that TTS is unavailable from earlier conversation complaints: the gateway handles playback. Speak the requested answer itself rather than announcing that you wrote it in chat or speculating about playback status.`;
 /** A later voice turn in a CLI context that already holds SPEECH_OVERLAY in full: the
  * output contract and the rules most often broken stay on every turn, the rest is referenced. */
-export const SPEECH_REMINDER = `For this voice-enabled turn the full voice reply rules given earlier in this conversation still apply unchanged. Return ONLY one JSON object with "display_text" (complete answer for chat) and "spoken_text" (1–3 short natural sentences, at most 600 characters, in the same language as display_text unless the user explicitly asked otherwise). Reply in the language the user is using, or the one they explicitly requested, and describe your own work in first person in the existing persona's voice. Answer greetings and direct questions naturally without announcing work. When work is needed, include spoken_acknowledgement in your first task_spawn call. Never claim a task finished before its persisted result, and on an automatic task notification report the actual result without starting more work. Do not read code, diffs, tables, URLs or raw tool receipts aloud.`;
+export const SPEECH_REMINDER = `For this voice-enabled turn the full voice reply rules given earlier in this conversation still apply unchanged. Return ONLY one JSON object with "display_text" (complete answer for chat) and "spoken_text" (1–3 short natural sentences, at most 600 characters, in the same language as display_text unless the user explicitly asked otherwise). Reply in the language the user is using, or the one they explicitly requested, and describe your own work in first person in the existing persona's voice. Answer greetings and direct questions naturally without announcing work. spoken_text answers the latest question first and, within the same budget, briefly covers every question display_text answers, never only an acknowledgement; keep the user's Latin-script terms spelled as written. When work is needed, include spoken_acknowledgement in your first task_spawn call. Never claim a task finished before its persisted result, and on an automatic task notification report the actual result without starting more work. Do not read code, diffs, tables, URLs or raw tool receipts aloud.`;
 /** How the raw turn text resolved into the user-facing surfaces.
  * 'structured'  — display_text was read out of the declared union payload.
  * 'plain'       — no payload at all; the prose IS the reply and nothing was lost.
@@ -114,6 +115,20 @@ export function splitSpeechResponse(raw: string): { display: string; spoken: str
   return { display, spoken: speakable(display), outcome: value ? 'empty_display' : 'unreadable' };
 }
 
+
+/** A Latin-script token, joined by . _ - / into one identifier (npm, package.json, follow-up). */
+const LATIN_TOKEN = /[A-Za-z][A-Za-z0-9]*(?:[._\-/][A-Za-z0-9]+)*/g;
+/** Latin-script words of the latest user input that display_text answers and spoken_text leaves out
+ * (issue #624). No model call and no word list: only a message that also uses another script has
+ * words that stand out (npm in a Thai question), and only plain words count, because identifiers
+ * are not read aloud. SPEECH_OVERLAY keeps those words spelled as written in speech. A Latin-only or
+ * Thai-only message is never reported. A diagnostic, not a rewrite. */
+export function speechCoverageGap(input: string, display: string, spoken: string): string[] {
+  if (!/[^\P{L}\p{Script=Latin}]/u.test(input)) return [];
+  const words = (text: string) => new Set((text.match(LATIN_TOKEN) ?? []).filter(token => /^[A-Za-z]{2,}$/.test(token)).map(token => token.toLowerCase()));
+  const answered = words(display), heard = words(spoken);
+  return [...words(input)].filter(word => answered.has(word) && !heard.has(word)).slice(0, 5);
+}
 
 export function speechVoiceStyle(gender?: string): string {
   if (gender !== 'female' && gender !== 'male') return '';
