@@ -487,12 +487,16 @@ Starts the project without an agent. Needs an admin key. Body `{}` picks the fir
 to 3099. `{ "port": 3005 }` asks for that port and gets `409 port_in_use` when
 something listens on it.
 
-The command is never taken from the request. The gateway builds it from the
-project's own files, and `GET /api/v1/projects/:name/running` answers `start`
-with `{ "command": "..." }` when it can start the project, `null` when it cannot.
+The gateway does not guess how to run a project. The project's agent writes
+`.pod/start.sh` once, and a start only runs that file as `sh .pod/start.sh` in the
+project folder, with `PORT` set to the port the gateway picked (or the one asked for).
+The script must listen on `$PORT` and on `0.0.0.0`, and exit non-zero when it fails.
+The command is never taken from the request.
 
-- `package.json` with a `dev` script, else a `start` script. The gateway runs it with the lockfile's package manager (`npm`, `pnpm`, `yarn` or `bun`). A script that runs `vite`, `astro` or `next` also gets its port and host flags. Any other script gets the port only as the `PORT` environment variable.
-- `main.py` or `app.py` with a top-level `app = FastAPI(`, and a `.venv` folder: `.venv/bin/uvicorn main:app --host 0.0.0.0 --port N`.
+The script must be a regular file (a symlink is refused), at most 64 KiB, and must
+resolve inside the project. Without one, the start answers `422 no_start_command`
+("The project has no start script yet"). `GET /api/v1/projects/:name/running` answers
+`start` with `{ "command": "sh .pod/start.sh" }` when the script exists, `null` otherwise.
 
 The process runs detached in the project folder with only `PATH`, `HOME`, `USER`,
 `LOGNAME`, `LANG`, `LC_ALL`, `SHELL`, `TMPDIR` and `PORT` in its environment, and
@@ -501,7 +505,7 @@ up to 20 seconds for a listener on that port from inside the project, then retur
 `200` with
 
 ```json
-{ "port": 3001, "pid": 4242, "command": "PORT=3001 npm run start" }
+{ "port": 3001, "pid": 4242, "command": "PORT=3001 sh .pod/start.sh" }
 ```
 
 On failure the body also carries `log`, the last 2000 characters of the output with
