@@ -38,6 +38,21 @@ function publicVoiceSettings(config: AgentConfig) {
   return voice;
 }
 
+type Settings = Record<string, unknown>;
+/** The values an agent owns after a save: those it already owned and those the request changes
+ * from the effective value. Nested groups such as live.vad follow the same rule per field. */
+function ownedSettings(previous: object | undefined, requested: object, current: object): Settings {
+  const own: Settings = { ...previous }, effective = current as Settings;
+  for (const [name, value] of Object.entries(requested)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const nested = ownedSettings(own[name] as object | undefined, value, effective[name] as object);
+      if (Object.keys(nested).length) own[name] = nested;
+      else delete own[name];
+    } else if (name in own || value !== effective[name]) own[name] = value;
+  }
+  return own;
+}
+
 function catalogErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message === 'INVALID_UPSTREAM_VOICE_URL') {
     return 'Upstream voice URL is missing or invalid. Check the Claude provider settings.';
@@ -118,9 +133,7 @@ export function voiceSettingsRouter(
         const current = resolveOrchestrationConfig(effective, previous).voice;
         for (const field of ['live', 'narrate'] as const) {
           if (!req.body[field]) continue;
-          const own: Record<string, unknown> = { ...previous[field] };
-          for (const [name, value] of Object.entries(req.body[field] as Record<string, unknown>))
-            if (name in own || value !== (current[field] as Record<string, unknown>)[name]) own[name] = value;
+          const own = ownedSettings(previous[field], req.body[field], current[field]);
           if (Object.keys(own).length) voice[field] = own;
           else delete voice[field];
         }

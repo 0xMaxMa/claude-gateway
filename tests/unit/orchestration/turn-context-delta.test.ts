@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
-import { SPEECH_OVERLAY, SPEECH_REMINDER } from '../../../src/orchestration/speech';
+import { LIVE_VOICE_STT_NOTE, SPEECH_OVERLAY, SPEECH_REMINDER } from '../../../src/orchestration/speech';
 import { SessionStore } from '../../../src/session/store';
 import { HistoryDB } from '../../../src/history/db';
 import type { SessionProcess } from '../../../src/session/process';
@@ -109,5 +109,24 @@ test('the voice rules are sent in full once per CLI context, then as a reminder,
     jest.spyOn((f.runtime as any).cliSessions, 'resolve').mockImplementation(() => ({ id: 'cli-other', resume: false }));
     await f.send('อีกรอบ', { modality: 'live_voice' });
     expect(f.prompts[3]).toContain(SPEECH_OVERLAY);
+  } finally { await f.close(); }
+});
+
+test('live-voice turns carry the realtime STT caveat on both the full and reminder paths; typed speech does not', async () => {
+  const f = await fixture();
+  try {
+    await f.send('สวัสดี', { modality: 'live_voice' });
+    await f.send('ทำอะไรอยู่', { modality: 'live_voice' });
+    expect(f.prompts[0]).toContain(SPEECH_OVERLAY);
+    expect(f.prompts[1]).toContain(SPEECH_REMINDER);
+    for (const prompt of f.prompts.slice(0, 2)) expect(prompt).toContain(LIVE_VOICE_STT_NOTE);
+    // Typed chat spoken to a connected listener is speech, but not a realtime transcript.
+    const unsubscribe = f.runtime.subscribeVoiceResults(f.scope.agentSessionId, 'owner', () => {});
+    await f.send('Typed question');
+    unsubscribe();
+    expect(f.prompts[2]).toContain(SPEECH_REMINDER);
+    expect(f.prompts[2]).not.toContain(LIVE_VOICE_STT_NOTE);
+    await f.send('Plain text');
+    expect(f.prompts[3]).not.toContain(LIVE_VOICE_STT_NOTE);
   } finally { await f.close(); }
 });

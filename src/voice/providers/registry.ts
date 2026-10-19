@@ -15,13 +15,15 @@ import { stripAudioTags, withoutAudioTags } from '../audio-tags';
 import { DeepgramStt } from './deepgram-stt';
 import { CartesiaTts } from './cartesia-tts';
 
-function makeSttProvider(config: { provider: string; model: string }): SttProvider {
+type SttConfig = { provider: string; model: string; filterBackgroundAudio?: boolean };
+function makeSttProvider(config: SttConfig): SttProvider {
   config = { ...config, provider: canonicalVoiceProvider(config.provider), model: nativeVoiceModel(config.provider, config.model) };
   if (['openrouter','upstream:openrouter'].includes(config.provider)) return new OpenRouterStt(config.provider,config.model);
   if (['gemini', 'upstream:gemini'].includes(config.provider)) return config.model === 'gemini-3.5-transcribe-live' ? new GeminiLiveStt(config.provider, config.model) : new GeminiStt(config.provider, config.model);
-  if (config.provider === 'managed:elevenlabs') return new ElevenLabsStt(upstreamVoiceConnection('elevenlabs', true).key, config.model, managedVoiceSocket, config.provider);
-  if (config.provider === 'upstream:elevenlabs') return new ElevenLabsStt(upstreamVoiceConnection().key, config.model, upstreamVoiceSocket, 'upstream:elevenlabs');
-  if (config.provider === 'elevenlabs') return new ElevenLabsStt(process.env.ELEVENLABS_API_KEY ?? '', config.model);
+  const elevenlabs = { filterBackgroundAudio: config.filterBackgroundAudio };
+  if (config.provider === 'managed:elevenlabs') return new ElevenLabsStt(upstreamVoiceConnection('elevenlabs', true).key, config.model, managedVoiceSocket, config.provider, elevenlabs);
+  if (config.provider === 'upstream:elevenlabs') return new ElevenLabsStt(upstreamVoiceConnection().key, config.model, upstreamVoiceSocket, 'upstream:elevenlabs', elevenlabs);
+  if (config.provider === 'elevenlabs') return new ElevenLabsStt(process.env.ELEVENLABS_API_KEY ?? '', config.model, undefined, undefined, elevenlabs);
   if (['paxalabs', 'upstream:paxalabs', 'managed:paxalabs'].includes(config.provider)) return isPaxaRealtimeSttModel(config.model) ? new PaxaLabsLiveStt(config.provider, config.model) : new PaxaLabsStt(config.provider, config.model);
   if (config.provider === 'deepgram') return new DeepgramStt(process.env.DEEPGRAM_API_KEY ?? '', config.model);
   throw new VoiceError('UNKNOWN_STT_PROVIDER');
@@ -38,7 +40,7 @@ function makeTtsProvider(config: { provider: string; model: string }): TtsProvid
   throw new VoiceError('UNKNOWN_TTS_PROVIDER');
 }
 
-export function sttProvider(config: { provider: string; model: string }): SttProvider {
+export function sttProvider(config: SttConfig): SttProvider {
   const provider = makeSttProvider(config);
   if (!config.provider.startsWith('managed:')) return provider;
   return { id: provider.id, capabilities: provider.capabilities, async open(options) {

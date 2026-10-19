@@ -69,7 +69,7 @@ import { resolveSkill, skillCatalog } from './skills';
 import { PSTACK_DECISION_NOTE, pstackCommandReply, pstackNotSetUpReply } from '../pstack/overlay';
 import type { SkillRegistry } from '../skills';
 import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
-import { SPEECH_OVERLAY, SPEECH_REMINDER, splitSpeechResponse, speechVoiceStyle } from './speech';
+import { LIVE_VOICE_STT_NOTE, SPEECH_OVERLAY, SPEECH_REMINDER, splitSpeechResponse, speechVoiceStyle } from './speech';
 import { join } from 'path';
 import { pathWithin } from '../utils/paths';
 import { randomUUID } from 'crypto';
@@ -1462,6 +1462,7 @@ export class AgentOrchestrationRuntime {
         // voice turns repeat only the short reminder and the persona's voice style.
         const style = speechVoiceStyle(gender), full = SPEECH_OVERLAY + style;
         speechDirective = `\n\n${contextPlan.select('directives', [{ id: 'speech', full }], directive => directive.id).length ? full : SPEECH_REMINDER + style}`;
+        if (input.modality === 'live_voice') speechDirective += `\n${LIVE_VOICE_STT_NOTE}`;
       }
       const previousReports = internalReview ? recentCommunicatedProgress(this.store, receipt.conversationId) : [];
       // Anthropic's prompt cache is a strict prefix match over [tools, system, messages],

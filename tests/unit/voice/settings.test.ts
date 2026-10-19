@@ -338,3 +338,22 @@ test('saving an echoed settings payload does not pin live/narrate defaults, and 
     expect(saved().live).toEqual({ fastAck: false, fastAckAfterMs: 2000 });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('live.vad edits persist only the changed fields and merge across saves', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'voice-vad-')), path = join(dir, 'config.json');
+  const selected = { enabled: true, tts: { provider: 'elevenlabs', model: 'eleven_v3', voiceId: '' }, stt: { provider: 'elevenlabs', model: 'scribe_v2_realtime' }, notes: { enabled: false } };
+  writeFileSync(path, JSON.stringify({ gateway: { orchestration: true }, agents: [{ id: 'a', voice: selected }] }));
+  const configs = new Map([['a', { id: 'a', voice: structuredClone(selected), orchestration: effectiveOrchestration({}, true) } as AgentConfig]]);
+  const app = express(); app.use(express.json()); app.use(voiceSettingsRouter(configs, new Map(), [{ id: 'owner', key: 'key', agents: ['a'], write: true }], path));
+  const patch = (body: unknown) => request(app).patch('/v1/agents/a/voice-settings').set('Authorization', 'Bearer key').send(body as object);
+  const saved = () => JSON.parse(readFileSync(path, 'utf8')).agents[0].voice;
+  try {
+    expect((await patch({ live: { vad: { minLevel: 0.03 } } })).status).toBe(200);
+    expect((await patch({ live: { vad: { ratio: 4.5 } } })).body.voice.live.vad).toMatchObject({ minLevel: 0.03, ratio: 4.5, startMs: 120 });
+    expect(saved().live).toEqual({ vad: { minLevel: 0.03, ratio: 4.5 } });
+    const echoed = (await request(app).get('/v1/agents/a/voice-settings').set('Authorization', 'Bearer key')).body.voice;
+    expect((await patch(echoed)).status).toBe(200);
+    expect(saved().live).toEqual({ vad: { minLevel: 0.03, ratio: 4.5 } });
+    expect((await patch({ live: { vad: { minLevel: -1 } } })).status).toBe(400);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
