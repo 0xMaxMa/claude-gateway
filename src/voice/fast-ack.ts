@@ -15,17 +15,11 @@ export function fastAckText(reply: string, heard = ''): string | undefined {
   return text;
 }
 
-/** One hesitation or restart word at the start of the text, longest alternative first. Each
- * alternative is tried once per position (no nested repetition), so matching stays linear. */
-const FILLER = /^(?:เอาใหม่|เดี๋ยวก่อน|เดี๋ยว|แบบว่า|แบบ|คือว่า|คือ|แป๊บ|นึง|ก่อน|ใหม่|เอ่อ|เอ้อ|เออ|เอ่|เอ้า|อ่า|อ้า|อา|อืม|อือ|อ่ะ|อะ|นะ|holdon|sorry|wait|well|like|huh|oh|so|u+h*m*|e+r+m*|h+m+|m+|a+h+)/u;
-/** A transcript that is only hesitation, a restart or too short to be a request: it gets no
- * acknowledgement and costs no model call. Thai STT often joins words without spaces, so the
- * words are peeled off a spacing-free copy. */
-export function fillerOnly(transcript: string): boolean {
-  let rest = transcript.toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, '');
-  if (rest.length < 3) return true;
-  for (let match = FILLER.exec(rest); rest && match?.[0]; match = FILLER.exec(rest)) rest = rest.slice(match[0].length);
-  return !rest;
+/** A transcript with fewer than three letters or digits is too short to be a request: it gets no
+ * acknowledgement and costs no model call. Whether longer words are only hesitation or a restart
+ * is the model's call (it replies "-"), not a word list's. */
+export function tooShort(transcript: string): boolean {
+  return transcript.replace(/[^\p{L}\p{M}\p{N}]+/gu, '').length < 3;
 }
 
 const SYSTEM = 'You voice a short acknowledgement in a live phone call while the assistant prepares its real answer. '

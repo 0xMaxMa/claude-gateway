@@ -19,7 +19,6 @@ import type {
  * Rules (any true ⇒ review):
  *   - sig.toolCalls >= cfg.minToolCalls
  *   - sig.recoveryFired            (error-recovery signal)
- *   - sig.userCorrection           (user-correction heuristic)
  *
  * Short-circuits, in order:
  *   1. cfg.enabled === false        ⇒ never review
@@ -37,15 +36,12 @@ export function shouldReview(
   if (budget.cap <= 0) return none;
   if (budget.spent >= budget.cap) return none;
 
-  // Rules — first matching reason wins (deterministic priority: tool-calls > recovery > correction).
+  // Rules — first matching reason wins (deterministic priority: tool-calls > recovery).
   if (cfg.minToolCalls > 0 && sig.toolCalls >= cfg.minToolCalls) {
     return { review: true, reason: 'tool-calls' };
   }
   if (sig.recoveryFired) {
     return { review: true, reason: 'recovery' };
-  }
-  if (sig.userCorrection) {
-    return { review: true, reason: 'user-correction' };
   }
 
   return none;

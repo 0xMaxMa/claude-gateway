@@ -64,6 +64,14 @@ npm test
 
 For async tests, wait for an observable state or event with a bounded deadline rather than an arbitrary sleep. Test real cancellation and failure paths when changing process supervision; CPU movement alone is not proof that a test passed.
 
+## Never infer meaning with hardcoded patterns
+
+Do not decide what natural-language text means with a regex, keyword list or word list, in any language. Use a model-declared structured field, real system state or an explicit command instead. Structural parsing (IDs, URLs, paths, JSON, markdown, CLI flags, protocol formats, secret redaction and script detection for language choice) remains allowed. [`AGENTS.md`](https://github.com/0xMaxMa/claude-gateway/blob/main/AGENTS.md) states the rule in full, and `tests/unit/no-semantic-regex.test.ts` fails on new violations. Run it alone with:
+
+```bash
+npm run lint:semantic-regex
+```
+
 ## Release and promote
 
 Run `make release` on an up-to-date `main` to release. It bumps the version, then pushes the commit and a `vX.Y.Z` tag. The release workflow runs the unit tests, builds, creates the GitHub Release and publishes the package to npm under the `latest` dist-tag.

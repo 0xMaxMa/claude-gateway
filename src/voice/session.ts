@@ -7,7 +7,7 @@ import { VoiceTurnManager } from './turn-manager';
 import { VoicePlayback } from './playback';
 import { SttProvider, SttSession, TtsProvider, TtsAudioChunk, PCM16, VoiceError } from './types';
 import { VoiceFrame, encodeVoiceFrame } from './protocol';
-import { fillerOnly, type FastAckContext } from './fast-ack';
+import { tooShort, type FastAckContext } from './fast-ack';
 
 export interface VoiceClient {
   control(message: Record<string, unknown>): void;
@@ -222,7 +222,7 @@ export class VoiceSession {
     const context: FastAckContext = { recentTurns: [...this.acks.turns], recentAcks: [...this.acks.spoken] };
     this.acks.turns = [...this.acks.turns, text].slice(-2);
     // Decided before submitting, so the turn knows whether an acknowledgement may precede its reply.
-    const skip = !this.options.acknowledge ? 'disabled' : fillerOnly(text) ? 'filler' : this.acks.lastAcked === index - 1 ? 'cooldown' : undefined;
+    const skip = !this.options.acknowledge ? 'disabled' : tooShort(text) ? 'too_short' : this.acks.lastAcked === index - 1 ? 'cooldown' : undefined;
     // The agent turn reports its own phases (process, first token, first spoken words) on this trace.
     const accepted = await this.submit(text, utteranceId, phase => turn.trace.emit(phase), { fastAck: !skip });
     turn.ids.inputId = accepted.inputId; turn.trace.emit('turn_admitted');
@@ -267,8 +267,8 @@ export class VoiceSession {
   }
   /** Starts the acknowledgement call with the turn. It is spoken only if the reply has not begun
    * speaking `fastAckAfterMs` after admission, and never after barge-in, the reply's own speech or
-   * another spoken response such as the turn's contextual acknowledgement. It is skipped on filler,
-   * right after an acknowledged turn, and when it repeats one already spoken in this call.
+   * another spoken response such as the turn's contextual acknowledgement. It is skipped on a transcript too
+   * short to be a request, right after an acknowledged turn, and when it repeats one already spoken in this call.
    * It is audio only: no response text, chat message or history entry. */
   private fastAck(text: string, interruption: number, turn: TurnTrace, index: number, context: FastAckContext, skip?: string): { cancel: (spoken?: boolean) => void } {
     const acknowledge = this.options.acknowledge;
