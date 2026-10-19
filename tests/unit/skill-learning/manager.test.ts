@@ -191,12 +191,12 @@ describe('SkillLearningManager — review path', () => {
 
 describe('review eligibility without another model call', () => {
   const none = async () => ({ stdout: JSON.stringify({ result: '{"action":"none"}' }) });
-  function qualify(mgr: SkillLearningManager, correction = false) {
-    mgr.onTurnStart('chat', 'session', correction ? 'wrong result' : 'work');
+  function qualify(mgr: SkillLearningManager, message = 'work') {
+    mgr.onTurnStart('chat', 'session', message);
     mgr.onToolUse('chat', 'tool');
     mgr.onTurnEnd('chat', 'session');
   }
-  it('skips exact unchanged content, but keeps novel content, recovery and corrections eligible', async () => {
+  it('skips exact unchanged content, but keeps novel content and recovery eligible', async () => {
     const spawn = jest.fn(none);
     const { db, mgr, dir } = setup({ minToolCalls: 1 }, spawn);
     try {
@@ -204,13 +204,25 @@ describe('review eligibility without another model call', () => {
       qualify(mgr); await mgr.runReviewNow('chat', 'session');
       qualify(mgr); await mgr.runReviewNow('chat', 'session');
       expect(spawn).toHaveBeenCalledTimes(1);
-      qualify(mgr, true); await mgr.runReviewNow('chat', 'session');
-      expect(spawn).toHaveBeenCalledTimes(2);
+      // The words of a message are not a review signal (issue #629): "no problem" is not a correction.
+      qualify(mgr, 'no problem, thanks!'); await mgr.runReviewNow('chat', 'session');
+      expect(spawn).toHaveBeenCalledTimes(1);
       qualify(mgr); mgr.onRecoveryFired('chat'); await mgr.runReviewNow('chat', 'session');
-      expect(spawn).toHaveBeenCalledTimes(3);
+      expect(spawn).toHaveBeenCalledTimes(2);
       db.insertMessage({ chatId: 'chat', sessionId: 'session', source: 'telegram', role: 'assistant', content: 'new reusable procedure', ts: NOW + 1 });
       qualify(mgr); await mgr.runReviewNow('chat', 'session');
-      expect(spawn).toHaveBeenCalledTimes(4);
+      expect(spawn).toHaveBeenCalledTimes(3);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+  it('a message that opens with a negation does not qualify a session that nothing else qualifies', async () => {
+    const spawn = jest.fn(none);
+    const { db, mgr, dir } = setup({ minToolCalls: 99 }, spawn);
+    try {
+      seedTranscript(db, 'session');
+      for (const message of ['no problem, thanks!', 'not bad — now deploy it', 'ผิดคาดมาก เยี่ยมเลย', 'ไม่ใช่แค่นั้น ช่วยทำต่อด้วย']) {
+        qualify(mgr, message); await mgr.runReviewNow('chat', 'session');
+      }
+      expect(spawn).not.toHaveBeenCalled();
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
   it('does not erase a new qualifying turn while the previous reviewer is running', async () => {
@@ -222,7 +234,7 @@ describe('review eligibility without another model call', () => {
     try {
       seedTranscript(db, 'session'); qualify(mgr);
       const pending = mgr.runReviewNow('chat', 'session');
-      qualify(mgr, true);
+      qualify(mgr); mgr.onRecoveryFired('chat');
       finish(await none()); await pending;
       await mgr.runReviewNow('chat', 'session');
       expect(spawn).toHaveBeenCalledTimes(2);
