@@ -47,23 +47,23 @@ describe('makeSharedPromoter — gating', () => {
 });
 
 describe('makeSharedPromoter — note identity + dedup (#386)', () => {
-  test('a brand-new fact with no existing relative creates one note named after its reason', () => {
+  test('a brand-new fact with no existing relative creates one note named after its topic', () => {
     const cfg = tmpSharedCfg();
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
-      promote({ reason: 'deploy-runbook', content: 'The prod cluster runs on kubernetes in region eu-west.' });
+      promote({ topic: 'deploy-runbook', reason: 'r', content: 'The prod cluster runs on kubernetes in region eu-west.' });
       expect(noteFiles(cfg)).toEqual(['deploy-runbook.md']);
     } finally {
       cleanup(cfg);
     }
   });
 
-  test('the SAME reason recurring across two promotions updates the ONE note, never creates a second file', () => {
+  test('the SAME topic recurring across two promotions updates the ONE note, never creates a second file', () => {
     const cfg = tmpSharedCfg();
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
-      promote({ reason: 'oncall-rotation', content: 'Escalate paging incidents to the platform team first.' });
-      promote({ reason: 'oncall-rotation', content: 'Platform team is first-line oncall; SRE is the fallback.' });
+      promote({ topic: 'oncall-rotation', reason: 'r', content: 'Escalate paging incidents to the platform team first.' });
+      promote({ topic: 'oncall-rotation', reason: 'r', content: 'Platform team is first-line oncall; SRE is the fallback.' });
 
       expect(noteFiles(cfg)).toEqual(['oncall-rotation.md']);
       const body = fs.readFileSync(path.join(sharedNotesDir(cfg), 'oncall-rotation.md'), 'utf8');
@@ -74,12 +74,12 @@ describe('makeSharedPromoter — note identity + dedup (#386)', () => {
     }
   });
 
-  test('re-promoting identical content under the same reason does not duplicate it in the note body', () => {
+  test('re-promoting identical content under the same topic does not duplicate it in the note body', () => {
     const cfg = tmpSharedCfg();
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
-      promote({ reason: 'db-pool', content: 'Connection pool max size is 50.' });
-      promote({ reason: 'db-pool', content: 'Connection pool max size is 50.' });
+      promote({ topic: 'db-pool', reason: 'r', content: 'Connection pool max size is 50.' });
+      promote({ topic: 'db-pool', reason: 'r', content: 'Connection pool max size is 50.' });
 
       const body = fs.readFileSync(path.join(sharedNotesDir(cfg), 'db-pool.md'), 'utf8');
       expect(body.match(/Connection pool max size is 50\./g)?.length).toBe(1);
@@ -89,7 +89,7 @@ describe('makeSharedPromoter — note identity + dedup (#386)', () => {
   });
 
   test(
-    'REGRESSION (#386): the same recurring fact, reworded under a DIFFERENT reason each night, ' +
+    'REGRESSION (#386): the same recurring fact, reworded under a DIFFERENT topic each night, ' +
       'merges into ONE shared note instead of piling up a near-duplicate per night',
     () => {
       const cfg = tmpSharedCfg();
@@ -97,7 +97,7 @@ describe('makeSharedPromoter — note identity + dedup (#386)', () => {
         const promote = makeSharedPromoter('agentA', cfg, undefined)!;
 
         promote({
-          reason: 'staging-db-timeout',
+          topic: 'staging-db-timeout', reason: 'r',
           content: 'The staging database connection pool times out after 30 seconds under load.',
         });
         // Simulate the reindex that happens between dream nights, so the near-dup
@@ -105,7 +105,7 @@ describe('makeSharedPromoter — note identity + dedup (#386)', () => {
         indexSharedArchive(cfg, undefined);
 
         promote({
-          reason: 'staging-timeout-followup',
+          topic: 'staging-timeout-followup', reason: 'r',
           content: 'Staging database connection pool timeout occurs after roughly 30 seconds under heavy load.',
         });
 
@@ -120,17 +120,17 @@ describe('makeSharedPromoter — note identity + dedup (#386)', () => {
     },
   );
 
-  test('a near-duplicate under a different reason links OTHER related notes found alongside the merge target', () => {
+  test('a near-duplicate under a different topic links OTHER related notes found alongside the merge target', () => {
     const cfg = tmpSharedCfg();
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
-      promote({ reason: 'redis-eviction-policy', content: 'Redis cache uses allkeys-lru eviction under memory pressure.' });
-      promote({ reason: 'redis-memory-limits', content: 'Redis cache memory limit is 4gb before eviction kicks in.' });
+      promote({ topic: 'redis-eviction-policy', reason: 'r', content: 'Redis cache uses allkeys-lru eviction under memory pressure.' });
+      promote({ topic: 'redis-memory-limits', reason: 'r', content: 'Redis cache memory limit is 4gb before eviction kicks in.' });
       indexSharedArchive(cfg, undefined);
 
       // Reworded close to the FIRST note; the search should surface both existing
       // redis notes, merge into the closest, and link the other.
-      promote({ reason: 'redis-cache-notes', content: 'Redis cache eviction runs allkeys-lru once memory pressure is hit.' });
+      promote({ topic: 'redis-cache-notes', reason: 'r', content: 'Redis cache eviction runs allkeys-lru once memory pressure is hit.' });
 
       const files = noteFiles(cfg);
       expect(files.length).toBe(2); // merged into an existing note, no third file
@@ -141,12 +141,12 @@ describe('makeSharedPromoter — note identity + dedup (#386)', () => {
     }
   });
 
-  test('empty content or reason is a silent no-op (never writes an empty/unnamed note)', () => {
+  test('empty content is a silent no-op (never writes an empty note)', () => {
     const cfg = tmpSharedCfg();
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
-      promote({ reason: '', content: 'has content but no reason' });
-      promote({ reason: 'no-content' });
+      promote({ topic: 'blank-content', reason: 'r', content: '   ' });
+      promote({ topic: 'no-content', reason: 'r' });
       expect(noteFiles(cfg)).toEqual([]);
     } finally {
       cleanup(cfg);
@@ -157,12 +157,12 @@ describe('makeSharedPromoter — note identity + dedup (#386)', () => {
     const cfg = tmpSharedCfg();
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
-      promote({ reason: 'growing-topic', content: 'x'.repeat(MAX_SHARED_NOTE_SIZE - 100) });
+      promote({ topic: 'growing-topic', reason: 'r', content: 'x'.repeat(MAX_SHARED_NOTE_SIZE - 100) });
       const before = fs.readFileSync(path.join(sharedNotesDir(cfg), 'growing-topic.md'), 'utf8');
 
       // Same reason recurs with enough new content that the merged result would
       // exceed the cap — pre-fix this would have written past it unbounded.
-      promote({ reason: 'growing-topic', content: 'y'.repeat(1000) });
+      promote({ topic: 'growing-topic', reason: 'r', content: 'y'.repeat(1000) });
 
       const after = fs.readFileSync(path.join(sharedNotesDir(cfg), 'growing-topic.md'), 'utf8');
       expect(after).toBe(before);
@@ -178,7 +178,7 @@ describe('findSimilarSharedNotes (Node-side near-dup search, node:sqlite)', () =
     const cfg = tmpSharedCfg();
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
-      promote({ reason: 'postgres-tuning', content: 'Postgres shared_buffers is tuned to 25 percent of RAM on prod.' });
+      promote({ topic: 'postgres-tuning', reason: 'r', content: 'Postgres shared_buffers is tuned to 25 percent of RAM on prod.' });
       indexSharedArchive(cfg, undefined);
 
       const hits = findSimilarSharedNotes(cfg, 'unrelated words postgres tuning memory', 3);
@@ -224,7 +224,7 @@ describe('makeSharedPromoter — index pointers are not shareable facts (issue #
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
       promote({
-        reason: 'runner-permission-blocker',
+        topic: 'runner-permission-blocker', reason: 'r',
         content:
           'The shared CI runner cannot clean its workspace between jobs, so every run fails the recap step.\n' +
           '- [runbook.md](runbook.md) — manual cleanup steps',
@@ -242,7 +242,7 @@ describe('makeSharedPromoter — unattended merges need a real similarity bar (i
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
       promote({
-        reason: 'ci-runner-cannot-clean-workspace',
+        topic: 'ci-runner-cannot-clean-workspace', reason: 'r',
         content:
           'The self-hosted CI runner cannot remove its docker workspace volume between jobs, so the recap ' +
           'job fails with a permission error on every pull request and needs manual intervention.',
@@ -254,7 +254,7 @@ describe('makeSharedPromoter — unattended merges need a real similarity bar (i
       // note above — this is exactly the case the old `similar.length > 0`
       // check merged. Containment is ~0.27, far below the merge bar.
       promote({
-        reason: 'reset-docker-volume-permissions-before-release',
+        topic: 'reset-docker-volume-permissions-before-release', reason: 'r',
         content:
           'Docker volume permissions on the build host must be reset before each release, otherwise the ' +
           'release job cannot write its artifacts and the upload step reports an empty bundle.',
@@ -277,7 +277,7 @@ describe('makeSharedPromoter — unattended merges need a real similarity bar (i
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
       promote({
-        reason: 'incus-rolling-upgrade-blocked',
+        topic: 'incus-rolling-upgrade-blocked', reason: 'r',
         content:
           'An incus rolling upgrade reports blocked while the cluster sits in a midstate; this is expected ' +
           'and resolves once every member has been upgraded.',
@@ -285,7 +285,7 @@ describe('makeSharedPromoter — unattended merges need a real similarity bar (i
       indexSharedArchive(cfg);
 
       promote({
-        reason: 'incus-upgrade-midstate-expected',
+        topic: 'incus-upgrade-midstate-expected', reason: 'r',
         content:
           'Incus rolling upgrade blocked in midstate is expected: the cluster stays blocked until every ' +
           'member has been upgraded.',
@@ -302,7 +302,7 @@ describe('makeSharedPromoter — unattended merges need a real similarity bar (i
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
       promote({
-        reason: 'postgres-bootstrap-required',
+        topic: 'postgres-bootstrap-required', reason: 'r',
         content:
           'The production database needs a one-time bootstrap before the first deploy; the develop ' +
           'environment silently skipped it and the migration then failed.',
@@ -342,7 +342,7 @@ describe('makeSharedPromoter — note identity (issue #398)', () => {
     }
   });
 
-  test('an instruction-shaped reason falls back to a content-derived name, keeping the fact', () => {
+  test('a proposal without a topic is named from its content, never from its reason', () => {
     const cfg = tmpSharedCfg();
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
@@ -353,6 +353,22 @@ describe('makeSharedPromoter — note identity (issue #398)', () => {
       // Named from the fact, not from the editing instruction.
       expect(noteFiles(cfg)).toEqual([
         'cron-jobs-default-to-allow_tools-false-so-bash-and-curl-are-blocked-until-set.md',
+      ]);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('an editing instruction in any language cannot become a note name (issue #629)', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      // No English edit verb, so a word list never recognised these as instructions.
+      promote({ reason: 'ใส่ไว้หลัง section cron ก่อนหัวข้อ memory', content: 'Staging deploys require the VPN to be connected first.' });
+      promote({ reason: 'Keep the index section in sync with deploys', content: 'Release tags are cut from main only after CI passes.' });
+      expect(noteFiles(cfg)).toEqual([
+        'release-tags-are-cut-from-main-only-after-ci-passes.md',
+        'staging-deploys-require-the-vpn-to-be-connected-first.md',
       ]);
     } finally {
       cleanup(cfg);
@@ -392,20 +408,6 @@ describe('makeSharedPromoter — note identity (issue #398)', () => {
       cleanup(cfg);
     }
   });
-
-  test('a descriptive reason that merely starts with a verb is NOT mistaken for an instruction', () => {
-    const cfg = tmpSharedCfg();
-    try {
-      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
-      promote({
-        reason: 'add-on billing is charged per seat',
-        content: 'Add-on billing is charged per seat, not per organization.',
-      });
-      expect(noteFiles(cfg)).toEqual(['add-on-billing-is-charged-per-seat.md']);
-    } finally {
-      cleanup(cfg);
-    }
-  });
 });
 
 // ── issue #398 review follow-ups ───────────────────────────────────────────
@@ -416,7 +418,7 @@ describe('makeSharedPromoter — graph edges below the merge bar (#398 review)',
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
       promote({
-        reason: 'ci-runner-cannot-clean-workspace',
+        topic: 'ci-runner-cannot-clean-workspace', reason: 'r',
         content:
           'The self-hosted CI runner cannot remove its docker workspace volume between jobs, so the recap ' +
           'job fails with a permission error on every pull request and needs manual intervention.',
@@ -424,7 +426,7 @@ describe('makeSharedPromoter — graph edges below the merge bar (#398 review)',
       indexSharedArchive(cfg);
 
       promote({
-        reason: 'reset-docker-volume-permissions-before-release',
+        topic: 'reset-docker-volume-permissions-before-release', reason: 'r',
         content:
           'Docker volume permissions on the build host must be reset before each release, otherwise the ' +
           'release job cannot write its artifacts and the upload step reports an empty bundle.',
@@ -464,7 +466,7 @@ describe('makeSharedPromoter — containment is scored against the whole note (#
       indexSharedArchive(cfg);
 
       promote({
-        reason: 'incus-upgrade-midstate-expected',
+        topic: 'incus-upgrade-midstate-expected', reason: 'r',
         content:
           'Incus rolling upgrade blocked in midstate is expected: the cluster stays blocked until every ' +
           'member has been upgraded.',
@@ -492,7 +494,7 @@ describe('makeSharedPromoter — retired notes (#398 review)', () => {
 
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
       promote({
-        reason: 'incus-upgrade-midstate-expected',
+        topic: 'incus-upgrade-midstate-expected', reason: 'r',
         content:
           'Incus rolling upgrade blocked in midstate is expected: the cluster stays blocked until every ' +
           'member has been upgraded.',
