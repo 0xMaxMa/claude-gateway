@@ -16,14 +16,14 @@ A project-bound chat belongs to its agent and follows the agent's rules like any
 [Sessions](/api/sessions#post-apiv1agentsagentidsessions).
 
 **Feature detection.** `GET /api/v1/capabilities` lists
-`"projects": ["list", "create", "git", "chat", "run", "start", "delete", "stop"]` for an admin key.
-A key that is not an admin key gets `["list", "git", "chat", "run"]`. Show the project list
+`"projects": ["list", "create", "git", "chat", "run", "start", "delete", "stop", "disk"]` for an admin key.
+A key that is not an admin key gets `["list", "git", "chat", "run", "disk"]`. Show the project list
 only when the array includes `"list"`, project create only when it includes `"create"`, the git status view only when it includes `"git"` (read-only: the gateway has no route that changes a repository),
 and [project-bound chat](/api/sessions#post-apiv1agentsagentidsessions) only when
-it includes `"chat"`. Show running status only when it includes `"run"`, the Stop button only when it includes `"stop"`, the Start button only when it includes `"start"`, and the Delete action only when it includes `"delete"`.
+it includes `"chat"`. Show running status only when it includes `"run"`, the Stop button only when it includes `"stop"`, the Start button only when it includes `"start"`, the Delete action only when it includes `"delete"`, and disk sizes only when it includes `"disk"`.
 When the array is empty, `projectsUnavailable` is `"disabled"`: the gateway serves no Projects API. The field is
 absent when Projects is usable. An older gateway omits the key, lists projects without
-`"git"`, `"chat"`, `"run"` or `"stop"`, or answers `"admin_required"` for a key that is not an admin key.
+`"git"`, `"chat"`, `"run"`, `"stop"` or `"disk"`, or answers `"admin_required"` for a key that is not an admin key.
 
 **On by default.** The routes are on for every install, with the root `~/projects`, and
 need no configuration. Every valid key can list the projects in that folder and read their git and running status, and every key with
@@ -386,6 +386,51 @@ curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/app/
 | 503 | `git_unavailable` | Git is not installed, or is not on the gateway's `PATH`. `git-summary` answers it too, since no repository can be read. The gateway logs a warning once. |
 | 504 | `timeout` | Git ran past its limit of 3 seconds. |
 | 500 | `git_failed` | Any other git failure. Git's output is not returned. |
+
+## Disk usage {#disk}
+
+### GET /api/v1/projects/disk {#get-disk}
+
+How much disk space each project occupies, and how full the disk that holds the projects root is. Any valid key can
+read it. Send it after the project list has rendered: it runs one `du` per project and can take seconds on a large root.
+
+The size of a project is the space its folder really occupies on disk, `node_modules` and `.git` included. A file with
+several hard links counts once, a symlink counts as the link itself and is never followed, and a folder mounted from
+another filesystem inside the project is not counted (`du -s -k -x`). The gateway runs `du` without a shell and with a
+trimmed environment, 3 at a time, with 10 seconds per project and 30 seconds for the whole request. The same folders
+as [`GET /api/v1/projects`](#get-projects) are measured: valid names, real folders inside the root, no `.deleting-*`.
+
+```bash
+curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/projects/disk
+```
+
+```json
+{
+  "supported": true,
+  "disk": { "total": 53687091200, "used": 16642998272, "free": 34359738368 },
+  "projects": [
+    { "name": "app", "bytes": 431194112, "state": "ok" },
+    { "name": "huge", "bytes": null, "state": "partial" },
+    { "name": "locked", "bytes": null, "state": "failed" }
+  ],
+  "computedAt": "2026-01-01T12:00:00.000Z",
+  "cached": false
+}
+```
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `supported` | `boolean` | `false` on a host that cannot be measured (Windows). `disk` is then `null` and `projects` is empty. |
+| `disk` | `{ total, used, free }` or `null` | Bytes of the filesystem that holds the root, from `statfs`. `free` is what a non-root user can still write, so `used + free` can be less than `total`. `null` when the root does not exist or cannot be read. |
+| `projects[].bytes` | integer or `null` | Bytes the folder occupies. `null` when no size is known. |
+| `projects[].state` | `"ok"`, `"partial"`, `"failed"` | `ok`: measured. `partial`: the time ran out (`bytes` is `null`), or `du` could not read part of the folder (`bytes` counts what it could read, so it is a lower bound). `failed`: no size could be read. |
+| `computedAt` | ISO 8601 string | When the numbers were measured. |
+| `cached` | `boolean` | `true` when the answer came from the cache. |
+
+**Cache.** The whole answer is kept for 60 seconds. Requests that arrive while a measurement runs share it. `?refresh=1`
+skips the cache but still joins a measurement already running, and the gateway honours it at most once every 5 seconds:
+a refresh sooner than that is answered like a plain read, so check `cached` and `computedAt` rather than assuming a
+fresh measurement. A root that cannot be listed answers the same errors as `GET /api/v1/projects` and is not cached.
 
 ## Running processes {#running}
 

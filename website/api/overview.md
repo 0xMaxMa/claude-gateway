@@ -91,6 +91,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `POST` | `/api/v1/projects` | Admin key | Create a project directory, optionally with `git init` |
 | `DELETE` | `/api/v1/projects/:name` | Admin key | Delete a project directory and everything in it |
 | `GET` | `/api/v1/projects/git-summary` | Key | Git sync summary of every project that is a repository |
+| `GET` | `/api/v1/projects/disk` | Key | Disk space each project occupies and how full the disk is |
 | `GET` | `/api/v1/projects/:name/git` | Key | Git status of one project |
 | `GET` | `/api/v1/projects/running` | Key | Listening processes of every project |
 | `GET` | `/api/v1/projects/:name/running` | Key | Listening processes of one project |
