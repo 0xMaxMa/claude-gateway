@@ -3,12 +3,18 @@ export type JevContent = string | JsonValue[] | { [key: string]: JsonValue };
 export type JevQuestion =
   | { type: 'noul'; instructions: JevContent; criteria?: { true?: JevContent; false?: JevContent } }
   | { type: 'choice'; instructions: JevContent; criteria: Record<string, JevContent | null> }
-  | { type: 'score'; instructions: JevContent; criteria: JevContent[] };
+  | { type: 'score'; instructions: JevContent; criteria: JevContent[] }
+  /** One normalized rectangle in a referenced image; Jev 1.14 only. Has no "not found" answer: pair it with a Noul. */
+  | { type: 'box'; instructions: JevContent };
+/** A still image placed wherever its reference string appears in state, instructions or criteria. */
+export interface JevImageAsset { type: 'image'; format: 'png' | 'jpg' | 'jpeg'; data_base64: string }
+export interface JevBox { top: number; bottom: number; left: number; right: number }
 export type JevAnswer =
   | { type: 'noul'; noul: number }
   | { type: 'choice'; choice: string; confidence: number; probabilities: Record<string, number> }
-  | { type: 'score'; score: number; confidence: number; probabilities: Record<string, number>; legend: Record<string, string> };
-export interface JevRequest { state: JevContent; questions: Record<string, JevQuestion>; requestId?: string }
+  | { type: 'score'; score: number; confidence: number; probabilities: Record<string, number>; legend: Record<string, string> }
+  | { type: 'box'; box: JevBox; confidence: number };
+export interface JevRequest { state: JevContent; questions: Record<string, JevQuestion>; assets?: Record<string, JevImageAsset>; requestId?: string }
 export interface JevConfig {
   /** Tool-free reasoning connection; instructions and output contracts live in Jev Loop. */
   thinking?: import('./browser-contract').BrowserTextHelperConfig;
@@ -16,6 +22,8 @@ export interface JevConfig {
   enabled?: boolean; provider?: 'typesafe' | 'upstream'; model?: string; baseUrl?: string;
   apiKeyFile?: string; apiKeyEnv?: string; timeoutMs?: number; maxConcurrentRequests?: number;
   maxQueueSize?: number; maxInputBytes?: number; maxQuestions?: number;
+  /** Experimental image input (TypeSafe-Danger-Zone-Images). Off unless enabled; image bytes are capped separately from maxInputBytes. */
+  images?: { enabled?: boolean; maxImageBytes?: number };
   allowedAgentIds?: string[];
   features?: Partial<Record<'computerTasks' | 'computerSteps' | 'browserTasks' | 'browserSteps', { enabled?: boolean }>>;
 }

@@ -94,10 +94,12 @@ export class JevService {
       this.authorized(context);
       if (!connection.apiKey || /[\r\n]/.test(connection.apiKey)) throw new JevError('AUTHENTICATION_FAILED', 'A valid Jev credential is required.');
       const endpoint = jevEndpoint(connection, config.provider);
+      // Validation admitted images only behind config.images.enabled.
+      const images = request.assets !== undefined || Object.values(request.questions).some(q => q.type === 'box');
       const response = await this.abortable((this.options.fetch ?? fetch)(endpoint, {
         method: 'POST', redirect: 'error', signal: controller.signal,
-        headers: { authorization: `Bearer ${connection.apiKey}`, 'content-type': 'application/json', 'x-request-id': wireRequestId },
-        body: JSON.stringify({ model: config.model, state: request.state, questions: request.questions, ...(config.provider === 'upstream' ? { request_id: wireRequestId } : {}) }),
+        headers: { authorization: `Bearer ${connection.apiKey}`, 'content-type': 'application/json', 'x-request-id': wireRequestId, ...(images ? { 'TypeSafe-Danger-Zone-Images': 'true' } : {}) },
+        body: JSON.stringify({ model: config.model, state: request.state, questions: request.questions, ...(request.assets ? { assets: request.assets } : {}), ...(config.provider === 'upstream' ? { request_id: wireRequestId } : {}) }),
       }), controller.signal);
       if (!response.ok) {
         let code: JevErrorCode = response.status === 401 ? 'AUTHENTICATION_FAILED' : response.status === 403 ? 'ACCESS_DENIED' : response.status === 402 ? 'QUOTA_EXCEEDED' : response.status === 429 ? 'RATE_LIMITED' : response.status === 409 ? 'REQUEST_CONFLICT' : response.status === 504 ? 'DEADLINE_EXCEEDED' : response.status === 404 ? 'MODEL_UNAVAILABLE' : response.status === 400 || response.status === 413 || response.status === 422 ? 'INVALID_REQUEST' : 'PROVIDER_UNAVAILABLE';
