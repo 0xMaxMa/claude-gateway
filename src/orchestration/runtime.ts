@@ -69,7 +69,7 @@ import { resolveSkill, skillCatalog } from './skills';
 import { PSTACK_DECISION_NOTE, pstackCommandReply, pstackNotSetUpReply } from '../pstack/overlay';
 import type { SkillRegistry } from '../skills';
 import { voiceChoices, resolveVoiceId } from '../voice/providers/voice-catalog';
-import { LIVE_VOICE_STT_NOTE, SPEECH_OVERLAY, SPEECH_REMINDER, splitSpeechResponse, speechVoiceStyle } from './speech';
+import { isEmptyReply, LIVE_VOICE_STT_NOTE, SPEECH_OVERLAY, SPEECH_REMINDER, splitSpeechResponse, speechVoiceStyle } from './speech';
 import { join } from 'path';
 import { pathWithin } from '../utils/paths';
 import { randomUUID } from 'crypto';
@@ -1705,7 +1705,7 @@ export class AgentOrchestrationRuntime {
       // Silence is valid only after a durable automation command in this turn.
       // User inputs may also drive a control task; do not call an applied command
       // an unreadable reply. Empty chat, failed commands and malformed JSON still fail.
-      const emptyControlReply=(()=>{try{const value=JSON.parse(response.text);return value&&typeof value.display_text==='string'&&!value.display_text.trim()&&(value.spoken_text===undefined||typeof value.spoken_text==='string'&&!value.spoken_text.trim())&&Object.keys(value).every(key=>key==='display_text'||key==='spoken_text');}catch{return !response.text.trim();}})();
+      const emptyControlReply=isEmptyReply(response.text);
       const userControlCommand=!active.notification&&this.store.all(
         "SELECT DISTINCT task_id FROM task_commands WHERE decision_id=? AND conversation_id=? AND principal_id=? AND command_type IN ('spawn','update','answer')",
         decision.decisionId,receipt.conversationId,input.scope.principalId).some(row=>{

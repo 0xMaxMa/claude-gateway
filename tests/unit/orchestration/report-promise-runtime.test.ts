@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { AgentOrchestrationRuntime } from '../../../src/orchestration/runtime';
-import { SPEECH_OVERLAY, SPEECH_REMINDER, splitSpeechResponse } from '../../../src/orchestration/speech';
+import { isEmptyReply, SPEECH_OVERLAY, SPEECH_REMINDER, splitSpeechResponse } from '../../../src/orchestration/speech';
 import { displayPrefix } from '../../../src/orchestration/display-stream';
 import { progressReviewResult } from '../../../src/orchestration/progress-review';
 import { SessionStore } from '../../../src/session/store';
@@ -125,6 +125,23 @@ test('the scheduled report turn asks the reply to declare follow_up', async () =
   await withRuntime(payload('Review finished.', 'none'), async (_runtime, report) => {
     expect(await report('auto')).toContain('set follow_up to "continues" only when your reply tells the user work will continue');
   });
-  // A voice report turn may carry it too: the speech rules do not cap the object at two fields.
-  for (const rules of [SPEECH_OVERLAY, SPEECH_REMINDER]) expect(rules).toContain("plus any other field this turn's instructions explicitly ask for");
+  // A voice report turn may carry it too: the speech rules allow it when asked.
+  for (const rules of [SPEECH_OVERLAY, SPEECH_REMINDER]) expect(rules).toContain("plus follow_up only when this turn's instructions ask for it");
+});
+
+test('parsing the same payload twice gives the same result: the shared regex keeps no position', () => {
+  const raw = `Done.\n${JSON.stringify({ display_text: 'Review finished.', follow_up: 'none' })}`;
+  expect(splitSpeechResponse(raw).display).toBe('Review finished.');
+  expect(splitSpeechResponse(raw).display).toBe('Review finished.');
+  expect(displayPrefix(raw)).toBe('Done.\n');
+  expect(displayPrefix(raw)).toBe('Done.\n');
+});
+
+test('an empty reply that also declares follow_up is still empty, so a control step stays silent', () => {
+  expect(isEmptyReply(JSON.stringify({ display_text: '', follow_up: 'none' }))).toBe(true);
+  expect(isEmptyReply(JSON.stringify({ display_text: '', spoken_text: ' ' }))).toBe(true);
+  expect(isEmptyReply('  ')).toBe(true);
+  expect(isEmptyReply(JSON.stringify({ display_text: 'Done.', follow_up: 'none' }))).toBe(false);
+  expect(isEmptyReply(JSON.stringify({ display_text: '', notify_user: false }))).toBe(false);
+  expect(isEmptyReply('{"display_text":')).toBe(false);
 });

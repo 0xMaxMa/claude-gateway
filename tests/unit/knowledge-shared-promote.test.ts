@@ -359,6 +359,18 @@ describe('makeSharedPromoter — note identity (issue #398)', () => {
     }
   });
 
+  test('without a topic, a reason that is itself a slug still names the note, so the fact recurs into it', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({ reason: 'staging-needs-vpn', content: 'Staging deploys require the VPN to be connected first.' });
+      promote({ reason: 'staging-needs-vpn', content: 'Connect the VPN before any staging deploy, or it times out.' });
+      expect(noteFiles(cfg)).toEqual(['staging-needs-vpn.md']);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
   test('an editing instruction in any language cannot become a note name (issue #629)', () => {
     const cfg = tmpSharedCfg();
     try {

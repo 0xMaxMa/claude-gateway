@@ -30,7 +30,7 @@ export function recentCommunicatedProgress(store: OrchestrationStore, conversati
 export type ProgressReviewOutcome = 'reported' | 'silent' | 'duplicate' | 'unparsed';
 export function progressReviewResult(raw: string, previous: string[]): { display: string; spoken: string; silent: boolean; outcome: ProgressReviewOutcome } {
   const normalized = raw.trim().replace(/^```(?:json)?\s*\n/, '').replace(/\n```$/, '');
-  const starts = [...normalized.matchAll(new RegExp(PAYLOAD_OPENING, 'g'))].slice(-32).map(m => m.index!);
+  const starts = [...normalized.matchAll(PAYLOAD_OPENING)].slice(-32).map(m => m.index!);
   for (const candidate of [normalized, ...starts.map(index => normalized.slice(index))]) {
     try {
       const value = JSON.parse(candidate);

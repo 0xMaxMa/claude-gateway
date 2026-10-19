@@ -9,15 +9,17 @@ import * as ts from 'typescript';
 //
 // This guard parses every source file and flags the shapes such heuristics take:
 //   thai-regex     a regex with Thai letters outside a character class (Thai words to match)
-//   english-words  a case-insensitive regex with an alternation of three or more plain words
-//   thai-words     an array of short strings that includes a Thai word (a word list)
+//   english-words  a regex that alternates three or more plain words, matched case-insensitively or
+//                  between word boundaries/whitespace, in a group or at the top level
+//   thai-words     an array of short strings that includes a Thai word, or an object keyed by Thai words
 // Script detection (a Thai character class such as [\u0E00-\u0E7F]) is not a word and is allowed.
 
 type Kind = 'thai-regex' | 'english-words' | 'thai-words';
 interface Finding { file: string; line: number; kind: Kind; source: string }
 
 const THAI_LETTER = /[\u0E01-\u0E5B]/;
-const PLAIN_WORD = /^[a-z]{2,}(?:'[a-z]+)?(?:(?:\\s[+*]?| )[a-z]+)*$/;
+// A lowercase or capitalised word, or a short phrase of them: not an IDENTIFIER, a_key or a-slug.
+const PLAIN_WORD = /^[A-Za-z][a-z]+(?:'[a-z]+)?(?:(?:\\s[+*]?| )[A-Za-z]?[a-z]+)*$/;
 
 /** The regex source with escapes neutralised and character classes removed: what remains are
  * the literal sequences the pattern matches. */
@@ -47,13 +49,20 @@ function regexFindings(source: string, flags: string): Kind[] {
   const literal = literalPart(source);
   const kinds: Kind[] = [];
   if (THAI_LETTER.test(literal)) kinds.push('thai-regex');
-  if (flags.includes('i')) {
-    for (const group of literal.matchAll(/\((?:\?(?::|=|!|<=|<!|<[A-Za-z]+>))?([^()]*)\)/g)) {
-      // A file-extension list (\.(png|jpe?g|gif)) names formats, not meanings.
-      if (/\\\.\s*$/.test(literal.slice(0, group.index))) continue;
-      const alternatives = group[1].split('|').map(alt => alt.replace(/\\b/g, '').trim());
-      if (alternatives.length >= 3 && alternatives.filter(alt => PLAIN_WORD.test(alt)).length >= 3) { kinds.push('english-words'); break; }
-    }
+  // Innermost groups, plus the top-level alternation with its groups masked out.
+  const groups = [...literal.matchAll(/\((?:\?(?::|=|!|<=|<!|<[A-Za-z]+>))?([^()]*)\)/g)].map(group => ({ body: group[1], before: literal.slice(0, group.index), after: literal.slice(group.index! + group[0].length) }));
+  let topLevel = literal;
+  while (/\([^()]*\)/.test(topLevel)) topLevel = topLevel.replace(/\([^()]*\)/g, '\0');
+  groups.push({ body: topLevel, before: '', after: '' });
+  for (const { body, before, after } of groups) {
+    // A file-extension list (\.(png|jpe?g|gif)) names formats, not meanings.
+    if (/\\\.\s*$/.test(before)) continue;
+    const alternatives = body.split('|');
+    // Prose is matched case-insensitively or between word boundaries/whitespace; a list of
+    // identifiers or format names is matched exactly.
+    const prose = flags.includes('i') || alternatives.some(alt => /\\[bs]/.test(alt)) || /\\[bs][*+?]?\s*$/.test(before) || /^[*+?]?\\[bs]/.test(after);
+    const words = alternatives.filter(alt => PLAIN_WORD.test(alt.replace(/\\[bBsS][*+?]?|[\^$]/g, '').trim())).length;
+    if (prose && alternatives.length >= 3 && words >= 3) { kinds.push('english-words'); break; }
   }
   return kinds;
 }
@@ -78,6 +87,9 @@ export function scanSource(file: string, text: string): Finding[] {
       }
     } else if (ts.isArrayLiteralExpression(node) && node.elements.length >= 2 && node.elements.every(isShortString) && node.elements.some(isThaiWord)) {
       add(node, 'thai-words', node.elements.map(element => (element as ts.StringLiteralLike).text).join('|'));
+    } else if (ts.isObjectLiteralExpression(node)) {
+      const keys = node.properties.map(property => property.name).filter((name): name is ts.PropertyName => Boolean(name) && isThaiWord(name!));
+      if (keys.length >= 2) add(node, 'thai-words', keys.map(name => (name as ts.StringLiteralLike).text).join('|'));
     }
     ts.forEachChild(node, visit);
   };
@@ -93,9 +105,10 @@ export function scanSource(file: string, text: string): Finding[] {
 const ALLOWED: Array<{ file: string; kind: Kind; count: number; category: 'structural' | 'debt'; reason: string }> = [
   // ── structural ────────────────────────────────────────────────────────────
   { file: 'src/agent/dreaming/migrate.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Fixed MEMORY.md h2 section names that memory files use.' },
-  { file: 'src/cli/redact.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Secret redaction: credential key names.' },
+  { file: 'src/cli/redact.ts', kind: 'english-words', count: 2, category: 'structural', reason: 'Secret redaction: credential key names and API key prefixes.' },
+  { file: 'src/orchestration/tool-activity.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Secret redaction: credential key names.' },
   { file: 'src/orchestration/provider-message.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Secret redaction: credential key names.' },
-  { file: 'src/safemode/context.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Secret redaction: credential key names.' },
+  { file: 'src/safemode/context.ts', kind: 'english-words', count: 2, category: 'structural', reason: 'Secret redaction: credential key names.' },
   { file: 'src/orchestration/inference-errors.ts', kind: 'english-words', count: 3, category: 'structural', reason: 'Provider error messages: machine-generated protocol text that carries no error code, not user or model language.' },
   { file: 'src/session/codex-native-mcp-client.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'JSON-RPC notification method names of the Codex MCP protocol.' },
   { file: 'src/share/session-image-catalog.ts', kind: 'english-words', count: 1, category: 'structural', reason: 'Placeholder tokens such as "(photo)" that channel receivers write for captionless media.' },
@@ -105,13 +118,15 @@ const ALLOWED: Array<{ file: string; kind: Kind; count: number; category: 'struc
   // ── debt: semantic heuristics to migrate (issue #629) ─────────────────────
   // Group B: direct Browser/Computer command shortcuts that parse user phrasing (PR #525, #570).
   { file: 'src/automation/browser-command.ts', kind: 'thai-regex', count: 3, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
+  { file: 'src/automation/browser-command.ts', kind: 'thai-words', count: 1, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
   { file: 'src/automation/command-steps.ts', kind: 'thai-regex', count: 5, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
   { file: 'src/automation/command-steps.ts', kind: 'english-words', count: 2, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
   { file: 'src/automation/computer-command.ts', kind: 'thai-regex', count: 4, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
-  { file: 'src/automation/computer-command.ts', kind: 'thai-words', count: 11, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
+  { file: 'src/automation/computer-command.ts', kind: 'english-words', count: 1, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
+  { file: 'src/automation/computer-command.ts', kind: 'thai-words', count: 12, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
   { file: 'src/automation/computer-safety.ts', kind: 'thai-regex', count: 2, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
   { file: 'src/automation/direct-command.ts', kind: 'thai-regex', count: 12, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
-  { file: 'src/automation/direct-command.ts', kind: 'thai-words', count: 1, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
+  { file: 'src/automation/direct-command.ts', kind: 'thai-words', count: 5, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
   { file: 'src/automation/direct-command.ts', kind: 'english-words', count: 3, category: 'debt', reason: 'Direct-command shortcut that parses user phrasing (group B).' },
   // Group C: the audio-tag vocabulary matched in model text.
   { file: 'src/voice/audio-tags.ts', kind: 'english-words', count: 1, category: 'debt', reason: 'Audio-tag vocabulary matched in model text (group C).' },
@@ -160,11 +175,17 @@ describe('the scanner', () => {
     expect(kinds(String.raw`const VERB = /^(insert|append|prepend|add|put)\b/i;`)).toEqual(['english-words']);
     expect(kinds(`const r = new RegExp('ถ้า|หาก');`)).toEqual(['thai-regex']);
     expect(kinds(`const STOP = new Set(['ครับ', 'ค่ะ', 'นะ']);`)).toEqual(['thai-words']);
+    expect(kinds(`const OPS = { 'บวก': '+', 'ลบ': '-' };`)).toEqual(['thai-words']);
+    // A top-level alternation, capitalised words, and word boundaries without the i flag.
+    expect(kinds(String.raw`const a = /^\s*no\b|^\s*wrong\b|^\s*nope\b/i;`)).toEqual(['english-words']);
+    expect(kinds(String.raw`const b = /^(Insert|Append|Move|Delete)\b/i;`)).toEqual(['english-words']);
+    expect(kinds(String.raw`const c = /^(?:no|wrong|nope|not)\b/;`)).toEqual(['english-words']);
   });
 
   test('leaves structural parsing alone', () => {
     expect(kinds(String.raw`const thai = /[\u0E00-\u0E7F]/; const t2 = /[฀-๿]/; const t3 = /\p{Script=Thai}/u;`)).toEqual([]);
     expect(kinds(String.raw`const ext = /\.(jpe?g|png|gif|webp)$/i; const json = /^(?:true|false|null)$/;`)).toEqual([]);
+    expect(kinds(String.raw`const env = /^(PATH|HOME|USER|SHELL)$/; const keys = /^(?:display_text|spoken_text|notify_user)$/;`)).toEqual([]);
     expect(kinds(String.raw`const url = /^https?:\/\/github\.com\/([^/]+)\/(tree|blob)\//; const fence = /^\x60\x60\x60(?:json)?\s*\n/;`)).toEqual([]);
     expect(kinds(`const reply = thai ? 'ยังไม่ได้เริ่มงาน กรุณาลองอีกครั้ง' : 'Not started.'; const one = ['ครับ'];`)).toEqual([]);
   });

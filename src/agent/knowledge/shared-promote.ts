@@ -13,6 +13,7 @@ import {
   MIN_RELATED_CONTAINMENT,
 } from './shared-dedup';
 import { STALE_NOTE_PREFIX } from './shared-staleness';
+import { isValidTopicSlug } from '../dreaming/episodic';
 import { resolveSharedConfig } from './config';
 import type { KnowledgeSharedConfig } from './types';
 
@@ -94,7 +95,7 @@ export function isIndexPointerOnly(content: string): boolean {
  * A note name derived from the fact itself — the fallback when the proposal has
  * no `topic`.
  *
- * The free-form `reason` is never a fallback name: it is prompted as a
+ * Free-form `reason` prose is never a fallback name: it is prompted as a
  * justification, and issue #386 found reviewers writing editing instructions
  * there ("insert after cron config, before the pty_shell section") that no later
  * occurrence of the same fact can match. Naming from the content keeps the fact;
@@ -167,10 +168,12 @@ export function makeSharedPromoter(
       return;
     }
 
-    // Identity: the reviewer-declared `topic` slug (mirroring the episodic
-    // contract), else the fact itself. The free-form `reason` is never a name,
-    // so an editing instruction written there cannot become one (issue #629).
-    const name = (p.topic ?? '').trim() || deriveNameFromContent(content);
+    // Identity, best first: the reviewer-declared `topic` slug (mirroring the
+    // episodic contract), then a `reason` that is itself a valid slug (a stable
+    // name across nights, #386), then the fact itself. A prose reason is never a
+    // name, so an editing instruction written there cannot become one (#629).
+    const reason = p.reason.trim();
+    const name = (p.topic ?? '').trim() || (isValidTopicSlug(reason) ? reason : deriveNameFromContent(content));
     if (!name) {
       skip('no-usable-name', { reason: p.reason });
       return;

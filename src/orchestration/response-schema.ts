@@ -67,5 +67,6 @@ export const ORCHESTRATION_RESPONSE_SCHEMA: Record<string, unknown> = deepFreeze
 
 /** The union's field names. A payload may open with any of them, whatever order the model emits. */
 export const RESPONSE_FIELDS: readonly string[] = Object.freeze(Object.keys(ORCHESTRATION_RESPONSE_SCHEMA.properties as object));
-/** A JSON object opening with one of RESPONSE_FIELDS: the shape that marks our payload in a turn. */
-export const PAYLOAD_OPENING = `\\{(?=\\s*"(?:${RESPONSE_FIELDS.join('|')})"\\s*:)`;
+/** A JSON object opening with one of RESPONSE_FIELDS: the shape that marks our payload in a turn.
+ * Global, for matchAll (which iterates a copy, so the shared lastIndex never moves). */
+export const PAYLOAD_OPENING = new RegExp(`\\{(?=\\s*"(?:${RESPONSE_FIELDS.join('|')})"\\s*:)`, 'g');
